@@ -74,10 +74,12 @@ logs:  ## Tail remote container logs
 ps:  ## Show remote container status
 	ssh $(DEPLOY_HOST) "cd $(DEPLOY_DIR) && sudo docker compose ps"
 
-health:  ## Hit /health on the deployed instance
+health:  ## Hit /health on the deployed instance (retries during post-deploy uvicorn cold start)
 	@echo ">>> http://$(DEPLOY_HOST)/health"
-	@curl -sS --max-time 5 http://$(DEPLOY_HOST)/health || (echo; echo "FAIL"; exit 1)
-	@echo
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		out=$$(curl -sS --max-time 3 http://$(DEPLOY_HOST)/health 2>/dev/null) && echo "$$out" && exit 0; \
+		sleep 2; \
+	done; echo; echo "FAIL after 10 attempts (~20s)"; exit 1
 
 clean:  ## Remove locally-built images
 	-docker rmi $(TAG_VERSION) $(TAG_DATESHA) 2>/dev/null

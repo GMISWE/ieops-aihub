@@ -1,6 +1,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -16,6 +17,13 @@ from routes.memories import router as memories_router
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 
 
+try:
+    __version__ = _pkg_version("ieops-mem")
+except PackageNotFoundError:
+    # Not pip-installed (e.g. running from a source checkout without install).
+    __version__ = "0.0.0+unknown"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_hash_secret()
@@ -27,7 +35,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="ieops-mem", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="ieops-mem", version=__version__, lifespan=lifespan)
 app.include_router(memories_router)
 app.include_router(admin_router)
 
@@ -47,7 +55,7 @@ async def health():
     except Exception:
         model_status = "not loaded"
 
-    return {"status": "ok", "db": db_status, "model": model_status, "version": "0.1.0"}
+    return {"status": "ok", "db": db_status, "model": model_status, "version": __version__}
 
 
 @app.exception_handler(HTTPException)

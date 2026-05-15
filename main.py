@@ -27,9 +27,14 @@ except PackageNotFoundError:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_hash_secret()
+    # Load the embedder BEFORE db.init_db — the v0.3.0 migration step 2
+    # reindex calls embedder.get_model() to re-embed historical rows; if
+    # the model isn't loaded yet, init_db raises RuntimeError on first
+    # boot against a pre-v0.3.0 DB. v0.3.0 shipped with this swapped and
+    # crash-looped in prod on first deploy.
+    embedder.load_model()
     db.init_db()
     bootstrap(os.getenv("ADMIN_API_KEY"))
-    embedder.load_model()
     scheduler = backup.start_scheduler()
     yield
     scheduler.shutdown(wait=False)

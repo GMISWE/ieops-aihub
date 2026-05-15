@@ -1,11 +1,8 @@
-import heapq
 import json
-import math
-import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import numpy as np
 from fastapi import APIRouter, Header, HTTPException, Query
 from ulid import ULID
 
@@ -25,8 +22,6 @@ from models import (
 )
 
 router = APIRouter()
-
-DECAY_LAMBDA = float(os.getenv("DECAY_LAMBDA", "0.005"))
 
 # Column list excluding the 1.5KB embedding BLOB — used by all non-search reads.
 _MEM_COLS = (
@@ -116,64 +111,105 @@ async def create_memory(
 @router.post("/memories/search", response_model=SearchResponse)
 async def search_memories(
     body: SearchRequest,
+    debug: bool = Query(False),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ):
+    from search import rrf_fuse, score_max_theoretical, RRF_K_DEFAULT
+
     auth = check_auth(x_api_key, body.project, "reader")
-    query_vec = await _embedder.embed(body.query, role="query")
+    q_vec = await _embedder.embed(body.query, role="query")
     now = _now()
 
+    # Visibility / expiry / deprecated filter shared across all channels.
+    if auth["role"] == "admin":
+        vis_clause = ""
+        vis_params: list = []
+    else:
+        vis_clause = " AND (m.showable = 1 OR m.author_key_id IS NULL OR m.author_key_id = ?)"
+        vis_params = [auth["key_id"]]
+
+    common_where = (
+        " WHERE m.project = ? AND m.deprecated = 0 "
+        " AND (m.expires_at IS NULL OR m.expires_at > ?)"
+        + vis_clause
+    )
+    common_params = [body.project, now] + vis_params
+
+    CHANNEL_TOP_N = 50
+
+    # Sanitize query for FTS5: replace non-alphanumeric chars with spaces so
+    # that e.g. "admin-visible" doesn't parse as a column NOT filter ("-visible"
+    # refers to a column named "visible" which doesn't exist in memories_fts).
+    _fts_safe = re.sub(r"[^A-Za-z0-9 ]", " ", body.query).strip()
+    _fts_query = _fts_safe if _fts_safe else None
+
     with get_db() as conn:
-        # Visibility filter pushed to SQL for efficiency at scale.
-        if auth["role"] == "admin":
-            visibility_clause = ""
-            visibility_params: list = []
-        else:
-            visibility_clause = " AND (showable = 1 OR author_key_id IS NULL OR author_key_id = ?)"
-            visibility_params = [auth["key_id"]]
-        rows = conn.execute(
-            f"""SELECT m.id, m.project, m.type, m.content, m.metadata,
-                       m.created_at, m.updated_at, m.expires_at, m.deprecated,
-                       m.deprecated_reason, m.superseded_by, m.author_key_id,
-                       m.showable, v.embedding
-               FROM memories m
-               JOIN vec_memories v ON v.rowid = m.rowid
-               WHERE m.project = ? AND m.deprecated = 0
-               AND (m.expires_at IS NULL OR m.expires_at > ?){visibility_clause}""",
-            [body.project, now] + visibility_params,
+        vec_rows = conn.execute(
+            f"SELECT X.rowid FROM vec_memories X JOIN memories m ON m.rowid = X.rowid {common_where}"
+            f" AND embedding MATCH ? AND k = ?"
+            f" ORDER BY distance",
+            common_params + [q_vec.tobytes(), CHANNEL_TOP_N],
         ).fetchall()
 
-    if not rows:
-        return SearchResponse(results=[])
+        if _fts_query:
+            bm25_rows = conn.execute(
+                f"SELECT X.rowid FROM memories_fts X JOIN memories m ON m.rowid = X.rowid {common_where}"
+                f" AND memories_fts MATCH ?"
+                f" ORDER BY rank LIMIT ?",
+                common_params + [_fts_query, CHANNEL_TOP_N],
+            ).fetchall()
+        else:
+            bm25_rows = []
 
-    embeddings, valid_rows = [], []
-    for row in rows:
-        raw = row["embedding"]
-        if raw:
-            embeddings.append(np.frombuffer(raw, dtype=np.float32))
-            valid_rows.append(row)
+        recency_rows = conn.execute(
+            f"SELECT m.rowid FROM memories m {common_where}"
+            f" ORDER BY m.created_at DESC LIMIT ?",
+            common_params + [CHANNEL_TOP_N],
+        ).fetchall()
 
-    if not embeddings:
-        return SearchResponse(results=[])
+    vec_ranks = [r[0] for r in vec_rows]
+    bm25_ranks = [r[0] for r in bm25_rows]
+    rec_ranks = [r[0] for r in recency_rows]
 
-    mat = np.stack(embeddings)
-    cosine = mat @ query_vec  # dot product == cosine (fastembed outputs L2-normalized)
+    # body.recency_boost is reinterpreted as recency channel weight (v0.3.0).
+    weights = [1.0, 1.0, float(body.recency_boost)]
+    scores = rrf_fuse([vec_ranks, bm25_ranks, rec_ranks], weights)
+    max_score = score_max_theoretical(weights, RRF_K_DEFAULT)
 
-    now_dt = datetime.now(timezone.utc)
-    scores = []
-    for i, row in enumerate(valid_rows):
-        created = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
-        days = max((now_dt - created).days, 0)
-        recency = math.exp(-DECAY_LAMBDA * days)
-        scores.append(float(cosine[i]) + body.recency_boost * recency)
+    top_k = body.top_k
+    top_ids = sorted(scores.keys(), key=lambda r: scores[r], reverse=True)[:top_k]
 
-    # O(N log k) partial sort; faster than full sorted() when N >> k.
-    top_idx = heapq.nlargest(body.top_k, range(len(scores)), key=lambda i: scores[i])
-    return SearchResponse(
-        results=[
-            SearchResult(memory=row_to_memory(valid_rows[i]), score=scores[i])
-            for i in top_idx
-        ]
-    )
+    if not top_ids:
+        return SearchResponse(results=[], score_max_theoretical=max_score)
+
+    placeholders = ",".join("?" * len(top_ids))
+    with get_db() as conn:
+        result_rows = {
+            r["rowid"]: r for r in conn.execute(
+                f"SELECT rowid, {_MEM_COLS} FROM memories WHERE rowid IN ({placeholders})",
+                top_ids,
+            ).fetchall()
+        }
+
+    def _rank_of(rowid: int, ch: list) -> Optional[int]:
+        try:
+            return ch.index(rowid)
+        except ValueError:
+            return None
+
+    results = []
+    for rowid in top_ids:
+        row = result_rows.get(rowid)
+        if row is None:
+            continue
+        item = SearchResult(memory=row_to_memory(row), score=scores[rowid])
+        if debug:
+            item.vector_rank = _rank_of(rowid, vec_ranks)
+            item.bm25_rank = _rank_of(rowid, bm25_ranks)
+            item.recency_rank = _rank_of(rowid, rec_ranks)
+        results.append(item)
+
+    return SearchResponse(results=results, score_max_theoretical=max_score)
 
 
 @router.get("/memories", response_model=MemoryListResponse)

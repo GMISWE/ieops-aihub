@@ -50,10 +50,16 @@ class SearchRequest(BaseModel):
 class SearchResult(BaseModel):
     memory: MemoryResponse
     score: float
+    # Per-channel ranks; only populated when ?debug=1.
+    vector_rank: Optional[int] = None
+    bm25_rank: Optional[int] = None
+    recency_rank: Optional[int] = None
 
 
 class SearchResponse(BaseModel):
     results: list[SearchResult]
+    score_scale: str = "rrf-fused"
+    score_max_theoretical: float = 0.0
 
 
 class AccessCreate(BaseModel):

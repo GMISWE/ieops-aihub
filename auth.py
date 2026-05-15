@@ -23,7 +23,9 @@ def hash_key(api_key: str) -> str:
     return hmac.new(HASH_SECRET, api_key.encode(), hashlib.sha256).hexdigest()
 
 
-def check_auth(api_key: str | None, project: str, min_role: str = "reader") -> None:
+def check_auth(api_key: str | None, project: str, min_role: str = "reader") -> dict:
+    """Authenticate + authorize. Returns {"key_id": str, "role": str} so callers
+    can record authorship on writes and gate own-vs-other modifications."""
     if not api_key:
         raise HTTPException(
             status_code=401,
@@ -40,7 +42,7 @@ def check_auth(api_key: str | None, project: str, min_role: str = "reader") -> N
                 detail={"code": "UNAUTHORIZED", "message": "invalid API key"},
             )
         row = conn.execute(
-            "SELECT role FROM access WHERE key_hash = ? AND (project = ? OR project = '*')",
+            "SELECT key_id, role FROM access WHERE key_hash = ? AND (project = ? OR project = '*')",
             (key_hash, project),
         ).fetchone()
 
@@ -54,6 +56,7 @@ def check_auth(api_key: str | None, project: str, min_role: str = "reader") -> N
             status_code=403,
             detail={"code": "FORBIDDEN", "message": f"requires {min_role} role"},
         )
+    return {"key_id": row["key_id"], "role": row["role"]}
 
 
 def bootstrap(admin_api_key: str | None) -> None:

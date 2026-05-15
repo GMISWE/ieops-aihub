@@ -10,11 +10,13 @@ class MemoryCreate(BaseModel):
     content: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     ttl_days: Optional[int] = None
+    showable: bool = True
 
 
 class MemoryUpdate(BaseModel):
     content: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
+    showable: Optional[bool] = None
 
 
 class DeprecateRequest(BaseModel):
@@ -34,6 +36,8 @@ class MemoryResponse(BaseModel):
     deprecated: bool
     deprecated_reason: Optional[str]
     superseded_by: Optional[str]
+    author_key_id: Optional[str]
+    showable: bool
 
 
 class SearchRequest(BaseModel):
@@ -90,4 +94,6 @@ def row_to_memory(row: sqlite3.Row) -> MemoryResponse:
         deprecated=bool(row["deprecated"]),
         deprecated_reason=row["deprecated_reason"],
         superseded_by=row["superseded_by"],
+        author_key_id=row["author_key_id"],
+        showable=bool(row["showable"]),
     )

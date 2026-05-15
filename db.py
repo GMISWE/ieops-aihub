@@ -18,7 +18,9 @@ CREATE TABLE IF NOT EXISTS memories (
     expires_at        TEXT,
     deprecated        INTEGER NOT NULL DEFAULT 0,
     deprecated_reason TEXT,
-    superseded_by     TEXT
+    superseded_by     TEXT,
+    author_key_id     TEXT,
+    showable          INTEGER NOT NULL DEFAULT 1
 )
 """
 
@@ -43,14 +45,25 @@ ON access(key_hash, project)
 """
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent column additions for upgrades from pre-v0.2.0 schemas."""
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(memories)")}
+    if "author_key_id" not in existing:
+        conn.execute("ALTER TABLE memories ADD COLUMN author_key_id TEXT")
+    if "showable" not in existing:
+        conn.execute("ALTER TABLE memories ADD COLUMN showable INTEGER NOT NULL DEFAULT 1")
+
+
 def init_db() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(_CREATE_MEMORIES)
         conn.execute(_CREATE_MEMORIES_IDX)
         conn.execute(_CREATE_ACCESS)
         conn.execute(_CREATE_ACCESS_IDX)
+        _migrate(conn)
         conn.commit()
 
 

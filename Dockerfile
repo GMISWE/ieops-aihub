@@ -22,6 +22,11 @@ list(TextEmbedding('sentence-transformers/all-MiniLM-L6-v2').embed(['warmup']))"
 
 COPY . .
 
+# Register the project in site-packages metadata so importlib.metadata
+# resolves __version__ at runtime. --no-deps because all runtime deps
+# are already installed in the earlier layer (preserves cache reuse).
+RUN pip install --no-cache-dir --no-deps .
+
 EXPOSE 8765
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8765"]

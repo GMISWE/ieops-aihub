@@ -157,6 +157,39 @@ _MIGRATION_STEPS.append((1, _step_1_create_vec_memories))
 _MIGRATION_STEPS.append((2, _step_2_reindex_into_vec))
 
 
+_CREATE_FTS_TRIGGERS = """
+CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE OF content ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+END;
+"""
+
+
+def _step_3_create_memories_fts(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+               content,
+               content='memories', content_rowid='rowid',
+               tokenize='porter unicode61'
+           )"""
+    )
+    conn.executescript(_CREATE_FTS_TRIGGERS)
+
+
+def _step_4_rebuild_memories_fts(conn: sqlite3.Connection) -> None:
+    conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+
+
+_MIGRATION_STEPS.append((3, _step_3_create_memories_fts))
+_MIGRATION_STEPS.append((4, _step_4_rebuild_memories_fts))
+
+
 def init_db() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:

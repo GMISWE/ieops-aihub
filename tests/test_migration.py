@@ -64,3 +64,34 @@ def test_step_2_reindexes_existing_rows_into_vec_memories(tmp_db):
         db._load_vec_extension(conn)
         n = conn.execute("SELECT COUNT(*) FROM vec_memories").fetchone()[0]
     assert n == 1
+
+
+def test_step_4_populates_memories_fts_from_existing(tmp_db):
+    import sqlite3
+    os.makedirs(os.path.dirname(db.DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(db.DB_PATH)
+    conn.executescript("""
+        CREATE TABLE memories (
+            id TEXT PRIMARY KEY, project TEXT NOT NULL, type TEXT NOT NULL,
+            content TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}',
+            embedding BLOB, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            expires_at TEXT, deprecated INTEGER NOT NULL DEFAULT 0,
+            deprecated_reason TEXT, superseded_by TEXT,
+            author_key_id TEXT, showable INTEGER NOT NULL DEFAULT 1
+        );
+    """)
+    conn.execute(
+        "INSERT INTO memories(id,project,type,content,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+        ("mem-test-1", "p", "note", "alpha bravo charlie", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"),
+    )
+    conn.commit()
+    conn.close()
+
+    db.init_db()
+
+    with sqlite3.connect(db.DB_PATH) as conn:
+        db._load_vec_extension(conn)
+        rows = conn.execute(
+            "SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'bravo'"
+        ).fetchall()
+    assert len(rows) == 1

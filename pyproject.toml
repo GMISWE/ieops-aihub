@@ -4,18 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ieops-mem"
-version = "0.2.3"
+version = "0.3.0"
 description = "Lightweight self-hosted shared memory service for polyforge-v2"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
-    "fastembed>=0.3",
+    "fastembed==0.3.6",
     "numpy>=1.26",
     "apscheduler>=3.10",
     "PyGithub>=2.3",
     "python-ulid>=1.0",
     "pyrage>=0.1",
+    "sqlite-vec==0.1.7",
 ]
 
 [project.optional-dependencies]

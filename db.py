@@ -115,6 +115,48 @@ def _run_migration(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _step_1_create_vec_memories(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(embedding float[384])"
+    )
+
+
+async def _embed_passage(content: str):
+    # Lazy import to avoid hard coupling at db.py-load time.
+    import embedder
+    return await embedder.embed(content, role="passage")
+
+
+def _step_2_reindex_into_vec(conn: sqlite3.Connection) -> None:
+    import asyncio
+
+    # Find memories.rowid not yet in vec_memories. INSERT OR IGNORE is the
+    # idempotency guarantee — resumed runs after partial completion just
+    # fill the missing rowids.
+    rows = conn.execute(
+        """SELECT m.rowid, m.content FROM memories m
+           LEFT JOIN vec_memories v ON v.rowid = m.rowid
+           WHERE v.rowid IS NULL"""
+    ).fetchall()
+    if not rows:
+        return
+
+    loop = asyncio.new_event_loop()
+    try:
+        for rowid, content in rows:
+            vec = loop.run_until_complete(_embed_passage(content))
+            conn.execute(
+                "INSERT OR IGNORE INTO vec_memories(rowid, embedding) VALUES (?, ?)",
+                (rowid, vec.tobytes()),
+            )
+    finally:
+        loop.close()
+
+
+_MIGRATION_STEPS.append((1, _step_1_create_vec_memories))
+_MIGRATION_STEPS.append((2, _step_2_reindex_into_vec))
+
+
 def init_db() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:

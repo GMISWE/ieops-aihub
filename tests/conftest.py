@@ -16,7 +16,7 @@ import embedder as _embedder  # noqa: E402
 def _mock_load_model() -> None:
     pass
 
-async def _mock_embed(text: str) -> np.ndarray:
+async def _mock_embed(text: str, role: str = "passage") -> np.ndarray:
     seed = abs(hash(text)) % (2**31)
     rng = np.random.RandomState(seed)
     vec = rng.randn(384).astype(np.float32)

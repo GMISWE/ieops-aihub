@@ -1,7 +1,3 @@
-import pytest
-from tests.conftest import PROJECT, WRITER_KEY, READER_KEY
-
-
 def _create(client, writer_key, project, **kwargs):
     payload = {"project": project, "type": "note", "content": "hello memory", **kwargs}
     return client.post("/memories", json=payload, headers={"X-API-Key": writer_key})

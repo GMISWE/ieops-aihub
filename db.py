@@ -190,6 +190,34 @@ _MIGRATION_STEPS.append((3, _step_3_create_memories_fts))
 _MIGRATION_STEPS.append((4, _step_4_rebuild_memories_fts))
 
 
+def _step_5_integrity_check(conn: sqlite3.Connection) -> None:
+    # FTS5 built-in: raises if external-content shadow has diverged.
+    try:
+        conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')")
+    except sqlite3.DatabaseError as e:
+        logger.warning("memories_fts diverged (%s); rebuilding", e)
+        conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+        conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')")
+
+    # vec_memories sanity: every memories.rowid has a corresponding vec entry.
+    n_mem = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    n_vec = conn.execute("SELECT COUNT(*) FROM vec_memories").fetchone()[0]
+    if n_mem != n_vec:
+        raise RuntimeError(
+            f"vec_memories integrity failure: memories={n_mem} vec={n_vec}"
+        )
+
+
+def _step_6_drop_embedding_column(conn: sqlite3.Connection) -> None:
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()]
+    if "embedding" in cols:
+        conn.execute("ALTER TABLE memories DROP COLUMN embedding")
+
+
+_MIGRATION_STEPS.append((5, _step_5_integrity_check))
+_MIGRATION_STEPS.append((6, _step_6_drop_embedding_column))
+
+
 def init_db() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:

@@ -77,29 +77,35 @@ async def create_memory(
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ):
     auth = check_auth(x_api_key, body.project, "writer")
-    vec = await _embedder.embed(body.content)
+    vec = await _embedder.embed(body.content, role="passage")
     now = _now()
     mem_id = f"mem-{ULID()}"
 
     with get_db() as conn:
         conn.execute(
             """INSERT INTO memories
-               (id, project, type, content, metadata, embedding,
+               (id, project, type, content, metadata,
                 created_at, updated_at, expires_at, author_key_id, showable)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
                 mem_id,
                 body.project,
                 body.type,
                 body.content,
                 json.dumps(body.metadata),
-                vec.tobytes(),
                 now,
                 now,
                 _expires_at(body.ttl_days),
                 auth["key_id"],
                 1 if body.showable else 0,
             ),
+        )
+        rowid = conn.execute(
+            "SELECT rowid FROM memories WHERE id = ?", (mem_id,)
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT OR IGNORE INTO vec_memories(rowid, embedding) VALUES (?, ?)",
+            (rowid, vec.tobytes()),
         )
         row = conn.execute(
             f"SELECT {_MEM_COLS} FROM memories WHERE id = ?", (mem_id,)
@@ -113,11 +119,10 @@ async def search_memories(
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ):
     auth = check_auth(x_api_key, body.project, "reader")
-    query_vec = await _embedder.embed(body.query)
+    query_vec = await _embedder.embed(body.query, role="query")
     now = _now()
 
     with get_db() as conn:
-        # Search needs the embedding column — keep SELECT *.
         # Visibility filter pushed to SQL for efficiency at scale.
         if auth["role"] == "admin":
             visibility_clause = ""
@@ -126,9 +131,14 @@ async def search_memories(
             visibility_clause = " AND (showable = 1 OR author_key_id IS NULL OR author_key_id = ?)"
             visibility_params = [auth["key_id"]]
         rows = conn.execute(
-            f"""SELECT * FROM memories
-               WHERE project = ? AND deprecated = 0
-               AND (expires_at IS NULL OR expires_at > ?){visibility_clause}""",
+            f"""SELECT m.id, m.project, m.type, m.content, m.metadata,
+                       m.created_at, m.updated_at, m.expires_at, m.deprecated,
+                       m.deprecated_reason, m.superseded_by, m.author_key_id,
+                       m.showable, v.embedding
+               FROM memories m
+               JOIN vec_memories v ON v.rowid = m.rowid
+               WHERE m.project = ? AND m.deprecated = 0
+               AND (m.expires_at IS NULL OR m.expires_at > ?){visibility_clause}""",
             [body.project, now] + visibility_params,
         ).fetchall()
 
@@ -137,8 +147,9 @@ async def search_memories(
 
     embeddings, valid_rows = [], []
     for row in rows:
-        if row["embedding"]:
-            embeddings.append(np.frombuffer(row["embedding"], dtype=np.float32))
+        raw = row["embedding"]
+        if raw:
+            embeddings.append(np.frombuffer(raw, dtype=np.float32))
             valid_rows.append(row)
 
     if not embeddings:
@@ -268,10 +279,10 @@ async def update_memory(
         )
 
     updates: dict = {"updated_at": _now()}
+    new_vec = None
     if body.content is not None:
-        vec = await _embedder.embed(body.content)
+        new_vec = await _embedder.embed(body.content, role="passage")
         updates["content"] = body.content
-        updates["embedding"] = vec.tobytes()
     if body.metadata is not None:
         existing = json.loads(row["metadata"]) if row["metadata"] else {}
         existing.update(body.metadata)
@@ -285,6 +296,15 @@ async def update_memory(
             f"UPDATE memories SET {set_clause} WHERE id = ?",
             list(updates.values()) + [memory_id],
         )
+        if new_vec is not None:
+            rowid = conn.execute(
+                "SELECT rowid FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+            if rowid:
+                conn.execute(
+                    "UPDATE vec_memories SET embedding = ? WHERE rowid = ?",
+                    (new_vec.tobytes(), rowid[0]),
+                )
         updated = conn.execute(
             f"SELECT {_MEM_COLS} FROM memories WHERE id = ?", (memory_id,)
         ).fetchone()
@@ -316,7 +336,12 @@ async def delete_memory(
             detail={"code": "FORBIDDEN", "message": "only the author or an admin may delete this memory"},
         )
     with get_db() as conn:
+        rowid = conn.execute(
+            "SELECT rowid FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
         conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        if rowid:
+            conn.execute("DELETE FROM vec_memories WHERE rowid = ?", (rowid[0],))
 
 
 @router.put("/memories/{memory_id}/deprecate", response_model=MemoryResponse)

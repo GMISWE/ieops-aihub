@@ -1,0 +1,12 @@
+[
+  {"query": "smoke test", "expected_top_id": "mem-001"},
+  {"query": "GPU autoscaler", "expected_top_id": "mem-002"},
+  {"query": "reconciler idempotent", "expected_top_id": "mem-003"},
+  {"query": "sqlite-vec sqlite-vss tradeoff", "expected_top_id": "mem-004"},
+  {"query": "worktrees gitignored", "expected_top_id": "mem-005"},
+  {"query": "image tag format", "expected_top_id": "mem-008"},
+  {"query": "squash merge policy", "expected_top_id": "mem-010"},
+  {"query": "RRF fusion constant", "expected_top_id": "mem-015"},
+  {"query": "pre-deploy snapshot location", "expected_top_id": "mem-019"},
+  {"query": "DROP COLUMN sqlite version", "expected_top_id": "mem-025"}
+]

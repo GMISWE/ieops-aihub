@@ -5,26 +5,25 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
     "fastapi>=0.111" \
     "uvicorn[standard]>=0.29" \
-    "fastembed>=0.3" \
+    "fastembed==0.3.6" \
     "numpy>=1.26" \
     "apscheduler>=3.10" \
     "PyGithub>=2.3" \
     "python-ulid>=1.0" \
     "pyrage>=0.1" \
+    "sqlite-vec==0.1.7" \
     "pytest>=8" \
     "pytest-asyncio>=0.23" \
     "httpx>=0.27"
 
-# Bake fastembed model into image to avoid cold-start download
+# Bake bge-small ONNX into image (~80MB) and verify sqlite-vec wheel
 RUN python -c "\
 from fastembed import TextEmbedding; \
-list(TextEmbedding('sentence-transformers/all-MiniLM-L6-v2').embed(['warmup']))"
+list(TextEmbedding('BAAI/bge-small-en-v1.5').embed(['warmup']))"
+RUN python -c "import sqlite_vec; print('sqlite-vec', sqlite_vec.__version__)"
 
 COPY . .
 
-# Register the project in site-packages metadata so importlib.metadata
-# resolves __version__ at runtime. --no-deps because all runtime deps
-# are already installed in the earlier layer (preserves cache reuse).
 RUN pip install --no-cache-dir --no-deps .
 
 EXPOSE 8765

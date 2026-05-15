@@ -44,16 +44,28 @@ class SearchRequest(BaseModel):
     project: str
     query: str
     top_k: int = Field(5, ge=1, le=200)
-    recency_boost: float = 0.1
+    recency_boost: float = Field(
+        1.0,
+        description=(
+            "RRF channel weight on recency; default 1.0 = equal pull with vector "
+            "and BM25; 0 disables recency entirely."
+        ),
+    )
 
 
 class SearchResult(BaseModel):
     memory: MemoryResponse
     score: float
+    # Per-channel ranks; only populated when ?debug=1.
+    vector_rank: Optional[int] = None
+    bm25_rank: Optional[int] = None
+    recency_rank: Optional[int] = None
 
 
 class SearchResponse(BaseModel):
     results: list[SearchResult]
+    score_scale: str = "rrf-fused"
+    score_max_theoretical: float = 0.0
 
 
 class AccessCreate(BaseModel):

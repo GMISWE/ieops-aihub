@@ -24,7 +24,7 @@
 
 Lightweight self-hosted shared memory service for polyforge-v2.
 
-- FastAPI + SQLite WAL + fastembed (all-MiniLM-L6-v2 via ONNX) + numpy cosine
+- FastAPI + SQLite WAL + sqlite-vec (vec0) + FTS5 + fastembed (bge-small-en-v1.5 via ONNX) + RRF k=60 hybrid search
 - Daily encrypted backup to a private GitHub repo via APScheduler + pyrage
 - Project-scoped HMAC-SHA256 API key auth, three roles (reader/writer/admin)
 

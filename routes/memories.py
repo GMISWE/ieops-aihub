@@ -135,7 +135,9 @@ async def search_memories(
     )
     common_params = [body.project, now] + vis_params
 
-    CHANNEL_TOP_N = 50
+    # Pull at least top_k candidates per channel so a large top_k gets a
+    # meaningful pool to fuse over; 50 is the floor when top_k <= 50.
+    CHANNEL_TOP_N = max(50, body.top_k)
 
     # Sanitize query for FTS5: replace non-alphanumeric chars with spaces so
     # that e.g. "admin-visible" doesn't parse as a column NOT filter ("-visible"

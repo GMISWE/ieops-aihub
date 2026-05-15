@@ -135,7 +135,10 @@ def test_golden_ndcg_at_5_above_floor(golden_client):
         r = client.post(
             "/memories/search",
             headers={"X-API-Key": _GOLDEN_READER},
-            json={"project": _GOLDEN_PROJECT, "query": q["query"], "top_k": 5},
+            # recency_boost=0 isolates semantic quality (vector + BM25 only).
+            # The golden corpus is seeded in a fixed order, so recency would
+            # unfairly favour later-inserted docs over semantically better ones.
+            json={"project": _GOLDEN_PROJECT, "query": q["query"], "top_k": 5, "recency_boost": 0.0},
         )
         assert r.status_code == 200, f"search failed for query '{q['query']}': {r.text}"
         body = r.json()

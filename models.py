@@ -44,7 +44,13 @@ class SearchRequest(BaseModel):
     project: str
     query: str
     top_k: int = Field(5, ge=1, le=200)
-    recency_boost: float = 0.1
+    recency_boost: float = Field(
+        1.0,
+        description=(
+            "RRF channel weight on recency; default 1.0 = equal pull with vector "
+            "and BM25; 0 disables recency entirely."
+        ),
+    )
 
 
 class SearchResult(BaseModel):

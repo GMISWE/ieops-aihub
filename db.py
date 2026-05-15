@@ -70,8 +70,10 @@ def _utcnow_iso() -> str:
 def _load_vec_extension(conn: sqlite3.Connection) -> None:
     """Enable extension loading for one call, load sqlite-vec, then lock off."""
     conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+    try:
+        sqlite_vec.load(conn)
+    finally:
+        conn.enable_load_extension(False)
 
 
 def _read_step(conn: sqlite3.Connection) -> int:
@@ -121,15 +123,17 @@ def _step_1_create_vec_memories(conn: sqlite3.Connection) -> None:
     )
 
 
-async def _embed_passage(content: str):
-    # Lazy import to avoid hard coupling at db.py-load time.
+def _embed_passage_sync(content: str):
+    """Sync embed path for migration — bypasses asyncio wrapper to stay
+    safe inside FastAPI lifespan (no nested event loops)."""
     import embedder
-    return await embedder.embed(content, role="passage")
+    import numpy as np
+    model = embedder.get_model()
+    vecs = list(model.embed([content]))
+    return vecs[0].astype(np.float32)
 
 
 def _step_2_reindex_into_vec(conn: sqlite3.Connection) -> None:
-    import asyncio
-
     # Find memories.rowid not yet in vec_memories. INSERT OR IGNORE is the
     # idempotency guarantee — resumed runs after partial completion just
     # fill the missing rowids.
@@ -140,17 +144,12 @@ def _step_2_reindex_into_vec(conn: sqlite3.Connection) -> None:
     ).fetchall()
     if not rows:
         return
-
-    loop = asyncio.new_event_loop()
-    try:
-        for rowid, content in rows:
-            vec = loop.run_until_complete(_embed_passage(content))
-            conn.execute(
-                "INSERT OR IGNORE INTO vec_memories(rowid, embedding) VALUES (?, ?)",
-                (rowid, vec.tobytes()),
-            )
-    finally:
-        loop.close()
+    for rowid, content in rows:
+        vec = _embed_passage_sync(content)
+        conn.execute(
+            "INSERT OR IGNORE INTO vec_memories(rowid, embedding) VALUES (?, ?)",
+            (rowid, vec.tobytes()),
+        )
 
 
 _MIGRATION_STEPS.append((1, _step_1_create_vec_memories))
@@ -199,12 +198,16 @@ def _step_5_integrity_check(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
         conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')")
 
-    # vec_memories sanity: every memories.rowid has a corresponding vec entry.
-    n_mem = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-    n_vec = conn.execute("SELECT COUNT(*) FROM vec_memories").fetchone()[0]
-    if n_mem != n_vec:
+    # Set-equality check via two EXCEPTs — catches counts-equal-but-rowids-differ.
+    missing = conn.execute(
+        "SELECT rowid FROM memories EXCEPT SELECT rowid FROM vec_memories LIMIT 1"
+    ).fetchone()
+    orphan = conn.execute(
+        "SELECT rowid FROM vec_memories EXCEPT SELECT rowid FROM memories LIMIT 1"
+    ).fetchone()
+    if missing or orphan:
         raise RuntimeError(
-            f"vec_memories integrity failure: memories={n_mem} vec={n_vec}"
+            f"vec_memories integrity failure: missing={missing} orphan={orphan}"
         )
 
 

@@ -23,10 +23,28 @@ async def _mock_embed(text: str, role: str = "passage") -> np.ndarray:
     vec /= np.linalg.norm(vec)
     return vec
 
+def _mock_model_embed(texts):
+    """Sync generator that yields deterministic unit vectors — used by
+    _embed_passage_sync (the migration path) which calls model.embed() directly."""
+    import numpy as np
+    for text in texts:
+        seed = abs(hash(text)) % (2**31)
+        rng = np.random.RandomState(seed)
+        vec = rng.randn(384).astype(np.float32)
+        vec /= np.linalg.norm(vec)
+        yield vec
+
+
+class _MockModel:
+    """Minimal fastembed-compatible stub for the conftest mock embedder."""
+    embed = staticmethod(_mock_model_embed)
+
+
 _embedder.load_model = _mock_load_model
 _embedder.embed = _mock_embed
-# Make get_model() return a sentinel so /health reports "loaded"
-_embedder._model = object()
+# Make get_model() return a mock model so /health reports "loaded"
+# and _embed_passage_sync (migration path) can call model.embed() directly.
+_embedder._model = _MockModel()
 
 # Patch backup scheduler to no-op
 import backup as _backup  # noqa: E402

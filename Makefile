@@ -24,7 +24,7 @@ DEPLOY_HOST := 10.146.0.16
 DEPLOY_DIR  := /opt/ieops-mem
 PLATFORM    := linux/amd64
 
-.PHONY: help version build push deploy redeploy all test logs ps health clean
+.PHONY: help version build push deploy redeploy all test logs ps health clean snapshot-before-deploy deploy-safe
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -83,3 +83,18 @@ health:  ## Hit /health on the deployed instance (retries during post-deploy uvi
 
 clean:  ## Remove locally-built images
 	-docker rmi $(TAG_VERSION) $(TAG_DATESHA) 2>/dev/null
+
+SNAPSHOTS_DIR := /opt/ieops-mem/snapshots
+SKIP_PREDEPLOY_SNAPSHOT ?=
+
+snapshot-before-deploy:  ## Take a snapshot of the prod DB before a release
+	@ts=$$(date -u +%Y%m%dT%H%M%SZ); \
+	echo ">>> snapshotting $(DEPLOY_HOST):/opt/ieops-mem/data/ieops-mem.db → $(SNAPSHOTS_DIR)/pre-v$(VERSION)-$$ts.db"; \
+	ssh $(DEPLOY_HOST) "sudo mkdir -p $(SNAPSHOTS_DIR) \
+	  && sudo sqlite3 /opt/ieops-mem/data/ieops-mem.db \".backup /tmp/snap-$$ts.db\" \
+	  && sudo mv /tmp/snap-$$ts.db $(SNAPSHOTS_DIR)/pre-v$(VERSION)-$$ts.db \
+	  && sudo ls -la $(SNAPSHOTS_DIR) | tail -3"
+
+deploy-safe:  ## Snapshot then deploy (recommended for MINOR/MAJOR bumps)
+	@[ "$$SKIP_PREDEPLOY_SNAPSHOT" = "1" ] || $(MAKE) snapshot-before-deploy
+	@$(MAKE) deploy

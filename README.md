@@ -25,6 +25,39 @@ docker run -d --name ieops-mem \
 
 `HASH_SECRET` must be ≥ 32 bytes; the service refuses to start otherwise.
 
+## Deploying
+
+For MINOR/MAJOR releases (e.g. v0.3.0), always use:
+
+    make deploy-safe
+
+This snapshots `/opt/ieops-mem/data/ieops-mem.db` to
+`/opt/ieops-mem/snapshots/pre-v$(VERSION)-<ts>.db` on the deploy host
+before pulling and starting the new image. Rollback is then a 3-line
+restore (see "Rollback" below).
+
+For patch releases or rapid iteration:
+
+    SKIP_PREDEPLOY_SNAPSHOT=1 make deploy
+
+## Rollback (v0.3.0 → v0.2.x)
+
+The v0.3.0 startup migration is forward-only — older images cannot
+read the new schema. To roll back:
+
+```bash
+make redeploy TAG=20260515-f8d012f   # any pre-v0.3.0 image tag
+ssh 10.146.0.16 "sudo docker stop ieops-mem \
+  && sudo cp /opt/ieops-mem/snapshots/pre-v0.3.0-<ts>.db /opt/ieops-mem/data/ieops-mem.db \
+  && sudo rm /opt/ieops-mem/data/ieops-mem.db-wal /opt/ieops-mem/data/ieops-mem.db-shm \
+  && sudo docker start ieops-mem"
+curl -sS http://10.146.0.16/health   # expect: version < 0.3.0
+```
+
+- **RTO ≤ 5 min** (snapshot restore + container restart).
+- **RPO** = age of the pre-deploy snapshot (taken immediately before
+  the migration; effectively 0 for routine releases).
+
 ## Backup restore runbook
 
 Backups land at `backups/ieops-mem-<UTC-timestamp>.db.age` on the

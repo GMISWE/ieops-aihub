@@ -36,16 +36,21 @@ _MEM_COLS = (
 )
 
 
+def _iso_ms(dt: datetime) -> str:
+    # Millisecond precision so same-second writes get distinct updated_at and
+    # SQL lex-compare against cutoff/expires_at stays monotonic. Pre-v0.2.3
+    # second-precision rows still parse via fromisoformat on read.
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _iso_ms(datetime.now(timezone.utc))
 
 
 def _expires_at(ttl_days: Optional[int]) -> Optional[str]:
     if ttl_days is None:
         return None
-    return (datetime.now(timezone.utc) + timedelta(days=ttl_days)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    return _iso_ms(datetime.now(timezone.utc) + timedelta(days=ttl_days))
 
 
 def _can_modify(row, auth: dict) -> bool:
@@ -196,9 +201,7 @@ async def list_memories(
         filters.append("json_extract(metadata, '$.external_id') = ?")
         params.append(external_id)
     if max_age_days is not None:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
+        cutoff = _iso_ms(datetime.now(timezone.utc) - timedelta(days=max_age_days))
         filters.append("created_at >= ?")
         params.append(cutoff)
 

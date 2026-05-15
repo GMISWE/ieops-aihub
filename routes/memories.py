@@ -31,7 +31,8 @@ DECAY_LAMBDA = float(os.getenv("DECAY_LAMBDA", "0.005"))
 # Column list excluding the 1.5KB embedding BLOB — used by all non-search reads.
 _MEM_COLS = (
     "id, project, type, content, metadata, created_at, updated_at, "
-    "expires_at, deprecated, deprecated_reason, superseded_by"
+    "expires_at, deprecated, deprecated_reason, superseded_by, "
+    "author_key_id, showable"
 )
 
 
@@ -47,12 +48,30 @@ def _expires_at(ttl_days: Optional[int]) -> Optional[str]:
     )
 
 
+def _can_modify(row, auth: dict) -> bool:
+    """admin or original author (NULL author_key_id = legacy data, any writer)."""
+    if auth["role"] == "admin":
+        return True
+    aid = row["author_key_id"]
+    return aid is None or aid == auth["key_id"]
+
+
+def _can_see(row, auth: dict) -> bool:
+    """admin always; otherwise showable=1 OR own memory (incl. legacy NULL)."""
+    if auth["role"] == "admin":
+        return True
+    if bool(row["showable"]):
+        return True
+    aid = row["author_key_id"]
+    return aid is None or aid == auth["key_id"]
+
+
 @router.post("/memories", status_code=201, response_model=MemoryResponse)
 async def create_memory(
     body: MemoryCreate,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ):
-    check_auth(x_api_key, body.project, "writer")
+    auth = check_auth(x_api_key, body.project, "writer")
     vec = await _embedder.embed(body.content)
     now = _now()
     mem_id = f"mem-{ULID()}"
@@ -60,8 +79,9 @@ async def create_memory(
     with get_db() as conn:
         conn.execute(
             """INSERT INTO memories
-               (id, project, type, content, metadata, embedding, created_at, updated_at, expires_at)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+               (id, project, type, content, metadata, embedding,
+                created_at, updated_at, expires_at, author_key_id, showable)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 mem_id,
                 body.project,
@@ -72,6 +92,8 @@ async def create_memory(
                 now,
                 now,
                 _expires_at(body.ttl_days),
+                auth["key_id"],
+                1 if body.showable else 0,
             ),
         )
         row = conn.execute(
@@ -85,17 +107,24 @@ async def search_memories(
     body: SearchRequest,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ):
-    check_auth(x_api_key, body.project, "reader")
+    auth = check_auth(x_api_key, body.project, "reader")
     query_vec = await _embedder.embed(body.query)
     now = _now()
 
     with get_db() as conn:
         # Search needs the embedding column — keep SELECT *.
+        # Visibility filter pushed to SQL for efficiency at scale.
+        if auth["role"] == "admin":
+            visibility_clause = ""
+            visibility_params: list = []
+        else:
+            visibility_clause = " AND (showable = 1 OR author_key_id IS NULL OR author_key_id = ?)"
+            visibility_params = [auth["key_id"]]
         rows = conn.execute(
-            """SELECT * FROM memories
+            f"""SELECT * FROM memories
                WHERE project = ? AND deprecated = 0
-               AND (expires_at IS NULL OR expires_at > ?)""",
-            (body.project, now),
+               AND (expires_at IS NULL OR expires_at > ?){visibility_clause}""",
+            [body.project, now] + visibility_params,
         ).fetchall()
 
     if not rows:
@@ -143,11 +172,16 @@ async def list_memories(
     offset: int = Query(0, ge=0),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ):
-    check_auth(x_api_key, project, "reader")
+    auth = check_auth(x_api_key, project, "reader")
     now = _now()
 
     filters = ["project = ?", "(expires_at IS NULL OR expires_at > ?)"]
     params: list = [project, now]
+
+    # Visibility filter: admin sees all; others see showable=1 OR own (incl. legacy NULL).
+    if auth["role"] != "admin":
+        filters.append("(showable = 1 OR author_key_id IS NULL OR author_key_id = ?)")
+        params.append(auth["key_id"])
 
     if not include_deprecated:
         filters.append("deprecated = 0")
@@ -200,7 +234,12 @@ async def get_memory(
         raise HTTPException(
             404, detail={"code": "NOT_FOUND", "message": f"memory {memory_id} not found"}
         )
-    check_auth(x_api_key, row["project"], "reader")
+    auth = check_auth(x_api_key, row["project"], "reader")
+    if not _can_see(row, auth):
+        raise HTTPException(
+            403,
+            detail={"code": "FORBIDDEN", "message": "memory is not visible to this caller"},
+        )
     return row_to_memory(row)
 
 
@@ -218,7 +257,12 @@ async def update_memory(
         raise HTTPException(
             404, detail={"code": "NOT_FOUND", "message": f"memory {memory_id} not found"}
         )
-    check_auth(x_api_key, row["project"], "writer")
+    auth = check_auth(x_api_key, row["project"], "writer")
+    if not _can_modify(row, auth):
+        raise HTTPException(
+            403,
+            detail={"code": "FORBIDDEN", "message": "only the author or an admin may modify this memory"},
+        )
 
     updates: dict = {"updated_at": _now()}
     if body.content is not None:
@@ -229,6 +273,8 @@ async def update_memory(
         existing = json.loads(row["metadata"]) if row["metadata"] else {}
         existing.update(body.metadata)
         updates["metadata"] = json.dumps(existing)
+    if body.showable is not None:
+        updates["showable"] = 1 if body.showable else 0
 
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     with get_db() as conn:
@@ -254,13 +300,18 @@ async def delete_memory(
 ):
     with get_db() as conn:
         row = conn.execute(
-            "SELECT project FROM memories WHERE id = ?", (memory_id,)
+            "SELECT project, author_key_id FROM memories WHERE id = ?", (memory_id,)
         ).fetchone()
     if not row:
         raise HTTPException(
             404, detail={"code": "NOT_FOUND", "message": f"memory {memory_id} not found"}
         )
-    check_auth(x_api_key, row["project"], "writer")
+    auth = check_auth(x_api_key, row["project"], "writer")
+    if not _can_modify(row, auth):
+        raise HTTPException(
+            403,
+            detail={"code": "FORBIDDEN", "message": "only the author or an admin may delete this memory"},
+        )
     with get_db() as conn:
         conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
 
@@ -273,13 +324,18 @@ async def deprecate_memory(
 ):
     with get_db() as conn:
         row = conn.execute(
-            "SELECT project FROM memories WHERE id = ?", (memory_id,)
+            "SELECT project, author_key_id FROM memories WHERE id = ?", (memory_id,)
         ).fetchone()
     if not row:
         raise HTTPException(
             404, detail={"code": "NOT_FOUND", "message": f"memory {memory_id} not found"}
         )
-    check_auth(x_api_key, row["project"], "writer")
+    auth = check_auth(x_api_key, row["project"], "writer")
+    if not _can_modify(row, auth):
+        raise HTTPException(
+            403,
+            detail={"code": "FORBIDDEN", "message": "only the author or an admin may deprecate this memory"},
+        )
     now = _now()
     with get_db() as conn:
         conn.execute(

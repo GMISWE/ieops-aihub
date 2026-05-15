@@ -1,5 +1,27 @@
 # ieops-mem
 
+## v0.3.0 migration notes
+
+- **`/memories/search` score scale changed.** v0.2.x returned a
+  cosine-plus-additive-boost score in [0, ~1.1]. v0.3.0 returns an
+  RRF-fused score in [0, ~0.05] (with default 3-channel weights
+  `[1.0, 1.0, 1.0]` and k=60). Use the new top-level
+  `score_max_theoretical` field for scale-free thresholds.
+  Detect the change by reading `score_scale: "rrf-fused"` on the
+  response; pre-v0.3.0 responses omitted that field.
+- **`recency_boost` request semantics changed.** v0.2.x: additive
+  exponential decay added at most `recency_boost` (default 0.1) to a
+  0.0-1.0 cosine. v0.3.0: `recency_boost` is the **weight** on the
+  recency RRF channel. Setting `1.0` (the new default) gives recency
+  equal pull to vector and BM25; `0` disables recency entirely.
+  Existing callers passing the old `0.1` will see recency contribute
+  ~10% of the fused score — close to the old intent.
+- **Schema migration is forward-only.** v0.2.x images cannot read
+  v0.3.0 schema (vec_memories + memories_fts virtual tables; the
+  `embedding` BLOB column is dropped). Always `make deploy-safe` for
+  v0.3.0+ deploys so a rollback can restore from the pre-deploy
+  snapshot. See the "Rollback" section below for the procedure.
+
 Lightweight self-hosted shared memory service for polyforge-v2.
 
 - FastAPI + SQLite WAL + fastembed (all-MiniLM-L6-v2 via ONNX) + numpy cosine
@@ -98,19 +120,19 @@ the source was under heavy WAL activity at backup time.
 
 ## API surface
 
-| Endpoint                              | Role   | Notes |
-|---------------------------------------|--------|-------|
-| `POST   /memories`                    | writer | sync embedding on write |
-| `GET    /memories`                    | reader | filters: type, status, max_age_days, external_id, include_deprecated |
-| `GET    /memories/:id`                | reader | |
-| `PUT    /memories/:id`                | writer | metadata merges; re-embeds on content change |
-| `DELETE /memories/:id`                | writer | hard delete |
-| `PUT    /memories/:id/deprecate`      | writer | soft delete; sets reason + superseded_by |
-| `POST   /memories/search`             | reader | cosine + recency boost |
-| `POST   /admin/access`                | admin  | upserts (key_hash, project) |
-| `GET    /admin/access?project=`       | admin  | |
-| `DELETE /admin/access/:key_id/:project` | admin | |
-| `GET    /health`                      | none   | db + model status |
+| Endpoint                              | Role   | Notes                                                                              |
+|---------------------------------------|--------|-----------------------------------------------------------------------------------|
+| `POST   /memories`                    | writer | embeds content (passage role) into vec_memories on write                          |
+| `GET    /memories`                    | reader | filters: type, status, max_age_days, external_id, include_deprecated              |
+| `GET    /memories/:id`                | reader |                                                                                   |
+| `PUT    /memories/:id`                | writer | metadata merges; re-embeds (passage role) on content change                       |
+| `DELETE /memories/:id`                | writer | hard delete; cleans vec_memories + memories_fts                                   |
+| `PUT    /memories/:id/deprecate`      | writer | soft delete; sets reason + superseded_by                                          |
+| `POST   /memories/search`             | reader | hybrid: vector + BM25 + recency; RRF k=60; response includes `score_scale: "rrf-fused"` and `score_max_theoretical`. `?debug=1` adds per-channel ranks per result. |
+| `POST   /admin/access`                | admin  | upserts (key_hash, project)                                                       |
+| `GET    /admin/access?project=`       | admin  |                                                                                   |
+| `DELETE /admin/access/:key_id/:project` | admin |                                                                                   |
+| `GET    /health`                      | none   | db + model status + version                                                       |
 
 ## Development
 

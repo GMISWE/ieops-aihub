@@ -1,7 +1,11 @@
 """nDCG@5 measurement runner.
 
 Usage:
+  # Production default (recency_boost=1.0 — same as real traffic):
   python scripts/measure_search_quality.py --live URL ADMIN_KEY
+
+  # Semantic-only baseline (isolates vector+BM25 quality from recency noise):
+  python scripts/measure_search_quality.py --live URL ADMIN_KEY --recency-boost 0
 
 Measures search quality against a deployed ieops-mem instance over the
 golden fixture corpus + queries.
@@ -27,7 +31,7 @@ def _ndcg(actual_ids, expected_id):
     return 0.0 if idx >= 5 else 1.0 / math.log2(idx + 2)
 
 
-def run_live(url, admin_key):
+def run_live(url, admin_key, recency_boost=None):
     corpus = json.loads((FIXTURES / "golden_corpus.json").read_text())
     queries = json.loads((FIXTURES / "golden_queries.json").read_text())
 
@@ -57,14 +61,16 @@ def run_live(url, admin_key):
 
         ndcgs = []
         for q in queries:
-            res = http("POST", "/memories/search",
-                       {"project": project, "query": q["query"], "top_k": 5},
-                       key=reader_key)
+            body = {"project": project, "query": q["query"], "top_k": 5}
+            if recency_boost is not None:
+                body["recency_boost"] = recency_boost
+            res = http("POST", "/memories/search", body, key=reader_key)
             expected_actual_id = seeded[q["expected_top_id"]]
             actual = [item["memory"]["id"] for item in res["results"]]
             ndcgs.append(_ndcg(actual, expected_actual_id))
         mean = sum(ndcgs) / len(ndcgs)
-        print(f"nDCG@5 = {mean:.4f} over {len(queries)} queries on {url}")
+        rb_label = f"recency_boost={recency_boost}" if recency_boost is not None else "recency_boost=default(1.0)"
+        print(f"nDCG@5 = {mean:.4f} over {len(queries)} queries on {url} [{rb_label}]")
         return mean
     finally:
         for actual_id in seeded.values():
@@ -81,11 +87,14 @@ def run_live(url, admin_key):
 
 
 def main():
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--live", nargs=2, metavar=("URL", "ADMIN_KEY"))
+    p.add_argument("--recency-boost", type=float, default=None, metavar="N",
+                   help="Override recency_boost (default: server default 1.0). "
+                        "Use 0.0 for pure semantic-quality baseline independent of insertion order.")
     args = p.parse_args()
     if args.live:
-        run_live(*args.live)
+        run_live(*args.live, recency_boost=args.recency_boost)
     else:
         p.print_help()
         sys.exit(2)

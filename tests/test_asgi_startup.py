@@ -114,7 +114,7 @@ def test_asgi_startup_runs_migration_and_health_reports_030():
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "ok"
-        assert body["version"] == "0.3.1"
+        assert body["version"] == "0.3.2"
 
     # Post-startup: vec_memories has the 2 seeded rows, memories_fts has them,
     # embedding column is gone.

@@ -84,15 +84,18 @@ health:  ## Hit /health on the deployed instance (retries during post-deploy uvi
 clean:  ## Remove locally-built images
 	-docker rmi $(TAG_VERSION) $(TAG_DATESHA) 2>/dev/null
 
+# Host data dir: docker volume source for ieops-mem's /data inside the container.
+# Verified via `docker inspect ieops-mem --format '{{json .Mounts}}'` → Source.
+DATA_DIR      := /data/ieops-mem/data
 SNAPSHOTS_DIR := /opt/ieops-mem/snapshots
 SKIP_PREDEPLOY_SNAPSHOT ?=
 
 snapshot-before-deploy:  ## Take a snapshot of the prod DB before a release
 	@ts=$$(date -u +%Y%m%dT%H%M%SZ); \
-	echo ">>> snapshotting $(DEPLOY_HOST):/opt/ieops-mem/data/ieops-mem.db → $(SNAPSHOTS_DIR)/pre-v$(VERSION)-$$ts.db"; \
+	echo ">>> snapshotting $(DEPLOY_HOST):$(DATA_DIR)/ieops-mem.db → $(SNAPSHOTS_DIR)/pre-v$(VERSION)-$$ts.db"; \
 	ssh $(DEPLOY_HOST) "sudo mkdir -p $(SNAPSHOTS_DIR) \
-	  && sudo sqlite3 /opt/ieops-mem/data/ieops-mem.db \".backup /tmp/snap-$$ts.db\" \
-	  && sudo mv /tmp/snap-$$ts.db $(SNAPSHOTS_DIR)/pre-v$(VERSION)-$$ts.db \
+	  && sudo docker exec ieops-mem python3 -c 'import sqlite3; sqlite3.connect(\"/data/ieops-mem.db\").execute(\"PRAGMA wal_checkpoint(FULL)\")' \
+	  && sudo cp $(DATA_DIR)/ieops-mem.db $(SNAPSHOTS_DIR)/pre-v$(VERSION)-$$ts.db \
 	  && sudo ls -la $(SNAPSHOTS_DIR) | tail -3"
 
 deploy-safe:  ## Snapshot then deploy (recommended for MINOR/MAJOR bumps)

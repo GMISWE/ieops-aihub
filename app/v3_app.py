@@ -43,6 +43,8 @@ def make_v3_app(
     from routes.v3_misc import router as misc_router
     from routes.v3_conflicts import router as conflicts_router
     from routes.v3_artifacts import router as artifacts_router
+    from routes.v3_admin import router as admin_router
+    from routes.v3_memories import router as memories_router
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -62,7 +64,8 @@ def make_v3_app(
 
     app = FastAPI(title="ieops-aihub v3", version="0.4.0", lifespan=lifespan)
     for r in (whoami_router, wi_router, claim_router, attempts_router,
-              misc_router, conflicts_router, artifacts_router):
+              misc_router, conflicts_router, artifacts_router,
+              admin_router, memories_router):
         app.include_router(r, prefix="/v1")
 
     @app.exception_handler(HTTPException)

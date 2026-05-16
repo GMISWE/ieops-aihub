@@ -13,4 +13,4 @@ def test_health_payload_shape(client):
     assert data["model"] == "loaded"
     # Regression guard for v0.2.1: /health must report installed package
     # version, not a hardcoded string.
-    assert data["version"] == _pkg_version("ieops-mem")
+    assert data["version"] == _pkg_version("polyforge-aihub")

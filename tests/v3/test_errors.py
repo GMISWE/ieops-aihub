@@ -1,4 +1,5 @@
 """server 侧 ErrorCode + envelope。"""
+import pytest
 from app.errors import ErrorCode, AihubServerError, envelope_response
 
 
@@ -6,8 +7,11 @@ def test_error_codes_match_client_enum_values():
     """server enum 值必须跟 client polyforge_v3.errors.ErrorCode 一字不差。
 
     G2-followup parity test:直接 import 两侧 enum 比较, 替代 hardcoded expected。
+    Cross-repo: requires `polyforge-v3` package installed (dev / staging env).
+    CI without polyforge-v3 skips this contract drift detection (v3.1: install in CI).
     """
-    from polyforge_v3.aihub.errors import ErrorCode as ClientErrorCode
+    polyforge_v3_errors = pytest.importorskip("polyforge_v3.aihub.errors")
+    ClientErrorCode = polyforge_v3_errors.ErrorCode
     server = {c.value for c in ErrorCode}
     client = {c.value for c in ClientErrorCode}
     assert server == client, f"client↔server ErrorCode drift: missing={client - server} extra={server - client}"

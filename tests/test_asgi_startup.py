@@ -114,7 +114,8 @@ def test_asgi_startup_runs_migration_and_health_reports_030():
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "ok"
-        assert body["version"] == "0.3.2"
+        from importlib.metadata import version as _pkg_version
+        assert body["version"] == _pkg_version("polyforge-aihub")
 
     # Post-startup: vec_memories has the 2 seeded rows, memories_fts has them,
     # embedding column is gone.

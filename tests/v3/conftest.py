@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from testcontainers.postgres import PostgresContainer
 from alembic.config import Config
 from alembic import command
+from tests.v3.fixtures import insert_reference_users
+from tests.v3.seed_reference_scenario import seed_09_00_state
 
 
 # Use session-scoped event loop for all tests and fixtures in this directory.
@@ -56,3 +58,43 @@ async def pg_engine(pg_container):
         await loop.run_in_executor(pool, _run_alembic_upgrade, async_url, ini_path)
     yield engine
     await engine.dispose()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def fresh_db(pg_engine):
+    """每个 test 跑前 truncate 所有 data 表, 保留 admin user。"""
+    async with pg_engine.connect() as conn:
+        # admin 永久存活
+        await conn.execute(sa.text("""
+            INSERT INTO users (id, email, display_name, role)
+            VALUES ('u_admin', 'admin@gmi.local', 'admin', 'admin')
+            ON CONFLICT (id) DO NOTHING
+        """))
+        # truncate 顺序: events / locks → attempts → memories → work_items → users
+        await conn.execute(sa.text("""
+            TRUNCATE TABLE
+              agent_events, resource_locks, run_attempts,
+              memories, work_items
+            CASCADE
+        """))
+        await conn.execute(sa.text(
+            "DELETE FROM users WHERE role != 'admin'"
+        ))
+        await conn.commit()
+    yield pg_engine
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def seeded_users(fresh_db):
+    async with fresh_db.connect() as conn:
+        await insert_reference_users(conn)
+        await conn.commit()
+    yield fresh_db
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def seeded_reference(seeded_users):
+    async with seeded_users.connect() as conn:
+        await seed_09_00_state(conn)
+        await conn.commit()
+    yield seeded_users

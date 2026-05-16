@@ -60,10 +60,14 @@ ENDPOINTS: list[EndpointShape] = [
                   AC_FIELDS | frozenset({"status"}),
                   frozenset({"ok"}),
                   frozenset({401, 403, 409})),
+    EndpointShape("POST", "/v1/attempts/{attempt_id}/pause", "pause_attempt",
+                  AC_FIELDS | frozenset({"reason"}),
+                  frozenset({"ok"}),
+                  frozenset({401, 403, 409})),
     EndpointShape("POST", "/v1/locks", "acquire_lock",
                   AC_FIELDS | frozenset({"resource_type", "resource_key"}),
                   frozenset({"ok"}),
-                  frozenset({401, 409})),
+                  frozenset({401, 403, 409})),  # G2-re r3: 加 403 actor mismatch (§6.2)
     EndpointShape("DELETE", "/v1/locks/{resource_type}/{resource_key}", "release_lock",
                   AC_FIELDS,
                   frozenset({"ok"}),
@@ -110,6 +114,11 @@ ENDPOINTS: list[EndpointShape] = [
                   frozenset({"id", "project", "author_user_id", "visibility",
                              "type", "metadata", "created_at"}),
                   frozenset({401, 403, 404})),
+    EndpointShape("POST", "/v1/memories/{memory_id}/redact", "redact_memory",
+                  # No AC per §6.1 memory carve-out — memory is per-user, not per-attempt
+                  frozenset({"reason"}),
+                  frozenset({"ok"}),
+                  frozenset({401, 403, 404})),
     EndpointShape("POST", "/v1/admin/users", "admin_add_user",
                   frozenset({"email", "display_name", "role", "projects"}),
                   frozenset({"user_id", "api_key"}),
@@ -125,6 +134,6 @@ ENDPOINTS: list[EndpointShape] = [
 ]
 
 
-assert len(ENDPOINTS) == 24
-assert len({(e.method, e.path) for e in ENDPOINTS}) == 24, "duplicate (method, path)"
-assert len({e.operation_id for e in ENDPOINTS}) == 24, "duplicate operation_id"
+assert len(ENDPOINTS) == 26, f"expected 26 endpoints, got {len(ENDPOINTS)}"
+assert len({(e.method, e.path) for e in ENDPOINTS}) == 26, "duplicate (method, path)"
+assert len({e.operation_id for e in ENDPOINTS}) == 26, "duplicate operation_id"

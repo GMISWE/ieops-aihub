@@ -128,10 +128,11 @@ def upgrade():
         " WHERE status = 'running'"
     )
 
-    # 4. resource_locks
+    # 4. resource_locks (resource_type CHECK 闭集 — 跟 §5/§12.5 RESOURCE_TYPES 同步)
     op.execute("""
     CREATE TABLE resource_locks (
-      resource_type    TEXT NOT NULL,
+      resource_type    TEXT NOT NULL
+                        CHECK (resource_type IN ('git_branch','worktree','file_scope','tcp_port','deploy_env')),
       resource_key     TEXT NOT NULL,
       owner_attempt_id TEXT NOT NULL REFERENCES run_attempts(id) ON DELETE CASCADE,
       claim_epoch      BIGINT NOT NULL,

@@ -61,29 +61,71 @@ components:
         claim_epoch: {type: integer, minimum: 1}
         session_secret:
           type: string
-          description: "raw 32-byte hex; server hash 比对存储的 session_secret_hash"
+          pattern: "^[0-9a-f]{64}$"
+          minLength: 64
+          maxLength: 64
+          description: "raw 32-byte hex (64 chars); server sha256 比对存储的 session_secret_hash (§6.1)"
 
     ErrorEnvelope:
       type: object
       required: [code, message]
       properties:
-        code: {type: string}
+        code:
+          type: string
+          enum:
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - CONFLICT_EPOCH_MISMATCH
+            - CONFLICT_LEASE_EXPIRED
+            - CONFLICT_LEASE_TAKEN_OVER
+            - CONFLICT_HARD_BLOCK
+            - CONFLICT_BUSY_NOT_TAKEOVER_ELIGIBLE
+            - CONFLICT_DUPLICATE_REQUEST
+            - BAD_REQUEST
+            - NOT_FOUND
+            - PAYLOAD_TOO_LARGE
+            - INTERNAL_ERROR
+            - SERVICE_UNAVAILABLE
+            - UNKNOWN_REMOTE_ERROR
+          description: "13 known ErrorCode (§6.1) + UNKNOWN_REMOTE_ERROR forward-compat placeholder; SoT polyforge_v3.aihub.errors.ErrorCode"
         message: {type: string}
         details: {type: object, additionalProperties: true}
 
     DeclaredResource:
       type: object
+      description: |
+        Intent-time 形状 (CreateWorkItemRequest / UpdateWorkItemRequest 入)。
+        Runtime fields (state/version/last_sha/last_pr_number/error) 不在此 schema 暴露,
+        通过 WorkItemDetailResponse.per_repo_state 返 PerRepoState。详见 §5.1 / §7.6。
       required: [type, uri, intent]
       properties:
         type: {type: string, enum: [repo, path, document, section, service, external_ref]}
         uri: {type: string}
         intent: {type: string, enum: [read, write, refactor, delete]}
-        state: {type: string}
-        version: {type: integer}
+        base_branch: {type: string, description: "optional; type=repo 才有"}
+        task_branch: {type: string, description: "optional; type=repo 才有"}
+        worktree_path_hint: {type: string, description: "optional; display 用, 不全局唯一"}
+        metadata: {type: object}
+
+    PerRepoState:
+      type: object
+      description: |
+        Runtime per-repo state (§7.6). Server 维护, WorkItemDetailResponse.per_repo_state
+        返。客户端不直接 mutate (走 reconcile / scenario.on_wrap)。
+      required: [type, uri, state, version]
+      properties:
+        type: {type: string, enum: [repo, path, document, section, service, external_ref]}
+        uri: {type: string}
+        intent: {type: string, enum: [read, write, refactor, delete]}
+        state:
+          type: string
+          enum: [declared, prepared, committed, pushed, pr_opened,
+                 blocked_merge_conflict, blocked_dirty_worktree, failed, skipped]
+          description: "§7.6 per-repo state machine"
+        version: {type: integer, minimum: 0, description: "per-repo state CAS 版本"}
         base_branch: {type: string}
         task_branch: {type: string}
-        worktree_path_hint: {type: string}
-        last_sha: {type: string}
+        last_sha: {type: string, pattern: "^[0-9a-f]{7,40}$"}
         last_pr_number: {type: integer}
         error: {type: [string, "null"]}
         metadata: {type: object}
@@ -211,7 +253,7 @@ components:
           type: string
           enum: [human, "auto:review", "auto:execute", "auto:debug",
                  "auto:retro", "sync:jira", "sync:github", "admin"]
-          description: "SoT 在 polyforge_v3.events.constants.SOURCE_VALUES"
+          description: "SoT 在 polyforge_v3.core.events.SOURCE_VALUES"
         metadata: {type: object}
 
     UpdateWorkItemRequest:
@@ -232,7 +274,12 @@ components:
           required: [machine_id, session_secret]
           properties:
             machine_id: {type: string}
-            session_secret: {type: string}
+            session_secret:
+              type: string
+              pattern: "^[0-9a-f]{64}$"
+              minLength: 64
+              maxLength: 64
+              description: "raw 32-byte hex (64 chars); G2-followup H7 full closure"
         requested_locks:
           type: array
           items:
@@ -255,7 +302,12 @@ components:
       required: [claim_epoch, session_secret]
       properties:
         claim_epoch: {type: integer, minimum: 1}
-        session_secret: {type: string}
+        session_secret:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          minLength: 64
+          maxLength: 64
+          description: "raw 32-byte hex (64 chars); attempt_id from path. G2-followup H7 full closure"
 
     CompleteAttemptRequest:
       allOf:
@@ -265,15 +317,22 @@ components:
           properties:
             status: {type: string, enum: [wrapped, failed]}
 
+    PauseAttemptRequest:
+      allOf:
+        - $ref: '#/components/schemas/AttemptCredential'
+        - type: object
+          required: [reason]
+          properties:
+            reason: {type: string, description: "user-facing reason, surfaced in /pf3-status"}
+
     AcquireLockRequest:
-      type: object
-      required: [attempt_id, claim_epoch, session_secret, resource_type, resource_key]
-      properties:
-        attempt_id: {type: string, pattern: "^ra_[a-z0-9]+$"}
-        claim_epoch: {type: integer, minimum: 1}
-        session_secret: {type: string}
-        resource_type: {type: string, enum: [git_branch, worktree, file_scope, tcp_port, deploy_env]}
-        resource_key: {type: string}
+      allOf:
+        - $ref: '#/components/schemas/AttemptCredential'
+        - type: object
+          required: [resource_type, resource_key]
+          properties:
+            resource_type: {type: string, enum: [git_branch, worktree, file_scope, tcp_port, deploy_env]}
+            resource_key: {type: string}
 
     EmitEventRequest:
       allOf:
@@ -330,6 +389,13 @@ components:
       required: [patch_payload]
       properties:
         patch_payload: {type: object}
+
+    RedactMemoryRequest:
+      type: object
+      description: "Per §6.1 memory carve-out — 不带 AttemptCredential (memory 是 per-user 不是 per-attempt)"
+      required: [reason]
+      properties:
+        reason: {type: string, description: "redaction 原因, 落 memories.redaction_reason"}
 
     AdminAddUserRequest:
       type: object
@@ -408,7 +474,7 @@ components:
         work_item: {$ref: '#/components/schemas/WorkItem'}
         current_attempt: {$ref: '#/components/schemas/RunAttempt'}
         recent_events: {type: array, items: {$ref: '#/components/schemas/AgentEvent'}}
-        per_repo_state: {type: array, items: {$ref: '#/components/schemas/DeclaredResource'}}
+        per_repo_state: {type: array, items: {$ref: '#/components/schemas/PerRepoState'}}
 
     AdminAddUserResponse:
       type: object
@@ -579,6 +645,22 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '409': {$ref: '#/components/responses/Conflict'}
 
+  /v1/attempts/{attempt_id}/pause:
+    parameters:
+      - {name: attempt_id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: pause_attempt
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PauseAttemptRequest'}}}
+      responses:
+        '200':
+          description: paused
+          content: {application/json: {schema: {$ref: '#/components/schemas/OkResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
   /v1/locks:
     post:
       operationId: acquire_lock
@@ -590,6 +672,7 @@ paths:
           description: lock acquired
           content: {application/json: {schema: {$ref: '#/components/schemas/OkResponse'}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
         '409': {$ref: '#/components/responses/Conflict'}
 
   /v1/locks/{resource_type}/{resource_key}:
@@ -749,6 +832,22 @@ paths:
         '200':
           description: updated
           content: {application/json: {schema: {$ref: '#/components/schemas/Memory'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /v1/memories/{memory_id}/redact:
+    parameters:
+      - {name: memory_id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: redact_memory
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/RedactMemoryRequest'}}}
+      responses:
+        '200':
+          description: redacted
+          content: {application/json: {schema: {$ref: '#/components/schemas/OkResponse'}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}

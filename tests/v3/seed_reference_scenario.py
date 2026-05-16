@@ -5,11 +5,20 @@ import sqlalchemy as sa
 
 async def seed_09_00_state(conn):
     """v3-reference-scenario §1 09:00 — 张三 claim wi_a3f 后的状态。"""
+    # 09:00 state declared_resources — intent-time + runtime 字段混存同一 JSONB 元素 (§5.1)
     declared = [
-        {"type": "repo", "uri": "repo:marketplace", "intent": "write",
-         "state": "prepared", "version": 1,
-         "base_branch": "main", "task_branch": "polyforge/wi_a3f"},
-        {"type": "path", "uri": "file:marketplace/src/auth/**", "intent": "write"},
+        {
+            # intent-time
+            "type": "repo", "uri": "repo:marketplace", "intent": "write",
+            "base_branch": "main", "task_branch": "polyforge/wi_a3f",
+            # runtime (per §7.6, 由 server 维护 — seed 模拟刚 prepare 完的状态)
+            "state": "prepared", "version": 1,
+        },
+        {
+            # path 类型 — intent-time + runtime; version=1 跟 repo item 对齐 (CAS 起始值)
+            "type": "path", "uri": "file:marketplace/src/auth/**", "intent": "write",
+            "state": "prepared", "version": 1,
+        },
     ]
 
     # Insert work_item with current_attempt_id=NULL first (FK is DEFERRABLE INITIALLY DEFERRED)

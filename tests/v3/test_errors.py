@@ -3,16 +3,16 @@ from app.errors import ErrorCode, AihubServerError, envelope_response
 
 
 def test_error_codes_match_client_enum_values():
-    """server enum 值必须跟 client polyforge_v3.errors.ErrorCode 一字不差。"""
+    """server enum 值必须跟 client polyforge_v3.errors.ErrorCode 一字不差。
+
+    G2-followup parity test:直接 import 两侧 enum 比较, 替代 hardcoded expected。
+    """
+    from polyforge_v3.aihub.errors import ErrorCode as ClientErrorCode
     server = {c.value for c in ErrorCode}
-    expected = {
-        "UNAUTHORIZED", "FORBIDDEN",
-        "CONFLICT_EPOCH_MISMATCH", "CONFLICT_LEASE_EXPIRED",
-        "CONFLICT_HARD_BLOCK", "CONFLICT_BUSY_NOT_TAKEOVER_ELIGIBLE",
-        "BAD_REQUEST", "NOT_FOUND", "PAYLOAD_TOO_LARGE",
-        "INTERNAL_ERROR", "SERVICE_UNAVAILABLE",
-    }
-    assert server == expected
+    client = {c.value for c in ClientErrorCode}
+    assert server == client, f"client↔server ErrorCode drift: missing={client - server} extra={server - client}"
+    # Sanity: 14 codes after G2-re r3 (+UNKNOWN_REMOTE_ERROR forward-compat)
+    assert len(server) == 14, f"expected 14 ErrorCode values, got {len(server)}"
 
 
 def test_unauthorized_returns_401():

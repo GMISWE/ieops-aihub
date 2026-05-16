@@ -55,6 +55,44 @@ async def test_pgvector_extension(pg_engine):
     assert rows.first() is not None
 
 
+async def test_resource_type_check_rejects_bogus(pg_engine):
+    """G2-re r3: resource_locks.resource_type CHECK enum 必须真拒绝非闭集值。
+    H4 patch 后这个 negative test 是 regression guard。"""
+    async with pg_engine.connect() as conn:
+        # 先建一个最小的 user + work_item + attempt 让 FK 不挂
+        await conn.execute(sa.text("""
+            INSERT INTO users (id, email, display_name, role)
+            VALUES ('u_test_neg', 'neg@gmi.local', 'neg', 'writer')
+            ON CONFLICT (id) DO NOTHING
+        """))
+        await conn.execute(sa.text("""
+            INSERT INTO work_items (id, project, scenario, goal, status, reporter_user_id)
+            VALUES ('wi_neg', 'marketplace', 'coding', 'neg test', 'queued', 'u_test_neg')
+            ON CONFLICT (id) DO NOTHING
+        """))
+        await conn.execute(sa.text("""
+            INSERT INTO run_attempts (
+                id, work_item_id, status, claim_epoch, idempotency_key, lease_until,
+                actor_user_id, api_key_id, actor_display, machine_id, session_secret_hash
+            )
+            VALUES ('ra_neg', 'wi_neg', 'running', 1, 'idem_neg',
+                    now() + interval '60 seconds',
+                    'u_test_neg', 'ak_neg', 'neg', 'neg-host', 'hash_neg')
+            ON CONFLICT (id) DO NOTHING
+        """))
+        # 尝试插入非法 resource_type, 期望 CHECK 拒绝
+        with pytest.raises(Exception) as exc:
+            await conn.execute(sa.text("""
+                INSERT INTO resource_locks (resource_type, resource_key, owner_attempt_id, claim_epoch)
+                VALUES ('bogus_type_not_in_enum', 'k', 'ra_neg', 1)
+            """))
+            await conn.commit()
+        # IntegrityError / CheckViolation 都接受
+        assert "check" in str(exc.value).lower() or "violates" in str(exc.value).lower() or "23514" in str(exc.value)
+        # rollback 避免污染 session
+        await conn.rollback()
+
+
 async def test_critical_indexes(pg_engine):
     """v3-design §5 要求的关键索引必须存在。"""
     expected_indexes = {

@@ -33,7 +33,7 @@ def test_no_top_level_components_duplicate(spec):
     assert "components" in spec, "components must exist at top level"
 
 
-def test_all_24_endpoints_present(spec):
+def test_all_endpoints_present(spec):
     actual_pairs = set()
     for path, methods in spec["paths"].items():
         for method in methods:
@@ -105,6 +105,30 @@ def test_components_attempt_credential_shape(spec):
     assert required >= AC_FIELDS, f"AttemptCredential missing fields: {AC_FIELDS - required}"
 
 
+def test_session_secret_pattern_consistent_everywhere(spec):
+    """G2-re r3: 所有出现 `session_secret` 的 property 必须有同一 pattern + length 限制 (§6.1 H7 full closure)。"""
+    PATTERN = "^[0-9a-f]{64}$"
+    found: list = []
+    for name, schema in spec["components"]["schemas"].items():
+        matches = _walk_property(schema, spec, "session_secret", collect_all=True)
+        if matches:
+            found.extend(matches)
+    assert found, "no session_secret property found anywhere (sanity)"
+    for prop in found:
+        assert prop.get("pattern") == PATTERN, f"session_secret missing pattern: {prop}"
+        assert prop.get("minLength") == 64, f"session_secret missing minLength=64: {prop}"
+        assert prop.get("maxLength") == 64, f"session_secret missing maxLength=64: {prop}"
+
+
+def test_error_envelope_code_enum(spec):
+    """G2-re r3: ErrorEnvelope.code 必须 enum 约束 (cross-validated 跟 polyforge_v3 ErrorCode)。"""
+    from polyforge_v3.aihub.errors import ErrorCode
+    envelope = spec["components"]["schemas"]["ErrorEnvelope"]
+    enum_vals = set(envelope["properties"]["code"]["enum"])
+    py_vals = {c.value for c in ErrorCode}
+    assert enum_vals == py_vals, f"ErrorEnvelope.code enum != ErrorCode: missing={py_vals - enum_vals} extra={enum_vals - py_vals}"
+
+
 def test_components_error_envelope_shape(spec):
     ee = spec["components"]["schemas"]["ErrorEnvelope"]
     assert "code" in ee["properties"]
@@ -144,13 +168,46 @@ def test_status_enum_matches_design_check(spec):
     assert status_enum == WORK_ITEM_STATUSES
 
 
+def _walk_property(schema: dict, spec: dict, key: str, collect_all: bool = False):
+    """Recursively walk $ref + allOf + nested objects, find property by name.
+
+    collect_all=False → return first match (or None).
+    collect_all=True  → return list of all matches (递归 nested objects 也找).
+    """
+    results: list = [] if collect_all else None
+    def _walk(s):
+        if not isinstance(s, dict):
+            return None
+        if "$ref" in s:
+            name = s["$ref"].split("/")[-1]
+            return _walk(spec["components"]["schemas"][name])
+        if "allOf" in s:
+            for sub in s["allOf"]:
+                found = _walk(sub)
+                if found is not None and not collect_all:
+                    return found
+            return None
+        for k, v in s.get("properties", {}).items():
+            if k == key:
+                if collect_all:
+                    results.append(v)
+                else:
+                    return v
+            if collect_all and isinstance(v, dict):
+                _walk(v)
+        return None
+    first = _walk(schema)
+    return results if collect_all else first
+
+
 def test_resource_type_enum_matches_constants(spec):
-    """RESOURCE_TYPES 在 POST /v1/locks request body 必须一致。"""
+    """RESOURCE_TYPES 在 POST /v1/locks request body 必须一致。
+    G2-followup: AcquireLockRequest 改 allOf+$ref, 此处递归 walk。
+    """
     from polyforge_v3.core.events import RESOURCE_TYPES
     op = spec["paths"]["/v1/locks"]["post"]
     rb_schema = op["requestBody"]["content"]["application/json"]["schema"]
-    if "$ref" in rb_schema:
-        name = rb_schema["$ref"].split("/")[-1]
-        rb_schema = spec["components"]["schemas"][name]
-    locks_enum = tuple(rb_schema["properties"]["resource_type"]["enum"])
+    rt_prop = _walk_property(rb_schema, spec, "resource_type")
+    assert rt_prop is not None, "resource_type property not found in AcquireLockRequest (walk allOf+$ref)"
+    locks_enum = tuple(rt_prop["enum"])
     assert locks_enum == RESOURCE_TYPES

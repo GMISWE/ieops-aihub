@@ -185,6 +185,14 @@ async def test_predict_rule3_cross_attempt_dedup(seeded_users):
     Two *different* running attempts on the SAME repo with intent=refactor
     should produce two independent predictions, not one (the pre-fix bug would
     collapse them because the dedup key was URI-only).
+
+    NOTE: This test asserts on Rule 1 output (same_resource_live_write) because
+    Rule 1 fires for every write-intent (refactor included) and ALREADY produces
+    one prediction per live attempt on the URI. Rule 3 then dedups against
+    Rule 1's output, so it contributes 0 net predictions in current code paths.
+    The user-visible invariant — cross-attempt predictions are NOT silently
+    collapsed — is what this test pins. Rule 3's fixed (URI, attempt_id) dedup
+    key is forward-looking defense in case Rule 1 ever narrows its scope.
     """
     async with seeded_users.connect() as conn:
         # work_item A: zhang refactors repo:marketplace

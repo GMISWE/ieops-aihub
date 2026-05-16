@@ -93,7 +93,16 @@ async def find_user_by_api_key(conn: AsyncConnection, bearer: str) -> UserRecord
     """Scan users.api_keys JSONB; return first non-revoked match.
 
     Per design §5: users.api_keys is JSONB array of objects with shape:
-      {id, key_hash, scopes, created_at, revoked_at: nullable}
+      {id, key_hash, scopes, created_at, revoked_at}
+
+    INVARIANT (insert-side contract — NOT schema-enforced today):
+      `revoked_at` MUST be present in every entry. null = active,
+      ISO-8601 timestamp = revoked. An entry that OMITS the field
+      entirely will be undiscoverable here because the GIN @> predicate
+      below requires the explicit key. All current insert paths
+      (tests/v3/fixtures.py + the not-yet-built admin key-issuance API)
+      must preserve this invariant. v3.0 GA prerequisite: harden via
+      CHECK constraint or pydantic-validate at insert.
 
     Index idx_users_api_keys_gin (jsonb_path_ops) exists on users.api_keys.
     We leverage it via the @> containment operator: only rows that contain at

@@ -126,7 +126,7 @@ def test_pagination_response_consistent(spec):
 
 def test_source_enum_matches_polyforge_v3_constants(spec):
     """⭐ M3 修复: OpenAPI POST /v1/work_items source enum 必须等于 SOURCE_VALUES。"""
-    from polyforge_v3.events.constants import SOURCE_VALUES
+    from polyforge_v3.core.events import SOURCE_VALUES
     op = spec["paths"]["/v1/work_items"]["post"]
     schema = op["requestBody"]["content"]["application/json"]["schema"]
     if "$ref" in schema:
@@ -138,7 +138,7 @@ def test_source_enum_matches_polyforge_v3_constants(spec):
 
 def test_status_enum_matches_design_check(spec):
     """work_items.status enum 必须等于 design §5 CHECK + polyforge_v3 constants。"""
-    from polyforge_v3.events.constants import WORK_ITEM_STATUSES
+    from polyforge_v3.core.events import WORK_ITEM_STATUSES
     wi = spec["components"]["schemas"]["WorkItem"]
     status_enum = tuple(wi["properties"]["status"]["enum"])
     assert status_enum == WORK_ITEM_STATUSES
@@ -146,7 +146,7 @@ def test_status_enum_matches_design_check(spec):
 
 def test_resource_type_enum_matches_constants(spec):
     """RESOURCE_TYPES 在 POST /v1/locks request body 必须一致。"""
-    from polyforge_v3.events.constants import RESOURCE_TYPES
+    from polyforge_v3.core.events import RESOURCE_TYPES
     op = spec["paths"]["/v1/locks"]["post"]
     rb_schema = op["requestBody"]["content"]["application/json"]["schema"]
     if "$ref" in rb_schema:

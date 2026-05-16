@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -13,6 +14,18 @@ import embedder
 from auth import bootstrap, validate_hash_secret
 from routes.admin import router as admin_router
 from routes.memories import router as memories_router
+
+# v3 routers + errors (mount under /v1 — separate, do not regress legacy routes)
+from app.db import init_db as _v3_init_db
+from app.gc import gc_loop as _v3_gc_loop
+from app.errors import AihubServerError, ErrorCode
+from routes.v3_whoami import router as v3_whoami_router
+from routes.v3_work_items import router as v3_wi_router
+from routes.v3_claim import router as v3_claim_router
+from routes.v3_attempts import router as v3_attempts_router
+from routes.v3_misc import router as v3_misc_router
+from routes.v3_conflicts import router as v3_conflicts_router
+from routes.v3_artifacts import router as v3_artifacts_router
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 
@@ -36,13 +49,41 @@ async def lifespan(app: FastAPI):
     db.init_db()
     bootstrap(os.getenv("ADMIN_API_KEY"))
     scheduler = backup.start_scheduler()
-    yield
-    scheduler.shutdown(wait=False)
+
+    # v3: init async engine + start GC loop (only if AIHUB_DATABASE_URL set —
+    # legacy ieops-mem deployments without Postgres skip v3 startup gracefully).
+    v3_gc_task: asyncio.Task | None = None
+    if os.environ.get("AIHUB_DATABASE_URL"):
+        try:
+            _v3_init_db()
+            from app.db import engine as _engine
+            app.state.engine = _engine
+            v3_gc_task = asyncio.create_task(_v3_gc_loop(_engine))
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "v3 init failed; legacy routes still served"
+            )
+
+    try:
+        yield
+    finally:
+        if v3_gc_task is not None:
+            v3_gc_task.cancel()
+            try:
+                await v3_gc_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        scheduler.shutdown(wait=False)
 
 
 app = FastAPI(title="ieops-mem", version=__version__, lifespan=lifespan)
 app.include_router(memories_router)
 app.include_router(admin_router)
+
+# v3 routers — all mounted under /v1
+for _r in (v3_whoami_router, v3_wi_router, v3_claim_router, v3_attempts_router,
+           v3_misc_router, v3_conflicts_router, v3_artifacts_router):
+    app.include_router(_r, prefix="/v1")
 
 
 @app.get("/health")
@@ -63,6 +104,41 @@ async def health():
     return {"status": "ok", "db": db_status, "model": model_status, "version": __version__}
 
 
+# ---------------------------------------------------------------------------
+# Exception handlers
+# ---------------------------------------------------------------------------
+
+# v3 routes raise AihubServerError (subclass of HTTPException). Its detail is
+# already a dict with {code, message, details} — the ErrorEnvelope shape per
+# openapi. Register a specific handler for AihubServerError FIRST so FastAPI
+# picks it over the generic HTTPException handler below (most-specific wins).
+@app.exception_handler(AihubServerError)
+async def v3_error_handler(request: Request, exc: AihubServerError):
+    """Return v3 ErrorEnvelope directly (no "error" wrapper)."""
+    return JSONResponse(status_code=exc.status_code, content=exc.detail)
+
+
+# v3 validation errors (RequestValidationError on /v1/* routes) — return 400
+# with ErrorEnvelope shape, not 422 with legacy wrapper. Routes under /v1 use
+# Pydantic models that trigger this handler; legacy routes use form-based
+# validation that never raises RequestValidationError (they do 400 via their
+# own checks). If a /v1 path triggers validation error, we detect the prefix.
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    if request.url.path.startswith("/v1"):
+        return JSONResponse(
+            status_code=400,
+            content={"code": ErrorCode.BAD_REQUEST.value,
+                     "message": "request validation failed",
+                     "details": {"errors": exc.errors()}},
+        )
+    return JSONResponse(
+        status_code=422,
+        content={"error": {"code": "VALIDATION_ERROR", "message": str(exc)}},
+    )
+
+
+# Legacy HTTPException handler — wraps in {"error": {...}} for /admin/* /memories/*
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     detail = exc.detail
@@ -79,12 +155,4 @@ async def generic_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=500,
         content={"error": {"code": "INTERNAL_ERROR", "message": "internal server error"}},
-    )
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(
-        status_code=422,
-        content={"error": {"code": "VALIDATION_ERROR", "message": str(exc)}},
     )

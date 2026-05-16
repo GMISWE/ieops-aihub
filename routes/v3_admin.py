@@ -272,26 +272,23 @@ async def admin_revoke_key(
                 f"version mismatch on user {user_row['id']} — concurrent admin mutation; retry",
             )
 
-        # 3. Find all running attempts using this key
-        running_rows = (await conn.execute(sa.text("""
-            SELECT id, work_item_id
-            FROM run_attempts
+        # 3. Atomically mark all *running* attempts as failed; fence against concurrent
+        #    terminal transitions (wrapped/failed/expired) by including status='running'
+        #    in the WHERE predicate.  RETURNING gives us only the rows actually changed.
+        terminated_rows = (await conn.execute(sa.text("""
+            UPDATE run_attempts
+            SET status = 'failed', ended_at = now()
             WHERE api_key_id = :kid AND status = 'running'
+            RETURNING id, work_item_id
         """), {"kid": key_id})).mappings().all()
 
-        terminated_ids: list[str] = []
+        terminated_ids: list[str] = [r["id"] for r in terminated_rows]
 
-        for attempt in running_rows:
+        for attempt in terminated_rows:
             aid = attempt["id"]
             wid = attempt["work_item_id"]
-            terminated_ids.append(aid)
 
-            # 4a. Mark attempt as failed (§17.4 uses 'failed'; schema has no 'terminated')
-            await conn.execute(sa.text("""
-                UPDATE run_attempts
-                SET status = 'failed', ended_at = now()
-                WHERE id = :aid
-            """), {"aid": aid})
+            # 4a. (already updated above via RETURNING)
 
             # 4b. Delete resource locks for this attempt
             await conn.execute(sa.text("""

@@ -12,6 +12,9 @@ from tests.v3.v3_client import (
 )
 from tests.v3.memories_client import make_memories_client as make_async_client
 
+# Admin bearer for AH-3 tests that need admin access
+BEARER_ADMIN_MEM = "argon2id$dummy_seed_hash_admin"
+
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -304,6 +307,8 @@ async def test_redact_memory_happy_path(seeded_users):
     m = redacted_items[0]
     assert m["redacted_at"] is not None
     assert m["redaction_reason"] == "contains PII"
+    # AH-1: content must be nulled on redaction (hard redaction per design §15.1 #8)
+    assert m["content"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -320,3 +325,149 @@ async def test_redact_memory_not_found(seeded_users):
 
     assert r.status_code == 404
     assert r.json()["code"] == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# 11. AH-1: after redact, direct DB fetch confirms content is NULL
+# ---------------------------------------------------------------------------
+
+async def test_redact_nulls_content_in_db(seeded_users):
+    """Hard redaction: content column must be NULL in DB after redact."""
+    async with make_async_client(seeded_users) as client:
+        r = await _create_memory(client, BEARER_ZHANG, content="sensitive data here")
+        mem_id = r.json()["id"]
+
+        r = await client.post(
+            f"/v1/memories/{mem_id}/redact",
+            json={"reason": "GDPR erasure"},
+            headers=auth_headers(BEARER_ZHANG),
+        )
+        assert r.status_code == 200
+
+    async with seeded_users.connect() as conn:
+        row = (await conn.execute(sa.text(
+            "SELECT content, redacted_at, redaction_reason FROM memories WHERE id = :id"
+        ), {"id": mem_id})).mappings().first()
+
+    assert row is not None
+    assert row["content"] is None
+    assert row["redacted_at"] is not None
+    assert row["redaction_reason"] == "GDPR erasure"
+
+
+# ---------------------------------------------------------------------------
+# Helper: seed a work_item for AH-3 tests
+# ---------------------------------------------------------------------------
+
+async def _seed_work_item(engine, wi_id: str, project: str, reporter: str = "u_zhangsan"):
+    async with engine.connect() as conn:
+        existing = (await conn.execute(sa.text(
+            "SELECT id FROM work_items WHERE id = :id"
+        ), {"id": wi_id})).scalar_one_or_none()
+        if existing is None:
+            await conn.execute(sa.text("""
+                INSERT INTO work_items (id, project, scenario, goal, status, reporter_user_id, labels)
+                VALUES (:id, :project, 'coding', 'test work item', 'queued', :reporter, '[]'::jsonb)
+            """), {"id": wi_id, "project": project, "reporter": reporter})
+        await conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# 12. AH-3: create_memory with valid work_item_id in caller's project — succeeds
+# ---------------------------------------------------------------------------
+
+async def test_create_memory_valid_work_item_id(seeded_users):
+    """create_memory with a work_item_id in the caller's own project succeeds."""
+    await _seed_work_item(seeded_users, "wi_ah3_valid", "marketplace")
+
+    async with make_async_client(seeded_users) as client:
+        r = await client.post(
+            "/v1/memories",
+            json={
+                "project": "marketplace",
+                "type": "note",
+                "content": "linked to work item",
+                "visibility": "project",
+                "work_item_id": "wi_ah3_valid",
+            },
+            headers=auth_headers(BEARER_ZHANG),
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["work_item_id"] == "wi_ah3_valid"
+    assert body["project"] == "marketplace"
+
+
+# ---------------------------------------------------------------------------
+# 13. AH-3: create_memory with work_item_id from different project — 403
+# ---------------------------------------------------------------------------
+
+async def test_create_memory_work_item_foreign_project_403(seeded_users):
+    """Wang (marketplace-only) cannot attach memory to a work_item in aihub."""
+    await _seed_work_item(seeded_users, "wi_ah3_aihub", "aihub")
+
+    async with make_async_client(seeded_users) as client:
+        r = await client.post(
+            "/v1/memories",
+            json={
+                "project": "aihub",
+                "type": "note",
+                "content": "cross-project attempt",
+                "visibility": "project",
+                "work_item_id": "wi_ah3_aihub",
+            },
+            headers=auth_headers(BEARER_WANG),  # wang is marketplace-only
+        )
+
+    assert r.status_code == 403, r.text
+    assert r.json()["code"] == "FORBIDDEN"
+
+
+# ---------------------------------------------------------------------------
+# 14. AH-3: create_memory with non-existent work_item_id — 404
+# ---------------------------------------------------------------------------
+
+async def test_create_memory_work_item_not_found_404(seeded_users):
+    """Non-existent work_item_id must return 404, not 500."""
+    async with make_async_client(seeded_users) as client:
+        r = await client.post(
+            "/v1/memories",
+            json={
+                "project": "marketplace",
+                "type": "note",
+                "content": "dangling reference",
+                "visibility": "project",
+                "work_item_id": "wi_does_not_exist_xyz",
+            },
+            headers=auth_headers(BEARER_ZHANG),
+        )
+
+    assert r.status_code == 404, r.text
+    assert r.json()["code"] == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# 15. AH-3: admin can attach memory to work_item in any project — succeeds
+# ---------------------------------------------------------------------------
+
+async def test_create_memory_admin_cross_project_work_item(seeded_users):
+    """Admin bypasses project membership check for work_item_id."""
+    await _seed_work_item(seeded_users, "wi_ah3_admin_cross", "aihub")
+
+    async with make_async_client(seeded_users) as client:
+        r = await client.post(
+            "/v1/memories",
+            json={
+                "project": "aihub",
+                "type": "note",
+                "content": "admin cross-project memory",
+                "visibility": "admin",
+                "work_item_id": "wi_ah3_admin_cross",
+            },
+            headers=auth_headers(BEARER_ADMIN_MEM),
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["work_item_id"] == "wi_ah3_admin_cross"

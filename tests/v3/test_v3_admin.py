@@ -294,7 +294,80 @@ async def test_admin_revoke_key_not_found(seeded_users):
 
 
 # ---------------------------------------------------------------------------
-# 8. admin_revoke_key — already-revoked key is idempotent
+# 8. admin_revoke_key — race: attempt already wrapped before revoke — not terminated
+# ---------------------------------------------------------------------------
+
+async def test_admin_revoke_key_skips_wrapped_attempt(seeded_users):
+    """AH-2: revoke must not overwrite a concurrently-wrapped attempt.
+
+    Seed a running attempt, then manually advance it to 'wrapped' (simulating
+    a concurrent /complete call), then call revoke.  The WHERE status='running'
+    predicate should fence it out — terminated_attempts must NOT include the
+    already-wrapped id.
+    """
+    await _seed_admin_key(seeded_users)
+
+    # Seed a fresh work_item and attempt using ak_zhang_001
+    wi_id = "wi_admin_race_test"
+    ra_id = "ra_admin_race_test"
+    async with seeded_users.connect() as conn:
+        existing_wi = (await conn.execute(sa.text(
+            "SELECT id FROM work_items WHERE id = :id"
+        ), {"id": wi_id})).scalar_one_or_none()
+        if existing_wi is None:
+            await conn.execute(sa.text("""
+                INSERT INTO work_items (id, project, scenario, goal, status,
+                                        reporter_user_id, labels)
+                VALUES (:wi_id, 'marketplace', 'coding', 'race test wi', 'queued',
+                        'u_zhangsan', '[]'::jsonb)
+            """), {"wi_id": wi_id})
+        existing_ra = (await conn.execute(sa.text(
+            "SELECT id FROM run_attempts WHERE id = :id"
+        ), {"id": ra_id})).scalar_one_or_none()
+        if existing_ra is None:
+            await conn.execute(sa.text("""
+                INSERT INTO run_attempts (
+                    id, work_item_id, status, claim_epoch, idempotency_key,
+                    lease_until, actor_user_id, api_key_id, actor_display,
+                    machine_id, session_secret_hash
+                )
+                VALUES (:ra_id, :wi_id, 'running', 200, 'idem_race_test',
+                        now() + interval '60 seconds',
+                        'u_zhangsan', 'ak_zhang_001', '张三', 'zhang-mbp', 'dummy_hash')
+            """), {"ra_id": ra_id, "wi_id": wi_id})
+            await conn.execute(sa.text("""
+                UPDATE work_items SET current_attempt_id = :ra_id WHERE id = :wi_id
+            """), {"ra_id": ra_id, "wi_id": wi_id})
+
+        # Simulate concurrent /complete: advance to 'wrapped' BEFORE revoke
+        await conn.execute(sa.text("""
+            UPDATE run_attempts SET status = 'wrapped', ended_at = now()
+            WHERE id = :ra_id
+        """), {"ra_id": ra_id})
+        await conn.commit()
+
+    async with make_admin_client(seeded_users) as client:
+        r = await client.post(
+            "/v1/admin/keys/revoke",
+            json={"key_id": "ak_zhang_001"},
+            headers=auth_headers(ADMIN_RAW_KEY),
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    # The already-wrapped attempt must NOT appear in terminated_attempts
+    assert ra_id not in body["terminated_attempts"]
+
+    # Verify the wrapped attempt is still 'wrapped' (not overwritten to 'failed')
+    async with seeded_users.connect() as conn:
+        ra_status = (await conn.execute(sa.text(
+            "SELECT status FROM run_attempts WHERE id = :id"
+        ), {"id": ra_id})).scalar_one()
+    assert ra_status == "wrapped"
+
+
+# ---------------------------------------------------------------------------
+# 9. admin_revoke_key — already-revoked key is idempotent
 # ---------------------------------------------------------------------------
 
 async def test_admin_revoke_key_idempotent(seeded_users):

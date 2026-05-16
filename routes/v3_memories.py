@@ -203,6 +203,36 @@ async def create_memory(
                 f"user {user.id} is not a member of project '{body.project}'",
             )
 
+        # Validate work_item_id ownership (cross-project fence)
+        if body.work_item_id is not None:
+            wi_row = (await conn.execute(sa.text("""
+                SELECT project FROM work_items WHERE id = :wi_id
+            """), {"wi_id": body.work_item_id})).mappings().first()
+
+            if wi_row is None:
+                raise AihubServerError(
+                    ErrorCode.NOT_FOUND,
+                    f"work_item {body.work_item_id} not found",
+                )
+
+            wi_project = wi_row["project"]
+
+            # Non-admin must have access to the work_item's project
+            if not is_admin and wi_project not in user.projects:
+                raise AihubServerError(
+                    ErrorCode.FORBIDDEN,
+                    f"work_item {body.work_item_id} belongs to project '{wi_project}' "
+                    f"which you don't have access to",
+                )
+
+            # Memory's project must match the work_item's project for consistency
+            if body.project != wi_project:
+                raise AihubServerError(
+                    ErrorCode.BAD_REQUEST,
+                    f"memory project '{body.project}' does not match "
+                    f"work_item project '{wi_project}'",
+                )
+
         mem_id = _mem_id()
         metadata = body.metadata or {}
 
@@ -386,7 +416,7 @@ async def redact_memory(
 
         await conn.execute(sa.text("""
             UPDATE memories
-            SET redacted_at = now(), redaction_reason = :reason
+            SET redacted_at = now(), redaction_reason = :reason, content = NULL
             WHERE id = :id
         """), {"id": memory_id, "reason": body.reason})
 

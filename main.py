@@ -26,6 +26,8 @@ from routes.v3_attempts import router as v3_attempts_router
 from routes.v3_misc import router as v3_misc_router
 from routes.v3_conflicts import router as v3_conflicts_router
 from routes.v3_artifacts import router as v3_artifacts_router
+from routes.v3_admin import router as v3_admin_router
+from routes.v3_memories import router as v3_memories_router
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 
@@ -82,7 +84,8 @@ app.include_router(admin_router)
 
 # v3 routers — all mounted under /v1
 for _r in (v3_whoami_router, v3_wi_router, v3_claim_router, v3_attempts_router,
-           v3_misc_router, v3_conflicts_router, v3_artifacts_router):
+           v3_misc_router, v3_conflicts_router, v3_artifacts_router,
+           v3_admin_router, v3_memories_router):
     app.include_router(_r, prefix="/v1")
 
 

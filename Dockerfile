@@ -12,6 +12,10 @@ RUN pip install --no-cache-dir \
     "python-ulid>=1.0" \
     "pyrage>=0.1" \
     "sqlite-vec==0.1.7" \
+    "sqlalchemy[asyncio]>=2.0" \
+    "asyncpg>=0.29" \
+    "alembic>=1.13" \
+    "pyyaml>=6" \
     "pytest>=8" \
     "pytest-asyncio>=0.23" \
     "httpx>=0.27"

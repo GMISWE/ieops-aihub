@@ -1,0 +1,795 @@
+openapi: 3.1.0
+info:
+  title: ieops-aihub
+  version: 0.4.0
+  description: |
+    polyforge-v3 backend. v3-design.md §5 (schema) + §10.1 (MCP tools)。
+    所有 mutating endpoint 强制带 AttemptCredential 三联 (attempt_id, claim_epoch, session_secret)。
+
+servers:
+  - url: http://10.146.0.16
+    description: GMI 内网默认部署 (design §6.1 推荐 HTTPS for 公网, warn-only on http://非localhost)
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: aihub_sk_*
+
+  responses:
+    Unauthorized:
+      description: 401 — invalid api_key / session_secret / lease
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Forbidden:
+      description: 403 — actor mismatch / not authorized for project
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    NotFound:
+      description: "404 — resource not found"
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    BadRequest:
+      description: 400 — payload schema 校验失败
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Conflict:
+      description: 409 — epoch mismatch / lease expired / lock hard_block / busy_not_takeover_eligible
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    PayloadTooLarge:
+      description: 413 — event payload > 64 KiB (design §20 M5)
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+
+  schemas:
+    AttemptCredential:
+      type: object
+      required: [attempt_id, claim_epoch, session_secret]
+      properties:
+        attempt_id: {type: string, pattern: "^ra_[a-z0-9]+$"}
+        claim_epoch: {type: integer, minimum: 1}
+        session_secret:
+          type: string
+          description: "raw 32-byte hex; server hash 比对存储的 session_secret_hash"
+
+    ErrorEnvelope:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        details: {type: object, additionalProperties: true}
+
+    DeclaredResource:
+      type: object
+      required: [type, uri, intent]
+      properties:
+        type: {type: string, enum: [repo, path, document, section, service, external_ref]}
+        uri: {type: string}
+        intent: {type: string, enum: [read, write, refactor, delete]}
+        state: {type: string}
+        version: {type: integer}
+        base_branch: {type: string}
+        task_branch: {type: string}
+        worktree_path_hint: {type: string}
+        last_sha: {type: string}
+        last_pr_number: {type: integer}
+        error: {type: [string, "null"]}
+        metadata: {type: object}
+
+    WorkItem:
+      type: object
+      required: [id, project, scenario, goal, status, priority, labels,
+                 reporter_user_id, declared_resources, resources_version,
+                 metadata, created_at, updated_at]
+      properties:
+        id: {type: string, pattern: "^wi_[a-z0-9]+$"}
+        project: {type: string}
+        scenario: {type: string}
+        goal: {type: string}
+        status: {type: string, enum: [queued, running, blocked, paused, wrapped, failed]}
+        priority: {type: string, enum: [low, normal, high, urgent]}
+        labels: {type: array, items: {type: string}}
+        reporter_user_id: {type: string}
+        current_attempt_id: {type: [string, "null"]}
+        declared_resources: {type: array, items: {$ref: '#/components/schemas/DeclaredResource'}}
+        resources_version: {type: integer}
+        external_share_type: {type: [string, "null"], enum: [jira, github, null]}
+        external_share_key: {type: [string, "null"]}
+        parent_work_item_id: {type: [string, "null"]}
+        metadata: {type: object}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        closed_at: {type: [string, "null"], format: date-time}
+
+    RunAttempt:
+      type: object
+      required: [id, work_item_id, status, claim_epoch, idempotency_key,
+                 lease_until, actor_user_id, api_key_id, actor_display,
+                 machine_id, started_at]
+      properties:
+        id: {type: string, pattern: "^ra_[a-z0-9]+$"}
+        work_item_id: {type: string}
+        status: {type: string, enum: [running, superseded, wrapped, failed, expired]}
+        claim_epoch: {type: integer, minimum: 1}
+        idempotency_key: {type: string}
+        lease_until: {type: string, format: date-time}
+        actor_user_id: {type: string}
+        api_key_id: {type: string}
+        actor_display: {type: string}
+        machine_id: {type: string}
+        session_secret_hash: {type: string}
+        parent_attempt_id: {type: [string, "null"]}
+        prepared_workspace: {type: [object, "null"]}
+        started_at: {type: string, format: date-time}
+        ended_at: {type: [string, "null"], format: date-time}
+
+    Memory:
+      type: object
+      required: [id, project, author_user_id, visibility, type, metadata, created_at]
+      properties:
+        id: {type: string}
+        project: {type: string}
+        author_user_id: {type: string}
+        work_item_id: {type: [string, "null"]}
+        visibility: {type: string, enum: [private, project, team, admin]}
+        type: {type: string}
+        content: {type: [string, "null"]}
+        metadata: {type: object}
+        embedding: {type: [array, "null"], items: {type: number}}
+        redacted_at: {type: [string, "null"], format: date-time}
+        redaction_reason: {type: [string, "null"]}
+        expires_at: {type: [string, "null"], format: date-time}
+        created_at: {type: string, format: date-time}
+
+    AgentEvent:
+      type: object
+      required: [id, work_item_id, actor_user_id, event_type, payload, created_at]
+      properties:
+        id: {type: string}
+        work_item_id: {type: string}
+        run_attempt_id: {type: [string, "null"]}
+        actor_user_id: {type: string}
+        api_key_id: {type: [string, "null"]}
+        event_type: {type: string}
+        payload: {type: object}
+        pinned: {type: boolean}
+        created_at: {type: string, format: date-time}
+
+    ExternalArtifactState:
+      type: object
+      required: [type, identifier, state, drift_detected]
+      properties:
+        type: {type: string, enum: [pr, branch, issue]}
+        identifier: {type: string}
+        state: {type: string, enum: [open, merged, closed, missing]}
+        drift_detected: {type: boolean}
+        detail: {type: object}
+
+    ConflictPrediction:
+      type: object
+      required: [rule_id, severity, resource_uri, conflicts_with, message]
+      properties:
+        rule_id: {type: string}
+        severity: {type: string, enum: [info, warn, soft_block, hard_block]}
+        resource_uri: {type: string}
+        conflicts_with:
+          type: object
+          properties:
+            work_item_id: {type: string}
+            attempt_id: {type: string}
+            actor_user_id: {type: string}
+            actor_display: {type: string}
+        message: {type: string}
+
+    # --- Request bodies ---
+    CreateWorkItemRequest:
+      type: object
+      required: [project, scenario, goal]
+      properties:
+        project: {type: string}
+        scenario: {type: string}
+        goal: {type: string}
+        declared_resources: {type: array, items: {$ref: '#/components/schemas/DeclaredResource'}}
+        labels: {type: array, items: {type: string}}
+        priority: {type: string, enum: [low, normal, high, urgent]}
+        external_share_type: {type: string, enum: [jira, github]}
+        external_share_key: {type: string}
+        parent_work_item_id: {type: string}
+        source:
+          type: string
+          enum: [human, "auto:review", "auto:execute", "auto:debug",
+                 "auto:retro", "sync:jira", "sync:github", "admin"]
+          description: "SoT 在 polyforge_v3.events.constants.SOURCE_VALUES"
+        metadata: {type: object}
+
+    UpdateWorkItemRequest:
+      allOf:
+        - $ref: '#/components/schemas/AttemptCredential'
+        - type: object
+          required: [patch_payload]
+          properties:
+            patch_payload: {type: object}
+
+    ClaimRequest:
+      type: object
+      required: [idempotency_key, session_info, requested_locks]
+      properties:
+        idempotency_key: {type: string}
+        session_info:
+          type: object
+          required: [machine_id, session_secret]
+          properties:
+            machine_id: {type: string}
+            session_secret: {type: string}
+        requested_locks:
+          type: array
+          items:
+            type: object
+            required: [resource_type, resource_key]
+            properties:
+              resource_type: {type: string, enum: [git_branch, worktree, file_scope, tcp_port, deploy_env]}
+              resource_key: {type: string}
+
+    CompleteWorkItemRequest:
+      allOf:
+        - $ref: '#/components/schemas/AttemptCredential'
+        - type: object
+          required: [final_status]
+          properties:
+            final_status: {type: string, enum: [wrapped, failed]}
+
+    RenewLeaseRequest:
+      type: object
+      required: [claim_epoch, session_secret]
+      properties:
+        claim_epoch: {type: integer, minimum: 1}
+        session_secret: {type: string}
+
+    CompleteAttemptRequest:
+      allOf:
+        - $ref: '#/components/schemas/AttemptCredential'
+        - type: object
+          required: [status]
+          properties:
+            status: {type: string, enum: [wrapped, failed]}
+
+    AcquireLockRequest:
+      type: object
+      required: [attempt_id, claim_epoch, session_secret, resource_type, resource_key]
+      properties:
+        attempt_id: {type: string, pattern: "^ra_[a-z0-9]+$"}
+        claim_epoch: {type: integer, minimum: 1}
+        session_secret: {type: string}
+        resource_type: {type: string, enum: [git_branch, worktree, file_scope, tcp_port, deploy_env]}
+        resource_key: {type: string}
+
+    EmitEventRequest:
+      allOf:
+        - $ref: '#/components/schemas/AttemptCredential'
+        - type: object
+          required: [work_item_id, event_type, payload]
+          properties:
+            work_item_id: {type: string}
+            event_type: {type: string}
+            payload: {type: object}
+            pinned: {type: boolean}
+
+    PredictConflictsRequest:
+      type: object
+      required: [project, declared_resources]
+      properties:
+        project: {type: string}
+        work_item_id: {type: string}
+        attempt_id: {type: string}
+        declared_resources: {type: array, items: {$ref: '#/components/schemas/DeclaredResource'}}
+
+    ReconcileArtifactsRequest:
+      allOf:
+        - $ref: '#/components/schemas/AttemptCredential'
+        - type: object
+          required: [work_item_id]
+          properties:
+            work_item_id: {type: string}
+
+    ArtifactActionRequest:
+      allOf:
+        - $ref: '#/components/schemas/AttemptCredential'
+        - type: object
+          required: [type, identifier, repo]
+          properties:
+            type: {type: string, enum: [pr, branch, issue]}
+            identifier: {type: string}
+            repo: {type: string}
+
+    CreateMemoryRequest:
+      type: object
+      required: [project, type, content, visibility]
+      properties:
+        project: {type: string}
+        type: {type: string}
+        content: {type: string}
+        visibility: {type: string, enum: [private, project, team, admin]}
+        work_item_id: {type: string}
+        metadata: {type: object}
+        expires_at: {type: string, format: date-time}
+
+    UpdateMemoryRequest:
+      type: object
+      required: [patch_payload]
+      properties:
+        patch_payload: {type: object}
+
+    AdminAddUserRequest:
+      type: object
+      required: [email, display_name, role, projects]
+      properties:
+        email: {type: string, format: email}
+        display_name: {type: string}
+        role: {type: string, enum: [reader, writer, admin]}
+        projects: {type: array, items: {type: string}}
+
+    AdminCreateKeyRequest:
+      type: object
+      required: [user_id, scopes]
+      properties:
+        user_id: {type: string}
+        scopes: {type: array, items: {type: string}}
+
+    AdminRevokeKeyRequest:
+      type: object
+      required: [key_id]
+      properties:
+        key_id: {type: string}
+
+    # --- Response shapes ---
+    ClaimResponse:
+      type: object
+      required: [attempt_id, claim_epoch, lease_until]
+      properties:
+        attempt_id: {type: string}
+        claim_epoch: {type: integer}
+        lease_until: {type: string, format: date-time}
+
+    LeaseRenewResponse:
+      type: object
+      required: [lease_until]
+      properties:
+        lease_until: {type: string, format: date-time}
+
+    OkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: {type: boolean}
+
+    EmitEventResponse:
+      type: object
+      required: [event_id]
+      properties:
+        event_id: {type: string}
+
+    PredictConflictsResponse:
+      type: object
+      required: [severity, predictions]
+      properties:
+        severity: {type: string, enum: [info, warn, soft_block, hard_block]}
+        predictions: {type: array, items: {$ref: '#/components/schemas/ConflictPrediction'}}
+
+    ReconcileArtifactsResponse:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/ExternalArtifactState'}}
+
+    WhoAmIResponse:
+      type: object
+      required: [user_id, role, projects]
+      properties:
+        user_id: {type: string}
+        role: {type: string, enum: [reader, writer, admin]}
+        projects: {type: array, items: {type: string}}
+
+    WorkItemDetailResponse:
+      type: object
+      required: [work_item, current_attempt, recent_events, per_repo_state]
+      properties:
+        work_item: {$ref: '#/components/schemas/WorkItem'}
+        current_attempt: {$ref: '#/components/schemas/RunAttempt'}
+        recent_events: {type: array, items: {$ref: '#/components/schemas/AgentEvent'}}
+        per_repo_state: {type: array, items: {$ref: '#/components/schemas/DeclaredResource'}}
+
+    AdminAddUserResponse:
+      type: object
+      required: [user_id, api_key]
+      properties:
+        user_id: {type: string}
+        api_key: {type: string, description: "one-time raw key, design §6.3"}
+
+    AdminCreateKeyResponse:
+      type: object
+      required: [key_id, api_key]
+      properties:
+        key_id: {type: string}
+        api_key: {type: string}
+
+    AdminRevokeKeyResponse:
+      type: object
+      required: [ok, terminated_attempts]
+      properties:
+        ok: {type: boolean}
+        terminated_attempts: {type: array, items: {type: string}}
+
+    # --- List response wrappers (M12) ---
+    WorkItemListResponse:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/WorkItem'}}
+        next_cursor: {type: [string, "null"]}
+
+    EventListResponse:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AgentEvent'}}
+        next_cursor: {type: [string, "null"]}
+
+    MemoryListResponse:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Memory'}}
+        next_cursor: {type: [string, "null"]}
+
+paths:
+  /v1/whoami:
+    get:
+      operationId: whoami
+      responses:
+        '200':
+          description: 当前 user
+          content: {application/json: {schema: {$ref: '#/components/schemas/WhoAmIResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /v1/work_items:
+    post:
+      operationId: create_work_item
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateWorkItemRequest'}}}
+      responses:
+        '201':
+          description: created
+          content: {application/json: {schema: {$ref: '#/components/schemas/WorkItem'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    get:
+      operationId: list_work_items
+      parameters:
+        - {name: project, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string}}
+        - {name: label, in: query, schema: {type: string}}
+        - {name: user_id, in: query, schema: {type: string}}
+        - {name: source, in: query, schema: {type: string}}
+        - {name: since, in: query, schema: {type: string, format: date-time}}
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, default: 50, maximum: 200}}
+      responses:
+        '200':
+          description: list
+          content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemListResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /v1/work_items/{work_item_id}:
+    parameters:
+      - {name: work_item_id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: get_work_item
+      responses:
+        '200':
+          description: 详细 + recent events + per_repo state
+          content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemDetailResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      operationId: update_work_item
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateWorkItemRequest'}}}
+      responses:
+        '200':
+          description: updated
+          content: {application/json: {schema: {$ref: '#/components/schemas/WorkItem'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /v1/work_items/{work_item_id}/claim:
+    parameters:
+      - {name: work_item_id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: claim_work_item
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ClaimRequest'}}}
+      responses:
+        '200':
+          description: claim ok
+          content: {application/json: {schema: {$ref: '#/components/schemas/ClaimResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /v1/work_items/{work_item_id}/complete:
+    parameters:
+      - {name: work_item_id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: complete_work_item
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CompleteWorkItemRequest'}}}
+      responses:
+        '200':
+          description: ok
+          content: {application/json: {schema: {$ref: '#/components/schemas/OkResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /v1/attempts/{attempt_id}/lease:
+    parameters:
+      - {name: attempt_id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: renew_lease
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/RenewLeaseRequest'}}}
+      responses:
+        '200':
+          description: lease renewed
+          content: {application/json: {schema: {$ref: '#/components/schemas/LeaseRenewResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /v1/attempts/{attempt_id}/complete:
+    parameters:
+      - {name: attempt_id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: complete_attempt
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CompleteAttemptRequest'}}}
+      responses:
+        '200':
+          description: ok
+          content: {application/json: {schema: {$ref: '#/components/schemas/OkResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /v1/locks:
+    post:
+      operationId: acquire_lock
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AcquireLockRequest'}}}
+      responses:
+        '200':
+          description: lock acquired
+          content: {application/json: {schema: {$ref: '#/components/schemas/OkResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /v1/locks/{resource_type}/{resource_key}:
+    parameters:
+      - {name: resource_type, in: path, required: true, schema: {type: string}}
+      - {name: resource_key, in: path, required: true, schema: {type: string}}
+    delete:
+      operationId: release_lock
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AttemptCredential'}}}
+      responses:
+        '200':
+          description: released
+          content: {application/json: {schema: {$ref: '#/components/schemas/OkResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /v1/events:
+    post:
+      operationId: emit_event
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/EmitEventRequest'}}}
+      responses:
+        '201':
+          description: event recorded
+          content: {application/json: {schema: {$ref: '#/components/schemas/EmitEventResponse'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+    get:
+      operationId: list_events
+      parameters:
+        - {name: work_item_id, in: query, schema: {type: string}}
+        - {name: types, in: query, schema: {type: string, description: "comma-separated event_type list"}}
+        - {name: since, in: query, schema: {type: string, format: date-time}}
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, default: 50, maximum: 200}}
+      responses:
+        '200':
+          description: events list
+          content: {application/json: {schema: {$ref: '#/components/schemas/EventListResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /v1/conflicts/predict:
+    post:
+      operationId: predict_conflicts
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PredictConflictsRequest'}}}
+      responses:
+        '200':
+          description: prediction
+          content: {application/json: {schema: {$ref: '#/components/schemas/PredictConflictsResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /v1/artifacts/reconcile:
+    post:
+      operationId: reconcile_artifacts
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ReconcileArtifactsRequest'}}}
+      responses:
+        '200':
+          description: artifact states
+          content: {application/json: {schema: {$ref: '#/components/schemas/ReconcileArtifactsResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /v1/work_items/{work_item_id}/artifacts/adopt:
+    parameters:
+      - {name: work_item_id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: adopt_artifact
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ArtifactActionRequest'}}}
+      responses:
+        '200':
+          description: adopted
+          content: {application/json: {schema: {$ref: '#/components/schemas/OkResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /v1/work_items/{work_item_id}/artifacts/ignore:
+    parameters:
+      - {name: work_item_id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: ignore_artifact
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ArtifactActionRequest'}}}
+      responses:
+        '200':
+          description: ignored
+          content: {application/json: {schema: {$ref: '#/components/schemas/OkResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /v1/work_items/{work_item_id}/artifacts/close:
+    parameters:
+      - {name: work_item_id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: close_artifact
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ArtifactActionRequest'}}}
+      responses:
+        '200':
+          description: closed
+          content: {application/json: {schema: {$ref: '#/components/schemas/OkResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /v1/memories:
+    post:
+      operationId: create_memory
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateMemoryRequest'}}}
+      responses:
+        '201':
+          description: created
+          content: {application/json: {schema: {$ref: '#/components/schemas/Memory'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    get:
+      operationId: list_memories
+      parameters:
+        - {name: project, in: query, schema: {type: string}}
+        - {name: query, in: query, schema: {type: string}}
+        - {name: type, in: query, schema: {type: string}}
+        - {name: visibility, in: query, schema: {type: string}}
+        - {name: work_item_id, in: query, schema: {type: string}}
+        - {name: top_k, in: query, schema: {type: integer}}
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, default: 50, maximum: 200}}
+      responses:
+        '200':
+          description: list
+          content: {application/json: {schema: {$ref: '#/components/schemas/MemoryListResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /v1/memories/{memory_id}:
+    parameters:
+      - {name: memory_id, in: path, required: true, schema: {type: string}}
+    patch:
+      operationId: update_memory
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateMemoryRequest'}}}
+      responses:
+        '200':
+          description: updated
+          content: {application/json: {schema: {$ref: '#/components/schemas/Memory'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /v1/admin/users:
+    post:
+      operationId: admin_add_user
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminAddUserRequest'}}}
+      responses:
+        '201':
+          description: user created + one-time API key
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminAddUserResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+
+  /v1/admin/keys:
+    post:
+      operationId: admin_create_key
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminCreateKeyRequest'}}}
+      responses:
+        '201':
+          description: key created + one-time raw
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminCreateKeyResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /v1/admin/keys/revoke:
+    post:
+      operationId: admin_revoke_key
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminRevokeKeyRequest'}}}
+      responses:
+        '200':
+          description: key revoked + 级联终止 attempts (design §17.4)
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminRevokeKeyResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}

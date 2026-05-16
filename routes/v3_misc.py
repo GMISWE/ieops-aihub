@@ -74,6 +74,20 @@ async def complete_work_item_endpoint(
         await conn.execute(sa.text("""
             DELETE FROM resource_locks WHERE owner_attempt_id = :aid
         """), {"aid": attempt.id})
+        # 1b. Check for non-terminal child work_items (§11 / reference §1 11:00)
+        open_children = (await conn.execute(sa.text("""
+            SELECT id, status FROM work_items
+            WHERE parent_work_item_id = :wi_id
+              AND status NOT IN ('wrapped', 'failed', 'expired', 'superseded')
+        """), {"wi_id": work_item_id})).mappings().all()
+        if open_children:
+            child_ids = [str(r["id"]) for r in open_children]
+            await emit_event(
+                conn, work_item_id=work_item_id,
+                event_type="work_item_completed_with_open_children",
+                payload={"child_ids": child_ids, "child_count": len(child_ids)},
+                actor_user_id=user.id, api_key_id=user.matched_api_key_id,
+            )
         # 2. complete work_item
         await conn.execute(sa.text("""
             UPDATE work_items

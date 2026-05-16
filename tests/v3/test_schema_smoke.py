@@ -110,3 +110,56 @@ async def test_critical_indexes(pg_engine):
         actual = {r[0] for r in rows}
     missing = expected_indexes - actual
     assert not missing, f"missing indexes: {missing}"
+
+
+async def test_api_keys_revoked_at_check_rejects_missing_field(pg_engine):
+    """alembic 0002: users.api_keys CHECK constraint rejects entries that
+    omit `revoked_at`. The GIN @> predicate in find_user_by_api_key relies
+    on revoked_at being present (null=active, ts=revoked); silently-missing
+    entries would render the user undiscoverable.
+    """
+    async with pg_engine.connect() as conn:
+        with pytest.raises(Exception) as exc:
+            await conn.execute(sa.text("""
+                INSERT INTO users (id, email, display_name, role, api_keys)
+                VALUES ('u_check_neg', 'neg-check@gmi.local', 'neg', 'writer',
+                        '[{"id": "ak_bad", "key_hash": "x", "scopes": [],
+                           "created_at": "2026-05-16T00:00:00Z"}]'::jsonb)
+            """))
+            await conn.commit()
+        msg = str(exc.value).lower()
+        assert "check" in msg or "violates" in msg or "23514" in msg
+        await conn.rollback()
+
+
+async def test_api_keys_revoked_at_check_accepts_null(pg_engine):
+    """The same CHECK must ACCEPT entries with explicit `revoked_at: null`
+    (the active-key sentinel)."""
+    async with pg_engine.connect() as conn:
+        await conn.execute(sa.text("""
+            INSERT INTO users (id, email, display_name, role, api_keys)
+            VALUES ('u_check_pos', 'pos-check@gmi.local', 'pos', 'writer',
+                    '[{"id": "ak_ok", "key_hash": "x", "scopes": [],
+                       "created_at": "2026-05-16T00:00:00Z",
+                       "revoked_at": null}]'::jsonb)
+            ON CONFLICT (id) DO NOTHING
+        """))
+        await conn.commit()
+        # Cleanup
+        await conn.execute(sa.text("DELETE FROM users WHERE id = 'u_check_pos'"))
+        await conn.commit()
+
+
+async def test_api_keys_revoked_at_check_accepts_empty_array(pg_engine):
+    """The CHECK must ACCEPT empty api_keys arrays (newly-onboarded user
+    before any key is provisioned)."""
+    async with pg_engine.connect() as conn:
+        await conn.execute(sa.text("""
+            INSERT INTO users (id, email, display_name, role, api_keys)
+            VALUES ('u_check_empty', 'empty-check@gmi.local', 'empty', 'reader',
+                    '[]'::jsonb)
+            ON CONFLICT (id) DO NOTHING
+        """))
+        await conn.commit()
+        await conn.execute(sa.text("DELETE FROM users WHERE id = 'u_check_empty'"))
+        await conn.commit()

@@ -169,14 +169,15 @@ async def admin_create_key(
         caller = await verify_bearer(conn, bearer)
         _require_admin(caller)
 
-        # Verify target user exists
+        # Verify target user exists and read current version (optimistic lock)
         row = (await conn.execute(sa.text(
-            "SELECT id, api_keys FROM users WHERE id = :uid"
+            "SELECT id, api_keys, version FROM users WHERE id = :uid FOR UPDATE"
         ), {"uid": body.user_id})).mappings().first()
         if row is None:
             raise AihubServerError(ErrorCode.NOT_FOUND,
                                    f"user {body.user_id!r} not found")
 
+        expected_version = int(row["version"])
         kid = _key_id()
         raw_key, key_hash = _generate_api_key()
         new_entry = {
@@ -187,14 +188,21 @@ async def admin_create_key(
             "revoked_at": None,
         }
 
-        await conn.execute(sa.text("""
+        result = await conn.execute(sa.text("""
             UPDATE users
-            SET api_keys = api_keys || CAST(:entry AS JSONB)
-            WHERE id = :uid
+            SET api_keys = api_keys || CAST(:entry AS JSONB),
+                version = version + 1
+            WHERE id = :uid AND version = :expected_version
         """), {
             "uid": body.user_id,
             "entry": json.dumps([new_entry]),
+            "expected_version": expected_version,
         })
+        if result.rowcount == 0:
+            raise AihubServerError(
+                ErrorCode.CONFLICT_EPOCH_MISMATCH,
+                f"version mismatch on user {body.user_id} — concurrent admin mutation; retry",
+            )
 
     return JSONResponse(status_code=201, content={
         "key_id": kid,
@@ -219,16 +227,19 @@ async def admin_revoke_key(
 
         key_id = body.key_id
 
-        # 1. Find the user that owns this key
+        # 1. Find the user that owns this key and read current version (optimistic lock)
         user_row = (await conn.execute(sa.text("""
-            SELECT id, api_keys
+            SELECT id, api_keys, version
             FROM users
             WHERE api_keys @> CAST(:filter AS JSONB)
+            FOR UPDATE
         """), {"filter": json.dumps([{"id": key_id}])})).mappings().first()
 
         if user_row is None:
             raise AihubServerError(ErrorCode.NOT_FOUND,
                                    f"api key {key_id!r} not found")
+
+        expected_version = int(user_row["version"])
 
         # 2. Set revoked_at on the matching key entry (find array index)
         api_keys: list = list(user_row["api_keys"])
@@ -241,18 +252,25 @@ async def admin_revoke_key(
         # Use jsonb_set with a literal array path (idx is a safe integer we control).
         # asyncpg cannot bind TEXT[] via sa.text params; use f-string for the path literal.
         path_literal = "{" + str(idx) + ",revoked_at}"
-        await conn.execute(sa.text(f"""
+        result = await conn.execute(sa.text(f"""
             UPDATE users
             SET api_keys = jsonb_set(
                 api_keys,
                 '{path_literal}'::TEXT[],
                 CAST(:revoked_at AS JSONB)
-            )
-            WHERE id = :uid
+            ),
+            version = version + 1
+            WHERE id = :uid AND version = :expected_version
         """), {
             "uid": user_row["id"],
             "revoked_at": json.dumps(now_ts),
+            "expected_version": expected_version,
         })
+        if result.rowcount == 0:
+            raise AihubServerError(
+                ErrorCode.CONFLICT_EPOCH_MISMATCH,
+                f"version mismatch on user {user_row['id']} — concurrent admin mutation; retry",
+            )
 
         # 3. Find all running attempts using this key
         running_rows = (await conn.execute(sa.text("""

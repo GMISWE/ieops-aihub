@@ -96,13 +96,18 @@ async def test_create_work_item_invalid_resource(seeded_users):
     assert r.status_code == 400
 
 
-async def test_create_work_item_auto_source(seeded_users):
-    """Path B — auto source allowed (no special perm beyond writer)."""
+async def test_create_work_item_auto_source(seeded_reference):
+    """Path B — auto source allowed when caller has a running attempt (§7.1 Path B).
+
+    MED-3: source='auto:*' now requires metadata.created_by_attempt_id pointing
+    to a running attempt owned by the caller. ra_111 belongs to 张三 and is
+    running in the seeded_reference state.
+    """
     payload = _wi_payload(goal="OAuth refresh 401")
     payload["source"] = "auto:debug"
     payload["metadata"] = {"created_by_attempt_id": "ra_111",
                            "parent_work_item_id": "wi_a3f"}
-    async with make_async_client(seeded_users) as client:
+    async with make_async_client(seeded_reference) as client:
         r = await client.post(
             "/v1/work_items", json=payload, headers=auth_headers(BEARER_ZHANG),
         )
@@ -232,3 +237,63 @@ async def test_get_work_item_detail_forbidden(seeded_reference):
             f"/v1/work_items/{wi_id}", headers=auth_headers(BEARER_WANG),
         )
     assert r.status_code == 403
+
+
+# ---- MED-3: source='auto:*' fencing (§7.1 Path B) ----
+
+async def test_auto_source_without_attempt_id_returns_400(seeded_users):
+    """MED-3: source='auto:*' with no metadata.created_by_attempt_id → 400 BAD_REQUEST."""
+    payload = _wi_payload(goal="auto without attempt")
+    payload["source"] = "auto:debug"
+    # No created_by_attempt_id in metadata
+    async with make_async_client(seeded_users) as client:
+        r = await client.post(
+            "/v1/work_items", json=payload, headers=auth_headers(BEARER_ZHANG),
+        )
+    assert r.status_code == 400
+    body = r.json()
+    assert body["code"] == "BAD_REQUEST"
+
+
+async def test_auto_source_with_nonexistent_attempt_returns_403(seeded_users):
+    """MED-3: source='auto:*' with a non-existent attempt_id → 403 FORBIDDEN."""
+    payload = _wi_payload(goal="auto with bad attempt")
+    payload["source"] = "auto:execute"
+    payload["metadata"] = {"created_by_attempt_id": "ra_nonexistent"}
+    async with make_async_client(seeded_users) as client:
+        r = await client.post(
+            "/v1/work_items", json=payload, headers=auth_headers(BEARER_ZHANG),
+        )
+    assert r.status_code == 403
+    assert r.json()["code"] == "FORBIDDEN"
+
+
+async def test_auto_source_with_running_attempt_succeeds(seeded_reference):
+    """MED-3 happy path: source='auto:*' with a valid running attempt owned by
+    the caller → 201. Confirms Path B is usable from within an active attempt.
+
+    ra_111 is running and owned by 张三 in seeded_reference.
+    """
+    payload = _wi_payload(goal="auto happy path")
+    payload["source"] = "auto:execute"
+    payload["metadata"] = {"created_by_attempt_id": "ra_111",
+                           "parent_work_item_id": "wi_a3f"}
+    async with make_async_client(seeded_reference) as client:
+        r = await client.post(
+            "/v1/work_items", json=payload, headers=auth_headers(BEARER_ZHANG),
+        )
+    assert r.status_code == 201
+    body = r.json()
+    assert body["metadata"]["source"] == "auto:execute"
+
+
+async def test_sync_source_rejected_for_writer(seeded_users):
+    """MED-3: source='sync:*' from a non-admin writer → 403 FORBIDDEN."""
+    payload = _wi_payload(goal="sync source test")
+    payload["source"] = "sync:jira"
+    async with make_async_client(seeded_users) as client:
+        r = await client.post(
+            "/v1/work_items", json=payload, headers=auth_headers(BEARER_ZHANG),
+        )
+    assert r.status_code == 403
+    assert r.json()["code"] == "FORBIDDEN"

@@ -64,11 +64,16 @@ async def insert_work_item(
 ) -> dict:
     """Create a work_item + emit work_item_filed event.
 
-    Permission: writer + reporter.project ∈ user.projects. The reporter is
-    the user attached to the bearer. For auto-* sources (metadata.source
-    starts with 'auto:'), the same user can still file from within an active
-    attempt; we don't separately enforce attempt fencing here (Path B can be
-    invoked from a running attempt without AC, per §7.1).
+    Permission: writer + reporter.project ∈ user.projects.
+
+    Source fencing per design.md §7.1:
+    - Missing/falsy source defaults to 'human'.
+    - source='auto:*' (Path B) requires metadata.created_by_attempt_id pointing
+      to a running attempt owned by the caller. Prevents human writers from
+      injecting auto-source items that corrupt /pf3-status and parent-child
+      auto-tree analytics.
+    - source='sync:*' is rejected from non-admin writers (sync paths are
+      external-system only; not exposed in v3.0).
     """
     project = body["project"]
     if project not in reporter.projects:
@@ -82,9 +87,38 @@ async def insert_work_item(
     _validate_declared_resources(declared)
 
     metadata = dict(body.get("metadata") or {})
-    source = body.get("source")
-    if source is not None:
-        metadata.setdefault("source", source)
+    source = body.get("source") or "human"  # default to 'human' if falsy/missing
+
+    # Fence auto:* sources — require an active attempt context (§7.1 Path B)
+    if source.startswith("auto:"):
+        created_by_attempt_id = metadata.get("created_by_attempt_id")
+        if not created_by_attempt_id:
+            raise AihubServerError(
+                ErrorCode.BAD_REQUEST,
+                "source='auto:*' requires metadata.created_by_attempt_id "
+                "(must reference a running attempt owned by caller)",
+            )
+        # Verify the referenced attempt exists, is running, and belongs to caller
+        ra_row = (await conn.execute(sa.text("""
+            SELECT id, status, actor_user_id FROM run_attempts
+            WHERE id = :aid AND status = 'running' AND actor_user_id = :uid
+        """), {"aid": created_by_attempt_id, "uid": reporter.id})).mappings().first()
+        if ra_row is None:
+            raise AihubServerError(
+                ErrorCode.FORBIDDEN,
+                f"attempt {created_by_attempt_id!r} is not a running attempt "
+                "owned by the calling user — auto:* source requires an active context",
+            )
+
+    # Reject sync:* from non-admin writers (external sync not exposed in v3.0)
+    if source.startswith("sync:") and reporter.role != "admin":
+        raise AihubServerError(
+            ErrorCode.FORBIDDEN,
+            "source='sync:*' is reserved for admin/external-sync paths; "
+            "use 'human' or 'auto:*' (with active attempt) instead",
+        )
+
+    metadata.setdefault("source", source)
 
     wi_id = _wi_id()
     priority = body.get("priority") or "normal"

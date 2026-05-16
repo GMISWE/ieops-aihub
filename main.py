@@ -15,10 +15,10 @@ from auth import bootstrap, validate_hash_secret
 from routes.admin import router as admin_router
 from routes.memories import router as memories_router
 
-# v3 routers (mount under /v1 — separate, do not regress legacy routes)
+# v3 routers + errors (mount under /v1 — separate, do not regress legacy routes)
 from app.db import init_db as _v3_init_db
-from app.v3_app import get_engine as _v3_get_engine
 from app.gc import gc_loop as _v3_gc_loop
+from app.errors import AihubServerError, ErrorCode
 from routes.v3_whoami import router as v3_whoami_router
 from routes.v3_work_items import router as v3_wi_router
 from routes.v3_claim import router as v3_claim_router
@@ -104,6 +104,41 @@ async def health():
     return {"status": "ok", "db": db_status, "model": model_status, "version": __version__}
 
 
+# ---------------------------------------------------------------------------
+# Exception handlers
+# ---------------------------------------------------------------------------
+
+# v3 routes raise AihubServerError (subclass of HTTPException). Its detail is
+# already a dict with {code, message, details} — the ErrorEnvelope shape per
+# openapi. Register a specific handler for AihubServerError FIRST so FastAPI
+# picks it over the generic HTTPException handler below (most-specific wins).
+@app.exception_handler(AihubServerError)
+async def v3_error_handler(request: Request, exc: AihubServerError):
+    """Return v3 ErrorEnvelope directly (no "error" wrapper)."""
+    return JSONResponse(status_code=exc.status_code, content=exc.detail)
+
+
+# v3 validation errors (RequestValidationError on /v1/* routes) — return 400
+# with ErrorEnvelope shape, not 422 with legacy wrapper. Routes under /v1 use
+# Pydantic models that trigger this handler; legacy routes use form-based
+# validation that never raises RequestValidationError (they do 400 via their
+# own checks). If a /v1 path triggers validation error, we detect the prefix.
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    if request.url.path.startswith("/v1"):
+        return JSONResponse(
+            status_code=400,
+            content={"code": ErrorCode.BAD_REQUEST.value,
+                     "message": "request validation failed",
+                     "details": {"errors": exc.errors()}},
+        )
+    return JSONResponse(
+        status_code=422,
+        content={"error": {"code": "VALIDATION_ERROR", "message": str(exc)}},
+    )
+
+
+# Legacy HTTPException handler — wraps in {"error": {...}} for /admin/* /memories/*
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     detail = exc.detail
@@ -120,12 +155,4 @@ async def generic_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=500,
         content={"error": {"code": "INTERNAL_ERROR", "message": "internal server error"}},
-    )
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(
-        status_code=422,
-        content={"error": {"code": "VALIDATION_ERROR", "message": str(exc)}},
     )

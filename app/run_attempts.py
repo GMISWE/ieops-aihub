@@ -88,10 +88,18 @@ async def claim_work_item(
 
     # ---- Step 3a: Idempotency replay check (BEFORE eligibility, so a client
     # retrying a successful claim from the SAME attempt key gets its same
-    # attempt back without hitting busy-not-eligible) ----
+    # attempt back without hitting busy-not-eligible).
+    #
+    # Per design.md §6.1: the replay contract applies ONLY to running attempts.
+    # A terminal attempt (superseded/wrapped/failed/expired) with the same key
+    # means the original request completed and a new claim should be treated as
+    # a fresh insert → UNIQUE constraint fires → 409 CONFLICT_DUPLICATE_REQUEST.
+    # Without the status='running' filter, a retrying client would get 200 with
+    # the terminal attempt's metadata and then fail on subsequent lease/complete. ----
     existing_replay = (await conn.execute(sa.text("""
         SELECT id, claim_epoch, lease_until FROM run_attempts
         WHERE work_item_id = :wid AND idempotency_key = :key
+          AND status = 'running'
     """), {"wid": wi_id, "key": idempotency_key})).mappings().first()
     if existing_replay is not None:
         return {

@@ -123,6 +123,21 @@ async def complete_attempt_endpoint(
             payload={"status": new_status}, actor_user_id=user.id,
             api_key_id=user.matched_api_key_id, run_attempt_id=attempt_id,
         )
+        # Per §7.7 state machine: running → wrap/fail transitions BOTH attempt
+        # AND work_item together in the same transaction. Without this, the
+        # work_item stays status='running' pointing to a terminal attempt.
+        await conn.execute(sa.text("""
+            UPDATE work_items
+            SET status = :s, closed_at = now(), updated_at = now()
+            WHERE id = :wid AND current_attempt_id = :aid
+        """), {"s": new_status, "wid": attempt.work_item_id, "aid": attempt_id})
+        await emit_event(
+            conn, work_item_id=attempt.work_item_id,
+            event_type="work_item_completed",
+            payload={"work_item_id": attempt.work_item_id, "final_status": new_status},
+            actor_user_id=user.id, api_key_id=user.matched_api_key_id,
+            run_attempt_id=attempt_id,
+        )
     return JSONResponse(status_code=200, content={"ok": True})
 
 

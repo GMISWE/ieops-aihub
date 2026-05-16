@@ -205,11 +205,14 @@ async def predict_conflicts(
               AND r->>'uri' = ANY(CAST(:uris AS text[]))
         """), {"proj": project, "wi": work_item_id or "",
                "uris": refactor_repo_uris})).mappings().all()
-        # Dedupe against rule 1 to avoid double-counting (same resource_uri
-        # already flagged by rule 1).
-        existing_uris = {p["resource_uri"] for p in predictions}
+        # Dedupe against rule 1 to avoid double-counting.
+        # Key includes (resource_uri, attempt_id) so predictions from different
+        # attempts on the same URI are NOT collapsed — each live attempt
+        # constitutes an independent conflict signal.
+        existing_keys = {(p["resource_uri"], p["conflicts_with"]["attempt_id"])
+                         for p in predictions}
         for r in rows:
-            if r["repo_uri"] in existing_uris:
+            if (r["repo_uri"], r["ra"]) in existing_keys:
                 continue
             predictions.append({
                 "rule_id": "same_repo_refactor",

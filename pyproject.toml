@@ -3,9 +3,9 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ieops-mem"
-version = "0.3.2"
-description = "Lightweight self-hosted shared memory service for polyforge-v2"
+name = "polyforge-aihub"
+version = "3.0.0"
+description = "polyforge v3 backend — PostgreSQL-backed work_items / claim / lease / conflict-predict service. Also serves the legacy /memories/* routes from polyforge-v2 (ieops-mem v0.3.x) during the migration window."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.111",

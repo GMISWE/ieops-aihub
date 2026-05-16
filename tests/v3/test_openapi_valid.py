@@ -121,8 +121,10 @@ def test_session_secret_pattern_consistent_everywhere(spec):
 
 
 def test_error_envelope_code_enum(spec):
-    """G2-re r3: ErrorEnvelope.code 必须 enum 约束 (cross-validated 跟 polyforge_v3 ErrorCode)。"""
-    from polyforge_v3.aihub.errors import ErrorCode
+    """G2-re r3: ErrorEnvelope.code 必须 enum 约束 (cross-validated 跟 polyforge_v3 ErrorCode)。
+    Cross-repo: requires polyforge-v3 installed; CI skips without it (v3.1: install in CI)."""
+    errors_mod = pytest.importorskip("polyforge_v3.aihub.errors")
+    ErrorCode = errors_mod.ErrorCode
     envelope = spec["components"]["schemas"]["ErrorEnvelope"]
     enum_vals = set(envelope["properties"]["code"]["enum"])
     py_vals = {c.value for c in ErrorCode}
@@ -149,8 +151,10 @@ def test_pagination_response_consistent(spec):
 
 
 def test_source_enum_matches_polyforge_v3_constants(spec):
-    """⭐ M3 修复: OpenAPI POST /v1/work_items source enum 必须等于 SOURCE_VALUES。"""
-    from polyforge_v3.core.events import SOURCE_VALUES
+    """⭐ M3 修复: OpenAPI POST /v1/work_items source enum 必须等于 SOURCE_VALUES。
+    Cross-repo: requires polyforge-v3 installed; CI skips without it."""
+    events_mod = pytest.importorskip("polyforge_v3.core.events")
+    SOURCE_VALUES = events_mod.SOURCE_VALUES
     op = spec["paths"]["/v1/work_items"]["post"]
     schema = op["requestBody"]["content"]["application/json"]["schema"]
     if "$ref" in schema:
@@ -161,8 +165,10 @@ def test_source_enum_matches_polyforge_v3_constants(spec):
 
 
 def test_status_enum_matches_design_check(spec):
-    """work_items.status enum 必须等于 design §5 CHECK + polyforge_v3 constants。"""
-    from polyforge_v3.core.events import WORK_ITEM_STATUSES
+    """work_items.status enum 必须等于 design §5 CHECK + polyforge_v3 constants。
+    Cross-repo: requires polyforge-v3 installed; CI skips without it."""
+    events_mod = pytest.importorskip("polyforge_v3.core.events")
+    WORK_ITEM_STATUSES = events_mod.WORK_ITEM_STATUSES
     wi = spec["components"]["schemas"]["WorkItem"]
     status_enum = tuple(wi["properties"]["status"]["enum"])
     assert status_enum == WORK_ITEM_STATUSES
@@ -203,8 +209,9 @@ def _walk_property(schema: dict, spec: dict, key: str, collect_all: bool = False
 def test_resource_type_enum_matches_constants(spec):
     """RESOURCE_TYPES 在 POST /v1/locks request body 必须一致。
     G2-followup: AcquireLockRequest 改 allOf+$ref, 此处递归 walk。
-    """
-    from polyforge_v3.core.events import RESOURCE_TYPES
+    Cross-repo: requires polyforge-v3 installed; CI skips without it."""
+    events_mod = pytest.importorskip("polyforge_v3.core.events")
+    RESOURCE_TYPES = events_mod.RESOURCE_TYPES
     op = spec["paths"]["/v1/locks"]["post"]
     rb_schema = op["requestBody"]["content"]["application/json"]["schema"]
     rt_prop = _walk_property(rb_schema, spec, "resource_type")

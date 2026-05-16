@@ -31,7 +31,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 
 
 try:
-    __version__ = _pkg_version("ieops-mem")
+    __version__ = _pkg_version("polyforge-aihub")
 except PackageNotFoundError:
     # Not pip-installed (e.g. running from a source checkout without install).
     __version__ = "0.0.0+unknown"
@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
         scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="ieops-mem", version=__version__, lifespan=lifespan)
+app = FastAPI(title="polyforge-aihub", version=__version__, lifespan=lifespan)
 app.include_router(memories_router)
 app.include_router(admin_router)
 

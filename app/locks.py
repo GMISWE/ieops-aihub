@@ -69,22 +69,37 @@ async def release_lock(
     resource_type: str,
     resource_key: str,
 ) -> None:
-    result = await conn.execute(sa.text("""
-        DELETE FROM resource_locks
-        WHERE resource_type = :rt AND resource_key = :rk
-          AND owner_attempt_id = :owner
-        RETURNING owner_attempt_id
-    """), {"rt": resource_type, "rk": resource_key, "owner": attempt.id})
-    row = result.first()
-    if row is None:
-        # Either no such lock, or owned by someone else; check to disambiguate
-        cur = (await conn.execute(sa.text("""
-            SELECT owner_attempt_id FROM resource_locks
+    # Single CTE: atomically attempt the DELETE (owner-fenced) AND snapshot the
+    # current owner in one round-trip. This eliminates the TOCTOU window that
+    # existed between a separate DELETE and a follow-up SELECT for disambiguation
+    # — between those two statements another claim could re-acquire the lock and
+    # cause us to return FORBIDDEN when the correct code is NOT_FOUND.
+    result = (await conn.execute(sa.text("""
+        WITH deleted AS (
+            DELETE FROM resource_locks
             WHERE resource_type = :rt AND resource_key = :rk
-        """), {"rt": resource_type, "rk": resource_key})).first()
-        if cur is None:
-            raise AihubServerError(ErrorCode.NOT_FOUND,
-                                   f"lock {resource_type}:{resource_key} not held")
+              AND owner_attempt_id = :owner
+            RETURNING owner_attempt_id
+        ),
+        current AS (
+            SELECT owner_attempt_id
+            FROM resource_locks
+            WHERE resource_type = :rt AND resource_key = :rk
+        )
+        SELECT
+            (SELECT owner_attempt_id FROM deleted)   AS deleted_owner,
+            (SELECT owner_attempt_id FROM current)   AS current_owner
+    """), {"rt": resource_type, "rk": resource_key, "owner": attempt.id})).mappings().first()
+
+    if result["deleted_owner"] is not None:
+        # DELETE succeeded — our attempt owned it; fall through to emit event.
+        pass
+    elif result["current_owner"] is None:
+        # No row exists (and our DELETE found nothing) → lock was not held.
+        raise AihubServerError(ErrorCode.NOT_FOUND,
+                               f"lock {resource_type}:{resource_key} not held")
+    else:
+        # Lock exists but is owned by a different attempt.
         raise AihubServerError(ErrorCode.FORBIDDEN,
                                "lock owned by a different attempt")
     await emit_event(

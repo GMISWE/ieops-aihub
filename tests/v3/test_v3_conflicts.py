@@ -177,6 +177,85 @@ async def test_predict_rule3_same_repo_refactor(seeded_users):
     assert "same_resource_live_write" in rule_ids
 
 
+# ---- Rule 3 dedup: cross-attempt predictions must NOT collapse ----
+
+async def test_predict_rule3_cross_attempt_dedup(seeded_users):
+    """LOW-2 regression: Rule 3 dedup key must include attempt_id.
+
+    Two *different* running attempts on the SAME repo with intent=refactor
+    should produce two independent predictions, not one (the pre-fix bug would
+    collapse them because the dedup key was URI-only).
+    """
+    async with seeded_users.connect() as conn:
+        # work_item A: zhang refactors repo:marketplace
+        await conn.execute(sa.text("""
+            INSERT INTO work_items (id, project, scenario, goal, status, priority,
+                                    labels, reporter_user_id, declared_resources,
+                                    resources_version, metadata)
+            VALUES ('wi_ded_a', 'marketplace', 'coding', 'refactor A', 'running',
+                    'normal', '[]'::jsonb, 'u_zhangsan',
+                    CAST(:dr AS JSONB), 1, '{}'::jsonb)
+        """), {"dr": '[{"type":"repo","uri":"repo:marketplace","intent":"refactor"}]'})
+        await conn.execute(sa.text("""
+            INSERT INTO run_attempts (id, work_item_id, status, claim_epoch,
+                                       idempotency_key, lease_until, actor_user_id,
+                                       api_key_id, actor_display, machine_id,
+                                       session_secret_hash)
+            VALUES ('ra_ded_a', 'wi_ded_a', 'running', 1, 'idem_ded_a',
+                    now() + interval '60 seconds', 'u_zhangsan', 'ak_zhang_001',
+                    '张三', 'zhang-mbp', 'h')
+        """))
+        await conn.execute(sa.text(
+            "UPDATE work_items SET current_attempt_id='ra_ded_a' WHERE id='wi_ded_a'"
+        ))
+        # work_item B: lisi ALSO refactors repo:marketplace (same URI, different attempt)
+        await conn.execute(sa.text("""
+            INSERT INTO work_items (id, project, scenario, goal, status, priority,
+                                    labels, reporter_user_id, declared_resources,
+                                    resources_version, metadata)
+            VALUES ('wi_ded_b', 'marketplace', 'coding', 'refactor B', 'running',
+                    'normal', '[]'::jsonb, 'u_lisi',
+                    CAST(:dr AS JSONB), 1, '{}'::jsonb)
+        """), {"dr": '[{"type":"repo","uri":"repo:marketplace","intent":"refactor"}]'})
+        await conn.execute(sa.text("""
+            INSERT INTO run_attempts (id, work_item_id, status, claim_epoch,
+                                       idempotency_key, lease_until, actor_user_id,
+                                       api_key_id, actor_display, machine_id,
+                                       session_secret_hash)
+            VALUES ('ra_ded_b', 'wi_ded_b', 'running', 1, 'idem_ded_b',
+                    now() + interval '60 seconds', 'u_lisi', 'ak_li_001',
+                    '李四', 'li-mbp', 'h')
+        """))
+        await conn.execute(sa.text(
+            "UPDATE work_items SET current_attempt_id='ra_ded_b' WHERE id='wi_ded_b'"
+        ))
+        await conn.commit()
+
+    async with make_async_client(seeded_users) as client:
+        r = await client.post(
+            "/v1/conflicts/predict",
+            json={"project": "marketplace",
+                  "declared_resources": [
+                      {"type": "repo", "uri": "repo:marketplace",
+                       "intent": "refactor"},
+                  ]},
+            headers=auth_headers(BEARER_WANG),  # 王五 not the proposer, not in preds
+        )
+    assert r.status_code == 200
+    body = r.json()
+    # Rule 1 fires for both (refactor ∈ _WRITE_INTENTS). Both attempts on the
+    # same URI must appear as separate predictions — not collapsed to one.
+    rule1_preds = [p for p in body["predictions"]
+                   if p["rule_id"] == "same_resource_live_write"]
+    attempt_ids_seen = {p["conflicts_with"]["attempt_id"] for p in rule1_preds}
+    assert "ra_ded_a" in attempt_ids_seen, (
+        "ra_ded_a prediction missing — cross-attempt dedup bug"
+    )
+    assert "ra_ded_b" in attempt_ids_seen, (
+        "ra_ded_b prediction missing — cross-attempt dedup bug"
+    )
+
+
 # ---- Rule 4: path_overlap (broad glob hits narrow file) ----
 
 async def test_predict_rule4_path_overlap(seeded_users):

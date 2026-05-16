@@ -123,7 +123,10 @@ async def claim_work_item(
 
     # ---- Step 4: Lock conflict re-validation (exclude own old attempt) ----
     if requested_locks:
-        exclude_id = old_a["id"] if old_a is not None else ""
+        # Use NULL sentinel so the SQL predicate reads "exclude this id if provided".
+        # An empty-string sentinel ('') would work for current ID format (ra_<ulid>)
+        # but NULL + IS NULL guard is semantically correct: "no exclusion needed".
+        exclude_id = old_a["id"] if old_a is not None else None
         # Use a tuple-array join (resource_type, resource_key)
         types = [l["resource_type"] for l in requested_locks]
         keys = [l["resource_key"] for l in requested_locks]
@@ -136,7 +139,7 @@ async def claim_work_item(
                 AS req(rt, rk) ON rl.resource_type = req.rt AND rl.resource_key = req.rk
             WHERE ra.status = 'running'
               AND ra.lease_until > now()
-              AND ra.id <> :exclude
+              AND (CAST(:exclude AS TEXT) IS NULL OR ra.id <> CAST(:exclude AS TEXT))
             LIMIT 1
         """), {"types": types, "keys": keys, "exclude": exclude_id})).mappings().first()
         if conflict_row is not None:

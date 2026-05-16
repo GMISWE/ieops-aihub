@@ -95,9 +95,16 @@ async def find_user_by_api_key(conn: AsyncConnection, bearer: str) -> UserRecord
     Per design §5: users.api_keys is JSONB array of objects with shape:
       {id, key_hash, scopes, created_at, revoked_at: nullable}
 
-    Index idx_users_api_keys_gin exists; we narrow with JSONB @> on the
-    revoked_at IS NULL predicate at the row level then iterate api_keys in
-    Python to match key_hash (it's rare a user has many keys).
+    Index idx_users_api_keys_gin (jsonb_path_ops) exists on users.api_keys.
+    We leverage it via the @> containment operator: only rows that contain at
+    least one api_key element with 'revoked_at': null are fetched, which lets
+    PG use the GIN index to skip fully-revoked users and empty-key rows.
+    Within the returned rows we iterate api_keys in Python to match key_hash
+    (it's rare a user has many keys).
+
+    Note: a fully revoked user (all keys have revoked_at set) is skipped by
+    the GIN filter. A user with a mix of active and revoked keys is returned
+    and the Python loop skips revoked entries individually.
     """
     if not bearer:
         return None
@@ -106,8 +113,7 @@ async def find_user_by_api_key(conn: AsyncConnection, bearer: str) -> UserRecord
                COALESCE(projects, '[]'::jsonb) AS projects,
                COALESCE(api_keys, '[]'::jsonb) AS api_keys
         FROM users
-        WHERE jsonb_typeof(api_keys) = 'array'
-          AND jsonb_array_length(api_keys) > 0
+        WHERE api_keys @> '[{"revoked_at": null}]'::jsonb
     """))
     for row in rows.mappings():
         for ak in row["api_keys"]:

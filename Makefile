@@ -1,8 +1,8 @@
-## ieops-mem — build / push / deploy automation
+## polyforge-aihub — build / push / deploy automation (formerly ieops-mem)
 ##
 ## Tags two immutable images per build:
-##   - :v<semver>          (e.g. v0.1.0; tracks pyproject.toml)
-##   - :<YYYYMMDD>-<sha>   (e.g. 20260515-3f5918d)
+##   - :v<semver>          (e.g. v3.0.0; tracks pyproject.toml)
+##   - :<YYYYMMDD>-<sha>   (e.g. 20260516-3f5918d)
 ##
 ## Deploy patches the remote docker-compose.yml in place to point at the
 ## new date-sha tag and runs `docker compose up -d`. Rollback is a manual
@@ -11,7 +11,7 @@
 SHELL := /bin/bash
 
 REGISTRY    := us-west1-docker.pkg.dev/devv-404803/public
-IMAGE       := ieops-mem
+IMAGE       := aihub
 VERSION     := $(shell grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
 DATE        := $(shell date -u +%Y%m%d)
 SHA         := $(shell git rev-parse --short HEAD)
@@ -21,7 +21,7 @@ TAG_VERSION := $(REGISTRY)/$(IMAGE):v$(VERSION)
 TAG_DATESHA := $(REGISTRY)/$(IMAGE):$(DATE)-$(SHA)$(DIRTY)
 
 DEPLOY_HOST := 10.146.0.16
-DEPLOY_DIR  := /opt/ieops-mem
+DEPLOY_DIR  := /opt/ieops-aihub
 PLATFORM    := linux/amd64
 
 .PHONY: help version build push deploy redeploy all test logs ps health clean snapshot-before-deploy deploy-safe
@@ -69,7 +69,7 @@ test:  ## Run pytest locally (mimics CI invocation)
 	pytest tests/ -v
 
 logs:  ## Tail remote container logs
-	ssh $(DEPLOY_HOST) "sudo docker logs -f --tail 50 ieops-mem"
+	ssh $(DEPLOY_HOST) "sudo docker logs -f --tail 50 aihub"
 
 ps:  ## Show remote container status
 	ssh $(DEPLOY_HOST) "cd $(DEPLOY_DIR) && sudo docker compose ps"
@@ -84,18 +84,27 @@ health:  ## Hit /health on the deployed instance (retries during post-deploy uvi
 clean:  ## Remove locally-built images
 	-docker rmi $(TAG_VERSION) $(TAG_DATESHA) 2>/dev/null
 
-# Host data dir: docker volume source for ieops-mem's /data inside the container.
-# Verified via `docker inspect ieops-mem --format '{{json .Mounts}}'` → Source.
-DATA_DIR      := /data/ieops-mem/data
-SNAPSHOTS_DIR := /opt/ieops-mem/snapshots
+# v3.0 deploy targets PostgreSQL; legacy SQLite snapshot retained as `snapshot-sqlite-legacy`
+# for any old-style ieops-mem deploys still on /data/ieops-mem.db. New deploys use pg_dump.
+SNAPSHOTS_DIR := /opt/ieops-aihub/snapshots
+PG_CONTAINER  := ieops-aihub-postgres-1
+PG_USER       := aihub
+PG_DB         := aihub
 SKIP_PREDEPLOY_SNAPSHOT ?=
 
-snapshot-before-deploy:  ## Take a snapshot of the prod DB before a release
+snapshot-before-deploy:  ## Take a pg_dump of the prod DB before a v3.x release
 	@ts=$$(date -u +%Y%m%dT%H%M%SZ); \
-	echo ">>> snapshotting $(DEPLOY_HOST):$(DATA_DIR)/ieops-mem.db → $(SNAPSHOTS_DIR)/pre-v$(VERSION)-$$ts.db"; \
+	echo ">>> pg_dump $(DEPLOY_HOST):$(PG_CONTAINER) → $(SNAPSHOTS_DIR)/pre-v$(VERSION)-$$ts.sql.gz"; \
+	ssh $(DEPLOY_HOST) "sudo mkdir -p $(SNAPSHOTS_DIR) \
+	  && sudo docker exec $(PG_CONTAINER) pg_dump -U $(PG_USER) $(PG_DB) | gzip | sudo tee $(SNAPSHOTS_DIR)/pre-v$(VERSION)-$$ts.sql.gz > /dev/null \
+	  && sudo ls -la $(SNAPSHOTS_DIR) | tail -3"
+
+snapshot-sqlite-legacy:  ## (legacy) Take a SQLite snapshot for pre-v3 deploys still on ieops-mem
+	@ts=$$(date -u +%Y%m%dT%H%M%SZ); \
+	echo ">>> snapshotting $(DEPLOY_HOST):/data/ieops-mem/data/ieops-mem.db → $(SNAPSHOTS_DIR)/legacy-$$ts.db"; \
 	ssh $(DEPLOY_HOST) "sudo mkdir -p $(SNAPSHOTS_DIR) \
 	  && sudo docker exec ieops-mem python3 -c 'import sqlite3; sqlite3.connect(\"/data/ieops-mem.db\").execute(\"PRAGMA wal_checkpoint(FULL)\")' \
-	  && sudo cp $(DATA_DIR)/ieops-mem.db $(SNAPSHOTS_DIR)/pre-v$(VERSION)-$$ts.db \
+	  && sudo cp /data/ieops-mem/data/ieops-mem.db $(SNAPSHOTS_DIR)/legacy-$$ts.db \
 	  && sudo ls -la $(SNAPSHOTS_DIR) | tail -3"
 
 deploy-safe:  ## Snapshot then deploy (recommended for MINOR/MAJOR bumps)

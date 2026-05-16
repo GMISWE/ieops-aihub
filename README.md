@@ -1,4 +1,12 @@
-# ieops-mem
+# polyforge-aihub (formerly `ieops-mem`)
+
+**v3.0** — polyforge v3 backend. PostgreSQL-backed `work_items` / `run_attempts` / `resource_locks` / `agent_events` / `memories` with atomic claim transaction, server-side lease + fencing, 5-rule conflict predictor, redaction (content + embedding). Routes live under `/v1/*`.
+
+Legacy `/memories/*` routes from ieops-mem v0.3.x remain available during the migration window (per v3-design.md §15.2 "推迟 v3.1+"); they are NOT deprecated yet but the v3 `/v1/memories` routes are preferred for new code.
+
+Internal-network deploy runbook: see [polyforge v3 deploy runbook](https://github.com/GMISWE/GMI-marketplace/tree/main/plugins/polyforge-v3/README.md#install) and the workspace memory file `aihub-v3-deploy-runbook.md`.
+
+---
 
 ## v0.3.0 migration notes
 

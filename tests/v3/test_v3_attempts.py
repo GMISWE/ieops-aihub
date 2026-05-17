@@ -413,3 +413,84 @@ async def test_pause_does_not_complete_work_item(seeded_users):
         ), {"wid": wi_id})).first()
         assert wi[0] == "paused"  # not 'wrapped' — pause keeps work_item alive
         assert wi[1] is None      # current_attempt_id cleared by pause
+
+
+# ---------------------------------------------------------------------------
+# F8 (M4): complete_attempt race — work_item takeover between verify and UPDATE
+# ---------------------------------------------------------------------------
+
+async def test_complete_attempt_race_skips_work_item_completed_event(seeded_users):
+    """F8/M4: if a concurrent takeover reassigned current_attempt_id before the
+    work_item UPDATE, rowcount == 0 → work_item_completed event is NOT emitted.
+
+    Simulated by manually clearing current_attempt_id right after verify_mutation
+    would have succeeded (i.e., between claim and complete via DB manipulation).
+    """
+    from app.auth import _hash_session_secret
+    MY_SECRET = "ab" * 32  # 64 valid hex chars
+
+    async with make_async_client(seeded_users) as client:
+        r0 = await client.post(
+            "/v1/work_items",
+            json={"project": "marketplace", "scenario": "coding",
+                  "goal": "race guard test",
+                  "declared_resources": [
+                      {"type": "repo", "uri": "repo:marketplace", "intent": "write"}
+                  ]},
+            headers=auth_headers(BEARER_ZHANG),
+        )
+        assert r0.status_code == 201
+        wi_id = r0.json()["id"]
+
+        r1 = await client.post(
+            f"/v1/work_items/{wi_id}/claim",
+            json={"idempotency_key": "idem_race_guard",
+                  "session_info": {"machine_id": "zhang-mbp", "session_secret": MY_SECRET},
+                  "requested_locks": []},
+            headers=auth_headers(BEARER_ZHANG),
+        )
+        assert r1.status_code == 200
+        claim = r1.json()
+        aid = claim["attempt_id"]
+
+    async with seeded_users.connect() as conn:
+        await conn.execute(sa.text(
+            "UPDATE run_attempts SET session_secret_hash = :h WHERE id = :aid"
+        ), {"h": _hash_session_secret(MY_SECRET), "aid": aid})
+        await conn.commit()
+
+    # Simulate concurrent takeover: clear current_attempt_id so the complete
+    # UPDATE WHERE current_attempt_id=:aid returns 0 rows
+    async with seeded_users.connect() as conn:
+        await conn.execute(sa.text(
+            "UPDATE work_items SET current_attempt_id = NULL WHERE id = :wid"
+        ), {"wid": wi_id})
+        await conn.commit()
+
+    async with make_async_client(seeded_users) as client:
+        r2 = await client.post(
+            f"/v1/attempts/{aid}/complete",
+            json={"attempt_id": aid, "claim_epoch": claim["claim_epoch"],
+                  "session_secret": MY_SECRET, "status": "wrapped"},
+            headers=auth_headers(BEARER_ZHANG),
+        )
+    # The endpoint should still return 200 (attempt itself was completed)
+    assert r2.status_code == 200, r2.text
+
+    # But work_item_completed event must NOT be emitted (race skipped it)
+    async with seeded_users.connect() as conn:
+        evt = (await conn.execute(sa.text("""
+            SELECT id FROM agent_events
+            WHERE work_item_id = :wid AND event_type = 'work_item_completed'
+        """), {"wid": wi_id})).first()
+    assert evt is None, "work_item_completed should NOT be emitted when WI was taken over"
+
+    # The work_item status should remain unchanged (not overwritten to 'wrapped')
+    async with seeded_users.connect() as conn:
+        wi_status = (await conn.execute(sa.text(
+            "SELECT status FROM work_items WHERE id = :wid"
+        ), {"wid": wi_id})).scalar()
+    # Status stays 'running' or whatever the race winner set — not forced to 'wrapped'
+    assert wi_status != "wrapped", (
+        "work_item.status must not be forced to 'wrapped' when current_attempt_id mismatch"
+    )

@@ -130,3 +130,55 @@ async def test_adopt_pr_identifier_must_be_int(seeded_reference):
             headers=auth_headers(BEARER_ZHANG),
         )
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# F3 (H5): adopt_artifact CAS — stale expected_resources_version → 409
+# ---------------------------------------------------------------------------
+
+async def test_adopt_artifact_cas_stale_version_409(seeded_reference):
+    """F3/H5: adopt with stale expected_resources_version must return 409 CONFLICT_EPOCH_MISMATCH."""
+    await _seed_real_secret(seeded_reference)
+
+    # Fetch current resources_version
+    async with seeded_reference.connect() as conn:
+        row = (await conn.execute(sa.text(
+            "SELECT resources_version FROM work_items WHERE id = 'wi_a3f'"
+        ))).mappings().first()
+    current_version = row["resources_version"]
+    stale_version = current_version - 1  # intentionally stale
+
+    async with make_async_client(seeded_reference) as client:
+        r = await client.post(
+            "/v1/work_items/wi_a3f/artifacts/adopt",
+            json={"attempt_id": "ra_111", "claim_epoch": 1,
+                  "session_secret": SECRET,
+                  "type": "branch", "identifier": "pf3/test-cas", "repo": "marketplace",
+                  "expected_resources_version": stale_version},
+            headers=auth_headers(BEARER_ZHANG),
+        )
+    assert r.status_code == 409, r.text
+    assert r.json()["code"] == "CONFLICT_EPOCH_MISMATCH"
+
+
+async def test_adopt_artifact_cas_correct_version_succeeds(seeded_reference):
+    """F3/H5: adopt with correct expected_resources_version succeeds."""
+    await _seed_real_secret(seeded_reference)
+
+    # Fetch current resources_version
+    async with seeded_reference.connect() as conn:
+        row = (await conn.execute(sa.text(
+            "SELECT resources_version FROM work_items WHERE id = 'wi_a3f'"
+        ))).mappings().first()
+    current_version = row["resources_version"]
+
+    async with make_async_client(seeded_reference) as client:
+        r = await client.post(
+            "/v1/work_items/wi_a3f/artifacts/adopt",
+            json={"attempt_id": "ra_111", "claim_epoch": 1,
+                  "session_secret": SECRET,
+                  "type": "branch", "identifier": "pf3/test-cas-ok", "repo": "marketplace",
+                  "expected_resources_version": current_version},
+            headers=auth_headers(BEARER_ZHANG),
+        )
+    assert r.status_code == 200, r.text

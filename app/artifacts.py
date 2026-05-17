@@ -52,12 +52,17 @@ async def adopt_artifact(
     artifact_type: str,
     identifier: str,
     repo: str,
+    expected_resources_version: int | None = None,
 ) -> None:
     """Attach artifact to declared_resources[repo] runtime fields.
 
     For pr type: set last_pr_number on the matching repo entry, bump version.
     Per §7.6 CAS protocol: only current_attempt may modify, resources_version
     bumped atomically.
+
+    If expected_resources_version is provided, the UPDATE WHERE clause adds
+    AND resources_version = :expected_version for optimistic concurrency control.
+    If the row is not updated (stale version), raises CONFLICT_VERSION_MISMATCH.
     """
     wi = await _select_wi_for_update(conn, wi_id)
     if attempt.work_item_id != wi_id:
@@ -90,14 +95,28 @@ async def adopt_artifact(
         entry["metadata"] = meta
     declared[idx] = entry
 
-    await conn.execute(sa.text("""
+    # Build WHERE clause — optionally include CAS on resources_version
+    params: dict[str, Any] = {
+        "dr": json.dumps(declared), "id": wi_id, "aid": attempt.id,
+    }
+    version_clause = ""
+    if expected_resources_version is not None:
+        version_clause = " AND resources_version = :expected_version"
+        params["expected_version"] = expected_resources_version
+
+    result = await conn.execute(sa.text(f"""
         UPDATE work_items
         SET declared_resources = CAST(:dr AS JSONB),
             resources_version = resources_version + 1,
             updated_at = now()
-        WHERE id = :id AND current_attempt_id = :aid
+        WHERE id = :id AND current_attempt_id = :aid{version_clause}
         RETURNING resources_version
-    """), {"dr": json.dumps(declared), "id": wi_id, "aid": attempt.id})
+    """), params)
+    if result.rowcount == 0:
+        raise AihubServerError(
+            ErrorCode.CONFLICT_EPOCH_MISMATCH,
+            "resources_version mismatch — concurrent update; refetch and retry",
+        )
 
     await emit_event(
         conn, work_item_id=wi_id, event_type="external_artifact_reconciled",

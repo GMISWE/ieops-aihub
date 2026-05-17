@@ -38,7 +38,8 @@ async def gc_tick(engine: AsyncEngine) -> dict:
             UPDATE run_attempts SET status='expired', ended_at=now()
             WHERE status='running'
               AND lease_until < now() - interval '5 minutes'
-            RETURNING id, work_item_id, actor_user_id, api_key_id, claim_epoch
+            RETURNING id, work_item_id, actor_user_id, api_key_id, claim_epoch,
+                      ended_at
         """))
         expired_rows = list(r1.mappings())
         results["attempts_expired"] = len(expired_rows)
@@ -62,9 +63,14 @@ async def gc_tick(engine: AsyncEngine) -> dict:
             cascaded_wi_ids = {r["id"] for r in cas.mappings()}
             cascaded = len(cascaded_wi_ids)
 
-            # Emit attempt_expired for every expired attempt; emit
+            # Emit attempt_expired for every expired attempt (M5/F9); emit
             # work_item_blocked only when we actually transitioned the WI.
+            # Payload per F9: {attempt_id, work_item_id, expired_at (ISO)}.
             for r in expired_rows:
+                expired_at_iso = (
+                    r["ended_at"].isoformat() if r["ended_at"] is not None
+                    else None
+                )
                 await emit_event(
                     conn,
                     work_item_id=r["work_item_id"],
@@ -72,7 +78,12 @@ async def gc_tick(engine: AsyncEngine) -> dict:
                     actor_user_id=r["actor_user_id"],
                     api_key_id=r["api_key_id"],
                     event_type="attempt_expired",
-                    payload={"claim_epoch": r["claim_epoch"]},
+                    payload={
+                        "attempt_id": r["id"],
+                        "work_item_id": r["work_item_id"],
+                        "expired_at": expired_at_iso,
+                        "claim_epoch": r["claim_epoch"],
+                    },
                 )
                 if r["work_item_id"] in cascaded_wi_ids:
                     await emit_event(

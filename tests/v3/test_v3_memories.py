@@ -12,8 +12,12 @@ from tests.v3.v3_client import (
 )
 from tests.v3.memories_client import make_memories_client as make_async_client
 
-# Admin bearer for AH-3 tests that need admin access
+# Admin bearer for AH-3 tests that need admin access.
+# Raw bearer string (presented by client): same legacy string, now hashed via sha256$.
+# sha256$035489188186405d47f36c360db7d40eb67dd42fe161cc76ef72c43bb2a8dc01
+# = sha256hex("argon2id$dummy_seed_hash_admin")
 BEARER_ADMIN_MEM = "argon2id$dummy_seed_hash_admin"
+BEARER_ADMIN_HASH = "sha256$035489188186405d47f36c360db7d40eb67dd42fe161cc76ef72c43bb2a8dc01"
 
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -29,7 +33,12 @@ BEARER_ADMIN = "argon2id$dummy_seed_hash_admin"
 
 @pytest_asyncio.fixture(loop_scope="session", autouse=True)
 async def _seed_admin_api_key(seeded_users):
-    """Inject an api_key entry for the admin user so Bearer auth works in tests."""
+    """Inject an api_key entry for the admin user so Bearer auth works in tests.
+
+    key_hash uses sha256$ format (argon2id$ backdoor removed per F6/M6).
+    The raw bearer string (BEARER_ADMIN) remains unchanged so existing test
+    HTTP calls continue to work — only the stored hash format changed.
+    """
     async with seeded_users.connect() as conn:
         await conn.execute(sa.text("""
             UPDATE users
@@ -38,7 +47,7 @@ async def _seed_admin_api_key(seeded_users):
         """), {
             "keys": json.dumps([{
                 "id": "ak_admin_001",
-                "key_hash": BEARER_ADMIN,
+                "key_hash": BEARER_ADMIN_HASH,
                 "scopes": ["admin"],
                 "created_at": "2026-05-16T09:00:00Z",
                 "revoked_at": None,
@@ -471,3 +480,138 @@ async def test_create_memory_admin_cross_project_work_item(seeded_users):
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["work_item_id"] == "wi_ah3_admin_cross"
+
+
+# ---------------------------------------------------------------------------
+# F2 (H3): redact clears embedding AND emits memory_redacted event
+# ---------------------------------------------------------------------------
+
+async def test_redact_clears_embedding_and_emits_event(seeded_users):
+    """F2/H3: redact must set embedding=NULL and emit one memory_redacted event."""
+    # Create a work_item to anchor the event (agent_events requires valid wid FK)
+    await _seed_work_item(seeded_users, "wi_redact_event_test", "marketplace")
+
+    async with make_async_client(seeded_users) as client:
+        # Create a memory linked to the work_item so the event can be emitted
+        r = await client.post(
+            "/v1/memories",
+            json={
+                "project": "marketplace",
+                "type": "note",
+                "content": "sensitive embedding data",
+                "visibility": "project",
+                "work_item_id": "wi_redact_event_test",
+            },
+            headers=auth_headers(BEARER_ZHANG),
+        )
+        assert r.status_code == 201, r.text
+        mem_id = r.json()["id"]
+
+        # Redact it
+        r = await client.post(
+            f"/v1/memories/{mem_id}/redact",
+            json={"reason": "embedding PII"},
+            headers=auth_headers(BEARER_ZHANG),
+        )
+        assert r.status_code == 200
+
+    # (a) embedding IS NULL after redact
+    async with seeded_users.connect() as conn:
+        row = (await conn.execute(sa.text(
+            "SELECT content, embedding FROM memories WHERE id = :id"
+        ), {"id": mem_id})).mappings().first()
+    assert row is not None
+    assert row["content"] is None
+    assert row["embedding"] is None
+
+    # (b) one memory_redacted event row exists in agent_events
+    async with seeded_users.connect() as conn:
+        evt = (await conn.execute(sa.text("""
+            SELECT id, payload FROM agent_events
+            WHERE event_type = 'memory_redacted'
+              AND payload->>'memory_id' = :mid
+        """), {"mid": mem_id})).mappings().first()
+    assert evt is not None, "memory_redacted event not found in agent_events"
+    assert evt["payload"]["memory_id"] == mem_id
+    assert evt["payload"]["reason"] == "embedding PII"
+    assert evt["payload"]["redacted_by"] == "u_zhangsan"
+
+
+# ---------------------------------------------------------------------------
+# F10 (M6): PATCH on redacted memory returns 409 CONFLICT
+# ---------------------------------------------------------------------------
+
+async def test_patch_redacted_memory_returns_conflict(seeded_users):
+    """F10/M6: patching a redacted memory must return 409 CONFLICT."""
+    async with make_async_client(seeded_users) as client:
+        # Create + redact
+        r = await _create_memory(client, BEARER_ZHANG, content="will be redacted")
+        mem_id = r.json()["id"]
+
+        r = await client.post(
+            f"/v1/memories/{mem_id}/redact",
+            json={"reason": "test"},
+            headers=auth_headers(BEARER_ZHANG),
+        )
+        assert r.status_code == 200
+
+        # Try to PATCH after redaction
+        r = await client.patch(
+            f"/v1/memories/{mem_id}",
+            json={"patch_payload": {"content": "should fail"}},
+            headers=auth_headers(BEARER_ZHANG),
+        )
+
+    assert r.status_code == 409, r.text
+    assert r.json()["code"] == "CONFLICT_EPOCH_MISMATCH"
+
+
+# ---------------------------------------------------------------------------
+# F11 (M7): team-visibility is project-scoped (cross-project isolation)
+# ---------------------------------------------------------------------------
+
+async def test_team_visibility_project_scoped(seeded_users):
+    """F11/M7: a writer in project A must NOT see team-visibility memories from project B.
+
+    Zhang is in [marketplace, aihub, ieops].
+    Wang is in [marketplace] only.
+    Zhang creates a team-visibility memory in 'aihub'.
+    Wang should NOT see it (not in aihub).
+    Zhang SHOULD see it (in aihub).
+    """
+    async with make_async_client(seeded_users) as client:
+        # Zhang creates team memory in 'aihub'
+        r = await client.post(
+            "/v1/memories",
+            json={
+                "project": "aihub",
+                "type": "note",
+                "content": "aihub team memory",
+                "visibility": "team",
+            },
+            headers=auth_headers(BEARER_ZHANG),
+        )
+        assert r.status_code == 201, r.text
+        aihub_team_mem_id = r.json()["id"]
+
+        # Zhang lists team memories in aihub — should see it
+        r_zhang = await client.get(
+            "/v1/memories",
+            params={"project": "aihub", "visibility": "team"},
+            headers=auth_headers(BEARER_ZHANG),
+        )
+        assert r_zhang.status_code == 200
+        zhang_ids = [m["id"] for m in r_zhang.json()["items"]]
+        assert aihub_team_mem_id in zhang_ids, "Zhang should see team memory in aihub"
+
+        # Wang lists all memories (no project filter) — should NOT see aihub team memory
+        r_wang = await client.get(
+            "/v1/memories",
+            params={"visibility": "team"},
+            headers=auth_headers(BEARER_WANG),
+        )
+        assert r_wang.status_code == 200
+        wang_ids = [m["id"] for m in r_wang.json()["items"]]
+        assert aihub_team_mem_id not in wang_ids, (
+            "Wang (marketplace-only) must NOT see team memory from aihub project"
+        )

@@ -198,6 +198,7 @@ class CreateWorkItemRequest(BaseModel):
 
 class UpdateWorkItemRequest(AttemptCredential):
     patch_payload: dict[str, Any]
+    expected_resources_version: int | None = None  # CAS guard for declared_resources writes
 
 
 class RequestedLock(BaseModel):
@@ -267,18 +268,11 @@ class PredictConflictsResponse(BaseModel):
     predictions: list[ConflictPrediction]
 
 
-class ReconcileArtifactsRequest(AttemptCredential):
-    work_item_id: str
-
-
-class ReconcileArtifactsResponse(BaseModel):
-    items: list[ExternalArtifactStateModel]
-
-
 class ArtifactActionRequest(AttemptCredential):
     type: ArtifactType
     identifier: str
     repo: str
+    expected_resources_version: int | None = None  # Optional CAS guard (§7.6)
 
 
 class OkResponse(BaseModel):

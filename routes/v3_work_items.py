@@ -78,9 +78,22 @@ async def update_work_item_endpoint(
 ):
     """1A scope: validate AC + work_item exists + actor matches; persist
     patch_payload (allowed fields only) on declared_resources / labels / priority
-    via row-locked update."""
+    via row-locked update.
+
+    CAS for declared_resources:
+      If expected_resources_version is provided AND patch includes declared_resources,
+      the UPDATE WHERE clause adds AND resources_version = :expected_version.
+      If 0 rows updated → 409 CONFLICT_VERSION_MISMATCH.
+      If declared_resources is patched WITHOUT expected_resources_version, a
+      warning is logged and the update proceeds (backward-compat; DEPRECATED —
+      callers should always supply expected_resources_version when patching
+      declared_resources to avoid lost-update races).
+    """
+    import logging as _logging
     import sqlalchemy as sa
     import json as _json
+
+    _log = _logging.getLogger("aihub.work_items")
 
     async with engine.begin() as conn:
         user, attempt = await verify_mutation(
@@ -107,13 +120,14 @@ async def update_work_item_endpoint(
 
         sets = ["updated_at = now()"]
         params: dict = {"id": work_item_id}
+        patching_declared = "declared_resources" in patch
         if "labels" in patch:
             sets.append("labels = CAST(:labels AS JSONB)")
             params["labels"] = _json.dumps(patch["labels"])
         if "priority" in patch:
             sets.append("priority = :priority")
             params["priority"] = patch["priority"]
-        if "declared_resources" in patch:
+        if patching_declared:
             sets.append("declared_resources = CAST(:dr AS JSONB)")
             sets.append("resources_version = resources_version + 1")
             params["dr"] = _json.dumps(patch["declared_resources"])
@@ -121,9 +135,31 @@ async def update_work_item_endpoint(
             sets.append("metadata = CAST(:metadata AS JSONB)")
             params["metadata"] = _json.dumps(patch["metadata"])
 
-        await conn.execute(sa.text(
-            f"UPDATE work_items SET {', '.join(sets)} WHERE id = :id"
+        # CAS guard: if patching declared_resources with expected_resources_version
+        where_extra = ""
+        if patching_declared and body.expected_resources_version is not None:
+            where_extra = " AND resources_version = :expected_resources_version"
+            params["expected_resources_version"] = body.expected_resources_version
+        elif patching_declared and body.expected_resources_version is None:
+            # DEPRECATED: declared_resources patched without CAS guard — log warning
+            _log.warning(
+                "update_work_item: declared_resources patched without "
+                "expected_resources_version for wi=%s attempt=%s — "
+                "concurrent update may cause lost-update race; "
+                "clients should supply expected_resources_version (deprecated path)",
+                work_item_id, attempt.id,
+            )
+
+        result = await conn.execute(sa.text(
+            f"UPDATE work_items SET {', '.join(sets)} WHERE id = :id{where_extra}"
         ), params)
+
+        if patching_declared and body.expected_resources_version is not None and result.rowcount == 0:
+            raise AihubServerError(
+                ErrorCode.CONFLICT_EPOCH_MISMATCH,
+                "resources_version mismatch — concurrent declared_resources update; refetch and retry",
+            )
+
         wi_row = (await conn.execute(sa.text("""
             SELECT * FROM work_items WHERE id = :id
         """), {"id": work_item_id})).mappings().first()

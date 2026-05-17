@@ -297,3 +297,95 @@ async def test_sync_source_rejected_for_writer(seeded_users):
         )
     assert r.status_code == 403
     assert r.json()["code"] == "FORBIDDEN"
+
+
+# ---------------------------------------------------------------------------
+# F4 (H6): update_work_item CAS for declared_resources
+# ---------------------------------------------------------------------------
+
+async def test_update_work_item_declared_resources_cas_conflict(seeded_users):
+    """F4/H6: two parallel PATCHes with declared_resources — only one wins.
+
+    Simulates: client A reads resources_version=V, client B updates first
+    (bumping to V+1), then client A submits with expected_resources_version=V
+    → 409 CONFLICT_EPOCH_MISMATCH.
+    """
+    from app.auth import _hash_session_secret
+    MY_SECRET = "f" * 64
+
+    async with make_async_client(seeded_users) as client:
+        # Create work_item
+        r0 = await client.post(
+            "/v1/work_items",
+            json={
+                "project": "marketplace",
+                "scenario": "coding",
+                "goal": "cas conflict test",
+                "declared_resources": [
+                    {"type": "repo", "uri": "repo:marketplace", "intent": "write"}
+                ],
+            },
+            headers=auth_headers(BEARER_ZHANG),
+        )
+        assert r0.status_code == 201
+        wi_id = r0.json()["id"]
+        initial_version = r0.json()["resources_version"]  # 0
+
+        # Claim
+        r1 = await client.post(
+            f"/v1/work_items/{wi_id}/claim",
+            json={"idempotency_key": "idem_cas_test",
+                  "session_info": {"machine_id": "zhang-mbp", "session_secret": MY_SECRET},
+                  "requested_locks": []},
+            headers=auth_headers(BEARER_ZHANG),
+        )
+        assert r1.status_code == 200
+        claim = r1.json()
+        aid = claim["attempt_id"]
+
+    async with seeded_users.connect() as conn:
+        await conn.execute(sa.text(
+            "UPDATE run_attempts SET session_secret_hash = :h WHERE id = :aid"
+        ), {"h": _hash_session_secret(MY_SECRET), "aid": aid})
+        await conn.commit()
+
+    async with make_async_client(seeded_users) as client:
+        # Client A: PATCH with initial_version (optimistic lock)
+        # First PATCH succeeds (initial_version is current)
+        r_a1 = await client.patch(
+            f"/v1/work_items/{wi_id}",
+            json={
+                "attempt_id": aid, "claim_epoch": claim["claim_epoch"],
+                "session_secret": MY_SECRET,
+                "patch_payload": {
+                    "declared_resources": [
+                        {"type": "repo", "uri": "repo:marketplace",
+                         "intent": "write", "task_branch": "pf3/client-a"}
+                    ]
+                },
+                "expected_resources_version": initial_version,
+            },
+            headers=auth_headers(BEARER_ZHANG),
+        )
+        assert r_a1.status_code == 200, r_a1.text
+        new_version = r_a1.json()["resources_version"]
+        assert new_version == initial_version + 1
+
+        # Simulate a second PATCH with the stale version (initial_version) → 409
+        r_a2 = await client.patch(
+            f"/v1/work_items/{wi_id}",
+            json={
+                "attempt_id": aid, "claim_epoch": claim["claim_epoch"],
+                "session_secret": MY_SECRET,
+                "patch_payload": {
+                    "declared_resources": [
+                        {"type": "repo", "uri": "repo:marketplace",
+                         "intent": "write", "task_branch": "pf3/client-b"}
+                    ]
+                },
+                "expected_resources_version": initial_version,  # stale
+            },
+            headers=auth_headers(BEARER_ZHANG),
+        )
+    assert r_a2.status_code == 409, r_a2.text
+    assert r_a2.json()["code"] == "CONFLICT_EPOCH_MISMATCH"

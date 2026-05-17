@@ -22,6 +22,7 @@ from ulid import ULID
 
 from app.auth import bearer_dep, verify_bearer
 from app.errors import AihubServerError, ErrorCode
+from app.events import emit_event
 from app.v3_app import get_engine
 
 
@@ -145,8 +146,13 @@ def _build_visibility_clauses(user) -> tuple[list[str], dict]:
     Rows are visible when ANY of:
     1. visibility='private' AND author_user_id = current_user.id
     2. visibility='project' AND project = ANY(current_user.projects)
-    3. visibility='team'
+    3. visibility='team' AND project = ANY(current_user.projects)  [F11/M7]
     4. visibility='admin' AND current_user.role = 'admin'
+
+    F11/M7: 'team' visibility is now project-scoped (conservative interpretation).
+    A user in project A cannot see 'team' memories from project B.
+    Design §15 is ambiguous on whether 'team' is org-global or project-scoped;
+    conservative project-scoping applied here pending design clarification.
     """
     is_admin = user.role == "admin"
     parts: list[str] = []
@@ -156,7 +162,7 @@ def _build_visibility_clauses(user) -> tuple[list[str], dict]:
     parts.append("(visibility = 'private' AND author_user_id = :vis_user_id)")
     params["vis_user_id"] = user.id
 
-    # 2. project-scoped
+    # 2. project-scoped 'project' visibility
     if user.projects:
         parts.append("(visibility = 'project' AND project = ANY(CAST(:vis_projects AS text[])))")
         params["vis_projects"] = list(user.projects)
@@ -164,8 +170,17 @@ def _build_visibility_clauses(user) -> tuple[list[str], dict]:
         # admin sees all project memories
         parts.append("(visibility = 'project')")
 
-    # 3. team
-    parts.append("(visibility = 'team')")
+    # 3. team — conservative project-scoping (design §15 is ambiguous; applying
+    #    project-scoped interpretation: team means "within your projects only").
+    #    Admin sees team memories across all projects (no project filter for admin).
+    if user.projects:
+        parts.append(
+            "(visibility = 'team' AND project = ANY(CAST(:viewer_projects AS text[])))"
+        )
+        params["viewer_projects"] = list(user.projects)
+    elif is_admin:
+        # admin with no project membership — sees all team memories org-wide
+        parts.append("(visibility = 'team')")
 
     # 4. admin-visibility
     if is_admin:
@@ -345,6 +360,13 @@ async def update_memory(
         if row is None:
             raise AihubServerError(ErrorCode.NOT_FOUND, f"memory {memory_id} not found")
 
+        # Gate: redacted memories cannot be patched (M6/F10)
+        if row["redacted_at"] is not None:
+            raise AihubServerError(
+                ErrorCode.CONFLICT_EPOCH_MISMATCH,
+                "memory redacted — cannot patch a redacted memory",
+            )
+
         # Gate: author or admin
         is_admin = user.role == "admin"
         if row["author_user_id"] != user.id and not is_admin:
@@ -400,7 +422,7 @@ async def redact_memory(
         user = await verify_bearer(conn, bearer)
 
         row = (await conn.execute(sa.text("""
-            SELECT id, author_user_id FROM memories WHERE id = :id FOR UPDATE
+            SELECT id, author_user_id, work_item_id FROM memories WHERE id = :id FOR UPDATE
         """), {"id": memory_id})).mappings().first()
 
         if row is None:
@@ -416,8 +438,28 @@ async def redact_memory(
 
         await conn.execute(sa.text("""
             UPDATE memories
-            SET redacted_at = now(), redaction_reason = :reason, content = NULL
+            SET redacted_at = now(), redaction_reason = :reason,
+                content = NULL, embedding = NULL
             WHERE id = :id
         """), {"id": memory_id, "reason": body.reason})
+
+        # Emit memory_redacted event (same transaction — atomicity with UPDATE).
+        # agent_events.work_item_id has a NOT NULL FK to work_items; we can only
+        # emit via the shared helper when the memory is linked to a work_item.
+        # For unlinked memories the redaction still clears content + embedding;
+        # the audit event is silently skipped (design constraint, not a bug).
+        wi_id = row["work_item_id"]
+        if wi_id is not None:
+            await emit_event(
+                conn,
+                work_item_id=wi_id,
+                event_type="memory_redacted",
+                payload={
+                    "memory_id": memory_id,
+                    "reason": body.reason,
+                    "redacted_by": user.id,
+                },
+                actor_user_id=user.id,
+            )
 
     return JSONResponse(status_code=200, content={"ok": True})

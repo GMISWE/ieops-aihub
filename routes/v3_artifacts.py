@@ -24,11 +24,15 @@ async def _action_common(
             attempt_id=body.attempt_id, claim_epoch=body.claim_epoch,
             session_secret=body.session_secret,
         )
-        await handler(
-            conn, user=user, attempt=attempt,
+        kwargs: dict = dict(
+            conn=conn, user=user, attempt=attempt,
             wi_id=work_item_id, artifact_type=body.type,
             identifier=body.identifier, repo=body.repo,
         )
+        # Thread optional CAS field through to adopt_artifact only
+        if hasattr(body, "expected_resources_version") and body.expected_resources_version is not None:
+            kwargs["expected_resources_version"] = body.expected_resources_version
+        await handler(**kwargs)
     return JSONResponse(status_code=200, content={"ok": True})
 
 

@@ -354,14 +354,6 @@ components:
         attempt_id: {type: string}
         declared_resources: {type: array, items: {$ref: '#/components/schemas/DeclaredResource'}}
 
-    ReconcileArtifactsRequest:
-      allOf:
-        - $ref: '#/components/schemas/AttemptCredential'
-        - type: object
-          required: [work_item_id]
-          properties:
-            work_item_id: {type: string}
-
     ArtifactActionRequest:
       allOf:
         - $ref: '#/components/schemas/AttemptCredential'
@@ -452,12 +444,6 @@ components:
       properties:
         severity: {type: string, enum: [info, warn, soft_block, hard_block]}
         predictions: {type: array, items: {$ref: '#/components/schemas/ConflictPrediction'}}
-
-    ReconcileArtifactsResponse:
-      type: object
-      required: [items]
-      properties:
-        items: {type: array, items: {$ref: '#/components/schemas/ExternalArtifactState'}}
 
     WhoAmIResponse:
       type: object
@@ -731,19 +717,6 @@ paths:
           description: prediction
           content: {application/json: {schema: {$ref: '#/components/schemas/PredictConflictsResponse'}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
-
-  /v1/artifacts/reconcile:
-    post:
-      operationId: reconcile_artifacts
-      requestBody:
-        required: true
-        content: {application/json: {schema: {$ref: '#/components/schemas/ReconcileArtifactsRequest'}}}
-      responses:
-        '200':
-          description: artifact states
-          content: {application/json: {schema: {$ref: '#/components/schemas/ReconcileArtifactsResponse'}}}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '409': {$ref: '#/components/responses/Conflict'}
 
   /v1/work_items/{work_item_id}/artifacts/adopt:
     parameters:

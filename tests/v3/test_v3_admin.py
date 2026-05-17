@@ -25,8 +25,9 @@ from tests.v3.v3_client import (
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 # Admin bearer — u_admin has no api_key row in the base fixture; we add one.
-BEARER_ADMIN = "sha256$" + __import__("hashlib").sha256(b"admin_raw_key_x").hexdigest()
+# The raw key is what the HTTP client presents; BEARER_ADMIN is stored as sha256$ hash.
 ADMIN_RAW_KEY = "admin_raw_key_x"
+BEARER_ADMIN = "sha256$" + __import__("hashlib").sha256(ADMIN_RAW_KEY.encode()).hexdigest()
 
 
 @asynccontextmanager
@@ -269,10 +270,10 @@ async def test_admin_revoke_key_cascade(seeded_users):
         ))).scalar_one()
         assert lock_count == 0
 
-        # attempt_revoked event should exist
+        # auth_revoked event should exist (design §17.4 / §7.8)
         evt_row = (await conn.execute(sa.text("""
             SELECT id FROM agent_events
-            WHERE run_attempt_id = 'ra_li_test' AND event_type = 'attempt_revoked'
+            WHERE run_attempt_id = 'ra_li_test' AND event_type = 'auth_revoked'
         """))).mappings().first()
         assert evt_row is not None
 
@@ -389,3 +390,37 @@ async def test_admin_revoke_key_idempotent(seeded_users):
     body = r.json()
     assert body["ok"] is True
     assert body["terminated_attempts"] == []  # no running attempts for revoked key
+
+
+# ---------------------------------------------------------------------------
+# 10. F1 (H4): revoke emits auth_revoked event (not the old attempt_revoked)
+# ---------------------------------------------------------------------------
+
+async def test_admin_revoke_key_emits_auth_revoked_event(seeded_users):
+    """F1/H4: key revocation must emit event_type='auth_revoked' per design §17.4/§7.8."""
+    await _seed_admin_key(seeded_users)
+    await _seed_lisi_running_attempt(seeded_users)
+
+    async with make_admin_client(seeded_users) as client:
+        r = await client.post(
+            "/v1/admin/keys/revoke",
+            json={"key_id": "ak_li_001"},
+            headers=auth_headers(ADMIN_RAW_KEY),
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+
+    async with seeded_users.connect() as conn:
+        # Must have auth_revoked, NOT attempt_revoked
+        auth_revoked = (await conn.execute(sa.text("""
+            SELECT id FROM agent_events
+            WHERE run_attempt_id = 'ra_li_test' AND event_type = 'auth_revoked'
+        """))).mappings().first()
+        assert auth_revoked is not None, "auth_revoked event not found"
+
+        old_evt = (await conn.execute(sa.text("""
+            SELECT id FROM agent_events
+            WHERE run_attempt_id = 'ra_li_test' AND event_type = 'attempt_revoked'
+        """))).mappings().first()
+        assert old_evt is None, "stale attempt_revoked event should not exist"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "polyforge-aihub"
-version = "3.0.0"
+version = "3.0.1"
 description = "polyforge v3 backend — PostgreSQL-backed work_items / claim / lease / conflict-predict service. Also serves the legacy /memories/* routes from polyforge-v2 (ieops-mem v0.3.x) during the migration window."
 requires-python = ">=3.11"
 dependencies = [

@@ -46,15 +46,19 @@ async def renew_lease_endpoint(
     async with engine.begin() as conn:
         user = await verify_bearer(conn, bearer)
         row = (await conn.execute(sa.text("""
-            UPDATE run_attempts
+            UPDATE run_attempts ra
             SET lease_until = now() + interval '60 seconds'
-            WHERE id = :aid
-              AND claim_epoch = :epoch
-              AND session_secret_hash = :hash
-              AND lease_until > now()
-              AND status = 'running'
-              AND actor_user_id = :uid
-            RETURNING lease_until
+            WHERE ra.id = :aid
+              AND ra.claim_epoch = :epoch
+              AND ra.session_secret_hash = :hash
+              AND ra.lease_until > now()
+              AND ra.status = 'running'
+              AND ra.actor_user_id = :uid
+              -- Defense-in-depth ABA check (§7.5 third leg): verify the work_item
+              -- still points at THIS attempt, closing the window between status='running'
+              -- and a concurrent takeover that may have reassigned current_attempt_id.
+              AND ra.work_item_id = (SELECT id FROM work_items WHERE current_attempt_id = ra.id)
+            RETURNING ra.lease_until
         """), {"aid": attempt_id, "epoch": body.claim_epoch,
                "hash": secret_hash, "uid": user.id})).mappings().first()
         if row is not None:
@@ -110,6 +114,9 @@ async def complete_attempt_endpoint(
             claim_epoch=body.claim_epoch,
             session_secret=body.session_secret,
         )
+        import logging as _logging
+        _log = _logging.getLogger("aihub.attempts")
+
         new_status = body.status  # 'wrapped' | 'failed'
         await conn.execute(sa.text("""
             UPDATE run_attempts SET status = :s, ended_at = now()
@@ -126,18 +133,30 @@ async def complete_attempt_endpoint(
         # Per §7.7 state machine: running → wrap/fail transitions BOTH attempt
         # AND work_item together in the same transaction. Without this, the
         # work_item stays status='running' pointing to a terminal attempt.
-        await conn.execute(sa.text("""
+        #
+        # M4 (F8): guard against 0-rowcount race — if a concurrent takeover
+        # reassigned current_attempt_id between verify_mutation and this UPDATE,
+        # WHERE current_attempt_id = :aid returns 0 rows.  Skip work_item_completed
+        # in that case; log a warning (the takeover path owns the WI now).
+        wi_result = await conn.execute(sa.text("""
             UPDATE work_items
             SET status = :s, closed_at = now(), updated_at = now()
             WHERE id = :wid AND current_attempt_id = :aid
         """), {"s": new_status, "wid": attempt.work_item_id, "aid": attempt_id})
-        await emit_event(
-            conn, work_item_id=attempt.work_item_id,
-            event_type="work_item_completed",
-            payload={"work_item_id": attempt.work_item_id, "final_status": new_status},
-            actor_user_id=user.id, api_key_id=user.matched_api_key_id,
-            run_attempt_id=attempt_id,
-        )
+        if wi_result.rowcount == 0:
+            _log.warning(
+                "complete_attempt: work_item %s no longer points at attempt %s "
+                "(concurrent takeover race); skipping work_item_completed event",
+                attempt.work_item_id, attempt_id,
+            )
+        else:
+            await emit_event(
+                conn, work_item_id=attempt.work_item_id,
+                event_type="work_item_completed",
+                payload={"work_item_id": attempt.work_item_id, "final_status": new_status},
+                actor_user_id=user.id, api_key_id=user.matched_api_key_id,
+                run_attempt_id=attempt_id,
+            )
     return JSONResponse(status_code=200, content={"ok": True})
 
 

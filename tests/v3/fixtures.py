@@ -1,4 +1,18 @@
-"""Reference users — 张三 / 李四 / 王五 + admin。v3-reference-scenario §0。"""
+"""Reference users — 张三 / 李四 / 王五 + admin。v3-reference-scenario §0。
+
+F6 (M6): argon2id$ literal-compare backdoor removed from app/auth.py.
+Fixture key_hash values are now real sha256$ digests of the raw bearer strings.
+Raw bearer strings are preserved (BEARER_ZHANG etc. in v3_client.py) so all
+test code remains unchanged — only the stored hashes use the correct format.
+
+Key derivation: sha256$<sha256hex(raw_bearer_string)>
+  BEARER_ZHANG = "argon2id$dummy_seed_hash_zhang"
+    → sha256$abc54edd98d7976caeaa3add0f1f5ff47f1020ec04667f6677862b146138a893
+  BEARER_LI    = "argon2id$dummy_seed_hash_li"
+    → sha256$bef306482a4e228f83d6ae1c2f1908ba88d0ed37f367824cd4618506ed8b3504
+  BEARER_WANG  = "argon2id$dummy_seed_hash_wang"
+    → sha256$7b281dd0fc7598615de6bd4a1720ea2362bf764d4634a8286565781790c861e6
+"""
 import json
 import sqlalchemy as sa
 
@@ -11,7 +25,7 @@ REFERENCE_USERS = [
         "role": "writer", "projects": ["marketplace", "aihub", "ieops"],
         "api_keys": [{
             "id": "ak_zhang_001",
-            "key_hash": "argon2id$dummy_seed_hash_zhang",
+            "key_hash": "sha256$abc54edd98d7976caeaa3add0f1f5ff47f1020ec04667f6677862b146138a893",
             "scopes": ["read:marketplace", "write:marketplace",
                        "read:aihub", "write:aihub",
                        "read:ieops", "write:ieops"],
@@ -24,7 +38,7 @@ REFERENCE_USERS = [
         "role": "writer", "projects": ["marketplace", "aihub"],
         "api_keys": [{
             "id": "ak_li_001",
-            "key_hash": "argon2id$dummy_seed_hash_li",
+            "key_hash": "sha256$bef306482a4e228f83d6ae1c2f1908ba88d0ed37f367824cd4618506ed8b3504",
             "scopes": ["read:marketplace", "write:marketplace",
                        "read:aihub", "write:aihub"],
             "created_at": "2026-05-16T09:00:00Z",
@@ -36,7 +50,7 @@ REFERENCE_USERS = [
         "role": "writer", "projects": ["marketplace"],
         "api_keys": [{
             "id": "ak_wang_001",
-            "key_hash": "argon2id$dummy_seed_hash_wang",
+            "key_hash": "sha256$7b281dd0fc7598615de6bd4a1720ea2362bf764d4634a8286565781790c861e6",
             "scopes": ["read:marketplace", "write:marketplace"],
             "created_at": "2026-05-16T09:00:00Z",
             "revoked_at": None,

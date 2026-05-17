@@ -37,8 +37,8 @@ def test_extract_bearer_missing():
 # ---- find_user_by_api_key ----
 
 async def test_find_user_by_api_key_match(seeded_users):
-    """Seed user u_zhangsan has key_hash='argon2id$dummy_seed_hash_zhang'.
-    bearer == stored_hash literal matches in 1A test convention.
+    """Seed user u_zhangsan has sha256$-hashed key_hash (F6/M6: argon2id$ backdoor removed).
+    The raw bearer "argon2id$dummy_seed_hash_zhang" is verified via sha256$ path.
     """
     async with seeded_users.connect() as conn:
         u = await find_user_by_api_key(conn, "argon2id$dummy_seed_hash_zhang")

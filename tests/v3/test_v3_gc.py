@@ -147,6 +147,32 @@ async def test_gc_cascade_expires_work_item_to_blocked(seeded_reference):
         assert blocked["payload"]["prior_attempt_id"] == "ra_111", blocked
 
 
+async def test_gc_attempt_expired_event_has_rich_payload(seeded_reference):
+    """F9/M5: GC must emit attempt_expired with {attempt_id, work_item_id, expired_at}."""
+    async with seeded_reference.connect() as conn:
+        await conn.execute(sa.text(
+            "UPDATE run_attempts SET lease_until = now() - interval '10 minutes' "
+            "WHERE id = 'ra_111'"
+        ))
+        await conn.commit()
+
+    res = await gc_tick(seeded_reference)
+    assert res["attempts_expired"] >= 1
+
+    async with seeded_reference.connect() as conn:
+        evt = (await conn.execute(sa.text("""
+            SELECT payload FROM agent_events
+            WHERE run_attempt_id = 'ra_111' AND event_type = 'attempt_expired'
+            ORDER BY created_at DESC LIMIT 1
+        """))).mappings().first()
+
+    assert evt is not None, "attempt_expired event not found"
+    payload = evt["payload"]
+    assert payload["attempt_id"] == "ra_111"
+    assert payload["work_item_id"] == "wi_a3f"
+    assert payload["expired_at"] is not None  # ISO timestamp set
+
+
 async def test_gc_cascade_skips_non_running_work_items(seeded_reference):
     """If a work_item was paused/blocked/wrapped concurrently by the API while
     its attempt's lease was lapsing, GC must NOT clobber the API-set status.

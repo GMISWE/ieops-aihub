@@ -295,11 +295,11 @@ async def admin_revoke_key(
                 DELETE FROM resource_locks WHERE owner_attempt_id = :aid
             """), {"aid": aid})
 
-            # 4c. Emit attempt_revoked event
+            # 4c. Emit auth_revoked event (design §17.4 / §7.8)
             await conn.execute(sa.text("""
                 INSERT INTO agent_events
                     (id, work_item_id, run_attempt_id, actor_user_id, api_key_id, event_type, payload)
-                VALUES (:eid, :wid, :aid, :uid, :kid, 'attempt_revoked', CAST(:payload AS JSONB))
+                VALUES (:eid, :wid, :aid, :uid, :kid, 'auth_revoked', CAST(:payload AS JSONB))
             """), {
                 "eid": _evt_id(),
                 "wid": wid,

@@ -3,11 +3,11 @@
 verify_mutation: lease-fenced endpoints (atomic attempt + AC three-tuple)
 verify_bearer:   whoami / memory / admin endpoints (Bearer-only, no AC)
 
-Token verification uses argon2id when the stored key_hash starts with
-'argon2id$'; tests / seed data use a 'argon2id$dummy_seed_hash_<who>' marker
-to keep fixtures deterministic without needing a kdf. Real production
-deployments must onboard users via /v1/admin/users which writes real argon2id
-digests (Phase 1B/C bootstrap; out of 1A scope).
+Token verification uses sha256 prefix: stored key_hash must start with
+'sha256$'. The argon2id$ literal-compare backdoor has been removed (F6/M6).
+All fixture and test key hashes use the sha256$ format.
+Production deployments onboard users via /v1/admin/users which writes sha256$
+hashes automatically.
 """
 from __future__ import annotations
 
@@ -69,19 +69,13 @@ def _hash_session_secret(raw: str) -> str:
 def _verify_api_key_hash(raw_bearer: str, stored_hash: str) -> bool:
     """Constant-time compare for the stored api_key hash.
 
-    Stored format: 'argon2id$<digest>' for real keys; tests use
-    'argon2id$dummy_seed_hash_<who>' as deterministic seed marker. In Phase 1A
-    we treat the dummy seed marker as a literal — admin route in 1B/C will swap
-    in real argon2id hashing. For now, also support 'sha256$' prefix as a
-    convenience for tests that want to feed real raw keys.
+    Stored format: 'sha256$<sha256hex(raw_bearer)>'.
+    The argon2id$ literal-compare backdoor has been removed (F6/M6 security fix).
+    Only sha256$ prefix is accepted; any other prefix returns False.
     """
     if stored_hash.startswith("sha256$"):
         digest = hashlib.sha256(raw_bearer.encode("utf-8")).hexdigest()
         return hmac.compare_digest("sha256$" + digest, stored_hash)
-    if stored_hash.startswith("argon2id$"):
-        # 1A test fixtures use literal raw bearer == stored_hash convention:
-        # raw bearer for u_zhangsan is the same 'argon2id$dummy_seed_hash_zhang' string.
-        return hmac.compare_digest(raw_bearer, stored_hash)
     return False
 
 

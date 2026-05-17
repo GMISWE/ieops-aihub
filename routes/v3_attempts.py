@@ -42,12 +42,16 @@ async def renew_lease_endpoint(
     # Bearer is required for audit, even though renew uses the secret as the
     # primary fence (per §7.3 description). Verifying bearer also catches
     # revoked-key cases up-front.
+    # AIHUB_LEASE_SECONDS overrides the 60s default (validated, see
+    # app.run_attempts.resolve_lease_seconds).
+    from app.run_attempts import resolve_lease_seconds
+    _lease_secs = resolve_lease_seconds()
     secret_hash = _hash_session_secret(body.session_secret)
     async with engine.begin() as conn:
         user = await verify_bearer(conn, bearer)
         row = (await conn.execute(sa.text("""
             UPDATE run_attempts ra
-            SET lease_until = now() + interval '60 seconds'
+            SET lease_until = now() + make_interval(secs => :lease_secs)
             WHERE ra.id = :aid
               AND ra.claim_epoch = :epoch
               AND ra.session_secret_hash = :hash
@@ -60,7 +64,8 @@ async def renew_lease_endpoint(
               AND ra.work_item_id = (SELECT id FROM work_items WHERE current_attempt_id = ra.id)
             RETURNING ra.lease_until
         """), {"aid": attempt_id, "epoch": body.claim_epoch,
-               "hash": secret_hash, "uid": user.id})).mappings().first()
+               "hash": secret_hash, "uid": user.id,
+               "lease_secs": _lease_secs})).mappings().first()
         if row is not None:
             return JSONResponse(status_code=200, content={
                 "lease_until": row["lease_until"].isoformat(),

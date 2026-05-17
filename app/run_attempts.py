@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from typing import Any
 
 import sqlalchemy as sa
@@ -29,6 +30,44 @@ from ulid import ULID
 
 from app.auth import UserRecord
 from app.errors import AihubServerError, ErrorCode
+
+
+_DEFAULT_LEASE_SECONDS = 60
+_LEASE_ENV_VAR = "AIHUB_LEASE_SECONDS"
+
+
+def resolve_lease_seconds() -> int:
+    """Return the lease duration (s) for newly minted / renewed attempts.
+
+    Reads ``AIHUB_LEASE_SECONDS`` if set; otherwise returns 60 (production
+    default per design.md §7.3). Test suites override via this env var to
+    shorten lease-expiry waits.
+
+    Robust to malformed env values: non-integer or non-positive values fall
+    back to the default and emit a logger warning. This is important because
+    the value is read on the hot path (every claim + every lease renewal);
+    a typo in deployment env shouldn't 500 the API.
+    """
+    raw = os.environ.get(_LEASE_ENV_VAR)
+    if raw is None:
+        return _DEFAULT_LEASE_SECONDS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s=%r is not a valid integer; falling back to %d",
+            _LEASE_ENV_VAR, raw, _DEFAULT_LEASE_SECONDS,
+        )
+        return _DEFAULT_LEASE_SECONDS
+    if value <= 0:
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s=%d must be positive; falling back to %d",
+            _LEASE_ENV_VAR, value, _DEFAULT_LEASE_SECONDS,
+        )
+        return _DEFAULT_LEASE_SECONDS
+    return value
 
 
 def _ra_id() -> str:
@@ -220,6 +259,9 @@ async def claim_work_item(
     new_aid = _ra_id()
     secret_hash = _hash_secret(session_secret_raw)
     try:
+        # AIHUB_LEASE_SECONDS overrides the 60s default (validated, see
+        # resolve_lease_seconds for fallback behavior).
+        _lease_secs = resolve_lease_seconds()
         ins_row = (await conn.execute(sa.text("""
             INSERT INTO run_attempts (
                 id, work_item_id, status, claim_epoch, idempotency_key,
@@ -227,7 +269,7 @@ async def claim_work_item(
                 machine_id, session_secret_hash, parent_attempt_id
             ) VALUES (
                 :id, :wid, 'running', :epoch, :key,
-                now() + interval '60 seconds',
+                now() + make_interval(secs => :lease_secs),
                 :uid, :kid, :display, :mid, :hash, :parent
             )
             RETURNING id, claim_epoch, lease_until
@@ -237,6 +279,7 @@ async def claim_work_item(
             "kid": user.matched_api_key_id,
             "display": user.display_name, "mid": machine_id,
             "hash": secret_hash, "parent": parent_attempt_id,
+            "lease_secs": _lease_secs,
         })).mappings().first()
     except IntegrityError as ie:
         # 23505 UNIQUE violation — could be (work_item_id, idempotency_key)

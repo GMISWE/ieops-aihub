@@ -79,12 +79,36 @@ async def claim_work_item(
                                "writer or admin required to claim")
 
     # ---- Step 2: SELECT FOR UPDATE old current_attempt ----
+    # Two paths to "no live current_attempt":
+    #   (a) Fresh work_item (never claimed) — current_attempt_id IS NULL, no history.
+    #   (b) Cascade cleared it (§17.4 api_key revoke, §17.5 GC lease-expiry) —
+    #       current_attempt_id IS NULL but history has prior terminal attempts.
+    # In (b) we still need the highest historical claim_epoch to compute new_epoch,
+    # otherwise the new attempt collides on the UNIQUE (work_item_id, claim_epoch)
+    # constraint. We also stash a "ghost" old_a for parent_attempt_id lineage.
     old_a = None
+    history_max_epoch = 0
+    history_last_terminal = None  # for parent_attempt_id when current_attempt_id is NULL
     if wi_row["current_attempt_id"] is not None:
         old_a = (await conn.execute(sa.text("""
             SELECT id, status, claim_epoch, lease_until, actor_user_id, actor_display
             FROM run_attempts WHERE id = :aid FOR UPDATE
         """), {"aid": wi_row["current_attempt_id"]})).mappings().first()
+    else:
+        # Path (b): query history. COALESCE returns 0 when no rows (fresh WI).
+        max_row = (await conn.execute(sa.text("""
+            SELECT COALESCE(MAX(claim_epoch), 0) AS max_epoch
+            FROM run_attempts WHERE work_item_id = :wid
+        """), {"wid": wi_id})).mappings().first()
+        history_max_epoch = max_row["max_epoch"] or 0
+        if history_max_epoch > 0:
+            # Pin most-recent prior attempt for lineage.
+            last_row = (await conn.execute(sa.text("""
+                SELECT id FROM run_attempts
+                WHERE work_item_id = :wid
+                ORDER BY claim_epoch DESC LIMIT 1
+            """), {"wid": wi_id})).mappings().first()
+            history_last_terminal = last_row["id"] if last_row else None
 
     # ---- Step 3a: Idempotency replay check (BEFORE eligibility, so a client
     # retrying a successful claim from the SAME attempt key gets its same
@@ -162,7 +186,16 @@ async def claim_work_item(
     # ---- Step 5: (idempotency was Step 3a) ----
 
     # ---- Step 6: Supersede old (takeover branch) ----
-    new_epoch = (old_a["claim_epoch"] + 1) if old_a is not None else 1
+    # Three sources of new_epoch:
+    #   1. old_a present → old_a.claim_epoch + 1 (most common takeover path)
+    #   2. old_a is None but history exists (cascade-cleared) → max_epoch + 1
+    #   3. fresh WI no history → 1
+    if old_a is not None:
+        new_epoch = old_a["claim_epoch"] + 1
+    elif history_max_epoch > 0:
+        new_epoch = history_max_epoch + 1
+    else:
+        new_epoch = 1
     parent_attempt_id = None
     if old_a is not None and old_a["status"] == "running" and old_a["lease_until"] <= db_now:
         await conn.execute(sa.text("""
@@ -178,6 +211,10 @@ async def claim_work_item(
         # Old attempt already terminal (wrapped/failed/superseded/expired);
         # parent chain still records causality.
         parent_attempt_id = old_a["id"]
+    elif history_last_terminal is not None:
+        # No current_attempt_id (cascade-cleared) but historical attempts exist.
+        # Pin lineage to the most-recent prior attempt.
+        parent_attempt_id = history_last_terminal
 
     # ---- Step 7: INSERT new attempt ----
     new_aid = _ra_id()

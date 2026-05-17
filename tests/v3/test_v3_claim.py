@@ -383,3 +383,78 @@ async def test_idempotency_replay_only_returns_running(seeded_users):
         )
     assert r3.status_code == 409
     assert r3.json()["code"] == "CONFLICT_DUPLICATE_REQUEST"
+
+
+async def test_claim_after_cascade_picks_next_epoch_from_history(seeded_users):
+    """Regression for the GC-cascade epoch collision (found in v3.0 e2e deploy):
+
+    When the GC cron cascade clears `work_items.current_attempt_id` (or §17.4
+    api_key revoke does the same), a subsequent claim previously fell back to
+    `new_epoch = 1` because `old_a is None`. With UNIQUE (work_item_id,
+    claim_epoch), this collided with the prior epoch=1 attempt and the claim
+    raised CONFLICT_DUPLICATE_REQUEST.
+
+    Post-fix: claim queries MAX(claim_epoch) from history when current_attempt_id
+    is NULL, so new_epoch becomes max+1 and the lineage continues.
+    """
+    async with make_async_client(seeded_users) as client:
+        # 1. Create + claim → attempt epoch=1
+        r0 = await client.post("/v1/work_items", json=_new_wi_payload(
+            goal="cascade epoch regression"), headers=auth_headers(BEARER_ZHANG))
+        wi_id = r0.json()["id"]
+        r1 = await client.post(
+            f"/v1/work_items/{wi_id}/claim",
+            json=_claim_body(idempotency_key="cascade_epoch_k1",
+                             locks=[{"resource_type": "git_branch",
+                                     "resource_key": f"mp/{wi_id}-cas"}]),
+            headers=auth_headers(BEARER_ZHANG),
+        )
+        assert r1.status_code == 200, r1.text
+        old_attempt = r1.json()["attempt_id"]
+        assert r1.json()["claim_epoch"] == 1
+
+    # 2. Simulate cascade: mark attempt expired + clear current_attempt_id + drop locks
+    async with seeded_users.connect() as conn:
+        await conn.execute(sa.text(
+            "UPDATE run_attempts SET status='expired', ended_at=now(), "
+            "lease_until = now() - interval '10 minutes' WHERE id = :aid"
+        ), {"aid": old_attempt})
+        await conn.execute(sa.text(
+            "UPDATE work_items SET status='blocked', current_attempt_id=NULL "
+            "WHERE id = :wid"
+        ), {"wid": wi_id})
+        await conn.execute(sa.text(
+            "DELETE FROM resource_locks WHERE owner_attempt_id = :aid"
+        ), {"aid": old_attempt})
+        await conn.commit()
+
+    # 3. Re-claim (Wang takes over via /pf3-resume semantics) → must succeed,
+    # epoch must bump to 2 (not collide on UNIQUE).
+    async with make_async_client(seeded_users) as client:
+        r2 = await client.post(
+            f"/v1/work_items/{wi_id}/claim",
+            json=_claim_body(idempotency_key="cascade_epoch_k2",
+                             session_secret=SECRET_B, machine_id="wang-mbp",
+                             locks=[{"resource_type": "git_branch",
+                                     "resource_key": f"mp/{wi_id}-cas"}]),
+            headers=auth_headers(BEARER_WANG),
+        )
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["claim_epoch"] == 2, body
+    assert body["attempt_id"] != old_attempt
+
+    # 4. Verify parent_attempt_id lineage and WI transitions back to running
+    async with seeded_users.connect() as conn:
+        ra = (await conn.execute(sa.text(
+            "SELECT status, claim_epoch, parent_attempt_id FROM run_attempts WHERE id = :aid"
+        ), {"aid": body["attempt_id"]})).mappings().first()
+        assert ra["status"] == "running"
+        assert ra["claim_epoch"] == 2
+        assert ra["parent_attempt_id"] == old_attempt, ra
+
+        wi = (await conn.execute(sa.text(
+            "SELECT status, current_attempt_id FROM work_items WHERE id = :wid"
+        ), {"wid": wi_id})).mappings().first()
+        assert wi["status"] == "running"
+        assert wi["current_attempt_id"] == body["attempt_id"]

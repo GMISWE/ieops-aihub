@@ -23,6 +23,16 @@ import httpx
 import pytest
 import pytest_asyncio
 
+# polyforge-v3 is a marketplace plugin installed alongside aihub in dev /
+# production environments, but aihub's CI doesn't install it. Skip the whole
+# directory cleanly when unavailable rather than ModuleNotFoundError. Same
+# pattern as test_3stream_wire_e2e.py for testcontainers.
+pytest.importorskip(
+    "polyforge_v3",
+    reason="wire_multi_agent tests require the polyforge-v3 plugin "
+           "(pip install polyforge-v3, or run from a workspace with it editable-installed)",
+)
+
 from app.v3_app import make_v3_app
 
 

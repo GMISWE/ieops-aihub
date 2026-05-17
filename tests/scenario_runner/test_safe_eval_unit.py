@@ -7,6 +7,15 @@ from __future__ import annotations
 
 import pytest
 
+# assertions.py transitively imports polyforge_v3.* via executor.py. To keep
+# this unit-test file portable to CI envs without the polyforge plugin, gate
+# the import. (Future cleanup: split _safe_eval_bool into a standalone module
+# with no polyforge deps so safe-eval can be unit-tested anywhere.)
+pytest.importorskip(
+    "polyforge_v3",
+    reason="safe-eval tests transitively import polyforge_v3 via executor",
+)
+
 from tests.scenario_runner.assertions import _safe_eval_bool, _coerce, _apply
 
 

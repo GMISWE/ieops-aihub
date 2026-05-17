@@ -15,6 +15,13 @@ from pathlib import Path
 import httpx
 import pytest
 
+# Cross-package: scenario_runner imports polyforge_v3.* in executor.py;
+# skip cleanly in CI environments that don't install the plugin.
+pytest.importorskip(
+    "polyforge_v3",
+    reason="scenario_runner requires the polyforge-v3 plugin",
+)
+
 from app.v3_app import make_v3_app
 from tests.scenario_runner.parser import parse_scenario
 from tests.scenario_runner.executor import execute_scenario

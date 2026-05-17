@@ -100,3 +100,73 @@ async def test_gc_idempotent(seeded_reference):
     res1 = await gc_tick(seeded_reference)
     res2 = await gc_tick(seeded_reference)
     assert res2["orphan_locks_deleted"] == 0
+
+
+async def test_gc_cascade_expires_work_item_to_blocked(seeded_reference):
+    """When a running attempt's lease lapses, GC must cascade:
+       attempt → expired, AND
+       work_item → blocked + current_attempt_id=NULL,
+       and emit attempt_expired + work_item_blocked events.
+
+    Mirrors §17.4 api_key revoke cascade for the §17.5 lease-expiry path.
+    Pre-fix this was silently incomplete (work_item stayed status='running'
+    pointing at an expired attempt; /pf3-status couldn't surface the gap).
+    """
+    # Force ra_111 lease > 5 min into the past so sweep 1 picks it up.
+    async with seeded_reference.connect() as conn:
+        await conn.execute(sa.text(
+            "UPDATE run_attempts SET lease_until = now() - interval '10 minutes' "
+            "WHERE id = 'ra_111'"
+        ))
+        await conn.commit()
+
+    res = await gc_tick(seeded_reference)
+    assert res["attempts_expired"] >= 1, res
+    assert res["work_items_blocked"] >= 1, res
+
+    async with seeded_reference.connect() as conn:
+        # work_item now blocked, current_attempt_id NULL.
+        row = (await conn.execute(sa.text(
+            "SELECT status, current_attempt_id FROM work_items WHERE id = 'wi_a3f'"
+        ))).mappings().first()
+        assert row["status"] == "blocked", row
+        assert row["current_attempt_id"] is None, row
+
+        # Both audit events emitted, referencing the prior attempt.
+        evts = list((await conn.execute(sa.text(
+            "SELECT event_type, payload FROM agent_events "
+            "WHERE work_item_id = 'wi_a3f' AND run_attempt_id = 'ra_111' "
+            "AND event_type IN ('attempt_expired','work_item_blocked') "
+            "ORDER BY created_at"
+        ))).mappings())
+        types = {e["event_type"] for e in evts}
+        assert {"attempt_expired", "work_item_blocked"}.issubset(types), evts
+        # work_item_blocked payload pins the reason + prior context.
+        blocked = next(e for e in evts if e["event_type"] == "work_item_blocked")
+        assert blocked["payload"]["reason"] == "lease_expired", blocked
+        assert blocked["payload"]["prior_attempt_id"] == "ra_111", blocked
+
+
+async def test_gc_cascade_skips_non_running_work_items(seeded_reference):
+    """If a work_item was paused/blocked/wrapped concurrently by the API while
+    its attempt's lease was lapsing, GC must NOT clobber the API-set status.
+    Sweep 2's `AND status='running'` filter guards this; this test pins it."""
+    async with seeded_reference.connect() as conn:
+        # Simulate: someone paused the WI via API at the same time lease expired.
+        await conn.execute(sa.text(
+            "UPDATE work_items SET status='paused' WHERE id = 'wi_a3f'"
+        ))
+        await conn.execute(sa.text(
+            "UPDATE run_attempts SET lease_until = now() - interval '10 minutes' "
+            "WHERE id = 'ra_111'"
+        ))
+        await conn.commit()
+
+    res = await gc_tick(seeded_reference)
+    assert res["attempts_expired"] >= 1
+    # Attempt still expired, but WI must remain paused (not flipped to blocked).
+    async with seeded_reference.connect() as conn:
+        row = (await conn.execute(sa.text(
+            "SELECT status FROM work_items WHERE id = 'wi_a3f'"
+        ))).mappings().first()
+        assert row["status"] == "paused", row

@@ -1,7 +1,9 @@
-"""POST /v1/admin/users|keys|keys/revoke — admin-only provisioning endpoints.
+"""POST /v1/admin/users|keys|keys/revoke|events — admin-only provisioning endpoints.
 
-All three endpoints require role='admin'. Design §17.4 covers key revocation
-cascade. Bearer auth via existing app.auth helpers.
+All endpoints require role='admin'. Design §17.4 covers key revocation cascade.
+Design §20 M9: pf3_emit_admin_event delivers system/admin events via
+POST /v1/admin/events — no attempt fence, run_attempt_id=null.
+Bearer auth via existing app.auth helpers.
 """
 from __future__ import annotations
 
@@ -9,7 +11,7 @@ import hashlib
 import json
 import secrets
 from datetime import datetime, timezone
-from typing import List
+from typing import Any, List
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends
@@ -20,6 +22,7 @@ from ulid import ULID
 
 from app.auth import bearer_dep, verify_bearer
 from app.errors import AihubServerError, ErrorCode
+from app.events import emit_event, _payload_too_large
 from app.v3_app import get_engine
 
 
@@ -59,6 +62,17 @@ class AdminRevokeKeyRequest(BaseModel):
 class AdminRevokeKeyResponse(BaseModel):
     ok: bool
     terminated_attempts: List[str]
+
+
+class EmitAdminEventRequest(BaseModel):
+    event_type: str
+    payload: dict[str, Any] = {}
+    work_item_id: str | None = None  # optional; if set, must reference a valid work_item
+    pinned: bool = False
+
+
+class EmitAdminEventResponse(BaseModel):
+    event_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -324,3 +338,59 @@ async def admin_revoke_key(
         "ok": True,
         "terminated_attempts": terminated_ids,
     })
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/admin/events  — §20 M9: admin/system event channel (no attempt fence)
+# ---------------------------------------------------------------------------
+
+@router.post("/admin/events", status_code=201, operation_id="emit_admin_event",
+             response_model=EmitAdminEventResponse)
+async def emit_admin_event_endpoint(
+    body: EmitAdminEventRequest,
+    bearer: str | None = Depends(bearer_dep),
+    engine: AsyncEngine = Depends(get_engine),
+):
+    """Emit a system/admin event without an active run_attempt (§20 M9).
+
+    Requires role='admin'. The event is stored with run_attempt_id=null so it
+    appears in the work_item's timeline as a server-initiated event. Payload
+    size cap: 64 KiB (same as pf3_emit_event).
+
+    work_item_id is optional: when supplied the referenced work_item must exist
+    and the event is attached to it; when omitted a 400 is returned (agent_events
+    requires a non-null work_item_id per the DB schema — true global events like
+    key revocation broadcasts are emitted at the attempt level by admin_revoke_key).
+    """
+    if _payload_too_large(body.payload):
+        raise AihubServerError(ErrorCode.PAYLOAD_TOO_LARGE,
+                               "event payload exceeds 64 KiB")
+    if body.work_item_id is None:
+        raise AihubServerError(
+            ErrorCode.BAD_REQUEST,
+            "work_item_id is required (agent_events schema requires non-null work_item_id; "
+            "for global events use admin_revoke_key or emit_event with an active attempt)",
+        )
+    async with engine.begin() as conn:
+        caller = await verify_bearer(conn, bearer)
+        _require_admin(caller)
+
+        # Validate work_item existence
+        row = (await conn.execute(sa.text(
+            "SELECT id FROM work_items WHERE id = :id"
+        ), {"id": body.work_item_id})).first()
+        if row is None:
+            raise AihubServerError(ErrorCode.NOT_FOUND,
+                                   f"work_item {body.work_item_id!r} not found")
+
+        eid = await emit_event(
+            conn,
+            work_item_id=body.work_item_id,
+            event_type=body.event_type,
+            payload=body.payload,
+            actor_user_id=caller.id,
+            api_key_id=caller.matched_api_key_id,
+            run_attempt_id=None,  # no attempt fence — design §20 M9
+            pinned=body.pinned,
+        )
+    return JSONResponse(status_code=201, content={"event_id": eid})

@@ -45,6 +45,7 @@ class CastMember:
     user: str
     machine_id: str
     session_secret: str | None = None
+    bearer_env: str | None = None
 
 
 @dataclass
@@ -86,8 +87,9 @@ def parse_scenario(path: Path) -> Scenario:
 
     cast = [
         CastMember(
-            id=c["id"], user=c["user"], machine_id=c["machine_id"],
+            id=c["id"], user=c.get("user", ""), machine_id=c.get("machine_id", ""),
             session_secret=c.get("session_secret"),
+            bearer_env=c.get("bearer_env"),
         )
         for c in meta["cast"]
     ]
@@ -235,6 +237,11 @@ def _action_from_dict(d: dict, path: Path, ctx: str) -> Action:
         # `repeat: N` + `skill: ...` in same dict
         inner = _action_from_dict({k: v for k, v in d.items() if k != "repeat"}, path, ctx)
         return Action(kind="repeat", payload=int(d["repeat"]), inner=inner)
+    if "mcp" in d:
+        raise NotImplementedError(
+            "mcp: actions are not supported in Mode-1 executor; "
+            "use Mode-2 /execute-scenario for MCP tool dispatch"
+        )
     raise ValueError(
         f"{path}: block '{ctx}' has action with no recognized kind "
         f"(expected one of skill/bash/sleep/repeat); got keys {list(d.keys())}"

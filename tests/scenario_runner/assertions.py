@@ -87,6 +87,7 @@ async def _eval_one(
         # by the executor (executor._execute_block merge step), so we look
         # at those scoped keys explicitly.
         success_capture = a.spec["success_capture"]
+        failure_capture = a.spec.get("failure_capture")
         actors = a.spec["actors"]
         n_success = sum(
             1 for actor in actors
@@ -101,6 +102,23 @@ async def _eval_one(
                 f"assertion #{idx} one_succeeds: expected exactly 1 success in "
                 f"{actors}, found {n_success}. Per-actor `{success_capture}`: {details}"
             )
+        # Validate failure_capture for all losing actors (those without success)
+        if failure_capture:
+            failure_key = failure_capture.lstrip("$")
+            winners = [
+                actor for actor in actors
+                if ctx.vars.get(f"{actor}.{success_capture}") is not None
+            ]
+            for actor in actors:
+                if actor in winners:
+                    continue
+                val = ctx.vars.get(f"{actor}.{failure_key}")
+                if val is None:
+                    raise AssertionError(
+                        f"assertion #{idx} one_succeeds: actor {actor!r} should have "
+                        f"populated failure_capture {failure_capture!r} but got None. "
+                        f"vars keys: {sorted(ctx.vars.keys())}"
+                    )
         return
 
     if a.kind == "loser":

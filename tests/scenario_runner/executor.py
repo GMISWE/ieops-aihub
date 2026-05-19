@@ -207,12 +207,21 @@ async def execute_scenario(
 async def _ensure_adapter(ctx: ExecutionContext, member: CastMember) -> None:
     if member.id in ctx.adapters:
         return
-    bearer = ctx.bearer_resolver(member.user) if member.user else None
+    # bearer_env takes precedence over the resolver-based user lookup
+    if member.bearer_env:
+        bearer = os.environ.get(member.bearer_env)
+        if bearer is None:
+            raise ValueError(
+                f"cast member {member.id!r}: bearer_env={member.bearer_env!r} "
+                f"is set but the environment variable is not defined."
+            )
+    else:
+        bearer = ctx.bearer_resolver(member.user) if member.user else None
     if bearer is None:
         raise ValueError(
-            f"cast member {member.id!r} references user {member.user!r} "
-            f"which the bearer_resolver doesn't know about. For polyforge "
-            f"scenarios, seed the user via tests/v3/fixtures.REFERENCE_USERS "
+            f"cast member {member.id!r}: no bearer found; set 'user' (resolvable "
+            f"via bearer_resolver) or 'bearer_env' (env var holding the token). "
+            f"For polyforge scenarios, seed the user via tests/v3/fixtures.REFERENCE_USERS "
             f"first; for product scenarios, pass execute_scenario(..., "
             f"bearer_resolver=...) with your own resolver."
         )
@@ -315,21 +324,64 @@ async def _execute_action(
         # we'd rather lock this down before someone adds a scenario that
         # captures arbitrary user-supplied input.
         cmd = ctx.substitute(str(action.payload), shell_quote=True)
-        subprocess.run(["bash", "-c", cmd], check=True)
+        result = subprocess.run(
+            ["bash", "-c", cmd],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
+        if action.capture:
+            # Build a capture dict: try to parse stdout as KEY=VALUE lines;
+            # always also expose raw stdout/stderr/rc so scenarios can capture
+            # those directly.
+            bash_output: dict[str, Any] = {
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+                "rc": result.returncode,
+            }
+            for line in result.stdout.splitlines():
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    bash_output[k.strip()] = v.strip()
+            for result_field, var_name in action.capture.items():
+                ctx.set_var(var_name, bash_output.get(result_field))
         return
     if action.kind == "repeat":
         n = int(action.payload)
+        role = _current_role.get()
         for i in range(n):
-            inner_ctx_vars = ctx.vars.copy()
-            ctx.vars["i"] = i
-            ctx.vars["role"] = cast_id
+            # Snapshot scratch/vars so we can restore loop-local vars after
+            # each iteration without clobbering real captures.
+            if role is not None:
+                scratch_snapshot = ctx.role_scratch.get(role, {}).copy()
+            else:
+                vars_snapshot = ctx.vars.copy()
+            ctx.set_var("i", str(i))
+            ctx.set_var("role", cast_id)
             try:
                 await _execute_action(cast_id, action.inner, scenario, ctx)  # type: ignore[arg-type]
             finally:
-                # Restore vars (only mutate explicitly-captured ones)
-                ctx.vars = {**inner_ctx_vars,
-                            **{k: v for k, v in ctx.vars.items()
-                               if k not in {"i", "role"}}}
+                # Restore only the loop-injected keys; keep any real captures
+                # the inner action produced.
+                if role is not None:
+                    scratch = ctx.role_scratch.setdefault(role, {})
+                    for loop_key in ("i", "role"):
+                        # Remove loop var; restore pre-iteration value if any
+                        scratch.pop(loop_key, None)
+                        if loop_key in scratch_snapshot:
+                            scratch[loop_key] = scratch_snapshot[loop_key]
+                else:
+                    ctx.vars.pop("i", None)
+                    ctx.vars.pop("role", None)
+                    if "i" in vars_snapshot:
+                        ctx.vars["i"] = vars_snapshot["i"]
+                    if "role" in vars_snapshot:
+                        ctx.vars["role"] = vars_snapshot["role"]
         return
     if action.kind == "skill":
         cmd = ctx.substitute(str(action.payload))
@@ -426,6 +478,11 @@ async def _execute_skill(
     raise NotImplementedError(f"executor does not yet handle skill: {skill}")
 
 
+# Flags that are always boolean — never consume the next token as their value.
+# Without this, `--no-claim foo` would silently parse as no_claim="foo".
+_BOOLEAN_FLAGS: frozenset[str] = frozenset({"no-claim", "force-claim"})
+
+
 def _parse_skill_args(tokens: list[str]) -> dict[str, Any]:
     """Cheap CLI-ish parser. Returns dict with --key:value pairs and _positional list."""
     out: dict[str, Any] = {"_positional": []}
@@ -434,7 +491,11 @@ def _parse_skill_args(tokens: list[str]) -> dict[str, Any]:
         t = tokens[i]
         if t.startswith("--"):
             key = t[2:]
-            if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+            if key in _BOOLEAN_FLAGS:
+                # Boolean flags always set to True without consuming next token
+                out[key] = True
+                i += 1
+            elif i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
                 out[key] = tokens[i + 1]
                 i += 2
             else:

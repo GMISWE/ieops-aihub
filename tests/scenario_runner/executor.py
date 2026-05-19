@@ -315,7 +315,32 @@ async def _execute_action(
         # we'd rather lock this down before someone adds a scenario that
         # captures arbitrary user-supplied input.
         cmd = ctx.substitute(str(action.payload), shell_quote=True)
-        subprocess.run(["bash", "-c", cmd], check=True)
+        result = subprocess.run(
+            ["bash", "-c", cmd],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
+        if action.capture:
+            # Build a capture dict: try to parse stdout as KEY=VALUE lines;
+            # always also expose raw stdout/stderr/rc so scenarios can capture
+            # those directly.
+            bash_output: dict[str, Any] = {
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+                "rc": result.returncode,
+            }
+            for line in result.stdout.splitlines():
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    bash_output[k.strip()] = v.strip()
+            for result_field, var_name in action.capture.items():
+                ctx.set_var(var_name, bash_output.get(result_field))
         return
     if action.kind == "repeat":
         n = int(action.payload)

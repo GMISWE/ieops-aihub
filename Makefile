@@ -50,7 +50,7 @@ push: build  ## Push both tags to Artifact Registry
 deploy: push  ## Build + push + ssh-update compose + restart container
 	@test -z "$(DIRTY)" || (echo ">>> ERROR: refusing to deploy dirty build"; exit 1)
 	@echo ">>> patching $(DEPLOY_HOST):$(DEPLOY_DIR)/docker-compose.yml → $(TAG_DATESHA)"
-	ssh $(DEPLOY_HOST) "sudo sed -i 's|image: .*|image: $(TAG_DATESHA)|' $(DEPLOY_DIR)/docker-compose.yml"
+	ssh $(DEPLOY_HOST) "sudo sed -i '/container_name: aihub/{n;s|image: .*|image: $(TAG_DATESHA)|;}' $(DEPLOY_DIR)/docker-compose.yml"
 	@echo ">>> docker compose pull + up -d"
 	ssh $(DEPLOY_HOST) "cd $(DEPLOY_DIR) && sudo docker compose pull && sudo docker compose up -d"
 	@$(MAKE) --no-print-directory health
@@ -58,7 +58,7 @@ deploy: push  ## Build + push + ssh-update compose + restart container
 redeploy:  ## Rollback / pin to a specific date-sha tag.  Usage: make redeploy TAG=20260514-abc1234
 	@test -n "$(TAG)" || (echo "Usage: make redeploy TAG=<date-sha>"; exit 1)
 	@echo ">>> redeploying $(REGISTRY)/$(IMAGE):$(TAG)"
-	ssh $(DEPLOY_HOST) "sudo sed -i 's|image: .*|image: $(REGISTRY)/$(IMAGE):$(TAG)|' $(DEPLOY_DIR)/docker-compose.yml"
+	ssh $(DEPLOY_HOST) "sudo sed -i '/container_name: aihub/{n;s|image: .*|image: $(REGISTRY)/$(IMAGE):$(TAG)|;}' $(DEPLOY_DIR)/docker-compose.yml"
 	ssh $(DEPLOY_HOST) "cd $(DEPLOY_DIR) && sudo docker compose pull && sudo docker compose up -d"
 	@$(MAKE) --no-print-directory health
 

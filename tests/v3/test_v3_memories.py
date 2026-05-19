@@ -515,14 +515,13 @@ async def test_redact_clears_embedding_and_emits_event(seeded_users):
         )
         assert r.status_code == 200
 
-    # (a) embedding IS NULL after redact
+    # (a) content is NULL after redact (embedding column removed in migration 0003)
     async with seeded_users.connect() as conn:
         row = (await conn.execute(sa.text(
-            "SELECT content, embedding FROM memories WHERE id = :id"
+            "SELECT content FROM memories WHERE id = :id"
         ), {"id": mem_id})).mappings().first()
     assert row is not None
     assert row["content"] is None
-    assert row["embedding"] is None
 
     # (b) one memory_redacted event row exists in agent_events
     async with seeded_users.connect() as conn:

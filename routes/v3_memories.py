@@ -2,7 +2,7 @@
 
 Design §15.2 carve-outs:
 - No semantic search (query param accepted but ignored).
-- No embedding computation server-side (embedding column stays null).
+- embedding column dropped (migration 0003) until semantic search is implemented.
 - No physical delete; redact is soft-delete only.
 - No AttemptCredential (§6.1 carve-out): Bearer-only auth on all 4 endpoints.
 """
@@ -439,7 +439,7 @@ async def redact_memory(
         await conn.execute(sa.text("""
             UPDATE memories
             SET redacted_at = now(), redaction_reason = :reason,
-                content = NULL, embedding = NULL
+                content = NULL
             WHERE id = :id
         """), {"id": memory_id, "reason": body.reason})
 

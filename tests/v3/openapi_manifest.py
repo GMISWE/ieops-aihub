@@ -127,9 +127,13 @@ ENDPOINTS: list[EndpointShape] = [
                   frozenset({"key_id"}),
                   frozenset({"ok", "terminated_attempts"}),
                   frozenset({401, 403, 404})),
+    EndpointShape("POST", "/v1/admin/events", "emit_admin_event",
+                  frozenset({"event_type", "work_item_id"}),
+                  frozenset({"event_id"}),
+                  frozenset({400, 401, 403, 404})),
 ]
 
 
-assert len(ENDPOINTS) == 25, f"expected 25 endpoints, got {len(ENDPOINTS)}"
-assert len({(e.method, e.path) for e in ENDPOINTS}) == 25, "duplicate (method, path)"
-assert len({e.operation_id for e in ENDPOINTS}) == 25, "duplicate operation_id"
+assert len(ENDPOINTS) == 26, f"expected 26 endpoints, got {len(ENDPOINTS)}"
+assert len({(e.method, e.path) for e in ENDPOINTS}) == 26, "duplicate (method, path)"
+assert len({e.operation_id for e in ENDPOINTS}) == 26, "duplicate operation_id"

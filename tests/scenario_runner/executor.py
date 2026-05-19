@@ -207,12 +207,21 @@ async def execute_scenario(
 async def _ensure_adapter(ctx: ExecutionContext, member: CastMember) -> None:
     if member.id in ctx.adapters:
         return
-    bearer = ctx.bearer_resolver(member.user) if member.user else None
+    # bearer_env takes precedence over the resolver-based user lookup
+    if member.bearer_env:
+        bearer = os.environ.get(member.bearer_env)
+        if bearer is None:
+            raise ValueError(
+                f"cast member {member.id!r}: bearer_env={member.bearer_env!r} "
+                f"is set but the environment variable is not defined."
+            )
+    else:
+        bearer = ctx.bearer_resolver(member.user) if member.user else None
     if bearer is None:
         raise ValueError(
-            f"cast member {member.id!r} references user {member.user!r} "
-            f"which the bearer_resolver doesn't know about. For polyforge "
-            f"scenarios, seed the user via tests/v3/fixtures.REFERENCE_USERS "
+            f"cast member {member.id!r}: no bearer found; set 'user' (resolvable "
+            f"via bearer_resolver) or 'bearer_env' (env var holding the token). "
+            f"For polyforge scenarios, seed the user via tests/v3/fixtures.REFERENCE_USERS "
             f"first; for product scenarios, pass execute_scenario(..., "
             f"bearer_resolver=...) with your own resolver."
         )
@@ -469,6 +478,11 @@ async def _execute_skill(
     raise NotImplementedError(f"executor does not yet handle skill: {skill}")
 
 
+# Flags that are always boolean — never consume the next token as their value.
+# Without this, `--no-claim foo` would silently parse as no_claim="foo".
+_BOOLEAN_FLAGS: frozenset[str] = frozenset({"no-claim", "force-claim"})
+
+
 def _parse_skill_args(tokens: list[str]) -> dict[str, Any]:
     """Cheap CLI-ish parser. Returns dict with --key:value pairs and _positional list."""
     out: dict[str, Any] = {"_positional": []}
@@ -477,7 +491,11 @@ def _parse_skill_args(tokens: list[str]) -> dict[str, Any]:
         t = tokens[i]
         if t.startswith("--"):
             key = t[2:]
-            if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+            if key in _BOOLEAN_FLAGS:
+                # Boolean flags always set to True without consuming next token
+                out[key] = True
+                i += 1
+            elif i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
                 out[key] = tokens[i + 1]
                 i += 2
             else:

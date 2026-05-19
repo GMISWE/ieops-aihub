@@ -865,3 +865,18 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+
+  /v1/admin/events:
+    post:
+      operationId: emit_admin_event
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/EmitAdminEventRequest'}}}
+      responses:
+        '201':
+          description: admin/system event emitted (no attempt fence — design §20 M9)
+          content: {application/json: {schema: {$ref: '#/components/schemas/EmitAdminEventResponse'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}

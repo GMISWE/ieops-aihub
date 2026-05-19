@@ -344,17 +344,35 @@ async def _execute_action(
         return
     if action.kind == "repeat":
         n = int(action.payload)
+        role = _current_role.get()
         for i in range(n):
-            inner_ctx_vars = ctx.vars.copy()
-            ctx.vars["i"] = i
-            ctx.vars["role"] = cast_id
+            # Snapshot scratch/vars so we can restore loop-local vars after
+            # each iteration without clobbering real captures.
+            if role is not None:
+                scratch_snapshot = ctx.role_scratch.get(role, {}).copy()
+            else:
+                vars_snapshot = ctx.vars.copy()
+            ctx.set_var("i", str(i))
+            ctx.set_var("role", cast_id)
             try:
                 await _execute_action(cast_id, action.inner, scenario, ctx)  # type: ignore[arg-type]
             finally:
-                # Restore vars (only mutate explicitly-captured ones)
-                ctx.vars = {**inner_ctx_vars,
-                            **{k: v for k, v in ctx.vars.items()
-                               if k not in {"i", "role"}}}
+                # Restore only the loop-injected keys; keep any real captures
+                # the inner action produced.
+                if role is not None:
+                    scratch = ctx.role_scratch.setdefault(role, {})
+                    for loop_key in ("i", "role"):
+                        # Remove loop var; restore pre-iteration value if any
+                        scratch.pop(loop_key, None)
+                        if loop_key in scratch_snapshot:
+                            scratch[loop_key] = scratch_snapshot[loop_key]
+                else:
+                    ctx.vars.pop("i", None)
+                    ctx.vars.pop("role", None)
+                    if "i" in vars_snapshot:
+                        ctx.vars["i"] = vars_snapshot["i"]
+                    if "role" in vars_snapshot:
+                        ctx.vars["role"] = vars_snapshot["role"]
         return
     if action.kind == "skill":
         cmd = ctx.substitute(str(action.payload))

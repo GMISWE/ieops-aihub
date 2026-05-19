@@ -424,3 +424,126 @@ async def test_admin_revoke_key_emits_auth_revoked_event(seeded_users):
             WHERE run_attempt_id = 'ra_li_test' AND event_type = 'attempt_revoked'
         """))).mappings().first()
         assert old_evt is None, "stale attempt_revoked event should not exist"
+
+
+# ---------------------------------------------------------------------------
+# 11. emit_admin_event — §20 M9: admin event channel (no attempt fence)
+# ---------------------------------------------------------------------------
+
+async def test_emit_admin_event_happy(seeded_reference):
+    """Admin can emit an event on a work_item without any attempt fence."""
+    await _seed_admin_key(seeded_reference)
+    async with make_admin_client(seeded_reference) as client:
+        r = await client.post(
+            "/v1/admin/events",
+            json={
+                "work_item_id": "wi_a3f",
+                "event_type": "admin_note",
+                "payload": {"message": "server-initiated lock expiry notification"},
+            },
+            headers=auth_headers(ADMIN_RAW_KEY),
+        )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["event_id"].startswith("evt_")
+
+    # Verify event was stored with run_attempt_id=null
+    async with seeded_reference.connect() as conn:
+        row = (await conn.execute(sa.text("""
+            SELECT run_attempt_id, event_type, actor_user_id
+            FROM agent_events WHERE id = :eid
+        """), {"eid": body["event_id"]})).mappings().first()
+    assert row is not None
+    assert row["run_attempt_id"] is None, "admin events must have run_attempt_id=null"
+    assert row["event_type"] == "admin_note"
+    assert row["actor_user_id"] == "u_admin"
+
+
+async def test_emit_admin_event_non_admin_403(seeded_reference):
+    """Non-admin (writer role) cannot use the admin event endpoint — must get 403."""
+    async with make_admin_client(seeded_reference) as client:
+        r = await client.post(
+            "/v1/admin/events",
+            json={
+                "work_item_id": "wi_a3f",
+                "event_type": "admin_note",
+                "payload": {},
+            },
+            headers=auth_headers(BEARER_ZHANG),  # zhang is 'writer', not 'admin'
+        )
+    assert r.status_code == 403, r.text
+    assert r.json()["code"] == "FORBIDDEN"
+
+
+async def test_emit_admin_event_missing_work_item_id_400(seeded_reference):
+    """Omitting work_item_id returns 400 (DB schema requires non-null work_item_id)."""
+    await _seed_admin_key(seeded_reference)
+    async with make_admin_client(seeded_reference) as client:
+        r = await client.post(
+            "/v1/admin/events",
+            json={
+                "event_type": "admin_note",
+                "payload": {"msg": "global event attempt"},
+            },
+            headers=auth_headers(ADMIN_RAW_KEY),
+        )
+    assert r.status_code == 400, r.text
+    assert r.json()["code"] == "BAD_REQUEST"
+
+
+async def test_emit_admin_event_nonexistent_work_item_404(seeded_reference):
+    """Referencing a nonexistent work_item returns 404."""
+    await _seed_admin_key(seeded_reference)
+    async with make_admin_client(seeded_reference) as client:
+        r = await client.post(
+            "/v1/admin/events",
+            json={
+                "work_item_id": "wi_does_not_exist",
+                "event_type": "admin_note",
+                "payload": {},
+            },
+            headers=auth_headers(ADMIN_RAW_KEY),
+        )
+    assert r.status_code == 404, r.text
+    assert r.json()["code"] == "NOT_FOUND"
+
+
+async def test_emit_admin_event_payload_too_large_413(seeded_reference):
+    """Payload exceeding 64 KiB returns 413."""
+    await _seed_admin_key(seeded_reference)
+    big = "x" * 70000
+    async with make_admin_client(seeded_reference) as client:
+        r = await client.post(
+            "/v1/admin/events",
+            json={
+                "work_item_id": "wi_a3f",
+                "event_type": "admin_note",
+                "payload": {"big": big},
+            },
+            headers=auth_headers(ADMIN_RAW_KEY),
+        )
+    assert r.status_code == 413, r.text
+
+
+async def test_emit_admin_event_pinned(seeded_reference):
+    """Admin can emit a pinned event; pinned=true is stored correctly."""
+    await _seed_admin_key(seeded_reference)
+    async with make_admin_client(seeded_reference) as client:
+        r = await client.post(
+            "/v1/admin/events",
+            json={
+                "work_item_id": "wi_a3f",
+                "event_type": "key_revoked",
+                "payload": {"key_id": "ak_old"},
+                "pinned": True,
+            },
+            headers=auth_headers(ADMIN_RAW_KEY),
+        )
+    assert r.status_code == 201, r.text
+    eid = r.json()["event_id"]
+
+    async with seeded_reference.connect() as conn:
+        row = (await conn.execute(sa.text(
+            "SELECT pinned FROM agent_events WHERE id = :eid"
+        ), {"eid": eid})).mappings().first()
+    assert row["pinned"] is True

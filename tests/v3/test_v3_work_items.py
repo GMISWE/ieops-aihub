@@ -151,6 +151,18 @@ async def test_list_work_items_filter_status(seeded_reference):
     assert all(i["status"] == "running" for i in r.json()["items"])
 
 
+async def test_list_work_items_filter_status_multi_value(seeded_reference):
+    async with make_async_client(seeded_reference) as client:
+        r = await client.get(
+            "/v1/work_items?status=running&status=queued",
+            headers=auth_headers(BEARER_ZHANG),
+        )
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) > 0
+    assert all(i["status"] in ("running", "queued") for i in items)
+
+
 async def test_list_work_items_pagination(seeded_users):
     """Create 3 work_items, fetch with limit=2 → cursor; fetch second page."""
     async with make_async_client(seeded_users) as client:

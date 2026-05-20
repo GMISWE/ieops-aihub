@@ -36,7 +36,7 @@ async def create_work_item(
             operation_id="list_work_items")
 async def list_work_items_endpoint(
     project: str | None = Query(default=None),
-    status: str | None = Query(default=None),
+    status: list[str] | None = Query(default=None),
     label: str | None = Query(default=None),
     user_id: str | None = Query(default=None),
     source: str | None = Query(default=None),

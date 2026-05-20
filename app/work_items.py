@@ -174,7 +174,7 @@ async def list_work_items(
     *,
     user: UserRecord,
     project: str | None,
-    status: str | None,
+    status: list[str] | None,
     label: str | None,
     user_id: str | None,
     source: str | None,
@@ -211,9 +211,8 @@ async def list_work_items(
         )
         params["projects"] = list(user.projects)
     if status is not None:
-        statuses = [status] if isinstance(status, str) else list(status)
         where_clauses.append("status = ANY(CAST(:statuses AS text[]))")
-        params["statuses"] = statuses
+        params["statuses"] = list(status)
     if user_id is not None:
         where_clauses.append("reporter_user_id = :uid")
         params["uid"] = user_id

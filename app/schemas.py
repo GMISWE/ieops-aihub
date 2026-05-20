@@ -111,7 +111,7 @@ class RunAttempt(BaseModel):
     status: RunAttemptStatus
     claim_epoch: int = Field(ge=1)
     idempotency_key: str
-    lease_until: datetime
+    lease_until: datetime | None = None
     actor_user_id: str
     api_key_id: str
     actor_display: str
@@ -215,12 +215,13 @@ class ClaimRequest(BaseModel):
     idempotency_key: str
     session_info: SessionInfo
     requested_locks: list[RequestedLock] = Field(default_factory=list)
+    force_takeover: bool = False
 
 
 class ClaimResponse(BaseModel):
     attempt_id: str
     claim_epoch: int
-    lease_until: datetime
+    lease_until: datetime | None = None
 
 
 class RenewLeaseRequest(BaseModel):
@@ -229,7 +230,7 @@ class RenewLeaseRequest(BaseModel):
 
 
 class LeaseRenewResponse(BaseModel):
-    lease_until: datetime
+    lease_until: datetime | None = None
 
 
 class CompleteAttemptRequest(AttemptCredential):

@@ -95,6 +95,7 @@ async def claim_work_item(
     machine_id: str,
     session_secret_raw: str,
     requested_locks: list[dict],
+    force_takeover: bool = False,
 ) -> dict:
     """Run the atomic claim transaction; return ClaimResponse-shaped dict.
 
@@ -174,15 +175,24 @@ async def claim_work_item(
     # ---- Step 3: Eligibility (server now()) ----
     db_now = (await conn.execute(sa.text("SELECT now()"))).scalar_one()
     if (wi_row["status"] == "running" and old_a is not None
-            and old_a["status"] == "running" and old_a["lease_until"] > db_now):
-        raise AihubServerError(
-            ErrorCode.CONFLICT_BUSY_NOT_TAKEOVER_ELIGIBLE,
-            f"work_item {wi_id} owned by {old_a['actor_display']} "
-            f"until {old_a['lease_until'].isoformat()}",
-            details={"owner_attempt_id": old_a["id"],
-                     "owner_actor_user_id": old_a["actor_user_id"],
-                     "lease_until": old_a["lease_until"].isoformat()},
-        )
+            and old_a["status"] == "running"
+            # R2: explicit None guard — NULL lease_until = permanent ownership.
+            # Python raises TypeError on None > datetime; SQL NULL semantics don't apply here.
+            and (old_a["lease_until"] is None or old_a["lease_until"] > db_now)):
+        if not force_takeover:
+            raise AihubServerError(
+                ErrorCode.CONFLICT_BUSY_NOT_TAKEOVER_ELIGIBLE,
+                f"work_item {wi_id} owned by {old_a['actor_display']}"
+                + (f" until {old_a['lease_until'].isoformat()}"
+                   if old_a["lease_until"] else " (ownership mode)"),
+                details={"owner_attempt_id": old_a["id"],
+                         "owner_actor_user_id": old_a["actor_user_id"],
+                         "lease_until": old_a["lease_until"].isoformat()
+                                        if old_a["lease_until"] else None},
+            )
+        # R3a: force_takeover requires admin role
+        if user.role != "admin":
+            raise AihubServerError(ErrorCode.FORBIDDEN, "force_takeover requires admin role")
 
     # ---- Step 4: Lock conflict re-validation (exclude own old attempt) ----
     if requested_locks:
@@ -201,7 +211,7 @@ async def claim_work_item(
             JOIN unnest(CAST(:types AS text[]), CAST(:keys AS text[]))
                 AS req(rt, rk) ON rl.resource_type = req.rt AND rl.resource_key = req.rk
             WHERE ra.status = 'running'
-              AND ra.lease_until > now()
+              AND (ra.lease_until IS NULL OR ra.lease_until > now())
               AND ra.id IS DISTINCT FROM CAST(:exclude AS TEXT)
             LIMIT 1
         """), {"types": types, "keys": keys, "exclude": exclude_id})).mappings().first()
@@ -236,16 +246,27 @@ async def claim_work_item(
     else:
         new_epoch = 1
     parent_attempt_id = None
-    if old_a is not None and old_a["status"] == "running" and old_a["lease_until"] <= db_now:
-        await conn.execute(sa.text("""
-            UPDATE run_attempts
-            SET status = 'superseded', ended_at = now()
-            WHERE id = :aid AND status = 'running'
-        """), {"aid": old_a["id"]})
-        await conn.execute(sa.text("""
-            DELETE FROM resource_locks WHERE owner_attempt_id = :aid
-        """), {"aid": old_a["id"]})
-        parent_attempt_id = old_a["id"]
+    if old_a is not None and old_a["status"] == "running":
+        if force_takeover:
+            # R3b: atomic admin-authorized supersede. Lock held since Step 2.
+            await conn.execute(sa.text("""
+                UPDATE run_attempts SET status = 'superseded', ended_at = now()
+                WHERE id = :aid AND status = 'running'
+            """), {"aid": old_a["id"]})
+            await conn.execute(sa.text("""
+                DELETE FROM resource_locks WHERE owner_attempt_id = :aid
+            """), {"aid": old_a["id"]})
+            parent_attempt_id = old_a["id"]
+        elif old_a["lease_until"] is not None and old_a["lease_until"] <= db_now:
+            # Legacy lease-expired takeover (pre-migration attempts with non-NULL lease_until)
+            await conn.execute(sa.text("""
+                UPDATE run_attempts SET status = 'superseded', ended_at = now()
+                WHERE id = :aid AND status = 'running'
+            """), {"aid": old_a["id"]})
+            await conn.execute(sa.text("""
+                DELETE FROM resource_locks WHERE owner_attempt_id = :aid
+            """), {"aid": old_a["id"]})
+            parent_attempt_id = old_a["id"]
     elif old_a is not None and old_a["status"] != "running":
         # Old attempt already terminal (wrapped/failed/superseded/expired);
         # parent chain still records causality.
@@ -259,17 +280,15 @@ async def claim_work_item(
     new_aid = _ra_id()
     secret_hash = _hash_secret(session_secret_raw)
     try:
-        # AIHUB_LEASE_SECONDS overrides the 60s default (validated, see
-        # resolve_lease_seconds for fallback behavior).
-        _lease_secs = resolve_lease_seconds()
         ins_row = (await conn.execute(sa.text("""
             INSERT INTO run_attempts (
                 id, work_item_id, status, claim_epoch, idempotency_key,
-                lease_until, actor_user_id, api_key_id, actor_display,
+                lease_until, last_active_at,
+                actor_user_id, api_key_id, actor_display,
                 machine_id, session_secret_hash, parent_attempt_id
             ) VALUES (
                 :id, :wid, 'running', :epoch, :key,
-                now() + make_interval(secs => :lease_secs),
+                NULL, now(),
                 :uid, :kid, :display, :mid, :hash, :parent
             )
             RETURNING id, claim_epoch, lease_until
@@ -279,7 +298,6 @@ async def claim_work_item(
             "kid": user.matched_api_key_id,
             "display": user.display_name, "mid": machine_id,
             "hash": secret_hash, "parent": parent_attempt_id,
-            "lease_secs": _lease_secs,
         })).mappings().first()
     except IntegrityError as ie:
         # 23505 UNIQUE violation — could be (work_item_id, idempotency_key)
@@ -365,6 +383,23 @@ async def claim_work_item(
                 "new_claim_epoch": new_epoch,
             }),
         })
+        if force_takeover:
+            # R3c: audit event for admin-authorized takeover
+            await conn.execute(sa.text("""
+                INSERT INTO agent_events (id, work_item_id, run_attempt_id,
+                                           actor_user_id, api_key_id, event_type, payload)
+                VALUES (:eid, :wid, :aid, :uid, :kid, 'force_takeover',
+                        CAST(:payload AS JSONB))
+            """), {
+                "eid": _evt_id(), "wid": wi_id, "aid": new_aid,
+                "uid": user.id, "kid": user.matched_api_key_id,
+                "payload": json.dumps({
+                    "prior_attempt_id": old_a["id"],
+                    "prior_owner_user_id": old_a["actor_user_id"],
+                    "new_attempt_id": new_aid,
+                    "new_claim_epoch": new_epoch,
+                }),
+            })
 
     return {
         "attempt_id": new_aid,

@@ -49,6 +49,24 @@ async def renew_lease_endpoint(
     secret_hash = _hash_session_secret(body.session_secret)
     async with engine.begin() as conn:
         user = await verify_bearer(conn, bearer)
+
+        # R10 + M5: ownership-mode attempt (lease_until IS NULL) — no-op renewal.
+        # H1: update last_active_at so zombie detection sees this client as alive.
+        ownership_updated = (await conn.execute(sa.text("""
+            UPDATE run_attempts
+            SET last_active_at = now()
+            WHERE id = :aid
+              AND status = 'running'
+              AND lease_until IS NULL
+              AND claim_epoch = :epoch
+              AND session_secret_hash = :hash
+              AND actor_user_id = :uid
+            RETURNING id
+        """), {"aid": attempt_id, "epoch": body.claim_epoch,
+               "hash": secret_hash, "uid": user.id})).mappings().first()
+        if ownership_updated is not None:
+            return JSONResponse(status_code=200, content={"lease_until": None})
+
         row = (await conn.execute(sa.text("""
             UPDATE run_attempts ra
             SET lease_until = now() + make_interval(secs => :lease_secs)

@@ -118,7 +118,7 @@ async def predict_conflicts(
             WHERE wi.project = :proj
               AND wi.id <> COALESCE(:wi, '')
               AND wi.status = 'running' AND ra.status = 'running'
-              AND ra.lease_until > now()
+              AND (ra.lease_until IS NULL OR ra.lease_until > now())
               AND r->>'uri' = ANY(CAST(:uris AS text[]))
               AND r->>'intent' IN ('write','delete','refactor')
         """), {"proj": project, "wi": work_item_id or "",
@@ -167,7 +167,8 @@ async def predict_conflicts(
             JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
             JOIN unnest(CAST(:types AS text[]), CAST(:keys AS text[]))
                 AS req(rt, rk) ON rl.resource_type = req.rt AND rl.resource_key = req.rk
-            WHERE ra.status = 'running' AND ra.lease_until > now()
+            WHERE ra.status = 'running'
+              AND (ra.lease_until IS NULL OR ra.lease_until > now())
               AND ra.id <> COALESCE(:exclude_aid, '')
         """), {"types": types, "keys": keys,
                "exclude_aid": attempt_id or ""})).mappings().all()
@@ -200,7 +201,7 @@ async def predict_conflicts(
             WHERE wi.project = :proj
               AND wi.id <> COALESCE(:wi, '')
               AND wi.status = 'running' AND ra.status = 'running'
-              AND ra.lease_until > now()
+              AND (ra.lease_until IS NULL OR ra.lease_until > now())
               AND r->>'type' = 'repo' AND r->>'intent' = 'refactor'
               AND r->>'uri' = ANY(CAST(:uris AS text[]))
         """), {"proj": project, "wi": work_item_id or "",
@@ -242,7 +243,7 @@ async def predict_conflicts(
             WHERE wi.project = :proj
               AND wi.id <> COALESCE(:wi, '')
               AND wi.status = 'running' AND ra.status = 'running'
-              AND ra.lease_until > now()
+              AND (ra.lease_until IS NULL OR ra.lease_until > now())
               AND r->>'type' = 'path'
         """), {"proj": project, "wi": work_item_id or ""})).mappings().all()
         existing_keys = {(p["resource_uri"], p["conflicts_with"]["attempt_id"])

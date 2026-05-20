@@ -32,10 +32,12 @@ async def claim_work_item_endpoint(
             machine_id=body.session_info.machine_id,
             session_secret_raw=body.session_info.session_secret,
             requested_locks=[l.model_dump() for l in body.requested_locks],
+            force_takeover=body.force_takeover,
         )
-    # ClaimResponse: attempt_id + claim_epoch + lease_until
+    # ClaimResponse: attempt_id + claim_epoch + lease_until (null = ownership mode)
     return JSONResponse(status_code=200, content={
         "attempt_id": result["attempt_id"],
         "claim_epoch": result["claim_epoch"],
-        "lease_until": result["lease_until"].isoformat(),
+        "lease_until": result["lease_until"].isoformat()
+                       if result["lease_until"] is not None else None,
     })

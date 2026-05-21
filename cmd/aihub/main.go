@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GMISWE/ieops-aihub/internal/db"
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 	"github.com/GMISWE/ieops-aihub/internal/server"
 	"github.com/GMISWE/ieops-aihub/internal/version"
 )
@@ -33,6 +34,26 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+
+	// GC background scheduler: runs all sweeps every 60s.
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				results := domain.RunAll(context.Background(), pool)
+				for _, r := range results {
+					if r.Skipped || r.Affected == 0 {
+						continue
+					}
+					fmt.Fprintf(os.Stderr, "gc: %s affected=%d\n", r.SweepType, r.Affected)
+				}
+			}
+		}
+	}()
 
 	e := server.NewRouter(pool)
 

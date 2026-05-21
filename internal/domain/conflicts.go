@@ -294,6 +294,29 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		}
 	}
 
+	// H7: cross-project folding — redact actor_display/work_item_slug for projects caller can't view
+	foldedPredictions := make([]ConflictPrediction, 0, len(result.Predictions))
+	for _, p := range result.Predictions {
+		if p.WIID != "" {
+			// Look up the project of the conflicting wi
+			var wiProject string
+			pool.QueryRow(ctx, `SELECT project FROM work_items WHERE id=$1`, p.WIID).Scan(&wiProject) //nolint:errcheck
+			if wiProject != "" {
+				callerRole := callerProjectRoles[wiProject]
+				if callerRole == "" && wiProject != "" {
+					// No access — redact identifying info
+					p.ActorDisplay = ""
+					p.WIID = ""
+					p.WISlug = ""
+					p.AttemptID = ""
+					p.Description = "[conflict in project " + wiProject + " — no visibility]"
+				}
+			}
+		}
+		foldedPredictions = append(foldedPredictions, p)
+	}
+	result.Predictions = foldedPredictions
+
 	return result, nil
 }
 

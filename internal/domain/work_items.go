@@ -450,7 +450,16 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 
 		sim := jaccardNGram(req.Goal, c.Goal, 3)
 		labelSim := setOverlap(req.Labels, c.Labels)
-		score := 0.6*sim + 0.2*labelSim
+		// C7: include resource overlap (resSim) per design §11 formula
+		var reqRes, cRes []string
+		if req.DeclaredResources != nil {
+			json.Unmarshal(req.DeclaredResources, &reqRes)
+		}
+		if c.Resources != nil {
+			json.Unmarshal(c.Resources, &cRes)
+		}
+		resSim := setOverlap(reqRes, cRes)
+		score := 0.6*sim + 0.2*labelSim + 0.2*resSim
 
 		if score >= 0.90 {
 			return NewErrDetails(ErrConflictDuplicate,

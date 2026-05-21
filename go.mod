@@ -6,6 +6,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/labstack/echo/v4 v4.15.2
 	github.com/modelcontextprotocol/go-sdk v1.6.0
+	github.com/pelletier/go-toml/v2 v2.3.1
 	gopkg.in/yaml.v3 v3.0.1
 )
 

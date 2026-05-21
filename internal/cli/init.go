@@ -17,6 +17,17 @@ import (
 // With --apply: also applies the local .polyforge/phase.yaml back to aihub
 // via a PATCH (CAS update, using the embedded __version__ field).
 func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot string, args []string) {
+	// Ensure ~/.polyforge/config.toml exists with a stable machine_id (§9.5.3).
+	mc, err := config.EnsureMachineConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pf init: config.toml: %v\n", err)
+	} else if mc.Auth.APIKey == "" && mc.Auth.APIKeyEnv == "" {
+		fmt.Fprintf(os.Stderr, "pf init: ~/.polyforge/config.toml created (machine_id=%s)\n", mc.MachineID)
+		fmt.Fprintf(os.Stderr, "         Add your API key:\n")
+		fmt.Fprintf(os.Stderr, "           [auth]\n")
+		fmt.Fprintf(os.Stderr, "           api_key = \"your-key-here\"\n")
+	}
+
 	apply := len(args) > 0 && args[0] == "--apply"
 
 	// Determine scenario from config (or default to "coding").

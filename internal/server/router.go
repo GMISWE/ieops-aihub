@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -27,6 +28,9 @@ func NewRouter(pool *pgxpool.Pool) *echo.Echo {
 
 	// Authenticated routes
 	v1 := e.Group("/v1", BearerAuth(pool), IdempotencyMiddleware())
+
+	// Identity (pf_whoami)
+	v1.GET("/users/me", handleWhoami())
 
 	// Work items
 	v1.POST("/work_items", handleCreateWorkItem(pool))
@@ -74,6 +78,33 @@ func handleHealth(pool *pgxpool.Pool) echo.HandlerFunc {
 			"status":  "ok",
 			"version": version.Version,
 			"db_ok":   dbOK,
+		})
+	}
+}
+
+// handleWhoami returns the caller's identity and project roles (pf_whoami).
+// Path: GET /v1/users/me — required by §5.2 (Core Tools).
+func handleWhoami() echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		if u == nil {
+			return writeError(c, domain.NewErr(domain.ErrUnauthorized, "not authenticated"))
+		}
+		// Build a non-empty projects list (callers expect [], not null)
+		projects := make([]string, 0, len(u.ProjectRoles))
+		for p := range u.ProjectRoles {
+			projects = append(projects, p)
+		}
+		return c.JSON(http.StatusOK, map[string]any{
+			"user_id":        u.UserID,
+			"email":          u.Email,
+			"display_name":   u.DisplayName,
+			"user_type":      u.UserType,
+			"role":           u.Role,
+			"project_roles":  u.ProjectRoles,
+			"projects":       projects,
+			"api_key_id":     u.APIKeyID,
+			"server_version": version.Version,
 		})
 	}
 }
@@ -147,6 +178,25 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 		if label := c.QueryParam("label"); label != "" {
 			filter.Label = &label
+		}
+		if userID := c.QueryParam("user_id"); userID != "" {
+			filter.UserID = &userID
+		}
+		if src := c.QueryParam("source"); src != "" {
+			filter.Source = &src
+		}
+		if ids := c.QueryParam("ids"); ids != "" {
+			filter.IDs = strings.Split(ids, ",")
+		}
+		if limit := c.QueryParam("limit"); limit != "" {
+			var n int
+			fmt.Sscanf(limit, "%d", &n)
+			if n > 0 {
+				filter.Limit = n
+			}
+		}
+		if cursor := c.QueryParam("cursor"); cursor != "" {
+			filter.Cursor = &cursor
 		}
 
 		result, aihubErr := domain.ListWorkItems(ctx, pool, project, filter)
@@ -255,7 +305,20 @@ func handleClaimWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		// For force_takeover the domain layer enforces maintainer/admin or self.
+		// Cross-user force_takeover via the claim path requires maintainer/admin (§4.3, §9.4).
+		// Self-takeover (same user_id) is implicit and only needs writer.
+		if req.ForceOver && wi.CurrentAttemptID != nil {
+			var currentActorUserID string
+			pool.QueryRow(ctx, `SELECT actor_user_id FROM run_attempts WHERE id=$1`, *wi.CurrentAttemptID).Scan(&currentActorUserID) //nolint:errcheck
+			if currentActorUserID != "" && currentActorUserID != u.UserID {
+				projRole := u.ProjectRoles[wi.Project]
+				if u.Role != "admin" && projRole != "maintainer" {
+					return writeError(c, domain.NewErr(domain.ErrForbidden,
+						"force_takeover of another user's attempt requires maintainer or admin role"))
+				}
+			}
+		}
+
 		resp, aihubErr := domain.FnClaimWorkItem(ctx, pool, c.Param("id"), &req, u.UserID, u.APIKeyID, u.DisplayName)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
@@ -332,6 +395,7 @@ func handleForceTakeover(pool *pgxpool.Pool) echo.HandlerFunc {
 }
 
 // handleUnblockWorkItem handles POST /v1/work_items/:id/unblock (admin only).
+// §4.3: body {reason} — required; emit admin_unblock event with the reason.
 func handleUnblockWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		ctx, cancel := contextWithTimeout(c)
@@ -339,19 +403,38 @@ func handleUnblockWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		u := GetUser(c)
 		wiID := c.Param("id")
-		_, err := pool.Exec(ctx, `
-			UPDATE work_items SET status='queued'
-			WHERE id=$1 AND status='blocked'`, wiID)
+
+		var req struct {
+			Reason string `json:"reason"`
+		}
+		c.Bind(&req) //nolint:errcheck — reason is optional in v1 but recorded
+
+		// Only unblock work_items that are actually in 'blocked' state; terminal/running → 409.
+		var status string
+		err := pool.QueryRow(ctx, `SELECT status FROM work_items WHERE id=$1`, wiID).Scan(&status)
 		if err != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "work item not found"))
+		}
+		if status != "blocked" {
+			return writeError(c, domain.NewErr(domain.ErrConflictTerminalState,
+				fmt.Sprintf("work item is not blocked (status=%s); cannot unblock", status)))
+		}
+
+		if _, err := pool.Exec(ctx, `
+			UPDATE work_items SET status='queued', updated_at=clock_timestamp()
+			WHERE id=$1 AND status='blocked'`, wiID); err != nil {
 			return internalError(c, "failed to unblock work item")
 		}
-		// H6: emit admin_unblock audit event
+
+		// H6: emit admin_unblock audit event with reason payload
 		if u != nil {
+			payload := map[string]any{"action": "unblock", "reason": req.Reason}
+			payloadJSON, _ := jsonMarshal(payload)
 			pool.Exec(context.Background(), `
 				INSERT INTO agent_events (id, work_item_id, actor_user_id, api_key_id, event_type, payload, project)
-				VALUES ($1, $2, $3, $4, 'admin_unblock', '{"action":"unblock"}'::jsonb,
+				VALUES ($1, $2, $3, $4, 'admin_unblock', $5::jsonb,
 				    (SELECT project FROM work_items WHERE id=$2))`,
-				domain.NewID("evt"), wiID, u.UserID, u.APIKeyID) //nolint:errcheck
+				domain.NewID("evt"), wiID, u.UserID, u.APIKeyID, string(payloadJSON)) //nolint:errcheck
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
 	}
@@ -375,6 +458,13 @@ func handleGetReadyQueue(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 
 		max := 10
+		if m := c.QueryParam("max"); m != "" {
+			var n int
+			fmt.Sscanf(m, "%d", &n)
+			if n > 0 {
+				max = n
+			}
+		}
 		result, aihubErr := domain.GetReadyQueue(ctx, pool, project, max)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)

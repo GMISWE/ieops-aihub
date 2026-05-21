@@ -11,6 +11,17 @@ import (
 	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
+// domainErr converts an error returned by a domain function to a *domain.AihubError,
+// then calls writeError. Domain functions return error (interface) but always
+// construct *domain.AihubError internally; this assertion is always safe.
+// If somehow a non-AihubError surfaces, wrap it as ErrInternal.
+func domainErr(c echo.Context, err error) error {
+	if ae, ok := err.(*domain.AihubError); ok {
+		return writeError(c, ae)
+	}
+	return writeError(c, domain.NewErr(domain.ErrInternalError, err.Error()))
+}
+
 // RegisterMemoryRoutes adds all Round 2b routes to the authenticated route group.
 // Called once from NewRouter after the admin group is registered.
 func RegisterMemoryRoutes(v1 *echo.Group, pool *pgxpool.Pool) {
@@ -56,7 +67,7 @@ func handleGetScenarioConfig(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		cfg, aihubErr := domain.GetScenarioConfig(ctx, pool, scenario)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return domainErr(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, cfg)
 	}
@@ -99,7 +110,7 @@ func handleUpdateScenarioConfig(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		cfg, aihubErr := domain.UpdateScenarioConfig(ctx, pool, scenario, &req, u.UserID)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return domainErr(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, map[string]any{"version": cfg.Version})
 	}
@@ -138,7 +149,7 @@ func handleRemember(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		mem, _, aihubErr := domain.Remember(ctx, pool, &req)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return domainErr(c, aihubErr)
 		}
 		return c.JSON(http.StatusCreated, map[string]string{"memory_id": mem.ID})
 	}
@@ -200,7 +211,7 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		resp, aihubErr := domain.Recall(ctx, pool, req)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return domainErr(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, resp)
 	}
@@ -220,7 +231,7 @@ func handleActivateMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		resp, aihubErr := domain.Activate(ctx, pool, memID, u.UserID, u.DisplayName)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return domainErr(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, resp)
 	}
@@ -239,7 +250,7 @@ func handleRedactMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 
 		if aihubErr := domain.Redact(ctx, pool, memID, u.UserID, u.Role); aihubErr != nil {
-			return writeError(c, aihubErr)
+			return domainErr(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
 	}
@@ -264,7 +275,7 @@ func handleEmitEvent(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		evtID, aihubErr := domain.EmitEvent(ctx, pool, &req, u.UserID, u.DisplayName, u.Role)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return domainErr(c, aihubErr)
 		}
 		return c.JSON(http.StatusCreated, map[string]string{"event_id": evtID})
 	}
@@ -284,7 +295,7 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 			// C1: require viewer access to this wi's project
 			wi, aihubErr := domain.GetWorkItem(ctx, pool, wiID)
 			if aihubErr != nil {
-				return writeError(c, aihubErr)
+				return domainErr(c, aihubErr)
 			}
 			if err := checkProjectAccess(c, u, wi.Project, "viewer"); err != nil {
 				return err
@@ -321,7 +332,7 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		resp, aihubErr := domain.ListEvents(ctx, pool, f)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return domainErr(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, resp)
 	}

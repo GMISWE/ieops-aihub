@@ -350,9 +350,9 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		AND status IN (%s)
 		AND (expires_at IS NULL OR expires_at > clock_timestamp())`, statusSet)
 
-	// Visibility: private memories only visible to author
+	// Visibility: private memories only visible to author (C2 fix: 'personal' → 'private')
 	if req.CallerRole != "admin" {
-		where += fmt.Sprintf(` AND (visibility != 'personal' OR author_user_id = $%d)`, idx)
+		where += fmt.Sprintf(` AND (visibility != 'private' OR author_user_id = $%d)`, idx)
 		args = append(args, req.CallerUserID)
 		idx++
 	}
@@ -380,9 +380,15 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		idx++
 	}
 
-	// Cursor-based pagination
+	// C5 fix: cursor-based pagination using timestamp, not id.
+	// ORDER BY last_activated_at DESC NULLS LAST, created_at DESC means we need
+	// AND (last_activated_at < cursor_ts OR (last_activated_at IS NULL AND created_at < cursor_ts))
+	// Cursor value is an RFC3339Nano timestamp string of the last item's sort key.
 	if req.Cursor != "" {
-		where += fmt.Sprintf(" AND id > $%d", idx)
+		where += fmt.Sprintf(` AND (
+			last_activated_at < $%d::timestamptz
+			OR (last_activated_at IS NULL AND created_at < $%d::timestamptz)
+		)`, idx, idx)
 		args = append(args, req.Cursor)
 		idx++
 	}
@@ -423,8 +429,16 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	var nextCursor *string
 	if len(items) > req.TopK {
 		items = items[:req.TopK]
-		last := items[len(items)-1].ID
-		nextCursor = &last
+		last := items[len(items)-1]
+		// C5 fix: cursor is the sort-key timestamp, not the id.
+		// Use last_activated_at when set, else created_at (mirrors ORDER BY logic).
+		var cursorVal string
+		if last.LastActivatedAt != nil {
+			cursorVal = last.LastActivatedAt.Format(time.RFC3339Nano)
+		} else {
+			cursorVal = last.CreatedAt.Format(time.RFC3339Nano)
+		}
+		nextCursor = &cursorVal
 	}
 
 	return &RecallResponse{Items: items, NextCursor: nextCursor}, nil
@@ -622,8 +636,10 @@ func ListEvents(ctx context.Context, pool *pgxpool.Pool, f *ListEventsFilter) (*
 		args = append(args, *f.Since)
 		idx++
 	}
+	// C5 fix: cursor is a created_at timestamp (RFC3339Nano), not an id.
+	// ORDER BY e.created_at DESC means we want rows with created_at < cursor_ts.
 	if f.Cursor != nil {
-		clauses = append(clauses, fmt.Sprintf("e.id > $%d", idx))
+		clauses = append(clauses, fmt.Sprintf("e.created_at < $%d::timestamptz", idx))
 		args = append(args, *f.Cursor)
 		idx++
 	}
@@ -670,8 +686,9 @@ func ListEvents(ctx context.Context, pool *pgxpool.Pool, f *ListEventsFilter) (*
 	var nextCursor *string
 	if len(events) > f.Limit {
 		events = events[:f.Limit]
-		last := events[len(events)-1].ID
-		nextCursor = &last
+		// C5 fix: cursor is the created_at timestamp of the last returned event.
+		cursorVal := events[len(events)-1].CreatedAt.Format(time.RFC3339Nano)
+		nextCursor = &cursorVal
 	}
 
 	return &ListEventsResponse{Events: events, NextCursor: nextCursor}, nil
@@ -700,12 +717,30 @@ var adminEventWhitelist = map[string]bool{
 	"wi_classification_missing":  true,
 }
 
+// adminOnlyEventTypes are event_types that ALWAYS require admin role, regardless of
+// whether req.Admin is set. This prevents event-type forgery (H6 fix): a non-admin
+// caller setting admin=false but using an admin event type would otherwise bypass the
+// req.Admin gate.
+var adminOnlyEventTypes = map[string]bool{
+	"admin_redact":          true,
+	"admin_unblock":         true,
+	"admin_force_takeover":  true,
+	"admin_gc_manual":       true,
+}
+
 // EmitEvent inserts a new event into agent_events.
 func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
 	callerUserID, callerDisplay, callerRole string) (string, error) {
 
 	if len(req.Payload) > 65536 {
 		return "", NewErr(ErrPayloadTooLarge, "event payload exceeds 64KB limit")
+	}
+
+	// H6 fix: admin-only event types require admin role regardless of req.Admin flag.
+	// This blocks forgery where a non-admin omits admin=true but uses an admin event_type.
+	if adminOnlyEventTypes[req.EventType] && callerRole != "admin" {
+		return "", NewErr(ErrForbidden,
+			fmt.Sprintf("event type %q requires admin role", req.EventType))
 	}
 
 	if req.Admin {

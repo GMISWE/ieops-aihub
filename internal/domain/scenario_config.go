@@ -37,8 +37,10 @@ func GetScenarioConfig(ctx context.Context, pool *pgxpool.Pool, scenario string)
 	).Scan(&cfg.Scenario, &cfg.Content, &cfg.Version, &cfg.UpdatedAt, &cfg.UpdatedBy)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return nil, NewErr(ErrNotFound,
-				fmt.Sprintf("no phase config found for scenario %q", scenario))
+			// H2 fix (C-R9-3): missing phase config is a server-side setup issue, not a client
+			// 404. Return 503 SERVICE_UNAVAILABLE so the caller knows to run aihub migrate.
+			return nil, NewErr(ErrServiceUnavailable,
+				fmt.Sprintf("scenario %q has no phase config — run aihub migrate to seed", scenario))
 		}
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to load scenario config: %v", err))
 	}

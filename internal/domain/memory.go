@@ -380,6 +380,17 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		idx++
 	}
 
+	// H9: min_strength filter in SQL (not Go-side post-LIMIT) using inline Ebbinghaus formula.
+	// immortal memories bypass the filter.
+	// Formula: base_strength * exp(-days_since / stability_days) >= min_strength
+	where += fmt.Sprintf(` AND (is_immortal = true OR (stability_days > 0 AND
+		base_strength * exp(
+			-extract(epoch from (clock_timestamp() - COALESCE(last_activated_at, created_at)))/86400.0
+			/ stability_days
+		) >= $%d))`, idx)
+	args = append(args, req.MinStrength)
+	idx++
+
 	// C5 fix: cursor-based pagination using timestamp, not id.
 	// ORDER BY last_activated_at DESC NULLS LAST, created_at DESC means we need
 	// AND (last_activated_at < cursor_ts OR (last_activated_at IS NULL AND created_at < cursor_ts))
@@ -418,10 +429,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 			continue
 		}
 		strength := MemoryStrength(m.BaseStrength, m.StabilityDays, m.LastActivatedAt, m.CreatedAt)
-		// Apply min_strength filter (immortal memories bypass)
-		if !m.IsImmortal && strength < req.MinStrength {
-			continue
-		}
+		// min_strength filter is now in SQL (H9); this is just for the EffectiveStrength field
 		items = append(items, MemoryWithStrength{Memory: *m, EffectiveStrength: strength})
 	}
 	rows.Close()

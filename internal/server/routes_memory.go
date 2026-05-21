@@ -1,9 +1,12 @@
 package server
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
@@ -342,54 +345,57 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 // ─── Admin GC Trigger ─────────────────────────────────────────────────────────
 
 // handleReinforceMemory handles PATCH /v1/memories/:id/reinforce.
-// Per §4.3: body carries {additional_context, attempt_id, claim_epoch, session_secret,
-// strength_delta?, work_item_id?}. Server appends additional_context to the existing
-// memory content and writes a new row with supersedes_id pointing at the prior one.
+//
+// Per design §7.3 / §19.6: reinforce strengthens an EXISTING memory in place —
+// it does NOT create a new row. Concretely:
+//   - activation_count += 1
+//   - stability_days recomputed via the Ebbinghaus formula
+//   - last_activated_at / last_activated_by updated
+//   - attrs.reinforcements gets a new entry {added_at, from_wi, context}
+//   - base_strength optionally adjusted by strength_delta (clamped to [1, 5])
+//
+// Returns {memory_id, activation_count, base_strength} per §5.2.
 func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
 		memID := c.Param("id")
+
 		var req struct {
-			// §4.3 fields
 			AdditionalContext string   `json:"additional_context"`
 			AttemptID         string   `json:"attempt_id"`
 			ClaimEpoch        int64    `json:"claim_epoch"`
 			SessionSecret     string   `json:"session_secret"`
 			StrengthDelta     *float64 `json:"strength_delta,omitempty"`
 			WorkItemID        string   `json:"work_item_id,omitempty"`
-
-			// Legacy back-compat: replaces content wholesale (older skill wrapper)
-			Body       string `json:"body,omitempty"`
-			Project    string `json:"project,omitempty"`
-			Type       string `json:"type,omitempty"`
-			Visibility string `json:"visibility,omitempty"`
 		}
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, err.Error()))
+		}
+		if req.AdditionalContext == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest,
+				"additional_context is required"))
 		}
 
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
-		// Load existing memory; need project/type/visibility/content.
-		var memProject, memType, memVisibility, existingContent string
+		// Load existing memory metadata (project for access check, attrs/strength for mutation).
+		var memProject, memType, memStatus string
+		var memAttrsRaw []byte
+		var memBaseStrength float64
+		var memActivationCount int
 		if err := pool.QueryRow(ctx, `
-			SELECT project, type, visibility, content
+			SELECT project, type, status, attrs, base_strength, activation_count
 			FROM memories WHERE id=$1`, memID,
-		).Scan(&memProject, &memType, &memVisibility, &existingContent); err != nil {
+		).Scan(&memProject, &memType, &memStatus, &memAttrsRaw, &memBaseStrength, &memActivationCount); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
 		}
-		if req.Project == "" {
-			req.Project = memProject
-		}
-		if req.Type == "" {
-			req.Type = memType
-		}
-		if req.Visibility == "" {
-			req.Visibility = memVisibility
+		if memStatus == "redacted" {
+			return writeError(c, domain.NewErr(domain.ErrForbidden,
+				"cannot reinforce a redacted memory"))
 		}
 
-		if err := checkProjectAccess(c, u, req.Project, "writer"); err != nil {
+		if err := checkProjectAccess(c, u, memProject, "writer"); err != nil {
 			return err
 		}
 
@@ -406,37 +412,85 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			}
 		}
 
-		// Decide new content: AdditionalContext appends; Body replaces (legacy).
-		newContent := existingContent
-		switch {
-		case req.AdditionalContext != "":
-			if existingContent != "" {
-				newContent = existingContent + "\n\n" + req.AdditionalContext
-			} else {
-				newContent = req.AdditionalContext
+		// Append the reinforcement record to attrs.reinforcements.
+		attrs := map[string]any{}
+		if len(memAttrsRaw) > 0 {
+			_ = json.Unmarshal(memAttrsRaw, &attrs)
+		}
+		reinforcements, _ := attrs["reinforcements"].([]any)
+		entry := map[string]any{
+			"added_at": time.Now().UTC().Format(time.RFC3339),
+			"context":  req.AdditionalContext,
+		}
+		if req.WorkItemID != "" {
+			entry["from_wi"] = req.WorkItemID
+		}
+		reinforcements = append(reinforcements, entry)
+		attrs["reinforcements"] = reinforcements
+		attrsJSON, _ := json.Marshal(attrs)
+
+		// Compute the new base_strength and activation_count in Go,
+		// then perform a single UPDATE that also recomputes stability_days.
+		newActivationCount := memActivationCount + 1
+		newBaseStrength := memBaseStrength
+		if req.StrengthDelta != nil {
+			newBaseStrength = memBaseStrength + *req.StrengthDelta
+			if newBaseStrength > 5 {
+				newBaseStrength = 5
 			}
-		case req.Body != "":
-			newContent = req.Body
-		default:
-			return writeError(c, domain.NewErr(domain.ErrBadRequest,
-				"either additional_context or body is required"))
+			if newBaseStrength < 1 {
+				newBaseStrength = 1
+			}
 		}
 
-		rr := &domain.RememberRequest{
-			Project:         req.Project,
-			Type:            req.Type,
-			Content:         newContent,
-			Visibility:      req.Visibility,
-			DedupMode:       "off", // explicit supersede, skip dedup
-			SupersedesMemID: &memID,
-			CallerUserID:    u.UserID,
-			CallerDisplay:   u.DisplayName,
+		// stability_days mirrors domain.computeStabilityDays(memType, newActivationCount):
+		// base_stability_for_type × (1 + activation_count × 0.5).
+		// We replicate it inline since the helper is unexported.
+		baseStability := 7.0
+		switch {
+		case strings.HasPrefix(memType, "fact."):
+			baseStability = 180.0
+		case strings.HasPrefix(memType, "rule."), strings.HasPrefix(memType, "methodology."):
+			baseStability = 36500.0
 		}
-		result, _, err := domain.Remember(ctx, pool, rr)
-		if err != nil {
-			return domainErr(c, err)
+		newStability := baseStability * (1.0 + float64(newActivationCount)*0.5)
+
+		_, execErr := pool.Exec(ctx, `
+			UPDATE memories
+			SET activation_count  = $1,
+			    base_strength     = $2,
+			    stability_days    = $3,
+			    attrs             = $4,
+			    last_activated_at = clock_timestamp(),
+			    last_activated_by = $5,
+			    status            = CASE WHEN status='archived' THEN 'active' ELSE status END,
+			    updated_at        = clock_timestamp()
+			WHERE id = $6`,
+			newActivationCount, newBaseStrength, newStability,
+			attrsJSON, u.UserID, memID,
+		)
+		if execErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrInternalError,
+				fmt.Sprintf("failed to reinforce memory: %v", execErr)))
 		}
-		return c.JSON(http.StatusOK, result)
+
+		// Emit memory_reinforced event (best effort).
+		payload, _ := json.Marshal(map[string]any{
+			"memory_id":         memID,
+			"activation_count":  newActivationCount,
+			"base_strength":     newBaseStrength,
+		})
+		pool.Exec(ctx, `
+			INSERT INTO agent_events (id, actor_user_id, actor_display, event_type, payload, project)
+			VALUES ($1, $2, $3, 'memory_reinforced', $4, $5)`,
+			domain.NewID("evt"), u.UserID, u.DisplayName, payload, memProject,
+		) //nolint:errcheck
+
+		return c.JSON(http.StatusOK, map[string]any{
+			"memory_id":        memID,
+			"activation_count": newActivationCount,
+			"base_strength":    newBaseStrength,
+		})
 	}
 }
 

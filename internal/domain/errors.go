@@ -88,9 +88,9 @@ func NewErrDetails(code ErrCode, msg string, details any) *AihubError {
 // codeToHTTPStatus maps ErrCode to the HTTP status defined in §17.
 func codeToHTTPStatus(code ErrCode) int {
 	switch code {
-	case ErrBadRequest, ErrGoalMultiline, ErrGoalChangeNotAllowed,
+	case ErrBadRequest, ErrGoalMultiline,
 		ErrInvalidPhaseYAML, ErrInvalidStepTransition, ErrProjectAmbiguous,
-		ErrWITypeMismatch, ErrInvalidMemoryType:
+		ErrInvalidMemoryType:
 		return 400
 	case ErrUnauthorized, ErrStaleCredential:
 		return 401
@@ -107,7 +107,11 @@ func codeToHTTPStatus(code ErrCode) int {
 		ErrConflictSimilarMemory, ErrConflictDependencyCycle,
 		ErrConflictLockTaken, ErrConflictDualWIAgent,
 		ErrRequiresHumanSessionMismatch, ErrConflictVersionMismatch,
-		ErrConflictTerminalState:
+		ErrConflictTerminalState,
+		// G6 / design §17: WI_TYPE_MISMATCH is 409 (conflict between wi_type and config)
+		ErrWITypeMismatch,
+		// G6 / design §4.3 line 1138: GOAL_CHANGE_NOT_ALLOWED is 409, not 400
+		ErrGoalChangeNotAllowed:
 		return 409
 	case ErrPreconditionFailed:
 		return 412

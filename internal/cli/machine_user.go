@@ -314,12 +314,16 @@ func RunWrap(ctx context.Context, c *client.Client, args []string) {
 	}
 
 	// 2. Complete attempt as wrapped.
+	// The URL parameter is the WORK ITEM id, not the attempt id; previously this
+	// called CompleteAttempt(ctx, sf.AttemptID, ...) which hit a 404. Also include
+	// attempt_id in the body so the server can verify the credential.
 	body := map[string]any{
+		"attempt_id":     sf.AttemptID,
 		"claim_epoch":    sf.ClaimEpoch,
 		"session_secret": sf.SessionSecret,
 		"status":         "wrapped",
 	}
-	result, err := c.CompleteAttempt(ctx, sf.AttemptID, body)
+	result, err := c.CompleteAttempt(ctx, sf.WIID, body)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "wrap: complete-attempt: %v\n", err)
 		os.Exit(1)

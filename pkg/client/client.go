@@ -249,16 +249,45 @@ func (c *Client) PredictConflicts(ctx context.Context, body any) (map[string]any
 
 // ─── Dependencies ────────────────────────────────────────────────────────
 
-// CreateDependency calls POST /v1/dependencies.
+// CreateDependency calls POST /v1/work_items/:blocked_id/dependencies.
+// body must include blocked_wi_id (used in the URL path), blocking_wi_id, kind.
 func (c *Client) CreateDependency(ctx context.Context, body any) (map[string]any, error) {
+	// Extract blocked_wi_id for the URL path
+	blockedID := ""
+	if m, ok := body.(map[string]any); ok {
+		if s, ok := m["blocked_wi_id"].(string); ok {
+			blockedID = s
+		}
+	}
+	if blockedID == "" {
+		return nil, fmt.Errorf("CreateDependency: blocked_wi_id is required in body")
+	}
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/dependencies", body, &out)
+	return out, c.do(ctx, "POST", "/v1/work_items/"+blockedID+"/dependencies", body, &out)
 }
 
-// RemoveDependency calls DELETE /v1/dependencies.
+// RemoveDependency calls DELETE /v1/work_items/:blocked_id/dependencies/:blocking_id/:kind.
+// body must include blocked_wi_id, blocking_wi_id, kind.
 func (c *Client) RemoveDependency(ctx context.Context, body any) (map[string]any, error) {
+	blockedID, blockingID, kind := "", "", ""
+	if m, ok := body.(map[string]any); ok {
+		if s, ok := m["blocked_wi_id"].(string); ok {
+			blockedID = s
+		}
+		if s, ok := m["blocking_wi_id"].(string); ok {
+			blockingID = s
+		}
+		if s, ok := m["kind"].(string); ok {
+			kind = s
+		}
+	}
+	if blockedID == "" || blockingID == "" || kind == "" {
+		return nil, fmt.Errorf("RemoveDependency: blocked_wi_id, blocking_wi_id, kind are required in body")
+	}
 	var out map[string]any
-	return out, c.do(ctx, "DELETE", "/v1/dependencies", body, &out)
+	return out, c.do(ctx, "DELETE",
+		"/v1/work_items/"+blockedID+"/dependencies/"+blockingID+"/"+kind,
+		nil, &out)
 }
 
 // ListDependencies calls GET /v1/work_items/:id/dependencies.

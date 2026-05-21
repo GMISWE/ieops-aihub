@@ -97,7 +97,11 @@ func UpdateScenarioConfig(ctx context.Context, pool *pgxpool.Pool,
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to update scenario config: %v", err))
 	}
 
-	// Emit phase_config_updated event
+	// Emit phase_config_updated event.
+	// This is a global/system event (scenario configs are project-agnostic), so
+	// the project column must be NULL. The scenario name lives in the payload.
+	// The agent_events CHECK constraint allows NULL work_item_id for
+	// 'phase_config_updated'.
 	payload, _ := json.Marshal(map[string]any{
 		"scenario":    scenario,
 		"old_version": req.Version,
@@ -106,8 +110,8 @@ func UpdateScenarioConfig(ctx context.Context, pool *pgxpool.Pool,
 	})
 	pool.Exec(ctx, `
 		INSERT INTO agent_events (id, actor_user_id, event_type, payload, project, created_at)
-		VALUES ($1, $2, 'phase_config_updated', $3, $4, clock_timestamp())`,
-		NewID("evt"), callerUserID, payload, scenario,
+		VALUES ($1, $2, 'phase_config_updated', $3, NULL, clock_timestamp())`,
+		NewID("evt"), callerUserID, payload,
 	) //nolint:errcheck
 
 	return cfg, nil

@@ -98,9 +98,14 @@ func (c *Client) WhoAmI(ctx context.Context) (map[string]any, error) {
 	return out, c.do(ctx, "GET", "/v1/users/me", nil, &out)
 }
 
-// Health calls GET /health and decodes the response.
+// Health calls GET /v1/health and decodes the response into out (may be nil).
 func (c *Client) Health(ctx context.Context, out any) error {
-	return c.do(ctx, "GET", "/health", nil, out)
+	return c.do(ctx, "GET", "/v1/health", nil, out)
+}
+
+// Ping calls GET /v1/health and returns nil if the server is reachable and healthy.
+func (c *Client) Ping(ctx context.Context) error {
+	return c.do(ctx, "GET", "/v1/health", nil, nil)
 }
 
 // ─── Work Items ────────────────────────────────────────────────────────────
@@ -145,10 +150,11 @@ func (c *Client) ClaimWorkItem(ctx context.Context, id string, body any) (map[st
 	return out, c.do(ctx, "POST", "/v1/work_items/"+id+"/claim", body, &out)
 }
 
-// CompleteAttempt calls POST /v1/attempts/:id/complete.
-func (c *Client) CompleteAttempt(ctx context.Context, attemptID string, body any) (map[string]any, error) {
+// CompleteAttempt calls POST /v1/work_items/:id/complete.
+// wiID is the work item id; the attempt credentials are embedded in body.
+func (c *Client) CompleteAttempt(ctx context.Context, wiID string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/attempts/"+attemptID+"/complete", body, &out)
+	return out, c.do(ctx, "POST", "/v1/work_items/"+wiID+"/complete", body, &out)
 }
 
 // ForceTakeover calls POST /v1/work_items/:id/force_takeover.
@@ -215,10 +221,10 @@ func (c *Client) Recall(ctx context.Context, params url.Values) (map[string]any,
 	return out, c.do(ctx, "GET", path, nil, &out)
 }
 
-// ActivateMemory calls PATCH /v1/memories/:id/activate.
+// ActivateMemory calls POST /v1/memories/:id/activate.
 func (c *Client) ActivateMemory(ctx context.Context, memoryID string) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "PATCH", "/v1/memories/"+memoryID+"/activate", nil, &out)
+	return out, c.do(ctx, "POST", "/v1/memories/"+memoryID+"/activate", nil, &out)
 }
 
 // ReinforceMemory calls PATCH /v1/memories/:id/reinforce.
@@ -263,16 +269,17 @@ func (c *Client) ListDependencies(ctx context.Context, wiID string) (map[string]
 
 // ─── Scenario Config ──────────────────────────────────────────────────────
 
-// GetScenarioConfig calls GET /v1/scenario_configs/:scenario.
+// GetScenarioConfig calls GET /v1/scenarios/:scenario/phase_config.
 func (c *Client) GetScenarioConfig(ctx context.Context, scenario string) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "GET", "/v1/scenario_configs/"+scenario, nil, &out)
+	return out, c.do(ctx, "GET", "/v1/scenarios/"+scenario+"/phase_config", nil, &out)
 }
 
-// UpdateScenarioConfig calls PATCH /v1/scenario_configs/:scenario.
+// UpdateScenarioConfig calls PUT /v1/scenarios/:scenario/phase_config.
+// body must include "content" (json.RawMessage) and "version" (int) for CAS.
 func (c *Client) UpdateScenarioConfig(ctx context.Context, scenario string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "PATCH", "/v1/scenario_configs/"+scenario, body, &out)
+	return out, c.do(ctx, "PUT", "/v1/scenarios/"+scenario+"/phase_config", body, &out)
 }
 
 // ─── Steps ────────────────────────────────────────────────────────────────

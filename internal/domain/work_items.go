@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -184,7 +185,7 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		req.Scenario,
 	).Scan(&configRaw)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, NewErr(ErrServiceUnavailable, fmt.Sprintf("no phase config for scenario %q — server not fully initialized", req.Scenario))
 		}
 		return nil, NewErr(ErrInternalError, "failed to load scenario config")
@@ -471,13 +472,15 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 
 		sim := jaccardNGram(req.Goal, c.Goal, 3)
 		labelSim := setOverlap(req.Labels, c.Labels)
-		// C7: include resource overlap (resSim) per design §11 formula
+		// C7: include resource overlap (resSim) per design §11 formula.
+		// JSON errors here just degrade dedup to label+goal scoring — they
+		// must not abort the create-work-item flow.
 		var reqRes, cRes []string
 		if req.DeclaredResources != nil {
-			json.Unmarshal(req.DeclaredResources, &reqRes)
+			_ = json.Unmarshal(req.DeclaredResources, &reqRes)
 		}
 		if c.Resources != nil {
-			json.Unmarshal(c.Resources, &cRes)
+			_ = json.Unmarshal(c.Resources, &cRes)
 		}
 		resSim := setOverlap(reqRes, cRes)
 		score := 0.6*sim + 0.2*labelSim + 0.2*resSim
@@ -544,10 +547,9 @@ func GetWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string) (*Wor
 		&wi.ParentWorkItemID, &wi.Attrs, &wi.CreatedAt, &wi.UpdatedAt, &wi.ClosedAt,
 	)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, NewErr(ErrNotFound, fmt.Sprintf("work item %q not found", idOrSlug))
-		}
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to get work item: %v", err))
+		return nil, pgxErr(err,
+			fmt.Sprintf("work item %q not found", idOrSlug),
+			"failed to get work item")
 	}
 	wi.Labels = labelsRaw
 	if wi.Labels == nil {
@@ -621,7 +623,7 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 	if f.Since != nil {
 		conds = append(conds, fmt.Sprintf("wi.created_at >= $%d", argIdx))
 		args = append(args, *f.Since)
-		argIdx++
+		// argIdx not incremented: last optional clause, kept symmetric for future filters
 	}
 
 	where := "WHERE " + strings.Join(conds, " AND ")

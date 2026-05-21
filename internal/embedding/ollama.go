@@ -58,7 +58,7 @@ func (o *OllamaProvider) Embed(ctx context.Context, text string) ([]float32, err
 	if err != nil {
 		return nil, fmt.Errorf("ollama embed http: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	var result ollamaEmbedResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

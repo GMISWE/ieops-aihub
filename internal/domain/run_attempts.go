@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -121,7 +122,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		&wi.ParentWorkItemID, &wi.Attrs, &wi.CreatedAt, &wi.UpdatedAt, &wi.ClosedAt,
 	)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, NewErr(ErrNotFound, fmt.Sprintf("work item %q not found", wiID))
 		}
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to lock work_item: %v", err))
@@ -194,7 +195,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		`SELECT content FROM scenario_phase_configs WHERE scenario = $1`, wi.Scenario,
 	).Scan(&configRaw)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			// C-R9-3: no config found → 503
 			return nil, NewErr(ErrServiceUnavailable, fmt.Sprintf("no phase config for scenario %q — server not fully initialized", wi.Scenario))
 		}
@@ -274,10 +275,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			}
 		}
 	} else if wi.Status == "paused" || wi.Status == "queued" {
-		// Normal claim
-		if wi.Status == "running" {
-			// Already handled above
-		}
+		// Normal claim — no extra checks required.
 	} else if wi.Status == "wrapped" || wi.Status == "failed" || wi.Status == "cancelled" {
 		return nil, NewErr(ErrConflictTerminalState, fmt.Sprintf("work item is in terminal state: %s", wi.Status))
 	}
@@ -570,7 +568,7 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 		FROM work_items WHERE id=$1 FOR UPDATE`, wiID,
 	).Scan(&wi.ID, &wi.Project, &wi.Status, &wi.CurrentAttemptID, &wi.CurrentAttemptEpoch)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return NewErr(ErrNotFound, "work item not found")
 		}
 		return NewErr(ErrInternalError, "failed to lock work_item")
@@ -985,7 +983,7 @@ func verifyAttemptCredential(ctx context.Context, tx pgx.Tx, wi WorkItem, attemp
 		SELECT claim_epoch, session_secret_hash, status FROM run_attempts WHERE id=$1`, attemptID,
 	).Scan(&storedEpoch, &storedSecretHash, &storedStatus)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return NewErr(ErrNotFound, "run_attempt not found")
 		}
 		return NewErr(ErrInternalError, "failed to load run_attempt")

@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"math/big"
 	"strings"
 )
@@ -27,15 +26,16 @@ func NewID(prefix string) string {
 }
 
 // NewBase62 generates n base62 characters from cryptographically random bytes.
+// A crypto/rand failure is fatal (matches NewID's behavior); falling back to a
+// constant character would silently bias the output.
 func NewBase62(n int) string {
 	out := make([]byte, n)
 	for i := 0; i < n; i++ {
-		n, err := rand.Int(rand.Reader, big.NewInt(62))
+		idx, err := rand.Int(rand.Reader, big.NewInt(62))
 		if err != nil {
-			out[i] = base62Chars[0]
-		} else {
-			out[i] = base62Chars[n.Int64()]
+			panic("crypto/rand unavailable: " + err.Error())
 		}
+		out[i] = base62Chars[idx.Int64()]
 	}
 	return string(out)
 }
@@ -56,7 +56,3 @@ func FormatIDOrSlug(idOrSlug string) (column string, value string) {
 	}
 	return "slug", idOrSlug
 }
-
-// Unused function to satisfy the import at bottom of run_attempts.go.
-// This keeps the code cleaner than duplicating the hash.
-var _ = fmt.Sprintf

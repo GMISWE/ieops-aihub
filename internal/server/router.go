@@ -210,6 +210,19 @@ func handleCancelWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
+		// C1: Load wi to get project; reporter needs writer, others need maintainer.
+		wi, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		minRole := "writer"
+		if wi.ReporterUserID != u.UserID {
+			minRole = "maintainer"
+		}
+		if err := checkProjectAccess(c, u, wi.Project, minRole); err != nil {
+			return err
+		}
+
 		if aihubErr := domain.CancelWorkItem(ctx, pool, c.Param("id"), u.UserID, u.Role, u.ProjectRoles); aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
@@ -250,12 +263,23 @@ func handleClaimWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 // handleCompleteAttempt handles POST /v1/work_items/:id/complete.
 func handleCompleteAttempt(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
+		u := GetUser(c)
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
 		var req domain.CompleteAttemptRequest
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
+		}
+
+		// C1: Load wi to get project; require writer access.
+		// AttemptCredential (session_secret) provides additional per-attempt gating inside domain.
+		wi, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
+			return err
 		}
 
 		if aihubErr := domain.FnCompleteAttempt(ctx, pool, c.Param("id"), &req); aihubErr != nil {
@@ -275,6 +299,15 @@ func handleForceTakeover(pool *pgxpool.Pool) echo.HandlerFunc {
 		var req domain.ForceTakeoverRequest
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
+		}
+
+		// C1: Load wi to get project; force takeover requires maintainer role.
+		wi, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		if err := checkProjectAccess(c, u, wi.Project, "maintainer"); err != nil {
+			return err
 		}
 
 		resp, aihubErr := domain.FnForceTakeover(ctx, pool, c.Param("id"), u.UserID, u.Role, u.ProjectRoles, &req)
@@ -338,6 +371,27 @@ func handleCreateDependency(pool *pgxpool.Pool) echo.HandlerFunc {
 		var req domain.CreateDependencyRequest
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
+		}
+
+		// C1: Load blocked wi → require writer on its project (caller "owns" it).
+		blockedWI, aihubErr := domain.GetWorkItem(ctx, pool, req.BlockedWIID)
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		if err := checkProjectAccess(c, u, blockedWI.Project, "writer"); err != nil {
+			return err
+		}
+
+		// For cross-project dependencies, also require viewer on the blocking wi's project.
+		blockingWI, aihubErr := domain.GetWorkItem(ctx, pool, req.BlockingWIID)
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		if blockingWI.Project != blockedWI.Project {
+			if err := checkProjectAccess(c, u, blockingWI.Project, "viewer"); err != nil {
+				return writeError(c, domain.NewErr(domain.ErrForbidden,
+					"no visibility to blocking work item's project"))
+			}
 		}
 
 		if aihubErr := domain.CreateDependency(ctx, pool, &req, u.UserID, u.ProjectRoles); aihubErr != nil {

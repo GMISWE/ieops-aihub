@@ -541,10 +541,7 @@ func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, call
 	).Scan(&memType, &baseStrength, &stabilityDays, &activationCount,
 		&lastActivatedAt, &status, &createdAt)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, NewErr(ErrNotFound, "memory not found")
-		}
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to load memory: %v", err))
+		return nil, pgxErr(err, "memory not found", "failed to load memory")
 	}
 	if status == "redacted" {
 		return nil, NewErr(ErrForbidden, "cannot activate a redacted memory")
@@ -601,10 +598,7 @@ func Redact(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, caller
 	err := pool.QueryRow(ctx, `SELECT author_user_id, status FROM memories WHERE id = $1`, memID).
 		Scan(&authorID, &status)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return NewErr(ErrNotFound, "memory not found")
-		}
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to load memory: %v", err))
+		return pgxErr(err, "memory not found", "failed to load memory")
 	}
 	if status == "redacted" {
 		return nil // idempotent

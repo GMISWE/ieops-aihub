@@ -61,7 +61,7 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 		os.Exit(1)
 	}
 
-	ver, _ := result["version"]
+	ver := result["version"]
 	fmt.Printf("ok .polyforge/phase.yaml written (scenario: %s, version: %v)\n", scenario, ver)
 }
 
@@ -81,7 +81,7 @@ func runInitApply(ctx context.Context, c *client.Client, scenario, phaseFile str
 
 	// Extract embedded __version__ for CAS.
 	// Server schema (UpdateScenarioConfigRequest) reads the field as "version" (§4.3 PUT body).
-	expectedVersion, _ := content["__version__"]
+	expectedVersion := content["__version__"]
 	delete(content, "__version__")
 
 	// Normalize version to int for the server's CAS check (handles yaml numeric decoding).
@@ -106,7 +106,7 @@ func runInitApply(ctx context.Context, c *client.Client, scenario, phaseFile str
 		os.Exit(1)
 	}
 
-	newVer, _ := result["version"]
+	newVer := result["version"]
 	fmt.Printf("ok phase.yaml applied to aihub (scenario: %s, version: %v)\n", scenario, newVer)
 
 	// Update the local file with the new version.

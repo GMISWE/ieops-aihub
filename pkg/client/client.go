@@ -54,7 +54,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if err != nil {
 		return fmt.Errorf("http %s %s: %w", method, path, err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode >= 400 {
 		var errResp struct {
@@ -74,20 +74,6 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		}
 	}
 	return nil
-}
-
-// buildQuery builds a URL query string from key-value pairs (skip empty values).
-func buildQuery(pairs ...string) string {
-	q := url.Values{}
-	for i := 0; i+1 < len(pairs); i += 2 {
-		if pairs[i+1] != "" {
-			q.Set(pairs[i], pairs[i+1])
-		}
-	}
-	if len(q) == 0 {
-		return ""
-	}
-	return "?" + q.Encode()
 }
 
 // ─── User / Auth ───────────────────────────────────────────────────────────

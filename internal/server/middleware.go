@@ -19,9 +19,7 @@ import (
 type ctxKey string
 
 const (
-	ctxUser         ctxKey = "user"
-	ctxAPIKeyID     ctxKey = "api_key_id"
-	ctxProjectRoles ctxKey = "project_roles"
+	ctxUser ctxKey = "user"
 )
 
 // UserContext holds the authenticated user info.
@@ -210,11 +208,6 @@ func RequestID() echo.MiddlewareFunc {
 			return next(c)
 		}
 	}
-}
-
-// WithContext is a helper to set a value on the echo context.
-func WithContext(c echo.Context, key string, val any) {
-	c.Set(key, val)
 }
 
 // GetProjectFromRequest extracts the project parameter from the request.

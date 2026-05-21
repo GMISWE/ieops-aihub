@@ -82,7 +82,7 @@ func (s *Server) registerLifecycleTools() {
 			versionInt = int(v)
 		case string:
 			var n int
-			fmt.Sscanf(v, "%d", &n)
+			fmt.Sscanf(v, "%d", &n) //nolint:errcheck — parse error -> n stays 0 -> caller validates
 			versionInt = n
 		}
 		body := map[string]any{

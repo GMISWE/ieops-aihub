@@ -190,7 +190,7 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 		if limit := c.QueryParam("limit"); limit != "" {
 			var n int
-			fmt.Sscanf(limit, "%d", &n)
+			fmt.Sscanf(limit, "%d", &n) //nolint:errcheck — parse error -> n stays 0 -> default kicks in
 			if n > 0 {
 				filter.Limit = n
 			}
@@ -407,7 +407,7 @@ func handleUnblockWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 		var req struct {
 			Reason string `json:"reason"`
 		}
-		c.Bind(&req) //nolint:errcheck — reason is optional in v1 but recorded
+		_ = c.Bind(&req) // reason is optional in v1 but recorded if present
 
 		// Only unblock work_items that are actually in 'blocked' state; terminal/running → 409.
 		var status string
@@ -426,15 +426,15 @@ func handleUnblockWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 			return internalError(c, "failed to unblock work item")
 		}
 
-		// H6: emit admin_unblock audit event with reason payload
+		// H6: emit admin_unblock audit event with reason payload (best-effort).
 		if u != nil {
 			payload := map[string]any{"action": "unblock", "reason": req.Reason}
 			payloadJSON, _ := jsonMarshal(payload)
-			pool.Exec(context.Background(), `
+			_, _ = pool.Exec(context.Background(), `
 				INSERT INTO agent_events (id, work_item_id, actor_user_id, api_key_id, event_type, payload, project)
 				VALUES ($1, $2, $3, $4, 'admin_unblock', $5::jsonb,
 				    (SELECT project FROM work_items WHERE id=$2))`,
-				domain.NewID("evt"), wiID, u.UserID, u.APIKeyID, string(payloadJSON)) //nolint:errcheck
+				domain.NewID("evt"), wiID, u.UserID, u.APIKeyID, string(payloadJSON))
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
 	}
@@ -460,7 +460,7 @@ func handleGetReadyQueue(pool *pgxpool.Pool) echo.HandlerFunc {
 		max := 10
 		if m := c.QueryParam("max"); m != "" {
 			var n int
-			fmt.Sscanf(m, "%d", &n)
+			fmt.Sscanf(m, "%d", &n) //nolint:errcheck — parse error -> n stays 0 -> default kicks in
 			if n > 0 {
 				max = n
 			}

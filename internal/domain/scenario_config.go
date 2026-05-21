@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -36,7 +37,7 @@ func GetScenarioConfig(ctx context.Context, pool *pgxpool.Pool, scenario string)
 		WHERE scenario = $1`, scenario,
 	).Scan(&cfg.Scenario, &cfg.Content, &cfg.Version, &cfg.UpdatedAt, &cfg.UpdatedBy)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			// H2 fix (C-R9-3): missing phase config is a server-side setup issue, not a client
 			// 404. Return 503 SERVICE_UNAVAILABLE so the caller knows to run aihub migrate.
 			return nil, NewErr(ErrServiceUnavailable,
@@ -77,14 +78,14 @@ func UpdateScenarioConfig(ctx context.Context, pool *pgxpool.Pool,
 	).Scan(&cfg.Scenario, &cfg.Content, &cfg.Version, &cfg.UpdatedAt, &cfg.UpdatedBy)
 
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			// Either scenario doesn't exist or version mismatch.
 			// Distinguish by checking current version.
 			var currentVersion int
 			lookupErr := pool.QueryRow(ctx,
 				`SELECT version FROM scenario_phase_configs WHERE scenario = $1`, scenario).
 				Scan(&currentVersion)
-			if lookupErr == pgx.ErrNoRows {
+			if errors.Is(lookupErr, pgx.ErrNoRows) {
 				return nil, NewErr(ErrNotFound,
 					fmt.Sprintf("no phase config found for scenario %q", scenario))
 			}

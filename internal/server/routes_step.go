@@ -101,9 +101,11 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 
 		if req.Heartbeat {
+			// Heartbeat: best-effort timestamp bump, transient DB errors must not
+			// fail the heartbeat (caller will retry anyway).
 			pool.Exec(c.Request().Context(), `
 				UPDATE wi_step_state SET step_started_at = clock_timestamp(), updated_at = clock_timestamp()
-				WHERE work_item_id = $1`, wiID)
+				WHERE work_item_id = $1`, wiID) //nolint:errcheck
 			return c.JSON(http.StatusOK, map[string]string{"status": "heartbeat_ok"})
 		}
 
@@ -152,10 +154,12 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				return writeError(c, domain.NewErr(domain.ErrInternalError, execErr.Error()))
 			}
 			if req.StepAttemptID != nil {
+				// Completion-row insert is best-effort; primary state change above
+				// has already succeeded.
 				tx.Exec(c.Request().Context(), `
 					INSERT INTO wi_step_completions (work_item_id, run_attempt_id, step_attempt_id, step_id, status)
 					VALUES ($1, $2, $3, $4, 'completed')`,
-					wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep))
+					wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep)) //nolint:errcheck
 			}
 			eventType = "step_completed"
 		case "failed":
@@ -167,10 +171,11 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				return writeError(c, domain.NewErr(domain.ErrInternalError, execErr.Error()))
 			}
 			if req.StepAttemptID != nil {
+				// Best-effort row; failure marker has already been written above.
 				tx.Exec(c.Request().Context(), `
 					INSERT INTO wi_step_completions (work_item_id, run_attempt_id, step_attempt_id, step_id, status)
 					VALUES ($1, $2, $3, $4, 'failed')`,
-					wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep))
+					wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep)) //nolint:errcheck
 			}
 			eventType = "step_failed"
 		default:
@@ -212,11 +217,11 @@ func handleRenewLease(pool *pgxpool.Pool) echo.HandlerFunc {
 		); credErr != nil {
 			return writeError(c, credErr)
 		}
-		// ownership-only: bump last_active_at
+		// ownership-only: bump last_active_at (best-effort lease renewal).
 		pool.Exec(c.Request().Context(), `
 			UPDATE run_attempts SET last_active_at = clock_timestamp()
 			WHERE id = $1 AND work_item_id = $2 AND claim_epoch = $3`,
-			req.AttemptID, wiID, req.ClaimEpoch)
+			req.AttemptID, wiID, req.ClaimEpoch) //nolint:errcheck
 		return c.JSON(http.StatusOK, map[string]string{"status": "renewed"})
 	}
 }

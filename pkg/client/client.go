@@ -302,3 +302,11 @@ func (c *Client) Promote(ctx context.Context, body any) (map[string]any, error) 
 	var out map[string]any
 	return out, c.do(ctx, "POST", "/v1/releases/promote", body, &out)
 }
+
+// ─── Version ──────────────────────────────────────────────────────────────────
+
+// GetVersion calls GET /v1/version.
+func (c *Client) GetVersion(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "GET", "/v1/version", nil, &out)
+}

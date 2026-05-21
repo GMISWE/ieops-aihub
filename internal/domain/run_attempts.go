@@ -716,7 +716,7 @@ type ForceTakeoverResponse struct {
 
 // FnForceTakeover implements the force_takeover operation (H-R7-4).
 // Permission check: same user → writer; other user → maintainer/admin.
-func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID, callerRole string, callerProjectRoles map[string]string, req *ForceTakeoverRequest) (*ForceTakeoverResponse, *AihubError) {
+func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID, callerDisplay, callerRole string, callerProjectRoles map[string]string, req *ForceTakeoverRequest) (*ForceTakeoverResponse, *AihubError) {
 	if req.Reason == "" {
 		return nil, NewErr(ErrBadRequest, "reason is required for force_takeover")
 	}
@@ -813,11 +813,34 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 			$8, clock_timestamp(), clock_timestamp()
 		)`,
 		newAttemptID, wi.ID, newEpoch, "force-takeover-"+newAttemptID,
-		callerUserID, callerTakeoverDisplay(callerProjectRoles, callerUserID), newSecretHash,
+		callerUserID, callerDisplay, newSecretHash,
 		priorID, // parent_attempt_id = superseded attempt
 	)
 	if err2 != nil {
 		return nil, NewErr(ErrInternalError, "failed to create new attempt after force_takeover")
+	}
+
+	// Re-INSERT resource_locks for new attempt based on wi.DeclaredResources
+	// (prior locks were deleted above; new attempt must hold them for conflict detection)
+	var declaredRes []struct {
+		Type       string `json:"type"`
+		URI        string `json:"uri"`
+		TaskBranch string `json:"task_branch,omitempty"`
+	}
+	if len(wi.DeclaredResources) > 0 {
+		json.Unmarshal(wi.DeclaredResources, &declaredRes) //nolint:errcheck
+	}
+	for _, res := range declaredRes {
+		lockType, lockKey := resourceToLock(DeclaredResourceItem{Type: res.Type, URI: res.URI, TaskBranch: res.TaskBranch})
+		if lockType == "" {
+			continue
+		}
+		tx.Exec(ctx, `
+			INSERT INTO resource_locks (resource_type, resource_key, owner_attempt_id, claim_epoch)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (resource_type, resource_key) DO UPDATE
+			  SET owner_attempt_id=$3, claim_epoch=$4, acquired_at=clock_timestamp()`,
+			lockType, lockKey, newAttemptID, newEpoch) //nolint:errcheck
 	}
 
 	// Update work_item to running with new attempt
@@ -842,9 +865,6 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	}, nil
 }
 
-func callerTakeoverDisplay(roles map[string]string, userID string) string {
-	return userID
-}
 
 // generateSessionSecret returns (plaintext, nil) for a new 32-byte session secret.
 func generateSessionSecret() (string, error) {

@@ -165,7 +165,7 @@ func checkWorktrees(ctx context.Context, c *client.Client, wsRoot string, fix bo
 	// Fetch active work items from aihub to cross-reference.
 	activeIDs := map[string]bool{}
 	if c != nil {
-		params := url.Values{"status": []string{"running,paused,queued"}}
+		params := url.Values{"status": []string{"running,paused,queued"}} // server splits on ","
 		if result, err := c.ListWorkItems(ctx, params); err == nil {
 			if items, ok := result["items"].([]any); ok {
 				for _, item := range items {

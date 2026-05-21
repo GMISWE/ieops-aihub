@@ -35,6 +35,19 @@ func boolArg(args map[string]any, key string) bool {
 	return false
 }
 
+// numArg extracts a float64 argument (returns 0 if absent or wrong type).
+func numArg(args map[string]any, key string) float64 {
+	if v, ok := args[key]; ok {
+		switch n := v.(type) {
+		case float64:
+			return n
+		case int:
+			return float64(n)
+		}
+	}
+	return 0
+}
+
 // setIfNonempty adds key=value to params if value is non-empty.
 func setIfNonempty(params url.Values, key, value string) {
 	if value != "" {

@@ -173,16 +173,16 @@ func (c *Client) GetReadyQueue(ctx context.Context, params url.Values) (map[stri
 	return out, c.do(ctx, "GET", path, nil, &out)
 }
 
-// RenewLease calls PATCH /v1/attempts/:id/renew.
-func (c *Client) RenewLease(ctx context.Context, attemptID string, body any) (map[string]any, error) {
+// RenewLease calls PATCH /v1/work_items/:wiID/renew.
+func (c *Client) RenewLease(ctx context.Context, wiID string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "PATCH", "/v1/attempts/"+attemptID+"/renew", body, &out)
+	return out, c.do(ctx, "PATCH", "/v1/work_items/"+wiID+"/renew", body, &out)
 }
 
-// PauseAttempt calls POST /v1/attempts/:id/pause.
-func (c *Client) PauseAttempt(ctx context.Context, attemptID string, body any) (map[string]any, error) {
+// PauseAttempt calls POST /v1/work_items/:wiID/pause.
+func (c *Client) PauseAttempt(ctx context.Context, wiID string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/attempts/"+attemptID+"/pause", body, &out)
+	return out, c.do(ctx, "POST", "/v1/work_items/"+wiID+"/pause", body, &out)
 }
 
 // ─── Events ────────────────────────────────────────────────────────────────

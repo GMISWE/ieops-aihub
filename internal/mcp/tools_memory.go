@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -71,8 +72,32 @@ func (s *Server) registerMemoryTools() {
 			return errResult(fmt.Errorf("project is required"))
 		}
 		params := url.Values{}
-		for _, k := range []string{"project", "query", "visibility", "work_item_id", "top_k"} {
+		for _, k := range []string{"project", "query", "visibility", "work_item_id", "top_k", "cursor"} {
 			setIfNonempty(params, k, strArg(args, k))
+		}
+		// min_strength and recency_weight are numbers — format as string
+		if v := numArg(args, "min_strength"); v != 0 {
+			params.Set("min_strength", fmt.Sprintf("%g", v))
+		}
+		if v := numArg(args, "recency_weight"); v != 0 {
+			params.Set("recency_weight", fmt.Sprintf("%g", v))
+		}
+		// type is an array — join as comma-separated
+		if types, ok := args["type"]; ok {
+			switch t := types.(type) {
+			case []any:
+				strs := make([]string, 0, len(t))
+				for _, v := range t {
+					if s, ok := v.(string); ok {
+						strs = append(strs, s)
+					}
+				}
+				if len(strs) > 0 {
+					params.Set("type", strings.Join(strs, ","))
+				}
+			case string:
+				params.Set("type", t)
+			}
 		}
 		if boolArg(args, "include_archived") {
 			params.Set("include_archived", "true")

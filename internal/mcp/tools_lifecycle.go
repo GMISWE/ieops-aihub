@@ -366,7 +366,7 @@ func (s *Server) registerLifecycleTools() {
 			body["force_terminate_step"] = true
 		}
 
-		result, err := s.client.CompleteAttempt(ctx, sf.AttemptID, body)
+		result, err := s.client.CompleteAttempt(ctx, wiID, body)
 		if err != nil {
 			return errResult(err)
 		}
@@ -531,7 +531,7 @@ func (s *Server) registerLifecycleTools() {
 			"claim_epoch":    sf.ClaimEpoch,
 			"session_secret": sf.SessionSecret,
 		}
-		result, err := s.client.RenewLease(ctx, sf.AttemptID, body)
+		result, err := s.client.RenewLease(ctx, sf.WIID, body)
 		if err != nil {
 			return errResult(err)
 		}
@@ -566,7 +566,7 @@ func (s *Server) registerLifecycleTools() {
 		if reason := strArg(args, "pause_reason"); reason != "" {
 			body["pause_reason"] = reason
 		}
-		result, err := s.client.PauseAttempt(ctx, sf.AttemptID, body)
+		result, err := s.client.PauseAttempt(ctx, sf.WIID, body)
 		if err != nil {
 			return errResult(err)
 		}

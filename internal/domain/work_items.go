@@ -421,7 +421,7 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 		FROM work_items
 		WHERE project = $1
 		  AND status IN ('queued','running','paused','blocked')
-		  AND (labels && $2::text[] OR declared_resources @> $3::jsonb OR true)
+		  AND (labels && $2::text[] OR declared_resources @> $3::jsonb)
 		LIMIT 50`,
 		req.Project, labelsJSON, req.DeclaredResources,
 	)

@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -136,6 +137,38 @@ func RequireProjectRole(minRole string) echo.MiddlewareFunc {
 			return next(c)
 		}
 	}
+}
+
+// roleLevel maps role string to integer for comparison.
+var roleLevel = map[string]int{
+	"viewer":     1,
+	"writer":     2,
+	"maintainer": 3,
+}
+
+// checkProjectAccess verifies the caller has at least minRole on the given project.
+// Admin users bypass all project checks.
+// Returns nil on success, or an error response already written to c on failure.
+func checkProjectAccess(c echo.Context, u *UserContext, project, minRole string) error {
+	if u == nil {
+		return writeError(c, domain.NewErr(domain.ErrUnauthorized, "not authenticated"))
+	}
+	if u.Role == "admin" {
+		return nil
+	}
+	if project == "" {
+		return writeError(c, domain.NewErr(domain.ErrBadRequest, "project is required"))
+	}
+	userRole, ok := u.ProjectRoles[project]
+	if !ok || userRole == "" {
+		return writeError(c, domain.NewErr(domain.ErrForbidden,
+			fmt.Sprintf("no access to project %q", project)))
+	}
+	if roleLevel[userRole] < roleLevel[minRole] {
+		return writeError(c, domain.NewErr(domain.ErrForbidden,
+			fmt.Sprintf("project %q requires %s role, you have %s", project, minRole, userRole)))
+	}
+	return nil
 }
 
 // errorResponse wraps an AihubError for JSON encoding.

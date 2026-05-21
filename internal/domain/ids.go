@@ -7,31 +7,23 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"time"
 )
 
 const base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 // NewID generates a new prefixed ID in the format "<prefix>_<8 base62 chars>".
-// The 8 base62 characters are derived from a ULID-like timestamp+random value.
+// Uses crypto/rand with big.Int rejection sampling to eliminate modulo bias.
 func NewID(prefix string) string {
 	b := make([]byte, 8)
-	_, err := rand.Read(b)
-	if err != nil {
-		// Fallback to time-based generation
-		ts := time.Now().UnixNano()
-		for i := range b {
-			b[i] = byte(ts >> (uint(i) * 8))
+	for i := range b {
+		n, err := rand.Int(rand.Reader, big.NewInt(62))
+		if err != nil {
+			// crypto/rand failure is fatal: do not fall back to weaker sources.
+			panic("crypto/rand unavailable: " + err.Error())
 		}
+		b[i] = base62Chars[n.Int64()]
 	}
-
-	// Encode 8 bytes into 8 base62 characters
-	var sb strings.Builder
-	for i := 0; i < 8; i++ {
-		sb.WriteByte(base62Chars[b[i]%62])
-	}
-
-	return prefix + "_" + sb.String()
+	return prefix + "_" + string(b)
 }
 
 // NewBase62 generates n base62 characters from cryptographically random bytes.

@@ -2,7 +2,7 @@ package domain
 
 import (
 	"context"
-	"crypto/hmac"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -511,6 +511,11 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 		return NewErr(ErrInternalError, "failed to lock work_item")
 	}
 
+	// H4: Reject double-wrap on terminal states
+	if wi.Status == "wrapped" || wi.Status == "failed" || wi.Status == "cancelled" {
+		return NewErr(ErrConflictTerminalState, fmt.Sprintf("work item is already %s", wi.Status))
+	}
+
 	// Verify attempt credential
 	if aihubErr := verifyAttemptCredential(ctx, tx, wi, req.AttemptID, req.ClaimEpoch, req.SessionSecret); aihubErr != nil {
 		return aihubErr
@@ -721,19 +726,15 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		return nil, NewErr(ErrInternalError, "failed to load current attempt")
 	}
 
-	// Permission check per §9.4
+	// Permission check per §9.4 and v1.21 ownership-only model.
+	// Only the same user (self-takeover) or a maintainer/admin may force_takeover.
+	// There is NO time-based auto-takeover: idle time does not grant takeover rights.
 	isSelf := currentActorUserID == callerUserID
 	projectRole := callerProjectRoles[wi.Project]
 	isMaintainerOrAdmin := projectRole == "maintainer" || callerRole == "admin"
-	isIdleOver30 := time.Since(currentLastActive) > 30*time.Minute
 
-	if !isSelf && !isMaintainerOrAdmin && !isIdleOver30 {
-		return nil, NewErr(ErrForbidden, "insufficient permissions: only maintainer/admin can force_takeover an active attempt; others must wait for 30 minutes of inactivity")
-	}
 	if !isSelf && !isMaintainerOrAdmin {
-		// Writer taking over idle attempt
-	} else if !isSelf {
-		// Maintainer/admin — require reason (already checked above)
+		return nil, NewErr(ErrForbidden, "insufficient permissions: only the owner or a maintainer/admin can force_takeover")
 	}
 
 	tx, err2 := pool.Begin(ctx)
@@ -824,9 +825,15 @@ func verifyAttemptCredential(ctx context.Context, tx pgx.Tx, wi WorkItem, attemp
 
 	// 4. Verify session_secret (constant-time)
 	hash := hashSecretInternal(sessionSecret)
-	storedHashBytes, _ := hex.DecodeString(storedSecretHash)
-	hashBytes, _ := hex.DecodeString(hash)
-	if !hmac.Equal(storedHashBytes, hashBytes) {
+	storedHashBytes, err2 := hex.DecodeString(storedSecretHash)
+	if err2 != nil {
+		return NewErr(ErrStaleCredential, "invalid stored credential format")
+	}
+	hashBytes, err3 := hex.DecodeString(hash)
+	if err3 != nil {
+		return NewErr(ErrInternalError, "failed to decode computed hash")
+	}
+	if subtle.ConstantTimeCompare(storedHashBytes, hashBytes) != 1 {
 		return NewErr(ErrUnauthorized, "invalid session_secret")
 	}
 

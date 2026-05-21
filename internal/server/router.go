@@ -95,6 +95,11 @@ func handleCreateWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
 		}
 
+		// C1: Require writer access to the target project
+		if err := checkProjectAccess(c, u, req.Project, "writer"); err != nil {
+			return err
+		}
+
 		wi, aihubErr := domain.CreateWorkItem(ctx, pool, &req, u.UserID, u.DisplayName)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
@@ -115,9 +120,9 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "project query parameter is required"))
 		}
 
-		// Permission check
-		if u.Role != "admin" && u.ProjectRoles[project] == "" {
-			return writeError(c, domain.NewErr(domain.ErrForbidden, "insufficient permissions for project"))
+		// C1: Require at least viewer access to the project
+		if err := checkProjectAccess(c, u, project, "viewer"); err != nil {
+			return err
 		}
 
 		filter := domain.ListWorkItemsFilter{
@@ -148,6 +153,7 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 // handleGetWorkItem handles GET /v1/work_items/:id.
 func handleGetWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
+		u := GetUser(c)
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
@@ -155,6 +161,12 @@ func handleGetWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
+
+		// C1: Require viewer access to the work item's project
+		if err := checkProjectAccess(c, u, wi.Project, "viewer"); err != nil {
+			return err
+		}
+
 		return c.JSON(http.StatusOK, wi)
 	}
 }
@@ -169,6 +181,15 @@ func handleUpdateWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 		var req domain.UpdateWorkItemRequest
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
+		}
+
+		// C1: Load wi to get project, then check writer access
+		existing, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		if err := checkProjectAccess(c, u, existing.Project, "writer"); err != nil {
+			return err
 		}
 
 		wi, aihubErr := domain.UpdateWorkItem(ctx, pool, c.Param("id"), u.UserID, u.Role, u.ProjectRoles, &req)
@@ -205,21 +226,16 @@ func handleClaimWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
 		}
 
-		// Permission check for force_takeover: maintainer/admin or self
-		if req.ForceOver {
-			wi, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
-			if aihubErr != nil {
-				return writeError(c, aihubErr)
-			}
-			projectRole := u.ProjectRoles[wi.Project]
-			if u.Role != "admin" && projectRole != "maintainer" && wi.ReporterUserID != u.UserID {
-				// May still proceed if same user_id (C-R9-12 implicit takeover)
-				if wi.CurrentAttemptID != nil {
-					// domain layer will check
-				}
-			}
+		// C1: Load wi to get project; require writer access; also enforce force_takeover permissions.
+		wi, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
+			return err
 		}
 
+		// For force_takeover the domain layer enforces maintainer/admin or self.
 		resp, aihubErr := domain.FnClaimWorkItem(ctx, pool, c.Param("id"), &req, u.UserID, u.APIKeyID, u.DisplayName)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
@@ -295,9 +311,9 @@ func handleGetReadyQueue(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "project query parameter is required"))
 		}
 
-		// Permission check
-		if u.Role != "admin" && u.ProjectRoles[project] == "" {
-			return writeError(c, domain.NewErr(domain.ErrForbidden, "insufficient permissions for project"))
+		// C1: Require at least viewer access to the project
+		if err := checkProjectAccess(c, u, project, "viewer"); err != nil {
+			return err
 		}
 
 		max := 10
@@ -351,8 +367,18 @@ func handleListDependencies(pool *pgxpool.Pool) echo.HandlerFunc {
 // handleDeleteDependency handles DELETE /v1/dependencies/:blocked_id/:blocking_id/:kind.
 func handleDeleteDependency(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
+		u := GetUser(c)
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
+
+		// C1: Require writer access — load blocked wi to get project
+		blockedWI, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("blocked_id"))
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		if err := checkProjectAccess(c, u, blockedWI.Project, "writer"); err != nil {
+			return err
+		}
 
 		if aihubErr := domain.DeleteDependency(ctx, pool,
 			c.Param("blocked_id"), c.Param("blocking_id"), c.Param("kind")); aihubErr != nil {

@@ -233,10 +233,10 @@ func (c *Client) ReinforceMemory(ctx context.Context, memoryID string, body any)
 	return out, c.do(ctx, "PATCH", "/v1/memories/"+memoryID+"/reinforce", body, &out)
 }
 
-// RedactMemory calls DELETE /v1/memories/:id.
+// RedactMemory calls PATCH /v1/memories/:id/redact per §4.3.
 func (c *Client) RedactMemory(ctx context.Context, memoryID string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "DELETE", "/v1/memories/"+memoryID, body, &out)
+	return out, c.do(ctx, "PATCH", "/v1/memories/"+memoryID+"/redact", body, &out)
 }
 
 // ─── Conflicts ────────────────────────────────────────────────────────────

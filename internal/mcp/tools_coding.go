@@ -245,13 +245,14 @@ func (s *Server) registerCodingTools() {
 			return errResult(fmt.Errorf("wrap sequence (push+PR): %w", err))
 		}
 
-		// Complete attempt
+		// Complete attempt — server expects wi_id in URL path; attempt_id in body for credential check.
 		body := map[string]any{
 			"status":         "wrapped",
+			"attempt_id":     sf.AttemptID,
 			"claim_epoch":    sf.ClaimEpoch,
 			"session_secret": sf.SessionSecret,
 		}
-		completeResult, err := s.client.CompleteAttempt(ctx, sf.AttemptID, body)
+		completeResult, err := s.client.CompleteAttempt(ctx, sf.WIID, body)
 		if err != nil {
 			return errResult(fmt.Errorf("complete_attempt: %w", err))
 		}

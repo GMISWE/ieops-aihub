@@ -80,12 +80,24 @@ func runInitApply(ctx context.Context, c *client.Client, scenario, phaseFile str
 	}
 
 	// Extract embedded __version__ for CAS.
+	// Server schema (UpdateScenarioConfigRequest) reads the field as "version" (§4.3 PUT body).
 	expectedVersion, _ := content["__version__"]
 	delete(content, "__version__")
 
+	// Normalize version to int for the server's CAS check (handles yaml numeric decoding).
+	var versionInt int
+	switch v := expectedVersion.(type) {
+	case int:
+		versionInt = v
+	case int64:
+		versionInt = int(v)
+	case float64:
+		versionInt = int(v)
+	}
+
 	body := map[string]any{
-		"content":          content,
-		"expected_version": expectedVersion,
+		"content": content,
+		"version": versionInt,
 	}
 
 	result, err := c.UpdateScenarioConfig(ctx, scenario, body)

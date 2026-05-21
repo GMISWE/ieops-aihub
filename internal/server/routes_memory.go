@@ -342,34 +342,92 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 // ─── Admin GC Trigger ─────────────────────────────────────────────────────────
 
 // handleReinforceMemory handles PATCH /v1/memories/:id/reinforce.
-// Merges additional_content into an existing memory (dedup_mode=merge + supersedes).
+// Per §4.3: body carries {additional_context, attempt_id, claim_epoch, session_secret,
+// strength_delta?, work_item_id?}. Server appends additional_context to the existing
+// memory content and writes a new row with supersedes_id pointing at the prior one.
 func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
 		memID := c.Param("id")
 		var req struct {
-			Body       string `json:"body"`        // updated body
-			Project    string `json:"project"`
-			Type       string `json:"type"`
-			Visibility string `json:"visibility"`
+			// §4.3 fields
+			AdditionalContext string   `json:"additional_context"`
+			AttemptID         string   `json:"attempt_id"`
+			ClaimEpoch        int64    `json:"claim_epoch"`
+			SessionSecret     string   `json:"session_secret"`
+			StrengthDelta     *float64 `json:"strength_delta,omitempty"`
+			WorkItemID        string   `json:"work_item_id,omitempty"`
+
+			// Legacy back-compat: replaces content wholesale (older skill wrapper)
+			Body       string `json:"body,omitempty"`
+			Project    string `json:"project,omitempty"`
+			Type       string `json:"type,omitempty"`
+			Visibility string `json:"visibility,omitempty"`
 		}
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, err.Error()))
 		}
-		if req.Project != "" {
-			if err := checkProjectAccess(c, u, req.Project, "writer"); err != nil {
-				return err
-			}
-		}
-		// Remember with dedup_mode=merge supersedes the existing memory
+
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
+
+		// Load existing memory; need project/type/visibility/content.
+		var memProject, memType, memVisibility, existingContent string
+		if err := pool.QueryRow(ctx, `
+			SELECT project, type, visibility, content
+			FROM memories WHERE id=$1`, memID,
+		).Scan(&memProject, &memType, &memVisibility, &existingContent); err != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+		}
+		if req.Project == "" {
+			req.Project = memProject
+		}
+		if req.Type == "" {
+			req.Type = memType
+		}
+		if req.Visibility == "" {
+			req.Visibility = memVisibility
+		}
+
+		if err := checkProjectAccess(c, u, req.Project, "writer"); err != nil {
+			return err
+		}
+
+		// Verify attempt credential when caller supplied one (mutating ops should carry it).
+		if req.AttemptID != "" || req.SessionSecret != "" {
+			if req.WorkItemID == "" {
+				return writeError(c, domain.NewErr(domain.ErrBadRequest,
+					"work_item_id is required when attempt_id/session_secret are provided"))
+			}
+			if credErr := domain.VerifyAttemptCredentialPool(
+				ctx, pool, req.WorkItemID, req.AttemptID, req.ClaimEpoch, req.SessionSecret,
+			); credErr != nil {
+				return writeError(c, credErr)
+			}
+		}
+
+		// Decide new content: AdditionalContext appends; Body replaces (legacy).
+		newContent := existingContent
+		switch {
+		case req.AdditionalContext != "":
+			if existingContent != "" {
+				newContent = existingContent + "\n\n" + req.AdditionalContext
+			} else {
+				newContent = req.AdditionalContext
+			}
+		case req.Body != "":
+			newContent = req.Body
+		default:
+			return writeError(c, domain.NewErr(domain.ErrBadRequest,
+				"either additional_context or body is required"))
+		}
+
 		rr := &domain.RememberRequest{
 			Project:         req.Project,
 			Type:            req.Type,
-			Content:         req.Body,
+			Content:         newContent,
 			Visibility:      req.Visibility,
-			DedupMode:       "suggest",
+			DedupMode:       "off", // explicit supersede, skip dedup
 			SupersedesMemID: &memID,
 			CallerUserID:    u.UserID,
 			CallerDisplay:   u.DisplayName,

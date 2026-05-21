@@ -249,6 +249,31 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		return nil, NewErr(ErrConflictTerminalState, fmt.Sprintf("work item is in terminal state: %s", wi.Status))
 	}
 
+	// §4.3 + §15: locks are derived from wi.declared_resources at claim time.
+	// If the client did not pass RequestedLocks explicitly, derive them from the
+	// work_item's declared_resources via resourceToLock mapping (§25 C-R3-8).
+	if len(req.RequestedLocks) == 0 && len(wi.DeclaredResources) > 0 {
+		var declared []struct {
+			Type       string `json:"type"`
+			URI        string `json:"uri"`
+			Intent     string `json:"intent,omitempty"`
+			TaskBranch string `json:"task_branch,omitempty"`
+		}
+		if jsonErr := json.Unmarshal(wi.DeclaredResources, &declared); jsonErr == nil {
+			for _, d := range declared {
+				lockType, lockKey := resourceToLock(DeclaredResourceItem{
+					Type: d.Type, URI: d.URI, Intent: d.Intent, TaskBranch: d.TaskBranch,
+				})
+				if lockType == "" {
+					continue
+				}
+				req.RequestedLocks = append(req.RequestedLocks, ResourceLockReq{
+					ResourceType: lockType, ResourceKey: lockKey,
+				})
+			}
+		}
+	}
+
 	// Check lock conflicts (advisory — actual conflict resolution in claim)
 	if len(req.RequestedLocks) > 0 && !isTakeover {
 		resourceKeys := make([]string, len(req.RequestedLocks))
@@ -604,7 +629,9 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	return nil
 }
 
-// fnForceTerminateStep inserts a wi_step_completions row with status=failed, error_type=force_terminate.
+// fnForceTerminateStep inserts a wi_step_completions row with status=failed,
+// error_type=force_terminate, emits a step_failed agent_event, and resets wi_step_state.
+// Per §4.3 force_terminate_step flow.
 func fnForceTerminateStep(ctx context.Context, tx pgx.Tx, wiID, attemptID string, stepAttemptID *string) *AihubError {
 	// Get current step
 	var currentStep *string
@@ -629,6 +656,20 @@ func fnForceTerminateStep(ctx context.Context, tx pgx.Tx, wiID, attemptID string
 	if err != nil {
 		return NewErr(ErrInternalError, fmt.Sprintf("failed to insert step_completion for force_terminate: %v", err))
 	}
+
+	// Emit step_failed event (§4.3 force_terminate_step flow)
+	evtID := NewID("evt")
+	payload, _ := json.Marshal(map[string]any{
+		"step_id":         *currentStep,
+		"step_attempt_id": saID,
+		"error_type":      "force_terminate_step",
+		"escalated":       false,
+	})
+	tx.Exec(ctx, `
+		INSERT INTO agent_events (id, work_item_id, run_attempt_id, event_type, payload, project)
+		VALUES ($1, $2, $3, 'step_failed', $4,
+		        (SELECT project FROM work_items WHERE id=$2))`,
+		evtID, wiID, attemptID, payload) //nolint:errcheck
 
 	// Reset wi_step_state
 	_, err = tx.Exec(ctx, `
@@ -699,8 +740,12 @@ func unblockDependentWI(ctx context.Context, tx pgx.Tx, wiID, project string) *A
 }
 
 // ForceTakeoverRequest is the parsed body for POST /v1/work_items/:id/force_takeover.
+// Carol-2 WALL-6: force_takeover includes implicit claim semantics; client supplies
+// session_info.session_secret so MCP server can persist it locally (Decision A:
+// secret never returns over HTTP).
 type ForceTakeoverRequest struct {
-	Reason string `json:"reason"`
+	Reason      string      `json:"reason"`
+	SessionInfo SessionInfo `json:"session_info"`
 }
 
 // ForceTakeoverResponse is returned by POST /v1/work_items/:id/force_takeover.
@@ -710,7 +755,9 @@ type ForceTakeoverResponse struct {
 	// H3: new attempt credentials — written to state file by MCP layer (never returned to LLM)
 	NewAttemptID    string `json:"new_attempt_id"`
 	NewClaimEpoch   int64  `json:"new_claim_epoch"`
-	NewSessionSecret string `json:"-"` // Decision A: never serialized to client
+	// NewSessionSecret is intentionally NOT in JSON (Decision A): the client supplied it
+	// in the request body and already knows the plaintext.
+	NewSessionSecret string `json:"-"`
 	OK              bool   `json:"ok"`
 }
 
@@ -797,23 +844,38 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		evtID, wi.ID, callerUserID, "", evtPayload, wi.Project,
 	) //nolint:errcheck
 
-	// H3: create new attempt immediately so caller doesn't need a separate /claim round-trip
+	// H3 + Decision A: use the session_secret supplied by the client.
+	// The client generated it before calling and wrote it to its local state file;
+	// returning a server-generated secret over JSON is impossible without breaking
+	// Decision A. Fall back to a server-generated secret only when the client omitted one
+	// (legacy callers / CLI which can't persist secrets).
 	newEpoch := wi.CurrentAttemptEpoch + 1
 	newAttemptID := NewID("ra")
-	newSecret, _ := generateSessionSecret()
+	newSecret := req.SessionInfo.SessionSecret
+	if newSecret == "" {
+		var genErr error
+		newSecret, genErr = generateSessionSecret()
+		if genErr != nil {
+			return nil, NewErr(ErrInternalError, "failed to generate session_secret")
+		}
+	}
 	newSecretHash := auth.HashSecret(newSecret)
+	machineID := req.SessionInfo.MachineID
+	if machineID == "" {
+		machineID = "force-takeover"
+	}
 	_, err2 = tx.Exec(ctx, `
 		INSERT INTO run_attempts (
 			id, work_item_id, status, claim_epoch, idempotency_key,
-			actor_user_id, api_key_id, actor_display, session_secret_hash,
+			actor_user_id, api_key_id, actor_display, machine_id, session_secret_hash,
 			parent_attempt_id, started_at, last_active_at
 		) VALUES (
 			$1, $2, 'running', $3, $4,
-			$5, '', $6, $7,
-			$8, clock_timestamp(), clock_timestamp()
+			$5, '', $6, $7, $8,
+			$9, clock_timestamp(), clock_timestamp()
 		)`,
 		newAttemptID, wi.ID, newEpoch, "force-takeover-"+newAttemptID,
-		callerUserID, callerDisplay, newSecretHash,
+		callerUserID, callerDisplay, machineID, newSecretHash,
 		priorID, // parent_attempt_id = superseded attempt
 	)
 	if err2 != nil {

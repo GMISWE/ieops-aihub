@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -58,7 +59,7 @@ func (s *Server) registerLifecycleTools() {
 		InputSchema: objectSchema(map[string]any{
 			"scenario": prop("string", "Scenario name"),
 			"content":  prop("object", "Updated config content"),
-			"version":  prop("string", "Current version for CAS"),
+			"version":  prop("integer", "Current version for CAS (int)"),
 		}, []string{"scenario", "content", "version"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -69,9 +70,24 @@ func (s *Server) registerLifecycleTools() {
 		if scenario == "" {
 			return errResult(fmt.Errorf("scenario is required"))
 		}
+		// version may arrive as float64 (MCP JSON), int, or string — coerce to int so the
+		// server's CAS check (UpdateScenarioConfigRequest.Version int) decodes correctly.
+		var versionInt int
+		switch v := args["version"].(type) {
+		case float64:
+			versionInt = int(v)
+		case int:
+			versionInt = v
+		case int64:
+			versionInt = int(v)
+		case string:
+			var n int
+			fmt.Sscanf(v, "%d", &n)
+			versionInt = n
+		}
 		body := map[string]any{
 			"content": args["content"],
-			"version": args["version"],
+			"version": versionInt,
 		}
 		result, err := s.client.UpdateScenarioConfig(ctx, scenario, body)
 		if err != nil {
@@ -266,11 +282,17 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(fmt.Errorf("write state file: %w", err))
 		}
 
-		// Build claim body
+		// Build claim body — server requires session_info.machine_id (FnClaimWorkItem 400 guard).
+		machineID := os.Getenv("POLYFORGE_MACHINE_ID")
+		if machineID == "" {
+			h, _ := os.Hostname()
+			machineID = h
+		}
 		body := map[string]any{
 			"idempotency_key": idemKey,
 			"session_info": map[string]any{
 				"session_secret": sessionSecret,
+				"machine_id":     machineID,
 			},
 		}
 		if mode := strArg(args, "mode"); mode != "" {
@@ -358,8 +380,9 @@ func (s *Server) registerLifecycleTools() {
 		}
 
 		body := map[string]any{
-			"status":       status,
-			"claim_epoch":  sf.ClaimEpoch,
+			"status":         status,
+			"attempt_id":     sf.AttemptID,
+			"claim_epoch":    sf.ClaimEpoch,
 			"session_secret": sf.SessionSecret,
 		}
 		if boolArg(args, "force_terminate_step") {
@@ -403,10 +426,16 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(fmt.Errorf("generate session_secret: %w", err))
 		}
 
+		machineID := os.Getenv("POLYFORGE_MACHINE_ID")
+		if machineID == "" {
+			h, _ := os.Hostname()
+			machineID = h
+		}
 		body := map[string]any{
 			"reason": strArg(args, "reason"),
 			"session_info": map[string]any{
 				"session_secret": sessionSecret,
+				"machine_id":     machineID,
 			},
 		}
 		result, err := s.client.ForceTakeover(ctx, id, body)
@@ -434,16 +463,14 @@ func (s *Server) registerLifecycleTools() {
 		}
 		_ = config.WriteStateFile(sf)
 
-		// Return result without session_secret
+		// Return result without session_secret.
+		// v1.21 ownership-only: no expires_at; do not surface that field.
 		safeResult := map[string]any{
 			"prior_attempt_id":    result["prior_attempt_id"],
 			"prior_actor_display": result["prior_actor_display"],
 			"new_attempt_id":      sf.AttemptID,
 			"new_claim_epoch":     sf.ClaimEpoch,
 			"ok":                  result["ok"],
-		}
-		if exp, ok := result["new_expires_at"]; ok {
-			safeResult["new_expires_at"] = exp
 		}
 		return jsonResult(safeResult)
 	})
@@ -528,6 +555,7 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
 		body := map[string]any{
+			"attempt_id":     sf.AttemptID,
 			"claim_epoch":    sf.ClaimEpoch,
 			"session_secret": sf.SessionSecret,
 		}
@@ -560,6 +588,7 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
 		body := map[string]any{
+			"attempt_id":     sf.AttemptID,
 			"claim_epoch":    sf.ClaimEpoch,
 			"session_secret": sf.SessionSecret,
 		}

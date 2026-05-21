@@ -50,19 +50,23 @@ type MemoryWithStrength struct {
 
 // RememberRequest is the body for POST /v1/memories.
 type RememberRequest struct {
-	Project         string          `json:"project"`
-	Type            string          `json:"type"`
-	Content         string          `json:"content"`
-	Visibility      string          `json:"visibility"`
-	WorkItemID      *string         `json:"work_item_id,omitempty"`
-	BaseStrength    *float64        `json:"base_strength,omitempty"`
-	Attrs           json.RawMessage `json:"attrs,omitempty"`
-	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
-	DedupMode       string          `json:"dedup_mode"` // strict | suggest | off
-	RelatedMemoryIDs []string       `json:"related_memory_ids,omitempty"`
-	ContextSnippet  *string         `json:"context_snippet,omitempty"`
-	SupersedesMemID *string         `json:"supersedes_memory_id,omitempty"`
-	Tags            []string        `json:"tags,omitempty"`
+	Project           string          `json:"project"`
+	Type              string          `json:"type"`
+	Content           string          `json:"content"`
+	Visibility        string          `json:"visibility"`
+	WorkItemID        *string         `json:"work_item_id,omitempty"`
+	BaseStrength      *float64        `json:"base_strength,omitempty"`
+	Attrs             json.RawMessage `json:"attrs,omitempty"`
+	ExpiresAt         *time.Time      `json:"expires_at,omitempty"`
+	DedupMode         string          `json:"dedup_mode"` // strict | suggest | off
+	RelatedMemoryIDs  []string        `json:"related_memory_ids,omitempty"`
+	ContextSnippet    *string         `json:"context_snippet,omitempty"`
+	SupersedesMemID   *string         `json:"supersedes_memory_id,omitempty"`
+	Tags              []string        `json:"tags,omitempty"`
+	// G35 / design §5.2 pf_save_artifact: methodology artifacts may carry a
+	// structured_payload (e.g. spec acceptance criteria). The server merges it
+	// into attrs.structured_payload so the recall flow can return it later.
+	StructuredPayload json.RawMessage `json:"structured_payload,omitempty"`
 	// Set by handler from Bearer token — not from JSON body.
 	CallerUserID  string `json:"-"`
 	CallerDisplay string `json:"-"`
@@ -169,15 +173,17 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		req.Visibility = "project"
 	}
 
-	// Dedup check (skip for "off" mode)
+	// Dedup check (skip for "off" mode).
+	// Design §7.7 / §11: strict mode rejects only at HIGH similarity (≥ 0.85);
+	// suggest mode annotates attrs.similar_to between LOW (0.65) and HIGH.
 	if req.DedupMode != "off" {
 		existing, err := textDedupCheck(ctx, pool, req.Project, req.Type, req.Content)
 		if err != nil {
 			return nil, false, err
 		}
 		if existing != nil {
-			if req.DedupMode == "strict" {
-				sim := jaccardSimilarity(req.Content, existing.Content)
+			sim := jaccardSimilarity(req.Content, existing.Content)
+			if req.DedupMode == "strict" && sim >= memoryDedupHigh {
 				return nil, false, NewErrDetails(ErrConflictSimilarMemory,
 					"similar memory already exists",
 					map[string]any{"existing": map[string]any{
@@ -188,7 +194,7 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 					}},
 				)
 			}
-			// suggest mode: annotate attrs with similar_to
+			// suggest mode (or strict-below-high): annotate attrs.similar_to
 			attrs := make(map[string]any)
 			if len(req.Attrs) > 0 {
 				json.Unmarshal(req.Attrs, &attrs) //nolint:errcheck
@@ -209,6 +215,27 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	}
 	if len(req.Attrs) == 0 {
 		req.Attrs = json.RawMessage(`{}`)
+	}
+
+	// G35: merge structured_payload / context_snippet / related_memory_ids into attrs
+	// so callers can retrieve them via Memory.attrs without losing data.
+	if len(req.StructuredPayload) > 0 || req.ContextSnippet != nil || len(req.RelatedMemoryIDs) > 0 {
+		attrsMap := map[string]any{}
+		_ = json.Unmarshal(req.Attrs, &attrsMap)
+		if len(req.StructuredPayload) > 0 {
+			var sp any
+			if jerr := json.Unmarshal(req.StructuredPayload, &sp); jerr == nil {
+				attrsMap["structured_payload"] = sp
+			}
+		}
+		if req.ContextSnippet != nil {
+			attrsMap["context_snippet"] = *req.ContextSnippet
+		}
+		if len(req.RelatedMemoryIDs) > 0 {
+			attrsMap["related_ids"] = req.RelatedMemoryIDs
+		}
+		merged, _ := json.Marshal(attrsMap)
+		req.Attrs = merged
 	}
 
 	// N1: if SupersedesMemID is set, archive the superseded memory first
@@ -266,7 +293,20 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	return mem, true, nil
 }
 
-// textDedupCheck checks for existing active memories with Jaccard similarity > 0.75.
+// Memory dedup thresholds per design §7.7 / §11:
+//   - High (≥ 0.85): treat as a duplicate match (strict mode → 409, suggest mode → annotate)
+//   - Low  (0.65 - 0.85): partial match, suggest mode → annotate; below low → ignore
+const (
+	memoryDedupHigh = 0.85
+	memoryDedupLow  = 0.65
+)
+
+// textDedupCheck returns the highest-similarity active memory whose Jaccard
+// similarity with `content` is ≥ memoryDedupLow (0.65). The caller decides
+// whether to error (strict) or annotate (suggest) based on `dedup_mode` and the
+// returned similarity score (compared against memoryDedupHigh / memoryDedupLow).
+//
+// Returns (nil, nil) when no candidate exceeds the low threshold.
 func textDedupCheck(ctx context.Context, pool *pgxpool.Pool, project, memType, content string) (*Memory, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT id, type, content
@@ -292,12 +332,22 @@ func textDedupCheck(ctx context.Context, pool *pgxpool.Pool, project, memType, c
 	}
 	rows.Close()
 
-	for _, c := range candidates {
-		if jaccardSimilarity(content, c.Content) > 0.75 {
-			return &Memory{ID: c.ID, Type: c.Type, Content: c.Content}, nil
+	// Pick the single highest-similarity candidate above the low threshold,
+	// so the caller can compare against the high threshold itself.
+	var best *Memory
+	bestSim := 0.0
+	for i := range candidates {
+		sim := jaccardSimilarity(content, candidates[i].Content)
+		if sim >= memoryDedupLow && sim > bestSim {
+			best = &Memory{
+				ID:      candidates[i].ID,
+				Type:    candidates[i].Type,
+				Content: candidates[i].Content,
+			}
+			bestSim = sim
 		}
 	}
-	return nil, nil
+	return best, nil
 }
 
 // jaccardSimilarity computes word-level Jaccard similarity.

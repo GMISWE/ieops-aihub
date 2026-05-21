@@ -84,13 +84,17 @@ func RunCompleteAttempt(ctx context.Context, c *client.Client, wsRoot string, ar
 	}
 
 	// Optionally emit a note event before completing.
+	// The server's EmitEvent path requires the full attempt credential
+	// (attempt_id + claim_epoch + session_secret) when work_item_id+attempt_id are set.
 	if reason != "" {
 		noteBody := map[string]any{
-			"work_item_id": wiID,
-			"attempt_id":   sf.AttemptID,
-			"event_type":   "note",
-			"pinned":       false,
-			"payload":      map[string]any{"text": reason},
+			"work_item_id":   wiID,
+			"attempt_id":     sf.AttemptID,
+			"claim_epoch":    sf.ClaimEpoch,
+			"session_secret": sf.SessionSecret,
+			"event_type":     "note",
+			"pinned":         false,
+			"payload":        map[string]any{"text": reason},
 		}
 		if _, err := c.EmitEvent(ctx, noteBody); err != nil {
 			// Non-fatal: log but continue.
@@ -98,7 +102,10 @@ func RunCompleteAttempt(ctx context.Context, c *client.Client, wsRoot string, ar
 		}
 	}
 
+	// CompleteAttemptRequest requires attempt_id + claim_epoch + session_secret + status
+	// (see domain.CompleteAttemptRequest). Without attempt_id the credential check fails.
 	body := map[string]any{
+		"attempt_id":     sf.AttemptID,
 		"claim_epoch":    sf.ClaimEpoch,
 		"session_secret": sf.SessionSecret,
 		"status":         status,

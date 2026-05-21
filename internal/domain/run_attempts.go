@@ -128,7 +128,10 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	}
 	wi.Labels = labelsRaw
 
-	// Check idempotency: if this key was already used for this wi, return cached response
+	// Check idempotency: if this key was already used for this wi, return cached response.
+	// G3 fix (design §7): on idem hit, re-query the live resource_locks for that attempt
+	// and recompute step_recovery_hint so callers (state-file writers) get the same shape
+	// as a fresh claim, not a phantom empty AcquiredLocks slice.
 	var existingAttemptID string
 	var existingEpoch int64
 	idemErr := tx.QueryRow(ctx,
@@ -136,15 +139,45 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		wi.ID, req.IdempotencyKey,
 	).Scan(&existingAttemptID, &existingEpoch)
 	if idemErr == nil {
-		// Idempotent: return existing attempt (best effort — locks may have changed)
+		// Re-query the locks held by the existing attempt.
+		existingLocks := []ResourceLock{}
+		lockRows, lockQErr := tx.Query(ctx,
+			`SELECT resource_type, resource_key, owner_attempt_id, claim_epoch
+			 FROM resource_locks WHERE owner_attempt_id=$1`, existingAttemptID)
+		if lockQErr == nil {
+			for lockRows.Next() {
+				var l ResourceLock
+				if scanErr := lockRows.Scan(&l.ResourceType, &l.ResourceKey, &l.OwnerAttemptID, &l.ClaimEpoch); scanErr == nil {
+					existingLocks = append(existingLocks, l)
+				}
+			}
+			lockRows.Close()
+		}
+
+		// Recompute step_recovery_hint identically to the fresh path.
+		idemHint := "clean"
+		var idemStepStatus string
+		var idemStepStartedAt *time.Time
+		stepErr := tx.QueryRow(ctx, `
+			SELECT current_step_status, step_started_at FROM wi_step_state WHERE work_item_id=$1`, wi.ID,
+		).Scan(&idemStepStatus, &idemStepStartedAt)
+		if stepErr == nil && idemStepStatus == "in_progress" {
+			if idemStepStartedAt != nil && time.Since(*idemStepStartedAt) < 15*time.Second {
+				idemHint = "active_in_progress_conflict"
+			} else {
+				idemHint = "crashed_in_progress"
+			}
+		}
+
 		if err := tx.Commit(ctx); err != nil {
 			return nil, NewErr(ErrInternalError, "failed to commit idempotent claim")
 		}
 		return &ClaimResponse{
 			AttemptID:            existingAttemptID,
 			ClaimEpoch:           existingEpoch,
-			AcquiredLocks:        []ResourceLock{},
+			AcquiredLocks:        existingLocks,
 			CurrentAttemptEpoch:  existingEpoch,
+			StepRecoveryHint:     idemHint,
 			RequiresHumanSession: wi.RequiresHumanSession,
 			WIType:               wi.WIType,
 		}, nil

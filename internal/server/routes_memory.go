@@ -34,6 +34,7 @@ func RegisterMemoryRoutes(v1 *echo.Group, pool *pgxpool.Pool) {
 	v1.GET("/memories", handleRecall(pool))
 	v1.POST("/memories/:id/activate", handleActivateMemory(pool))
 	v1.PATCH("/memories/:id/redact", handleRedactMemory(pool))
+	v1.PATCH("/memories/:id/reinforce", handleReinforceMemory(pool))
 
 	// Events (§4.3) — POST is write; GET is read
 	v1.POST("/events", handleEmitEvent(pool))
@@ -339,6 +340,47 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 }
 
 // ─── Admin GC Trigger ─────────────────────────────────────────────────────────
+
+// handleReinforceMemory handles PATCH /v1/memories/:id/reinforce.
+// Merges additional_content into an existing memory (dedup_mode=merge + supersedes).
+func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		memID := c.Param("id")
+		var req struct {
+			Body       string `json:"body"`        // updated body
+			Project    string `json:"project"`
+			Type       string `json:"type"`
+			Visibility string `json:"visibility"`
+		}
+		if err := c.Bind(&req); err != nil {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, err.Error()))
+		}
+		if req.Project != "" {
+			if err := checkProjectAccess(c, u, req.Project, "writer"); err != nil {
+				return err
+			}
+		}
+		// Remember with dedup_mode=merge supersedes the existing memory
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+		rr := &domain.RememberRequest{
+			Project:         req.Project,
+			Type:            req.Type,
+			Content:         req.Body,
+			Visibility:      req.Visibility,
+			DedupMode:       "suggest",
+			SupersedesMemID: &memID,
+			CallerUserID:    u.UserID,
+			CallerDisplay:   u.DisplayName,
+		}
+		result, _, err := domain.Remember(ctx, pool, rr)
+		if err != nil {
+			return domainErr(c, err)
+		}
+		return c.JSON(http.StatusOK, result)
+	}
+}
 
 // handleRunGC handles POST /v1/admin/gc (admin only).
 // Runs all GC sweeps and returns a summary.

@@ -84,15 +84,15 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			if lockType == "" {
 				continue
 			}
-			var ownerAttemptID, actorDisplay, wiSlug string
+			var ownerAttemptID, actorDisplay, wiSlug, wiID string
 			err := pool.QueryRow(ctx, `
-				SELECT rl.owner_attempt_id, ra.actor_display, wi.slug
+				SELECT rl.owner_attempt_id, ra.actor_display, wi.slug, wi.id
 				FROM resource_locks rl
 				JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
 				JOIN work_items wi ON wi.id = ra.work_item_id
 				WHERE rl.resource_type=$1 AND rl.resource_key=$2 AND ra.status='running'`,
 				lockType, lockKey,
-			).Scan(&ownerAttemptID, &actorDisplay, &wiSlug)
+			).Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID)
 			if err == nil {
 				result.Predictions = append(result.Predictions, ConflictPrediction{
 					Rule:         1,
@@ -103,6 +103,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 					AttemptID:    ownerAttemptID,
 					ActorDisplay: actorDisplay,
 					WISlug:       wiSlug,
+					WIID:         wiID,
 				})
 				result.Severity = SeverityHardBlock
 				return result, nil // hard_block: stop processing further rules
@@ -117,7 +118,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		}
 		repoName := strings.TrimPrefix(res.URI, "repo:")
 		rows, err := pool.Query(ctx, `
-			SELECT rl.owner_attempt_id, ra.actor_display, wi.slug
+			SELECT rl.owner_attempt_id, ra.actor_display, wi.slug, wi.id
 			FROM resource_locks rl
 			JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
 			JOIN work_items wi ON wi.id = ra.work_item_id
@@ -128,8 +129,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		)
 		if err == nil {
 			for rows.Next() {
-				var ownerAttemptID, actorDisplay, wiSlug string
-				if err := rows.Scan(&ownerAttemptID, &actorDisplay, &wiSlug); err != nil {
+				var ownerAttemptID, actorDisplay, wiSlug, wiID string
+				if err := rows.Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID); err != nil {
 					continue
 				}
 				result.Predictions = append(result.Predictions, ConflictPrediction{
@@ -140,6 +141,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 					AttemptID:    ownerAttemptID,
 					ActorDisplay: actorDisplay,
 					WISlug:       wiSlug,
+					WIID:         wiID,
 				})
 				if result.Severity != SeverityHardBlock {
 					result.Severity = SeveritySoftBlock
@@ -157,7 +159,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		uri := res.URI
 		lockKey := fileURIToLockKey(uri)
 		rows, err := pool.Query(ctx, `
-			SELECT rl.resource_key, ra.actor_display, wi.slug
+			SELECT rl.resource_key, ra.actor_display, wi.slug, wi.id
 			FROM resource_locks rl
 			JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
 			JOIN work_items wi ON wi.id = ra.work_item_id
@@ -166,8 +168,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		)
 		if err == nil {
 			for rows.Next() {
-				var existingKey, actorDisplay, wiSlug string
-				if err := rows.Scan(&existingKey, &actorDisplay, &wiSlug); err != nil {
+				var existingKey, actorDisplay, wiSlug, wiID string
+				if err := rows.Scan(&existingKey, &actorDisplay, &wiSlug, &wiID); err != nil {
 					continue
 				}
 				if globOverlap(lockKey, existingKey) {
@@ -183,6 +185,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 						ResourceKey:  existingKey,
 						ActorDisplay: actorDisplay,
 						WISlug:       wiSlug,
+						WIID:         wiID,
 					})
 					if result.Severity != SeverityHardBlock && severity == SeveritySoftBlock {
 						result.Severity = SeveritySoftBlock
@@ -200,7 +203,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		}
 		repoName := strings.TrimPrefix(res.URI, "repo:")
 		rows, err := pool.Query(ctx, `
-			SELECT ra.actor_display, wi.slug
+			SELECT ra.actor_display, wi.slug, wi.id
 			FROM work_items wi
 			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
 			WHERE wi.status='running'
@@ -209,8 +212,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		)
 		if err == nil {
 			for rows.Next() {
-				var actorDisplay, wiSlug string
-				if err := rows.Scan(&actorDisplay, &wiSlug); err != nil {
+				var actorDisplay, wiSlug, wiID string
+				if err := rows.Scan(&actorDisplay, &wiSlug, &wiID); err != nil {
 					continue
 				}
 				result.Predictions = append(result.Predictions, ConflictPrediction{
@@ -236,7 +239,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			continue
 		}
 		rows, err := pool.Query(ctx, `
-			SELECT ra.actor_display, wi.slug
+			SELECT ra.actor_display, wi.slug, wi.id
 			FROM work_items wi
 			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
 			WHERE wi.status='running'
@@ -245,8 +248,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		)
 		if err == nil {
 			for rows.Next() {
-				var actorDisplay, wiSlug string
-				if err := rows.Scan(&actorDisplay, &wiSlug); err != nil {
+				var actorDisplay, wiSlug, wiID string
+				if err := rows.Scan(&actorDisplay, &wiSlug, &wiID); err != nil {
 					continue
 				}
 				result.Predictions = append(result.Predictions, ConflictPrediction{

@@ -55,6 +55,9 @@ func NewRouter(pool *pgxpool.Pool) *echo.Echo {
 	admin.POST("/users/:id/keys", handleCreateAPIKey(pool))
 	admin.DELETE("/users/:id/keys/:key_id", handleRevokeAPIKey(pool))
 
+	// Round 2b: memories, events, scenario configs, GC
+	RegisterMemoryRoutes(v1, pool)
+
 	return e
 }
 

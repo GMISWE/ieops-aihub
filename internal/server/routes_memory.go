@@ -151,11 +151,24 @@ func handleRemember(pool *pgxpool.Pool) echo.HandlerFunc {
 		req.CallerUserID = u.UserID
 		req.CallerDisplay = u.DisplayName
 
-		mem, _, aihubErr := domain.Remember(ctx, pool, &req)
+		mem, isNew, aihubErr := domain.Remember(ctx, pool, &req)
 		if aihubErr != nil {
 			return domainErr(c, aihubErr)
 		}
-		return c.JSON(http.StatusCreated, map[string]string{"memory_id": mem.ID})
+		// Return full memory object per design §4.3 + is_new flag
+		resp := map[string]any{
+			"id":               mem.ID,
+			"memory_id":        mem.ID, // alias for backward compat
+			"is_new":           isNew,
+			"type":             mem.Type,
+			"project":          mem.Project,
+			"visibility":       mem.Visibility,
+			"activation_count": mem.ActivationCount,
+			"stability_days":   mem.StabilityDays,
+			"base_strength":    mem.BaseStrength,
+			"created_at":       mem.CreatedAt,
+		}
+		return c.JSON(http.StatusCreated, resp)
 	}
 }
 

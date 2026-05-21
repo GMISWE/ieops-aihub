@@ -4,6 +4,7 @@ package integration_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -20,7 +21,7 @@ func TestSameUserForceTakeover(t *testing.T) {
 
 	// 1. Create a chore wi (requires_human_session=false)
 	wiID := mustCreateWorkItem(t, c, ctx, map[string]any{
-		"goal":     "Force takeover test: same user, different machine",
+		"goal":     fmt.Sprintf("Force takeover test: %d", time.Now().UnixNano()),
 		"project":  testProject,
 		"scenario": "coding",
 		"wi_type":  "chore",
@@ -59,17 +60,19 @@ func TestSameUserForceTakeover(t *testing.T) {
 	}
 
 	// 6. Multiple sequential takeovers must each increment epoch
+	si3 := newSessionInfo()
 	claim3, err := c.ClaimWorkItem(ctx, wiID, map[string]any{
 		"idempotency_key": "takeover-machine-C-001",
 		"session_info": map[string]any{
 			"machine_id":     "test-machine-003",
-			"session_secret": newSessionInfo()["session_secret"],
+			"session_secret": si3["session_secret"],
 		},
 		"mode": "fresh",
 	})
 	if err != nil {
 		t.Fatalf("third takeover should succeed: %v", err)
 	}
+	claim3["session_secret"] = si3["session_secret"]
 	epoch3 := int64(claim3["claim_epoch"].(float64))
 	if epoch3 != epoch2+1 {
 		t.Errorf("expected epoch3=%d (epoch2+1), got %d", epoch2+1, epoch3)

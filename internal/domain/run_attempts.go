@@ -423,6 +423,14 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		return nil, NewErr(ErrInternalError, "failed to update work_item status")
 	}
 
+	// Bug fix: read step state BEFORE the upsert resets it to idle.
+	// The hint must reflect what the prior attempt left behind, not the post-reset state.
+	var priorStepStatus string
+	var priorStepStartedAt *time.Time
+	priorStepErr := tx.QueryRow(ctx,
+		`SELECT current_step_status, step_started_at FROM wi_step_state WHERE work_item_id=$1`, wi.ID,
+	).Scan(&priorStepStatus, &priorStepStartedAt)
+
 	// Upsert wi_step_state (C-R7-9: INSERT ... ON CONFLICT DO UPDATE)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO wi_step_state (work_item_id, wi_type, graph_source, current_step, current_step_status)
@@ -489,17 +497,14 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		evtID, wi.ID, newAttemptID, callerUserID, callerDisplay, callerAPIKeyID, evtPayload, wi.Project,
 	) //nolint:errcheck
 
-	// Determine step_recovery_hint
+	// Determine step_recovery_hint from the state we read BEFORE the reset upsert.
+	// (Reading post-upsert would always return idle — that was the original bug.)
 	stepRecoveryHint := "clean"
-	var stepStatus string
-	var stepStartedAt *time.Time
-	stepErr := tx.QueryRow(ctx, `
-		SELECT current_step_status, step_started_at FROM wi_step_state WHERE work_item_id=$1`, wi.ID,
-	).Scan(&stepStatus, &stepStartedAt)
-	if stepErr == nil && stepStatus == "in_progress" {
+	if priorStepErr == nil && priorStepStatus == "in_progress" {
 		if isTakeover {
-			// For takeover, check if step is freshly in_progress (< 15s)
-			if stepStartedAt != nil && time.Since(*stepStartedAt) < 15*time.Second {
+			// For takeover: step was freshly started by the prior attempt (< 15s) → conflict
+			// vs. genuinely crashed (≥ 15s) → recommend re-running
+			if priorStepStartedAt != nil && time.Since(*priorStepStartedAt) < 15*time.Second {
 				stepRecoveryHint = "active_in_progress_conflict"
 			} else {
 				stepRecoveryHint = "crashed_in_progress"

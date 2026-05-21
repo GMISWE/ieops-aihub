@@ -211,18 +211,25 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		req.Attrs = json.RawMessage(`{}`)
 	}
 
+	// N1: if SupersedesMemID is set, archive the superseded memory first
+	if req.SupersedesMemID != nil && *req.SupersedesMemID != "" {
+		pool.Exec(ctx, `
+			UPDATE memories SET status='archived', updated_at=clock_timestamp()
+			WHERE id=$1 AND status='active'`, *req.SupersedesMemID) //nolint:errcheck
+	}
+
 	mem := &Memory{}
 	err := pool.QueryRow(ctx, `
 		INSERT INTO memories (
 			id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			activation_count, expires_at, tags, source_artifact_id,
-			status, attrs, created_at, updated_at
+			status, attrs, supersedes_id, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11,
 			0, $12, $13, $14,
-			'active', $15, clock_timestamp(), clock_timestamp()
+			'active', $15, $16, clock_timestamp(), clock_timestamp()
 		)
 		RETURNING id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
@@ -231,7 +238,7 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		NewID("mem"), req.Project, req.Type, req.Content, req.CallerUserID, req.CallerDisplay,
 		req.WorkItemID, req.Visibility, immortal, baseStrength, stabilityDays,
 		req.ExpiresAt, req.Tags, nil, // source_artifact_id = nil
-		req.Attrs,
+		req.Attrs, req.SupersedesMemID,
 	).Scan(
 		&mem.ID, &mem.Project, &mem.Type, &mem.Content, &mem.AuthorUserID, &mem.AuthorDisplay,
 		&mem.WorkItemID, &mem.Visibility, &mem.IsImmortal, &mem.BaseStrength, &mem.StabilityDays,

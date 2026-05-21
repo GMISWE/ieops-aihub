@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	cryptoRand "crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GMISWE/ieops-aihub/internal/auth"
 )
 
 
@@ -293,18 +296,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			return nil, NewErr(ErrInternalError, "failed to delete prior attempt locks")
 		}
 
-		// Emit attempt_superseded event
-		supEvtID := NewID("evt")
-		supPayload, _ := json.Marshal(map[string]any{
-			"superseded_by_attempt_id": "pending", // will be filled after insert
-			"reason":                  "force_takeover by same user or explicit takeover",
-			"actor_user_id":           callerUserID,
-		})
-		tx.Exec(ctx, `
-			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
-			VALUES ($1, $2, $3, $4, 'attempt_superseded', $5, $6)`,
-			supEvtID, wi.ID, callerUserID, callerDisplay, supPayload, wi.Project,
-		) //nolint:errcheck
+		// N5: supersede event emitted after new attempt INSERT (see below)
 	}
 
 	// Calculate new claim_epoch = current_attempt_epoch + 1
@@ -328,6 +320,21 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to insert run_attempt: %v", err))
+	}
+
+	// N5: emit attempt_superseded event now that we have the real newAttemptID
+	if isTakeover && priorAttemptID != "" {
+		supEvtID := NewID("evt")
+		supPayload, _ := json.Marshal(map[string]any{
+			"superseded_by_attempt_id": newAttemptID,
+			"reason":                  "claim by same user or explicit takeover",
+			"actor_user_id":           callerUserID,
+		})
+		tx.Exec(ctx, `
+			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
+			VALUES ($1, $2, $3, $4, 'attempt_superseded', $5, $6)`,
+			supEvtID, wi.ID, callerUserID, callerDisplay, supPayload, wi.Project,
+		) //nolint:errcheck
 	}
 
 	// Insert resource_locks for requested locks
@@ -546,10 +553,13 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 		return NewErr(ErrInternalError, "failed to update run_attempt status")
 	}
 
-	// Delete resource_locks for this attempt (on wrapped/failed, locks released; on paused too)
-	_, err = tx.Exec(ctx, `DELETE FROM resource_locks WHERE owner_attempt_id=$1`, req.AttemptID)
-	if err != nil {
-		return NewErr(ErrInternalError, "failed to release resource locks")
+	// N4: on paused, keep resource_locks so resume can reclaim them (C5-3 design invariant)
+	// on wrapped/failed: release locks
+	if req.Status != "paused" {
+		_, err = tx.Exec(ctx, `DELETE FROM resource_locks WHERE owner_attempt_id=$1`, req.AttemptID)
+		if err != nil {
+			return NewErr(ErrInternalError, "failed to release resource locks")
+		}
 	}
 
 	// Update work_item status
@@ -697,7 +707,11 @@ type ForceTakeoverRequest struct {
 type ForceTakeoverResponse struct {
 	PriorAttemptID    string `json:"prior_attempt_id"`
 	PriorActorDisplay string `json:"prior_actor_display"`
-	OK                bool   `json:"ok"`
+	// H3: new attempt credentials — written to state file by MCP layer (never returned to LLM)
+	NewAttemptID    string `json:"new_attempt_id"`
+	NewClaimEpoch   int64  `json:"new_claim_epoch"`
+	NewSessionSecret string `json:"-"` // Decision A: never serialized to client
+	OK              bool   `json:"ok"`
 }
 
 // FnForceTakeover implements the force_takeover operation (H-R7-4).
@@ -783,11 +797,35 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		evtID, wi.ID, callerUserID, "", evtPayload, wi.Project,
 	) //nolint:errcheck
 
-	// Update work_item to paused so caller can re-claim
+	// H3: create new attempt immediately so caller doesn't need a separate /claim round-trip
+	newEpoch := wi.CurrentAttemptEpoch + 1
+	newAttemptID := NewID("ra")
+	newSecret, _ := generateSessionSecret()
+	newSecretHash := auth.HashSecret(newSecret)
 	_, err2 = tx.Exec(ctx, `
-		UPDATE work_items SET status='paused', current_attempt_id=NULL WHERE id=$1`, wi.ID)
+		INSERT INTO run_attempts (
+			id, work_item_id, status, claim_epoch, idempotency_key,
+			actor_user_id, api_key_id, actor_display, session_secret_hash,
+			parent_attempt_id, started_at, last_active_at
+		) VALUES (
+			$1, $2, 'running', $3, $4,
+			$5, '', $6, $7,
+			$8, clock_timestamp(), clock_timestamp()
+		)`,
+		newAttemptID, wi.ID, newEpoch, "force-takeover-"+newAttemptID,
+		callerUserID, callerTakeoverDisplay(callerProjectRoles, callerUserID), newSecretHash,
+		priorID, // parent_attempt_id = superseded attempt
+	)
 	if err2 != nil {
-		return nil, NewErr(ErrInternalError, "failed to set work_item to paused")
+		return nil, NewErr(ErrInternalError, "failed to create new attempt after force_takeover")
+	}
+
+	// Update work_item to running with new attempt
+	_, err2 = tx.Exec(ctx, `
+		UPDATE work_items SET status='running', current_attempt_id=$1, current_attempt_epoch=$2 WHERE id=$3`,
+		newAttemptID, newEpoch, wi.ID)
+	if err2 != nil {
+		return nil, NewErr(ErrInternalError, "failed to update work_item after force_takeover")
 	}
 
 	if err2 = tx.Commit(ctx); err2 != nil {
@@ -797,8 +835,24 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	return &ForceTakeoverResponse{
 		PriorAttemptID:    priorID,
 		PriorActorDisplay: currentActorDisplay,
+		NewAttemptID:      newAttemptID,
+		NewClaimEpoch:     newEpoch,
+		NewSessionSecret:  newSecret,
 		OK:                true,
 	}, nil
+}
+
+func callerTakeoverDisplay(roles map[string]string, userID string) string {
+	return userID
+}
+
+// generateSessionSecret returns (plaintext, nil) for a new 32-byte session secret.
+func generateSessionSecret() (string, error) {
+	b := make([]byte, 32)
+	if _, err := cryptoRand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // verifyAttemptCredential validates attempt_id, claim_epoch, and session_secret
@@ -849,5 +903,24 @@ func verifyAttemptCredential(ctx context.Context, tx pgx.Tx, wi WorkItem, attemp
 	// 6. Update last_active_at (heartbeat)
 	tx.Exec(ctx, `UPDATE run_attempts SET last_active_at=clock_timestamp() WHERE id=$1`, attemptID) //nolint:errcheck
 
+	return nil
+}
+
+// VerifyAttemptCredentialPool is the exported pool-based variant used by HTTP handlers
+// that don't yet have an open transaction (e.g. step routes).
+func VerifyAttemptCredentialPool(ctx context.Context, pool *pgxpool.Pool, wiID, attemptID string, claimEpoch int64, sessionSecret string) *AihubError {
+	wi, aihubErr := GetWorkItem(ctx, pool, wiID)
+	if aihubErr != nil {
+		return aihubErr
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return NewErr(ErrInternalError, "failed to begin verification tx")
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if aihubErr = verifyAttemptCredential(ctx, tx, *wi, attemptID, claimEpoch, sessionSecret); aihubErr != nil {
+		return aihubErr
+	}
+	tx.Commit(ctx) //nolint:errcheck
 	return nil
 }

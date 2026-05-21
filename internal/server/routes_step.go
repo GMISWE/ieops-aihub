@@ -91,6 +91,16 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
+		// N3: verify AttemptCredential — session_secret must match the active attempt
+		if req.AttemptID != "" && req.SessionSecret != "" {
+			if credErr := domain.VerifyAttemptCredentialPool(
+				c.Request().Context(), pool, wiID,
+				req.AttemptID, req.ClaimEpoch, req.SessionSecret,
+			); credErr != nil {
+				return writeError(c, credErr)
+			}
+		}
+
 		if req.Heartbeat {
 			pool.Exec(c.Request().Context(), `
 				UPDATE wi_step_state SET step_started_at = clock_timestamp(), updated_at = clock_timestamp()

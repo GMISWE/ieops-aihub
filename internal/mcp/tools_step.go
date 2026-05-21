@@ -46,7 +46,7 @@ func (s *Server) registerStepTools() {
 			"error_type":       prop("string", "Error type (for failed status)"),
 			"escalated":        prop("boolean", "Whether to escalate the failure"),
 			"expected_version": prop("string", "Expected step state version (for optimistic locking)"),
-		}, []string{"work_item_id", "step_id", "status", "expected_version"}),
+		}, []string{"work_item_id", "step_id", "status"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -62,10 +62,6 @@ func (s *Server) registerStepTools() {
 		if strArg(args, "status") == "" {
 			return errResult(fmt.Errorf("status is required"))
 		}
-		if strArg(args, "expected_version") == "" {
-			return errResult(fmt.Errorf("expected_version is required"))
-		}
-
 		// Inject credentials from state file
 		sf, err := config.ReadStateFile(wiID)
 		if err != nil {
@@ -73,7 +69,7 @@ func (s *Server) registerStepTools() {
 		}
 
 		body := map[string]any{
-			"step_id":          strArg(args, "step_id"),
+			"step":             strArg(args, "step_id"),  // server reads json:"step"
 			"status":           strArg(args, "status"),
 			"attempt_id":       sf.AttemptID,
 			"claim_epoch":      sf.ClaimEpoch,

@@ -157,9 +157,9 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				// Completion-row insert is best-effort; primary state change above
 				// has already succeeded.
 				tx.Exec(c.Request().Context(), `
-					INSERT INTO wi_step_completions (work_item_id, run_attempt_id, step_attempt_id, step_id, status)
-					VALUES ($1, $2, $3, $4, 'completed')`,
-					wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep)) //nolint:errcheck
+					INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status)
+					VALUES ($1, $2, $3, $4, $5, 'completed')`,
+					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep)) //nolint:errcheck
 			}
 			eventType = "step_completed"
 		case "failed":
@@ -173,9 +173,9 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			if req.StepAttemptID != nil {
 				// Best-effort row; failure marker has already been written above.
 				tx.Exec(c.Request().Context(), `
-					INSERT INTO wi_step_completions (work_item_id, run_attempt_id, step_attempt_id, step_id, status)
-					VALUES ($1, $2, $3, $4, 'failed')`,
-					wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep)) //nolint:errcheck
+					INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status)
+					VALUES ($1, $2, $3, $4, $5, 'failed')`,
+					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep)) //nolint:errcheck
 			}
 			eventType = "step_failed"
 		default:

@@ -2,7 +2,7 @@
 
 CREATE TABLE wi_step_state (
     work_item_id           TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE,
-    wi_type                TEXT NOT NULL,
+    wi_type                TEXT,
     -- graph_source (v1.23 update):
     --   'scenario_config'  = read from scenario_phase_configs[wi.scenario] (standard path)
     --   'scenario_default' = scenario built-in default graph (fallback when scenario_phase_configs empty)

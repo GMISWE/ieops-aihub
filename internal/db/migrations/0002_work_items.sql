@@ -79,13 +79,14 @@ CREATE INDEX idx_wi_parent ON work_items(parent_work_item_id) WHERE parent_work_
 CREATE INDEX idx_wi_closed ON work_items(closed_at) WHERE closed_at IS NOT NULL;
 
 -- Trigger: auto-update updated_at
+-- +goose StatementBegin
 CREATE OR REPLACE FUNCTION fn_wi_updated_at() RETURNS trigger AS $$
 BEGIN
     NEW.updated_at = clock_timestamp();
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-
+-- +goose StatementEnd
 CREATE TRIGGER trg_wi_updated_at
     BEFORE UPDATE ON work_items
     FOR EACH ROW EXECUTE FUNCTION fn_wi_updated_at();
@@ -99,6 +100,7 @@ CREATE TRIGGER trg_wi_updated_at
 --   d. emits wi_goal_updated event {old_goal, new_goal, reason, changed_by}
 
 -- Trigger: auto-set closed_at on terminal status transitions
+-- +goose StatementBegin
 CREATE OR REPLACE FUNCTION fn_wi_closed_at() RETURNS trigger AS $$
 BEGIN
     IF NEW.status IN ('wrapped', 'failed', 'cancelled')
@@ -108,7 +110,7 @@ BEGIN
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-
+-- +goose StatementEnd
 CREATE TRIGGER trg_wi_closed_at
     BEFORE UPDATE OF status ON work_items
     FOR EACH ROW EXECUTE FUNCTION fn_wi_closed_at();

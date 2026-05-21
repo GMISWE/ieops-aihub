@@ -23,6 +23,7 @@ INSERT INTO scenario_phase_configs (scenario, content, version, updated_by) VALU
     "classification_rules": [
       {"priority": "urgent", "wi_type_prefix": "critical", "set": {"wi_type": "critical_bug", "requires_human_session": true}},
       {"priority": "normal", "wi_type_prefix": "fix", "set": {"wi_type": "fix_bug", "requires_human_session": false}},
+      {"priority": "normal", "wi_type_prefix": "feature", "set": {"wi_type": "feature", "requires_human_session": true}},
       {"priority": "normal", "wi_type_prefix": "chore", "set": {"wi_type": "chore", "requires_human_session": false}}
     ]
   }',

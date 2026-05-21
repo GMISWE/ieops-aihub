@@ -32,7 +32,14 @@ CREATE TABLE agent_events (
     -- misc: note, decision, wi_zombied, wi_stalled, wi_goal_updated
     payload        JSONB NOT NULL DEFAULT '{}',
                    -- H14: 64KB limit enforced by server middleware
-    pinned         BOOLEAN NOT NULL DEFAULT FALSE
+    pinned         BOOLEAN NOT NULL DEFAULT FALSE,
+    -- C2: lifecycle events (attempt_started, commit, etc.) must have a work_item_id;
+    -- only global system events may have work_item_id=NULL
+    CONSTRAINT chk_evt_work_item_id CHECK (
+        work_item_id IS NOT NULL
+        OR event_type IN ('phase_config_updated', 'admin_redact', 'admin_unblock',
+                          'system_gc', 'system_force_takeover', 'memory_gc')
+    )
 ) PARTITION BY RANGE (created_at);
 
 -- Initial partition (created by GC job going forward, pre-create first two months)
@@ -40,6 +47,14 @@ CREATE TABLE agent_events_2026_05 PARTITION OF agent_events
     FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
 CREATE TABLE agent_events_2026_06 PARTITION OF agent_events
     FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
+CREATE TABLE agent_events_2026_07 PARTITION OF agent_events
+    FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
+CREATE TABLE agent_events_2026_08 PARTITION OF agent_events
+    FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
+CREATE TABLE agent_events_2026_09 PARTITION OF agent_events
+    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+CREATE TABLE agent_events_2026_10 PARTITION OF agent_events
+    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
 -- H13: GC job (daily tick) creates partitions 60 days ahead to prevent
 -- month-boundary write failures. See §15 GC task list.
 
@@ -52,6 +67,23 @@ CREATE INDEX idx_evt_pinned ON agent_events(work_item_id) WHERE pinned = TRUE;
 CREATE INDEX idx_evt_type_time ON agent_events(event_type, created_at DESC);
 CREATE INDEX idx_evt_step ON agent_events(work_item_id, event_type, created_at DESC)
     WHERE event_type LIKE 'step_%';
+
+-- C1: auto-fill agent_events.project from work_items when project is NULL on INSERT
+-- Applied to parent table; propagates to all range partitions automatically.
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION fn_evt_project_fill() RETURNS trigger AS $$
+BEGIN
+    IF NEW.work_item_id IS NOT NULL AND NEW.project IS NULL THEN
+        SELECT wi.project INTO NEW.project
+        FROM work_items wi WHERE wi.id = NEW.work_item_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+-- +goose StatementEnd
+CREATE TRIGGER trg_evt_project_fill
+    BEFORE INSERT ON agent_events
+    FOR EACH ROW EXECUTE FUNCTION fn_evt_project_fill();
 
 -- memories: knowledge base with forgetting curve + activation mechanism
 -- B1: memory_embeddings table merged into memories (1:1, eliminates JOIN)
@@ -123,6 +155,7 @@ CREATE INDEX idx_mem_activation ON memories(last_activated_at)
 
 -- C-R3-2/C-R3-3: is_immortal + stability_days + expires_at forced by type
 -- Decision: fact.* slow decay (180d) not immortal; rule.* immortal; methodology.* bound to wi lifecycle
+-- +goose StatementBegin
 CREATE OR REPLACE FUNCTION fn_mem_immortal() RETURNS trigger AS $$
 BEGIN
     IF NEW.type LIKE 'rule.%' THEN
@@ -143,7 +176,7 @@ BEGIN
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-
+-- +goose StatementEnd
 CREATE TRIGGER trg_mem_immortal
     BEFORE INSERT ON memories
     FOR EACH ROW EXECUTE FUNCTION fn_mem_immortal();
@@ -152,6 +185,12 @@ CREATE TRIGGER trg_mem_immortal
 DROP TRIGGER IF EXISTS trg_mem_immortal ON memories;
 DROP FUNCTION IF EXISTS fn_mem_immortal();
 DROP TABLE IF EXISTS memories CASCADE;
+DROP TRIGGER IF EXISTS trg_evt_project_fill ON agent_events;
+DROP FUNCTION IF EXISTS fn_evt_project_fill();
+DROP TABLE IF EXISTS agent_events_2026_10;
+DROP TABLE IF EXISTS agent_events_2026_09;
+DROP TABLE IF EXISTS agent_events_2026_08;
+DROP TABLE IF EXISTS agent_events_2026_07;
 DROP TABLE IF EXISTS agent_events_2026_06;
 DROP TABLE IF EXISTS agent_events_2026_05;
 DROP TABLE IF EXISTS agent_events CASCADE;

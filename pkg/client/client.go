@@ -332,3 +332,29 @@ func (c *Client) GetVersion(ctx context.Context) (map[string]any, error) {
 	var out map[string]any
 	return out, c.do(ctx, "GET", "/v1/version", nil, &out)
 }
+
+// ─── Admin ────────────────────────────────────────────────────────────────────
+
+// UnblockWorkItem calls POST /v1/work_items/:id/unblock (admin only).
+func (c *Client) UnblockWorkItem(ctx context.Context, wiID string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "POST", "/v1/work_items/"+wiID+"/unblock", body, &out)
+}
+
+// CreateUser calls POST /v1/admin/users (admin only).
+func (c *Client) CreateUser(ctx context.Context, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "POST", "/v1/admin/users", body, &out)
+}
+
+// CreateAPIKey calls POST /v1/admin/users/:id/keys (admin only).
+func (c *Client) CreateAPIKey(ctx context.Context, userID string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "POST", "/v1/admin/users/"+userID+"/keys", body, &out)
+}
+
+// RevokeAPIKey calls DELETE /v1/admin/users/:id/keys/:key_id (admin only).
+func (c *Client) RevokeAPIKey(ctx context.Context, userID, keyID string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "DELETE", "/v1/admin/users/"+userID+"/keys/"+keyID, nil, &out)
+}

@@ -576,12 +576,16 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 		evtID, wi.ID, req.AttemptID, evtPayload, wi.Project,
 	) //nolint:errcheck
 
-	// If terminal (wrapped/failed): unblock dependent wi
+	// If terminal (wrapped/failed): unblock dependent wi + set methodology expires_at
 	if req.Status == "wrapped" || req.Status == "failed" {
 		if aihubErr := unblockDependentWI(ctx, tx, wi.ID, wi.Project); aihubErr != nil {
-			// Non-fatal; log but don't fail the transaction
-			_ = aihubErr
+			_ = aihubErr // non-fatal
 		}
+		// C4: set methodology.* memory expires_at = closed_at + 90d
+		tx.Exec(ctx, `
+			UPDATE memories SET expires_at = clock_timestamp() + interval '90 days'
+			WHERE work_item_id = $1 AND type LIKE 'methodology.%' AND expires_at IS NULL`,
+			wi.ID) //nolint:errcheck
 	}
 
 	if err := tx.Commit(ctx); err != nil {

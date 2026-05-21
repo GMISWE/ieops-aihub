@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -304,12 +305,21 @@ func handleForceTakeover(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
 		}
 
-		// C1: Load wi to get project; force takeover requires maintainer role.
+		// C5: Load wi; same-user self-takeover needs Writer; cross-user needs Maintainer.
 		wi, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
-		if err := checkProjectAccess(c, u, wi.Project, "maintainer"); err != nil {
+		minRole := "maintainer"
+		if wi.CurrentAttemptID != nil {
+			// Check if the current attempt belongs to this user
+			var actorUserID string
+			pool.QueryRow(ctx, `SELECT actor_user_id FROM run_attempts WHERE id=$1`, *wi.CurrentAttemptID).Scan(&actorUserID) //nolint:errcheck
+			if actorUserID == u.UserID {
+				minRole = "writer" // same user, different machine → self-takeover
+			}
+		}
+		if err := checkProjectAccess(c, u, wi.Project, minRole); err != nil {
 			return err
 		}
 
@@ -327,12 +337,21 @@ func handleUnblockWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
+		u := GetUser(c)
 		wiID := c.Param("id")
 		_, err := pool.Exec(ctx, `
 			UPDATE work_items SET status='queued'
 			WHERE id=$1 AND status='blocked'`, wiID)
 		if err != nil {
 			return internalError(c, "failed to unblock work item")
+		}
+		// H6: emit admin_unblock audit event
+		if u != nil {
+			pool.Exec(context.Background(), `
+				INSERT INTO agent_events (id, work_item_id, actor_user_id, api_key_id, event_type, payload, project)
+				VALUES ($1, $2, $3, $4, 'admin_unblock', '{"action":"unblock"}'::jsonb,
+				    (SELECT project FROM work_items WHERE id=$2))`,
+				domain.NewID("evt"), wiID, u.UserID, u.APIKeyID) //nolint:errcheck
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
 	}

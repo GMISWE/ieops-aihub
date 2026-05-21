@@ -2,13 +2,16 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 
+	"github.com/GMISWE/ieops-aihub/internal/auth"
 	"github.com/GMISWE/ieops-aihub/internal/domain"
 	"github.com/GMISWE/ieops-aihub/internal/version"
 )
@@ -25,6 +28,9 @@ func NewRouter(pool *pgxpool.Pool) *echo.Echo {
 	// Unauthenticated
 	e.GET("/v1/health", handleHealth(pool))
 	e.GET("/v1/version", handleVersion())
+	// Bootstrap: creates the first admin user when users table is empty.
+	// Protected by ADMIN_BOOTSTRAP_KEY env var; disabled when key is unset.
+	e.POST("/v1/bootstrap", handleBootstrap(pool))
 
 	// Authenticated routes
 	v1 := e.Group("/v1", BearerAuth(pool), IdempotencyMiddleware())
@@ -897,4 +903,73 @@ func must(b []byte, err error) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// handleBootstrap creates the first admin user when the users table is empty.
+// Requires ADMIN_BOOTSTRAP_KEY env var to match the X-Bootstrap-Key header.
+// Disabled (405) when the env var is not set.
+func handleBootstrap(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		bootstrapKey := os.Getenv("ADMIN_BOOTSTRAP_KEY")
+		if bootstrapKey == "" {
+			return writeError(c, domain.NewErr(domain.ErrNotImplemented, "bootstrap is disabled (ADMIN_BOOTSTRAP_KEY not set)"))
+		}
+		if c.Request().Header.Get("X-Bootstrap-Key") != bootstrapKey {
+			return writeError(c, domain.NewErr(domain.ErrForbidden, "invalid bootstrap key"))
+		}
+
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		// Guard: only allowed when no users exist yet
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+			return internalError(c, "failed to check users table")
+		}
+		if count > 0 {
+			return writeError(c, domain.NewErr(domain.ErrForbidden, "bootstrap already done — users table is non-empty"))
+		}
+
+		var req struct {
+			Email       string `json:"email"`
+			DisplayName string `json:"display_name"`
+			APIKeyName  string `json:"api_key_name"`
+		}
+		if err := c.Bind(&req); err != nil {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, err.Error()))
+		}
+		if req.Email == "" || req.DisplayName == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "email and display_name required"))
+		}
+
+		// Generate API key
+		rawKey := domain.NewBase62(32) // 32-char base62 key
+		keyID := "k_" + domain.NewBase62(8)
+		keyHash := auth.HashKey(rawKey)
+		apiKeysJSON, _ := json.Marshal([]map[string]any{{
+			"id":         keyID,
+			"key_hash":   keyHash,
+			"name":       req.APIKeyName,
+			"created_at": "now",
+		}})
+
+		userID := domain.NewID("u")
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO users (id, email, display_name, user_type, role, project_roles, api_keys, author_aliases)
+			VALUES ($1, $2, $3, 'human', 'admin', '{}', $4, '{}')`,
+			userID, req.Email, req.DisplayName, apiKeysJSON,
+		); err != nil {
+			return internalError(c, "failed to create bootstrap admin user")
+		}
+
+		return c.JSON(http.StatusCreated, map[string]any{
+			"user_id":     userID,
+			"email":       req.Email,
+			"display_name": req.DisplayName,
+			"role":        "admin",
+			"api_key":     rawKey,
+			"api_key_id":  keyID,
+			"note":        "save api_key — it will not be shown again",
+		})
+	}
 }

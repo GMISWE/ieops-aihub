@@ -628,6 +628,10 @@ func handleCreateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 		if req.ProjectRoles != nil {
 			projectRolesJSON = must(marshalJSON(req.ProjectRoles))
 		}
+		// author_aliases is NOT NULL in the schema — default to empty slice when not provided.
+		if req.AuthorAliases == nil {
+			req.AuthorAliases = []string{}
+		}
 
 		userID := domain.NewID("u")
 		var id string

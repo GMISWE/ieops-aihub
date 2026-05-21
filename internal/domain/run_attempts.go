@@ -104,7 +104,6 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 
 	// Lock the work_item row FOR UPDATE to prevent concurrent claims
 	var wi WorkItem
-	var labelsRaw []string
 	err = tx.QueryRow(ctx, `
 		SELECT id, seq, slug, project, scenario, goal, source, wi_type, priority,
 		       requires_human_session, milestone, labels, status,
@@ -114,7 +113,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		FROM work_items WHERE id = $1 FOR UPDATE`, wiID,
 	).Scan(
 		&wi.ID, &wi.Seq, &wi.Slug, &wi.Project, &wi.Scenario, &wi.Goal, &wi.Source,
-		&wi.WIType, &wi.Priority, &wi.RequiresHumanSession, &wi.Milestone, &labelsRaw,
+		&wi.WIType, &wi.Priority, &wi.RequiresHumanSession, &wi.Milestone, &wi.Labels,
 		&wi.Status, &wi.DeclaredResources, &wi.ResourcesVersion,
 		&wi.ExternalShareType, &wi.ExternalShareKey,
 		&wi.ReporterUserID, &wi.ReporterDisplay,
@@ -127,7 +126,6 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		}
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to lock work_item: %v", err))
 	}
-	wi.Labels = labelsRaw
 
 	// Check idempotency: if this key was already used for this wi, return cached response.
 	// G3 fix (design §7): on idem hit, re-query the live resource_locks for that attempt
@@ -620,10 +618,11 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 
 	// Update work_item status
 	wiStatus := req.Status
-	if wiStatus == "wrapped" || wiStatus == "failed" {
-		// terminal
-	} else if wiStatus == "paused" {
-		wiStatus = "paused"
+	switch wiStatus {
+	case "wrapped", "failed":
+		// terminal — work_item moves to same status
+	case "paused":
+		// paused — keep wiStatus as-is
 	}
 
 	_, err = tx.Exec(ctx, `UPDATE work_items SET status=$1 WHERE id=$2`, wiStatus, wi.ID)

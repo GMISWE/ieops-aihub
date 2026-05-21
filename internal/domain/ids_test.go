@@ -34,7 +34,7 @@ func TestNewID_DifferentPrefixes(t *testing.T) {
 func TestNewID_Unique(t *testing.T) {
 	const n = 1000
 	seen := make(map[string]struct{}, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		id := NewID("wi")
 		if _, ok := seen[id]; ok {
 			t.Fatalf("collision after %d ids: %q already seen", i, id)
@@ -50,7 +50,7 @@ func TestNewID_Unique(t *testing.T) {
 func TestNewID_DistributionSanity(t *testing.T) {
 	const samples = 5000
 	seen := make(map[byte]int, 62)
-	for i := 0; i < samples; i++ {
+	for range samples {
 		id := NewID("x")
 		tail := strings.TrimPrefix(id, "x_")
 		for j := 0; j < len(tail); j++ {
@@ -82,7 +82,7 @@ func TestNewBase62_Length(t *testing.T) {
 func TestNewBase62_Unique(t *testing.T) {
 	const n = 1000
 	seen := make(map[string]struct{}, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s := NewBase62(12)
 		if _, ok := seen[s]; ok {
 			t.Fatalf("NewBase62 collision after %d samples: %q", i, s)

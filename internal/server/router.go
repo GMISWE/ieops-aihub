@@ -881,14 +881,7 @@ func intToString(n int) string {
 }
 
 func joinComma(ss []string) string {
-	result := ""
-	for i, s := range ss {
-		if i > 0 {
-			result += ", "
-		}
-		result += s
-	}
-	return result
+	return strings.Join(ss, ", ")
 }
 
 func marshalJSON(v any) ([]byte, error) {

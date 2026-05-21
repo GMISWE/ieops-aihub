@@ -30,7 +30,7 @@ func NewID(prefix string) string {
 // constant character would silently bias the output.
 func NewBase62(n int) string {
 	out := make([]byte, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		idx, err := rand.Int(rand.Reader, big.NewInt(62))
 		if err != nil {
 			panic("crypto/rand unavailable: " + err.Error())

@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"net/http"
 	"time"
 
@@ -108,11 +107,22 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			return c.JSON(http.StatusOK, map[string]string{"status": "heartbeat_ok"})
 		}
 
-		var execErr error
+		// All step transitions run in a single transaction for atomicity
+		tx, txErr := pool.Begin(c.Request().Context())
+		if txErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrInternalError, "begin tx"))
+		}
+		defer tx.Rollback(c.Request().Context()) //nolint:errcheck
+
 		eventType := ""
+		// Read current step name for step_completions
+		var currentStep *string
+		tx.QueryRow(c.Request().Context(), `SELECT current_step FROM wi_step_state WHERE work_item_id=$1`, wiID).Scan(&currentStep) //nolint:errcheck
+
 		switch req.Status {
 		case "in_progress":
-			_, execErr = pool.Exec(c.Request().Context(), `
+			// H-Medium: guard idle→in_progress only; reject if already in_progress
+			tag, execErr := tx.Exec(c.Request().Context(), `
 				INSERT INTO wi_step_state (work_item_id, current_step, current_step_status,
 				    current_step_attempt, step_started_at, version)
 				VALUES ($1, $2, 'in_progress', $3, clock_timestamp(), 1)
@@ -122,54 +132,65 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				    current_step_attempt = $3,
 				    step_started_at = clock_timestamp(),
 				    version = wi_step_state.version + 1,
-				    updated_at = clock_timestamp()`,
+				    updated_at = clock_timestamp()
+				WHERE wi_step_state.current_step_status = 'idle'`,
 				wiID, req.Step, req.StepAttemptID)
+			if execErr != nil {
+				return writeError(c, domain.NewErr(domain.ErrInternalError, execErr.Error()))
+			}
+			if tag.RowsAffected() == 0 {
+				return writeError(c, domain.NewErr(domain.ErrConflictCASFailed, "step already in_progress; cannot start again until completed or failed"))
+			}
 			eventType = "step_started"
 		case "completed":
-			_, execErr = pool.Exec(c.Request().Context(), `
+			if _, execErr := tx.Exec(c.Request().Context(), `
 				UPDATE wi_step_state
 				SET current_step = $2, current_step_status = 'idle',
 				    current_step_attempt = NULL, step_started_at = NULL,
 				    version = version + 1, updated_at = clock_timestamp()
-				WHERE work_item_id = $1`, wiID, req.Step)
+				WHERE work_item_id = $1`, wiID, req.Step); execErr != nil {
+				return writeError(c, domain.NewErr(domain.ErrInternalError, execErr.Error()))
+			}
 			if req.StepAttemptID != nil {
-				pool.Exec(context.Background(), `
-					INSERT INTO wi_step_completions (work_item_id, run_attempt_id, step_attempt_id, status)
-					VALUES ($1, $2, $3, 'completed')`,
-					wiID, req.AttemptID, *req.StepAttemptID)
+				tx.Exec(c.Request().Context(), `
+					INSERT INTO wi_step_completions (work_item_id, run_attempt_id, step_attempt_id, step_id, status)
+					VALUES ($1, $2, $3, $4, 'completed')`,
+					wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep))
 			}
 			eventType = "step_completed"
 		case "failed":
-			_, execErr = pool.Exec(c.Request().Context(), `
+			if _, execErr := tx.Exec(c.Request().Context(), `
 				UPDATE wi_step_state
 				SET current_step_status = 'idle', current_step_attempt = NULL,
 				    step_started_at = NULL, version = version + 1, updated_at = clock_timestamp()
-				WHERE work_item_id = $1`, wiID)
+				WHERE work_item_id = $1`, wiID); execErr != nil {
+				return writeError(c, domain.NewErr(domain.ErrInternalError, execErr.Error()))
+			}
 			if req.StepAttemptID != nil {
-				pool.Exec(context.Background(), `
-					INSERT INTO wi_step_completions (work_item_id, run_attempt_id, step_attempt_id, status)
-					VALUES ($1, $2, $3, 'failed')`,
-					wiID, req.AttemptID, *req.StepAttemptID)
+				tx.Exec(c.Request().Context(), `
+					INSERT INTO wi_step_completions (work_item_id, run_attempt_id, step_attempt_id, step_id, status)
+					VALUES ($1, $2, $3, $4, 'failed')`,
+					wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep))
 			}
 			eventType = "step_failed"
 		default:
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "status must be in_progress|completed|failed"))
 		}
-		if execErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrInternalError, execErr.Error()))
-		}
 
-		// Emit step event (best-effort)
+		// Emit step event inside transaction
 		if eventType != "" && u != nil {
-			pool.Exec(context.Background(), `
+			tx.Exec(c.Request().Context(), `
 				INSERT INTO agent_events
 				    (id, work_item_id, run_attempt_id, actor_user_id, api_key_id, event_type, payload, project)
 				VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb,
 				    (SELECT project FROM work_items WHERE id=$2))`,
 				domain.NewID("evt"), wiID, req.AttemptID, u.UserID, u.APIKeyID, eventType,
-				`{"step":"`+derefStr(req.Step)+`"}`)
+				`{"step":"`+derefStr(req.Step)+`"}`) //nolint:errcheck
 		}
 
+		if err := tx.Commit(c.Request().Context()); err != nil {
+			return writeError(c, domain.NewErr(domain.ErrInternalError, "commit step update"))
+		}
 		return c.JSON(http.StatusOK, map[string]string{"status": req.Status})
 	}
 }
@@ -185,7 +206,13 @@ func handleRenewLease(pool *pgxpool.Pool) echo.HandlerFunc {
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, err.Error()))
 		}
-		// ownership-only: no real lease expiry, just bump last_active_at
+		// Verify AttemptCredential before touching last_active_at
+		if credErr := domain.VerifyAttemptCredentialPool(
+			c.Request().Context(), pool, wiID, req.AttemptID, req.ClaimEpoch, req.SessionSecret,
+		); credErr != nil {
+			return writeError(c, credErr)
+		}
+		// ownership-only: bump last_active_at
 		pool.Exec(c.Request().Context(), `
 			UPDATE run_attempts SET last_active_at = clock_timestamp()
 			WHERE id = $1 AND work_item_id = $2 AND claim_epoch = $3`,
@@ -198,14 +225,11 @@ func handlePauseAttempt(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
 		wiID := c.Param("id")
-		var req struct {
-			AttemptID     string `json:"attempt_id"`
-			ClaimEpoch    int64  `json:"claim_epoch"`
-			SessionSecret string `json:"session_secret"`
-		}
+		var req domain.CompleteAttemptRequest
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, err.Error()))
 		}
+		req.Status = "paused"
 
 		wi, err := domain.GetWorkItem(c.Request().Context(), pool, wiID)
 		if err != nil {
@@ -215,15 +239,10 @@ func handlePauseAttempt(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		if _, err := pool.Exec(c.Request().Context(), `
-			UPDATE work_items SET status='paused', updated_at=clock_timestamp() WHERE id=$1 AND status='running'`,
-			wiID); err != nil {
-			return writeError(c, domain.NewErr(domain.ErrInternalError, err.Error()))
+		// Delegate to FnCompleteAttempt(paused) — correctly keeps locks, emits events
+		if aihubErr := domain.FnCompleteAttempt(c.Request().Context(), pool, wiID, &req); aihubErr != nil {
+			return writeError(c, aihubErr)
 		}
-		pool.Exec(c.Request().Context(), `
-			UPDATE run_attempts SET status='wrapped', ended_at=clock_timestamp()
-			WHERE id=$1 AND claim_epoch=$2`, req.AttemptID, req.ClaimEpoch)
-		// Keep locks and state file (C5-3: pause preserves context)
 		return c.JSON(http.StatusOK, map[string]string{"status": "paused"})
 	}
 }

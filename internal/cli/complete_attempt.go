@@ -104,7 +104,7 @@ func RunCompleteAttempt(ctx context.Context, c *client.Client, wsRoot string, ar
 		"status":         status,
 	}
 
-	result, err := c.CompleteAttempt(ctx, sf.AttemptID, body)
+	result, err := c.CompleteAttempt(ctx, sf.WIID, body)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "complete-attempt: %v\n", err)
 		os.Exit(1)

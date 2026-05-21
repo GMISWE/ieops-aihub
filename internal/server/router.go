@@ -137,7 +137,7 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 
 		if status := c.QueryParam("status"); status != "" {
-			filter.Status = []string{status}
+			filter.Status = strings.Split(status, ",") // supports "running,paused,queued"
 		}
 		if wiType := c.QueryParam("wi_type"); wiType != "" {
 			filter.WIType = &wiType
@@ -323,7 +323,7 @@ func handleForceTakeover(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		resp, aihubErr := domain.FnForceTakeover(ctx, pool, c.Param("id"), u.UserID, u.Role, u.ProjectRoles, &req)
+		resp, aihubErr := domain.FnForceTakeover(ctx, pool, c.Param("id"), u.UserID, u.DisplayName, u.Role, u.ProjectRoles, &req)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
 		}

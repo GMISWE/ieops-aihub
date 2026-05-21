@@ -4,6 +4,7 @@ package integration_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -24,7 +25,7 @@ func TestCrashRecovery(t *testing.T) {
 
 	// 1. Create a wi
 	wiID := mustCreateWorkItem(t, c, ctx, map[string]any{
-		"goal":     "Crash recovery test: step in_progress then restart",
+		"goal":     fmt.Sprintf("Crash recovery test: restart %d", time.Now().UnixNano()),
 		"project":  testProject,
 		"scenario": "coding",
 		"wi_type":  "fix_bug",
@@ -45,14 +46,17 @@ func TestCrashRecovery(t *testing.T) {
 
 	// 3. "Crash" — do not complete attempt-1, just re-claim with a new idempotency key.
 	//    C-R9-12: same API key (same user) → implicit self-takeover allowed.
+	si2 := newSessionInfo()
 	claim2, err := c.ClaimWorkItem(ctx, wiID, map[string]any{
 		"idempotency_key": "crash-test-session2-001",
-		"session_info":    newSessionInfo(),
+		"session_info":    si2,
 		"mode":            "fresh",
 	})
 	if err != nil {
 		t.Fatalf("re-claim after crash should succeed (C-R9-12 implicit takeover): %v", err)
 	}
+	// Inject session_secret (server never returns it per Decision A §24)
+	claim2["session_secret"] = si2["session_secret"]
 
 	attemptID2 := claim2["attempt_id"].(string)
 	claimEpoch2 := int64(claim2["claim_epoch"].(float64))

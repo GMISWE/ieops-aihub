@@ -4,6 +4,7 @@ package integration_test
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func TestFixBugWIHappyPath(t *testing.T) {
 
 	// 1. Create a fix_bug wi
 	wiID := mustCreateWorkItem(t, c, ctx, map[string]any{
-		"goal":     "Fix: null pointer in login handler",
+		"goal":     fmt.Sprintf("Fix: null pointer test %d", time.Now().UnixNano()),
 		"project":  testProject,
 		"scenario": "coding",
 		"wi_type":  "fix_bug",

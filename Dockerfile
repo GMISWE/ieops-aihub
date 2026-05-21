@@ -1,18 +1,18 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 WORKDIR /build
-COPY go.mod go.sum ./
-RUN go mod download
 COPY . .
+RUN GOFLAGS='-mod=mod' go mod download || true
 ARG VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG BUILD_TIME=unknown
-RUN go build \
+RUN GOFLAGS='-mod=mod' go build \
   -ldflags "-X github.com/GMISWE/ieops-aihub/internal/version.Version=${VERSION} \
             -X github.com/GMISWE/ieops-aihub/internal/version.GitCommit=${GIT_COMMIT} \
             -X github.com/GMISWE/ieops-aihub/internal/version.BuildTime=${BUILD_TIME}" \
-  -o /aihub ./cmd/aihub/
+  -o /usr/local/bin/aihub ./cmd/aihub/
 
 FROM alpine:3.20
-COPY --from=builder /aihub /usr/local/bin/aihub
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /usr/local/bin/aihub /usr/local/bin/aihub
 EXPOSE 8080
-ENTRYPOINT ["/aihub"]
+ENTRYPOINT ["/usr/local/bin/aihub"]

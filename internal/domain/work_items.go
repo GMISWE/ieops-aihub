@@ -302,11 +302,9 @@ func applyClassificationRules(configRaw []byte, req *CreateWorkItemRequest) (*st
 			RequiresHumanSession bool `json:"requires_human_session"`
 		} `json:"wi_types"`
 		ClassificationRules []struct {
-			Name   string `json:"name"`
-			Match  struct {
-				WITypePrefix string `json:"wi_type_prefix"`
-				Priority     string `json:"priority"`
-			} `json:"match"`
+			Name         string `json:"name"`
+			Priority     string `json:"priority"`      // flat field, not under "match"
+			WITypePrefix string `json:"wi_type_prefix"` // flat field, not under "match"
 			Set struct {
 				WIType               string `json:"wi_type"`
 				RequiresHumanSession *bool  `json:"requires_human_session"`
@@ -322,10 +320,10 @@ func applyClassificationRules(configRaw []byte, req *CreateWorkItemRequest) (*st
 
 	// Apply classification rules (first match wins)
 	for _, rule := range config.ClassificationRules {
-		matchesPriority := rule.Match.Priority == "" || rule.Match.Priority == req.Priority
-		matchesPrefix := rule.Match.WITypePrefix == "" ||
-			(req.WIType != nil && strings.HasPrefix(*req.WIType, rule.Match.WITypePrefix)) ||
-			(req.WIType == nil && rule.Match.WITypePrefix == "")
+		matchesPriority := rule.Priority == "" || rule.Priority == req.Priority
+		matchesPrefix := rule.WITypePrefix == "" ||
+			(req.WIType != nil && strings.HasPrefix(*req.WIType, rule.WITypePrefix)) ||
+			(req.WIType == nil && strings.HasPrefix(strings.ToLower(req.Goal), strings.ToLower(rule.WITypePrefix)))
 		if matchesPriority && matchesPrefix {
 			if rule.Set.WIType != "" {
 				t := rule.Set.WIType
@@ -414,17 +412,40 @@ func setOverlap(a, b []string) float64 {
 
 // checkDedup performs the F3 dedup check within a transaction.
 func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *AihubError {
-	labelsJSON, _ := json.Marshal(req.Labels)
+	// Pass req.Labels as []string so pgx serializes it as a proper PostgreSQL text[]
+	// (not JSON "[]" which cannot be cast with ::text[]).
+	labels := req.Labels
+	if labels == nil {
+		labels = []string{}
+	}
 
-	rows, err := tx.Query(ctx, `
-		SELECT id, slug, goal, labels, declared_resources
-		FROM work_items
-		WHERE project = $1
-		  AND status IN ('queued','running','paused','blocked')
-		  AND (labels && $2::text[] OR declared_resources @> $3::jsonb)
-		LIMIT 50`,
-		req.Project, labelsJSON, req.DeclaredResources,
-	)
+	// When labels is empty we rely only on goal similarity and resource overlap.
+	// Don't use labels && $2 when $2 is empty — that would give a type-cast error.
+	// When declared_resources is empty [], @> $3::jsonb is trivially true for every row,
+	// so we guard with a non-empty check.
+	var rows pgx.Rows
+	var err error
+	if len(labels) == 0 {
+		// No labels: only filter by goal similarity (done in Go) + resource overlap (if any)
+		rows, err = tx.Query(ctx, `
+			SELECT id, slug, goal, labels, declared_resources
+			FROM work_items
+			WHERE project = $1
+			  AND status IN ('queued','running','paused','blocked')
+			LIMIT 50`,
+			req.Project,
+		)
+	} else {
+		rows, err = tx.Query(ctx, `
+			SELECT id, slug, goal, labels, declared_resources
+			FROM work_items
+			WHERE project = $1
+			  AND status IN ('queued','running','paused','blocked')
+			  AND (labels && $2::text[] OR declared_resources @> $3::jsonb)
+			LIMIT 50`,
+			req.Project, labels, req.DeclaredResources,
+		)
+	}
 	if err != nil {
 		return nil // Dedup is best-effort; if query fails, allow creation
 	}

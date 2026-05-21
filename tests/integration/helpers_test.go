@@ -84,8 +84,15 @@ func newSessionInfo() map[string]any {
 }
 
 // mustCreateWorkItem creates a work item or fails the test.
+// Automatically sets force_create=true with a standard reason to avoid dedup conflicts
+// between integration test runs.
 func mustCreateWorkItem(t *testing.T, c *client.Client, ctx context.Context, body map[string]any) string {
 	t.Helper()
+	// force_create bypasses dedup to prevent false conflicts between test runs
+	if _, has := body["force_create"]; !has {
+		body["force_create"] = true
+		body["force_reason"] = "integration test isolation (dedup bypass)"
+	}
 	result, err := c.CreateWorkItem(ctx, body)
 	if err != nil {
 		t.Fatalf("CreateWorkItem: %v", err)
@@ -98,7 +105,8 @@ func mustCreateWorkItem(t *testing.T, c *client.Client, ctx context.Context, bod
 }
 
 // mustClaimWorkItem claims a work item or fails the test.
-// Returns the full claim response map.
+// Returns the claim response augmented with "session_secret" (injected from request,
+// since server never returns it per Decision A §24 — but tests need the credential triple).
 func mustClaimWorkItem(t *testing.T, c *client.Client, ctx context.Context, wiID, idemKey string) map[string]any {
 	t.Helper()
 	si := newSessionInfo()
@@ -110,6 +118,8 @@ func mustClaimWorkItem(t *testing.T, c *client.Client, ctx context.Context, wiID
 	if err != nil {
 		t.Fatalf("ClaimWorkItem(%s): %v", wiID, err)
 	}
+	// Inject the session_secret we sent so complete/step operations can use it.
+	result["session_secret"] = si["session_secret"]
 	return result
 }
 
@@ -119,7 +129,7 @@ func mustCompleteAttempt(t *testing.T, c *client.Client, ctx context.Context, wi
 	attemptID := claim["attempt_id"].(string)
 	claimEpoch := int64(claim["claim_epoch"].(float64))
 	sessionSecret := claim["session_secret"].(string)
-	_, err := c.CompleteAttempt(ctx, attemptID, map[string]any{
+	_, err := c.CompleteAttempt(ctx, wiID, map[string]any{
 		"attempt_id":     attemptID,
 		"claim_epoch":    claimEpoch,
 		"session_secret": sessionSecret,

@@ -39,10 +39,10 @@ func NewRouter(pool *pgxpool.Pool) *echo.Echo {
 	v1.POST("/work_items/:id/force_takeover", handleForceTakeover(pool))
 	v1.POST("/work_items/:id/unblock", handleUnblockWorkItem(pool), RequireAdmin())
 
-	// Dependencies
-	v1.POST("/dependencies", handleCreateDependency(pool))
-	v1.GET("/dependencies", handleListDependencies(pool))
-	v1.DELETE("/dependencies/:blocked_id/:blocking_id/:kind", handleDeleteDependency(pool))
+	// Dependencies (path matches client: /v1/work_items/:id/dependencies)
+	v1.POST("/work_items/:id/dependencies", handleCreateDependency(pool))
+	v1.GET("/work_items/:id/dependencies", handleListDependencies(pool))
+	v1.DELETE("/work_items/:blocked_id/dependencies/:blocking_id/:kind", handleDeleteDependency(pool))
 
 	// Conflicts
 	v1.POST("/conflicts/predict", handlePredictConflicts(pool))
@@ -57,6 +57,9 @@ func NewRouter(pool *pgxpool.Pool) *echo.Echo {
 
 	// Round 2b: memories, events, scenario configs, GC
 	RegisterMemoryRoutes(v1, pool)
+
+	// Round 2 fix: step state, release stubs, attempt lifecycle
+	RegisterStepRoutes(v1, pool)
 
 	return e
 }
@@ -372,6 +375,10 @@ func handleCreateDependency(pool *pgxpool.Pool) echo.HandlerFunc {
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
 		}
+		// path /:id overrides body field when present
+		if pathID := c.Param("id"); pathID != "" {
+			req.BlockedWIID = pathID
+		}
 
 		// C1: Load blocked wi → require writer on its project (caller "owns" it).
 		blockedWI, aihubErr := domain.GetWorkItem(ctx, pool, req.BlockedWIID)
@@ -408,9 +415,12 @@ func handleListDependencies(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
-		wiID := c.QueryParam("work_item_id")
+		wiID := c.Param("id")
 		if wiID == "" {
-			return writeError(c, domain.NewErr(domain.ErrBadRequest, "work_item_id query parameter is required"))
+			wiID = c.QueryParam("work_item_id")
+		}
+		if wiID == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "work_item_id required"))
 		}
 
 		resp, aihubErr := domain.ListDependencies(ctx, pool, wiID, u.ProjectRoles)

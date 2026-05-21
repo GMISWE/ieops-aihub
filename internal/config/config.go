@@ -1,5 +1,13 @@
 package config
 
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"gopkg.in/yaml.v3"
+)
+
 type Config struct {
 	Version  int                `yaml:"version"`
 	Scenario string             `yaml:"scenario"`
@@ -22,4 +30,18 @@ type Repo struct {
 	URL             string `yaml:"url"`
 	GithubOwnerRepo string `yaml:"github_owner_repo"`
 	Description     string `yaml:"description"`
+}
+
+// Load reads .polyforge.yaml from the given directory.
+func Load(dir string) (*Config, error) {
+	path := filepath.Join(dir, ".polyforge.yaml")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("load .polyforge.yaml: %w", err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		return nil, fmt.Errorf("parse .polyforge.yaml: %w", err)
+	}
+	return &cfg, nil
 }

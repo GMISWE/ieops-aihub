@@ -298,6 +298,18 @@ func handleEmitEvent(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "event_type is required"))
 		}
 
+		// C1: enforce project-level writer access.
+		// Derive the project from the work_item when work_item_id is provided.
+		if req.WorkItemID != "" {
+			wi, aihubErr := domain.GetWorkItem(ctx, pool, req.WorkItemID)
+			if aihubErr != nil {
+				return domainErr(c, aihubErr)
+			}
+			if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
+				return err
+			}
+		}
+
 		evtID, aihubErr := domain.EmitEvent(ctx, pool, &req, u.UserID, u.DisplayName, u.Role)
 		if aihubErr != nil {
 			return domainErr(c, aihubErr)

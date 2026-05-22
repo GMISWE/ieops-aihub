@@ -74,6 +74,11 @@ func (s *Server) registerStepTools() {
 			}
 			result, err := s.client.UpdateStep(ctx, wiID, body)
 			if err != nil {
+				errMsg := err.Error()
+				if strings.Contains(errMsg, "CONFLICT_EPOCH_MISMATCH") || strings.Contains(errMsg, "ATTEMPT_MISMATCH") {
+					_ = config.DeleteStateFile(wiID)
+					return errResult(fmt.Errorf("STALE_LOCAL_CREDENTIAL: state file deleted — please re-claim this work item"))
+				}
 				return errResult(err)
 			}
 			return jsonResult(result)

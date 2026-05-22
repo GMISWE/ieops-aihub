@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
 	"github.com/GMISWE/ieops-aihub/pkg/client"
 	"gopkg.in/yaml.v3"
-	"strings"
 )
 
 // RunInit fetches the scenario phase config from aihub and writes it to
@@ -41,7 +42,7 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 	phaseFile := filepath.Join(phaseDir, "phase.yaml")
 
 	if apply {
-		runInitApply(ctx, c, scenario, phaseFile)
+		runInitApply(ctx, c, cfg, wsRoot, scenario, phaseFile)
 		return
 	}
 
@@ -97,13 +98,13 @@ func writeUsageMd(path string) error {
 	const content = `# polyforge v1 workspace guide
 
 > **State authority = aihub PostgreSQL** at the URL in ~/.polyforge/config.toml.
-> Per-wi task worktrees materialize at pf3.<shortid>/<repo>/ on /pf-work.
+> Per-wi task worktrees materialize at pf.<seq>.<ulid8>/<repo>/ on /pf-work.
 
 ## Iron Rules
 
 **IR1 — Work-item-gated writes**
 Every git commit/push/PR and Edit/Write under .repo/ must happen inside a
-claimed wi worktree (pf3.<shortid>/<repo>/). No env-var bypass.
+claimed wi worktree (pf.<seq>.<ulid8>/<repo>/). No env-var bypass.
 
 **IR2 — Analyze obstacles; track blockers as wi's**
 When you hit an obstacle, find the root cause. If it's a bug or out of
@@ -198,53 +199,105 @@ func ensureClaudeMdRef(claudeMd string) error {
 	return nil
 }
 
-// runInitApply reads the local phase.yaml and PATCHes it back to aihub (CAS).
-func runInitApply(ctx context.Context, c *client.Client, scenario, phaseFile string) {
-	b, err := os.ReadFile(phaseFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "pf init --apply: read phase.yaml: %v\n", err)
+// repoEntry holds a repo name and clone URL for the managed block.
+type repoEntry struct{ name, url string }
+
+// runInitApply clones repos listed in .polyforge.yaml into <wsRoot>/.repo/<name>/
+// and writes (or updates) a managed block in CLAUDE.md. This is idempotent.
+// §12 of the design doc.
+func runInitApply(_ context.Context, _ *client.Client, cfg *config.Config, wsRoot, _, _ string) {
+	if cfg == nil {
+		fmt.Fprintf(os.Stderr, "pf init --apply: .polyforge.yaml not found or empty\n")
 		os.Exit(1)
 	}
 
-	var content map[string]any
-	if err := yaml.Unmarshal(b, &content); err != nil {
-		fmt.Fprintf(os.Stderr, "pf init --apply: parse phase.yaml: %v\n", err)
+	repoDir := filepath.Join(wsRoot, ".repo")
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init --apply: mkdir .repo: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Extract embedded __version__ for CAS.
-	// Server schema (UpdateScenarioConfigRequest) reads the field as "version" (§4.3 PUT body).
-	expectedVersion := content["__version__"]
-	delete(content, "__version__")
+	// Collect all repos across all projects for the managed block.
+	var allRepos []repoEntry
 
-	// Normalize version to int for the server's CAS check (handles yaml numeric decoding).
-	var versionInt int
-	switch v := expectedVersion.(type) {
-	case int:
-		versionInt = v
-	case int64:
-		versionInt = int(v)
-	case float64:
-		versionInt = int(v)
+	for _, proj := range cfg.Projects {
+		for _, repo := range proj.Repos {
+			if repo.Name == "" || repo.URL == "" {
+				continue
+			}
+			allRepos = append(allRepos, repoEntry{repo.Name, repo.URL})
+			destPath := filepath.Join(repoDir, repo.Name)
+			if _, err := os.Stat(destPath); err == nil {
+				fmt.Printf("skip .repo/%s (already exists)\n", repo.Name)
+				continue
+			}
+			// Clone the repo — non-fatal on failure.
+			cmd := exec.Command("git", "clone", repo.URL, destPath)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "pf init --apply: clone %s: %v (skipping)\n", repo.Name, err)
+				continue
+			}
+			fmt.Printf("ok cloned %s → .repo/%s\n", repo.URL, repo.Name)
+		}
 	}
 
-	body := map[string]any{
-		"content": content,
-		"version": versionInt,
+	// Write managed block to CLAUDE.md.
+	claudeMd := filepath.Join(wsRoot, "CLAUDE.md")
+	if err := upsertManagedBlock(claudeMd, allRepos); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init --apply: update CLAUDE.md: %v\n", err)
+	} else {
+		fmt.Printf("ok CLAUDE.md managed block updated\n")
+	}
+}
+
+const managedBlockStart = `<!-- polyforge:managed:version="1.0" -->`
+const managedBlockEnd = `<!-- /polyforge:managed -->`
+
+// upsertManagedBlock writes or replaces the managed block in CLAUDE.md.
+func upsertManagedBlock(claudeMd string, repos []repoEntry) error {
+	// Build the managed block content.
+	var sb strings.Builder
+	sb.WriteString(managedBlockStart + "\n")
+	sb.WriteString("## Workspace\n\n")
+	sb.WriteString("| repo | remote |\n")
+	sb.WriteString("|------|--------|\n")
+	for _, r := range repos {
+		sb.WriteString(fmt.Sprintf("| %s | %s |\n", r.name, r.url))
+	}
+	sb.WriteString(managedBlockEnd + "\n")
+	block := sb.String()
+
+	// Read existing CLAUDE.md (or create from scratch).
+	existing := ""
+	b, err := os.ReadFile(claudeMd)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil {
+		existing = string(b)
 	}
 
-	result, err := c.UpdateScenarioConfig(ctx, scenario, body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "pf init --apply: PATCH scenario config: %v\n", err)
-		os.Exit(1)
+	startIdx := strings.Index(existing, managedBlockStart)
+	endIdx := strings.Index(existing, managedBlockEnd)
+
+	var updated string
+	if startIdx >= 0 && endIdx >= 0 && endIdx > startIdx {
+		// Replace existing managed block (including the end tag + trailing newline).
+		endTagEnd := endIdx + len(managedBlockEnd)
+		if endTagEnd < len(existing) && existing[endTagEnd] == '\n' {
+			endTagEnd++
+		}
+		updated = existing[:startIdx] + block + existing[endTagEnd:]
+	} else {
+		// Append managed block at the end.
+		if existing != "" && !strings.HasSuffix(existing, "\n") {
+			existing += "\n"
+		}
+		updated = existing + "\n" + block
 	}
 
-	newVer := result["version"]
-	fmt.Printf("ok phase.yaml applied to aihub (scenario: %s, version: %v)\n", scenario, newVer)
-
-	// Update the local file with the new version.
-	content["__version__"] = newVer
-	updated, _ := yaml.Marshal(content)
-	_ = os.WriteFile(phaseFile, updated, 0644)
+	return os.WriteFile(claudeMd, []byte(updated), 0644)
 }
 

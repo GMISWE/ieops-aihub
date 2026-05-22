@@ -75,6 +75,8 @@ type ClaimResponse struct {
 	StepRecoveryHint      string         `json:"step_recovery_hint,omitempty"`
 	RequiresHumanSession  *bool          `json:"requires_human_session"`
 	WIType                *string        `json:"wi_type"`
+	Slug                  string         `json:"slug,omitempty"`
+	Project               string         `json:"project,omitempty"`
 }
 
 // FnClaimWorkItem implements the atomic claim transaction per §7 / §8.4 of the design doc.
@@ -179,6 +181,8 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			StepRecoveryHint:     idemHint,
 			RequiresHumanSession: wi.RequiresHumanSession,
 			WIType:               wi.WIType,
+			Slug:                 wi.Slug,
+			Project:              wi.Project,
 		}, nil
 	}
 
@@ -526,6 +530,8 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		StepRecoveryHint:     stepRecoveryHint,
 		RequiresHumanSession: wi.RequiresHumanSession,
 		WIType:               wi.WIType,
+		Slug:                 wi.Slug,
+		Project:              wi.Project,
 	}, nil
 }
 

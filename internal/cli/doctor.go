@@ -36,7 +36,7 @@ func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot
 		checkWorkspace(wsRoot, cfg),
 		checkConfig(ctx, c),
 		checkRepos(wsRoot, cfg),
-		checkWorktrees(ctx, c, wsRoot, fix),
+		checkWorktrees(ctx, c, cfg, wsRoot, fix),
 		checkVersion(ctx, c),
 	}
 
@@ -146,7 +146,7 @@ func checkRepos(wsRoot string, cfg *config.Config) checkResult {
 
 // checkWorktrees cross-references pf.* directories with active work items
 // from aihub; flags directories with no matching running wi.
-func checkWorktrees(ctx context.Context, c *client.Client, wsRoot string, fix bool) checkResult {
+func checkWorktrees(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot string, fix bool) checkResult {
 	entries, err := os.ReadDir(wsRoot)
 	if err != nil {
 		return checkResult{Name: "worktrees", Status: "error", Message: fmt.Sprintf("readdir: %v", err)}
@@ -163,10 +163,22 @@ func checkWorktrees(ctx context.Context, c *client.Client, wsRoot string, fix bo
 	}
 
 	// Fetch active work items from aihub to cross-reference.
+	// The server requires a "project" query parameter, so we query each project
+	// separately and merge the results. If cfg is nil we skip the cross-reference
+	// (cannot determine projects) and list pf.* dirs as a warning only.
 	activeIDs := map[string]bool{}
-	if c != nil {
-		params := url.Values{"status": []string{"running,paused,queued"}} // server splits on ","
-		if result, err := c.ListWorkItems(ctx, params); err == nil {
+	if c != nil && cfg != nil {
+		for projectName := range cfg.Projects {
+			params := url.Values{
+				"project": []string{projectName},
+				"status":  []string{"running,paused,queued"}, // server splits on ","
+			}
+			result, err := c.ListWorkItems(ctx, params)
+			if err != nil {
+				// Skip this project on error; orphan check will still run for
+				// projects that succeeded.
+				continue
+			}
 			if items, ok := result["items"].([]any); ok {
 				for _, item := range items {
 					if m, ok := item.(map[string]any); ok {
@@ -203,8 +215,8 @@ func checkWorktrees(ctx context.Context, c *client.Client, wsRoot string, fix bo
 				break
 			}
 		}
-		// If aihub unreachable, we cannot confirm orphan — skip auto-removal.
-		if !found && c != nil {
+		// If aihub unreachable or cfg is nil, we cannot confirm orphan — skip.
+		if !found && c != nil && cfg != nil {
 			orphans = append(orphans, name)
 		}
 	}

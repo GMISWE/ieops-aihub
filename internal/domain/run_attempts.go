@@ -325,7 +325,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 				JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
 				JOIN work_items wi2 ON wi2.id = ra.work_item_id
 				WHERE rl.resource_type = $1 AND rl.resource_key = $2
-				  AND ra.status = 'running'`,
+				  AND ra.status IN ('running', 'paused')`,
 				resourceTypes[i], resourceKeys[i],
 			).Scan(&conflictAttemptID, &conflictActorDisplay, &conflictWISlug)
 			if err == nil {

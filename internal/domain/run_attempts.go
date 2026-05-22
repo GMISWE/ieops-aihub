@@ -691,7 +691,8 @@ func fnForceTerminateStep(ctx context.Context, tx pgx.Tx, wiID, attemptID string
 	_, err := tx.Exec(ctx, `
 		INSERT INTO wi_step_completions (id, work_item_id, step_id, step_attempt_id, run_attempt_id,
 		                                  status, error_type, escalated, completed_at)
-		VALUES ($1, $2, $3, $4, $5, 'failed', 'force_terminate', false, clock_timestamp())`,
+		VALUES ($1, $2, $3, $4, $5, 'failed', 'force_terminate', false, clock_timestamp())
+		ON CONFLICT (step_attempt_id) DO NOTHING`,
 		scID, wiID, *currentStep, saID, attemptID,
 	)
 	if err != nil {

@@ -24,9 +24,9 @@ CALL: pf_create_work_item(project="marketplace",
       goal="[test] M07 Step 2: API refactor (blocked until migration done)",
       wi_type="fix_bug", priority="normal",
       blocked_by=[WI_A])
-ASSERT: response.status == "queued"
+ASSERT: response.status == "blocked"
 NOTE: save response.id as WI_B
-NOTE: WI_B may show status="blocked" depending on implementation
+NOTE: WI_B is immediately blocked because blocked_by=[WI_A] is set at creation time
 
 ### Ready queue: WI_A in items[], WI_B in blocked[] or not in items[]
 AS ADMIN:

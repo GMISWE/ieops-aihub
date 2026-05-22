@@ -21,9 +21,8 @@ Validates that takeover correctly invalidates the previous attempt's credentials
 Admin creates memory with visibility="admin".
 Bob (writer) calls GET /memories — result should NOT contain the admin memory.
 Admin calls GET /memories — result SHOULD contain it.
-NOTE: Current server implementation does NOT filter admin visibility separately (server gap).
-This test will FAIL until the server is fixed — useful as a regression-finding test.
-Reference: domain/memory.go Recall — visibility filter incomplete.
+NOTE: Admin visibility filter implemented in memory.go:411-416. This scenario now passes.
+Reference: domain/memory.go Recall — visibility filter complete.
 
 ## P1-5 — Multi-blocker dependency (AND semantics)
 WI_C blocked_by=[WI_A, WI_B]. Only WI_A wraps; WI_C must stay blocked.

@@ -13,8 +13,8 @@ AS ADMIN: pf_create_work_item(goal="[test] P1-05 blocker B p105b", chore) -> WI_
 AS ADMIN: pf_create_work_item(goal="[test] P1-05 dependent C p105c", chore) -> WI_C
 
 ### Add both dependencies to WI_C
-AS ADMIN: pf_create_dependency(dependent_id=WI_C, dependency_id=WI_A)
-AS ADMIN: pf_create_dependency(dependent_id=WI_C, dependency_id=WI_B)
+AS ADMIN: pf_create_dependency(work_item_id=WI_C, blocked_wi_id=WI_C, blocking_wi_id=WI_A, kind="blocks")
+AS ADMIN: pf_create_dependency(work_item_id=WI_C, blocked_wi_id=WI_C, blocking_wi_id=WI_B, kind="blocks")
 
 ### WI_C blocked
 AS ADMIN: GET /v1/work_items/WI_C -> ASSERT: status=="blocked"

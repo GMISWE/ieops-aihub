@@ -38,9 +38,9 @@ NOTE: Either response is acceptable; 500 or state corruption is NOT acceptable
 AS ADMIN: GET /v1/work_items/WI_ID
 ASSERT: response.status == "wrapped"
 
-### Event count: work_item_completed should appear exactly once (not twice)
+### Event count: attempt_completed should appear exactly once (not twice)
 AS ADMIN: pf_read_events(work_item_id=WI_ID, limit="50")
-NOTE: count events with event_type=="work_item_completed"
+NOTE: count events with event_type=="attempt_completed"
 ASSERT: count == 1 (idempotent wrap must not emit duplicate terminal events)
 
 ## PASS criteria

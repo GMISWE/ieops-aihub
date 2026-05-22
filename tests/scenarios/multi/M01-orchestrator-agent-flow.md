@@ -80,7 +80,7 @@ ASSERT: response.status == "wrapped"
 
 CALL: pf_read_events(work_item_id=WI_ID, limit="20")
 ASSERT: any event.event_type=="attempt_started"
-ASSERT: any event.event_type=="work_item_completed"
+ASSERT: any event.event_type=="attempt_completed"
 ASSERT: any(e for e in events if e.actor_user_id == "u_CX6BMioR")  (Alice's events)
 
 ### Ready queue: wi no longer in items[]

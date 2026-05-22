@@ -50,6 +50,30 @@ Always execute CLEANUP steps regardless of pass/fail.
 
 Carol's project_roles = {marketplace: "viewer"} — can GET but not POST/PATCH on project resources.
 
+## Credentials round-trip (HTTP direct-call scenarios)
+
+When running scenarios that use raw HTTP calls (multi/ and some e2e/), follow this pattern:
+
+```bash
+# 1. Generate a fresh session secret (64-hex chars)
+MY_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+
+# 2. Claim and save the attempt_id
+MY_ATTEMPT=$(curl -s -X POST $BASE/v1/work_items/$WI_ID/claim \
+  -H "Authorization: Bearer $MY_KEY" -H "Content-Type: application/json" \
+  -d "{\"idempotency_key\":\"unique-key\",\"session_info\":{\"machine_id\":\"my-host\",\"session_secret\":\"$MY_SECRET\"}}" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['attempt_id'])")
+
+# 3. Use saved credentials in subsequent calls
+curl -X POST $BASE/v1/work_items/$WI_ID/complete \
+  -H "Authorization: Bearer $MY_KEY" -H "Content-Type: application/json" \
+  -d "{\"status\":\"wrapped\",\"attempt_id\":\"$MY_ATTEMPT\",\"claim_epoch\":1,\"session_secret\":\"$MY_SECRET\"}"
+```
+
+Replace `<64hex>` / `<secret>` placeholders in scenario files with `MY_SECRET` bound this way.
+For scenarios where step 2 uses MCP pf_claim_work_item, read credentials from:
+`~/.polyforge/state/<wi_id>.json` → fields: `attempt_id`, `claim_epoch`, `session_secret`.
+
 ## Field format reference
 
 ### declared_resources (pf_create_work_item)

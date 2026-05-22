@@ -10,6 +10,7 @@ tests/scenarios/
   layer2/    — Step management (pf_update_step, heartbeat, stale-cred, guard)
   layer3/    — Methodology artifact chain (spec/plan/execute, memory recall)
   e2e/       — Full lifecycle (init, worktree, claim→wrap, doctor, conflict)
+  multi/     — Multi-role, multi-user real-world scenarios
 ```
 
 ## ⚠️ All scenarios require MCP transport
@@ -30,13 +31,24 @@ You are a polyforge e2e test runner. Execute the scenario at:
   tests/scenarios/<path>.md
 
 Use the polyforge MCP tools (pf_*) available in this session.
-AIHUB_URL=http://10.146.0.16:8080  API_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
+AIHUB_URL=http://10.146.0.16:8080
 WORKSPACE_ROOT=/root/code/aicoding/gmi-ws-v3
 
 Report each ASSERT line as PASS or FAIL with the actual value observed.
 At the end print: SCENARIO PASS or SCENARIO FAIL (with failure count).
 Always execute CLEANUP steps regardless of pass/fail.
 ```
+
+## Test accounts
+
+| Role | User | API Key |
+|------|------|---------|
+| admin | xiaokang.w | `baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig` |
+| machine/writer | Test Agent Alice | `pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V` |
+| human/writer | Test Writer Bob | `pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR` |
+| human/viewer(project) | Test Viewer Carol | `pf_k1_2j5gcKsUTBRazaEWydEQ1i4bDRwdR6Bh` |
+
+Carol's project_roles = {marketplace: "viewer"} — can GET but not POST/PATCH on project resources.
 
 ## Field format reference
 
@@ -45,7 +57,6 @@ Always execute CLEANUP steps regardless of pass/fail.
 [{"type": "repo", "uri": "repo:<repoName>", "intent": "exclusive",
   "task_branch": "polyforge/<branchName>"}]
 ```
-Types: `repo` | `path` | `document` | `section` | `service` | `external_ref`
 
 ### requested_locks (pf_claim_work_item)
 ```json
@@ -56,12 +67,12 @@ Types: `repo` | `path` | `document` | `section` | `service` | `external_ref`
 - `status="in_progress"` → `{status: "in_progress"}`
 - `status="completed"` → `{status: "completed"}`
 - `heartbeat=true` → `{status: "heartbeat_ok"}`
-- Does NOT return `{ok: true}`
 
 ## File conventions
 
-- `CALL:` — MCP tool invocation
-- `ASSERT:` — field/condition to verify (fail if not met)
-- `ASSERT_ERROR:` — expect an error containing this string
+- `CALL:` — MCP tool invocation (or HTTP call for multi-user scenarios)
+- `AS <user>:` — context switch to that user's API key
+- `ASSERT:` — verify (fail if not met)
+- `ASSERT_ERROR:` — expect error containing this string
 - `CLEANUP:` — always run regardless of pass/fail
-- `NOTE:` — informational, not asserted
+- `NOTE:` — informational

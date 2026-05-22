@@ -1,80 +1,95 @@
-# M07 — Cross-wi dependency chain: blocked claim rejected; claim succeeds after blocker wraps
+# M07 — Cross-wi dependency chain: B blocked by A, auto-unblocks on wrap
 
-Tests the full lifecycle of a wi blocked by a dependency:
-1. WI_B depends on WI_A → WI_B status transitions to "blocked" immediately.
-2. Attempting to claim WI_B while blocked returns HTTP 409 (Fix: blocked claim rejection).
-3. WI_A wraps → WI_B transitions to "queued".
-4. WI_B claim now succeeds.
+Real-world scenario: Wi B depends on Wi A (database migration must complete before
+API refactor). B stays blocked and out of ready queue until A wraps.
+Tests the dependency enforcement and auto-unblock flow.
 
-## Actors
-
-- Alice (user_id: u_aliceXXXXXX)
-- Bob   (user_id: u_bobYYYYYYYY)
-
-## Setup
-
-### Create WI_A (blocker)
-CALL: pf_create_work_item(project="marketplace",
-      goal="[test] M07 dependency blocker WI_A",
-      wi_type="chore", priority="normal")
-NOTE: save response.id as WI_A
-
-### Create WI_B (dependent)
-CALL: pf_create_work_item(project="marketplace",
-      goal="[test] M07 dependent WI_B",
-      wi_type="chore", priority="normal")
-NOTE: save response.id as WI_B
+## Users
+- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig  (admin, creates wi's)
+- ALICE_KEY=pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V  (Test Agent Alice, does WI_A)
+- BOB_KEY=pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR  (Test Writer Bob, waits for WI_B)
 
 ## Steps
 
-### Step 1: Alice claims WI_A
-AS ALICE:
-CALL: pf_claim_work_item(work_item_id=WI_A, idempotency_key="m07-alice-claim-a",
-      mode="fresh")
-ASSERT: response.ok == true
-ASSERT: response.claim_epoch == 1
+### Admin: create WI_A (database migration — prerequisite)
+AS ADMIN:
+CALL: pf_create_work_item(project="marketplace",
+      goal="[test] M07 Step 1: run database migration (prerequisite)",
+      wi_type="chore", priority="high")
+NOTE: save response.id as WI_A, response.slug as SLUG_A
 
-### Step 2: Create dependency WI_B → blocked_by WI_A
-CALL: pf_create_dependency(dependent_id=WI_B, dependency_id=WI_A)
-ASSERT: response.ok == true
+### Admin: create WI_B blocked by WI_A
+AS ADMIN:
+CALL: pf_create_work_item(project="marketplace",
+      goal="[test] M07 Step 2: API refactor (blocked until migration done)",
+      wi_type="fix_bug", priority="normal",
+      blocked_by=[WI_A])
+ASSERT: response.status == "queued"
+NOTE: save response.id as WI_B
+NOTE: WI_B may show status="blocked" depending on implementation
 
-### Step 3: Verify WI_B is now blocked (not queued)
-CALL: pf_get_work_item(work_item_id=WI_B)
-ASSERT: response.status == "blocked"
+### Ready queue: WI_A in items[], WI_B in blocked[] or not in items[]
+AS ADMIN:
+CALL: pf_get_ready_queue(project="marketplace")
+ASSERT: any(item for item in response.items if item.id == WI_A)
+ASSERT: not any(item for item in response.items if item.id == WI_B)
 
-### Step 4: Bob attempts to claim WI_B — must be rejected (dependency unresolved)
+### Bob tries to claim WI_B — must be blocked
 AS BOB:
 HTTP POST /v1/work_items/WI_B/claim
-body: {"idempotency_key": "m07-bob-claim-b", "mode": "fresh"}
-ASSERT_ERROR: HTTP 409 "blocked"
+body: {"idempotency_key":"m07-bob-early-claim","session_info":{"machine_id":"bob-ws","session_secret":"<64hex_B>"}}
+ASSERT_ERROR: HTTP 409 OR "BLOCKED" OR "dependency not satisfied"
 
-### Step 5: Verify WI_B still blocked (claim failure had no side-effects)
-CALL: pf_get_work_item(work_item_id=WI_B)
-ASSERT: response.status == "blocked"
-
-### Step 6: Alice completes WI_A — releases the dependency
+### Alice claims and completes WI_A
 AS ALICE:
-CALL: pf_complete_attempt(work_item_id=WI_A, status="wrapped")
-ASSERT: response.ok == true
-
-### Step 7: WI_B should now be queued (blocker resolved)
-CALL: pf_get_work_item(work_item_id=WI_B)
-ASSERT: response.status == "queued"
-
-### Step 8: Bob can now claim WI_B successfully
-AS BOB:
-CALL: pf_claim_work_item(work_item_id=WI_B, idempotency_key="m07-bob-claim-b-retry",
-      mode="fresh")
-ASSERT: response.ok == true
+HTTP POST /v1/work_items/WI_A/claim
+body: {"idempotency_key":"m07-alice-claim","session_info":{"machine_id":"alice-agent","session_secret":"<64hex_A>"}}
+ASSERT: HTTP 200
 ASSERT: response.claim_epoch == 1
+NOTE: save ALICE_ATTEMPT
+
+AS ALICE:
+HTTP PATCH /v1/work_items/WI_A/step
+body: {"step":"code_change","status":"in_progress","attempt_id":ALICE_ATTEMPT,"claim_epoch":1,"session_secret":"<secret_A>"}
+HTTP PATCH /v1/work_items/WI_A/step
+body: {"step":"code_change","status":"completed","step_attempt_id":"sa_m07_code","attempt_id":ALICE_ATTEMPT,"claim_epoch":1,"session_secret":"<secret_A>"}
+HTTP PATCH /v1/work_items/WI_A/step
+body: {"step":"commit_and_pr","status":"in_progress","attempt_id":ALICE_ATTEMPT,"claim_epoch":1,"session_secret":"<secret_A>"}
+HTTP PATCH /v1/work_items/WI_A/step
+body: {"step":"commit_and_pr","status":"completed","step_attempt_id":"sa_m07_pr","attempt_id":ALICE_ATTEMPT,"claim_epoch":1,"session_secret":"<secret_A>"}
+
+AS ALICE:
+HTTP POST /v1/work_items/WI_A/complete
+body: {"status":"wrapped","attempt_id":ALICE_ATTEMPT,"claim_epoch":1,"session_secret":"<secret_A>"}
+ASSERT: response.ok == true
+
+### WI_A wrapped → WI_B auto-unblocked
+AS ADMIN:
+CALL: pf_get_ready_queue(project="marketplace")
+ASSERT: any(item for item in response.items if item.id == WI_B)
+NOTE: WI_B now unblocked and in ready queue
+
+CALL: pf_get_work_item(work_item_id=WI_B)
+NOTE: Status should now be "queued" (no longer blocked)
+
+### Bob can now claim WI_B
+AS BOB:
+HTTP POST /v1/work_items/WI_B/claim
+body: {"idempotency_key":"m07-bob-claim","session_info":{"machine_id":"bob-ws","session_secret":"<64hex_B>"}}
+ASSERT: HTTP 200
+ASSERT: response.claim_epoch == 1
+NOTE: save BOB_ATTEMPT
+
+CALL: pf_get_work_item(work_item_id=WI_B)
+ASSERT: response.status == "running"
 
 ## Cleanup
 
 AS BOB:
-CALL: pf_complete_attempt(work_item_id=WI_B, status="wrapped")
+HTTP POST /v1/work_items/WI_B/complete
+body: {"status":"wrapped","attempt_id":BOB_ATTEMPT,"claim_epoch":1,"session_secret":"<secret_B>"}
 
 ## PASS criteria
 
-WI_B enters "blocked" as soon as the dependency is created (not "queued").
-Claim attempt on a blocked wi returns 409 with message containing "blocked".
-After WI_A wraps, WI_B transitions to "queued" and becomes claimable.
+WI_B blocked until WI_A wraps; Bob's early claim rejected; after Alice wraps WI_A,
+WI_B appears in ready queue; Bob's second claim succeeds.

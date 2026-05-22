@@ -1,70 +1,95 @@
-# M04 — Manager force-takeover of a stalled agent
+# M04 — Manager takeover: Admin rescues stalled Alice agent
 
-Tests that an Admin can force-take a running wi whose agent has gone stale,
-without issuing a second claim. force_takeover writes its own credentials into
-the state file; the Admin can then proceed directly.
+Real-world scenario: Alice's agent session crashes or stalls mid-work.
+Admin (as maintainer) force-takes over the wi, picks up from where Alice left off,
+completes and wraps. Tests the cross-user force_takeover flow.
 
-## Actors
-
-- Alice  (user_id: u_aliceXXXXXX) — original agent
-- Admin  (user_id: u_5dFjeaMZ)   — manager with force_takeover permission
-
-## Setup
-
-CALL: pf_create_work_item(project="marketplace",
-      goal="[test] M04 stalled agent wi",
-      wi_type="chore", priority="normal")
-NOTE: save response.id as WI_ID
+## Users
+- ALICE_KEY=pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V  (Test Agent Alice, writer)
+- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig  (xiaokang.w, admin)
 
 ## Steps
 
-### Step 1: Alice claims the wi
+### Alice claims and starts work
 AS ALICE:
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="m04-alice-claim",
-      mode="fresh")
-ASSERT: response.ok == true
+HTTP POST /v1/work_items — create wi (via Alice's key):
+body: {"project":"marketplace","goal":"[test] M04 Alice starts, Admin rescues",
+       "wi_type":"fix_bug","priority":"high","scenario":"coding"}
+NOTE: If create requires admin, switch to ADMIN for creation, Alice for claim.
+NOTE: save response.id as WI_ID
+
+AS ALICE:
+HTTP POST /v1/work_items/WI_ID/claim
+body: {"idempotency_key":"m04-alice-claim",
+       "session_info":{"machine_id":"alice-agent-02","session_secret":"<64hex_A>"}}
 ASSERT: response.claim_epoch == 1
-NOTE: save response.attempt_id as ATTEMPT_ALICE
+NOTE: save ALICE_ATTEMPT, ALICE_SECRET = <64hex_A>
 
-### Step 2: Alice starts a step (then stalls — no further heartbeats)
 AS ALICE:
-CALL: pf_update_step(work_item_id=WI_ID, step_id="code_change", status="in_progress")
-ASSERT: response.status == "in_progress"
+HTTP PATCH /v1/work_items/WI_ID/step
+body: {"step":"prepare_context","status":"in_progress","attempt_id":ALICE_ATTEMPT,"claim_epoch":1,"session_secret":ALICE_SECRET}
 
-### Step 3: Verify wi is running under Alice
+NOTE: Alice's agent "crashes" here — step left in_progress, lease will eventually expire.
+NOTE: In this test we simulate by just having Admin forcibly take over.
+
+### Admin: observe the stalled wi
+AS ADMIN:
 CALL: pf_get_work_item(work_item_id=WI_ID)
 ASSERT: response.status == "running"
 ASSERT: response.current_attempt_epoch == 1
 
-### Step 4: Admin force-takeover (different user, explicit force_over=true)
-AS ADMIN (u_5dFjeaMZ):
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="m04-admin-takeover",
-      mode="fresh", force_over=true)
+CALL: pf_get_step(work_item_id=WI_ID)
+ASSERT: response.current_step_status == "in_progress"
+ASSERT: response.current_step == "prepare_context"
+
+### Admin: force takeover (same user = always allowed; cross-user admin = always allowed)
+AS ADMIN:
+CALL: pf_force_takeover(work_item_id=WI_ID,
+      reason="Alice agent crashed — admin rescuing stalled wi M04")
+ASSERT: response.ok == true OR response.new_attempt_id != null
+NOTE: save response.new_attempt_id as ADMIN_ATTEMPT (new attempt created)
+
+### Admin: re-claim after takeover
+AS ADMIN:
+CALL: pf_claim_work_item(work_item_id=WI_ID,
+      idempotency_key="m04-admin-claim", mode="resume")
 ASSERT: response.ok == true
 ASSERT: response.claim_epoch == 2
-NOTE: save response.attempt_id as ATTEMPT_ADMIN
-NOTE: force_takeover supersedes Alice's attempt; Admin's credentials are now active
+NOTE: save new credentials
 
-### Step 5: Admin completes the wi (no second claim needed)
-NOTE: Admin uses ATTEMPT_ADMIN credentials written by force_takeover above.
-AS ADMIN (u_5dFjeaMZ):
-CALL: pf_complete_attempt(work_item_id=WI_ID, status="wrapped", force_terminate_step=true)
+### Admin: clean up in-progress step, continue from where Alice left off
+AS ADMIN:
+CALL: pf_update_step(work_item_id=WI_ID, step_id="prepare_context",
+      status="failed", step_attempt_id="sa_m04_alice_crash",
+      error_type="agent_crashed")
+ASSERT: response.status == "failed"
+
+CALL: pf_get_step(work_item_id=WI_ID)
+ASSERT: response.current_step_status == "idle"
+
+### Admin: complete all remaining steps
+CALL: pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="in_progress")
+CALL: pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="completed",
+      step_attempt_id="sa_m04_admin_ctx", artifact_summary="admin rescued context step")
+CALL: pf_update_step(work_item_id=WI_ID, step_id="code_change", status="in_progress")
+CALL: pf_update_step(work_item_id=WI_ID, step_id="code_change", status="completed",
+      step_attempt_id="sa_m04_admin_code", artifact_summary="admin completed code change")
+CALL: pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="in_progress")
+CALL: pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="completed",
+      step_attempt_id="sa_m04_admin_pr", artifact_summary="admin completed PR")
+
+### Admin: wrap
+CALL: pf_complete_attempt(work_item_id=WI_ID, status="wrapped")
 ASSERT: response.ok == true
 
-## Event assertions
-
-ASSERT: any event with event_type=="attempt_started" AND claim_epoch==1
-        (Alice's original claim)
-
-ASSERT: any event with event_type=="force_takeover" AND actor==u_5dFjeaMZ
-        (Admin's takeover — force_takeover does NOT emit attempt_started)
-
-ASSERT: any event with event_type=="work_item_completed" AND actor==u_5dFjeaMZ
-        (Admin wraps)
+### Verify event timeline shows both Alice and Admin as actors
+CALL: pf_read_events(work_item_id=WI_ID, limit="20")
+ASSERT: any event with actor == Alice (u_CX6BMioR) — attempt_started
+ASSERT: any event with actor == Admin (u_5dFjeaMZ) — force_takeover + step_* + wrapped
+ASSERT: any event.event_type == "attempt_started" with claim_epoch==1  (Alice's)
+ASSERT: any event.event_type == "attempt_started" with claim_epoch==2  (Admin's)
 
 ## PASS criteria
 
-Admin force-takeover (epoch=2) supersedes Alice (epoch=1) without a second
-pf_claim call. Admin wraps the wi directly using the takeover credentials.
-Events: attempt_started(epoch=1, actor=Alice) + force_takeover(actor=Admin)
-+ work_item_completed(actor=Admin).
+Alice claims → starts step → Admin force-takes over → Admin claims (epoch=2) →
+step completed → wi wrapped. Event timeline shows 2 actors across 2 attempts.

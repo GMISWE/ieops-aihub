@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 )
 
-// StateFile is the per-wi credential file at ~/.polyforge/state/<wi_id>.json.
+// StateFile is the per-wi credential file at <workspace>/.polyforge/state/<wi_id>.json.
 // Created by pf_claim_work_item, read by credential middleware, deleted (for
 // terminal states) by pf_complete_attempt.
+// Per design §9.5.4: state files are workspace-scoped, not home-dir global.
+// Only ~/.polyforge/config.toml is machine-global.
 type StateFile struct {
 	WIID          string            `json:"wi_id"`
 	Slug          string            `json:"slug,omitempty"`
@@ -23,13 +25,19 @@ type StateFile struct {
 	Worktrees     map[string]string `json:"worktrees,omitempty"` // repo -> abs path
 }
 
-// StateDir returns the directory where state files live.
+// StateDir returns the workspace-scoped state directory: <wsRoot>/.polyforge/state/
+// Per design §9.5.4, state files are workspace-local (not in ~/), so different
+// workspaces don't bleed credentials into each other.
+// Uses POLYFORGE_WORKSPACE_ROOT env (set by Claude Code), falling back to cwd.
 func StateDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".polyforge", "state")
+	wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
+	if wsRoot == "" {
+		wsRoot, _ = os.Getwd()
+	}
+	return filepath.Join(wsRoot, ".polyforge", "state")
 }
 
-// WriteStateFile writes s to ~/.polyforge/state/<wi_id>.json with mode 0600.
+// WriteStateFile writes s to <workspace>/.polyforge/state/<wi_id>.json with mode 0600.
 func WriteStateFile(s *StateFile) error {
 	dir := StateDir()
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -43,7 +51,7 @@ func WriteStateFile(s *StateFile) error {
 	return os.WriteFile(path, b, 0600)
 }
 
-// ReadStateFile reads ~/.polyforge/state/<wi_id>.json.
+// ReadStateFile reads <workspace>/.polyforge/state/<wi_id>.json.
 func ReadStateFile(wiID string) (*StateFile, error) {
 	path := filepath.Join(StateDir(), wiID+".json")
 	b, err := os.ReadFile(path)
@@ -57,7 +65,7 @@ func ReadStateFile(wiID string) (*StateFile, error) {
 	return &s, nil
 }
 
-// DeleteStateFile removes ~/.polyforge/state/<wi_id>.json.
+// DeleteStateFile removes <workspace>/.polyforge/state/<wi_id>.json.
 func DeleteStateFile(wiID string) error {
 	return os.Remove(filepath.Join(StateDir(), wiID+".json"))
 }

@@ -276,6 +276,8 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 				)
 			}
 		}
+	} else if wi.Status == "blocked" {
+		return nil, NewErr(ErrConflictTerminalState, "work item is blocked by dependencies; resolve blockers first")
 	} else if wi.Status == "paused" || wi.Status == "queued" {
 		// Normal claim — no extra checks required.
 	} else if wi.Status == "wrapped" || wi.Status == "failed" || wi.Status == "cancelled" {

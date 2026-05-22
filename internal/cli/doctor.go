@@ -27,7 +27,7 @@ type checkResult struct {
 //  1. workspace  – can locate .polyforge.yaml from wsRoot
 //  2. config     – ~/.polyforge/config not required in v1, checks aihub reachability
 //  3. repos      – .repo/<name>/ exist and match .polyforge.yaml remotes
-//  4. worktrees  – pf3.<xxx>/ list vs server wi list; flag orphans
+//  4. worktrees  – pf.<seq>.<ulid8>/ list vs server wi list; flag orphans
 //  5. version    – GET /v1/version; compare min_client_version vs local binary
 func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot string, args []string) {
 	fix := len(args) > 0 && args[0] == "--fix"
@@ -144,7 +144,7 @@ func checkRepos(wsRoot string, cfg *config.Config) checkResult {
 	}
 }
 
-// checkWorktrees cross-references pf3.* directories with active work items
+// checkWorktrees cross-references pf.* directories with active work items
 // from aihub; flags directories with no matching running wi.
 func checkWorktrees(ctx context.Context, c *client.Client, wsRoot string, fix bool) checkResult {
 	entries, err := os.ReadDir(wsRoot)
@@ -154,7 +154,7 @@ func checkWorktrees(ctx context.Context, c *client.Client, wsRoot string, fix bo
 
 	var wt []string
 	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), "pf3.") {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "pf.") {
 			wt = append(wt, e.Name())
 		}
 	}
@@ -185,8 +185,8 @@ func checkWorktrees(ctx context.Context, c *client.Client, wsRoot string, fix bo
 	// Identify orphans: worktree whose shortid does not appear in active IDs.
 	var orphans []string
 	for _, name := range wt {
-		// pf3.<shortid> or pf3.<shortid>/ — extract shortid after "pf3."
-		shortid := strings.TrimPrefix(name, "pf3.")
+		// pf.<seq>.<ulid8> — extract the ulid8 (last 8 chars after the final dot)
+		shortid := strings.TrimPrefix(name, "pf.")
 		// shortid may be "01ks510z" or composite like "01ks510z" — match prefix
 		found := false
 		for active := range activeIDs {

@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -334,23 +337,107 @@ func (s *Server) registerLifecycleTools() {
 				sf.ClaimEpoch = ce
 			}
 		}
+		if v, ok := result["slug"].(string); ok {
+			sf.Slug = v
+		}
+		if v, ok := result["project"].(string); ok {
+			sf.Project = v
+		}
 
 		if err := config.WriteStateFile(sf); err != nil {
 			return errResult(fmt.Errorf("update state file: %w", err))
 		}
 
+		// Create git worktrees for each repo in the project (non-fatal).
+		// Worktree path format: pf.<seq>.<ulid8>/<repo>/
+		// Branch name: polyforge/<ulid8>
+		if s.cfg != nil && sf.Project != "" {
+			wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
+			if wsRoot == "" {
+				wsRoot, _ = os.Getwd()
+			}
+			if wsRoot != "" {
+				// Derive seq from slug (e.g. "marketplace#42" → "42").
+				seq := ""
+				if sf.Slug != "" {
+					if idx := strings.LastIndex(sf.Slug, "#"); idx >= 0 {
+						seq = sf.Slug[idx+1:]
+					}
+				}
+
+				// Derive ulid8: last 8 chars of wi_id after stripping "wi_" prefix.
+				ulid8 := ""
+				bare := strings.TrimPrefix(wiID, "wi_")
+				if len(bare) >= 8 {
+					ulid8 = bare[len(bare)-8:]
+				}
+
+				if seq != "" && ulid8 != "" {
+					wtDir := fmt.Sprintf("pf.%s.%s", seq, ulid8)
+					branchName := "polyforge/" + ulid8
+					mode := strArg(args, "mode")
+
+					if proj, ok := s.cfg.Projects[sf.Project]; ok {
+						worktrees := make(map[string]string)
+						for _, repo := range proj.Repos {
+							srcPath := filepath.Join(wsRoot, ".repo", repo.Name)
+							wtPath := filepath.Join(wsRoot, wtDir, repo.Name)
+
+							var cmd *exec.Cmd
+							if mode == "resume" {
+								// Branch already exists; just attach.
+								cmd = exec.Command("git", "-C", srcPath, "worktree", "add", wtPath, branchName)
+							} else {
+								// Fresh claim: create branch.
+								cmd = exec.Command("git", "-C", srcPath, "worktree", "add", "-b", branchName, wtPath)
+								if out, err := cmd.CombinedOutput(); err != nil {
+									// Branch may already exist (idempotent retry) — fall back to attach.
+									if strings.Contains(string(out), "already exists") || strings.Contains(string(out), "already checked out") {
+										cmd = exec.Command("git", "-C", srcPath, "worktree", "add", wtPath, branchName)
+									} else {
+										// Unexpected error; skip this repo.
+										fmt.Fprintf(os.Stderr, "polyforge: worktree add for %s: %s\n", repo.Name, string(out))
+										continue
+									}
+								} else {
+									// Success on first try; record and continue.
+									worktrees[repo.Name] = wtPath
+									continue
+								}
+							}
+
+							if out, err := cmd.CombinedOutput(); err != nil {
+								fmt.Fprintf(os.Stderr, "polyforge: worktree add for %s: %s\n", repo.Name, string(out))
+							} else {
+								worktrees[repo.Name] = wtPath
+							}
+						}
+
+						if len(worktrees) > 0 {
+							sf.Worktrees = worktrees
+							// Best-effort: update state file with worktree paths.
+							_ = config.WriteStateFile(sf)
+						}
+					}
+				}
+			}
+		}
+
 		// Don't return session_secret to LLM (decision A)
 		// Return attempt_id and claim_epoch only
 		safeResult := map[string]any{
-			"attempt_id":   sf.AttemptID,
-			"claim_epoch":  sf.ClaimEpoch,
-			"ok":           true,
+			"attempt_id":  sf.AttemptID,
+			"claim_epoch": sf.ClaimEpoch,
+			"ok":          true,
 		}
 		// Pass through other non-secret fields
 		for _, k := range []string{"expires_at", "acquired_locks", "current_attempt_epoch", "slug", "project"} {
 			if v, ok := result[k]; ok {
 				safeResult[k] = v
 			}
+		}
+		if len(sf.Worktrees) > 0 {
+			safeResult["worktrees"] = sf.Worktrees
 		}
 		return jsonResult(safeResult)
 	})

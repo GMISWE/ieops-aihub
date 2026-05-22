@@ -354,7 +354,7 @@ func (s *Server) registerLifecycleTools() {
 		if s.cfg != nil && sf.Project != "" {
 			wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
 			if wsRoot == "" {
-				wsRoot, _ = os.Getwd()
+				wsRoot = config.FindWorkspaceRoot()
 			}
 			if wsRoot != "" {
 				// Derive seq from slug (e.g. "marketplace#42" → "42").

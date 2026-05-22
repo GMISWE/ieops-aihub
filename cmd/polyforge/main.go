@@ -37,12 +37,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load .polyforge.yaml from POLYFORGE_WORKSPACE_ROOT or cwd (non-fatal).
-	// When config.toml has api_key + server.url the workspace config is optional,
-	// allowing the MCP server to run from any directory (global plugin install).
+	// Load .polyforge.yaml from POLYFORGE_WORKSPACE_ROOT, or by walking up from
+	// cwd to find .polyforge.yaml (non-fatal). When config.toml has api_key +
+	// server.url the workspace config is optional, allowing the MCP server to
+	// run from any directory (global plugin install).
 	wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
 	if wsRoot == "" {
-		wsRoot = "."
+		wsRoot = config.FindWorkspaceRoot()
 	}
 	cfg, _ := config.Load(wsRoot) // non-fatal: config.toml takes priority
 
@@ -77,14 +78,11 @@ func runCLI(ctx context.Context, args []string) {
 		return
 	}
 
-	// Workspace root: prefer POLYFORGE_WORKSPACE_ROOT, fall back to cwd.
+	// Workspace root: prefer POLYFORGE_WORKSPACE_ROOT, then walk up from cwd
+	// to find .polyforge.yaml (same logic as FindWorkspaceRoot).
 	wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
 	if wsRoot == "" {
-		var err error
-		wsRoot, err = os.Getwd()
-		if err != nil {
-			wsRoot = "."
-		}
+		wsRoot = config.FindWorkspaceRoot()
 	}
 
 	// Load config.toml + .polyforge.yaml (non-fatal for version/help).

@@ -6,12 +6,13 @@ import (
 	"testing"
 )
 
-// withTempHome points HOME at a fresh tempdir for the test, so StateDir()
-// resolves under it. Restored on test cleanup.
+// withTempHome points HOME and POLYFORGE_WORKSPACE_ROOT at a fresh tempdir for
+// the test, so StateDir() resolves under it. Restored on test cleanup.
 func withTempHome(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("POLYFORGE_WORKSPACE_ROOT", tmp)
 	return tmp
 }
 
@@ -169,10 +170,71 @@ func TestReadStateFile_BadJSON(t *testing.T) {
 }
 
 func TestStateDir(t *testing.T) {
-	tmp := withTempHome(t)
+	tmp := t.TempDir()
+	t.Setenv("POLYFORGE_WORKSPACE_ROOT", tmp)
 	got := StateDir()
 	want := filepath.Join(tmp, ".polyforge", "state")
 	if got != want {
 		t.Errorf("StateDir = %q, want %q", got, want)
+	}
+}
+
+func TestFindWorkspaceRoot_EnvOverride(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("POLYFORGE_WORKSPACE_ROOT", tmp)
+	// StateDir must respect the env var (FindWorkspaceRoot not called).
+	got := StateDir()
+	if got != filepath.Join(tmp, ".polyforge", "state") {
+		t.Errorf("StateDir with env = %q, want under %q", got, tmp)
+	}
+}
+
+func TestFindWorkspaceRoot_WalksUp(t *testing.T) {
+	// Build a temp tree:  root/ .polyforge.yaml
+	//                     root/sub/subsub/
+	// Start from root/sub/subsub — FindWorkspaceRoot must return root.
+	root := t.TempDir()
+	yamlPath := filepath.Join(root, ".polyforge.yaml")
+	if err := os.WriteFile(yamlPath, []byte("workspace: test\n"), 0644); err != nil {
+		t.Fatalf("write .polyforge.yaml: %v", err)
+	}
+	deep := filepath.Join(root, "sub", "subsub")
+	if err := os.MkdirAll(deep, 0755); err != nil {
+		t.Fatalf("mkdir deep: %v", err)
+	}
+
+	// Temporarily chdir into the deep directory so FindWorkspaceRoot starts there.
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(deep); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	got := FindWorkspaceRoot()
+	if got != root {
+		t.Errorf("FindWorkspaceRoot = %q, want %q", got, root)
+	}
+}
+
+func TestFindWorkspaceRoot_FallsBackToCwd(t *testing.T) {
+	// Use a temp dir with no .polyforge.yaml anywhere above it.
+	// FindWorkspaceRoot must fall back to cwd.
+	tmp := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	got := FindWorkspaceRoot()
+	// The result should be tmp (the cwd), not empty or ".".
+	if got != tmp {
+		t.Errorf("FindWorkspaceRoot fallback = %q, want %q", got, tmp)
 	}
 }

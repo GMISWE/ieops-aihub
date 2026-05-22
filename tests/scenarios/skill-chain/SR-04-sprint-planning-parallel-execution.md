@@ -41,14 +41,36 @@ ADMIN creates 5 wi's (all requires_human_session=false):
     declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
       "task_branch":"polyforge/docs-sr04"}])
 
-ADMIN creates dependencies (after wi creation):
-  pf_create_dependency(blocked_work_item_id=WI_API, blocking_work_item_id=WI_DB)
-  pf_create_dependency(blocked_work_item_id=WI_TEST, blocking_work_item_id=WI_API)
+ADMIN creates dependencies (pf_create_dependency requires a claimed wi for credentials;
+Admin must claim a coordinator wi first, OR use a wi they already have claimed):
+
+NOTE on pf_create_dependency params (from tools_dependency.go):
+  - blocked_wi_id: the wi that becomes blocked (waits for the other)
+  - blocking_wi_id: the wi that must complete first
+  - kind: "blocks" | "supersedes" | "related"
+  - work_item_id: a CLAIMED wi id for credential injection (Admin's active attempt)
+
+  pf_create_dependency(
+    blocked_wi_id=WI_API,
+    blocking_wi_id=WI_DB,
+    kind="blocks",
+    work_item_id=<admin_claimed_wi>
+  )
+  → WI_API is blocked until WI_DB wraps
+
+  pf_create_dependency(
+    blocked_wi_id=WI_TEST,
+    blocking_wi_id=WI_API,
+    kind="blocks",
+    work_item_id=<admin_claimed_wi>
+  )
+  → WI_TEST is blocked until WI_API wraps
 
 SKILL_INVOKE (as ADMIN): polyforge:pf-status
 ASSERT:
   - items[]: WI_DB (high), WI_UI (normal), WI_DOCS (low) — ordered by priority
-  - WI_API, WI_TEST NOT in items[] (blocked by dependency)
+  - stalled[]: WI_API (blocked by WI_DB), WI_TEST (blocked by WI_API)
+  - WI_API and WI_TEST NOT in items[] (in stalled[] due to dependencies)
 
 ### Phase 2: Alice takes highest-priority WI_DB
 SKILL_INVOKE (as ALICE): polyforge:pf-work WI_DB
@@ -59,15 +81,21 @@ Bob takes WI_UI concurrently:
 SKILL_INVOKE (as BOB): polyforge:pf-work WI_UI
 ASSERT:
   - WI_UI claimed by Bob, status=running
-  - Alice and Bob have separate worktrees for separate repos (no lock conflict:
-    WI_DB and WI_UI use different task_branches)
+  - Alice and Bob have separate worktrees (different shortids)
+  - No lock conflict (WI_DB and WI_UI use different task_branches)
 
 ### Phase 3: Alice wraps WI_DB (unblocks WI_API)
 SKILL_INVOKE (as ALICE): polyforge:pf-stop --wrap
   (Alice may skip code_change/commit for speed in this test)
 
+EXPECTED SKILL BEHAVIOR (coding scenario — pf_wrap, not pf_complete_attempt):
+  - pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_DB, repo="marketplace")
+
+ASSERT:
+  - pf_wrap called (NOT pf_complete_attempt directly)
+
 SKILL_INVOKE (as ADMIN): polyforge:pf-status
-ASSERT: WI_API now in items[] (unblocked by WI_DB wrap)
+ASSERT: WI_API now in items[] (unblocked by WI_DB wrap, moved from stalled[])
 
 ### Phase 4: Alice picks up WI_API (next high-priority)
 SKILL_INVOKE (as ALICE): polyforge:pf-work WI_API
@@ -78,11 +106,20 @@ ASSERT:
 ### Phase 5: Bob wraps WI_UI
 SKILL_INVOKE (as BOB): polyforge:pf-stop --wrap
 
+EXPECTED SKILL BEHAVIOR (coding scenario — pf_wrap, not pf_complete_attempt):
+  - pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_UI, repo="marketplace")
+
+ASSERT:
+  - pf_wrap called (NOT pf_complete_attempt directly)
+
 ### Phase 6: Alice wraps WI_API (unblocks WI_TEST)
 SKILL_INVOKE (as ALICE): polyforge:pf-stop --wrap
 
+EXPECTED SKILL BEHAVIOR (coding scenario — pf_wrap, not pf_complete_attempt):
+  - pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_API, repo="marketplace")
+
 SKILL_INVOKE (as ADMIN): polyforge:pf-status
-ASSERT: WI_TEST now in items[] (unblocked by WI_API wrap)
+ASSERT: WI_TEST now in items[] (unblocked by WI_API wrap, moved from stalled[])
 
 ### Phase 7: Final status
 SKILL_INVOKE (as ADMIN): polyforge:pf-status
@@ -92,9 +129,12 @@ ASSERT:
 
 ## Cleanup
 CLEANUP (as ADMIN):
-  - pf_complete_attempt(WI_TEST, status="cancelled")
-  - pf_complete_attempt(WI_DOCS, status="cancelled")
+  - pf_complete_attempt(work_item_id=WI_TEST, status="cancelled")
+  - pf_complete_attempt(work_item_id=WI_DOCS, status="cancelled")
 
 ## PASS criteria
-Dependency ordering enforced; high-priority tasks picked first; parallel agents
-don't conflict on separate branches; unblocking cascade works correctly.
+Dependency ordering enforced (stalled[] correctly populated);
+blocked wi's move to items[] after blocker wraps (cascade unblock works);
+high-priority tasks picked first; parallel agents don't conflict on separate branches;
+all wrap calls use pf_wrap (coding scenario);
+pf_create_dependency uses correct params: blocked_wi_id, blocking_wi_id, kind, work_item_id.

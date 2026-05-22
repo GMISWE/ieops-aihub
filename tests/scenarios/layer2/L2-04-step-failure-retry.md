@@ -1,6 +1,7 @@
 # L2-04 — Step failure resets to idle (retry path)
 
 Tests that a failed step resets current_step_status to idle so the step can be retried.
+Version increments on fail (idle→in_progress = +1, in_progress→failed = +1).
 
 ## Setup
 
@@ -13,7 +14,7 @@ ASSERT: response.ok == true
 
 ## Steps
 
-### Start step
+### Start step (version 0→1)
 CALL: pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="in_progress")
 ASSERT: response.status == "in_progress"
 
@@ -21,17 +22,17 @@ CALL: pf_get_step(work_item_id=WI_ID)
 ASSERT: response.current_step_status == "in_progress"
 ASSERT: response.version == 1
 
-### Fail step
+### Fail step (version 1→2, resets to idle)
 CALL: pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="failed",
       step_attempt_id="sa_l2_04_fail", error_type="tool_error")
 ASSERT: response.status == "failed"
 
-### Verify reset to idle
 CALL: pf_get_step(work_item_id=WI_ID)
 ASSERT: response.current_step_status == "idle"
 ASSERT: response.version == 2
+NOTE: current_step stays "prepare_context" after failure (not cleared)
 
-### Retry (start again after failure) — must succeed
+### Retry: start again (version 2→3)
 CALL: pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="in_progress")
 ASSERT: response.status == "in_progress"
 
@@ -39,12 +40,19 @@ CALL: pf_get_step(work_item_id=WI_ID)
 ASSERT: response.current_step_status == "in_progress"
 ASSERT: response.version == 3
 
+### Complete on retry (version 3→4)
+CALL: pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="completed",
+      step_attempt_id="sa_l2_04_retry_ok", artifact_summary="context gathered on retry")
+ASSERT: response.status == "completed"
+
+CALL: pf_get_step(work_item_id=WI_ID)
+ASSERT: response.current_step_status == "idle"
+ASSERT: response.version == 4
+
 ## Cleanup
 
-CALL: pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="failed",
-      step_attempt_id="sa_l2_04_cleanup2")
-CALL: pf_complete_attempt(work_item_id=WI_ID, status="failed")
+CALL: pf_complete_attempt(work_item_id=WI_ID, status="wrapped")
 
 ## PASS criteria
 
-Failed step resets version to idle; retry (second in_progress) succeeds.
+Failed step resets to idle at version 2; retry succeeds; final version == 4.

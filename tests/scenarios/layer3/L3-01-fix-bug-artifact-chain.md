@@ -1,13 +1,14 @@
 # L3-01 — fix_bug methodology: prepare_context artifact → code_change → commit_and_pr
 
 Tests the full Layer 3 methodology chain for fix_bug wi_type.
-Verifies artifacts are saved, recallable, and linked to the wi.
+Verifies artifacts are saved with correct project (backfilled from wi), recallable by wi_id and type.
 
 ## Setup
 
 CALL: pf_create_work_item(project="marketplace",
       goal="[test] L3-01 fix_bug artifact chain",
       wi_type="fix_bug", priority="normal")
+ASSERT: response.status == "queued"
 NOTE: save response.id as WI_ID, response.slug as SLUG
 
 CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l3-01-claim", mode="fresh")
@@ -16,7 +17,7 @@ ASSERT: response.project == "marketplace"
 
 ## Steps
 
-### prepare_context step + artifact
+### prepare_context step + save spec artifact
 CALL: pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="in_progress")
 ASSERT: response.status == "in_progress"
 
@@ -28,14 +29,14 @@ CALL: pf_save_artifact(type="methodology.spec", work_item_id=WI_ID,
 ASSERT: response.is_new == true
 ASSERT: response.type == "methodology.spec"
 ASSERT: response.project == "marketplace"
-NOTE: save response.id as SPEC_MEM_ID
+NOTE: save response.id as SPEC_MEM_ID (also in response.memory_id — same value)
 
 CALL: pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="completed",
       step_attempt_id="sa_l3_01_ctx",
       artifact_summary="spec saved: context + root cause identified")
 ASSERT: response.status == "completed"
 
-### code_change step
+### code_change step + save plan artifact
 CALL: pf_update_step(work_item_id=WI_ID, step_id="code_change", status="in_progress")
 ASSERT: response.status == "in_progress"
 
@@ -44,11 +45,12 @@ CALL: pf_save_artifact(type="methodology.plan", work_item_id=WI_ID,
       visibility="project")
 ASSERT: response.is_new == true
 ASSERT: response.type == "methodology.plan"
+ASSERT: response.project == "marketplace"
 NOTE: save response.id as PLAN_MEM_ID
 
 CALL: pf_update_step(work_item_id=WI_ID, step_id="code_change", status="completed",
       step_attempt_id="sa_l3_01_code",
-      artifact_summary="plan saved: code change plan written")
+      artifact_summary="plan saved: code change steps")
 ASSERT: response.status == "completed"
 
 ### commit_and_pr step
@@ -60,16 +62,17 @@ CALL: pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="comple
       artifact_summary="PR created: fix/null-check")
 ASSERT: response.status == "completed"
 
-### Recall artifacts by wi
+### Recall by wi_id — order not guaranteed, check by id
 CALL: pf_recall(project="marketplace", work_item_id=WI_ID, top_k="5")
 ASSERT: len(response.items) >= 2
-ASSERT: any item.id == SPEC_MEM_ID
-ASSERT: any item.id == PLAN_MEM_ID
+ASSERT: any(item for item in response.items if item.id == SPEC_MEM_ID)
+ASSERT: any(item for item in response.items if item.id == PLAN_MEM_ID)
 
-### Recall artifacts by type
-CALL: pf_recall(project="marketplace", type=["methodology.spec"], top_k="3")
+### Recall by type — all items must be methodology.spec
+CALL: pf_recall(project="marketplace", type=["methodology.spec"],
+      work_item_id=WI_ID, top_k="5")
 ASSERT: len(response.items) >= 1
-ASSERT: response.items[0].type == "methodology.spec"
+ASSERT: all(item.type == "methodology.spec" for item in response.items)
 
 ## Cleanup
 
@@ -78,5 +81,5 @@ ASSERT: response.ok == true
 
 ## PASS criteria
 
-Both spec and plan artifacts saved; recall by wi_id and by type return them;
-wrap succeeds; all 3 steps completed without errors.
+Both artifacts saved with project="marketplace"; recall by wi_id and type correct;
+all 3 steps completed; wrap succeeds.

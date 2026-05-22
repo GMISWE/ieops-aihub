@@ -1,7 +1,7 @@
 # L3-02 — feature wi: full 5-step methodology chain
 
 Tests spec → plan → code_change → commit_and_pr → review for a feature wi.
-Verifies artifact save at each step and final memory recall.
+Verifies artifact save at key steps and final memory recall.
 
 ## Setup
 
@@ -17,16 +17,18 @@ ASSERT: response.ok == true
 
 ## Steps
 
-### Step 1: spec
+### Step 1: spec (version 0→1→2)
 CALL: pf_update_step(work_item_id=WI_ID, step_id="spec", status="in_progress")
 ASSERT: response.status == "in_progress"
 
 CALL: pf_save_artifact(type="methodology.spec", work_item_id=WI_ID,
       content="## Spec\nAdd dark mode toggle.\n### Acceptance Criteria\n- Toggle persists across sessions",
-      structured_payload={"feature": "dark-mode",
-                          "decisions": [{"decision": "use CSS variables", "reason": "easy theming"}],
-                          "acceptance_criteria": ["toggle persists", "no flash on reload"],
-                          "non_goals": ["mobile-only support"]},
+      structured_payload={
+        "feature": "dark-mode",
+        "decisions": [{"decision": "use CSS variables", "reason": "easy theming"}],
+        "acceptance_criteria": ["toggle persists", "no flash on reload"],
+        "non_goals": ["mobile-only support"]
+      },
       visibility="project")
 ASSERT: response.type == "methodology.spec"
 ASSERT: response.project == "marketplace"
@@ -37,7 +39,10 @@ CALL: pf_update_step(work_item_id=WI_ID, step_id="spec", status="completed",
       artifact_summary="spec saved: dark mode toggle with CSS variables")
 ASSERT: response.status == "completed"
 
-### Step 2: plan
+CALL: pf_get_step(work_item_id=WI_ID)
+ASSERT: response.version == 2
+
+### Step 2: plan (version 2→3→4)
 CALL: pf_update_step(work_item_id=WI_ID, step_id="plan", status="in_progress")
 ASSERT: response.status == "in_progress"
 
@@ -53,7 +58,10 @@ CALL: pf_update_step(work_item_id=WI_ID, step_id="plan", status="completed",
       artifact_summary="plan saved: 3-step implementation plan")
 ASSERT: response.status == "completed"
 
-### Step 3: code_change
+CALL: pf_get_step(work_item_id=WI_ID)
+ASSERT: response.version == 4
+
+### Step 3: code_change (version 4→5→6)
 CALL: pf_update_step(work_item_id=WI_ID, step_id="code_change", status="in_progress")
 ASSERT: response.status == "in_progress"
 
@@ -62,32 +70,32 @@ CALL: pf_update_step(work_item_id=WI_ID, step_id="code_change", status="complete
       artifact_summary="CSS vars + toggle component added")
 ASSERT: response.status == "completed"
 
-### Step 4: commit_and_pr
-CALL: pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="in_progress")
-ASSERT: response.status == "in_progress"
+CALL: pf_get_step(work_item_id=WI_ID)
+ASSERT: response.version == 6
 
+### Step 4: commit_and_pr (version 6→7→8)
+CALL: pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="in_progress")
 CALL: pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="completed",
       step_attempt_id="sa_l3_02_pr",
       artifact_summary="PR opened: feat/dark-mode-toggle")
 ASSERT: response.status == "completed"
 
-### Step 5: review
+### Step 5: review (version 8→9→10)
 CALL: pf_update_step(work_item_id=WI_ID, step_id="review", status="in_progress")
-ASSERT: response.status == "in_progress"
-
 CALL: pf_update_step(work_item_id=WI_ID, step_id="review", status="completed",
       step_attempt_id="sa_l3_02_review",
       artifact_summary="code review passed: no blocking issues")
 ASSERT: response.status == "completed"
 
-### Verify final step state
 CALL: pf_get_step(work_item_id=WI_ID)
 ASSERT: response.current_step_status == "idle"
 ASSERT: response.version == 10
 
-### Verify both artifacts recallable
+### Verify both artifacts recallable (order-independent)
 CALL: pf_recall(project="marketplace", work_item_id=WI_ID, top_k="5")
 ASSERT: len(response.items) >= 2
+ASSERT: any(item for item in response.items if item.id == SPEC_ID)
+ASSERT: any(item for item in response.items if item.id == PLAN_ID)
 
 ## Cleanup
 
@@ -96,5 +104,5 @@ ASSERT: response.ok == true
 
 ## PASS criteria
 
-All 5 steps complete in order; spec+plan artifacts saved; final step version == 10;
-wrap succeeds with no errors.
+All 5 steps complete in order; version 0→10; spec+plan artifacts saved;
+recall returns both artifacts; wrap succeeds.

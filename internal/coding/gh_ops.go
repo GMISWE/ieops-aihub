@@ -18,8 +18,6 @@ func GHCreatePR(ctx context.Context, worktreePath, title, body, head, base strin
 	if base != "" {
 		args = append(args, "--base", base)
 	}
-	args = append(args, "--json", "url,number")
-
 	cmd := exec.CommandContext(ctx, "gh", args...)
 	cmd.Dir = worktreePath
 

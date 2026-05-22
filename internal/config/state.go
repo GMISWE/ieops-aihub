@@ -28,13 +28,38 @@ type StateFile struct {
 // StateDir returns the workspace-scoped state directory: <wsRoot>/.polyforge/state/
 // Per design §9.5.4, state files are workspace-local (not in ~/), so different
 // workspaces don't bleed credentials into each other.
-// Uses POLYFORGE_WORKSPACE_ROOT env (set by Claude Code), falling back to cwd.
+// Uses POLYFORGE_WORKSPACE_ROOT env (set by Claude Code), falling back to
+// FindWorkspaceRoot (walks up from cwd looking for .polyforge.yaml).
 func StateDir() string {
 	wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
 	if wsRoot == "" {
-		wsRoot, _ = os.Getwd()
+		wsRoot = FindWorkspaceRoot()
 	}
 	return filepath.Join(wsRoot, ".polyforge", "state")
+}
+
+// FindWorkspaceRoot walks up from the current working directory looking for a
+// .polyforge.yaml file, similar to how git locates .git. The directory
+// containing .polyforge.yaml is returned as the workspace root.
+// Falls back to cwd when no .polyforge.yaml is found (e.g. no workspace
+// configured yet, or running outside any workspace).
+func FindWorkspaceRoot() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	for {
+		if _, statErr := os.Stat(filepath.Join(dir, ".polyforge.yaml")); statErr == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// reached filesystem root without finding .polyforge.yaml
+			cwd, _ := os.Getwd()
+			return cwd
+		}
+		dir = parent
+	}
 }
 
 // WriteStateFile writes s to <workspace>/.polyforge/state/<wi_id>.json with mode 0600.

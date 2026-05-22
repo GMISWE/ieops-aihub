@@ -407,11 +407,13 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		AND status IN (%s)
 		AND (expires_at IS NULL OR expires_at > clock_timestamp())`, statusSet)
 
-	// Visibility: private memories only visible to author (C2 fix: 'personal' → 'private')
+	// Visibility: private memories only visible to author (C2 fix: 'personal' → 'private');
+	// admin-tier memories only visible to users with global role='admin'.
 	if req.CallerRole != "admin" {
 		where += fmt.Sprintf(` AND (visibility != 'private' OR author_user_id = $%d)`, idx)
 		args = append(args, req.CallerUserID)
 		idx++
+		where += ` AND visibility != 'admin'`
 	}
 
 	// Type filter with prefix matching

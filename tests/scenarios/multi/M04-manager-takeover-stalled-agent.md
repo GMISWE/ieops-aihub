@@ -47,15 +47,8 @@ AS ADMIN:
 CALL: pf_force_takeover(work_item_id=WI_ID,
       reason="Alice agent crashed — admin rescuing stalled wi M04")
 ASSERT: response.ok == true OR response.new_attempt_id != null
-NOTE: save response.new_attempt_id as ADMIN_ATTEMPT (new attempt created)
-
-### Admin: re-claim after takeover
-AS ADMIN:
-CALL: pf_claim_work_item(work_item_id=WI_ID,
-      idempotency_key="m04-admin-claim", mode="resume")
-ASSERT: response.ok == true
-ASSERT: response.claim_epoch == 2
-NOTE: save new credentials
+NOTE: force_takeover creates a new attempt with claim_epoch==2 and writes the state file.
+NOTE: save response.new_attempt_id as ADMIN_ATTEMPT; Admin credentials are already active (no second claim needed).
 
 ### Admin: clean up in-progress step, continue from where Alice left off
 AS ADMIN:
@@ -87,9 +80,11 @@ CALL: pf_read_events(work_item_id=WI_ID, limit="20")
 ASSERT: any event with actor == Alice (u_CX6BMioR) — attempt_started
 ASSERT: any event with actor == Admin (u_5dFjeaMZ) — force_takeover + step_* + wrapped
 ASSERT: any event.event_type == "attempt_started" with claim_epoch==1  (Alice's)
-ASSERT: any event.event_type == "attempt_started" with claim_epoch==2  (Admin's)
+ASSERT: any event.event_type == "force_takeover" with actor == Admin
+NOTE: force_takeover creates Admin's attempt at epoch=2; no separate claim event for Admin.
 
 ## PASS criteria
 
-Alice claims → starts step → Admin force-takes over → Admin claims (epoch=2) →
-step completed → wi wrapped. Event timeline shows 2 actors across 2 attempts.
+Alice claims (epoch=1) → starts step → Admin force-takes over (epoch=2, credentials written to state file) →
+Admin uses epoch=2 credentials directly → step completed → wi wrapped.
+Event timeline shows 2 actors across 2 attempts.

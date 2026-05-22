@@ -1,7 +1,7 @@
 # P1-04 — visibility=admin memory invisible to writers (server gap detector)
 
 Tests that visibility="admin" memories are not visible to writer-role users.
-NOTE: If Bob CAN see the admin memory, this reveals a server bug.
+NOTE: Server correctly filters visibility=admin memories (domain/memory.go:411-416). This test should PASS.
 
 ## Users
 - ADMIN_KEY (creates admin-only memory)

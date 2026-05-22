@@ -29,9 +29,11 @@ AS ADMIN: pf_update_step(WI_ID, commit_and_pr, completed, step_attempt_id="sa_l3
 AS ADMIN: pf_complete_attempt(work_item_id=WI_ID, status="wrapped")
 
 ### Verify expires_at was set on methodology memory
-NOTE: Query the memory directly or recall and check expires_at field
-AS ADMIN: GET /v1/memories/MEM_ID
-ASSERT: response.expires_at != null
+NOTE: There is no GET /v1/memories/:id endpoint; use the list endpoint and filter by id.
+AS ADMIN: GET /v1/memories?project=marketplace&work_item_id=WI_ID&min_strength=0
+Filter: find item where item.id == MEM_ID
+ASSERT: item != null (memory still exists)
+ASSERT: item.expires_at != null
 NOTE: expires_at should be approximately closed_at + 90 days
 NOTE: If expires_at is null or very far in future (>= year 9999), the expiry was NOT set (server gap).
 

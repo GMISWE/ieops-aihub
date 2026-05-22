@@ -37,20 +37,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load .polyforge.yaml from POLYFORGE_WORKSPACE_ROOT or cwd.
+	// Load .polyforge.yaml from POLYFORGE_WORKSPACE_ROOT or cwd (non-fatal).
+	// When config.toml has api_key + server.url the workspace config is optional,
+	// allowing the MCP server to run from any directory (global plugin install).
 	wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
 	if wsRoot == "" {
 		wsRoot = "."
 	}
-	cfg, err := config.Load(wsRoot)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "config load: %v\n", err)
-		os.Exit(1)
-	}
+	cfg, _ := config.Load(wsRoot) // non-fatal: config.toml takes priority
 
 	// Resolve API key: config.toml [auth] > .polyforge.yaml api_key_env > POLYFORGE_API_KEY.
 	apiKey := mc.ResolveAPIKey()
-	if apiKey == "" {
+	if apiKey == "" && cfg != nil {
 		apiKey = os.Getenv(cfg.AIHub.APIKeyEnv)
 	}
 	if apiKey == "" {
@@ -60,7 +58,7 @@ func main() {
 
 	// Resolve aihub URL: config.toml [server] > .polyforge.yaml > POLYFORGE_AIHUB_URL.
 	aihubURL := mc.ResolveAihubURL()
-	if aihubURL == "" {
+	if aihubURL == "" && cfg != nil {
 		aihubURL = cfg.AIHub.URL
 	}
 

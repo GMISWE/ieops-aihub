@@ -52,43 +52,34 @@ with no heartbeat. For this test, treat the lack of completed event as sufficien
 SKILL_INVOKE (as ADMIN): polyforge:pf-work WI_ID --force
 USER_INTENT: "take over Alice's stalled wi and complete it"
 
-EXPECTED SKILL BEHAVIOR (pf-work Mode D — force-takeover, TWO sequential calls):
+EXPECTED SKILL BEHAVIOR (pf-work Mode D — force-takeover):
   1. Memory-First recall for context
   2. pf_list_work_items(ids=[WI_ID]) — check expires_at
   3. pf_force_takeover(id_or_slug=WI_ID, reason="agent stalled; manager rescue")
-     → terminates Alice's attempt, increments claim_epoch
-  4. pf_claim_work_item(work_item_id=WI_ID, mode="resume", idempotency_key=<client ULID>)
-     → Admin gets new attempt_id, claim_epoch=2, new state file written
-  NOTE: Both calls are required. pf_force_takeover alone does NOT create a new attempt.
-        pf_claim_work_item(mode="resume") continues from task_branch commits.
-  5. pf_emit_event(work_item_id=WI_ID, event_type="note",
+     → terminates Alice's attempt, increments claim_epoch to 2,
+       creates a new attempt for Admin (epoch+1),
+       calls fnForceTerminateStep internally → resets stale code_change step to idle.
+     → returns {ok: true, new_attempt_id: ADMIN_ATTEMPT_ID, claim_epoch: 2}
+  4. pf_emit_event(work_item_id=WI_ID, event_type="note",
        payload={text: "force takeover: rescuing stalled code_change"})
 
+  NOTE: pf_force_takeover ALREADY: creates the new attempt (epoch+1), writes the
+        state file, and calls fnForceTerminateStep to reset the stale step to idle.
+        No separate pf_claim_work_item(mode="resume") is needed — Admin is immediately
+        the owner with a valid attempt after force_takeover returns.
+
 ASSERT:
-  - BOTH pf_force_takeover AND pf_claim_work_item(mode="resume") called
-  - Admin now owns WI (claim_epoch=2, owner=Admin)
+  - pf_force_takeover called → ok==true
+  - Admin now owns WI with claim_epoch=2 (new attempt created by force_takeover)
+  - pf_get_step(WI_ID) → code_change.status="idle" (reset by fnForceTerminateStep)
   - pf_get_work_item(WI_ID) → attempt.owner = Admin
-  - Previous Alice attempt marked as superseded
+  - pf_claim_work_item NOT called (force_takeover handles attempt creation)
 
-### Phase 4: Admin resets stale step and completes work
-NOTE: After force-takeover the previous code_change step is still in_progress
-under Alice's old attempt. Admin must reset it using status="failed" (not "completed")
-to clear the stale step_attempt_id and allow a fresh in_progress transition.
+### Phase 4: Admin proceeds directly with executing steps
+NOTE: pf_force_takeover already reset the stale code_change step to idle and created
+Admin's attempt. Admin can proceed directly — no manual step reset needed.
 
-AS ADMIN: Reset stale step (clear old step_attempt_id):
-  pf_update_step(
-    work_item_id=WI_ID,
-    step_id="code_change",
-    status="failed",
-    step_attempt_id=STALE_STEP_ATTEMPT_ID,
-    escalated=false
-  )
-  → This resets the step so it can be retried with a new step_attempt_id.
-
-NOTE: Use status="failed" (not "completed") for stale step reset. "completed" would
-incorrectly advance the step without actual work being done under the new attempt.
-
-AS ADMIN: Take code_change step in_progress again:
+AS ADMIN: Take code_change step in_progress:
   version_info = pf_get_step(work_item_id=WI_ID)
   pf_update_step(
     work_item_id=WI_ID,
@@ -96,10 +87,10 @@ AS ADMIN: Take code_change step in_progress again:
     status="in_progress",
     expected_version=version_info.version
   )
-  → returns new ADMIN_STEP_ATTEMPT_ID
+  → returns ADMIN_STEP_ATTEMPT_ID (claim_epoch=2 on Admin's attempt)
 
 AS ADMIN: Complete the code change (applying fix from Alice's prepare_context context):
-  (Read start_step.artifact_summary, make file changes, then mark completed)
+  (Read prepare_context.artifact_summary, make file changes, then mark completed)
   pf_update_step(
     work_item_id=WI_ID,
     step_id="code_change",
@@ -107,6 +98,10 @@ AS ADMIN: Complete the code change (applying fix from Alice's prepare_context co
     step_attempt_id=ADMIN_STEP_ATTEMPT_ID,
     artifact_summary="force-recovered: applied connection pool fix from Alice's context"
   )
+
+ASSERT:
+  - claim_epoch=2 on Admin's step_attempt (confirms correct epoch after force_takeover)
+  - No manual pf_update_step(status="failed") needed (step already reset by force_takeover)
 
 SKILL_INVOKE (as ADMIN): polyforge-coding:commit_and_pr
 EXPECTED:
@@ -129,13 +124,21 @@ ASSERT:
 ### Phase 5: Verify event timeline shows both actors
 AS ADMIN: pf_read_events(work_item_id=WI_ID, limit=50)
 ASSERT:
-  - Events with actor=Alice (claim, step_update: start_step completed, step_update: code_change in_progress)
-  - Events with actor=Admin (force_takeover, claim, step_update: code_change failed[reset],
+  - Events with actor=Alice (claim, step_update: prepare_context completed, step_update: code_change in_progress)
+  - Events with actor=Admin (force_takeover [includes step reset internally],
       step_update: code_change in_progress, step_update: code_change completed,
       commit, push, pr_opened, wrapped)
   - claim_epoch=1 on Alice's events, claim_epoch=2 on Admin's events
+  NOTE: No separate "claim" event for Admin (force_takeover creates the attempt).
+        No "step_update: code_change failed[reset]" event for Admin (step reset is
+        handled internally by fnForceTerminateStep inside force_takeover).
 
 ## PASS criteria
-Admin sees stall in pf-status; force-takeover calls BOTH pf_force_takeover AND
-pf_claim_work_item(mode="resume"); stale step reset uses status="failed" not "completed";
+Admin sees stall in pf-status; pf_force_takeover called with reason (ok==true);
+force_takeover internally creates Admin's attempt (claim_epoch=2) and resets stale step to idle
+(fnForceTerminateStep); no separate pf_claim_work_item or manual step reset needed;
+Admin proceeds directly to pf_update_step(code_change, in_progress) with claim_epoch=2;
 Admin completes wi via pf_wrap; event timeline shows 2 actors across 2 epochs.
+
+NOTE: Aligned with M04 reference pattern — pf_force_takeover is atomic: terminates old
+attempt, creates new attempt, resets stale step. One call, not three.

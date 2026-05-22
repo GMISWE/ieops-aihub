@@ -107,14 +107,14 @@ ASSERT:
 SKILL_INVOKE: polyforge-coding:commit_and_pr
 
 EXPECTED SKILL BEHAVIOR:
-  1. pf_update_step(work_item_id=WI_ID, step_id="ship", status="in_progress", ...)
+  1. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="in_progress", ...)
   2. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace", vs_base=true)
   3. pf_commit(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
        message="feat(ui): add dark mode toggle\n\n...\n\nwi: marketplace#<seq>")
   4. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace")
   5. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
        title="feat(ui): add dark mode toggle", body="...")
-  6. pf_update_step(step_id="ship", status="completed", artifact_summary="PR #N: <url>")
+  6. pf_update_step(step_id="commit_and_pr", status="completed", artifact_summary="PR #N: <url>")
 
 ASSERT:
   - pf_commit called with conventional commit message

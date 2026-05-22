@@ -24,7 +24,6 @@ The subagent must follow pf-execute skill instructions, not call MCP tools direc
   - wi goal: "fix: remove stale cache entry on user logout"
   - wi_type: fix_bug, requires_human_session=false
   - Steps per phase.yaml: ["prepare_context", "code_change", "commit_and_pr"]
-    mapped to start_step, step-2, ship
 
 ## Scenario
 
@@ -35,7 +34,7 @@ USER_INTENT: "execute" (or "run it" / "let's do it")
 EXPECTED SKILL BEHAVIOR — Setup phase:
   1. Load wi info:
      pf_list_work_items(ids=[WI_ID], include_step_state=true)
-     → requires_human_session=false, current_step="start_step", phase_mode="step"
+     → requires_human_session=false, current_step="prepare_context", phase_mode="step"
 
   2. Memory-First before dispatch:
      pf_recall(project="marketplace", query=wi.goal,
@@ -48,7 +47,7 @@ ASSERT MCP CALLS (setup):
 
 ---
 
-### Step 2: pf-execute dispatches start_step (prepare_context) subagent
+### Step 2: pf-execute dispatches prepare_context subagent
 EXPECTED SKILL BEHAVIOR (from pf-execute step loop):
   Because requires_human_session=false → dispatch subagent (NOT inline execution):
 
@@ -62,33 +61,33 @@ EXPECTED SKILL BEHAVIOR (from pf-execute step loop):
     c. pf_activate_memory(id) for each useful result
     d. Read codebase in WT_PATH (git log, read key files)
     e. pf_get_step(work_item_id=WI_ID) — get current version
-    f. pf_update_step(work_item_id=WI_ID, step_id="start_step",
+    f. pf_update_step(work_item_id=WI_ID, step_id="prepare_context",
                       status="in_progress", expected_version=<version>)
        → returns step_attempt_id, new version
     g. Build initial_context JSON: {goal_analysis, relevant_files, prior_experience,
                                     known_pitfalls, suggested_approach, test_baseline}
-    h. [If step takes >5min] pf_update_step(work_item_id=WI_ID, step_id="start_step",
+    h. [If step takes >5min] pf_update_step(work_item_id=WI_ID, step_id="prepare_context",
                                              heartbeat=true)
-    i. pf_update_step(work_item_id=WI_ID, step_id="start_step", status="completed",
+    i. pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="completed",
                       step_attempt_id=<from f>,
                       artifact_summary=<initial_context JSON [0:4096]>)
     NOTE: prepare_context does NOT call pf_save_artifact. Output goes in artifact_summary only.
 
   Wi Agent verifies completion:
     pf_get_step(work_item_id=WI_ID)
-    assert current_step != "start_step"  // must advance to code_change
+    assert current_step != "prepare_context"  // must advance to code_change
 
-ASSERT MCP CALLS (start_step dispatch):
-  - pf_update_step(step_id="start_step", status="in_progress") called by subagent
-  - pf_update_step(step_id="start_step", status="completed") called with artifact_summary
+ASSERT MCP CALLS (prepare_context dispatch):
+  - pf_update_step(step_id="prepare_context", status="in_progress") called by subagent
+  - pf_update_step(step_id="prepare_context", status="completed") called with artifact_summary
     containing initial_context JSON (not pf_save_artifact)
   - pf_get_step called after subagent completes (Wi Agent verification)
   - pf_save_artifact NOT called
 
-ASSERT STATE after start_step:
+ASSERT STATE after prepare_context:
   - pf_get_step(WI_ID) → current_step="code_change"
-  - start_step.status="completed"
-  - start_step.artifact_summary contains initial_context JSON
+  - prepare_context.status="completed"
+  - prepare_context.artifact_summary contains initial_context JSON
 
 NOTE: If subagent does not advance within 60s, pf-execute triggers M16 retry logic:
   1. pf_update_step(status="failed", step_attempt_id=<old>, escalated=false) — reset stale
@@ -111,14 +110,14 @@ EXPECTED SKILL BEHAVIOR (main step loop iteration 1):
   Dispatch subagent with:
     action: code_change
     skill: polyforge-coding:code_change
-    previous_context: start_step.artifact_summary (initial_context JSON)
+    previous_context: prepare_context.artifact_summary (initial_context JSON)
 
   Subagent executes (per code_change skill):
     a. pf_get_step(work_item_id=WI_ID) — get current version
     b. pf_update_step(work_item_id=WI_ID, step_id="code_change",
                       status="in_progress", expected_version=<version>)
        → returns step_attempt_id
-    c. Read initial_context from previous_steps.start_step.artifact_summary
+    c. Read initial_context from previous_steps.prepare_context.artifact_summary
     d. Edit file(s) in WT_PATH (apply fix: remove stale cache entry on logout)
     e. [If >5min] pf_update_step(work_item_id=WI_ID, step_id="code_change",
                                   heartbeat=true)
@@ -164,7 +163,7 @@ EXPECTED SKILL BEHAVIOR (main step loop iteration 2):
 
   Subagent executes (per commit_and_pr skill):
     a. pf_get_step(work_item_id=WI_ID) — get current version
-    b. pf_update_step(work_item_id=WI_ID, step_id="ship",
+    b. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr",
                       status="in_progress", expected_version=<version>)
     c. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
                repo="marketplace", vs_base=true)
@@ -176,7 +175,7 @@ EXPECTED SKILL BEHAVIOR (main step loop iteration 2):
     f. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
              repo="marketplace",
              title="fix(cache): remove stale entry on user logout", body="...")
-    g. pf_update_step(work_item_id=WI_ID, step_id="ship", status="completed",
+    g. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="completed",
                       step_attempt_id=<from b>, artifact_summary="PR #N: <url>")
 
 ASSERT MCP CALLS (commit_and_pr dispatch):
@@ -201,9 +200,9 @@ EXPECTED SKILL BEHAVIOR (automatic retro):
     wi_id: WI_ID
     wi_goal: "fix: remove stale cache entry on user logout"
     step_summaries: [
-      {step_id: "start_step", artifact_summary: "<initial_context JSON>"},
-      {step_id: "code_change", artifact_summary: "<files_changed JSON>"},
-      {step_id: "ship",       artifact_summary: "PR #N: <url>"}
+      {step_id: "prepare_context", artifact_summary: "<initial_context JSON>"},
+      {step_id: "code_change",     artifact_summary: "<files_changed JSON>"},
+      {step_id: "commit_and_pr",   artifact_summary: "PR #N: <url>"}
     ]
 
   Retro subagent executes (per pf-retro skill):

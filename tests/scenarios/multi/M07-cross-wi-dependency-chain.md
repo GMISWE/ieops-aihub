@@ -38,7 +38,7 @@ ASSERT: not any(item for item in response.items if item.id == WI_B)
 AS BOB:
 HTTP POST /v1/work_items/WI_B/claim
 body: {"idempotency_key":"m07-bob-early-claim","session_info":{"machine_id":"bob-ws","session_secret":"<64hex_B>"}}
-ASSERT_ERROR: HTTP 409 OR "BLOCKED" OR "dependency not satisfied"
+ASSERT_ERROR: HTTP 409 "CONFLICT_TERMINAL_STATE" (wi status is "blocked" — treated as terminal for claim purposes)
 
 ### Alice claims and completes WI_A
 AS ALICE:

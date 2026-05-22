@@ -75,6 +75,12 @@ Human wi's flow: Session 2 → pf-execute runs spec/plan inline, dispatches codi
 | SC-02 | feature with spec+plan: pf-work→pf-spec→pf-plan→code_change→commit_and_pr→review→pf-stop | feature | 2 (human-led) |
 | SC-03 | pf-status LCRS six-segment view with wi's in all states | mixed | any |
 | SC-04 | pf-retro extracts learnings after wrap | any | any |
+| SC-05 | pf-execute drives fix_bug wi end-to-end (auto, Session 1) | fix_bug | 1 (auto) |
+| SC-06 | pf-stop pause and resume lifecycle | any | any |
+| SC-07 | pf-stop --fail terminal failure path | any | any |
+| SC-08 | pf-work dedup handling for duplicate goals | any | any |
+| SC-09 | pf-execute for requires_human_session=true wi (Session 2/3) | feature | 2 (human-led) |
+| SC-10 | pf-execute M16 retry loop: code_change stall → reset → renew lease → retry; escalation on 3rd fail | fix_bug | 1 (auto) |
 
 ### SR-* (multi-role realistic)
 

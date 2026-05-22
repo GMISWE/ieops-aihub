@@ -67,8 +67,9 @@ or stalled[]. The LCRS view is critical for Admin to identify bottlenecks.
 
 ## Cleanup
 CLEANUP:
-  - Cancel WI_AUTO, WI_HUMAN, WI_BLOCKED_DEP, WI_UNCLASSIFIED
-    (pf_complete_attempt(status="cancelled") or DELETE endpoint)
+  - Cancel WI_AUTO, WI_HUMAN, WI_BLOCKED_DEP, WI_UNCLASSIFIED via:
+    pf_cancel_work_item(work_item_id=<WI_ID>, reason="test cleanup")
+    NOTE: pf_complete_attempt only accepts wrapped/failed/paused; use pf_cancel_work_item for cancellation.
   - Wrap WI_RUNNING (pf_complete_attempt(status="wrapped") via Admin key)
   - Re-claim then wrap WI_PAUSED (pf_claim_work_item mode="resume" then pf_complete_attempt(status="wrapped"))
 

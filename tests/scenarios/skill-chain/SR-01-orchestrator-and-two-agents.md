@@ -91,7 +91,8 @@ ASSERT:
   - WI_FIX2 still in items[] (available for next agent)
 
 ## Cleanup
-CLEANUP: pf_complete_attempt(work_item_id=WI_FIX2, status="cancelled") via Admin key
+CLEANUP: pf_cancel_work_item(work_item_id=WI_FIX2, reason="test cleanup") via Admin key
+NOTE: pf_complete_attempt only accepts wrapped/failed/paused; use pf_cancel_work_item for cancellation.
 
 ## PASS criteria
 Two agents work concurrently without interfering; Orchestrator sees correct state

@@ -55,14 +55,14 @@ NOTE: User starts working but does not complete the step before pausing.
 The step is in_progress state when pause is requested.
 
 Partial prepare_context work:
-  a. pf_get_step(work_item_id=WI_ID) → current_step="start_step", version=V1
-  b. pf_update_step(work_item_id=WI_ID, step_id="start_step",
+  a. pf_get_step(work_item_id=WI_ID) → current_step="prepare_context", version=V1
+  b. pf_update_step(work_item_id=WI_ID, step_id="prepare_context",
                     status="in_progress", expected_version=V1)
      → returns step_attempt_id=SA_ID
   (User's environment interrupted before completing the step)
 
 ASSERT STATE:
-  - start_step.status="in_progress"
+  - prepare_context.status="in_progress"
   - step_attempt_id=SA_ID is set
 
 ---
@@ -72,10 +72,10 @@ SKILL_INVOKE: polyforge:pf-stop --pause
 USER_INTENT: "pause, I'll come back later"
 
 EXPECTED SKILL BEHAVIOR (pf-stop pause mode):
-  1. Detect in_progress step (start_step):
+  1. Detect in_progress step (prepare_context):
      pf_update_step(
        work_item_id=WI_ID,
-       step_id="start_step",
+       step_id="prepare_context",
        status="failed",
        step_attempt_id=SA_ID
      )
@@ -95,15 +95,15 @@ EXPECTED SKILL BEHAVIOR (pf-stop pause mode):
      wi WI_ID paused. Locks retained; resume with `/pf-work WI_ID --resume`.
 
      ## 状态
-     | wi      | marketplace#<seq> |
-     | status  | paused            |
-     | step    | start_step reset  |
+     | wi      | marketplace#<seq>      |
+     | status  | paused                 |
+     | step    | prepare_context reset  |
 
      ## 下一步
      - Resume with `/pf-work WI_ID --resume`
 
 ASSERT MCP CALLS:
-  - pf_update_step(step_id="start_step", status="failed", step_attempt_id=SA_ID) called FIRST
+  - pf_update_step(step_id="prepare_context", status="failed", step_attempt_id=SA_ID) called FIRST
     (resets in-progress step before releasing lease)
   - pf_complete_attempt(work_item_id=WI_ID, status="paused") called
   - pf_wrap NOT called (pause is not terminal)
@@ -111,7 +111,7 @@ ASSERT MCP CALLS:
 
 ASSERT STATE after pause:
   - WI_ID status="paused"
-  - start_step.status="failed" (reset for retry on resume)
+  - prepare_context.status="failed" (reset for retry on resume)
   - Lease released (expires_at in the past or cleared)
   - Locks retained on git_branch resource
   - State file still present at WORKSPACE_ROOT/.polyforge/state/WI_ID.json
@@ -143,7 +143,7 @@ EXPECTED SKILL BEHAVIOR (Mode C — resume paused wi):
      (updated with new attempt_id, claim_epoch)
 
   3. Show step progress in output:
-     "Resuming at step 1/3 (prepare_context — start_step reset, will retry)"
+     "Resuming at step 1/3 (prepare_context — reset, will retry)"
 
   4. Start background lease renewer: pf_renew_lease(attempt_id=NEW_ATTEMPT_ID)
      every 20 seconds.
@@ -170,8 +170,8 @@ ASSERT STATE after resume:
   - WI_ID status="running"
   - State file updated: attempt_id=NEW_ATTEMPT_ID, claim_epoch=NEW_CLAIM_EPOCH
   - Worktree at WT_PATH still present (or re-materialized if cleaned)
-  - start_step.status="failed" still (ready to retry from step 1)
-  - pf_get_step(WI_ID) → current_step="start_step" (reset, not "code_change")
+  - prepare_context.status="failed" still (ready to retry from step 1)
+  - pf_get_step(WI_ID) → current_step="prepare_context" (reset, not "code_change")
 
 ---
 
@@ -185,11 +185,11 @@ See SC-05 for the complete pf-execute dispatch flow.
 
 EXPECTED SKILL BEHAVIOR:
   pf_list_work_items(ids=[WI_ID], include_step_state=true)
-  → current_step="start_step" (resumed state)
-  Dispatch start_step subagent → code_change → commit_and_pr → retro → pf_wrap
+  → current_step="prepare_context" (resumed state)
+  Dispatch prepare_context subagent → code_change → commit_and_pr → retro → pf_wrap
 
 ASSERT MCP CALLS:
-  - pf_update_step(step_id="start_step", status="in_progress") called (fresh attempt)
+  - pf_update_step(step_id="prepare_context", status="in_progress") called (fresh attempt)
   - All subsequent steps complete normally (see SC-05 for detailed assertions)
   - pf_wrap called at end (state file deleted)
 
@@ -197,4 +197,4 @@ ASSERT MCP CALLS:
 pf-stop --pause resets in-progress step before releasing lease; lease released via
 pf_complete_attempt(status="paused"); state file kept; locks retained; WI_ID appears
 in paused[] segment; pf-work --resume calls pf_claim_work_item(mode="resume") and
-returns a new attempt_id; work continues from start_step on resume.
+returns a new attempt_id; work continues from prepare_context on resume.

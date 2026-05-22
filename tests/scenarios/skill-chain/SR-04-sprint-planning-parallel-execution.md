@@ -129,8 +129,9 @@ ASSERT:
 
 ## Cleanup
 CLEANUP (as ADMIN):
-  - pf_complete_attempt(work_item_id=WI_TEST, status="cancelled")
-  - pf_complete_attempt(work_item_id=WI_DOCS, status="cancelled")
+  - pf_cancel_work_item(work_item_id=WI_TEST, reason="test cleanup")
+  - pf_cancel_work_item(work_item_id=WI_DOCS, reason="test cleanup")
+  NOTE: pf_complete_attempt only accepts wrapped/failed/paused; use pf_cancel_work_item for cancellation.
 
 ## PASS criteria
 Dependency ordering enforced (stalled[] correctly populated);

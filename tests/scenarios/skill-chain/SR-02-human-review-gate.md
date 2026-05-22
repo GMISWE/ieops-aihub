@@ -15,7 +15,7 @@ An auto-agent (Alice) cannot pick it up.
 ## Scenario
 
 NOTE: critical_bug steps per phase.yaml: ["prepare_context", "spec", "code_change", "commit_and_pr"]
-     (4 steps; start_step=prepare_context, then spec, then code, then ship)
+     (4 steps: prepare_context, spec, code_change, commit_and_pr)
 
 ### Phase 1: Admin reports critical bug
 ADMIN (via MCP): pf_create_work_item(
@@ -57,14 +57,14 @@ EXPECTED SKILL BEHAVIOR:
   1. pf_list_work_items(ids=[WI_CRITICAL], include_step_state=true)
   2. pf_recall(project="marketplace", query=wi.goal, type=["experience.*","rule.*"])
   3. pf_get_step(work_item_id=WI_CRITICAL) — get version
-  4. pf_update_step(work_item_id=WI_CRITICAL, step_id="start_step", status="in_progress", expected_version=<version>)
+  4. pf_update_step(work_item_id=WI_CRITICAL, step_id="prepare_context", status="in_progress", expected_version=<version>)
   5. Analyze codebase in WT_PATH — find the admin middleware vulnerability
-  6. pf_update_step(work_item_id=WI_CRITICAL, step_id="start_step", status="completed",
+  6. pf_update_step(work_item_id=WI_CRITICAL, step_id="prepare_context", status="completed",
        step_attempt_id=<from 4>,
        artifact_summary=<initial_context JSON: {goal_analysis, relevant_files, suggested_approach}>)
 
 ASSERT:
-  - pf_update_step(start_step, completed) called
+  - pf_update_step(prepare_context, completed) called
   - pf_get_step(WI_CRITICAL) → current_step="spec"
 
 ### Phase 5: Bob runs debug spec (step 2 of critical_bug)
@@ -110,7 +110,7 @@ EXPECTED:
   - pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_CRITICAL, repo="marketplace")
   - pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_CRITICAL, repo="marketplace",
       title="fix(auth): add JWT validation to admin middleware", body="...")
-  - pf_update_step(ship, completed, artifact_summary="PR #N: <url>")
+  - pf_update_step(commit_and_pr, completed, artifact_summary="PR #N: <url>")
 
 SKILL_INVOKE (as BOB): polyforge:pf-stop --wrap
 

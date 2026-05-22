@@ -16,7 +16,7 @@ Session 2/3 via pf-execute.
   - wi goal: "feat: add rate limiting per API key to prevent abuse"
   - wi_type: feature, requires_human_session=true
   - Steps per phase.yaml: ["spec", "plan", "code_change", "commit_and_pr", "review"]
-    (5 steps: start_step=spec, then plan, code_change, commit_and_pr, review)
+    (5 steps: spec, plan, code_change, commit_and_pr, review)
   - Status: running
   - State file at WORKSPACE_ROOT/.polyforge/state/WI_ID.json
   - Worktree at WT_PATH = WORKSPACE_ROOT/pf.<shortid>/marketplace/
@@ -31,7 +31,7 @@ USER_INTENT: "execute" / "implement this feature"
 EXPECTED SKILL BEHAVIOR — Setup phase:
   1. Load wi info:
      pf_list_work_items(ids=[WI_ID], include_step_state=true)
-     → requires_human_session=true, current_step="start_step" (spec), phase_mode="step"
+     → requires_human_session=true, current_step="spec" (spec), phase_mode="step"
 
   2. Memory-First:
      pf_recall(project="marketplace", query=wi.goal,
@@ -47,16 +47,16 @@ ASSERT MCP CALLS (setup):
 
 ### Step 2: pf-execute runs spec INLINE (not dispatched as subagent)
 EXPECTED SKILL BEHAVIOR (from pf-execute SKILL.md):
-  Because wi.requires_human_session=true AND start_step.action="pf-spec":
+  Because wi.requires_human_session=true AND current step action="pf-spec":
   → INLINE execution (do NOT dispatch subagent; Alice is the Wi Agent here)
 
   Inline spec execution:
     a. pf_get_step(work_item_id=WI_ID) → current version V1
-    b. pf_update_step(work_item_id=WI_ID, step_id="start_step",
+    b. pf_update_step(work_item_id=WI_ID, step_id="spec",
                       status="in_progress", expected_version=V1)
        → returns step_attempt_id=SA_SPEC
     c. Heartbeat during discussion:
-       pf_update_step(work_item_id=WI_ID, step_id="start_step", heartbeat=true)
+       pf_update_step(work_item_id=WI_ID, step_id="spec", heartbeat=true)
        [Called every 5 minutes while human is writing the spec with Alice]
     d. Guide human through spec: What/Why, Non-goals, Acceptance criteria,
        Rate limiting strategy (token bucket vs fixed window), storage backend (Redis).
@@ -74,16 +74,16 @@ EXPECTED SKILL BEHAVIOR (from pf-execute SKILL.md):
        → returns mem_SPEC_ID
     f. pf_emit_event(work_item_id=WI_ID, event_type="note",
                       payload={text: "spec saved: mem_SPEC_ID"})
-    g. pf_update_step(work_item_id=WI_ID, step_id="start_step", status="completed",
+    g. pf_update_step(work_item_id=WI_ID, step_id="spec", status="completed",
                       step_attempt_id=SA_SPEC,
                       artifact_summary="spec saved: mem_SPEC_ID — rate limiting via token bucket + Redis")
 
 ASSERT MCP CALLS (spec inline):
-  - pf_update_step(step_id="start_step", status="in_progress") called
+  - pf_update_step(step_id="spec", status="in_progress") called
   - pf_update_step(heartbeat=true) called at least once (if discussion takes >5min)
   - pf_save_artifact called with type="methodology.spec" (spec DOES save artifact)
   - pf_emit_event called with note
-  - pf_update_step(step_id="start_step", status="completed") called with artifact_summary
+  - pf_update_step(step_id="spec", status="completed") called with artifact_summary
 
 ASSERT STATE after spec:
   - pf_get_step(WI_ID) → current_step="plan"
@@ -144,7 +144,7 @@ EXPECTED SKILL BEHAVIOR:
     action: code_change
     skill: polyforge-coding:code_change
     previous_context: spec (mem_SPEC_ID), plan (mem_PLAN_ID),
-                      start_step.artifact_summary
+                      spec.artifact_summary
 
   Subagent executes (per code_change skill):
     a. pf_get_step(work_item_id=WI_ID) → version V3
@@ -178,7 +178,7 @@ EXPECTED SKILL BEHAVIOR (dispatch — same as auto wi):
     skill: polyforge-coding:commit_and_pr
 
   Subagent executes:
-    a. pf_update_step(step_id="ship", status="in_progress", ...)
+    a. pf_update_step(step_id="commit_and_pr", status="in_progress", ...)
     b. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
                repo="marketplace", vs_base=true)
     c. pf_commit(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
@@ -191,7 +191,7 @@ EXPECTED SKILL BEHAVIOR (dispatch — same as auto wi):
              title="feat(api): add per-key rate limiting via token bucket",
              body="...")
        → returns PR_URL
-    f. pf_update_step(step_id="ship", status="completed",
+    f. pf_update_step(step_id="commit_and_pr", status="completed",
                       artifact_summary="PR #N: PR_URL")
 
 ASSERT MCP CALLS (commit_and_pr subagent):
@@ -260,13 +260,13 @@ ASSERT FINAL STATE:
 
 ### Summary: inline vs dispatch decision table
 
-| Step           | Action      | requires_human_session=true? | Execution |
-|----------------|-------------|------------------------------|-----------|
-| start_step     | pf-spec     | yes                          | INLINE    |
-| plan           | pf-plan     | yes                          | INLINE    |
-| code_change    | code_change | yes (coding step)            | SUBAGENT  |
-| commit_and_pr  | ship        | yes (coding step)            | SUBAGENT  |
-| review         | review      | yes (human interactive)      | INLINE    |
+| Step          | Action       | requires_human_session=true? | Execution |
+|---------------|--------------|------------------------------|-----------|
+| spec          | pf-spec      | yes                          | INLINE    |
+| plan          | pf-plan      | yes                          | INLINE    |
+| code_change   | code_change  | yes (coding step)            | SUBAGENT  |
+| commit_and_pr | commit_and_pr| yes (coding step)            | SUBAGENT  |
+| review        | review       | yes (human interactive)      | INLINE    |
 
 NOTE: For requires_human_session=false wi's (SC-05), ALL steps are dispatched as
 subagents — even spec and plan if they exist in the phase.yaml step graph.

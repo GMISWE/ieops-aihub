@@ -48,7 +48,7 @@ SKILL_INVOKE: polyforge-coding:prepare_context
 NOTE: prepare_context saves its output ONLY in the step's artifact_summary via
 pf_update_step(completed, artifact_summary=<initial_context JSON>).
 It does NOT call pf_save_artifact. The artifact_summary is consumed by code_change
-via pf_get_step(previous_steps.start_step.artifact_summary).
+via pf_get_step(previous_steps.prepare_context.artifact_summary).
 
 EXPECTED SKILL BEHAVIOR:
   1. pf_list_work_items(ids=[WI_ID], include_step_state=true) — load wi context
@@ -56,19 +56,19 @@ EXPECTED SKILL BEHAVIOR:
   3. pf_activate_memory(id) for each useful result
   4. Read codebase in WT_PATH to understand the target area (git log, Read key files)
   5. pf_get_step(work_item_id=WI_ID) — get current version
-  6. pf_update_step(work_item_id=WI_ID, step_id="start_step", status="in_progress", expected_version=<version>)
+  6. pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="in_progress", expected_version=<version>)
   7. Build initial_context JSON: {goal_analysis, relevant_files, prior_experience, known_pitfalls, suggested_approach, test_baseline}
-  8. pf_update_step(work_item_id=WI_ID, step_id="start_step", status="completed", step_attempt_id=<from 6>, artifact_summary=<initial_context JSON [0:4096]>)
+  8. pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="completed", step_attempt_id=<from 6>, artifact_summary=<initial_context JSON [0:4096]>)
 
 ASSERT MCP CALLS:
   - pf_recall called
-  - pf_update_step(start_step, in_progress) called
-  - pf_update_step(start_step, completed) called with artifact_summary containing initial_context JSON
+  - pf_update_step(prepare_context, in_progress) called
+  - pf_update_step(prepare_context, completed) called with artifact_summary containing initial_context JSON
   - pf_save_artifact NOT called (prepare_context does not save artifacts)
 
 ASSERT STATE:
-  - pf_get_step(WI_ID) → current_step="code_change" (advanced past start_step)
-  - start_step.artifact_summary contains initial_context JSON
+  - pf_get_step(WI_ID) → current_step="code_change" (advanced past prepare_context)
+  - prepare_context.artifact_summary contains initial_context JSON
 
 ### Step 3: code_change step
 SKILL_INVOKE: polyforge-coding:code_change
@@ -80,7 +80,7 @@ EXPECTED SKILL BEHAVIOR:
   1. pf_get_step(work_item_id=WI_ID) — get current version
   2. pf_update_step(work_item_id=WI_ID, step_id="code_change", status="in_progress", expected_version=<version>)
      → returns step_attempt_id
-  3. pf_get_step(work_item_id=WI_ID) — read initial_context from previous_steps.start_step.artifact_summary
+  3. pf_get_step(work_item_id=WI_ID) — read initial_context from previous_steps.prepare_context.artifact_summary
   4. Edit file in WT_PATH (the actual fix — add null check)
   5. Periodic heartbeat if taking >5min: pf_update_step(heartbeat=true)
   6. pf_update_step(work_item_id=WI_ID, step_id="code_change", status="completed",
@@ -102,14 +102,14 @@ SKILL_INVOKE: polyforge-coding:commit_and_pr
 
 EXPECTED SKILL BEHAVIOR:
   1. pf_get_step(work_item_id=WI_ID) — get current version
-  2. pf_update_step(work_item_id=WI_ID, step_id="ship", status="in_progress", expected_version=<version>)
+  2. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="in_progress", expected_version=<version>)
   3. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace", vs_base=true) — review the diff
   4. pf_commit(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
        message="fix(auth): add null check for empty user input\n\n...\n\nwi: marketplace#<seq>")
   5. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace", skip_base_check=false)
   6. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
        title="fix(auth): add null check for empty user input", body="...")
-  7. pf_update_step(work_item_id=WI_ID, step_id="ship", status="completed",
+  7. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="completed",
        step_attempt_id=<from 2>, artifact_summary="PR #N: <url>")
 
 ASSERT MCP CALLS:
@@ -120,7 +120,7 @@ ASSERT MCP CALLS:
 
 ASSERT STATE:
   - `git -C WT_PATH log --oneline -1` shows the commit
-  - pf_get_step(WI_ID) → commit_and_pr (ship) completed; current_step=null (all steps done)
+  - pf_get_step(WI_ID) → commit_and_pr completed; current_step=null (all steps done)
 
 ### Step 5: wrap up
 SKILL_INVOKE: polyforge:pf-stop --wrap

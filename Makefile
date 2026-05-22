@@ -1,4 +1,8 @@
-.PHONY: build migrate-up migrate-down test lint
+.PHONY: build migrate-up migrate-down test lint deploy
+
+PROD_HOST  ?= 10.146.0.16
+GCR_IMAGE  := us-west1-docker.pkg.dev/devv-404803/public/aihub
+COMPOSE_DIR := /root/manifests/aihub-v1
 
 VERSION ?= dev
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -22,3 +26,13 @@ test:
 
 lint:
 	golangci-lint run ./...
+
+# Deploy latest image to prod server.
+# GCR auth must be configured on $(PROD_HOST): docker login us-west1-docker.pkg.dev
+# Key: ~/.gcp/devv-404803-2ab2fee8bad0.json (artifact-service@devv-404803)
+deploy:
+	ssh $(PROD_HOST) " \
+	  docker pull $(GCR_IMAGE):latest && \
+	  cd $(COMPOSE_DIR) && \
+	  docker compose up -d --no-deps --force-recreate aihub \
+	"

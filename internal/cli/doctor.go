@@ -182,15 +182,23 @@ func checkWorktrees(ctx context.Context, c *client.Client, wsRoot string, fix bo
 		}
 	}
 
-	// Identify orphans: worktree whose shortid does not appear in active IDs.
+	// Identify orphans: worktree whose ulid8 does not appear in active IDs.
 	var orphans []string
 	for _, name := range wt {
-		// pf.<seq>.<ulid8> — extract the ulid8 (last 8 chars after the final dot)
-		shortid := strings.TrimPrefix(name, "pf.")
-		// shortid may be "01ks510z" or composite like "01ks510z" — match prefix
+		// Parse pf.<seq>.<ulid8> — take only the ulid8 part for matching.
+		// activeIDs stores the full id with "wi_" stripped (e.g. "cTJvYHAy..."),
+		// but worktree names only carry the last-8-char suffix.
+		remainder := strings.TrimPrefix(name, "pf.")
+		parts := strings.SplitN(remainder, ".", 2)
+		var ulid8 string
+		if len(parts) == 2 {
+			ulid8 = parts[1] // new format: pf.<seq>.<ulid8>
+		} else {
+			ulid8 = remainder // legacy format: pf.<ulid8>
+		}
 		found := false
 		for active := range activeIDs {
-			if strings.HasPrefix(active, shortid) || strings.HasPrefix(shortid, active[:min(len(active), len(shortid))]) {
+			if strings.HasSuffix(active, ulid8) {
 				found = true
 				break
 			}

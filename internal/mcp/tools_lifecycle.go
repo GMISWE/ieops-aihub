@@ -383,6 +383,12 @@ func (s *Server) registerLifecycleTools() {
 							srcPath := filepath.Join(wsRoot, ".repo", repo.Name)
 							wtPath := filepath.Join(wsRoot, wtDir, repo.Name)
 
+							// If the worktree directory already exists, reuse it directly.
+							if _, statErr := os.Stat(wtPath); statErr == nil {
+								worktrees[repo.Name] = wtPath
+								continue
+							}
+
 							var cmd *exec.Cmd
 							if mode == "resume" {
 								// Branch already exists; just attach.

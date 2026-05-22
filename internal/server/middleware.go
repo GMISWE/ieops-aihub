@@ -146,25 +146,37 @@ var roleLevel = map[string]int{
 
 // checkProjectAccess verifies the caller has at least minRole on the given project.
 // Admin users bypass all project checks.
-// Returns nil on success, or an error response already written to c on failure.
+//
+// On denial the error response is written to c AND a non-nil error is returned so
+// that callers' "if err != nil { return err }" guard reliably stops execution before
+// any subsequent database write. (Previously writeError returned nil on a successful
+// JSON write, causing the caller to continue into the DB even after a 403 was sent.)
 func checkProjectAccess(c echo.Context, u *UserContext, project, minRole string) error {
 	if u == nil {
-		return writeError(c, domain.NewErr(domain.ErrUnauthorized, "not authenticated"))
+		ae := domain.NewErr(domain.ErrUnauthorized, "not authenticated")
+		writeError(c, ae) //nolint:errcheck — response committed; return ae below
+		return ae
 	}
 	if u.Role == "admin" {
 		return nil
 	}
 	if project == "" {
-		return writeError(c, domain.NewErr(domain.ErrBadRequest, "project is required"))
+		ae := domain.NewErr(domain.ErrBadRequest, "project is required")
+		writeError(c, ae) //nolint:errcheck
+		return ae
 	}
 	userRole, ok := u.ProjectRoles[project]
 	if !ok || userRole == "" {
-		return writeError(c, domain.NewErr(domain.ErrForbidden,
-			fmt.Sprintf("no access to project %q", project)))
+		ae := domain.NewErr(domain.ErrForbidden,
+			fmt.Sprintf("no access to project %q", project))
+		writeError(c, ae) //nolint:errcheck
+		return ae
 	}
 	if roleLevel[userRole] < roleLevel[minRole] {
-		return writeError(c, domain.NewErr(domain.ErrForbidden,
-			fmt.Sprintf("project %q requires %s role, you have %s", project, minRole, userRole)))
+		ae := domain.NewErr(domain.ErrForbidden,
+			fmt.Sprintf("project %q requires %s role, you have %s", project, minRole, userRole))
+		writeError(c, ae) //nolint:errcheck
+		return ae
 	}
 	return nil
 }

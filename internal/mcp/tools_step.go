@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -46,6 +47,7 @@ func (s *Server) registerStepTools() {
 			"error_type":       prop("string", "Error type (for failed status)"),
 			"escalated":        prop("boolean", "Whether to escalate the failure"),
 			"expected_version": prop("string", "Expected step state version (for optimistic locking)"),
+			"heartbeat":        prop("boolean", "Send a heartbeat ping to keep the lease alive (resets step_started_at)"),
 		}, []string{"work_item_id", "step_id", "status"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -56,16 +58,32 @@ func (s *Server) registerStepTools() {
 		if wiID == "" {
 			return errResult(fmt.Errorf("work_item_id is required"))
 		}
+		// Inject credentials from state file
+		sf, err := config.ReadStateFile(wiID)
+		if err != nil {
+			return errResult(fmt.Errorf("read state file: %w", err))
+		}
+
+		// Heartbeat mode: only requires work_item_id + credentials
+		if boolArg(args, "heartbeat") {
+			body := map[string]any{
+				"heartbeat":      true,
+				"attempt_id":     sf.AttemptID,
+				"claim_epoch":    sf.ClaimEpoch,
+				"session_secret": sf.SessionSecret,
+			}
+			result, err := s.client.UpdateStep(ctx, wiID, body)
+			if err != nil {
+				return errResult(err)
+			}
+			return jsonResult(result)
+		}
+
 		if strArg(args, "step_id") == "" {
 			return errResult(fmt.Errorf("step_id is required"))
 		}
 		if strArg(args, "status") == "" {
 			return errResult(fmt.Errorf("status is required"))
-		}
-		// Inject credentials from state file
-		sf, err := config.ReadStateFile(wiID)
-		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
 		}
 
 		body := map[string]any{
@@ -87,6 +105,11 @@ func (s *Server) registerStepTools() {
 
 		result, err := s.client.UpdateStep(ctx, wiID, body)
 		if err != nil {
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "CONFLICT_EPOCH_MISMATCH") || strings.Contains(errMsg, "ATTEMPT_MISMATCH") {
+				_ = config.DeleteStateFile(wiID)
+				return errResult(fmt.Errorf("STALE_LOCAL_CREDENTIAL: state file deleted — please re-claim this work item"))
+			}
 			return errResult(err)
 		}
 		return jsonResult(result)

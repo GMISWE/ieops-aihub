@@ -133,6 +133,14 @@ func handleRemember(pool *pgxpool.Pool) echo.HandlerFunc {
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
 		}
+		// If project is not provided but work_item_id is, back-fill project from the work item.
+		if req.Project == "" && req.WorkItemID != nil && *req.WorkItemID != "" {
+			wi, wiErr := domain.GetWorkItem(ctx, pool, *req.WorkItemID)
+			if wiErr != nil {
+				return writeError(c, domain.NewErr(domain.ErrBadRequest, "project is required (work_item_id lookup failed)"))
+			}
+			req.Project = wi.Project
+		}
 		if req.Project == "" {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "project is required"))
 		}

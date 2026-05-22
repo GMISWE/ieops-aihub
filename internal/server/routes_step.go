@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -155,11 +156,18 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			}
 			if req.StepAttemptID != nil {
 				// Completion-row insert is best-effort; primary state change above
-				// has already succeeded.
-				tx.Exec(c.Request().Context(), `
+				// has already succeeded. SAVEPOINT isolates this insert so that a
+				// unique-constraint violation (e.g. duplicate step_attempt_id) does
+				// not abort the surrounding transaction.
+				tx.Exec(c.Request().Context(), `SAVEPOINT bp`) //nolint:errcheck
+				if _, bpErr := tx.Exec(c.Request().Context(), `
 					INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status)
 					VALUES ($1, $2, $3, $4, $5, 'completed')`,
-					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep)) //nolint:errcheck
+					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep)); bpErr != nil {
+					tx.Exec(c.Request().Context(), `ROLLBACK TO SAVEPOINT bp`) //nolint:errcheck
+				} else {
+					tx.Exec(c.Request().Context(), `RELEASE SAVEPOINT bp`) //nolint:errcheck
+				}
 			}
 			eventType = "step_completed"
 		case "failed":
@@ -172,25 +180,39 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			}
 			if req.StepAttemptID != nil {
 				// Best-effort row; failure marker has already been written above.
-				tx.Exec(c.Request().Context(), `
+				// SAVEPOINT isolates this insert so that a unique-constraint violation
+				// does not abort the surrounding transaction.
+				tx.Exec(c.Request().Context(), `SAVEPOINT bp`) //nolint:errcheck
+				if _, bpErr := tx.Exec(c.Request().Context(), `
 					INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status)
 					VALUES ($1, $2, $3, $4, $5, 'failed')`,
-					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep)) //nolint:errcheck
+					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep)); bpErr != nil {
+					tx.Exec(c.Request().Context(), `ROLLBACK TO SAVEPOINT bp`) //nolint:errcheck
+				} else {
+					tx.Exec(c.Request().Context(), `RELEASE SAVEPOINT bp`) //nolint:errcheck
+				}
 			}
 			eventType = "step_failed"
 		default:
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "status must be in_progress|completed|failed"))
 		}
 
-		// Emit step event inside transaction
+		// Emit step event inside transaction — best-effort; SAVEPOINT ensures a
+		// failed insert (e.g. FK violation on run_attempt_id) does not abort the
+		// main transaction. JSON payload uses fmt.Sprintf(%q) for safe escaping.
 		if eventType != "" && u != nil {
-			tx.Exec(c.Request().Context(), `
+			tx.Exec(c.Request().Context(), `SAVEPOINT bp`) //nolint:errcheck
+			if _, bpErr := tx.Exec(c.Request().Context(), `
 				INSERT INTO agent_events
 				    (id, work_item_id, run_attempt_id, actor_user_id, api_key_id, event_type, payload, project)
 				VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb,
 				    (SELECT project FROM work_items WHERE id=$2))`,
 				domain.NewID("evt"), wiID, req.AttemptID, u.UserID, u.APIKeyID, eventType,
-				`{"step":"`+derefStr(req.Step)+`"}`) //nolint:errcheck
+				fmt.Sprintf(`{"step":%q}`, derefStr(req.Step))); bpErr != nil {
+				tx.Exec(c.Request().Context(), `ROLLBACK TO SAVEPOINT bp`) //nolint:errcheck
+			} else {
+				tx.Exec(c.Request().Context(), `RELEASE SAVEPOINT bp`) //nolint:errcheck
+			}
 		}
 
 		if err := tx.Commit(c.Request().Context()); err != nil {

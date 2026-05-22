@@ -255,10 +255,3 @@ func checkVersion(ctx context.Context, c *client.Client) checkResult {
 		Message: fmt.Sprintf("server min_client_version=%s (local=dev)", minVer)}
 }
 
-// min returns the smaller of two ints.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

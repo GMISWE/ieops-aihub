@@ -87,6 +87,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Google Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: us-west1-docker.pkg.dev
+          username: _json_key
+          password: ${{ secrets.GCR_SERVICE_ACCOUNT_KEY }}
+
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
@@ -95,6 +102,8 @@ jobs:
           tags: |
             ghcr.io/gmiswe/aihub:latest
             ghcr.io/gmiswe/aihub:${{ github.sha }}
+            us-west1-docker.pkg.dev/devv-404803/public/aihub:latest
+            us-west1-docker.pkg.dev/devv-404803/public/aihub:${{ github.sha }}
           build-args: |
             GIT_COMMIT=${{ github.sha }}
             BUILD_TIME=${{ github.event.head_commit.timestamp }}

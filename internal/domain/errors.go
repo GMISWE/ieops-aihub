@@ -60,6 +60,17 @@ const (
 	// HTTP 503
 	ErrServiceUnavailable ErrCode = "SERVICE_UNAVAILABLE"
 	ErrAihubUnavailable   ErrCode = "AIHUB_UNAVAILABLE"
+
+	// Projects
+	ErrProjectNotFound          ErrCode = "PROJECT_NOT_FOUND"
+	ErrProjectAlreadyExists     ErrCode = "PROJECT_ALREADY_EXISTS"
+	ErrProjectNameInvalid       ErrCode = "PROJECT_NAME_INVALID"
+	ErrProjectAccessDenied      ErrCode = "PROJECT_ACCESS_DENIED"
+	ErrProjectOwnerRequired     ErrCode = "PROJECT_OWNER_REQUIRED"
+	ErrProjectHasWorkItems      ErrCode = "PROJECT_HAS_WORK_ITEMS"
+	ErrRepoDuplicateName        ErrCode = "REPO_DUPLICATE_NAME"
+	ErrRepoDuplicateURL         ErrCode = "REPO_DUPLICATE_URL"
+	ErrInvalidProjectIdentifier ErrCode = "INVALID_PROJECT_IDENTIFIER"
 )
 
 // AihubError is the canonical error type for all API errors.
@@ -119,6 +130,14 @@ func codeToHTTPStatus(code ErrCode) int {
 		return 413
 	case ErrServiceUnavailable, ErrAihubUnavailable:
 		return 503
+	case ErrProjectNotFound:
+		return 404
+	case ErrProjectAlreadyExists:
+		return 409
+	case ErrProjectNameInvalid, ErrProjectHasWorkItems, ErrRepoDuplicateName, ErrRepoDuplicateURL, ErrInvalidProjectIdentifier:
+		return 400
+	case ErrProjectAccessDenied, ErrProjectOwnerRequired:
+		return 403
 	default:
 		return 500
 	}

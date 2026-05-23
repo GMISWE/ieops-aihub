@@ -358,3 +358,40 @@ func (c *Client) RevokeAPIKey(ctx context.Context, userID, keyID string) (map[st
 	var out map[string]any
 	return out, c.do(ctx, "DELETE", "/v1/admin/users/"+userID+"/keys/"+keyID, nil, &out)
 }
+
+// ─── Projects ─────────────────────────────────────────────────────────────────
+
+// ListProjects calls GET /v1/projects.
+func (c *Client) ListProjects(ctx context.Context, params url.Values) (map[string]any, error) {
+	path := "/v1/projects"
+	if len(params) > 0 {
+		path += "?" + params.Encode()
+	}
+	var out map[string]any
+	return out, c.do(ctx, "GET", path, nil, &out)
+}
+
+// CreateProject calls POST /v1/projects.
+func (c *Client) CreateProject(ctx context.Context, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "POST", "/v1/projects", body, &out)
+}
+
+// GetProject calls GET /v1/projects/:name.
+func (c *Client) GetProject(ctx context.Context, name string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "GET", "/v1/projects/"+name, nil, &out)
+}
+
+// UpdateProject calls PATCH /v1/projects/:name.
+func (c *Client) UpdateProject(ctx context.Context, name string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "PATCH", "/v1/projects/"+name, body, &out)
+}
+
+// RotateProjectIdentifier calls POST /v1/projects/:name/rotate_identifier.
+// Returns {plain, prefix} — plain is shown once and must not be logged.
+func (c *Client) RotateProjectIdentifier(ctx context.Context, name string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "POST", "/v1/projects/"+name+"/rotate_identifier", nil, &out)
+}

@@ -80,7 +80,7 @@ func (s *Server) startupScan() {
 	}
 }
 
-// registerAll registers all 32 pf_ tools.
+// registerAll registers all pf_ tools.
 func (s *Server) registerAll() {
 	s.registerLifecycleTools()
 	s.registerEventTools()
@@ -90,6 +90,7 @@ func (s *Server) registerAll() {
 	s.registerReleaseTools()
 	s.registerDependencyTools()
 	s.registerCodingTools()
+	s.registerProjectTools()
 }
 
 // jsonResult marshals v to JSON and returns a text content result.

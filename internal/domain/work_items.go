@@ -729,6 +729,41 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 		if req.ReclassifyReason == nil || len(*req.ReclassifyReason) < 10 {
 			return nil, NewErr(ErrBadRequest, "reclassify_reason is required (min 10 chars) when updating wi_type")
 		}
+
+		// Fix 1: validate new wi_type exists in scenario_phase_configs.
+		// Fix 2: auto-infer requires_human_session from phase config when not provided.
+		var configRaw []byte
+		cfgErr := pool.QueryRow(ctx,
+			`SELECT content FROM scenario_phase_configs WHERE scenario = $1`, wi.Scenario,
+		).Scan(&configRaw)
+		if cfgErr != nil {
+			if errors.Is(cfgErr, pgx.ErrNoRows) {
+				return nil, NewErr(ErrServiceUnavailable, fmt.Sprintf("no phase config for scenario %q — server not fully initialized", wi.Scenario))
+			}
+			return nil, NewErr(ErrInternalError, "failed to load scenario config")
+		}
+		var phaseCfg struct {
+			WITypes map[string]struct {
+				RequiresHumanSession bool `json:"requires_human_session"`
+			} `json:"wi_types"`
+		}
+		if jsonErr := json.Unmarshal(configRaw, &phaseCfg); jsonErr != nil {
+			return nil, NewErr(ErrInternalError, "failed to parse scenario config")
+		}
+		if _, ok := phaseCfg.WITypes[*req.WIType]; !ok {
+			available := make([]string, 0, len(phaseCfg.WITypes))
+			for k := range phaseCfg.WITypes {
+				available = append(available, k)
+			}
+			return nil, NewErrDetails(ErrWITypeMismatch,
+				fmt.Sprintf("wi_type %q does not exist in scenario config", *req.WIType),
+				map[string]any{"wi_type": *req.WIType, "available_wi_types": available},
+			)
+		}
+		if req.RequiresHumanSession == nil {
+			rhs := phaseCfg.WITypes[*req.WIType].RequiresHumanSession
+			req.RequiresHumanSession = &rhs
+		}
 	}
 
 	tx, err := pool.Begin(ctx)
@@ -821,6 +856,37 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 		)
 		if err != nil {
 			return nil, NewErr(ErrInternalError, "failed to emit wi_goal_updated event")
+		}
+	}
+
+	// Fix 3: emit wi_reclassified audit event if wi_type changed
+	if req.WIType != nil {
+		evtID := NewID("evt")
+		oldWIType := ""
+		if wi.WIType != nil {
+			oldWIType = *wi.WIType
+		}
+		var oldRHS, newRHS *bool
+		oldRHS = wi.RequiresHumanSession
+		newRHS = req.RequiresHumanSession
+		reason := ""
+		if req.ReclassifyReason != nil {
+			reason = *req.ReclassifyReason
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"old_wi_type":                oldWIType,
+			"new_wi_type":                *req.WIType,
+			"old_requires_human_session": oldRHS,
+			"new_requires_human_session": newRHS,
+			"reason":                     reason,
+		})
+		_, err = tx.Exec(ctx, `
+			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
+			VALUES ($1, $2, $3, $4, 'wi_reclassified', $5, $6)`,
+			evtID, wi.ID, callerUserID, "", payload, wi.Project,
+		)
+		if err != nil {
+			return nil, NewErr(ErrInternalError, "failed to emit wi_reclassified event")
 		}
 	}
 

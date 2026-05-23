@@ -1,6 +1,7 @@
 -- +goose Up
 
 -- Step 1: backfill projects from work_items/memories DISTINCT project
+-- +goose StatementBegin
 DO $$
 DECLARE fallback_admin TEXT;
 BEGIN
@@ -13,6 +14,7 @@ BEGIN
     FROM (SELECT project FROM work_items UNION SELECT project FROM memories) p
     ON CONFLICT(name) DO NOTHING;
 END $$;
+-- +goose StatementEnd
 
 -- Step 2: users.project_roles keys → projects table (ensure all referenced projects exist)
 INSERT INTO projects(name, owner_user_id, visible, scenario)
@@ -22,6 +24,7 @@ WHERE NOT EXISTS (SELECT 1 FROM projects WHERE name=key)
 ON CONFLICT(name) DO NOTHING;
 
 -- members migration: copy users.project_roles into projects.members JSONB
+-- +goose StatementBegin
 DO $$
 DECLARE rec RECORD;
 BEGIN
@@ -43,6 +46,7 @@ BEGIN
         END IF;
     END LOOP;
 END $$;
+-- +goose StatementEnd
 
 -- Step 3: FK constraints from work_items/memories → projects
 ALTER TABLE work_items ADD CONSTRAINT fk_wi_project

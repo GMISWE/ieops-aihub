@@ -388,13 +388,21 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// SELECT FOR UPDATE to prevent concurrent members/repos writes
-	var lockName string
-	if err := tx.QueryRow(ctx, `SELECT name FROM projects WHERE name=$1 FOR UPDATE`, name).Scan(&lockName); err != nil {
+	// SELECT FOR UPDATE to prevent concurrent members/repos writes.
+	// Also fetch owner_user_id so we can re-validate after acquiring the lock
+	// (owner may have been transferred between the pre-transaction access check and here).
+	var lockedOwnerID string
+	if err := tx.QueryRow(ctx,
+		`SELECT owner_user_id FROM projects WHERE name=$1 FOR UPDATE`, name,
+	).Scan(&lockedOwnerID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, NewErr(ErrProjectNotFound, fmt.Sprintf("project %q not found", name))
 		}
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("lock project: %v", err))
+	}
+	// Re-validate ownership inside the transaction to close the TOCTOU window.
+	if caller.Role != "admin" && lockedOwnerID != caller.ID {
+		return nil, NewErr(ErrProjectOwnerRequired, "only owner or admin can update project")
 	}
 
 	setClauses := []string{}

@@ -51,6 +51,8 @@ ALTER TABLE memories ADD CONSTRAINT fk_mem_project
     FOREIGN KEY (project) REFERENCES projects(name) ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 -- +goose Down
+-- Remove FK constraints added by this migration first, then remove all backfilled projects.
+-- This fully reverts 0013: the projects table was empty before this migration ran.
 ALTER TABLE work_items DROP CONSTRAINT IF EXISTS fk_wi_project;
 ALTER TABLE memories DROP CONSTRAINT IF EXISTS fk_mem_project;
-DELETE FROM projects WHERE name NOT IN ('marketplace','aihub','ieops');
+DELETE FROM projects;

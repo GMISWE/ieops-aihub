@@ -351,7 +351,7 @@ func (s *Server) registerLifecycleTools() {
 		}
 
 		// Create git worktrees for each repo in the project (non-fatal).
-		// Worktree path format: pf.<seq>.<ulid8>/<repo>/
+		// Worktree path format: pf.<project>-<seq>/<repo>/
 		// Branch name: polyforge/<ulid8>
 		if s.cfg != nil && sf.Project != "" {
 			wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
@@ -368,6 +368,7 @@ func (s *Server) registerLifecycleTools() {
 				}
 
 				// Derive ulid8: last 8 chars of wi_id after stripping "wi_" prefix.
+				// Used only for the branch name; directory name uses the readable slug.
 				ulid8 := ""
 				bare := strings.TrimPrefix(wiID, "wi_")
 				if len(bare) >= 8 {
@@ -375,7 +376,9 @@ func (s *Server) registerLifecycleTools() {
 				}
 
 				if seq != "" && ulid8 != "" {
-					wtDir := fmt.Sprintf("pf.%s.%s", seq, ulid8)
+					// Directory name uses readable format: pf.<project>-<seq>
+					// (e.g. "pf.aihub-26") so developers can identify the wi at a glance.
+					wtDir := fmt.Sprintf("pf.%s-%s", sf.Project, seq)
 					branchName := "polyforge/" + ulid8
 					mode := strArg(args, "mode")
 

@@ -2,6 +2,8 @@ package domain
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +40,7 @@ type WorkItem struct {
 	CurrentAttemptEpoch  int64           `json:"current_attempt_epoch"`
 	ParentWorkItemID     *string         `json:"parent_work_item_id"`
 	Attrs                json.RawMessage `json:"attrs"`
+	Content              *string         `json:"content"`
 	CreatedAt            time.Time       `json:"created_at"`
 	UpdatedAt            time.Time       `json:"updated_at"`
 	ClosedAt             *time.Time      `json:"closed_at"`
@@ -58,6 +61,7 @@ type CreateWorkItemRequest struct {
 	BlockedBy            []string        `json:"blocked_by"`
 	Source               string          `json:"source"`
 	Attrs                json.RawMessage `json:"attrs"`
+	Content              *string         `json:"content"`
 	ForceCreate          bool            `json:"force_create"`
 	ForceReason          string          `json:"force_reason"`
 }
@@ -75,6 +79,7 @@ type UpdateWorkItemRequest struct {
 	Attrs                json.RawMessage `json:"attrs"`
 	Goal                 *string         `json:"goal"`
 	GoalChangeReason     *string         `json:"goal_change_reason"`
+	Content              *string         `json:"content"`
 }
 
 // ReadyQueue is the six-segment LCRS response for GET /v1/work_items/ready.
@@ -236,16 +241,16 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 			id, seq, project, scenario, goal, source, wi_type, priority,
 			requires_human_session, milestone, labels, status,
 			declared_resources, reporter_user_id, reporter_display,
-			parent_work_item_id, attrs
+			parent_work_item_id, attrs, content
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8,
 			$9, $10, $11, 'queued',
 			$12, $13, $14,
-			$15, $16
+			$15, $16, $17
 		)`,
 		wiID, seq, req.Project, req.Scenario, req.Goal, req.Source, wiType, req.Priority,
 		requiresHumanSession, req.Milestone, req.Labels, req.DeclaredResources,
-		callerUserID, callerDisplay, req.ParentWorkItemID, req.Attrs,
+		callerUserID, callerDisplay, req.ParentWorkItemID, req.Attrs, req.Content,
 	)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to insert work_item: %v", err))
@@ -524,7 +529,7 @@ func GetWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string) (*Wor
 			       requires_human_session, milestone, labels, status,
 			       declared_resources, resources_version, external_share_type, external_share_key,
 			       reporter_user_id, reporter_display, current_attempt_id, current_attempt_epoch,
-			       parent_work_item_id, attrs, created_at, updated_at, closed_at
+			       parent_work_item_id, attrs, content, created_at, updated_at, closed_at
 			FROM work_items WHERE id = $1`
 		arg = idOrSlug
 	} else {
@@ -532,7 +537,7 @@ func GetWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string) (*Wor
 			       requires_human_session, milestone, labels, status,
 			       declared_resources, resources_version, external_share_type, external_share_key,
 			       reporter_user_id, reporter_display, current_attempt_id, current_attempt_epoch,
-			       parent_work_item_id, attrs, created_at, updated_at, closed_at
+			       parent_work_item_id, attrs, content, created_at, updated_at, closed_at
 			FROM work_items WHERE slug = $1`
 		arg = idOrSlug
 	}
@@ -544,7 +549,7 @@ func GetWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string) (*Wor
 		&wi.ExternalShareType, &wi.ExternalShareKey,
 		&wi.ReporterUserID, &wi.ReporterDisplay,
 		&wi.CurrentAttemptID, &wi.CurrentAttemptEpoch,
-		&wi.ParentWorkItemID, &wi.Attrs, &wi.CreatedAt, &wi.UpdatedAt, &wi.ClosedAt,
+		&wi.ParentWorkItemID, &wi.Attrs, &wi.Content, &wi.CreatedAt, &wi.UpdatedAt, &wi.ClosedAt,
 	)
 	if err != nil {
 		return nil, pgxErr(err,
@@ -781,6 +786,16 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 		args = append(args, *req.Goal)
 		argIdx++
 	}
+	if req.Content != nil {
+		// Content may be updated in any non-terminal status
+		nonTerminal := wi.Status == "queued" || wi.Status == "paused" || wi.Status == "running" || wi.Status == "blocked"
+		if !nonTerminal {
+			return nil, NewErr(ErrConflictTerminalState, fmt.Sprintf("cannot update content when work item is in terminal state: %s", wi.Status))
+		}
+		setClauses = append(setClauses, fmt.Sprintf("content = $%d", argIdx))
+		args = append(args, *req.Content)
+		argIdx++
+	}
 
 	args = append(args, wi.ID)
 	query := fmt.Sprintf("UPDATE work_items SET %s WHERE id = $%d",
@@ -806,6 +821,30 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 		)
 		if err != nil {
 			return nil, NewErr(ErrInternalError, "failed to emit wi_goal_updated event")
+		}
+	}
+
+	// Emit wi_content_updated event if content changed
+	if req.Content != nil {
+		evtID := NewID("evt")
+		oldContentHash := ""
+		if wi.Content != nil {
+			h := sha256.Sum256([]byte(*wi.Content))
+			oldContentHash = hex.EncodeToString(h[:8])
+		}
+		newContentLength := len(*req.Content)
+		payload, _ := json.Marshal(map[string]any{
+			"old_content_hash":   oldContentHash,
+			"new_content_length": newContentLength,
+			"changed_by":         callerUserID,
+		})
+		_, err = tx.Exec(ctx, `
+			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
+			VALUES ($1, $2, $3, $4, 'wi_content_updated', $5, $6)`,
+			evtID, wi.ID, callerUserID, "", payload, wi.Project,
+		)
+		if err != nil {
+			return nil, NewErr(ErrInternalError, "failed to emit wi_content_updated event")
 		}
 	}
 

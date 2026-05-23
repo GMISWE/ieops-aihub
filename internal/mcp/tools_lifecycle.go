@@ -117,6 +117,7 @@ func (s *Server) registerLifecycleTools() {
 			"source":                 prop("string", "Source reference"),
 			"attrs":                  prop("object", "Additional attributes"),
 			"blocked_by":             prop("array", "List of blocking work item IDs"),
+			"content":                prop("string", "Background context for this wi (markdown, max 20000 chars)"),
 			"force_create":           prop("boolean", "Force create bypassing duplicate check"),
 			"force_reason":           prop("string", "Reason for force create"),
 		}, []string{"project", "goal"}),
@@ -223,6 +224,7 @@ func (s *Server) registerLifecycleTools() {
 			"declared_resources":     prop("array", "Updated declared resources"),
 			"resources_version":      prop("string", "Current resources version for CAS"),
 			"attrs":                  prop("object", "Updated attributes"),
+			"content":                prop("string", "Background context for this wi (markdown, max 20000 chars)"),
 		}, []string{"work_item_id"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)

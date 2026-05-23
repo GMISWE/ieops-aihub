@@ -22,13 +22,74 @@ func (s *Server) registerLifecycleTools() {
 	// pf_whoami
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_whoami",
-		Description: "Return caller identity and project roles from aihub",
+		Description: "Return caller identity, project roles, and accessible projects from aihub",
 		InputSchema: emptyObjectSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		result, err := s.client.WhoAmI(ctx)
 		if err != nil {
 			return errResult(err)
 		}
+
+		// Enrich with projects list: [{name, relation, role}]
+		// relation: "owner" | "member" | "public"
+		projectsResult, listErr := s.client.ListProjects(ctx, nil)
+		if listErr == nil {
+			callerID, _ := result["user_id"].(string)
+			callerRole, _ := result["role"].(string)
+			if itemsAny, ok := projectsResult["items"]; ok {
+				if items, ok := itemsAny.([]any); ok {
+					projectInfos := make([]map[string]any, 0, len(items))
+					for _, item := range items {
+						if proj, ok := item.(map[string]any); ok {
+							name, _ := proj["name"].(string)
+							ownerID, _ := proj["owner_user_id"].(string)
+							membersRaw, _ := proj["members"]
+
+							relation := "public"
+							memberRole := "viewer"
+
+							if callerRole == "admin" || ownerID == callerID {
+								relation = "owner"
+								memberRole = "owner"
+							} else if membersRaw != nil {
+								// Parse members to find caller's role
+								var membersBytes []byte
+								switch m := membersRaw.(type) {
+								case string:
+									membersBytes = []byte(m)
+								case []byte:
+									membersBytes = m
+								}
+								if len(membersBytes) > 0 {
+									var members []map[string]any
+									if json.Unmarshal(membersBytes, &members) == nil {
+										for _, mem := range members {
+											uid, _ := mem["user_id"].(string)
+											if uid == callerID {
+												relation = "member"
+												if r, ok := mem["role"].(string); ok {
+													memberRole = r
+												}
+												break
+											}
+										}
+									}
+								}
+							}
+
+							projectInfos = append(projectInfos, map[string]any{
+								"name":     name,
+								"relation": relation,
+								"role":     memberRole,
+							})
+						}
+					}
+					result["projects"] = projectInfos
+				}
+			}
+		}
+		// If listing projects fails, still return whoami without projects field (best-effort)
+
 		return jsonResult(result)
 	})
 
@@ -138,6 +199,10 @@ func (s *Server) registerLifecycleTools() {
 		}
 		result, err := s.client.CreateWorkItem(ctx, args)
 		if err != nil {
+			// Surface PROJECT_NOT_FOUND with a clear message
+			if isAihubCode(err, "PROJECT_NOT_FOUND") {
+				return errResult(fmt.Errorf("PROJECT_NOT_FOUND: project %q does not exist — create it first with pf_create_project", strArg(args, "project")))
+			}
 			return errResult(err)
 		}
 		return jsonResult(result)

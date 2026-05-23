@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 // marshalJSON marshals v to JSON bytes.
@@ -65,4 +66,13 @@ func parseArgs(raw json.RawMessage) (map[string]any, error) {
 		return nil, fmt.Errorf("parse arguments: %w", err)
 	}
 	return m, nil
+}
+
+// isAihubCode checks whether the error message from the aihub client contains
+// the given error code (e.g. "PROJECT_NOT_FOUND").
+func isAihubCode(err error, code string) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), code)
 }

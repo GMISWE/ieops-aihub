@@ -72,6 +72,9 @@ func NewRouter(pool *pgxpool.Pool) *echo.Echo {
 	// Round 2 fix: step state, release stubs, attempt lifecycle
 	RegisterStepRoutes(v1, pool)
 
+	// Projects CRUD + identifier rotation + owner transfer
+	RegisterProjectRoutes(v1, pool)
+
 	return e
 }
 

@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -212,26 +213,22 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		return nil, NewErr(ErrBadRequest, "force_reason is required and must be at least 10 characters when force_create=true")
 	}
 
-	// Get next seq for project
-	seqName := "wi_seq_" + strings.ToLower(req.Project)
+	// Get next seq from projects table (UPDATE must be last write in tx to minimize row lock duration)
+	// This is deferred to after the INSERT; we do it here to fail fast on FK violation.
 	var seq int64
 	err = tx.QueryRow(ctx,
-		fmt.Sprintf(`SELECT nextval('%s')`, seqName),
+		`UPDATE projects SET wi_seq = wi_seq + 1 WHERE name = $1 RETURNING wi_seq`,
+		req.Project,
 	).Scan(&seq)
 	if err != nil {
-		// Try creating the sequence on first use
-		_, createErr := tx.Exec(ctx,
-			fmt.Sprintf(`CREATE SEQUENCE IF NOT EXISTS %s AS BIGINT START 1`, seqName),
-		)
-		if createErr != nil {
-			return nil, NewErr(ErrInternalError, "failed to create project sequence")
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return nil, NewErr(ErrProjectNotFound, fmt.Sprintf("project %q not found", req.Project))
 		}
-		err = tx.QueryRow(ctx,
-			fmt.Sprintf(`SELECT nextval('%s')`, seqName),
-		).Scan(&seq)
-		if err != nil {
-			return nil, NewErr(ErrInternalError, "failed to get next sequence value")
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, NewErr(ErrProjectNotFound, fmt.Sprintf("project %q not found", req.Project))
 		}
+		return nil, NewErr(ErrInternalError, fmt.Sprintf("increment wi_seq: %v", err))
 	}
 
 	wiID := newWorkItemID()

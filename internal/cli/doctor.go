@@ -27,7 +27,7 @@ type checkResult struct {
 //  1. workspace  – can locate .polyforge.yaml from wsRoot
 //  2. config     – ~/.polyforge/config not required in v1, checks aihub reachability
 //  3. repos      – .repo/<name>/ exist and match .polyforge.yaml remotes
-//  4. worktrees  – pf.<seq>.<ulid8>/ list vs server wi list; flag orphans
+//  4. worktrees  – pf.<project>-<seq>/ list vs server wi list; flag orphans
 //  5. version    – GET /v1/version; compare min_client_version vs local binary
 func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot string, args []string) {
 	fix := len(args) > 0 && args[0] == "--fix"
@@ -166,7 +166,8 @@ func checkWorktrees(ctx context.Context, c *client.Client, cfg *config.Config, w
 	// The server requires a "project" query parameter, so we query each project
 	// separately and merge the results. If cfg is nil we skip the cross-reference
 	// (cannot determine projects) and list pf.* dirs as a warning only.
-	activeIDs := map[string]bool{}
+	activeIDs := map[string]bool{}   // ulid8 suffix → true (legacy format match)
+	activeSlugs := map[string]bool{} // "pf.<project>-<seq>" → true (new format match)
 	if c != nil && cfg != nil {
 		for projectName := range cfg.Projects {
 			params := url.Values{
@@ -188,33 +189,49 @@ func checkWorktrees(ctx context.Context, c *client.Client, cfg *config.Config, w
 								activeIDs[id[3:]] = true // strip "wi_" prefix
 							}
 						}
+						// New slug-based format: "aihub#30" → "pf.aihub-30"
+						if slug, ok := m["slug"].(string); ok && slug != "" {
+							dirName := "pf." + strings.ReplaceAll(slug, "#", "-")
+							activeSlugs[dirName] = true
+						}
 					}
 				}
 			}
 		}
 	}
 
-	// Identify orphans: worktree whose ulid8 does not appear in active IDs.
+	// Identify orphans: worktree that does not match any active wi.
+	// Supports three formats:
+	//   pf.<project>-<seq>   — new readable format (matched via activeSlugs)
+	//   pf.<seq>.<ulid8>     — previous format (matched via activeIDs ulid8 suffix)
+	//   pf.<ulid8>           — legacy format (matched via activeIDs ulid8 suffix)
 	var orphans []string
 	for _, name := range wt {
-		// Parse pf.<seq>.<ulid8> — take only the ulid8 part for matching.
-		// activeIDs stores the full id with "wi_" stripped (e.g. "cTJvYHAy..."),
-		// but worktree names only carry the last-8-char suffix.
-		remainder := strings.TrimPrefix(name, "pf.")
-		parts := strings.SplitN(remainder, ".", 2)
-		var ulid8 string
-		if len(parts) == 2 {
-			ulid8 = parts[1] // new format: pf.<seq>.<ulid8>
-		} else {
-			ulid8 = remainder // legacy format: pf.<ulid8>
-		}
 		found := false
-		for active := range activeIDs {
-			if strings.HasSuffix(active, ulid8) {
-				found = true
-				break
+
+		// New format: pf.<project>-<seq> — check slug map directly.
+		if activeSlugs[name] {
+			found = true
+		}
+
+		if !found {
+			// Old formats: extract ulid8 and match against activeIDs suffix.
+			remainder := strings.TrimPrefix(name, "pf.")
+			parts := strings.SplitN(remainder, ".", 2)
+			var ulid8 string
+			if len(parts) == 2 {
+				ulid8 = parts[1] // format: pf.<seq>.<ulid8>
+			} else {
+				ulid8 = remainder // legacy format: pf.<ulid8>
+			}
+			for active := range activeIDs {
+				if strings.HasSuffix(active, ulid8) {
+					found = true
+					break
+				}
 			}
 		}
+
 		// If aihub unreachable or cfg is nil, we cannot confirm orphan — skip.
 		if !found && c != nil && cfg != nil {
 			orphans = append(orphans, name)

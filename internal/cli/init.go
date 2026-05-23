@@ -106,13 +106,13 @@ func writeUsageMd(path string) error {
 	const content = `# polyforge v1 workspace guide
 
 > **State authority = aihub PostgreSQL** at the URL in ~/.polyforge/config.toml.
-> Per-wi task worktrees materialize at pf.<seq>.<ulid8>/<repo>/ on /pf-work.
+> Per-wi task worktrees materialize at pf.<project>-<seq>/<repo>/ on /pf-work.
 
 ## Iron Rules
 
 **IR1 — Work-item-gated writes**
 Every git commit/push/PR and Edit/Write under .repo/ must happen inside a
-claimed wi worktree (pf.<seq>.<ulid8>/<repo>/). No env-var bypass.
+claimed wi worktree (pf.<project>-<seq>/<repo>/). No env-var bypass.
 
 **IR2 — Analyze obstacles; track blockers as wi's**
 When you hit an obstacle, find the root cause. If it's a bug or out of

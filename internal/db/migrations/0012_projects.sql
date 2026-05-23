@@ -18,9 +18,11 @@ CREATE INDEX idx_projects_owner ON projects(owner_user_id);
 CREATE INDEX idx_projects_members ON projects USING GIN(members jsonb_path_ops);
 CREATE INDEX idx_projects_visible ON projects(visible) WHERE visible = true;
 
+-- +goose StatementBegin
 CREATE OR REPLACE FUNCTION fn_projects_updated_at() RETURNS trigger AS $$
 BEGIN NEW.updated_at = clock_timestamp(); RETURN NEW; END;
 $$ LANGUAGE plpgsql;
+-- +goose StatementEnd
 
 CREATE TRIGGER trg_projects_updated_at BEFORE UPDATE ON projects
 FOR EACH ROW EXECUTE FUNCTION fn_projects_updated_at();

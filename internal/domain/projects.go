@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -376,7 +377,7 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 		return nil, NewErr(ErrProjectAccessDenied, "only owner or admin can update project")
 	}
 
-	if req.Repos != nil && len(req.Repos) > 0 && string(req.Repos) != "null" {
+	if len(req.Repos) > 0 && string(req.Repos) != "null" {
 		if aerr := validateRepos(req.Repos); aerr != nil {
 			return nil, aerr
 		}
@@ -424,7 +425,7 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 		args = append(args, *req.Scenario)
 		idx++
 	}
-	if req.Repos != nil && len(req.Repos) > 0 && string(req.Repos) != "null" {
+	if len(req.Repos) > 0 && string(req.Repos) != "null" {
 		setClauses = append(setClauses, fmt.Sprintf("repos=$%d", idx))
 		args = append(args, []byte(req.Repos))
 		idx++
@@ -532,9 +533,11 @@ func joinStrings(ss []string, sep string) string {
 	if len(ss) == 0 {
 		return ""
 	}
-	result := ss[0]
+	var sb strings.Builder
+	sb.WriteString(ss[0])
 	for _, s := range ss[1:] {
-		result += sep + s
+		sb.WriteString(sep)
+		sb.WriteString(s)
 	}
-	return result
+	return sb.String()
 }

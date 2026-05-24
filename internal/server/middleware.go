@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -62,7 +61,7 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 			// Query users by iterating api_keys JSONB
 			// We use a subquery that unnests api_keys and matches by key_hash
 			rows, err := pool.Query(c.Request().Context(), `
-				SELECT u.id, u.email, u.display_name, u.user_type, u.role, u.project_roles,
+				SELECT u.id, u.email, u.display_name, u.user_type, u.role,
 				       k->>'id' as key_id, k->>'project_scope' as project_scope, k->>'revoked_at' as revoked_at
 				FROM users u,
 				     jsonb_array_elements(u.api_keys) AS k
@@ -80,12 +79,11 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 			}
 
 			var uc UserContext
-			var projectRolesRaw []byte
 			var projectScope *string
 			var revokedAt *string
 
 			if err := rows.Scan(&uc.UserID, &uc.Email, &uc.DisplayName, &uc.UserType, &uc.Role,
-				&projectRolesRaw, &uc.APIKeyID, &projectScope, &revokedAt); err != nil {
+				&uc.APIKeyID, &projectScope, &revokedAt); err != nil {
 				return c.JSON(http.StatusInternalServerError, errorResponse(domain.NewErr(domain.ErrInternalError, "failed to scan user")))
 			}
 			rows.Close()
@@ -94,11 +92,7 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 				return c.JSON(http.StatusUnauthorized, errorResponse(domain.NewErr(domain.ErrUnauthorized, "API key has been revoked")))
 			}
 
-			// Parse project_roles
 			uc.ProjectRoles = make(map[string]string)
-			if len(projectRolesRaw) > 0 {
-				json.Unmarshal(projectRolesRaw, &uc.ProjectRoles) //nolint:errcheck
-			}
 
 			c.Set(string(ctxUser), &uc)
 			return next(c)

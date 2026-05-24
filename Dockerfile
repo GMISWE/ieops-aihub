@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26.3-alpine AS builder
 WORKDIR /build
 COPY . .
 # Build goose for migrations, then the aihub server binary

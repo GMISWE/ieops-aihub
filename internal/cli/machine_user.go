@@ -12,56 +12,6 @@ import (
 	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
-// ─── Claim ────────────────────────────────────────────────────────────────────
-
-// RunClaim claims a work item via CLI (machine-user pattern).
-// Usage: polyforge claim <wi_id> [--idempotency-key=<key>]
-func RunClaim(ctx context.Context, c *client.Client, cfg *config.Config, args []string) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: polyforge claim <wi_id> [--idempotency-key=<key>]")
-		os.Exit(1)
-	}
-	wiID := args[0]
-	idemKey := "cli-claim-" + wiID
-	if len(wiID) > 8 {
-		idemKey = "cli-claim-" + wiID[:8]
-	}
-
-	for _, a := range args[1:] {
-		if strings.HasPrefix(a, "--idempotency-key=") {
-			idemKey = a[len("--idempotency-key="):]
-		}
-	}
-
-	body := map[string]any{
-		"idempotency_key": idemKey,
-	}
-
-	result, err := c.ClaimWorkItem(ctx, wiID, body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "claim: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Write state file.
-	sf := &config.StateFile{
-		WIID:          wiID,
-		AttemptID:     fmt.Sprint(result["attempt_id"]),
-		SessionSecret: fmt.Sprint(result["session_secret"]),
-		Claimed:       true,
-	}
-	if epoch, ok := result["claim_epoch"].(float64); ok {
-		sf.ClaimEpoch = int64(epoch)
-	}
-
-	if err := config.WriteStateFile(sf); err != nil {
-		fmt.Fprintf(os.Stderr, "claim: write state file: %v\n", err)
-		os.Exit(1)
-	}
-
-	b, _ := json.MarshalIndent(result, "", "  ")
-	fmt.Println(string(b))
-}
 
 // ─── Get Step ─────────────────────────────────────────────────────────────────
 
@@ -270,70 +220,6 @@ func RunPR(ctx context.Context, args []string) {
 	}
 }
 
-// ─── Wrap ─────────────────────────────────────────────────────────────────────
-
-// RunWrap pushes + creates a PR + marks the attempt as wrapped.
-// Usage: polyforge wrap [--wi-id=<id>]
-func RunWrap(ctx context.Context, c *client.Client, args []string) {
-	wiID := ""
-	for _, a := range args {
-		if strings.HasPrefix(a, "--wi-id=") {
-			wiID = a[len("--wi-id="):]
-		}
-	}
-
-	if wiID == "" {
-		wiID = os.Getenv("POLYFORGE_WORK_ITEM_ID")
-	}
-	if wiID == "" {
-		states, _ := config.FindStateFiles()
-		if len(states) == 1 {
-			wiID = states[0].WIID
-		} else if len(states) > 1 {
-			fmt.Fprintln(os.Stderr, "wrap: multiple active work items; set --wi-id or POLYFORGE_WORK_ITEM_ID")
-			os.Exit(1)
-		}
-	}
-	if wiID == "" {
-		fmt.Fprintln(os.Stderr, "wrap: no active work item")
-		os.Exit(1)
-	}
-
-	sf, err := config.ReadStateFile(wiID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "wrap: read state file: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 1. Push all worktrees.
-	for _, wt := range sf.Worktrees {
-		if err := runGit(ctx, "-C", wt, "push", "--force-with-lease", "origin", "HEAD"); err != nil {
-			fmt.Fprintf(os.Stderr, "wrap: push %s: %v\n", wt, err)
-			os.Exit(1)
-		}
-	}
-
-	// 2. Complete attempt as wrapped.
-	// The URL parameter is the WORK ITEM id, not the attempt id; previously this
-	// called CompleteAttempt(ctx, sf.AttemptID, ...) which hit a 404. Also include
-	// attempt_id in the body so the server can verify the credential.
-	body := map[string]any{
-		"attempt_id":     sf.AttemptID,
-		"claim_epoch":    sf.ClaimEpoch,
-		"session_secret": sf.SessionSecret,
-		"status":         "wrapped",
-	}
-	result, err := c.CompleteAttempt(ctx, sf.WIID, body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "wrap: complete-attempt: %v\n", err)
-		os.Exit(1)
-	}
-
-	_ = config.DeleteStateFile(wiID)
-
-	b, _ := json.MarshalIndent(result, "", "  ")
-	fmt.Printf("wrapped %s\n%s\n", wiID, string(b))
-}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

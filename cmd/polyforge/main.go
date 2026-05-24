@@ -112,28 +112,8 @@ func runCLI(ctx context.Context, args []string) {
 		cli.RunInit(ctx, aihubClient, cfg, wsRoot, args[1:])
 	case "doctor":
 		cli.RunDoctor(ctx, aihubClient, cfg, wsRoot, args[1:])
-	case "ready":
-		if aihubClient == nil {
-			fatalf("config: %v\n", cfgErr)
-		}
-		cli.RunReady(ctx, aihubClient, cfg, args[1:])
-	case "stalled":
-		if aihubClient == nil {
-			fatalf("config: %v\n", cfgErr)
-		}
-		cli.RunStalled(ctx, aihubClient, cfg, args[1:])
 	case "version":
 		cli.RunVersion()
-	case "complete-attempt":
-		if aihubClient == nil {
-			fatalf("config: %v\n", cfgErr)
-		}
-		cli.RunCompleteAttempt(ctx, aihubClient, wsRoot, args[1:])
-	case "claim":
-		if aihubClient == nil {
-			fatalf("config: %v\n", cfgErr)
-		}
-		cli.RunClaim(ctx, aihubClient, cfg, args[1:])
 	case "get-step":
 		if aihubClient == nil {
 			fatalf("config: %v\n", cfgErr)
@@ -150,11 +130,6 @@ func runCLI(ctx context.Context, args []string) {
 		cli.RunPush(ctx, args[1:])
 	case "pr":
 		cli.RunPR(ctx, args[1:])
-	case "wrap":
-		if aihubClient == nil {
-			fatalf("config: %v\n", cfgErr)
-		}
-		cli.RunWrap(ctx, aihubClient, args[1:])
 	case "help":
 		printUsage()
 	default:
@@ -179,14 +154,7 @@ Usage:
 Workspace commands:
   init [--apply]              Fetch scenario config → .polyforge/phase.yaml
   doctor [--fix]              5-item health check
-  ready [--project=<p>]       Ready queue (6-segment LCRS view)
-  stalled [--project=<p>]     Stalled work items
   version                     Print version
-
-Work-item lifecycle:
-  claim <id>                  Claim a work item
-  complete-attempt            Mark attempt wrapped/failed (CI trap EXIT)
-  wrap [--wi-id=<id>]         Push + PR + complete-attempt(wrapped)
 
 Step management (machine-user):
   get-step [--wi-id=<id>]     Get current step

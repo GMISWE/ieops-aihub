@@ -145,8 +145,6 @@ EXPECTED SKILL BEHAVIOR (Mode C — resume paused wi):
   3. Show step progress in output:
      "Resuming at step 1/3 (prepare_context — reset, will retry)"
 
-  4. Start background lease renewer: pf_renew_lease(attempt_id=NEW_ATTEMPT_ID)
-     every 20 seconds.
 
   5. Output three-segment format with step progress in 状态 table:
      ## 结果

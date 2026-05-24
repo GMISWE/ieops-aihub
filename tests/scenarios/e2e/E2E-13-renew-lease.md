@@ -1,8 +1,7 @@
-# E2E-13 — renew_lease resets last_active_at
+# E2E-13 — renew_lease endpoint removed (410 Gone)
 
-Tests that pf_renew_lease(attempt_id) updates last_active_at on the run_attempt,
-preventing zombie sweep from terminating an idle but active attempt.
-Reference: FnRenewLease updates run_attempts.last_active_at.
+Tests that `/work_items/:id/renew` returns 410 Gone. The lease renewal mechanism
+was removed in aihub#36: claim is now static ownership, no heartbeat required.
 
 ## Users
 - ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
@@ -11,29 +10,26 @@ Reference: FnRenewLease updates run_attempts.last_active_at.
 ## Steps
 
 ### Alice claims wi
-AS ADMIN: pf_create_work_item(project="marketplace", goal="[test] E2E-13 renew lease", wi_type="chore")
+AS ADMIN: pf_create_work_item(project="marketplace", goal="[test] E2E-13 renew lease removed", wi_type="chore")
 Save WI_ID
 
 AS ALICE: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e13-alice", mode="fresh")
-ASSERT: ok==true; Save ATTEMPT_ID from state file
+ASSERT: ok==true
 
-### Record initial last_active_at
-AS ADMIN: GET /v1/work_items/WI_ID (or GET /v1/run_attempts/ATTEMPT_ID)
-NOTE: Save T1 = current last_active_at of the attempt
+### Verify endpoint returns 410
+HTTP PATCH /v1/work_items/WI_ID/renew
+  Authorization: Bearer ALICE_KEY
+  Body: {"attempt_id": ATTEMPT_ID, "claim_epoch": 1, "session_secret": "xxx"}
 
-### Call renew_lease
-CALL: pf_renew_lease(attempt_id=ATTEMPT_ID) [if available as MCP tool]
-OR: HTTP POST /v1/run_attempts/ATTEMPT_ID/renew
-    with credentials from state file
-ASSERT: HTTP 200, response contains updated last_active_at or ok==true
+ASSERT: HTTP 410 Gone
+ASSERT: response body contains "error" field
 
-### Verify last_active_at bumped
-AS ADMIN: GET attempt status
-ASSERT: new last_active_at >= T1 (lease was renewed)
-NOTE: Even if exact timestamp comparison is difficult, the API returning 200 confirms the lease was accepted.
+### Verify ownership unchanged
+AS ALICE: pf_get_work_item(work_item_id=WI_ID)
+ASSERT: status == "running" (claim still active despite no renewal)
 
 ## Cleanup
 AS ALICE: pf_complete_attempt(WI_ID, status="wrapped")
 
 ## PASS criteria
-renew_lease returns 200; last_active_at updated; wi stays running until wrap.
+PATCH /renew returns 410; wi remains running without renewal calls.

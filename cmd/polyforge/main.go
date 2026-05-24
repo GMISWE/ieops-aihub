@@ -180,8 +180,7 @@ Environment (overrides config.toml):
   POLYFORGE_API_KEY          API key override (highest priority)
   POLYFORGE_AIHUB_URL        aihub URL override
   POLYFORGE_MACHINE_ID       Machine ID override (CI containers)
-  POLYFORGE_WORK_ITEM_ID     Active wi ID (for CI / complete-attempt)
-  POLYFORGE_EXIT_CODE        Exit code to pass to complete-attempt
+  POLYFORGE_WORK_ITEM_ID     Active wi ID (used by get-step/update-step/commit/push/pr)
   CI                         Set to "true" in CI environments
 `[1:])
 }

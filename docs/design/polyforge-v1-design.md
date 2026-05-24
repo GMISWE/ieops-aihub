@@ -42,7 +42,7 @@
 > **版本说明**：本文档的 "polyforge v1" 是新一代 Go 重写代际（plugin v1.0），与已归档的 polyforge-v3（Python 版）是不同重写代际，无版本继承关系。
 
 - **aihub PostgreSQL 是唯一状态权威（SoT）**，本地几乎零持久状态
-- **ownership-only**：wi claim 后永久持有，无 `expires_at`。释放路径：(a) 自己 complete；(b) 同 user_id 自我接管；(c) maintainer/admin force_takeover。zombie sweeper 以 `last_active_at > 24h` 为准，仅 emit 告警，不自动释放
+- **ownership-only**：wi claim 后永久持有，无 `expires_at`，无 lease renewal。释放路径：(a) 自己 complete（pause/wrap/fail）；(b) 同 user_id 自我接管；(c) maintainer/admin force_takeover。`updated_at > 24h` 未更新的 running wi 出现在 `stale_running` 提醒段，不自动释放
 - **单二进制分发**：`polyforge` Go binary，无 PyPI、无 uvx、无 editable install
 - **LLM 是执行引擎**：Skills（Markdown）定义 how，MCP tools 提供副作用，aihub 持久化状态
 - **三层分离**：Layer 1（并发控制）/ Layer 2（单 wi 执行）/ Layer 3（跨 wi 调度）
@@ -817,7 +817,7 @@ CREATE TABLE agent_events (
                                    -- 避免 project 级查询 JOIN 跨分区表
     event_type     TEXT NOT NULL,
     -- lifecycle: work_item_filed, attempt_started, attempt_completed,
-    --            attempt_superseded, attempt_zombied, force_takeover, admin_force_takeover,
+    --            attempt_superseded, force_takeover, admin_force_takeover,
     --            wi_unblocked, stop_step_partial_failure
     -- locks: lock_acquired, lock_released
     -- coding: commit, push, pr_opened, push_blocked_base_moved
@@ -826,7 +826,7 @@ CREATE TABLE agent_events (
     -- memory: memory_saved, memory_activated, memory_archived, memory_reinforced
     -- conflict: conflict_prediction_overridden
     -- admin: admin_unblock, admin_redact  (H-R3-4: 统一命名)
-    -- misc: note, decision, wi_zombied, wi_stalled, wi_goal_updated
+    -- misc: note, decision, wi_stalled, wi_goal_updated
     payload        JSONB NOT NULL DEFAULT '{}',
                    -- H14: 64KB 上限由 server middleware 校验
     pinned         BOOLEAN NOT NULL DEFAULT FALSE
@@ -995,9 +995,7 @@ running → paused     （pf_complete_attempt(paused)）
 running → wrapped    （pf_complete_attempt(wrapped)，同时 DELETE resource_locks）
 running → failed     （pf_complete_attempt(failed)，同时 DELETE resource_locks）
 running → superseded （force_takeover：旧 attempt 被新 attempt 替换）
-running → lost       （zombie sweeper，last_active_at > 24h）
-           -- 注意：sweeper 阈值是 24h（非 expires_at 的 30min）
-           -- expires_at 仅是 takeover 权限判定，非超时触发
+running → lost       （force_takeover 时旧 attempt 被标为 superseded/lost）
 paused  → running    （re-claim：创建新 attempt，旧 paused row 永保 paused）
            -- C-R3-6: re-claim 不是同一 row 复活，而是新 INSERT run_attempts
            --         wi.current_attempt_id 指向新 attempt，旧 row 不变
@@ -1527,7 +1525,7 @@ pf_emit_event(work_item_id, attempt_id, claim_epoch, session_secret,
               event_type, payload, pinned?, admin?)
   -- H10: admin=true 时 token 必须 role=admin
   -- admin-only event_type 白名单：
-  --   wi_zombied, attempt_zombied, attempt_superseded, admin_force_takeover,
+  --   attempt_superseded, admin_force_takeover,
   --   admin_unblock, admin_redact（server 自动 emit 时也走此路径）
   → {event_id}
 
@@ -2501,7 +2499,7 @@ on_exit() {
 }
 ```
 
-不执行 cleanup → 24h zombie sweeper 才清（孤儿 attempt 期间 lock 持续占用）。
+不执行 cleanup → 孤儿 attempt 期间 lock 持续占用，直到 GC orphan_lock_cleanup sweep 清除。
 
 **§27 Known Limitations 补充**：v1 CI 整条 path（config.toml 跳过、trap cleanup、短 TTL attempt）是 workaround，未来考虑 server 端 `runtime=ephemeral` + 2h 短 TTL attempt 设计。
 
@@ -2873,21 +2871,14 @@ claim → expires_at = clock_timestamp() + interval '30 minutes'
 
 -- C-R3-7: mutating tool call 同时刷新两个字段
 mutating tool call →
-  last_active_at = clock_timestamp()（zombie 检测用）
-  expires_at = clock_timestamp() + interval '30 minutes'（takeover 阈值重置）
--- 两者保持联动：active 的 attempt expires_at 始终 = last_active_at + 30min
--- v1.21: expires_at 已删除；zombie sweeper 只做监控，不自动释放
+  last_active_at = clock_timestamp()（活跃记录用）
+-- v1.21: expires_at 已删除；claim 是永久持有，无 lease renewal
 
-zombie sweeper（5min tick）：
-  -- C-R9-5: 24h 无心跳 → system actor 执行 force_takeover，释放 locks，防资源永久泄漏
-  last_active_at < now() - interval '24 hours' AND status = 'running'
-  → system force_takeover：
-      attempt.status = 'lost'
-      DELETE resource_locks WHERE owner_attempt_id = attempt.id
-      wi.status = 'paused'（可 resume）
-      emit attempt_zombied event + emit wi_possibly_abandoned event
-  -- ownership-only 语义保留：wi.status=paused，仍可 resume/force_takeover
-  -- 与 §3.1 "running → lost (zombie sweeper)" 状态机一致
+stale_running 提醒（ReadyQueue 新增段）：
+  running → 永久持有直到显式操作（pause/wrap/fail/force_takeover）
+  updated_at > 24h 未更新 → stale_running 提醒（不强制释放）
+  -- GetReadyQueue 返回 stale_running[]：running wi 且 updated_at < now() - 24h
+  -- 仅做可见性提醒；释放需调用方显式操作（pf_complete_attempt 或 pf_force_takeover）
 
 takeover 条件（v1.21）：
   同 user_id（自我接管）→ 总是允许
@@ -3330,12 +3321,8 @@ interface Memory {
 // attempt_superseded
 { superseded_by_attempt_id: string; reason: string; actor_user_id: string }
 
-// attempt_zombied
-{ last_active_at: string; idle_seconds: number }
-
 // force_takeover
-{ prior_attempt_id: string; prior_actor: string; reason: string;
-  is_zombie: boolean }  // is_zombie: last_active_at > 24h
+{ prior_attempt_id: string; prior_actor: string; reason: string }
 
 // lock_acquired
 { resource_type: string; resource_key: string }

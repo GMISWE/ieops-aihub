@@ -701,38 +701,6 @@ func (s *Server) registerLifecycleTools() {
 		return jsonResult(result)
 	})
 
-	// pf_renew_lease
-	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_renew_lease",
-		Description: "Renew the lease on an active attempt",
-		InputSchema: objectSchema(map[string]any{
-			"work_item_id": prop("string", "Work item ID (used to find state file)"),
-		}, []string{"work_item_id"}),
-	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
-		args, err := parseArgs(req.Params.Arguments)
-		if err != nil {
-			return errResult(err)
-		}
-		wiID := strArg(args, "work_item_id")
-		if wiID == "" {
-			return errResult(fmt.Errorf("work_item_id is required"))
-		}
-		sf, err := config.ReadStateFile(wiID)
-		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
-		}
-		body := map[string]any{
-			"attempt_id":     sf.AttemptID,
-			"claim_epoch":    sf.ClaimEpoch,
-			"session_secret": sf.SessionSecret,
-		}
-		result, err := s.client.RenewLease(ctx, sf.WIID, body)
-		if err != nil {
-			return errResult(err)
-		}
-		return jsonResult(result)
-	})
-
 	// pf_pause_attempt
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_pause_attempt",

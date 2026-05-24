@@ -1,41 +1,36 @@
-# E2E-16 — Zombie sweep: stale attempt force-taken-over with is_zombie=true
+# E2E-16 — Stale running wi appears in stale_running list
 
-Tests that when a run_attempt's last_active_at exceeds the zombie threshold
-(typically 24h), the system or admin can force-takeover and the resulting
-event includes is_zombie=true.
+Tests that a running wi with updated_at older than 24h appears in the
+`stale_running` field of `pf_get_ready_queue`. No automatic action is taken.
+The zombie sweep was removed in aihub#36.
 
-NOTE: This scenario requires manipulating last_active_at directly via DB
-or waiting 24h — both impractical in automated testing. This documents the
-expected behavior for manual verification.
+NOTE: This scenario requires DB manipulation to backdate updated_at.
+
+## Users
+- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
+- ALICE_KEY=pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V
 
 ## Manual verification steps
 
 ### Setup
-1. Create and claim a wi (normal flow)
-2. Do NOT call renew_lease or update_step for >24h
-   (OR: directly UPDATE run_attempts SET last_active_at = now() - interval '25 hours' WHERE id=ATTEMPT_ID)
+1. Create and claim a wi (normal flow), save WI_ID
+2. Backdate updated_at via DB:
+   ```sql
+   UPDATE work_items SET updated_at = now() - interval '25 hours' WHERE id = 'WI_ID';
+   ```
 
-### Verify zombie detection
-polyforge doctor should show the attempt as stale/orphaned:
-```bash
-POLYFORGE_WORKSPACE_ROOT= polyforge doctor
-```
-ASSERT: output mentions stale attempt or orphan worktree
+### Verify stale_running appears in ready queue
+AS ALICE: pf_get_ready_queue(project="marketplace")
+ASSERT: response contains `stale_running` array
+ASSERT: WI_ID appears in stale_running
 
-### Admin force-takeover (is_zombie path)
-AS ADMIN: pf_force_takeover(work_item_id=WI_ID, reason="zombie recovery test")
-ASSERT: ok==true
+### Verify wi ownership unchanged
+AS ALICE: pf_get_work_item(work_item_id=WI_ID)
+ASSERT: status == "running" (NOT paused/lost — no automatic action)
 
-### Verify is_zombie in event
-AS ADMIN: pf_read_events(work_item_id=WI_ID)
-ASSERT: any event with event_type=="force_takeover" AND payload.is_zombie==true
-
-## SKIP condition
-Skip in automated test runs unless DB manipulation is available.
-Use manual DB UPDATE for integration testing:
-```sql
-UPDATE run_attempts SET last_active_at = now() - interval '25 hours' WHERE id = 'ATTEMPT_ID';
-```
+### Cleanup
+AS ALICE: pf_complete_attempt(WI_ID, status="wrapped")
 
 ## PASS criteria
-After 24h idle, admin force_takeover succeeds with is_zombie=true in event payload.
+Running wi with updated_at > 24h appears in stale_running. Wi ownership
+is not affected — only a warning signal, no forced release.

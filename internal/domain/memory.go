@@ -770,9 +770,9 @@ type EmitEventRequest struct {
 }
 
 // adminEventWhitelist contains event_types allowed for admin=true events.
-// Per §5.2 (pf_emit_event H10): the design lists wi_zombied, attempt_zombied,
-// attempt_superseded, admin_force_takeover, admin_unblock, admin_redact as the
-// admin-only set; the server also emits these via the same path.
+// Per §5.2 (pf_emit_event H10): the design lists attempt_superseded,
+// admin_force_takeover, admin_unblock, admin_redact as the admin-only set;
+// the server also emits these via the same path.
 var adminEventWhitelist = map[string]bool{
 	"admin_unblock":             true,
 	"admin_force_takeover":      true,
@@ -780,8 +780,6 @@ var adminEventWhitelist = map[string]bool{
 	"phase_config_updated":      true,
 	"wi_needs_attention":        true,
 	"wi_classification_missing": true,
-	"wi_zombied":                true,
-	"attempt_zombied":           true,
 	"attempt_superseded":        true,
 }
 

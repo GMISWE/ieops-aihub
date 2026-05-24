@@ -91,6 +91,7 @@ type ReadyQueue struct {
 	Paused             []PausedItem   `json:"paused"`
 	NeedsHumanSession  []ReadyItem    `json:"needs_human_session"`
 	Unclassified       []ReadyItem    `json:"unclassified"`
+	StaleRunning       []RunningItem  `json:"stale_running,omitempty"`
 }
 
 // ReadyItem is a work item in the items/needs_human_session/unclassified segments.
@@ -1151,6 +1152,31 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 			result.Unclassified = append(result.Unclassified, item)
 		}
 		unclRows.Close()
+	}
+
+	// stale_running[]: running wi with updated_at > 24h (ownership reminder, not forced)
+	staleRows, staleErr := pool.Query(ctx, `
+		SELECT wi.id, wi.slug, wi.goal, ra.actor_display, ra.last_active_at
+		FROM work_items wi
+		JOIN run_attempts ra ON ra.id = wi.current_attempt_id
+		WHERE wi.project = $1
+		  AND wi.status = 'running'
+		  AND wi.updated_at < now() - interval '24 hours'
+		ORDER BY wi.updated_at ASC`,
+		project,
+	)
+	if staleErr == nil {
+		defer staleRows.Close()
+		for staleRows.Next() {
+			var item RunningItem
+			var lat time.Time
+			if err := staleRows.Scan(&item.ID, &item.Slug, &item.Goal, &item.OwnerDisplay, &lat); err != nil {
+				continue
+			}
+			item.LastActiveAt = lat.Format(time.RFC3339)
+			result.StaleRunning = append(result.StaleRunning, item)
+		}
+		staleRows.Close()
 	}
 
 	return result, nil

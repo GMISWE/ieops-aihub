@@ -115,25 +115,8 @@ ASSERT STATE after reset:
 
 ### Step 4: M16 renew lease before retry dispatch
 EXPECTED SKILL BEHAVIOR:
-  // Step 2: Renew lease — prevent zombie sweeper from claiming the wi
-  //         during the retry dispatch window
-  renew_result = pf_renew_lease(
-    attempt_id=ATTEMPT_ID,
-    claim_epoch=CLAIM_EPOCH,
-    session_secret=SESSION_SECRET
-  )
-
-  if renew_result.error or renew_result.status == "lost_lease":
-    // Lease already expired — do NOT retry; escalate to user:
-    // "Lease lost during retry window. Use /pf-resume to reclaim."
-    break  // terminate the loop; no further dispatch
-
-  // Lease still valid → proceed to re-dispatch (retry_count += 1 → retry_count = 1)
-
-ASSERT MCP CALLS (lease renewal):
-  - pf_renew_lease called with attempt_id=ATTEMPT_ID, claim_epoch=CLAIM_EPOCH,
-    session_secret=SESSION_SECRET
-  - renew_result.status == "ok" (lease renewed successfully)
+  // Claim is static ownership — no lease renewal needed before retry dispatch
+  // Proceed directly to re-dispatch (retry_count += 1 → retry_count = 1)
   - NO pf_update_step(escalated=true) emitted at this point (retry still within limit)
 
 ASSERT STATE:
@@ -205,8 +188,6 @@ EXPECTED SKILL BEHAVIOR — three consecutive stalls:
   STALL 2 → RESET 2 (same sequence):
     pf_update_step(step_id="code_change", status="failed",
                    step_attempt_id=SA_CODE_2, escalated=false)
-    pf_renew_lease(attempt_id=ATTEMPT_ID, claim_epoch=CLAIM_EPOCH,
-                   session_secret=SESSION_SECRET)
     retry_count = 2
 
   STALL 3 detected → retry_count is now 2; incrementing to 3 ≥ threshold:
@@ -290,7 +271,6 @@ EXPECTED SKILL BEHAVIOR (three-segment format after escalation — Step 6 path):
 - pf_recall called before first dispatch (Memory-First enforced)
 - 60s wait executed; stall detected when step remains "in_progress"
 - pf_update_step(status="failed", escalated=false) called to reset stale step
-- pf_renew_lease called before retry dispatch with correct attempt_id + claim_epoch
 - Fresh subagent dispatched with retry_count=1; uses post-reset version (V3)
 - Retry subagent calls pf_update_step(in_progress) with expected_version=V3
 - Retry subagent calls pf_update_step(completed) with non-empty artifact_summary

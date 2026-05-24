@@ -224,27 +224,9 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 
 func handleRenewLease(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		wiID := c.Param("id")
-		var req struct {
-			AttemptID     string `json:"attempt_id"`
-			ClaimEpoch    int64  `json:"claim_epoch"`
-			SessionSecret string `json:"session_secret"`
-		}
-		if err := c.Bind(&req); err != nil {
-			return writeError(c, domain.NewErr(domain.ErrBadRequest, err.Error()))
-		}
-		// Verify AttemptCredential before touching last_active_at
-		if credErr := domain.VerifyAttemptCredentialPool(
-			c.Request().Context(), pool, wiID, req.AttemptID, req.ClaimEpoch, req.SessionSecret,
-		); credErr != nil {
-			return writeError(c, credErr)
-		}
-		// ownership-only: bump last_active_at (best-effort lease renewal).
-		pool.Exec(c.Request().Context(), `
-			UPDATE run_attempts SET last_active_at = clock_timestamp()
-			WHERE id = $1 AND work_item_id = $2 AND claim_epoch = $3`,
-			req.AttemptID, wiID, req.ClaimEpoch) //nolint:errcheck
-		return c.JSON(http.StatusOK, map[string]string{"status": "renewed"})
+		return c.JSON(http.StatusGone, map[string]string{
+			"error": "pf_renew_lease removed: claim is permanent ownership",
+		})
 	}
 }
 

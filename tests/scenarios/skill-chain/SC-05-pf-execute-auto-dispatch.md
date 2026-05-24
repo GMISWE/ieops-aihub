@@ -91,10 +91,7 @@ ASSERT STATE after prepare_context:
 
 NOTE: If subagent does not advance within 60s, pf-execute triggers M16 retry logic:
   1. pf_update_step(status="failed", step_attempt_id=<old>, escalated=false) — reset stale
-  2. pf_renew_lease(attempt_id=<current_attempt_id>, claim_epoch=<current_claim_epoch>,
-                    session_secret=<session_secret>) — prevent zombie sweep during retry
-     If renew fails or status="lost_lease" → stop, escalate to user
-  3. Dispatch new subagent (retry_count += 1; fail escalated=true if retry_count >= 3)
+  2. Dispatch new subagent (retry_count += 1; fail escalated=true if retry_count >= 3)
 
 ---
 

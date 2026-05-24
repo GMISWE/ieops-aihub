@@ -20,7 +20,6 @@ const (
 	gcLockPartitionCreate    = int64(2006)
 	gcLockNeedsHumanAging    = int64(2007)
 	gcLockUnclassifiedAlert  = int64(2008)
-	gcLockZombieSweep        = int64(2009) // 5-minute tick
 )
 
 // GCResult summarizes what a single GC sweep did.
@@ -401,111 +400,9 @@ func RunUnclassifiedWIAlert(ctx context.Context, pool *pgxpool.Pool) GCResult {
 	return result
 }
 
-// ─── Zombie Sweeper (5-min tick) ─────────────────────────────────────────────
-
-// RunZombieSweep finds run_attempts with last_active_at > 24h and performs a system
-// force_takeover: releases locks, sets attempt.status='lost', wi.status='paused',
-// emits attempt_zombied + wi_possibly_abandoned events (C-R9-5).
-func RunZombieSweep(ctx context.Context, pool *pgxpool.Pool) GCResult {
-	result := GCResult{SweepType: "zombie_sweep"}
-	acquired, release, err := tryAdvisoryLock(ctx, pool, gcLockZombieSweep)
-	if err != nil {
-		result.Error = err.Error()
-		return result
-	}
-	if !acquired {
-		result.Skipped = true
-		return result
-	}
-	defer release()
-
-	// Find zombie attempts: running for > 24h without activity
-	rows, err := pool.Query(ctx, `
-		SELECT ra.id, ra.work_item_id, ra.actor_display, wi.project, wi.slug
-		FROM run_attempts ra
-		JOIN work_items wi ON wi.id = ra.work_item_id
-		WHERE ra.status = 'running'
-		  AND ra.last_active_at < now() - interval '24 hours'`)
-	if err != nil {
-		result.Error = fmt.Sprintf("zombie query: %v", err)
-		return result
-	}
-	defer rows.Close()
-
-	type zombieRow struct{ AttemptID, WIID, ActorDisplay, Project, WISlug string }
-	var zombies []zombieRow
-	for rows.Next() {
-		var z zombieRow
-		if err := rows.Scan(&z.AttemptID, &z.WIID, &z.ActorDisplay, &z.Project, &z.WISlug); err == nil {
-			zombies = append(zombies, z)
-		}
-	}
-	rows.Close()
-
-	affected := int64(0)
-	for _, z := range zombies {
-		if err := runZombieForce(ctx, pool, z.AttemptID, z.WIID, z.ActorDisplay, z.Project, z.WISlug); err == nil {
-			affected++
-		}
-	}
-	result.Affected = affected
-	return result
-}
-
-// runZombieForce performs a single zombie force_takeover atomically.
-func runZombieForce(ctx context.Context, pool *pgxpool.Pool, attemptID, wiID, priorDisplay, project, wiSlug string) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	// Mark attempt as lost
-	_, err = tx.Exec(ctx, `
-		UPDATE run_attempts SET status = 'lost', ended_at = clock_timestamp()
-		WHERE id = $1 AND status = 'running'`, attemptID)
-	if err != nil {
-		return err
-	}
-
-	// Release resource locks
-	tx.Exec(ctx, `DELETE FROM resource_locks WHERE owner_attempt_id = $1`, attemptID) //nolint:errcheck
-
-	// Set wi.status to paused (resumable)
-	tx.Exec(ctx, `
-		UPDATE work_items SET status = 'paused', current_attempt_id = NULL, updated_at = clock_timestamp()
-		WHERE id = $1 AND status = 'running'`, wiID) //nolint:errcheck
-
-	// Emit attempt_zombied event
-	zombiedPayload, _ := json.Marshal(map[string]any{
-		"attempt_id":    attemptID,
-		"prior_display": priorDisplay,
-		"reason":        "last_active_at exceeded 24h threshold",
-	})
-	tx.Exec(ctx, `
-		INSERT INTO agent_events (id, work_item_id, event_type, payload, project, created_at)
-		VALUES ($1, $2, 'attempt_zombied', $3, $4, clock_timestamp())`,
-		NewID("evt"), wiID, zombiedPayload, project) //nolint:errcheck
-
-	// Emit wi_possibly_abandoned event
-	abandonedPayload, _ := json.Marshal(map[string]any{
-		"wi_id":         wiID,
-		"wi_slug":       wiSlug,
-		"attempt_id":    attemptID,
-		"prior_display": priorDisplay,
-	})
-	tx.Exec(ctx, `
-		INSERT INTO agent_events (id, work_item_id, event_type, payload, project, created_at)
-		VALUES ($1, $2, 'wi_possibly_abandoned', $3, $4, clock_timestamp())`,
-		NewID("evt"), wiID, abandonedPayload, project) //nolint:errcheck
-
-	return tx.Commit(ctx)
-}
-
 // ─── RunAll ───────────────────────────────────────────────────────────────────
 
 // RunAll executes all 8 GC sweeps (the 60s-tick set) in sequence.
-// The zombie sweeper (5-min tick) is also included here for completeness.
 func RunAll(ctx context.Context, pool *pgxpool.Pool) []GCResult {
 	sweeps := []func(context.Context, *pgxpool.Pool) GCResult{
 		RunOrphanLockSweep,
@@ -516,7 +413,6 @@ func RunAll(ctx context.Context, pool *pgxpool.Pool) []GCResult {
 		RunPartitionCreate,
 		RunNeedsHumanSessionAging,
 		RunUnclassifiedWIAlert,
-		RunZombieSweep,
 	}
 
 	results := make([]GCResult, 0, len(sweeps))

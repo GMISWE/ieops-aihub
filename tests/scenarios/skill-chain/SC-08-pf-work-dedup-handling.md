@@ -117,7 +117,6 @@ EXPECTED SKILL BEHAVIOR (transition to Mode B):
   4. Worktree created at WORKSPACE_ROOT/pf.<shortid>/marketplace/
      Save WT_PATH
 
-  5. Start background lease renewer: pf_renew_lease(attempt_id) every 20 seconds.
 
   6. Output three-segment format:
      ## 结果

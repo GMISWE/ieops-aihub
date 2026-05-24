@@ -159,12 +159,6 @@ func (c *Client) GetReadyQueue(ctx context.Context, params url.Values) (map[stri
 	return out, c.do(ctx, "GET", path, nil, &out)
 }
 
-// RenewLease calls PATCH /v1/work_items/:wiID/renew.
-func (c *Client) RenewLease(ctx context.Context, wiID string, body any) (map[string]any, error) {
-	var out map[string]any
-	return out, c.do(ctx, "PATCH", "/v1/work_items/"+wiID+"/renew", body, &out)
-}
-
 // PauseAttempt calls POST /v1/work_items/:wiID/pause.
 func (c *Client) PauseAttempt(ctx context.Context, wiID string, body any) (map[string]any, error) {
 	var out map[string]any

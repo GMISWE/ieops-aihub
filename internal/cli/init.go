@@ -102,7 +102,17 @@ func cloneOrSync(repoDir, repoName, url string) {
 			fmt.Fprintf(os.Stderr, "pf init: fetch %s: %v (skipping reset)\n", repoName, ferr)
 			return
 		}
-		reset := exec.Command("git", "-C", destPath, "reset", "--hard", "origin/main")
+		// Detect the remote default branch dynamically (Bug 2 fix).
+		defaultBranch := "origin/main" // fallback
+		if headRef, herr := exec.Command("git", "-C", destPath, "symbolic-ref", "refs/remotes/origin/HEAD").Output(); herr == nil {
+			ref := strings.TrimSpace(string(headRef))
+			// "refs/remotes/origin/main" → "origin/main"
+			parts := strings.SplitN(ref, "/", 4) // [refs, remotes, origin, main]
+			if len(parts) == 4 {
+				defaultBranch = "origin/" + parts[3]
+			}
+		}
+		reset := exec.Command("git", "-C", destPath, "reset", "--hard", defaultBranch)
 		reset.Stdout = os.Stdout
 		reset.Stderr = os.Stderr
 		if rerr := reset.Run(); rerr != nil {
@@ -128,14 +138,20 @@ func runClone(url, destPath string) error {
 	if err := cmd.Run(); err == nil {
 		return nil
 	}
-	// Retry with GH token for GitHub URLs.
+	// Retry with GH token for GitHub URLs (Bug 3 fix: also handles SSH URLs).
 	if strings.Contains(url, "github.com") {
 		tokenCmd := exec.Command("gh", "auth", "token")
 		tokenBytes, terr := tokenCmd.Output()
 		if terr == nil {
 			token := strings.TrimSpace(string(tokenBytes))
-			// Inject token into URL: https://TOKEN@github.com/...
-			authedURL := strings.Replace(url, "https://", "https://"+token+"@", 1)
+			// Convert SSH URL to HTTPS so token injection works:
+			// git@github.com:org/repo.git → https://github.com/org/repo.git
+			httpsURL := url
+			if strings.HasPrefix(url, "git@github.com:") {
+				httpsURL = "https://github.com/" + strings.TrimPrefix(url, "git@github.com:")
+			}
+			// Inject token into HTTPS URL: https://TOKEN@github.com/...
+			authedURL := strings.Replace(httpsURL, "https://", "https://"+token+"@", 1)
 			cmd2 := exec.Command("git", "clone", authedURL, destPath)
 			cmd2.Stdout = os.Stdout
 			cmd2.Stderr = os.Stderr
@@ -209,6 +225,34 @@ func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, rep
 	// Merged repo list = server + appended local-only
 	merged := append(serverRepos, toAppend...)
 
+	// Check if any existing repo has a changed description (Bug 1 fix).
+	var hasDescriptionChanges bool
+	for _, lr := range localRepos {
+		if lr.Name == "" {
+			continue
+		}
+		if sr, ok := serverByName[lr.Name]; ok {
+			localDesc := lr.Description
+			serverDesc := ""
+			if sr.Description != nil {
+				serverDesc = *sr.Description
+			}
+			if localDesc != serverDesc {
+				hasDescriptionChanges = true
+				// Propagate the local description into the merged list.
+				if localDesc != "" {
+					for i, r := range merged {
+						if r.Name == lr.Name {
+							desc := localDesc
+							merged[i].Description = &desc
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Clone/sync all repos in merged list
 	for _, r := range merged {
 		if r.URL == "" {
@@ -217,8 +261,8 @@ func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, rep
 		cloneOrSync(repoDir, r.Name, r.URL)
 	}
 
-	// PATCH server if we have new repos to add.
-	if len(toAppend) > 0 {
+	// PATCH server if we have new repos to add or existing descriptions changed.
+	if len(toAppend) > 0 || hasDescriptionChanges {
 		reposJSON, jerr := json.Marshal(merged)
 		if jerr == nil {
 			patch := map[string]any{
@@ -227,7 +271,7 @@ func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, rep
 			if _, perr := c.UpdateProject(ctx, sp.Name, patch); perr != nil {
 				fmt.Fprintf(os.Stderr, "pf init: PATCH project %q repos: %v\n", sp.Name, perr)
 			} else {
-				fmt.Printf("ok updated server repos for project %q (%d added)\n", sp.Name, len(toAppend))
+				fmt.Printf("ok updated server repos for project %q (%d added, descriptions synced: %v)\n", sp.Name, len(toAppend), hasDescriptionChanges)
 			}
 		}
 	}

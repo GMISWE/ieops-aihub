@@ -14,11 +14,271 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// repoEntry holds a repo name and description for the managed block.
+type repoEntry struct {
+	Name        string
+	Description *string
+}
+
+// projectBlock groups a project's display data for the managed block.
+type projectBlock struct {
+	Name        string
+	Description *string
+	Repos       []repoEntry
+}
+
+// serverRepoEntry mirrors the JSON shape stored in domain.Project.Repos.
+type serverRepoEntry struct {
+	Name            string  `json:"name"`
+	URL             string  `json:"url"`
+	GithubOwnerRepo *string `json:"github_owner_repo,omitempty"`
+	Description     *string `json:"description,omitempty"`
+}
+
+// serverProject mirrors the JSON response shape from GET /v1/projects.
+type serverProject struct {
+	Name        string          `json:"name"`
+	Description *string         `json:"description"`
+	OwnerUserID string          `json:"owner_user_id"`
+	Repos       json.RawMessage `json:"repos"`
+}
+
+// parseServerProjects decodes the list response from GET /v1/projects.
+// The API wraps results in {"items": [...]} or returns a bare array.
+func parseServerProjects(raw map[string]any) ([]serverProject, error) {
+	// Try {"items": [...]} first, then bare array at top level.
+	var items []any
+	if v, ok := raw["items"]; ok {
+		if arr, ok := v.([]any); ok {
+			items = arr
+		}
+	} else if v, ok := raw["projects"]; ok {
+		if arr, ok := v.([]any); ok {
+			items = arr
+		}
+	}
+
+	if items == nil {
+		// Bare-list: the map IS the container — iterate over nothing
+		return nil, nil
+	}
+
+	b, err := json.Marshal(items)
+	if err != nil {
+		return nil, err
+	}
+	var projects []serverProject
+	return projects, json.Unmarshal(b, &projects)
+}
+
+// parseServerRepos decodes the repos array from a server project.
+func parseServerRepos(raw json.RawMessage) []serverRepoEntry {
+	if len(raw) == 0 {
+		return nil
+	}
+	var repos []serverRepoEntry
+	_ = json.Unmarshal(raw, &repos)
+	return repos
+}
+
+// repoEntriesFromServer converts server repos to repoEntry display structs.
+func repoEntriesFromServer(repos []serverRepoEntry) []repoEntry {
+	entries := make([]repoEntry, 0, len(repos))
+	for _, r := range repos {
+		entries = append(entries, repoEntry{Name: r.Name, Description: r.Description})
+	}
+	return entries
+}
+
+// cloneOrSync clones a repo if it doesn't exist, or fetch+reset if it does.
+func cloneOrSync(repoDir, repoName, url string) {
+	destPath := filepath.Join(repoDir, repoName)
+	if _, err := os.Stat(destPath); err == nil {
+		// Already exists — fetch + reset
+		fetch := exec.Command("git", "-C", destPath, "fetch", "origin")
+		fetch.Stdout = os.Stdout
+		fetch.Stderr = os.Stderr
+		if ferr := fetch.Run(); ferr != nil {
+			fmt.Fprintf(os.Stderr, "pf init: fetch %s: %v (skipping reset)\n", repoName, ferr)
+			return
+		}
+		reset := exec.Command("git", "-C", destPath, "reset", "--hard", "origin/main")
+		reset.Stdout = os.Stdout
+		reset.Stderr = os.Stderr
+		if rerr := reset.Run(); rerr != nil {
+			fmt.Fprintf(os.Stderr, "pf init: reset %s: %v\n", repoName, rerr)
+		}
+		fmt.Printf("ok synced .repo/%s\n", repoName)
+		return
+	}
+	// Clone
+	if err := runClone(url, destPath); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init: clone %s: %v (skipping)\n", repoName, err)
+		return
+	}
+	fmt.Printf("ok cloned %s → .repo/%s\n", url, repoName)
+}
+
+// runClone tries a plain git clone; if that fails for a github.com URL it
+// retries using `gh auth token` as the credential.
+func runClone(url, destPath string) error {
+	cmd := exec.Command("git", "clone", url, destPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err == nil {
+		return nil
+	}
+	// Retry with GH token for GitHub URLs.
+	if strings.Contains(url, "github.com") {
+		tokenCmd := exec.Command("gh", "auth", "token")
+		tokenBytes, terr := tokenCmd.Output()
+		if terr == nil {
+			token := strings.TrimSpace(string(tokenBytes))
+			// Inject token into URL: https://TOKEN@github.com/...
+			authedURL := strings.Replace(url, "https://", "https://"+token+"@", 1)
+			cmd2 := exec.Command("git", "clone", authedURL, destPath)
+			cmd2.Stdout = os.Stdout
+			cmd2.Stderr = os.Stderr
+			if err2 := cmd2.Run(); err2 == nil {
+				return nil
+			} else {
+				return err2
+			}
+		}
+	}
+	// Re-run plain clone to surface the real error message.
+	cmd3 := exec.Command("git", "clone", url, destPath)
+	cmd3.Stdout = os.Stdout
+	cmd3.Stderr = os.Stderr
+	return cmd3.Run()
+}
+
+// runOwnerInit performs the owner-side init for a single project:
+//  1. Reads local .polyforge.yaml repos.
+//  2. Diffs against server repos: local-only → PATCH append; server-only → warning.
+//  3. Clones/syncs all repos.
+//  4. PATCHes server with merged repo list.
+//  5. GETs refreshed project for CLAUDE.md block.
+func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, repoDir string, sp serverProject) projectBlock {
+	localRepos := []config.Repo{}
+	if cfg != nil {
+		if lp, ok := cfg.Projects[sp.Name]; ok {
+			localRepos = lp.Repos
+		}
+	}
+
+	serverRepos := parseServerRepos(sp.Repos)
+
+	// Build lookup maps.
+	serverByName := make(map[string]serverRepoEntry, len(serverRepos))
+	for _, r := range serverRepos {
+		serverByName[r.Name] = r
+	}
+	localByName := make(map[string]config.Repo, len(localRepos))
+	for _, r := range localRepos {
+		localByName[r.Name] = r
+	}
+
+	// local-only → append to server list
+	var toAppend []serverRepoEntry
+	for _, lr := range localRepos {
+		if lr.Name == "" || lr.URL == "" {
+			continue
+		}
+		if _, exists := serverByName[lr.Name]; !exists {
+			desc := lr.Description
+			var descPtr *string
+			if desc != "" {
+				descPtr = &desc
+			}
+			toAppend = append(toAppend, serverRepoEntry{
+				Name:        lr.Name,
+				URL:         lr.URL,
+				Description: descPtr,
+			})
+		}
+	}
+
+	// server-only → warning (exit 0)
+	for _, sr := range serverRepos {
+		if _, exists := localByName[sr.Name]; !exists {
+			fmt.Fprintf(os.Stderr, "pf init: warning: repo %q is on server but not in .polyforge.yaml (skipping removal)\n", sr.Name)
+		}
+	}
+
+	// Merged repo list = server + appended local-only
+	merged := append(serverRepos, toAppend...)
+
+	// Clone/sync all repos in merged list
+	for _, r := range merged {
+		if r.URL == "" {
+			continue
+		}
+		cloneOrSync(repoDir, r.Name, r.URL)
+	}
+
+	// PATCH server if we have new repos to add.
+	if len(toAppend) > 0 {
+		reposJSON, jerr := json.Marshal(merged)
+		if jerr == nil {
+			patch := map[string]any{
+				"repos": json.RawMessage(reposJSON),
+			}
+			if _, perr := c.UpdateProject(ctx, sp.Name, patch); perr != nil {
+				fmt.Fprintf(os.Stderr, "pf init: PATCH project %q repos: %v\n", sp.Name, perr)
+			} else {
+				fmt.Printf("ok updated server repos for project %q (%d added)\n", sp.Name, len(toAppend))
+			}
+		}
+	}
+
+	// GET refreshed project from server.
+	raw, gerr := c.GetProject(ctx, sp.Name)
+	var block projectBlock
+	block.Name = sp.Name
+	block.Description = sp.Description
+	block.Repos = repoEntriesFromServer(merged)
+	if gerr == nil && raw != nil {
+		refreshed, perr := projectFromRaw(raw)
+		if perr == nil {
+			block.Description = refreshed.Description
+			block.Repos = repoEntriesFromServer(parseServerRepos(refreshed.Repos))
+		}
+	}
+	return block
+}
+
+// projectFromRaw decodes a GET /v1/projects/:name response.
+func projectFromRaw(raw map[string]any) (*serverProject, error) {
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var sp serverProject
+	return &sp, json.Unmarshal(b, &sp)
+}
+
+// runMemberInit performs the member-side init for a single project:
+// uses server repos directly, clones/syncs them.
+func runMemberInit(repoDir string, sp serverProject) projectBlock {
+	serverRepos := parseServerRepos(sp.Repos)
+	for _, r := range serverRepos {
+		if r.URL == "" {
+			continue
+		}
+		cloneOrSync(repoDir, r.Name, r.URL)
+	}
+	return projectBlock{
+		Name:        sp.Name,
+		Description: sp.Description,
+		Repos:       repoEntriesFromServer(serverRepos),
+	}
+}
+
 // RunInit fetches the scenario phase config from aihub and writes it to
-// <wsRoot>/.polyforge/phase.yaml.
-//
-// With --apply: also applies the local .polyforge/phase.yaml back to aihub
-// via a PATCH (CAS update, using the embedded __version__ field).
+// <wsRoot>/.polyforge/phase.yaml.  It then iterates over all visible
+// projects and performs per-project owner/member init, cloning repos and
+// updating CLAUDE.md's managed block.
 func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot string, args []string) {
 	// Ensure ~/.polyforge/config.toml exists with a stable machine_id (§9.5.3).
 	mc, err := config.EnsureMachineConfig()
@@ -31,7 +291,11 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 		fmt.Fprintf(os.Stderr, "           api_key = \"your-key-here\"\n")
 	}
 
-	apply := len(args) > 0 && args[0] == "--apply"
+	// --apply is deprecated.
+	if len(args) > 0 && args[0] == "--apply" {
+		fmt.Fprintln(os.Stderr, "polyforge init --apply is deprecated and has no effect. Use polyforge init instead.")
+		return
+	}
 
 	// Determine scenario from config (or default to "coding").
 	scenario := "coding"
@@ -41,11 +305,6 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 
 	phaseDir := filepath.Join(wsRoot, ".polyforge")
 	phaseFile := filepath.Join(phaseDir, "phase.yaml")
-
-	if apply {
-		runInitApply(ctx, c, cfg, wsRoot, scenario, phaseFile)
-		return
-	}
 
 	// GET /v1/scenario_configs/:scenario
 	result, err := c.GetScenarioConfig(ctx, scenario)
@@ -86,17 +345,79 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 		fmt.Printf("ok .polyforge/usage.md written\n")
 	}
 
-	// Ensure CLAUDE.md references @.polyforge/usage.md (not @.claude/polyforge.md).
-	claudeMd := filepath.Join(wsRoot, "CLAUDE.md")
-	if err := ensureClaudeMdRef(claudeMd); err != nil {
-		fmt.Fprintf(os.Stderr, "pf init: update CLAUDE.md: %v\n", err)
-	}
-
 	// Write pf-session-start.sh and register it in ~/.claude/settings.json.
 	if err := ensureSessionStartHook(); err != nil {
 		fmt.Fprintf(os.Stderr, "pf init: session start hook: %v\n", err)
 	} else {
 		fmt.Printf("ok ~/.claude/hooks/pf-session-start.sh registered\n")
+	}
+
+	// Ensure .gitignore covers .polyforge.yaml and .polyforge/ secrets.
+	gitignore := filepath.Join(wsRoot, ".gitignore")
+	if err := ensureGitignore(gitignore); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init: .gitignore: %v\n", err)
+	}
+
+	// --- Project-level init ---
+
+	// Get current user ID from GET /v1/users/me.
+	currentUserID := ""
+	if me, merr := c.WhoAmI(ctx); merr == nil {
+		if id, ok := me["user_id"].(string); ok {
+			currentUserID = id
+		} else if id, ok := me["id"].(string); ok {
+			currentUserID = id
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "pf init: whoami: %v (owner detection disabled)\n", merr)
+	}
+
+	// GET /v1/projects — list all visible projects.
+	raw, lerr := c.ListProjects(ctx, nil)
+	if lerr != nil {
+		fmt.Fprintf(os.Stderr, "pf init: list projects: %v\n", lerr)
+		// Still write CLAUDE.md ref even if projects fetch fails.
+		claudeMd := filepath.Join(wsRoot, "CLAUDE.md")
+		if uerr := ensureClaudeMdRef(claudeMd); uerr != nil {
+			fmt.Fprintf(os.Stderr, "pf init: update CLAUDE.md: %v\n", uerr)
+		}
+		return
+	}
+
+	projects, perr := parseServerProjects(raw)
+	if perr != nil {
+		fmt.Fprintf(os.Stderr, "pf init: parse projects: %v\n", perr)
+		projects = nil
+	}
+
+	repoDir := filepath.Join(wsRoot, ".repo")
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init: mkdir .repo: %v\n", err)
+		os.Exit(1)
+	}
+
+	var blocks []projectBlock
+	for _, sp := range projects {
+		var blk projectBlock
+		if currentUserID != "" && sp.OwnerUserID == currentUserID {
+			blk = runOwnerInit(ctx, c, cfg, repoDir, sp)
+		} else {
+			blk = runMemberInit(repoDir, sp)
+		}
+		blocks = append(blocks, blk)
+	}
+
+	// Write managed block to CLAUDE.md.
+	claudeMd := filepath.Join(wsRoot, "CLAUDE.md")
+	if err := upsertManagedBlock(claudeMd, blocks); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init: update CLAUDE.md: %v\n", err)
+	} else {
+		fmt.Printf("ok CLAUDE.md managed block updated (%d project(s))\n", len(blocks))
+	}
+
+	// Ensure @.polyforge/usage.md reference is in CLAUDE.md.
+	if err := ensureClaudeMdRef(claudeMd); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init: update CLAUDE.md ref: %v\n", err)
 	}
 }
 
@@ -212,6 +533,24 @@ url = "http://your-aihub-host"
 	if _, err := os.Stat(path); err == nil {
 		return nil // already exists — don't overwrite user edits
 	}
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+// ensureGitignore ensures .gitignore contains .polyforge.yaml and .polyforge/ secrets.
+func ensureGitignore(path string) error {
+	const entry = ".polyforge.yaml"
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	content := string(b)
+	if strings.Contains(content, entry) {
+		return nil
+	}
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += entry + "\n"
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
@@ -387,72 +726,37 @@ func ensureSettingsHook(settingsPath, hookCmd string) error {
 	return os.WriteFile(settingsPath, append(out, '\n'), 0644)
 }
 
-// repoEntry holds a repo name and clone URL for the managed block.
-type repoEntry struct{ name, url string }
-
-// runInitApply clones repos listed in .polyforge.yaml into <wsRoot>/.repo/<name>/
-// and writes (or updates) a managed block in CLAUDE.md. This is idempotent.
-// §12 of the design doc.
-func runInitApply(_ context.Context, _ *client.Client, cfg *config.Config, wsRoot, _, _ string) {
-	if cfg == nil {
-		fmt.Fprintf(os.Stderr, "pf init --apply: .polyforge.yaml not found or empty\n")
-		os.Exit(1)
-	}
-
-	repoDir := filepath.Join(wsRoot, ".repo")
-	if err := os.MkdirAll(repoDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "pf init --apply: mkdir .repo: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Collect all repos across all projects for the managed block.
-	var allRepos []repoEntry
-
-	for _, proj := range cfg.Projects {
-		for _, repo := range proj.Repos {
-			if repo.Name == "" || repo.URL == "" {
-				continue
-			}
-			allRepos = append(allRepos, repoEntry{repo.Name, repo.URL})
-			destPath := filepath.Join(repoDir, repo.Name)
-			if _, err := os.Stat(destPath); err == nil {
-				fmt.Printf("skip .repo/%s (already exists)\n", repo.Name)
-				continue
-			}
-			// Clone the repo — non-fatal on failure.
-			cmd := exec.Command("git", "clone", repo.URL, destPath)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				fmt.Fprintf(os.Stderr, "pf init --apply: clone %s: %v (skipping)\n", repo.Name, err)
-				continue
-			}
-			fmt.Printf("ok cloned %s → .repo/%s\n", repo.URL, repo.Name)
-		}
-	}
-
-	// Write managed block to CLAUDE.md.
-	claudeMd := filepath.Join(wsRoot, "CLAUDE.md")
-	if err := upsertManagedBlock(claudeMd, allRepos); err != nil {
-		fmt.Fprintf(os.Stderr, "pf init --apply: update CLAUDE.md: %v\n", err)
-	} else {
-		fmt.Printf("ok CLAUDE.md managed block updated\n")
-	}
-}
-
 const managedBlockStart = `<!-- polyforge:managed:version="1.0" -->`
 const managedBlockEnd = `<!-- /polyforge:managed -->`
 
 // upsertManagedBlock writes or replaces the managed block in CLAUDE.md.
-func upsertManagedBlock(claudeMd string, repos []repoEntry) error {
+// The block is grouped per project with a description and repo table.
+// Remote URLs are NOT included in the managed block.
+func upsertManagedBlock(claudeMd string, blocks []projectBlock) error {
 	// Build the managed block content.
 	var sb strings.Builder
 	sb.WriteString(managedBlockStart + "\n")
-	sb.WriteString("## Workspace\n\n")
-	sb.WriteString("| repo | remote |\n")
-	sb.WriteString("|------|--------|\n")
-	for _, r := range repos {
-		fmt.Fprintf(&sb, "| %s | %s |\n", r.name, r.url)
+	sb.WriteString("## Workspace\n")
+	for _, blk := range blocks {
+		sb.WriteString("\n")
+		fmt.Fprintf(&sb, "### %s\n", blk.Name)
+		if blk.Description != nil && *blk.Description != "" {
+			fmt.Fprintf(&sb, "%s\n", *blk.Description)
+		} else {
+			sb.WriteString("*(description pending — ask project owner to run polyforge init)*\n")
+		}
+		sb.WriteString("\n")
+		if len(blk.Repos) > 0 {
+			sb.WriteString("| repo | description |\n")
+			sb.WriteString("|------|-------------|\n")
+			for _, r := range blk.Repos {
+				desc := "*(pending)*"
+				if r.Description != nil && *r.Description != "" {
+					desc = *r.Description
+				}
+				fmt.Fprintf(&sb, "| %s | %s |\n", r.Name, desc)
+			}
+		}
 	}
 	sb.WriteString(managedBlockEnd + "\n")
 	block := sb.String()
@@ -488,4 +792,3 @@ func upsertManagedBlock(claudeMd string, repos []repoEntry) error {
 
 	return os.WriteFile(claudeMd, []byte(updated), 0644)
 }
-

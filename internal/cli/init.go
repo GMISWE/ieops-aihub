@@ -40,6 +40,7 @@ type serverProject struct {
 	Name        string          `json:"name"`
 	Description *string         `json:"description"`
 	OwnerUserID string          `json:"owner_user_id"`
+	Visible     bool            `json:"visible"`
 	Repos       json.RawMessage `json:"repos"`
 }
 
@@ -442,6 +443,9 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 
 	var blocks []projectBlock
 	for _, sp := range projects {
+		if !sp.Visible {
+			continue
+		}
 		var blk projectBlock
 		if currentUserID != "" && sp.OwnerUserID == currentUserID {
 			blk = runOwnerInit(ctx, c, cfg, repoDir, sp)

@@ -826,11 +826,10 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 
 	// Load current attempt
 	var currentActorUserID, currentActorDisplay string
-	var currentLastActive time.Time
 	err := pool.QueryRow(ctx, `
-		SELECT actor_user_id, actor_display, last_active_at FROM run_attempts WHERE id=$1`,
+		SELECT actor_user_id, actor_display FROM run_attempts WHERE id=$1`,
 		*wi.CurrentAttemptID,
-	).Scan(&currentActorUserID, &currentActorDisplay, &currentLastActive)
+	).Scan(&currentActorUserID, &currentActorDisplay)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, "failed to load current attempt")
 	}
@@ -875,12 +874,10 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 
 	// Emit force_takeover event
 	evtID := NewID("evt")
-	isZombie := time.Since(currentLastActive) > 24*time.Hour
 	evtPayload, _ := json.Marshal(map[string]any{
-		"prior_attempt_id":   priorID,
-		"prior_actor":        currentActorDisplay,
-		"reason":             req.Reason,
-		"is_zombie":          isZombie,
+		"prior_attempt_id": priorID,
+		"prior_actor":      currentActorDisplay,
+		"reason":           req.Reason,
 	})
 	tx.Exec(ctx, `
 		INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)

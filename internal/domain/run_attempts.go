@@ -741,11 +741,11 @@ func unblockDependentWI(ctx context.Context, tx pgx.Tx, wiID, project string) *A
 			// Emit wi_unblocked event
 			evtID := NewID("evt")
 			evtPayload, _ := json.Marshal(map[string]any{"unblocked_by_wi": wiID})
-			tx.Exec(ctx, `
+			_, _ = tx.Exec(ctx, `
 				INSERT INTO agent_events (id, work_item_id, event_type, payload, project)
 				VALUES ($1, $2, 'wi_unblocked', $3, $4)`,
 				evtID, blockedID, evtPayload, project,
-			) //nolint:errcheck
+			)
 		}
 	}
 	return nil
@@ -847,11 +847,11 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		"prior_actor":      currentActorDisplay,
 		"reason":           req.Reason,
 	})
-	tx.Exec(ctx, `
+	_, _ = tx.Exec(ctx, `
 		INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
 		VALUES ($1, $2, $3, $4, 'force_takeover', $5, $6)`,
 		evtID, wi.ID, callerUserID, "", evtPayload, wi.Project,
-	) //nolint:errcheck
+	)
 
 	// H3 + Decision A: use the session_secret supplied by the client.
 	// The client generated it before calling and wrote it to its local state file;
@@ -906,12 +906,12 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		if lockType == "" {
 			continue
 		}
-		tx.Exec(ctx, `
+		_, _ = tx.Exec(ctx, `
 			INSERT INTO resource_locks (resource_type, resource_key, owner_attempt_id, claim_epoch)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (resource_type, resource_key) DO UPDATE
 			  SET owner_attempt_id=$3, claim_epoch=$4, acquired_at=clock_timestamp()`,
-			lockType, lockKey, newAttemptID, newEpoch) //nolint:errcheck
+			lockType, lockKey, newAttemptID, newEpoch)
 	}
 
 	// Update work_item to running with new attempt

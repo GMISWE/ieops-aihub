@@ -189,6 +189,9 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	// scenario_phase_configs has been removed; classification is handled client-side
 	// using the local scenario clone (scenario_ref).
 	wiType := req.WIType
+	if wiType == nil || *wiType == "" {
+		return nil, NewErr(ErrBadRequest, "wi_type is required")
+	}
 	requiresHumanSession := req.RequiresHumanSession
 
 	// Dedup check (skip if force_create)

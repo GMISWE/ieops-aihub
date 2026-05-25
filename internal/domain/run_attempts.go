@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -31,7 +32,7 @@ type RunAttempt struct {
 	MachineID           string     `json:"machine_id"`
 	SessionSecretHash   string     `json:"session_secret_hash"`
 	ParentAttemptID     *string    `json:"parent_attempt_id"`
-	PhaseConfigVersion  *int       `json:"phase_config_version"`
+	PhaseConfigVersion  *int       `json:"phase_config_version"` // kept as audit field; always NULL since scenario_phase_configs was removed (aihub#38)
 	PreparedWorkspace   *json.RawMessage `json:"prepared_workspace"`
 	StartedAt           time.Time  `json:"started_at"`
 	EndedAt             *time.Time `json:"ended_at"`
@@ -415,8 +416,8 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		wi.ID, wi.WIType, req.ScenarioRef,
 	)
 	if err != nil {
-		// step_state upsert failure is non-fatal for free-execution mode
-		_ = err
+		// Non-fatal but log: agent will lack scenario_ref and fall back to default behavior.
+		fmt.Fprintf(os.Stderr, "claim: wi_step_state upsert failed (scenario_ref not written): %v\n", err)
 	}
 
 	// C-R9-12: If wi.requires_human_session IS NULL, write back resolved value from config

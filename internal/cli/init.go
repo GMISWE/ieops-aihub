@@ -484,8 +484,11 @@ func syncScenarioRepos(wsRoot string, cfg *config.Config) {
 
 		// Create symlink <wsRoot>/.polyforge/scenarios/<project> → <cachePath>
 		linkPath := filepath.Join(linkDir, projName)
-		_ = os.Remove(linkPath) // remove stale link
-		if err := os.Symlink(cachePath, linkPath); err != nil && !os.IsExist(err) {
+		if rmErr := os.Remove(linkPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			fmt.Fprintf(os.Stderr, "pf init: remove stale symlink for %s: %v\n", projName, rmErr)
+			continue
+		}
+		if err := os.Symlink(cachePath, linkPath); err != nil {
 			fmt.Fprintf(os.Stderr, "pf init: symlink scenario for %s: %v\n", projName, err)
 			continue
 		}

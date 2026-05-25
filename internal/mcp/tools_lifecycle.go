@@ -401,8 +401,13 @@ func (s *Server) registerLifecycleTools() {
 								// Branch already exists; just attach.
 								cmd = exec.Command("git", "-C", srcPath, "worktree", "add", wtPath, branchName)
 							} else {
-								// Fresh claim: create branch.
-								cmd = exec.Command("git", "-C", srcPath, "worktree", "add", "-b", branchName, wtPath)
+								// Fresh claim: sync local clone from origin so the new branch
+								// starts from the latest remote state, not a stale local HEAD.
+								if out, err := exec.Command("git", "-C", srcPath, "fetch", "origin").CombinedOutput(); err != nil {
+									fmt.Fprintf(os.Stderr, "polyforge: fetch origin for %s: %s\n", repo.Name, string(out))
+								}
+								// Create branch from origin/main (always fresh after fetch above).
+								cmd = exec.Command("git", "-C", srcPath, "worktree", "add", "-b", branchName, wtPath, "origin/main")
 								if out, err := cmd.CombinedOutput(); err != nil {
 									// Branch may already exist (idempotent retry) — fall back to attach.
 									if strings.Contains(string(out), "already exists") || strings.Contains(string(out), "already checked out") {

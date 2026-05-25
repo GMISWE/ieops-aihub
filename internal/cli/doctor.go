@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -20,7 +21,7 @@ type checkResult struct {
 	FixCmd  string
 }
 
-// RunDoctor runs 5 diagnostic checks and reports their status.
+// RunDoctor runs 6 diagnostic checks and reports their status.
 // With --fix: attempts to auto-repair fixable issues.
 //
 // Checks (§12.1):
@@ -29,6 +30,7 @@ type checkResult struct {
 //  3. repos      – .repo/<name>/ exist and match .polyforge.yaml remotes
 //  4. worktrees  – pf.<project>-<seq>/ list vs server wi list; flag orphans
 //  5. version    – GET /v1/version; compare min_client_version vs local binary
+//  6. hook       – ~/.claude/settings.json SessionStart hook timeout is sane
 func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot string, args []string) {
 	fix := len(args) > 0 && args[0] == "--fix"
 
@@ -38,6 +40,7 @@ func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot
 		checkRepos(wsRoot, cfg),
 		checkWorktrees(ctx, c, cfg, wsRoot, fix),
 		checkVersion(ctx, c),
+		checkSessionStartHook(),
 	}
 
 	allOk := true
@@ -262,6 +265,86 @@ func checkWorktrees(ctx context.Context, c *client.Client, cfg *config.Config, w
 		Status:  "warning",
 		Message: fmt.Sprintf("%d orphan worktrees: %s", len(orphans), strings.Join(orphans, ", ")),
 		FixCmd:  "polyforge doctor --fix",
+	}
+}
+
+// sessionStartHookMinTimeoutMs is the lower bound below which the
+// SessionStart hook timeout is almost certainly a typo (Claude Code hook
+// timeouts are in milliseconds; cold-starting bash + python3 needs more
+// than a few ms).
+const sessionStartHookMinTimeoutMs = 100
+
+// checkSessionStartHook verifies that the polyforge SessionStart hook
+// registered in ~/.claude/settings.json has a sensible timeout. Too-low
+// timeouts cause Claude Code to SIGKILL the hook before it can inject the
+// `using-polyforge` meta skill, so this is worth flagging.
+func checkSessionStartHook() checkResult {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return checkResult{Name: "hook", Status: "warning", Message: fmt.Sprintf("cannot resolve home: %v", err)}
+	}
+	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
+	b, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return checkResult{
+				Name:    "hook",
+				Status:  "warning",
+				Message: "~/.claude/settings.json not found",
+				FixCmd:  "polyforge init",
+			}
+		}
+		return checkResult{Name: "hook", Status: "error", Message: fmt.Sprintf("read settings.json: %v", err)}
+	}
+
+	var settings map[string]any
+	if err := json.Unmarshal(b, &settings); err != nil {
+		return checkResult{Name: "hook", Status: "error", Message: fmt.Sprintf("parse settings.json: %v", err)}
+	}
+
+	hookPath := filepath.Join(homeDir, ".claude", "hooks", "pf-session-start.sh")
+	hooks, _ := settings["hooks"].(map[string]any)
+	sessionStart, _ := hooks["SessionStart"].([]any)
+	for _, grp := range sessionStart {
+		g, _ := grp.(map[string]any)
+		entries, _ := g["hooks"].([]any)
+		for _, e := range entries {
+			m, _ := e.(map[string]any)
+			if m == nil {
+				continue
+			}
+			if cmd, _ := m["command"].(string); cmd != hookPath {
+				continue
+			}
+			ms, ok := m["timeout"].(float64)
+			if !ok {
+				return checkResult{
+					Name:    "hook",
+					Status:  "warning",
+					Message: "pf-session-start hook missing timeout field",
+					FixCmd:  "polyforge init",
+				}
+			}
+			if int(ms) < sessionStartHookMinTimeoutMs {
+				return checkResult{
+					Name:    "hook",
+					Status:  "warning",
+					Message: fmt.Sprintf("pf-session-start hook timeout=%d ms is too low; meta skill will not auto-load", int(ms)),
+					FixCmd:  "polyforge init",
+				}
+			}
+			return checkResult{
+				Name:    "hook",
+				Status:  "ok",
+				Message: fmt.Sprintf("pf-session-start hook registered (timeout=%d ms)", int(ms)),
+			}
+		}
+	}
+	return checkResult{
+		Name:    "hook",
+		Status:  "warning",
+		Message: "pf-session-start hook not registered",
+		FixCmd:  "polyforge init",
 	}
 }
 

@@ -240,9 +240,9 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 
 	// N1: if SupersedesMemID is set, archive the superseded memory first
 	if req.SupersedesMemID != nil && *req.SupersedesMemID != "" {
-		pool.Exec(ctx, `
+		_, _ = pool.Exec(ctx, `
 			UPDATE memories SET status='archived', updated_at=clock_timestamp()
-			WHERE id=$1 AND status='active'`, *req.SupersedesMemID) //nolint:errcheck
+			WHERE id=$1 AND status='active'`, *req.SupersedesMemID)
 	}
 
 	mem := &Memory{}
@@ -284,11 +284,11 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		"project":    mem.Project,
 		"visibility": mem.Visibility,
 	})
-	pool.Exec(ctx, `
+	_, _ = pool.Exec(ctx, `
 		INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
 		VALUES ($1, $2, $3, $4, 'memory_created', $5, $6)`,
 		NewID("evt"), req.WorkItemID, req.CallerUserID, req.CallerDisplay, payload, req.Project,
-	) //nolint:errcheck
+	)
 
 	return mem, true, nil
 }
@@ -577,7 +577,7 @@ func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, call
 		"activation_count":   newCount,
 		"new_stability_days": newStability,
 	})
-	pool.Exec(ctx, `
+	_, _ = pool.Exec(ctx, `
 		INSERT INTO agent_events (id, actor_user_id, actor_display, event_type, payload, project)
 		SELECT $1, $2, $3, 'memory_activated', $4, project
 		FROM memories WHERE id = $5`,

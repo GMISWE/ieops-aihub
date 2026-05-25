@@ -199,7 +199,7 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 		if limit := c.QueryParam("limit"); limit != "" {
 			var n int
-			fmt.Sscanf(limit, "%d", &n) //nolint:errcheck — parse error -> n stays 0 -> default kicks in
+			fmt.Sscanf(limit, "%d", &n) //nolint:errcheck // parse error -> n stays 0 -> default kicks in
 			if n > 0 {
 				filter.Limit = n
 			}
@@ -469,7 +469,7 @@ func handleGetReadyQueue(pool *pgxpool.Pool) echo.HandlerFunc {
 		max := 10
 		if m := c.QueryParam("max"); m != "" {
 			var n int
-			fmt.Sscanf(m, "%d", &n) //nolint:errcheck — parse error -> n stays 0 -> default kicks in
+			fmt.Sscanf(m, "%d", &n) //nolint:errcheck // parse error -> n stays 0 -> default kicks in
 			if n > 0 {
 				max = n
 			}

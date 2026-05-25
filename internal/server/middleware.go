@@ -186,7 +186,7 @@ var roleLevel = map[string]int{
 func checkProjectAccess(c echo.Context, u *UserContext, project, minRole string) error {
 	if u == nil {
 		ae := domain.NewErr(domain.ErrUnauthorized, "not authenticated")
-		writeError(c, ae) //nolint:errcheck — response committed; return ae below
+		writeError(c, ae) //nolint:errcheck // response committed; return ae below
 		return ae
 	}
 	if u.Role == "admin" {

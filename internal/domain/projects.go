@@ -455,9 +455,7 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 
 	if len(setClauses) == 0 {
 		// Nothing to update — return current state
-		if err := tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
-			// best effort
-		}
+		_ = tx.Rollback(ctx)
 		return existing, nil
 	}
 

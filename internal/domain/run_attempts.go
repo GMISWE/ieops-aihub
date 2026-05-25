@@ -356,11 +356,11 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			"reason":                  "claim by same user or explicit takeover",
 			"actor_user_id":           callerUserID,
 		})
-		tx.Exec(ctx, `
+		_, _ = tx.Exec(ctx, `
 			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
 			VALUES ($1, $2, $3, $4, 'attempt_superseded', $5, $6)`,
 			supEvtID, wi.ID, callerUserID, callerDisplay, supPayload, wi.Project,
-		) //nolint:errcheck
+		)
 	}
 
 	// Insert resource_locks for requested locks
@@ -436,11 +436,11 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			"wi_type":                *wi.WIType,
 			"requires_human_session": resolvedRHS,
 		})
-		tx.Exec(ctx, `
+		_, _ = tx.Exec(ctx, `
 			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
 			VALUES ($1, $2, $3, $4, 'wi_classification_resolved', $5, $6)`,
 			evtID, wi.ID, callerUserID, callerDisplay, evtPayload, wi.Project,
-		) //nolint:errcheck
+		)
 		wi.RequiresHumanSession = &resolvedRHS
 	} else if *wi.RequiresHumanSession != resolvedRHS {
 		// C-R9-12: mismatch → 409 REQUIRES_HUMAN_SESSION_MISMATCH
@@ -465,11 +465,11 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		"is_resume":     req.Mode == "resume",
 		"claim_epoch":   newEpoch,
 	})
-	tx.Exec(ctx, `
+	_, _ = tx.Exec(ctx, `
 		INSERT INTO agent_events (id, work_item_id, run_attempt_id, actor_user_id, actor_display, api_key_id, event_type, payload, project)
 		VALUES ($1, $2, $3, $4, $5, $6, 'attempt_started', $7, $8)`,
 		evtID, wi.ID, newAttemptID, callerUserID, callerDisplay, callerAPIKeyID, evtPayload, wi.Project,
-	) //nolint:errcheck
+	)
 
 	// Determine step_recovery_hint from the state we read BEFORE the reset upsert.
 	// (Reading post-upsert would always return idle — that was the original bug.)
@@ -616,11 +616,11 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	evtPayload, _ := json.Marshal(map[string]any{
 		"status": req.Status,
 	})
-	tx.Exec(ctx, `
+	_, _ = tx.Exec(ctx, `
 		INSERT INTO agent_events (id, work_item_id, run_attempt_id, event_type, payload, project)
 		VALUES ($1, $2, $3, 'attempt_completed', $4, $5)`,
 		evtID, wi.ID, req.AttemptID, evtPayload, wi.Project,
-	) //nolint:errcheck
+	)
 
 	// If terminal (wrapped/failed): unblock dependent wi + set methodology expires_at
 	if req.Status == "wrapped" || req.Status == "failed" {
@@ -628,10 +628,10 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 			_ = aihubErr // non-fatal
 		}
 		// C4: set methodology.* memory expires_at = closed_at + 90d
-		tx.Exec(ctx, `
+		_, _ = tx.Exec(ctx, `
 			UPDATE memories SET expires_at = clock_timestamp() + interval '90 days'
 			WHERE work_item_id = $1 AND type LIKE 'methodology.%' AND expires_at IS NULL`,
-			wi.ID) //nolint:errcheck
+			wi.ID)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -677,11 +677,11 @@ func fnForceTerminateStep(ctx context.Context, tx pgx.Tx, wiID, attemptID string
 		"error_type":      "force_terminate_step",
 		"escalated":       false,
 	})
-	tx.Exec(ctx, `
+	_, _ = tx.Exec(ctx, `
 		INSERT INTO agent_events (id, work_item_id, run_attempt_id, event_type, payload, project)
 		VALUES ($1, $2, $3, 'step_failed', $4,
 		        (SELECT project FROM work_items WHERE id=$2))`,
-		evtID, wiID, attemptID, payload) //nolint:errcheck
+		evtID, wiID, attemptID, payload)
 
 	// Reset wi_step_state
 	_, err = tx.Exec(ctx, `
@@ -741,11 +741,11 @@ func unblockDependentWI(ctx context.Context, tx pgx.Tx, wiID, project string) *A
 			// Emit wi_unblocked event
 			evtID := NewID("evt")
 			evtPayload, _ := json.Marshal(map[string]any{"unblocked_by_wi": wiID})
-			tx.Exec(ctx, `
+			_, _ = tx.Exec(ctx, `
 				INSERT INTO agent_events (id, work_item_id, event_type, payload, project)
 				VALUES ($1, $2, 'wi_unblocked', $3, $4)`,
 				evtID, blockedID, evtPayload, project,
-			) //nolint:errcheck
+			)
 		}
 	}
 	return nil
@@ -847,11 +847,11 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		"prior_actor":      currentActorDisplay,
 		"reason":           req.Reason,
 	})
-	tx.Exec(ctx, `
+	_, _ = tx.Exec(ctx, `
 		INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
 		VALUES ($1, $2, $3, $4, 'force_takeover', $5, $6)`,
 		evtID, wi.ID, callerUserID, "", evtPayload, wi.Project,
-	) //nolint:errcheck
+	)
 
 	// H3 + Decision A: use the session_secret supplied by the client.
 	// The client generated it before calling and wrote it to its local state file;
@@ -906,12 +906,12 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		if lockType == "" {
 			continue
 		}
-		tx.Exec(ctx, `
+		_, _ = tx.Exec(ctx, `
 			INSERT INTO resource_locks (resource_type, resource_key, owner_attempt_id, claim_epoch)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (resource_type, resource_key) DO UPDATE
 			  SET owner_attempt_id=$3, claim_epoch=$4, acquired_at=clock_timestamp()`,
-			lockType, lockKey, newAttemptID, newEpoch) //nolint:errcheck
+			lockType, lockKey, newAttemptID, newEpoch)
 	}
 
 	// Update work_item to running with new attempt

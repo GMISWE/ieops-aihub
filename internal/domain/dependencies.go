@@ -93,7 +93,7 @@ func CreateDependency(ctx context.Context, pool *pgxpool.Pool, req *CreateDepend
 
 	// If kind=blocks and blocked_wi is queued, set it to blocked
 	if req.Kind == "blocks" {
-		pool.Exec(ctx, `
+		_, _ = pool.Exec(ctx, `
 			UPDATE work_items SET status='blocked'
 			WHERE id=$1 AND status='queued'`, req.BlockedWIID)
 	}

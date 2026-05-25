@@ -43,7 +43,7 @@ func (s *Server) registerLifecycleTools() {
 						if proj, ok := item.(map[string]any); ok {
 							name, _ := proj["name"].(string)
 							ownerID, _ := proj["owner_user_id"].(string)
-							membersRaw, _ := proj["members"]
+							membersRaw := proj["members"]
 
 							relation := "public"
 							memberRole := "viewer"

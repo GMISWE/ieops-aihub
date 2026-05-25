@@ -356,11 +356,11 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			"reason":                  "claim by same user or explicit takeover",
 			"actor_user_id":           callerUserID,
 		})
-		tx.Exec(ctx, `
+		_, _ = tx.Exec(ctx, `
 			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
 			VALUES ($1, $2, $3, $4, 'attempt_superseded', $5, $6)`,
 			supEvtID, wi.ID, callerUserID, callerDisplay, supPayload, wi.Project,
-		) //nolint:errcheck
+		)
 	}
 
 	// Insert resource_locks for requested locks
@@ -436,11 +436,11 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			"wi_type":                *wi.WIType,
 			"requires_human_session": resolvedRHS,
 		})
-		tx.Exec(ctx, `
+		_, _ = tx.Exec(ctx, `
 			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
 			VALUES ($1, $2, $3, $4, 'wi_classification_resolved', $5, $6)`,
 			evtID, wi.ID, callerUserID, callerDisplay, evtPayload, wi.Project,
-		) //nolint:errcheck
+		)
 		wi.RequiresHumanSession = &resolvedRHS
 	} else if *wi.RequiresHumanSession != resolvedRHS {
 		// C-R9-12: mismatch → 409 REQUIRES_HUMAN_SESSION_MISMATCH
@@ -465,11 +465,11 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		"is_resume":     req.Mode == "resume",
 		"claim_epoch":   newEpoch,
 	})
-	tx.Exec(ctx, `
+	_, _ = tx.Exec(ctx, `
 		INSERT INTO agent_events (id, work_item_id, run_attempt_id, actor_user_id, actor_display, api_key_id, event_type, payload, project)
 		VALUES ($1, $2, $3, $4, $5, $6, 'attempt_started', $7, $8)`,
 		evtID, wi.ID, newAttemptID, callerUserID, callerDisplay, callerAPIKeyID, evtPayload, wi.Project,
-	) //nolint:errcheck
+	)
 
 	// Determine step_recovery_hint from the state we read BEFORE the reset upsert.
 	// (Reading post-upsert would always return idle — that was the original bug.)

@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -93,6 +94,43 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 			}
 
 			uc.ProjectRoles = make(map[string]string)
+
+			// Non-admin users: load project memberships from projects.members JSONB.
+			// Admin users bypass all project checks so we skip the extra query.
+			if uc.Role != "admin" {
+				prows, perr := pool.Query(c.Request().Context(), `
+					SELECT name, members
+					FROM projects
+					WHERE members @> jsonb_build_array(jsonb_build_object('user_id', $1::text))`,
+					uc.UserID,
+				)
+				if perr == nil {
+					for prows.Next() {
+						var projName string
+						var membersRaw []byte
+						if perr := prows.Scan(&projName, &membersRaw); perr != nil {
+							continue
+						}
+						var members []struct {
+							UserID string `json:"user_id"`
+							Role   string `json:"role"`
+						}
+						if json.Unmarshal(membersRaw, &members) != nil {
+							continue
+						}
+						for _, m := range members {
+							if m.UserID == uc.UserID {
+								// Respect project_scope on the API key if set.
+								if projectScope == nil || *projectScope == projName {
+									uc.ProjectRoles[projName] = m.Role
+								}
+								break
+							}
+						}
+					}
+					prows.Close()
+				}
+			}
 
 			c.Set(string(ctxUser), &uc)
 			return next(c)

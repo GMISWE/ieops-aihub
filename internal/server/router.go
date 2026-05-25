@@ -600,12 +600,11 @@ func handleCreateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 		defer cancel()
 
 		var req struct {
-			Email        *string           `json:"email"`
-			DisplayName  string            `json:"display_name"`
-			UserType     string            `json:"user_type"`
-			Role         string            `json:"role"`
-			ProjectRoles map[string]string `json:"project_roles"`
-			AuthorAliases []string         `json:"author_aliases"`
+			Email         *string  `json:"email"`
+			DisplayName   string   `json:"display_name"`
+			UserType      string   `json:"user_type"`
+			Role          string   `json:"role"`
+			AuthorAliases []string `json:"author_aliases"`
 		}
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
@@ -633,10 +632,6 @@ func handleCreateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "email is required for human users"))
 		}
 
-		projectRolesJSON := []byte("{}")
-		if req.ProjectRoles != nil {
-			projectRolesJSON = must(marshalJSON(req.ProjectRoles))
-		}
 		// author_aliases is NOT NULL in the schema — default to empty slice when not provided.
 		if req.AuthorAliases == nil {
 			req.AuthorAliases = []string{}
@@ -645,22 +640,21 @@ func handleCreateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 		userID := domain.NewID("u")
 		var id string
 		err := pool.QueryRow(ctx, `
-			INSERT INTO users (id, email, display_name, user_type, role, project_roles, author_aliases)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO users (id, email, display_name, user_type, role, author_aliases)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			RETURNING id`,
-			userID, *email, req.DisplayName, req.UserType, req.Role, projectRolesJSON, req.AuthorAliases,
+			userID, *email, req.DisplayName, req.UserType, req.Role, req.AuthorAliases,
 		).Scan(&id)
 		if err != nil {
 			return internalError(c, "failed to create user")
 		}
 
 		return c.JSON(http.StatusCreated, map[string]any{
-			"id":            id,
-			"email":         *email,
-			"display_name":  req.DisplayName,
-			"user_type":     req.UserType,
-			"role":          req.Role,
-			"project_roles": req.ProjectRoles,
+			"id":           id,
+			"email":        *email,
+			"display_name": req.DisplayName,
+			"user_type":    req.UserType,
+			"role":         req.Role,
 		})
 	}
 }
@@ -672,7 +666,7 @@ func handleListUsers(pool *pgxpool.Pool) echo.HandlerFunc {
 		defer cancel()
 
 		rows, err := pool.Query(ctx, `
-			SELECT id, email, display_name, user_type, role, project_roles
+			SELECT id, email, display_name, user_type, role
 			FROM users ORDER BY created_at DESC LIMIT 100`)
 		if err != nil {
 			return internalError(c, "failed to list users")
@@ -682,17 +676,15 @@ func handleListUsers(pool *pgxpool.Pool) echo.HandlerFunc {
 		var items []map[string]any
 		for rows.Next() {
 			var id, email, displayName, userType, role string
-			var projectRolesRaw []byte
-			if err := rows.Scan(&id, &email, &displayName, &userType, &role, &projectRolesRaw); err != nil {
+			if err := rows.Scan(&id, &email, &displayName, &userType, &role); err != nil {
 				continue
 			}
 			items = append(items, map[string]any{
-				"id":            id,
-				"email":         email,
-				"display_name":  displayName,
-				"user_type":     userType,
-				"role":          role,
-				"project_roles": string(projectRolesRaw),
+				"id":           id,
+				"email":        email,
+				"display_name": displayName,
+				"user_type":    userType,
+				"role":         role,
 			})
 		}
 		if items == nil {
@@ -709,23 +701,12 @@ func handleUpdateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 		defer cancel()
 
 		var req struct {
-			DisplayName  *string           `json:"display_name"`
-			Role         *string           `json:"role"`
-			ProjectRoles map[string]string `json:"project_roles"`
-			AuthorAliases []string         `json:"author_aliases"`
+			DisplayName   *string  `json:"display_name"`
+			Role          *string  `json:"role"`
+			AuthorAliases []string `json:"author_aliases"`
 		}
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
-		}
-
-		// Validate project_roles values
-		if req.ProjectRoles != nil {
-			for proj, role := range req.ProjectRoles {
-				if role != "viewer" && role != "writer" && role != "maintainer" {
-					return writeError(c, domain.NewErr(domain.ErrBadRequest,
-						"invalid project_roles value for "+proj+": must be viewer, writer, or maintainer"))
-				}
-			}
 		}
 
 		sets := []string{}
@@ -743,12 +724,6 @@ func handleUpdateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 			}
 			sets = append(sets, "role=$"+itoa(idx))
 			args = append(args, *req.Role)
-			idx++
-		}
-		if req.ProjectRoles != nil {
-			prJSON := must(marshalJSON(req.ProjectRoles))
-			sets = append(sets, "project_roles=$"+itoa(idx))
-			args = append(args, prJSON)
 			idx++
 		}
 		if req.AuthorAliases != nil {
@@ -958,8 +933,8 @@ func handleBootstrap(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		userID := domain.NewID("u")
 		if _, err := pool.Exec(ctx, `
-			INSERT INTO users (id, email, display_name, user_type, role, project_roles, api_keys, author_aliases)
-			VALUES ($1, $2, $3, 'human', 'admin', '{}', $4, '{}')`,
+			INSERT INTO users (id, email, display_name, user_type, role, api_keys, author_aliases)
+			VALUES ($1, $2, $3, 'human', 'admin', $4, '{}')`,
 			userID, req.Email, req.DisplayName, apiKeysJSON,
 		); err != nil {
 			return internalError(c, "failed to create bootstrap admin user")

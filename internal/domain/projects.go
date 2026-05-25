@@ -44,12 +44,20 @@ type CreateProjectRequest struct {
 	Repos       json.RawMessage `json:"repos"`
 }
 
+// MemberInput is a single entry in a members update request.
+type MemberInput struct {
+	UserID string `json:"user_id"`
+	Role   string `json:"role"` // "viewer" | "writer" | "maintainer"
+}
+
 // UpdateProjectRequest is the body for PATCH /v1/projects/:name.
 type UpdateProjectRequest struct {
 	Description *string         `json:"description"`
 	Visible     *bool           `json:"visible"`
 	Scenario    *string         `json:"scenario"`
 	Repos       json.RawMessage `json:"repos"`
+	// Members, when non-nil, replaces the entire members list.
+	Members *[]MemberInput `json:"members"`
 }
 
 // projectMember is a single entry in the members JSONB array.
@@ -428,6 +436,20 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 	if len(req.Repos) > 0 && string(req.Repos) != "null" {
 		setClauses = append(setClauses, fmt.Sprintf("repos=$%d", idx))
 		args = append(args, []byte(req.Repos))
+		idx++
+	}
+	if req.Members != nil {
+		for _, m := range *req.Members {
+			if m.Role != "viewer" && m.Role != "writer" && m.Role != "maintainer" {
+				return nil, NewErr(ErrBadRequest, fmt.Sprintf("invalid role %q for member %s: must be viewer, writer, or maintainer", m.Role, m.UserID))
+			}
+		}
+		membersJSON, err := json.Marshal(*req.Members)
+		if err != nil {
+			return nil, NewErr(ErrInternalError, "failed to marshal members")
+		}
+		setClauses = append(setClauses, fmt.Sprintf("members=$%d", idx))
+		args = append(args, membersJSON)
 		idx++
 	}
 

@@ -57,6 +57,7 @@ func (s *Server) registerProjectTools() {
 			"visible":     prop("boolean", "Updated visibility"),
 			"scenario":    prop("string", "Updated scenario type"),
 			"repos":       prop("array", "Updated repository list"),
+			"members":     prop("array", "Replace member list: [{user_id, role}] where role is viewer|writer|maintainer"),
 		}, []string{"name"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)

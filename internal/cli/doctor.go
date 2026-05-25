@@ -76,7 +76,7 @@ func checkWorkspace(wsRoot string, cfg *config.Config) checkResult {
 	return checkResult{
 		Name:    "workspace",
 		Status:  "ok",
-		Message: fmt.Sprintf(".polyforge.yaml found (scenario: %s)", cfg.Scenario),
+		Message: ".polyforge.yaml found",
 	}
 }
 

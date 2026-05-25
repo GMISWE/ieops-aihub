@@ -766,8 +766,15 @@ func ensureSessionStartHook() error {
 	return ensureSettingsHook(settingsPath, hookPath)
 }
 
-// ensureSettingsHook adds hookCmd to the SessionStart hooks in settings.json.
-// Idempotent: skips if the command is already registered.
+// sessionStartHookTimeoutMs is the Claude Code SessionStart hook timeout in
+// milliseconds. The pf-session-start.sh script forks bash and python3, so it
+// needs enough headroom for cold start — anything below ~1s tends to get the
+// hook SIGKILL'd before it can write additionalContext.
+const sessionStartHookTimeoutMs = 5000
+
+// ensureSettingsHook adds hookCmd to the SessionStart hooks in settings.json,
+// or reconciles the timeout/type fields of an existing entry. Idempotent: a
+// no-op when the existing entry already matches the desired shape.
 func ensureSettingsHook(settingsPath, hookCmd string) error {
 	var settings map[string]any
 
@@ -804,22 +811,47 @@ func ensureSettingsHook(settingsPath, hookCmd string) error {
 
 	entries, _ := group["hooks"].([]any)
 
-	// Check if already registered.
+	const desiredType = "command"
+	desiredTimeout := sessionStartHookTimeoutMs
+
+	// Find existing entry by command; reconcile its fields if found, otherwise
+	// append a new entry. Reconcile (not early-return) so legacy installs that
+	// captured a wrong timeout get healed when the user re-runs init.
+	found := false
+	changed := false
 	for _, e := range entries {
-		if m, ok := e.(map[string]any); ok {
-			if m["command"] == hookCmd {
-				return nil // already present
-			}
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
 		}
+		if cmd, _ := m["command"].(string); cmd != hookCmd {
+			continue
+		}
+		found = true
+		if t, _ := m["type"].(string); t != desiredType {
+			m["type"] = desiredType
+			changed = true
+		}
+		// JSON unmarshal turns numbers into float64; coerce before comparing.
+		if ms, ok := m["timeout"].(float64); !ok || int(ms) != desiredTimeout {
+			m["timeout"] = desiredTimeout
+			changed = true
+		}
+		break
+	}
+	if !found {
+		entries = append(entries, map[string]any{
+			"type":    desiredType,
+			"command": hookCmd,
+			"timeout": desiredTimeout,
+		})
+		group["hooks"] = entries
+		changed = true
 	}
 
-	// Append the new hook entry.
-	entries = append(entries, map[string]any{
-		"type":    "command",
-		"command": hookCmd,
-		"timeout": 5,
-	})
-	group["hooks"] = entries
+	if !changed {
+		return nil
+	}
 
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {

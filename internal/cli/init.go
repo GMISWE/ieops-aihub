@@ -392,6 +392,13 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 	}
 
 	phaseDir := filepath.Join(wsRoot, ".polyforge")
+	if err := os.MkdirAll(phaseDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init: mkdir .polyforge: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(filepath.Join(phaseDir, "state"), 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init: mkdir .polyforge/state: %v\n", err)
+	}
 
 	// Write .polyforge/usage.md — polyforge v1 workspace guide.
 	usageFile := filepath.Join(phaseDir, "usage.md")

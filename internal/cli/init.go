@@ -503,6 +503,17 @@ to direct HTTP calls. Use /reload-plugins or restart to reconnect.
 
 ---
 
+## Wi 创建规则
+
+**所有 wi 创建必须通过 ` + "`" + `/pf-work` + "`" + ` skill**，不管是人还是 AI。
+
+- **对话模式**（默认）：人/AI 在 session 讨论中决定建 wi → 创建后询问是否认领
+- **静默模式**：AI 在 step 执行中途发现问题 → 调用 pf-work 时说明"静默模式" → 只创建放 queue，不询问
+
+不要直接调用 ` + "`" + `pf_create_work_item` + "`" + ` MCP tool 创建 wi，统一走 pf-work 以保持行为一致。
+
+---
+
 ## ~/.polyforge/config.toml (machine-level)
 
 ` + "```" + `toml

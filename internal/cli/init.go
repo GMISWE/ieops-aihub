@@ -305,7 +305,6 @@ func writeMemberPolyforgeYAML(path string, projects []serverProject) error {
 
 	cfg := config.Config{
 		Version:  1,
-		Scenario: "coding",
 		AIHub:    config.AIHubConfig{URL: mc.ResolveAihubURL()},
 		Projects: make(map[string]config.Project),
 	}

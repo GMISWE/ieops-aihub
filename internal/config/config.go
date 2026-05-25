@@ -10,7 +10,6 @@ import (
 
 type Config struct {
 	Version  int                `yaml:"version"`
-	Scenario string             `yaml:"scenario"`
 	AIHub    AIHubConfig        `yaml:"aihub"`
 	Projects map[string]Project `yaml:"projects"`
 }

@@ -23,6 +23,7 @@ type AIHubConfig struct {
 type Project struct {
 	Repos       []Repo `yaml:"repos"`
 	Description string `yaml:"description"`
+	Scenario    string `yaml:"scenario,omitempty"`
 }
 
 type Repo struct {

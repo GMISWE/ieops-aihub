@@ -52,6 +52,7 @@ type ClaimRequest struct {
 	RequestedLocks []ResourceLockReq `json:"requested_locks"`
 	Mode           string        `json:"mode"` // "fresh" | "resume"
 	ForceOver      bool          `json:"force_takeover"`
+	ScenarioRef    *string       `json:"scenario_ref,omitempty"` // git SHA of local scenario clone at claim time
 }
 
 // SessionInfo carries machine_id and session_secret.
@@ -191,51 +192,15 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		return nil, NewErr(ErrWITypeMismatch, "wi_type is not set; update it with pf_update_work_item(wi_type=...) before claiming")
 	}
 
-	// Load scenario_phase_configs for this scenario
-	var configRaw []byte
-	err = tx.QueryRow(ctx,
-		`SELECT content FROM scenario_phase_configs WHERE scenario = $1`, wi.Scenario,
-	).Scan(&configRaw)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// C-R9-3: no config found → 503
-			return nil, NewErr(ErrServiceUnavailable, fmt.Sprintf("no phase config for scenario %q — server not fully initialized", wi.Scenario))
-		}
-		return nil, NewErr(ErrInternalError, "failed to load scenario config")
-	}
-
-	var config struct {
-		Version  int
-		WITypes  map[string]struct {
-			RequiresHumanSession bool `json:"requires_human_session"`
-		} `json:"wi_types"`
-	}
-	var configFull struct {
-		WITypes map[string]struct {
-			RequiresHumanSession bool `json:"requires_human_session"`
-		} `json:"wi_types"`
-	}
-	if jsonErr := json.Unmarshal(configRaw, &configFull); jsonErr != nil {
-		return nil, NewErr(ErrInternalError, "failed to parse scenario config")
-	}
-	config.WITypes = configFull.WITypes
-
-	// Also load config version
-	var configVersion int
-	tx.QueryRow(ctx, `SELECT version FROM scenario_phase_configs WHERE scenario = $1`, wi.Scenario).Scan(&configVersion) //nolint:errcheck
-	config.Version = configVersion
-
-	// C-R9-10: validate wi_type still exists in config
-	wiTypeDef, typeExists := config.WITypes[*wi.WIType]
-	if !typeExists {
-		available := make([]string, 0, len(config.WITypes))
-		for k := range config.WITypes {
-			available = append(available, k)
-		}
-		return nil, NewErrDetails(ErrWITypeMismatch,
-			fmt.Sprintf("wi_type %q no longer exists in scenario config", *wi.WIType),
-			map[string]any{"wi_type": *wi.WIType, "available_wi_types": available},
-		)
+	// Determine requires_human_session for the wi_type.
+	// scenario_phase_configs has been removed; the client is responsible for
+	// setting requires_human_session on the wi before claiming. If it is already
+	// set on the wi row we use that value; if NULL we default to true (conservative).
+	wiTypeDef := struct {
+		RequiresHumanSession bool
+	}{RequiresHumanSession: true}
+	if wi.RequiresHumanSession != nil {
+		wiTypeDef.RequiresHumanSession = *wi.RequiresHumanSession
 	}
 
 	isTakeover := false
@@ -372,11 +337,11 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		) VALUES (
 			$1, $2, 'running', $3, $4,
 			$5, $6, $7, $8, $9,
-			$10, $11, clock_timestamp(), clock_timestamp()
+			$10, NULL, clock_timestamp(), clock_timestamp()
 		)`,
 		newAttemptID, wi.ID, newEpoch, req.IdempotencyKey,
 		callerUserID, callerAPIKeyID, callerDisplay, req.SessionInfo.MachineID, secretHash,
-		nilIfEmpty(priorAttemptID), config.Version,
+		nilIfEmpty(priorAttemptID),
 	)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to insert run_attempt: %v", err))
@@ -438,14 +403,16 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	).Scan(&priorStepStatus, &priorStepStartedAt)
 
 	// Upsert wi_step_state (C-R7-9: INSERT ... ON CONFLICT DO UPDATE)
+	// scenario_ref is the git SHA of the local scenario clone at claim time (client-provided).
 	_, err = tx.Exec(ctx, `
-		INSERT INTO wi_step_state (work_item_id, wi_type, graph_source, current_step, current_step_status)
-		VALUES ($1, $2, 'scenario_config', NULL, 'idle')
+		INSERT INTO wi_step_state (work_item_id, wi_type, graph_source, current_step, current_step_status, scenario_ref)
+		VALUES ($1, $2, 'scenario_ref', NULL, 'idle', $3)
 		ON CONFLICT (work_item_id) DO UPDATE
-		  SET wi_type=$2, graph_source='scenario_config',
+		  SET wi_type=$2, graph_source='scenario_ref',
+		      scenario_ref=$3,
 		      current_step_status='idle', current_step_attempt=NULL,
 		      step_started_at=NULL, updated_at=clock_timestamp()`,
-		wi.ID, wi.WIType,
+		wi.ID, wi.WIType, req.ScenarioRef,
 	)
 	if err != nil {
 		// step_state upsert failure is non-fatal for free-execution mode

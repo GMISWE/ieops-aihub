@@ -276,21 +276,6 @@ func (c *Client) ListDependencies(ctx context.Context, wiID string) (map[string]
 	return out, c.do(ctx, "GET", "/v1/work_items/"+wiID+"/dependencies", nil, &out)
 }
 
-// ─── Scenario Config ──────────────────────────────────────────────────────
-
-// GetScenarioConfig calls GET /v1/scenarios/:scenario/phase_config.
-func (c *Client) GetScenarioConfig(ctx context.Context, scenario string) (map[string]any, error) {
-	var out map[string]any
-	return out, c.do(ctx, "GET", "/v1/scenarios/"+scenario+"/phase_config", nil, &out)
-}
-
-// UpdateScenarioConfig calls PUT /v1/scenarios/:scenario/phase_config.
-// body must include "content" (json.RawMessage) and "version" (int) for CAS.
-func (c *Client) UpdateScenarioConfig(ctx context.Context, scenario string, body any) (map[string]any, error) {
-	var out map[string]any
-	return out, c.do(ctx, "PUT", "/v1/scenarios/"+scenario+"/phase_config", body, &out)
-}
-
 // ─── Steps ────────────────────────────────────────────────────────────────
 
 // GetStep calls GET /v1/work_items/:id/step.

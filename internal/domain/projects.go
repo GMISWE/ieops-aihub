@@ -29,7 +29,7 @@ type Project struct {
 	Repos            json.RawMessage `json:"repos"`
 	Members          json.RawMessage `json:"members"`
 	WISeq            int64           `json:"wi_seq"`
-	Scenario         string          `json:"scenario"`
+	Scenario         *string         `json:"scenario"`
 	OwnerUserID      string          `json:"owner_user_id"`
 	CreatedAt        time.Time       `json:"created_at"`
 	UpdatedAt        time.Time       `json:"updated_at"`
@@ -283,9 +283,9 @@ func CreateProject(ctx context.Context, conn *pgxpool.Pool, owner *UserRecord, r
 		visible = *req.Visible
 	}
 
-	scenario := "coding"
+	var scenario *string
 	if req.Scenario != nil && *req.Scenario != "" {
-		scenario = *req.Scenario
+		scenario = req.Scenario
 	}
 
 	// Validate and default repos

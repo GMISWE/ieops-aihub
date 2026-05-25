@@ -132,6 +132,7 @@ func TestRoleLevel(t *testing.T) {
 func TestProject_JSONRoundtrip(t *testing.T) {
 	desc := "test project"
 	prefix := "pi_ab12ef34"
+	scenario := "git@github.com:GMISWE/polyforge-coding.git"
 	p := Project{
 		Name:             "test-project",
 		Description:      &desc,
@@ -140,7 +141,7 @@ func TestProject_JSONRoundtrip(t *testing.T) {
 		Repos:            json.RawMessage(`[{"name":"r","url":"u"}]`),
 		Members:          json.RawMessage(`[{"user_id":"u_abc","role":"writer"}]`),
 		WISeq:            42,
-		Scenario:         "coding",
+		Scenario:         &scenario,
 		OwnerUserID:      "u_owner",
 	}
 

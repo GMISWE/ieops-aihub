@@ -105,9 +105,9 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 		if req.Heartbeat {
 			// Heartbeat: best-effort timestamp bump, transient DB errors must not
 			// fail the heartbeat (caller will retry anyway).
-			pool.Exec(c.Request().Context(), `
+			_, _ = pool.Exec(c.Request().Context(), `
 				UPDATE wi_step_state SET step_started_at = clock_timestamp(), updated_at = clock_timestamp()
-				WHERE work_item_id = $1`, wiID) //nolint:errcheck
+				WHERE work_item_id = $1`, wiID)
 			return c.JSON(http.StatusOK, map[string]string{"status": "heartbeat_ok"})
 		}
 

@@ -437,11 +437,11 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			"activation_count":  newActivationCount,
 			"base_strength":     newBaseStrength,
 		})
-		pool.Exec(ctx, `
+		_, _ = pool.Exec(ctx, `
 			INSERT INTO agent_events (id, actor_user_id, actor_display, event_type, payload, project)
 			VALUES ($1, $2, $3, 'memory_reinforced', $4, $5)`,
 			domain.NewID("evt"), u.UserID, u.DisplayName, payload, memProject,
-		) //nolint:errcheck
+		)
 
 		return c.JSON(http.StatusOK, map[string]any{
 			"memory_id":        memID,

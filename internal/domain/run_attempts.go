@@ -616,11 +616,11 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	evtPayload, _ := json.Marshal(map[string]any{
 		"status": req.Status,
 	})
-	tx.Exec(ctx, `
+	_, _ = tx.Exec(ctx, `
 		INSERT INTO agent_events (id, work_item_id, run_attempt_id, event_type, payload, project)
 		VALUES ($1, $2, $3, 'attempt_completed', $4, $5)`,
 		evtID, wi.ID, req.AttemptID, evtPayload, wi.Project,
-	) //nolint:errcheck
+	)
 
 	// If terminal (wrapped/failed): unblock dependent wi + set methodology expires_at
 	if req.Status == "wrapped" || req.Status == "failed" {
@@ -628,10 +628,10 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 			_ = aihubErr // non-fatal
 		}
 		// C4: set methodology.* memory expires_at = closed_at + 90d
-		tx.Exec(ctx, `
+		_, _ = tx.Exec(ctx, `
 			UPDATE memories SET expires_at = clock_timestamp() + interval '90 days'
 			WHERE work_item_id = $1 AND type LIKE 'methodology.%' AND expires_at IS NULL`,
-			wi.ID) //nolint:errcheck
+			wi.ID)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -677,11 +677,11 @@ func fnForceTerminateStep(ctx context.Context, tx pgx.Tx, wiID, attemptID string
 		"error_type":      "force_terminate_step",
 		"escalated":       false,
 	})
-	tx.Exec(ctx, `
+	_, _ = tx.Exec(ctx, `
 		INSERT INTO agent_events (id, work_item_id, run_attempt_id, event_type, payload, project)
 		VALUES ($1, $2, $3, 'step_failed', $4,
 		        (SELECT project FROM work_items WHERE id=$2))`,
-		evtID, wiID, attemptID, payload) //nolint:errcheck
+		evtID, wiID, attemptID, payload)
 
 	// Reset wi_step_state
 	_, err = tx.Exec(ctx, `

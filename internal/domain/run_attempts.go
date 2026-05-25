@@ -407,10 +407,10 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	// scenario_ref is the git SHA of the local scenario clone at claim time (client-provided).
 	_, err = tx.Exec(ctx, `
 		INSERT INTO wi_step_state (work_item_id, wi_type, graph_source, current_step, current_step_status, scenario_ref)
-		VALUES ($1, $2, 'scenario_ref', NULL, 'idle', $3)
+		VALUES ($1, $2, 'scenario_config', NULL, 'idle', $3)
 		ON CONFLICT (work_item_id) DO UPDATE
-		  SET wi_type=$2, graph_source='scenario_ref',
-		      scenario_ref=$3,
+		  SET wi_type=$2, graph_source='scenario_config',
+		      scenario_ref=COALESCE($3, wi_step_state.scenario_ref),
 		      current_step_status='idle', current_step_attempt=NULL,
 		      step_started_at=NULL, updated_at=clock_timestamp()`,
 		wi.ID, wi.WIType, req.ScenarioRef,

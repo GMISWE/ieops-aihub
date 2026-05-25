@@ -471,6 +471,7 @@ func syncScenarioRepos(wsRoot string, cfg *config.Config) {
 			cmd.Stderr = os.Stderr
 			if err := cmd.Run(); err != nil {
 				fmt.Fprintf(os.Stderr, "pf init: clone scenario %s: %v\n", url, err)
+				os.RemoveAll(cachePath) //nolint:errcheck — clean up partial clone
 				continue
 			}
 		} else {
@@ -483,10 +484,15 @@ func syncScenarioRepos(wsRoot string, cfg *config.Config) {
 		}
 
 		// Create symlink <wsRoot>/.polyforge/scenarios/<project> → <cachePath>
+		// Only remove an existing symlink (not a real directory).
 		linkPath := filepath.Join(linkDir, projName)
-		if rmErr := os.Remove(linkPath); rmErr != nil && !os.IsNotExist(rmErr) {
-			fmt.Fprintf(os.Stderr, "pf init: remove stale symlink for %s: %v\n", projName, rmErr)
-			continue
+		if fi, statErr := os.Lstat(linkPath); statErr == nil {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				os.Remove(linkPath) //nolint:errcheck
+			} else {
+				fmt.Fprintf(os.Stderr, "pf init: %s exists and is not a symlink, skipping\n", linkPath)
+				continue
+			}
 		}
 		if err := os.Symlink(cachePath, linkPath); err != nil {
 			fmt.Fprintf(os.Stderr, "pf init: symlink scenario for %s: %v\n", projName, err)

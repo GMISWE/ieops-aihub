@@ -29,7 +29,7 @@ func (s *Server) registerProjectTools() {
 			"name":        prop("string", "Project name (lowercase letters/digits/dash/underscore, 1-40 chars)"),
 			"description": prop("string", "Optional description"),
 			"visible":     prop("boolean", "Whether the project is publicly visible (default: true)"),
-			"scenario":    prop("string", "Scenario type: coding|writing|data (default: coding)"),
+			"scenario":    prop("string", "Scenario repo URL (e.g. git@github.com:GMISWE/polyforge-coding.git)"),
 			"repos":       prop("array", "Repository list [{name,url,github_owner_repo,description}]"),
 		}, []string{"name"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
@@ -55,7 +55,7 @@ func (s *Server) registerProjectTools() {
 			"name":        prop("string", "Project name"),
 			"description": prop("string", "Updated description"),
 			"visible":     prop("boolean", "Updated visibility"),
-			"scenario":    prop("string", "Updated scenario type"),
+			"scenario":    prop("string", "Updated scenario repo URL (e.g. git@github.com:GMISWE/polyforge-coding.git)"),
 			"repos":       prop("array", "Updated repository list"),
 		}, []string{"name"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {

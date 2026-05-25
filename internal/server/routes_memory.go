@@ -28,10 +28,6 @@ func domainErr(c echo.Context, err error) error {
 // RegisterMemoryRoutes adds all Round 2b routes to the authenticated route group.
 // Called once from NewRouter after the admin group is registered.
 func RegisterMemoryRoutes(v1 *echo.Group, pool *pgxpool.Pool) {
-	// Scenario phase config (§4.3)
-	v1.GET("/scenarios/:scenario/phase_config", handleGetScenarioConfig(pool))
-	v1.PUT("/scenarios/:scenario/phase_config", handleUpdateScenarioConfig(pool))
-
 	// Memories (§4.3, §7)
 	v1.POST("/memories", handleRemember(pool))
 	v1.GET("/memories", handleRecall(pool))
@@ -46,78 +42,6 @@ func RegisterMemoryRoutes(v1 *echo.Group, pool *pgxpool.Pool) {
 	// Admin GC trigger
 	gc := v1.Group("/admin/gc", RequireAdmin())
 	gc.POST("", handleRunGC(pool))
-}
-
-// ─── Scenario Phase Config ────────────────────────────────────────────────────
-
-// handleGetScenarioConfig handles GET /v1/scenarios/:scenario/phase_config.
-// Requires viewer+ access.
-func handleGetScenarioConfig(pool *pgxpool.Pool) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		u := GetUser(c)
-		ctx, cancel := contextWithTimeout(c)
-		defer cancel()
-
-		scenario := c.Param("scenario")
-		if scenario == "" {
-			return writeError(c, domain.NewErr(domain.ErrBadRequest, "scenario parameter is required"))
-		}
-
-		// Viewer+ access: check user has at least viewer role on any project
-		// For scenario config we use global role check (admin or any project role)
-		if u.Role != "admin" && len(u.ProjectRoles) == 0 {
-			return writeError(c, domain.NewErr(domain.ErrForbidden, "viewer access required"))
-		}
-
-		cfg, aihubErr := domain.GetScenarioConfig(ctx, pool, scenario)
-		if aihubErr != nil {
-			return domainErr(c, aihubErr)
-		}
-		return c.JSON(http.StatusOK, cfg)
-	}
-}
-
-// handleUpdateScenarioConfig handles PUT /v1/scenarios/:scenario/phase_config.
-// Requires maintainer or admin.
-func handleUpdateScenarioConfig(pool *pgxpool.Pool) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		u := GetUser(c)
-		ctx, cancel := contextWithTimeout(c)
-		defer cancel()
-
-		scenario := c.Param("scenario")
-		if scenario == "" {
-			return writeError(c, domain.NewErr(domain.ErrBadRequest, "scenario parameter is required"))
-		}
-
-		// Require maintainer or admin
-		if u.Role != "admin" {
-			hasMaintainer := false
-			for _, role := range u.ProjectRoles {
-				if role == "maintainer" {
-					hasMaintainer = true
-					break
-				}
-			}
-			if !hasMaintainer {
-				return writeError(c, domain.NewErr(domain.ErrForbidden, "maintainer or admin role required"))
-			}
-		}
-
-		var req domain.UpdateScenarioConfigRequest
-		if err := c.Bind(&req); err != nil {
-			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
-		}
-		if len(req.Content) == 0 {
-			return writeError(c, domain.NewErr(domain.ErrBadRequest, "content is required"))
-		}
-
-		cfg, aihubErr := domain.UpdateScenarioConfig(ctx, pool, scenario, &req, u.UserID)
-		if aihubErr != nil {
-			return domainErr(c, aihubErr)
-		}
-		return c.JSON(http.StatusOK, map[string]any{"version": cfg.Version})
-	}
 }
 
 // ─── Memories ─────────────────────────────────────────────────────────────────

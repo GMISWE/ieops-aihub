@@ -20,6 +20,7 @@ type StepState struct {
 	CurrentStepAttempt *string    `json:"current_step_attempt,omitempty"`
 	StepStartedAt      *time.Time `json:"step_started_at,omitempty"`
 	Version            int64      `json:"version"`
+	ScenarioRef        *string    `json:"scenario_ref,omitempty"`
 }
 
 // UpdateStepRequest is the body for PATCH /v1/work_items/:id/step.
@@ -62,10 +63,10 @@ func handleGetStep(pool *pgxpool.Pool) echo.HandlerFunc {
 		s.WorkItemID = wiID
 		scanErr := pool.QueryRow(c.Request().Context(), `
 			SELECT wi_type, current_step, current_step_status,
-			       current_step_attempt, step_started_at, version
+			       current_step_attempt, step_started_at, version, scenario_ref
 			FROM wi_step_state WHERE work_item_id = $1`, wiID,
 		).Scan(&s.WIType, &s.CurrentStep, &s.CurrentStepStatus,
-			&s.CurrentStepAttempt, &s.StepStartedAt, &s.Version)
+			&s.CurrentStepAttempt, &s.StepStartedAt, &s.Version, &s.ScenarioRef)
 		if scanErr != nil {
 			s.CurrentStepStatus = "idle"
 			s.Version = 0

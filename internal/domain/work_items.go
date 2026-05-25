@@ -185,29 +185,15 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Load scenario_phase_configs for classification rules
-	var configRaw []byte
-	err = tx.QueryRow(ctx,
-		`SELECT content FROM scenario_phase_configs WHERE scenario = $1`,
-		req.Scenario,
-	).Scan(&configRaw)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, NewErr(ErrServiceUnavailable, fmt.Sprintf("no phase config for scenario %q — server not fully initialized", req.Scenario))
-		}
-		return nil, NewErr(ErrInternalError, "failed to load scenario config")
-	}
-
-	// Apply classification rules
-	wiType, requiresHumanSession, aihubErr := applyClassificationRules(configRaw, req)
-	if aihubErr != nil {
-		return nil, aihubErr
-	}
+	// wi_type and requires_human_session are provided by the caller directly.
+	// scenario_phase_configs has been removed; classification is handled client-side
+	// using the local scenario clone (scenario_ref).
+	wiType := req.WIType
+	requiresHumanSession := req.RequiresHumanSession
 
 	// Dedup check (skip if force_create)
 	if !req.ForceCreate {
-		aihubErr = checkDedup(ctx, tx, req)
-		if aihubErr != nil {
+		if aihubErr := checkDedup(ctx, tx, req); aihubErr != nil {
 			return nil, aihubErr
 		}
 	} else if req.ForceReason == "" || len(req.ForceReason) < 10 {
@@ -296,71 +282,6 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	}
 
 	return GetWorkItem(ctx, pool, wiID)
-}
-
-// applyClassificationRules applies scenario classification_rules to determine wi_type and requires_human_session.
-// Returns (wi_type, requires_human_session, err).
-func applyClassificationRules(configRaw []byte, req *CreateWorkItemRequest) (*string, *bool, *AihubError) {
-	var config struct {
-		WITypes map[string]struct {
-			RequiresHumanSession bool `json:"requires_human_session"`
-		} `json:"wi_types"`
-		ClassificationRules []struct {
-			Name         string `json:"name"`
-			Priority     string `json:"priority"`      // flat field, not under "match"
-			WITypePrefix string `json:"wi_type_prefix"` // flat field, not under "match"
-			Set struct {
-				WIType               string `json:"wi_type"`
-				RequiresHumanSession *bool  `json:"requires_human_session"`
-			} `json:"set"`
-		} `json:"classification_rules"`
-	}
-	if err := json.Unmarshal(configRaw, &config); err != nil {
-		return nil, nil, NewErr(ErrInternalError, "failed to parse scenario config")
-	}
-
-	wiType := req.WIType
-	requiresHumanSession := req.RequiresHumanSession
-
-	// Apply classification rules (first match wins)
-	for _, rule := range config.ClassificationRules {
-		matchesPriority := rule.Priority == "" || rule.Priority == req.Priority
-		matchesPrefix := rule.WITypePrefix == "" ||
-			(req.WIType != nil && strings.HasPrefix(*req.WIType, rule.WITypePrefix)) ||
-			(req.WIType == nil && strings.HasPrefix(strings.ToLower(req.Goal), strings.ToLower(rule.WITypePrefix)))
-		if matchesPriority && matchesPrefix {
-			if rule.Set.WIType != "" {
-				t := rule.Set.WIType
-				wiType = &t
-			}
-			if rule.Set.RequiresHumanSession != nil {
-				b := *rule.Set.RequiresHumanSession
-				requiresHumanSession = &b
-			}
-			break
-		}
-	}
-
-	// C-R9-4: Validate wi_type exists in config if set
-	if wiType != nil && *wiType != "" {
-		if _, ok := config.WITypes[*wiType]; !ok {
-			available := make([]string, 0, len(config.WITypes))
-			for k := range config.WITypes {
-				available = append(available, k)
-			}
-			return nil, nil, NewErrDetails(ErrWITypeMismatch,
-				fmt.Sprintf("wi_type %q does not exist in scenario config", *wiType),
-				map[string]any{"wi_type": *wiType, "available_wi_types": available},
-			)
-		}
-		// If requires_human_session not set, derive from phase config
-		if requiresHumanSession == nil {
-			rhs := config.WITypes[*wiType].RequiresHumanSession
-			requiresHumanSession = &rhs
-		}
-	}
-
-	return wiType, requiresHumanSession, nil
 }
 
 // jaccardNGram computes a simple n-gram Jaccard similarity between two strings.
@@ -728,40 +649,8 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 			return nil, NewErr(ErrBadRequest, "reclassify_reason is required (min 10 chars) when updating wi_type")
 		}
 
-		// Fix 1: validate new wi_type exists in scenario_phase_configs.
-		// Fix 2: auto-infer requires_human_session from phase config when not provided.
-		var configRaw []byte
-		cfgErr := pool.QueryRow(ctx,
-			`SELECT content FROM scenario_phase_configs WHERE scenario = $1`, wi.Scenario,
-		).Scan(&configRaw)
-		if cfgErr != nil {
-			if errors.Is(cfgErr, pgx.ErrNoRows) {
-				return nil, NewErr(ErrServiceUnavailable, fmt.Sprintf("no phase config for scenario %q — server not fully initialized", wi.Scenario))
-			}
-			return nil, NewErr(ErrInternalError, "failed to load scenario config")
-		}
-		var phaseCfg struct {
-			WITypes map[string]struct {
-				RequiresHumanSession bool `json:"requires_human_session"`
-			} `json:"wi_types"`
-		}
-		if jsonErr := json.Unmarshal(configRaw, &phaseCfg); jsonErr != nil {
-			return nil, NewErr(ErrInternalError, "failed to parse scenario config")
-		}
-		if _, ok := phaseCfg.WITypes[*req.WIType]; !ok {
-			available := make([]string, 0, len(phaseCfg.WITypes))
-			for k := range phaseCfg.WITypes {
-				available = append(available, k)
-			}
-			return nil, NewErrDetails(ErrWITypeMismatch,
-				fmt.Sprintf("wi_type %q does not exist in scenario config", *req.WIType),
-				map[string]any{"wi_type": *req.WIType, "available_wi_types": available},
-			)
-		}
-		if req.RequiresHumanSession == nil {
-			rhs := phaseCfg.WITypes[*req.WIType].RequiresHumanSession
-			req.RequiresHumanSession = &rhs
-		}
+		// scenario_phase_configs has been removed; wi_type is accepted as-is from the caller.
+		// requires_human_session must be provided by the caller when reclassifying.
 	}
 
 	tx, err := pool.Begin(ctx)

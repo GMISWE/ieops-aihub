@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,7 +13,6 @@ import (
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
 	"github.com/GMISWE/ieops-aihub/pkg/client"
-	"gopkg.in/yaml.v3"
 )
 
 // repoEntry holds a repo name and description for the managed block.
@@ -342,45 +343,7 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 		return
 	}
 
-	// Determine scenario from config (or default to "coding").
-	scenario := "coding"
-	if cfg != nil && cfg.Scenario != "" {
-		scenario = cfg.Scenario
-	}
-
 	phaseDir := filepath.Join(wsRoot, ".polyforge")
-	phaseFile := filepath.Join(phaseDir, "phase.yaml")
-
-	// GET /v1/scenario_configs/:scenario
-	result, err := c.GetScenarioConfig(ctx, scenario)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "pf init: failed to fetch scenario config: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Write to .polyforge/phase.yaml in the workspace root.
-	if err := os.MkdirAll(phaseDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "pf init: mkdir .polyforge: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Embed version for CAS on future --apply.
-	if v, ok := result["version"]; ok {
-		result["__version__"] = v
-	}
-
-	b, err := yaml.Marshal(result)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "pf init: marshal phase.yaml: %v\n", err)
-		os.Exit(1)
-	}
-	if err := os.WriteFile(phaseFile, b, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "pf init: write phase.yaml: %v\n", err)
-		os.Exit(1)
-	}
-
-	ver := result["version"]
-	fmt.Printf("ok .polyforge/phase.yaml written (scenario: %s, version: %v)\n", scenario, ver)
 
 	// Write .polyforge/usage.md — polyforge v1 workspace guide.
 	usageFile := filepath.Join(phaseDir, "usage.md")
@@ -467,6 +430,87 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 	if err := ensureClaudeMdRef(claudeMd); err != nil {
 		fmt.Fprintf(os.Stderr, "pf init: update CLAUDE.md ref: %v\n", err)
 	}
+
+	// --- Scenario repo cloning ---
+	// For each project that has a Scenario URL in .polyforge.yaml, clone/sync
+	// the scenario repo into a URL-keyed cache and symlink it per project.
+	if cfg != nil {
+		syncScenarioRepos(wsRoot, cfg)
+	}
+}
+
+// syncScenarioRepos clones or updates scenario repos for all projects that
+// declare a Scenario URL in .polyforge.yaml.  Multiple projects sharing the
+// same URL deduplicate to a single cache directory.
+//
+// Layout:
+//
+//	<wsRoot>/.polyforge/scenarios/_cache/<urlhash>/  — bare clone cache
+//	<wsRoot>/.polyforge/scenarios/<project>/         — symlink → cache
+func syncScenarioRepos(wsRoot string, cfg *config.Config) {
+	cacheDir := filepath.Join(wsRoot, ".polyforge", "scenarios", "_cache")
+	linkDir := filepath.Join(wsRoot, ".polyforge", "scenarios")
+
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init: mkdir scenarios cache: %v\n", err)
+		return
+	}
+
+	for projName, proj := range cfg.Projects {
+		if proj.Scenario == "" {
+			continue
+		}
+		url := proj.Scenario
+		hash := scenarioURLHash(url)
+		cachePath := filepath.Join(cacheDir, hash)
+
+		// Clone or fetch-reset the scenario repo.
+		if _, statErr := os.Stat(filepath.Join(cachePath, ".git")); os.IsNotExist(statErr) {
+			cmd := exec.Command("git", "clone", url, cachePath)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "pf init: clone scenario %s: %v\n", url, err)
+				os.RemoveAll(cachePath) //nolint:errcheck — clean up partial clone
+				continue
+			}
+		} else {
+			fetch := exec.Command("git", "-C", cachePath, "fetch", "origin")
+			fetch.Stderr = os.Stderr
+			fetch.Run() //nolint:errcheck — best-effort
+			reset := exec.Command("git", "-C", cachePath, "reset", "--hard", "origin/HEAD")
+			reset.Stderr = os.Stderr
+			reset.Run() //nolint:errcheck
+		}
+
+		// Create symlink <wsRoot>/.polyforge/scenarios/<project> → <cachePath>
+		// Only remove an existing symlink (not a real directory).
+		linkPath := filepath.Join(linkDir, projName)
+		if fi, statErr := os.Lstat(linkPath); statErr == nil {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				os.Remove(linkPath) //nolint:errcheck
+			} else {
+				fmt.Fprintf(os.Stderr, "pf init: %s exists and is not a symlink, skipping\n", linkPath)
+				continue
+			}
+		}
+		if err := os.Symlink(cachePath, linkPath); err != nil {
+			fmt.Fprintf(os.Stderr, "pf init: symlink scenario for %s: %v\n", projName, err)
+			continue
+		}
+		fmt.Printf("ok synced scenario for project %q\n", projName)
+	}
+}
+
+// scenarioURLHash returns a short deterministic hash of a URL for use as a
+// cache directory name.  Uses the first 16 hex chars of SHA-256(url).
+func scenarioURLHash(url string) string {
+	// Import crypto/sha256 inline to avoid a new import block.
+	h := scenarioSHA256(url)
+	if len(h) > 16 {
+		return h[:16]
+	}
+	return h
 }
 
 // writeUsageMd creates <wsRoot>/.polyforge/usage.md with the polyforge v1 workspace guide.
@@ -839,4 +883,10 @@ func upsertManagedBlock(claudeMd string, blocks []projectBlock) error {
 	}
 
 	return os.WriteFile(claudeMd, []byte(updated), 0644)
+}
+
+// scenarioSHA256 returns the hex-encoded SHA-256 of s.
+func scenarioSHA256(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
 }

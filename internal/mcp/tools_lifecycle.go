@@ -93,73 +93,6 @@ func (s *Server) registerLifecycleTools() {
 		return jsonResult(result)
 	})
 
-	// pf_get_scenario_config
-	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_get_scenario_config",
-		Description: "Read scenario phase config — available wi_types, classification_rules",
-		InputSchema: objectSchema(map[string]any{
-			"scenario": prop("string", "Scenario name (e.g. coding)"),
-		}, []string{"scenario"}),
-	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
-		args, err := parseArgs(req.Params.Arguments)
-		if err != nil {
-			return errResult(err)
-		}
-		scenario := strArg(args, "scenario")
-		if scenario == "" {
-			return errResult(fmt.Errorf("scenario is required"))
-		}
-		result, err := s.client.GetScenarioConfig(ctx, scenario)
-		if err != nil {
-			return errResult(err)
-		}
-		return jsonResult(result)
-	})
-
-	// pf_update_scenario_config
-	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_update_scenario_config",
-		Description: "Update scenario phase config (CAS). Requires maintainer/admin role.",
-		InputSchema: objectSchema(map[string]any{
-			"scenario": prop("string", "Scenario name"),
-			"content":  prop("object", "Updated config content"),
-			"version":  prop("integer", "Current version for CAS (int)"),
-		}, []string{"scenario", "content", "version"}),
-	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
-		args, err := parseArgs(req.Params.Arguments)
-		if err != nil {
-			return errResult(err)
-		}
-		scenario := strArg(args, "scenario")
-		if scenario == "" {
-			return errResult(fmt.Errorf("scenario is required"))
-		}
-		// version may arrive as float64 (MCP JSON), int, or string — coerce to int so the
-		// server's CAS check (UpdateScenarioConfigRequest.Version int) decodes correctly.
-		var versionInt int
-		switch v := args["version"].(type) {
-		case float64:
-			versionInt = int(v)
-		case int:
-			versionInt = v
-		case int64:
-			versionInt = int(v)
-		case string:
-			var n int
-			fmt.Sscanf(v, "%d", &n) //nolint:errcheck — parse error -> n stays 0 -> caller validates
-			versionInt = n
-		}
-		body := map[string]any{
-			"content": args["content"],
-			"version": versionInt,
-		}
-		result, err := s.client.UpdateScenarioConfig(ctx, scenario, body)
-		if err != nil {
-			return errResult(err)
-		}
-		return jsonResult(result)
-	})
-
 	// pf_create_work_item
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_create_work_item",
@@ -324,6 +257,7 @@ func (s *Server) registerLifecycleTools() {
 			"mode":            prop("string", "fresh|resume (default: fresh)"),
 			"requested_locks": prop("array", "Resource locks to acquire"),
 			"force_takeover":  prop("boolean", "Force takeover if already claimed"),
+			"scenario_ref":    prop("string", "Git SHA of local scenario clone at claim time (optional)"),
 		}, []string{"work_item_id", "idempotency_key"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -377,6 +311,9 @@ func (s *Server) registerLifecycleTools() {
 		}
 		if boolArg(args, "force_takeover") {
 			body["force_takeover"] = true
+		}
+		if sr := strArg(args, "scenario_ref"); sr != "" {
+			body["scenario_ref"] = sr
 		}
 
 		result, err := s.client.ClaimWorkItem(ctx, wiID, body)

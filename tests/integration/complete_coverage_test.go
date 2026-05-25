@@ -1103,7 +1103,6 @@ func TestAdminUserManagement(t *testing.T) {
 		"display_name":   displayName,
 		"user_type":      "machine", // auto-generates email
 		"role":           "writer",
-		"project_roles":  map[string]string{testProject: "writer"},
 		"author_aliases": []string{}, // text[] NOT NULL — must be supplied explicitly
 	})
 	if err != nil {

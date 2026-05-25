@@ -1,13 +1,17 @@
 FROM golang:1.26.3-alpine AS builder
 WORKDIR /build
+
+# Copy dependency manifests first so this layer is cached until go.mod/go.sum change.
+COPY go.mod go.sum ./
+RUN go mod download && \
+    go install github.com/pressly/goose/v3/cmd/goose@latest
+
+# Copy source and build — this layer re-runs on every source change.
 COPY . .
-# Build goose for migrations, then the aihub server binary
-RUN GOFLAGS='-mod=mod' go install github.com/pressly/goose/v3/cmd/goose@latest && \
-    GOFLAGS='-mod=mod' go mod download || true
 ARG VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG BUILD_TIME=unknown
-RUN GOFLAGS='-mod=mod' go build \
+RUN go build \
   -ldflags "-X github.com/GMISWE/ieops-aihub/internal/version.Version=${VERSION} \
             -X github.com/GMISWE/ieops-aihub/internal/version.GitCommit=${GIT_COMMIT} \
             -X github.com/GMISWE/ieops-aihub/internal/version.BuildTime=${BUILD_TIME}" \

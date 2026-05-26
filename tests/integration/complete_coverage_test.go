@@ -1119,7 +1119,7 @@ func TestAdminUserManagement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListUsers: %v", err)
 	}
-	users, _ := listResp["users"].([]any)
+	users, _ := listResp["items"].([]any)
 	foundUser := false
 	for _, u := range users {
 		if m, ok := u.(map[string]any); ok && m["id"] == userID {
@@ -1133,17 +1133,29 @@ func TestAdminUserManagement(t *testing.T) {
 		t.Logf("OK: ListUsers returns newly created user (total=%d)", len(users))
 	}
 
-	// UpdateUser: change display_name and verify the change is reflected.
+	// UpdateUser: change display_name and verify via a follow-up ListUsers.
 	updatedName := fmt.Sprintf("updated-%s", displayName)
-	updateResp, err := adminC.UpdateUser(ctx, userID, map[string]any{
+	_, err = adminC.UpdateUser(ctx, userID, map[string]any{
 		"display_name": updatedName,
 	})
 	if err != nil {
 		t.Fatalf("UpdateUser: %v", err)
 	}
-	gotName, _ := updateResp["display_name"].(string)
+	// Server returns {"ok": true}; verify persistence via ListUsers.
+	listResp2, err := adminC.ListUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListUsers (post-update): %v", err)
+	}
+	users2, _ := listResp2["items"].([]any)
+	gotName := ""
+	for _, u := range users2 {
+		if m, ok := u.(map[string]any); ok && m["id"] == userID {
+			gotName, _ = m["display_name"].(string)
+			break
+		}
+	}
 	if gotName != updatedName {
-		t.Errorf("UpdateUser: expected display_name=%q, got %q (resp=%v)", updatedName, gotName, updateResp)
+		t.Errorf("UpdateUser: expected display_name=%q, got %q", updatedName, gotName)
 	} else {
 		t.Logf("OK: UpdateUser display_name updated to %q", gotName)
 	}

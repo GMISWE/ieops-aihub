@@ -5,7 +5,6 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -84,8 +83,10 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		if u == nil {
 			return redirectToLogin(c)
 		}
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
 
-		projects := projectsAvailableSorted(u)
+		projects := availableProjectsForUI(ctx, pool, u)
 		project := c.QueryParam("project")
 		if project == "" && len(projects) > 0 {
 			project = projects[0]
@@ -156,9 +157,6 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		if data.Type != "" {
 			req.Types = []string{data.Type}
 		}
-
-		ctx, cancel := contextWithTimeout(c)
-		defer cancel()
 
 		resp, err := recallMemoriesFn(ctx, pool, req)
 		if err != nil {
@@ -260,20 +258,6 @@ func memoryVisibleTo(u *UserContext, mem *domain.Memory) bool {
 	return true
 }
 
-// projectsAvailableSorted returns u.ProjectRoles keys sorted lexicographically.
-// Admins have an empty ProjectRoles map by design (middleware.go:104-106); the
-// caller may augment from c.QueryParam("project") if needed.
-func projectsAvailableSorted(u *UserContext) []string {
-	if u == nil {
-		return nil
-	}
-	out := make([]string, 0, len(u.ProjectRoles))
-	for p := range u.ProjectRoles {
-		out = append(out, p)
-	}
-	sort.Strings(out)
-	return out
-}
 
 // buildMemFilterQuery rebuilds the current filter as a URL query so the detail
 // page can link back to the list with state preserved.

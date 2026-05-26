@@ -19,7 +19,6 @@ package server
 import (
 	"context"
 	"html/template"
-	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -82,28 +81,16 @@ func emptyQueue() *domain.ReadyQueue {
 	}
 }
 
-// sortedProjectNames returns the user's project memberships in deterministic
-// alphabetical order. Empty when the user has no project roles.
-func sortedProjectNames(u *UserContext) []string {
-	if u == nil || len(u.ProjectRoles) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(u.ProjectRoles))
-	for p := range u.ProjectRoles {
-		out = append(out, p)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // resolveProject picks the project to render. Order of preference:
 //
 //  1. ?project=<name> from the query string
-//  2. alphabetically-first project from the user's ProjectRoles map
+//  2. alphabetically-first project the caller can see (via
+//     availableProjectsForUI — admin sees all visible projects, others see
+//     their ProjectRoles keys)
 //
 // Returns "" when both are empty (the no-projects hint will fire).
-func resolveProject(c echo.Context, u *UserContext) (string, []string) {
-	available := sortedProjectNames(u)
+func resolveProject(ctx context.Context, pool *pgxpool.Pool, c echo.Context, u *UserContext) (string, []string) {
+	available := availableProjectsForUI(ctx, pool, u)
 	q := c.QueryParam("project")
 	if q != "" {
 		return q, available
@@ -120,7 +107,9 @@ func resolveProject(c echo.Context, u *UserContext) (string, []string) {
 func handleUIQueue(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
-		project, available := resolveProject(c, u)
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+		project, available := resolveProject(ctx, pool, c, u)
 
 		data := queuePageData{
 			Title:             "Queue",
@@ -149,8 +138,6 @@ func handleUIQueue(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFunc
 			}
 		}
 
-		ctx, cancel := contextWithTimeout(c)
-		defer cancel()
 		q, aerr := getQueueFn(ctx, pool, project, 100)
 		if aerr != nil {
 			data.Err = "failed to load ready queue: " + aerr.Message
@@ -166,7 +153,9 @@ func handleUIQueue(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFunc
 func handleUIQueuePartial(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
-		project, available := resolveProject(c, u)
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+		project, available := resolveProject(ctx, pool, c, u)
 
 		data := queuePageData{
 			Title:             "Queue",
@@ -192,8 +181,6 @@ func handleUIQueuePartial(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 			}
 		}
 
-		ctx, cancel := contextWithTimeout(c)
-		defer cancel()
 		q, aerr := getQueueFn(ctx, pool, project, 100)
 		if aerr != nil {
 			data.Err = "failed to load ready queue: " + aerr.Message

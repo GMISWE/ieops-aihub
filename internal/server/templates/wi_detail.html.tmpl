@@ -36,7 +36,7 @@
     <div class="pf-detail-card">
       <h2>Events</h2>
       <div id="pf-events"
-           hx-get="/ui/wi/{{or .WI.Slug .WI.ID}}/events/partial"
+           hx-get="{{wiref (or .WI.Slug .WI.ID)}}/events/partial"
            hx-trigger="every 5s"
            hx-target="#pf-events"
            hx-swap="innerHTML">
@@ -69,7 +69,7 @@
           {{if .Hidden}}
             <span class="pf-empty">[hidden — cross-project]</span>
           {{else}}
-            <a href="/ui/wi/{{.Slug}}"><code>{{.Slug}}</code></a>
+            <a href="{{wiref .Slug}}"><code>{{.Slug}}</code></a>
           {{end}}
           <span class="pf-dep-kind">{{.Kind}}</span>
         </li>
@@ -87,7 +87,7 @@
           {{if .Hidden}}
             <span class="pf-empty">[hidden — cross-project]</span>
           {{else}}
-            <a href="/ui/wi/{{.Slug}}"><code>{{.Slug}}</code></a>
+            <a href="{{wiref .Slug}}"><code>{{.Slug}}</code></a>
           {{end}}
           <span class="pf-dep-kind">{{.Kind}}</span>
         </li>
@@ -103,7 +103,7 @@
       <ul class="pf-artifact-list">
         {{range .Artifacts}}
         <li>
-          <a href="/v1/artifacts/{{.MemID}}/html" target="_blank" rel="noopener">
+          <a href="/ui/artifacts/{{.MemID}}/html" target="_blank" rel="noopener">
             <span class="pf-artifact-type">{{.Type}}</span>
           </a>
           <span class="pf-artifact-preview">{{truncate 80 .Content}}</span>

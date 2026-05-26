@@ -218,8 +218,8 @@ func TestUIMemoryDetail_SpecRedirects(t *testing.T) {
 		t.Fatalf("status: got %d, want 302", rec.Code)
 	}
 	loc := rec.Header().Get("Location")
-	if loc != "/v1/artifacts/mem_spec_42/html" {
-		t.Errorf("Location: got %q, want %q", loc, "/v1/artifacts/mem_spec_42/html")
+	if loc != "/ui/artifacts/mem_spec_42/html" {
+		t.Errorf("Location: got %q, want %q", loc, "/ui/artifacts/mem_spec_42/html")
 	}
 }
 

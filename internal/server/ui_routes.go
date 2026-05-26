@@ -71,4 +71,11 @@ func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	registerUIQueueHandlers(uiGroup, pool, tmpl)
 	registerUIWIHandlers(uiGroup, pool, tmpl)
 	registerUIMemoryHandlers(uiGroup, pool, tmpl)
+
+	// Mirror /v1/artifacts/:id/html under cookie auth so /ui/memories/<id>
+	// spec/plan redirects and /ui/wi/<slug> artifact links work without a
+	// Bearer token. Same handler — handleArtifactHTML is auth-agnostic, it
+	// reads UserContext from echo.Context which RequireUISession populates
+	// the same way BearerAuth does.
+	uiGroup.GET("/artifacts/:id/html", handleArtifactHTML(pool))
 }

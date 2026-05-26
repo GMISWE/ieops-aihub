@@ -50,6 +50,7 @@
       <th>Priority</th>
       <th>Status</th>
       <th>Goal</th>
+      <th>Owner</th>
       <th>Reporter</th>
     </tr>
   </thead>
@@ -61,10 +62,11 @@
       <td><span class="pf-badge pf-badge-priority-{{or .Priority "normal"}}">{{or .Priority "normal"}}</span></td>
       <td><span class="pf-badge pf-badge-status-{{.Status}}">{{.Status}}</span></td>
       <td>{{truncate 100 .Goal}}</td>
-      <td>{{or .OwnerDisplay "—"}}</td>
+      <td>{{if .OwnerDisplay}}{{.OwnerDisplay}}{{else}}<span class="pf-empty">—</span>{{end}}</td>
+      <td>{{or .ReporterDisplay "—"}}</td>
     </tr>
     {{else}}
-    <tr><td colspan="6" class="pf-empty">No work items match the current filters.</td></tr>
+    <tr><td colspan="7" class="pf-empty">No work items match the current filters.</td></tr>
     {{end}}
   </tbody>
 </table>

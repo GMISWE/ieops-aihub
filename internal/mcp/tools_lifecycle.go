@@ -355,12 +355,22 @@ func (s *Server) registerLifecycleTools() {
 		// Create git worktrees for each repo in the project (non-fatal).
 		// Worktree path format: pf.<project>-<seq>/<repo>/
 		// Branch name: polyforge/<ulid8>
-		if s.cfg != nil && sf.Project != "" {
+		if sf.Project != "" {
 			wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
 			if wsRoot == "" {
 				wsRoot = config.FindWorkspaceRoot()
 			}
 			if wsRoot != "" {
+				// Resolve workspace config: use server-level cfg if available, otherwise
+				// load fresh from wsRoot. This handles the case where the MCP server
+				// started without POLYFORGE_WORKSPACE_ROOT set (e.g. a background session
+				// whose cwd has no .polyforge.yaml ancestor), so s.cfg is nil even though
+				// wsRoot is now correctly resolved at claim time.
+				effectiveCfg := s.cfg
+				if effectiveCfg == nil {
+					effectiveCfg, _ = config.Load(wsRoot) // non-fatal; stays nil if not found
+				}
+
 				// Derive seq from slug (e.g. "marketplace#42" → "42").
 				seq := ""
 				if sf.Slug != "" {
@@ -377,14 +387,14 @@ func (s *Server) registerLifecycleTools() {
 					ulid8 = bare[len(bare)-8:]
 				}
 
-				if seq != "" && ulid8 != "" {
+				if effectiveCfg != nil && seq != "" && ulid8 != "" {
 					// Directory name uses readable format: pf.<project>-<seq>
 					// (e.g. "pf.aihub-26") so developers can identify the wi at a glance.
 					wtDir := fmt.Sprintf("pf.%s-%s", sf.Project, seq)
 					branchName := "polyforge/" + ulid8
 					mode := strArg(args, "mode")
 
-					if proj, ok := s.cfg.Projects[sf.Project]; ok {
+					if proj, ok := effectiveCfg.Projects[sf.Project]; ok {
 						worktrees := make(map[string]string)
 						for _, repo := range proj.Repos {
 							srcPath := filepath.Join(wsRoot, ".repo", repo.Name)

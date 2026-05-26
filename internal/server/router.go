@@ -75,6 +75,9 @@ func NewRouter(pool *pgxpool.Pool) *echo.Echo {
 	// Projects CRUD + identifier rotation + owner transfer
 	RegisterProjectRoutes(v1, pool)
 
+	// aihub#27 / IEBE-1694: spec/plan artifact HTML viewer
+	RegisterArtifactRoutes(v1, pool)
+
 	return e
 }
 

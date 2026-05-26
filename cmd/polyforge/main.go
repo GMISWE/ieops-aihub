@@ -130,6 +130,11 @@ func runCLI(ctx context.Context, args []string) {
 		cli.RunPush(ctx, args[1:])
 	case "pr":
 		cli.RunPR(ctx, args[1:])
+	case "artifact":
+		if aihubClient == nil {
+			fatalf("config: %v\n", cfgErr)
+		}
+		cli.RunArtifact(ctx, aihubClient, args[1:])
 	case "help":
 		printUsage()
 	default:
@@ -164,6 +169,9 @@ Git helpers (machine-user):
   commit [--wi-id=<id>] [--message=<msg>]  git commit in worktree
   push   [--wi-id=<id>]                    git push in worktree
   pr     [--wi-id=<id>] --title=<t>        gh pr create in worktree
+
+Artifact viewer:
+  artifact view <memory_id>   Fetch spec/plan HTML and open in browser
 
 Config files (§9.5.3):
   ~/.polyforge/config.toml   Machine-level config (machine_id, [auth] api_key)

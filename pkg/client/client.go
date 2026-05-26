@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -74,6 +75,45 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		}
 	}
 	return nil
+}
+
+// doRaw executes an HTTP request and returns the response body bytes plus its
+// Content-Type, bypassing the JSON decoder. Used by endpoints that return
+// non-JSON payloads such as the spec/plan HTML viewer (aihub#27).
+//
+// Error envelope handling matches do(): if status >= 400 we still try to read
+// the JSON error body and wrap it; only on 2xx do we return the raw bytes.
+func (c *Client) doRaw(ctx context.Context, method, path string) ([]byte, string, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("http %s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, "", fmt.Errorf("read response: %w", readErr)
+	}
+
+	if resp.StatusCode >= 400 {
+		var errResp struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(body, &errResp)
+		if errResp.Code != "" {
+			return nil, "", fmt.Errorf("aihub %d %s: %s", resp.StatusCode, errResp.Code, errResp.Message)
+		}
+		return nil, "", fmt.Errorf("aihub %d: unexpected error", resp.StatusCode)
+	}
+
+	return body, resp.Header.Get("Content-Type"), nil
 }
 
 // ─── User / Auth ───────────────────────────────────────────────────────────
@@ -217,6 +257,20 @@ func (c *Client) ReinforceMemory(ctx context.Context, memoryID string, body any)
 func (c *Client) RedactMemory(ctx context.Context, memoryID string, body any) (map[string]any, error) {
 	var out map[string]any
 	return out, c.do(ctx, "PATCH", "/v1/memories/"+memoryID+"/redact", body, &out)
+}
+
+// ─── Artifacts ────────────────────────────────────────────────────────────
+
+// GetArtifactHTML calls GET /v1/artifacts/:id/html and returns the rendered
+// HTML body verbatim (aihub#27 / IEBE-1694). Returns an error when the memory
+// does not exist, the caller lacks visibility, or the row has no rendered HTML
+// (legacy spec/plan / non spec/plan type).
+func (c *Client) GetArtifactHTML(ctx context.Context, memoryID string) (string, error) {
+	body, _, err := c.doRaw(ctx, "GET", "/v1/artifacts/"+memoryID+"/html")
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 // ─── Conflicts ────────────────────────────────────────────────────────────

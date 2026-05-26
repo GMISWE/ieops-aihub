@@ -1,0 +1,29 @@
+{{define "content"}}
+<section class="pf-page-head">
+  <h1>Ready queue{{if .Project}}: <span class="pf-queue-proj">{{.Project}}</span>{{end}}</h1>
+  {{if .ProjectsAvailable}}
+  <form method="GET" action="/ui/queue" class="pf-project-picker">
+    <label for="pf-queue-proj-select">Project:</label>
+    <select id="pf-queue-proj-select" name="project" onchange="this.form.submit()">
+      {{range .ProjectsAvailable}}
+      <option value="{{.}}" {{if eq . $.Project}}selected{{end}}>{{.}}</option>
+      {{end}}
+    </select>
+    <noscript><button type="submit">Go</button></noscript>
+  </form>
+  {{end}}
+</section>
+
+{{if .NoAccess}}
+<div class="pf-err">no projects accessible — ask an admin to add you to a project.</div>
+{{else if .AccessDenied}}
+<div class="pf-err">no access to project {{.Project | default "(unspecified)" .Project}}; pick another from the picker.</div>
+{{else}}
+<div id="pf-queue-content"
+     hx-get="/ui/queue/partial?project={{.Project}}"
+     hx-trigger="every 5s"
+     hx-swap="innerHTML">
+  {{template "queue_section.html.tmpl" .}}
+</div>
+{{end}}
+{{end}}

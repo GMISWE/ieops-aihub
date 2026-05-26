@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
@@ -55,7 +57,8 @@ func main() {
 		}
 	}()
 
-	e := server.NewRouter(pool)
+	cookieSecret := loadUICookieSecret()
+	e := server.NewRouter(pool, cookieSecret)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -77,4 +80,34 @@ func main() {
 		fmt.Fprintf(os.Stderr, "shutdown error: %v\n", err)
 	}
 	fmt.Println("aihub stopped")
+}
+
+// loadUICookieSecret resolves the secret used to sign /ui/* session cookies.
+//
+// Source order:
+//  1. POLYFORGE_UI_COOKIE_SECRET — preferred. Accepted as hex (auto-decoded
+//     if the string is even-length and all hex chars) or raw bytes.
+//  2. Random 32 bytes from crypto/rand — emits a stderr warning so operators
+//     know sessions will be invalidated on every restart.
+//
+// We do not enforce a minimum length on env-supplied secrets so dev/test can
+// use short values; for prod, supply 32+ bytes of high-entropy data.
+func loadUICookieSecret() []byte {
+	if raw := os.Getenv("POLYFORGE_UI_COOKIE_SECRET"); raw != "" {
+		if decoded, err := hex.DecodeString(raw); err == nil && len(decoded) > 0 {
+			return decoded
+		}
+		return []byte(raw)
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: failed to generate ephemeral UI cookie secret: %v\n", err)
+		// Fall back to a process-lifetime fixed value rather than crash —
+		// the UI is still usable, just brittle across restarts.
+		return []byte("aihub-ephemeral-fallback-secret")
+	}
+	fmt.Fprintln(os.Stderr,
+		"warn: POLYFORGE_UI_COOKIE_SECRET not set — using an ephemeral random secret. "+
+			"Existing UI sessions will be invalidated on the next restart.")
+	return buf
 }

@@ -1,0 +1,47 @@
+{{define "content"}}
+{{with .Memory}}
+<section class="pf-page-header">
+  <h1>Memory <code>{{.ID}}</code></h1>
+  <span class="pf-meta">
+    <a href="/ui/memories{{if $.BackQuery}}?{{$.BackQuery}}{{end}}">&larr; back to memories</a>
+  </span>
+</section>
+
+<div class="pf-detail-grid">
+  <div>
+    <div class="pf-detail-card">
+      <h2>Content</h2>
+      <div class="pf-content-md">
+        {{if $.RenderAsMD}}
+          {{.Content | md}}
+        {{else}}
+          <pre>{{.Content}}</pre>
+        {{end}}
+      </div>
+    </div>
+  </div>
+
+  <aside>
+    <div class="pf-detail-card">
+      <h2>Metadata</h2>
+      <dl class="pf-kv">
+        <dt>type</dt><dd><span class="pf-mem-type">{{.Type}}</span></dd>
+        <dt>project</dt><dd>{{.Project}}</dd>
+        <dt>visibility</dt><dd>{{.Visibility}}</dd>
+        <dt>author</dt><dd>{{default "—" .AuthorDisplay}}</dd>
+        <dt>created</dt><dd>{{.CreatedAt.Format "2006-01-02 15:04 MST"}}</dd>
+        <dt>updated</dt><dd>{{.UpdatedAt.Format "2006-01-02 15:04 MST"}}</dd>
+        <dt>strength (base)</dt><dd>{{printf "%.2f" .BaseStrength}}</dd>
+        <dt>stability (days)</dt><dd>{{printf "%.1f" .StabilityDays}}</dd>
+        <dt>activations</dt><dd>{{.ActivationCount}}</dd>
+        <dt>immortal</dt><dd>{{.IsImmortal}}</dd>
+        <dt>status</dt><dd>{{.Status}}</dd>
+        {{with .WorkItemID}}
+        <dt>work item</dt><dd><a href="/ui/wi/{{.}}">{{.}}</a></dd>
+        {{end}}
+      </dl>
+    </div>
+  </aside>
+</div>
+{{end}}
+{{end}}

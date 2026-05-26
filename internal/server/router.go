@@ -17,7 +17,11 @@ import (
 )
 
 // NewRouter constructs the echo router with all routes.
-func NewRouter(pool *pgxpool.Pool) *echo.Echo {
+//
+// uiCookieSecret seeds the HMAC for /ui/* session cookies (see ui_session.go).
+// Pass at least 32 bytes for production; main.go reads POLYFORGE_UI_COOKIE_SECRET
+// or generates an ephemeral secret with a warning when unset.
+func NewRouter(pool *pgxpool.Pool, uiCookieSecret []byte) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
@@ -77,6 +81,9 @@ func NewRouter(pool *pgxpool.Pool) *echo.Echo {
 
 	// aihub#27 / IEBE-1694: spec/plan artifact HTML viewer
 	RegisterArtifactRoutes(v1, pool)
+
+	// aihub#59 / IEBE-1696: read-only Web UI
+	RegisterUIRoutes(e, pool, uiCookieSecret)
 
 	return e
 }

@@ -1,0 +1,36 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} — polyforge</title>
+<link rel="stylesheet" href="/ui/static/ui.css">
+<script src="/ui/static/htmx.min.js" defer></script>
+</head>
+<body>
+<header class="pf-nav">
+  <div class="pf-nav-inner">
+    <a class="pf-nav-brand" href="/ui/">polyforge</a>
+    <nav class="pf-nav-links">
+      <a href="/ui/queue" {{if eq .Active "queue"}}class="pf-active"{{end}}>Queue</a>
+      <a href="/ui/wi" {{if eq .Active "wi"}}class="pf-active"{{end}}>Work Items</a>
+      <a href="/ui/memories" {{if eq .Active "memories"}}class="pf-active"{{end}}>Memories</a>
+    </nav>
+    <div class="pf-nav-user">
+      {{if .User}}
+        <span class="pf-nav-who">{{.User.DisplayName}}</span>
+      {{end}}
+      <form method="POST" action="/ui/logout" class="pf-nav-logout">
+        <button type="submit">Logout</button>
+      </form>
+    </div>
+  </div>
+</header>
+<main class="pf-main">
+{{block "content" .}}{{end}}
+</main>
+<footer class="pf-footer">
+  <span>read-only view — write operations go through the CLI or MCP</span>
+</footer>
+</body>
+</html>{{end}}

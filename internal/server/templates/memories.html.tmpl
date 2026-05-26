@@ -1,0 +1,68 @@
+{{define "content"}}
+<section class="pf-page-header">
+  <h1>Memories{{if .Project}}: <span class="pf-queue-proj">{{.Project}}</span>{{end}}</h1>
+  {{if and .Items (gt (len .Items) 0)}}
+    <span class="pf-meta">{{len .Items}} shown{{if gt .HiddenCount 0}}; {{.HiddenCount}} hidden by visibility{{end}}</span>
+  {{end}}
+</section>
+
+{{if .NoAccess}}
+<div class="pf-err">no projects accessible — ask an admin to add you to a project.</div>
+{{else}}
+
+<form method="GET" action="/ui/memories" class="pf-filter-bar pf-mem-filters">
+  <label for="pf-mem-proj">project</label>
+  <select id="pf-mem-proj" name="project">
+    {{range .ProjectsAvailable}}
+    <option value="{{.}}" {{if eq . $.Project}}selected{{end}}>{{.}}</option>
+    {{end}}
+  </select>
+
+  <label for="pf-mem-type">type</label>
+  <input id="pf-mem-type" type="text" name="type" value="{{.Type}}" placeholder="experience.* / methodology.spec">
+
+  <label for="pf-mem-strength">strength &ge;</label>
+  <input id="pf-mem-strength" type="text" name="strength_min" value="{{printf "%g" .StrengthMin}}" size="5">
+
+  <label for="pf-mem-q">search</label>
+  <input id="pf-mem-q" type="text" name="q" value="{{.Query}}" placeholder="(optional)">
+
+  <button type="submit">Apply</button>
+</form>
+
+{{if .AccessDenied}}
+<div class="pf-err">no access to project {{default "(unspecified)" .Project}}; pick another above.</div>
+{{else if .ErrMessage}}
+<div class="pf-err">{{.ErrMessage}}</div>
+{{else if not .Items}}
+<div class="pf-empty">no memories match these filters.</div>
+{{else}}
+
+<table class="pf-table pf-mem-table">
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Strength</th>
+      <th>Activations</th>
+      <th>Created</th>
+      <th>Author</th>
+      <th>Content</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Items}}
+    <tr>
+      <td><span class="pf-mem-type">{{.Type}}</span></td>
+      <td>{{printf "%.2f" .EffectiveStrength}}</td>
+      <td>{{.ActivationCount}}</td>
+      <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+      <td>{{default "—" .AuthorDisplay}}</td>
+      <td><a href="/ui/memories/{{.ID}}?back={{$.FilterQuery}}">{{truncate 120 .Content}}</a></td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+
+{{end}}
+{{end}}
+{{end}}

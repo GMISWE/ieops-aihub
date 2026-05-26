@@ -85,31 +85,35 @@ type wiListPageData struct {
 // domain.WorkItem keeps template field access simple (no pointers / nil checks
 // scattered through the template).
 type wiListRow struct {
-	ID           string
-	Slug         string
-	Project      string
-	WIType       string
-	Priority     string
-	Status       string
-	Goal         string
-	OwnerDisplay string
+	ID              string
+	Slug            string
+	Project         string
+	WIType          string
+	Priority        string
+	Status          string
+	Goal            string
+	OwnerDisplay    string // run_attempts.actor_display of current attempt; "" if no attempt
+	ReporterDisplay string // who filed the wi (always populated)
 }
 
 // wiDetailPageData is the data passed to wi_detail.html.tmpl.
 type wiDetailPageData struct {
-	Title        string
-	Active       string
-	User         *UserContext
-	WI           *domain.WorkItem
-	WIType       string // flattened *WI.WIType
-	Content      string // flattened *WI.Content for direct template access
-	Milestone    string // flattened *WI.Milestone
-	AttemptID    string // flattened *WI.CurrentAttemptID
-	Dependencies *depView
-	Events       []eventView
-	Artifacts    []artifactLink
-	Err          string
-	AccessDenied bool
+	Title          string
+	Active         string
+	User           *UserContext
+	WI             *domain.WorkItem
+	WIType         string     // flattened *WI.WIType
+	Content        string     // flattened *WI.Content for direct template access
+	Milestone      string     // flattened *WI.Milestone
+	AttemptID      string     // flattened *WI.CurrentAttemptID
+	OwnerDisplay   string     // run_attempts.actor_display of current attempt, "" if none
+	OwnerActive    time.Time  // run_attempts.last_active_at of current attempt
+	OwnerHasActive bool       // true when OwnerActive is meaningful (non-zero)
+	Dependencies   *depView
+	Events         []eventView
+	Artifacts      []artifactLink
+	Err            string
+	AccessDenied   bool
 }
 
 // depView is the template-friendly projection of DependenciesResponse with
@@ -269,9 +273,19 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 			return renderTemplate(c, tmpl, "layout", data)
 		}
 
+		// Batch-fetch current-attempt owners so the list can show "who claimed
+		// it" without issuing N+1 queries.
+		attemptIDs := make([]string, 0, len(res.Items))
+		for _, wi := range res.Items {
+			if wi.CurrentAttemptID != nil {
+				attemptIDs = append(attemptIDs, *wi.CurrentAttemptID)
+			}
+		}
+		owners := fetchAttemptOwners(ctx, pool, attemptIDs)
+
 		rows := make([]*wiListRow, 0, len(res.Items))
 		for _, wi := range res.Items {
-			rows = append(rows, toListRow(wi))
+			rows = append(rows, toListRow(wi, owners))
 		}
 		data.Items = rows
 
@@ -334,17 +348,18 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			return renderTemplate(c, tmpl, "layout", data)
 		}
 
-		// Parallel fan-out for the three side-load queries.
+		// Parallel fan-out for the four side-load queries.
 		var (
 			deps      *domain.DependenciesResponse
 			depsErr   *domain.AihubError
 			events    []eventView
 			eventsErr error
 			arts      []artifactLink
+			ownerInfo attemptOwner
 			wg        sync.WaitGroup
 		)
 
-		wg.Add(3)
+		wg.Add(4)
 
 		go func() {
 			defer wg.Done()
@@ -373,6 +388,13 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			arts = fetchArtifactLinks(ctx, pool, u, wi)
 		}()
 
+		go func() {
+			defer wg.Done()
+			if wi.CurrentAttemptID != nil {
+				ownerInfo = fetchAttemptOwner(ctx, pool, *wi.CurrentAttemptID)
+			}
+		}()
+
 		wg.Wait()
 
 		if depsErr != nil {
@@ -385,6 +407,9 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		}
 		data.Events = events
 		data.Artifacts = arts
+		data.OwnerDisplay = ownerInfo.Display
+		data.OwnerActive = ownerInfo.LastActiveAt
+		data.OwnerHasActive = !ownerInfo.LastActiveAt.IsZero()
 
 		return renderTemplate(c, tmpl, "layout", data)
 	}
@@ -499,18 +524,23 @@ func depEntryFrom(e domain.DependencyListEntry) depEntry {
 // query has the running attempt's actor available but the list does not, so
 // we surface the reporter as a fallback signal of "who is associated with this
 // wi" without spending a per-row query.
-func toListRow(wi *domain.WorkItem) *wiListRow {
+func toListRow(wi *domain.WorkItem, owners map[string]attemptOwner) *wiListRow {
 	row := &wiListRow{
-		ID:           wi.ID,
-		Slug:         wi.Slug,
-		Project:      wi.Project,
-		Priority:     wi.Priority,
-		Status:       wi.Status,
-		Goal:         wi.Goal,
-		OwnerDisplay: wi.ReporterDisplay,
+		ID:              wi.ID,
+		Slug:            wi.Slug,
+		Project:         wi.Project,
+		Priority:        wi.Priority,
+		Status:          wi.Status,
+		Goal:            wi.Goal,
+		ReporterDisplay: wi.ReporterDisplay,
 	}
 	if wi.WIType != nil {
 		row.WIType = *wi.WIType
+	}
+	if wi.CurrentAttemptID != nil {
+		if o, ok := owners[*wi.CurrentAttemptID]; ok {
+			row.OwnerDisplay = o.Display
+		}
 	}
 	return row
 }

@@ -52,6 +52,8 @@
         <dt>Project</dt><dd><code>{{.WI.Project}}</code></dd>
         <dt>Source</dt><dd>{{or .WI.Source "—"}}</dd>
         <dt>Reporter</dt><dd>{{or .WI.ReporterDisplay "—"}}</dd>
+        <dt>Claimed by</dt><dd>{{if .OwnerDisplay}}{{.OwnerDisplay}}{{else}}<span class="pf-empty">— (no active attempt)</span>{{end}}</dd>
+        {{if .OwnerHasActive}}<dt>Last active</dt><dd>{{.OwnerActive.Format "2006-01-02 15:04 MST"}}</dd>{{end}}
         <dt>Created</dt><dd>{{.WI.CreatedAt.Format "2006-01-02 15:04 MST"}}</dd>
         <dt>Updated</dt><dd>{{.WI.UpdatedAt.Format "2006-01-02 15:04 MST"}}</dd>
         {{if .Milestone}}<dt>Milestone</dt><dd>{{.Milestone}}</dd>{{end}}

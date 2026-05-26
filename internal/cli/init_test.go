@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -193,5 +194,96 @@ func TestEnsureSettingsHook_PreservesUnrelatedEntries(t *testing.T) {
 	}
 	if int(added["timeout"].(float64)) != sessionStartHookTimeoutMs {
 		t.Errorf("polyforge hook timeout = %v, want %d", added["timeout"], sessionStartHookTimeoutMs)
+	}
+}
+
+// TestParseServerProjects_PreservesScenario guards the wi#58 fix: the CLI
+// must decode the `scenario` field returned by GET /v1/projects so that
+// member workspaces can clone the scenario repo and persist it into
+// .polyforge.yaml. Regression coverage for the silent-drop bug where the
+// field existed on the server but not on the CLI struct.
+func TestParseServerProjects_PreservesScenario(t *testing.T) {
+	const scenarioURL = "git@github.com:GMISWE/polyforge-coding.git"
+	raw := map[string]any{
+		"items": []any{
+			map[string]any{
+				"name":          "aihub",
+				"owner_user_id": "u_xxx",
+				"visible":       true,
+				"scenario":      scenarioURL,
+				"repos":         []any{},
+			},
+			map[string]any{
+				"name":          "no-scenario",
+				"owner_user_id": "u_xxx",
+				"visible":       true,
+				"repos":         []any{},
+			},
+		},
+	}
+
+	projects, err := parseServerProjects(raw)
+	if err != nil {
+		t.Fatalf("parseServerProjects: %v", err)
+	}
+	if len(projects) != 2 {
+		t.Fatalf("got %d projects, want 2", len(projects))
+	}
+	if projects[0].Scenario == nil {
+		t.Fatal("projects[0].Scenario is nil; want server scenario field to be decoded")
+	}
+	if *projects[0].Scenario != scenarioURL {
+		t.Errorf("projects[0].Scenario = %q, want %q", *projects[0].Scenario, scenarioURL)
+	}
+	if projects[1].Scenario != nil {
+		t.Errorf("projects[1].Scenario = %v, want nil for project without scenario", *projects[1].Scenario)
+	}
+}
+
+// TestWriteMemberPolyforgeYAML_IncludesScenario guards the wi#58 fix: the
+// generated member .polyforge.yaml must carry the per-project `scenario:`
+// line whenever the server returned one. Without this, re-running pf init
+// loses the scenario binding and downstream tools (pf-execute) can't
+// resolve the scenario repo.
+func TestWriteMemberPolyforgeYAML_IncludesScenario(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	scenarioURL := "git@github.com:GMISWE/polyforge-coding.git"
+	projects := []serverProject{
+		{
+			Name:        "aihub",
+			OwnerUserID: "u_xxx",
+			Visible:     true,
+			Scenario:    &scenarioURL,
+			Repos:       json.RawMessage(`[{"name":"aihub","url":"git@github.com:GMISWE/ieops-aihub.git"}]`),
+		},
+		{
+			Name:        "no-scenario",
+			OwnerUserID: "u_xxx",
+			Visible:     true,
+			Repos:       json.RawMessage(`[]`),
+		},
+	}
+
+	path := filepath.Join(tmp, ".polyforge.yaml")
+	if err := writeMemberPolyforgeYAML(path, projects); err != nil {
+		t.Fatalf("writeMemberPolyforgeYAML: %v", err)
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read .polyforge.yaml: %v", err)
+	}
+	got := string(b)
+	if !strings.Contains(got, "scenario: "+scenarioURL) {
+		t.Errorf("rendered yaml missing `scenario: %s` line; got:\n%s", scenarioURL, got)
+	}
+	// Project without a server scenario must not emit a scenario line
+	// (config.Project tag is `scenario,omitempty`). Count `scenario: `
+	// occurrences — the trailing space avoids matching the `no-scenario:`
+	// project key.
+	if n := strings.Count(got, "scenario: "); n != 1 {
+		t.Errorf("rendered yaml has %d `scenario: ` lines, want exactly 1; got:\n%s", n, got)
 	}
 }

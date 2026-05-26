@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GMISWE/ieops-aihub/internal/render"
 )
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -37,6 +40,7 @@ type Memory struct {
 	EmbDims          *int            `json:"emb_dims,omitempty"`
 	Status           string          `json:"status"`
 	Attrs            json.RawMessage `json:"attrs,omitempty"`
+	RenderedHTML     *string         `json:"rendered_html,omitempty"`
 	CreatedAt        time.Time       `json:"created_at"`
 	UpdatedAt        time.Time       `json:"updated_at"`
 }
@@ -245,33 +249,48 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			WHERE id=$1 AND status='active'`, *req.SupersedesMemID)
 	}
 
+	// aihub#27 / IEBE-1694: render markdown to HTML for spec/plan artifacts only.
+	// Render is best-effort — a render failure must NOT block the insert (spec
+	// decision 3). Other memory types leave rendered_html NULL.
+	var renderedHTML *string
+	if req.Type == "methodology.spec" || req.Type == "methodology.plan" {
+		if h, rerr := render.Markdown(req.Content); rerr != nil {
+			fmt.Fprintf(os.Stderr,
+				"memory render: markdown→HTML failed for type=%s; storing without rendered_html: %v\n",
+				req.Type, rerr)
+		} else {
+			renderedHTML = &h
+		}
+	}
+
 	mem := &Memory{}
 	err := pool.QueryRow(ctx, `
 		INSERT INTO memories (
 			id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			activation_count, expires_at, tags, source_artifact_id,
-			status, attrs, supersedes_id, created_at, updated_at
+			status, attrs, rendered_html, supersedes_id, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11,
 			0, $12, $13, $14,
-			'active', $15, $16, clock_timestamp(), clock_timestamp()
+			'active', $15, $16, $17, clock_timestamp(), clock_timestamp()
 		)
 		RETURNING id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
-			tags, source_artifact_id, emb_model, emb_dims, status, attrs, created_at, updated_at`,
+			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
+			rendered_html, created_at, updated_at`,
 		NewID("mem"), req.Project, req.Type, req.Content, req.CallerUserID, req.CallerDisplay,
 		req.WorkItemID, req.Visibility, immortal, baseStrength, stabilityDays,
 		req.ExpiresAt, req.Tags, nil, // source_artifact_id = nil
-		req.Attrs, req.SupersedesMemID,
+		req.Attrs, renderedHTML, req.SupersedesMemID,
 	).Scan(
 		&mem.ID, &mem.Project, &mem.Type, &mem.Content, &mem.AuthorUserID, &mem.AuthorDisplay,
 		&mem.WorkItemID, &mem.Visibility, &mem.IsImmortal, &mem.BaseStrength, &mem.StabilityDays,
 		&mem.LastActivatedAt, &mem.LastActivatedBy, &mem.ActivationCount, &mem.ExpiresAt,
 		&mem.Tags, &mem.SourceArtifactID, &mem.EmbModel, &mem.EmbDims, &mem.Status,
-		&mem.Attrs, &mem.CreatedAt, &mem.UpdatedAt,
+		&mem.Attrs, &mem.RenderedHTML, &mem.CreatedAt, &mem.UpdatedAt,
 	)
 	if err != nil {
 		return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to insert memory: %v", err))
@@ -469,7 +488,8 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		SELECT id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
-			tags, source_artifact_id, emb_model, emb_dims, status, attrs, created_at, updated_at
+			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
+			rendered_html, created_at, updated_at
 		FROM memories
 		WHERE %s
 		ORDER BY last_activated_at DESC NULLS LAST, created_at DESC
@@ -512,6 +532,11 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 }
 
 // scanMemory scans a full memory row from pgx.Rows.
+//
+// IMPORTANT (aihub#27 pitfall mem_i9I2g8Hv): the column order here MUST match
+// the SELECT in Recall, the INSERT/RETURNING in Remember, the column list in
+// GetMemoryByID, and the field order on the Memory struct. pgx Scan is
+// positional — silent corruption if anything drifts.
 func scanMemory(rows pgx.Rows) (*Memory, error) {
 	m := &Memory{}
 	err := rows.Scan(
@@ -519,9 +544,40 @@ func scanMemory(rows pgx.Rows) (*Memory, error) {
 		&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
 		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
 		&m.Tags, &m.SourceArtifactID, &m.EmbModel, &m.EmbDims, &m.Status,
-		&m.Attrs, &m.CreatedAt, &m.UpdatedAt,
+		&m.Attrs, &m.RenderedHTML, &m.CreatedAt, &m.UpdatedAt,
 	)
 	return m, err
+}
+
+// GetMemoryByID loads a single active or archived memory by primary key.
+// Returns ErrNotFound when the row is missing or has status='redacted'.
+// Used by the artifact HTML viewer endpoint (aihub#27).
+//
+// Column order MUST mirror Recall's SELECT / scanMemory — see scanMemory docs.
+func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory, *AihubError) {
+	m := &Memory{}
+	err := pool.QueryRow(ctx, `
+		SELECT id, project, type, content, author_user_id, author_display,
+			work_item_id, visibility, is_immortal, base_strength, stability_days,
+			last_activated_at, last_activated_by, activation_count, expires_at,
+			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
+			rendered_html, created_at, updated_at
+		FROM memories
+		WHERE id = $1 AND status != 'redacted'`, id,
+	).Scan(
+		&m.ID, &m.Project, &m.Type, &m.Content, &m.AuthorUserID, &m.AuthorDisplay,
+		&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
+		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
+		&m.Tags, &m.SourceArtifactID, &m.EmbModel, &m.EmbDims, &m.Status,
+		&m.Attrs, &m.RenderedHTML, &m.CreatedAt, &m.UpdatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, NewErr(ErrNotFound, "memory not found")
+		}
+		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to load memory: %v", err))
+	}
+	return m, nil
 }
 
 // ─── Activate (§7.3) ──────────────────────────────────────────────────────────

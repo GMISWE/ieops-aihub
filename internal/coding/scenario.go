@@ -28,9 +28,12 @@ func WorktreePath(wiID, repo, workspaceRoot string) (string, error) {
 		return "", fmt.Errorf("worktree path for repo %q not found in state file and workspace_root not provided", repo)
 	}
 
-	// Conventional path: <workspace_root>/pf3.<shortid>/<repo>/
+	// Fallback for old state files that predate the worktrees field.
+	// Uses <workspace_root>/pf.<shortid>/<repo>/ where shortid is the segment
+	// after the last underscore in wi_id (e.g. "wi_KmBoOqUE" → "KmBoOqUE").
+	// Note: shortid != <project>-<seq>; this path is only used for legacy compat.
 	shortID := shortID(wiID)
-	return filepath.Join(workspaceRoot, "pf3."+shortID, repo), nil
+	return filepath.Join(workspaceRoot, "pf."+shortID, repo), nil
 }
 
 // shortID extracts the 8-char base62 shortid from a full wi ID (e.g. "wi_01ks510z").

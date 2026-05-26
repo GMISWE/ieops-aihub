@@ -15,7 +15,6 @@ import (
 	"context"
 	"html/template"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -188,12 +187,15 @@ func registerUIWIHandlers(g *echo.Group, pool *pgxpool.Pool, _ *template.Templat
 // handleUIWIList renders the work-item list page.
 //
 // Project selection mirrors the queue page: query ?project= wins; otherwise
-// the first project (alphabetical) in the caller's ProjectRoles. Admins see
-// any project they pass in but their ProjectRoles map may be empty, so the
-// dropdown stays empty for them — they must use the query param.
+// the first project (alphabetical) the caller can see. For non-admins this
+// comes from their ProjectRoles map; for admins (empty map by design — see
+// middleware.go ~L104-106) availableProjectsForUI falls back to all visible
+// projects via domain.ListProjects.
 func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
 
 		data := &wiListPageData{
 			Title:  "Work items",
@@ -201,16 +203,9 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 			User:   u,
 		}
 
-		// Build the sorted project dropdown from the user's ProjectRoles map.
-		projects := make([]string, 0, len(u.ProjectRoles))
-		for p := range u.ProjectRoles {
-			projects = append(projects, p)
-		}
-		sort.Strings(projects)
+		projects := availableProjectsForUI(ctx, pool, u)
 		data.ProjectsAvailable = projects
 
-		// Resolve project: query param wins; else first project in ProjectRoles.
-		// Admin with empty ProjectRoles must pass ?project=… explicitly.
 		project := strings.TrimSpace(c.QueryParam("project"))
 		if project == "" && len(projects) > 0 {
 			project = projects[0]
@@ -267,9 +262,6 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		if kindParam != "" {
 			filter.WIType = &kindParam
 		}
-
-		ctx, cancel := contextWithTimeout(c)
-		defer cancel()
 
 		res, aerr := listWorkItemsFn(ctx, pool, project, filter)
 		if aerr != nil {

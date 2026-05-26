@@ -50,6 +50,9 @@ func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	tmpl := parseTemplates()
 
 	// No-auth pages.
+	e.GET("/", func(c echo.Context) error {
+		return c.Redirect(http.StatusFound, "/ui/queue")
+	})
 	e.GET("/ui", func(c echo.Context) error {
 		return c.Redirect(http.StatusFound, "/ui/queue")
 	})

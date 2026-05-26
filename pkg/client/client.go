@@ -392,6 +392,18 @@ func (c *Client) RevokeAPIKey(ctx context.Context, userID, keyID string) (map[st
 	return out, c.do(ctx, "DELETE", "/v1/admin/users/"+userID+"/keys/"+keyID, nil, &out)
 }
 
+// ListUsers calls GET /v1/admin/users (admin only).
+func (c *Client) ListUsers(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "GET", "/v1/admin/users", nil, &out)
+}
+
+// UpdateUser calls PATCH /v1/admin/users/:id (admin only).
+func (c *Client) UpdateUser(ctx context.Context, userID string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "PATCH", "/v1/admin/users/"+userID, body, &out)
+}
+
 // ─── Projects ─────────────────────────────────────────────────────────────────
 
 // ListProjects calls GET /v1/projects.

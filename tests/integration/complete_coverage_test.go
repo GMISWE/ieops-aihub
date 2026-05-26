@@ -1114,6 +1114,40 @@ func TestAdminUserManagement(t *testing.T) {
 	}
 	t.Logf("OK: created user %s", userID)
 
+	// ListUsers: verify the newly created user appears in the list.
+	listResp, err := adminC.ListUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	users, _ := listResp["users"].([]any)
+	foundUser := false
+	for _, u := range users {
+		if m, ok := u.(map[string]any); ok && m["id"] == userID {
+			foundUser = true
+			break
+		}
+	}
+	if !foundUser {
+		t.Errorf("ListUsers: newly created user %s not found in response (got %d users)", userID, len(users))
+	} else {
+		t.Logf("OK: ListUsers returns newly created user (total=%d)", len(users))
+	}
+
+	// UpdateUser: change display_name and verify the change is reflected.
+	updatedName := fmt.Sprintf("updated-%s", displayName)
+	updateResp, err := adminC.UpdateUser(ctx, userID, map[string]any{
+		"display_name": updatedName,
+	})
+	if err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+	gotName, _ := updateResp["display_name"].(string)
+	if gotName != updatedName {
+		t.Errorf("UpdateUser: expected display_name=%q, got %q (resp=%v)", updatedName, gotName, updateResp)
+	} else {
+		t.Logf("OK: UpdateUser display_name updated to %q", gotName)
+	}
+
 	keyResp, err := adminC.CreateAPIKey(ctx, userID, map[string]any{
 		"name": "integration-test-key",
 	})

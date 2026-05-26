@@ -91,6 +91,7 @@ func (s *Server) registerAll() {
 	s.registerDependencyTools()
 	s.registerCodingTools()
 	s.registerProjectTools()
+	s.registerUserTools()
 }
 
 // jsonResult marshals v to JSON and returns a text content result.

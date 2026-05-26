@@ -42,6 +42,7 @@ type serverProject struct {
 	Description *string         `json:"description"`
 	OwnerUserID string          `json:"owner_user_id"`
 	Visible     bool            `json:"visible"`
+	Scenario    *string         `json:"scenario,omitempty"`
 	Repos       json.RawMessage `json:"repos"`
 }
 
@@ -329,7 +330,11 @@ func writeMemberPolyforgeYAML(path string, projects []serverProject) error {
 				Description:     desc,
 			})
 		}
-		cfg.Projects[sp.Name] = config.Project{Repos: repos}
+		proj := config.Project{Repos: repos}
+		if sp.Scenario != nil {
+			proj.Scenario = *sp.Scenario
+		}
+		cfg.Projects[sp.Name] = proj
 	}
 
 	b, err := yaml.Marshal(cfg)
@@ -497,17 +502,26 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 	}
 
 	// --- Scenario repo cloning ---
-	// Clone scenario repos into .repo/ alongside other repos.
+	// Clone scenario repos into .repo/ alongside other repos. Source of truth
+	// is the server payload so this runs identically for owner and member
+	// workspaces (members have no local .polyforge.yaml on first init).
 	// Multiple projects sharing the same URL share one clone (dedup by URL).
-	if cfg != nil {
-		seen := map[string]bool{}
-		for _, proj := range cfg.Projects {
-			if proj.Scenario == "" || seen[proj.Scenario] {
-				continue
-			}
-			seen[proj.Scenario] = true
-			cloneOrSync(repoDir, scenarioRepoName(proj.Scenario), proj.Scenario)
+	seen := map[string]bool{}
+	for _, sp := range projects {
+		if !sp.Visible || sp.Scenario == nil || *sp.Scenario == "" {
+			continue
 		}
+		url := *sp.Scenario
+		if seen[url] {
+			continue
+		}
+		seen[url] = true
+		name := scenarioRepoName(url)
+		if name == "" || name == url {
+			fmt.Fprintf(os.Stderr, "pf init: skipping scenario %q for project %s — expected a git URL (e.g. git@github.com:GMISWE/polyforge-coding.git)\n", url, sp.Name)
+			continue
+		}
+		cloneOrSync(repoDir, name, url)
 	}
 }
 

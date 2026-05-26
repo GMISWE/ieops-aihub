@@ -76,6 +76,8 @@ type wiListPageData struct {
 	ProjectsAvailable []string
 	Status            string
 	Kind              string
+	Reporter          string
+	Owner             string
 	Limit             int
 	Items             []*wiListRow
 	Err               string
@@ -219,6 +221,8 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		// Filter params.
 		statusParam := strings.TrimSpace(c.QueryParam("status"))
 		kindParam := strings.TrimSpace(c.QueryParam("kind"))
+		reporterParam := strings.TrimSpace(c.QueryParam("reporter"))
+		ownerParam := strings.TrimSpace(c.QueryParam("owner"))
 		if statusParam != "" && !validWIStatuses[statusParam] {
 			statusParam = ""
 		}
@@ -227,6 +231,8 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		}
 		data.Status = statusParam
 		data.Kind = kindParam
+		data.Reporter = reporterParam
+		data.Owner = ownerParam
 
 		limit := 50
 		if raw := strings.TrimSpace(c.QueryParam("limit")); raw != "" {
@@ -265,6 +271,12 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		}
 		if kindParam != "" {
 			filter.WIType = &kindParam
+		}
+		if reporterParam != "" {
+			filter.ReporterDisplay = &reporterParam
+		}
+		if ownerParam != "" {
+			filter.OwnerDisplay = &ownerParam
 		}
 
 		res, aerr := listWorkItemsFn(ctx, pool, project, filter)
@@ -363,7 +375,19 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 
 		go func() {
 			defer wg.Done()
-			deps, depsErr = listDependenciesFn(ctx, pool, wi.ID, u.ProjectRoles)
+			// ListDependencies hides cross-project entries by checking
+			// `callerProjectRoles[entry.Project] != ""`. Admins have an
+			// empty ProjectRoles map by design (middleware.go ~L104-106),
+			// so synthesize a viewer role on every visible project so the
+			// admin sees the real slug instead of "[hidden — cross-project]".
+			roles := u.ProjectRoles
+			if u.Role == "admin" {
+				roles = map[string]string{}
+				for _, p := range availableProjectsForUI(ctx, pool, u) {
+					roles[p] = "viewer"
+				}
+			}
+			deps, depsErr = listDependenciesFn(ctx, pool, wi.ID, roles)
 		}()
 
 		go func() {
@@ -499,14 +523,21 @@ func toDepView(d *domain.DependenciesResponse) *depView {
 	if d == nil {
 		return nil
 	}
+	// NOTE: domain.DependenciesResponse uses inverted field semantics —
+	// `Blocking` is populated from rows where this wi is the *blocked* side
+	// (so it actually lists the wi's that block us), and `BlockedBy` lists
+	// the wi's we are blocking. Swap them here so the template labels mean
+	// what a human reader expects:
+	//   depView.BlockedBy = "who blocks us" (domain.Blocking)
+	//   depView.Blocking  = "who we block"  (domain.BlockedBy)
 	v := &depView{
-		Blocking:  make([]depEntry, 0, len(d.Blocking)),
-		BlockedBy: make([]depEntry, 0, len(d.BlockedBy)),
-	}
-	for _, e := range d.Blocking {
-		v.Blocking = append(v.Blocking, depEntryFrom(e))
+		Blocking:  make([]depEntry, 0, len(d.BlockedBy)),
+		BlockedBy: make([]depEntry, 0, len(d.Blocking)),
 	}
 	for _, e := range d.BlockedBy {
+		v.Blocking = append(v.Blocking, depEntryFrom(e))
+	}
+	for _, e := range d.Blocking {
 		v.BlockedBy = append(v.BlockedBy, depEntryFrom(e))
 	}
 	return v

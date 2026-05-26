@@ -484,18 +484,20 @@ func GetWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string) (*Wor
 
 // ListWorkItemsFilter holds optional filters for ListWorkItems.
 type ListWorkItemsFilter struct {
-	Status    []string
-	WIType    *string
-	Priority  *string
-	Milestone *string
-	Label     *string
-	UserID    *string
-	Source    *string
-	ReadyOnly bool
-	IDs       []string
-	Since     *time.Time
-	Limit     int
-	Cursor    *string
+	Status          []string
+	WIType          *string
+	Priority        *string
+	Milestone       *string
+	Label           *string
+	UserID          *string // reporter user_id exact match (legacy)
+	ReporterDisplay *string // case-insensitive contains on wi.reporter_display
+	OwnerDisplay    *string // case-insensitive contains on run_attempts.actor_display (current attempt)
+	Source          *string
+	ReadyOnly       bool
+	IDs             []string
+	Since           *time.Time
+	Limit           int
+	Cursor          *string
 }
 
 // ListWorkItemsResult holds paginated results.
@@ -539,6 +541,20 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 		args = append(args, *f.UserID)
 		argIdx++
 	}
+	if f.ReporterDisplay != nil && *f.ReporterDisplay != "" {
+		conds = append(conds, fmt.Sprintf("wi.reporter_display ILIKE '%%' || $%d || '%%'", argIdx))
+		args = append(args, *f.ReporterDisplay)
+		argIdx++
+	}
+	// OwnerDisplay needs a JOIN to run_attempts. Only inject the join when
+	// the filter is requested so the no-filter path stays at zero extra cost.
+	joinClause := ""
+	if f.OwnerDisplay != nil && *f.OwnerDisplay != "" {
+		joinClause = " LEFT JOIN run_attempts ra ON ra.id = wi.current_attempt_id"
+		conds = append(conds, fmt.Sprintf("ra.actor_display ILIKE '%%' || $%d || '%%'", argIdx))
+		args = append(args, *f.OwnerDisplay)
+		argIdx++
+	}
 	if len(f.IDs) > 0 {
 		conds = append(conds, fmt.Sprintf("wi.id = ANY($%d)", argIdx))
 		args = append(args, f.IDs)
@@ -559,10 +575,10 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 			   wi.reporter_user_id, wi.reporter_display,
 			   wi.current_attempt_id, wi.current_attempt_epoch,
 			   wi.parent_work_item_id, wi.attrs, wi.created_at, wi.updated_at, wi.closed_at
-		FROM work_items wi
+		FROM work_items wi%s
 		%s
 		ORDER BY wi.created_at DESC
-		LIMIT %d`, where, f.Limit+1)
+		LIMIT %d`, joinClause, where, f.Limit+1)
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {

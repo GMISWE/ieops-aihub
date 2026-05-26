@@ -1,0 +1,101 @@
+name: Publish Bins
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed for pushing to bins-* branches
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for git describe --tags --always to find previous tags
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Determine channel
+        id: channel
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "channel=stable" >> $GITHUB_OUTPUT
+          else
+            echo "channel=dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build all arches (sequential, CGO_ENABLED=0 required for cross-compilation)
+        run: |
+          SHA=$(git rev-parse HEAD)
+          # Use full 40-char SHA (not --short) so polyforge-mcp.sh can do exact version comparison
+          VERSION=$(git describe --tags --always 2>/dev/null || echo dev)
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          LDFLAGS="-s -w -X github.com/GMISWE/ieops-aihub/internal/version.GitCommit=${SHA} -X github.com/GMISWE/ieops-aihub/internal/version.Version=${VERSION} -X github.com/GMISWE/ieops-aihub/internal/version.BuildTime=${NOW}"
+          mkdir -p dist/bin
+          # Build targets sequentially — do NOT use matrix here; parallel force-pushes to the
+          # same orphan branch would race and corrupt its history.
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            GOOS=${target%/*}
+            GOARCH=${target#*/}
+            # CGO_ENABLED=0 is required for cross-compilation; cgo cannot link foreign libc at build time
+            GOOS=${GOOS} GOARCH=${GOARCH} CGO_ENABLED=0 \
+              go build -ldflags "${LDFLAGS}" \
+              -o dist/bin/polyforge-${GOOS}-${GOARCH} \
+              ./cmd/polyforge/
+          done
+          # Store full 40-char SHA for version comparison in polyforge-mcp.sh
+          echo "${SHA}" > dist/bin/version.txt
+          ls -la dist/bin/
+
+      - name: Log previous bins branch HEAD (rollback reference)
+        run: |
+          CHANNEL="${{ steps.channel.outputs.channel }}"
+          OLD_SHA=$(git ls-remote origin "refs/heads/bins-${CHANNEL}" | awk '{print $1}')
+          [ -z "${OLD_SHA}" ] && OLD_SHA="none (branch does not exist yet)"
+          echo "### Rollback reference" >> $GITHUB_STEP_SUMMARY
+          echo "Previous \`bins-${CHANNEL}\` HEAD: \`${OLD_SHA}\`" >> $GITHUB_STEP_SUMMARY
+          echo "To rollback: \`git push --force origin ${OLD_SHA}:refs/heads/bins-${CHANNEL}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Publish to bins-{channel} orphan branch
+        run: |
+          CHANNEL="${{ steps.channel.outputs.channel }}"
+          git config user.email "ci@gmi.com"
+          git config user.name "CI"
+          # Capture HEAD SHA before switching branches
+          COMMIT_SHA=$(git rev-parse HEAD)
+          # Create orphan branch — MUST immediately run git rm -rf . to prevent
+          # the source tree from being committed into the bins-* branch
+          git checkout --orphan "bins-${CHANNEL}"
+          git rm -rf .
+          mkdir -p bin
+          cp dist/bin/* bin/
+          git add bin/
+          git commit -m "publish: ${COMMIT_SHA} [${CHANNEL}]"
+          git push --force origin "HEAD:refs/heads/bins-${CHANNEL}"
+
+      - name: Notify aihub (non-blocking)
+        continue-on-error: true
+        env:
+          POLYFORGE_API_KEY: ${{ secrets.POLYFORGE_API_KEY }}
+          AIHUB_URL: ${{ secrets.AIHUB_URL }}
+        run: |
+          [ -z "$POLYFORGE_API_KEY" ] && echo "POLYFORGE_API_KEY not set, skipping" && exit 0
+          [ -z "$AIHUB_URL" ] && echo "AIHUB_URL not set, skipping" && exit 0
+          CHANNEL="${{ steps.channel.outputs.channel }}"
+          # Read source commit SHA from version.txt written in build step.
+          # Do NOT use `git rev-parse HEAD` here — after --orphan checkout, HEAD
+          # points to the bins branch commit, not the original source commit.
+          COMMIT_SHA=$(cat bin/version.txt 2>/dev/null | tr -d '[:space:]')
+          [ -z "$COMMIT_SHA" ] && echo "version.txt missing, skipping notify" && exit 0
+          curl -sf -X PUT \
+            -H "Authorization: Bearer ${POLYFORGE_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"channel\":\"${CHANNEL}\",\"commit\":\"${COMMIT_SHA}\",\"published_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
+            "${AIHUB_URL}/v1/binary" \
+            && echo "aihub notify ok" || echo "aihub notify failed (non-blocking)"

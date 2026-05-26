@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # needed for git rev-parse HEAD to work reliably
+          fetch-depth: 0  # needed for git describe --tags --always to find previous tags
 
       - uses: actions/setup-go@v5
         with:
@@ -88,7 +88,11 @@ jobs:
           [ -z "$POLYFORGE_API_KEY" ] && echo "POLYFORGE_API_KEY not set, skipping" && exit 0
           [ -z "$AIHUB_URL" ] && echo "AIHUB_URL not set, skipping" && exit 0
           CHANNEL="${{ steps.channel.outputs.channel }}"
-          COMMIT_SHA=$(cat bin/version.txt 2>/dev/null || git rev-parse HEAD)
+          # Read source commit SHA from version.txt written in build step.
+          # Do NOT use `git rev-parse HEAD` here — after --orphan checkout, HEAD
+          # points to the bins branch commit, not the original source commit.
+          COMMIT_SHA=$(cat bin/version.txt 2>/dev/null | tr -d '[:space:]')
+          [ -z "$COMMIT_SHA" ] && echo "version.txt missing, skipping notify" && exit 0
           curl -sf -X PUT \
             -H "Authorization: Bearer ${POLYFORGE_API_KEY}" \
             -H "Content-Type: application/json" \

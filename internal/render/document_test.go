@@ -40,7 +40,7 @@ func TestDocument_IncludesStylesheet(t *testing.T) {
 	for _, want := range []string{
 		"body {",     // base body rules
 		"table {",    // table styling
-		"pre {",      // code block container
+		"pre.chroma", // code block container (chroma-aware selector)
 		".chroma .k", // chroma keyword color
 	} {
 		if !strings.Contains(got, want) {

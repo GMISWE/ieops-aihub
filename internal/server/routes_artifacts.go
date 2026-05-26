@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/GMISWE/ieops-aihub/internal/domain"
+	"github.com/GMISWE/ieops-aihub/internal/render"
 )
 
 // RegisterArtifactRoutes wires the spec/plan HTML viewer endpoint
@@ -59,7 +60,12 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				"no HTML available for this artifact (rendered_html is NULL — only methodology.spec / methodology.plan render, and legacy rows are not backfilled)"))
 		}
 
-		return c.HTMLBlob(http.StatusOK, []byte(*mem.RenderedHTML))
+		// Wrap the stored body fragment in a standalone HTML document so the
+		// `polyforge artifact view` browser flow gets usable styling without
+		// extra setup. The fragment in `memories.rendered_html` is kept raw so
+		// it can be embedded in other contexts (future webui, etc.) later.
+		title := mem.ID + " (" + mem.Type + ")"
+		return c.HTMLBlob(http.StatusOK, []byte(render.Document(*mem.RenderedHTML, title)))
 	}
 }
 

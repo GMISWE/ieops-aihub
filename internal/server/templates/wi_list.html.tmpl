@@ -37,7 +37,13 @@
       <option value="release" {{if eq .Kind "release"}}selected{{end}}>release</option>
     </select>
   </label>
-  <noscript><button type="submit">Apply</button></noscript>
+  <label>Owner:
+    <input type="text" name="owner" value="{{.Owner}}" placeholder="display name" size="14">
+  </label>
+  <label>Reporter:
+    <input type="text" name="reporter" value="{{.Reporter}}" placeholder="display name" size="14">
+  </label>
+  <button type="submit">Apply</button>
 </form>
 
 {{if .Err}}<div class="pf-err">{{.Err}}</div>{{end}}

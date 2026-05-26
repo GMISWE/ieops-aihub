@@ -1,0 +1,98 @@
+{{define "queue_section.html.tmpl"}}
+{{if .Err}}<div class="pf-err">{{.Err}}</div>{{end}}
+<section class="pf-queue-grid">
+
+  <div class="pf-queue-section">
+    <h2>Running ({{len .Q.Running}})</h2>
+    {{if .Q.Running}}
+    <ul class="pf-queue-list">
+      {{range .Q.Running}}
+      <li>
+        <a href="/ui/wi/{{or .Slug .ID}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
+        <span class="pf-wi-goal">{{truncate 80 .Goal}}</span>
+        {{if .OwnerDisplay}}<span class="pf-wi-owner">[{{.OwnerDisplay}}]</span>{{end}}
+        {{if .LastActiveAt}}<span class="pf-wi-ts">{{.LastActiveAt}}</span>{{end}}
+      </li>
+      {{end}}
+    </ul>
+    {{else}}<p class="pf-empty">—</p>{{end}}
+  </div>
+
+  <div class="pf-queue-section">
+    <h2>Items ({{len .Q.Items}})</h2>
+    {{if .Q.Items}}
+    <ul class="pf-queue-list">
+      {{range .Q.Items}}
+      <li>
+        <a href="/ui/wi/{{or .Slug .ID}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
+        <span class="pf-wi-prio pf-prio-{{default "normal" .Priority}}">{{default "normal" .Priority}}</span>
+        <span class="pf-wi-goal">{{truncate 80 .Goal}}</span>
+      </li>
+      {{end}}
+    </ul>
+    {{else}}<p class="pf-empty">—</p>{{end}}
+  </div>
+
+  <div class="pf-queue-section">
+    <h2>Needs you ({{len .Q.NeedsHumanSession}})</h2>
+    {{if .Q.NeedsHumanSession}}
+    <ul class="pf-queue-list">
+      {{range .Q.NeedsHumanSession}}
+      <li>
+        <a href="/ui/wi/{{or .Slug .ID}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
+        <span class="pf-wi-prio pf-prio-{{default "normal" .Priority}}">{{default "normal" .Priority}}</span>
+        <span class="pf-wi-goal">{{truncate 80 .Goal}}</span>
+      </li>
+      {{end}}
+    </ul>
+    {{else}}<p class="pf-empty">—</p>{{end}}
+  </div>
+
+  <div class="pf-queue-section">
+    <h2>Stalled ({{len .Q.Stalled}})</h2>
+    {{if .Q.Stalled}}
+    <ul class="pf-queue-list">
+      {{range .Q.Stalled}}
+      <li>
+        <a href="/ui/wi/{{or .Slug .ID}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
+        {{if .StallReason}}<span class="pf-wi-stall">{{truncate 80 .StallReason}}</span>{{end}}
+        {{if .LastActorDisplay}}<span class="pf-wi-owner">[{{.LastActorDisplay}}]</span>{{end}}
+        {{if .StalledSince}}<span class="pf-wi-ts">{{.StalledSince}}</span>{{end}}
+      </li>
+      {{end}}
+    </ul>
+    {{else}}<p class="pf-empty">—</p>{{end}}
+  </div>
+
+  <div class="pf-queue-section">
+    <h2>Paused ({{len .Q.Paused}})</h2>
+    {{if .Q.Paused}}
+    <ul class="pf-queue-list">
+      {{range .Q.Paused}}
+      <li>
+        <a href="/ui/wi/{{or .Slug .ID}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
+        {{if .LastActorDisplay}}<span class="pf-wi-owner">[{{.LastActorDisplay}}]</span>{{end}}
+        {{if .PausedSince}}<span class="pf-wi-ts">{{.PausedSince}}</span>{{end}}
+      </li>
+      {{end}}
+    </ul>
+    {{else}}<p class="pf-empty">—</p>{{end}}
+  </div>
+
+  <div class="pf-queue-section">
+    <h2>Unclassified ({{len .Q.Unclassified}})</h2>
+    {{if .Q.Unclassified}}
+    <ul class="pf-queue-list">
+      {{range .Q.Unclassified}}
+      <li>
+        <a href="/ui/wi/{{or .Slug .ID}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
+        <span class="pf-wi-prio pf-prio-{{default "normal" .Priority}}">{{default "normal" .Priority}}</span>
+        <span class="pf-wi-goal">{{truncate 80 .Goal}}</span>
+      </li>
+      {{end}}
+    </ul>
+    {{else}}<p class="pf-empty">—</p>{{end}}
+  </div>
+
+</section>
+{{end}}

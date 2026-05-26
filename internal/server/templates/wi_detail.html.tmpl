@@ -1,0 +1,118 @@
+{{define "content"}}
+{{if .AccessDenied}}
+<div class="pf-err">{{.Err}}</div>
+{{else if not .WI}}
+<div class="pf-err">{{or .Err "work item not found"}}</div>
+<p><a href="/ui/wi">← back to work items</a></p>
+{{else}}
+<section class="pf-page-header">
+  <h1>
+    <a href="/ui/wi" class="pf-back">← wi</a>
+    <code class="pf-wi-slug">{{or .WI.Slug .WI.ID}}</code>
+  </h1>
+  <span class="pf-meta">
+    <span class="pf-badge pf-badge-status-{{.WI.Status}}">{{.WI.Status}}</span>
+    {{if .WIType}}<span class="pf-badge pf-badge-type-{{.WIType}}">{{.WIType}}</span>{{end}}
+    <span class="pf-badge pf-badge-priority-{{or .WI.Priority "normal"}}">{{or .WI.Priority "normal"}}</span>
+  </span>
+</section>
+
+{{if .Err}}<div class="pf-err">{{.Err}}</div>{{end}}
+
+<div class="pf-detail-grid">
+  <div class="pf-detail-main">
+    <div class="pf-detail-card">
+      <h2>Goal</h2>
+      <p class="pf-wi-goal">{{.WI.Goal}}</p>
+    </div>
+
+    {{if .Content}}
+    <div class="pf-detail-card">
+      <h2>Background</h2>
+      <div class="pf-content-md pf-wi-content">{{md .Content}}</div>
+    </div>
+    {{end}}
+
+    <div class="pf-detail-card">
+      <h2>Events</h2>
+      <div id="pf-events"
+           hx-get="/ui/wi/{{or .WI.Slug .WI.ID}}/events/partial"
+           hx-trigger="every 5s"
+           hx-target="#pf-events"
+           hx-swap="innerHTML">
+        {{template "events_timeline.html.tmpl" .}}
+      </div>
+    </div>
+  </div>
+
+  <aside class="pf-detail-side">
+    <div class="pf-detail-card">
+      <h2>Meta</h2>
+      <dl class="pf-kv">
+        <dt>Project</dt><dd><code>{{.WI.Project}}</code></dd>
+        <dt>Source</dt><dd>{{or .WI.Source "—"}}</dd>
+        <dt>Reporter</dt><dd>{{or .WI.ReporterDisplay "—"}}</dd>
+        <dt>Created</dt><dd>{{.WI.CreatedAt.Format "2006-01-02 15:04 MST"}}</dd>
+        <dt>Updated</dt><dd>{{.WI.UpdatedAt.Format "2006-01-02 15:04 MST"}}</dd>
+        {{if .Milestone}}<dt>Milestone</dt><dd>{{.Milestone}}</dd>{{end}}
+        {{if .AttemptID}}<dt>Attempt</dt><dd><code>{{.AttemptID}}</code></dd>{{end}}
+      </dl>
+    </div>
+
+    {{if .Dependencies}}
+    <div class="pf-detail-card">
+      <h2>Blocked by ({{len .Dependencies.BlockedBy}})</h2>
+      {{if .Dependencies.BlockedBy}}
+      <ul class="pf-dep-list">
+        {{range .Dependencies.BlockedBy}}
+        <li>
+          {{if .Hidden}}
+            <span class="pf-empty">[hidden — cross-project]</span>
+          {{else}}
+            <a href="/ui/wi/{{.Slug}}"><code>{{.Slug}}</code></a>
+          {{end}}
+          <span class="pf-dep-kind">{{.Kind}}</span>
+        </li>
+        {{end}}
+      </ul>
+      {{else}}<p class="pf-empty">—</p>{{end}}
+    </div>
+
+    <div class="pf-detail-card">
+      <h2>Blocking ({{len .Dependencies.Blocking}})</h2>
+      {{if .Dependencies.Blocking}}
+      <ul class="pf-dep-list">
+        {{range .Dependencies.Blocking}}
+        <li>
+          {{if .Hidden}}
+            <span class="pf-empty">[hidden — cross-project]</span>
+          {{else}}
+            <a href="/ui/wi/{{.Slug}}"><code>{{.Slug}}</code></a>
+          {{end}}
+          <span class="pf-dep-kind">{{.Kind}}</span>
+        </li>
+        {{end}}
+      </ul>
+      {{else}}<p class="pf-empty">—</p>{{end}}
+    </div>
+    {{end}}
+
+    {{if .Artifacts}}
+    <div class="pf-detail-card">
+      <h2>Artifacts ({{len .Artifacts}})</h2>
+      <ul class="pf-artifact-list">
+        {{range .Artifacts}}
+        <li>
+          <a href="/v1/artifacts/{{.MemID}}/html" target="_blank" rel="noopener">
+            <span class="pf-artifact-type">{{.Type}}</span>
+          </a>
+          <span class="pf-artifact-preview">{{truncate 80 .Content}}</span>
+        </li>
+        {{end}}
+      </ul>
+    </div>
+    {{end}}
+  </aside>
+</div>
+{{end}}
+{{end}}

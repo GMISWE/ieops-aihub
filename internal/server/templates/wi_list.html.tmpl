@@ -1,0 +1,71 @@
+{{define "content"}}
+<section class="pf-page-header">
+  <h1>Work items{{if .Project}}: <span class="pf-wi-proj">{{.Project}}</span>{{end}}</h1>
+  <span class="pf-meta">{{len .Items}} shown · limit {{.Limit}}</span>
+</section>
+
+<form method="GET" action="/ui/wi" class="pf-filter-bar pf-wi-filters">
+  <label>Project:
+    <select name="project" onchange="this.form.submit()">
+      {{if not .ProjectsAvailable}}
+        <option value="{{.Project}}">{{or .Project "(none)"}}</option>
+      {{end}}
+      {{range .ProjectsAvailable}}
+        <option value="{{.}}" {{if eq . $.Project}}selected{{end}}>{{.}}</option>
+      {{end}}
+    </select>
+  </label>
+  <label>Status:
+    <select name="status" onchange="this.form.submit()">
+      <option value="" {{if eq .Status ""}}selected{{end}}>active</option>
+      <option value="queued" {{if eq .Status "queued"}}selected{{end}}>queued</option>
+      <option value="running" {{if eq .Status "running"}}selected{{end}}>running</option>
+      <option value="paused" {{if eq .Status "paused"}}selected{{end}}>paused</option>
+      <option value="blocked" {{if eq .Status "blocked"}}selected{{end}}>blocked</option>
+      <option value="wrapped" {{if eq .Status "wrapped"}}selected{{end}}>wrapped</option>
+      <option value="cancelled" {{if eq .Status "cancelled"}}selected{{end}}>cancelled</option>
+    </select>
+  </label>
+  <label>Kind:
+    <select name="kind" onchange="this.form.submit()">
+      <option value="" {{if eq .Kind ""}}selected{{end}}>all</option>
+      <option value="feature" {{if eq .Kind "feature"}}selected{{end}}>feature</option>
+      <option value="fix_bug" {{if eq .Kind "fix_bug"}}selected{{end}}>fix_bug</option>
+      <option value="chore" {{if eq .Kind "chore"}}selected{{end}}>chore</option>
+      <option value="refactor" {{if eq .Kind "refactor"}}selected{{end}}>refactor</option>
+      <option value="critical_bug" {{if eq .Kind "critical_bug"}}selected{{end}}>critical_bug</option>
+      <option value="release" {{if eq .Kind "release"}}selected{{end}}>release</option>
+    </select>
+  </label>
+  <noscript><button type="submit">Apply</button></noscript>
+</form>
+
+{{if .Err}}<div class="pf-err">{{.Err}}</div>{{end}}
+
+<table class="pf-table pf-wi-table">
+  <thead>
+    <tr>
+      <th>Slug</th>
+      <th>Kind</th>
+      <th>Priority</th>
+      <th>Status</th>
+      <th>Goal</th>
+      <th>Reporter</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Items}}
+    <tr>
+      <td><a href="/ui/wi/{{or .Slug .ID}}"><code>{{or .Slug .ID}}</code></a></td>
+      <td>{{if .WIType}}<span class="pf-badge pf-badge-type-{{.WIType}}">{{.WIType}}</span>{{else}}<span class="pf-empty">—</span>{{end}}</td>
+      <td><span class="pf-badge pf-badge-priority-{{or .Priority "normal"}}">{{or .Priority "normal"}}</span></td>
+      <td><span class="pf-badge pf-badge-status-{{.Status}}">{{.Status}}</span></td>
+      <td>{{truncate 100 .Goal}}</td>
+      <td>{{or .OwnerDisplay "—"}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="6" class="pf-empty">No work items match the current filters.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

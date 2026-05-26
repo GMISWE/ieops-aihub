@@ -1,0 +1,16 @@
+{{define "events_timeline.html.tmpl"}}
+{{if .Events}}
+<ul class="pf-timeline pf-events">
+  {{range .Events}}
+  <li class="pf-event {{if .Pinned}}pf-event-pinned{{end}}">
+    <span class="ts">{{.CreatedAt.Format "2006-01-02 15:04:05"}}</span>
+    <span class="ev pf-event-type">{{.EventType}}</span>
+    {{if .ActorDisplay}}<span class="pf-event-actor">{{.ActorDisplay}}</span>{{end}}
+    {{if .Payload}}<span class="pf-event-body">{{truncate 200 .Payload}}</span>{{end}}
+  </li>
+  {{end}}
+</ul>
+{{else}}
+<p class="pf-empty">No events yet.</p>
+{{end}}
+{{end}}

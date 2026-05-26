@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -95,6 +96,17 @@ func uiFuncMap() template.FuncMap {
 			return value
 		},
 		"hasPrefix": strings.HasPrefix,
+		// wiref builds an href for a wi detail page from a slug or wi_id.
+		// Slugs like "aihub#1" contain '#', which browsers treat as a URL
+		// fragment and strip from the request — the handler would then see
+		// only "aihub" and 404. PathEscape turns "#" into "%23" so the full
+		// slug survives the round-trip.
+		"wiref": func(slugOrID string) string {
+			if slugOrID == "" {
+				return ""
+			}
+			return "/ui/wi/" + url.PathEscape(slugOrID)
+		},
 	}
 }
 

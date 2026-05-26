@@ -56,7 +56,7 @@
   <tbody>
     {{range .Items}}
     <tr>
-      <td><a href="/ui/wi/{{or .Slug .ID}}"><code>{{or .Slug .ID}}</code></a></td>
+      <td><a href="{{wiref (or .Slug .ID)}}"><code>{{or .Slug .ID}}</code></a></td>
       <td>{{if .WIType}}<span class="pf-badge pf-badge-type-{{.WIType}}">{{.WIType}}</span>{{else}}<span class="pf-empty">—</span>{{end}}</td>
       <td><span class="pf-badge pf-badge-priority-{{or .Priority "normal"}}">{{or .Priority "normal"}}</span></td>
       <td><span class="pf-badge pf-badge-status-{{.Status}}">{{.Status}}</span></td>

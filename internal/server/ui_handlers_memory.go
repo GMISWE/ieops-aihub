@@ -189,8 +189,10 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 type memLoaderFn func(ctx context.Context, pool *pgxpool.Pool, id string) (*domain.Memory, *domain.AihubError)
 
 // handleUIMemoryDetail renders a single memory's detail page. Spec/plan
-// artifacts redirect to /v1/artifacts/<id>/html, which already wraps the cached
-// rendered HTML in a styled document via render.Document.
+// artifacts redirect to /ui/artifacts/<id>/html, the cookie-authed mirror of
+// /v1/artifacts/<id>/html (same handler — handleArtifactHTML — mounted under
+// uiGroup so the session cookie satisfies auth without requiring users to
+// paste their bearer key).
 func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -224,7 +226,7 @@ func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 		// missing (legacy row), the artifact endpoint will return a clear 404 —
 		// preferable to re-rendering markdown a second time here.
 		if mem.Type == "methodology.spec" || mem.Type == "methodology.plan" {
-			return c.Redirect(http.StatusFound, "/v1/artifacts/"+mem.ID+"/html")
+			return c.Redirect(http.StatusFound, "/ui/artifacts/"+mem.ID+"/html")
 		}
 
 		data := memDetailPageData{

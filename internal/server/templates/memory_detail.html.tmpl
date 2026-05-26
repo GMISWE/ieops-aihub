@@ -37,7 +37,7 @@
         <dt>immortal</dt><dd>{{.IsImmortal}}</dd>
         <dt>status</dt><dd>{{.Status}}</dd>
         {{with .WorkItemID}}
-        <dt>work item</dt><dd><a href="/ui/wi/{{.}}">{{.}}</a></dd>
+        <dt>work item</dt><dd><a href="{{wiref .}}">{{.}}</a></dd>
         {{end}}
       </dl>
     </div>

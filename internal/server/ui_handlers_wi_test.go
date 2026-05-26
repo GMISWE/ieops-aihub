@@ -278,7 +278,8 @@ func TestUIWIDetail_200_RendersMarkdown(t *testing.T) {
 }
 
 // TestUIWIDetail_RendersArtifactLinks asserts that methodology artifacts are
-// surfaced with hrefs that target /v1/artifacts/<id>/html.
+// surfaced with hrefs that target /ui/artifacts/<id>/html (cookie-authed
+// mirror of /v1/artifacts/<id>/html).
 func TestUIWIDetail_RendersArtifactLinks(t *testing.T) {
 	now := time.Now()
 	withFakeGetWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string) (*domain.WorkItem, *domain.AihubError) {
@@ -331,10 +332,10 @@ func TestUIWIDetail_RendersArtifactLinks(t *testing.T) {
 		t.Fatalf("status: got %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `href="/v1/artifacts/mem_spec1/html"`) {
+	if !strings.Contains(body, `href="/ui/artifacts/mem_spec1/html"`) {
 		t.Errorf("expected spec artifact href, got body fragment:\n%s", body)
 	}
-	if !strings.Contains(body, `href="/v1/artifacts/mem_plan1/html"`) {
+	if !strings.Contains(body, `href="/ui/artifacts/mem_plan1/html"`) {
 		t.Errorf("expected plan artifact href, got body fragment:\n%s", body)
 	}
 	if !strings.Contains(body, "methodology.spec") {

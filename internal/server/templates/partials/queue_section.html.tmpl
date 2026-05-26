@@ -8,7 +8,7 @@
     <ul class="pf-queue-list">
       {{range .Q.Running}}
       <li>
-        <a href="/ui/wi/{{or .Slug .ID}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
+        <a href="{{wiref (or .Slug .ID)}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
         <span class="pf-wi-goal">{{truncate 80 .Goal}}</span>
         {{if .OwnerDisplay}}<span class="pf-wi-owner">[{{.OwnerDisplay}}]</span>{{end}}
         {{if .LastActiveAt}}<span class="pf-wi-ts">{{.LastActiveAt}}</span>{{end}}
@@ -24,7 +24,7 @@
     <ul class="pf-queue-list">
       {{range .Q.Items}}
       <li>
-        <a href="/ui/wi/{{or .Slug .ID}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
+        <a href="{{wiref (or .Slug .ID)}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
         <span class="pf-wi-prio pf-prio-{{default "normal" .Priority}}">{{default "normal" .Priority}}</span>
         <span class="pf-wi-goal">{{truncate 80 .Goal}}</span>
       </li>
@@ -39,7 +39,7 @@
     <ul class="pf-queue-list">
       {{range .Q.NeedsHumanSession}}
       <li>
-        <a href="/ui/wi/{{or .Slug .ID}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
+        <a href="{{wiref (or .Slug .ID)}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
         <span class="pf-wi-prio pf-prio-{{default "normal" .Priority}}">{{default "normal" .Priority}}</span>
         <span class="pf-wi-goal">{{truncate 80 .Goal}}</span>
       </li>
@@ -54,7 +54,7 @@
     <ul class="pf-queue-list">
       {{range .Q.Stalled}}
       <li>
-        <a href="/ui/wi/{{or .Slug .ID}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
+        <a href="{{wiref (or .Slug .ID)}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
         {{if .StallReason}}<span class="pf-wi-stall">{{truncate 80 .StallReason}}</span>{{end}}
         {{if .LastActorDisplay}}<span class="pf-wi-owner">[{{.LastActorDisplay}}]</span>{{end}}
         {{if .StalledSince}}<span class="pf-wi-ts">{{.StalledSince}}</span>{{end}}
@@ -70,7 +70,7 @@
     <ul class="pf-queue-list">
       {{range .Q.Paused}}
       <li>
-        <a href="/ui/wi/{{or .Slug .ID}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
+        <a href="{{wiref (or .Slug .ID)}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
         {{if .LastActorDisplay}}<span class="pf-wi-owner">[{{.LastActorDisplay}}]</span>{{end}}
         {{if .PausedSince}}<span class="pf-wi-ts">{{.PausedSince}}</span>{{end}}
       </li>
@@ -85,7 +85,7 @@
     <ul class="pf-queue-list">
       {{range .Q.Unclassified}}
       <li>
-        <a href="/ui/wi/{{or .Slug .ID}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
+        <a href="{{wiref (or .Slug .ID)}}" class="pf-wi-slug">{{or .Slug .ID}}</a>
         <span class="pf-wi-prio pf-prio-{{default "normal" .Priority}}">{{default "normal" .Priority}}</span>
         <span class="pf-wi-goal">{{truncate 80 .Goal}}</span>
       </li>

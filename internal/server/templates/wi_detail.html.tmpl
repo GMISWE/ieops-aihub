@@ -33,16 +33,6 @@
     </div>
     {{end}}
 
-    <div class="pf-detail-card">
-      <h2>Events</h2>
-      <div id="pf-events"
-           hx-get="{{wiref (or .WI.Slug .WI.ID)}}/events/partial"
-           hx-trigger="every 5s"
-           hx-target="#pf-events"
-           hx-swap="innerHTML">
-        {{template "events_timeline.html.tmpl" .}}
-      </div>
-    </div>
   </div>
 
   <aside class="pf-detail-side">
@@ -98,6 +88,17 @@
       {{else}}<p class="pf-empty">—</p>{{end}}
     </div>
     {{end}}
+
+    <div class="pf-detail-card">
+      <h2>Events</h2>
+      <div id="pf-events"
+           hx-get="{{wiref (or .WI.Slug .WI.ID)}}/events/partial"
+           hx-trigger="every 5s"
+           hx-target="#pf-events"
+           hx-swap="innerHTML">
+        {{template "events_timeline.html.tmpl" .}}
+      </div>
+    </div>
 
     {{if .Artifacts}}
     <div class="pf-detail-card">

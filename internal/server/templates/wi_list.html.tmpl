@@ -4,6 +4,18 @@
   <span class="pf-meta">{{len .Items}} shown · limit {{.Limit}}</span>
 </section>
 
+{{if and (not .AllMode) (ne .Project "")}}
+<details class="pf-queue-embed">
+  <summary>Ready queue</summary>
+  <div class="pf-queue-embed-body"
+       hx-get="/ui/queue/partial?project={{.Project}}"
+       hx-trigger="load, every 5s"
+       hx-swap="innerHTML">
+    <p class="pf-empty">loading…</p>
+  </div>
+</details>
+{{end}}
+
 <form method="GET" action="/ui/wi" class="pf-filter-bar pf-wi-filters">
   <label>Project:
     <select name="project" onchange="this.form.submit()">

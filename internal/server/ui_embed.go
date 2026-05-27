@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 
@@ -84,10 +85,13 @@ func uiFuncMap() template.FuncMap {
 			return template.HTML(out)
 		},
 		"truncate": func(n int, s string) string {
-			if n <= 0 || len(s) <= n {
+			// n is the maximum number of runes (user-visible characters),
+			// not bytes. Byte-based truncation would slice mid-rune on
+			// multi-byte UTF-8 (e.g. CJK) and emit garbled output.
+			if n <= 0 || utf8.RuneCountInString(s) <= n {
 				return s
 			}
-			return s[:n] + "..."
+			return string([]rune(s)[:n]) + "..."
 		},
 		"default": func(fallback, value string) string {
 			if value == "" {

@@ -66,12 +66,44 @@ type projectMember struct {
 	Role   string `json:"role"`
 }
 
+// repoModule is one entry in a repo's main_modules list: a directory path and
+// the role it plays. Paths are validated for existence client-side (in /pf-init,
+// which has the clones) — the server only checks structure.
+type repoModule struct {
+	Path string `json:"path"`
+	Role string `json:"role"`
+}
+
 // repoEntry is a single entry in the repos JSONB array.
+//
+// The structured description block (positioning/tech_stack/main_modules/
+// change_scenarios + generation metadata) is optional *as a block*: a repo may
+// omit it entirely (legacy rows carry only the single-line Description, which
+// /pf-init uses as a generation seed). But if any block field is set, all four
+// content fields must be present and well-formed — see validateRepos. Project-
+// wide completeness ("every repo described") is enforced by /pf-init's render
+// gate, not here, so unrelated project updates never break mid-rollout.
 type repoEntry struct {
-	Name             string  `json:"name"`
-	URL              string  `json:"url"`
-	GithubOwnerRepo  *string `json:"github_owner_repo,omitempty"`
-	Description      *string `json:"description,omitempty"`
+	Name            string  `json:"name"`
+	URL             string  `json:"url"`
+	GithubOwnerRepo *string `json:"github_owner_repo,omitempty"`
+	Description     *string `json:"description,omitempty"` // legacy single line; generation seed
+
+	// Structured description block (all-or-nothing; English).
+	Positioning     string       `json:"positioning,omitempty"`      // one line: what this repo is / its role
+	TechStack       []string     `json:"tech_stack,omitempty"`       // ["Go", "PostgreSQL"]
+	MainModules     []repoModule `json:"main_modules,omitempty"`     // {path, role}; paths validated client-side
+	ChangeScenarios []string     `json:"change_scenarios,omitempty"` // ["add MCP tool", "schema migration"]
+
+	// Generation metadata (set by /pf-init when it writes the block).
+	GeneratedAt     *time.Time `json:"generated_at,omitempty"`     // RFC3339; age-based staleness
+	GeneratedCommit string     `json:"generated_commit,omitempty"` // repo HEAD SHA at generation; content-staleness
+}
+
+// hasDescriptionBlock reports whether any structured-description field is set.
+func (r *repoEntry) hasDescriptionBlock() bool {
+	return r.Positioning != "" || len(r.TechStack) > 0 ||
+		len(r.MainModules) > 0 || len(r.ChangeScenarios) > 0
 }
 
 // UserRecord holds caller info passed to domain project functions.
@@ -120,7 +152,8 @@ func validateRepos(repos json.RawMessage) *AihubError {
 	}
 	names := make(map[string]bool, len(entries))
 	urls := make(map[string]bool, len(entries))
-	for _, r := range entries {
+	for i := range entries {
+		r := &entries[i]
 		if r.Name != "" {
 			if names[r.Name] {
 				return NewErr(ErrRepoDuplicateName, fmt.Sprintf("duplicate repo name: %q", r.Name))
@@ -132,6 +165,52 @@ func validateRepos(repos json.RawMessage) *AihubError {
 				return NewErr(ErrRepoDuplicateURL, fmt.Sprintf("duplicate repo URL: %q", r.URL))
 			}
 			urls[r.URL] = true
+		}
+		if aerr := validateDescriptionBlock(r); aerr != nil {
+			return aerr
+		}
+	}
+	return nil
+}
+
+// validateDescriptionBlock enforces the all-or-nothing rule for a repo's
+// structured description: the block may be absent, but if any field is set then
+// all four content fields must be present and well-formed. It does NOT check
+// main_modules path existence — the server has no repo clones; /pf-init does
+// that validation against the local checkout before calling pf_update_project.
+func validateDescriptionBlock(r *repoEntry) *AihubError {
+	if !r.hasDescriptionBlock() {
+		return nil
+	}
+	incomplete := func(field string) *AihubError {
+		return NewErr(ErrRepoIncompleteDescription,
+			fmt.Sprintf("repo %q description block is incomplete: %s required when any description field is set", r.Name, field))
+	}
+	if strings.TrimSpace(r.Positioning) == "" {
+		return incomplete("positioning")
+	}
+	if len(r.TechStack) == 0 {
+		return incomplete("tech_stack")
+	}
+	for _, t := range r.TechStack {
+		if strings.TrimSpace(t) == "" {
+			return incomplete("tech_stack entries must be non-empty")
+		}
+	}
+	if len(r.MainModules) == 0 {
+		return incomplete("main_modules")
+	}
+	for _, m := range r.MainModules {
+		if strings.TrimSpace(m.Path) == "" || strings.TrimSpace(m.Role) == "" {
+			return incomplete("each main_modules entry must have non-empty path and role")
+		}
+	}
+	if len(r.ChangeScenarios) == 0 {
+		return incomplete("change_scenarios")
+	}
+	for _, c := range r.ChangeScenarios {
+		if strings.TrimSpace(c) == "" {
+			return incomplete("change_scenarios entries must be non-empty")
 		}
 	}
 	return nil

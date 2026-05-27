@@ -30,7 +30,7 @@ func (s *Server) registerProjectTools() {
 			"description": prop("string", "Optional description"),
 			"visible":     prop("boolean", "Whether the project is publicly visible (default: true)"),
 			"scenario":    prop("string", "Scenario repo URL (e.g. git@github.com:GMISWE/polyforge-coding.git)"),
-			"repos":       prop("array", "Repository list [{name,url,github_owner_repo,description}]"),
+			"repos":       prop("array", "Repository list. Each: {name, url, github_owner_repo?, description?, and an optional all-or-nothing structured block: positioning(string), tech_stack([string]), main_modules([{path,role}]), change_scenarios([string]), generated_at(RFC3339), generated_commit(string)}. If any structured field is set, all four content fields are required (English)."),
 		}, []string{"name"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -56,7 +56,7 @@ func (s *Server) registerProjectTools() {
 			"description": prop("string", "Updated description"),
 			"visible":     prop("boolean", "Updated visibility"),
 			"scenario":    prop("string", "Updated scenario repo URL (e.g. git@github.com:GMISWE/polyforge-coding.git)"),
-			"repos":       prop("array", "Updated repository list"),
+			"repos":       prop("array", "Updated repository list. Each: {name, url, github_owner_repo?, description?, and an optional all-or-nothing structured block: positioning(string), tech_stack([string]), main_modules([{path,role}]), change_scenarios([string]), generated_at(RFC3339), generated_commit(string)}. If any structured field is set, all four content fields are required (English)."),
 			"members":     prop("array", "Replace member list: [{user_id, role}] where role is viewer|writer|maintainer"),
 		}, []string{"name"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {

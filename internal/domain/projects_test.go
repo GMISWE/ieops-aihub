@@ -97,6 +97,57 @@ func TestValidateRepos_DuplicateURL(t *testing.T) {
 	}
 }
 
+// ─── validateDescriptionBlock (all-or-nothing) ──────────────────────────────────
+
+func TestValidateRepos_NoDescriptionBlock_OK(t *testing.T) {
+	// Legacy entries carrying only the single-line description must still pass —
+	// the structured block is optional as a whole.
+	repos := json.RawMessage(`[
+		{"name":"aihub","url":"u1","description":"Go HTTP server"}
+	]`)
+	if aerr := validateRepos(repos); aerr != nil {
+		t.Errorf("legacy description-only repo: got %v, want nil", aerr)
+	}
+}
+
+func TestValidateRepos_CompleteDescriptionBlock_OK(t *testing.T) {
+	repos := json.RawMessage(`[{
+		"name":"aihub","url":"u1",
+		"positioning":"polyforge core API",
+		"tech_stack":["Go","PostgreSQL"],
+		"main_modules":[{"path":"internal/api","role":"HTTP handlers"}],
+		"change_scenarios":["add MCP tool"],
+		"generated_commit":"abc123"
+	}]`)
+	if aerr := validateRepos(repos); aerr != nil {
+		t.Errorf("complete block: got %v, want nil", aerr)
+	}
+}
+
+func TestValidateRepos_PartialDescriptionBlock_Rejected(t *testing.T) {
+	// positioning set but the rest missing → all-or-nothing violation.
+	cases := map[string]string{
+		"only positioning": `[{"name":"a","url":"u","positioning":"x"}]`,
+		"missing change_scenarios": `[{"name":"a","url":"u","positioning":"x",
+			"tech_stack":["Go"],"main_modules":[{"path":"p","role":"r"}]}]`,
+		"empty tech_stack entry": `[{"name":"a","url":"u","positioning":"x",
+			"tech_stack":[""],"main_modules":[{"path":"p","role":"r"}],"change_scenarios":["c"]}]`,
+		"module missing role": `[{"name":"a","url":"u","positioning":"x",
+			"tech_stack":["Go"],"main_modules":[{"path":"p","role":""}],"change_scenarios":["c"]}]`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			aerr := validateRepos(json.RawMessage(body))
+			if aerr == nil {
+				t.Fatalf("%s: expected REPO_INCOMPLETE_DESCRIPTION, got nil", name)
+			}
+			if aerr.Code != ErrRepoIncompleteDescription {
+				t.Errorf("%s: code = %q, want REPO_INCOMPLETE_DESCRIPTION", name, aerr.Code)
+			}
+		})
+	}
+}
+
 func TestValidateRepos_InvalidJSON(t *testing.T) {
 	aerr := validateRepos(json.RawMessage(`not-json`))
 	if aerr == nil {

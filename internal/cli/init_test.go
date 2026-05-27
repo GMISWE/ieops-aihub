@@ -287,3 +287,73 @@ func TestWriteMemberPolyforgeYAML_IncludesScenario(t *testing.T) {
 		t.Errorf("rendered yaml has %d `scenario: ` lines, want exactly 1; got:\n%s", n, got)
 	}
 }
+
+// ─── renderRepoBlock ─────────────────────────────────────────────────────────
+
+func TestRenderRepoBlock(t *testing.T) {
+	desc := "Go HTTP server + PostgreSQL"
+	cases := []struct {
+		name       string
+		repo       repoEntry
+		wantSubstr []string
+		notWant    []string
+	}{
+		{
+			name: "structured block renders headline + bullets",
+			repo: repoEntry{
+				Name:            "aihub",
+				Positioning:     "polyforge core API",
+				TechStack:       []string{"Go", "PostgreSQL"},
+				MainModules:     []repoModuleEntry{{Path: "internal/api", Role: "HTTP handlers"}, {Path: "internal/store", Role: "PG store"}},
+				ChangeScenarios: []string{"add MCP tool", "schema migration"},
+			},
+			wantSubstr: []string{
+				"- **aihub** — polyforge core API",
+				"  - stack: Go, PostgreSQL",
+				"  - modules: internal/api (HTTP handlers); internal/store (PG store)",
+				"  - changes: add MCP tool; schema migration",
+			},
+		},
+		{
+			name:       "legacy description-only renders headline, no bullets",
+			repo:       repoEntry{Name: "marketplace", Description: &desc},
+			wantSubstr: []string{"- **marketplace** — Go HTTP server + PostgreSQL"},
+			notWant:    []string{"  - stack:", "  - modules:", "  - changes:"},
+		},
+		{
+			name:       "empty repo renders pending placeholder",
+			repo:       repoEntry{Name: "proxy-server"},
+			wantSubstr: []string{"- **proxy-server** — *(description pending"},
+			notWant:    []string{"  - stack:"},
+		},
+		{
+			name: "embedded newline is collapsed to a single line",
+			repo: repoEntry{
+				Name:            "x",
+				Positioning:     "line one\nline two",
+				TechStack:       []string{"Go"},
+				MainModules:     []repoModuleEntry{{Path: "p", Role: "r"}},
+				ChangeScenarios: []string{"c"},
+			},
+			wantSubstr: []string{"- **x** — line one line two"},
+			notWant:    []string{"line one\nline two"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sb strings.Builder
+			renderRepoBlock(&sb, tc.repo)
+			got := sb.String()
+			for _, want := range tc.wantSubstr {
+				if !strings.Contains(got, want) {
+					t.Errorf("missing %q in:\n%s", want, got)
+				}
+			}
+			for _, no := range tc.notWant {
+				if strings.Contains(got, no) {
+					t.Errorf("unexpected %q in:\n%s", no, got)
+				}
+			}
+		})
+	}
+}

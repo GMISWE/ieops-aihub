@@ -15,10 +15,28 @@ import (
 	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
-// repoEntry holds a repo name and description for the managed block.
+// repoModuleEntry is one {path, role} pair in a repo's main_modules list.
+type repoModuleEntry struct {
+	Path string `json:"path"`
+	Role string `json:"role"`
+}
+
+// repoEntry holds a repo's display data for the managed block. Description is the
+// legacy single-line field; the structured fields (when present) render a richer
+// per-repo block for AI routing.
 type repoEntry struct {
-	Name        string
-	Description *string
+	Name            string
+	Description     *string
+	Positioning     string
+	TechStack       []string
+	MainModules     []repoModuleEntry
+	ChangeScenarios []string
+}
+
+// hasStructuredDesc reports whether the structured description block is present.
+func (r repoEntry) hasStructuredDesc() bool {
+	return r.Positioning != "" || len(r.TechStack) > 0 ||
+		len(r.MainModules) > 0 || len(r.ChangeScenarios) > 0
 }
 
 // projectBlock groups a project's display data for the managed block.
@@ -30,10 +48,14 @@ type projectBlock struct {
 
 // serverRepoEntry mirrors the JSON shape stored in domain.Project.Repos.
 type serverRepoEntry struct {
-	Name            string  `json:"name"`
-	URL             string  `json:"url"`
-	GithubOwnerRepo *string `json:"github_owner_repo,omitempty"`
-	Description     *string `json:"description,omitempty"`
+	Name            string            `json:"name"`
+	URL             string            `json:"url"`
+	GithubOwnerRepo *string           `json:"github_owner_repo,omitempty"`
+	Description     *string           `json:"description,omitempty"`
+	Positioning     string            `json:"positioning,omitempty"`
+	TechStack       []string          `json:"tech_stack,omitempty"`
+	MainModules     []repoModuleEntry `json:"main_modules,omitempty"`
+	ChangeScenarios []string          `json:"change_scenarios,omitempty"`
 }
 
 // serverProject mirrors the JSON response shape from GET /v1/projects.
@@ -88,7 +110,14 @@ func parseServerRepos(raw json.RawMessage) []serverRepoEntry {
 func repoEntriesFromServer(repos []serverRepoEntry) []repoEntry {
 	entries := make([]repoEntry, 0, len(repos))
 	for _, r := range repos {
-		entries = append(entries, repoEntry{Name: r.Name, Description: r.Description})
+		entries = append(entries, repoEntry{
+			Name:            r.Name,
+			Description:     r.Description,
+			Positioning:     r.Positioning,
+			TechStack:       r.TechStack,
+			MainModules:     r.MainModules,
+			ChangeScenarios: r.ChangeScenarios,
+		})
 	}
 	return entries
 }
@@ -893,7 +922,59 @@ const managedBlockEnd = `<!-- /polyforge:managed -->`
 
 // upsertManagedBlock writes or replaces the managed block in CLAUDE.md.
 // The block is grouped per project with a description and repo table.
+// oneLine collapses any embedded newlines/CRs into spaces so a field can't break
+// the single-line markdown bullet it's rendered into. (Server validation only
+// trims the ends; it doesn't reject interior newlines.)
+func oneLine(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return strings.TrimSpace(s)
+}
+
 // Remote URLs are NOT included in the managed block.
+// renderRepoBlock writes one repo's entry into the managed block. When the
+// structured description is present it renders a positioning line plus stack /
+// modules / typical-change bullets (for AI routing); otherwise it falls back to
+// the legacy single-line description or a pending placeholder.
+func renderRepoBlock(sb *strings.Builder, r repoEntry) {
+	headline := ""
+	switch {
+	case r.Positioning != "":
+		headline = oneLine(r.Positioning)
+	case r.Description != nil && *r.Description != "":
+		headline = oneLine(*r.Description)
+	default:
+		headline = "*(description pending — run /pf-init to generate)*"
+	}
+	fmt.Fprintf(sb, "- **%s** — %s\n", r.Name, headline)
+
+	if !r.hasStructuredDesc() {
+		return
+	}
+	if len(r.TechStack) > 0 {
+		stack := make([]string, 0, len(r.TechStack))
+		for _, t := range r.TechStack {
+			stack = append(stack, oneLine(t))
+		}
+		fmt.Fprintf(sb, "  - stack: %s\n", strings.Join(stack, ", "))
+	}
+	if len(r.MainModules) > 0 {
+		mods := make([]string, 0, len(r.MainModules))
+		for _, m := range r.MainModules {
+			mods = append(mods, fmt.Sprintf("%s (%s)", oneLine(m.Path), oneLine(m.Role)))
+		}
+		fmt.Fprintf(sb, "  - modules: %s\n", strings.Join(mods, "; "))
+	}
+	if len(r.ChangeScenarios) > 0 {
+		changes := make([]string, 0, len(r.ChangeScenarios))
+		for _, c := range r.ChangeScenarios {
+			changes = append(changes, oneLine(c))
+		}
+		fmt.Fprintf(sb, "  - changes: %s\n", strings.Join(changes, "; "))
+	}
+}
+
 func upsertManagedBlock(claudeMd string, blocks []projectBlock) error {
 	// Build the managed block content.
 	var sb strings.Builder
@@ -908,16 +989,8 @@ func upsertManagedBlock(claudeMd string, blocks []projectBlock) error {
 			sb.WriteString("*(description pending — ask project owner to run polyforge init)*\n")
 		}
 		sb.WriteString("\n")
-		if len(blk.Repos) > 0 {
-			sb.WriteString("| repo | description |\n")
-			sb.WriteString("|------|-------------|\n")
-			for _, r := range blk.Repos {
-				desc := "*(pending)*"
-				if r.Description != nil && *r.Description != "" {
-					desc = *r.Description
-				}
-				fmt.Fprintf(&sb, "| %s | %s |\n", r.Name, desc)
-			}
+		for _, r := range blk.Repos {
+			renderRepoBlock(&sb, r)
 		}
 	}
 	sb.WriteString(managedBlockEnd + "\n")
@@ -954,4 +1027,3 @@ func upsertManagedBlock(claudeMd string, blocks []projectBlock) error {
 
 	return os.WriteFile(claudeMd, []byte(updated), 0644)
 }
-

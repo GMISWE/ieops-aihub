@@ -52,9 +52,9 @@ func staticFSRoot() http.FileSystem {
 // defined in any sibling file, and so a single named handler invocation
 // (ExecuteTemplate with the page filename) renders the full doc.
 //
-// The peer-subagent files (queue.html.tmpl, wi_list.html.tmpl,
-// wi_detail.html.tmpl, memories.html.tmpl, partials/*.tmpl) will land in the
-// templates/ directory and be picked up automatically by the embed.FS glob.
+// The page files (wi_list.html.tmpl, wi_detail.html.tmpl,
+// memories.html.tmpl, partials/*.tmpl) live in the templates/ directory and
+// are picked up automatically by the embed.FS glob.
 func parseTemplates() *template.Template {
 	root := template.New("").Funcs(uiFuncMap())
 	root = template.Must(root.ParseFS(templateFS, "templates/*.tmpl"))
@@ -121,9 +121,9 @@ func uiFuncMap() template.FuncMap {
 //
 // Usage from a peer-subagent register* function:
 //
-//	queueTmpl := pageTemplate("queue.html.tmpl", "queue_section.html.tmpl")
-//	g.GET("/queue", func(c echo.Context) error {
-//	    return renderTemplate(c, queueTmpl, "layout", data)
+//	listTmpl := pageTemplate("wi_list.html.tmpl")
+//	g.GET("/wi", func(c echo.Context) error {
+//	    return renderTemplate(c, listTmpl, "layout", data)
 //	})
 //
 // `partials` are filenames inside templates/partials/. They may be empty.
@@ -137,6 +137,16 @@ func pageTemplate(pageFile string, partials ...string) *template.Template {
 		files = append(files, "templates/partials/"+p)
 	}
 	return template.Must(t.ParseFS(templateFS, files...))
+}
+
+// partialTemplate builds a *template.Template for a standalone partial that
+// has no full-page wrapper — i.e. it is only ever rendered as an htmx fragment
+// via its own {{define}} block, never through "layout". Used by the queue
+// section, which lost its full page when the ready queue moved into the wi
+// list page as an embedded block.
+func partialTemplate(partialFile string) *template.Template {
+	t := template.New("").Funcs(uiFuncMap())
+	return template.Must(t.ParseFS(templateFS, "templates/partials/"+partialFile))
 }
 
 // renderTemplate executes the named template against data and writes the

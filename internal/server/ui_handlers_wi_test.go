@@ -193,6 +193,86 @@ func TestUIWIList_RejectsUnknownStatus(t *testing.T) {
 	}
 }
 
+// --- embedded ready queue block ----------------------------------------------
+
+// TestUIWIList_SingleProject_RendersQueueEmbed asserts the collapsible ready
+// queue block is present on a single-project list page, wired to poll the
+// queue partial endpoint.
+func TestUIWIList_SingleProject_RendersQueueEmbed(t *testing.T) {
+	withFakeListWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		return &domain.ListWorkItemsResult{Items: []*domain.WorkItem{}}, nil
+	})
+
+	e := echo.New()
+	g := e.Group("/ui", wiInjectUser(wiTestUser()))
+	registerUIWIHandlers(g, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/wi?project=p1", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "pf-queue-embed") {
+		t.Errorf("single-project list should embed the ready queue block; body:\n%s", body)
+	}
+	if !strings.Contains(body, `hx-get="/ui/queue/partial`) {
+		t.Errorf("queue embed should poll /ui/queue/partial; body:\n%s", body)
+	}
+}
+
+// TestUIWIList_AllMode_OmitsQueueEmbed asserts the queue embed is hidden in
+// the cross-project view-all mode (the queue is per-project).
+func TestUIWIList_AllMode_OmitsQueueEmbed(t *testing.T) {
+	withFakeListWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		return &domain.ListWorkItemsResult{Items: []*domain.WorkItem{}}, nil
+	})
+
+	e := echo.New()
+	g := e.Group("/ui", wiInjectUser(wiTestUser()))
+	registerUIWIHandlers(g, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/wi?project=__all__", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "pf-queue-embed") {
+		t.Errorf("view-all mode should NOT embed the ready queue block")
+	}
+}
+
+// TestUIWIList_NoProject_OmitsQueueEmbed asserts the queue embed is hidden
+// when no project is resolved (user with zero memberships).
+func TestUIWIList_NoProject_OmitsQueueEmbed(t *testing.T) {
+	u := &UserContext{
+		UserID:       "u_lonely",
+		DisplayName:  "Lonely",
+		Role:         "writer",
+		ProjectRoles: map[string]string{},
+		APIKeyID:     "k_lonely",
+	}
+
+	e := echo.New()
+	g := e.Group("/ui", wiInjectUser(u))
+	registerUIWIHandlers(g, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/wi", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "pf-queue-embed") {
+		t.Errorf("no-project list should NOT embed the ready queue block")
+	}
+}
+
 // --- detail page -------------------------------------------------------------
 
 // TestUIWIDetail_404_UnknownSlug asserts that a missing wi yields a 404

@@ -33,14 +33,14 @@ import (
 // Route map:
 //
 //   no-auth:
-//     GET  /ui/                 -> 302 /ui/queue
+//     GET  /ui/                 -> 302 /ui/wi
 //     GET  /ui/login            -> login form
 //     POST /ui/login            -> issue cookie
 //     POST /ui/logout           -> clear cookie
 //     GET  /ui/static/*         -> embedded css + htmx
 //
 //   authed (RequireUISession):
-//     GET  /ui/queue            -> queue overview (peer subagent)
+//     GET  /ui/queue            -> 302 /ui/wi (legacy; queue is embedded there)
 //     GET  /ui/wi               -> wi list      (peer subagent)
 //     GET  /ui/wi/:id           -> wi detail    (peer subagent)
 //     GET  /ui/memories         -> memory index (peer subagent)
@@ -49,15 +49,17 @@ func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	sm := NewSessionManager(cookieSecret)
 	tmpl := parseTemplates()
 
-	// No-auth pages.
+	// No-auth pages. The landing pages point at the wi list, which now hosts
+	// the ready queue as an embedded block (the standalone /ui/queue page is
+	// gone — it 302s here too).
 	e.GET("/", func(c echo.Context) error {
-		return c.Redirect(http.StatusFound, "/ui/queue")
+		return c.Redirect(http.StatusFound, "/ui/wi")
 	})
 	e.GET("/ui", func(c echo.Context) error {
-		return c.Redirect(http.StatusFound, "/ui/queue")
+		return c.Redirect(http.StatusFound, "/ui/wi")
 	})
 	e.GET("/ui/", func(c echo.Context) error {
-		return c.Redirect(http.StatusFound, "/ui/queue")
+		return c.Redirect(http.StatusFound, "/ui/wi")
 	})
 	e.GET("/ui/login", handleUILoginGet(tmpl))
 	e.POST("/ui/login", handleUILoginPost(pool, sm, tmpl))

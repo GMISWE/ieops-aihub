@@ -7,9 +7,10 @@ package server
 // router_auth_test.go) injects a fully-formed UserContext.
 //
 // Tests exercise:
-//   - the no-projects-accessible hint
-//   - happy path: all six LCRS section headings present
-//   - partial endpoint omits layout chrome
+//   - the /ui/queue full page now 302-redirects to /ui/wi (the queue is
+//     embedded there as a collapsible block)
+//   - the redirect preserves ?project=
+//   - partial endpoint renders all six LCRS sections + omits layout chrome
 //   - the /ui/queue route is wired correctly on a real echo group
 
 import (
@@ -109,97 +110,46 @@ func newQueueRequest(t *testing.T, target string, uc *UserContext) (echo.Context
 	return c, rec
 }
 
-func TestUIQueue_NoProjectAccess_RendersHint(t *testing.T) {
-	// No DB calls expected — but override anyway in case the guard fails.
-	defer withQueueFnOverride(fixtureQueue())()
-
-	tmpl := pageTemplate("queue.html.tmpl", "queue_section.html.tmpl")
+// TestUIQueue_Redirects_NoProject asserts that GET /ui/queue (no ?project=)
+// 302-redirects to the bare /ui/wi list page. No DB call, no user needed for
+// the redirect itself.
+func TestUIQueue_Redirects_NoProject(t *testing.T) {
 	c, rec := newQueueRequest(t, "/ui/queue", userNoProjects())
 
-	if err := handleUIQueue(nil, tmpl)(c); err != nil {
+	if err := handleUIQueue()(c); err != nil {
 		t.Fatalf("handler returned error: %v", err)
 	}
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "no projects accessible") {
-		t.Errorf("body missing 'no projects accessible' hint: %s", body)
-	}
-	if !strings.Contains(body, "<!DOCTYPE html>") {
-		t.Errorf("full page should include <!DOCTYPE html> chrome")
+	if loc := rec.Header().Get("Location"); loc != "/ui/wi" {
+		t.Errorf("Location: got %q, want /ui/wi", loc)
 	}
 }
 
-func TestUIQueue_RendersSixSections(t *testing.T) {
-	defer withQueueFnOverride(fixtureQueue())()
-
-	tmpl := pageTemplate("queue.html.tmpl", "queue_section.html.tmpl")
+// TestUIQueue_Redirects_PreservesProject asserts that ?project= is carried
+// through to the /ui/wi redirect target so bookmarks keep working.
+func TestUIQueue_Redirects_PreservesProject(t *testing.T) {
 	c, rec := newQueueRequest(t, "/ui/queue?project=testproject", userWithProjects("testproject"))
 
-	if err := handleUIQueue(nil, tmpl)(c); err != nil {
+	if err := handleUIQueue()(c); err != nil {
 		t.Fatalf("handler returned error: %v", err)
 	}
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
-	body := rec.Body.String()
-
-	wantSections := []string{
-		"Running",
-		"Items",
-		"Needs you",
-		"Stalled",
-		"Paused",
-		"Unclassified",
-	}
-	for _, s := range wantSections {
-		if !strings.Contains(body, s) {
-			t.Errorf("body missing section heading %q", s)
-		}
-	}
-
-	// Spot check that fixture entries actually landed.
-	wantSlugs := []string{"running-one", "items-one", "needs-human-one", "stalled-one", "paused-one", "unc-one"}
-	for _, s := range wantSlugs {
-		if !strings.Contains(body, s) {
-			t.Errorf("body missing fixture slug %q", s)
-		}
+	if loc := rec.Header().Get("Location"); loc != "/ui/wi?project=testproject" {
+		t.Errorf("Location: got %q, want /ui/wi?project=testproject", loc)
 	}
 }
 
-// TestUIQueue_AccessDenied_RendersError guards the access-denied branch of
-// queue.html.tmpl. A writer who requests a project they are not a member of
-// hits the AccessDenied path, which once carried a 3-arg `default` call
-// ({{.Project | default "x" .Project}}) that panics the template executor.
-func TestUIQueue_AccessDenied_RendersError(t *testing.T) {
+// TestUIQueuePartial_RendersSixSections_NoLayout asserts the partial endpoint
+// renders all six LCRS sections (the coverage that used to live on the full
+// page) and omits layout chrome so htmx can innerHTML-swap it.
+func TestUIQueuePartial_RendersSixSections_NoLayout(t *testing.T) {
 	defer withQueueFnOverride(fixtureQueue())()
 
-	tmpl := pageTemplate("queue.html.tmpl", "queue_section.html.tmpl")
-	// Member of "testproject", but asks for one they can't see.
-	c, rec := newQueueRequest(t, "/ui/queue?project=forbidden-project", userWithProjects("testproject"))
-
-	if err := handleUIQueue(nil, tmpl)(c); err != nil {
-		t.Fatalf("handler returned error: %v", err)
-	}
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d (body: %s)", rec.Code, rec.Body.String())
-	}
-	body := rec.Body.String()
-	if strings.Contains(body, "template error") {
-		t.Fatalf("template execution error in access-denied branch: %s", body)
-	}
-	if !strings.Contains(body, "no access to project forbidden-project") {
-		t.Errorf("body missing access-denied message: %s", body)
-	}
-}
-
-func TestUIQueuePartial_NoLayout_NoDoctype(t *testing.T) {
-	defer withQueueFnOverride(fixtureQueue())()
-
-	tmpl := pageTemplate("queue.html.tmpl", "queue_section.html.tmpl")
+	tmpl := partialTemplate("queue_section.html.tmpl")
 	c, rec := newQueueRequest(t, "/ui/queue/partial?project=testproject", userWithProjects("testproject"))
 
 	if err := handleUIQueuePartial(nil, tmpl)(c); err != nil {
@@ -216,8 +166,20 @@ func TestUIQueuePartial_NoLayout_NoDoctype(t *testing.T) {
 	if strings.Contains(body, "<html") {
 		t.Errorf("partial should NOT include <html>; got:\n%s", body)
 	}
-	if !strings.Contains(body, "Running") {
-		t.Errorf("partial missing section heading 'Running'")
+
+	wantSections := []string{"Running", "Items", "Needs you", "Stalled", "Paused", "Unclassified"}
+	for _, s := range wantSections {
+		if !strings.Contains(body, s) {
+			t.Errorf("partial missing section heading %q", s)
+		}
+	}
+
+	// Spot check that fixture entries actually landed.
+	wantSlugs := []string{"running-one", "items-one", "needs-human-one", "stalled-one", "paused-one", "unc-one"}
+	for _, s := range wantSlugs {
+		if !strings.Contains(body, s) {
+			t.Errorf("partial missing fixture slug %q", s)
+		}
 	}
 }
 
@@ -243,11 +205,11 @@ func TestUIQueueRoute_Mounted(t *testing.T) {
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /ui/queue: expected 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusFound {
+		t.Fatalf("GET /ui/queue: expected 302, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "Ready queue") {
-		t.Errorf("expected 'Ready queue' heading in body, got:\n%s", rec.Body.String())
+	if loc := rec.Header().Get("Location"); loc != "/ui/wi?project=testproject" {
+		t.Errorf("expected redirect to /ui/wi?project=testproject, got %q", loc)
 	}
 
 	// Partial endpoint should also be wired.

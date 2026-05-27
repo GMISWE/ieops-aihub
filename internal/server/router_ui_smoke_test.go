@@ -20,7 +20,7 @@ import (
 	"testing"
 )
 
-func TestUIRoutes_RootRedirectsToQueue(t *testing.T) {
+func TestUIRoutes_RootRedirectsToWI(t *testing.T) {
 	e := NewRouter(nil, []byte("smoke-test-secret"))
 
 	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
@@ -30,8 +30,8 @@ func TestUIRoutes_RootRedirectsToQueue(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("GET /ui/: expected 302, got %d", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); loc != "/ui/queue" {
-		t.Fatalf("GET /ui/: expected redirect to /ui/queue, got %q", loc)
+	if loc := rec.Header().Get("Location"); loc != "/ui/wi" {
+		t.Fatalf("GET /ui/: expected redirect to /ui/wi, got %q", loc)
 	}
 }
 

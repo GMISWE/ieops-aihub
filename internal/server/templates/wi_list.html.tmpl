@@ -1,17 +1,18 @@
 {{define "content"}}
 <section class="pf-page-header">
-  <h1>Work items{{if .Project}}: <span class="pf-wi-proj">{{.Project}}</span>{{end}}</h1>
+  <h1>Work items: <span class="pf-wi-proj">{{if .AllMode}}all projects{{else}}{{or .Project "—"}}{{end}}</span></h1>
   <span class="pf-meta">{{len .Items}} shown · limit {{.Limit}}</span>
 </section>
 
 <form method="GET" action="/ui/wi" class="pf-filter-bar pf-wi-filters">
   <label>Project:
     <select name="project" onchange="this.form.submit()">
-      {{if not .ProjectsAvailable}}
-        <option value="{{.Project}}">{{or .Project "(none)"}}</option>
+      <option value="__all__" {{if .AllMode}}selected{{end}}>(all projects)</option>
+      {{if and (not .ProjectsAvailable) (not .AllMode)}}
+        <option value="{{.Project}}" selected>{{or .Project "(none)"}}</option>
       {{end}}
       {{range .ProjectsAvailable}}
-        <option value="{{.}}" {{if eq . $.Project}}selected{{end}}>{{.}}</option>
+        <option value="{{.}}" {{if and (not $.AllMode) (eq . $.Project)}}selected{{end}}>{{.}}</option>
       {{end}}
     </select>
   </label>
@@ -38,12 +39,22 @@
     </select>
   </label>
   <label>Owner:
-    <input type="text" name="owner" value="{{.Owner}}" placeholder="display name" size="14">
+    <select name="owner" onchange="this.form.submit()">
+      <option value="" {{if eq .Owner ""}}selected{{end}}>any</option>
+      {{range .OwnerOptions}}
+        <option value="{{.}}" {{if eq . $.Owner}}selected{{end}}>{{.}}</option>
+      {{end}}
+    </select>
   </label>
   <label>Reporter:
-    <input type="text" name="reporter" value="{{.Reporter}}" placeholder="display name" size="14">
+    <select name="reporter" onchange="this.form.submit()">
+      <option value="" {{if eq .Reporter ""}}selected{{end}}>any</option>
+      {{range .ReporterOptions}}
+        <option value="{{.}}" {{if eq . $.Reporter}}selected{{end}}>{{.}}</option>
+      {{end}}
+    </select>
   </label>
-  <button type="submit">Apply</button>
+  <noscript><button type="submit">Apply</button></noscript>
 </form>
 
 {{if .Err}}<div class="pf-err">{{.Err}}</div>{{end}}
@@ -52,6 +63,7 @@
   <thead>
     <tr>
       <th>Slug</th>
+      {{if .AllMode}}<th>Project</th>{{end}}
       <th>Kind</th>
       <th>Priority</th>
       <th>Status</th>
@@ -64,6 +76,7 @@
     {{range .Items}}
     <tr>
       <td><a href="{{wiref (or .Slug .ID)}}"><code>{{or .Slug .ID}}</code></a></td>
+      {{if $.AllMode}}<td><code>{{.Project}}</code></td>{{end}}
       <td>{{if .WIType}}<span class="pf-badge pf-badge-type-{{.WIType}}">{{.WIType}}</span>{{else}}<span class="pf-empty">—</span>{{end}}</td>
       <td><span class="pf-badge pf-badge-priority-{{or .Priority "normal"}}">{{or .Priority "normal"}}</span></td>
       <td><span class="pf-badge pf-badge-status-{{.Status}}">{{.Status}}</span></td>
@@ -72,7 +85,7 @@
       <td>{{or .ReporterDisplay "—"}}</td>
     </tr>
     {{else}}
-    <tr><td colspan="7" class="pf-empty">No work items match the current filters.</td></tr>
+    <tr><td colspan="{{if .AllMode}}8{{else}}7{{end}}" class="pf-empty">No work items match the current filters.</td></tr>
     {{end}}
   </tbody>
 </table>

@@ -85,13 +85,13 @@ type UpdateWorkItemRequest struct {
 
 // ReadyQueue is the six-segment LCRS response for GET /v1/work_items/ready.
 type ReadyQueue struct {
-	Items              []ReadyItem    `json:"items"`
-	Running            []RunningItem  `json:"running"`
-	Stalled            []StalledItem  `json:"stalled"`
-	Paused             []PausedItem   `json:"paused"`
-	NeedsHumanSession  []ReadyItem    `json:"needs_human_session"`
-	Unclassified       []ReadyItem    `json:"unclassified"`
-	StaleRunning       []RunningItem  `json:"stale_running,omitempty"`
+	Items             []ReadyItem   `json:"items"`
+	Running           []RunningItem `json:"running"`
+	Stalled           []StalledItem `json:"stalled"`
+	Paused            []PausedItem  `json:"paused"`
+	NeedsHumanSession []ReadyItem   `json:"needs_human_session"`
+	Unclassified      []ReadyItem   `json:"unclassified"`
+	StaleRunning      []RunningItem `json:"stale_running,omitempty"`
 }
 
 // ReadyItem is a work item in the items/needs_human_session/unclassified segments.
@@ -107,27 +107,27 @@ type ReadyItem struct {
 
 // RunningItem is a work item in the running segment.
 type RunningItem struct {
-	ID           string  `json:"id"`
-	Slug         string  `json:"slug"`
-	Goal         string  `json:"goal"`
-	OwnerDisplay string  `json:"owner_display"`
-	LastActiveAt string  `json:"last_active_at"`
+	ID           string `json:"id"`
+	Slug         string `json:"slug"`
+	Goal         string `json:"goal"`
+	OwnerDisplay string `json:"owner_display"`
+	LastActiveAt string `json:"last_active_at"`
 }
 
 // StalledItem is a work item in the stalled segment.
 type StalledItem struct {
-	ID              string `json:"id"`
-	Slug            string `json:"slug"`
-	StallReason     string `json:"stall_reason"`
-	StalledSince    string `json:"stalled_since"`
+	ID               string `json:"id"`
+	Slug             string `json:"slug"`
+	StallReason      string `json:"stall_reason"`
+	StalledSince     string `json:"stalled_since"`
 	LastActorDisplay string `json:"last_actor_display"`
 }
 
 // PausedItem is a work item in the paused segment.
 type PausedItem struct {
-	ID              string `json:"id"`
-	Slug            string `json:"slug"`
-	PausedSince     string `json:"paused_since"`
+	ID               string `json:"id"`
+	Slug             string `json:"slug"`
+	PausedSince      string `json:"paused_since"`
 	LastActorDisplay string `json:"last_actor_display"`
 }
 
@@ -484,20 +484,21 @@ func GetWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string) (*Wor
 
 // ListWorkItemsFilter holds optional filters for ListWorkItems.
 type ListWorkItemsFilter struct {
-	Status          []string
-	WIType          *string
-	Priority        *string
-	Milestone       *string
-	Label           *string
-	UserID          *string // reporter user_id exact match (legacy)
-	ReporterDisplay *string // case-insensitive contains on wi.reporter_display
-	OwnerDisplay    *string // case-insensitive contains on run_attempts.actor_display (current attempt)
-	Source          *string
-	ReadyOnly       bool
-	IDs             []string
-	Since           *time.Time
-	Limit           int
-	Cursor          *string
+	Status             []string
+	WIType             *string
+	Priority           *string
+	Milestone          *string
+	Label              *string
+	UserID             *string  // reporter user_id exact match (legacy)
+	ReporterDisplay    *string  // case-insensitive contains on wi.reporter_display
+	OwnerDisplay       *string  // case-insensitive contains on run_attempts.actor_display (current attempt)
+	AccessibleProjects []string // project allow-list for "view all" when project arg is ""
+	Source             *string
+	ReadyOnly          bool
+	IDs                []string
+	Since              *time.Time
+	Limit              int
+	Cursor             *string
 }
 
 // ListWorkItemsResult holds paginated results.
@@ -506,15 +507,32 @@ type ListWorkItemsResult struct {
 	NextCursor *string     `json:"next_cursor"`
 }
 
-// ListWorkItems returns a paginated list of work items for a project.
+// ListWorkItems returns a paginated list of work items.
+//
+// Project scoping:
+//   - project != ""              → single project (WHERE wi.project = $project)
+//   - project == "" + AccessibleProjects set → scope to those projects
+//     (WHERE wi.project = ANY(...)), used by the "view all" UI option for a
+//     non-admin caller
+//   - project == "" + AccessibleProjects empty → no project clause at all
+//     (admin "view all" across every project)
 func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f ListWorkItemsFilter) (*ListWorkItemsResult, *AihubError) {
 	if f.Limit <= 0 || f.Limit > 200 {
 		f.Limit = 50
 	}
 
-	args := []any{project}
-	conds := []string{"wi.project = $1"}
-	argIdx := 2
+	args := []any{}
+	conds := []string{}
+	argIdx := 1
+	if project != "" {
+		conds = append(conds, fmt.Sprintf("wi.project = $%d", argIdx))
+		args = append(args, project)
+		argIdx++
+	} else if len(f.AccessibleProjects) > 0 {
+		conds = append(conds, fmt.Sprintf("wi.project = ANY($%d)", argIdx))
+		args = append(args, f.AccessibleProjects)
+		argIdx++
+	}
 
 	if len(f.Status) > 0 {
 		conds = append(conds, fmt.Sprintf("wi.status = ANY($%d)", argIdx))
@@ -566,7 +584,10 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 		// argIdx not incremented: last optional clause, kept symmetric for future filters
 	}
 
-	where := "WHERE " + strings.Join(conds, " AND ")
+	where := ""
+	if len(conds) > 0 {
+		where = "WHERE " + strings.Join(conds, " AND ")
+	}
 	query := fmt.Sprintf(`
 		SELECT wi.id, wi.seq, wi.slug, wi.project, wi.scenario, wi.goal, wi.source,
 			   wi.wi_type, wi.priority, wi.requires_human_session, wi.milestone, wi.labels,

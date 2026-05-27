@@ -31,6 +31,8 @@ type repoEntry struct {
 	TechStack       []string
 	MainModules     []repoModuleEntry
 	ChangeScenarios []string
+	GeneratedAt     string
+	GeneratedCommit string
 }
 
 // hasStructuredDesc reports whether the structured description block is present.
@@ -56,6 +58,8 @@ type serverRepoEntry struct {
 	TechStack       []string          `json:"tech_stack,omitempty"`
 	MainModules     []repoModuleEntry `json:"main_modules,omitempty"`
 	ChangeScenarios []string          `json:"change_scenarios,omitempty"`
+	GeneratedAt     string            `json:"generated_at,omitempty"`
+	GeneratedCommit string            `json:"generated_commit,omitempty"`
 }
 
 // serverProject mirrors the JSON response shape from GET /v1/projects.
@@ -117,6 +121,8 @@ func repoEntriesFromServer(repos []serverRepoEntry) []repoEntry {
 			TechStack:       r.TechStack,
 			MainModules:     r.MainModules,
 			ChangeScenarios: r.ChangeScenarios,
+			GeneratedAt:     r.GeneratedAt,
+			GeneratedCommit: r.GeneratedCommit,
 		})
 	}
 	return entries
@@ -947,7 +953,7 @@ func renderRepoBlock(sb *strings.Builder, r repoEntry) {
 	default:
 		headline = "*(description pending — run /pf-init to generate)*"
 	}
-	fmt.Fprintf(sb, "- **%s** — %s\n", r.Name, headline)
+	fmt.Fprintf(sb, "- **%s**: %s\n", r.Name, headline)
 
 	if !r.hasStructuredDesc() {
 		return
@@ -960,18 +966,47 @@ func renderRepoBlock(sb *strings.Builder, r repoEntry) {
 		fmt.Fprintf(sb, "  - stack: %s\n", strings.Join(stack, ", "))
 	}
 	if len(r.MainModules) > 0 {
-		mods := make([]string, 0, len(r.MainModules))
+		// Nested sub-list (one bullet per module) — far more scannable than a
+		// long semicolon-joined line when a repo has many modules.
+		sb.WriteString("  - modules:\n")
 		for _, m := range r.MainModules {
-			mods = append(mods, fmt.Sprintf("%s (%s)", oneLine(m.Path), oneLine(m.Role)))
+			fmt.Fprintf(sb, "    - %s — %s\n", oneLine(m.Path), oneLine(m.Role))
 		}
-		fmt.Fprintf(sb, "  - modules: %s\n", strings.Join(mods, "; "))
 	}
 	if len(r.ChangeScenarios) > 0 {
-		changes := make([]string, 0, len(r.ChangeScenarios))
+		// Nested sub-list, matching the modules style (a semicolon-joined line
+		// clashes with the surrounding bullet layout).
+		sb.WriteString("  - changes:\n")
 		for _, c := range r.ChangeScenarios {
-			changes = append(changes, oneLine(c))
+			fmt.Fprintf(sb, "    - %s\n", oneLine(c))
 		}
-		fmt.Fprintf(sb, "  - changes: %s\n", strings.Join(changes, "; "))
+	}
+	if line := generatedLine(r); line != "" {
+		fmt.Fprintf(sb, "  - generated: %s\n", line)
+	}
+}
+
+// generatedLine formats the freshness metadata as "<date> @ <short-sha>", using
+// whichever parts are present. generated_at is an RFC3339 timestamp (we keep the
+// date), generated_commit is a full SHA (we shorten to 7 chars).
+func generatedLine(r repoEntry) string {
+	date := r.GeneratedAt
+	if len(date) >= 10 {
+		date = date[:10] // YYYY-MM-DD from RFC3339
+	}
+	commit := r.GeneratedCommit
+	if len(commit) > 7 {
+		commit = commit[:7]
+	}
+	switch {
+	case date != "" && commit != "":
+		return date + " @ " + commit
+	case date != "":
+		return date
+	case commit != "":
+		return "@ " + commit
+	default:
+		return ""
 	}
 }
 

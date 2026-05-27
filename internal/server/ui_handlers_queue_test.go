@@ -170,6 +170,32 @@ func TestUIQueue_RendersSixSections(t *testing.T) {
 	}
 }
 
+// TestUIQueue_AccessDenied_RendersError guards the access-denied branch of
+// queue.html.tmpl. A writer who requests a project they are not a member of
+// hits the AccessDenied path, which once carried a 3-arg `default` call
+// ({{.Project | default "x" .Project}}) that panics the template executor.
+func TestUIQueue_AccessDenied_RendersError(t *testing.T) {
+	defer withQueueFnOverride(fixtureQueue())()
+
+	tmpl := pageTemplate("queue.html.tmpl", "queue_section.html.tmpl")
+	// Member of "testproject", but asks for one they can't see.
+	c, rec := newQueueRequest(t, "/ui/queue?project=forbidden-project", userWithProjects("testproject"))
+
+	if err := handleUIQueue(nil, tmpl)(c); err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "template error") {
+		t.Fatalf("template execution error in access-denied branch: %s", body)
+	}
+	if !strings.Contains(body, "no access to project forbidden-project") {
+		t.Errorf("body missing access-denied message: %s", body)
+	}
+}
+
 func TestUIQueuePartial_NoLayout_NoDoctype(t *testing.T) {
 	defer withQueueFnOverride(fixtureQueue())()
 

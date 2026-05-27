@@ -43,6 +43,10 @@ var listEventsFn = domain.ListEvents
 // artifacts associated with a work item.
 var recallFn = domain.Recall
 
+// fetchWIFacetsFn is the package-level seam for tests so the list handler can
+// run without a live pool. Defaults to the real distinct-facet query.
+var fetchWIFacetsFn = fetchWIFacets
+
 // validWIStatuses enumerates the values accepted in the ?status= filter.
 // The empty string maps to "active" = queued + running + paused + blocked.
 var validWIStatuses = map[string]bool{
@@ -56,16 +60,20 @@ var validWIStatuses = map[string]bool{
 
 // validWIKinds enumerates the values accepted in the ?kind= filter.
 var validWIKinds = map[string]bool{
-	"feature":       true,
-	"fix_bug":       true,
-	"chore":         true,
-	"refactor":      true,
-	"critical_bug":  true,
-	"release":       true,
+	"feature":      true,
+	"fix_bug":      true,
+	"chore":        true,
+	"refactor":     true,
+	"critical_bug": true,
+	"release":      true,
 }
 
 // activeStatuses is the default status set when no ?status= filter is set.
 var activeStatuses = []string{"queued", "running", "paused", "blocked"}
+
+// allProjectsSentinel is the ?project= value that selects the cross-project
+// "view all" mode on the wi list.
+const allProjectsSentinel = "__all__"
 
 // wiListPageData is the data passed to wi_list.html.tmpl.
 type wiListPageData struct {
@@ -74,10 +82,13 @@ type wiListPageData struct {
 	User              *UserContext
 	Project           string
 	ProjectsAvailable []string
+	AllMode           bool // true when viewing across all accessible projects
 	Status            string
 	Kind              string
 	Reporter          string
 	Owner             string
+	ReporterOptions   []string // distinct reporter display names for the filter dropdown
+	OwnerOptions      []string // distinct owner display names for the filter dropdown
 	Limit             int
 	Items             []*wiListRow
 	Err               string
@@ -104,13 +115,13 @@ type wiDetailPageData struct {
 	Active         string
 	User           *UserContext
 	WI             *domain.WorkItem
-	WIType         string     // flattened *WI.WIType
-	Content        string     // flattened *WI.Content for direct template access
-	Milestone      string     // flattened *WI.Milestone
-	AttemptID      string     // flattened *WI.CurrentAttemptID
-	OwnerDisplay   string     // run_attempts.actor_display of current attempt, "" if none
-	OwnerActive    time.Time  // run_attempts.last_active_at of current attempt
-	OwnerHasActive bool       // true when OwnerActive is meaningful (non-zero)
+	WIType         string    // flattened *WI.WIType
+	Content        string    // flattened *WI.Content for direct template access
+	Milestone      string    // flattened *WI.Milestone
+	AttemptID      string    // flattened *WI.CurrentAttemptID
+	OwnerDisplay   string    // run_attempts.actor_display of current attempt, "" if none
+	OwnerActive    time.Time // run_attempts.last_active_at of current attempt
+	OwnerHasActive bool      // true when OwnerActive is meaningful (non-zero)
 	Dependencies   *depView
 	Events         []eventView
 	Artifacts      []artifactLink
@@ -212,11 +223,20 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		projects := availableProjectsForUI(ctx, pool, u)
 		data.ProjectsAvailable = projects
 
-		project := strings.TrimSpace(c.QueryParam("project"))
-		if project == "" && len(projects) > 0 {
+		// project resolution:
+		//   "__all__"  → view across every project the caller can see
+		//   ""         → default to first available
+		//   "<name>"   → single project
+		projectParam := strings.TrimSpace(c.QueryParam("project"))
+		allMode := projectParam == allProjectsSentinel
+		project := projectParam
+		if allMode {
+			project = allProjectsSentinel // keep sentinel for the template's selected-option check
+		} else if project == "" && len(projects) > 0 {
 			project = projects[0]
 		}
 		data.Project = project
+		data.AllMode = allMode
 
 		// Filter params.
 		statusParam := strings.TrimSpace(c.QueryParam("status"))
@@ -245,21 +265,14 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		}
 		data.Limit = limit
 
-		// No project = no listing — the dropdown still renders so the user can
-		// pick one. (Same pattern as the queue page.)
+		// No project selected (and not view-all) = no listing yet — the
+		// dropdown still renders so the user can pick one.
 		if project == "" {
 			if u.Role != "admin" && len(projects) == 0 {
 				data.Err = "no projects accessible — ask an admin to add you to a project."
 			} else {
 				data.Err = "select a project to view work items."
 			}
-			return renderTemplate(c, tmpl, "layout", data)
-		}
-
-		// Access check before hitting the DB so we don't leak the existence of
-		// the project to a caller who doesn't have access. (Admin bypasses.)
-		if err := checkProjectAccessSoft(u, project); err != nil {
-			data.Err = err.Error()
 			return renderTemplate(c, tmpl, "layout", data)
 		}
 
@@ -279,7 +292,34 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 			filter.OwnerDisplay = &ownerParam
 		}
 
-		res, aerr := listWorkItemsFn(ctx, pool, project, filter)
+		// queryProject is what we hand to the domain layer: "" in view-all
+		// mode (so it scopes by AccessibleProjects), else the single project.
+		// facetScope is the project set used to populate the filter dropdowns.
+		queryProject := project
+		var facetScope []string
+		if allMode {
+			queryProject = ""
+			if u.Role != "admin" {
+				// non-admin view-all is bounded to their member projects
+				filter.AccessibleProjects = projects
+				facetScope = projects
+			}
+			// admin view-all: AccessibleProjects empty + facetScope nil = every project
+		} else {
+			// single project — access check (admin bypasses)
+			if err := checkProjectAccessSoft(u, project); err != nil {
+				data.Err = err.Error()
+				return renderTemplate(c, tmpl, "layout", data)
+			}
+			facetScope = []string{project}
+		}
+
+		// Populate filter dropdown options for the current scope.
+		facets := fetchWIFacetsFn(ctx, pool, facetScope)
+		data.ReporterOptions = facets.Reporters
+		data.OwnerOptions = facets.Owners
+
+		res, aerr := listWorkItemsFn(ctx, pool, queryProject, filter)
 		if aerr != nil {
 			data.Err = aerr.Message
 			return renderTemplate(c, tmpl, "layout", data)

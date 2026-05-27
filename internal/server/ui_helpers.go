@@ -32,6 +32,60 @@ func fetchAttemptOwner(ctx context.Context, pool *pgxpool.Pool, attemptID string
 	return out
 }
 
+// wiFacets holds the distinct reporter / owner display names available within
+// a set of projects, used to populate the wi-list filter dropdowns.
+type wiFacets struct {
+	Reporters []string
+	Owners    []string
+}
+
+// fetchWIFacets returns the sorted distinct reporter_display and current-attempt
+// owner (run_attempts.actor_display) values across the given projects. An empty
+// projects slice means "all projects" (admin view-all). Errors degrade to empty
+// lists so the filter dropdowns simply show no options rather than 500ing.
+func fetchWIFacets(ctx context.Context, pool *pgxpool.Pool, projects []string) wiFacets {
+	var f wiFacets
+	if pool == nil {
+		return f
+	}
+
+	repWhere, ownWhere := "", ""
+	args := []any{}
+	if len(projects) > 0 {
+		repWhere = "WHERE project = ANY($1) AND reporter_display <> ''"
+		ownWhere = "WHERE wi.project = ANY($1) AND ra.actor_display <> ''"
+		args = append(args, projects)
+	} else {
+		repWhere = "WHERE reporter_display <> ''"
+		ownWhere = "WHERE ra.actor_display <> ''"
+	}
+
+	if rows, err := pool.Query(ctx,
+		`SELECT DISTINCT reporter_display FROM work_items `+repWhere+` ORDER BY 1`, args...); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var s string
+			if rows.Scan(&s) == nil {
+				f.Reporters = append(f.Reporters, s)
+			}
+		}
+	}
+
+	if rows, err := pool.Query(ctx,
+		`SELECT DISTINCT ra.actor_display
+		 FROM run_attempts ra JOIN work_items wi ON wi.current_attempt_id = ra.id `+ownWhere+` ORDER BY 1`, args...); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var s string
+			if rows.Scan(&s) == nil {
+				f.Owners = append(f.Owners, s)
+			}
+		}
+	}
+
+	return f
+}
+
 // fetchAttemptOwners is the batched form of fetchAttemptOwner for use on the
 // wi list page, which would otherwise issue N+1 queries.
 func fetchAttemptOwners(ctx context.Context, pool *pgxpool.Pool, attemptIDs []string) map[string]attemptOwner {

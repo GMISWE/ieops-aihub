@@ -7,23 +7,23 @@ type ErrCode string
 
 const (
 	// HTTP 400
-	ErrBadRequest              ErrCode = "BAD_REQUEST"
-	ErrGoalMultiline           ErrCode = "GOAL_MULTILINE"
-	ErrGoalChangeNotAllowed    ErrCode = "GOAL_CHANGE_NOT_ALLOWED"
-	ErrInvalidPhaseYAML        ErrCode = "INVALID_PHASE_YAML"
-	ErrInvalidStepTransition   ErrCode = "INVALID_STEP_TRANSITION"
-	ErrProjectAmbiguous        ErrCode = "PROJECT_AMBIGUOUS"
-	ErrWITypeMismatch          ErrCode = "WI_TYPE_MISMATCH"
-	ErrInvalidMemoryType       ErrCode = "INVALID_MEMORY_TYPE"
+	ErrBadRequest            ErrCode = "BAD_REQUEST"
+	ErrGoalMultiline         ErrCode = "GOAL_MULTILINE"
+	ErrGoalChangeNotAllowed  ErrCode = "GOAL_CHANGE_NOT_ALLOWED"
+	ErrInvalidPhaseYAML      ErrCode = "INVALID_PHASE_YAML"
+	ErrInvalidStepTransition ErrCode = "INVALID_STEP_TRANSITION"
+	ErrProjectAmbiguous      ErrCode = "PROJECT_AMBIGUOUS"
+	ErrWITypeMismatch        ErrCode = "WI_TYPE_MISMATCH"
+	ErrInvalidMemoryType     ErrCode = "INVALID_MEMORY_TYPE"
 
 	// HTTP 401
-	ErrUnauthorized      ErrCode = "UNAUTHORIZED"
-	ErrStaleCredential   ErrCode = "STALE_LOCAL_CREDENTIAL"
+	ErrUnauthorized    ErrCode = "UNAUTHORIZED"
+	ErrStaleCredential ErrCode = "STALE_LOCAL_CREDENTIAL"
 
 	// HTTP 403
-	ErrForbidden                  ErrCode = "FORBIDDEN"
-	ErrAttemptMismatch            ErrCode = "ATTEMPT_MISMATCH"
-	ErrWIReclassifyForbidden      ErrCode = "WI_RECLASSIFY_FORBIDDEN"
+	ErrForbidden             ErrCode = "FORBIDDEN"
+	ErrAttemptMismatch       ErrCode = "ATTEMPT_MISMATCH"
+	ErrWIReclassifyForbidden ErrCode = "WI_RECLASSIFY_FORBIDDEN"
 
 	// HTTP 404
 	ErrNotFound ErrCode = "NOT_FOUND"
@@ -32,21 +32,21 @@ const (
 	ErrNotImplemented ErrCode = "NOT_IMPLEMENTED"
 
 	// HTTP 409
-	ErrConflictEpochMismatch            ErrCode = "CONFLICT_EPOCH_MISMATCH"
-	ErrConflictStepInProgress           ErrCode = "CONFLICT_STEP_IN_PROGRESS"
-	ErrConflictStepAttemptMismatch      ErrCode = "CONFLICT_STEP_ATTEMPT_MISMATCH"
-	ErrConflictCASFailed                ErrCode = "CONFLICT_CAS_FAILED"
-	ErrConflictWIAlreadyClaimed         ErrCode = "CONFLICT_WI_ALREADY_CLAIMED"
-	ErrConflictHardBlock                ErrCode = "CONFLICT_HARD_BLOCK"
-	ErrConflictDuplicate                ErrCode = "CONFLICT_DUPLICATE"
-	ErrConflictCandidates               ErrCode = "CONFLICT_CANDIDATES"
-	ErrConflictSimilarMemory            ErrCode = "CONFLICT_SIMILAR_MEMORY"
-	ErrConflictDependencyCycle          ErrCode = "CONFLICT_DEPENDENCY_CYCLE"
-	ErrConflictLockTaken                ErrCode = "CONFLICT_LOCK_TAKEN"
-	ErrConflictDualWIAgent              ErrCode = "CONFLICT_DUAL_WI_AGENT"
-	ErrRequiresHumanSessionMismatch     ErrCode = "REQUIRES_HUMAN_SESSION_MISMATCH"
-	ErrConflictVersionMismatch          ErrCode = "CONFLICT_VERSION_MISMATCH"
-	ErrConflictTerminalState            ErrCode = "CONFLICT_TERMINAL_STATE"
+	ErrConflictEpochMismatch        ErrCode = "CONFLICT_EPOCH_MISMATCH"
+	ErrConflictStepInProgress       ErrCode = "CONFLICT_STEP_IN_PROGRESS"
+	ErrConflictStepAttemptMismatch  ErrCode = "CONFLICT_STEP_ATTEMPT_MISMATCH"
+	ErrConflictCASFailed            ErrCode = "CONFLICT_CAS_FAILED"
+	ErrConflictWIAlreadyClaimed     ErrCode = "CONFLICT_WI_ALREADY_CLAIMED"
+	ErrConflictHardBlock            ErrCode = "CONFLICT_HARD_BLOCK"
+	ErrConflictDuplicate            ErrCode = "CONFLICT_DUPLICATE"
+	ErrConflictCandidates           ErrCode = "CONFLICT_CANDIDATES"
+	ErrConflictSimilarMemory        ErrCode = "CONFLICT_SIMILAR_MEMORY"
+	ErrConflictDependencyCycle      ErrCode = "CONFLICT_DEPENDENCY_CYCLE"
+	ErrConflictLockTaken            ErrCode = "CONFLICT_LOCK_TAKEN"
+	ErrConflictDualWIAgent          ErrCode = "CONFLICT_DUAL_WI_AGENT"
+	ErrRequiresHumanSessionMismatch ErrCode = "REQUIRES_HUMAN_SESSION_MISMATCH"
+	ErrConflictVersionMismatch      ErrCode = "CONFLICT_VERSION_MISMATCH"
+	ErrConflictTerminalState        ErrCode = "CONFLICT_TERMINAL_STATE"
 
 	// HTTP 412
 	ErrPreconditionFailed ErrCode = "PRECONDITION_FAILED"
@@ -62,15 +62,16 @@ const (
 	ErrAihubUnavailable   ErrCode = "AIHUB_UNAVAILABLE"
 
 	// Projects
-	ErrProjectNotFound          ErrCode = "PROJECT_NOT_FOUND"
-	ErrProjectAlreadyExists     ErrCode = "PROJECT_ALREADY_EXISTS"
-	ErrProjectNameInvalid       ErrCode = "PROJECT_NAME_INVALID"
-	ErrProjectAccessDenied      ErrCode = "PROJECT_ACCESS_DENIED"
-	ErrProjectOwnerRequired     ErrCode = "PROJECT_OWNER_REQUIRED"
-	ErrProjectHasWorkItems      ErrCode = "PROJECT_HAS_WORK_ITEMS"
-	ErrRepoDuplicateName        ErrCode = "REPO_DUPLICATE_NAME"
-	ErrRepoDuplicateURL         ErrCode = "REPO_DUPLICATE_URL"
-	ErrInvalidProjectIdentifier ErrCode = "INVALID_PROJECT_IDENTIFIER"
+	ErrProjectNotFound           ErrCode = "PROJECT_NOT_FOUND"
+	ErrProjectAlreadyExists      ErrCode = "PROJECT_ALREADY_EXISTS"
+	ErrProjectNameInvalid        ErrCode = "PROJECT_NAME_INVALID"
+	ErrProjectAccessDenied       ErrCode = "PROJECT_ACCESS_DENIED"
+	ErrProjectOwnerRequired      ErrCode = "PROJECT_OWNER_REQUIRED"
+	ErrProjectHasWorkItems       ErrCode = "PROJECT_HAS_WORK_ITEMS"
+	ErrRepoDuplicateName         ErrCode = "REPO_DUPLICATE_NAME"
+	ErrRepoDuplicateURL          ErrCode = "REPO_DUPLICATE_URL"
+	ErrRepoIncompleteDescription ErrCode = "REPO_INCOMPLETE_DESCRIPTION"
+	ErrInvalidProjectIdentifier  ErrCode = "INVALID_PROJECT_IDENTIFIER"
 )
 
 // AihubError is the canonical error type for all API errors.
@@ -134,7 +135,7 @@ func codeToHTTPStatus(code ErrCode) int {
 		return 404
 	case ErrProjectAlreadyExists:
 		return 409
-	case ErrProjectNameInvalid, ErrProjectHasWorkItems, ErrRepoDuplicateName, ErrRepoDuplicateURL, ErrInvalidProjectIdentifier:
+	case ErrProjectNameInvalid, ErrProjectHasWorkItems, ErrRepoDuplicateName, ErrRepoDuplicateURL, ErrRepoIncompleteDescription, ErrInvalidProjectIdentifier:
 		return 400
 	case ErrProjectAccessDenied, ErrProjectOwnerRequired:
 		return 403

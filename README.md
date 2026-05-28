@@ -3,6 +3,9 @@
 polyforge backend service — HTTP API + read-only Web UI for managing work
 items, attempts, memories, and dependencies. Backed by PostgreSQL.
 
+> New to polyforge? Start with [`docs/onboarding.md`](docs/onboarding.md) for
+> the end-to-end install (API key → config.toml → Claude Code plugin → demo).
+
 ## Quick start
 
 ```bash

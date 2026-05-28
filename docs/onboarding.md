@@ -6,7 +6,7 @@ operators (see `README.md` for `aihub` server setup).
 
 The end-to-end flow is:
 
-1. [Get an API key from an admin](#1-get-an-api-key)
+1. [Get an API key from the owner](#1-get-an-api-key)
 2. [Pre-write `~/.polyforge/config.toml`](#2-pre-write-polyforgeconfigtoml)
 3. [Install the marketplace + plugin in Claude Code](#3-install-the-marketplace--plugin-in-claude-code)
 4. [Restart Claude Code and verify with `pf_whoami`](#4-restart-claude-code-and-verify)
@@ -20,20 +20,8 @@ not need to stand up your own backend.
 
 ## 1. Get an API key
 
-API keys are issued by an existing admin. Ping one and ask for a key tied to
-your user account. The admin will either:
-
-- call `pf_create_api_key` through their own MCP session, or
-- `POST /v1/admin/users/<your-user-id>/keys` against the shared server with
-  their own admin key.
-
-You will receive a token that looks like `pf_k1_…`. Treat it like a password —
-it is the entire credential for talking to the shared server.
-
-> If no admin is available and the `users` table is empty, see
-> `README.md` § "First admin user" for the one-shot `POST /v1/bootstrap`
-> escape hatch. That path is intended for the very first install, not for
-> normal onboarding.
+Ask the owner for a key tied to your account. You will receive a token that
+looks like `pf_k1_…` — treat it like a password.
 
 ## 2. Pre-write `~/.polyforge/config.toml`
 

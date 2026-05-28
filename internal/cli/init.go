@@ -62,14 +62,39 @@ type serverRepoEntry struct {
 	GeneratedCommit string            `json:"generated_commit,omitempty"`
 }
 
+// serverProjectMember mirrors one entry in a project's members list.
+type serverProjectMember struct {
+	UserID string `json:"user_id"`
+	Role   string `json:"role"`
+}
+
 // serverProject mirrors the JSON response shape from GET /v1/projects.
 type serverProject struct {
-	Name        string          `json:"name"`
-	Description *string         `json:"description"`
-	OwnerUserID string          `json:"owner_user_id"`
-	Visible     bool            `json:"visible"`
-	Scenario    *string         `json:"scenario,omitempty"`
-	Repos       json.RawMessage `json:"repos"`
+	Name        string                `json:"name"`
+	Description *string               `json:"description"`
+	OwnerUserID string                `json:"owner_user_id"`
+	Visible     bool                  `json:"visible"`
+	Scenario    *string               `json:"scenario,omitempty"`
+	Members     []serverProjectMember `json:"members,omitempty"`
+	Repos       json.RawMessage       `json:"repos"`
+}
+
+// callerHasRole reports whether the caller (identified by uid) has an explicit
+// role in sp: either project owner or listed in members[]. Used to gate auto-
+// init/clone so that public-visible projects without a caller role are skipped.
+func callerHasRole(sp serverProject, uid string) bool {
+	if uid == "" {
+		return false
+	}
+	if sp.OwnerUserID == uid {
+		return true
+	}
+	for _, m := range sp.Members {
+		if m.UserID == uid {
+			return true
+		}
+	}
+	return false
 }
 
 // parseServerProjects decodes the list response from GET /v1/projects.
@@ -503,6 +528,12 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 		if !sp.Visible {
 			continue
 		}
+		// Only init projects where the caller has an explicit role (owner or
+		// member). Public-visible projects without a caller role are skipped
+		// — listing them in GET /v1/projects does not imply consent to clone.
+		if !callerHasRole(sp, currentUserID) {
+			continue
+		}
 		var blk projectBlock
 		if currentUserID != "" && sp.OwnerUserID == currentUserID {
 			blk = runOwnerInit(ctx, c, cfg, repoDir, sp)
@@ -544,6 +575,12 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 	seen := map[string]bool{}
 	for _, sp := range projects {
 		if !sp.Visible || sp.Scenario == nil || *sp.Scenario == "" {
+			continue
+		}
+		// Mirror the role filter from the main init loop: only clone scenarios
+		// for projects the caller has a role in. Public-only projects do not
+		// pull their scenario repo into .repo/.
+		if !callerHasRole(sp, currentUserID) {
 			continue
 		}
 		url := *sp.Scenario

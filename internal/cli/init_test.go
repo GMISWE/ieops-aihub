@@ -267,7 +267,9 @@ func TestWriteMemberPolyforgeYAML_IncludesScenario(t *testing.T) {
 	}
 
 	path := filepath.Join(tmp, ".polyforge.yaml")
-	if err := writeMemberPolyforgeYAML(path, projects); err != nil {
+	// Empty callerUID skips role filtering, exercising the scenario-only
+	// rendering path that this test guards.
+	if err := writeMemberPolyforgeYAML(path, projects, ""); err != nil {
 		t.Fatalf("writeMemberPolyforgeYAML: %v", err)
 	}
 
@@ -285,6 +287,66 @@ func TestWriteMemberPolyforgeYAML_IncludesScenario(t *testing.T) {
 	// project key.
 	if n := strings.Count(got, "scenario: "); n != 1 {
 		t.Errorf("rendered yaml has %d `scenario: ` lines, want exactly 1; got:\n%s", n, got)
+	}
+}
+
+// TestWriteMemberPolyforgeYAML_ExcludesPublicOnlyProjects guards the
+// aihub#89 fix: when a callerUID is provided, the generated member
+// .polyforge.yaml must omit projects where the caller has no explicit role
+// (owner or member). Public-visible projects without a caller role are
+// listable via GET /v1/projects but the member workspace should not cache
+// them — otherwise `polyforge doctor` reports missing repos for projects
+// the caller was never going to clone.
+func TestWriteMemberPolyforgeYAML_ExcludesPublicOnlyProjects(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	const callerUID = "u_caller"
+	projects := []serverProject{
+		{
+			// Caller is the owner — must be included.
+			Name:        "owned",
+			OwnerUserID: callerUID,
+			Visible:     true,
+			Repos:       json.RawMessage(`[{"name":"owned-repo","url":"git@github.com:example/owned.git"}]`),
+		},
+		{
+			// Caller is listed as a member — must be included.
+			Name:        "member",
+			OwnerUserID: "u_other",
+			Members:     []serverProjectMember{{UserID: callerUID}},
+			Visible:     true,
+			Repos:       json.RawMessage(`[{"name":"member-repo","url":"git@github.com:example/member.git"}]`),
+		},
+		{
+			// Public-visible but caller has no role — must be excluded.
+			Name:        "public-only",
+			OwnerUserID: "u_other",
+			Visible:     true,
+			Repos:       json.RawMessage(`[{"name":"public-repo","url":"git@github.com:example/public.git"}]`),
+		},
+	}
+
+	path := filepath.Join(tmp, ".polyforge.yaml")
+	if err := writeMemberPolyforgeYAML(path, projects, callerUID); err != nil {
+		t.Fatalf("writeMemberPolyforgeYAML: %v", err)
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read .polyforge.yaml: %v", err)
+	}
+	got := string(b)
+
+	for _, want := range []string{"owned:", "member:"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered yaml missing %q (expected projects where caller has a role); got:\n%s", want, got)
+		}
+	}
+	for _, no := range []string{"public-only:", "public-repo"} {
+		if strings.Contains(got, no) {
+			t.Errorf("rendered yaml leaked %q (caller has no role on that project); got:\n%s", no, got)
+		}
 	}
 }
 

@@ -358,7 +358,14 @@ func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, rep
 // writeMemberPolyforgeYAML generates .polyforge.yaml for a member workspace
 // as a local cache of the server's project+repo list. The file is written
 // only when it does not already exist.
-func writeMemberPolyforgeYAML(path string, projects []serverProject) error {
+//
+// callerUID gates project inclusion the same way the project-init loop does:
+// only projects where the caller has an explicit role (owner or member) are
+// emitted. Public-visible projects without a caller role are skipped so the
+// member yaml mirrors what was actually cloned. When callerUID is empty
+// (whoami failed at init time) the role check is skipped to preserve legacy
+// behavior — we'd rather emit a too-broad yaml than an empty one.
+func writeMemberPolyforgeYAML(path string, projects []serverProject, callerUID string) error {
 	mc, err := config.LoadMachineConfig()
 	if err != nil {
 		return err
@@ -371,6 +378,9 @@ func writeMemberPolyforgeYAML(path string, projects []serverProject) error {
 	}
 	for _, sp := range projects {
 		if !sp.Visible {
+			continue
+		}
+		if callerUID != "" && !callerHasRole(sp, callerUID) {
 			continue
 		}
 		serverRepos := parseServerRepos(sp.Repos)
@@ -547,7 +557,7 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 	// doesn't exist yet. Owners already have it as their source of truth.
 	polyforgeYAMLPath := filepath.Join(wsRoot, ".polyforge.yaml")
 	if _, yerr := os.Stat(polyforgeYAMLPath); os.IsNotExist(yerr) && len(projects) > 0 {
-		if werr := writeMemberPolyforgeYAML(polyforgeYAMLPath, projects); werr != nil {
+		if werr := writeMemberPolyforgeYAML(polyforgeYAMLPath, projects, currentUserID); werr != nil {
 			fmt.Fprintf(os.Stderr, "pf init: write .polyforge.yaml: %v\n", werr)
 		} else {
 			fmt.Printf("ok .polyforge.yaml generated (member workspace)\n")

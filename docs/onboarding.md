@@ -177,13 +177,13 @@ example:
 ```
 
 That triggers the `polyforge:pf-work` skill, which talks to the shared
-`aihub` at `http://10.146.0.16:8080` to claim or create a work item for you.
+`aihub` at `http://34.180.90.199:8080` to claim or create a work item for you.
 
 To see the work item land server-side, open the Web UI:
 
-1. Visit `http://10.146.0.16:8080/ui/login` and paste your API key. The
+1. Visit `http://34.180.90.199:8080/ui/login` and paste your API key. The
    server mints a 7-day signed session cookie.
-2. Browse to `http://10.146.0.16:8080/ui/wi` — the list polls every 5 s, so
+2. Browse to `http://34.180.90.199:8080/ui/wi` — the list polls every 5 s, so
    your new wi shows up without a manual refresh.
 3. Click through to `/ui/wi/<id>` for the full timeline, declared resources,
    and step state.

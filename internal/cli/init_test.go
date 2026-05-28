@@ -365,3 +365,98 @@ func TestRenderRepoBlock(t *testing.T) {
 		})
 	}
 }
+
+// ─── callerHasRole ────────────────────────────────────────────────────────────
+
+// TestCallerHasRole guards the aihub#87 fix: polyforge init must only clone
+// projects where the caller is owner or appears in members[]. Public-visible
+// projects without an explicit caller role must be skipped.
+func TestCallerHasRole(t *testing.T) {
+	owner := serverProject{
+		Name:        "owned",
+		OwnerUserID: "u_owner",
+		Visible:     true,
+	}
+	member := serverProject{
+		Name:        "joined",
+		OwnerUserID: "u_other",
+		Visible:     true,
+		Members: []serverProjectMember{
+			{UserID: "u_alice", Role: "writer"},
+			{UserID: "u_bob", Role: "viewer"},
+		},
+	}
+	publicOnly := serverProject{
+		Name:        "public",
+		OwnerUserID: "u_other",
+		Visible:     true,
+		// no members[] containing the caller
+	}
+
+	cases := []struct {
+		name string
+		sp   serverProject
+		uid  string
+		want bool
+	}{
+		{"owner matches by owner_user_id", owner, "u_owner", true},
+		{"non-owner without membership is false", owner, "u_alice", false},
+		{"member listed in members[] is true", member, "u_alice", true},
+		{"viewer listed in members[] is true (role doesn't gate, presence does)", member, "u_bob", true},
+		{"unrelated uid against member project is false", member, "u_eve", false},
+		{"public-only project (no membership) is false", publicOnly, "u_alice", false},
+		{"empty uid never has role even if owner_user_id is empty", serverProject{}, "", false},
+		{"empty uid against real project is false", member, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := callerHasRole(tc.sp, tc.uid); got != tc.want {
+				t.Errorf("callerHasRole(%s, %q) = %v, want %v", tc.sp.Name, tc.uid, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestServerProjectMembersParse guards that the JSON shape returned by
+// GET /v1/projects (members: [{user_id, role}]) deserializes into
+// serverProject.Members. Regression for aihub#87 — without this field,
+// callerHasRole can never see member entries.
+func TestServerProjectMembersParse(t *testing.T) {
+	raw := `{
+        "items": [
+            {
+                "name": "aihub",
+                "owner_user_id": "u_owner",
+                "visible": true,
+                "members": [
+                    {"user_id": "u_alice", "role": "writer"},
+                    {"user_id": "u_bob", "role": "viewer"}
+                ],
+                "repos": []
+            }
+        ]
+    }`
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	projects, err := parseServerProjects(m)
+	if err != nil {
+		t.Fatalf("parseServerProjects: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("got %d projects, want 1", len(projects))
+	}
+	if got := len(projects[0].Members); got != 2 {
+		t.Fatalf("got %d members, want 2", got)
+	}
+	if projects[0].Members[0].UserID != "u_alice" || projects[0].Members[0].Role != "writer" {
+		t.Errorf("members[0] = %+v, want {u_alice writer}", projects[0].Members[0])
+	}
+	if !callerHasRole(projects[0], "u_alice") {
+		t.Errorf("callerHasRole(aihub, u_alice) = false, want true")
+	}
+	if callerHasRole(projects[0], "u_eve") {
+		t.Errorf("callerHasRole(aihub, u_eve) = true, want false")
+	}
+}

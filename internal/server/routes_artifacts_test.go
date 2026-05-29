@@ -3,11 +3,13 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
 
 	"github.com/GMISWE/ieops-aihub/internal/domain"
+	"github.com/GMISWE/ieops-aihub/internal/render"
 )
 
 // adminUser is a global-admin caller used by tests that need to bypass project
@@ -178,5 +180,64 @@ func TestArtifactHTML_401_NoUser(t *testing.T) {
 	}
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d, want 401", rec.Code)
+	}
+}
+
+// strptr is a tiny helper for building *string test inputs.
+func strptr(s string) *string { return &s }
+
+// TestArtifactBackHref covers the route-aware back-link logic that decides
+// whether the standalone artifact document gets a "Back to work item" nav:
+//   - /ui route + a work item  -> nav to the path-escaped wi detail URL
+//   - /v1 route                -> never a nav (pure content document)
+//   - work item == nil         -> never a nav, and must not panic
+func TestArtifactBackHref(t *testing.T) {
+	cases := []struct {
+		name       string
+		routePath  string
+		workItemID *string
+		want       string
+	}{
+		{"ui_with_wi", "/ui/artifacts/:id/html", strptr("aihub#98"), "/ui/wi/aihub%2398"},
+		{"ui_plain_wi", "/ui/artifacts/:id/html", strptr("wi_abc123"), "/ui/wi/wi_abc123"},
+		{"v1_with_wi", "/v1/artifacts/:id/html", strptr("aihub#98"), ""},
+		{"ui_nil_wi", "/ui/artifacts/:id/html", nil, ""},
+		{"v1_nil_wi", "/v1/artifacts/:id/html", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := artifactBackHref(tc.routePath, tc.workItemID)
+			if got != tc.want {
+				t.Errorf("artifactBackHref(%q, %v) = %q; want %q", tc.routePath, tc.workItemID, got, tc.want)
+			}
+			if strings.Contains(got, "#") {
+				t.Errorf("back href %q contains a raw '#' — browser would strip it as a URL fragment", got)
+			}
+		})
+	}
+}
+
+// TestArtifactBackHref_RendersIntoDocument bridges the back-link helper to the
+// final standalone document so the two stay consistent: the /ui route yields a
+// nav linking to the wi, while the /v1 route yields no rendered nav element.
+// (The full handler needs a DB pool for GetMemoryByID, so the DB path is
+// covered by checkMemoryVisibility tests above; here we exercise the render
+// seam directly.)
+func TestArtifactBackHref_RendersIntoDocument(t *testing.T) {
+	wiID := "aihub#98"
+
+	uiHref := artifactBackHref("/ui/artifacts/:id/html", &wiID)
+	uiDoc := render.Document("<p>spec</p>", "mem (methodology.spec)", uiHref)
+	if !strings.Contains(uiDoc, `<nav class="pf-doc-nav">`) {
+		t.Errorf("/ui document missing rendered pf-doc-nav element")
+	}
+	if !strings.Contains(uiDoc, "/ui/wi/aihub%2398") {
+		t.Errorf("/ui document missing path-escaped wi back-link; got: %s", uiDoc)
+	}
+
+	v1Href := artifactBackHref("/v1/artifacts/:id/html", &wiID)
+	v1Doc := render.Document("<p>spec</p>", "mem (methodology.spec)", v1Href)
+	if strings.Contains(v1Doc, `<nav class="pf-doc-nav">`) {
+		t.Errorf("/v1 document must not render a pf-doc-nav element")
 	}
 }

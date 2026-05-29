@@ -1,6 +1,7 @@
 package server
 
 import (
+	"html/template"
 	"strings"
 	"testing"
 )
@@ -82,5 +83,27 @@ func TestUIFuncMap_Wiref(t *testing.T) {
 		if strings.Contains(tc.in, "#") && strings.Contains(got, "#") {
 			t.Errorf("wiref(%q) returned %q which still contains a raw '#' — browser will strip it as URL fragment", tc.in, got)
 		}
+	}
+}
+
+// TestUIFuncMap_SafeHTML asserts safeHTML passes a trusted, pre-rendered HTML
+// fragment through unescaped, and degrades to an empty string on a nil pointer
+// (the NULL rendered_html case for review/execute/retro/wrap_summary
+// artifacts). The pointer signature lets the template gate on non-nil via
+// {{if .RenderedHTML}} before invoking.
+func TestUIFuncMap_SafeHTML(t *testing.T) {
+	funcs := uiFuncMap()
+	safeHTML, ok := funcs["safeHTML"].(func(*string) template.HTML)
+	if !ok {
+		t.Fatalf("safeHTML not registered in uiFuncMap or wrong signature")
+	}
+
+	if got := safeHTML(nil); got != template.HTML("") {
+		t.Errorf("safeHTML(nil) = %q; want empty string", got)
+	}
+
+	raw := "<b>x</b>"
+	if got := safeHTML(&raw); got != template.HTML("<b>x</b>") {
+		t.Errorf("safeHTML(&%q) = %q; want raw HTML passed through unescaped", raw, got)
 	}
 }

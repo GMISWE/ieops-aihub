@@ -831,3 +831,108 @@ a:hover { text-decoration: underline; }
   color: #fff !important;
 }
 .pf-confirm-dialog-confirm:hover { filter: brightness(1.08); }
+
+/* ---------- IEBE-1712: inline spec/plan artifact (wi detail) ---------- */
+
+/* The <details> summary is the click target — make it obviously clickable. */
+.pf-artifact-details > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6em;
+  padding: 0.25em 0;
+}
+.pf-artifact-details > summary .pf-artifact-type { flex: 1 1 auto; }
+.pf-artifact-details > summary a {
+  font-size: 0.8em;
+  color: var(--pf-accent);
+  white-space: nowrap;
+}
+
+/* Inline-rendered fragment container. Constrain very long specs so a big
+   artifact doesn't blow up the sidebar card; scroll inside instead. */
+.pf-artifact-html {
+  margin-top: 0.5em;
+  padding: 0.6em 0.8em;
+  border: 1px solid var(--pf-border);
+  border-radius: 6px;
+  background: var(--pf-bg);
+  font-size: 0.88em;
+  line-height: 1.5;
+  max-height: 28em;
+  overflow: auto;
+}
+.pf-artifact-html h1, .pf-artifact-html h2 {
+  font-size: 1.1em;
+  border-bottom: 1px solid var(--pf-border);
+  padding-bottom: 0.2em;
+  margin: 0.8em 0 0.4em;
+}
+.pf-artifact-html h3, .pf-artifact-html h4, .pf-artifact-html h5, .pf-artifact-html h6 {
+  font-size: 1em;
+  margin: 0.7em 0 0.3em;
+}
+.pf-artifact-html table { border-collapse: collapse; width: 100%; margin: 0.7em 0; }
+.pf-artifact-html th, .pf-artifact-html td {
+  border: 1px solid var(--pf-border);
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.pf-artifact-html th { background: var(--pf-bg-soft); }
+
+/* Code + chroma token colors copied from internal/render/style.css and scoped
+   under .pf-artifact-html so they cannot bleed into the rest of the page. */
+.pf-artifact-html code {
+  background: #afb8c133;
+  padding: 0.2em 0.4em;
+  border-radius: 4px;
+  font-family: var(--pf-mono);
+  font-size: 0.9em;
+}
+.pf-artifact-html pre, .pf-artifact-html pre.chroma {
+  background: var(--pf-bg-soft);
+  border: 1px solid var(--pf-border);
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.45;
+  margin: 0.8em 0;
+}
+.pf-artifact-html pre code, .pf-artifact-html pre.chroma code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.875em;
+  color: var(--pf-fg);
+}
+
+/* chroma github-light token mapping (scoped). */
+.pf-artifact-html .chroma .k,
+.pf-artifact-html .chroma .kd,
+.pf-artifact-html .chroma .kt,
+.pf-artifact-html .chroma .kr,
+.pf-artifact-html .chroma .kn { color: #cf222e; }
+.pf-artifact-html .chroma .nf,
+.pf-artifact-html .chroma .nx { color: #8250df; }
+.pf-artifact-html .chroma .nb,
+.pf-artifact-html .chroma .nl,
+.pf-artifact-html .chroma .na { color: #0550ae; }
+.pf-artifact-html .chroma .s,
+.pf-artifact-html .chroma .s1,
+.pf-artifact-html .chroma .s2,
+.pf-artifact-html .chroma .sb,
+.pf-artifact-html .chroma .sc { color: #0a3069; }
+.pf-artifact-html .chroma .c,
+.pf-artifact-html .chroma .cm,
+.pf-artifact-html .chroma .c1,
+.pf-artifact-html .chroma .cs,
+.pf-artifact-html .chroma .cp { color: #6e7781; font-style: italic; }
+.pf-artifact-html .chroma .mi,
+.pf-artifact-html .chroma .mf,
+.pf-artifact-html .chroma .mh,
+.pf-artifact-html .chroma .il,
+.pf-artifact-html .chroma .mb { color: #0550ae; }
+.pf-artifact-html .chroma .n,
+.pf-artifact-html .chroma .p,
+.pf-artifact-html .chroma .o,
+.pf-artifact-html .chroma .ow { color: var(--pf-fg); }

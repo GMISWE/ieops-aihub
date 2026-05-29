@@ -2,6 +2,8 @@ package server
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
@@ -65,8 +67,26 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 		// extra setup. The fragment in `memories.rendered_html` is kept raw so
 		// it can be embedded in other contexts (future webui, etc.) later.
 		title := mem.ID + " (" + mem.Type + ")"
-		return c.HTMLBlob(http.StatusOK, []byte(render.Document(*mem.RenderedHTML, title)))
+		// Only the cookie-authed /ui mirror gets a "Back to work item" nav;
+		// the /v1 (Bearer/CLI) route stays a pure content document. echo's
+		// c.Path() returns the registered route pattern, so it is
+		// "/ui/artifacts/:id/html" for the UI route and
+		// "/v1/artifacts/:id/html" for the API route.
+		backHref := artifactBackHref(c.Path(), mem.WorkItemID)
+		return c.HTMLBlob(http.StatusOK, []byte(render.Document(*mem.RenderedHTML, title, backHref)))
 	}
+}
+
+// artifactBackHref returns the wi detail URL for the standalone artifact
+// document's back-link, or "" when no nav should be emitted. A nav is only
+// added for the /ui (cookie/webui) route and only when the artifact is tied to
+// a work item. The /v1 (Bearer/CLI) route always gets "" so its document stays
+// a pure content view.
+func artifactBackHref(routePath string, workItemID *string) string {
+	if strings.HasPrefix(routePath, "/ui") && workItemID != nil {
+		return "/ui/wi/" + url.PathEscape(*workItemID)
+	}
+	return ""
 }
 
 // checkMemoryVisibility enforces the per-row visibility rules that recall

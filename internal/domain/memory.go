@@ -542,9 +542,9 @@ func EditCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, body, 
 
 	// best-effort audit event
 	payload, _ := json.Marshal(map[string]any{
-		"memory_id":      memID,
-		"commit_id":      commitID,
-		"actor_user_id":  callerUserID,
+		"memory_id":     memID,
+		"commit_id":     commitID,
+		"actor_user_id": callerUserID,
 	})
 	_, _ = pool.Exec(ctx, `
 		INSERT INTO agent_events (id, actor_user_id, actor_display, event_type, payload, project)
@@ -775,6 +775,22 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to load memory: %v", err))
 	}
 	return m, nil
+}
+
+// SetMemoryVisibility updates a single memory's visibility tier. Used by the artifact
+// share endpoints to toggle public/project. Touches only the visibility column, so it
+// is immune to the multi-site Scan column-ordering hazard.
+func SetMemoryVisibility(ctx context.Context, pool *pgxpool.Pool, id, visibility string) *AihubError {
+	tag, err := pool.Exec(ctx,
+		`UPDATE memories SET visibility=$1, updated_at=clock_timestamp() WHERE id=$2`,
+		visibility, id)
+	if err != nil {
+		return NewErr(ErrInternalError, "failed to update memory visibility")
+	}
+	if tag.RowsAffected() == 0 {
+		return NewErr(ErrNotFound, "memory not found")
+	}
+	return nil
 }
 
 // ─── Activate (§7.3) ──────────────────────────────────────────────────────────

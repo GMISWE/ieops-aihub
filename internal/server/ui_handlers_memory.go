@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"html/template"
 	"net/http"
 	"net/url"
@@ -26,6 +27,19 @@ var recallMemoriesFn recallMemoryFn = domain.Recall
 // loadMemoryFn is the production-wired GetMemoryByID — swappable in tests.
 var loadMemoryFn memLoaderFn = domain.GetMemoryByID
 
+// CommitEntry is one human annotation stored in the memories.commits column.
+// aihub#70 v3: ID is required (backfilled by 0022); UpdatedAt is present only
+// after an edit. The template surfaces Edit/Delete affordances when the
+// current user is the entry's author or has admin role.
+type CommitEntry struct {
+	ID            string `json:"id"`
+	AuthorUserID  string `json:"author_user_id"`
+	AuthorDisplay string `json:"author_display"`
+	Body          string `json:"body"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at,omitempty"`
+}
+
 // memListPageData drives memories.html.tmpl.
 type memListPageData struct {
 	Title             string
@@ -37,6 +51,7 @@ type memListPageData struct {
 	AccessDenied      bool
 	// Filter state (echoed back into the form).
 	Type        string
+	TypeOptions []string
 	StrengthMin float64
 	Query       string
 	Limit       int
@@ -50,12 +65,13 @@ type memListPageData struct {
 
 // memDetailPageData drives memory_detail.html.tmpl.
 type memDetailPageData struct {
-	Title       string
-	Active      string
-	User        *UserContext
-	Memory      *domain.Memory
-	BackQuery   string
-	RenderAsMD  bool
+	Title      string
+	Active     string
+	User       *UserContext
+	Memory     *domain.Memory
+	BackQuery  string
+	RenderAsMD bool
+	Commits    []CommitEntry
 }
 
 // Package-level template cache. Initialised by registerUIMemoryHandlers.
@@ -64,7 +80,8 @@ var (
 	memDetailTmpl *template.Template
 )
 
-// registerUIMemoryHandlers wires /ui/memories and /ui/memories/:id.
+// registerUIMemoryHandlers wires /ui/memories, /ui/memories/:id, and
+// POST /ui/memories/:id/commit (the only write operation in the UI).
 // The 3rd template arg is the shared root (unused — we build per-page
 // templates here to avoid {{define "content"}} collisions across pages).
 func registerUIMemoryHandlers(g *echo.Group, pool *pgxpool.Pool, _ *template.Template) {
@@ -73,6 +90,9 @@ func registerUIMemoryHandlers(g *echo.Group, pool *pgxpool.Pool, _ *template.Tem
 
 	g.GET("/memories", handleUIMemories(pool, memListTmpl))
 	g.GET("/memories/:id", handleUIMemoryDetail(pool, memDetailTmpl))
+	g.POST("/memories/:id/commit", handleUICommitMemory(pool))
+	g.POST("/memories/:id/commit/:commit_id/edit", handleUIEditCommit(pool))
+	g.POST("/memories/:id/commit/:commit_id/delete", handleUIDeleteCommit(pool))
 }
 
 // handleUIMemories renders the memory index. The package-level recallMemoriesFn
@@ -92,6 +112,10 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			project = projects[0]
 		}
 
+		typeOptions := append(
+			[]string{"experience.*", "fact.*", "rule.*", "methodology.*"},
+			domain.MemoryTypeEnum...,
+		)
 		data := memListPageData{
 			Title:             "Memories",
 			Active:            "memories",
@@ -99,6 +123,7 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			Project:           project,
 			ProjectsAvailable: projects,
 			Type:              c.QueryParam("type"),
+			TypeOptions:       typeOptions,
 			Query:             c.QueryParam("q"),
 		}
 
@@ -227,6 +252,13 @@ func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 			return c.Redirect(http.StatusFound, "/ui/artifacts/"+mem.ID+"/html")
 		}
 
+		// Parse commits from the JSONB column; failures yield an empty slice
+		// so they never block page rendering.
+		var commits []CommitEntry
+		if len(mem.Commits) > 0 {
+			_ = json.Unmarshal(mem.Commits, &commits)
+		}
+
 		data := memDetailPageData{
 			Title:      "Memory " + mem.ID,
 			Active:     "memories",
@@ -234,6 +266,7 @@ func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 			Memory:     mem,
 			BackQuery:  c.QueryParam("back"),
 			RenderAsMD: looksLikeMarkdown(mem.Content),
+			Commits:    commits,
 		}
 		return renderTemplate(c, tmpl, "layout", data)
 	}
@@ -258,7 +291,6 @@ func memoryVisibleTo(u *UserContext, mem *domain.Memory) bool {
 	return true
 }
 
-
 // buildMemFilterQuery rebuilds the current filter as a URL query so the detail
 // page can link back to the list with state preserved.
 func buildMemFilterQuery(project, memType string, strengthMin float64, q string, limit int) string {
@@ -277,6 +309,146 @@ func buildMemFilterQuery(project, memType string, strengthMin float64, q string,
 		v.Set("limit", strconv.Itoa(limit))
 	}
 	return v.Encode()
+}
+
+// commitMemoryProjectFn fetches (project, status) for a memory without filtering
+// out redacted rows — allowing the caller to do a project access-check before
+// CommitMemory's own redacted guard fires. Swappable in tests.
+var commitMemoryProjectFn = func(ctx context.Context, pool *pgxpool.Pool, memID string) (project, status string, err error) {
+	err = pool.QueryRow(ctx, `SELECT project, status FROM memories WHERE id=$1`, memID).
+		Scan(&project, &status)
+	return
+}
+
+// doCommitMemoryFn wraps domain.CommitMemory; swappable in tests.
+var doCommitMemoryFn = func(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUserID, callerDisplay string) error {
+	return domain.CommitMemory(ctx, pool, memID, body, callerUserID, callerDisplay)
+}
+
+// doEditCommitFn / doDeleteCommitFn — same pattern as doCommitMemoryFn,
+// swappable for testing. The domain functions handle author-or-admin checks
+// internally; the handlers only enforce the project-writer gate.
+var doEditCommitFn = func(ctx context.Context, pool *pgxpool.Pool, memID, commitID, body, callerUserID, callerDisplay, callerRole string) error {
+	return domain.EditCommit(ctx, pool, memID, commitID, body, callerUserID, callerDisplay, callerRole)
+}
+var doDeleteCommitFn = func(ctx context.Context, pool *pgxpool.Pool, memID, commitID, callerUserID, callerDisplay, callerRole string) error {
+	return domain.DeleteCommit(ctx, pool, memID, commitID, callerUserID, callerDisplay, callerRole)
+}
+
+// handleUICommitMemory handles POST /ui/memories/:id/commit.
+//
+// Appends a human annotation to the memory's commits JSONB column.
+// Access: must be a logged-in writer on the memory's project.
+// Auth note: no CSRF token — relies on same-site=Lax session cookie (htmx
+// first write operation; full CSRF review deferred to a follow-up wi).
+func handleUICommitMemory(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		if u == nil {
+			return redirectToLogin(c)
+		}
+
+		memID := c.Param("id")
+		if memID == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "memory id is required"))
+		}
+
+		body := c.FormValue("body")
+		if body == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "body is required"))
+		}
+
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		// Load (project, status) without filtering redacted so we can do the
+		// access check before CommitMemory's own redacted guard fires.
+		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
+		if loadErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+		}
+
+		// C1: require writer access before mutating.
+		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+			return err
+		}
+
+		if err := doCommitMemoryFn(ctx, pool, memID, body, u.UserID, u.DisplayName); err != nil {
+			return domainErr(c, err)
+		}
+
+		return c.Redirect(http.StatusSeeOther, "/ui/memories/"+memID)
+	}
+}
+
+// handleUIEditCommit handles POST /ui/memories/:id/commit/:commit_id/edit.
+//
+// Replaces the body of a single commit. Access: project writer (handler) +
+// commit author OR global admin (domain). Empty body is rejected with 400.
+func handleUIEditCommit(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		if u == nil {
+			return redirectToLogin(c)
+		}
+		memID := c.Param("id")
+		commitID := c.Param("commit_id")
+		if memID == "" || commitID == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "memory id and commit id are required"))
+		}
+		body := c.FormValue("body")
+		if body == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "body is required"))
+		}
+
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
+		if loadErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+		}
+		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+			return err
+		}
+		if err := doEditCommitFn(ctx, pool, memID, commitID, body, u.UserID, u.DisplayName, u.Role); err != nil {
+			return domainErr(c, err)
+		}
+		return c.Redirect(http.StatusSeeOther, "/ui/memories/"+memID)
+	}
+}
+
+// handleUIDeleteCommit handles POST /ui/memories/:id/commit/:commit_id/delete.
+//
+// Hard-deletes a single commit. Access: project writer (handler) + commit
+// author OR global admin (domain).
+func handleUIDeleteCommit(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		if u == nil {
+			return redirectToLogin(c)
+		}
+		memID := c.Param("id")
+		commitID := c.Param("commit_id")
+		if memID == "" || commitID == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "memory id and commit id are required"))
+		}
+
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
+		if loadErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+		}
+		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+			return err
+		}
+		if err := doDeleteCommitFn(ctx, pool, memID, commitID, u.UserID, u.DisplayName, u.Role); err != nil {
+			return domainErr(c, err)
+		}
+		return c.Redirect(http.StatusSeeOther, "/ui/memories/"+memID)
+	}
 }
 
 // looksLikeMarkdown is a very rough heuristic: if the content starts with a

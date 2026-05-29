@@ -15,9 +15,65 @@
         {{if $.RenderAsMD}}
           {{.Content | md}}
         {{else}}
-          <pre>{{.Content}}</pre>
+          <pre class="pf-content-raw">{{.Content}}</pre>
         {{end}}
       </div>
+    </div>
+
+    <div class="pf-detail-card pf-commits-card">
+      <h2>Commits</h2>
+      {{if $.Commits}}
+      <ul class="pf-commits-list">
+        {{range $.Commits}}
+        {{$canMod := false}}
+        {{if $.User}}
+          {{if or (eq $.User.UserID .AuthorUserID) (eq $.User.Role "admin")}}{{$canMod = true}}{{end}}
+        {{end}}
+        <li class="pf-commit-entry">
+          <div class="pf-commit-meta">
+            <span class="pf-commit-author">{{default "—" .AuthorDisplay}}</span>
+            <span class="pf-commit-ts">{{fmtTs .CreatedAt}}</span>
+            {{if .UpdatedAt}}<span class="pf-commit-edited">(edited {{fmtTs .UpdatedAt}})</span>{{end}}
+            {{if $canMod}}
+            <span class="pf-commit-actions">
+              <details class="pf-commit-edit">
+                <summary>Edit</summary>
+                <form method="POST" action="/ui/memories/{{$.Memory.ID}}/commit/{{.ID}}/edit" class="pf-commit-edit-form">
+                  <textarea name="body" required>{{.Body}}</textarea>
+                  <button type="submit">Save</button>
+                </form>
+              </details>
+              <button type="button" class="pf-commit-delete-btn"
+                      onclick="this.nextElementSibling.showModal()">Delete</button>
+              <dialog class="pf-confirm-dialog">
+                <form method="POST" action="/ui/memories/{{$.Memory.ID}}/commit/{{.ID}}/delete" class="pf-confirm-dialog-form">
+                  <h3>Delete this commit?</h3>
+                  <p class="pf-confirm-dialog-meta">{{default "—" .AuthorDisplay}} · {{fmtTs .CreatedAt}}</p>
+                  <p class="pf-confirm-dialog-body">{{.Body}}</p>
+                  <p class="pf-confirm-dialog-warn">This cannot be undone.</p>
+                  <div class="pf-confirm-dialog-actions">
+                    <button type="button" onclick="this.closest('dialog').close()">Cancel</button>
+                    <button type="submit" class="pf-confirm-dialog-confirm">Delete</button>
+                  </div>
+                </form>
+              </dialog>
+            </span>
+            {{end}}
+          </div>
+          <div class="pf-commit-body">{{.Body}}</div>
+        </li>
+        {{end}}
+      </ul>
+      {{else}}
+      <p class="pf-empty">no commits yet.</p>
+      {{end}}
+
+      {{with $.Memory}}
+      <form method="POST" action="/ui/memories/{{.ID}}/commit" class="pf-commit-form">
+        <textarea name="body" rows="3" placeholder="Add a commit annotation…" required></textarea>
+        <button type="submit">Add commit</button>
+      </form>
+      {{end}}
     </div>
   </div>
 
@@ -44,4 +100,5 @@
   </aside>
 </div>
 {{end}}
+
 {{end}}

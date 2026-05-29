@@ -19,7 +19,12 @@
   </select>
 
   <label for="pf-mem-type">type</label>
-  <input id="pf-mem-type" type="text" name="type" value="{{.Type}}" placeholder="experience.* / methodology.spec">
+  <select id="pf-mem-type" name="type">
+    <option value="">all</option>
+    {{range .TypeOptions}}
+    <option value="{{.}}" {{if eq . $.Type}}selected{{end}}>{{.}}</option>
+    {{end}}
+  </select>
 
   <label for="pf-mem-strength">strength &ge;</label>
   <input id="pf-mem-strength" type="text" name="strength_min" value="{{printf "%g" .StrengthMin}}" size="5">

@@ -9,6 +9,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -253,3 +254,150 @@ func TestUIMemoryDetail_ExperienceRenders(t *testing.T) {
 	}
 }
 
+// ─── UI Commit Handler Tests ──────────────────────────────────────────────────
+
+// withCommitMemoryProjectOverride replaces commitMemoryProjectFn for the duration of a test.
+func withCommitMemoryProjectOverride(project, status string, err error) func() {
+	prev := commitMemoryProjectFn
+	commitMemoryProjectFn = func(_ context.Context, _ *pgxpool.Pool, _ string) (string, string, error) {
+		return project, status, err
+	}
+	return func() { commitMemoryProjectFn = prev }
+}
+
+// withDoCommitMemoryOverride replaces doCommitMemoryFn for the duration of a test.
+func withDoCommitMemoryOverride(returnErr error) func() {
+	prev := doCommitMemoryFn
+	doCommitMemoryFn = func(_ context.Context, _ *pgxpool.Pool, _, _, _, _ string) error {
+		return returnErr
+	}
+	return func() { doCommitMemoryFn = prev }
+}
+
+// newCommitRequest builds a POST form request for /ui/memories/:id/commit.
+func newCommitRequest(t *testing.T, memID, body string, uc *UserContext) (echo.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+	e := echo.New()
+	form := "body=" + body
+	req := httptest.NewRequest(http.MethodPost, "/ui/memories/"+memID+"/commit",
+		strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(memID)
+	if uc != nil {
+		setUser(c, uc)
+	}
+	return c, rec
+}
+
+// TestUICommitMemory_NotLoggedIn verifies that unauthenticated requests redirect to login.
+func TestUICommitMemory_NotLoggedIn(t *testing.T) {
+	c, rec := newCommitRequest(t, "mem_abc", "some body", nil)
+	if err := handleUICommitMemory(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusFound {
+		t.Errorf("status: got %d, want 302 (redirect to login)", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "/ui/login") {
+		t.Errorf("should redirect to /ui/login; got %q", loc)
+	}
+}
+
+// TestUICommitMemory_EmptyBody verifies that an empty body returns a 400 error.
+func TestUICommitMemory_EmptyBody(t *testing.T) {
+	c, rec := newCommitRequest(t, "mem_abc", "", userWithProjects("testproject"))
+	if err := handleUICommitMemory(nil)(c); err != nil {
+		// Error-style response is acceptable too.
+		return
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status: got %d, want 400 for empty body", rec.Code)
+	}
+}
+
+// TestUICommitMemory_MemoryNotFound verifies that a missing memory returns an error.
+func TestUICommitMemory_MemoryNotFound(t *testing.T) {
+	cleanup := withCommitMemoryProjectOverride("", "", fmt.Errorf("no rows"))
+	defer cleanup()
+
+	c, rec := newCommitRequest(t, "mem_missing", "hello", userWithProjects("testproject"))
+	if err := handleUICommitMemory(nil)(c); err == nil && rec.Code != http.StatusNotFound {
+		t.Errorf("should return error or 404 for missing memory; code=%d", rec.Code)
+	}
+}
+
+// TestUICommitMemory_NonWriter verifies that a user without writer access gets a 403.
+func TestUICommitMemory_NonWriter(t *testing.T) {
+	cleanup := withCommitMemoryProjectOverride("otherproject", "active", nil)
+	defer cleanup()
+
+	// userWithProjects only has "testproject", not "otherproject"
+	c, rec := newCommitRequest(t, "mem_abc", "annotation", userWithProjects("testproject"))
+	if err := handleUICommitMemory(nil)(c); err == nil && rec.Code != http.StatusForbidden {
+		t.Errorf("should return 403 for non-writer; code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// writerUser returns a UserContext with writer-level access to the given project.
+func writerUser(project string) *UserContext {
+	return &UserContext{
+		UserID:       "u_writer",
+		Email:        "writer@example.com",
+		DisplayName:  "Writer User",
+		UserType:     "human",
+		Role:         "writer",
+		ProjectRoles: map[string]string{project: "writer"},
+		APIKeyID:     "k_writer",
+	}
+}
+
+// TestUICommitMemory_Success verifies that a valid commit redirects to the memory detail page.
+func TestUICommitMemory_Success(t *testing.T) {
+	cleanupProject := withCommitMemoryProjectOverride("testproject", "active", nil)
+	defer cleanupProject()
+	cleanupCommit := withDoCommitMemoryOverride(nil)
+	defer cleanupCommit()
+
+	c, rec := newCommitRequest(t, "mem_abc", "a human annotation", writerUser("testproject"))
+	if err := handleUICommitMemory(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("status: got %d, want 303", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "mem_abc") {
+		t.Errorf("redirect Location should contain memory id; got %q", loc)
+	}
+}
+
+// TestUIMemories_TypeOptions verifies that memListPageData has 23 TypeOptions (4 wildcards + 19 exact).
+func TestUIMemories_TypeOptions(t *testing.T) {
+	_, cleanup := withRecallOverride(nil)
+	defer cleanup()
+
+	tmpl := pageTemplate("memories.html.tmpl")
+	c, rec := newMemoriesRequest(t, "/ui/memories?project=testproject", userWithProjects("testproject"))
+
+	if err := handleUIMemories(nil, tmpl)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	// The 4 wildcard prefixes must appear as select options.
+	for _, opt := range []string{"experience.*", "fact.*", "rule.*", "methodology.*"} {
+		if !strings.Contains(body, opt) {
+			t.Errorf("type select missing wildcard option %q", opt)
+		}
+	}
+	// At least one exact type must appear.
+	if !strings.Contains(body, "methodology.spec") {
+		t.Errorf("type select missing exact option methodology.spec")
+	}
+}

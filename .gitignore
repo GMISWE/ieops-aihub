@@ -219,3 +219,7 @@ __marimo__/
 
 # Ruflo tool local cache
 .claude-flow/
+
+# polyforge step state files (written by pf-execute, must not enter git)
+.pf_meta.json
+.pf_steps.json

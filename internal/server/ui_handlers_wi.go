@@ -104,6 +104,7 @@ type wiListRow struct {
 	WIType          string
 	Priority        string
 	Status          string
+	HumanMode       string // requires_human_session folded for display: "Human" (true) / "Auto" (false) / "" (NULL/unclassified)
 	Goal            string
 	OwnerDisplay    string // run_attempts.actor_display of current attempt; "" if no attempt
 	ReporterDisplay string // who filed the wi (always populated)
@@ -116,6 +117,7 @@ type wiDetailPageData struct {
 	User           *UserContext
 	WI             *domain.WorkItem
 	WIType         string    // flattened *WI.WIType
+	HumanMode      string    // requires_human_session folded: "Human" (true) / "Auto" (false) / "" (NULL/unclassified)
 	Content        string    // flattened *WI.Content for direct template access
 	Milestone      string    // flattened *WI.Milestone
 	AttemptID      string    // flattened *WI.CurrentAttemptID
@@ -391,6 +393,13 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		if wi.CurrentAttemptID != nil {
 			data.AttemptID = *wi.CurrentAttemptID
 		}
+		if wi.RequiresHumanSession != nil {
+			if *wi.RequiresHumanSession {
+				data.HumanMode = "Human"
+			} else {
+				data.HumanMode = "Auto"
+			}
+		}
 
 		// Project access check — must come AFTER GetWorkItem because we don't
 		// know the project until we've read the row.
@@ -607,6 +616,13 @@ func toListRow(wi *domain.WorkItem, owners map[string]attemptOwner) *wiListRow {
 	}
 	if wi.WIType != nil {
 		row.WIType = *wi.WIType
+	}
+	if wi.RequiresHumanSession != nil {
+		if *wi.RequiresHumanSession {
+			row.HumanMode = "Human"
+		} else {
+			row.HumanMode = "Auto"
+		}
 	}
 	if wi.CurrentAttemptID != nil {
 		if o, ok := owners[*wi.CurrentAttemptID]; ok {

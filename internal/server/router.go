@@ -36,6 +36,9 @@ func NewRouter(pool *pgxpool.Pool, uiCookieSecret []byte) *echo.Echo {
 	// Protected by ADMIN_BOOTSTRAP_KEY env var; disabled when key is unset.
 	e.POST("/v1/bootstrap", handleBootstrap(pool))
 
+	// aihub#96: unauthenticated public artifact share — memory_id is the unguessable link.
+	e.GET("/share/:id", handleSharedArtifact(pool))
+
 	// Authenticated routes
 	v1 := e.Group("/v1", BearerAuth(pool), IdempotencyMiddleware())
 

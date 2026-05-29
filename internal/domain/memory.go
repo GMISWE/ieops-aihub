@@ -64,6 +64,32 @@ func InitRenderTypes(envVal string) {
 	fmt.Fprintf(os.Stderr, "aihub: render types: %v\n", keys)
 }
 
+// resolveRenderedHTML decides the value stored in memories.rendered_html on save
+// (aihub#27 / aihub#104). Precedence:
+//  1. explicit non-empty HTML (pf_save_artifact html=) → stored verbatim, any type;
+//  2. else, if the type is in the configured renderTypes set → goldmark-render the
+//     markdown content (best-effort; a render error stores NULL, never blocks insert);
+//  3. else → nil (column left NULL).
+func resolveRenderedHTML(explicit *string, memType, content string) *string {
+	if explicit != nil && strings.TrimSpace(*explicit) != "" {
+		return explicit
+	}
+	renderTypesMu.RLock()
+	shouldRender := renderTypes[memType]
+	renderTypesMu.RUnlock()
+	if !shouldRender {
+		return nil
+	}
+	h, rerr := render.Markdown(content)
+	if rerr != nil {
+		fmt.Fprintf(os.Stderr,
+			"memory render: markdown→HTML failed for type=%s; storing without rendered_html: %v\n",
+			memType, rerr)
+		return nil
+	}
+	return &h
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 // Memory represents a row from the memories table.
@@ -121,6 +147,12 @@ type RememberRequest struct {
 	// structured_payload (e.g. spec acceptance criteria). The server merges it
 	// into attrs.structured_payload so the recall flow can return it later.
 	StructuredPayload json.RawMessage `json:"structured_payload,omitempty"`
+	// aihub#104: optional pre-rendered HTML stored verbatim in
+	// memories.rendered_html. When non-empty it OVERRIDES the server-side
+	// markdown auto-render (renderTypes), letting callers attach a custom
+	// standalone HTML document (or fragment) for any artifact type — e.g.
+	// pf_save_artifact html=. Empty/whitespace falls back to auto-render.
+	RenderedHTML *string `json:"rendered_html,omitempty"`
 	// Set by handler from Bearer token — not from JSON body.
 	CallerUserID  string `json:"-"`
 	CallerDisplay string `json:"-"`
@@ -302,19 +334,7 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	// aihub#27 / IEBE-1694: render markdown to HTML for configured types only.
 	// Render is best-effort — a render failure must NOT block the insert (spec
 	// decision 3). Other memory types leave rendered_html NULL.
-	var renderedHTML *string
-	renderTypesMu.RLock()
-	shouldRender := renderTypes[req.Type]
-	renderTypesMu.RUnlock()
-	if shouldRender {
-		if h, rerr := render.Markdown(req.Content); rerr != nil {
-			fmt.Fprintf(os.Stderr,
-				"memory render: markdown→HTML failed for type=%s; storing without rendered_html: %v\n",
-				req.Type, rerr)
-		} else {
-			renderedHTML = &h
-		}
-	}
+	renderedHTML := resolveRenderedHTML(req.RenderedHTML, req.Type, req.Content)
 
 	mem := &Memory{}
 	err := pool.QueryRow(ctx, `

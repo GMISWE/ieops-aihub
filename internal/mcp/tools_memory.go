@@ -212,6 +212,7 @@ func (s *Server) registerMemoryTools() {
 			"structured_payload":   prop("object", "Optional structured payload"),
 			"visibility":           prop("string", "private|project|team|admin (default: project)"),
 			"supersedes_memory_id": prop("string", "Memory ID this supersedes"),
+			"html":                 prop("string", "Optional pre-rendered HTML stored verbatim in rendered_html (full standalone document or body fragment). Overrides server-side markdown auto-render; use for custom-styled artifact views served by the artifact HTML viewer."),
 		}, []string{"type", "work_item_id", "content"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -251,6 +252,9 @@ func (s *Server) registerMemoryTools() {
 		}
 		if v := strArg(args, "supersedes_memory_id"); v != "" {
 			body["supersedes_memory_id"] = v
+		}
+		if v := strArg(args, "html"); v != "" {
+			body["rendered_html"] = v
 		}
 
 		result, err := s.client.Remember(ctx, body)

@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -178,5 +179,38 @@ func TestArtifactHTML_401_NoUser(t *testing.T) {
 	}
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d, want 401", rec.Code)
+	}
+}
+
+// TestRenderArtifactBody_FullDocVerbatim verifies aihub#104: a stored value that is
+// already a complete HTML document is served verbatim (no double-wrapping), case-
+// and leading-whitespace-insensitive.
+func TestRenderArtifactBody_FullDocVerbatim(t *testing.T) {
+	docs := []string{
+		"<!doctype html><html><head></head><body>x</body></html>",
+		"<!DOCTYPE HTML>\n<html><body>x</body></html>",
+		"  \n\t<html lang=\"en\"><body>x</body></html>",
+	}
+	for _, doc := range docs {
+		if got := renderArtifactBody(doc, "mem_x (methodology.review)"); got != doc {
+			t.Fatalf("full document must be served verbatim;\n got: %q\nwant: %q", got, doc)
+		}
+	}
+}
+
+// TestRenderArtifactBody_FragmentWrapped verifies a body fragment (goldmark
+// auto-render path) is wrapped into a standalone document containing the fragment.
+func TestRenderArtifactBody_FragmentWrapped(t *testing.T) {
+	frag := "<h1>Hello</h1>\n<p>a fragment</p>"
+	got := renderArtifactBody(frag, "My Title")
+	if got == frag {
+		t.Fatalf("fragment should be wrapped, got served verbatim")
+	}
+	if !strings.Contains(got, frag) {
+		t.Fatalf("wrapped output should embed the fragment; got %q", got)
+	}
+	lc := strings.ToLower(got)
+	if !strings.Contains(lc, "<html") && !strings.Contains(lc, "<!doctype") {
+		t.Fatalf("wrapped output should be a full document; got %q", got)
 	}
 }

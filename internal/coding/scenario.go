@@ -5,46 +5,47 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
 )
 
 // WorktreePath returns the absolute worktree path for a given work item and repo.
-// It reads the state file and looks up the worktrees map.
+// It reads the state file and looks up the worktrees map (primary path).
+//
+// Fallback (state files written before worktree creation ran): reconstructs the
+// path from state file fields Project + Slug using the canonical directory format
+// pf.<project>-<seq>/<repo>/ (e.g. pf.aihub-80/aihub).
+//
+// Returns a clear error if the path cannot be determined; no silent fallback to
+// an incorrect path.
 func WorktreePath(wiID, repo, workspaceRoot string) (string, error) {
 	sf, err := config.ReadStateFile(wiID)
 	if err != nil {
 		return "", fmt.Errorf("read state file for wi %s: %w", wiID, err)
 	}
 
+	// Primary: state file has explicit worktrees map (set by pf_claim_work_item).
 	if sf.Worktrees != nil {
 		if path, ok := sf.Worktrees[repo]; ok {
 			return path, nil
 		}
 	}
 
-	// Fallback: derive from workspace root
+	// Fallback: reconstruct from Project + Slug using the canonical format
+	// pf.<project>-<seq>/<repo>/ (mirrors tools_lifecycle.go worktree creation).
 	if workspaceRoot == "" {
-		return "", fmt.Errorf("worktree path for repo %q not found in state file and workspace_root not provided", repo)
+		return "", fmt.Errorf("worktree path for repo %q not found in state file (wi %s) and workspace_root not provided", repo, wiID)
 	}
-
-	// Fallback for old state files that predate the worktrees field.
-	// Uses <workspace_root>/pf.<shortid>/<repo>/ where shortid is the segment
-	// after the last underscore in wi_id (e.g. "wi_KmBoOqUE" → "KmBoOqUE").
-	// Note: shortid != <project>-<seq>; this path is only used for legacy compat.
-	shortID := shortID(wiID)
-	return filepath.Join(workspaceRoot, "pf."+shortID, repo), nil
-}
-
-// shortID extracts the 8-char base62 shortid from a full wi ID (e.g. "wi_01ks510z").
-func shortID(wiID string) string {
-	// wi_XXXXXXXX format: take everything after the last underscore
-	for i := len(wiID) - 1; i >= 0; i-- {
-		if wiID[i] == '_' {
-			return wiID[i+1:]
-		}
+	if sf.Project == "" || sf.Slug == "" {
+		return "", fmt.Errorf("worktree path for repo %q not found in state file (wi %s): worktrees map is absent and state file has no project/slug fields to reconstruct the path", repo, wiID)
 	}
-	return wiID
+	idx := strings.LastIndex(sf.Slug, "#")
+	if idx < 0 || idx == len(sf.Slug)-1 {
+		return "", fmt.Errorf("worktree path for repo %q not found in state file (wi %s): cannot parse seq from slug %q", repo, wiID, sf.Slug)
+	}
+	seq := sf.Slug[idx+1:]
+	return filepath.Join(workspaceRoot, fmt.Sprintf("pf.%s-%s", sf.Project, seq), repo), nil
 }
 
 // Wrap executes the wrap sequence for a work item:

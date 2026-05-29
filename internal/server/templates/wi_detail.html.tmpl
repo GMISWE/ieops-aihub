@@ -41,6 +41,7 @@
       <dl class="pf-kv">
         <dt>Project</dt><dd><code>{{.WI.Project}}</code></dd>
         <dt>Source</dt><dd>{{or .WI.Source "—"}}</dd>
+        <dt>Mode</dt><dd>{{if .HumanMode}}{{.HumanMode}}{{else}}<span class="pf-empty">—</span>{{end}}</dd>
         <dt>Reporter</dt><dd>{{or .WI.ReporterDisplay "—"}}</dd>
         <dt>Claimed by</dt><dd>{{if .OwnerDisplay}}{{.OwnerDisplay}}{{else}}<span class="pf-empty">— (no active attempt)</span>{{end}}</dd>
         {{if .OwnerHasActive}}<dt>Last active</dt><dd>{{.OwnerActive.Format "2006-01-02 15:04 MST"}}</dd>{{end}}

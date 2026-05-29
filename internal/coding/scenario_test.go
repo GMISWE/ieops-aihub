@@ -42,16 +42,18 @@ func TestWorktreePathFromStateFile(t *testing.T) {
 	}
 }
 
-// TestWorktreePathFallbackPrefix verifies that the fallback path uses the
-// "pf." prefix (not the stale "pf3." prefix), matching the directory format
-// used by pf_claim_work_item when creating worktrees.
-func TestWorktreePathFallbackPrefix(t *testing.T) {
+// TestWorktreePathFallbackSlug verifies that when the state file has no
+// worktrees map but has Project and Slug fields, the fallback reconstructs
+// the canonical pf.<project>-<seq>/<repo>/ path.
+func TestWorktreePathFallbackSlug(t *testing.T) {
 	tmp := t.TempDir()
-	// State file with NO worktrees field — simulates old state file or
-	// state written before the worktree creation logic ran.
+	// State file with NO worktrees field but with Project + Slug set —
+	// simulates a state file written before the worktree creation logic ran.
 	sf := &config.StateFile{
 		WIID:      "wi_TestBBB",
 		AttemptID: "att_2",
+		Project:   "aihub",
+		Slug:      "aihub#42",
 		Worktrees: nil,
 	}
 	writeStateFile(t, tmp, sf)
@@ -60,11 +62,28 @@ func TestWorktreePathFallbackPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Fallback derives shortid from wi_id by stripping "wi_" prefix.
-	// shortID("wi_TestBBB") == "TestBBB"
-	want := filepath.Join(tmp, "pf.TestBBB", "aihub")
+	// Fallback reconstructs canonical format: pf.<project>-<seq>/<repo>
+	want := filepath.Join(tmp, "pf.aihub-42", "aihub")
 	if got != want {
-		t.Errorf("got %q, want %q (check for stale 'pf3.' prefix)", got, want)
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestWorktreePathFallbackNoProjectSlug verifies that when the state file
+// has no worktrees map and no Project/Slug, a clear error is returned.
+func TestWorktreePathFallbackNoProjectSlug(t *testing.T) {
+	tmp := t.TempDir()
+	sf := &config.StateFile{
+		WIID:      "wi_TestBBB2",
+		AttemptID: "att_2b",
+		Worktrees: nil,
+		// No Project, no Slug
+	}
+	writeStateFile(t, tmp, sf)
+
+	_, err := WorktreePath("wi_TestBBB2", "aihub", tmp)
+	if err == nil {
+		t.Error("expected error when no worktrees and no project/slug, got nil")
 	}
 }
 

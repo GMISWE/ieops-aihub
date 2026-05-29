@@ -1,10 +1,13 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 
 	"github.com/GMISWE/ieops-aihub/internal/domain"
@@ -178,5 +181,238 @@ func TestArtifactHTML_401_NoUser(t *testing.T) {
 	}
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d, want 401", rec.Code)
+	}
+}
+
+// ─── aihub#96: public artifact share (/share/:id) ──────────────────────────────
+//
+// These mirror the no-DB strategy used elsewhere in the package: swap the
+// loadMemoryFn / setMemoryVisibilityFn seams so the handlers run their full
+// logic against fixture memories. The share endpoint takes NO auth.
+
+// withSetVisibilityOverride swaps setMemoryVisibilityFn for a test, capturing the
+// last (id, visibility) pair so callers can assert the mutation that would persist.
+func withSetVisibilityOverride(aerr *domain.AihubError) (gotID, gotVis *string, cleanup func()) {
+	prev := setMemoryVisibilityFn
+	var id, vis string
+	setMemoryVisibilityFn = func(_ context.Context, _ *pgxpool.Pool, memID, visibility string) *domain.AihubError {
+		id, vis = memID, visibility
+		return aerr
+	}
+	return &id, &vis, func() { setMemoryVisibilityFn = prev }
+}
+
+func htmlPtr(s string) *string { return &s }
+
+// publicSharedMem is a methodology.spec artifact that has been made public and
+// has a non-null rendered_html fragment.
+func publicSharedMem() *domain.Memory {
+	return &domain.Memory{
+		ID:           "mem_share1",
+		Project:      "testproj",
+		Type:         "methodology.spec",
+		Visibility:   "public",
+		AuthorUserID: "u_author",
+		RenderedHTML: htmlPtr("<h1>SPEC-BODY-MARKER</h1>"),
+	}
+}
+
+// Scenario 1: public artifact + rendered_html non-null →
+// GET /share/:id returns 200, text/html, body contains the fragment, NO auth set.
+func TestSharedArtifact_Public_200(t *testing.T) {
+	defer withLoadMemoryOverride(publicSharedMem(), nil)()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/share/mem_share1", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_share1")
+	// Deliberately NO setUser — public bypasses auth.
+
+	if err := handleSharedArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get(echo.HeaderContentType); !strings.Contains(ct, "text/html") {
+		t.Fatalf("content-type: got %q, want text/html", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "SPEC-BODY-MARKER") {
+		t.Fatalf("body does not contain the rendered fragment: %s", rec.Body.String())
+	}
+	// XSS hardening: the anonymous path must ship a strict CSP + nosniff so a
+	// <script> embedded in a malicious artifact cannot execute on our origin.
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") {
+		t.Fatalf("public share must send a strict CSP, got %q", csp)
+	}
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("public share must send X-Content-Type-Options: nosniff")
+	}
+}
+
+// Scenario 2: after unshare (visibility back to project) →
+// GET /share/:id returns 404. We run the real unshare handler to flip the
+// fixture's visibility, then re-load it through /share/:id.
+func TestSharedArtifact_AfterUnshare_404(t *testing.T) {
+	mem := publicSharedMem()
+	defer withLoadMemoryOverride(mem, nil)()
+	gotID, gotVis, cleanup := withSetVisibilityOverride(nil)
+	defer cleanup()
+
+	// Unshare as the writer/author.
+	e := echo.New()
+	ureq := httptest.NewRequest(http.MethodDelete, "/v1/artifacts/mem_share1/share", nil)
+	urec := httptest.NewRecorder()
+	uc := e.NewContext(ureq, urec)
+	uc.SetParamNames("id")
+	uc.SetParamValues("mem_share1")
+	setUser(uc, authorUser())
+	if err := handleUnshareArtifact(nil)(uc); err != nil {
+		e.HTTPErrorHandler(err, uc)
+	}
+	if urec.Code != http.StatusOK {
+		t.Fatalf("unshare status: got %d, want 200 (body=%s)", urec.Code, urec.Body.String())
+	}
+	if *gotID != "mem_share1" || *gotVis != "project" {
+		t.Fatalf("unshare mutation: got (%q,%q), want (mem_share1,project)", *gotID, *gotVis)
+	}
+
+	// Simulate the persisted state and hit /share/:id again → 404.
+	mem.Visibility = "project"
+	sreq := httptest.NewRequest(http.MethodGet, "/share/mem_share1", nil)
+	srec := httptest.NewRecorder()
+	sc := e.NewContext(sreq, srec)
+	sc.SetParamNames("id")
+	sc.SetParamValues("mem_share1")
+	if err := handleSharedArtifact(nil)(sc); err != nil {
+		e.HTTPErrorHandler(err, sc)
+	}
+	if srec.Code != http.StatusNotFound {
+		t.Fatalf("post-unshare status: got %d, want 404 (body=%s)", srec.Code, srec.Body.String())
+	}
+}
+
+// Scenario 3: non-public artifact (visibility=project) → GET /share/:id returns 404.
+func TestSharedArtifact_NonPublic_404(t *testing.T) {
+	mem := publicSharedMem()
+	mem.Visibility = "project"
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/share/mem_share1", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_share1")
+	if err := handleSharedArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status: got %d, want 404 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// Scenario 4: POST /v1/artifacts/:id/share on an artifact with rendered_html=NULL → 412.
+func TestShareArtifact_NoRenderedHTML_412(t *testing.T) {
+	mem := publicSharedMem()
+	mem.Visibility = "project"
+	mem.RenderedHTML = nil // not a spec/plan → nothing to share
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/v1/artifacts/mem_share1/share", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_share1")
+	setUser(c, authorUser()) // writer on testproj
+
+	if err := handleShareArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("status: got %d, want 412 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// Scenario 5: POST /v1/artifacts/:id/share as a viewer (not writer) → 403.
+func TestShareArtifact_Viewer_403(t *testing.T) {
+	mem := publicSharedMem()
+	mem.Visibility = "project"
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/v1/artifacts/mem_share1/share", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_share1")
+	setUser(c, otherViewerUser()) // viewer on testproj
+
+	if err := handleShareArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status: got %d, want 403 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// Scenario 6: a caller who is NOT a project member (anonymous here, the strongest
+// case) hits GET /share/:id for a public artifact → 200. Public bypasses the
+// project access check entirely (handleSharedArtifact never calls checkProjectAccess).
+func TestSharedArtifact_NonMember_200(t *testing.T) {
+	defer withLoadMemoryOverride(publicSharedMem(), nil)()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/share/mem_share1", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_share1")
+	// No user at all: anonymous, definitionally not a project member.
+
+	if err := handleSharedArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "SPEC-BODY-MARKER") {
+		t.Fatalf("body does not contain the rendered fragment: %s", rec.Body.String())
+	}
+}
+
+// Scenario 7: a writer shares a spec/plan artifact that has rendered_html →
+// 200, visibility flipped to public, and the response carries the share_url.
+// Covers the success path of POST /v1/artifacts/:id/share.
+func TestShareArtifact_Writer_200(t *testing.T) {
+	mem := publicSharedMem()
+	mem.Visibility = "project" // not yet shared
+	defer withLoadMemoryOverride(mem, nil)()
+	gotID, gotVis, cleanup := withSetVisibilityOverride(nil)
+	defer cleanup()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/v1/artifacts/mem_share1/share", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_share1")
+	setUser(c, authorUser()) // writer on testproj
+
+	if err := handleShareArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if *gotID != "mem_share1" || *gotVis != "public" {
+		t.Fatalf("share mutation: got (%q,%q), want (mem_share1,public)", *gotID, *gotVis)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "share_url") || !strings.Contains(body, "/share/mem_share1") {
+		t.Fatalf("response missing share_url for the artifact: %s", body)
 	}
 }

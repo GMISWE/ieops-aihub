@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +26,9 @@ const defaultRenderTypes = "methodology.spec,methodology.plan"
 // performed on save. Initialised to the default set so Remember() is safe to
 // call before InitRenderTypes (e.g. in unit tests that bypass main()).
 var renderTypes = parseRenderTypes(defaultRenderTypes)
+
+// renderTypesMu guards renderTypes against concurrent read/write.
+var renderTypesMu sync.RWMutex
 
 // parseRenderTypes parses a comma-separated type list into a lookup set.
 // Falls back to defaultRenderTypes when envVal is empty or whitespace-only.
@@ -46,11 +51,16 @@ func parseRenderTypes(envVal string) map[string]bool {
 // values fall back to the default. Logs the effective set to stderr.
 // Call once from cmd/aihub/main.go before serving requests.
 func InitRenderTypes(envVal string) {
-	renderTypes = parseRenderTypes(envVal)
-	keys := make([]string, 0, len(renderTypes))
-	for k := range renderTypes {
+	m := parseRenderTypes(envVal)
+	renderTypesMu.Lock()
+	renderTypes = m
+	renderTypesMu.Unlock()
+	// Log after Unlock to avoid holding the mutex during I/O.
+	keys := make([]string, 0, len(m))
+	for k := range m {
 		keys = append(keys, k)
 	}
+	sort.Strings(keys)
 	fmt.Fprintf(os.Stderr, "aihub: render types: %v\n", keys)
 }
 
@@ -293,7 +303,10 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	// Render is best-effort — a render failure must NOT block the insert (spec
 	// decision 3). Other memory types leave rendered_html NULL.
 	var renderedHTML *string
-	if renderTypes[req.Type] {
+	renderTypesMu.RLock()
+	shouldRender := renderTypes[req.Type]
+	renderTypesMu.RUnlock()
+	if shouldRender {
 		if h, rerr := render.Markdown(req.Content); rerr != nil {
 			fmt.Fprintf(os.Stderr,
 				"memory render: markdown→HTML failed for type=%s; storing without rendered_html: %v\n",
@@ -748,6 +761,9 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		items = append(items, MemoryWithStrength{Memory: *m, EffectiveStrength: strength})
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, NewErr(ErrInternalError, fmt.Sprintf("recall rows error: %v", err))
+	}
 
 	var nextCursor *string
 	if len(items) > req.TopK {

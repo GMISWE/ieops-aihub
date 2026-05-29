@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
@@ -60,13 +61,24 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				"no HTML available for this artifact (rendered_html is NULL — only methodology.spec / methodology.plan render, and legacy rows are not backfilled)"))
 		}
 
-		// Wrap the stored body fragment in a standalone HTML document so the
-		// `polyforge artifact view` browser flow gets usable styling without
-		// extra setup. The fragment in `memories.rendered_html` is kept raw so
-		// it can be embedded in other contexts (future webui, etc.) later.
 		title := mem.ID + " (" + mem.Type + ")"
-		return c.HTMLBlob(http.StatusOK, []byte(render.Document(*mem.RenderedHTML, title)))
+		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBody(*mem.RenderedHTML, title)))
 	}
+}
+
+// renderArtifactBody returns the HTML body to serve for a stored rendered_html
+// value. A caller-supplied custom render (pf_save_artifact html=, aihub#104) may
+// already be a complete standalone document — detected by a leading <!doctype or
+// <html — and is served verbatim to avoid double-wrapping. Otherwise the stored
+// value is a body fragment (the goldmark auto-render path), so it is wrapped in a
+// standalone document to give the `polyforge artifact view` browser flow usable
+// styling. The fragment is kept raw in the column so it can be embedded elsewhere.
+func renderArtifactBody(stored, title string) string {
+	lc := strings.ToLower(strings.TrimSpace(stored))
+	if strings.HasPrefix(lc, "<!doctype") || strings.HasPrefix(lc, "<html") {
+		return stored
+	}
+	return render.Document(stored, title)
 }
 
 // checkMemoryVisibility enforces the per-row visibility rules that recall

@@ -725,3 +725,10 @@ func prop(typ, description string) map[string]any {
 		"description": description,
 	}
 }
+
+// propEnum returns a property definition with an enum constraint (aihub#70).
+func propEnum(typ, description string, enum []string) map[string]any {
+	p := prop(typ, description)
+	p["enum"] = enum
+	return p
+}

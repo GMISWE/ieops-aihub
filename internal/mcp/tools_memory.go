@@ -9,6 +9,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
 func (s *Server) registerMemoryTools() {
@@ -18,7 +19,7 @@ func (s *Server) registerMemoryTools() {
 		Description: "Store a memory in aihub. type must use full name (e.g. experience.debug). Rejects methodology.* types.",
 		InputSchema: objectSchema(map[string]any{
 			"project":              prop("string", "Project name"),
-			"type":                 prop("string", "Memory type (full name, e.g. experience.debug)"),
+			"type":                 propEnum("string", "Memory type (select from enum; full name e.g. experience.debug)", domain.MemoryTypeEnum),
 			"content":              prop("string", "Memory content"),
 			"visibility":           prop("string", "private|project|team|admin"),
 			"work_item_id":         prop("string", "Associated work item ID"),

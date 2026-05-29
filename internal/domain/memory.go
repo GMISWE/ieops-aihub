@@ -41,6 +41,7 @@ type Memory struct {
 	Status           string          `json:"status"`
 	Attrs            json.RawMessage `json:"attrs,omitempty"`
 	RenderedHTML     *string         `json:"rendered_html,omitempty"`
+	Commits          json.RawMessage `json:"commits"`
 	CreatedAt        time.Time       `json:"created_at"`
 	UpdatedAt        time.Time       `json:"updated_at"`
 }
@@ -54,19 +55,19 @@ type MemoryWithStrength struct {
 
 // RememberRequest is the body for POST /v1/memories.
 type RememberRequest struct {
-	Project           string          `json:"project"`
-	Type              string          `json:"type"`
-	Content           string          `json:"content"`
-	Visibility        string          `json:"visibility"`
-	WorkItemID        *string         `json:"work_item_id,omitempty"`
-	BaseStrength      *float64        `json:"base_strength,omitempty"`
-	Attrs             json.RawMessage `json:"attrs,omitempty"`
-	ExpiresAt         *time.Time      `json:"expires_at,omitempty"`
-	DedupMode         string          `json:"dedup_mode"` // strict | suggest | off
-	RelatedMemoryIDs  []string        `json:"related_memory_ids,omitempty"`
-	ContextSnippet    *string         `json:"context_snippet,omitempty"`
-	SupersedesMemID   *string         `json:"supersedes_memory_id,omitempty"`
-	Tags              []string        `json:"tags,omitempty"`
+	Project          string          `json:"project"`
+	Type             string          `json:"type"`
+	Content          string          `json:"content"`
+	Visibility       string          `json:"visibility"`
+	WorkItemID       *string         `json:"work_item_id,omitempty"`
+	BaseStrength     *float64        `json:"base_strength,omitempty"`
+	Attrs            json.RawMessage `json:"attrs,omitempty"`
+	ExpiresAt        *time.Time      `json:"expires_at,omitempty"`
+	DedupMode        string          `json:"dedup_mode"` // strict | suggest | off
+	RelatedMemoryIDs []string        `json:"related_memory_ids,omitempty"`
+	ContextSnippet   *string         `json:"context_snippet,omitempty"`
+	SupersedesMemID  *string         `json:"supersedes_memory_id,omitempty"`
+	Tags             []string        `json:"tags,omitempty"`
 	// G35 / design §5.2 pf_save_artifact: methodology artifacts may carry a
 	// structured_payload (e.g. spec acceptance criteria). The server merges it
 	// into attrs.structured_payload so the recall flow can return it later.
@@ -280,7 +281,7 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
 			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
-			rendered_html, created_at, updated_at`,
+			rendered_html, commits, created_at, updated_at`,
 		NewID("mem"), req.Project, req.Type, req.Content, req.CallerUserID, req.CallerDisplay,
 		req.WorkItemID, req.Visibility, immortal, baseStrength, stabilityDays,
 		req.ExpiresAt, req.Tags, nil, // source_artifact_id = nil
@@ -290,7 +291,7 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		&mem.WorkItemID, &mem.Visibility, &mem.IsImmortal, &mem.BaseStrength, &mem.StabilityDays,
 		&mem.LastActivatedAt, &mem.LastActivatedBy, &mem.ActivationCount, &mem.ExpiresAt,
 		&mem.Tags, &mem.SourceArtifactID, &mem.EmbModel, &mem.EmbDims, &mem.Status,
-		&mem.Attrs, &mem.RenderedHTML, &mem.CreatedAt, &mem.UpdatedAt,
+		&mem.Attrs, &mem.RenderedHTML, &mem.Commits, &mem.CreatedAt, &mem.UpdatedAt,
 	)
 	if err != nil {
 		return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to insert memory: %v", err))
@@ -398,6 +399,202 @@ func tokenSet(s string) map[string]bool {
 	return m
 }
 
+// ─── Type Enum ────────────────────────────────────────────────────────────────
+
+// MemoryTypeEnum is the curated select list for memory types (aihub#70).
+// Canonical 16 + actively-used {rule.coding, rule.work, fact.note} = 19.
+// Select-UX list ONLY — server validation stays lenient (4-prefix check),
+// so off-list-but-valid-prefix types are still accepted.
+var MemoryTypeEnum = []string{
+	"experience.debug", "experience.approach", "experience.pitfall", "experience.code",
+	"fact.architecture", "fact.constraint", "fact.reference", "fact.note",
+	"rule.scheduling", "rule.convention", "rule.process", "rule.coding", "rule.work",
+	"methodology.spec", "methodology.plan", "methodology.review",
+	"methodology.execute", "methodology.retro", "methodology.wrap_summary",
+}
+
+// ─── Commit (human annotation) ────────────────────────────────────────────────
+
+// CommitMemory appends a human annotation to the dedicated `commits` JSONB column.
+// It does NOT touch activation_count, base_strength, stability_days, or
+// last_activated_at — those fields are managed by the forgetting-curve path only.
+// updated_at is refreshed automatically by the BEFORE UPDATE trigger trg_mem_updated_at.
+// Write surface: UI only (POST /ui/memories/:id/commit).
+func CommitMemory(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUserID, callerDisplay string) error {
+	var project, status string
+	err := pool.QueryRow(ctx, `SELECT project, status FROM memories WHERE id=$1`, memID).
+		Scan(&project, &status)
+	if err != nil {
+		return pgxErr(err, "memory not found", "failed to load memory")
+	}
+	if status == "redacted" {
+		return NewErr(ErrForbidden, "cannot commit to a redacted memory")
+	}
+
+	entry := map[string]any{
+		// aihub#70 v3: every entry carries an id so it can later be edited or
+		// deleted by id. Existing rows without ids are backfilled by 0022.
+		"id":             NewID("cm"),
+		"author_user_id": callerUserID,
+		"author_display": callerDisplay,
+		"body":           body,
+		"created_at":     time.Now().UTC().Format(time.RFC3339),
+	}
+	entryJSON, _ := json.Marshal(entry)
+	// Wrap as a single-element JSON array so || can append it to the existing array.
+	entryArrayJSON := "[" + string(entryJSON) + "]"
+
+	_, execErr := pool.Exec(ctx, `
+		UPDATE memories
+		SET commits = commits || $2::jsonb
+		WHERE id = $1`,
+		memID, entryArrayJSON,
+	)
+	if execErr != nil {
+		return NewErr(ErrInternalError, fmt.Sprintf("failed to commit memory: %v", execErr))
+	}
+
+	// Emit memory_committed event (best-effort, fire-and-forget).
+	payload, _ := json.Marshal(map[string]any{
+		"memory_id":      memID,
+		"author_user_id": callerUserID,
+	})
+	_, _ = pool.Exec(ctx, `
+		INSERT INTO agent_events (id, actor_user_id, actor_display, event_type, payload, project)
+		VALUES ($1, $2, $3, 'memory_committed', $4, $5)`,
+		NewID("evt"), callerUserID, callerDisplay, payload, project,
+	) //nolint:errcheck
+
+	return nil
+}
+
+// ─── Commit edit / delete (aihub#70 v3) ───────────────────────────────────────
+
+// findCommitEntry locates a commit by id inside the memory's commits JSONB
+// column and returns its author_user_id (for the author-or-admin check).
+// Returns ErrNotFound when the memory or commit id is missing.
+func findCommitEntry(ctx context.Context, pool *pgxpool.Pool, memID, commitID string) (project, status, authorUserID string, err error) {
+	row := pool.QueryRow(ctx, `
+		SELECT m.project, m.status,
+		       (SELECT entry->>'author_user_id'
+		        FROM jsonb_array_elements(m.commits) AS entry
+		        WHERE entry->>'id' = $2
+		        LIMIT 1)
+		FROM memories m WHERE m.id = $1`, memID, commitID)
+	var authorPtr *string
+	if e := row.Scan(&project, &status, &authorPtr); e != nil {
+		err = pgxErr(e, "memory not found", "failed to load memory")
+		return
+	}
+	if authorPtr == nil {
+		err = NewErr(ErrNotFound, "commit not found")
+		return
+	}
+	authorUserID = *authorPtr
+	return
+}
+
+// checkCommitAuthor enforces the author-or-admin permission on edit/delete.
+func checkCommitAuthor(entryAuthorUserID, callerUserID, callerRole string) error {
+	if callerRole == "admin" || entryAuthorUserID == callerUserID {
+		return nil
+	}
+	return NewErr(ErrForbidden, "only the commit author or an admin may modify this commit")
+}
+
+// EditCommit replaces the body of a single commit by id, sets updated_at,
+// and emits memory_commit_edited. The commit's id, author and created_at
+// fields are immutable. Forgetting-curve fields are not touched.
+func EditCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, body, callerUserID, callerDisplay, callerRole string) error {
+	project, status, entryAuthor, err := findCommitEntry(ctx, pool, memID, commitID)
+	if err != nil {
+		return err
+	}
+	if status == "redacted" {
+		return NewErr(ErrForbidden, "cannot edit a commit on a redacted memory")
+	}
+	if err := checkCommitAuthor(entryAuthor, callerUserID, callerRole); err != nil {
+		return err
+	}
+
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	_, execErr := pool.Exec(ctx, `
+		UPDATE memories
+		SET commits = (
+			SELECT jsonb_agg(
+				CASE
+					WHEN entry->>'id' = $2 THEN
+						jsonb_set(
+							jsonb_set(entry, '{body}', to_jsonb($3::text), true),
+							'{updated_at}', to_jsonb($4::text), true
+						)
+					ELSE entry
+				END
+			)
+			FROM jsonb_array_elements(commits) AS entry
+		)
+		WHERE id = $1`,
+		memID, commitID, body, updatedAt,
+	)
+	if execErr != nil {
+		return NewErr(ErrInternalError, fmt.Sprintf("failed to edit commit: %v", execErr))
+	}
+
+	// best-effort audit event
+	payload, _ := json.Marshal(map[string]any{
+		"memory_id":      memID,
+		"commit_id":      commitID,
+		"actor_user_id":  callerUserID,
+	})
+	_, _ = pool.Exec(ctx, `
+		INSERT INTO agent_events (id, actor_user_id, actor_display, event_type, payload, project)
+		VALUES ($1, $2, $3, 'memory_commit_edited', $4, $5)`,
+		NewID("evt"), callerUserID, callerDisplay, payload, project,
+	) //nolint:errcheck
+	return nil
+}
+
+// DeleteCommit removes a single commit by id from the commits array and emits
+// memory_commit_deleted. Hard delete; no tombstone.
+func DeleteCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, callerUserID, callerDisplay, callerRole string) error {
+	project, status, entryAuthor, err := findCommitEntry(ctx, pool, memID, commitID)
+	if err != nil {
+		return err
+	}
+	if status == "redacted" {
+		return NewErr(ErrForbidden, "cannot delete a commit on a redacted memory")
+	}
+	if err := checkCommitAuthor(entryAuthor, callerUserID, callerRole); err != nil {
+		return err
+	}
+
+	_, execErr := pool.Exec(ctx, `
+		UPDATE memories
+		SET commits = COALESCE((
+			SELECT jsonb_agg(entry)
+			FROM jsonb_array_elements(commits) AS entry
+			WHERE entry->>'id' != $2
+		), '[]'::jsonb)
+		WHERE id = $1`,
+		memID, commitID,
+	)
+	if execErr != nil {
+		return NewErr(ErrInternalError, fmt.Sprintf("failed to delete commit: %v", execErr))
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"memory_id":     memID,
+		"commit_id":     commitID,
+		"actor_user_id": callerUserID,
+	})
+	_, _ = pool.Exec(ctx, `
+		INSERT INTO agent_events (id, actor_user_id, actor_display, event_type, payload, project)
+		VALUES ($1, $2, $3, 'memory_commit_deleted', $4, $5)`,
+		NewID("evt"), callerUserID, callerDisplay, payload, project,
+	) //nolint:errcheck
+	return nil
+}
+
 // ─── Recall ───────────────────────────────────────────────────────────────────
 
 // Recall retrieves memories per §7.5 (text/tag search path).
@@ -489,7 +686,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
 			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
-			rendered_html, created_at, updated_at
+			rendered_html, commits, created_at, updated_at
 		FROM memories
 		WHERE %s
 		ORDER BY last_activated_at DESC NULLS LAST, created_at DESC
@@ -544,7 +741,7 @@ func scanMemory(rows pgx.Rows) (*Memory, error) {
 		&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
 		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
 		&m.Tags, &m.SourceArtifactID, &m.EmbModel, &m.EmbDims, &m.Status,
-		&m.Attrs, &m.RenderedHTML, &m.CreatedAt, &m.UpdatedAt,
+		&m.Attrs, &m.RenderedHTML, &m.Commits, &m.CreatedAt, &m.UpdatedAt,
 	)
 	return m, err
 }
@@ -561,7 +758,7 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
 			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
-			rendered_html, created_at, updated_at
+			rendered_html, commits, created_at, updated_at
 		FROM memories
 		WHERE id = $1 AND status != 'redacted'`, id,
 	).Scan(
@@ -569,7 +766,7 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 		&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
 		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
 		&m.Tags, &m.SourceArtifactID, &m.EmbModel, &m.EmbDims, &m.Status,
-		&m.Attrs, &m.RenderedHTML, &m.CreatedAt, &m.UpdatedAt,
+		&m.Attrs, &m.RenderedHTML, &m.Commits, &m.CreatedAt, &m.UpdatedAt,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -844,10 +1041,10 @@ var adminEventWhitelist = map[string]bool{
 // caller setting admin=false but using an admin event type would otherwise bypass the
 // req.Admin gate.
 var adminOnlyEventTypes = map[string]bool{
-	"admin_redact":          true,
-	"admin_unblock":         true,
-	"admin_force_takeover":  true,
-	"admin_gc_manual":       true,
+	"admin_redact":         true,
+	"admin_unblock":        true,
+	"admin_force_takeover": true,
+	"admin_gc_manual":      true,
 }
 
 // EmitEvent inserts a new event into agent_events.

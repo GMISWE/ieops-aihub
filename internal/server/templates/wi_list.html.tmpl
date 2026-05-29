@@ -79,6 +79,7 @@
       <th>Kind</th>
       <th>Priority</th>
       <th>Status</th>
+      <th>Mode</th>
       <th>Goal</th>
       <th>Owner</th>
       <th>Reporter</th>
@@ -92,12 +93,13 @@
       <td>{{if .WIType}}<span class="pf-badge pf-badge-type-{{.WIType}}">{{.WIType}}</span>{{else}}<span class="pf-empty">—</span>{{end}}</td>
       <td><span class="pf-badge pf-badge-priority-{{or .Priority "normal"}}">{{or .Priority "normal"}}</span></td>
       <td><span class="pf-badge pf-badge-status-{{.Status}}">{{.Status}}</span></td>
+      <td>{{if .HumanMode}}<span class="pf-badge">{{.HumanMode}}</span>{{else}}<span class="pf-empty">—</span>{{end}}</td>
       <td>{{truncate 100 .Goal}}</td>
       <td>{{if .OwnerDisplay}}{{.OwnerDisplay}}{{else}}<span class="pf-empty">—</span>{{end}}</td>
       <td>{{or .ReporterDisplay "—"}}</td>
     </tr>
     {{else}}
-    <tr><td colspan="{{if .AllMode}}8{{else}}7{{end}}" class="pf-empty">No work items match the current filters.</td></tr>
+    <tr><td colspan="{{if .AllMode}}9{{else}}8{{end}}" class="pf-empty">No work items match the current filters.</td></tr>
     {{end}}
   </tbody>
 </table>

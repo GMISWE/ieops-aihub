@@ -17,19 +17,18 @@ import (
 
 // ─── Render Types (config-driven) ─────────────────────────────────────────────
 
-// renderTypes is the set of memory types for which Markdown→HTML rendering is
-// performed on save. Populated at startup by InitRenderTypes.
-var renderTypes map[string]bool
-
 // defaultRenderTypes is the backward-compatible default (aihub#102).
 const defaultRenderTypes = "methodology.spec,methodology.plan"
 
-// InitRenderTypes initialises the renderTypes set from an env-var value.
-// envVal is a comma-separated list, e.g. "methodology.spec,methodology.plan".
-// When envVal is empty the default list is used.
-// Call this once from cmd/aihub/main.go before serving requests.
-func InitRenderTypes(envVal string) {
-	if envVal == "" {
+// renderTypes is the set of memory types for which Markdown→HTML rendering is
+// performed on save. Initialised to the default set so Remember() is safe to
+// call before InitRenderTypes (e.g. in unit tests that bypass main()).
+var renderTypes = parseRenderTypes(defaultRenderTypes)
+
+// parseRenderTypes parses a comma-separated type list into a lookup set.
+// Falls back to defaultRenderTypes when envVal is empty or whitespace-only.
+func parseRenderTypes(envVal string) map[string]bool {
+	if strings.TrimSpace(envVal) == "" {
 		envVal = defaultRenderTypes
 	}
 	m := make(map[string]bool)
@@ -39,7 +38,20 @@ func InitRenderTypes(envVal string) {
 			m[t] = true
 		}
 	}
-	renderTypes = m
+	return m
+}
+
+// InitRenderTypes overrides the render-type set from an env-var value at
+// server startup. envVal is a comma-separated list; empty or whitespace-only
+// values fall back to the default. Logs the effective set to stderr.
+// Call once from cmd/aihub/main.go before serving requests.
+func InitRenderTypes(envVal string) {
+	renderTypes = parseRenderTypes(envVal)
+	keys := make([]string, 0, len(renderTypes))
+	for k := range renderTypes {
+		keys = append(keys, k)
+	}
+	fmt.Fprintf(os.Stderr, "aihub: render types: %v\n", keys)
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -728,6 +740,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	for rows.Next() {
 		m, err := scanMemoryLite(rows)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "recall: scanMemoryLite error (possible column drift): %v\n", err)
 			continue
 		}
 		strength := MemoryStrength(m.BaseStrength, m.StabilityDays, m.LastActivatedAt, m.CreatedAt)
@@ -752,24 +765,6 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	}
 
 	return &RecallResponse{Items: items, NextCursor: nextCursor}, nil
-}
-
-// scanMemory scans a full memory row from pgx.Rows.
-//
-// IMPORTANT (aihub#27 pitfall mem_i9I2g8Hv): the column order here MUST match
-// the SELECT in the INSERT/RETURNING in Remember, the column list in
-// GetMemoryByID, and the field order on the Memory struct. pgx Scan is
-// positional — silent corruption if anything drifts.
-func scanMemory(rows pgx.Rows) (*Memory, error) {
-	m := &Memory{}
-	err := rows.Scan(
-		&m.ID, &m.Project, &m.Type, &m.Content, &m.AuthorUserID, &m.AuthorDisplay,
-		&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
-		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
-		&m.Tags, &m.SourceArtifactID, &m.EmbModel, &m.EmbDims, &m.Status,
-		&m.Attrs, &m.RenderedHTML, &m.Commits, &m.CreatedAt, &m.UpdatedAt,
-	)
-	return m, err
 }
 
 // scanMemoryLite scans a lightweight memory row for LLM recall (aihub#102).
@@ -798,7 +793,8 @@ func scanMemoryLite(rows pgx.Rows) (*Memory, error) {
 // Returns ErrNotFound when the row is missing or has status='redacted'.
 // Used by the artifact HTML viewer endpoint (aihub#27).
 //
-// Column order MUST mirror Recall's SELECT / scanMemory — see scanMemory docs.
+// Column order MUST mirror the INSERT/RETURNING in Remember and the Memory struct
+// field order (positional scan — silent corruption if anything drifts).
 func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory, *AihubError) {
 	m := &Memory{}
 	err := pool.QueryRow(ctx, `

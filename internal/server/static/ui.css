@@ -565,3 +565,269 @@ a:hover { text-decoration: underline; }
   margin: 0.5em 0;
   font-size: 0.9em;
 }
+
+/* ---------- aihub#70: memory content auto-wrap + commits card ---------- */
+
+/* Non-markdown content fallback — wrap long lines instead of horizontal-scroll. */
+.pf-content-raw {
+  background: var(--pf-bg-soft);
+  border: 1px solid var(--pf-border);
+  padding: 12px;
+  border-radius: 6px;
+  font-family: var(--pf-mono);
+  font-size: 0.9em;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+
+/* Markdown-rendered code blocks: wrap rather than horizontal-scroll
+   (overrides the overflow-x: auto above for a more "Warp-like" feel). */
+.pf-content-md pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Commits card (memory_detail). */
+.pf-commits-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.5em;
+}
+.pf-commit-entry {
+  padding: 0.7em 0;
+  border-bottom: 1px solid var(--pf-border);
+}
+.pf-commit-entry:last-child { border-bottom: none; }
+.pf-commit-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7em;
+  margin-bottom: 0.3em;
+}
+.pf-commit-author {
+  font-weight: 600;
+  color: var(--pf-fg);
+  font-size: 0.92em;
+}
+.pf-commit-ts {
+  color: var(--pf-fg-muted);
+  font-family: var(--pf-mono);
+  font-size: 0.82em;
+}
+.pf-commit-body {
+  color: var(--pf-fg);
+  font-size: 0.93em;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pf-commit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+  padding-top: 0.9em;
+  margin-top: 0.3em;
+  border-top: 1px dashed var(--pf-border);
+}
+.pf-commit-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 0.93em;
+  padding: 0.55em 0.7em;
+  border: 1px solid var(--pf-border);
+  border-radius: 6px;
+  resize: vertical;
+  min-height: 4.2em;
+  field-sizing: content; /* Chrome 123+ / supported browsers auto-grow on input */
+  background: var(--pf-bg);
+  color: var(--pf-fg);
+}
+.pf-commit-form textarea:focus {
+  outline: none;
+  border-color: var(--pf-accent);
+  box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.18);
+}
+.pf-commit-form button {
+  align-self: flex-end;
+  padding: 0.4em 1.1em;
+  font: inherit;
+  font-size: 0.88em;
+  border: 1px solid var(--pf-border);
+  border-radius: 6px;
+  background: var(--pf-bg-soft);
+  color: var(--pf-fg);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.pf-commit-form button:hover,
+.pf-commit-form button:focus {
+  background: var(--pf-accent);
+  color: #fff;
+  border-color: var(--pf-accent);
+  outline: none;
+}
+
+/* commits-card specific empty-state (upstream defines .pf-empty for
+   other contexts; scope ours so we don't override them). */
+.pf-commits-card .pf-empty {
+  color: var(--pf-fg-muted);
+  font-style: italic;
+  margin: 0.4em 0;
+  font-size: 0.92em;
+  text-align: left;
+  padding: 0;
+}
+
+/* aihub#70 v3: per-entry edit/delete affordances ----------------- */
+
+.pf-commit-edited {
+  color: var(--pf-fg-muted);
+  font-size: 0.8em;
+  font-style: italic;
+  margin-left: 0.3em;
+}
+.pf-commit-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6em;
+  margin-left: auto;          /* push to the right edge of the meta row */
+  font-size: 0.82em;
+}
+.pf-commit-actions summary,
+.pf-commit-actions button {
+  cursor: pointer;
+  font: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--pf-accent);
+}
+.pf-commit-actions summary:hover,
+.pf-commit-actions button:hover {
+  text-decoration: underline;
+}
+.pf-commit-actions summary {
+  list-style: none;           /* hide the default disclosure triangle */
+}
+.pf-commit-actions summary::-webkit-details-marker { display: none; }
+.pf-commit-delete-btn {
+  color: var(--pf-danger);
+}
+.pf-commit-edit[open] {
+  display: block;
+  width: 100%;
+  margin-top: 0.4em;
+}
+.pf-commit-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+  padding: 0.5em;
+  margin-top: 0.3em;
+  background: var(--pf-bg-soft);
+  border: 1px solid var(--pf-border);
+  border-radius: 6px;
+}
+.pf-commit-edit-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 0.93em;
+  padding: 0.5em 0.6em;
+  border: 1px solid var(--pf-border);
+  border-radius: 4px;
+  resize: vertical;
+  min-height: 3.5em;
+  field-sizing: content;
+  background: var(--pf-bg);
+}
+.pf-commit-edit-form textarea:focus {
+  outline: none;
+  border-color: var(--pf-accent);
+  box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.18);
+}
+.pf-commit-edit-form button {
+  align-self: flex-end;
+  padding: 0.3em 0.9em;
+  font: inherit;
+  font-size: 0.85em;
+  border: 1px solid var(--pf-accent);
+  border-radius: 4px;
+  background: var(--pf-accent);
+  color: #fff;
+  cursor: pointer;
+}
+.pf-commit-edit-form button:hover { filter: brightness(1.1); }
+
+/* aihub#70 v3.1: in-page confirm dialog for delete (replaces native confirm). */
+.pf-confirm-dialog {
+  border: 1px solid var(--pf-border);
+  border-radius: 8px;
+  padding: 0;
+  max-width: 480px;
+  width: 90%;
+  background: var(--pf-bg);
+  color: var(--pf-fg);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+}
+.pf-confirm-dialog::backdrop {
+  background: rgba(20, 24, 30, 0.45);
+  backdrop-filter: blur(2px);
+}
+.pf-confirm-dialog-form {
+  padding: 1.1em 1.2em 0.9em;
+}
+.pf-confirm-dialog h3 {
+  margin: 0 0 0.4em;
+  font-size: 1.05em;
+}
+.pf-confirm-dialog-meta {
+  margin: 0 0 0.4em;
+  color: var(--pf-fg-muted);
+  font-family: var(--pf-mono);
+  font-size: 0.82em;
+}
+.pf-confirm-dialog-body {
+  margin: 0 0 0.6em;
+  padding: 0.55em 0.7em;
+  background: var(--pf-bg-soft);
+  border-left: 3px solid var(--pf-border);
+  border-radius: 4px;
+  font-size: 0.9em;
+  line-height: 1.45;
+  max-height: 8em;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pf-confirm-dialog-warn {
+  margin: 0 0 0.8em;
+  color: var(--pf-danger);
+  font-size: 0.85em;
+}
+.pf-confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5em;
+}
+.pf-confirm-dialog-actions button {
+  font: inherit;
+  font-size: 0.88em;
+  padding: 0.4em 1em;
+  border: 1px solid var(--pf-border);
+  border-radius: 6px;
+  background: var(--pf-bg-soft);
+  color: var(--pf-fg);
+  cursor: pointer;
+}
+.pf-confirm-dialog-actions button:hover { background: #e1e4e8; }
+.pf-confirm-dialog-confirm {
+  background: var(--pf-danger) !important;
+  border-color: var(--pf-danger) !important;
+  color: #fff !important;
+}
+.pf-confirm-dialog-confirm:hover { filter: brightness(1.08); }

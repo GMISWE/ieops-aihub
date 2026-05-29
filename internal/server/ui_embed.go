@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
@@ -70,11 +71,17 @@ func parseTemplates() *template.Template {
 
 // uiFuncMap exposes a small set of helpers to all templates.
 //
-//   - md     : render a string as markdown -> safe HTML. Used for wi.Content
-//              and memory.content fields. Falls back to escaped plain text on
-//              renderer error.
+//   - md       : render a string as markdown -> safe HTML. Used for wi.Content
+//                and memory.content fields. Falls back to escaped plain text
+//                on renderer error.
 //   - truncate : clip a long string with an ellipsis. Useful for wi list views.
-//   - default: replace empty strings with a placeholder.
+//   - default  : replace empty strings with a placeholder.
+//   - hasPrefix: strings.HasPrefix.
+//   - wiref    : build /ui/wi/<slug-or-id> with '#' path-escaped.
+//   - fmtTs    : parse an RFC3339 timestamp string and format it the same way
+//                metadata-card timestamps are formatted ("2006-01-02 15:04 UTC").
+//                Used by the memory_detail commits card (aihub#70) so commit
+//                timestamps line up with the rest of the page.
 func uiFuncMap() template.FuncMap {
 	return template.FuncMap{
 		"md": func(src string) template.HTML {
@@ -110,6 +117,15 @@ func uiFuncMap() template.FuncMap {
 				return ""
 			}
 			return "/ui/wi/" + url.PathEscape(slugOrID)
+		},
+		"fmtTs": func(s string) string {
+			if s == "" {
+				return "—"
+			}
+			if t, err := time.Parse(time.RFC3339, s); err == nil {
+				return t.UTC().Format("2006-01-02 15:04 MST")
+			}
+			return s
 		},
 	}
 }

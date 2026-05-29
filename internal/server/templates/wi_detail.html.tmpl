@@ -105,12 +105,24 @@
       <h2>Artifacts ({{len .Artifacts}})</h2>
       <ul class="pf-artifact-list">
         {{range .Artifacts}}
+        {{if .RenderedHTML}}
+        <li>
+          <details class="pf-artifact-details">
+            <summary>
+              <span class="pf-artifact-type">{{.Type}}</span>
+              <a href="/ui/artifacts/{{.MemID}}/html" target="_blank" rel="noopener">open ↗</a>
+            </summary>
+            <div class="pf-artifact-html">{{safeHTML .RenderedHTML}}</div>
+          </details>
+        </li>
+        {{else}}
         <li>
           <a href="/ui/artifacts/{{.MemID}}/html" target="_blank" rel="noopener">
             <span class="pf-artifact-type">{{.Type}}</span>
           </a>
           <span class="pf-artifact-preview">{{truncate 80 .Content}}</span>
         </li>
+        {{end}}
         {{end}}
       </ul>
     </div>

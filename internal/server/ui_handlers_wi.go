@@ -186,6 +186,10 @@ type artifactLink struct {
 	MemID   string
 	Type    string
 	Content string
+	// RenderedHTML carries the cached spec/plan HTML fragment so the detail
+	// page can render it inline in a <details> block. nil for artifact types
+	// that have no rendered_html (review/execute/retro/wrap_summary).
+	RenderedHTML *string
 }
 
 // registerUIWIHandlers wires the /ui/wi tree onto the given group. The third
@@ -546,11 +550,18 @@ func fetchArtifactLinks(ctx context.Context, pool *pgxpool.Pool, u *UserContext,
 		if m.Visibility == "private" && m.AuthorUserID != u.UserID && u.Role != "admin" {
 			continue
 		}
-		out = append(out, artifactLink{
+		al := artifactLink{
 			MemID:   m.ID,
 			Type:    m.Type,
 			Content: m.Content,
-		})
+		}
+		// Only surface rendered_html when it's a non-empty fragment, so the
+		// template's {{if .RenderedHTML}} gate never renders an empty <details>
+		// for an empty spec/plan (render.Markdown("") yields a non-nil &"").
+		if m.RenderedHTML != nil && *m.RenderedHTML != "" {
+			al.RenderedHTML = m.RenderedHTML
+		}
+		out = append(out, al)
 	}
 	return out
 }

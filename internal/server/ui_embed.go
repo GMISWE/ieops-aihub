@@ -91,6 +91,16 @@ func uiFuncMap() template.FuncMap {
 			}
 			return template.HTML(out)
 		},
+		// safeHTML passes a pre-rendered, trusted HTML fragment through
+		// without escaping. Used for cached methodology.spec / methodology.plan
+		// rendered_html on the wi detail page. The pointer form lets the
+		// template gate on non-nil before invoking ({{if .RenderedHTML}}).
+		"safeHTML": func(s *string) template.HTML {
+			if s == nil {
+				return template.HTML("")
+			}
+			return template.HTML(*s)
+		},
 		"truncate": func(n int, s string) string {
 			// n is the maximum number of runes (user-visible characters),
 			// not bytes. Byte-based truncation would slice mid-rune on

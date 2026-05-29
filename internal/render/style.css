@@ -93,3 +93,19 @@ hr {
 .chroma .c, .chroma .cm, .chroma .c1, .chroma .cs, .chroma .cp { color: #6e7781; font-style: italic; }
 .chroma .mi, .chroma .mf, .chroma .mh, .chroma .il, .chroma .mb { color: #0550ae; }
 .chroma .n, .chroma .p, .chroma .o, .chroma .ow { color: #1f2328; }
+
+/* Standalone-document back-link nav (webui new-tab return path).
+   Sticky bar consistent with the github-light theme above. */
+.pf-doc-nav {
+    position: sticky;
+    top: 0;
+    background: #fff;
+    border-bottom: 1px solid #d0d7de;
+    padding: 8px 16px;
+    margin: -2em -1.5em 1.5em;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
+        sans-serif;
+    font-size: 0.9em;
+}
+.pf-doc-nav a { color: #0969da; text-decoration: none; }
+.pf-doc-nav a:hover { text-decoration: underline; }

@@ -1,0 +1,1 @@
+{"code_change": "Recall SELECT drops rendered_html/emb_model/emb_dims (new scanMemoryLite), and render-type check replaced with InitRenderTypes(RENDER_MEMORY_TYPES env) config-driven map; 253 tests pass"}

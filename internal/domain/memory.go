@@ -15,6 +15,33 @@ import (
 	"github.com/GMISWE/ieops-aihub/internal/render"
 )
 
+// ─── Render Types (config-driven) ─────────────────────────────────────────────
+
+// renderTypes is the set of memory types for which Markdown→HTML rendering is
+// performed on save. Populated at startup by InitRenderTypes.
+var renderTypes map[string]bool
+
+// defaultRenderTypes is the backward-compatible default (aihub#102).
+const defaultRenderTypes = "methodology.spec,methodology.plan"
+
+// InitRenderTypes initialises the renderTypes set from an env-var value.
+// envVal is a comma-separated list, e.g. "methodology.spec,methodology.plan".
+// When envVal is empty the default list is used.
+// Call this once from cmd/aihub/main.go before serving requests.
+func InitRenderTypes(envVal string) {
+	if envVal == "" {
+		envVal = defaultRenderTypes
+	}
+	m := make(map[string]bool)
+	for _, t := range strings.Split(envVal, ",") {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			m[t] = true
+		}
+	}
+	renderTypes = m
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 // Memory represents a row from the memories table.
@@ -250,11 +277,11 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			WHERE id=$1 AND status='active'`, *req.SupersedesMemID)
 	}
 
-	// aihub#27 / IEBE-1694: render markdown to HTML for spec/plan artifacts only.
+	// aihub#27 / IEBE-1694: render markdown to HTML for configured types only.
 	// Render is best-effort — a render failure must NOT block the insert (spec
 	// decision 3). Other memory types leave rendered_html NULL.
 	var renderedHTML *string
-	if req.Type == "methodology.spec" || req.Type == "methodology.plan" {
+	if renderTypes[req.Type] {
 		if h, rerr := render.Markdown(req.Content); rerr != nil {
 			fmt.Fprintf(os.Stderr,
 				"memory render: markdown→HTML failed for type=%s; storing without rendered_html: %v\n",
@@ -685,8 +712,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		SELECT id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
-			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
-			rendered_html, commits, created_at, updated_at
+			tags, source_artifact_id, status, attrs, commits, created_at, updated_at
 		FROM memories
 		WHERE %s
 		ORDER BY last_activated_at DESC NULLS LAST, created_at DESC
@@ -700,7 +726,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 
 	var items []MemoryWithStrength
 	for rows.Next() {
-		m, err := scanMemory(rows)
+		m, err := scanMemoryLite(rows)
 		if err != nil {
 			continue
 		}
@@ -731,7 +757,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 // scanMemory scans a full memory row from pgx.Rows.
 //
 // IMPORTANT (aihub#27 pitfall mem_i9I2g8Hv): the column order here MUST match
-// the SELECT in Recall, the INSERT/RETURNING in Remember, the column list in
+// the SELECT in the INSERT/RETURNING in Remember, the column list in
 // GetMemoryByID, and the field order on the Memory struct. pgx Scan is
 // positional — silent corruption if anything drifts.
 func scanMemory(rows pgx.Rows) (*Memory, error) {
@@ -742,6 +768,28 @@ func scanMemory(rows pgx.Rows) (*Memory, error) {
 		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
 		&m.Tags, &m.SourceArtifactID, &m.EmbModel, &m.EmbDims, &m.Status,
 		&m.Attrs, &m.RenderedHTML, &m.Commits, &m.CreatedAt, &m.UpdatedAt,
+	)
+	return m, err
+}
+
+// scanMemoryLite scans a lightweight memory row for LLM recall (aihub#102).
+// It omits rendered_html, emb_model, and emb_dims — fields the LLM never
+// needs — halving the token cost for methodology.spec/plan recalls.
+//
+// Column order MUST match Recall's SELECT exactly (positional scan):
+//
+//	id, project, type, content, author_user_id, author_display,
+//	work_item_id, visibility, is_immortal, base_strength, stability_days,
+//	last_activated_at, last_activated_by, activation_count, expires_at,
+//	tags, source_artifact_id, status, attrs, commits, created_at, updated_at
+func scanMemoryLite(rows pgx.Rows) (*Memory, error) {
+	m := &Memory{}
+	err := rows.Scan(
+		&m.ID, &m.Project, &m.Type, &m.Content, &m.AuthorUserID, &m.AuthorDisplay,
+		&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
+		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
+		&m.Tags, &m.SourceArtifactID, &m.Status,
+		&m.Attrs, &m.Commits, &m.CreatedAt, &m.UpdatedAt,
 	)
 	return m, err
 }

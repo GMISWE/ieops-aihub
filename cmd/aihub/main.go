@@ -37,6 +37,11 @@ func main() {
 	}
 	defer pool.Close()
 
+	// aihub#102: initialise config-driven render types.
+	// RENDER_MEMORY_TYPES is comma-separated, e.g. "methodology.spec,methodology.plan".
+	// When unset, defaults to "methodology.spec,methodology.plan" (backward-compatible).
+	domain.InitRenderTypes(os.Getenv("RENDER_MEMORY_TYPES"))
+
 	// GC background scheduler: runs all sweeps every 60s.
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)

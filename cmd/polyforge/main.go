@@ -157,7 +157,7 @@ Usage:
   polyforge <command> [args]  Run a CLI command
 
 Workspace commands:
-  init [--apply]              Fetch scenario config → .polyforge/phase.yaml
+  init                        Set up/repair workspace (usage.md, session hook, clone repos, CLAUDE.md)
   doctor [--fix]              5-item health check
   version                     Print version
 

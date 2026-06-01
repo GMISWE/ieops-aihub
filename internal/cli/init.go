@@ -433,10 +433,10 @@ func runMemberInit(repoDir string, sp serverProject) projectBlock {
 	}
 }
 
-// RunInit fetches the scenario phase config from aihub and writes it to
-// <wsRoot>/.polyforge/phase.yaml.  It then iterates over all visible
-// projects and performs per-project owner/member init, cloning repos and
-// updating CLAUDE.md's managed block.
+// RunInit sets up (or repairs) the workspace: it ensures ~/.polyforge/config.toml,
+// writes .polyforge/usage.md and the session-start hook, then iterates over all
+// visible projects and performs per-project owner/member init, cloning repos and
+// updating CLAUDE.md's managed block. (--apply is deprecated and a no-op.)
 func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot string, args []string) {
 	// Ensure ~/.polyforge/config.toml exists with a stable machine_id (§9.5.3).
 	mc, err := config.EnsureMachineConfig()

@@ -13,6 +13,14 @@ import (
 	"time"
 )
 
+// seg path-escapes a single caller-supplied path segment (id, slug, name,
+// memory/user/key id) before it is interpolated into a request URL. Without
+// this, a human slug like "aihub#27" has its "#27" parsed by net/url as a URL
+// fragment and stripped client-side, so the server only receives
+// "/v1/work_items/aihub" -> 404. PathEscape leaves URL-safe ids (wi_xxx,
+// mem_xxx, u_xxx) unchanged, so id-based callers see no behavior change.
+func seg(s string) string { return url.PathEscape(s) }
+
 // Client is the aihub HTTP API client.
 type Client struct {
 	baseURL    string
@@ -155,38 +163,38 @@ func (c *Client) ListWorkItems(ctx context.Context, params url.Values) (map[stri
 // GetWorkItem calls GET /v1/work_items/:id.
 func (c *Client) GetWorkItem(ctx context.Context, id string) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "GET", "/v1/work_items/"+id, nil, &out)
+	return out, c.do(ctx, "GET", "/v1/work_items/"+seg(id), nil, &out)
 }
 
 // UpdateWorkItem calls PATCH /v1/work_items/:id.
 func (c *Client) UpdateWorkItem(ctx context.Context, id string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "PATCH", "/v1/work_items/"+id, body, &out)
+	return out, c.do(ctx, "PATCH", "/v1/work_items/"+seg(id), body, &out)
 }
 
 // CancelWorkItem calls POST /v1/work_items/:id/cancel.
 func (c *Client) CancelWorkItem(ctx context.Context, id string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/work_items/"+id+"/cancel", body, &out)
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(id)+"/cancel", body, &out)
 }
 
 // ClaimWorkItem calls POST /v1/work_items/:id/claim.
 func (c *Client) ClaimWorkItem(ctx context.Context, id string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/work_items/"+id+"/claim", body, &out)
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(id)+"/claim", body, &out)
 }
 
 // CompleteAttempt calls POST /v1/work_items/:id/complete.
 // wiID is the work item id; the attempt credentials are embedded in body.
 func (c *Client) CompleteAttempt(ctx context.Context, wiID string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/work_items/"+wiID+"/complete", body, &out)
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/complete", body, &out)
 }
 
 // ForceTakeover calls POST /v1/work_items/:id/force_takeover.
 func (c *Client) ForceTakeover(ctx context.Context, id string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/work_items/"+id+"/force_takeover", body, &out)
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(id)+"/force_takeover", body, &out)
 }
 
 // GetReadyQueue calls GET /v1/work_items/ready.
@@ -202,7 +210,7 @@ func (c *Client) GetReadyQueue(ctx context.Context, params url.Values) (map[stri
 // PauseAttempt calls POST /v1/work_items/:wiID/pause.
 func (c *Client) PauseAttempt(ctx context.Context, wiID string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/work_items/"+wiID+"/pause", body, &out)
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/pause", body, &out)
 }
 
 // ─── Events ────────────────────────────────────────────────────────────────
@@ -244,19 +252,19 @@ func (c *Client) Recall(ctx context.Context, params url.Values) (map[string]any,
 // ActivateMemory calls POST /v1/memories/:id/activate.
 func (c *Client) ActivateMemory(ctx context.Context, memoryID string) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/memories/"+memoryID+"/activate", nil, &out)
+	return out, c.do(ctx, "POST", "/v1/memories/"+seg(memoryID)+"/activate", nil, &out)
 }
 
 // ReinforceMemory calls PATCH /v1/memories/:id/reinforce.
 func (c *Client) ReinforceMemory(ctx context.Context, memoryID string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "PATCH", "/v1/memories/"+memoryID+"/reinforce", body, &out)
+	return out, c.do(ctx, "PATCH", "/v1/memories/"+seg(memoryID)+"/reinforce", body, &out)
 }
 
 // RedactMemory calls PATCH /v1/memories/:id/redact per §4.3.
 func (c *Client) RedactMemory(ctx context.Context, memoryID string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "PATCH", "/v1/memories/"+memoryID+"/redact", body, &out)
+	return out, c.do(ctx, "PATCH", "/v1/memories/"+seg(memoryID)+"/redact", body, &out)
 }
 
 // ─── Artifacts ────────────────────────────────────────────────────────────
@@ -266,7 +274,7 @@ func (c *Client) RedactMemory(ctx context.Context, memoryID string, body any) (m
 // does not exist, the caller lacks visibility, or the row has no rendered HTML
 // (legacy spec/plan / non spec/plan type).
 func (c *Client) GetArtifactHTML(ctx context.Context, memoryID string) (string, error) {
-	body, _, err := c.doRaw(ctx, "GET", "/v1/artifacts/"+memoryID+"/html")
+	body, _, err := c.doRaw(ctx, "GET", "/v1/artifacts/"+seg(memoryID)+"/html")
 	if err != nil {
 		return "", err
 	}
@@ -297,7 +305,7 @@ func (c *Client) CreateDependency(ctx context.Context, body any) (map[string]any
 		return nil, fmt.Errorf("CreateDependency: blocked_wi_id is required in body")
 	}
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/work_items/"+blockedID+"/dependencies", body, &out)
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(blockedID)+"/dependencies", body, &out)
 }
 
 // RemoveDependency calls DELETE /v1/work_items/:blocked_id/dependencies/:blocking_id/:kind.
@@ -320,14 +328,14 @@ func (c *Client) RemoveDependency(ctx context.Context, body any) (map[string]any
 	}
 	var out map[string]any
 	return out, c.do(ctx, "DELETE",
-		"/v1/work_items/"+blockedID+"/dependencies/"+blockingID+"/"+kind,
+		"/v1/work_items/"+seg(blockedID)+"/dependencies/"+seg(blockingID)+"/"+seg(kind),
 		nil, &out)
 }
 
 // ListDependencies calls GET /v1/work_items/:id/dependencies.
 func (c *Client) ListDependencies(ctx context.Context, wiID string) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "GET", "/v1/work_items/"+wiID+"/dependencies", nil, &out)
+	return out, c.do(ctx, "GET", "/v1/work_items/"+seg(wiID)+"/dependencies", nil, &out)
 }
 
 // ─── Steps ────────────────────────────────────────────────────────────────
@@ -335,13 +343,13 @@ func (c *Client) ListDependencies(ctx context.Context, wiID string) (map[string]
 // GetStep calls GET /v1/work_items/:id/step.
 func (c *Client) GetStep(ctx context.Context, wiID string) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "GET", "/v1/work_items/"+wiID+"/step", nil, &out)
+	return out, c.do(ctx, "GET", "/v1/work_items/"+seg(wiID)+"/step", nil, &out)
 }
 
 // UpdateStep calls PATCH /v1/work_items/:id/step.
 func (c *Client) UpdateStep(ctx context.Context, wiID string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "PATCH", "/v1/work_items/"+wiID+"/step", body, &out)
+	return out, c.do(ctx, "PATCH", "/v1/work_items/"+seg(wiID)+"/step", body, &out)
 }
 
 // ─── Release ──────────────────────────────────────────────────────────────
@@ -371,7 +379,7 @@ func (c *Client) GetVersion(ctx context.Context) (map[string]any, error) {
 // UnblockWorkItem calls POST /v1/work_items/:id/unblock (admin only).
 func (c *Client) UnblockWorkItem(ctx context.Context, wiID string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/work_items/"+wiID+"/unblock", body, &out)
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/unblock", body, &out)
 }
 
 // CreateUser calls POST /v1/admin/users (admin only).
@@ -383,13 +391,13 @@ func (c *Client) CreateUser(ctx context.Context, body any) (map[string]any, erro
 // CreateAPIKey calls POST /v1/admin/users/:id/keys (admin only).
 func (c *Client) CreateAPIKey(ctx context.Context, userID string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/admin/users/"+userID+"/keys", body, &out)
+	return out, c.do(ctx, "POST", "/v1/admin/users/"+seg(userID)+"/keys", body, &out)
 }
 
 // RevokeAPIKey calls DELETE /v1/admin/users/:id/keys/:key_id (admin only).
 func (c *Client) RevokeAPIKey(ctx context.Context, userID, keyID string) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "DELETE", "/v1/admin/users/"+userID+"/keys/"+keyID, nil, &out)
+	return out, c.do(ctx, "DELETE", "/v1/admin/users/"+seg(userID)+"/keys/"+seg(keyID), nil, &out)
 }
 
 // ListUsers calls GET /v1/admin/users (admin only).
@@ -401,7 +409,7 @@ func (c *Client) ListUsers(ctx context.Context) (map[string]any, error) {
 // UpdateUser calls PATCH /v1/admin/users/:id (admin only).
 func (c *Client) UpdateUser(ctx context.Context, userID string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "PATCH", "/v1/admin/users/"+userID, body, &out)
+	return out, c.do(ctx, "PATCH", "/v1/admin/users/"+seg(userID), body, &out)
 }
 
 // ─── Projects ─────────────────────────────────────────────────────────────────
@@ -425,18 +433,18 @@ func (c *Client) CreateProject(ctx context.Context, body any) (map[string]any, e
 // GetProject calls GET /v1/projects/:name.
 func (c *Client) GetProject(ctx context.Context, name string) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "GET", "/v1/projects/"+name, nil, &out)
+	return out, c.do(ctx, "GET", "/v1/projects/"+seg(name), nil, &out)
 }
 
 // UpdateProject calls PATCH /v1/projects/:name.
 func (c *Client) UpdateProject(ctx context.Context, name string, body any) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "PATCH", "/v1/projects/"+name, body, &out)
+	return out, c.do(ctx, "PATCH", "/v1/projects/"+seg(name), body, &out)
 }
 
 // RotateProjectIdentifier calls POST /v1/projects/:name/rotate_identifier.
 // Returns {plain, prefix} — plain is shown once and must not be logged.
 func (c *Client) RotateProjectIdentifier(ctx context.Context, name string) (map[string]any, error) {
 	var out map[string]any
-	return out, c.do(ctx, "POST", "/v1/projects/"+name+"/rotate_identifier", nil, &out)
+	return out, c.do(ctx, "POST", "/v1/projects/"+seg(name)+"/rotate_identifier", nil, &out)
 }

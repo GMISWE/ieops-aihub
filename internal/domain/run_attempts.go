@@ -114,7 +114,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		       declared_resources, resources_version, external_share_type, external_share_key,
 		       reporter_user_id, reporter_display, current_attempt_id, current_attempt_epoch,
 		       parent_work_item_id, attrs, created_at, updated_at, closed_at
-		FROM work_items WHERE id = $1 FOR UPDATE`, wiID,
+		FROM work_items WHERE (id = $1 OR slug = $1) FOR UPDATE`, wiID,
 	).Scan(
 		&wi.ID, &wi.Seq, &wi.Slug, &wi.Project, &wi.Scenario, &wi.Goal, &wi.Source,
 		&wi.WIType, &wi.Priority, &wi.RequiresHumanSession, &wi.Milestone, &wi.Labels,

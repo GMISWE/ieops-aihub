@@ -15,7 +15,13 @@ var defaultStylesheet string
 // artifact HTTP endpoint needs the standalone document wrapping.
 //
 // If title is empty, falls back to "polyforge artifact".
-func Document(body, title string) string {
+//
+// When backHref is non-empty, a sticky "Back to work item" nav bar is emitted
+// at the top of <body>. The webui passes the wi detail URL here so a spec/plan
+// opened in a new tab can navigate back; the CLI/API path passes "" so the
+// standalone document stays a pure content view (byte-identical to the
+// pre-backHref output aside from the extra param).
+func Document(body, title, backHref string) string {
 	if title == "" {
 		title = "polyforge artifact"
 	}
@@ -29,6 +35,11 @@ func Document(body, title string) string {
 	b.WriteString("</title>\n<style>\n")
 	b.WriteString(defaultStylesheet)
 	b.WriteString("\n</style>\n</head>\n<body>\n")
+	if backHref != "" {
+		b.WriteString("<nav class=\"pf-doc-nav\"><a href=\"")
+		b.WriteString(html.EscapeString(backHref))
+		b.WriteString("\">&larr; Back to work item</a></nav>\n")
+	}
 	b.WriteString(body)
 	b.WriteString("\n</body>\n</html>\n")
 	return b.String()

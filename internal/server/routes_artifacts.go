@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -62,23 +63,42 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 
 		title := mem.ID + " (" + mem.Type + ")"
-		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBody(*mem.RenderedHTML, title)))
+		// Only the cookie-authed /ui mirror gets a "Back to work item" nav; the
+		// /v1 (Bearer/CLI) route stays a pure content document. echo's c.Path()
+		// returns the registered route pattern, so it is "/ui/artifacts/:id/html"
+		// for the UI route and "/v1/artifacts/:id/html" for the API route.
+		backHref := artifactBackHref(c.Path(), mem.WorkItemID)
+		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBody(*mem.RenderedHTML, title, backHref)))
 	}
 }
 
 // renderArtifactBody returns the HTML body to serve for a stored rendered_html
 // value. A caller-supplied custom render (pf_save_artifact html=, aihub#104) may
 // already be a complete standalone document — detected by a leading <!doctype or
-// <html — and is served verbatim to avoid double-wrapping. Otherwise the stored
-// value is a body fragment (the goldmark auto-render path), so it is wrapped in a
-// standalone document to give the `polyforge artifact view` browser flow usable
-// styling. The fragment is kept raw in the column so it can be embedded elsewhere.
-func renderArtifactBody(stored, title string) string {
+// <html — and is served verbatim to avoid double-wrapping (no back-nav is
+// injected in that case). Otherwise the stored value is a body fragment (the
+// goldmark auto-render path), so it is wrapped in a standalone document — with
+// the optional back-nav — to give the `polyforge artifact view` browser flow
+// usable styling. The fragment is kept raw in the column so it can be embedded
+// elsewhere.
+func renderArtifactBody(stored, title, backHref string) string {
 	lc := strings.ToLower(strings.TrimSpace(stored))
 	if strings.HasPrefix(lc, "<!doctype") || strings.HasPrefix(lc, "<html") {
 		return stored
 	}
-	return render.Document(stored, title)
+	return render.Document(stored, title, backHref)
+}
+
+// artifactBackHref returns the wi detail URL for the standalone artifact
+// document's back-link, or "" when no nav should be emitted. A nav is only
+// added for the /ui (cookie/webui) route and only when the artifact is tied to
+// a work item. The /v1 (Bearer/CLI) route always gets "" so its document stays
+// a pure content view.
+func artifactBackHref(routePath string, workItemID *string) string {
+	if strings.HasPrefix(routePath, "/ui") && workItemID != nil {
+		return "/ui/wi/" + url.PathEscape(*workItemID)
+	}
+	return ""
 }
 
 // checkMemoryVisibility enforces the per-row visibility rules that recall

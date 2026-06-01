@@ -54,6 +54,7 @@ type memListPageData struct {
 	TypeOptions []string
 	StrengthMin float64
 	Query       string
+	WorkItemID  string
 	Limit       int
 	// Results.
 	Items       []domain.MemoryWithStrength
@@ -61,6 +62,18 @@ type memListPageData struct {
 	// For the link back / pagination preservation.
 	FilterQuery string
 	ErrMessage  string
+}
+
+// MemRelatedRef is the view-layer representation of a related memory, sourced
+// from mem.Attrs["related_ids"] (a JSON string array written by pf_remember).
+//
+// Type and Summary are empty for now — the attrs source only provides IDs.
+// TODO(aihub#112 Stream A): replace attrs.related_ids source with join-table-
+// enriched Related[] including type and summary.
+type MemRelatedRef struct {
+	ID      string
+	Type    string
+	Summary string
 }
 
 // memDetailPageData drives memory_detail.html.tmpl.
@@ -72,6 +85,7 @@ type memDetailPageData struct {
 	BackQuery  string
 	RenderAsMD bool
 	Commits    []CommitEntry
+	Related    []MemRelatedRef
 }
 
 // Package-level template cache. Initialised by registerUIMemoryHandlers.
@@ -125,6 +139,7 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			Type:              c.QueryParam("type"),
 			TypeOptions:       typeOptions,
 			Query:             c.QueryParam("q"),
+			WorkItemID:        c.QueryParam("wi"),
 		}
 
 		// Strength filter — default 0.3, clamp to non-negative.
@@ -150,7 +165,7 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		}
 
 		// Build filter-query string for "self link" pagination / detail back-link.
-		data.FilterQuery = buildMemFilterQuery(project, data.Type, data.StrengthMin, data.Query, data.Limit)
+		data.FilterQuery = buildMemFilterQuery(project, data.Type, data.StrengthMin, data.Query, data.WorkItemID, data.Limit)
 
 		// Access gates.
 		if u.Role != "admin" && len(u.ProjectRoles) == 0 {
@@ -181,6 +196,9 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		}
 		if data.Type != "" {
 			req.Types = []string{data.Type}
+		}
+		if data.WorkItemID != "" {
+			req.WorkItemID = &data.WorkItemID
 		}
 
 		resp, err := recallMemoriesFn(ctx, pool, req)
@@ -267,6 +285,7 @@ func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 			BackQuery:  c.QueryParam("back"),
 			RenderAsMD: looksLikeMarkdown(mem.Content),
 			Commits:    commits,
+			Related:    parseMemRelatedRefs(mem.Attrs),
 		}
 		return renderTemplate(c, tmpl, "layout", data)
 	}
@@ -293,7 +312,7 @@ func memoryVisibleTo(u *UserContext, mem *domain.Memory) bool {
 
 // buildMemFilterQuery rebuilds the current filter as a URL query so the detail
 // page can link back to the list with state preserved.
-func buildMemFilterQuery(project, memType string, strengthMin float64, q string, limit int) string {
+func buildMemFilterQuery(project, memType string, strengthMin float64, q, workItemID string, limit int) string {
 	v := url.Values{}
 	if project != "" {
 		v.Set("project", project)
@@ -305,10 +324,48 @@ func buildMemFilterQuery(project, memType string, strengthMin float64, q string,
 	if q != "" {
 		v.Set("q", q)
 	}
+	if workItemID != "" {
+		v.Set("wi", workItemID)
+	}
 	if limit > 0 && limit != 50 {
 		v.Set("limit", strconv.Itoa(limit))
 	}
 	return v.Encode()
+}
+
+// parseMemRelatedRefs parses mem.Attrs["related_ids"] (a JSON string array
+// written by pf_remember) into []MemRelatedRef for the memory detail template.
+// Uses the same logic as parseRelatedRefs in routes_artifacts.go; kept separate
+// so the server package doesn't import render for a pure view-data concern.
+//
+// TODO(aihub#112 Stream A): replace attrs.related_ids source with join-table-
+// enriched Related[] including type and summary.
+func parseMemRelatedRefs(attrs json.RawMessage) []MemRelatedRef {
+	if len(attrs) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(attrs, &obj); err != nil {
+		return nil
+	}
+	raw, ok := obj["related_ids"]
+	if !ok {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal(raw, &ids); err != nil {
+		return nil
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	refs := make([]MemRelatedRef, 0, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			refs = append(refs, MemRelatedRef{ID: id})
+		}
+	}
+	return refs
 }
 
 // commitMemoryProjectFn fetches (project, status) for a memory without filtering

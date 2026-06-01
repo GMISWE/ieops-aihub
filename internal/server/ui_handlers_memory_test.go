@@ -375,6 +375,124 @@ func TestUICommitMemory_Success(t *testing.T) {
 	}
 }
 
+// ─── aihub#113: wi= filter and WorkItem column ────────────────────────────────
+
+// TestUIMemories_WIFilter verifies that ?wi=<id> is forwarded into the
+// RecallRequest.WorkItemID field. The domain.Recall function filters by
+// work_item_id in SQL (memory.go ~L724-726); here we only assert that the
+// handler plumbs the query param through correctly.
+func TestUIMemories_WIFilter(t *testing.T) {
+	wiID := "aihub#77"
+	got, cleanup := withRecallOverride(nil)
+	defer cleanup()
+
+	tmpl := pageTemplate("memories.html.tmpl")
+	c, rec := newMemoriesRequest(t,
+		"/ui/memories?project=testproject&wi="+wiID,
+		userWithProjects("testproject"))
+
+	if err := handleUIMemories(nil, tmpl)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	if got.WorkItemID == nil {
+		t.Fatalf("RecallRequest.WorkItemID should be set when ?wi= is present, got nil")
+	}
+	if *got.WorkItemID != wiID {
+		t.Errorf("RecallRequest.WorkItemID: got %q, want %q", *got.WorkItemID, wiID)
+	}
+}
+
+// TestUIMemories_WorkItemColumn verifies that the memories list page renders a
+// "Work Item" column header and that a memory with a WorkItemID shows a link,
+// while one without shows "—".
+func TestUIMemories_WorkItemColumn(t *testing.T) {
+	wiID := "aihub#55"
+	m1 := memFixture("mem_wi_1", "experience.debug", "has a wi")
+	m1.WorkItemID = &wiID
+	m2 := memFixture("mem_wi_2", "experience.debug", "no wi")
+	// m2.WorkItemID is nil
+
+	_, cleanup := withRecallOverride([]domain.MemoryWithStrength{
+		{Memory: m1, EffectiveStrength: 2.0},
+		{Memory: m2, EffectiveStrength: 2.0},
+	})
+	defer cleanup()
+
+	tmpl := pageTemplate("memories.html.tmpl")
+	c, rec := newMemoriesRequest(t, "/ui/memories?project=testproject", userWithProjects("testproject"))
+
+	if err := handleUIMemories(nil, tmpl)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	body := rec.Body.String()
+
+	// Column header must be present.
+	if !strings.Contains(body, "Work Item") {
+		t.Errorf("body missing 'Work Item' column header; body=%s", body[:min(len(body), 800)])
+	}
+	// Row with a wi should render a link to /ui/wi/<id>.
+	if !strings.Contains(body, "/ui/wi/aihub%2355") {
+		t.Errorf("body missing wi link for mem_wi_1; body=%s", body[:min(len(body), 800)])
+	}
+	// Row without a wi should render an em-dash, not a link (memFixture sets a
+	// non-empty AuthorDisplay, so the only "<td>—</td>" is the empty wi cell).
+	if !strings.Contains(body, "<td>—</td>") {
+		t.Errorf("body missing em-dash for mem_wi_2 (no wi); body=%s", body[:min(len(body), 800)])
+	}
+}
+
+// TestUIMemories_WIFilterPreservedInForm verifies that when the list is filtered
+// by ?wi=<id>, the filter form carries a hidden wi input so resubmitting the form
+// (to change type/strength/query) does not silently drop the work-item filter.
+func TestUIMemories_WIFilterPreservedInForm(t *testing.T) {
+	_, cleanup := withRecallOverride([]domain.MemoryWithStrength{})
+	defer cleanup()
+
+	tmpl := pageTemplate("memories.html.tmpl")
+	c, rec := newMemoriesRequest(t, "/ui/memories?project=testproject&wi=aihub%2377", userWithProjects("testproject"))
+
+	if err := handleUIMemories(nil, tmpl)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `name="wi" value="aihub#77"`) {
+		t.Errorf("filter form missing hidden wi input (wi filter would be dropped on resubmit); body=%s", body[:min(len(body), 1200)])
+	}
+}
+
+// TestUIMemoryDetail_Related verifies that the memory detail page renders a
+// Related section when attrs.related_ids is set.
+func TestUIMemoryDetail_Related(t *testing.T) {
+	relID := "mem_related_99"
+	exp := memFixture("mem_with_related", "experience.debug", "has related")
+	exp.Attrs = []byte(`{"related_ids":["` + relID + `"]}`)
+	cleanup := withLoadMemoryOverride(&exp, nil)
+	defer cleanup()
+
+	tmpl := pageTemplate("memory_detail.html.tmpl")
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/ui/memories/mem_with_related", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_with_related")
+	setUser(c, userWithProjects("testproject"))
+
+	if err := handleUIMemoryDetail(nil, tmpl)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "/ui/artifacts/"+relID+"/html") {
+		t.Errorf("body missing related memory link; body=%s", body[:min(len(body), 1000)])
+	}
+}
+
 // TestUIMemories_TypeOptions verifies that memListPageData has 23 TypeOptions (4 wildcards + 19 exact).
 func TestUIMemories_TypeOptions(t *testing.T) {
 	_, cleanup := withRecallOverride(nil)

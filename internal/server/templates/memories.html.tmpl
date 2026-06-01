@@ -32,6 +32,11 @@
   <label for="pf-mem-q">search</label>
   <input id="pf-mem-q" type="text" name="q" value="{{.Query}}" placeholder="(optional)">
 
+  {{if .WorkItemID}}
+  <input type="hidden" name="wi" value="{{.WorkItemID}}">
+  <span class="pf-filter-chip">wi: {{.WorkItemID}} <a href="/ui/memories?project={{.Project}}">&times;</a></span>
+  {{end}}
+
   <button type="submit">Apply</button>
 </form>
 
@@ -51,6 +56,7 @@
       <th>Activations</th>
       <th>Created</th>
       <th>Author</th>
+      <th>Work Item</th>
       <th>Content</th>
     </tr>
   </thead>
@@ -62,6 +68,7 @@
       <td>{{.ActivationCount}}</td>
       <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
       <td>{{default "—" .AuthorDisplay}}</td>
+      <td>{{with .WorkItemID}}<a href="{{wiref .}}">{{.}}</a>{{else}}—{{end}}</td>
       <td><a href="/ui/memories/{{.ID}}?back={{$.FilterQuery}}">{{truncate 120 .Content}}</a></td>
     </tr>
     {{end}}

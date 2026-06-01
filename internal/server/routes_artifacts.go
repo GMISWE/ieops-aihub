@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
@@ -79,7 +80,20 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 		// returns the registered route pattern, so it is "/ui/artifacts/:id/html"
 		// for the UI route and "/v1/artifacts/:id/html" for the API route.
 		backHref := artifactBackHref(c.Path(), mem.WorkItemID)
-		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBody(*mem.RenderedHTML, title, backHref)))
+
+		// Build owning-wi href and related-memory refs for the /ui metadata header.
+		// These are only injected for /ui routes (backHref != "" is a reliable proxy
+		// since artifactBackHref only returns non-empty for /ui + non-nil WorkItemID,
+		// but we check the path prefix directly for clarity).
+		ownerHref, ownerLabel, related := "", "", []render.RelatedRef(nil)
+		if strings.HasPrefix(c.Path(), "/ui") {
+			if mem.WorkItemID != nil {
+				ownerHref = wiHref(*mem.WorkItemID)
+				ownerLabel = *mem.WorkItemID
+			}
+			related = parseRelatedRefs(mem.Attrs)
+		}
+		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBodyWithMeta(*mem.RenderedHTML, title, backHref, ownerHref, ownerLabel, related)))
 	}
 }
 
@@ -98,6 +112,68 @@ func renderArtifactBody(stored, title, backHref string) string {
 		return stored
 	}
 	return render.Document(stored, title, backHref)
+}
+
+// renderArtifactBodyWithMeta is the /ui variant of renderArtifactBody that also
+// injects the owning-wi link and related-memory links into the document header.
+// Full-document artifacts (already have <!doctype / <html prefix) are served
+// verbatim — same policy as renderArtifactBody — so no metadata is injected for
+// those (they own their own HTML structure).
+func renderArtifactBodyWithMeta(stored, title, backHref, ownerHref, ownerLabel string, related []render.RelatedRef) string {
+	lc := strings.ToLower(strings.TrimSpace(stored))
+	if strings.HasPrefix(lc, "<!doctype") || strings.HasPrefix(lc, "<html") {
+		return stored
+	}
+	return render.DocumentWithMeta(stored, title, backHref, ownerHref, ownerLabel, related)
+}
+
+// wiHref is the server-side equivalent of the `wiref` template helper in
+// ui_embed.go. Both use url.PathEscape so '#' in slug-style IDs (e.g.
+// "aihub#98") is encoded as "%23" and survives the browser round-trip without
+// being interpreted as a URL fragment. Keep these two in sync.
+func wiHref(slugOrID string) string {
+	if slugOrID == "" {
+		return ""
+	}
+	return "/ui/wi/" + url.PathEscape(slugOrID)
+}
+
+// parseRelatedRefs builds a []render.RelatedRef from the mem.Attrs JSONB value.
+// It reads the "related_ids" key, which is a JSON array of memory-id strings
+// written by pf_remember when RelatedMemoryIDs is set.
+//
+// Type and Summary are left empty for now — only the ID is available from the
+// attrs source.
+//
+// TODO(aihub#112 Stream A): replace attrs.related_ids source with a join-table
+// that provides enriched Related[] entries including type and summary, then
+// populate the Type and Summary fields here.
+func parseRelatedRefs(attrs json.RawMessage) []render.RelatedRef {
+	if len(attrs) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(attrs, &obj); err != nil {
+		return nil
+	}
+	raw, ok := obj["related_ids"]
+	if !ok {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal(raw, &ids); err != nil {
+		return nil
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	refs := make([]render.RelatedRef, 0, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			refs = append(refs, render.RelatedRef{ID: id})
+		}
+	}
+	return refs
 }
 
 // artifactBackHref returns the wi detail URL for the standalone artifact

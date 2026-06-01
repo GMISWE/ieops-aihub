@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -475,6 +476,122 @@ func TestSharedArtifact_NonMember_200(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "SPEC-BODY-MARKER") {
 		t.Fatalf("body does not contain the rendered fragment: %s", rec.Body.String())
 	}
+}
+
+// ─── aihub#113: owning-wi + related memory links ─────────────────────────────
+
+// TestRenderArtifactBodyWithMeta_OwningWIAndRelated verifies that the /ui
+// render path injects the owning-wi link and a related-memory link when both
+// are provided. Uses renderArtifactBodyWithMeta directly — same seam as
+// TestArtifactBackHref_RendersIntoDocument.
+func TestRenderArtifactBodyWithMeta_OwningWIAndRelated(t *testing.T) {
+	ownerHref := "/ui/wi/aihub%2399"
+	relID := "mem_related_42"
+	related := []render.RelatedRef{{ID: relID}}
+
+	got := renderArtifactBodyWithMeta("<h1>SPEC-CONTENT</h1>", "mem (methodology.spec)",
+		ownerHref, ownerHref, "aihub#99", related)
+
+	// Must contain the spec content.
+	if !strings.Contains(got, "SPEC-CONTENT") {
+		t.Errorf("output missing spec content; got: %s", excerptStr(got))
+	}
+	// Must contain path-escaped wi href.
+	if !strings.Contains(got, "/ui/wi/aihub%2399") {
+		t.Errorf("output missing owning-wi href; got: %s", excerptStr(got))
+	}
+	// Must contain related memory link.
+	if !strings.Contains(got, "/ui/artifacts/"+relID+"/html") {
+		t.Errorf("output missing related memory link; got: %s", excerptStr(got))
+	}
+}
+
+// TestRenderArtifactBodyWithMeta_NoRelated verifies that when related is nil/empty,
+// the related section is omitted but the owning-wi link is still present.
+func TestRenderArtifactBodyWithMeta_NoRelated(t *testing.T) {
+	ownerHref := "/ui/wi/aihub%23100"
+	got := renderArtifactBodyWithMeta("<p>body</p>", "mem (methodology.spec)",
+		ownerHref, ownerHref, "aihub#100", nil)
+
+	if !strings.Contains(got, "/ui/wi/aihub%23100") {
+		t.Errorf("output missing owning-wi link; got: %s", excerptStr(got))
+	}
+	if strings.Contains(got, "pf-doc-meta-related") {
+		t.Errorf("output should not contain a related section when no related_ids")
+	}
+}
+
+// TestParseRelatedRefs covers the attrs→[]render.RelatedRef parsing helper.
+func TestParseRelatedRefs(t *testing.T) {
+	cases := []struct {
+		name  string
+		attrs json.RawMessage
+		want  int // expected number of refs
+	}{
+		{"nil_attrs", nil, 0},
+		{"empty_attrs", json.RawMessage(`{}`), 0},
+		{"no_related_ids_key", json.RawMessage(`{"foo":"bar"}`), 0},
+		{"empty_array", json.RawMessage(`{"related_ids":[]}`), 0},
+		{"one_id", json.RawMessage(`{"related_ids":["mem_abc"]}`), 1},
+		{"two_ids", json.RawMessage(`{"related_ids":["mem_abc","mem_def"]}`), 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseRelatedRefs(tc.attrs)
+			if len(got) != tc.want {
+				t.Errorf("parseRelatedRefs(%s) = %d refs; want %d", tc.attrs, len(got), tc.want)
+			}
+		})
+	}
+}
+
+// TestRenderArtifactBodyWithMeta_UIVsV1 bridges the render helper to the final
+// standalone document for the /ui vs /v1 distinction — same approach as
+// TestArtifactBackHref_RendersIntoDocument. It verifies:
+//   - /ui route: owning-wi link + related-memory link appear
+//   - /v1 route (ownerHref="", related=nil): neither appears
+func TestRenderArtifactBodyWithMeta_UIVsV1(t *testing.T) {
+	wiID := "aihub#99"
+	relID := "mem_related_42"
+	attrs := json.RawMessage(`{"related_ids":["` + relID + `"]}`)
+
+	// Simulate what handleArtifactHTML does on the /ui path.
+	uiOwnerHref := wiHref(wiID)
+	uiRelated := parseRelatedRefs(attrs)
+	backHref := artifactBackHref("/ui/artifacts/:id/html", &wiID)
+
+	uiDoc := renderArtifactBodyWithMeta("<h1>SPEC-CONTENT</h1>", "mem (methodology.spec)",
+		backHref, uiOwnerHref, wiID, uiRelated)
+
+	if !strings.Contains(uiDoc, "SPEC-CONTENT") {
+		t.Errorf("UI doc missing spec content; excerpt: %s", excerptStr(uiDoc))
+	}
+	if !strings.Contains(uiDoc, "/ui/wi/aihub%2399") {
+		t.Errorf("UI doc missing path-escaped owning-wi href; excerpt: %s", excerptStr(uiDoc))
+	}
+	if !strings.Contains(uiDoc, "/ui/artifacts/"+relID+"/html") {
+		t.Errorf("UI doc missing related memory link; excerpt: %s", excerptStr(uiDoc))
+	}
+
+	// Simulate what handleArtifactHTML does on the /v1 path: no meta injected.
+	v1BackHref := artifactBackHref("/v1/artifacts/:id/html", &wiID)
+	v1Doc := renderArtifactBodyWithMeta("<h1>V1-CONTENT</h1>", "mem (methodology.spec)",
+		v1BackHref, "", "", nil)
+
+	if strings.Contains(v1Doc, "pf-doc-meta") {
+		t.Errorf("/v1 doc must not contain pf-doc-meta header; excerpt: %s", excerptStr(v1Doc))
+	}
+	if strings.Contains(v1Doc, relID) {
+		t.Errorf("/v1 doc must not contain related memory ref; excerpt: %s", excerptStr(v1Doc))
+	}
+}
+
+// excerptStr returns the first 500 bytes of a string for error messages.
+func excerptStr(s string) string {
+	if len(s) <= 500 {
+		return s
+	}
+	return s[:500] + "..."
 }
 
 // Scenario 7: a writer shares a spec/plan artifact that has rendered_html →

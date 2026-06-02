@@ -20,7 +20,7 @@ import (
 // ─── Render Types (config-driven) ─────────────────────────────────────────────
 
 // defaultRenderTypes is the backward-compatible default (aihub#102).
-const defaultRenderTypes = "methodology.spec,methodology.plan"
+const defaultRenderTypes = "methodology.spec,methodology.plan,methodology.review"
 
 // renderTypes is the set of memory types for which Markdown→HTML rendering is
 // performed on save. Initialised to the default set so Remember() is safe to

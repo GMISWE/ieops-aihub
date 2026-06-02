@@ -111,6 +111,20 @@
             <span class="pf-artifact-type">{{.Type}}</span>
           </a>
           <span class="pf-artifact-preview">{{truncate 80 .Content}}</span>
+          {{if .Versions}}
+          <details class="pf-artifact-versions">
+            <summary>{{len .Versions}} version{{if gt (len .Versions) 1}}s{{end}}</summary>
+            <ol class="pf-artifact-version-list">
+              {{range $i, $v := .Versions}}
+              <li class="{{if $v.IsCurrent}}pf-version-current{{end}}">
+                <a href="/ui/artifacts/{{$v.ID}}/html" target="_blank" rel="noopener">v{{inc $i}}</a>
+                <span class="pf-version-ts">({{truncate 10 $v.CreatedAt}})</span>
+                {{if $v.IsCurrent}}<span class="pf-version-badge">current</span>{{end}}
+              </li>
+              {{end}}
+            </ol>
+          </details>
+          {{end}}
         </li>
         {{end}}
       </ul>

@@ -732,3 +732,275 @@ func TestShareArtifact_Writer_200(t *testing.T) {
 		t.Fatalf("response missing share_url for the artifact: %s", body)
 	}
 }
+
+// ─── aihub#124: annotation UI tests ──────────────────────────────────────────
+
+// TestBuildAnnotationHTML_RouteAware is the core route-aware test:
+//   - Calling buildAnnotationHTML (the /ui path) with a spec body + commits
+//     produces HTML containing thread markers and the add-comment form.
+//   - renderArtifactBodyWithMeta with empty annotHTML (the /v1 path) does NOT
+//     contain any annotation markers.
+func TestBuildAnnotationHTML_RouteAware(t *testing.T) {
+	const specBody = `<h1 id="overview">Overview</h1>
+<p>intro</p>
+<h2 id="goals">Goals</h2>
+<p>goals text</p>`
+
+	// Two commits: one open (anchored to "overview"), one resolved with reply.
+	openEntry := CommitEntry{
+		ID:            "cm_open1",
+		AuthorDisplay: "Alice",
+		AuthorUserID:  "u_alice",
+		Body:          "This section needs more detail",
+		CreatedAt:     "2024-01-01T10:00:00Z",
+		Status:        CommitStatusOpen,
+		Anchor:        &CommitAnchor{HeadingID: "overview", HeadingText: "Overview"},
+	}
+	resolvedEntry := CommitEntry{
+		ID:            "cm_res1",
+		AuthorDisplay: "Bob",
+		AuthorUserID:  "u_bob",
+		Body:          "Goals are unclear",
+		CreatedAt:     "2024-01-02T10:00:00Z",
+		Status:        CommitStatusResolved,
+		Reply:         "Updated goals section with specific OKRs",
+		ResolvedAt:    "2024-01-03T09:00:00Z",
+		Anchor:        &CommitAnchor{HeadingID: "goals", HeadingText: "Goals"},
+	}
+
+	commitsJSON, _ := jsonMarshal([]CommitEntry{openEntry, resolvedEntry})
+	commitsRaw := json.RawMessage(commitsJSON)
+
+	// --- /ui path: buildAnnotationHTML should return non-empty HTML ---
+	annotHTML := buildAnnotationHTML("mem_spec_42", specBody, commitsRaw)
+
+	if annotHTML == "" {
+		t.Fatal("buildAnnotationHTML returned empty string for non-empty commits")
+	}
+	// Must contain the open thread marker.
+	if !strings.Contains(annotHTML, "open") {
+		t.Errorf("annotation HTML missing 'open' status marker; got: %s", excerptStr(annotHTML))
+	}
+	// Must contain the resolved thread marker.
+	if !strings.Contains(annotHTML, "resolved") {
+		t.Errorf("annotation HTML missing 'resolved' status marker; got: %s", excerptStr(annotHTML))
+	}
+	// Must contain the AI reply text.
+	if !strings.Contains(annotHTML, "Updated goals section with specific OKRs") {
+		t.Errorf("annotation HTML missing AI reply text; got: %s", excerptStr(annotHTML))
+	}
+	// Must contain the form action pointing to the artifact commit route.
+	if !strings.Contains(annotHTML, "/ui/artifacts/mem_spec_42/commit") {
+		t.Errorf("annotation HTML missing form action; got: %s", excerptStr(annotHTML))
+	}
+	// Must contain heading anchor links in the thread headers.
+	if !strings.Contains(annotHTML, "#overview") {
+		t.Errorf("annotation HTML missing anchor link to #overview; got: %s", excerptStr(annotHTML))
+	}
+	// Must contain select options for the headings.
+	if !strings.Contains(annotHTML, "overview") || !strings.Contains(annotHTML, "goals") {
+		t.Errorf("annotation HTML missing heading select options; got: %s", excerptStr(annotHTML))
+	}
+
+	// --- /v1 path: renderArtifactBodyWithMeta with empty annotHTML ---
+	v1Doc := renderArtifactBodyWithMeta(specBody, "mem (methodology.spec)", "", "", "", nil)
+	// /v1 must not contain any annotation section markers.
+	if strings.Contains(v1Doc, "<section class=\"pf-annotations\"") {
+		t.Errorf("/v1 document must not contain pf-annotations section; got: %s", excerptStr(v1Doc))
+	}
+	if strings.Contains(v1Doc, "/ui/artifacts/mem_spec_42/commit") {
+		t.Errorf("/v1 document must not contain annotation form action")
+	}
+
+	// --- /ui path: renderArtifactBodyWithMeta WITH annotHTML ---
+	uiDoc := renderArtifactBodyWithMeta(specBody, "mem (methodology.spec)", "", "", "", nil, annotHTML)
+	if !strings.Contains(uiDoc, "<section class=\"pf-annotations\"") {
+		t.Errorf("/ui document must contain pf-annotations section; got: %s", excerptStr(uiDoc))
+	}
+	if !strings.Contains(uiDoc, "Updated goals section with specific OKRs") {
+		t.Errorf("/ui document must contain AI reply text; got: %s", excerptStr(uiDoc))
+	}
+}
+
+// TestBuildAnnotationHTML_NoCommitsNoHeadings verifies that an artifact with
+// neither commits nor headings returns an empty annotation fragment.
+func TestBuildAnnotationHTML_NoCommitsNoHeadings(t *testing.T) {
+	got := buildAnnotationHTML("mem_x", "<p>no headings here</p>", nil)
+	if got != "" {
+		t.Errorf("expected empty annotation fragment, got: %s", excerptStr(got))
+	}
+}
+
+// TestBuildAnnotationHTML_UnanchoredGroup verifies that commits with no anchor
+// fall into the general/unanchored group.
+func TestBuildAnnotationHTML_UnanchoredGroup(t *testing.T) {
+	entry := CommitEntry{
+		ID:            "cm_general",
+		AuthorDisplay: "Carol",
+		Body:          "General comment",
+		CreatedAt:     "2024-01-01T10:00:00Z",
+		Status:        CommitStatusOpen,
+		// No Anchor set — unanchored.
+	}
+	commitsJSON, _ := jsonMarshal([]CommitEntry{entry})
+	got := buildAnnotationHTML("mem_y", "<h1 id=\"intro\">Intro</h1>", json.RawMessage(commitsJSON))
+	if !strings.Contains(got, "general") {
+		t.Errorf("unanchored commit should appear in general group; got: %s", excerptStr(got))
+	}
+	if !strings.Contains(got, "General comment") {
+		t.Errorf("unanchored commit body missing; got: %s", excerptStr(got))
+	}
+}
+
+// TestExtractHeadingsFromHTML verifies that extractHeadingsFromHTML produces
+// (id, text) pairs that match what goldmark's WithAutoHeadingID would render.
+// We validate by checking a known goldmark output snippet.
+func TestExtractHeadingsFromHTML(t *testing.T) {
+	// This is a real goldmark-rendered fragment (WithAutoHeadingID enabled).
+	htmlFrag := `<h1 id="overview">Overview</h1>
+<p>intro text</p>
+<h2 id="background-and-motivation">Background and Motivation</h2>
+<p>more text</p>
+<h3 id="sub-section">Sub Section</h3>`
+
+	refs := extractHeadingsFromHTML(htmlFrag)
+	if len(refs) != 3 {
+		t.Fatalf("expected 3 heading refs, got %d: %+v", len(refs), refs)
+	}
+	cases := []struct {
+		id   string
+		text string
+	}{
+		{"overview", "Overview"},
+		{"background-and-motivation", "Background and Motivation"},
+		{"sub-section", "Sub Section"},
+	}
+	for i, tc := range cases {
+		if refs[i].ID != tc.id {
+			t.Errorf("ref[%d].ID = %q, want %q", i, refs[i].ID, tc.id)
+		}
+		if refs[i].Text != tc.text {
+			t.Errorf("ref[%d].Text = %q, want %q", i, refs[i].Text, tc.text)
+		}
+	}
+}
+
+// TestExtractHeadingsFromHTML_HeadingIDAlignmentWithGoldmark proves that the
+// heading ids in the extracted refs are identical to those goldmark renders.
+// We render a markdown snippet with render.Markdown, extract the ids from the
+// produced HTML with extractHeadingsFromHTML, and compare to render.ExtractHeadings
+// run on the same markdown source — they MUST match.
+func TestExtractHeadingsFromHTML_HeadingIDAlignmentWithGoldmark(t *testing.T) {
+	const md = "# Overview\n\n## Background and Motivation\n\n### Sub Section\n"
+
+	// Render via goldmark (same engine as the artifact pipeline).
+	htmlOut, err := render.Markdown(md)
+	if err != nil {
+		t.Fatalf("render.Markdown: %v", err)
+	}
+
+	// Extract from the rendered HTML (simulates the route handler path).
+	htmlRefs := extractHeadingsFromHTML(htmlOut)
+
+	// Extract via goldmark AST walk (the reference ground truth).
+	astRefs := render.ExtractHeadings(md)
+
+	if len(htmlRefs) != len(astRefs) {
+		t.Fatalf("ref count mismatch: htmlRefs=%d, astRefs=%d\nhtmlRefs=%+v\nastRefs=%+v",
+			len(htmlRefs), len(astRefs), htmlRefs, astRefs)
+	}
+	for i := range htmlRefs {
+		if htmlRefs[i].ID != astRefs[i].ID {
+			t.Errorf("ref[%d] ID mismatch: html=%q ast=%q", i, htmlRefs[i].ID, astRefs[i].ID)
+		}
+	}
+}
+
+// ─── aihub#124: version history UI ──────────────────────────────────────────
+
+// TestBuildVersionHistoryHTML_SingleVersion verifies that a chain with only one
+// entry produces an empty string (nothing to render — no history to surface).
+func TestBuildVersionHistoryHTML_SingleVersion(t *testing.T) {
+	versions := []domain.MemoryVersionRef{
+		{ID: "mem_v1", CreatedAt: "2024-01-01T00:00:00Z", Status: "active", IsCurrent: true},
+	}
+	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions)
+	if got != "" {
+		t.Errorf("single-version chain must produce empty HTML, got: %s", excerptStr(got))
+	}
+}
+
+// TestBuildVersionHistoryHTML_MultiVersion verifies:
+//  1. Two-version chain produces HTML with pf-version-history class.
+//  2. The currently-viewed version is labelled "viewing" (plain text, not a link).
+//  3. The head version (IsCurrent=true) gets the "current" badge.
+//  4. Non-viewed versions appear as links to /ui/artifacts/<id>/html.
+func TestBuildVersionHistoryHTML_MultiVersion(t *testing.T) {
+	versions := []domain.MemoryVersionRef{
+		{ID: "mem_v1", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
+		{ID: "mem_v2", CreatedAt: "2024-06-01T12:00:00Z", Status: "active", IsCurrent: true},
+	}
+	// Viewing mem_v1 (the older version).
+	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions)
+
+	if !strings.Contains(got, "pf-version-history") {
+		t.Errorf("missing pf-version-history class; got: %s", excerptStr(got))
+	}
+	// v1 is being viewed — must NOT be a link.
+	if strings.Contains(got, `href="/ui/artifacts/mem_v1/html"`) {
+		t.Errorf("currently-viewed version must not be a link; got: %s", excerptStr(got))
+	}
+	if !strings.Contains(got, "viewing") {
+		t.Errorf("currently-viewed version must carry 'viewing' label; got: %s", excerptStr(got))
+	}
+	// v2 is the head — must be a link + carry "current" badge.
+	if !strings.Contains(got, `href="/ui/artifacts/mem_v2/html"`) {
+		t.Errorf("other version must be a link; got: %s", excerptStr(got))
+	}
+	if !strings.Contains(got, "current") {
+		t.Errorf("head version must carry 'current' badge; got: %s", excerptStr(got))
+	}
+	// Timestamp prefix (YYYY-MM-DD) must appear.
+	if !strings.Contains(got, "2024-01-01") {
+		t.Errorf("v1 date prefix missing; got: %s", excerptStr(got))
+	}
+}
+
+// TestVersionHistoryHTML_RouteAware verifies the route-aware purity:
+//   - /ui path: renderArtifactBodyWithMeta WITH versionHistory+annotHTML fragment
+//     contains "pf-version-history".
+//   - /v1 path (no fragment passed): must NOT contain "pf-version-history".
+func TestVersionHistoryHTML_RouteAware(t *testing.T) {
+	specBody := `<h1 id="overview">Overview</h1><p>content</p>`
+
+	versions := []domain.MemoryVersionRef{
+		{ID: "mem_v1", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
+		{ID: "mem_v2", CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+	}
+	vhHTML := buildVersionHistoryHTML(context.TODO(), nil, "mem_v2", versions)
+	if vhHTML == "" {
+		t.Fatal("buildVersionHistoryHTML returned empty for 2-version chain")
+	}
+
+	// /ui: pass vhHTML as the variadic annotationsHTML arg.
+	uiDoc := renderArtifactBodyWithMeta(specBody, "mem (methodology.spec)", "", "", "", nil, vhHTML)
+	if !strings.Contains(uiDoc, "<section class=\"pf-version-history\"") {
+		t.Errorf("/ui document must contain pf-version-history; got: %s", excerptStr(uiDoc))
+	}
+
+	// /v1: call WITHOUT variadic arg (no extra fragments at all).
+	v1Doc := renderArtifactBodyWithMeta(specBody, "mem (methodology.spec)", "", "", "", nil)
+	if strings.Contains(v1Doc, "<section class=\"pf-version-history\"") {
+		t.Errorf("/v1 document must NOT contain pf-version-history; got: %s", excerptStr(v1Doc))
+	}
+}
+
+// TestVersionHistoryHTML_NilVersions verifies that a nil/empty slice returns "".
+func TestVersionHistoryHTML_NilVersions(t *testing.T) {
+	if got := buildVersionHistoryHTML(context.TODO(), nil, "mem_x", nil); got != "" {
+		t.Errorf("nil versions must produce empty HTML, got: %s", excerptStr(got))
+	}
+	if got := buildVersionHistoryHTML(context.TODO(), nil, "mem_x", []domain.MemoryVersionRef{}); got != "" {
+		t.Errorf("empty versions must produce empty HTML, got: %s", excerptStr(got))
+	}
+}

@@ -96,3 +96,22 @@ func TestMemoryStruct_CommitsField(t *testing.T) {
 		t.Errorf("Commits round-trip failed; got: %s", string(m2.Commits))
 	}
 }
+
+// TestResolveCommitSQLKeys verifies that the four jsonb_set paths written by
+// ResolveCommit match the CommitEntry JSON tags expected by the UI / MCP
+// consumers. It asserts against the real resolveCommitSQL constant so any
+// key-name drift in the SQL breaks this test. No DB required.
+func TestResolveCommitSQLKeys(t *testing.T) {
+	// These are the exact jsonb_set path literals that resolveCommitSQL must contain.
+	requiredPaths := []string{"'{status}'", "'{reply}'", "'{resolved_at}'", "'{resolved_by}'"}
+	for _, path := range requiredPaths {
+		if !strings.Contains(resolveCommitSQL, path) {
+			t.Errorf("resolveCommitSQL missing jsonb_set path %s", path)
+		}
+	}
+
+	// The SQL must hard-code the status value as the literal string "resolved".
+	if !strings.Contains(resolveCommitSQL, `"resolved"`) {
+		t.Errorf("resolveCommitSQL does not hard-code status value %q", "resolved")
+	}
+}

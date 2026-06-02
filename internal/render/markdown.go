@@ -14,13 +14,16 @@ package render
 
 import (
 	"bytes"
+	"strings"
 
 	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
+	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer/html"
+	"github.com/yuin/goldmark/text"
 )
 
 // md is the shared goldmark engine. goldmark.Markdown is safe for concurrent use
@@ -51,4 +54,61 @@ func Markdown(src string) (string, error) {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+
+// HeadingRef is a (id, text) pair extracted from a markdown source by ExtractHeadings.
+// The id value matches what goldmark's parser.WithAutoHeadingID produces in the
+// rendered HTML, so form selects built from these refs align exactly with the
+// anchor ids on the rendered page — there is no separate slugification step.
+type HeadingRef struct {
+	ID   string
+	Text string
+}
+
+// ExtractHeadings parses src with the same goldmark engine used by Markdown()
+// and returns the ordered list of (id, text) pairs for every heading in the
+// document. The ids are the auto-generated heading anchors emitted by the
+// parser (WithAutoHeadingID). Returns nil when src is empty.
+func ExtractHeadings(src string) []HeadingRef {
+	if src == "" {
+		return nil
+	}
+	source := []byte(src)
+	reader := text.NewReader(source)
+	doc := md.Parser().Parse(reader)
+
+	var refs []HeadingRef
+	ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) { //nolint:errcheck
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		if n.Kind() != ast.KindHeading {
+			return ast.WalkContinue, nil
+		}
+		// Collect id attribute (set by WithAutoHeadingID).
+		idVal, ok := n.AttributeString("id")
+		if !ok {
+			return ast.WalkContinue, nil
+		}
+		var id string
+		switch v := idVal.(type) {
+		case []byte:
+			id = string(v)
+		case string:
+			id = v
+		default:
+			return ast.WalkContinue, nil
+		}
+		// Collect inline text by walking children.
+		var txtBuf strings.Builder
+		for child := n.FirstChild(); child != nil; child = child.NextSibling() {
+			if t, ok := child.(*ast.Text); ok {
+				txtBuf.Write(t.Value(source))
+			}
+		}
+		refs = append(refs, HeadingRef{ID: id, Text: txtBuf.String()})
+		return ast.WalkSkipChildren, nil
+	}) //nolint:errcheck
+	return refs
 }

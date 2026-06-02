@@ -304,6 +304,39 @@ func (s *Server) registerMemoryTools() {
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		return s.emitArtifactAction(ctx, req, "ignore")
 	})
+
+	// pf_resolve_commit
+	s.mcp.AddTool(&sdkmcp.Tool{
+		Name:        "pf_resolve_commit",
+		Description: "Resolve a spec/plan commit annotation with an AI reply (marks status=resolved, emits memory_commit_resolved).",
+		InputSchema: objectSchema(map[string]any{
+			"memory_id": prop("string", "Memory ID"),
+			"commit_id": prop("string", "Commit annotation ID"),
+			"reply":     prop("string", "AI reply explaining what was changed or why the annotation is resolved"),
+		}, []string{"memory_id", "commit_id", "reply"}),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		args, err := parseArgs(req.Params.Arguments)
+		if err != nil {
+			return errResult(err)
+		}
+		memID := strArg(args, "memory_id")
+		if memID == "" {
+			return errResult(fmt.Errorf("memory_id is required"))
+		}
+		commitID := strArg(args, "commit_id")
+		if commitID == "" {
+			return errResult(fmt.Errorf("commit_id is required"))
+		}
+		reply := strArg(args, "reply")
+		if reply == "" {
+			return errResult(fmt.Errorf("reply is required"))
+		}
+		result, err := s.client.ResolveCommit(ctx, memID, commitID, map[string]any{"reply": reply})
+		if err != nil {
+			return errResult(err)
+		}
+		return jsonResult(result)
+	})
 }
 
 // emitArtifactAction is the shared implementation for adopt/close/ignore artifact wrappers.

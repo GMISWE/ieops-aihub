@@ -33,6 +33,7 @@ func RegisterMemoryRoutes(v1 *echo.Group, pool *pgxpool.Pool) {
 	v1.GET("/memories", handleRecall(pool))
 	v1.POST("/memories/:id/activate", handleActivateMemory(pool))
 	v1.PATCH("/memories/:id/redact", handleRedactMemory(pool))
+	v1.POST("/memories/:id/commit/:commit_id/resolve", handleResolveCommit(pool))
 	v1.PATCH("/memories/:id/reinforce", handleReinforceMemory(pool))
 
 	// Events (§4.3) — POST is write; GET is read
@@ -200,6 +201,50 @@ func handleRedactMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		if aihubErr := domain.Redact(ctx, pool, memID, u.UserID, u.Role); aihubErr != nil {
 			return domainErr(c, aihubErr)
+		}
+		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
+	}
+}
+
+
+// handleResolveCommit handles POST /v1/memories/:id/commit/:commit_id/resolve.
+// Marks the commit entry as resolved, writes an AI reply, and emits
+// memory_commit_resolved. Requires writer access on the memory's project.
+func handleResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		memID := c.Param("id")
+		commitID := c.Param("commit_id")
+		if memID == "" || commitID == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "memory id and commit_id are required"))
+		}
+
+		var req struct {
+			Reply string `json:"reply"`
+		}
+		if err := c.Bind(&req); err != nil {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
+		}
+		if req.Reply == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "reply is required"))
+		}
+
+		// Enforce project-writer access before mutating — mirrors handleUIEditCommit
+		// and handleUIArtifactCommit. A memory's project is immutable, so a pre-check
+		// is safe with no TOCTOU concern.
+		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
+		if loadErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+		}
+		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+			return err
+		}
+
+		if err := domain.ResolveCommit(ctx, pool, memID, commitID, req.Reply, u.UserID, u.DisplayName); err != nil {
+			return domainErr(c, err)
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
 	}

@@ -268,7 +268,7 @@ func withCommitMemoryProjectOverride(project, status string, err error) func() {
 // withDoCommitMemoryOverride replaces doCommitMemoryFn for the duration of a test.
 func withDoCommitMemoryOverride(returnErr error) func() {
 	prev := doCommitMemoryFn
-	doCommitMemoryFn = func(_ context.Context, _ *pgxpool.Pool, _, _, _, _ string) error {
+	doCommitMemoryFn = func(_ context.Context, _ *pgxpool.Pool, _, _, _, _, _, _ string) error {
 		return returnErr
 	}
 	return func() { doCommitMemoryFn = prev }

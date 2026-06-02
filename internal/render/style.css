@@ -109,3 +109,142 @@ hr {
 }
 .pf-doc-nav a { color: #0969da; text-decoration: none; }
 .pf-doc-nav a:hover { text-decoration: underline; }
+
+/* ── aihub#124: annotations + version history.
+   Styled to match the memory_detail commit UI (ui.css .pf-commit-*),
+   reusing the github-light palette above. Self-contained, no JS. ── */
+.pf-annotations,
+.pf-version-history {
+    margin-top: 2.5em;
+    padding-top: 1.2em;
+    border-top: 1px solid #d0d7de;
+}
+.pf-annotations-heading,
+.pf-version-history-heading {
+    font-size: 1.3em;
+    border-bottom: none;
+    padding-bottom: 0;
+    margin: 0 0 0.7em;
+}
+
+/* version history */
+.pf-version-list { list-style: decimal; padding-left: 1.6em; margin: 0; }
+.pf-version-item { line-height: 1.9; }
+.pf-version-ts {
+    color: #57606a;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    font-size: 0.82em;
+}
+.pf-version-badge {
+    display: inline-block;
+    font-size: 0.72em;
+    font-weight: 600;
+    padding: 0.05em 0.55em;
+    border-radius: 999px;
+    background: #afb8c133;
+    color: #57606a;
+    margin-left: 0.35em;
+    vertical-align: middle;
+}
+.pf-version-badge.pf-version-head { background: #ddf4ff; color: #0969da; }
+.pf-version-current { font-weight: 600; }
+
+/* annotation threads */
+.pf-annot-section { margin: 0 0 1.1em; }
+.pf-annot-section-title { font-size: 0.95em; margin: 1.2em 0 0.4em; color: #57606a; }
+.pf-annot-section-title a { color: #57606a; }
+.pf-annot-entry {
+    padding: 0.6em 0.8em;
+    border-left: 3px solid #d0d7de;
+    margin-bottom: 0.5em;
+    background: #f6f8fa;
+    border-radius: 0 6px 6px 0;
+}
+.pf-annot-open { border-left-color: #9a6700; }
+.pf-annot-resolved { border-left-color: #1f883d; }
+.pf-annot-meta {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.6em;
+    margin-bottom: 0.3em;
+    font-size: 0.82em;
+    color: #57606a;
+}
+.pf-annot-meta strong { color: #1f2328; font-size: 1.05em; }
+.pf-annot-status {
+    font-weight: 600;
+    padding: 0.02em 0.55em;
+    border-radius: 999px;
+}
+.pf-annot-open .pf-annot-status { background: #fff8c5; color: #9a6700; }
+.pf-annot-resolved .pf-annot-status { background: #dafbe1; color: #1f883d; }
+.pf-annot-body {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 0.93em;
+    line-height: 1.55;
+}
+.pf-annot-reply {
+    margin-top: 0.55em;
+    padding: 0.5em 0.7em;
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    font-size: 0.9em;
+}
+.pf-annot-reply strong { color: #0969da; }
+
+/* add-annotation form — mirrors memory_detail .pf-commit-form */
+.pf-annot-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5em;
+    margin-top: 1em;
+    padding-top: 1em;
+    border-top: 1px dashed #d0d7de;
+}
+.pf-annot-form-title { font-size: 1.05em; margin: 0; border-bottom: none; }
+.pf-annot-form label { font-size: 0.85em; color: #57606a; }
+.pf-annot-form select,
+.pf-annot-form textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font: inherit;
+    font-size: 0.93em;
+    padding: 0.5em 0.7em;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    background: #fff;
+    color: #1f2328;
+}
+.pf-annot-form textarea {
+    resize: vertical;
+    min-height: 4.2em;
+    field-sizing: content; /* auto-grow on input where supported (matches memory_detail) */
+}
+.pf-annot-form select:focus,
+.pf-annot-form textarea:focus {
+    outline: none;
+    border-color: #0969da;
+    box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.18);
+}
+.pf-annot-form button {
+    align-self: flex-end;
+    padding: 0.4em 1.1em;
+    font: inherit;
+    font-size: 0.88em;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    background: #f6f8fa;
+    color: #1f2328;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.pf-annot-form button:hover,
+.pf-annot-form button:focus {
+    background: #0969da;
+    color: #fff;
+    border-color: #0969da;
+    outline: none;
+}

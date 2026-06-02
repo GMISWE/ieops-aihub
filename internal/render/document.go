@@ -32,7 +32,7 @@ var defaultStylesheet string
 // The backHref nav bar is identical to Document's.
 // When both ownerWIHref and related are empty the output is identical to
 // calling Document(body, title, backHref).
-func DocumentWithMeta(body, title, backHref, ownerWIHref, ownerWILabel string, related []RelatedRef) string {
+func DocumentWithMeta(body, title, backHref, ownerWIHref, ownerWILabel string, related []RelatedRef, annotationsHTML ...string) string {
 	if title == "" {
 		title = "polyforge artifact"
 	}
@@ -82,6 +82,11 @@ func DocumentWithMeta(body, title, backHref, ownerWIHref, ownerWILabel string, r
 		b.WriteString("</div>\n")
 	}
 	b.WriteString(body)
+	// Inject annotation UI fragment (aihub#124) — only present on /ui path.
+	if len(annotationsHTML) > 0 && annotationsHTML[0] != "" {
+		b.WriteString("\n")
+		b.WriteString(annotationsHTML[0])
+	}
 	b.WriteString("\n</body>\n</html>\n")
 	return b.String()
 }

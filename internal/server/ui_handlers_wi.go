@@ -43,6 +43,10 @@ var listEventsFn = domain.ListEvents
 // artifacts associated with a work item.
 var recallFn = domain.Recall
 
+// wiVersionChainFn is the seam for MemoryVersionChain used by fetchArtifactLinks.
+// Swappable in tests so the handler runs without a live pool (same pattern as recallFn).
+var wiVersionChainFn = domain.MemoryVersionChain
+
 // fetchWIFacetsFn is the package-level seam for tests so the list handler can
 // run without a live pool. Defaults to the real distinct-facet query.
 var fetchWIFacetsFn = fetchWIFacets
@@ -185,9 +189,12 @@ func toEventViews(rows []domain.EventRow) []eventView {
 
 // artifactLink is the per-row data for the artifacts section on the detail page.
 type artifactLink struct {
-	MemID   string
-	Type    string
-	Content string
+	MemID    string
+	Type     string
+	Content  string
+	// Versions is non-nil (len > 1) when this artifact has a supersede chain.
+	// Each entry links to /ui/artifacts/<id>/html. Only populated on the /ui path.
+	Versions []domain.MemoryVersionRef
 }
 
 // registerUIWIHandlers wires the /ui/wi tree onto the given group. The third
@@ -555,11 +562,20 @@ func fetchArtifactLinks(ctx context.Context, pool *pgxpool.Pool, u *UserContext,
 		if m.Visibility == "private" && m.AuthorUserID != u.UserID && u.Role != "admin" {
 			continue
 		}
-		out = append(out, artifactLink{
+		link := artifactLink{
 			MemID:   m.ID,
 			Type:    m.Type,
 			Content: m.Content,
-		})
+		}
+		// aihub#124 version_history: populate version chain for artifacts that have
+		// multiple versions. Best-effort — a query error leaves Versions nil, which
+		// the template treats as "no history to show". Skip when pool is nil (tests).
+		if pool != nil {
+			if versions, verErr := wiVersionChainFn(ctx, pool, m.ID); verErr == nil && len(versions) > 1 {
+				link.Versions = versions
+			}
+		}
+		out = append(out, link)
 	}
 	return out
 }

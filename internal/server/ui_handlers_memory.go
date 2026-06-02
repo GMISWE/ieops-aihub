@@ -27,17 +27,51 @@ var recallMemoriesFn recallMemoryFn = domain.Recall
 // loadMemoryFn is the production-wired GetMemoryByID — swappable in tests.
 var loadMemoryFn memLoaderFn = domain.GetMemoryByID
 
+// CommitAnchor identifies the section of a spec/plan artifact that a CommitEntry
+// is anchored to. Both fields come from the UI at annotation time; they are
+// stored verbatim and never re-derived server-side.
+type CommitAnchor struct {
+	HeadingID   string `json:"heading_id"`
+	HeadingText string `json:"heading_text"`
+}
+
+// Commit status constants. An absent (empty) status is treated as open for
+// backward compatibility with entries written before aihub#124.
+const (
+	CommitStatusOpen     = "open"
+	CommitStatusResolved = "resolved"
+)
+
 // CommitEntry is one human annotation stored in the memories.commits column.
 // aihub#70 v3: ID is required (backfilled by 0022); UpdatedAt is present only
 // after an edit. The template surfaces Edit/Delete affordances when the
 // current user is the entry's author or has admin role.
+//
+// aihub#124: Anchor, Status, Reply, ResolvedAt, ResolvedBy are all optional
+// (omitempty) so existing entries without these fields unmarshal cleanly.
 type CommitEntry struct {
-	ID            string `json:"id"`
-	AuthorUserID  string `json:"author_user_id"`
-	AuthorDisplay string `json:"author_display"`
-	Body          string `json:"body"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at,omitempty"`
+	ID            string        `json:"id"`
+	AuthorUserID  string        `json:"author_user_id"`
+	AuthorDisplay string        `json:"author_display"`
+	Body          string        `json:"body"`
+	CreatedAt     string        `json:"created_at"`
+	UpdatedAt     string        `json:"updated_at,omitempty"`
+	Anchor        *CommitAnchor `json:"anchor,omitempty"`
+	Status        string        `json:"status,omitempty"`
+	Reply         string        `json:"reply,omitempty"`
+	ResolvedAt    string        `json:"resolved_at,omitempty"`
+	ResolvedBy    string        `json:"resolved_by,omitempty"`
+}
+
+// IsOpen reports whether the entry is in the open state. Entries written
+// before aihub#124 (Status=="") are treated as open.
+func (c CommitEntry) IsOpen() bool {
+	return c.Status == "" || c.Status == CommitStatusOpen
+}
+
+// IsResolved reports whether the entry has been resolved.
+func (c CommitEntry) IsResolved() bool {
+	return c.Status == CommitStatusResolved
 }
 
 // memListPageData drives memories.html.tmpl.
@@ -363,8 +397,10 @@ var commitMemoryProjectFn = func(ctx context.Context, pool *pgxpool.Pool, memID 
 }
 
 // doCommitMemoryFn wraps domain.CommitMemory; swappable in tests.
-var doCommitMemoryFn = func(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUserID, callerDisplay string) error {
-	return domain.CommitMemory(ctx, pool, memID, body, callerUserID, callerDisplay)
+// The headingID and headingText params are passed through for artifact-scoped
+// commits (aihub#124). The memory commit path passes "", "" (no anchor).
+var doCommitMemoryFn = func(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUserID, callerDisplay, headingID, headingText string) error {
+	return domain.CommitMemory(ctx, pool, memID, body, callerUserID, callerDisplay, headingID, headingText)
 }
 
 // doEditCommitFn / doDeleteCommitFn — same pattern as doCommitMemoryFn,
@@ -415,7 +451,7 @@ func handleUICommitMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		if err := doCommitMemoryFn(ctx, pool, memID, body, u.UserID, u.DisplayName); err != nil {
+		if err := doCommitMemoryFn(ctx, pool, memID, body, u.UserID, u.DisplayName, "", ""); err != nil {
 			return domainErr(c, err)
 		}
 

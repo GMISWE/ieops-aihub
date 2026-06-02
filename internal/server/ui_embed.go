@@ -122,6 +122,9 @@ func uiFuncMap() template.FuncMap {
 			}
 			return s
 		},
+		// inc adds 1 to an integer; used in range loops to convert 0-based indices
+		// to 1-based labels (e.g. {{inc $i}} → "1", "2", …) for version-history lists.
+		"inc": func(n int) int { return n + 1 },
 	}
 }
 

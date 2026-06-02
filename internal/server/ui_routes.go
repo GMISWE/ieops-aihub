@@ -83,4 +83,7 @@ func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	// reads UserContext from echo.Context which RequireUISession populates
 	// the same way BearerAuth does.
 	uiGroup.GET("/artifacts/:id/html", handleArtifactHTML(pool))
+
+	// aihub#124: section-level annotation commit — /ui only (no /v1 mirror).
+	RegisterUIArtifactCommitRoute(uiGroup, pool)
 }

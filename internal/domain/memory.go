@@ -524,8 +524,13 @@ var MemoryTypeEnum = []string{
 // It does NOT touch activation_count, base_strength, stability_days, or
 // last_activated_at — those fields are managed by the forgetting-curve path only.
 // updated_at is refreshed automatically by the BEFORE UPDATE trigger trg_mem_updated_at.
-// Write surface: UI only (POST /ui/memories/:id/commit).
-func CommitMemory(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUserID, callerDisplay string) error {
+// Write surface: UI only (POST /ui/memories/:id/commit and POST /ui/artifacts/:id/commit).
+//
+// headingID and headingText are optional section anchors (aihub#124). When headingID is
+// non-empty, the stored entry carries an "anchor" object so the annotation is tied to a
+// specific markdown heading in the rendered artifact. Callers that do not anchor should
+// pass "", "".
+func CommitMemory(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUserID, callerDisplay, headingID, headingText string) error {
 	var project, status string
 	err := pool.QueryRow(ctx, `SELECT project, status FROM memories WHERE id=$1`, memID).
 		Scan(&project, &status)
@@ -544,6 +549,14 @@ func CommitMemory(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUs
 		"author_display": callerDisplay,
 		"body":           body,
 		"created_at":     time.Now().UTC().Format(time.RFC3339),
+	}
+	// aihub#124: include anchor object only when a heading is specified, so
+	// entries without anchors remain backward-compatible (no extra key).
+	if headingID != "" {
+		entry["anchor"] = map[string]string{
+			"heading_id":   headingID,
+			"heading_text": headingText,
+		}
 	}
 	entryJSON, _ := json.Marshal(entry)
 	// Wrap as a single-element JSON array so || can append it to the existing array.
@@ -1336,4 +1349,248 @@ func verifyAttemptCredentialSimple(ctx context.Context, pool *pgxpool.Pool, wi *
 		return NewErr(ErrAttemptMismatch, "invalid session_secret")
 	}
 	return nil
+}
+
+// ─── Resolve commit (aihub#124) ───────────────────────────────────────────────
+
+// resolveCommitSQL is the UPDATE that atomically rewrites a single commit entry
+// inside the commits JSONB array. Extracted so tests can assert the exact
+// jsonb_set paths without hitting a real database.
+//
+// The status value "resolved" is inlined as a literal so the const itself
+// encodes the invariant (tests can grep for it without a DB).
+//
+// Parameters: $1=memID $2=commitID $3=reply $4=resolvedAt $5=callerDisplay
+const resolveCommitSQL = `
+		UPDATE memories
+		SET commits = (
+			SELECT jsonb_agg(
+				CASE
+					WHEN entry->>'id' = $2 THEN
+						jsonb_set(
+							jsonb_set(
+								jsonb_set(
+									jsonb_set(entry, '{status}', '"resolved"', true),
+									'{reply}', to_jsonb($3::text), true
+								),
+								'{resolved_at}', to_jsonb($4::text), true
+							),
+							'{resolved_by}', to_jsonb($5::text), true
+						)
+					ELSE entry
+				END
+			)
+			FROM jsonb_array_elements(commits) AS entry
+		)
+		WHERE id = $1`
+
+// ResolveCommit marks a single commit entry as resolved: sets status="resolved",
+// reply, resolved_at (RFC3339 UTC), and resolved_by. It then emits
+// memory_commit_resolved carrying the memory's work_item_id (which may be NULL
+// when the artifact has no associated work item — the event INSERT is
+// fire-and-forget and will silently fail the chk_evt_work_item_id constraint in
+// that case, matching the behaviour of memory_committed / memory_commit_edited).
+func ResolveCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, reply, callerUserID, callerDisplay string) error {
+	project, status, _, err := findCommitEntry(ctx, pool, memID, commitID)
+	if err != nil {
+		return err
+	}
+	if status == "redacted" {
+		return NewErr(ErrForbidden, "cannot resolve a commit on a redacted memory")
+	}
+
+	resolvedAt := time.Now().UTC().Format(time.RFC3339)
+	_, execErr := pool.Exec(ctx, resolveCommitSQL,
+		memID, commitID, reply, resolvedAt, callerDisplay,
+	)
+	if execErr != nil {
+		return NewErr(ErrInternalError, fmt.Sprintf("failed to resolve commit: %v", execErr))
+	}
+
+	// Look up the memory's work_item_id for the event row.
+	// project is already known from findCommitEntry above.
+	var wiID *string
+	_ = pool.QueryRow(ctx, `SELECT work_item_id FROM memories WHERE id=$1`, memID).
+		Scan(&wiID)
+
+	// Emit memory_commit_resolved (best-effort, fire-and-forget).
+	// NOTE: when work_item_id IS NULL and event_type is not in the constraint
+	// whitelist, the INSERT will fail silently — this matches memory_committed /
+	// memory_commit_edited behaviour for artifact memories without a wi.
+	payload, _ := json.Marshal(map[string]any{
+		"memory_id":   memID,
+		"commit_id":   commitID,
+		"resolved_by": callerDisplay,
+	})
+	_, _ = pool.Exec(ctx, `
+		INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
+		VALUES ($1, $2, $3, $4, 'memory_commit_resolved', $5, $6)`,
+		NewID("evt"), wiID, callerUserID, callerDisplay, payload, project,
+	) //nolint:errcheck
+
+	return nil
+}
+
+// ─── Version chain (aihub#124) ────────────────────────────────────────────────
+
+// MemoryVersionRef is a lightweight entry in a memory's supersede lineage.
+type MemoryVersionRef struct {
+	ID        string `json:"id"`
+	CreatedAt string `json:"created_at"` // RFC3339
+	Status    string `json:"status"`
+	IsCurrent bool   `json:"is_current"` // true for the single active (non-archived, non-superseded) head
+}
+
+// orderVersionChain takes a flat map of {id → {supersedesID, status, createdAt}} and
+// the starting id, then walks the chain to produce an oldest-first ordered slice.
+// This pure function is unit-tested without a DB in memory_version_test.go.
+// Cycles are bounded by maxChainLen. Redacted entries (status="redacted") are excluded.
+func orderVersionChain(nodes map[string]versionNode, startID string, maxChainLen int) []MemoryVersionRef {
+	if len(nodes) == 0 {
+		return nil
+	}
+
+	// Build a "newer" index: for each node, which node supersedes it?
+	// i.e. newerOf[X] = Y means Y.supersedes_id == X  (Y is newer than X).
+	newerOf := make(map[string]string, len(nodes))
+	for id, n := range nodes {
+		if n.SupersedesID != "" {
+			newerOf[n.SupersedesID] = id
+		}
+	}
+
+	// Walk backwards (via supersedes_id) to find the oldest ancestor.
+	oldest := startID
+	seen := map[string]bool{}
+	for hop := 0; hop < maxChainLen; hop++ {
+		n, ok := nodes[oldest]
+		if !ok || n.SupersedesID == "" {
+			break
+		}
+		if seen[n.SupersedesID] {
+			break // cycle guard
+		}
+		seen[n.SupersedesID] = true
+		if _, exists := nodes[n.SupersedesID]; !exists {
+			break // older version was redacted/not loaded — stop
+		}
+		oldest = n.SupersedesID
+	}
+
+	// Walk forward from oldest via newerOf to build the chain.
+	var chain []MemoryVersionRef
+	cur := oldest
+	seenForward := map[string]bool{}
+	for hop := 0; hop < maxChainLen; hop++ {
+		n, ok := nodes[cur]
+		if !ok {
+			break
+		}
+		if seenForward[cur] {
+			break // cycle guard
+		}
+		seenForward[cur] = true
+		chain = append(chain, MemoryVersionRef{
+			ID:        cur,
+			CreatedAt: n.CreatedAt,
+			Status:    n.Status,
+		})
+		next, hasNewer := newerOf[cur]
+		if !hasNewer {
+			break
+		}
+		cur = next
+	}
+
+	// Mark IsCurrent: the single active head. If none is active, mark the last entry.
+	activeFound := false
+	for i := range chain {
+		if chain[i].Status == "active" {
+			chain[i].IsCurrent = true
+			activeFound = true
+		}
+	}
+	if !activeFound && len(chain) > 0 {
+		chain[len(chain)-1].IsCurrent = true
+	}
+
+	return chain
+}
+
+// versionNode is the raw DB row used by MemoryVersionChain.
+type versionNode struct {
+	SupersedesID string // empty when this is the oldest version
+	Status       string
+	CreatedAt    string // RFC3339
+}
+
+// maxVersionChainLen caps the chain walk so corrupt/adversarial data cannot loop forever.
+const maxVersionChainLen = 100
+
+// MemoryVersionChain returns the full supersede lineage for the given memory id,
+// ordered oldest → newest. Redacted entries are excluded. A single-version
+// memory (no chain) returns a 1-element slice. An unknown id returns an empty
+// slice (not an error, to keep callers simple).
+//
+// Implementation: two queries — one recursive CTE that walks the supersedes_id
+// chain in both directions (ancestors via supersedes_id, descendants via reverse
+// lookup), collecting all nodes into a flat map that orderVersionChain sorts.
+func MemoryVersionChain(ctx context.Context, pool *pgxpool.Pool, memID string) ([]MemoryVersionRef, error) {
+	// CTE strategy: start from memID, walk UP (older) via supersedes_id, and DOWN
+	// (newer) via reverse. We use two CTEs chained together to avoid an infinite
+	// recursion issue with bidirectional traversal in one CTE.
+	//
+	// Step 1: collect all ancestors (including self) via supersedes_id.
+	// Step 2: for each ancestor, collect all descendants (including self) via reverse.
+	// Combine both sets, deduplicate, exclude redacted.
+	const q = `
+WITH RECURSIVE
+ancestors(id) AS (
+    SELECT id FROM memories WHERE id = $1 AND status != 'redacted'
+    UNION
+    SELECT m.supersedes_id
+    FROM memories m
+    JOIN ancestors a ON m.id = a.id
+    WHERE m.supersedes_id IS NOT NULL
+      AND EXISTS (SELECT 1 FROM memories WHERE id = m.supersedes_id AND status != 'redacted')
+),
+descendants(id) AS (
+    SELECT id FROM ancestors
+    UNION
+    SELECT m.id
+    FROM memories m
+    JOIN descendants d ON m.supersedes_id = d.id
+    WHERE m.status != 'redacted'
+)
+SELECT m.id,
+       COALESCE(m.supersedes_id, '') AS supersedes_id,
+       m.status,
+       m.created_at::text
+FROM memories m
+JOIN descendants d ON m.id = d.id
+WHERE m.status != 'redacted'`
+
+	rows, err := pool.Query(ctx, q, memID)
+	if err != nil {
+		return nil, fmt.Errorf("MemoryVersionChain: %w", err)
+	}
+	defer rows.Close()
+
+	nodes := make(map[string]versionNode)
+	for rows.Next() {
+		var id, supersedesID, status, createdAt string
+		if err := rows.Scan(&id, &supersedesID, &status, &createdAt); err != nil {
+			return nil, fmt.Errorf("MemoryVersionChain scan: %w", err)
+		}
+		nodes[id] = versionNode{SupersedesID: supersedesID, Status: status, CreatedAt: createdAt}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("MemoryVersionChain rows: %w", err)
+	}
+
+	if len(nodes) == 0 {
+		return nil, nil // memID not found or redacted
+	}
+
+	return orderVersionChain(nodes, memID, maxVersionChainLen), nil
 }

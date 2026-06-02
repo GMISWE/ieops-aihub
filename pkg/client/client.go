@@ -267,6 +267,13 @@ func (c *Client) RedactMemory(ctx context.Context, memoryID string, body any) (m
 	return out, c.do(ctx, "PATCH", "/v1/memories/"+seg(memoryID)+"/redact", body, &out)
 }
 
+// ResolveCommit calls POST /v1/memories/:id/commit/:commit_id/resolve.
+// body should be map[string]any{"reply": "..."}.
+func (c *Client) ResolveCommit(ctx context.Context, memoryID, commitID string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "POST", "/v1/memories/"+seg(memoryID)+"/commit/"+seg(commitID)+"/resolve", body, &out)
+}
+
 // ─── Artifacts ────────────────────────────────────────────────────────────
 
 // GetArtifactHTML calls GET /v1/artifacts/:id/html and returns the rendered

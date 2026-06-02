@@ -2,12 +2,12 @@ package server
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html"
 	"html/template"
 	"io/fs"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -72,16 +72,16 @@ func parseTemplates() *template.Template {
 // uiFuncMap exposes a small set of helpers to all templates.
 //
 //   - md       : render a string as markdown -> safe HTML. Used for wi.Content
-//                and memory.content fields. Falls back to escaped plain text
-//                on renderer error.
+//     and memory.content fields. Falls back to escaped plain text
+//     on renderer error.
 //   - truncate : clip a long string with an ellipsis. Useful for wi list views.
 //   - default  : replace empty strings with a placeholder.
 //   - hasPrefix: strings.HasPrefix.
 //   - wiref    : build /ui/wi/<slug-or-id> with '#' path-escaped.
 //   - fmtTs    : parse an RFC3339 timestamp string and format it the same way
-//                metadata-card timestamps are formatted ("2006-01-02 15:04 UTC").
-//                Used by the memory_detail commits card (aihub#70) so commit
-//                timestamps line up with the rest of the page.
+//     metadata-card timestamps are formatted ("2006-01-02 15:04 UTC").
+//     Used by the memory_detail commits card (aihub#70) so commit
+//     timestamps line up with the rest of the page.
 func uiFuncMap() template.FuncMap {
 	return template.FuncMap{
 		"md": func(src string) template.HTML {
@@ -112,12 +112,7 @@ func uiFuncMap() template.FuncMap {
 		// fragment and strip from the request — the handler would then see
 		// only "aihub" and 404. PathEscape turns "#" into "%23" so the full
 		// slug survives the round-trip.
-		"wiref": func(slugOrID string) string {
-			if slugOrID == "" {
-				return ""
-			}
-			return "/ui/wi/" + url.PathEscape(slugOrID)
-		},
+		"wiref": func(slugOrID string) string { return wiHref(slugOrID) },
 		"fmtTs": func(s string) string {
 			if s == "" {
 				return "—"
@@ -177,4 +172,37 @@ func renderTemplate(c echo.Context, tmpl *template.Template, name string, data a
 		return c.String(http.StatusInternalServerError, "template error: "+err.Error())
 	}
 	return c.HTMLBlob(http.StatusOK, []byte(buf.String()))
+}
+
+// parseRelatedIDs extracts the "related_ids" string array from a mem.Attrs
+// JSONB value. It returns the non-empty IDs, or nil for missing/empty/malformed
+// input. Both parseRelatedRefs (routes_artifacts.go) and parseMemRelatedRefs
+// (ui_handlers_memory.go) delegate here so the JSON-parsing logic lives in
+// exactly one place.
+func parseRelatedIDs(attrs json.RawMessage) []string {
+	if len(attrs) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(attrs, &obj); err != nil {
+		return nil
+	}
+	raw, ok := obj["related_ids"]
+	if !ok {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal(raw, &ids); err != nil {
+		return nil
+	}
+	out := ids[:0]
+	for _, id := range ids {
+		if id != "" {
+			out = append(out, id)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

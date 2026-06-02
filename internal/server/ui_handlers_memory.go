@@ -335,35 +335,20 @@ func buildMemFilterQuery(project, memType string, strengthMin float64, q, workIt
 
 // parseMemRelatedRefs parses mem.Attrs["related_ids"] (a JSON string array
 // written by pf_remember) into []MemRelatedRef for the memory detail template.
-// Uses the same logic as parseRelatedRefs in routes_artifacts.go; kept separate
-// so the server package doesn't import render for a pure view-data concern.
+// JSON parsing is handled by parseRelatedIDs (ui_embed.go); kept separate from
+// parseRelatedRefs in routes_artifacts.go so the server package doesn't import
+// render for a pure view-data concern.
 //
 // TODO(aihub#112 Stream A): replace attrs.related_ids source with join-table-
 // enriched Related[] including type and summary.
 func parseMemRelatedRefs(attrs json.RawMessage) []MemRelatedRef {
-	if len(attrs) == 0 {
-		return nil
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(attrs, &obj); err != nil {
-		return nil
-	}
-	raw, ok := obj["related_ids"]
-	if !ok {
-		return nil
-	}
-	var ids []string
-	if err := json.Unmarshal(raw, &ids); err != nil {
-		return nil
-	}
+	ids := parseRelatedIDs(attrs)
 	if len(ids) == 0 {
 		return nil
 	}
 	refs := make([]MemRelatedRef, 0, len(ids))
 	for _, id := range ids {
-		if id != "" {
-			refs = append(refs, MemRelatedRef{ID: id})
-		}
+		refs = append(refs, MemRelatedRef{ID: id})
 	}
 	return refs
 }

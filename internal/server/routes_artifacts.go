@@ -127,10 +127,11 @@ func renderArtifactBodyWithMeta(stored, title, backHref, ownerHref, ownerLabel s
 	return render.DocumentWithMeta(stored, title, backHref, ownerHref, ownerLabel, related)
 }
 
-// wiHref is the server-side equivalent of the `wiref` template helper in
-// ui_embed.go. Both use url.PathEscape so '#' in slug-style IDs (e.g.
-// "aihub#98") is encoded as "%23" and survives the browser round-trip without
-// being interpreted as a URL fragment. Keep these two in sync.
+// wiHref returns the UI href for a wi detail page. The `wiref` template func
+// in ui_embed.go delegates to this function so the path logic lives in one
+// place. url.PathEscape encodes '#' in slug-style IDs (e.g. "aihub#98") as
+// "%23" so the full slug survives the browser round-trip without being
+// interpreted as a URL fragment.
 func wiHref(slugOrID string) string {
 	if slugOrID == "" {
 		return ""
@@ -149,29 +150,13 @@ func wiHref(slugOrID string) string {
 // that provides enriched Related[] entries including type and summary, then
 // populate the Type and Summary fields here.
 func parseRelatedRefs(attrs json.RawMessage) []render.RelatedRef {
-	if len(attrs) == 0 {
-		return nil
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(attrs, &obj); err != nil {
-		return nil
-	}
-	raw, ok := obj["related_ids"]
-	if !ok {
-		return nil
-	}
-	var ids []string
-	if err := json.Unmarshal(raw, &ids); err != nil {
-		return nil
-	}
+	ids := parseRelatedIDs(attrs)
 	if len(ids) == 0 {
 		return nil
 	}
 	refs := make([]render.RelatedRef, 0, len(ids))
 	for _, id := range ids {
-		if id != "" {
-			refs = append(refs, render.RelatedRef{ID: id})
-		}
+		refs = append(refs, render.RelatedRef{ID: id})
 	}
 	return refs
 }

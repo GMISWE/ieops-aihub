@@ -357,8 +357,11 @@ func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, rep
 
 // writeMemberPolyforgeYAML generates .polyforge.yaml for a member workspace
 // as a local cache of the server's project+repo list. The file is written
-// only when it does not already exist.
-func writeMemberPolyforgeYAML(path string, projects []serverProject) error {
+// only when it does not already exist. It applies the same callerHasRole
+// filter as the clone loop so the cache declares only projects the caller has
+// a role in — listing a visible project in GET /v1/projects does not imply the
+// caller should treat its repos as part of their workspace.
+func writeMemberPolyforgeYAML(path string, projects []serverProject, currentUserID string) error {
 	mc, err := config.LoadMachineConfig()
 	if err != nil {
 		return err
@@ -371,6 +374,13 @@ func writeMemberPolyforgeYAML(path string, projects []serverProject) error {
 	}
 	for _, sp := range projects {
 		if !sp.Visible {
+			continue
+		}
+		// Mirror the role filter from the main init loop: only declare
+		// projects the caller has a role in (owner or member). Public-visible
+		// projects without a caller role are not cloned, so declaring them here
+		// would produce spurious "missing repos" warnings.
+		if !callerHasRole(sp, currentUserID) {
 			continue
 		}
 		serverRepos := parseServerRepos(sp.Repos)
@@ -547,7 +557,7 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 	// doesn't exist yet. Owners already have it as their source of truth.
 	polyforgeYAMLPath := filepath.Join(wsRoot, ".polyforge.yaml")
 	if _, yerr := os.Stat(polyforgeYAMLPath); os.IsNotExist(yerr) && len(projects) > 0 {
-		if werr := writeMemberPolyforgeYAML(polyforgeYAMLPath, projects); werr != nil {
+		if werr := writeMemberPolyforgeYAML(polyforgeYAMLPath, projects, currentUserID); werr != nil {
 			fmt.Fprintf(os.Stderr, "pf init: write .polyforge.yaml: %v\n", werr)
 		} else {
 			fmt.Printf("ok .polyforge.yaml generated (member workspace)\n")

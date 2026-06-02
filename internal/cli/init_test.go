@@ -267,7 +267,8 @@ func TestWriteMemberPolyforgeYAML_IncludesScenario(t *testing.T) {
 	}
 
 	path := filepath.Join(tmp, ".polyforge.yaml")
-	if err := writeMemberPolyforgeYAML(path, projects); err != nil {
+	// Caller owns both projects (u_xxx), so both pass the callerHasRole filter.
+	if err := writeMemberPolyforgeYAML(path, projects, "u_xxx"); err != nil {
 		t.Fatalf("writeMemberPolyforgeYAML: %v", err)
 	}
 
@@ -285,6 +286,68 @@ func TestWriteMemberPolyforgeYAML_IncludesScenario(t *testing.T) {
 	// project key.
 	if n := strings.Count(got, "scenario: "); n != 1 {
 		t.Errorf("rendered yaml has %d `scenario: ` lines, want exactly 1; got:\n%s", n, got)
+	}
+}
+
+// TestWriteMemberPolyforgeYAML_FiltersRoleless guards the aihub#123 fix: the
+// generated member .polyforge.yaml must declare only projects the caller has a
+// role in (owner or member), mirroring the clone loop's callerHasRole gate.
+// Visible-but-role-less projects (e.g. infra, tether) were previously written
+// into the yaml while their repos were never cloned, producing spurious
+// "missing repos" warnings in doctor/teammate checks.
+func TestWriteMemberPolyforgeYAML_FiltersRoleless(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	projects := []serverProject{
+		{
+			Name:    "aihub",
+			Visible: true,
+			Members: []serverProjectMember{{UserID: "u_caller", Role: "writer"}},
+			Repos:   json.RawMessage(`[{"name":"aihub","url":"git@github.com:GMISWE/ieops-aihub.git"}]`),
+		},
+		{
+			Name:        "ieops",
+			OwnerUserID: "u_caller",
+			Visible:     true,
+			Repos:       json.RawMessage(`[{"name":"ieops-v2","url":"git@github.com:GMISWE/ieops-v2.git"}]`),
+		},
+		{
+			Name:        "infra",
+			OwnerUserID: "u_other",
+			Visible:     true, // visible but caller has no role → must be excluded
+			Repos:       json.RawMessage(`[{"name":"vllm","url":"git@github.com:vllm/vllm.git"}]`),
+		},
+		{
+			Name:        "tether",
+			OwnerUserID: "u_other",
+			Visible:     true,
+			Members:     []serverProjectMember{{UserID: "u_someone_else", Role: "writer"}},
+			Repos:       json.RawMessage(`[{"name":"tether","url":"git@github.com:GMISWE/tether.git"}]`),
+		},
+	}
+
+	path := filepath.Join(tmp, ".polyforge.yaml")
+	if err := writeMemberPolyforgeYAML(path, projects, "u_caller"); err != nil {
+		t.Fatalf("writeMemberPolyforgeYAML: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read .polyforge.yaml: %v", err)
+	}
+	got := string(b)
+
+	// Projects the caller has a role in must be present.
+	for _, want := range []string{"aihub:", "ieops:"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered yaml missing role-bearing project %q; got:\n%s", want, got)
+		}
+	}
+	// Role-less visible projects must be excluded.
+	for _, notWant := range []string{"infra:", "tether:"} {
+		if strings.Contains(got, notWant) {
+			t.Errorf("rendered yaml includes role-less project %q; got:\n%s", notWant, got)
+		}
 	}
 }
 

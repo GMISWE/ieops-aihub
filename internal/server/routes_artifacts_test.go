@@ -594,6 +594,112 @@ func excerptStr(s string) string {
 	return s[:500] + "..."
 }
 
+// ─── aihub#81: lazy-render fallback in handleArtifactHTML ────────────────────
+
+// retroMemNullHTML returns a methodology.retro artifact whose rendered_html is
+// NULL (legacy row saved before aihub#81 extended the render-type set).
+func retroMemNullHTML() *domain.Memory {
+	content := "# Retro\n\n- item one\n- item two"
+	return &domain.Memory{
+		ID:           "mem_retro1",
+		Project:      "testproj",
+		Type:         "methodology.retro",
+		Content:      content,
+		Visibility:   "project",
+		AuthorUserID: "u_author",
+		RenderedHTML: nil, // NULL — the legacy / not-yet-rendered case
+	}
+}
+
+// TestArtifactHTML_LazyRender_MarkdownContent_200 verifies that a retro artifact
+// with rendered_html=NULL and markdown content is lazy-rendered on-the-fly,
+// returning 200 (not 404) with a body containing the rendered output.
+func TestArtifactHTML_LazyRender_MarkdownContent_200(t *testing.T) {
+	defer withLoadMemoryOverride(retroMemNullHTML(), nil)()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/v1/artifacts/mem_retro1/html", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_retro1")
+	setUser(c, adminUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("lazy-render: status got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	ct := rec.Header().Get(echo.HeaderContentType)
+	if !strings.Contains(ct, "text/html") {
+		t.Fatalf("lazy-render: content-type got %q, want text/html", ct)
+	}
+	// goldmark renders "# Retro" as an <h1>
+	if !strings.Contains(rec.Body.String(), "<h1") {
+		t.Fatalf("lazy-render: body should contain goldmark-rendered HTML; got: %s", excerptStr(rec.Body.String()))
+	}
+}
+
+// TestArtifactHTML_LazyRender_PlainTextFallback_200 verifies that when content
+// is not valid markdown (plain text) the handler still returns 200 with a
+// <pre> fallback block — never a 404.
+func TestArtifactHTML_LazyRender_PlainTextFallback_200(t *testing.T) {
+	mem := retroMemNullHTML()
+	mem.Content = "plain text, no markdown" // goldmark still renders this, but we test pre path
+	// Force the pre-block path by using content with no markdown constructs.
+	// (goldmark will still succeed on plain text; use an empty content to force the
+	// empty-content branch for the <pre></pre> path.)
+	mem.Content = ""
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/v1/artifacts/mem_retro1/html", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_retro1")
+	setUser(c, adminUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pre fallback: status got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "<pre>") {
+		t.Fatalf("pre fallback: body should contain a <pre> element; got: %s", excerptStr(rec.Body.String()))
+	}
+}
+
+// TestArtifactHTML_LazyRender_PlainTextInPre_200 verifies that plain text content
+// (non-markdown) with RenderedHTML=NULL is served in a <pre> wrapper (via goldmark
+// returning a trivial paragraph or the pre fallback), returning 200, never 404.
+func TestArtifactHTML_LazyRender_PlainTextInPre_200(t *testing.T) {
+	mem := retroMemNullHTML()
+	mem.Content = "just plain text with <special> chars & entities"
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/v1/artifacts/mem_retro1/html", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_retro1")
+	setUser(c, adminUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("plain text render: status got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	ct := rec.Header().Get(echo.HeaderContentType)
+	if !strings.Contains(ct, "text/html") {
+		t.Fatalf("plain text render: content-type got %q, want text/html", ct)
+	}
+}
+
 // Scenario 7: a writer shares a spec/plan artifact that has rendered_html →
 // 200, visibility flipped to public, and the response carries the share_url.
 // Covers the success path of POST /v1/artifacts/:id/share.

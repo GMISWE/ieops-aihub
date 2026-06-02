@@ -54,3 +54,31 @@ func TestRenderTypes_DefaultIncludesReview(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderTypes_DefaultIncludesExecuteRetroWrapSummary verifies aihub#81: the
+// three new types also auto-render at save time using the default render-type set.
+// Uses parseRenderTypes directly (no global mutation).
+func TestRenderTypes_DefaultIncludesExecuteRetroWrapSummary(t *testing.T) {
+	set := parseRenderTypes(defaultRenderTypes)
+	for _, want := range []string{"methodology.execute", "methodology.retro", "methodology.wrap_summary"} {
+		if !set[want] {
+			t.Fatalf("defaultRenderTypes must include %q; got %q", want, defaultRenderTypes)
+		}
+	}
+}
+
+// TestResolveRenderedHTML_NewTypes asserts resolveRenderedHTML returns non-nil HTML
+// for the three types added in aihub#81 when using the default render-type set.
+func TestResolveRenderedHTML_NewTypes(t *testing.T) {
+	// Reset to default so the test is independent of ordering with
+	// TestResolveRenderedHTML_Fallback, which overrides with a narrower set.
+	InitRenderTypes(defaultRenderTypes)
+
+	content := "# Heading\n\nbody paragraph"
+	for _, memType := range []string{"methodology.execute", "methodology.retro", "methodology.wrap_summary"} {
+		got := resolveRenderedHTML(nil, memType, content)
+		if got == nil || *got == "" {
+			t.Fatalf("resolveRenderedHTML(nil, %q, content) = nil/empty; want non-empty HTML", memType)
+		}
+	}
+}

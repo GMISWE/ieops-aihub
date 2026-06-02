@@ -19,8 +19,11 @@ import (
 
 // ─── Render Types (config-driven) ─────────────────────────────────────────────
 
-// defaultRenderTypes is the backward-compatible default (aihub#102).
-const defaultRenderTypes = "methodology.spec,methodology.plan,methodology.review"
+// defaultRenderTypes is the backward-compatible default (aihub#102 / aihub#81).
+// If a deploy overrides this via RENDER_MEMORY_TYPES it must include these
+// types too — but the lazy-render fallback in handleArtifactHTML makes
+// save-time rendering an optimisation, not the only render path.
+const defaultRenderTypes = "methodology.spec,methodology.plan,methodology.review,methodology.execute,methodology.retro,methodology.wrap_summary"
 
 // renderTypes is the set of memory types for which Markdown→HTML rendering is
 // performed on save. Initialised to the default set so Remember() is safe to

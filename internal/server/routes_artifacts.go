@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"html"
 	"net/http"
 	"net/url"
 	"strings"
@@ -35,14 +37,19 @@ type memVisibilitySetterFn func(ctx context.Context, pool *pgxpool.Pool, id, vis
 // setMemoryVisibilityFn is the production-wired SetMemoryVisibility — swappable in tests.
 var setMemoryVisibilityFn memVisibilitySetterFn = domain.SetMemoryVisibility
 
-// handleArtifactHTML serves the cached rendered HTML for a spec/plan artifact.
+// handleArtifactHTML serves the rendered HTML for any artifact.
 //
 // Status map:
 //   - 401 — handled upstream by BearerAuth
 //   - 404 — memory missing / redacted
 //   - 403 — visibility denies the caller (private→non-author, admin→non-admin)
-//   - 404 — rendered_html IS NULL (non spec/plan, or pre-feature legacy row)
-//   - 200 — body = stored HTML, Content-Type: text/html; charset=utf-8
+//   - 200 — body = HTML document, Content-Type: text/html; charset=utf-8
+//
+// When rendered_html is NULL the handler lazy-renders on the fly (aihub#81):
+//  1. Try render.Markdown(mem.Content) — produces a rich HTML fragment.
+//  2. If that fails or content is empty — fallback: serve content in a <pre>.
+//
+// No DB write is performed on a GET; render-on-view only.
 func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -54,7 +61,7 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "memory id is required"))
 		}
 
-		mem, aihubErr := domain.GetMemoryByID(ctx, pool, memID)
+		mem, aihubErr := loadMemoryFn(ctx, pool, memID)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
@@ -67,11 +74,25 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		if mem.RenderedHTML == nil {
-			// Distinguish from "memory not found" with a message — the row exists,
-			// it just has no HTML payload (legacy spec/plan or unsupported type).
-			return writeError(c, domain.NewErr(domain.ErrNotFound,
-				"no HTML available for this artifact (rendered_html is NULL — only methodology.spec / methodology.plan / methodology.review render, and legacy rows are not backfilled)"))
+		// Resolve the HTML body fragment to serve. Prefer the stored rendered_html;
+		// if NULL, lazy-render on the fly so no renderable artifact ever 404s.
+		var bodyFragment string
+		if mem.RenderedHTML != nil {
+			bodyFragment = *mem.RenderedHTML
+		} else {
+			// Lazy-render: try goldmark first, fall back to a <pre> block.
+			if mem.Content != "" {
+				rendered, rerr := render.Markdown(mem.Content)
+				if rerr == nil && rendered != "" {
+					bodyFragment = rendered
+				} else {
+					// render error or empty output: safe <pre> fallback.
+					bodyFragment = fmt.Sprintf("<pre>%s</pre>", html.EscapeString(mem.Content))
+				}
+			} else {
+				// Empty content: serve a minimal placeholder.
+				bodyFragment = "<pre></pre>"
+			}
 		}
 
 		title := mem.ID + " (" + mem.Type + ")"
@@ -93,7 +114,7 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			}
 			related = parseRelatedRefs(mem.Attrs)
 		}
-		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBodyWithMeta(*mem.RenderedHTML, title, backHref, ownerHref, ownerLabel, related)))
+		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBodyWithMeta(bodyFragment, title, backHref, ownerHref, ownerLabel, related)))
 	}
 }
 
@@ -177,6 +198,8 @@ func artifactBackHref(routePath string, workItemID *string) string {
 // The memory_id is itself the unguessable share link. Only memories with
 // visibility='public' and non-null rendered_html are reachable; anything else returns a
 // uniform 404 so the endpoint never leaks whether a given id exists.
+// TODO(aihub#81): could apply the same lazy-render fallback here so artifacts shared
+// before rendered_html was populated still serve instead of returning 404.
 func handleSharedArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		ctx, cancel := contextWithTimeout(c)

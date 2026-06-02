@@ -97,6 +97,16 @@
         {{end}}
       </dl>
     </div>
+    {{if $.Related}}
+    <div class="pf-detail-card">
+      <h2>Related</h2>
+      <ul class="pf-related-list">
+        {{range $.Related}}
+        <li><a href="/ui/artifacts/{{.ID}}/html">{{.ID}}</a>{{if .Summary}} — {{.Summary}}{{end}}</li>
+        {{end}}
+      </ul>
+    </div>
+    {{end}}
   </aside>
 </div>
 {{end}}

@@ -119,6 +119,18 @@ type Memory struct {
 	Commits          json.RawMessage `json:"commits"`
 	CreatedAt        time.Time       `json:"created_at"`
 	UpdatedAt        time.Time       `json:"updated_at"`
+	// populated post-scan from memory_relations (aihub#74); NOT part of any SELECT/Scan — do not add to the 6 lockstep sites.
+	Related   []RelatedRef `json:"related,omitempty"`
+	Backlinks []RelatedRef `json:"backlinks,omitempty"`
+}
+
+// RelatedRef is a lightweight reference to a related memory, used in
+// Memory.Related (forward links) and Memory.Backlinks (incoming links).
+// Summary is a short content snippet (≤120 chars) for inline display.
+type RelatedRef struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Summary string `json:"summary"` // short snippet of the target memory's content
 }
 
 // MemoryWithStrength extends Memory with a computed recall score.
@@ -367,6 +379,24 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	)
 	if err != nil {
 		return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to insert memory: %v", err))
+	}
+
+	// aihub#74 Stream A: dual-write related links into memory_relations.
+	// Keep attrs.related_ids write (above) UNCHANGED — Stream B / aihub#116 reads it;
+	// do not remove until that stream switches reads to this table and drops the attrs write.
+	// Skip target ids that don't exist to avoid FK violations on dangling refs,
+	// and t.id <> $1 to skip self-links. The insert is non-fatal (attrs.related_ids
+	// above stays the authoritative transitional copy), but a failure is logged so a
+	// divergence between attrs and memory_relations is observable rather than silent.
+	if len(req.RelatedMemoryIDs) > 0 {
+		if _, relErr := pool.Exec(ctx, `
+			INSERT INTO memory_relations (from_mem, to_mem, project)
+			SELECT $1, t.id, $2 FROM memories t WHERE t.id = ANY($3) AND t.id <> $1
+			ON CONFLICT DO NOTHING`,
+			mem.ID, mem.Project, req.RelatedMemoryIDs,
+		); relErr != nil {
+			fmt.Fprintf(os.Stderr, "remember: memory_relations dual-write failed for %s: %v\n", mem.ID, relErr)
+		}
 	}
 
 	// Emit memory_created event (non-critical, fire and forget)
@@ -800,6 +830,25 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		nextCursor = &cursorVal
 	}
 
+	// aihub#74 Stream A: enrich list results with forward links (no backlinks in list to keep it lean).
+	if len(items) > 0 {
+		ids := make([]string, len(items))
+		for i := range items {
+			ids[i] = items[i].ID
+		}
+		forwardMap, ferr := loadForwardRelations(ctx, pool, ids, req.Project, req.CallerUserID, req.CallerRole)
+		if ferr != nil {
+			// Non-fatal: log and continue without enrichment.
+			fmt.Fprintf(os.Stderr, "recall: loadForwardRelations error: %v\n", ferr)
+		} else {
+			for i := range items {
+				if refs, ok := forwardMap[items[i].ID]; ok {
+					items[i].Related = refs
+				}
+			}
+		}
+	}
+
 	return &RecallResponse{Items: items, NextCursor: nextCursor}, nil
 }
 
@@ -823,6 +872,49 @@ func scanMemoryLite(rows pgx.Rows) (*Memory, error) {
 		&m.Attrs, &m.Commits, &m.CreatedAt, &m.UpdatedAt,
 	)
 	return m, err
+}
+
+// ─── Relation helpers (aihub#74) ─────────────────────────────────────────────
+
+// loadForwardRelations returns from_mem → []RelatedRef for a set of source memory ids.
+// Each RelatedRef carries the target's id, type, and a content snippet (≤120 chars).
+// Executes ONE query (no N+1). Returns an empty map for an empty ids slice.
+func loadForwardRelations(ctx context.Context, pool *pgxpool.Pool, ids []string, project, callerUserID, callerRole string) (map[string][]RelatedRef, error) {
+	if len(ids) == 0 {
+		return map[string][]RelatedRef{}, nil
+	}
+	// Apply the SAME visibility/project scoping Recall enforces, so a related target
+	// cannot leak a private / admin / cross-project memory's id, type, or content
+	// snippet through the relation graph. Mirrors the predicate at Recall (the
+	// `CallerRole != "admin"` block).
+	where := "r.from_mem = ANY($1) AND m.project = $2 AND m.status != 'redacted' AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())"
+	args := []any{ids, project}
+	if callerRole != "admin" {
+		where += " AND (m.visibility != 'private' OR m.author_user_id = $3) AND m.visibility != 'admin'"
+		args = append(args, callerUserID)
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT r.from_mem, r.to_mem, m.type, left(m.content, 120)
+		FROM memory_relations r
+		JOIN memories m ON m.id = r.to_mem
+		WHERE `+where, args...)
+	if err != nil {
+		return nil, fmt.Errorf("loadForwardRelations: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]RelatedRef, len(ids))
+	for rows.Next() {
+		var fromMem, toMem, memType, snippet string
+		if err := rows.Scan(&fromMem, &toMem, &memType, &snippet); err != nil {
+			return nil, fmt.Errorf("loadForwardRelations scan: %w", err)
+		}
+		result[fromMem] = append(result[fromMem], RelatedRef{ID: toMem, Type: memType, Summary: snippet})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("loadForwardRelations rows: %w", err)
+	}
+	return result, nil
 }
 
 // GetMemoryByID loads a single active or archived memory by primary key.
@@ -854,6 +946,12 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 		}
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to load memory: %v", err))
 	}
+
+	// aihub#74 Stream A: single-memory related/backlinks enrichment is deferred to the
+	// follow-up that wires it into a handler with caller-scoped visibility — GetMemoryByID
+	// has no caller identity here, and populating .Related/.Backlinks without the visibility
+	// predicate would leak private/admin/cross-project memories. Recall enriches forward
+	// links with full scoping (see loadForwardRelations).
 	return m, nil
 }
 

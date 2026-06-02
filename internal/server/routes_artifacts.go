@@ -71,7 +71,7 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			// Distinguish from "memory not found" with a message — the row exists,
 			// it just has no HTML payload (legacy spec/plan or unsupported type).
 			return writeError(c, domain.NewErr(domain.ErrNotFound,
-				"no HTML available for this artifact (rendered_html is NULL — only methodology.spec / methodology.plan render, and legacy rows are not backfilled)"))
+				"no HTML available for this artifact (rendered_html is NULL — only methodology.spec / methodology.plan / methodology.review render, and legacy rows are not backfilled)"))
 		}
 
 		title := mem.ID + " (" + mem.Type + ")"
@@ -238,7 +238,7 @@ func handleShareArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 		if mem.RenderedHTML == nil {
 			return writeError(c, domain.NewErr(domain.ErrPreconditionFailed,
-				"artifact has no rendered HTML to share (only methodology.spec / methodology.plan render)"))
+				"artifact has no rendered HTML to share (only methodology.spec / methodology.plan / methodology.review render)"))
 		}
 		if aihubErr := setMemoryVisibilityFn(ctx, pool, mem.ID, "public"); aihubErr != nil {
 			return writeError(c, aihubErr)

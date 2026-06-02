@@ -42,3 +42,15 @@ func TestResolveRenderedHTML_Fallback(t *testing.T) {
 		t.Fatalf("render type without explicit html should auto-render; got nil/empty")
 	}
 }
+
+// TestRenderTypes_DefaultIncludesReview verifies methodology.review auto-renders
+// by default (IEBE-1725). Uses the pure parser so it does not touch the global
+// renderTypes set shared with other tests.
+func TestRenderTypes_DefaultIncludesReview(t *testing.T) {
+	set := parseRenderTypes(defaultRenderTypes)
+	for _, want := range []string{"methodology.spec", "methodology.plan", "methodology.review"} {
+		if !set[want] {
+			t.Fatalf("defaultRenderTypes must include %q; got %q", want, defaultRenderTypes)
+		}
+	}
+}

@@ -836,7 +836,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		for i := range items {
 			ids[i] = items[i].ID
 		}
-		forwardMap, ferr := loadForwardRelations(ctx, pool, ids)
+		forwardMap, ferr := loadForwardRelations(ctx, pool, ids, req.Project, req.CallerUserID, req.CallerRole)
 		if ferr != nil {
 			// Non-fatal: log and continue without enrichment.
 			fmt.Fprintf(os.Stderr, "recall: loadForwardRelations error: %v\n", ferr)
@@ -879,15 +879,25 @@ func scanMemoryLite(rows pgx.Rows) (*Memory, error) {
 // loadForwardRelations returns from_mem → []RelatedRef for a set of source memory ids.
 // Each RelatedRef carries the target's id, type, and a content snippet (≤120 chars).
 // Executes ONE query (no N+1). Returns an empty map for an empty ids slice.
-func loadForwardRelations(ctx context.Context, pool *pgxpool.Pool, ids []string) (map[string][]RelatedRef, error) {
+func loadForwardRelations(ctx context.Context, pool *pgxpool.Pool, ids []string, project, callerUserID, callerRole string) (map[string][]RelatedRef, error) {
 	if len(ids) == 0 {
 		return map[string][]RelatedRef{}, nil
+	}
+	// Apply the SAME visibility/project scoping Recall enforces, so a related target
+	// cannot leak a private / admin / cross-project memory's id, type, or content
+	// snippet through the relation graph. Mirrors the predicate at Recall (the
+	// `CallerRole != "admin"` block).
+	where := "r.from_mem = ANY($1) AND m.project = $2 AND m.status != 'redacted' AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())"
+	args := []any{ids, project}
+	if callerRole != "admin" {
+		where += " AND (m.visibility != 'private' OR m.author_user_id = $3) AND m.visibility != 'admin'"
+		args = append(args, callerUserID)
 	}
 	rows, err := pool.Query(ctx, `
 		SELECT r.from_mem, r.to_mem, m.type, left(m.content, 120)
 		FROM memory_relations r
 		JOIN memories m ON m.id = r.to_mem
-		WHERE r.from_mem = ANY($1) AND m.status != 'redacted'`, ids)
+		WHERE `+where, args...)
 	if err != nil {
 		return nil, fmt.Errorf("loadForwardRelations: %w", err)
 	}
@@ -903,37 +913,6 @@ func loadForwardRelations(ctx context.Context, pool *pgxpool.Pool, ids []string)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("loadForwardRelations rows: %w", err)
-	}
-	return result, nil
-}
-
-// loadBacklinks returns to_mem → []RelatedRef (incoming links) for a set of ids.
-// Each RelatedRef carries the source memory's id, type, and a content snippet (≤120 chars).
-// Executes ONE query (no N+1). Returns an empty map for an empty ids slice.
-func loadBacklinks(ctx context.Context, pool *pgxpool.Pool, ids []string) (map[string][]RelatedRef, error) {
-	if len(ids) == 0 {
-		return map[string][]RelatedRef{}, nil
-	}
-	rows, err := pool.Query(ctx, `
-		SELECT r.to_mem, r.from_mem, m.type, left(m.content, 120)
-		FROM memory_relations r
-		JOIN memories m ON m.id = r.from_mem
-		WHERE r.to_mem = ANY($1) AND m.status != 'redacted'`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("loadBacklinks: %w", err)
-	}
-	defer rows.Close()
-
-	result := make(map[string][]RelatedRef, len(ids))
-	for rows.Next() {
-		var toMem, fromMem, memType, snippet string
-		if err := rows.Scan(&toMem, &fromMem, &memType, &snippet); err != nil {
-			return nil, fmt.Errorf("loadBacklinks scan: %w", err)
-		}
-		result[toMem] = append(result[toMem], RelatedRef{ID: fromMem, Type: memType, Summary: snippet})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("loadBacklinks rows: %w", err)
 	}
 	return result, nil
 }
@@ -968,19 +947,11 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to load memory: %v", err))
 	}
 
-	// aihub#74 Stream A: enrich single-memory view with forward links + backlinks.
-	ids := []string{id}
-	if forwardMap, ferr := loadForwardRelations(ctx, pool, ids); ferr != nil {
-		fmt.Fprintf(os.Stderr, "GetMemoryByID: loadForwardRelations error: %v\n", ferr)
-	} else if refs, ok := forwardMap[id]; ok {
-		m.Related = refs
-	}
-	if backlinkMap, berr := loadBacklinks(ctx, pool, ids); berr != nil {
-		fmt.Fprintf(os.Stderr, "GetMemoryByID: loadBacklinks error: %v\n", berr)
-	} else if refs, ok := backlinkMap[id]; ok {
-		m.Backlinks = refs
-	}
-
+	// aihub#74 Stream A: single-memory related/backlinks enrichment is deferred to the
+	// follow-up that wires it into a handler with caller-scoped visibility — GetMemoryByID
+	// has no caller identity here, and populating .Related/.Backlinks without the visibility
+	// predicate would leak private/admin/cross-project memories. Recall enriches forward
+	// links with full scoping (see loadForwardRelations).
 	return m, nil
 }
 

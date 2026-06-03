@@ -252,6 +252,7 @@ func TestProjectErrorCodes_HTTPStatus(t *testing.T) {
 		{ErrProjectNotFound, 404},
 		{ErrProjectAlreadyExists, 409},
 		{ErrProjectNameInvalid, 400},
+		{ErrProjectScenarioInvalid, 400},
 		{ErrProjectAccessDenied, 403},
 		{ErrProjectHasWorkItems, 400},
 		{ErrRepoDuplicateName, 400},
@@ -262,6 +263,51 @@ func TestProjectErrorCodes_HTTPStatus(t *testing.T) {
 		got := codeToHTTPStatus(tt.code)
 		if got != tt.want {
 			t.Errorf("codeToHTTPStatus(%q) = %d, want %d", tt.code, got, tt.want)
+		}
+	}
+}
+
+// ─── validateScenario ─────────────────────────────────────────────────────────
+
+func TestValidateScenario_Accept(t *testing.T) {
+	valid := []string{
+		"",                           // unset
+		"   ",                        // whitespace-only == empty
+		"git@github.com:GMISWE/polyforge-coding.git",  // ssh scp-like with .git
+		"git@github.com:GMISWE/polyforge-coding",      // ssh scp-like without .git
+		"https://github.com/GMISWE/polyforge-coding.git",
+		"https://github.com/GMISWE/polyforge-coding",
+		"ssh://git@github.com/GMISWE/polyforge-coding.git",
+		"git@gitlab.example.com:team/sub/repo.git",    // nested path
+		"https://gitlab.example.com/team/sub/repo.git",
+	}
+	for _, s := range valid {
+		if aerr := validateScenario(s); aerr != nil {
+			t.Errorf("expected scenario %q to be accepted, got %v", s, aerr)
+		}
+	}
+}
+
+func TestValidateScenario_Reject(t *testing.T) {
+	invalid := []string{
+		"coding",                 // bare logical name — the bug this wi fixes
+		"polyforge-coding",       // bare repo name, no host/owner
+		"my-scenario",
+		"github.com",             // host only, no path
+		"git@github.com",         // scp-like missing :path
+		"git@github.com:",        // scp-like with empty path
+		"https://github.com",     // url missing path
+		"https://github.com/",    // url with empty path
+		"just some text",
+	}
+	for _, s := range invalid {
+		aerr := validateScenario(s)
+		if aerr == nil {
+			t.Errorf("expected scenario %q to be rejected", s)
+			continue
+		}
+		if aerr.Code != ErrProjectScenarioInvalid {
+			t.Errorf("scenario %q: got code %q, want %q", s, aerr.Code, ErrProjectScenarioInvalid)
 		}
 	}
 }

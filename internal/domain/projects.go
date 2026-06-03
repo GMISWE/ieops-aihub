@@ -20,6 +20,36 @@ import (
 // projectNameRe validates project names: ^[a-z][a-z0-9_-]{0,39}$
 var projectNameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,39}$`)
 
+// scenarioURLRe validates that a project's scenario field holds a git repo URL
+// (not a bare logical name like "coding"). The scenario value is consumed by
+// internal/cli/init.go's scenarioRepoName()+cloneOrSync() to clone the scenario
+// repo; a bare name has no host/owner so cloning is impossible and pf init silently
+// skips it. We accept the two forms git remotes actually use:
+//
+//	SSH scp-like : git@github.com:GMISWE/polyforge-coding.git
+//	URL (any scheme, e.g. https/ssh/git) : https://github.com/GMISWE/polyforge-coding.git
+//
+// Both require a host and at least one path segment, and an optional ".git" suffix.
+var scenarioURLRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://[^/\s]+/.+|[^@\s]+@[^:\s]+:.+?)(\.git)?$`)
+
+// validateScenario checks that a project's scenario value is a git repo URL or
+// empty. Empty (unset/cleared) is always allowed; a non-empty value that does not
+// look like a git URL (e.g. the bare logical name "coding") is rejected so the
+// bad value can never be persisted and break `pf init` scenario cloning.
+func validateScenario(scenario string) *AihubError {
+	s := strings.TrimSpace(scenario)
+	if s == "" {
+		return nil
+	}
+	if !scenarioURLRe.MatchString(s) {
+		return NewErr(ErrProjectScenarioInvalid,
+			fmt.Sprintf("project scenario %q is invalid: must be a git URL "+
+				"(e.g. git@github.com:GMISWE/polyforge-coding.git or "+
+				"https://github.com/GMISWE/polyforge-coding.git) or empty", scenario))
+	}
+	return nil
+}
+
 // Project mirrors the projects table row.
 type Project struct {
 	Name             string          `json:"name"`
@@ -364,6 +394,9 @@ func CreateProject(ctx context.Context, conn *pgxpool.Pool, owner *UserRecord, r
 
 	var scenario *string
 	if req.Scenario != nil && *req.Scenario != "" {
+		if aerr := validateScenario(*req.Scenario); aerr != nil {
+			return nil, aerr
+		}
 		scenario = req.Scenario
 	}
 
@@ -466,6 +499,14 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 
 	if len(req.Repos) > 0 && string(req.Repos) != "null" {
 		if aerr := validateRepos(req.Repos); aerr != nil {
+			return nil, aerr
+		}
+	}
+
+	// Validate scenario when present. A nil pointer means "leave unchanged"; an
+	// empty string means "clear" (allowed). A non-empty value must be a git URL.
+	if req.Scenario != nil {
+		if aerr := validateScenario(*req.Scenario); aerr != nil {
 			return nil, aerr
 		}
 	}

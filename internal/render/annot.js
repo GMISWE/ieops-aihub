@@ -565,14 +565,20 @@
     setField('heading_id',   hEl ? (hEl.id || '')                   : '');
     setField('heading_text', hEl ? (hEl.textContent.trim() || '')   : '');
 
-    // Position selform near the selection end.
+    // Position selform in place — directly below the selection end (where the
+    // annotate button was), clamped to the viewport. NOT pinned to the right
+    // edge: on wide screens that detaches the input from the text being
+    // annotated.
     var rects = range.getClientRects();
     if (rects && rects.length > 0) {
       var last = rects[rects.length - 1];
+      var fw = 320; // approximate form width incl. padding
+      var left = Math.max(8, Math.min(last.left, window.innerWidth - fw - 16));
+      var top = Math.min(last.bottom + 8, window.innerHeight - 220);
       _selform.style.position = 'fixed';
-      _selform.style.top      = (last.bottom + 8) + 'px';
-      _selform.style.right    = '1.5em';
-      _selform.style.left     = 'auto';
+      _selform.style.top      = top + 'px';
+      _selform.style.right    = 'auto';
+      _selform.style.left     = left + 'px';
       _selform.style.zIndex   = '900';
       _selform.style.maxWidth = '300px';
       _selform.style.background = '#fff';

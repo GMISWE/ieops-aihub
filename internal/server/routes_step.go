@@ -58,6 +58,9 @@ func handleGetStep(pool *pgxpool.Pool) echo.HandlerFunc {
 		if err := checkProjectAccess(c, u, wi.Project, "viewer"); err != nil {
 			return err
 		}
+		// Resolve slug -> canonical work_items.id so wi_step_state lookups key
+		// correctly (a slug returns no rows -> always idle). (aihub#127)
+		wiID = wi.ID
 
 		var s StepState
 		s.WorkItemID = wiID
@@ -91,6 +94,10 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 		if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
 			return err
 		}
+		// Resolve slug -> canonical work_items.id so the credential check and every
+		// wi_step_state read/write key on work_items.id, not the raw slug (which
+		// violates the wi_step_state.work_item_id FK on INSERT). (aihub#127)
+		wiID = wi.ID
 
 		// N3: verify AttemptCredential — session_secret must match the active attempt
 		if req.AttemptID != "" && req.SessionSecret != "" {
@@ -249,8 +256,9 @@ func handlePauseAttempt(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		// Delegate to FnCompleteAttempt(paused) — correctly keeps locks, emits events
-		if aihubErr := domain.FnCompleteAttempt(c.Request().Context(), pool, wiID, &req); aihubErr != nil {
+		// Delegate to FnCompleteAttempt(paused) — correctly keeps locks, emits events.
+		// Pass the resolved canonical id (wiID may be a slug). (aihub#127)
+		if aihubErr := domain.FnCompleteAttempt(c.Request().Context(), pool, wi.ID, &req); aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, map[string]string{"status": "paused"})

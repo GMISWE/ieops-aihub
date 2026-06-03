@@ -79,6 +79,7 @@ type ClaimResponse struct {
 	WIType                *string        `json:"wi_type"`
 	Slug                  string         `json:"slug,omitempty"`
 	Project               string         `json:"project,omitempty"`
+	ID                    string         `json:"id,omitempty"`
 }
 
 // FnClaimWorkItem implements the atomic claim transaction per §7 / §8.4 of the design doc.
@@ -185,6 +186,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			WIType:               wi.WIType,
 			Slug:                 wi.Slug,
 			Project:              wi.Project,
+			ID:                   wi.ID,
 		}, nil
 	}
 
@@ -502,6 +504,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		WIType:               wi.WIType,
 		Slug:                 wi.Slug,
 		Project:              wi.Project,
+		ID:                   wi.ID,
 	}, nil
 }
 

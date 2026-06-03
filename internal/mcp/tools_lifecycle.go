@@ -322,9 +322,16 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(fmt.Errorf("claim work item: %w", err))
 		}
 
-		// Build complete state file
+		// Build complete state file. Key by the canonical work_items.id the server
+		// returns (the input wiID may be a slug like "aihub#1"); persisting the slug
+		// makes later step/event/complete calls send a slug and hit FK / lookup
+		// errors. (aihub#127)
+		canonicalWIID := wiID
+		if v, ok := result["id"].(string); ok && v != "" {
+			canonicalWIID = v
+		}
 		sf := &config.StateFile{
-			WIID:          wiID,
+			WIID:          canonicalWIID,
 			IdemKey:       idemKey,
 			SessionSecret: sessionSecret,
 			Claimed:       true,

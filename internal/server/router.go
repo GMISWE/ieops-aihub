@@ -299,7 +299,8 @@ func handleCancelWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		if aihubErr := domain.CancelWorkItem(ctx, pool, c.Param("id"), u.UserID, u.Role, u.ProjectRoles); aihubErr != nil {
+		// Pass the resolved canonical id (c.Param("id") may be a slug). (aihub#127)
+		if aihubErr := domain.CancelWorkItem(ctx, pool, wi.ID, u.UserID, u.Role, u.ProjectRoles); aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
@@ -371,7 +372,8 @@ func handleCompleteAttempt(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		if aihubErr := domain.FnCompleteAttempt(ctx, pool, c.Param("id"), &req); aihubErr != nil {
+		// Pass the resolved canonical id (c.Param("id") may be a slug). (aihub#127)
+		if aihubErr := domain.FnCompleteAttempt(ctx, pool, wi.ID, &req); aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})

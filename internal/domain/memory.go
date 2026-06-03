@@ -274,6 +274,18 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		req.Visibility = "project"
 	}
 
+	// Resolve work_item_id (may be a slug like "aihub#1") to the canonical
+	// work_items.id before the memories / agent_events inserts below, both of which
+	// FK-reference work_items(id). Passing a raw slug violates the FK. (aihub#127)
+	if req.WorkItemID != nil && *req.WorkItemID != "" {
+		wi, werr := GetWorkItem(ctx, pool, *req.WorkItemID)
+		if werr != nil {
+			return nil, false, werr
+		}
+		canonical := wi.ID
+		req.WorkItemID = &canonical
+	}
+
 	// Dedup check (skip for "off" mode).
 	// Design §7.7 / §11: strict mode rejects only at HIGH similarity (≥ 0.85);
 	// suggest mode annotates attrs.similar_to between LOW (0.65) and HIGH.
@@ -1297,22 +1309,24 @@ func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
 		req.Payload = json.RawMessage(`{}`)
 	}
 
-	var wiIDArg *string
-	if req.WorkItemID != "" {
-		wiIDArg = &req.WorkItemID
-	}
 	var attemptIDArg *string
 	if req.AttemptID != "" {
 		attemptIDArg = &req.AttemptID
 	}
 
-	// Derive project from the work_item if present
+	// Resolve work_item_id (may be a slug like "aihub#1") to the canonical
+	// work_items.id before the agent_events insert below, which FK-references
+	// work_items(id). Passing a raw slug violates the FK. (aihub#127)
+	var wiIDArg *string
 	var project *string
 	if req.WorkItemID != "" {
 		wi, err := GetWorkItem(ctx, pool, req.WorkItemID)
-		if err == nil {
-			project = &wi.Project
+		if err != nil {
+			return "", err
 		}
+		canonicalID := wi.ID
+		wiIDArg = &canonicalID
+		project = &wi.Project
 	}
 
 	evtID := NewID("evt")

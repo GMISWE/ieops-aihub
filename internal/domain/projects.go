@@ -33,21 +33,24 @@ var projectNameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,39}$`)
 var scenarioURLRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://[^/\s]+/.+|[^@\s]+@[^:\s]+:.+?)(\.git)?$`)
 
 // validateScenario checks that a project's scenario value is a git repo URL or
-// empty. Empty (unset/cleared) is always allowed; a non-empty value that does not
-// look like a git URL (e.g. the bare logical name "coding") is rejected so the
-// bad value can never be persisted and break `pf init` scenario cloning.
-func validateScenario(scenario string) *AihubError {
+// empty, and returns the normalized (whitespace-trimmed) value to persist. Empty
+// (unset/cleared, including whitespace-only) is always allowed and normalizes to
+// ""; a non-empty value that does not look like a git URL (e.g. the bare logical
+// name "coding") is rejected so the bad value can never be persisted and break
+// `pf init` scenario cloning. Callers MUST store the returned value, not the raw
+// input, so surrounding whitespace can't slip through and re-break cloning.
+func validateScenario(scenario string) (string, *AihubError) {
 	s := strings.TrimSpace(scenario)
 	if s == "" {
-		return nil
+		return "", nil
 	}
 	if !scenarioURLRe.MatchString(s) {
-		return NewErr(ErrProjectScenarioInvalid,
+		return "", NewErr(ErrProjectScenarioInvalid,
 			fmt.Sprintf("project scenario %q is invalid: must be a git URL "+
 				"(e.g. git@github.com:GMISWE/polyforge-coding.git or "+
 				"https://github.com/GMISWE/polyforge-coding.git) or empty", scenario))
 	}
-	return nil
+	return s, nil
 }
 
 // Project mirrors the projects table row.
@@ -393,11 +396,14 @@ func CreateProject(ctx context.Context, conn *pgxpool.Pool, owner *UserRecord, r
 	}
 
 	var scenario *string
-	if req.Scenario != nil && *req.Scenario != "" {
-		if aerr := validateScenario(*req.Scenario); aerr != nil {
+	if req.Scenario != nil {
+		norm, aerr := validateScenario(*req.Scenario)
+		if aerr != nil {
 			return nil, aerr
 		}
-		scenario = req.Scenario
+		if norm != "" {
+			scenario = &norm
+		}
 	}
 
 	// Validate and default repos
@@ -504,11 +510,15 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 	}
 
 	// Validate scenario when present. A nil pointer means "leave unchanged"; an
-	// empty string means "clear" (allowed). A non-empty value must be a git URL.
+	// empty/whitespace string means "clear" (allowed). A non-empty value must be a
+	// git URL. Normalize req.Scenario to the trimmed value so the SQL below persists
+	// it (not the raw, possibly space-padded, input).
 	if req.Scenario != nil {
-		if aerr := validateScenario(*req.Scenario); aerr != nil {
+		norm, aerr := validateScenario(*req.Scenario)
+		if aerr != nil {
 			return nil, aerr
 		}
+		req.Scenario = &norm
 	}
 
 	tx, err := conn.Begin(ctx)

@@ -30,14 +30,14 @@ func TestProjectNameRe_Valid(t *testing.T) {
 func TestProjectNameRe_Invalid(t *testing.T) {
 	invalid := []string{
 		"",
-		"A",           // uppercase
-		"0abc",        // starts with digit
-		"-abc",        // starts with dash
-		"_abc",        // starts with underscore
-		"abc!",        // invalid char
-		"ABC",         // uppercase
-		"my project",  // space
-		"my.project",  // dot
+		"A",          // uppercase
+		"0abc",       // starts with digit
+		"-abc",       // starts with dash
+		"_abc",       // starts with underscore
+		"abc!",       // invalid char
+		"ABC",        // uppercase
+		"my project", // space
+		"my.project", // dot
 		// 41 chars (over limit of 40):
 		"a" + "bcdefghijklmnopqrstuvwxyz012345678901234",
 	}
@@ -224,10 +224,10 @@ func TestCreateProjectRequest_JSONRoundtrip(t *testing.T) {
 	vis := true
 	scen := "coding"
 	req := CreateProjectRequest{
-		Name:        "my-proj",
-		Visible:     &vis,
-		Scenario:    &scen,
-		Repos:       json.RawMessage(`[]`),
+		Name:     "my-proj",
+		Visible:  &vis,
+		Scenario: &scen,
+		Repos:    json.RawMessage(`[]`),
 	}
 	b, err := json.Marshal(&req)
 	if err != nil {
@@ -271,18 +271,18 @@ func TestProjectErrorCodes_HTTPStatus(t *testing.T) {
 
 func TestValidateScenario_Accept(t *testing.T) {
 	valid := []string{
-		"",                           // unset
-		"   ",                        // whitespace-only == empty
-		"git@github.com:GMISWE/polyforge-coding.git",  // ssh scp-like with .git
-		"git@github.com:GMISWE/polyforge-coding",      // ssh scp-like without .git
+		"",    // unset
+		"   ", // whitespace-only == empty
+		"git@github.com:GMISWE/polyforge-coding.git", // ssh scp-like with .git
+		"git@github.com:GMISWE/polyforge-coding",     // ssh scp-like without .git
 		"https://github.com/GMISWE/polyforge-coding.git",
 		"https://github.com/GMISWE/polyforge-coding",
 		"ssh://git@github.com/GMISWE/polyforge-coding.git",
-		"git@gitlab.example.com:team/sub/repo.git",    // nested path
+		"git@gitlab.example.com:team/sub/repo.git", // nested path
 		"https://gitlab.example.com/team/sub/repo.git",
 	}
 	for _, s := range valid {
-		if aerr := validateScenario(s); aerr != nil {
+		if _, aerr := validateScenario(s); aerr != nil {
 			t.Errorf("expected scenario %q to be accepted, got %v", s, aerr)
 		}
 	}
@@ -290,24 +290,48 @@ func TestValidateScenario_Accept(t *testing.T) {
 
 func TestValidateScenario_Reject(t *testing.T) {
 	invalid := []string{
-		"coding",                 // bare logical name — the bug this wi fixes
-		"polyforge-coding",       // bare repo name, no host/owner
+		"coding",           // bare logical name — the bug this wi fixes
+		"polyforge-coding", // bare repo name, no host/owner
 		"my-scenario",
-		"github.com",             // host only, no path
-		"git@github.com",         // scp-like missing :path
-		"git@github.com:",        // scp-like with empty path
-		"https://github.com",     // url missing path
-		"https://github.com/",    // url with empty path
+		"github.com",          // host only, no path
+		"git@github.com",      // scp-like missing :path
+		"git@github.com:",     // scp-like with empty path
+		"https://github.com",  // url missing path
+		"https://github.com/", // url with empty path
 		"just some text",
 	}
 	for _, s := range invalid {
-		aerr := validateScenario(s)
+		_, aerr := validateScenario(s)
 		if aerr == nil {
 			t.Errorf("expected scenario %q to be rejected", s)
 			continue
 		}
 		if aerr.Code != ErrProjectScenarioInvalid {
 			t.Errorf("scenario %q: got code %q, want %q", s, aerr.Code, ErrProjectScenarioInvalid)
+		}
+	}
+}
+
+// TestValidateScenario_Normalizes pins the contract that callers persist the
+// returned value, not the raw input: surrounding whitespace is trimmed, and a
+// whitespace-only value normalizes to "" (treated as clear/unset). Without this,
+// a value like "   " or a space-padded URL would slip past the empty-check and be
+// stored verbatim, re-triggering the `pf init` "skipping scenario" bug.
+func TestValidateScenario_Normalizes(t *testing.T) {
+	cases := map[string]string{
+		"   ":                             "", // whitespace-only → clear
+		"  git@github.com:GMISWE/x.git  ": "git@github.com:GMISWE/x.git",
+		"\thttps://github.com/GMISWE/x\n": "https://github.com/GMISWE/x",
+		"git@github.com:GMISWE/x.git":     "git@github.com:GMISWE/x.git",
+	}
+	for in, want := range cases {
+		got, aerr := validateScenario(in)
+		if aerr != nil {
+			t.Errorf("validateScenario(%q) unexpected err %v", in, aerr)
+			continue
+		}
+		if got != want {
+			t.Errorf("validateScenario(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

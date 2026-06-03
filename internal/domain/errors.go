@@ -65,6 +65,7 @@ const (
 	ErrProjectNotFound           ErrCode = "PROJECT_NOT_FOUND"
 	ErrProjectAlreadyExists      ErrCode = "PROJECT_ALREADY_EXISTS"
 	ErrProjectNameInvalid        ErrCode = "PROJECT_NAME_INVALID"
+	ErrProjectScenarioInvalid    ErrCode = "PROJECT_SCENARIO_INVALID"
 	ErrProjectAccessDenied       ErrCode = "PROJECT_ACCESS_DENIED"
 	ErrProjectOwnerRequired      ErrCode = "PROJECT_OWNER_REQUIRED"
 	ErrProjectHasWorkItems       ErrCode = "PROJECT_HAS_WORK_ITEMS"
@@ -135,7 +136,7 @@ func codeToHTTPStatus(code ErrCode) int {
 		return 404
 	case ErrProjectAlreadyExists:
 		return 409
-	case ErrProjectNameInvalid, ErrProjectHasWorkItems, ErrRepoDuplicateName, ErrRepoDuplicateURL, ErrRepoIncompleteDescription, ErrInvalidProjectIdentifier:
+	case ErrProjectNameInvalid, ErrProjectScenarioInvalid, ErrProjectHasWorkItems, ErrRepoDuplicateName, ErrRepoDuplicateURL, ErrRepoIncompleteDescription, ErrInvalidProjectIdentifier:
 		return 400
 	case ErrProjectAccessDenied, ErrProjectOwnerRequired:
 		return 403

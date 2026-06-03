@@ -20,6 +20,39 @@ import (
 // projectNameRe validates project names: ^[a-z][a-z0-9_-]{0,39}$
 var projectNameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,39}$`)
 
+// scenarioURLRe validates that a project's scenario field holds a git repo URL
+// (not a bare logical name like "coding"). The scenario value is consumed by
+// internal/cli/init.go's scenarioRepoName()+cloneOrSync() to clone the scenario
+// repo; a bare name has no host/owner so cloning is impossible and pf init silently
+// skips it. We accept the two forms git remotes actually use:
+//
+//	SSH scp-like : git@github.com:GMISWE/polyforge-coding.git
+//	URL (any scheme, e.g. https/ssh/git) : https://github.com/GMISWE/polyforge-coding.git
+//
+// Both require a host and at least one path segment, and an optional ".git" suffix.
+var scenarioURLRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://[^/\s]+/.+|[^@\s]+@[^:\s]+:.+?)(\.git)?$`)
+
+// validateScenario checks that a project's scenario value is a git repo URL or
+// empty, and returns the normalized (whitespace-trimmed) value to persist. Empty
+// (unset/cleared, including whitespace-only) is always allowed and normalizes to
+// ""; a non-empty value that does not look like a git URL (e.g. the bare logical
+// name "coding") is rejected so the bad value can never be persisted and break
+// `pf init` scenario cloning. Callers MUST store the returned value, not the raw
+// input, so surrounding whitespace can't slip through and re-break cloning.
+func validateScenario(scenario string) (string, *AihubError) {
+	s := strings.TrimSpace(scenario)
+	if s == "" {
+		return "", nil
+	}
+	if !scenarioURLRe.MatchString(s) {
+		return "", NewErr(ErrProjectScenarioInvalid,
+			fmt.Sprintf("project scenario %q is invalid: must be a git URL "+
+				"(e.g. git@github.com:GMISWE/polyforge-coding.git or "+
+				"https://github.com/GMISWE/polyforge-coding.git) or empty", scenario))
+	}
+	return s, nil
+}
+
 // Project mirrors the projects table row.
 type Project struct {
 	Name             string          `json:"name"`
@@ -363,8 +396,14 @@ func CreateProject(ctx context.Context, conn *pgxpool.Pool, owner *UserRecord, r
 	}
 
 	var scenario *string
-	if req.Scenario != nil && *req.Scenario != "" {
-		scenario = req.Scenario
+	if req.Scenario != nil {
+		norm, aerr := validateScenario(*req.Scenario)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if norm != "" {
+			scenario = &norm
+		}
 	}
 
 	// Validate and default repos
@@ -468,6 +507,18 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 		if aerr := validateRepos(req.Repos); aerr != nil {
 			return nil, aerr
 		}
+	}
+
+	// Validate scenario when present. A nil pointer means "leave unchanged"; an
+	// empty/whitespace string means "clear" (allowed). A non-empty value must be a
+	// git URL. Normalize req.Scenario to the trimmed value so the SQL below persists
+	// it (not the raw, possibly space-padded, input).
+	if req.Scenario != nil {
+		norm, aerr := validateScenario(*req.Scenario)
+		if aerr != nil {
+			return nil, aerr
+		}
+		req.Scenario = &norm
 	}
 
 	tx, err := conn.Begin(ctx)

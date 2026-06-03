@@ -115,48 +115,18 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				ownerLabel = *mem.WorkItemID
 			}
 			related = parseRelatedRefs(mem.Attrs)
-			// aihub#124 version_history + aihub#125 inherited annotations: fetch the
-			// supersede chain once. Best-effort — errors are silently swallowed
-			// (non-fatal like other /ui enrichments).
-			versions, verErr := versionChainFn(ctx, pool, mem.ID)
-			// aihub#125: collect still-open commits from EARLIER versions so the
-			// feedback follows the document forward. The chain is oldest-first;
-			// stop at the version being viewed (an old version page shows only
-			// its own commits).
-			var older []olderOpenCommits
-			if verErr == nil {
-				for i, v := range versions {
-					if v.ID == mem.ID {
-						break
-					}
-					oldMem, lerr := loadMemoryFn(ctx, pool, v.ID)
-					if lerr != nil || oldMem == nil || len(oldMem.Commits) == 0 {
-						continue
-					}
-					// Same per-memory visibility policy as the head page — an
-					// older private/admin-tier version must not leak its
-					// comment bodies to viewers who couldn't open it directly.
-					if !memoryVisibleTo(u, oldMem) {
-						continue
-					}
-					var entries []CommitEntry
-					if json.Unmarshal(oldMem.Commits, &entries) != nil || len(entries) == 0 {
-						continue
-					}
-					older = append(older, olderOpenCommits{
-						MemID:   v.ID,
-						Label:   fmt.Sprintf("v%d", i+1),
-						Commits: entries,
-					})
-				}
-			}
 			// aihub#124: build annotation UI (section threads + add-comment form).
 			// Only for /ui — /v1 and /share must stay byte-for-byte pure.
 			// Use bodyFragment (the resolved HTML — stored rendered_html OR the
 			// lazy-rendered fallback from #146) so heading anchors align with the
 			// rendered document even when rendered_html is NULL.
-			annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits, older...)
-			if verErr == nil {
+			// Annotations are strictly per-version: a page shows only the commits
+			// made on the version being viewed (cross-version feedback flow is
+			// pf-revise's job, which reads the old head explicitly by id).
+			annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits)
+			// aihub#124 version_history: fetch supersede chain and build version-history block.
+			// Best-effort: an error is silently swallowed (non-fatal like other /ui enrichments).
+			if versions, verErr := versionChainFn(ctx, pool, mem.ID); verErr == nil {
 				if vhHTML := buildVersionHistoryHTML(ctx, pool, mem.ID, versions); vhHTML != "" {
 					// Prepend version history before the annotation section.
 					annotHTML = vhHTML + annotHTML
@@ -393,15 +363,6 @@ func escapeJSONForScriptTag(b []byte) []byte {
 	return []byte(strings.ReplaceAll(string(b), "</", "<\\/"))
 }
 
-// olderOpenCommits carries the commits of one EARLIER version in a memory's
-// supersede chain, surfaced on the head page so still-open feedback follows
-// the document forward (aihub#125).
-type olderOpenCommits struct {
-	MemID   string // the older version's memory id (form actions target this)
-	Label   string // human version label in the chain, e.g. "v1"
-	Commits []CommitEntry
-}
-
 // buildAnnotationHTML constructs the annotation section fragment for the /ui
 // artifact viewer. It emits:
 //   - A JSON data island (<script type="application/json" id="pf-annot-data">)
@@ -414,35 +375,13 @@ type olderOpenCommits struct {
 // Returns "" when there are no commits AND no headings (non-spec artifact).
 // The /v1 and /share paths never call this function.
 //
-// older (aihub#125): open commits inherited from earlier versions in the
-// supersede chain. They render alongside the current version's commits —
-// quote re-anchoring happens client-side against the NEW document text — but
-// their reply/resolve forms target the SOURCE memory (pf-revise semantics:
-// always resolve on the version the comment was made on).
-func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage, older ...olderOpenCommits) string {
+// Annotations are per-version: only the commits stored on this memory row are
+// rendered (no supersede-chain inheritance — decided 2026-06-03).
+func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage) string {
 	// Parse commits.
 	var commits []CommitEntry
 	if len(commitsRaw) > 0 {
 		_ = json.Unmarshal(commitsRaw, &commits)
-	}
-
-	// Merge older-version open commits ahead of the current version's
-	// (chronological order). Track their source memory + version label.
-	srcMem := map[string]string{}
-	srcVer := map[string]string{}
-	if len(older) > 0 {
-		var merged []CommitEntry
-		for _, o := range older {
-			for _, e := range o.Commits {
-				if !e.IsOpen() {
-					continue // resolved history stays on its own version page
-				}
-				merged = append(merged, e)
-				srcMem[e.ID] = o.MemID
-				srcVer[e.ID] = o.Label
-			}
-		}
-		commits = append(merged, commits...)
 	}
 
 	// Extract heading refs from the rendered HTML.
@@ -481,10 +420,6 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage,
 		ResolvedBy    string        `json:"resolved_by,omitempty"`
 		Anchor        *islandAnchor `json:"anchor,omitempty"`
 		Replies       []islandReply `json:"replies,omitempty"`
-		// aihub#125: set when the commit lives on an earlier version in the
-		// supersede chain — JS targets reply/resolve at the source memory.
-		SourceMemID  string `json:"source_mem_id,omitempty"`
-		VersionLabel string `json:"version_label,omitempty"`
 	}
 	type islandPayload struct {
 		MemID   string         `json:"mem_id"`
@@ -502,8 +437,6 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage,
 			Reply:         e.Reply,
 			ResolvedAt:    e.ResolvedAt,
 			ResolvedBy:    e.ResolvedBy,
-			SourceMemID:   srcMem[e.ID],
-			VersionLabel:  srcVer[e.ID],
 		}
 		if e.Anchor != nil {
 			ic.Anchor = &islandAnchor{
@@ -608,13 +541,7 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage,
 			b.WriteString(html.EscapeString(e.CreatedAt))
 			b.WriteString(" &middot; <span class=\"pf-annot-status\">")
 			b.WriteString(statusLabel)
-			b.WriteString("</span>")
-			if v := srcVer[e.ID]; v != "" {
-				b.WriteString(" &middot; <span class=\"pf-annot-version\">from ")
-				b.WriteString(html.EscapeString(v))
-				b.WriteString("</span>")
-			}
-			b.WriteString("</div>\n")
+			b.WriteString("</span></div>\n")
 
 			// Quote excerpt (aihub#125): display-truncate at ~120 runes.
 			if e.Anchor != nil && e.Anchor.Quote != "" {
@@ -662,14 +589,9 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage,
 			}
 
 			// Inline reply + resolve forms for open commits (aihub#125).
-			// Inherited commits target their SOURCE version's memory.
 			if e.IsOpen() {
-				actionMem := memID
-				if s := srcMem[e.ID]; s != "" {
-					actionMem = s
-				}
-				replyAction := "/ui/artifacts/" + html.EscapeString(actionMem) + "/commit/" + html.EscapeString(e.ID) + "/reply"
-				resolveAction := "/ui/artifacts/" + html.EscapeString(actionMem) + "/commit/" + html.EscapeString(e.ID) + "/resolve"
+				replyAction := "/ui/artifacts/" + html.EscapeString(memID) + "/commit/" + html.EscapeString(e.ID) + "/reply"
+				resolveAction := "/ui/artifacts/" + html.EscapeString(memID) + "/commit/" + html.EscapeString(e.ID) + "/resolve"
 				b.WriteString("<div class=\"pf-annot-inline-forms\">\n")
 				b.WriteString("<form method=\"POST\" action=\"")
 				b.WriteString(replyAction)

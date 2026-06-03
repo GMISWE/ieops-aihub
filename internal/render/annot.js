@@ -274,9 +274,6 @@
     authorStrong.appendChild(document.createTextNode(commit.author_display || ''));
     header.appendChild(authorStrong);
     header.appendChild(document.createTextNode(' · ' + relTime(commit.created_at)));
-    if (commit.version_label) {
-      header.appendChild(document.createTextNode(' · from ' + commit.version_label));
-    }
     if (isResolved) {
       var badge = el('span', { 'class': 'pf-annot-status' });
       badge.appendChild(document.createTextNode('resolved'));
@@ -332,12 +329,9 @@
     // Reply + resolve forms for open commits.
     if (!isResolved) {
       var formsDiv = el('div', { 'class': 'pf-annot-inline-forms' });
-      // Inherited commits (from an earlier version in the supersede chain)
-      // carry source_mem_id — reply/resolve must target the source version.
-      var actionMem = commit.source_mem_id || memID;
-      var replyAction   = '/ui/artifacts/' + encodeURIComponent(actionMem) +
+      var replyAction   = '/ui/artifacts/' + encodeURIComponent(memID) +
                           '/commit/' + encodeURIComponent(commit.id) + '/reply';
-      var resolveAction = '/ui/artifacts/' + encodeURIComponent(actionMem) +
+      var resolveAction = '/ui/artifacts/' + encodeURIComponent(memID) +
                           '/commit/' + encodeURIComponent(commit.id) + '/resolve';
 
       var replyForm  = el('form', { 'method': 'POST', 'action': replyAction,   'class': 'pf-annot-inline-form' });

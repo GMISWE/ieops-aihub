@@ -248,3 +248,202 @@ hr {
     border-color: #0969da;
     outline: none;
 }
+
+/* ── aihub#125: text-selection annotation layout + margin rail ─────────────
+   Default (no .pf-annot-active): single column, flat list visible, rail hidden.
+   .pf-annot-active activates the two-column grid: content | 320px rail.
+   @media (max-width:1100px): rail + activation disabled → fall back to flat list. */
+
+/* Wrap root — JS adds .pf-annot-active to <body> when rail is mounted.
+   #pf-doc-col (server-emitted on /ui only) holds the entire document content
+   so the grid has exactly one content cell; the rail is the second column and
+   spans all rows so absolutely-positioned bubbles align with document offsets. */
+body.pf-annot-active {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    column-gap: 2rem;
+    max-width: none;
+    margin: 2em auto;
+    padding: 0 1.5em;
+}
+
+/* Everything except the rail lives in the content column */
+body.pf-annot-active > *:not(#pf-margin-rail) {
+    min-width: 0;
+    grid-column: 1;
+}
+body.pf-annot-active > .pf-doc-nav {
+    grid-column: 1 / -1;
+}
+body.pf-annot-active > #pf-doc-col {
+    max-width: 880px;
+}
+
+/* Margin rail — hidden by default; JS removes [hidden] when activating.
+   position:relative + full row span: bubbles are absolutely positioned by JS
+   at document Y offsets, so the rail must start at the content top and
+   stretch the full document height (no sticky / no inner scrolling). */
+#pf-margin-rail {
+    position: relative;
+    padding: 0.5rem 0;
+}
+body.pf-annot-active > #pf-margin-rail {
+    grid-column: 2;
+    grid-row: 1 / -1;
+}
+
+/* Margin annotation bubble */
+.pf-margin-bubble {
+    background: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-left: 3px solid #9a6700;
+    border-radius: 0 6px 6px 0;
+    padding: 0.55em 0.75em;
+    margin-bottom: 0.6em;
+    font-size: 0.82em;
+    line-height: 1.45;
+    cursor: pointer;
+    transition: border-color 0.12s ease, background 0.12s ease;
+}
+.pf-margin-bubble[data-status="resolved"] {
+    border-left-color: #1f883d;
+    color: #57606a;
+}
+.pf-margin-bubble.pf-margin-bubble--active {
+    border-left-color: #0969da;
+    background: #ddf4ff;
+}
+
+/* In-text highlight for annotated selections */
+.pf-annot-highlight {
+    background: #fff8c5;
+    border-bottom: 2px solid #9a6700;
+    border-radius: 2px;
+    cursor: pointer;
+}
+.pf-annot-highlight--resolved {
+    background: #f0fff4;
+    border-bottom-color: #1f883d;
+    opacity: 0.75;
+}
+.pf-annot-highlight--active {
+    animation: pf-annot-flash 0.5s ease;
+}
+@keyframes pf-annot-flash {
+    0%, 100% { background: #fff8c5; }
+    50%       { background: #ffdf5d; }
+}
+
+/* Quote excerpt in flat list */
+.pf-annot-quote {
+    font-size: 0.85em;
+    color: #57606a;
+    font-style: italic;
+    border-left: 3px solid #d0d7de;
+    padding: 0.2em 0.6em;
+    margin: 0.35em 0 0.4em;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+/* Threaded replies */
+.pf-annot-replies {
+    margin-top: 0.5em;
+    padding-left: 0.75em;
+    border-left: 2px solid #d0d7de;
+}
+.pf-annot-reply-item {
+    padding: 0.35em 0;
+    font-size: 0.88em;
+}
+.pf-annot-reply-item .pf-annot-reply-meta {
+    color: #57606a;
+    font-size: 0.85em;
+    margin-bottom: 0.15em;
+}
+
+/* Inline reply / resolve forms inside flat list */
+.pf-annot-inline-form {
+    margin-top: 0.55em;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4em;
+}
+.pf-annot-inline-form textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font: inherit;
+    font-size: 0.88em;
+    padding: 0.4em 0.6em;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    background: #fff;
+    color: #1f2328;
+    resize: vertical;
+    min-height: 3em;
+}
+.pf-annot-inline-form textarea:focus {
+    outline: none;
+    border-color: #0969da;
+    box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.18);
+}
+.pf-annot-inline-form button {
+    align-self: flex-start;
+    padding: 0.35em 0.9em;
+    font: inherit;
+    font-size: 0.85em;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    background: #f6f8fa;
+    color: #1f2328;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+.pf-annot-inline-form button:hover,
+.pf-annot-inline-form button:focus {
+    background: #0969da;
+    color: #fff;
+    border-color: #0969da;
+    outline: none;
+}
+.pf-annot-inline-forms {
+    display: flex;
+    gap: 0.75em;
+    flex-wrap: wrap;
+    margin-top: 0.5em;
+}
+
+/* Floating add-comment button (shown by JS on selection) */
+.pf-selbtn {
+    position: fixed;
+    z-index: 1000;
+    padding: 0.35em 0.85em;
+    font: inherit;
+    font-size: 0.82em;
+    background: #0969da;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    display: none;
+}
+.pf-selbtn:hover { background: #0757ba; }
+
+/* Disable rail + activation on narrow viewports */
+@media (max-width: 1100px) {
+    body.pf-annot-active {
+        display: block;
+        max-width: 880px;
+        margin: 2em auto;
+        padding: 0 1.5em;
+    }
+    #pf-margin-rail {
+        display: none !important;
+    }
+    .pf-selbtn {
+        display: none !important;
+    }
+}

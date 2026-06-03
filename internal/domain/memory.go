@@ -520,17 +520,39 @@ var MemoryTypeEnum = []string{
 
 // ─── Commit (human annotation) ────────────────────────────────────────────────
 
+// CommitAnchorArgs carries the optional anchor fields for CommitMemory (aihub#125).
+// HeadingID/HeadingText are from aihub#124; Quote/Prefix/Suffix add text-selection
+// anchoring. Callers that do not anchor any field should pass the zero value.
+// Validation limits: Quote ≤ 2000 chars, Prefix/Suffix ≤ 64 chars each.
+type CommitAnchorArgs struct {
+	HeadingID   string
+	HeadingText string
+	Quote       string // exact selected text (≤2000 chars)
+	Prefix      string // context before the selection (≤64 chars)
+	Suffix      string // context after the selection (≤64 chars)
+}
+
 // CommitMemory appends a human annotation to the dedicated `commits` JSONB column.
 // It does NOT touch activation_count, base_strength, stability_days, or
 // last_activated_at — those fields are managed by the forgetting-curve path only.
 // updated_at is refreshed automatically by the BEFORE UPDATE trigger trg_mem_updated_at.
 // Write surface: UI only (POST /ui/memories/:id/commit and POST /ui/artifacts/:id/commit).
 //
-// headingID and headingText are optional section anchors (aihub#124). When headingID is
-// non-empty, the stored entry carries an "anchor" object so the annotation is tied to a
-// specific markdown heading in the rendered artifact. Callers that do not anchor should
-// pass "", "".
-func CommitMemory(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUserID, callerDisplay, headingID, headingText string) error {
+// anchor carries optional section/selection anchors (aihub#124 heading fields,
+// aihub#125 quote/prefix/suffix). Pass zero value when no anchor is needed.
+// Anchor object is written when HeadingID != "" OR Quote != "".
+func CommitMemory(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUserID, callerDisplay string, anchor CommitAnchorArgs) error {
+	// Validate anchor field caps (aihub#125).
+	if len(anchor.Quote) > 2000 {
+		return NewErr(ErrPayloadTooLarge, "anchor quote exceeds 2000 characters")
+	}
+	if len(anchor.Prefix) > 64 {
+		return NewErr(ErrPayloadTooLarge, "anchor prefix exceeds 64 characters")
+	}
+	if len(anchor.Suffix) > 64 {
+		return NewErr(ErrPayloadTooLarge, "anchor suffix exceeds 64 characters")
+	}
+
 	var project, status string
 	err := pool.QueryRow(ctx, `SELECT project, status FROM memories WHERE id=$1`, memID).
 		Scan(&project, &status)
@@ -550,13 +572,23 @@ func CommitMemory(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUs
 		"body":           body,
 		"created_at":     time.Now().UTC().Format(time.RFC3339),
 	}
-	// aihub#124: include anchor object only when a heading is specified, so
-	// entries without anchors remain backward-compatible (no extra key).
-	if headingID != "" {
-		entry["anchor"] = map[string]string{
-			"heading_id":   headingID,
-			"heading_text": headingText,
+	// aihub#124/125: include anchor object only when at least one anchor field is
+	// set, so entries without anchors remain backward-compatible (no extra key).
+	if anchor.HeadingID != "" || anchor.Quote != "" {
+		am := map[string]string{
+			"heading_id":   anchor.HeadingID,
+			"heading_text": anchor.HeadingText,
 		}
+		if anchor.Quote != "" {
+			am["quote"] = anchor.Quote
+		}
+		if anchor.Prefix != "" {
+			am["prefix"] = anchor.Prefix
+		}
+		if anchor.Suffix != "" {
+			am["suffix"] = anchor.Suffix
+		}
+		entry["anchor"] = am
 	}
 	entryJSON, _ := json.Marshal(entry)
 	// Wrap as a single-element JSON array so || can append it to the existing array.
@@ -710,6 +742,89 @@ func DeleteCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, call
 		VALUES ($1, $2, $3, 'memory_commit_deleted', $4, $5)`,
 		NewID("evt"), callerUserID, callerDisplay, payload, project,
 	) //nolint:errcheck
+	return nil
+}
+
+// replyCommitSQL appends a new reply entry to a single commit's replies array
+// inside the commits JSONB column. It is extracted as a constant so tests can
+// assert the jsonb_set paths without a DB (same pattern as resolveCommitSQL).
+//
+// Parameters: $1=memID $2=commitID $3=replyJSON (a JSON object, not array)
+const replyCommitSQL = `
+		UPDATE memories
+		SET commits = COALESCE((
+			SELECT jsonb_agg(
+				CASE
+					WHEN entry->>'id' = $2 THEN
+						jsonb_set(
+							entry,
+							'{replies}',
+							COALESCE(entry->'replies', '[]'::jsonb) || $3::jsonb,
+							true
+						)
+					ELSE entry
+					END
+			)
+			FROM jsonb_array_elements(commits) AS entry
+		), commits)
+		WHERE id = $1`
+
+// ReplyCommit appends a threaded reply to a single commit inside a memory's
+// commits JSONB column. It emits memory_commit_replied (best-effort, same
+// fire-and-forget pattern as ResolveCommit's memory_commit_resolved).
+//
+// Validation: body must be non-empty and ≤ 20000 chars (matching the
+// memory body cap searched in domain code).
+func ReplyCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, authorUserID, authorDisplay, body string) error {
+	if body == "" {
+		return NewErr(ErrBadRequest, "reply body is required")
+	}
+	const maxBody = 20000
+	if len(body) > maxBody {
+		return NewErr(ErrPayloadTooLarge, fmt.Sprintf("reply body exceeds %d characters", maxBody))
+	}
+
+	project, status, _, err := findCommitEntry(ctx, pool, memID, commitID)
+	if err != nil {
+		return err
+	}
+	if status == "redacted" {
+		return NewErr(ErrForbidden, "cannot reply to a commit on a redacted memory")
+	}
+
+	reply := map[string]any{
+		"id":             NewID("cr"),
+		"author_user_id": authorUserID,
+		"author_display": authorDisplay,
+		"body":           body,
+		"created_at":     time.Now().UTC().Format(time.RFC3339),
+	}
+	replyJSON, _ := json.Marshal(reply)
+	// Wrap as single-element array so || can append to the existing replies array.
+	replyArrayJSON := "[" + string(replyJSON) + "]"
+
+	_, execErr := pool.Exec(ctx, replyCommitSQL, memID, commitID, replyArrayJSON)
+	if execErr != nil {
+		return NewErr(ErrInternalError, fmt.Sprintf("failed to reply to commit: %v", execErr))
+	}
+
+	// Look up the memory's work_item_id for the event row.
+	var wiID *string
+	_ = pool.QueryRow(ctx, `SELECT work_item_id FROM memories WHERE id=$1`, memID).
+		Scan(&wiID)
+
+	// Emit memory_commit_replied (best-effort, fire-and-forget).
+	payload, _ := json.Marshal(map[string]any{
+		"memory_id":  memID,
+		"commit_id":  commitID,
+		"replied_by": authorDisplay,
+	})
+	_, _ = pool.Exec(ctx, `
+		INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
+		VALUES ($1, $2, $3, $4, 'memory_commit_replied', $5, $6)`,
+		NewID("evt"), wiID, authorUserID, authorDisplay, payload, project,
+	) //nolint:errcheck
+
 	return nil
 }
 

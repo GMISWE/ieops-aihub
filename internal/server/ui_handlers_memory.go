@@ -30,9 +30,25 @@ var loadMemoryFn memLoaderFn = domain.GetMemoryByID
 // CommitAnchor identifies the section of a spec/plan artifact that a CommitEntry
 // is anchored to. Both fields come from the UI at annotation time; they are
 // stored verbatim and never re-derived server-side.
+//
+// aihub#125: Quote/Prefix/Suffix carry an exact text selection with surrounding
+// context (omitempty so legacy entries without these fields unmarshal cleanly).
 type CommitAnchor struct {
 	HeadingID   string `json:"heading_id"`
 	HeadingText string `json:"heading_text"`
+	Quote       string `json:"quote,omitempty"`  // exact selected text
+	Prefix      string `json:"prefix,omitempty"` // context before the selection
+	Suffix      string `json:"suffix,omitempty"` // context after the selection
+}
+
+// CommitReply is a threaded reply to a CommitEntry, stored inside the entry's
+// replies array. Fields mirror CommitEntry's author/body shape (aihub#125).
+type CommitReply struct {
+	ID            string `json:"id"`
+	AuthorUserID  string `json:"author_user_id"`
+	AuthorDisplay string `json:"author_display"`
+	Body          string `json:"body"`
+	CreatedAt     string `json:"created_at"` // RFC3339
 }
 
 // Commit status constants. An absent (empty) status is treated as open for
@@ -61,6 +77,7 @@ type CommitEntry struct {
 	Reply         string        `json:"reply,omitempty"`
 	ResolvedAt    string        `json:"resolved_at,omitempty"`
 	ResolvedBy    string        `json:"resolved_by,omitempty"`
+	Replies       []CommitReply `json:"replies,omitempty"`
 }
 
 // IsOpen reports whether the entry is in the open state. Entries written
@@ -141,6 +158,8 @@ func registerUIMemoryHandlers(g *echo.Group, pool *pgxpool.Pool, _ *template.Tem
 	g.POST("/memories/:id/commit", handleUICommitMemory(pool))
 	g.POST("/memories/:id/commit/:commit_id/edit", handleUIEditCommit(pool))
 	g.POST("/memories/:id/commit/:commit_id/delete", handleUIDeleteCommit(pool))
+	g.POST("/memories/:id/commit/:commit_id/reply", handleUIReplyCommit(pool))
+	g.POST("/memories/:id/commit/:commit_id/resolve", handleUIResolveCommit(pool))
 }
 
 // handleUIMemories renders the memory index. The package-level recallMemoriesFn
@@ -397,10 +416,10 @@ var commitMemoryProjectFn = func(ctx context.Context, pool *pgxpool.Pool, memID 
 }
 
 // doCommitMemoryFn wraps domain.CommitMemory; swappable in tests.
-// The headingID and headingText params are passed through for artifact-scoped
-// commits (aihub#124). The memory commit path passes "", "" (no anchor).
-var doCommitMemoryFn = func(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUserID, callerDisplay, headingID, headingText string) error {
-	return domain.CommitMemory(ctx, pool, memID, body, callerUserID, callerDisplay, headingID, headingText)
+// The anchor param is passed through for artifact-scoped commits (aihub#124/125).
+// The plain memory commit path passes zero CommitAnchorArgs (no anchor).
+var doCommitMemoryFn = func(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUserID, callerDisplay string, anchor domain.CommitAnchorArgs) error {
+	return domain.CommitMemory(ctx, pool, memID, body, callerUserID, callerDisplay, anchor)
 }
 
 // doEditCommitFn / doDeleteCommitFn — same pattern as doCommitMemoryFn,
@@ -411,6 +430,16 @@ var doEditCommitFn = func(ctx context.Context, pool *pgxpool.Pool, memID, commit
 }
 var doDeleteCommitFn = func(ctx context.Context, pool *pgxpool.Pool, memID, commitID, callerUserID, callerDisplay, callerRole string) error {
 	return domain.DeleteCommit(ctx, pool, memID, commitID, callerUserID, callerDisplay, callerRole)
+}
+
+// doReplyCommitFn wraps domain.ReplyCommit; swappable in tests (aihub#125).
+var doReplyCommitFn = func(ctx context.Context, pool *pgxpool.Pool, memID, commitID, authorUserID, authorDisplay, body string) error {
+	return domain.ReplyCommit(ctx, pool, memID, commitID, authorUserID, authorDisplay, body)
+}
+
+// doResolveCommitFn wraps domain.ResolveCommit; swappable in tests (aihub#125).
+var doResolveCommitFn = func(ctx context.Context, pool *pgxpool.Pool, memID, commitID, reply, callerUserID, callerDisplay string) error {
+	return domain.ResolveCommit(ctx, pool, memID, commitID, reply, callerUserID, callerDisplay)
 }
 
 // handleUICommitMemory handles POST /ui/memories/:id/commit.
@@ -451,7 +480,7 @@ func handleUICommitMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		if err := doCommitMemoryFn(ctx, pool, memID, body, u.UserID, u.DisplayName, "", ""); err != nil {
+		if err := doCommitMemoryFn(ctx, pool, memID, body, u.UserID, u.DisplayName, domain.CommitAnchorArgs{}); err != nil {
 			return domainErr(c, err)
 		}
 
@@ -523,6 +552,77 @@ func handleUIDeleteCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 		if err := doDeleteCommitFn(ctx, pool, memID, commitID, u.UserID, u.DisplayName, u.Role); err != nil {
+			return domainErr(c, err)
+		}
+		return c.Redirect(http.StatusSeeOther, "/ui/memories/"+memID)
+	}
+}
+
+// handleUIReplyCommit handles POST /ui/memories/:id/commit/:commit_id/reply.
+//
+// Appends a threaded reply to a commit. Access: project writer.
+// Form field: body (required, non-empty). 303 redirect back to the memory detail page.
+func handleUIReplyCommit(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		if u == nil {
+			return redirectToLogin(c)
+		}
+		memID := c.Param("id")
+		commitID := c.Param("commit_id")
+		if memID == "" || commitID == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "memory id and commit id are required"))
+		}
+		body := c.FormValue("body")
+		if body == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "body is required"))
+		}
+
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
+		if loadErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+		}
+		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+			return err
+		}
+		if err := doReplyCommitFn(ctx, pool, memID, commitID, u.UserID, u.DisplayName, body); err != nil {
+			return domainErr(c, err)
+		}
+		return c.Redirect(http.StatusSeeOther, "/ui/memories/"+memID)
+	}
+}
+
+// handleUIResolveCommit handles POST /ui/memories/:id/commit/:commit_id/resolve.
+//
+// Marks a commit as resolved with an optional reply. Access: project writer.
+// Form field: reply (optional free text). 303 redirect back to the memory detail page.
+func handleUIResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		if u == nil {
+			return redirectToLogin(c)
+		}
+		memID := c.Param("id")
+		commitID := c.Param("commit_id")
+		if memID == "" || commitID == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "memory id and commit id are required"))
+		}
+
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
+		if loadErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+		}
+		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+			return err
+		}
+		reply := c.FormValue("reply")
+		if err := doResolveCommitFn(ctx, pool, memID, commitID, reply, u.UserID, u.DisplayName); err != nil {
 			return domainErr(c, err)
 		}
 		return c.Redirect(http.StatusSeeOther, "/ui/memories/"+memID)

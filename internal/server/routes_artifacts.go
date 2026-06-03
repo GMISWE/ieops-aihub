@@ -115,20 +115,58 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				ownerLabel = *mem.WorkItemID
 			}
 			related = parseRelatedRefs(mem.Attrs)
+			// aihub#124 version_history + aihub#125 inherited annotations: fetch the
+			// supersede chain once. Best-effort — errors are silently swallowed
+			// (non-fatal like other /ui enrichments).
+			versions, verErr := versionChainFn(ctx, pool, mem.ID)
+			// aihub#125: collect still-open commits from EARLIER versions so the
+			// feedback follows the document forward. The chain is oldest-first;
+			// stop at the version being viewed (an old version page shows only
+			// its own commits).
+			var older []olderOpenCommits
+			if verErr == nil {
+				for i, v := range versions {
+					if v.ID == mem.ID {
+						break
+					}
+					oldMem, lerr := loadMemoryFn(ctx, pool, v.ID)
+					if lerr != nil || oldMem == nil || len(oldMem.Commits) == 0 {
+						continue
+					}
+					// Same per-memory visibility policy as the head page — an
+					// older private/admin-tier version must not leak its
+					// comment bodies to viewers who couldn't open it directly.
+					if !memoryVisibleTo(u, oldMem) {
+						continue
+					}
+					var entries []CommitEntry
+					if json.Unmarshal(oldMem.Commits, &entries) != nil || len(entries) == 0 {
+						continue
+					}
+					older = append(older, olderOpenCommits{
+						MemID:   v.ID,
+						Label:   fmt.Sprintf("v%d", i+1),
+						Commits: entries,
+					})
+				}
+			}
 			// aihub#124: build annotation UI (section threads + add-comment form).
 			// Only for /ui — /v1 and /share must stay byte-for-byte pure.
 			// Use bodyFragment (the resolved HTML — stored rendered_html OR the
 			// lazy-rendered fallback from #146) so heading anchors align with the
 			// rendered document even when rendered_html is NULL.
-			annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits)
-			// aihub#124 version_history: fetch supersede chain and build version-history block.
-			// Best-effort: an error is silently swallowed (non-fatal like other /ui enrichments).
-			if versions, verErr := versionChainFn(ctx, pool, mem.ID); verErr == nil {
+			annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits, older...)
+			if verErr == nil {
 				if vhHTML := buildVersionHistoryHTML(ctx, pool, mem.ID, versions); vhHTML != "" {
 					// Prepend version history before the annotation section.
 					annotHTML = vhHTML + annotHTML
 				}
 			}
+			// aihub#125: inject client-side annotation scripts — /ui path only.
+			// ?v= content hash busts browser caches on deploys (assets are served
+			// with Cache-Control max-age).
+			av := render.AssetVersion()
+			annotHTML += "\n<script src=\"/ui/static/annotator.js?v=" + av + "\" defer></script>\n<script src=\"/ui/static/annot.js?v=" + av + "\" defer></script>\n"
 		}
 		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBodyWithMeta(bodyFragment, title, backHref, ownerHref, ownerLabel, related, annotHTML)))
 	}
@@ -314,33 +352,24 @@ func checkMemoryVisibility(c echo.Context, u *UserContext, mem *domain.Memory) e
 		writeError(c, ae) //nolint:errcheck
 		return ae
 	}
-	// Admin bypasses both visibility tiers.
-	if u.Role == "admin" {
+	if memoryVisibleTo(u, mem) {
 		return nil
 	}
-	switch mem.Visibility {
-	case "private":
-		if mem.AuthorUserID != u.UserID {
-			ae := domain.NewErr(domain.ErrForbidden,
-				"this memory is private to its author")
-			writeError(c, ae) //nolint:errcheck
-			return ae
-		}
-	case "admin":
-		ae := domain.NewErr(domain.ErrForbidden,
-			"this memory requires admin role")
-		writeError(c, ae) //nolint:errcheck
-		return ae
+	msg := "this memory is private to its author"
+	if mem.Visibility == "admin" {
+		msg = "this memory requires admin role"
 	}
-	return nil
+	ae := domain.NewErr(domain.ErrForbidden, msg)
+	writeError(c, ae) //nolint:errcheck
+	return ae
 }
 
 // ─── aihub#124: section-level annotation UI ──────────────────────────────────
 
 // doArtifactCommitFn wraps domain.CommitMemory for the artifact commit path.
 // Swappable in tests (same pattern as doCommitMemoryFn in ui_handlers_memory.go).
-var doArtifactCommitFn = func(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUserID, callerDisplay, headingID, headingText string) error {
-	return domain.CommitMemory(ctx, pool, memID, body, callerUserID, callerDisplay, headingID, headingText)
+var doArtifactCommitFn = func(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUserID, callerDisplay string, anchor domain.CommitAnchorArgs) error {
+	return domain.CommitMemory(ctx, pool, memID, body, callerUserID, callerDisplay, anchor)
 }
 
 // buildAnnotationHTML constructs the annotation section fragment for the /ui
@@ -351,22 +380,163 @@ var doArtifactCommitFn = func(ctx context.Context, pool *pgxpool.Pool, memID, bo
 //
 // Returns "" when there are no commits AND no headings (e.g. non-spec artifact).
 // The /v1 and /share paths never call this function.
-func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage) string {
+// escapeJSONForScriptTag escapes the "</script" byte sequence inside a JSON
+// blob so that it cannot break out of a <script> tag when embedded as a data
+// island. JSON.parse on the client side is unaffected because "\/" is
+// semantically identical to "/" in JSON strings.
+func escapeJSONForScriptTag(b []byte) []byte {
+	// Replacing every "</" with "<\/" is sufficient: the script-data tokenizer
+	// only exits a <script type="application/json"> block on a literal
+	// "</script", and the "<!--" escaped-state breakout also requires an
+	// unescaped "</script" to take effect. "\/" is a valid JSON escape for
+	// "/", so the payload round-trips unchanged.
+	return []byte(strings.ReplaceAll(string(b), "</", "<\\/"))
+}
+
+// olderOpenCommits carries the commits of one EARLIER version in a memory's
+// supersede chain, surfaced on the head page so still-open feedback follows
+// the document forward (aihub#125).
+type olderOpenCommits struct {
+	MemID   string // the older version's memory id (form actions target this)
+	Label   string // human version label in the chain, e.g. "v1"
+	Commits []CommitEntry
+}
+
+// buildAnnotationHTML constructs the annotation section fragment for the /ui
+// artifact viewer. It emits:
+//   - A JSON data island (<script type="application/json" id="pf-annot-data">)
+//     containing all commits with their anchor/reply/replies payload for JS.
+//   - A flat no-JS thread list (grouped by heading, showing quote excerpts,
+//     replies, and inline reply/resolve forms for open commits).
+//   - A margin-rail scaffold (#pf-margin-rail hidden) for JS to populate.
+//   - A hidden selection-comment form (#pf-selform) for JS to reveal.
+//
+// Returns "" when there are no commits AND no headings (non-spec artifact).
+// The /v1 and /share paths never call this function.
+//
+// older (aihub#125): open commits inherited from earlier versions in the
+// supersede chain. They render alongside the current version's commits —
+// quote re-anchoring happens client-side against the NEW document text — but
+// their reply/resolve forms target the SOURCE memory (pf-revise semantics:
+// always resolve on the version the comment was made on).
+func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage, older ...olderOpenCommits) string {
 	// Parse commits.
 	var commits []CommitEntry
 	if len(commitsRaw) > 0 {
 		_ = json.Unmarshal(commitsRaw, &commits)
 	}
 
-	// Extract heading refs from the rendered HTML. The ids in the HTML are
-	// byte-identical to what goldmark's WithAutoHeadingID assigns, so the form
-	// <select> options and the rendered heading anchors stay in sync without any
-	// separate slugification step.
+	// Merge older-version open commits ahead of the current version's
+	// (chronological order). Track their source memory + version label.
+	srcMem := map[string]string{}
+	srcVer := map[string]string{}
+	if len(older) > 0 {
+		var merged []CommitEntry
+		for _, o := range older {
+			for _, e := range o.Commits {
+				if !e.IsOpen() {
+					continue // resolved history stays on its own version page
+				}
+				merged = append(merged, e)
+				srcMem[e.ID] = o.MemID
+				srcVer[e.ID] = o.Label
+			}
+		}
+		commits = append(merged, commits...)
+	}
+
+	// Extract heading refs from the rendered HTML.
 	headings := extractHeadingsFromHTML(renderedHTML)
 
 	if len(commits) == 0 && len(headings) == 0 {
 		return ""
 	}
+
+	var b strings.Builder
+
+	// ─── Data island ─────────────────────────────────────────────────────────
+	// Build a minimal JSON payload for JS (margin bubbles + highlight placement).
+	// "</script" is escaped to "<\/script" to prevent tag breakout.
+	type islandAnchor struct {
+		HeadingID   string `json:"heading_id"`
+		HeadingText string `json:"heading_text"`
+		Quote       string `json:"quote,omitempty"`
+		Prefix      string `json:"prefix,omitempty"`
+		Suffix      string `json:"suffix,omitempty"`
+	}
+	type islandReply struct {
+		ID            string `json:"id"`
+		AuthorDisplay string `json:"author_display"`
+		Body          string `json:"body"`
+		CreatedAt     string `json:"created_at"`
+	}
+	type islandCommit struct {
+		ID            string        `json:"id"`
+		AuthorDisplay string        `json:"author_display"`
+		Body          string        `json:"body"`
+		CreatedAt     string        `json:"created_at"`
+		Status        string        `json:"status"`
+		Reply         string        `json:"reply,omitempty"`
+		ResolvedAt    string        `json:"resolved_at,omitempty"`
+		ResolvedBy    string        `json:"resolved_by,omitempty"`
+		Anchor        *islandAnchor `json:"anchor,omitempty"`
+		Replies       []islandReply `json:"replies,omitempty"`
+		// aihub#125: set when the commit lives on an earlier version in the
+		// supersede chain — JS targets reply/resolve at the source memory.
+		SourceMemID  string `json:"source_mem_id,omitempty"`
+		VersionLabel string `json:"version_label,omitempty"`
+	}
+	type islandPayload struct {
+		MemID   string         `json:"mem_id"`
+		Commits []islandCommit `json:"commits"`
+	}
+
+	islandCommits := make([]islandCommit, 0, len(commits))
+	for _, e := range commits {
+		ic := islandCommit{
+			ID:            e.ID,
+			AuthorDisplay: e.AuthorDisplay,
+			Body:          e.Body,
+			CreatedAt:     e.CreatedAt,
+			Status:        e.Status,
+			Reply:         e.Reply,
+			ResolvedAt:    e.ResolvedAt,
+			ResolvedBy:    e.ResolvedBy,
+			SourceMemID:   srcMem[e.ID],
+			VersionLabel:  srcVer[e.ID],
+		}
+		if e.Anchor != nil {
+			ic.Anchor = &islandAnchor{
+				HeadingID:   e.Anchor.HeadingID,
+				HeadingText: e.Anchor.HeadingText,
+				Quote:       e.Anchor.Quote,
+				Prefix:      e.Anchor.Prefix,
+				Suffix:      e.Anchor.Suffix,
+			}
+		}
+		for _, r := range e.Replies {
+			ic.Replies = append(ic.Replies, islandReply{
+				ID:            r.ID,
+				AuthorDisplay: r.AuthorDisplay,
+				Body:          r.Body,
+				CreatedAt:     r.CreatedAt,
+			})
+		}
+		islandCommits = append(islandCommits, ic)
+	}
+
+	payload := islandPayload{MemID: memID, Commits: islandCommits}
+	islandJSON, islandErr := json.Marshal(payload)
+	if islandErr == nil {
+		islandJSON = escapeJSONForScriptTag(islandJSON)
+		b.WriteString("<script type=\"application/json\" id=\"pf-annot-data\">")
+		b.Write(islandJSON)
+		b.WriteString("</script>\n")
+	}
+
+	// ─── Flat fallback list v2 ────────────────────────────────────────────────
+	b.WriteString("<section class=\"pf-annotations\">\n")
+	b.WriteString("<h2 class=\"pf-annotations-heading\">Annotations</h2>\n")
 
 	// Group commits by heading id ("" = unanchored / general).
 	type threadGroup struct {
@@ -384,18 +554,15 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage)
 		}
 	}
 
-	// Pre-seed groups for all document headings (so the form shows all options).
 	for _, h := range headings {
 		addGroup(h.ID, h.Text)
 	}
-	// Add unanchored group when any commit lacks an anchor.
 	for i := range commits {
 		if commits[i].Anchor == nil || commits[i].Anchor.HeadingID == "" {
 			addGroup("", "(general / unanchored)")
 			break
 		}
 	}
-	// Distribute commits into their groups.
 	for i := range commits {
 		hid, htxt := "", "(general / unanchored)"
 		if commits[i].Anchor != nil && commits[i].Anchor.HeadingID != "" {
@@ -406,15 +573,10 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage)
 		groups[hid].Entries = append(groups[hid].Entries, commits[i])
 	}
 
-	var b strings.Builder
-	b.WriteString("<section class=\"pf-annotations\">\n")
-	b.WriteString("<h2 class=\"pf-annotations-heading\">Annotations</h2>\n")
-
-	// Render thread for each heading group that has commits.
 	for _, hid := range groupOrder {
 		g := groups[hid]
 		if len(g.Entries) == 0 {
-			continue // no commits for this heading yet
+			continue
 		}
 		b.WriteString("<div class=\"pf-annot-section\">\n")
 		b.WriteString("<h3 class=\"pf-annot-section-title\">")
@@ -436,28 +598,100 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage)
 			}
 			b.WriteString("<div class=\"pf-annot-entry ")
 			b.WriteString(statusClass)
+			b.WriteString("\" data-commit-id=\"")
+			b.WriteString(html.EscapeString(e.ID))
 			b.WriteString("\">\n")
+
 			b.WriteString("<div class=\"pf-annot-meta\"><strong>")
 			b.WriteString(html.EscapeString(e.AuthorDisplay))
 			b.WriteString("</strong> &middot; ")
 			b.WriteString(html.EscapeString(e.CreatedAt))
 			b.WriteString(" &middot; <span class=\"pf-annot-status\">")
 			b.WriteString(statusLabel)
-			b.WriteString("</span></div>\n")
+			b.WriteString("</span>")
+			if v := srcVer[e.ID]; v != "" {
+				b.WriteString(" &middot; <span class=\"pf-annot-version\">from ")
+				b.WriteString(html.EscapeString(v))
+				b.WriteString("</span>")
+			}
+			b.WriteString("</div>\n")
+
+			// Quote excerpt (aihub#125): display-truncate at ~120 runes.
+			if e.Anchor != nil && e.Anchor.Quote != "" {
+				q := e.Anchor.Quote
+				const maxQuote = 120
+				runes := []rune(q)
+				ellipsis := ""
+				if len(runes) > maxQuote {
+					runes = runes[:maxQuote]
+					ellipsis = "…"
+				}
+				b.WriteString("<div class=\"pf-annot-quote\">&ldquo;")
+				b.WriteString(html.EscapeString(string(runes)))
+				b.WriteString(ellipsis)
+				b.WriteString("&rdquo;</div>\n")
+			}
+
 			b.WriteString("<div class=\"pf-annot-body\">")
 			b.WriteString(html.EscapeString(e.Body))
 			b.WriteString("</div>\n")
+
+			// Legacy AI reply (resolved only).
 			if e.IsResolved() && e.Reply != "" {
 				b.WriteString("<div class=\"pf-annot-reply\"><strong>AI reply:</strong> ")
 				b.WriteString(html.EscapeString(e.Reply))
 				b.WriteString("</div>\n")
 			}
-			b.WriteString("</div>\n")
+
+			// Threaded replies (aihub#125).
+			if len(e.Replies) > 0 {
+				b.WriteString("<div class=\"pf-annot-replies\">\n")
+				for _, r := range e.Replies {
+					b.WriteString("<div class=\"pf-annot-reply-item\">\n")
+					b.WriteString("<div class=\"pf-annot-reply-meta\"><strong>")
+					b.WriteString(html.EscapeString(r.AuthorDisplay))
+					b.WriteString("</strong> &middot; ")
+					b.WriteString(html.EscapeString(r.CreatedAt))
+					b.WriteString("</div>\n")
+					b.WriteString("<div class=\"pf-annot-body\">")
+					b.WriteString(html.EscapeString(r.Body))
+					b.WriteString("</div>\n")
+					b.WriteString("</div>\n")
+				}
+				b.WriteString("</div>\n")
+			}
+
+			// Inline reply + resolve forms for open commits (aihub#125).
+			// Inherited commits target their SOURCE version's memory.
+			if e.IsOpen() {
+				actionMem := memID
+				if s := srcMem[e.ID]; s != "" {
+					actionMem = s
+				}
+				replyAction := "/ui/artifacts/" + html.EscapeString(actionMem) + "/commit/" + html.EscapeString(e.ID) + "/reply"
+				resolveAction := "/ui/artifacts/" + html.EscapeString(actionMem) + "/commit/" + html.EscapeString(e.ID) + "/resolve"
+				b.WriteString("<div class=\"pf-annot-inline-forms\">\n")
+				b.WriteString("<form method=\"POST\" action=\"")
+				b.WriteString(replyAction)
+				b.WriteString("\" class=\"pf-annot-inline-form\">\n")
+				b.WriteString("<textarea name=\"body\" rows=\"2\" placeholder=\"Reply…\" required></textarea>\n")
+				b.WriteString("<button type=\"submit\">Reply</button>\n")
+				b.WriteString("</form>\n")
+				b.WriteString("<form method=\"POST\" action=\"")
+				b.WriteString(resolveAction)
+				b.WriteString("\" class=\"pf-annot-inline-form\">\n")
+				b.WriteString("<textarea name=\"reply\" rows=\"2\" placeholder=\"Resolution note (optional)\"></textarea>\n")
+				b.WriteString("<button type=\"submit\">Resolve</button>\n")
+				b.WriteString("</form>\n")
+				b.WriteString("</div>\n")
+			}
+
+			b.WriteString("</div>\n") // pf-annot-entry
 		}
-		b.WriteString("</div>\n")
+		b.WriteString("</div>\n") // pf-annot-section
 	}
 
-	// Add-comment form.
+	// ─── Add-comment form (unchanged — heading-dropdown creation path) ────────
 	b.WriteString("<div class=\"pf-annot-form\">\n")
 	b.WriteString("<h3 class=\"pf-annot-form-title\">Add annotation</h3>\n")
 	b.WriteString("<form method=\"POST\" action=\"/ui/artifacts/")
@@ -468,7 +702,7 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage)
 		b.WriteString("<label for=\"pf-annot-heading\">Section:</label>\n")
 		b.WriteString("<select id=\"pf-annot-heading\" name=\"heading_id\"")
 		b.WriteString(" onchange=\"document.getElementById('pf-annot-htxt').value=this.options[this.selectedIndex].dataset.text\">\n")
-		b.WriteString("<option value=\"\" data-text=\"\">\xe2\x80\x94 general \xe2\x80\x94</option>\n")
+		b.WriteString("<option value=\"\" data-text=\"\">— general —</option>\n")
 		for _, h := range headings {
 			b.WriteString("<option value=\"")
 			b.WriteString(html.EscapeString(h.ID))
@@ -491,6 +725,25 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage)
 	b.WriteString("</form>\n")
 	b.WriteString("</div>\n")
 	b.WriteString("</section>\n")
+
+	// ─── Margin rail scaffold ─────────────────────────────────────────────────
+	// JS removes [hidden] and populates bubbles from the data island.
+	b.WriteString("<div id=\"pf-margin-rail\" hidden></div>\n")
+
+	// ─── Hidden selection-comment form ────────────────────────────────────────
+	// JS reveals + positions this on text selection.
+	b.WriteString("<form id=\"pf-selform\" hidden method=\"POST\" action=\"/ui/artifacts/")
+	b.WriteString(html.EscapeString(memID))
+	b.WriteString("/commit\">\n")
+	b.WriteString("<input type=\"hidden\" name=\"quote\" value=\"\">\n")
+	b.WriteString("<input type=\"hidden\" name=\"prefix\" value=\"\">\n")
+	b.WriteString("<input type=\"hidden\" name=\"suffix\" value=\"\">\n")
+	b.WriteString("<input type=\"hidden\" name=\"heading_id\" value=\"\">\n")
+	b.WriteString("<input type=\"hidden\" name=\"heading_text\" value=\"\">\n")
+	b.WriteString("<textarea name=\"body\" rows=\"3\" placeholder=\"Add annotation for selection…\" required></textarea>\n")
+	b.WriteString("<button type=\"submit\">Add</button>\n")
+	b.WriteString("</form>\n")
+
 	return b.String()
 }
 
@@ -600,6 +853,92 @@ func RegisterUIArtifactCommitRoute(uiGroup *echo.Group, pool *pgxpool.Pool) {
 	uiGroup.POST("/artifacts/:id/commit", handleUIArtifactCommit(pool))
 }
 
+// RegisterUIArtifactReplyResolveRoutes registers the /ui-only POST reply and
+// resolve routes for artifact-scoped commits (aihub#125). Called from
+// RegisterUIRoutes after the auth middleware is set up.
+func RegisterUIArtifactReplyResolveRoutes(uiGroup *echo.Group, pool *pgxpool.Pool) {
+	uiGroup.POST("/artifacts/:id/commit/:commit_id/reply", handleUIArtifactReplyCommit(pool))
+	uiGroup.POST("/artifacts/:id/commit/:commit_id/resolve", handleUIArtifactResolveCommit(pool))
+}
+
+// artifactRedirectURL builds the 303 redirect target for artifact-scoped write
+// operations: always back to the artifact HTML page.
+func artifactRedirectURL(memID string) string {
+	return "/ui/artifacts/" + url.PathEscape(memID) + "/html"
+}
+
+// handleUIArtifactReplyCommit handles POST /ui/artifacts/:id/commit/:commit_id/reply.
+//
+// Appends a threaded reply to a commit on a spec/plan artifact. Thin wrapper
+// around doReplyCommitFn (same seam as the memory reply handler). Redirects 303
+// back to the artifact HTML page.
+func handleUIArtifactReplyCommit(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		if u == nil {
+			return redirectToLogin(c)
+		}
+		memID := c.Param("id")
+		commitID := c.Param("commit_id")
+		if memID == "" || commitID == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "artifact id and commit id are required"))
+		}
+		body := c.FormValue("body")
+		if body == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "body is required"))
+		}
+
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
+		if loadErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "artifact not found"))
+		}
+		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+			return err
+		}
+		if err := doReplyCommitFn(ctx, pool, memID, commitID, u.UserID, u.DisplayName, body); err != nil {
+			return domainErr(c, err)
+		}
+		return c.Redirect(http.StatusSeeOther, artifactRedirectURL(memID))
+	}
+}
+
+// handleUIArtifactResolveCommit handles POST /ui/artifacts/:id/commit/:commit_id/resolve.
+//
+// Marks a commit as resolved with an optional resolution reply. Thin wrapper
+// around doResolveCommitFn. Redirects 303 back to the artifact HTML page.
+func handleUIArtifactResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		if u == nil {
+			return redirectToLogin(c)
+		}
+		memID := c.Param("id")
+		commitID := c.Param("commit_id")
+		if memID == "" || commitID == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "artifact id and commit id are required"))
+		}
+
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
+		if loadErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "artifact not found"))
+		}
+		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+			return err
+		}
+		reply := c.FormValue("reply")
+		if err := doResolveCommitFn(ctx, pool, memID, commitID, reply, u.UserID, u.DisplayName); err != nil {
+			return domainErr(c, err)
+		}
+		return c.Redirect(http.StatusSeeOther, artifactRedirectURL(memID))
+	}
+}
+
 // handleUIArtifactCommit handles POST /ui/artifacts/:id/commit.
 //
 // Appends a section-anchored annotation to a spec/plan artifact's commits column.
@@ -622,8 +961,13 @@ func handleUIArtifactCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		if body == "" {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "body is required"))
 		}
-		headingID := c.FormValue("heading_id")
-		headingText := c.FormValue("heading_text")
+		anchor := domain.CommitAnchorArgs{
+			HeadingID:   c.FormValue("heading_id"),
+			HeadingText: c.FormValue("heading_text"),
+			Quote:       c.FormValue("quote"),
+			Prefix:      c.FormValue("prefix"),
+			Suffix:      c.FormValue("suffix"),
+		}
 
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
@@ -637,7 +981,7 @@ func handleUIArtifactCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		if err := doArtifactCommitFn(ctx, pool, memID, body, u.UserID, u.DisplayName, headingID, headingText); err != nil {
+		if err := doArtifactCommitFn(ctx, pool, memID, body, u.UserID, u.DisplayName, anchor); err != nil {
 			return domainErr(c, err)
 		}
 

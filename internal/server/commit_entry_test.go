@@ -159,3 +159,189 @@ func TestCommitEntry_OmitemptyMinimal(t *testing.T) {
 		}
 	}
 }
+
+// ─── aihub#125 tests ─────────────────────────────────────────────────────────
+
+// TestCommitAnchor_QuoteFieldsRoundTrip verifies that the new Quote/Prefix/Suffix
+// fields on CommitAnchor survive marshal/unmarshal and appear in JSON.
+func TestCommitAnchor_QuoteFieldsRoundTrip(t *testing.T) {
+	original := CommitEntry{
+		ID:        "cm_q1",
+		Body:      "selection annotation",
+		CreatedAt: "2026-06-01T00:00:00Z",
+		Anchor: &CommitAnchor{
+			HeadingID:   "section-impl",
+			HeadingText: "Implementation",
+			Quote:       "exact selected text",
+			Prefix:      "context before",
+			Suffix:      "context after",
+		},
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	for _, key := range []string{`"quote"`, `"prefix"`, `"suffix"`, `"heading_id"`, `"heading_text"`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("JSON missing key %s; got: %s", key, data)
+		}
+	}
+
+	var got CommitEntry
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Anchor == nil {
+		t.Fatal("Anchor nil after round-trip")
+	}
+	if got.Anchor.Quote != original.Anchor.Quote {
+		t.Errorf("Quote: want %q got %q", original.Anchor.Quote, got.Anchor.Quote)
+	}
+	if got.Anchor.Prefix != original.Anchor.Prefix {
+		t.Errorf("Prefix: want %q got %q", original.Anchor.Prefix, got.Anchor.Prefix)
+	}
+	if got.Anchor.Suffix != original.Anchor.Suffix {
+		t.Errorf("Suffix: want %q got %q", original.Anchor.Suffix, got.Anchor.Suffix)
+	}
+}
+
+// TestCommitAnchor_LegacyHeadingOnlyUnmarshal verifies that a legacy anchor
+// with only heading_id/heading_text (no quote/prefix/suffix) unmarshals cleanly
+// with empty Quote/Prefix/Suffix (omitempty round-trip stability).
+func TestCommitAnchor_LegacyHeadingOnlyUnmarshal(t *testing.T) {
+	raw := `{"id":"cm_h","body":"old","created_at":"2026-01-01T00:00:00Z","anchor":{"heading_id":"s1","heading_text":"Section 1"}}`
+	var entry CommitEntry
+	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if entry.Anchor == nil {
+		t.Fatal("Anchor nil")
+	}
+	if entry.Anchor.HeadingID != "s1" {
+		t.Errorf("HeadingID: want s1 got %q", entry.Anchor.HeadingID)
+	}
+	if entry.Anchor.Quote != "" {
+		t.Errorf("Quote should be empty for legacy anchor, got %q", entry.Anchor.Quote)
+	}
+
+	// Re-marshal: Quote/Prefix/Suffix must NOT appear (omitempty).
+	out, _ := json.Marshal(entry)
+	for _, key := range []string{`"quote"`, `"prefix"`, `"suffix"`} {
+		if strings.Contains(string(out), key) {
+			t.Errorf("remarshaled legacy anchor should not contain %s; got: %s", key, out)
+		}
+	}
+}
+
+// TestCommitReply_RoundTrip verifies that CommitReply fields survive a
+// marshal/unmarshal cycle and the Replies slice on CommitEntry works end-to-end.
+func TestCommitReply_RoundTrip(t *testing.T) {
+	original := CommitEntry{
+		ID:        "cm_r1",
+		Body:      "original annotation",
+		CreatedAt: "2026-06-01T00:00:00Z",
+		Replies: []CommitReply{
+			{
+				ID:            "cr_a",
+				AuthorUserID:  "u_bob",
+				AuthorDisplay: "Bob",
+				Body:          "first reply",
+				CreatedAt:     "2026-06-02T00:00:00Z",
+			},
+			{
+				ID:            "cr_b",
+				AuthorUserID:  "u_alice",
+				AuthorDisplay: "Alice",
+				Body:          "second reply",
+				CreatedAt:     "2026-06-03T00:00:00Z",
+			},
+		},
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	for _, key := range []string{`"replies"`, `"author_user_id"`, `"author_display"`, `"created_at"`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("JSON missing key %s; got: %s", key, data)
+		}
+	}
+
+	var got CommitEntry
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Replies) != 2 {
+		t.Fatalf("want 2 replies, got %d", len(got.Replies))
+	}
+	if got.Replies[0].ID != "cr_a" {
+		t.Errorf("reply[0].ID: want cr_a got %q", got.Replies[0].ID)
+	}
+	if got.Replies[1].Body != "second reply" {
+		t.Errorf("reply[1].Body: want %q got %q", "second reply", got.Replies[1].Body)
+	}
+}
+
+// TestCommitEntry_LegacyNoReplies verifies that a CommitEntry without a replies
+// field unmarshals to an empty Replies slice (not nil panic risk), and that
+// marshaling a minimal entry does not emit "replies" (omitempty).
+func TestCommitEntry_LegacyNoReplies(t *testing.T) {
+	raw := `{"id":"cm_old","body":"hi","created_at":"2026-01-01T00:00:00Z"}`
+	var entry CommitEntry
+	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(entry.Replies) != 0 {
+		t.Errorf("legacy entry Replies should be empty, got %v", entry.Replies)
+	}
+
+	out, _ := json.Marshal(entry)
+	if strings.Contains(string(out), `"replies"`) {
+		t.Errorf("legacy entry JSON must not contain replies key; got: %s", out)
+	}
+}
+
+// TestCommitEntry_ResolvedWithLegacyReplyAndNewReplies verifies that a
+// resolved CommitEntry carrying both the legacy Reply string and the new
+// Replies slice unmarshal cleanly (coexistence).
+func TestCommitEntry_ResolvedWithLegacyReplyAndNewReplies(t *testing.T) {
+	raw := `{
+		"id":"cm_coexist",
+		"body":"annotation",
+		"created_at":"2026-01-01T00:00:00Z",
+		"status":"resolved",
+		"reply":"AI resolution text",
+		"resolved_at":"2026-06-01T00:00:00Z",
+		"resolved_by":"Agent",
+		"replies":[{"id":"cr_1","author_user_id":"u_1","author_display":"Alice","body":"human reply","created_at":"2026-06-02T00:00:00Z"}]
+	}`
+
+	var entry CommitEntry
+	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if entry.Reply != "AI resolution text" {
+		t.Errorf("Reply: want %q got %q", "AI resolution text", entry.Reply)
+	}
+	if len(entry.Replies) != 1 {
+		t.Fatalf("Replies: want 1 got %d", len(entry.Replies))
+	}
+	if entry.Replies[0].ID != "cr_1" {
+		t.Errorf("Replies[0].ID: want cr_1 got %q", entry.Replies[0].ID)
+	}
+	if !entry.IsResolved() {
+		t.Error("IsResolved() should be true")
+	}
+
+	// Re-marshal should preserve both fields.
+	out, _ := json.Marshal(entry)
+	for _, key := range []string{`"reply"`, `"replies"`, `"resolved_by"`} {
+		if !strings.Contains(string(out), key) {
+			t.Errorf("remarshal missing key %s; got: %s", key, out)
+		}
+	}
+}

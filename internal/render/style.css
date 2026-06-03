@@ -260,8 +260,12 @@ hr {
    spans all rows so absolutely-positioned bubbles align with document offsets. */
 body.pf-annot-active {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 320px;
-    column-gap: 2rem;
+    /* Google-Docs style: the document keeps its readable 880px width and the
+       comment rail sits directly beside it; the PAIR is centered as a whole
+       (justify-content) instead of content-left / bubbles-far-right. */
+    grid-template-columns: minmax(0, 880px) 320px;
+    column-gap: 2.5rem;
+    justify-content: center;
     max-width: none;
     margin: 2em auto;
     padding: 0 1.5em;
@@ -274,9 +278,6 @@ body.pf-annot-active > *:not(#pf-margin-rail) {
 }
 body.pf-annot-active > .pf-doc-nav {
     grid-column: 1 / -1;
-}
-body.pf-annot-active > #pf-doc-col {
-    max-width: 880px;
 }
 
 /* Margin rail — hidden by default; JS removes [hidden] when activating.

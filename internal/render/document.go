@@ -1,7 +1,9 @@
 package render
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"html"
 	"strings"
 )
@@ -21,6 +23,33 @@ type RelatedRef struct {
 
 //go:embed style.css
 var defaultStylesheet string
+
+//go:embed annotator.js
+var annotatorJS []byte
+
+//go:embed annot.js
+var annotJS []byte
+
+// AnnotatorJS returns the embedded annotator.js bundle bytes (served at
+// /ui/static/annotator.js). The bytes are the same across all calls — the
+// embed is loaded once at program startup.
+func AnnotatorJS() []byte { return annotatorJS }
+
+// AnnotJS returns the embedded annot.js glue bytes (served at
+// /ui/static/annot.js).
+func AnnotJS() []byte { return annotJS }
+
+// assetVersion is a content hash over the embedded JS assets, computed once at
+// startup. Appended as a ?v= cache-buster to the script URLs so a deploy with
+// changed JS invalidates browser caches immediately despite Cache-Control
+// max-age (aihub#125).
+var assetVersion = func() string {
+	sum := sha256.Sum256(append(append([]byte{}, annotatorJS...), annotJS...))
+	return hex.EncodeToString(sum[:4])
+}()
+
+// AssetVersion returns the 8-hex-char content version of the embedded JS assets.
+func AssetVersion() string { return assetVersion }
 
 // DocumentWithMeta wraps a rendered HTML body fragment in a complete HTML5
 // document (same as Document) and injects a small metadata header above the
@@ -50,6 +79,15 @@ func DocumentWithMeta(body, title, backHref, ownerWIHref, ownerWILabel string, r
 		b.WriteString("<nav class=\"pf-doc-nav\"><a href=\"")
 		b.WriteString(html.EscapeString(backHref))
 		b.WriteString("\">&larr; Back to work item</a></nav>\n")
+	}
+	// aihub#125: when the annotation UI is present (/ui path only), wrap the
+	// metadata header + document content in a single column element so the
+	// two-column grid (content | margin rail) has exactly one content cell.
+	// Without this wrapper every direct <body> child becomes its own grid item
+	// and auto-placement scatters the document across both columns.
+	annotated := len(annotationsHTML) > 0 && annotationsHTML[0] != ""
+	if annotated {
+		b.WriteString("<div id=\"pf-doc-col\">\n")
 	}
 	// Metadata header: owning wi + related memories.
 	if ownerWIHref != "" || len(related) > 0 {
@@ -82,8 +120,11 @@ func DocumentWithMeta(body, title, backHref, ownerWIHref, ownerWILabel string, r
 		b.WriteString("</div>\n")
 	}
 	b.WriteString(body)
+	if annotated {
+		b.WriteString("\n</div>\n")
+	}
 	// Inject annotation UI fragment (aihub#124) — only present on /ui path.
-	if len(annotationsHTML) > 0 && annotationsHTML[0] != "" {
+	if annotated {
 		b.WriteString("\n")
 		b.WriteString(annotationsHTML[0])
 	}

@@ -23,6 +23,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
+
+	"github.com/GMISWE/ieops-aihub/internal/render"
 )
 
 // RegisterUIRoutes wires the read-only /ui/* tree on the given echo instance.
@@ -32,19 +34,19 @@ import (
 //
 // Route map:
 //
-//   no-auth:
-//     GET  /ui/                 -> 302 /ui/wi
-//     GET  /ui/login            -> login form
-//     POST /ui/login            -> issue cookie
-//     POST /ui/logout           -> clear cookie
-//     GET  /ui/static/*         -> embedded css + htmx
+//	no-auth:
+//	  GET  /ui/                 -> 302 /ui/wi
+//	  GET  /ui/login            -> login form
+//	  POST /ui/login            -> issue cookie
+//	  POST /ui/logout           -> clear cookie
+//	  GET  /ui/static/*         -> embedded css + htmx
 //
-//   authed (RequireUISession):
-//     GET  /ui/queue            -> 302 /ui/wi (legacy; queue is embedded there)
-//     GET  /ui/wi               -> wi list      (peer subagent)
-//     GET  /ui/wi/:id           -> wi detail    (peer subagent)
-//     GET  /ui/memories         -> memory index (peer subagent)
-//     GET  /ui/memories/:id     -> memory view  (peer subagent)
+//	authed (RequireUISession):
+//	  GET  /ui/queue            -> 302 /ui/wi (legacy; queue is embedded there)
+//	  GET  /ui/wi               -> wi list      (peer subagent)
+//	  GET  /ui/wi/:id           -> wi detail    (peer subagent)
+//	  GET  /ui/memories         -> memory index (peer subagent)
+//	  GET  /ui/memories/:id     -> memory view  (peer subagent)
 func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	sm := NewSessionManager(cookieSecret)
 	tmpl := parseTemplates()
@@ -86,4 +88,24 @@ func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 
 	// aihub#124: section-level annotation commit — /ui only (no /v1 mirror).
 	RegisterUIArtifactCommitRoute(uiGroup, pool)
+	// aihub#125: artifact-scoped reply + resolve — /ui only.
+	RegisterUIArtifactReplyResolveRoutes(uiGroup, pool)
+	// aihub#125: vendored annotation JS + glue script.
+	// Note: static JS files are on the uiGroup (/ui prefix) but do not require
+	// auth themselves — the RequireUISession middleware allows static GETs.
+	// We call render.AnnotatorJS() / render.AnnotJS() to avoid a separate FS
+	// handler; the render package owns the embed.
+	for _, entry := range []struct {
+		path string
+		data []byte
+	}{
+		{"/static/annotator.js", render.AnnotatorJS()},
+		{"/static/annot.js", render.AnnotJS()},
+	} {
+		d := entry.data
+		uiGroup.GET(entry.path, func(c echo.Context) error {
+			c.Response().Header().Set("Cache-Control", "public, max-age=3600")
+			return c.Blob(http.StatusOK, "text/javascript; charset=utf-8", d)
+		})
+	}
 }

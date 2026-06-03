@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -268,7 +269,7 @@ func withCommitMemoryProjectOverride(project, status string, err error) func() {
 // withDoCommitMemoryOverride replaces doCommitMemoryFn for the duration of a test.
 func withDoCommitMemoryOverride(returnErr error) func() {
 	prev := doCommitMemoryFn
-	doCommitMemoryFn = func(_ context.Context, _ *pgxpool.Pool, _, _, _, _, _, _ string) error {
+	doCommitMemoryFn = func(_ context.Context, _ *pgxpool.Pool, _, _, _, _ string, _ domain.CommitAnchorArgs) error {
 		return returnErr
 	}
 	return func() { doCommitMemoryFn = prev }
@@ -517,5 +518,169 @@ func TestUIMemories_TypeOptions(t *testing.T) {
 	// At least one exact type must appear.
 	if !strings.Contains(body, "methodology.spec") {
 		t.Errorf("type select missing exact option methodology.spec")
+	}
+}
+
+// ─── aihub#125: UI Reply/Resolve handler tests ───────────────────────────────
+
+// withReplyCommitOverride replaces doReplyCommitFn for the duration of a test.
+// The capture slice records the (memID, commitID, body) args of each call.
+func withReplyCommitOverride(returnErr error) (calls *[][3]string, cleanup func()) {
+	prev := doReplyCommitFn
+	var recorded [][3]string
+	doReplyCommitFn = func(_ context.Context, _ *pgxpool.Pool, memID, commitID, _, _, body string) error {
+		recorded = append(recorded, [3]string{memID, commitID, body})
+		return returnErr
+	}
+	return &recorded, func() { doReplyCommitFn = prev }
+}
+
+// withResolveCommitOverride replaces doResolveCommitFn for the duration of a test.
+func withResolveCommitOverride(returnErr error) (calls *[][3]string, cleanup func()) {
+	prev := doResolveCommitFn
+	var recorded [][3]string
+	doResolveCommitFn = func(_ context.Context, _ *pgxpool.Pool, memID, commitID, reply, _, _ string) error {
+		recorded = append(recorded, [3]string{memID, commitID, reply})
+		return returnErr
+	}
+	return &recorded, func() { doResolveCommitFn = prev }
+}
+
+// newReplyRequest builds a POST form request for /ui/memories/:id/commit/:commit_id/reply.
+func newReplyRequest(t *testing.T, memID, commitID, body string, uc *UserContext) (echo.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+	e := echo.New()
+	form := "body=" + url.QueryEscape(body)
+	req := httptest.NewRequest(http.MethodPost,
+		"/ui/memories/"+memID+"/commit/"+commitID+"/reply",
+		strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "commit_id")
+	c.SetParamValues(memID, commitID)
+	if uc != nil {
+		setUser(c, uc)
+	}
+	return c, rec
+}
+
+// newResolveRequest builds a POST form request for /ui/memories/:id/commit/:commit_id/resolve.
+func newResolveRequest(t *testing.T, memID, commitID, reply string, uc *UserContext) (echo.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+	e := echo.New()
+	form := "reply=" + url.QueryEscape(reply)
+	req := httptest.NewRequest(http.MethodPost,
+		"/ui/memories/"+memID+"/commit/"+commitID+"/resolve",
+		strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "commit_id")
+	c.SetParamValues(memID, commitID)
+	if uc != nil {
+		setUser(c, uc)
+	}
+	return c, rec
+}
+
+// TestUIReplyCommit_Success verifies a valid reply redirects 303 to the memory page.
+func TestUIReplyCommit_Success(t *testing.T) {
+	cleanupProject := withCommitMemoryProjectOverride("testproject", "active", nil)
+	defer cleanupProject()
+	calls, cleanupReply := withReplyCommitOverride(nil)
+	defer cleanupReply()
+
+	c, rec := newReplyRequest(t, "mem_abc", "cm_001", "great point!", writerUser("testproject"))
+	if err := handleUIReplyCommit(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("status: got %d, want 303", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "/ui/memories/mem_abc" {
+		t.Errorf("Location: got %q, want %q", loc, "/ui/memories/mem_abc")
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("doReplyCommitFn call count: got %d, want 1", len(*calls))
+	}
+	if (*calls)[0][0] != "mem_abc" || (*calls)[0][1] != "cm_001" || (*calls)[0][2] != "great point!" {
+		t.Errorf("doReplyCommitFn args: got %v", (*calls)[0])
+	}
+}
+
+// TestUIReplyCommit_EmptyBody verifies that an empty body returns 4xx without calling domain.
+func TestUIReplyCommit_EmptyBody(t *testing.T) {
+	calls, cleanupReply := withReplyCommitOverride(nil)
+	defer cleanupReply()
+
+	c, rec := newReplyRequest(t, "mem_abc", "cm_001", "", writerUser("testproject"))
+	if err := handleUIReplyCommit(nil)(c); err == nil && rec.Code < 400 {
+		t.Errorf("expected 4xx for empty body; got %d", rec.Code)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("doReplyCommitFn must not be called for empty body; got %d calls", len(*calls))
+	}
+}
+
+// TestUIReplyCommit_NonWriter verifies that a non-writer gets 403.
+func TestUIReplyCommit_NonWriter(t *testing.T) {
+	cleanupProject := withCommitMemoryProjectOverride("otherproject", "active", nil)
+	defer cleanupProject()
+	calls, cleanupReply := withReplyCommitOverride(nil)
+	defer cleanupReply()
+
+	c, rec := newReplyRequest(t, "mem_abc", "cm_001", "a reply", userWithProjects("testproject"))
+	if err := handleUIReplyCommit(nil)(c); err == nil && rec.Code != http.StatusForbidden {
+		t.Errorf("should return 403 for non-writer; code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 0 {
+		t.Errorf("doReplyCommitFn must not be called on auth failure; got %d calls", len(*calls))
+	}
+}
+
+// TestUIResolveCommit_Success verifies a resolve redirects 303 to the memory page.
+func TestUIResolveCommit_Success(t *testing.T) {
+	cleanupProject := withCommitMemoryProjectOverride("testproject", "active", nil)
+	defer cleanupProject()
+	calls, cleanupResolve := withResolveCommitOverride(nil)
+	defer cleanupResolve()
+
+	c, rec := newResolveRequest(t, "mem_xyz", "cm_002", "resolved — looks good", writerUser("testproject"))
+	if err := handleUIResolveCommit(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("status: got %d, want 303", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "/ui/memories/mem_xyz" {
+		t.Errorf("Location: got %q, want %q", loc, "/ui/memories/mem_xyz")
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("doResolveCommitFn call count: got %d, want 1", len(*calls))
+	}
+	if (*calls)[0][0] != "mem_xyz" || (*calls)[0][1] != "cm_002" {
+		t.Errorf("doResolveCommitFn args: got %v", (*calls)[0])
+	}
+}
+
+// TestUIResolveCommit_EmptyReply verifies that reply is optional (empty is accepted).
+func TestUIResolveCommit_EmptyReply(t *testing.T) {
+	cleanupProject := withCommitMemoryProjectOverride("testproject", "active", nil)
+	defer cleanupProject()
+	calls, cleanupResolve := withResolveCommitOverride(nil)
+	defer cleanupResolve()
+
+	c, rec := newResolveRequest(t, "mem_xyz", "cm_002", "", writerUser("testproject"))
+	if err := handleUIResolveCommit(nil)(c); err != nil {
+		t.Fatalf("handler error for empty reply: %v", err)
+	}
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("status: got %d, want 303 (empty reply is allowed)", rec.Code)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("doResolveCommitFn should be called even with empty reply; got %d calls", len(*calls))
 	}
 }

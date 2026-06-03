@@ -34,6 +34,7 @@ func RegisterMemoryRoutes(v1 *echo.Group, pool *pgxpool.Pool) {
 	v1.POST("/memories/:id/activate", handleActivateMemory(pool))
 	v1.PATCH("/memories/:id/redact", handleRedactMemory(pool))
 	v1.POST("/memories/:id/commit/:commit_id/resolve", handleResolveCommit(pool))
+	v1.POST("/memories/:id/commit/:commit_id/reply", handleV1ReplyCommit(pool))
 	v1.PATCH("/memories/:id/reinforce", handleReinforceMemory(pool))
 
 	// Events (§4.3) — POST is write; GET is read
@@ -206,7 +207,6 @@ func handleRedactMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 	}
 }
 
-
 // handleResolveCommit handles POST /v1/memories/:id/commit/:commit_id/resolve.
 // Marks the commit entry as resolved, writes an AI reply, and emits
 // memory_commit_resolved. Requires writer access on the memory's project.
@@ -244,6 +244,46 @@ func handleResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 
 		if err := domain.ResolveCommit(ctx, pool, memID, commitID, req.Reply, u.UserID, u.DisplayName); err != nil {
+			return domainErr(c, err)
+		}
+		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
+	}
+}
+
+// handleV1ReplyCommit handles POST /v1/memories/:id/commit/:commit_id/reply.
+// Appends a threaded reply to a commit entry. Requires writer access on the
+// memory's project. JSON body: {"body": "..."}. Returns {ok: true}.
+func handleV1ReplyCommit(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		memID := c.Param("id")
+		commitID := c.Param("commit_id")
+		if memID == "" || commitID == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "memory id and commit_id are required"))
+		}
+
+		var req struct {
+			Body string `json:"body"`
+		}
+		if err := c.Bind(&req); err != nil {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
+		}
+		if req.Body == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "body is required"))
+		}
+
+		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
+		if loadErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+		}
+		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+			return err
+		}
+
+		if err := doReplyCommitFn(ctx, pool, memID, commitID, u.UserID, u.DisplayName, req.Body); err != nil {
 			return domainErr(c, err)
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
@@ -478,9 +518,9 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		// Emit memory_reinforced event (best effort).
 		payload, _ := json.Marshal(map[string]any{
-			"memory_id":         memID,
-			"activation_count":  newActivationCount,
-			"base_strength":     newBaseStrength,
+			"memory_id":        memID,
+			"activation_count": newActivationCount,
+			"base_strength":    newBaseStrength,
 		})
 		_, _ = pool.Exec(ctx, `
 			INSERT INTO agent_events (id, actor_user_id, actor_display, event_type, payload, project)

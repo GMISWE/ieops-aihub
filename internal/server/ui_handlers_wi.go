@@ -15,6 +15,7 @@ import (
 	"context"
 	"html/template"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +52,10 @@ var wiVersionChainFn = domain.MemoryVersionChain
 // run without a live pool. Defaults to the real distinct-facet query.
 var fetchWIFacetsFn = fetchWIFacets
 
+// fetchProjectWICountsFn is the seam for the per-project count query used by the
+// project switcher. Swappable in tests (nil pool returns empty map).
+var fetchProjectWICountsFn = fetchProjectWICounts
+
 // validWIStatuses enumerates the values accepted in the ?status= filter.
 // The empty string maps to "active" = queued + running + paused + blocked.
 var validWIStatuses = map[string]bool{
@@ -83,19 +88,49 @@ const allProjectsSentinel = "__all__"
 type wiListPageData struct {
 	Title             string
 	Active            string
+	Theme             string
 	User              *UserContext
 	Project           string
-	ProjectsAvailable []string
-	AllMode           bool // true when viewing across all accessible projects
-	Status            string
+	ProjectLabel      string          // human label for the project switcher button ("All projects" / "<name>")
+	ProjectsAvailable []string        // sorted project names for the switcher
+	ProjectCounts     map[string]int  // per-project active-wi count for the switcher
+	TotalCount        int             // sum of ProjectCounts (the "All projects" count)
+	AllMode           bool            // true when viewing across all accessible projects
+	Status            string          // legacy single-status (kept for the hidden field / back-compat)
+	Statuses          map[string]bool // multi-select status filter — set of selected status values
+	StatusLabel       string          // human label for the status-filter button
 	Kind              string
 	Reporter          string
 	Owner             string
+	Mine              bool     // true when the Owner filter equals the current user (the "Mine" segment)
 	ReporterOptions   []string // distinct reporter display names for the filter dropdown
 	OwnerOptions      []string // distinct owner display names for the filter dropdown
 	Limit             int
-	Items             []*wiListRow
+	Items             []*wiListRow  // flat list, kept for tests / fallback
+	Groups            []wiListGroup // grouped rows for display (Needs you / status blocks / Unclaimed)
+	Strip             stripCounts   // headline count strip — derived from Groups (single source of truth)
 	Err               string
+}
+
+// StatusOn reports whether the given status value is currently selected in the
+// multi-select status filter. Used by the template to mark dropdown checkboxes.
+func (d *wiListPageData) StatusOn(s string) bool { return d.Statuses[s] }
+
+// wiListGroup is a display bucket of rows under a single heading. When Rows is
+// empty the template renders the .empty empty-state component instead of
+// silently dropping the section (the smart sections are always emitted; status
+// blocks are emitted for every selected status even when empty — see
+// groupListRows).
+//
+// Kind classifies the bucket so the template + client JS can treat them
+// differently: "personal" (Needs you) and "pool" (Unclaimed) are smart sections
+// that keep a fixed position (top / bottom respectively), while "status" blocks
+// are drag-reorderable keyed by Status (the raw lowercase status value).
+type wiListGroup struct {
+	Label  string
+	Kind   string // "personal" | "pool" | "status"
+	Status string // raw status value for "status" blocks ("running", ...); "" otherwise
+	Rows   []*wiListRow
 }
 
 // wiListRow is a view-model row for the list table. Decoupling from
@@ -105,29 +140,39 @@ type wiListRow struct {
 	ID              string
 	Slug            string
 	Project         string
+	Seq             int64     // wi sequence within its project — sort tiebreak
+	CreatedAt       time.Time // wi creation time — primary global sort key (DESC)
 	WIType          string
 	Priority        string
 	Status          string
 	HumanMode       string // requires_human_session folded for display: "Human" (true) / "Auto" (false) / "" (NULL/unclassified)
+	NeedsHuman      bool   // requires_human_session == true (display-only "Human" mode hint)
+	NeedsYou        bool   // current-attempt owner == viewer AND status in {paused,blocked} — drives the "Needs you" group + .row.hot highlight (set by groupListRows)
 	Goal            string
-	OwnerDisplay    string // run_attempts.actor_display of current attempt; "" if no attempt
-	ReporterDisplay string // who filed the wi (always populated)
+	OwnerDisplay    string     // run_attempts.actor_display of current attempt; "" if no attempt
+	ReporterDisplay string     // who filed the wi (always populated)
+	Assignee        personChip // owner chip; zero value = unassigned (ghost avatar)
 }
 
 // wiDetailPageData is the data passed to wi_detail.html.tmpl.
 type wiDetailPageData struct {
 	Title          string
 	Active         string
+	Theme          string
 	User           *UserContext
 	WI             *domain.WorkItem
-	WIType         string    // flattened *WI.WIType
-	HumanMode      string    // requires_human_session folded: "Human" (true) / "Auto" (false) / "" (NULL/unclassified)
-	Content        string    // flattened *WI.Content for direct template access
-	Milestone      string    // flattened *WI.Milestone
-	AttemptID      string    // flattened *WI.CurrentAttemptID
-	OwnerDisplay   string    // run_attempts.actor_display of current attempt, "" if none
-	OwnerActive    time.Time // run_attempts.last_active_at of current attempt
-	OwnerHasActive bool      // true when OwnerActive is meaningful (non-zero)
+	WIType         string     // flattened *WI.WIType
+	HumanMode      string     // requires_human_session folded: "Human" (true) / "Auto" (false) / "" (NULL/unclassified)
+	Content        string     // flattened *WI.Content for direct template access
+	Milestone      string     // flattened *WI.Milestone
+	AttemptID      string     // flattened *WI.CurrentAttemptID
+	Labels         []string   // flattened *WI.Labels for the meta sidebar
+	Reporter       personChip // who filed the wi — person-chip in the meta sidebar
+	Assignee       personChip // current-attempt owner — zero value = unassigned (ghost)
+	NeedsYou       bool       // owner == current user AND status in {paused,blocked} — drives the needs-you bar
+	OwnerDisplay   string     // run_attempts.actor_display of current attempt, "" if none
+	OwnerActive    time.Time  // run_attempts.last_active_at of current attempt
+	OwnerHasActive bool       // true when OwnerActive is meaningful (non-zero)
 	Dependencies   *depView
 	Events         []eventView
 	Artifacts      []artifactLink
@@ -144,11 +189,17 @@ type depView struct {
 }
 
 // depEntry is the per-row dependency projection. `Slug` is empty when the
-// caller can't see the cross-project wi.
+// caller can't see the cross-project wi. Status + Assignee are filled in by a
+// view-layer batch lookup (fetchDepMeta) so each row can show the linked wi's
+// status badge and owner avatar; both stay zero when the lookup misses (e.g.
+// pool nil in tests or a hidden cross-project entry).
 type depEntry struct {
-	Slug   string
-	Kind   string
-	Hidden bool
+	ID       string
+	Slug     string
+	Kind     string
+	Hidden   bool
+	Status   string     // linked wi status ("queued"/"running"/...) — drives the status badge
+	Assignee personChip // linked wi current-attempt owner; zero = unassigned ghost
 }
 
 // wiEventsPartialData is the data passed to events_timeline.html.tmpl when
@@ -161,10 +212,13 @@ type wiEventsPartialData struct {
 // json.RawMessage fields flattened to plain strings.
 type eventView struct {
 	CreatedAt    time.Time
-	EventType    string
-	ActorDisplay string
+	EventType    string     // raw event_type, kept verbatim (the activity feed shows it)
+	ActorDisplay string     // raw actor display name
+	Actor        personChip // actor person-chip (zero value = no actor, e.g. system events)
 	Payload      string
 	Pinned       bool
+	Family       string // semantic color family: "ok"|"good"|"warn"|"bad"|"info" (see eventFamily)
+	Tag          string // short uppercase action tag for the feed icon (see eventTag)
 }
 
 // toEventViews flattens []EventRow into []eventView.
@@ -175,9 +229,12 @@ func toEventViews(rows []domain.EventRow) []eventView {
 			CreatedAt: r.CreatedAt,
 			EventType: r.EventType,
 			Pinned:    r.Pinned,
+			Family:    eventFamily(r.EventType),
+			Tag:       eventTag(r.EventType),
 		}
 		if r.ActorDisplay != nil {
 			ev.ActorDisplay = *r.ActorDisplay
+			ev.Actor = chipFor(*r.ActorDisplay)
 		}
 		if len(r.Payload) > 0 {
 			ev.Payload = string(r.Payload)
@@ -187,11 +244,104 @@ func toEventViews(rows []domain.EventRow) []eventView {
 	return out
 }
 
+// eventFamily maps a raw event_type to one of the five semantic color families
+// the activity feed renders (prototype design-system section 9). This is the
+// SINGLE place the mapping lives:
+//
+//	"ok"   green + dot  in-progress     (attempt/claim started, step started, resume)
+//	"good" green        positive output (attempt wrapped, memory saved, unblocked, resolved)
+//	"warn" amber        waiting/blocked (paused, blocked, stall/zombie)
+//	"bad"  red          failure/destructive (failed, cancelled, force takeover)
+//	"info" grey         informational   (created/filed, note, reply, everything else)
+//
+// Matching is substring-based on the lowercased type so related variants
+// (e.g. "attempt_completed_wrapped", "memory_commit_resolved") land in the
+// right family without enumerating every concrete event_type.
+func eventFamily(t string) string {
+	s := strings.ToLower(t)
+	switch {
+	// failure / destructive — checked first so "*_failed" / "force_takeover"
+	// never get misread as a positive/in-progress event.
+	case strings.Contains(s, "fail"),
+		strings.Contains(s, "cancel"),
+		strings.Contains(s, "takeover"),
+		strings.Contains(s, "error"):
+		return "bad"
+	// waiting / impediment.
+	case strings.Contains(s, "pause"),
+		strings.Contains(s, "block") && !strings.Contains(s, "unblock"),
+		strings.Contains(s, "stall"),
+		strings.Contains(s, "zombie"):
+		return "warn"
+	// positive output / completion.
+	case strings.Contains(s, "wrap"),
+		strings.Contains(s, "unblock"),
+		strings.Contains(s, "resolve"),
+		strings.Contains(s, "adopt"),
+		strings.Contains(s, "memory") || strings.Contains(s, "artifact") || strings.Contains(s, "saved"):
+		return "good"
+	// in-progress.
+	case strings.Contains(s, "claim"),
+		strings.Contains(s, "resume"),
+		strings.Contains(s, "started") || strings.Contains(s, "start"),
+		strings.Contains(s, "step"),
+		strings.Contains(s, "heartbeat"):
+		return "ok"
+	default:
+		// created / note / reply / anything unmapped → informational grey.
+		return "info"
+	}
+}
+
+// eventTag derives the short uppercase action word shown in the feed icon
+// (≤8 chars). It collapses the verbose event_type to its salient verb so the
+// fixed-width icon reads cleanly; the full event_type still renders as the body
+// text. Purely presentational.
+func eventTag(t string) string {
+	s := strings.ToLower(t)
+	switch {
+	case strings.Contains(s, "wrap"):
+		return "wrap"
+	case strings.Contains(s, "unblock"):
+		return "unblock"
+	case strings.Contains(s, "resolve"):
+		return "resolve"
+	case strings.Contains(s, "memory") || strings.Contains(s, "artifact") || strings.Contains(s, "saved"):
+		return "save"
+	case strings.Contains(s, "claim"):
+		return "claim"
+	case strings.Contains(s, "resume"):
+		return "resume"
+	case strings.Contains(s, "step"):
+		return "step"
+	case strings.Contains(s, "fail"):
+		return "fail"
+	case strings.Contains(s, "cancel"):
+		return "cancel"
+	case strings.Contains(s, "takeover"):
+		return "takeover"
+	case strings.Contains(s, "pause"):
+		return "pause"
+	case strings.Contains(s, "block"):
+		return "block"
+	case strings.Contains(s, "stall"), strings.Contains(s, "zombie"):
+		return "stall"
+	case strings.Contains(s, "note"):
+		return "note"
+	case strings.Contains(s, "reply"):
+		return "reply"
+	case strings.Contains(s, "create"):
+		return "create"
+	default:
+		return "event"
+	}
+}
+
 // artifactLink is the per-row data for the artifacts section on the detail page.
 type artifactLink struct {
-	MemID    string
-	Type     string
-	Content  string
+	MemID   string
+	Type    string
+	Content string
 	// Versions is non-nil (len > 1) when this artifact has a supersede chain.
 	// Each entry links to /ui/artifacts/<id>/html. Only populated on the /ui path.
 	Versions []domain.MemoryVersionRef
@@ -223,9 +373,23 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
+		// HTMX in-place filter request: when the wi-list controls fire an
+		// hx-get targeting #wi-list-body we return ONLY that fragment (the
+		// "wi-list-body" block) instead of the full page, so the filter bar /
+		// project switcher / count strip above are left untouched. We gate on
+		// HX-Target too so a boosted full-page navigation (which also sets
+		// HX-Request) still gets the whole document. Both branches feed the
+		// SAME data through the SAME grouping pipeline — only the template name
+		// differs (renderName below).
+		renderName := "layout"
+		if c.Request().Header.Get("HX-Request") == "true" && c.Request().Header.Get("HX-Target") == "wi-list-body" {
+			renderName = "wi-list-body"
+		}
+
 		data := &wiListPageData{
 			Title:  "Work items",
 			Active: "wi",
+			Theme:  themeFromCookie(c),
 			User:   u,
 		}
 
@@ -246,22 +410,64 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		}
 		data.Project = project
 		data.AllMode = allMode
+		if allMode || project == "" {
+			data.ProjectLabel = "All projects"
+		} else {
+			data.ProjectLabel = project
+		}
+
+		// Per-project active-wi counts for the switcher dropdown. Scope to the
+		// projects the user can see; nil for admins means "all projects".
+		var countScope []string
+		if u.Role != "admin" {
+			countScope = projects
+		}
+		data.ProjectCounts, data.TotalCount = fetchProjectWICountsFn(ctx, pool, countScope)
 
 		// Filter params.
-		statusParam := strings.TrimSpace(c.QueryParam("status"))
-		kindParam := strings.TrimSpace(c.QueryParam("kind"))
-		reporterParam := strings.TrimSpace(c.QueryParam("reporter"))
-		ownerParam := strings.TrimSpace(c.QueryParam("owner"))
-		if statusParam != "" && !validWIStatuses[statusParam] {
-			statusParam = ""
+		//
+		// Status is multi-select: the dropdown emits repeated ?status= params
+		// (one per checked box). We keep the union of valid values. The legacy
+		// single ?status= shape still works (one value = a one-element set).
+		statusParams := c.QueryParams()["status"]
+		selStatuses := map[string]bool{}
+		var statusList []string // deterministic order for the label / hidden field
+		for _, s := range statusParams {
+			s = strings.TrimSpace(s)
+			if s != "" && validWIStatuses[s] && !selStatuses[s] {
+				selStatuses[s] = true
+				statusList = append(statusList, s)
+			}
 		}
+		kindParam := strings.TrimSpace(c.QueryParam("kind"))
 		if kindParam != "" && !validWIKinds[kindParam] {
 			kindParam = ""
 		}
-		data.Status = statusParam
+		data.Statuses = selStatuses
+		// data.Status keeps the first selected value so the legacy hidden field
+		// and any single-value consumers stay populated.
+		if len(statusList) > 0 {
+			data.Status = statusList[0]
+		}
 		data.Kind = kindParam
-		data.Reporter = reporterParam
+		data.Reporter = strings.TrimSpace(c.QueryParam("reporter"))
+		data.StatusLabel = statusFilterLabel(statusList)
+
+		// "Mine" segment is the owner filter pinned to the current user's
+		// display name. There is no separate domain concept — it reuses the
+		// existing ?owner= filter. This list is a PERSONAL dashboard, so when
+		// the caller has not explicitly chosen a segment (no ?owner= and no
+		// explicit ?all=1 opt-out) we DEFAULT to "Mine".
+		ownerParam := strings.TrimSpace(c.QueryParam("owner"))
+		_, ownerExplicit := c.QueryParams()["owner"]
+		allOptOut := c.QueryParam("all") == "1"
+		if ownerParam == "" && !ownerExplicit && !allOptOut && u != nil && u.DisplayName != "" {
+			ownerParam = u.DisplayName // default view = Mine
+		}
 		data.Owner = ownerParam
+		if u != nil && ownerParam != "" && ownerParam == u.DisplayName {
+			data.Mine = true
+		}
 
 		limit := 50
 		if raw := strings.TrimSpace(c.QueryParam("limit")); raw != "" {
@@ -282,22 +488,31 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 			} else {
 				data.Err = "select a project to view work items."
 			}
-			return renderTemplate(c, tmpl, "layout", data)
+			return renderTemplate(c, tmpl, renderName, data)
 		}
 
 		filter := domain.ListWorkItemsFilter{Limit: limit}
-		if statusParam != "" {
-			filter.Status = []string{statusParam}
+		// Multi-status: pass the union to the domain layer, which already does
+		// `wi.status = ANY($n)` — no domain API change. Empty selection falls
+		// back to the active-status set.
+		if len(statusList) > 0 {
+			filter.Status = statusList
 		} else {
 			filter.Status = activeStatuses
 		}
 		if kindParam != "" {
 			filter.WIType = &kindParam
 		}
-		if reporterParam != "" {
-			filter.ReporterDisplay = &reporterParam
+		if data.Reporter != "" {
+			filter.ReporterDisplay = &data.Reporter
 		}
-		if ownerParam != "" {
+		// In "Mine" view we do NOT push OwnerDisplay into the DB query: the list
+		// is owner-scoped for the personal sections (Needs you / Running) but
+		// still has to surface the Unclaimed pool (which by definition has no
+		// owner and would be filtered out). groupListRows does the owner scoping
+		// in memory instead. The explicit-owner case (an "All"-view owner filter
+		// the user typed) keeps the DB filter.
+		if ownerParam != "" && !data.Mine {
 			filter.OwnerDisplay = &ownerParam
 		}
 
@@ -318,7 +533,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 			// single project — access check (admin bypasses)
 			if err := checkProjectAccessSoft(u, project); err != nil {
 				data.Err = err.Error()
-				return renderTemplate(c, tmpl, "layout", data)
+				return renderTemplate(c, tmpl, renderName, data)
 			}
 			facetScope = []string{project}
 		}
@@ -328,30 +543,125 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		data.ReporterOptions = facets.Reporters
 		data.OwnerOptions = facets.Owners
 
-		res, aerr := listWorkItemsFn(ctx, pool, queryProject, filter)
-		if aerr != nil {
-			data.Err = aerr.Message
-			return renderTemplate(c, tmpl, "layout", data)
+		viewer := ""
+		if u != nil {
+			viewer = u.DisplayName
 		}
-
-		// Batch-fetch current-attempt owners so the list can show "who claimed
-		// it" without issuing N+1 queries.
-		attemptIDs := make([]string, 0, len(res.Items))
-		for _, wi := range res.Items {
-			if wi.CurrentAttemptID != nil {
-				attemptIDs = append(attemptIDs, *wi.CurrentAttemptID)
+		// Headline strip counts come from the grouping (single source of truth —
+		// annotation #2). The strip is a STABLE overview and must NOT shift with
+		// the display status filter: when a status filter is active, compute it
+		// from the fixed active-status set — identical to the 5s poll
+		// (handleUIQueuePartial) so the strip never flickers between first paint
+		// and the poll. This runs BEFORE the display query so the display query
+		// (with the user's status filter) stays the last list call. When no
+		// status filter is set, the display query already uses activeStatuses, so
+		// its groups are reused (no extra query).
+		var stripGroups []wiListGroup
+		if len(statusList) > 0 {
+			sf := filter
+			sf.Status = activeStatuses
+			if _, ag, serr := fetchListGroups(ctx, pool, queryProject, sf, viewer, data.Mine, nil); serr == nil {
+				stripGroups = ag
 			}
 		}
-		owners := fetchAttemptOwners(ctx, pool, attemptIDs)
 
-		rows := make([]*wiListRow, 0, len(res.Items))
-		for _, wi := range res.Items {
-			rows = append(rows, toListRow(wi, owners))
+		rows, groups, aerr := fetchListGroups(ctx, pool, queryProject, filter, viewer, data.Mine, selStatuses)
+		if aerr != nil {
+			data.Err = aerr.Message
+			return renderTemplate(c, tmpl, renderName, data)
 		}
 		data.Items = rows
+		data.Groups = groups
 
-		return renderTemplate(c, tmpl, "layout", data)
+		if stripGroups == nil {
+			stripGroups = groups
+		}
+		// Stalled has no list group; pull it from the ready-queue path,
+		// aggregated across projects in __all__ mode.
+		data.Strip = groupCountsFromGroups(stripGroups)
+		data.Strip.Stalled = stalledCount(ctx, pool, project, allMode, projects, u)
+
+		return renderTemplate(c, tmpl, renderName, data)
 	}
+}
+
+// fetchListGroups runs the wi list query, batch-loads current-attempt owners,
+// projects rows, and groups them — the shared pipeline behind both the wi list
+// page and the count-strip poll so the two never diverge. queryProject is "" in
+// view-all mode (filter.AccessibleProjects bounds the scope); otherwise it is a
+// single project name.
+func fetchListGroups(ctx context.Context, pool *pgxpool.Pool, queryProject string, filter domain.ListWorkItemsFilter, viewer string, mine bool, selStatuses map[string]bool) ([]*wiListRow, []wiListGroup, *domain.AihubError) {
+	res, aerr := listWorkItemsFn(ctx, pool, queryProject, filter)
+	if aerr != nil {
+		return nil, nil, aerr
+	}
+
+	// Batch-fetch current-attempt owners so the list can show "who claimed it"
+	// without issuing N+1 queries.
+	attemptIDs := make([]string, 0, len(res.Items))
+	for _, wi := range res.Items {
+		if wi.CurrentAttemptID != nil {
+			attemptIDs = append(attemptIDs, *wi.CurrentAttemptID)
+		}
+	}
+	owners := fetchAttemptOwners(ctx, pool, attemptIDs)
+
+	rows := make([]*wiListRow, 0, len(res.Items))
+	for _, wi := range res.Items {
+		rows = append(rows, toListRow(wi, owners))
+	}
+	// One consistent global sort across ALL rows BEFORE grouping (round-3 #4).
+	// In __all__ mode the domain layer concatenates per-project segments, so the
+	// raw order is inconsistent (each project sorted independently). Re-sorting
+	// here makes every group's rows follow the same key regardless of project.
+	sortListRows(rows)
+	return rows, groupListRows(rows, viewer, mine, selStatuses), nil
+}
+
+// sortListRows applies the single global ordering used across every list group:
+// newest first by CreatedAt, tiebroken by project name then sequence so the
+// order is deterministic and identical in every bucket (round-3 #4). Sorting the
+// flat slice before grouping means each bucket inherits the same order — the
+// per-project concatenation from __all__ mode no longer leaks through.
+func sortListRows(rows []*wiListRow) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.After(b.CreatedAt) // newest first
+		}
+		if a.Project != b.Project {
+			return a.Project < b.Project
+		}
+		return a.Seq < b.Seq
+	})
+}
+
+// stalledCount returns the number of stalled (running-but-gone-quiet) items for
+// the strip. In single-project mode it queries that project; in __all__ mode it
+// sums across the accessible projects (admins: every visible project). This is
+// the only strip cell not derived from the list grouping — the list has no
+// "stalled" concept. Best-effort: query errors contribute 0.
+func stalledCount(ctx context.Context, pool *pgxpool.Pool, project string, allMode bool, accessible []string, u *UserContext) int {
+	if pool == nil {
+		return 0
+	}
+	scope := []string{project}
+	if allMode {
+		scope = accessible
+		if u != nil && u.Role == "admin" {
+			scope = availableProjectsForUI(ctx, pool, u)
+		}
+	}
+	total := 0
+	for _, p := range scope {
+		if p == "" {
+			continue
+		}
+		if q, aerr := getQueueFn(ctx, pool, p, 100); aerr == nil && q != nil {
+			total += len(q.Stalled)
+		}
+	}
+	return total
 }
 
 // handleUIWIDetail renders the work-item detail page.
@@ -372,6 +682,7 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		data := &wiDetailPageData{
 			Title:  "Work item",
 			Active: "wi",
+			Theme:  themeFromCookie(c),
 			User:   u,
 		}
 
@@ -481,6 +792,10 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			data.Err = depsErr.Message
 		} else {
 			data.Dependencies = toDepView(deps)
+			// Enrich each linked dep with the wi's status + owner avatar so the
+			// sidebar lists read like the prototype (status badge + slug + owner).
+			// One batched query; best-effort (a miss just drops the adornments).
+			enrichDepView(data.Dependencies, fetchDepMeta(ctx, pool, depViewIDs(data.Dependencies)))
 		}
 		if eventsErr != nil && data.Err == "" {
 			data.Err = "failed to load events: " + eventsErr.Error()
@@ -490,6 +805,20 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		data.OwnerDisplay = ownerInfo.Display
 		data.OwnerActive = ownerInfo.LastActiveAt
 		data.OwnerHasActive = !ownerInfo.LastActiveAt.IsZero()
+
+		// Meta-sidebar person chips: reporter (always present) + assignee (the
+		// current-attempt owner, ghost when unclaimed).
+		data.Reporter = chipFor(wi.ReporterDisplay)
+		data.Assignee = chipFor(ownerInfo.Display)
+		data.Labels = wi.Labels
+
+		// needs-you bar: this item is awaiting the current user — they own the
+		// active attempt and it is paused/blocked (mirrors the list's Needs you
+		// section gate).
+		if u != nil && ownerInfo.Display != "" && ownerInfo.Display == u.DisplayName &&
+			(wi.Status == "paused" || wi.Status == "blocked") {
+			data.NeedsYou = true
+		}
 
 		return renderTemplate(c, tmpl, "layout", data)
 	}
@@ -556,6 +885,7 @@ func fetchArtifactLinks(ctx context.Context, pool *pgxpool.Pool, u *UserContext,
 		return nil
 	}
 	out := make([]artifactLink, 0, len(resp.Items))
+	seen := make(map[string]bool)
 	for _, m := range resp.Items {
 		// Skip private memories the caller can't read — recall already filters
 		// these out, but defense in depth.
@@ -572,10 +902,37 @@ func fetchArtifactLinks(ctx context.Context, pool *pgxpool.Pool, u *UserContext,
 		// the template treats as "no history to show". Skip when pool is nil (tests).
 		if pool != nil {
 			if versions, verErr := wiVersionChainFn(ctx, pool, m.ID); verErr == nil && len(versions) > 1 {
-				link.Versions = versions
+				// Collapse the supersede chain to a single artifact: show only the
+				// current (head) version; older versions live in its version
+				// dropdown. Recall returns every version as its own row, so skip
+				// any item that is a superseded (non-current) member of a chain.
+				headID := m.ID
+				for _, v := range versions {
+					if v.IsCurrent {
+						headID = v.ID
+					}
+				}
+				if m.ID != headID || seen[headID] {
+					continue
+				}
+				seen[headID] = true
+				// Display newest-first (review feedback): reverse the
+				// oldest->newest chain so the current version sits on top.
+				link.Versions = reverseVersionRefs(versions)
 			}
 		}
 		out = append(out, link)
+	}
+	return out
+}
+
+// reverseVersionRefs returns a new slice with the version chain reversed so the
+// detail page can render newest-first while the chronological version numbers
+// (computed from the total count in the template) stay correct.
+func reverseVersionRefs(v []domain.MemoryVersionRef) []domain.MemoryVersionRef {
+	out := make([]domain.MemoryVersionRef, len(v))
+	for i := range v {
+		out[len(v)-1-i] = v[i]
 	}
 	return out
 }
@@ -612,7 +969,85 @@ func depEntryFrom(e domain.DependencyListEntry) depEntry {
 	if e.Slug == nil || e.ID == "hidden" {
 		return depEntry{Kind: e.Kind, Hidden: true}
 	}
-	return depEntry{Slug: *e.Slug, Kind: e.Kind}
+	return depEntry{ID: e.ID, Slug: *e.Slug, Kind: e.Kind}
+}
+
+// depMeta is the per-wi status + owner display loaded by fetchDepMeta.
+type depMeta struct {
+	Status     string
+	OwnerActor string // current-attempt actor_display; "" when unclaimed
+}
+
+// fetchDepMeta batch-loads the status + current-attempt owner for a set of
+// linked work item IDs in ONE query (work_items LEFT JOIN run_attempts on the
+// current attempt). View-layer only — it reads existing columns to enrich the
+// dependency rows with a status badge + owner avatar; no domain/API/DB change.
+// Errors or a nil pool degrade to an empty map so the dep lists still render
+// (just without the status/owner adornments).
+func fetchDepMeta(ctx context.Context, pool *pgxpool.Pool, ids []string) map[string]depMeta {
+	out := map[string]depMeta{}
+	if pool == nil || len(ids) == 0 {
+		return out
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT wi.id, wi.status, COALESCE(ra.actor_display, '')
+		 FROM work_items wi
+		 LEFT JOIN run_attempts ra ON ra.id = wi.current_attempt_id
+		 WHERE wi.id = ANY($1)`,
+		ids,
+	)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var m depMeta
+		if rows.Scan(&id, &m.Status, &m.OwnerActor) == nil {
+			out[id] = m
+		}
+	}
+	return out
+}
+
+// enrichDepView fills each visible dep entry's Status + Assignee from the
+// batch-loaded meta map. Hidden (cross-project) entries are left untouched.
+func enrichDepView(v *depView, meta map[string]depMeta) {
+	if v == nil {
+		return
+	}
+	fill := func(entries []depEntry) {
+		for i := range entries {
+			if entries[i].Hidden || entries[i].ID == "" {
+				continue
+			}
+			if m, ok := meta[entries[i].ID]; ok {
+				entries[i].Status = m.Status
+				entries[i].Assignee = chipFor(m.OwnerActor)
+			}
+		}
+	}
+	fill(v.Blocking)
+	fill(v.BlockedBy)
+}
+
+// depViewIDs collects the non-hidden linked wi IDs across both directions so
+// fetchDepMeta can load them in one round-trip.
+func depViewIDs(v *depView) []string {
+	if v == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(v.Blocking)+len(v.BlockedBy))
+	add := func(entries []depEntry) {
+		for _, e := range entries {
+			if !e.Hidden && e.ID != "" {
+				ids = append(ids, e.ID)
+			}
+		}
+	}
+	add(v.Blocking)
+	add(v.BlockedBy)
+	return ids
 }
 
 // toListRow is the WorkItem → wiListRow projection used by the list page.
@@ -625,6 +1060,8 @@ func toListRow(wi *domain.WorkItem, owners map[string]attemptOwner) *wiListRow {
 		ID:              wi.ID,
 		Slug:            wi.Slug,
 		Project:         wi.Project,
+		Seq:             wi.Seq,
+		CreatedAt:       wi.CreatedAt,
 		Priority:        wi.Priority,
 		Status:          wi.Status,
 		Goal:            wi.Goal,
@@ -636,6 +1073,7 @@ func toListRow(wi *domain.WorkItem, owners map[string]attemptOwner) *wiListRow {
 	if wi.RequiresHumanSession != nil {
 		if *wi.RequiresHumanSession {
 			row.HumanMode = "Human"
+			row.NeedsHuman = true
 		} else {
 			row.HumanMode = "Auto"
 		}
@@ -645,7 +1083,162 @@ func toListRow(wi *domain.WorkItem, owners map[string]attemptOwner) *wiListRow {
 			row.OwnerDisplay = o.Display
 		}
 	}
+	row.Assignee = chipFor(row.OwnerDisplay)
 	return row
+}
+
+// titleASCII upper-cases the first byte of an ASCII word (e.g. "queued" ->
+// "Queued"). Status names are a fixed ASCII enum, so this avoids the deprecated
+// strings.Title / the heavier golang.org/x/text cases.Title.
+func titleASCII(s string) string {
+	if s == "" {
+		return s
+	}
+	b := []byte(s)
+	if b[0] >= 'a' && b[0] <= 'z' {
+		b[0] -= 'a' - 'A'
+	}
+	return string(b)
+}
+
+// statusBlockOrder is the canonical default order of the six status blocks
+// (top->bottom) when no drag order is applied. The client may reorder these
+// live (see dropdown.js applyStatusGroupOrder); the server always emits them in
+// this order so the saved drag order has a stable base to permute.
+var statusBlockOrder = []string{"queued", "running", "paused", "blocked", "wrapped", "cancelled"}
+
+// groupListRows buckets the flat row list into display groups under the
+// "status-blocks primary" model (Model A). Both Mine and All views group work
+// items by STATUS into blocks, with two SMART sections that are not status
+// blocks: "Needs you" (pinned first) and "Unclaimed" (pinned last). Every item
+// lands in EXACTLY ONE section by this precedence (no item appears twice):
+//
+//  1. no current-attempt owner AND status in {queued, blocked} -> "Unclaimed"
+//     (the claimable pool — relevant to everyone, ALWAYS shown in both views).
+//  2. else current-attempt owner == viewer AND status in {paused, blocked}
+//     -> "Needs you" (your own work awaiting your attention).
+//  3. else -> a status block keyed by the item's OWN status (one of
+//     queued / running / paused / blocked / wrapped / cancelled).
+//
+// Owner scope:
+//   - Mine view (mine=true): only items whose current-attempt owner is the
+//     viewer feed "Needs you" and the status blocks. A running item I own goes
+//     to the Running block; a queued item I own goes to the Queued block. Items
+//     owned by others are dropped (except the ownerless Unclaimed pool).
+//   - All view (mine=false): all items feed the status blocks; "Needs you" still
+//     requires owner == viewer by definition.
+//   - "Unclaimed" is NOT owner-scoped — it is always shown in both views.
+//
+// Which status blocks render is driven by selStatuses (the statuses chosen in
+// the multi-select). The SERVER emits a block for every SELECTED status even
+// when it has zero items (the template renders the .empty state inside it), so
+// the filter's effect is always perceptible. When no status is selected the
+// full six blocks render (empty ones included). "Needs you" / "Unclaimed" are
+// always emitted (empty -> empty-state) and are never part of selStatuses.
+//
+// Render order top->bottom: Needs you -> status blocks (canonical order;
+// reordered live by the client) -> Unclaimed.
+//
+// A requires_human_session item with no owner is NOT "Needs you" — it has not
+// been claimed by the viewer, so it belongs in Unclaimed (the aihub#4 bug).
+func groupListRows(rows []*wiListRow, viewer string, mine bool, selStatuses map[string]bool) []wiListGroup {
+	const (
+		gNeeds     = "Needs you"
+		gUnclaimed = "Unclaimed"
+	)
+	var needs, unclaimed []*wiListRow
+	// Status blocks keyed by raw status value. Only the SELECTED statuses get a
+	// block; rows whose status is not selected are dropped from the middle (they
+	// can still reach Needs you / Unclaimed via the smart-section rules above).
+	statusBuckets := map[string][]*wiListRow{}
+	for _, s := range statusBlockOrder {
+		if len(selStatuses) == 0 || selStatuses[s] {
+			statusBuckets[s] = []*wiListRow{}
+		}
+	}
+
+	for _, r := range rows {
+		switch {
+		case r.OwnerDisplay == "" && (r.Status == "queued" || r.Status == "blocked"):
+			unclaimed = append(unclaimed, r)
+		case viewer != "" && r.OwnerDisplay == viewer && (r.Status == "paused" || r.Status == "blocked"):
+			r.NeedsYou = true // gates the .row.hot left bar
+			needs = append(needs, r)
+		case mine && (viewer == "" || r.OwnerDisplay != viewer):
+			// Mine view is owner-scoped: items owned by others never feed the
+			// status blocks (Unclaimed already captured the ownerless pool).
+			continue
+		default:
+			if _, ok := statusBuckets[r.Status]; ok {
+				statusBuckets[r.Status] = append(statusBuckets[r.Status], r)
+			}
+		}
+	}
+
+	out := make([]wiListGroup, 0, 2+len(statusBuckets))
+	// "Needs you" is the smart section pinned FIRST — always emitted (empty ->
+	// empty-state). Not drag-reorderable, not part of selStatuses.
+	out = append(out, wiListGroup{Label: gNeeds, Kind: "personal", Rows: needs})
+	// Status blocks in canonical order; the client permutes them live per the
+	// saved drag order. Emitted for every selected status (or all six when none
+	// is selected), empty ones included.
+	for _, k := range statusBlockOrder {
+		rs, ok := statusBuckets[k]
+		if !ok {
+			continue
+		}
+		out = append(out, wiListGroup{Label: titleASCII(k), Kind: "status", Status: k, Rows: rs})
+	}
+	// "Unclaimed" is the smart pool pinned LAST — always emitted (empty ->
+	// empty-state). Not owner-scoped, not drag-reorderable.
+	out = append(out, wiListGroup{Label: gUnclaimed, Kind: "pool", Rows: unclaimed})
+	return out
+}
+
+// stripCounts holds the four headline counts shown in the .qstrip count strip.
+// Running / NeedsYou / Unclaimed are derived from the SAME grouping the list
+// renders (groupCountsFromGroups), so the strip numbers always equal the
+// visible list sections. Stalled has no list group — it is the GC-derived
+// "running but gone quiet" segment carried over from the ready queue.
+type stripCounts struct {
+	Running   int
+	NeedsYou  int
+	Unclaimed int
+	Stalled   int
+}
+
+// groupCountsFromGroups reads Running / Needs you / Unclaimed counts straight
+// off the grouped output so the strip is a faithful tally of what the list
+// shows. Running is the "running" STATUS block (Kind "status"); Needs you and
+// Unclaimed are the smart sections. Other status blocks are ignored — the strip
+// only headlines these three (plus Stalled, filled in by the caller).
+func groupCountsFromGroups(groups []wiListGroup) stripCounts {
+	var s stripCounts
+	for _, g := range groups {
+		switch {
+		case g.Kind == "status" && g.Status == "running":
+			s.Running = len(g.Rows)
+		case g.Label == "Needs you":
+			s.NeedsYou = len(g.Rows)
+		case g.Label == "Unclaimed":
+			s.Unclaimed = len(g.Rows)
+		}
+	}
+	return s
+}
+
+// statusFilterLabel builds the human label for the multi-select status filter
+// button: "All status" when nothing is selected, the single status name when
+// exactly one is chosen, or "N selected" for two or more.
+func statusFilterLabel(sel []string) string {
+	switch len(sel) {
+	case 0:
+		return "All status"
+	case 1:
+		return titleASCII(sel[0])
+	default:
+		return strconv.Itoa(len(sel)) + " selected"
+	}
 }
 
 // renderHTMLStatus is a 404-aware variant of renderTemplate. The shared

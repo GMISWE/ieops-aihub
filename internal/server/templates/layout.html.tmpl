@@ -1,11 +1,17 @@
 {{define "layout"}}<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="{{.Theme}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}} — polyforge</title>
-<link rel="stylesheet" href="/ui/static/ui.css">
+{{/* Preload the self-hosted woff2 fonts BEFORE the stylesheet so they start
+     downloading immediately and the swap is imperceptible (FOUT fix — round-3 #1). */}}
+<link rel="preload" as="font" type="font/woff2" crossorigin href="/ui/static/fonts/Geist-Variable.woff2">
+<link rel="preload" as="font" type="font/woff2" crossorigin href="/ui/static/fonts/GeistMono-Variable.woff2">
+<link rel="stylesheet" href="/ui/static/ui.css?v={{assetv}}">
 <script src="/ui/static/htmx.min.js" defer></script>
+<script src="/ui/static/theme.js?v={{assetv}}" defer></script>
+<script src="/ui/static/dropdown.js?v={{assetv}}" defer></script>
 </head>
 <body>
 <header class="pf-nav">
@@ -16,6 +22,11 @@
       <a href="/ui/memories" {{if eq .Active "memories"}}class="pf-active"{{end}}>Memories</a>
     </nav>
     <div class="pf-nav-user">
+      <div class="pf-theme-seg" id="pf-theme-seg" role="group" aria-label="Color theme">
+        <button type="button" data-theme-mode="auto"{{if eq .Theme "auto"}} class="on"{{end}}>Auto</button>
+        <button type="button" data-theme-mode="light"{{if eq .Theme "light"}} class="on"{{end}}>Light</button>
+        <button type="button" data-theme-mode="dark"{{if eq .Theme "dark"}} class="on"{{end}}>Dark</button>
+      </div>
       {{if .User}}
         <span class="pf-nav-who">{{.User.DisplayName}}</span>
       {{end}}

@@ -1,0 +1,1069 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>polyforge UI - design language proto (all pages)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;450;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   DESIGN TOKENS - dual theme (light/dark) + dual accent (indigo/blue)
+   Collaboration-first, Linear/Vercel restrained. No pure #000/#fff.
+   ============================================================ */
+:root{
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:20px;--s6:24px;--s8:32px;--s10:40px;
+  --r-sm:5px;--r:7px;--r-lg:10px;--pill:999px;
+  --sans:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue","PingFang SC","Noto Sans CJK SC",sans-serif;
+  --mono:"Geist Mono",ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  /* monochrome (Notion-style): chromatic accent removed. --accent is near-black/near-white per theme; selected states use grey (--selected). Defined in the theme blocks below. */
+}
+html[data-theme="light"]{
+  --bg:#fbfbfa;--surface:#fff;--surface-2:#f6f6f4;--surface-3:#efeeec;
+  --border:#e6e5e1;--border-strong:#d6d5d0;
+  --text:#1c1c20;--text-muted:#646469;--text-subtle:#94949b;
+  --success:#16a34a;--success-soft:#d8f3e2;--warning:#e08c0a;--warning-soft:#fcecc6;
+  --danger:#e23b30;--danger-soft:#fbdfdb;--neutral-soft:#edecea;--neutral-fg:#5b5b61;
+  --accent:#1c1c20;--accent-hover:#000;--accent-contrast:#fff;--accent-soft:rgba(20,20,30,.06);--accent-ring:rgba(20,20,30,.16);--selected:#eae8e3;
+  --shadow:0 1px 2px rgba(20,20,30,.04),0 2px 8px rgba(20,20,30,.05);
+  --shadow-pop:0 10px 34px rgba(20,20,30,.16);
+}
+html[data-theme="dark"]{
+  --bg:#0a0a0b;--surface:#151517;--surface-2:#1c1c20;--surface-3:#232328;
+  --border:#2a2a2f;--border-strong:#383840;
+  --text:#ededf0;--text-muted:#a0a0a8;--text-subtle:#6e6e77;
+  --success:#3fcf78;--success-soft:rgba(63,207,120,.14);--warning:#e3b341;--warning-soft:rgba(227,179,65,.14);
+  --danger:#f2655a;--danger-soft:rgba(242,101,90,.15);--neutral-soft:#26262b;--neutral-fg:#b4b4bd;
+  --accent:#ededf0;--accent-hover:#fff;--accent-contrast:#0a0a0b;--accent-soft:rgba(255,255,255,.08);--accent-ring:rgba(255,255,255,.18);--selected:#2a2a30;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 2px 8px rgba(0,0,0,.35);
+  --shadow-pop:0 14px 44px rgba(0,0,0,.55);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+.mono{font-family:var(--mono)}
+[hidden]{display:none!important}
+@media (prefers-reduced-motion:no-preference){
+  a,button,.row,.card,.mcard,.av,.tab{transition:background .14s ease,border-color .14s ease,color .14s ease,transform .14s ease,box-shadow .14s ease}
+}
+
+/* nav */
+.nav{position:sticky;top:0;z-index:30;height:54px;display:flex;align-items:center;gap:var(--s5);padding:0 var(--s6);
+  background:color-mix(in srgb,var(--surface) 86%,transparent);backdrop-filter:saturate(160%) blur(10px);border-bottom:1px solid var(--border)}
+.brand{display:flex;align-items:center;gap:var(--s2);font-weight:650;letter-spacing:-.01em}
+.brand .mark{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--accent),var(--accent-hover));display:grid;place-items:center;color:var(--accent-contrast);font-size:13px;font-weight:700}
+.nav .links{display:flex;gap:2px;margin-left:var(--s3)}
+.nav .links a{padding:6px 10px;border-radius:var(--r-sm);color:var(--text-muted);font-weight:500;cursor:pointer}
+.nav .links a:hover{background:var(--surface-2);color:var(--text)}
+.nav .links a.on{color:var(--text);background:var(--selected)}
+.nav .spacer{flex:1}
+.iconbtn{height:32px;min-width:32px;padding:0 8px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--surface);color:var(--text-muted);display:inline-grid;place-items:center;cursor:pointer;font-size:13px}
+.iconbtn:hover{color:var(--text);border-color:var(--border-strong)}
+
+/* prototype page switcher */
+.proto{position:sticky;top:54px;z-index:25;display:flex;gap:2px;padding:7px var(--s6);background:var(--surface-2);border-bottom:1px solid var(--border);overflow-x:auto}
+.proto .tag{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-subtle);align-self:center;margin-right:var(--s2);white-space:nowrap}
+.tab{padding:5px 11px;border-radius:var(--pill);font-size:12.5px;font-weight:550;color:var(--text-muted);cursor:pointer;white-space:nowrap;border:1px solid transparent}
+.tab:hover{color:var(--text);background:var(--surface)}
+.tab.on{background:var(--selected);color:var(--text)}
+
+/* person chip */
+.who{display:inline-flex;align-items:center;gap:6px;font-size:13px}
+.av{width:24px;height:24px;border-radius:var(--pill);display:grid;place-items:center;font-size:10.5px;font-weight:650;color:#fff;flex:none;letter-spacing:0;overflow:hidden}
+.av.sm{width:20px;height:20px;font-size:9.5px}.av.lg{width:30px;height:30px;font-size:12px}
+.av.ghost{background:transparent;border:1.5px dashed var(--border-strong);color:var(--text-subtle)}
+.av-mo{background:#3a7ca5}.av-xqr{background:#b5683a}.av-xk{background:#6a7f3a}.av-sys{background:#6b6b73}.av-li{background:#8a5cf0}
+.who .nm{font-weight:550;color:var(--text)}.who .role{color:var(--text-subtle)}
+
+/* layout */
+.wrap{max-width:1100px;margin:0 auto;padding:var(--s6) var(--s6) var(--s10)}
+.crumb{display:flex;align-items:center;gap:8px;color:var(--text-subtle);font-size:12.5px;margin-bottom:var(--s4)}
+.crumb a:hover{color:var(--text-muted);cursor:pointer}
+.ph{display:flex;align-items:center;gap:var(--s3);margin-bottom:var(--s5)}
+.ph h1{font-size:19px;font-weight:650;letter-spacing:-.01em;margin:0}
+.ph .sub{color:var(--text-subtle);font-size:13px}
+
+/* badges */
+.badge{display:inline-flex;align-items:center;gap:5px;height:21px;padding:0 9px;border-radius:var(--pill);font-size:11px;font-weight:600;letter-spacing:.01em;white-space:nowrap}
+.badge .dot{width:6px;height:6px;border-radius:var(--pill)}
+.b-feature{background:var(--neutral-soft);color:var(--neutral-fg)}
+.b-bug{background:var(--danger-soft);color:var(--danger)}
+.b-chore{background:var(--neutral-soft);color:var(--neutral-fg)}
+.b-high{background:var(--warning-soft);color:var(--warning)}
+.b-running{background:var(--success-soft);color:var(--success)}.b-running .dot{background:var(--success)}
+.b-queued{background:var(--neutral-soft);color:var(--neutral-fg)}.b-queued .dot{background:var(--text-subtle)}
+.b-wrapped{background:var(--success-soft);color:var(--success)}
+.b-blocked{background:var(--danger-soft);color:var(--danger)}
+.b-paused{background:var(--neutral-soft);color:var(--neutral-fg)}
+.b-type{background:var(--surface-2);color:var(--text-muted);border:1px solid var(--border);font-family:var(--mono);font-weight:500;text-transform:none}
+
+/* buttons */
+.btn{height:32px;padding:0 14px;border-radius:var(--r-sm);font-size:13px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--surface);color:var(--text)}
+.btn:hover{border-color:var(--border-strong);background:var(--surface-2)}
+.btn:active{transform:translateY(1px)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-contrast)}
+.btn.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
+.btn.sm{height:28px;padding:0 10px;font-size:12px}
+.actions{display:flex;gap:var(--s2);margin-left:auto}
+
+/* cards / sections */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow)}
+.card+.card{margin-top:var(--s4)}
+.card .hd{display:flex;align-items:center;justify-content:space-between;padding:var(--s3) var(--s4);border-bottom:1px solid var(--border)}
+.card .hd h3{margin:0;font-size:12px;font-weight:650;color:var(--text-muted);letter-spacing:.03em;text-transform:uppercase}
+.card .bd{padding:var(--s4)}
+.prose{font-size:13.5px}.prose p{margin:0 0 10px}.prose h4{margin:14px 0 6px;font-size:13.5px;font-weight:650}
+.prose code{font-family:var(--mono);font-size:12px;background:var(--surface-2);border:1px solid var(--border);padding:1px 5px;border-radius:5px}
+.prose ul{margin:0 0 10px;padding-left:18px}.prose li{margin:3px 0;color:var(--text-muted)}
+.link{color:var(--text);font-weight:550;cursor:pointer;text-decoration:underline;text-underline-offset:2px;text-decoration-color:var(--text-subtle)}.link:hover{text-decoration-color:var(--text)}
+
+/* filter bar */
+.filters{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;margin-bottom:var(--s4)}
+.input{height:32px;padding:0 10px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;font-family:var(--sans)}
+.input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ring)}
+.search{flex:1;min-width:200px;display:flex;align-items:center;gap:8px;height:32px;padding:0 10px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface);color:var(--text-subtle)}
+.search input{border:0;background:transparent;outline:none;color:var(--text);font-size:13px;width:100%;font-family:var(--sans)}
+.seg{display:flex;border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden}
+.seg button{height:32px;padding:0 11px;border:0;background:var(--surface);color:var(--text-muted);font-size:12.5px;font-weight:550;cursor:pointer}
+.seg button+button{border-left:1px solid var(--border)}
+.seg button.on{background:var(--selected);color:var(--text)}
+
+/* queue strip */
+.qstrip{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--s3);margin-bottom:var(--s5)}
+@media(max-width:820px){.qstrip{grid-template-columns:repeat(2,1fr)}}
+.qcell{border:1px solid var(--border);border-radius:var(--r);padding:var(--s3) var(--s4);background:var(--surface)}
+.qcell .n{font-size:22px;font-weight:680;letter-spacing:-.02em;font-family:var(--mono)}
+.qcell .l{font-size:11.5px;color:var(--text-subtle);text-transform:uppercase;letter-spacing:.05em;margin-top:2px}
+.qcell.hot{border-color:var(--accent-ring);background:var(--accent-soft)}
+.qcell.hot .n,.qcell.hot .l{color:var(--accent)}
+
+/* list */
+.list{border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;background:var(--surface);box-shadow:var(--shadow)}
+.list .grp{padding:8px var(--s4);background:var(--surface-2);font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.05em;color:var(--text-subtle);border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center}
+.row{display:grid;grid-template-columns:74px 1fr auto;gap:var(--s3);align-items:center;padding:11px var(--s4);border-bottom:1px solid var(--border);cursor:pointer}
+.row:last-child{border-bottom:0}
+.row:hover{background:var(--surface-2)}
+.row .id{font-family:var(--mono);font-size:12px;color:var(--text-subtle)}
+.row .ti{min-width:0}
+.row .ti .t{font-weight:550;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .ti .m{display:flex;gap:8px;align-items:center;margin-top:3px;color:var(--text-subtle);font-size:11.5px}
+.row .rt{display:flex;gap:var(--s3);align-items:center}
+.row.hot{box-shadow:inset 3px 0 0 var(--accent)}
+
+/* detail */
+.detail{display:grid;grid-template-columns:1fr 300px;gap:var(--s6);align-items:start}
+@media(max-width:860px){.detail{grid-template-columns:1fr}}
+.h-title{font-size:21px;line-height:1.3;font-weight:650;letter-spacing:-.012em;margin:6px 0 var(--s3)}
+.metaline{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;margin-bottom:var(--s5)}
+.meta-row{display:flex;justify-content:space-between;gap:var(--s3);padding:9px 0;border-bottom:1px solid var(--border);font-size:13px}
+.meta-row:last-child{border-bottom:0}.meta-row .k{color:var(--text-subtle)}.meta-row .v{color:var(--text);font-weight:500;text-align:right}
+.dep{display:flex;align-items:center;gap:var(--s2);padding:9px 0;border-bottom:1px solid var(--border)}
+.dep:last-child{border-bottom:0}.dep .id{font-family:var(--mono);font-size:12px;color:var(--text-muted)}
+.dep .txt{flex:1;color:var(--text-muted);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.needs{display:flex;align-items:center;gap:var(--s2);padding:10px var(--s4);border-radius:var(--r);background:var(--accent-soft);color:var(--accent);font-size:13px;font-weight:550;margin-bottom:var(--s5);border:1px solid var(--accent-ring)}
+.art{display:flex;align-items:center;gap:var(--s3);padding:10px;border:1px solid var(--border);border-radius:var(--r);background:var(--surface-2)}
+.art .ico{width:30px;height:30px;border-radius:var(--r-sm);background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;font-size:14px;flex:none;font-weight:700}
+.art .nm{font-weight:600;font-size:13px}.art .sub{color:var(--text-subtle);font-size:11.5px;font-family:var(--mono)}
+
+/* activity feed */
+.feed{position:relative}
+.fe{display:flex;gap:var(--s3);padding:0 0 var(--s4) var(--s2);position:relative}
+.fe:before{content:"";position:absolute;left:28px;top:26px;bottom:-2px;width:1.5px;background:var(--border)}
+.fe:last-child:before{display:none}
+.fe .ic{width:62px;height:20px;border-radius:5px;background:var(--surface-2);border:1px solid var(--border);display:inline-flex;align-items:center;justify-content:center;gap:5px;color:var(--text-muted);font-family:var(--mono);font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;flex:none;z-index:1}
+.fe .ic .dot,.atag .dot{width:5px;height:5px;border-radius:var(--pill);background:currentColor;flex:none}
+.fe.act .ic{background:var(--accent-soft);border-color:transparent;color:var(--accent)}
+.fe .ct{font-size:13px;padding-top:3px}.fe .ct .t{color:var(--text);line-height:1.45}.fe .ct .t b{font-weight:600}
+.fe .ct .ts{color:var(--text-subtle);font-size:11.5px;margin-top:1px}
+
+/* memory cards */
+.mgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:var(--s3)}
+@media(max-width:760px){.mgrid{grid-template-columns:1fr}}
+.mcard{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--surface);padding:var(--s4);cursor:pointer;box-shadow:var(--shadow)}
+.mcard:hover{border-color:var(--border-strong);transform:translateY(-1px)}
+.mcard .top{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.mcard .snip{font-size:13px;color:var(--text-muted);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.mcard .ft{display:flex;align-items:center;gap:10px;margin-top:10px;color:var(--text-subtle);font-size:11.5px}
+.mcard .ft .wi{font-family:var(--mono);color:var(--accent)}
+.strength{display:inline-flex;gap:2px;align-items:center;margin-left:auto;cursor:help}
+.strength i{width:5px;height:11px;border-radius:1px;background:var(--border-strong)}
+.strength i.on{background:var(--accent)}
+
+/* artifact viewer (centered doc + margin rail, a la #125) */
+.docwrap{display:grid;grid-template-columns:minmax(0,720px) 300px;gap:var(--s6);justify-content:center}
+@media(max-width:1040px){.docwrap{grid-template-columns:1fr}.rail{display:none}}
+.doc{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--s8) var(--s8);box-shadow:var(--shadow)}
+.doc h1{font-size:22px;font-weight:680;letter-spacing:-.015em;margin:0 0 6px}
+.doc h2{font-size:15px;font-weight:650;margin:22px 0 8px;padding-top:4px;border-top:1px solid var(--border)}
+.doc p,.doc li{font-size:13.5px;color:var(--text);line-height:1.65}
+.doc ul{padding-left:18px}
+.doc .hl{background:rgba(250,204,21,.38);border-bottom:2px solid rgba(202,138,4,.55);border-radius:2px;padding:0 1px;cursor:pointer}
+.doc .hl.res{background:rgba(34,197,94,.2);border-bottom:2px solid rgba(21,128,61,.45)}
+.doc .hl.sel{background:rgba(250,204,21,.22);border-bottom:2px dashed rgba(202,138,4,.7);position:relative}
+.annot-pill{position:absolute;top:-36px;right:0;height:27px;padding:0 12px;border-radius:var(--pill);background:var(--accent);color:var(--accent-contrast);font-size:12px;font-weight:600;display:inline-flex;align-items:center;box-shadow:var(--shadow-pop);cursor:pointer;white-space:nowrap;z-index:6}
+.annot-input{position:absolute;top:26px;right:0;width:300px;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);padding:12px;z-index:5;font-style:normal}
+.annot-input textarea{width:100%;min-height:54px;resize:vertical;border:1px solid var(--accent);box-shadow:0 0 0 3px var(--accent-ring);border-radius:var(--r-sm);background:var(--surface);color:var(--text);font-family:var(--sans);font-size:13px;padding:8px;box-sizing:border-box}
+.annot-input .rowb{display:flex;gap:8px;justify-content:flex-end;margin-top:9px}
+@keyframes hlflash{0%{background:rgba(250,204,21,.75)}100%{background:rgba(250,204,21,.38)}}
+.doc .hl.flash{animation:hlflash 1.4s ease}
+.note.focus{border-color:var(--text);box-shadow:0 0 0 3px var(--accent-ring)}
+.note.draft{border-left:3px solid var(--border-strong)}
+.note .ta{width:100%;min-height:56px;resize:vertical;border:1px solid var(--accent);box-shadow:0 0 0 3px var(--accent-ring);border-radius:var(--r-sm);background:var(--surface);color:var(--text);font-family:var(--sans);font-size:13px;padding:8px;margin-top:6px;box-sizing:border-box}
+.note .rowb{display:flex;gap:8px;justify-content:flex-end;margin-top:9px}
+.note .nh .st.d{color:var(--text-subtle)}
+.vers{display:flex;gap:8px;align-items:center;margin:12px 0 0;flex-wrap:wrap}
+.vchip{font-family:var(--mono);font-size:11px;padding:3px 10px;border-radius:var(--pill);border:1px solid var(--border);color:var(--text-muted);cursor:pointer}
+.vchip.cur{background:var(--selected);color:var(--text);border-color:var(--border-strong)}
+.vchip:hover{border-color:var(--border-strong)}
+.vpanel{margin-top:10px;border:1px solid var(--border);border-radius:var(--r);background:var(--surface-2);padding:6px 0;max-width:430px}
+.vrow{display:flex;gap:10px;padding:8px 14px;position:relative;align-items:flex-start;font-size:12.5px}
+.vrow:before{content:"";position:absolute;left:18px;top:22px;bottom:-6px;width:1.5px;background:var(--border-strong)}
+.vrow:last-child:before{display:none}
+.vdot{width:9px;height:9px;border-radius:50%;background:var(--border-strong);margin-top:4px;flex:none;z-index:1}
+.vrow.cur .vdot{background:var(--text)}
+.vrow b{font-family:var(--mono);font-size:12px}
+.vrow .vmeta{color:var(--text-subtle);font-size:11.5px;margin-top:1px}
+.vtag{font-family:var(--mono);font-size:10px;font-weight:600;background:var(--neutral-soft);color:var(--neutral-fg);border-radius:var(--pill);padding:1px 7px;margin-left:6px;vertical-align:1px}
+.find{border:1px solid var(--border);border-radius:var(--r);padding:12px 14px;margin:10px 0;background:var(--surface)}
+.find .fh{display:flex;align-items:center;gap:9px;margin-bottom:6px;flex-wrap:wrap}
+.find .fh b{font-size:13.5px}
+.find p{margin:0;color:var(--text-muted);font-size:13px;line-height:1.55}
+.b-mustfix{background:var(--danger-soft);color:var(--danger)}
+.b-should{background:var(--warning-soft);color:var(--warning)}
+.b-nit{background:var(--neutral-soft);color:var(--neutral-fg)}
+.ckl{list-style:none;padding:0;margin:0}
+.ckl li{display:flex;gap:9px;align-items:baseline;padding:4px 0;color:var(--text-muted);font-size:13px}
+.ckl .ok{width:5px;height:9px;border-right:1.8px solid var(--success);border-bottom:1.8px solid var(--success);transform:rotate(40deg);flex:none}
+.vlist{border:1px solid var(--border);border-radius:var(--r);background:var(--surface-2);margin:6px 0 2px;padding:2px 0}
+.chev{display:inline-block;width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);margin-right:8px;vertical-align:1px}
+@media (prefers-reduced-motion:no-preference){.chev{transition:transform .15s ease}}
+.chev.open{transform:rotate(45deg);vertical-align:2px}
+.pager{display:flex;align-items:center;gap:6px;margin-top:var(--s5)}
+.pager .pinfo{font-family:var(--mono);font-size:11.5px;color:var(--text-subtle)}
+.pbtn{min-width:28px;height:28px;border-radius:var(--r-sm);border:1px solid transparent;background:transparent;color:var(--text-muted);font-size:12.5px;font-weight:550;cursor:pointer}
+.pbtn:hover{background:var(--surface-2);color:var(--text)}
+.pbtn.on{background:var(--selected);color:var(--text);border-color:var(--border-strong)}
+.pell{color:var(--text-subtle);font-size:12px;padding:0 2px}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.dd{position:relative;display:inline-block}
+.dd-btn{height:30px;padding:0 12px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:12.5px;font-weight:550;cursor:pointer;display:inline-flex;align-items:center;gap:9px}
+.dd-btn:hover{border-color:var(--border-strong)}
+.dd-menu{position:absolute;top:35px;left:0;min-width:200px;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--r);box-shadow:var(--shadow-pop);padding:5px;z-index:30}
+.dd-it{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:5px;font-size:13px;cursor:pointer;color:var(--text)}
+.dd-it:hover{background:var(--surface-2)}
+.dd-it.on{background:var(--selected);font-weight:600}
+.dd-it .cnt{font-family:var(--mono);font-size:11px;color:var(--text-subtle)}
+.dd-it .ck{width:5px;height:9px;border-right:1.8px solid var(--text);border-bottom:1.8px solid var(--text);transform:rotate(40deg);margin-left:6px;opacity:0;flex:none}
+.dd-it.on .ck{opacity:1}
+.rail{display:flex;flex-direction:column;gap:var(--s3)}
+.note{border:1px solid var(--border);border-radius:var(--r);background:var(--surface);box-shadow:var(--shadow);padding:var(--s3)}
+.note.open{border-left:3px solid var(--warning)}
+.note.resolved{opacity:.7}
+.note .nh{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.note .nh .st{margin-left:auto;font-size:10.5px;font-weight:650;text-transform:uppercase;letter-spacing:.04em}
+.note .nh .st.o{color:var(--warning)}.note .nh .st.r{color:var(--success)}
+.note .q{font-size:12px;color:var(--text-subtle);border-left:2px solid var(--border-strong);padding-left:8px;margin-bottom:7px;font-style:italic}
+.note .body{font-size:13px;color:var(--text);line-height:1.5}
+.note .reply{display:flex;gap:7px;margin-top:9px;padding-top:9px;border-top:1px solid var(--border)}
+.note .reply .body{font-size:12.5px;color:var(--text-muted)}
+
+/* login */
+.loginwrap{min-height:calc(100dvh - 54px - 47px);display:grid;place-items:center;padding:var(--s6)}
+.logincard{width:360px;max-width:100%;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);padding:var(--s8)}
+.logincard .lb{display:flex;align-items:center;gap:var(--s2);justify-content:center;margin-bottom:var(--s5);font-weight:650;font-size:16px}
+.field{margin-bottom:var(--s4)}
+.field label{display:block;font-size:12.5px;font-weight:550;color:var(--text-muted);margin-bottom:6px}
+.field .input{width:100%}
+.muted{color:var(--text-subtle);font-size:12px;text-align:center;margin-top:var(--s4)}
+
+/* ===== design system (styleguide) page ===== */
+.sg{max-width:1000px}
+.ds-sec{padding:24px 0;border-top:1px solid var(--border)}
+.ds-sec:first-of-type{border-top:0}
+.ds-h{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-subtle);font-weight:650;margin:0 0 14px}
+.ds-row{display:flex;flex-wrap:wrap;gap:14px 18px;align-items:center}
+.ds-row.col{flex-direction:column;align-items:flex-start;gap:11px}
+.spec{font-family:var(--mono);font-size:11px;color:var(--text-subtle)}
+.tline{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;width:100%}
+.tline .spec{margin-left:auto}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--text-muted)}
+.btn.ghost:hover{background:var(--surface-2);color:var(--text)}
+.btn.danger{background:var(--danger);border-color:var(--danger);color:#fff}
+.btn.is-hover{background:var(--surface-2);border-color:var(--border-strong)}
+.btn.primary.is-hover{background:var(--accent-hover);border-color:var(--accent-hover)}
+.btn.is-focus{box-shadow:0 0 0 3px var(--accent-ring);border-color:var(--accent)}
+.btn.is-disabled{opacity:.45;cursor:not-allowed}
+.spin{width:13px;height:13px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;display:inline-block;vertical-align:-2px;margin-right:6px}
+@media (prefers-reduced-motion:no-preference){.spin{animation:sp .7s linear infinite}}
+@keyframes sp{to{transform:rotate(360deg)}}
+.input.is-focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ring);outline:none}
+.input.err{border-color:var(--danger)}
+.err-txt{color:var(--danger);font-size:12px;margin-top:5px}
+.help-txt{color:var(--text-subtle);font-size:12px;margin-top:5px}
+.b-urgent{background:var(--danger-soft);color:var(--danger)}.b-urgent .dot{background:var(--danger)}
+.b-normal{background:var(--neutral-soft);color:var(--neutral-fg)}
+.b-low{background:var(--neutral-soft);color:var(--text-subtle)}
+.b-failed{background:var(--danger-soft);color:var(--danger)}.b-failed .dot{background:var(--danger)}
+.swatch{display:flex;flex-direction:column;gap:6px;align-items:flex-start;font-size:10.5px;color:var(--text-subtle);font-family:var(--mono)}
+.swatch .box{width:64px;height:36px;border-radius:7px;border:1px solid var(--border)}
+.sp-bar{height:16px;background:var(--text);border-radius:3px}
+.empty{text-align:center;padding:30px;border:1px dashed var(--border-strong);border-radius:var(--r-lg);color:var(--text-muted);max-width:360px}
+.empty .ei{width:40px;height:40px;border-radius:10px;background:var(--surface-2);display:grid;place-items:center;margin:0 auto 10px;font-size:18px;color:var(--text-subtle)}
+.empty .et{font-weight:600;color:var(--text);margin-bottom:4px}
+.skel{background:var(--surface-2);border-radius:6px;height:12px}
+.skel.av{width:28px;height:28px;border-radius:50%}
+.cbx{display:inline-flex;align-items:center;gap:8px;font-size:13px}
+.cbx input{width:16px;height:16px;accent-color:var(--accent)}
+
+/* ===== commit / annotation layer ===== */
+body.cmt-on{cursor:crosshair}
+body.cmt-on .nav,body.cmt-on .proto,body.cmt-on .cmt-panel{cursor:default}
+.iconbtn.on{background:var(--selected);color:var(--text);border-color:var(--border-strong)}
+.pin{position:absolute;min-width:22px;height:22px;padding:0 5px;border-radius:11px 11px 11px 2px;background:var(--accent);color:var(--accent-contrast);font-size:11px;font-weight:700;display:inline-grid;place-items:center;transform:translate(-2px,-100%);cursor:pointer;z-index:40;box-shadow:var(--shadow-pop)}
+.cmt-pop{position:absolute;z-index:60;width:280px;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);padding:12px}
+.cmt-pop textarea{width:100%;min-height:62px;resize:vertical;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface);color:var(--text);font-family:var(--sans);font-size:13px;padding:8px}
+.cmt-pop textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ring)}
+.cmt-pop .tgt{font-size:11px;color:var(--text-subtle);margin-bottom:7px;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cmt-pop .rowb{display:flex;gap:8px;justify-content:flex-end;margin-top:9px}
+.cmt-panel{position:fixed;right:0;top:0;bottom:0;width:330px;background:var(--surface);border-left:1px solid var(--border);box-shadow:var(--shadow-pop);z-index:55;transform:translateX(100%);display:flex;flex-direction:column}
+.cmt-panel.open{transform:none}
+@media (prefers-reduced-motion:no-preference){.cmt-panel{transition:transform .2s ease}}
+.cmt-panel .ph2{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid var(--border);font-weight:650;font-size:14px}
+.cmt-list{overflow:auto;padding:8px;flex:1}
+.cmt-item{border:1px solid var(--border);border-radius:var(--r);padding:10px;margin-bottom:8px;font-size:13px;cursor:pointer}
+.cmt-item:hover{border-color:var(--border-strong);background:var(--surface-2)}
+.cmt-item .m{display:flex;gap:8px;align-items:center;color:var(--text-subtle);font-size:11px;font-family:var(--mono);margin-bottom:5px}
+.cmt-item .num{background:var(--accent);color:var(--accent-contrast);border-radius:7px;min-width:18px;height:16px;display:inline-grid;place-items:center;font-size:10px;font-weight:700}
+.cmt-item .tg{color:var(--text-subtle);font-family:var(--mono);font-size:11px;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cmt-empty{color:var(--text-subtle);font-size:13px;text-align:center;padding:24px;line-height:1.6}
+
+/* activity action tags - systematic color families (round3 #10) */
+.atag{min-width:56px;height:20px;padding:0 9px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;gap:5px;font-family:var(--mono);font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;background:var(--surface-2);border:1px solid var(--border);color:var(--text-muted);box-sizing:border-box}
+.fe .ic.a-save,.fe .ic.a-unblock,.fe .ic.a-wrap,.fe .ic.a-resolve,.atag.a-save,.atag.a-unblock,.atag.a-wrap,.atag.a-resolve{background:var(--success-soft);color:var(--success);border-color:transparent}
+.fe .ic.a-claim,.fe .ic.a-resume,.fe .ic.a-step,.atag.a-claim,.atag.a-resume,.atag.a-step{background:var(--success-soft);color:var(--success);border-color:transparent}
+.fe .ic.a-pause,.fe .ic.a-block,.fe .ic.a-stall,.atag.a-pause,.atag.a-block,.atag.a-stall{background:var(--warning-soft);color:var(--warning);border-color:transparent}
+.fe .ic.a-fail,.fe .ic.a-cancel,.fe .ic.a-takeover,.atag.a-fail,.atag.a-cancel,.atag.a-takeover{background:var(--danger-soft);color:var(--danger);border-color:transparent}
+.fe .ic.a-create,.fe .ic.a-note,.fe .ic.a-reply,.atag.a-create,.atag.a-note,.atag.a-reply{background:var(--neutral-soft);color:var(--neutral-fg);border-color:transparent}
+/* wi refs are clickable (commit #9) */
+.dep[data-go]{cursor:pointer}
+.dep[data-go]:hover{background:var(--surface-2)}
+</style>
+</head>
+<body>
+<header class="nav">
+  <div class="brand"><span class="mark">p</span> polyforge</div>
+  <nav class="links">
+    <a data-go="list" class="on">Work Items</a>
+    <a data-go="memories">Memories</a>
+  </nav>
+  <span class="spacer"></span>
+  <button class="iconbtn" id="cmtBtn" title="comment mode - click any element to leave a note for the agent">comment</button>
+  <button class="iconbtn" id="panelBtn" title="show comments">notes</button>
+  <button class="iconbtn" id="themeBtn" title="toggle light / dark">light / dark</button>
+  <span class="who"><span class="av av-mo">MO</span><span class="nm">monte</span></span>
+</header>
+
+<div class="proto">
+  <span class="tag">proto pages</span>
+  <span class="tab" data-go="ds">Design system</span>
+  <span class="tab on" data-go="list">Work item list + queue</span>
+  <span class="tab" data-go="detail">WI detail</span>
+  <span class="tab" data-go="memories">Memory list</span>
+  <span class="tab" data-go="memdetail">Memory detail</span>
+  <span class="tab" data-go="artifact">Artifact viewer</span>
+  <span class="tab" data-go="review">Review viewer</span>
+  <span class="tab" data-go="login">Login</span>
+</div>
+
+<!-- ============ PAGE: DESIGN SYSTEM ============ -->
+<main class="wrap sg" data-page="ds" hidden>
+  <div class="ph"><h1>Design system</h1><span class="sub">monochrome &middot; Geist &middot; light / dark &middot; locked tokens</span></div>
+
+  <div class="ds-sec">
+    <div class="ds-h">0 &middot; Color - greyscale ramp + muted state colors</div>
+    <div class="ds-row">
+      <div class="swatch"><div class="box" style="background:var(--bg)"></div>bg</div>
+      <div class="swatch"><div class="box" style="background:var(--surface)"></div>surface</div>
+      <div class="swatch"><div class="box" style="background:var(--surface-2)"></div>surface-2</div>
+      <div class="swatch"><div class="box" style="background:var(--surface-3)"></div>surface-3</div>
+      <div class="swatch"><div class="box" style="background:var(--selected)"></div>selected</div>
+      <div class="swatch"><div class="box" style="background:var(--border)"></div>border</div>
+      <div class="swatch"><div class="box" style="background:var(--text-subtle)"></div>subtle</div>
+      <div class="swatch"><div class="box" style="background:var(--text-muted)"></div>muted</div>
+      <div class="swatch"><div class="box" style="background:var(--text)"></div>text</div>
+      <div class="swatch"><div class="box" style="background:var(--accent)"></div>accent</div>
+    </div>
+    <div class="ds-row" style="margin-top:12px">
+      <div class="swatch"><div class="box" style="background:var(--success)"></div>success</div>
+      <div class="swatch"><div class="box" style="background:var(--warning)"></div>warning</div>
+      <div class="swatch"><div class="box" style="background:var(--danger)"></div>danger</div>
+      <span class="spec">color only survives in status/priority - never as UI accent</span>
+    </div>
+  </div>
+
+  <div class="ds-sec">
+    <div class="ds-h">1 &middot; Type scale (Geist / Geist Mono)</div>
+    <div class="ds-row col">
+      <div class="tline"><span style="font-size:28px;font-weight:700;letter-spacing:-.02em">Display</span><span class="spec">28 / 700 / -0.02em</span></div>
+      <div class="tline"><span style="font-size:21px;font-weight:650;letter-spacing:-.012em">Heading 1</span><span class="spec">21 / 650 / -0.012em</span></div>
+      <div class="tline"><span style="font-size:15px;font-weight:650">Heading 2</span><span class="spec">15 / 650</span></div>
+      <div class="tline"><span style="font-size:14px">Body - the quick brown fox jumps</span><span class="spec">14 / 400 / 1.55</span></div>
+      <div class="tline"><span style="font-size:12.5px;font-weight:500;color:var(--text-muted)">Small / secondary text</span><span class="spec">12.5 / 500 / muted</span></div>
+      <div class="tline"><span style="font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--text-subtle)">Caption / label</span><span class="spec">11 / 650 / .06em upper</span></div>
+      <div class="tline"><span class="mono" style="font-size:12px">aihub#129 &middot; ra_w7Bib9a4 &middot; 47</span><span class="spec">Geist Mono 12 - ids/nums/ts</span></div>
+    </div>
+  </div>
+
+  <div class="ds-sec">
+    <div class="ds-h">2 &middot; Spacing (4px base) + radius</div>
+    <div class="ds-row col" style="gap:8px">
+      <div style="display:flex;align-items:center;gap:10px"><div class="sp-bar" style="width:4px"></div><span class="spec">s1 &middot; 4</span></div>
+      <div style="display:flex;align-items:center;gap:10px"><div class="sp-bar" style="width:8px"></div><span class="spec">s2 &middot; 8</span></div>
+      <div style="display:flex;align-items:center;gap:10px"><div class="sp-bar" style="width:12px"></div><span class="spec">s3 &middot; 12</span></div>
+      <div style="display:flex;align-items:center;gap:10px"><div class="sp-bar" style="width:16px"></div><span class="spec">s4 &middot; 16</span></div>
+      <div style="display:flex;align-items:center;gap:10px"><div class="sp-bar" style="width:24px"></div><span class="spec">s6 &middot; 24</span></div>
+      <div style="display:flex;align-items:center;gap:10px"><div class="sp-bar" style="width:32px"></div><span class="spec">s8 &middot; 32</span></div>
+    </div>
+    <div class="ds-row" style="margin-top:16px">
+      <div class="swatch"><div class="box" style="background:var(--surface-2);border-radius:5px"></div>5 sm</div>
+      <div class="swatch"><div class="box" style="background:var(--surface-2);border-radius:7px"></div>7 base</div>
+      <div class="swatch"><div class="box" style="background:var(--surface-2);border-radius:10px"></div>10 lg</div>
+      <div class="swatch"><div class="box" style="background:var(--surface-2);border-radius:999px"></div>pill</div>
+    </div>
+  </div>
+
+  <div class="ds-sec">
+    <div class="ds-h">3 &middot; Buttons</div>
+    <div class="ds-row">
+      <button class="btn primary">Claim</button>
+      <button class="btn primary is-hover">Claim</button>
+      <button class="btn primary is-focus">Claim</button>
+      <button class="btn primary"><span class="spin"></span>Saving</button>
+      <button class="btn primary is-disabled">Claim</button>
+      <span class="spec">primary &middot; default / hover / focus / loading / disabled</span>
+    </div>
+    <div class="ds-row" style="margin-top:11px">
+      <button class="btn">Secondary</button>
+      <button class="btn is-hover">Secondary</button>
+      <button class="btn ghost">Ghost</button>
+      <button class="btn danger">Delete</button>
+      <button class="btn sm">Small</button>
+      <span class="spec">h32 (sm h28) &middot; r5 &middot; 13/600 &middot; primary = 1 per view</span>
+    </div>
+  </div>
+
+  <div class="ds-sec">
+    <div class="ds-h">4 &middot; Badges + status dots</div>
+    <div class="ds-row">
+      <span class="badge b-queued"><span class="dot"></span>queued</span>
+      <span class="badge b-running"><span class="dot"></span>running</span>
+      <span class="badge b-wrapped">wrapped</span>
+      <span class="badge b-blocked">blocked</span>
+      <span class="badge b-paused">paused</span>
+      <span class="badge b-failed"><span class="dot"></span>failed</span>
+      <span class="spec">status</span>
+    </div>
+    <div class="ds-row" style="margin-top:10px">
+      <span class="badge b-low">low</span>
+      <span class="badge b-normal">normal</span>
+      <span class="badge b-high">high</span>
+      <span class="badge b-urgent"><span class="dot"></span>urgent</span>
+      <span class="spec">priority</span>
+    </div>
+    <div class="ds-row" style="margin-top:10px">
+      <span class="badge b-feature">feature</span>
+      <span class="badge b-bug">fix_bug</span>
+      <span class="badge b-chore">chore</span>
+      <span class="badge b-type">methodology.spec</span>
+      <span class="spec">kind / type - neutral (no accent)</span>
+    </div>
+  </div>
+
+  <div class="ds-sec">
+    <div class="ds-h">5 &middot; Inputs &amp; forms</div>
+    <div class="ds-row" style="align-items:flex-start">
+      <div><label class="help-txt" style="display:block;margin:0 0 6px;color:var(--text-muted);font-weight:550">Label</label><input class="input" style="width:200px" placeholder="Default"></div>
+      <div><label class="help-txt" style="display:block;margin:0 0 6px;color:var(--text-muted);font-weight:550">Focused</label><input class="input is-focus" style="width:200px" value="Typing..."></div>
+      <div><label class="help-txt" style="display:block;margin:0 0 6px;color:var(--text-muted);font-weight:550">Error</label><input class="input err" style="width:200px" value="bad value"><div class="err-txt">This field is required.</div></div>
+    </div>
+    <div class="ds-row" style="margin-top:14px">
+      <div class="dd">
+        <button class="dd-btn"><span class="lbl">Select option</span><span class="chev open" style="margin:0"></span></button>
+        <div class="dd-menu" style="position:static;margin-top:8px;box-shadow:var(--shadow)">
+          <div class="dd-it on" data-l="Option A">Option A<span style="flex:1"></span><span class="ck"></span></div>
+          <div class="dd-it" data-l="Option B">Option B<span style="flex:1"></span><span class="ck"></span></div>
+          <div class="dd-it" data-l="Option C">Option C<span style="flex:1"></span><span class="ck"></span></div>
+        </div>
+      </div>
+      <div class="search" style="width:220px"><span>search</span><input placeholder="Search..."></div>
+      <label class="cbx"><input type="checkbox" checked> Checkbox</label>
+      <label class="cbx"><input type="radio" checked name="r"> Radio</label>
+    </div>
+  </div>
+
+  <div class="ds-sec">
+    <div class="ds-h">6 &middot; Person chip + avatars (per-person color)</div>
+    <div class="ds-row">
+      <span class="av sm av-mo">MO</span><span class="av av-xqr">XQ</span><span class="av lg av-xk">XK</span><span class="av lg av-li">LI</span>
+      <span class="spec">sm 20 / md 24 / lg 30</span>
+    </div>
+    <div class="ds-row" style="margin-top:12px">
+      <span class="who"><span class="av av-mo">MO</span><span class="nm">monte</span></span>
+      <span class="who"><span class="av av-xqr">XQ</span><span class="nm">xqr</span> <span class="role">reporter</span></span>
+      <span class="who"><span class="av ghost">?</span><span class="role">unassigned</span></span>
+    </div>
+  </div>
+
+  <div class="ds-sec">
+    <div class="ds-h">7 &middot; Containers - card / list row / divider</div>
+    <div class="ds-row" style="align-items:stretch;gap:16px">
+      <div class="card" style="width:260px"><div class="hd"><h3>Card</h3></div><div class="bd" style="font-size:13px;color:var(--text-muted)">Elevated surface, 1px border, r10, subtle shadow.</div></div>
+      <div class="list" style="flex:1;min-width:280px;box-shadow:none">
+        <div class="row"><span class="id">aihub#129</span><span class="ti"><div class="t">Default row</div></span><span class="rt"><span class="badge b-queued"><span class="dot"></span>queued</span></span></div>
+        <div class="row is-hover"><span class="id">aihub#127</span><span class="ti"><div class="t">Hover row</div></span><span class="rt"><span class="badge b-running"><span class="dot"></span>running</span></span></div>
+        <div class="row hot"><span class="id">aihub#125</span><span class="ti"><div class="t">Selected / needs-you (black bar)</div></span><span class="rt"><span class="who"><span class="av lg av-mo">MO</span></span></span></div>
+      </div>
+    </div>
+    <div class="spec" style="margin-top:10px">prefer 1px dividers over nested cards at high density; hover = surface-2; needs-you = inset black bar</div>
+  </div>
+
+  <div class="ds-sec">
+    <div class="ds-h">8 &middot; Empty / loading / error states</div>
+    <div class="ds-row" style="align-items:flex-start">
+      <div class="empty"><div class="ei">+</div><div class="et">No work items yet</div>No items match this filter. Create one or clear filters.</div>
+      <div class="card" style="width:280px"><div class="bd">
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px"><div class="skel av"></div><div style="flex:1"><div class="skel" style="width:60%;margin-bottom:7px"></div><div class="skel" style="width:40%;height:10px"></div></div></div>
+        <div class="skel" style="margin:7px 0"></div><div class="skel" style="width:80%;margin:7px 0"></div>
+        <div class="spec" style="margin-top:8px">skeleton matches final shape</div>
+      </div></div>
+      <div class="card" style="width:260px"><div class="bd" style="display:flex;gap:10px"><span style="color:var(--danger);font-weight:700">!</span><div style="font-size:13px"><div style="font-weight:600">Could not load</div><div style="color:var(--text-muted)">Retry or check connection.</div><button class="btn sm" style="margin-top:8px">Retry</button></div></div></div>
+    </div>
+  </div>
+
+  <div class="ds-sec">
+    <div class="ds-h">9 &middot; Activity feed + comment thread</div>
+    <div class="ds-row" style="align-items:flex-start;gap:24px">
+      <div class="feed" style="flex:1;min-width:300px">
+        <div class="fe act"><span class="ic a-save">save</span><div class="ct"><div class="t"><span class="who"><span class="av sm av-mo">MO</span><b>monte</b></span> saved a spec <span class="mono link">mem_xfOviiEY</span></div><div class="ts">12 minutes ago</div></div></div>
+        <div class="fe"><span class="ic a-unblock">unblock</span><div class="ct"><div class="t">unblocked by <span class="mono">aihub#125</span></div><div class="ts">1 hour ago</div></div></div>
+      </div>
+      <div style="flex:1;min-width:300px">
+        <div class="note open"><div class="nh"><span class="who"><span class="av sm av-xqr">XQ</span><b class="nm">xqr</b></span><span class="st o" style="margin-left:auto">open</span></div><div class="q">"design language"</div><div class="body">Lock the accent before plan?</div><div class="reply"><span class="av sm av-mo">MO</span><div class="body"><b style="color:var(--text)">monte</b> - locked monochrome.</div></div></div>
+      </div>
+    </div>
+    <div style="margin-top:18px">
+      <div class="ds-row"><span class="atag a-wrap">wrap</span><span class="atag a-save">save</span><span class="atag a-unblock">unblock</span><span class="atag a-resolve">resolve</span><span class="spec">positive result = green, no dot (same language as the wrapped badge)</span></div>
+      <div class="ds-row" style="margin-top:8px"><span class="atag a-claim"><span class="dot"></span>claim</span><span class="atag a-resume"><span class="dot"></span>resume</span><span class="atag a-step"><span class="dot"></span>step</span><span class="spec">in progress = green + dot (same language as the running badge)</span></div>
+      <div class="ds-row" style="margin-top:8px"><span class="atag a-pause">pause</span><span class="atag a-block">block</span><span class="atag a-stall">stall</span><span class="spec">waiting / impediment = amber</span></div>
+      <div class="ds-row" style="margin-top:8px"><span class="atag a-fail">fail</span><span class="atag a-cancel">cancel</span><span class="atag a-takeover">takeover</span><span class="spec">failure / destructive = red</span></div>
+      <div class="ds-row" style="margin-top:8px"><span class="atag a-create">create</span><span class="atag a-note">note</span><span class="atag a-reply">reply</span><span class="spec">informational = neutral</span></div>
+    </div>
+  </div>
+</main>
+
+<!-- ============ PAGE: WI LIST + QUEUE ============ -->
+<main class="wrap" data-page="list">
+  <div class="ph"><h1>Work Items</h1>
+    <div class="dd" id="projDD">
+      <button class="dd-btn"><span class="lbl">All projects</span><span class="chev open" style="margin:0"></span></button>
+      <div class="dd-menu" hidden>
+        <div class="dd-it on" data-v="all" data-l="All projects">All projects<span style="flex:1"></span><span class="cnt">7</span><span class="ck"></span></div>
+        <div class="dd-it" data-v="aihub" data-l="aihub">aihub<span style="flex:1"></span><span class="cnt">5</span><span class="ck"></span></div>
+        <div class="dd-it" data-v="ieops" data-l="ieops">ieops<span style="flex:1"></span><span class="cnt">1</span><span class="ck"></span></div>
+        <div class="dd-it" data-v="tether" data-l="tether">tether<span style="flex:1"></span><span class="cnt">1</span><span class="ck"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="qstrip">
+    <div class="qcell"><div class="n">2</div><div class="l">Running</div></div>
+    <div class="qcell hot"><div class="n">1</div><div class="l">Needs you</div></div>
+    <div class="qcell"><div class="n">4</div><div class="l">Unclaimed</div></div>
+    <div class="qcell"><div class="n">0</div><div class="l">Stalled</div></div>
+  </div>
+
+  <div class="filters">
+    <div class="search"><span>search</span><input placeholder="Filter by title, id, label..."></div>
+    <div class="seg"><button class="on">All</button><button>Mine</button><button>Watching</button></div>
+    <div class="dd">
+      <button class="dd-btn"><span class="lbl">All status</span><span class="chev open" style="margin:0"></span></button>
+      <div class="dd-menu" hidden style="left:auto;right:0">
+        <div class="dd-it on" data-l="All status">All status<span style="flex:1"></span><span class="ck"></span></div>
+        <div class="dd-it" data-l="Running">Running<span style="flex:1"></span><span class="ck"></span></div>
+        <div class="dd-it" data-l="Queued">Queued<span style="flex:1"></span><span class="ck"></span></div>
+        <div class="dd-it" data-l="Wrapped">Wrapped<span style="flex:1"></span><span class="ck"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="list">
+    <div class="grp">Needs you</div>
+    <div class="row hot" data-go="detail">
+      <span class="id">aihub#129</span>
+      <span class="ti"><div class="t">Major visual and usability overhaul of the polyforge Web UI</div>
+        <div class="m"><span class="badge b-feature">feature</span><span class="badge b-high">high</span><span>updated 12m ago</span></div></span>
+      <span class="rt"><span class="badge b-queued"><span class="dot"></span>queued</span><span class="who"><span class="av lg av-mo">MO</span></span></span>
+    </div>
+    <div class="grp">Running</div>
+    <div class="row">
+      <span class="id">aihub#127</span>
+      <span class="ti"><div class="t">fix(mcp/claim): persist wi_id not slug in state file</div>
+        <div class="m"><span class="badge b-bug">fix_bug</span><span>updated 1h ago</span></div></span>
+      <span class="rt"><span class="badge b-running"><span class="dot"></span>running</span><span class="who"><span class="av lg av-mo">MO</span></span></span>
+    </div>
+    <div class="row">
+      <span class="id">aihub#125</span>
+      <span class="ti"><div class="t">Word/Overleaf-style text-selection annotations</div>
+        <div class="m"><span class="badge b-feature">feature</span><span>wrapped 1h ago</span></div></span>
+      <span class="rt"><span class="badge b-wrapped">wrapped</span><span class="who"><span class="av lg av-mo">MO</span></span></span>
+    </div>
+    <div class="row">
+      <span class="id">tether#3</span>
+      <span class="ti"><div class="t">fix: WebTransport handshake fails on UDP-blocked networks</div>
+        <div class="m"><span class="badge b-bug">fix_bug</span><span>updated 30m ago</span></div></span>
+      <span class="rt"><span class="badge b-running"><span class="dot"></span>running</span><span class="who"><span class="av lg av-li">LE</span></span></span>
+    </div>
+    <div class="grp">Unclaimed</div>
+    <div class="row">
+      <span class="id">aihub#128</span>
+      <span class="ti"><div class="t">fix: binary download fixed-name tmp blocks MCP startup</div>
+        <div class="m"><span class="badge b-bug">fix_bug</span><span>created 4h ago</span></div></span>
+      <span class="rt"><span class="badge b-queued"><span class="dot"></span>queued</span><span class="who" title="unassigned"><span class="av lg ghost">?</span></span></span>
+    </div>
+    <div class="row">
+      <span class="id">aihub#60</span>
+      <span class="ti"><div class="t">fix(tests): integration seed bootstrap fails on migration 0013</div>
+        <div class="m"><span class="badge b-bug">fix_bug</span><span>created 6d ago</span></div></span>
+      <span class="rt"><span class="badge b-queued"><span class="dot"></span>queued</span><span class="who" title="unassigned"><span class="av lg ghost">?</span></span></span>
+    </div>
+    <div class="row">
+      <span class="id">ieops#11</span>
+      <span class="ti"><div class="t">fix(controller): HasRegionPriority coupling + config re-assert fragility</div>
+        <div class="m"><span class="badge b-bug">fix_bug</span><span>created 4d ago</span></div></span>
+      <span class="rt"><span class="badge b-queued"><span class="dot"></span>queued</span><span class="who" title="unassigned"><span class="av lg ghost">?</span></span></span>
+    </div>
+  </div>
+</main>
+
+<!-- ============ PAGE: WI DETAIL ============ -->
+<main class="wrap" data-page="detail" hidden>
+  <div class="crumb"><a data-go="list">Work Items</a> <span>/</span> <span class="mono">aihub#129</span></div>
+  <div class="needs"><span>●</span> Needs you - this item is queued and assigned to your team. Claim it to start the spec.</div>
+  <div class="detail">
+    <div>
+      <div class="metaline">
+        <span class="badge b-feature">feature</span><span class="badge b-high">high</span>
+        <span class="badge b-queued"><span class="dot"></span>queued</span>
+        <span class="actions"><button class="btn">Watch</button><button class="btn primary">Claim</button></span>
+      </div>
+      <h1 class="h-title">Major visual and usability overhaul of the polyforge Web UI: rework the /ui views' design language, hierarchy, and interactions toward a product-grade UI</h1>
+      <div class="card"><div class="hd"><h3>Background</h3></div>
+        <div class="bd prose">
+          <p>The current <code>/ui</code> is a functional internal tool: only 10 <code>:root</code> variables, GitHub Light palette, ad-hoc spacing, a single breakpoint, no dark mode, no design system.</p>
+          <h4>Why now</h4>
+          <p>Lift the whole Web UI to a mature team-collaboration product feel: one visual language, clear hierarchy, comfortable typography, usable navigation and status feedback.</p>
+          <h4>Constraints</h4>
+          <ul><li>Stay on HTMX + server-rendered, no SPA framework</li><li>No backend / API / DB / route changes, presentation layer only</li><li>Coordinate the artifact viewer with <code>aihub#125</code>, keep /v1 + /share invariant</li></ul>
+        </div>
+      </div>
+      <div class="card"><div class="hd"><h3>Activity</h3><span class="role mono" style="font-size:11px;color:var(--text-subtle)">live</span></div>
+        <div class="bd feed">
+          <div class="fe act"><span class="ic a-save">save</span><div class="ct"><div class="t"><span class="who"><span class="av sm av-mo">MO</span><b>monte</b></span> saved a spec artifact <span class="mono link">mem_xfOviiEY</span></div><div class="ts">12 minutes ago</div></div></div>
+          <div class="fe"><span class="ic a-claim"><span class="dot"></span>claim</span><div class="ct"><div class="t"><span class="who"><span class="av sm av-mo">MO</span><b>monte</b></span> claimed the item - attempt <span class="mono">ra_w7Bib9a4</span></div><div class="ts">18 minutes ago</div></div></div>
+          <div class="fe"><span class="ic a-resolve">resolve</span><div class="ct"><div class="t"><span class="who"><span class="av sm av-mo">MO</span><b>monte</b></span> resolved <b>xqr</b>'s annotation on the spec</div><div class="ts">15 minutes ago</div></div></div>
+          <div class="fe"><span class="ic a-unblock">unblock</span><div class="ct"><div class="t">unblocked - dependency <span class="mono">aihub#125</span> was wrapped by <span class="who"><span class="av sm av-mo">MO</span><b>monte</b></span></div><div class="ts">1 hour ago</div></div></div>
+          <div class="fe"><span class="ic a-resume"><span class="dot"></span>resume</span><div class="ct"><div class="t"><span class="who"><span class="av sm av-xqr">XQ</span><b>xqr</b></span> resumed the item</div><div class="ts">2 hours ago</div></div></div>
+          <div class="fe"><span class="ic a-pause">pause</span><div class="ct"><div class="t"><span class="who"><span class="av sm av-xqr">XQ</span><b>xqr</b></span> paused the item - lease released</div><div class="ts">3 hours ago</div></div></div>
+          <div class="fe"><span class="ic a-block">block</span><div class="ct"><div class="t">blocked - dependency on <span class="mono">aihub#125</span> added</div><div class="ts">5 hours ago</div></div></div>
+          <div class="fe"><span class="ic a-takeover">takeover</span><div class="ct"><div class="t"><span class="who"><span class="av sm av-xqr">XQ</span><b>xqr</b></span> took over the idle attempt from <b>leo</b></div><div class="ts">yesterday</div></div></div>
+          <div class="fe"><span class="ic a-fail">fail</span><div class="ct"><div class="t">attempt <span class="mono">ra_q2NbA0c</span> failed - build error in render tests</div><div class="ts">yesterday</div></div></div>
+          <div class="fe"><span class="ic a-note">note</span><div class="ct"><div class="t"><span class="who"><span class="av sm av-xk">XK</span><b>xiaokang.w</b></span> left a note - "coordinate with #125 annotations"</div><div class="ts">yesterday</div></div></div>
+          <div class="fe"><span class="ic a-create">create</span><div class="ct"><div class="t"><span class="who"><span class="av sm av-mo">MO</span><b>monte</b></span> created this work item</div><div class="ts">2 days ago</div></div></div>
+        </div>
+      </div>
+    </div>
+    <aside>
+      <div class="card"><div class="hd"><h3>Details</h3></div><div class="bd">
+        <div class="meta-row"><span class="k">Reporter</span><span class="v"><span class="who"><span class="av av-mo">MO</span><span class="nm">monte</span></span></span></div>
+        <div class="meta-row"><span class="k">Assignee</span><span class="v"><span class="who"><span class="av av-mo">MO</span><span class="nm">monte</span></span></span></div>
+        <div class="meta-row"><span class="k">Created</span><span class="v">2026-06-03</span></div>
+      </div></div>
+      <div class="card"><div class="hd"><h3>Blocked by</h3></div><div class="bd">
+        <div class="dep" data-go="detail"><span class="badge b-wrapped">wrapped</span><span class="id link">aihub#125</span><span style="flex:1"></span><span class="who" title="owner: monte"><span class="av sm av-mo">MO</span></span></div>
+      </div></div>
+      <div class="card"><div class="hd"><h3>Blocking</h3></div><div class="bd">
+        <div class="dep" data-go="detail"><span class="badge b-queued"><span class="dot"></span>queued</span><span class="id link">aihub#130</span><span style="flex:1"></span><span class="who" title="unassigned"><span class="av sm ghost">?</span></span></div>
+        <div class="dep" data-go="detail"><span class="badge b-queued"><span class="dot"></span>queued</span><span class="id link">aihub#131</span><span style="flex:1"></span><span class="who" title="unassigned"><span class="av sm ghost">?</span></span></div>
+      </div></div>
+      <div class="card"><div class="hd"><h3>Artifacts</h3></div><div class="bd">
+        <div class="art"><span class="ico">S</span><div><div class="nm">Spec<span class="vtag">v3</span></div><div class="sub">mem_xfOviiEY</div></div><span style="margin-left:auto;display:inline-flex;align-items:center;gap:12px"><a class="link" data-go="artifact" style="font-size:12.5px">Open</a><span class="chev" data-toggle="specVers" style="cursor:pointer"></span></span></div>
+        <div class="vlist" id="specVers" hidden>
+          <div class="vrow cur"><span class="vdot"></span><div><b>v3</b> <span style="font-size:10.5px;color:var(--success);font-weight:650;margin-left:4px">current</span><div class="vmeta">today - monte - revised after review annotations</div></div></div>
+          <div class="vrow"><span class="vdot"></span><div><b>v2</b><div class="vmeta">06-02 - monte - post-review</div></div><span style="margin-left:auto;display:inline-flex;gap:8px"><a class="link" style="font-size:11px">View</a><a class="link" data-go="review" style="font-size:11px;color:var(--success)">Review</a></span></div>
+          <div class="vrow"><span class="vdot"></span><div><b>v1</b><div class="vmeta">06-01 - monte - initial</div></div><a class="link" style="margin-left:auto;font-size:11px">View</a></div>
+        </div>
+        <div class="art" style="margin-top:8px"><span class="ico">P</span><div><div class="nm">Plan<span class="vtag">v1</span></div><div class="sub">mem_q8PlanRf</div></div><a class="link" data-go="artifact" style="margin-left:auto;font-size:12.5px">Open</a></div>
+      </div></div>
+    </aside>
+  </div>
+</main>
+
+<!-- ============ PAGE: MEMORY LIST ============ -->
+<main class="wrap" data-page="memories" hidden>
+  <div class="ph"><h1>Memories</h1><span class="sub">team knowledge - experiences, facts, rules, specs</span></div>
+  <div class="filters">
+    <div class="search"><span>search</span><input placeholder="Semantic recall over team memory..."></div>
+    <div class="dd">
+      <button class="dd-btn"><span class="lbl">All types</span><span class="chev open" style="margin:0"></span></button>
+      <div class="dd-menu" hidden>
+        <div class="dd-it on" data-l="All types">All types<span style="flex:1"></span><span class="ck"></span></div>
+        <div class="dd-it" data-l="experience.*">experience.*<span style="flex:1"></span><span class="ck"></span></div>
+        <div class="dd-it" data-l="rule.*">rule.*<span style="flex:1"></span><span class="ck"></span></div>
+        <div class="dd-it" data-l="methodology.*">methodology.*<span style="flex:1"></span><span class="ck"></span></div>
+      </div>
+    </div>
+    <div class="dd">
+      <button class="dd-btn"><span class="lbl">Newest first</span><span class="chev open" style="margin:0"></span></button>
+      <div class="dd-menu" hidden>
+        <div class="dd-it on" data-l="Newest first">Newest first<span style="flex:1"></span><span class="ck"></span></div>
+        <div class="dd-it" data-l="Oldest first">Oldest first<span style="flex:1"></span><span class="ck"></span></div>
+        <div class="dd-it" data-l="Strength: high to low">Strength: high to low<span style="flex:1"></span><span class="ck"></span></div>
+        <div class="dd-it" data-l="Strength: low to high">Strength: low to high<span style="flex:1"></span><span class="ck"></span></div>
+      </div>
+    </div>
+    <div class="seg"><button class="on">All</button><button>Mine</button></div>
+  </div>
+  <div class="mgrid">
+    <div class="mcard" data-go="memdetail">
+      <div class="top"><span class="badge b-bug">experience.pitfall</span><span class="strength" title="memory strength (recall weight)"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i></span></div>
+      <div class="snip">aihub Memory struct has its column order replicated in FOUR places that MUST stay in lock-step. Adding a column requires editing all 5 sites with the SAME ordering or pgx Scan silently misaligns.</div>
+      <div class="ft"><span class="who"><span class="av sm av-mo">MO</span><span class="nm">monte</span></span><span class="wi">aihub#27</span><span style="margin-left:auto">35d</span></div>
+    </div>
+    <div class="mcard" data-go="memdetail">
+      <div class="top"><span class="badge b-feature">methodology.spec</span><span class="strength" title="memory strength (recall weight)"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i></span></div>
+      <div class="snip">Spec: aihub#125 - Word/Overleaf-style text-selection annotations. W3C TextQuoteSelector anchoring, per-version isolation, threaded replies with in-place resolve.</div>
+      <div class="ft"><span class="who"><span class="av sm av-mo">MO</span><span class="nm">monte</span></span><span class="wi">aihub#125</span><span style="margin-left:auto">1h</span></div>
+    </div>
+    <div class="mcard" data-go="memdetail">
+      <div class="top"><span class="badge b-chore">rule.process</span><span class="strength" title="memory strength (recall weight)"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></span></div>
+      <div class="snip">When subagents WRITE code, dispatch with model sonnet (haiku for trivial). Opus orchestrates planning + reviews; Sonnet executes from the plan markdown.</div>
+      <div class="ft"><span class="who"><span class="av sm av-xk">XK</span><span class="nm">xiaokang.w</span></span><span class="wi">aihub#74</span><span style="margin-left:auto">1d</span></div>
+    </div>
+    <div class="mcard" data-go="memdetail">
+      <div class="top"><span class="badge b-chore">experience.approach</span><span class="strength" title="memory strength (recall weight)"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i></span></div>
+      <div class="snip">Adding fields to a repo entry needs NO DB migration - projects.repos is a JSONB array. Extend repoEntry struct + validateRepos and mirror in cli/init.go.</div>
+      <div class="ft"><span class="who"><span class="av sm av-xqr">XQ</span><span class="nm">xqr</span></span><span class="wi">aihub#66</span><span style="margin-left:auto">7d</span></div>
+    </div>
+  </div>
+  <div class="pager">
+    <span class="pinfo">1-12 of 248</span>
+    <div class="dd" style="margin-left:10px">
+      <button class="dd-btn" style="height:28px;font-size:12px"><span class="lbl">12 / page</span><span class="chev open" style="margin:0"></span></button>
+      <div class="dd-menu" hidden style="top:auto;bottom:33px">
+        <div class="dd-it on" data-l="12 / page">12 / page<span style="flex:1"></span><span class="ck"></span></div>
+        <div class="dd-it" data-l="24 / page">24 / page<span style="flex:1"></span><span class="ck"></span></div>
+        <div class="dd-it" data-l="48 / page">48 / page<span style="flex:1"></span><span class="ck"></span></div>
+        <div class="dd-it" data-l="96 / page">96 / page<span style="flex:1"></span><span class="ck"></span></div>
+      </div>
+    </div>
+    <span style="flex:1"></span>
+    <button class="btn sm" disabled>Prev</button>
+    <button class="pbtn on">1</button><button class="pbtn">2</button><button class="pbtn">3</button><span class="pell">...</span><button class="pbtn">21</button>
+    <button class="btn sm">Next</button>
+  </div>
+</main>
+
+<!-- ============ PAGE: MEMORY DETAIL ============ -->
+<main class="wrap" data-page="memdetail" hidden>
+  <div class="crumb"><a data-go="memories">Memories</a> <span>/</span> <span class="mono">mem_i9I2g8Hv</span></div>
+  <div class="detail">
+    <div>
+      <div class="metaline"><span class="badge b-bug">experience.pitfall</span><span class="strength" style="margin-left:0"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i></span></div>
+      <h1 class="h-title">aihub Memory struct column-drift across 5 sites</h1>
+      <div class="card"><div class="bd prose">
+        <p>aihub Memory struct (<code>internal/domain/memory.go</code>) has its column order replicated in FOUR places that MUST stay in lock-step: struct field order, the INSERT column list, the RETURNING + Scan, and <code>scanMemory</code> rows.Scan (whose SELECT list is the 5th place).</p>
+        <p>Adding a column requires editing all 5 sites with the SAME ordering or pgx Scan silently misaligns and corrupts neighboring fields - no compile error, no runtime panic, wrong values returned.</p>
+      </div></div>
+      <div class="card"><div class="hd"><h3>Comments</h3><span class="badge b-feature" style="margin-left:auto">2 open</span></div><div class="bd">
+        <div class="note open" style="margin-bottom:12px">
+          <div class="nh"><span class="who"><span class="av sm av-xqr">XQ</span><b class="nm">xqr</b></span><span class="ts" style="color:var(--text-subtle);font-size:11.5px">2d</span><span class="st o">open</span></div>
+          <div class="body">Should we just generate the scan list from struct tags to kill this whole class of bug?</div>
+          <div class="reply"><span class="av sm av-mo">MO</span><div class="body"><b style="color:var(--text)">monte</b> - agree, but out of scope here; filed as a follow-up chore.</div></div>
+        </div>
+        <div class="note resolved">
+          <div class="nh"><span class="who"><span class="av sm av-xk">XK</span><b class="nm">xiaokang.w</b></span><span class="st r">resolved</span></div>
+          <div class="body">Confirmed the 5th site in Recall's SELECT. Added a comment marker.</div>
+        </div>
+      </div></div>
+    </div>
+    <aside>
+      <div class="card"><div class="hd"><h3>Details</h3></div><div class="bd">
+        <div class="meta-row"><span class="k">Author</span><span class="v"><span class="who"><span class="av av-mo">MO</span><span class="nm">monte</span></span></span></div>
+        <div class="meta-row"><span class="k">Type</span><span class="v mono" style="font-size:12px">experience.pitfall</span></div>
+        <div class="meta-row"><span class="k">Project</span><span class="v">aihub</span></div>
+        <div class="meta-row"><span class="k">Owning WI</span><span class="v link mono">aihub#27</span></div>
+        <div class="meta-row"><span class="k">Activations</span><span class="v mono">8</span></div>
+      </div></div>
+      <div class="card"><div class="hd"><h3>Related</h3></div><div class="bd">
+        <div class="dep"><span class="badge b-type">approach</span><span class="txt link">repoEntry JSONB needs no migration</span></div>
+        <div class="dep"><span class="badge b-type">approach</span><span class="txt link">correct pattern for new MCP tools</span></div>
+      </div></div>
+    </aside>
+  </div>
+</main>
+
+<!-- ============ PAGE: ARTIFACT VIEWER ============ -->
+<main class="wrap" data-page="artifact" hidden style="max-width:1120px">
+  <div class="crumb"><a data-go="detail">aihub#129</a> <span>/</span> <span>Spec</span> <span class="mono" style="margin-left:6px">mem_xfOviiEY</span></div>
+  <div class="docwrap">
+    <article class="doc">
+      <h1>Spec: aihub#129 - Web UI overhaul (Phase 1)</h1>
+      <p style="color:var(--text-subtle);font-size:12px">methodology.spec - project aihub - by monte</p>
+      <div class="vers"><button class="btn sm" id="vhBtn"><span class="chev" id="vhChev"></span>History - 3 versions</button></div>
+      <div class="vpanel" id="vhPanel" hidden>
+        <div class="vrow cur"><span class="vdot"></span><div><b>v3</b> <span style="font-size:11px;color:var(--success);font-weight:650;margin-left:4px">current</span><div class="vmeta">today - monte - revised after review annotations (2 resolved)</div></div></div>
+        <div class="vrow"><span class="vdot"></span><div><b>v2</b><div class="vmeta">06-02 - monte - post-review revision</div></div><span style="margin-left:auto;display:inline-flex;gap:10px"><a class="link" style="font-size:11.5px">View</a><a class="link" data-go="review" style="font-size:11.5px;color:var(--success)">Review</a></span></div>
+        <div class="vrow"><span class="vdot"></span><div><b>v1</b><div class="vmeta">06-01 - monte - initial spec</div></div><a class="link" style="margin-left:auto;font-size:11.5px">View</a></div>
+      </div>
+      <h2>What / Why</h2>
+      <p>The current <span class="hl">/ui is a functional internal tool</span> with no design system. Phase 1 delivers the shared design-system foundation plus the app shell, work item list, and work item detail.</p>
+      <h2>Design decisions</h2>
+      <p>D2 - aesthetic aligns to a <span class="hl" id="hl-d2">Linear/Vercel developer-product feel</span> (restrained, dark-friendly), tuned for team collaboration: identity and presence are first-class.</p>
+      <p>D3 - dual theme via CSS custom properties; <span class="hl sel">theme is read from a cookie server-side<span class="annot-pill">+ Annotate</span><span class="annot-input"><textarea>which cookie name? pf_theme?</textarea><span class="rowb"><button class="btn sm">Cancel</button><button class="btn primary sm">Comment</button></span></span></span> to avoid FOUC, toggled with minimal JS.</p>
+      <h2>Acceptance criteria</h2>
+      <ul><li>Documented dual-theme design tokens + component classes</li><li>Dark mode switchable, no FOUC, preference persists</li><li>No backend / API / DB changes; <span class="hl res" id="hl-ac3">/v1 + /share byte-identical</span></li></ul>
+      <h2>Scope (Phase 1)</h2>
+      <p>The shared design-system foundation: dual-theme greyscale tokens, type scale on Geist, a 4px spacing scale, one radius system, and component classes for buttons, badges, inputs, cards, list rows, person chips, activity feeds and comment threads.</p>
+      <p>The app shell: header navigation with active states, theme toggle, user chip; the login page moves to API-key-only sign-in.</p>
+      <p>Work item list with the six-segment queue summary and an All-projects / single-project switcher; work item detail with both dependency directions, a full artifact list and a readable activity feed.</p>
+      <h2>Non-goals</h2>
+      <p>No SPA framework, no npm build step, no backend or route changes. <span class="hl" id="hl-ng">Memory pages and the artifact viewer ship as child work items</span> blocked by this one; the annotation machinery from aihub#125 is preserved untouched in this phase.</p>
+      <p>No changes to recall or decay semantics; no new tables or columns; no modification of the /v1 API surface.</p>
+      <h2>Rollout and verification</h2>
+      <p>Each page lands behind the shared token layer first, then is restyled in place. go build and the render/server test suites must stay green on every step. Light and dark are screenshot-reviewed per page before merge.</p>
+      <p>The /v1 and /share artifact outputs are diffed byte-for-byte against the pre-change baseline in CI to enforce the invariant.</p>
+      <h2>Risks</h2>
+      <p>Dark-mode misses in inline styles and the login page's embedded CSS; chroma code-highlight contrast inside the app surface; <span class="hl" id="hl-risk">the artifact viewer's annotation overlay must keep its alignment math when the document typography changes</span> in the child work item.</p>
+      <h2>References</h2>
+      <p>aihub#124 and aihub#125 (annotation system), aihub#98 (artifact back-link), the design-comments record of the prototype iteration rounds, and the Design System page of this prototype as the living token source.</p>
+    </article>
+    <div class="rail">
+      <div class="note open" data-hl="hl-d2">
+        <div class="nh"><span class="who"><span class="av sm av-xqr">XQ</span><b class="nm">xqr</b></span><span class="st o" style="margin-left:auto">open</span></div>
+        <div class="q">"Linear/Vercel developer-product feel"</div>
+        <div class="body">Can we confirm the accent before plan? indigo vs blue changes the whole token set.</div>
+        <div class="reply"><span class="av sm av-mo">MO</span><div class="body"><b style="color:var(--text)">monte</b> - building both variants to compare first.</div></div>
+      </div>
+      <div class="note resolved" data-hl="hl-ac3">
+        <div class="nh"><span class="who"><span class="av sm av-xk">XK</span><b class="nm">xiaokang.w</b></span><span class="st r" style="margin-left:auto">resolved</span></div>
+        <div class="q">"/v1 + /share byte-identical"</div>
+        <div class="body">Good - keeps the #125 invariant intact.</div>
+      </div>
+      <div class="note open" data-hl="hl-ng">
+        <div class="nh"><span class="who"><span class="av sm av-xqr">XQ</span><b class="nm">xqr</b></span><span class="st o" style="margin-left:auto">open</span></div>
+        <div class="q">"Memory pages and the artifact viewer ship as child work items"</div>
+        <div class="body">Do the two children run in parallel once the foundation lands, or does B wait for A?</div>
+      </div>
+      <div class="note open" data-hl="hl-risk">
+        <div class="nh"><span class="who"><span class="av sm av-mo">MO</span><b class="nm">monte</b></span><span class="st o" style="margin-left:auto">open</span></div>
+        <div class="q">"annotation overlay must keep its alignment math"</div>
+        <div class="body">Add a regression fixture with annotated docs before retypesetting in child B.</div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ============ PAGE: REVIEW VIEWER ============ -->
+<main class="wrap" data-page="review" hidden style="max-width:1120px">
+  <div class="crumb"><a data-go="detail">aihub#129</a> <span>/</span> <a data-go="artifact">Spec</a> <span class="mono">v2</span> <span>/</span> <span>Review</span></div>
+  <div class="docwrap" style="grid-template-columns:minmax(0,720px)">
+    <article class="doc">
+      <h1>Review: Spec v2</h1>
+      <p style="color:var(--text-subtle);font-size:12px">methodology.review - agent reviewer (clean context) - target: <span class="mono">mem_xfOviiEY</span> v2 - 06-02</p>
+      <div class="needs" style="background:var(--warning-soft);border-color:transparent;color:var(--warning);margin-top:14px">Verdict: PASS with findings - 1 must-fix, 1 suggestion, 1 nit. All addressed in v3.</div>
+      <h2>Findings</h2>
+      <div class="find">
+        <div class="fh"><span class="badge b-mustfix">must-fix</span><b>Dark-mode token coverage misses the login page</b></div>
+        <p>The cookie-based theme covers full page loads and HTMX swaps inherit correctly, but the login page carries its own embedded CSS and never receives the token layer. Add login to the shared tokens and extend the acceptance criteria accordingly. <a class="link" data-go="artifact" style="font-size:12px">jump to spec section</a></p>
+      </div>
+      <div class="find">
+        <div class="fh"><span class="badge b-should">should</span><b>Acceptance criteria lack a measurable contrast check</b></div>
+        <p>"Readable in both themes" is not testable as written. Add an explicit WCAG AA pass (4.5:1 body, 3:1 large text) per page to the verification step.</p>
+      </div>
+      <div class="find">
+        <div class="fh"><span class="badge b-nit">nit</span><b>Version labels name the trigger inconsistently</b></div>
+        <p>"post-review" vs "initial" mixes trigger and ordinal. Name versions by what produced them: initial, post-review, post-annotation.</p>
+      </div>
+      <h2>Checked</h2>
+      <ul class="ckl">
+        <li><span class="ok"></span>Scope matches the wi goal; phase split is implementable</li>
+        <li><span class="ok"></span>Non-goals consistent with the aihub#125 /v1 + /share invariant</li>
+        <li><span class="ok"></span>Child work item split (A memory pages, B artifact viewer) has clean boundaries</li>
+        <li><span class="ok"></span>Risks enumerate the dark-mode and annotation-overlay hazards</li>
+        <li><span class="ok"></span>No backend / API / DB changes implied anywhere</li>
+      </ul>
+      <h2>Outcome</h2>
+      <p>Spec revised as <a class="link" data-go="artifact">v3</a> on 06-03 - all three findings resolved. This review is pinned to v2 and immutable.</p>
+    </article>
+  </div>
+</main>
+
+<!-- ============ PAGE: LOGIN ============ -->
+<div data-page="login" hidden>
+  <div class="loginwrap">
+    <div class="logincard">
+      <div class="lb"><span class="mark" style="width:24px;height:24px;border-radius:7px;background:linear-gradient(135deg,var(--accent),var(--accent-hover));display:grid;place-items:center;color:#fff;font-weight:700;font-size:14px">p</span> polyforge</div>
+      <div class="field"><label>API key</label><input class="input" type="password" placeholder="pf_xxxxxxxxxxxxxxxx" style="font-family:var(--mono)"></div>
+      <button class="btn primary" style="width:100%;height:36px">Sign in</button>
+      <div class="help-txt" style="text-align:center">API-key login only. Ask an admin to issue yours.</div>
+      <div class="muted">Read-mostly UI. Work items and memory are managed via the MCP tools.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const root=document.documentElement;
+  document.getElementById('themeBtn').onclick=()=>root.setAttribute('data-theme',root.getAttribute('data-theme')==='dark'?'light':'dark');
+  const pages=[...document.querySelectorAll('[data-page]')];
+  const navlinks=[...document.querySelectorAll('.nav .links a')];
+  const tabs=[...document.querySelectorAll('.proto .tab')];
+  function show(p){
+    pages.forEach(s=>s.hidden=s.dataset.page!==p);
+    tabs.forEach(t=>t.classList.toggle('on',t.dataset.go===p));
+    navlinks.forEach(a=>a.classList.toggle('on',a.dataset.go===p||(p!=='memories'&&p!=='memdetail'&&a.dataset.go==='list')));
+    window.scrollTo(0,0);
+  }
+  document.querySelectorAll('[data-go]').forEach(el=>el.addEventListener('click',()=>show(el.dataset.go)));
+  show('list');
+
+  /* ---- commit / annotation layer ---- */
+  const esc=s=>(s||'').replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
+  const cmtBtn=document.getElementById('cmtBtn'), panelBtn=document.getElementById('panelBtn');
+  let cmtMode=false, comments=[];
+  const panel=document.createElement('div'); panel.className='cmt-panel';
+  panel.innerHTML='<div class="ph2"><span>Comments</span><button class="iconbtn" id="cmtClose">close</button></div><div class="cmt-list" id="cmtList"></div>';
+  document.body.appendChild(panel);
+  const listEl=panel.querySelector('#cmtList');
+  panel.querySelector('#cmtClose').onclick=()=>panel.classList.remove('open');
+  panelBtn.onclick=()=>panel.classList.toggle('open');
+  cmtBtn.onclick=()=>{cmtMode=!cmtMode;document.body.classList.toggle('cmt-on',cmtMode);cmtBtn.classList.toggle('on',cmtMode);};
+
+  const activeMain=()=>[...document.querySelectorAll('[data-page]')].find(s=>!s.hidden);
+  const curPage=()=>{const m=activeMain();return m?m.dataset.page:'';};
+  function ensureRel(m){if(getComputedStyle(m).position==='static')m.style.position='relative';}
+
+  function renderPins(){
+    document.querySelectorAll('.pin').forEach(p=>p.remove());
+    const m=activeMain(); if(!m) return; ensureRel(m);
+    comments.filter(c=>c.page===curPage()&&c.x!=null).forEach(c=>{
+      const pin=document.createElement('div'); pin.className='pin'; pin.textContent=c.id;
+      pin.style.left=c.x+'px'; pin.style.top=c.y+'px'; pin.title=c.text;
+      pin.onclick=ev=>{ev.stopPropagation();panel.classList.add('open');};
+      m.appendChild(pin);
+    });
+  }
+  function renderList(){
+    if(!comments.length){listEl.innerHTML='<div class="cmt-empty">No comments yet.<br>Turn on <b>comment</b> mode, then click any element to leave a note the agent will read.</div>';return;}
+    listEl.innerHTML=comments.map(c=>`<div class="cmt-item" data-go2="${c.page}"><div class="m"><span class="num">${c.id}</span> ${esc(c.page)}</div><div>${esc(c.text)}</div>${c.target?`<div class="tg">@ ${esc(c.target)}</div>`:''}</div>`).join('');
+    listEl.querySelectorAll('.cmt-item').forEach(el=>el.onclick=()=>{show(el.dataset.go2);});
+  }
+  async function loadComments(){try{const r=await fetch('/commits');const j=await r.json();if(Array.isArray(j)){comments=j;renderPins();renderList();}}catch(e){}}
+
+  document.addEventListener('click',e=>{
+    if(!cmtMode) return;
+    if(e.target.closest('.nav,.proto,.cmt-pop,.cmt-panel,.pin')) return;
+    const m=activeMain(); if(!m) return;
+    e.preventDefault(); e.stopPropagation();
+    document.querySelectorAll('.cmt-pop').forEach(p=>p.remove());
+    ensureRel(m);
+    const rect=m.getBoundingClientRect();
+    const x=Math.round(e.clientX-rect.left), y=Math.round(e.clientY-rect.top);
+    const tEl=e.target.closest('h1,h2,h3,.ds-h,.t,.badge,button,label,p,.nm,.spec,.id,.k,.v,.swatch')||e.target;
+    const target=((tEl.innerText||tEl.textContent||'').trim().replace(/\s+/g,' ')).slice(0,80);
+    const pop=document.createElement('div'); pop.className='cmt-pop';
+    pop.style.left=Math.max(8,Math.min(x,rect.width-290))+'px'; pop.style.top=y+'px';
+    pop.innerHTML=`<div class="tgt">@ ${esc(target)||curPage()}</div><textarea placeholder="Leave a note for the agent..."></textarea><div class="rowb"><button class="btn sm" data-a="c">Cancel</button><button class="btn primary sm" data-a="s">Comment</button></div>`;
+    m.appendChild(pop);
+    const ta=pop.querySelector('textarea'); ta.focus();
+    pop.querySelector('[data-a="c"]').onclick=()=>pop.remove();
+    pop.querySelector('[data-a="s"]').onclick=async()=>{
+      const text=ta.value.trim(); if(!text){pop.remove();return;}
+      try{const r=await fetch('/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page:curPage(),x,y,target,text})});const rec=await r.json();comments.push(rec);}catch(err){}
+      pop.remove(); renderPins(); renderList(); panel.classList.add('open');
+    };
+  },true);
+
+  /* margin notes align to their anchored line, greedy push-down (round2 #5, a la #125) */
+  function alignArtifactNotes(){
+    const sec=document.querySelector('[data-page="artifact"]');
+    if(!sec||sec.hidden) return;
+    const rail=sec.querySelector('.rail'); if(!rail) return;
+    rail.style.position='relative';
+    const railTop=rail.getBoundingClientRect().top;
+    const notes=[...rail.querySelectorAll('.note[data-hl]')].map(n=>({n,h:document.getElementById(n.dataset.hl)})).filter(x=>x.h);
+    notes.sort((a,b)=>a.h.getBoundingClientRect().top-b.h.getBoundingClientRect().top);
+    let last=0;
+    notes.forEach(({n,h})=>{
+      let top=h.getBoundingClientRect().top-railTop;
+      if(top<last+10) top=last+10;
+      n.style.position='absolute'; n.style.top=top+'px'; n.style.left='0'; n.style.right='0'; n.style.margin='0';
+      last=top+n.offsetHeight;
+    });
+    rail.style.minHeight=(last+20)+'px';
+  }
+  window.addEventListener('resize',alignArtifactNotes);
+  setTimeout(alignArtifactNotes,700);
+
+  const _show=show;
+  show=p=>{_show(p);renderPins();if(p==='artifact')setTimeout(alignArtifactNotes,60);};
+  loadComments();
+  setInterval(loadComments,5000);
+
+  /* generic chevron toggles (round3 #13) */
+  document.querySelectorAll('[data-toggle]').forEach(c=>c.addEventListener('click',e=>{
+    e.stopPropagation();const t=document.getElementById(c.dataset.toggle);
+    if(t){t.hidden=!t.hidden;c.classList.toggle('open',!t.hidden);}
+  }));
+
+  /* version history toggle (round3 #2) */
+  const vhBtn=document.getElementById('vhBtn'), vhPanel=document.getElementById('vhPanel');
+  if(vhBtn&&vhPanel){vhBtn.onclick=()=>{vhPanel.hidden=!vhPanel.hidden;document.getElementById('vhChev').classList.toggle('open',!vhPanel.hidden);setTimeout(alignArtifactNotes,60);};}
+
+  /* annotation <-> highlight bidirectional jump (round2 #4) */
+  document.querySelectorAll('.rail .note[data-hl]').forEach(n=>{
+    n.style.cursor='pointer';
+    n.addEventListener('click',e=>{
+      if(e.target.closest('button,textarea'))return;
+      const h=document.getElementById(n.dataset.hl);
+      if(h){h.scrollIntoView({behavior:'smooth',block:'center'});h.classList.remove('flash');void h.offsetWidth;h.classList.add('flash');}
+    });
+  });
+  document.querySelectorAll('.doc .hl[id]').forEach(h=>{
+    h.addEventListener('click',()=>{
+      const n=document.querySelector('.rail .note[data-hl="'+h.id+'"]');
+      if(n){n.scrollIntoView({behavior:'smooth',block:'center'});document.querySelectorAll('.rail .note').forEach(x=>x.classList.remove('focus'));n.classList.add('focus');setTimeout(()=>n.classList.remove('focus'),1600);}
+    });
+  });
+
+  /* generic dropdown component (round3 #9): every select shares this design */
+  const applyProj=v=>{document.querySelectorAll('[data-page="list"] .list .row').forEach(r=>{const id=(r.querySelector('.id')||{textContent:''}).textContent;r.style.display=(v==='all'||id.startsWith(v+'#'))?'':'none';});};
+  const closeMenus=()=>document.querySelectorAll('.dd-menu').forEach(m=>{if(m.style.position!=='static')m.hidden=true;});
+  document.querySelectorAll('.dd').forEach(dd=>{
+    const btn=dd.querySelector('.dd-btn'),menu=dd.querySelector('.dd-menu'),lbl=dd.querySelector('.lbl');
+    if(!btn||!menu||menu.style.position==='static') return;
+    btn.addEventListener('click',e=>{e.stopPropagation();const wasHidden=menu.hidden;closeMenus();menu.hidden=!wasHidden;});
+    menu.querySelectorAll('.dd-it').forEach(it=>it.addEventListener('click',e=>{
+      e.stopPropagation();
+      menu.querySelectorAll('.dd-it').forEach(x=>x.classList.toggle('on',x===it));
+      if(lbl&&it.dataset.l) lbl.textContent=it.dataset.l;
+      menu.hidden=true;
+      if(dd.id==='projDD'&&it.dataset.v) applyProj(it.dataset.v);
+    }));
+  });
+  document.addEventListener('click',closeMenus);
+  applyProj('all');
+</script>
+</body>
+</html>

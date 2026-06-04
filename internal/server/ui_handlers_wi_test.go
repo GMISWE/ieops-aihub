@@ -223,9 +223,11 @@ func TestUIWIList_SingleProject_RendersQueueEmbed(t *testing.T) {
 	}
 }
 
-// TestUIWIList_AllMode_OmitsQueueEmbed asserts the queue embed is hidden in
-// the cross-project view-all mode (the queue is per-project).
-func TestUIWIList_AllMode_OmitsQueueEmbed(t *testing.T) {
+// TestUIWIList_AllMode_RendersQueueEmbed asserts the count strip IS rendered in
+// the cross-project view-all mode (aihub#129 review-round-2 #2): the strip now
+// aggregates across accessible projects, so it must be present and poll the
+// partial with the __all__ sentinel.
+func TestUIWIList_AllMode_RendersQueueEmbed(t *testing.T) {
 	withFakeListWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
 		return &domain.ListWorkItemsResult{Items: []*domain.WorkItem{}}, nil
 	})
@@ -241,8 +243,12 @@ func TestUIWIList_AllMode_OmitsQueueEmbed(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if strings.Contains(rec.Body.String(), "pf-queue-embed") {
-		t.Errorf("view-all mode should NOT embed the ready queue block")
+	body := rec.Body.String()
+	if !strings.Contains(body, "pf-queue-embed") {
+		t.Errorf("view-all mode SHOULD render the count strip; body:\n%s", body)
+	}
+	if !strings.Contains(body, "/ui/queue/partial?project=__all__") {
+		t.Errorf("view-all strip should poll the partial with the __all__ sentinel; body:\n%s", body)
 	}
 }
 
@@ -270,6 +276,183 @@ func TestUIWIList_NoProject_OmitsQueueEmbed(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "pf-queue-embed") {
 		t.Errorf("no-project list should NOT embed the ready queue block")
+	}
+}
+
+// TestUIWIList_RendersGroupWrapWithTotalCount asserts the per-section markup:
+// each section renders as a .grp-wrap with a .grp-n total-count pill and a
+// per-block pager container, so the client can paginate each block independently.
+func TestUIWIList_RendersGroupWrapWithTotalCount(t *testing.T) {
+	now := time.Now()
+	withFakeListWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		return &domain.ListWorkItemsResult{Items: []*domain.WorkItem{
+			{ID: "wi_a", Slug: "p1#1", Project: "p1", Status: "queued", Goal: "first", CreatedAt: now},
+			{ID: "wi_b", Slug: "p1#2", Project: "p1", Status: "queued", Goal: "second", CreatedAt: now.Add(-time.Hour)},
+		}}, nil
+	})
+
+	e := echo.New()
+	g := e.Group("/ui", wiInjectUser(wiTestUser()))
+	registerUIWIHandlers(g, nil, nil)
+
+	// All view so we exercise the full grouping path.
+	req := httptest.NewRequest(http.MethodGet, "/ui/wi?project=p1&all=1", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"grp-wrap", "data-grp", `class="grp-n"`, "data-grp-pager", "data-grp-rows"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("list body missing %q; body:\n%s", want, body)
+		}
+	}
+	// Both queued items land in Unclaimed (ownerless + queued) — its count pill
+	// must read 2.
+	if !strings.Contains(body, `<span class="grp-n">2</span>`) {
+		t.Errorf("expected Unclaimed total-count pill of 2; body:\n%s", body)
+	}
+}
+
+// --- in-place HTMX filtering (aihub#129) -------------------------------------
+
+// TestUIWIList_FullPage_WiresHTMXFilterBar asserts the full page renders the
+// filter form wired for in-place HTMX requests (hx-get + #wi-list-body target)
+// and wraps the grouped list in the #wi-list-body container the controls swap.
+func TestUIWIList_FullPage_WiresHTMXFilterBar(t *testing.T) {
+	now := time.Now()
+	withFakeListWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		return &domain.ListWorkItemsResult{Items: []*domain.WorkItem{
+			{ID: "wi_a", Slug: "p1#1", Project: "p1", Status: "queued", Goal: "g", CreatedAt: now},
+		}}, nil
+	})
+
+	e := echo.New()
+	g := e.Group("/ui", wiInjectUser(wiTestUser()))
+	registerUIWIHandlers(g, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/wi?project=p1", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`id="wi-list-body"`,
+		`hx-get="/ui/wi"`,
+		`hx-target="#wi-list-body"`,
+		`hx-include="this"`,
+		`hx-push-url="true"`,
+		"data-status-params",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("full page missing %q; body:\n%s", want, body)
+		}
+	}
+}
+
+// TestUIWIList_HXRequest_ReturnsFragmentOnly asserts that an HX-Request
+// targeting wi-list-body returns ONLY the list-body fragment (the grouped
+// sections), not the full page chrome or the filter bar — so a filter toggle
+// swaps just the rows in place.
+func TestUIWIList_HXRequest_ReturnsFragmentOnly(t *testing.T) {
+	now := time.Now()
+	withFakeListWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		return &domain.ListWorkItemsResult{Items: []*domain.WorkItem{
+			{ID: "wi_a", Slug: "p1#1", Project: "p1", Status: "queued", Goal: "g", CreatedAt: now},
+		}}, nil
+	})
+
+	e := echo.New()
+	g := e.Group("/ui", wiInjectUser(wiTestUser()))
+	registerUIWIHandlers(g, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/wi?project=p1&all=1", nil)
+	req.Header.Set("HX-Request", "true")
+	req.Header.Set("HX-Target", "wi-list-body")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// Fragment: no layout chrome, no filter bar, no #wi-list-body wrapper.
+	if strings.Contains(body, "<!DOCTYPE html>") {
+		t.Errorf("HX fragment must not include layout chrome; got DOCTYPE:\n%s", body)
+	}
+	if strings.Contains(body, "data-wi-filters") {
+		t.Errorf("HX fragment must not re-emit the filter bar; body:\n%s", body)
+	}
+	if strings.Contains(body, `id="wi-list-body"`) {
+		t.Errorf("HX fragment is the inner content; it must not re-emit the #wi-list-body wrapper; body:\n%s", body)
+	}
+	// But it MUST carry the grouped rows it is meant to swap in.
+	if !strings.Contains(body, "grp-wrap") || !strings.Contains(body, "data-grp-rows") {
+		t.Errorf("HX fragment should contain the grouped list rows; body:\n%s", body)
+	}
+}
+
+// TestUIWIList_HXRequest_BoostedNavReturnsFullPage asserts that a boosted
+// full-page navigation (HX-Request set but HX-Target is NOT wi-list-body) still
+// gets the whole document, not the bare fragment.
+func TestUIWIList_HXRequest_BoostedNavReturnsFullPage(t *testing.T) {
+	withFakeListWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		return &domain.ListWorkItemsResult{Items: []*domain.WorkItem{}}, nil
+	})
+
+	e := echo.New()
+	g := e.Group("/ui", wiInjectUser(wiTestUser()))
+	registerUIWIHandlers(g, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/wi?project=p1", nil)
+	req.Header.Set("HX-Request", "true") // boosted nav, no #wi-list-body target
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "<!DOCTYPE html>") {
+		t.Errorf("boosted nav (no wi-list-body target) should return the full page")
+	}
+}
+
+// TestUIWIList_MultiStatus_AllForwarded asserts that repeated ?status= params
+// are ALL forwarded into the ListWorkItems filter — the mechanism that lets the
+// multi-status selection travel with every in-place request (and survive a
+// project switch).
+func TestUIWIList_MultiStatus_AllForwarded(t *testing.T) {
+	var captured domain.ListWorkItemsFilter
+	withFakeListWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string, f domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		captured = f
+		return &domain.ListWorkItemsResult{Items: []*domain.WorkItem{}}, nil
+	})
+
+	e := echo.New()
+	g := e.Group("/ui", wiInjectUser(wiTestUser()))
+	registerUIWIHandlers(g, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/wi?project=p1&status=running&status=wrapped&status=running", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// Both distinct statuses forwarded, duplicate de-duped.
+	want := map[string]bool{"running": true, "wrapped": true}
+	if len(captured.Status) != len(want) {
+		t.Fatalf("multi-status filter: got %v, want running+wrapped", captured.Status)
+	}
+	for _, s := range captured.Status {
+		if !want[s] {
+			t.Errorf("unexpected status %q forwarded", s)
+		}
 	}
 }
 
@@ -478,8 +661,8 @@ func TestUIWIDetail_403_NoProjectAccess(t *testing.T) {
 	withFakeGetWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string) (*domain.WorkItem, *domain.AihubError) {
 		return &domain.WorkItem{
 			ID: "wi_secret", Slug: "secret-1", Project: "p_other",
-			Goal: "secret goal you cannot see",
-			Status: "running",
+			Goal:      "secret goal you cannot see",
+			Status:    "running",
 			CreatedAt: now, UpdatedAt: now,
 		}, nil
 	})

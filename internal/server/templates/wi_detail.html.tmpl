@@ -1,136 +1,196 @@
 {{define "content"}}
 {{if .AccessDenied}}
-<div class="pf-err">{{.Err}}</div>
+<div class="empty" style="max-width:none">{{.Err}}</div>
 {{else if not .WI}}
-<div class="pf-err">{{or .Err "work item not found"}}</div>
-<p><a href="/ui/wi">← back to work items</a></p>
+<div class="empty" style="max-width:none">
+  <div class="et">Work item not found</div>
+  {{or .Err "This work item does not exist or you cannot see it."}}
+  <div style="margin-top:10px"><a class="link" href="/ui/wi">Back to work items</a></div>
+</div>
 {{else}}
-<section class="pf-page-header">
-  <h1>
-    <a href="/ui/wi" class="pf-back">← wi</a>
-    <code class="pf-wi-slug">{{or .WI.Slug .WI.ID}}</code>
-  </h1>
-  <span class="pf-meta">
-    <span class="pf-badge pf-badge-status-{{.WI.Status}}">{{.WI.Status}}</span>
-    {{if .WIType}}<span class="pf-badge pf-badge-type-{{.WIType}}">{{.WIType}}</span>{{end}}
-    <span class="pf-badge pf-badge-priority-{{or .WI.Priority "normal"}}">{{or .WI.Priority "normal"}}</span>
-  </span>
-</section>
 
-{{if .Err}}<div class="pf-err">{{.Err}}</div>{{end}}
+<div class="crumb">
+  <a class="link" href="/ui/wi">Work Items</a>
+  <span>/</span>
+  <span class="mono">{{or .WI.Slug .WI.ID}}</span>
+</div>
 
-<div class="pf-detail-grid">
-  <div class="pf-detail-main">
-    <div class="pf-detail-card">
-      <h2>Goal</h2>
-      <p class="pf-wi-goal">{{.WI.Goal}}</p>
+{{if .NeedsYou}}
+{{/* needs-you bar — this item is awaiting the current user (they own the
+     active attempt and it is paused/blocked). Subtle grey treatment mirrors the
+     list's Needs you section. */}}
+<div class="needs"><span class="dot"></span> Needs you — you own this item and it is {{.WI.Status}}. Resume it to keep going.</div>
+{{end}}
+
+{{if and .Err (not .NeedsYou)}}<div class="empty" style="max-width:none;margin-bottom:var(--s5)">{{.Err}}</div>{{end}}
+
+<div class="detail">
+  {{/* ---------- main column ---------- */}}
+  <div>
+    <div class="metaline">
+      {{if .WIType}}<span class="badge b-{{.WIType}}">{{.WIType}}</span>{{end}}
+      <span class="badge b-{{or .WI.Priority "normal"}}">{{or .WI.Priority "normal"}}</span>
+      <span class="badge b-{{.WI.Status}}">{{if or (eq .WI.Status "running") (eq .WI.Status "queued")}}<span class="dot"></span>{{end}}{{.WI.Status}}</span>
     </div>
+
+    <h1 class="h-title">{{.WI.Goal}}</h1>
 
     {{if .Content}}
-    <div class="pf-detail-card">
-      <h2>Background</h2>
-      <div class="pf-content-md pf-wi-content">{{md .Content}}</div>
+    <div class="card">
+      <div class="hd"><h3>Background</h3></div>
+      <div class="bd prose">{{md .Content}}</div>
     </div>
     {{end}}
 
+    <div class="card">
+      <div class="hd"><h3>Activity</h3><span class="role mono" style="font-size:11px">live</span></div>
+      <div class="bd">
+        {{/* HTMX poll: refresh the activity feed in place every 5s. The target
+             swaps only the feed fragment so the card chrome stays put. */}}
+        <div id="pf-events"
+             hx-get="{{wiref (or .WI.Slug .WI.ID)}}/events/partial"
+             hx-trigger="every 5s"
+             hx-target="#pf-events"
+             hx-swap="innerHTML">
+          {{template "events_timeline.html.tmpl" .}}
+        </div>
+      </div>
+    </div>
   </div>
 
-  <aside class="pf-detail-side">
-    <div class="pf-detail-card">
-      <h2>Meta</h2>
-      <dl class="pf-kv">
-        <dt>Project</dt><dd><code>{{.WI.Project}}</code></dd>
-        <dt>Source</dt><dd>{{or .WI.Source "—"}}</dd>
-        <dt>Mode</dt><dd>{{if .HumanMode}}{{.HumanMode}}{{else}}<span class="pf-empty">—</span>{{end}}</dd>
-        <dt>Reporter</dt><dd>{{or .WI.ReporterDisplay "—"}}</dd>
-        <dt>Claimed by</dt><dd>{{if .OwnerDisplay}}{{.OwnerDisplay}}{{else}}<span class="pf-empty">— (no active attempt)</span>{{end}}</dd>
-        {{if .OwnerHasActive}}<dt>Last active</dt><dd>{{.OwnerActive.Format "2006-01-02 15:04 MST"}}</dd>{{end}}
-        <dt>Created</dt><dd>{{.WI.CreatedAt.Format "2006-01-02 15:04 MST"}}</dd>
-        <dt>Updated</dt><dd>{{.WI.UpdatedAt.Format "2006-01-02 15:04 MST"}}</dd>
-        {{if .Milestone}}<dt>Milestone</dt><dd>{{.Milestone}}</dd>{{end}}
-        {{if .AttemptID}}<dt>Attempt</dt><dd><code>{{.AttemptID}}</code></dd>{{end}}
-      </dl>
-    </div>
-
-    {{if .Dependencies}}
-    <div class="pf-detail-card">
-      <h2>Blocked by ({{len .Dependencies.BlockedBy}})</h2>
-      {{if .Dependencies.BlockedBy}}
-      <ul class="pf-dep-list">
-        {{range .Dependencies.BlockedBy}}
-        <li>
-          {{if .Hidden}}
-            <span class="pf-empty">[hidden — cross-project]</span>
-          {{else}}
-            <a href="{{wiref .Slug}}"><code>{{.Slug}}</code></a>
-          {{end}}
-          <span class="pf-dep-kind">{{.Kind}}</span>
-        </li>
+  {{/* ---------- sidebar ---------- */}}
+  <aside>
+    <div class="card">
+      <div class="hd"><h3>Details</h3></div>
+      <div class="bd">
+        <div class="meta-row">
+          <span class="k">Reporter</span>
+          <span class="v">{{template "person_chip" .Reporter}}</span>
+        </div>
+        <div class="meta-row">
+          <span class="k">Assignee</span>
+          <span class="v">{{template "person_chip" .Assignee}}</span>
+        </div>
+        <div class="meta-row"><span class="k">Project</span><span class="v mono">{{.WI.Project}}</span></div>
+        {{if .Milestone}}<div class="meta-row"><span class="k">Milestone</span><span class="v">{{.Milestone}}</span></div>{{end}}
+        {{if .HumanMode}}<div class="meta-row"><span class="k">Mode</span><span class="v">{{.HumanMode}}</span></div>{{end}}
+        <div class="meta-row"><span class="k">Created</span><span class="v mono">{{.WI.CreatedAt.Format "2006-01-02 15:04 MST"}}</span></div>
+        <div class="meta-row"><span class="k">Updated</span><span class="v mono">{{.WI.UpdatedAt.Format "2006-01-02 15:04 MST"}}</span></div>
+        {{if .Labels}}
+        <div class="meta-row">
+          <span class="k">Labels</span>
+          <span class="v" style="display:flex;flex-wrap:wrap;gap:5px;justify-content:flex-end">
+            {{range .Labels}}<span class="badge b-type">{{.}}</span>{{end}}
+          </span>
+        </div>
         {{end}}
-      </ul>
-      {{else}}<p class="pf-empty">—</p>{{end}}
-    </div>
-
-    <div class="pf-detail-card">
-      <h2>Blocking ({{len .Dependencies.Blocking}})</h2>
-      {{if .Dependencies.Blocking}}
-      <ul class="pf-dep-list">
-        {{range .Dependencies.Blocking}}
-        <li>
-          {{if .Hidden}}
-            <span class="pf-empty">[hidden — cross-project]</span>
-          {{else}}
-            <a href="{{wiref .Slug}}"><code>{{.Slug}}</code></a>
-          {{end}}
-          <span class="pf-dep-kind">{{.Kind}}</span>
-        </li>
-        {{end}}
-      </ul>
-      {{else}}<p class="pf-empty">—</p>{{end}}
-    </div>
-    {{end}}
-
-    <div class="pf-detail-card">
-      <h2>Events</h2>
-      <div id="pf-events"
-           hx-get="{{wiref (or .WI.Slug .WI.ID)}}/events/partial"
-           hx-trigger="every 5s"
-           hx-target="#pf-events"
-           hx-swap="innerHTML">
-        {{template "events_timeline.html.tmpl" .}}
       </div>
     </div>
 
-    {{if .Artifacts}}
-    <div class="pf-detail-card">
-      <h2>Artifacts ({{len .Artifacts}})</h2>
-      <ul class="pf-artifact-list">
-        {{range .Artifacts}}
-        <li>
-          <a href="/ui/artifacts/{{.MemID}}/html" target="_blank" rel="noopener">
-            <span class="pf-artifact-type">{{.Type}}</span>
-          </a>
-          <span class="pf-artifact-preview">{{truncate 80 .Content}}</span>
-          {{if .Versions}}
-          <details class="pf-artifact-versions">
-            <summary>{{len .Versions}} version{{if gt (len .Versions) 1}}s{{end}}</summary>
-            <ol class="pf-artifact-version-list">
-              {{range $i, $v := .Versions}}
-              <li class="{{if $v.IsCurrent}}pf-version-current{{end}}">
-                <a href="/ui/artifacts/{{$v.ID}}/html" target="_blank" rel="noopener">v{{inc $i}}</a>
-                <span class="pf-version-ts">({{truncate 10 $v.CreatedAt}})</span>
-                {{if $v.IsCurrent}}<span class="pf-version-badge">current</span>{{end}}
-              </li>
-              {{end}}
-            </ol>
-          </details>
+    {{/* Artifacts sit directly under the meta card, above the dependency
+         blocks (review feedback). */}}
+    <div class="card">
+      <div class="hd"><h3>Artifacts</h3><span class="grp-n">{{len .Artifacts}}</span></div>
+      <div class="bd">
+        {{if .Artifacts}}
+          {{range $i, $a := .Artifacts}}
+          <div class="art-item{{if gt $i 0}} art-stack{{end}}">
+            <div class="art">
+              <span class="ico">{{artifactInitial $a.Type}}</span>
+              <div class="art-meta">
+                <div class="nm">{{$a.Type}}{{if $a.Versions}}<span class="vtag">v{{len $a.Versions}}</span>{{end}}</div>
+                <div class="sub mono">{{$a.MemID}}</div>
+              </div>
+              <a class="link" href="/ui/artifacts/{{$a.MemID}}/html" target="_blank" rel="noopener">Open</a>
+            </div>
+            {{if $a.Versions}}
+            {{/* Collapsible mini version timeline (supersede chain). Native
+                 <details> — no JS. MemoryVersionRef carries id / created_at /
+                 status / is_current only; there is no author or change-summary in
+                 the domain type, so each row shows the version label, date, and
+                 the current marker. Each version links to its own
+                 /ui/artifacts/<id>/html. */}}
+            <details class="vers-details">
+              <summary><span class="chev"></span>{{len $a.Versions}} versions</summary>
+              {{/* Versions are reversed newest-first in the handler; the version
+                   number is total - displayIndex so labels stay chronological
+                   (v{N} current on top ... v1 oldest at the bottom). */}}
+              {{$n := len $a.Versions}}
+              <div class="vlist">
+                {{range $vi, $v := $a.Versions}}
+                <div class="vrow{{if $v.IsCurrent}} cur{{end}}">
+                  <span class="vdot"></span>
+                  <div class="vrow-body">
+                    <b>v{{sub $n $vi}}</b>{{if $v.IsCurrent}}<span class="vcur">current</span>{{end}}
+                    <div class="vmeta">{{shortDate $v.CreatedAt}}{{if $v.Status}} · {{$v.Status}}{{end}}</div>
+                  </div>
+                  <a class="link" href="/ui/artifacts/{{$v.ID}}/html" target="_blank" rel="noopener" style="font-size:11px">View</a>
+                </div>
+                {{end}}
+              </div>
+            </details>
+            {{end}}
+          </div>
           {{end}}
-        </li>
+        {{else}}
+          <div class="empty" style="max-width:none;padding:14px;border:0"><div class="et">Nothing here</div>No artifacts yet.</div>
         {{end}}
-      </ul>
+      </div>
     </div>
-    {{end}}
+
+    {{/* Blocked by — the wis that block THIS one (see toDepView for the
+         direction note). */}}
+    <div class="card">
+      <div class="hd"><h3>Blocked by</h3><span class="grp-n">{{if .Dependencies}}{{len .Dependencies.BlockedBy}}{{else}}0{{end}}</span></div>
+      <div class="bd">
+        {{if and .Dependencies .Dependencies.BlockedBy}}
+          {{range .Dependencies.BlockedBy}}{{template "dep_row" .}}{{end}}
+        {{else}}
+          <div class="empty" style="max-width:none;padding:14px;border:0"><div class="et">Nothing here</div>No blocking dependencies.</div>
+        {{end}}
+      </div>
+    </div>
+
+    {{/* Blocking — the wis THIS one blocks. */}}
+    <div class="card">
+      <div class="hd"><h3>Blocking</h3><span class="grp-n">{{if .Dependencies}}{{len .Dependencies.Blocking}}{{else}}0{{end}}</span></div>
+      <div class="bd">
+        {{if and .Dependencies .Dependencies.Blocking}}
+          {{range .Dependencies.Blocking}}{{template "dep_row" .}}{{end}}
+        {{else}}
+          <div class="empty" style="max-width:none;padding:14px;border:0"><div class="et">Nothing here</div>Not blocking anything.</div>
+        {{end}}
+      </div>
+    </div>
   </aside>
 </div>
 {{end}}
+{{end}}
+
+{{/* ---- person-chip partial: full chip with name; ghost when unassigned ---- */}}
+{{define "person_chip"}}
+{{if .Display}}
+<span class="who"><span class="av {{.ColorClass}}">{{.Initials}}</span><span class="nm">{{.Display}}</span></span>
+{{else}}
+<span class="who" title="unassigned"><span class="av ghost">?</span><span class="role">unassigned</span></span>
+{{end}}
+{{end}}
+
+{{/* ---- dependency row: status badge + slug link + owner avatar ---- */}}
+{{define "dep_row"}}
+<div class="dep">
+  {{if .Hidden}}
+    <span class="badge b-type">hidden</span>
+    <span class="txt">cross-project</span>
+  {{else}}
+    {{if .Status}}<span class="badge b-{{.Status}}">{{if or (eq .Status "running") (eq .Status "queued")}}<span class="dot"></span>{{end}}{{.Status}}</span>{{end}}
+    <a class="id link" href="{{wiref .Slug}}">{{.Slug}}</a>
+    <span style="flex:1"></span>
+    {{if .Assignee.Display}}
+      <span class="who" title="owner: {{.Assignee.Display}}"><span class="av sm {{.Assignee.ColorClass}}">{{.Assignee.Initials}}</span></span>
+    {{else}}
+      <span class="who" title="unassigned"><span class="av sm ghost">?</span></span>
+    {{end}}
+  {{end}}
+</div>
 {{end}}

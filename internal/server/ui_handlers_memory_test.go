@@ -406,9 +406,10 @@ func TestUIMemories_WIFilter(t *testing.T) {
 	}
 }
 
-// TestUIMemories_WorkItemColumn verifies that the memories list page renders a
-// "Work Item" column header and that a memory with a WorkItemID shows a link,
-// while one without shows "—".
+// TestUIMemories_WorkItemColumn verifies that a memory card with a WorkItemID
+// renders a link to its work item, while one without renders an em-dash
+// placeholder. (The page is now a card grid, not a table — aihub#137 — so the
+// assertions target the card footer's .wi element instead of a <td> column.)
 func TestUIMemories_WorkItemColumn(t *testing.T) {
 	wiID := "aihub#55"
 	m1 := memFixture("mem_wi_1", "experience.debug", "has a wi")
@@ -430,17 +431,13 @@ func TestUIMemories_WorkItemColumn(t *testing.T) {
 	}
 	body := rec.Body.String()
 
-	// Column header must be present.
-	if !strings.Contains(body, "Work Item") {
-		t.Errorf("body missing 'Work Item' column header; body=%s", body[:min(len(body), 800)])
-	}
-	// Row with a wi should render a link to /ui/wi/<id>.
+	// Card with a wi should render a link to /ui/wi/<id> in its footer.
 	if !strings.Contains(body, "/ui/wi/aihub%2355") {
 		t.Errorf("body missing wi link for mem_wi_1; body=%s", body[:min(len(body), 800)])
 	}
-	// Row without a wi should render an em-dash, not a link (memFixture sets a
-	// non-empty AuthorDisplay, so the only "<td>—</td>" is the empty wi cell).
-	if !strings.Contains(body, "<td>—</td>") {
+	// Card without a wi should render an em-dash placeholder in the .wi slot
+	// rather than a link.
+	if !strings.Contains(body, `<span class="wi" style="color:var(--text-subtle)">—</span>`) {
 		t.Errorf("body missing em-dash for mem_wi_2 (no wi); body=%s", body[:min(len(body), 800)])
 	}
 }

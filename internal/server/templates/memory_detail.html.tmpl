@@ -1,114 +1,232 @@
 {{define "content"}}
 {{with .Memory}}
-<section class="pf-page-header">
-  <h1>Memory <code>{{.ID}}</code></h1>
-  <span class="pf-meta">
-    <a href="/ui/memories{{if $.BackQuery}}?{{$.BackQuery}}{{end}}">&larr; back to memories</a>
-  </span>
-</section>
+<div class="crumb">
+  <a class="link" href="/ui/memories{{if $.BackQuery}}?{{$.BackQuery}}{{end}}">Memories</a>
+  <span>/</span>
+  <span class="mono">{{.ID}}</span>
+</div>
 
-<div class="pf-detail-grid">
+<div class="detail">
+  {{/* ---------- main column ---------- */}}
   <div>
-    <div class="pf-detail-card">
-      <h2>Content</h2>
-      <div class="pf-content-md">
+    <div class="metaline">
+      <span class="pf-mem-type">{{.Type}}</span>
+      {{/* 5-pip strength bar, mirrors the list card (BaseStrength on a 1-5 scale). */}}
+      <span class="pf-strength-bar" title="memory strength {{printf "%.2f" .BaseStrength}} (recall weight on a 1-5 scale)">
+        <i{{if ge .BaseStrength 0.25}} class="on"{{end}}></i><i{{if ge .BaseStrength 1.5}} class="on"{{end}}></i><i{{if ge .BaseStrength 2.5}} class="on"{{end}}></i><i{{if ge .BaseStrength 3.5}} class="on"{{end}}></i><i{{if ge .BaseStrength 4.5}} class="on"{{end}}></i>
+      </span>
+    </div>
+
+    <div class="card">
+      <div class="hd"><h3>Content</h3></div>
+      <div class="bd">
         {{if $.RenderAsMD}}
-          {{.Content | md}}
+          <div class="prose">{{.Content | md}}</div>
         {{else}}
           <pre class="pf-content-raw">{{.Content}}</pre>
         {{end}}
       </div>
     </div>
 
-    <div class="pf-detail-card pf-commits-card">
-      <h2>Commits</h2>
-      {{if $.Commits}}
-      <ul class="pf-commits-list">
-        {{range $.Commits}}
-        {{$canMod := false}}
-        {{if $.User}}
-          {{if or (eq $.User.UserID .AuthorUserID) (eq $.User.Role "admin")}}{{$canMod = true}}{{end}}
-        {{end}}
-        <li class="pf-commit-entry">
-          <div class="pf-commit-meta">
-            <span class="pf-commit-author">{{default "—" .AuthorDisplay}}</span>
-            <span class="pf-commit-ts">{{fmtTs .CreatedAt}}</span>
-            {{if .UpdatedAt}}<span class="pf-commit-edited">(edited {{fmtTs .UpdatedAt}})</span>{{end}}
-            {{if $canMod}}
-            <span class="pf-commit-actions">
-              <details class="pf-commit-edit">
-                <summary>Edit</summary>
-                <form method="POST" action="/ui/memories/{{$.Memory.ID}}/commit/{{.ID}}/edit" class="pf-commit-edit-form">
-                  <textarea name="body" required>{{.Body}}</textarea>
-                  <button type="submit">Save</button>
-                </form>
-              </details>
-              <button type="button" class="pf-commit-delete-btn"
-                      onclick="this.nextElementSibling.showModal()">Delete</button>
-              <dialog class="pf-confirm-dialog">
-                <form method="POST" action="/ui/memories/{{$.Memory.ID}}/commit/{{.ID}}/delete" class="pf-confirm-dialog-form">
-                  <h3>Delete this commit?</h3>
-                  <p class="pf-confirm-dialog-meta">{{default "—" .AuthorDisplay}} · {{fmtTs .CreatedAt}}</p>
-                  <p class="pf-confirm-dialog-body">{{.Body}}</p>
-                  <p class="pf-confirm-dialog-warn">This cannot be undone.</p>
-                  <div class="pf-confirm-dialog-actions">
-                    <button type="button" onclick="this.closest('dialog').close()">Cancel</button>
-                    <button type="submit" class="pf-confirm-dialog-confirm">Delete</button>
-                  </div>
-                </form>
-              </dialog>
-            </span>
-            {{end}}
-          </div>
-          <div class="pf-commit-body">{{.Body}}</div>
-        </li>
-        {{end}}
-      </ul>
-      {{else}}
-      <p class="pf-empty">no commits yet.</p>
-      {{end}}
-
-      {{with $.Memory}}
-      <form method="POST" action="/ui/memories/{{.ID}}/commit" class="pf-commit-form">
-        <textarea name="body" rows="3" placeholder="Add a commit annotation…" required></textarea>
-        <button type="submit">Add commit</button>
-      </form>
-      {{end}}
+    {{/* ---------- comment thread ----------
+         Wrapped in #mem-comments so every mutation (add / edit / delete /
+         reply / resolve) can swap just this node in place. The frozen handler
+         303-redirects to the full detail page after each POST; HTMX follows the
+         redirect, hx-selects #mem-comments out of the returned full document and
+         swaps it (outerHTML). No HX fragment branch on the server is needed, and
+         the same plain <form action=...> still works without JS (native POST ->
+         303 -> full reload). */}}
+    <div class="card">
+      <div class="hd">
+        <h3>Comments</h3>
+        {{$open := 0}}{{range $.Commits}}{{if .IsOpen}}{{$open = inc $open}}{{end}}{{end}}
+        {{if $.Commits}}<span class="badge {{if gt $open 0}}b-high{{else}}b-running{{end}}" style="margin-left:auto">{{if gt $open 0}}{{$open}} open{{else}}all resolved{{end}}</span>{{end}}
+      </div>
+      <div class="bd">
+        <div id="mem-comments">
+          {{template "mem-comments" $}}
+        </div>
+      </div>
     </div>
   </div>
 
+  {{/* ---------- sidebar ---------- */}}
   <aside>
-    <div class="pf-detail-card">
-      <h2>Metadata</h2>
-      <dl class="pf-kv">
-        <dt>type</dt><dd><span class="pf-mem-type">{{.Type}}</span></dd>
-        <dt>project</dt><dd>{{.Project}}</dd>
-        <dt>visibility</dt><dd>{{.Visibility}}</dd>
-        <dt>author</dt><dd>{{default "—" .AuthorDisplay}}</dd>
-        <dt>created</dt><dd>{{.CreatedAt.Format "2006-01-02 15:04 MST"}}</dd>
-        <dt>updated</dt><dd>{{.UpdatedAt.Format "2006-01-02 15:04 MST"}}</dd>
-        <dt>strength (base)</dt><dd>{{printf "%.2f" .BaseStrength}}</dd>
-        <dt>stability (days)</dt><dd>{{printf "%.1f" .StabilityDays}}</dd>
-        <dt>activations</dt><dd>{{.ActivationCount}}</dd>
-        <dt>immortal</dt><dd>{{.IsImmortal}}</dd>
-        <dt>status</dt><dd>{{.Status}}</dd>
-        {{with .WorkItemID}}
-        <dt>work item</dt><dd><a href="{{wiref .}}">{{.}}</a></dd>
-        {{end}}
-      </dl>
+    <div class="card">
+      <div class="hd"><h3>Details</h3></div>
+      <div class="bd">
+        <div class="meta-row">
+          <span class="k">Author</span>
+          <span class="v">
+            {{if .AuthorDisplay}}
+              <span class="who"><span class="av sm" data-av-name="{{.AuthorDisplay}}"></span><span class="nm">{{.AuthorDisplay}}</span></span>
+            {{else}}
+              <span class="who" title="unknown"><span class="av sm ghost">?</span><span class="role">unknown</span></span>
+            {{end}}
+          </span>
+        </div>
+        <div class="meta-row"><span class="k">Type</span><span class="v mono" style="font-size:12px">{{.Type}}</span></div>
+        <div class="meta-row"><span class="k">Project</span><span class="v mono">{{.Project}}</span></div>
+        <div class="meta-row"><span class="k">Visibility</span><span class="v">{{.Visibility}}</span></div>
+        {{with .WorkItemID}}<div class="meta-row"><span class="k">Work item</span><span class="v"><a class="link mono" href="{{wiref .}}">{{.}}</a></span></div>{{end}}
+        <div class="meta-row"><span class="k">Strength (base)</span><span class="v mono">{{printf "%.2f" .BaseStrength}}</span></div>
+        <div class="meta-row"><span class="k">Stability (days)</span><span class="v mono">{{printf "%.1f" .StabilityDays}}</span></div>
+        <div class="meta-row"><span class="k">Activations</span><span class="v mono">{{.ActivationCount}}</span></div>
+        <div class="meta-row"><span class="k">Immortal</span><span class="v">{{.IsImmortal}}</span></div>
+        <div class="meta-row"><span class="k">Status</span><span class="v">{{.Status}}</span></div>
+        <div class="meta-row"><span class="k">Created</span><span class="v mono">{{.CreatedAt.Format "2006-01-02 15:04 MST"}}</span></div>
+        <div class="meta-row"><span class="k">Updated</span><span class="v mono">{{.UpdatedAt.Format "2006-01-02 15:04 MST"}}</span></div>
+      </div>
     </div>
+
     {{if $.Related}}
-    <div class="pf-detail-card">
-      <h2>Related</h2>
-      <ul class="pf-related-list">
+    <div class="card">
+      <div class="hd"><h3>Related</h3><span class="grp-n">{{len $.Related}}</span></div>
+      <div class="bd">
         {{range $.Related}}
-        <li><a href="/ui/artifacts/{{.ID}}/html">{{.ID}}</a>{{if .Summary}} — {{.Summary}}{{end}}</li>
+        <div class="dep">
+          {{if .Type}}<span class="badge b-type">{{.Type}}</span>{{end}}
+          <a class="txt link" href="/ui/artifacts/{{.ID}}/html">{{if .Summary}}{{.Summary}}{{else}}{{.ID}}{{end}}</a>
+        </div>
         {{end}}
-      </ul>
+      </div>
     </div>
     {{end}}
   </aside>
 </div>
+
+{{/* avatars.js paints the author / commenter chips ([data-av-name]); re-painted
+     on every #mem-comments swap by the inline-edit helper below. Cache-busted. */}}
+<script src="/ui/static/avatars.js?v={{assetv}}" defer></script>
+<script src="/ui/static/memory_detail.js?v={{assetv}}" defer></script>
+{{end}}
 {{end}}
 
+{{/* ──────────────────────────────────────────────────────────────────────────
+     mem-comments: the full comment thread. Rendered inside #mem-comments on the
+     full page and re-selected out of the redirect target after every mutation.
+     `.` here is the page data ($ from the caller).
+     ────────────────────────────────────────────────────────────────────────── */}}
+{{define "mem-comments"}}
+{{$mem := .Memory}}
+{{$user := .User}}
+{{if .Commits}}
+<div class="notes">
+  {{range .Commits}}
+  {{$canMod := false}}
+  {{if $user}}{{if or (eq $user.UserID .AuthorUserID) (eq $user.Role "admin")}}{{$canMod = true}}{{end}}{{end}}
+  <div class="note {{if .IsResolved}}resolved{{else}}open{{end}}" id="cmt-{{.ID}}">
+    <div class="nh">
+      <span class="who">
+        {{if .AuthorDisplay}}<span class="av sm" data-av-name="{{.AuthorDisplay}}"></span>{{else}}<span class="av sm ghost">?</span>{{end}}
+        <b class="nm">{{default "unknown" .AuthorDisplay}}</b>
+      </span>
+      <span class="ts">{{fmtTs .CreatedAt}}{{if .UpdatedAt}} · edited {{fmtTs .UpdatedAt}}{{end}}</span>
+      <span class="st {{if .IsResolved}}r{{else}}o{{end}}">{{if .IsResolved}}resolved{{else}}open{{end}}</span>
+    </div>
+
+    {{/* Rendered body — JS toggles this with the inline edit form (data-cmt-view
+         / data-cmt-edit). */}}
+    <div class="body" data-cmt-view>{{.Body}}</div>
+
+    {{/* Inline edit form, hidden until the Edit action toggles it. hx-post hits
+         the FROZEN edit endpoint; on its 303 redirect HTMX hx-selects
+         #mem-comments out of the full detail page and swaps it in place. Native
+         POST (no JS) still 303-redirects to a full reload. */}}
+    {{if $canMod}}
+    <form class="note-edit" data-cmt-edit hidden
+          method="POST" action="/ui/memories/{{$mem.ID}}/commit/{{.ID}}/edit"
+          hx-post="/ui/memories/{{$mem.ID}}/commit/{{.ID}}/edit"
+          hx-target="#mem-comments" hx-select="#mem-comments" hx-swap="outerHTML">
+      <textarea class="ta" name="body" required>{{.Body}}</textarea>
+      <div class="rowb">
+        <button type="button" class="btn ghost sm" data-cmt-cancel>Cancel</button>
+        <button type="submit" class="btn primary sm">Save</button>
+      </div>
+    </form>
+    {{end}}
+
+    {{/* Threaded replies. */}}
+    {{range .Replies}}
+    <div class="reply">
+      {{if .AuthorDisplay}}<span class="av sm" data-av-name="{{.AuthorDisplay}}"></span>{{else}}<span class="av sm ghost">?</span>{{end}}
+      <div class="body"><b style="color:var(--text)">{{default "unknown" .AuthorDisplay}}</b> · <span class="ts">{{fmtTs .CreatedAt}}</span><br>{{.Body}}</div>
+    </div>
+    {{end}}
+
+    {{/* Resolution reply (the resolver's note + who/when). */}}
+    {{if .IsResolved}}
+    <div class="reply resolved-reply">
+      {{if .ResolvedBy}}<span class="av sm" data-av-name="{{.ResolvedBy}}"></span>{{else}}<span class="av sm ghost">?</span>{{end}}
+      <div class="body"><b style="color:var(--success)">resolved</b>{{if .ResolvedBy}} by {{.ResolvedBy}}{{end}}{{if .ResolvedAt}} · <span class="ts">{{fmtTs .ResolvedAt}}</span>{{end}}{{if .Reply}}<br>{{.Reply}}{{end}}</div>
+    </div>
+    {{end}}
+
+    {{/* Action row: Edit/Delete gated to author-or-admin; Reply/Resolve open to
+         any project writer (the handlers enforce the writer gate). Each action
+         posts to its frozen endpoint with the same in-place swap of
+         #mem-comments. */}}
+    <div class="note-actions">
+      {{if $canMod}}
+      <button type="button" class="btn ghost sm" data-cmt-editbtn data-cmt-target="cmt-{{.ID}}">Edit</button>
+      <button type="button" class="btn ghost sm pf-danger-link" data-cmt-delbtn>Delete</button>
+      {{end}}
+      <button type="button" class="btn ghost sm" data-cmt-replybtn data-cmt-target="cmt-{{.ID}}">Reply</button>
+      {{if .IsOpen}}
+      <form method="POST" action="/ui/memories/{{$mem.ID}}/commit/{{.ID}}/resolve"
+            hx-post="/ui/memories/{{$mem.ID}}/commit/{{.ID}}/resolve"
+            hx-target="#mem-comments" hx-select="#mem-comments" hx-swap="outerHTML" style="display:inline">
+        <button type="submit" class="btn ghost sm pf-success-link">Resolve</button>
+      </form>
+      {{end}}
+    </div>
+
+    {{/* Inline reply form, hidden until Reply toggles it. */}}
+    <form class="note-reply" data-cmt-reply hidden
+          method="POST" action="/ui/memories/{{$mem.ID}}/commit/{{.ID}}/reply"
+          hx-post="/ui/memories/{{$mem.ID}}/commit/{{.ID}}/reply"
+          hx-target="#mem-comments" hx-select="#mem-comments" hx-swap="outerHTML">
+      <textarea class="ta" name="body" placeholder="Write a reply..." required></textarea>
+      <div class="rowb">
+        <button type="button" class="btn ghost sm" data-cmt-replycancel>Cancel</button>
+        <button type="submit" class="btn primary sm">Reply</button>
+      </div>
+    </form>
+
+    {{/* Styled delete-confirmation dialog (kept over a native hx-confirm per
+         user preference). Opened by the Delete action via memory_detail.js
+         (dialog.showModal); the confirm button posts to the frozen delete
+         endpoint with the same in-place #mem-comments swap. */}}
+    {{if $canMod}}
+    <dialog class="cdlg" data-cmt-confirm>
+      <form method="POST" action="/ui/memories/{{$mem.ID}}/commit/{{.ID}}/delete"
+            hx-post="/ui/memories/{{$mem.ID}}/commit/{{.ID}}/delete"
+            hx-target="#mem-comments" hx-select="#mem-comments" hx-swap="outerHTML">
+        <h4>Delete comment?</h4>
+        <div class="cdlg-prev">{{truncate 200 .Body}}</div>
+        <p class="cdlg-warn">This cannot be undone.</p>
+        <div class="cdlg-actions">
+          <button type="button" class="btn ghost sm" data-cmt-delcancel>Cancel</button>
+          <button type="submit" class="btn danger sm">Delete</button>
+        </div>
+      </form>
+    </dialog>
+    {{end}}
+  </div>
+  {{end}}
+</div>
+{{else}}
+<p class="pf-empty" style="text-align:left;padding:0;border:0;max-width:none">No comments yet.</p>
+{{end}}
+
+{{/* Add-comment form. Same in-place swap pattern — posts to the frozen commit
+     endpoint, follows the 303, hx-selects #mem-comments. */}}
+<form class="note-add" method="POST" action="/ui/memories/{{$mem.ID}}/commit"
+      hx-post="/ui/memories/{{$mem.ID}}/commit"
+      hx-target="#mem-comments" hx-select="#mem-comments" hx-swap="outerHTML">
+  <textarea class="ta" name="body" rows="3" placeholder="Add a comment..." required></textarea>
+  <div class="rowb">
+    <button type="submit" class="btn primary sm">Add comment</button>
+  </div>
+</form>
 {{end}}

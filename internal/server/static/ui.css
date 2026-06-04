@@ -575,32 +575,9 @@ a:hover { text-decoration: underline; }
 }
 
 /* ---------- memories index ---------- */
-.pf-mem-filters input[type=text] { min-width: 8em; }
-.pf-mem-table {
-  table-layout: auto;
-  width: 100%;
-}
-.pf-mem-table td:nth-child(2),
-.pf-mem-table td:nth-child(3) {
-  font-family: var(--pf-mono);
-  font-size: 0.85em;
-  text-align: right;
-  white-space: nowrap;
-}
-.pf-mem-table td:nth-child(4) {
-  font-family: var(--pf-mono);
-  font-size: 0.82em;
-  white-space: nowrap;
-  color: var(--pf-fg-muted);
-}
-.pf-mem-table td:last-child a {
-  display: inline-block;
-  max-width: 60ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  vertical-align: middle;
-}
+/* .pf-mem-type is the mono type pill reused by the redesigned card list
+   (aihub#137). The old <table> rules (.pf-mem-table / .pf-mem-filters) were
+   dropped with the table layout. */
 .pf-mem-type {
   display: inline-block;
   padding: 1px 7px;
@@ -724,248 +701,93 @@ a:hover { text-decoration: underline; }
   overflow-wrap: anywhere;
 }
 
-/* Commits card (memory_detail). */
-.pf-commits-list {
-  list-style: none;
-  padding: 0;
-  margin: 0 0 0.5em;
-}
-.pf-commit-entry {
-  padding: 0.7em 0;
-  border-bottom: 1px solid var(--pf-border);
-}
-.pf-commit-entry:last-child { border-bottom: none; }
-.pf-commit-meta {
-  display: flex;
-  align-items: baseline;
-  gap: 0.7em;
-  margin-bottom: 0.3em;
-}
-.pf-commit-author {
-  font-weight: 600;
-  color: var(--pf-fg);
-  font-size: 0.92em;
-}
-.pf-commit-ts {
-  color: var(--pf-fg-muted);
-  font-family: var(--pf-mono);
-  font-size: 0.82em;
-}
-.pf-commit-body {
-  color: var(--pf-fg);
-  font-size: 0.93em;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
+/* ============================================================
+   Memory detail comment thread (aihub#137). Ports the prototype's
+   .note / .nh / .st / .reply comment-thread styling into the shipped
+   design system, plus the inline-edit / reply affordances. Replaces the
+   pre-#129 .pf-commit* / .pf-confirm-dialog block (now removed — the
+   redesigned thread uses hx-confirm for delete instead of a dialog).
+   ============================================================ */
 
-.pf-commit-form {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5em;
-  padding-top: 0.9em;
-  margin-top: 0.3em;
-  border-top: 1px dashed var(--pf-border);
-}
-.pf-commit-form textarea {
-  width: 100%;
-  box-sizing: border-box;
-  font: inherit;
-  font-size: 0.93em;
-  padding: 0.55em 0.7em;
-  border: 1px solid var(--pf-border);
-  border-radius: 6px;
-  resize: vertical;
-  min-height: 4.2em;
-  field-sizing: content; /* Chrome 123+ / supported browsers auto-grow on input */
-  background: var(--pf-bg);
-  color: var(--pf-fg);
-}
-.pf-commit-form textarea:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-ring);
-}
-.pf-commit-form button {
-  align-self: flex-end;
-  padding: 0.4em 1.1em;
-  font: inherit;
-  font-size: 0.88em;
+/* Stack of comment cards. */
+.notes { display: flex; flex-direction: column; gap: var(--s3); margin-bottom: var(--s4); }
+
+.note {
   border: 1px solid var(--border);
-  border-radius: var(--r-sm);
+  border-radius: var(--r);
   background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  box-shadow: var(--shadow);
+  padding: var(--s3);
 }
-.pf-commit-form button:hover,
-.pf-commit-form button:focus {
-  background: var(--accent);
-  color: var(--accent-contrast);
-  border-color: var(--accent);
-  outline: none;
+.note.open { border-left: 3px solid var(--warning); }
+.note.resolved { opacity: .72; }
+
+.note .nh { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.note .nh .ts { color: var(--text-subtle); font-size: 11.5px; }
+.note .nh .st {
+  margin-left: auto; font-size: 10.5px; font-weight: 650;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.note .nh .st.o { color: var(--warning); }
+.note .nh .st.r { color: var(--success); }
+
+.note .body {
+  font-size: 13px; color: var(--text); line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
 
-/* commits-card specific empty-state (upstream defines .pf-empty for
-   other contexts; scope ours so we don't override them). */
-.pf-commits-card .pf-empty {
-  color: var(--pf-fg-muted);
-  font-style: italic;
-  margin: 0.4em 0;
-  font-size: 0.92em;
-  text-align: left;
-  padding: 0;
+/* Threaded reply + resolution row. */
+.note .reply {
+  display: flex; gap: 7px; margin-top: 9px;
+  padding-top: 9px; border-top: 1px solid var(--border);
 }
+.note .reply .body { font-size: 12.5px; color: var(--text-muted); }
+.note .reply .body .ts { color: var(--text-subtle); }
 
-/* aihub#70 v3: per-entry edit/delete affordances ----------------- */
+/* Action row: subtle ghost buttons, danger/success accents for delete/resolve. */
+.note-actions {
+  display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+  margin-top: 9px;
+}
+.note-actions .btn.sm { height: 24px; padding: 0 8px; font-size: 12px; }
+.note-actions form { margin: 0; }
+.pf-danger-link:hover { color: var(--danger); }
+.pf-success-link:hover { color: var(--success); }
 
-.pf-commit-edited {
-  color: var(--pf-fg-muted);
-  font-size: 0.8em;
-  font-style: italic;
-  margin-left: 0.3em;
+/* Inline edit / reply / add-comment forms. The .ta textarea reuses the
+   prototype's focused-input treatment. */
+.note-edit, .note-reply, .note-add {
+  display: flex; flex-direction: column; gap: 8px;
 }
-.pf-commit-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.6em;
-  margin-left: auto;          /* push to the right edge of the meta row */
-  font-size: 0.82em;
+.note-edit, .note-reply { margin-top: 9px; }
+.note-add { margin-top: var(--s2); }
+.note-add .ta { min-height: 4.4em; }
+.ta {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 56px;
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--text);
+  font-family: var(--sans); font-size: 13px; padding: 8px;
 }
-.pf-commit-actions summary,
-.pf-commit-actions button {
-  cursor: pointer;
-  font: inherit;
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--pf-accent);
-}
-.pf-commit-actions summary:hover,
-.pf-commit-actions button:hover {
-  text-decoration: underline;
-}
-.pf-commit-actions summary {
-  list-style: none;           /* hide the default disclosure triangle */
-}
-.pf-commit-actions summary::-webkit-details-marker { display: none; }
-.pf-commit-delete-btn {
-  color: var(--pf-danger);
-}
-.pf-commit-edit[open] {
-  display: block;
-  width: 100%;
-  margin-top: 0.4em;
-}
-.pf-commit-edit-form {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4em;
-  padding: 0.5em;
-  margin-top: 0.3em;
-  background: var(--pf-bg-soft);
-  border: 1px solid var(--pf-border);
-  border-radius: 6px;
-}
-.pf-commit-edit-form textarea {
-  width: 100%;
-  box-sizing: border-box;
-  font: inherit;
-  font-size: 0.93em;
-  padding: 0.5em 0.6em;
-  border: 1px solid var(--pf-border);
-  border-radius: 4px;
-  resize: vertical;
-  min-height: 3.5em;
-  field-sizing: content;
-  background: var(--pf-bg);
-}
-.pf-commit-edit-form textarea:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-ring);
-}
-.pf-commit-edit-form button {
-  align-self: flex-end;
-  padding: 0.3em 0.9em;
-  font: inherit;
-  font-size: 0.85em;
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  background: var(--accent);
-  color: var(--accent-contrast);
-  cursor: pointer;
-}
-.pf-commit-edit-form button:hover { filter: brightness(1.1); }
+.ta:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.rowb { display: flex; gap: 8px; justify-content: flex-end; }
 
-/* aihub#70 v3.1: in-page confirm dialog for delete (replaces native confirm). */
-.pf-confirm-dialog {
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-lg);
-  padding: 0;
-  max-width: 480px;
-  width: 90%;
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: var(--shadow-pop);
+/* Delete-confirmation dialog (memory_detail) — styled native <dialog>, opened
+   via memory_detail.js (showModal). Tokenized to the #129 design system. */
+.cdlg {
+  border: 1px solid var(--border-strong); border-radius: var(--r-lg);
+  background: var(--surface); color: var(--text); padding: 0;
+  max-width: 420px; width: 90%; box-shadow: var(--shadow-pop);
 }
-.pf-confirm-dialog::backdrop {
-  background: rgba(20, 24, 30, 0.45);
-  backdrop-filter: blur(2px);
+.cdlg::backdrop { background: rgba(0, 0, 0, .45); backdrop-filter: blur(2px); }
+.cdlg form { padding: var(--s5); display: flex; flex-direction: column; gap: var(--s3); }
+.cdlg h4 { margin: 0; font-size: 15px; }
+.cdlg .cdlg-prev {
+  font-size: 12.5px; color: var(--text-muted); background: var(--surface-2);
+  border-left: 3px solid var(--border-strong); padding: var(--s2) var(--s3);
+  border-radius: var(--r-sm); max-height: 6em; overflow: auto; white-space: pre-wrap;
 }
-.pf-confirm-dialog-form {
-  padding: 1.1em 1.2em 0.9em;
-}
-.pf-confirm-dialog h3 {
-  margin: 0 0 0.4em;
-  font-size: 1.05em;
-}
-.pf-confirm-dialog-meta {
-  margin: 0 0 0.4em;
-  color: var(--pf-fg-muted);
-  font-family: var(--pf-mono);
-  font-size: 0.82em;
-}
-.pf-confirm-dialog-body {
-  margin: 0 0 0.6em;
-  padding: 0.55em 0.7em;
-  background: var(--pf-bg-soft);
-  border-left: 3px solid var(--pf-border);
-  border-radius: 4px;
-  font-size: 0.9em;
-  line-height: 1.45;
-  max-height: 8em;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.pf-confirm-dialog-warn {
-  margin: 0 0 0.8em;
-  color: var(--pf-danger);
-  font-size: 0.85em;
-}
-.pf-confirm-dialog-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.5em;
-}
-.pf-confirm-dialog-actions button {
-  font: inherit;
-  font-size: 0.88em;
-  padding: 0.4em 1em;
-  border: 1px solid var(--pf-border);
-  border-radius: 6px;
-  background: var(--pf-bg-soft);
-  color: var(--pf-fg);
-  cursor: pointer;
-}
-.pf-confirm-dialog-actions button:hover { background: var(--surface-3); }
-.pf-confirm-dialog-confirm {
-  background: var(--danger) !important;
-  border-color: var(--danger) !important;
-  color: #fff !important;
-}
-.pf-confirm-dialog-confirm:hover { filter: brightness(1.08); }
+.cdlg .cdlg-warn { font-size: 12.5px; color: var(--danger); margin: 0; }
+.cdlg .cdlg-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
 /* ============================================================
    Reusable component classes ported from the prototype Design
@@ -1427,3 +1249,43 @@ a:hover { text-decoration: underline; }
   border-radius: var(--r-sm); padding: 8px 12px; color: var(--danger);
   margin-bottom: var(--s4); font-size: 13px;
 }
+
+/* ---------- memory list (aihub#137) ---------- */
+/* Memory-specific additions only. The card (.mcard), badges, avatars (.av /
+   .av-c*), person chip (.who), dropdowns (.dd), segmented control (.seg),
+   pagination (.grp-pager / .pbtn / .pell) and empty state all come from the
+   shared #129 component set above — these are the bits unique to the memory
+   list: the strength meter, the card grid, and the bottom pager strip. */
+
+/* Strength meter — five segments, the filled count reflects effective recall
+   strength (prototype .strength). The whole bar carries a help-cursor tooltip
+   that explains the value. Mirrors the prototype 1:1. */
+.pf-strength-bar {
+  display: inline-flex; gap: 2px; align-items: center; margin-left: auto; cursor: help;
+}
+.pf-strength-bar i {
+  width: 5px; height: 11px; border-radius: 1px; background: var(--border-strong);
+}
+.pf-strength-bar i.on { background: var(--accent); }
+
+/* Card grid (prototype .mgrid) — responsive auto-fill of memory cards. */
+.mgrid {
+  display: grid; gap: var(--s3);
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+
+/* Bottom pager strip (prototype .pager) — per-page count on the left, the
+   numbered page buttons (.grp-pager) on the right. Reuses .grp-pager / .pbtn /
+   .pell from the shared set for the actual controls. */
+.pager { display: flex; align-items: center; margin-top: var(--s4); gap: var(--s2); }
+.pager .pinfo { color: var(--text-subtle); font-size: 12px; }
+.pager .grp-pager { margin: 0; }
+
+/* Card click target: the card is a <div> (a nested <a> wi-link inside an outer
+   <a> is invalid HTML and breaks the grid), so an absolutely positioned overlay
+   link covers the card for click-to-open, and the interactive / tooltip bits
+   (wi link, strength meter) are raised above it. */
+.mcard { position: relative; }
+.mcard-link { position: absolute; inset: 0; z-index: 0; border-radius: inherit; }
+.mcard .ft .wi { position: relative; z-index: 1; }
+.mcard .pf-strength-bar { position: relative; z-index: 1; }

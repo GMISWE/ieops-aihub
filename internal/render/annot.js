@@ -575,17 +575,14 @@
       var fw = 320; // approximate form width incl. padding
       var left = Math.max(8, Math.min(last.left, window.innerWidth - fw - 16));
       var top = Math.min(last.bottom + 8, window.innerHeight - 220);
+      // Position is dynamic (computed from selection geometry); appearance
+      // is now handled by viewer.css #pf-selform so dark mode works correctly.
       _selform.style.position = 'fixed';
       _selform.style.top      = top + 'px';
       _selform.style.right    = 'auto';
       _selform.style.left     = left + 'px';
       _selform.style.zIndex   = '900';
       _selform.style.maxWidth = '300px';
-      _selform.style.background = '#fff';
-      _selform.style.border   = '1px solid #d0d7de';
-      _selform.style.borderRadius = '6px';
-      _selform.style.padding  = '0.8em';
-      _selform.style.boxShadow = '0 4px 16px rgba(0,0,0,0.14)';
     }
     _selform.hidden = false;
     _selbtn.style.display = 'none';

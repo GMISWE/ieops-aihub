@@ -590,3 +590,285 @@ func TestHandleArtifactHTML_V1Path_NoAnnotScaffold(t *testing.T) {
 		}
 	}
 }
+
+// ─── aihub#138: review viewer tests ─────────────────────────────────────────
+
+// reviewMem builds a methodology.review fixture for handler tests.
+func reviewMem(structuredPayload string) *domain.Memory {
+	var attrsJSON json.RawMessage
+	if structuredPayload != "" {
+		attrsJSON = json.RawMessage(`{"structured_payload":` + structuredPayload + `}`)
+	}
+	renderedBody := "<p>Review body text.</p>"
+	return &domain.Memory{
+		ID:           "mem_rev1",
+		Project:      "testproj",
+		Type:         "methodology.review",
+		Visibility:   "project",
+		AuthorUserID: "u_author",
+		RenderedHTML: strptr(renderedBody),
+		Attrs:        attrsJSON,
+	}
+}
+
+// specPayload is a full structured_payload matching the spec-shape for reviews.
+const specPayload = `{
+  "verdict": "PASS with findings",
+  "findings": [
+    {"severity":"mustfix","title":"Dark-mode coverage misses login","body":"Login page needs token layer."},
+    {"severity":"should","title":"Add contrast check","body":"WCAG AA pass required."},
+    {"severity":"nit","title":"Version labels inconsistent","body":"Use trigger-based names."}
+  ],
+  "checked": ["Scope matches the wi goal","Non-goals consistent with invariant"],
+  "outcome": "Spec revised as v3 on 06-03 — all findings resolved.",
+  "reviewed_memory_id": "mem_spec_v2",
+  "reviewed_version": "v2"
+}`
+
+// quickPayload is the quick-review shape used by deployed reviews.
+const quickPayload = `{
+  "result": "WARN",
+  "level": "quick",
+  "issues": [
+    {"severity":"warning","text":"Test coverage stops at the resolver."},
+    {"severity":"minor","text":"Latent: empty-Slug canonical file."}
+  ]
+}`
+
+// TestHandleArtifactHTML_ReviewType_UI verifies that a methodology.review
+// artifact on the /ui path:
+//   - returns 200
+//   - renders the verdict banner
+//   - renders findings with severity badges
+//   - renders the checked list (spec-shape)
+//   - includes the viewer.css link
+func TestHandleArtifactHTML_ReviewType_UI(t *testing.T) {
+	mem := reviewMem(specPayload)
+	defer withLoadMemoryOverride(mem, nil)()
+
+	prevVCF := versionChainFn
+	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+		return nil, nil
+	}
+	defer func() { versionChainFn = prevVCF }()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/ui/artifacts/mem_rev1/html", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/ui/artifacts/:id/html")
+	c.SetParamNames("id")
+	c.SetParamValues("mem_rev1")
+	setUser(c, adminUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// Must contain verdict text.
+	if !strings.Contains(body, "PASS with findings") {
+		t.Errorf("review /ui must render verdict; excerpt: %s", excerptStr(body))
+	}
+	// Must contain findings structure.
+	if !strings.Contains(body, "pf-review-find") {
+		t.Errorf("review /ui must render pf-review-find; excerpt: %s", excerptStr(body))
+	}
+	// Must contain badge classes.
+	if !strings.Contains(body, "pf-b-mustfix") {
+		t.Errorf("review /ui must render pf-b-mustfix badge; excerpt: %s", excerptStr(body))
+	}
+	// Must contain checked list.
+	if !strings.Contains(body, "pf-review-checked-list") {
+		t.Errorf("review /ui must render pf-review-checked-list; excerpt: %s", excerptStr(body))
+	}
+	// Must contain viewer.css link (token layer).
+	if !strings.Contains(body, "/ui/static/viewer.css") {
+		t.Errorf("review /ui must include viewer.css link; excerpt: %s", excerptStr(body))
+	}
+	// Must NOT contain annotation scaffold (reviews don't use it).
+	if strings.Contains(body, `id="pf-annot-data"`) {
+		t.Errorf("review /ui must not contain annotation scaffold; excerpt: %s", excerptStr(body))
+	}
+}
+
+// TestHandleArtifactHTML_ReviewType_QuickPayload verifies that a review with the
+// quick-review shape (result + issues instead of verdict + findings) also renders.
+func TestHandleArtifactHTML_ReviewType_QuickPayload(t *testing.T) {
+	mem := reviewMem(quickPayload)
+	defer withLoadMemoryOverride(mem, nil)()
+
+	prevVCF := versionChainFn
+	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+		return nil, nil
+	}
+	defer func() { versionChainFn = prevVCF }()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/ui/artifacts/mem_rev1/html", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/ui/artifacts/:id/html")
+	c.SetParamNames("id")
+	c.SetParamValues("mem_rev1")
+	setUser(c, adminUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// Verdict from result field.
+	if !strings.Contains(body, "WARN") {
+		t.Errorf("quick-review must render result field as verdict; excerpt: %s", excerptStr(body))
+	}
+	// Issues rendered as findings.
+	if !strings.Contains(body, "pf-review-find") {
+		t.Errorf("quick-review must render pf-review-find; excerpt: %s", excerptStr(body))
+	}
+	// Warning badge.
+	if !strings.Contains(body, "pf-b-should") {
+		t.Errorf("quick-review must render pf-b-should for warning severity; excerpt: %s", excerptStr(body))
+	}
+}
+
+// TestHandleArtifactHTML_ReviewType_V1_PlainDoc verifies that a review artifact
+// on the /v1 path returns a plain document (no review chrome, no scaffold).
+// This enforces the /v1 + /share byte-invariance contract for review type.
+func TestHandleArtifactHTML_ReviewType_V1_PlainDoc(t *testing.T) {
+	mem := reviewMem(specPayload)
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/v1/artifacts/mem_rev1/html", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/v1/artifacts/:id/html")
+	c.SetParamNames("id")
+	c.SetParamValues("mem_rev1")
+	setUser(c, adminUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// No review chrome.
+	for _, forbidden := range []string{
+		"pf-review-find",
+		"pf-review-verdict",
+		"pf-review-checked-list",
+		"/ui/static/viewer.css",
+		"/ui/static/ui.css",
+		`id="pf-annot-data"`,
+		`id="pf-selform"`,
+		`id="pf-doc-col"`,
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("/v1 review must not contain %q; excerpt: %s", forbidden, excerptStr(body))
+		}
+	}
+	// Body fragment must be present (plain document).
+	if !strings.Contains(body, "Review body text.") {
+		t.Errorf("/v1 review must contain rendered body; excerpt: %s", excerptStr(body))
+	}
+}
+
+// TestHandleArtifactHTML_ReviewType_NoPayload_Fallback verifies that a review
+// artifact with no structured_payload falls back gracefully — returns 200 and
+// the body fragment is served (no crash, no review chrome injected).
+func TestHandleArtifactHTML_ReviewType_NoPayload_Fallback(t *testing.T) {
+	mem := reviewMem("") // no structured_payload
+	defer withLoadMemoryOverride(mem, nil)()
+
+	prevVCF := versionChainFn
+	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+		return nil, nil
+	}
+	defer func() { versionChainFn = prevVCF }()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/ui/artifacts/mem_rev1/html", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/ui/artifacts/:id/html")
+	c.SetParamNames("id")
+	c.SetParamValues("mem_rev1")
+	setUser(c, adminUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// Body fragment must be present.
+	if !strings.Contains(body, "Review body text.") {
+		t.Errorf("no-payload fallback must contain body fragment; excerpt: %s", excerptStr(body))
+	}
+	// No review chrome.
+	if strings.Contains(body, "pf-review-find") {
+		t.Errorf("no-payload fallback must not inject review chrome; excerpt: %s", excerptStr(body))
+	}
+}
+
+// TestBuildVersionHistoryHTML_ReviewLink verifies that buildVersionHistoryHTML
+// emits a Review link only when buildVersionReviewLinks returns a match,
+// and no link when no review exists. The pool is nil so buildVersionReviewLinks
+// returns an empty map — no link emitted.
+func TestBuildVersionHistoryHTML_ReviewLink(t *testing.T) {
+	versions := []domain.MemoryVersionRef{
+		{ID: "mem_v1", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
+		{ID: "mem_v2", CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+	}
+	// With nil pool, buildVersionReviewLinks returns empty → no review links.
+	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v2", versions)
+	if got == "" {
+		t.Fatal("buildVersionHistoryHTML returned empty for 2-version chain")
+	}
+	// No review links when pool is nil.
+	if strings.Contains(got, "pf-review-link") {
+		t.Errorf("no review links expected when pool is nil; got: %s", excerptStr(got))
+	}
+	// pf-version-history class must still be present.
+	if !strings.Contains(got, "pf-version-history") {
+		t.Errorf("pf-version-history class missing; got: %s", excerptStr(got))
+	}
+	// viewing label present.
+	if !strings.Contains(got, "viewing") {
+		t.Errorf("viewing label missing; got: %s", excerptStr(got))
+	}
+	// current badge present.
+	if !strings.Contains(got, "current") {
+		t.Errorf("current badge missing; got: %s", excerptStr(got))
+	}
+}
+
+// TestBuildVersionHistoryHTML_CollapsibleToggle verifies the collapsible
+// structure: a <button> toggle and a hidden panel are emitted.
+func TestBuildVersionHistoryHTML_CollapsibleToggle(t *testing.T) {
+	versions := []domain.MemoryVersionRef{
+		{ID: "mem_v1", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
+		{ID: "mem_v2", CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+	}
+	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions)
+	if !strings.Contains(got, "pf-version-history-toggle") {
+		t.Errorf("missing toggle button class; got: %s", excerptStr(got))
+	}
+	if !strings.Contains(got, "pf-version-history-panel") {
+		t.Errorf("missing panel div class; got: %s", excerptStr(got))
+	}
+	if !strings.Contains(got, "hidden") {
+		t.Errorf("panel must be hidden by default; got: %s", excerptStr(got))
+	}
+}

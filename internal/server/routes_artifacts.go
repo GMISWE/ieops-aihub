@@ -115,28 +115,61 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				ownerLabel = *mem.WorkItemID
 			}
 			related = parseRelatedRefs(mem.Attrs)
-			// aihub#124: build annotation UI (section threads + add-comment form).
-			// Only for /ui — /v1 and /share must stay byte-for-byte pure.
-			// Use bodyFragment (the resolved HTML — stored rendered_html OR the
-			// lazy-rendered fallback from #146) so heading anchors align with the
-			// rendered document even when rendered_html is NULL.
-			// Annotations are strictly per-version: a page shows only the commits
-			// made on the version being viewed (cross-version feedback flow is
-			// pf-revise's job, which reads the old head explicitly by id).
-			annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits)
-			// aihub#124 version_history: fetch supersede chain and build version-history block.
-			// Best-effort: an error is silently swallowed (non-fatal like other /ui enrichments).
-			if versions, verErr := versionChainFn(ctx, pool, mem.ID); verErr == nil {
-				if vhHTML := buildVersionHistoryHTML(ctx, pool, mem.ID, versions); vhHTML != "" {
-					// Prepend version history before the annotation section.
-					annotHTML = vhHTML + annotHTML
-				}
-			}
-			// aihub#125: inject client-side annotation scripts — /ui path only.
-			// ?v= content hash busts browser caches on deploys (assets are served
-			// with Cache-Control max-age).
+
+			// aihub#138: inject /ui-only design tokens + viewer stylesheet so
+			// the artifact document renders with the #129 design system. These tags
+			// are appended into <body> — DocumentWithMeta places annotHTML before
+			// </body>, and its <html>/<head> output is frozen to keep /v1 + /share
+			// byte-identical, so we cannot put the links in <head>. An inline script
+			// sets data-theme synchronously; because the stylesheets load late there
+			// is a brief restyle flash on first paint — an accepted tradeoff given the
+			// frozen document shell. Theme comes from the cookie, defaulting to "auto"
+			// (follow OS). viewer.css overrides the earlier-embedded style.css via the
+			// token vars declared by ui.css.
 			av := render.AssetVersion()
-			annotHTML += "\n<script src=\"/ui/static/annotator.js?v=" + av + "\" defer></script>\n<script src=\"/ui/static/annot.js?v=" + av + "\" defer></script>\n"
+			theme := themeFromCookie(c)
+			var uiHead strings.Builder
+			// Set data-theme on <html> immediately (inline script runs synchronously).
+			uiHead.WriteString("<script>(function(){document.documentElement.setAttribute('data-theme',")
+			uiHead.WriteString("'")
+			uiHead.WriteString(theme) // "auto", "light", or "dark" — server-validated
+			uiHead.WriteString("')})();</script>\n")
+			uiHead.WriteString("<link rel=\"stylesheet\" href=\"/ui/static/ui.css?v=")
+			uiHead.WriteString(av)
+			uiHead.WriteString("\">\n")
+			uiHead.WriteString("<link rel=\"stylesheet\" href=\"/ui/static/viewer.css?v=")
+			uiHead.WriteString(av)
+			uiHead.WriteString("\">\n")
+
+			// aihub#138: review viewer — methodology.review gets a dedicated layout
+			// instead of the annotation scaffold. /v1 + /share stay plain document.
+			if mem.Type == "methodology.review" {
+				annotHTML = uiHead.String() + buildReviewHTML(mem)
+			} else {
+				// aihub#124: build annotation UI (section threads + add-comment form).
+				// Only for /ui — /v1 and /share must stay byte-for-byte pure.
+				// Use bodyFragment (the resolved HTML — stored rendered_html OR the
+				// lazy-rendered fallback from #146) so heading anchors align with the
+				// rendered document even when rendered_html is NULL.
+				// Annotations are strictly per-version: a page shows only the commits
+				// made on the version being viewed (cross-version feedback flow is
+				// pf-revise's job, which reads the old head explicitly by id).
+				annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits)
+				// aihub#124 version_history: fetch supersede chain and build version-history block.
+				// Best-effort: an error is silently swallowed (non-fatal like other /ui enrichments).
+				if versions, verErr := versionChainFn(ctx, pool, mem.ID); verErr == nil {
+					if vhHTML := buildVersionHistoryHTML(ctx, pool, mem.ID, versions); vhHTML != "" {
+						// Prepend version history before the annotation section.
+						annotHTML = vhHTML + annotHTML
+					}
+				}
+				// aihub#125: inject client-side annotation scripts — /ui path only.
+				// ?v= content hash busts browser caches on deploys (assets are served
+				// with Cache-Control max-age).
+				annotHTML += "\n<script src=\"/ui/static/annotator.js?v=" + av + "\" defer></script>\n<script src=\"/ui/static/annot.js?v=" + av + "\" defer></script>\n"
+				// Prepend ui.css + viewer.css links + theme setter.
+				annotHTML = uiHead.String() + annotHTML
+			}
 		}
 		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBodyWithMeta(bodyFragment, title, backHref, ownerHref, ownerLabel, related, annotHTML)))
 	}
@@ -919,17 +952,37 @@ var versionChainFn = func(ctx context.Context, pool *pgxpool.Pool, memID string)
 	return domain.MemoryVersionChain(ctx, pool, memID)
 }
 
-// buildVersionHistoryHTML returns a small HTML fragment listing all versions in
-// the supersede chain for memID. Returns "" when the chain has ≤1 entry (nothing
-// to show) or on error (best-effort, non-fatal). Only called on the /ui path.
+// buildVersionHistoryHTML returns a collapsible HTML fragment listing all
+// versions in the supersede chain for memID. Returns "" when the chain has ≤1
+// entry (nothing to show) or on error (best-effort, non-fatal). Only called
+// on the /ui path.
+//
+// For versions that have a linked review (keyed via attrs.structured_payload
+// .reviewed_memory_id), a "Review" link is emitted.
+// aihub#138: converted to collapsible <details> and added per-version review link.
 func buildVersionHistoryHTML(ctx context.Context, pool *pgxpool.Pool, memID string, versions []domain.MemoryVersionRef) string {
 	if len(versions) <= 1 {
 		return ""
 	}
 
+	// Build a map of version_id → review_mem_id for versions that have a review.
+	// Best-effort: errors silently ignored (non-fatal).
+	reviewLinks := buildVersionReviewLinks(ctx, pool, versions)
+
 	var b strings.Builder
 	b.WriteString("<section class=\"pf-version-history\">\n")
-	b.WriteString("<h2 class=\"pf-version-history-heading\">Version history</h2>\n")
+	nVers := len(versions)
+	b.WriteString("<button type=\"button\" class=\"pf-version-history-toggle\" onclick=\"")
+	b.WriteString("var p=this.nextElementSibling;var c=this.querySelector('.pf-vchev');")
+	b.WriteString("p.hidden=!p.hidden;if(c)c.classList.toggle('open',!p.hidden);\">")
+	b.WriteString("<span class=\"pf-vchev\"></span>History &mdash; ")
+	b.WriteString(strconv.Itoa(nVers))
+	b.WriteString(" version")
+	if nVers != 1 {
+		b.WriteString("s")
+	}
+	b.WriteString("</button>\n")
+	b.WriteString("<div class=\"pf-version-history-panel\" hidden>\n")
 	b.WriteString("<ol class=\"pf-version-list\">\n")
 	for i, v := range versions {
 		label := "v" + strconv.Itoa(i+1)
@@ -943,31 +996,274 @@ func buildVersionHistoryHTML(ctx context.Context, pool *pgxpool.Pool, memID stri
 			b.WriteString(" pf-version-current")
 		}
 		b.WriteString("\">")
+		b.WriteString("<span class=\"pf-version-dot\"></span>")
+		b.WriteString("<span class=\"pf-version-content\">")
 		if v.ID == memID {
 			// Currently viewed version: plain text, mark it.
-			b.WriteString("<strong>")
+			b.WriteString("<span class=\"pf-version-label\">")
 			b.WriteString(html.EscapeString(label))
-			b.WriteString("</strong>")
-			b.WriteString(" <span class=\"pf-version-ts\">(")
-			b.WriteString(html.EscapeString(ts))
-			b.WriteString(")</span>")
+			b.WriteString("</span>")
 			b.WriteString(" <span class=\"pf-version-badge\">viewing</span>")
 		} else {
 			b.WriteString("<a href=\"/ui/artifacts/")
 			b.WriteString(html.EscapeString(v.ID))
-			b.WriteString("/html\">")
+			b.WriteString("/html\" class=\"pf-version-label\">")
 			b.WriteString(html.EscapeString(label))
 			b.WriteString("</a>")
-			b.WriteString(" <span class=\"pf-version-ts\">(")
-			b.WriteString(html.EscapeString(ts))
-			b.WriteString(")</span>")
 		}
 		if v.IsCurrent && v.ID != memID {
 			b.WriteString(" <span class=\"pf-version-badge pf-version-head\">current</span>")
 		}
+		b.WriteString("<div class=\"pf-version-ts\">")
+		b.WriteString(html.EscapeString(ts))
+		b.WriteString("</div>")
+		b.WriteString("</span>") // pf-version-content
+		// Per-version actions: View (when not currently viewed) + Review link if available.
+		if v.ID != memID || reviewLinks[v.ID] != "" {
+			b.WriteString("<span class=\"pf-version-actions\">")
+			if v.ID != memID {
+				b.WriteString("<a href=\"/ui/artifacts/")
+				b.WriteString(html.EscapeString(v.ID))
+				b.WriteString("/html\">View</a>")
+			}
+			if reviewID := reviewLinks[v.ID]; reviewID != "" {
+				b.WriteString("<a href=\"/ui/artifacts/")
+				b.WriteString(html.EscapeString(reviewID))
+				b.WriteString("/html\" class=\"pf-review-link\">Review</a>")
+			}
+			b.WriteString("</span>")
+		}
 		b.WriteString("</li>\n")
 	}
 	b.WriteString("</ol>\n")
+	b.WriteString("</div>\n") // pf-version-history-panel
 	b.WriteString("</section>\n")
 	return b.String()
+}
+
+// buildVersionReviewLinks queries the DB for methodology.review memories whose
+// structured_payload.reviewed_memory_id references any version in the chain.
+// Returns a map of reviewed_version_id → review_memory_id (first match wins).
+// Best-effort: returns an empty map on any error.
+func buildVersionReviewLinks(ctx context.Context, pool *pgxpool.Pool, versions []domain.MemoryVersionRef) map[string]string {
+	result := map[string]string{}
+	if pool == nil || len(versions) == 0 {
+		return result
+	}
+	ids := make([]string, len(versions))
+	for i, v := range versions {
+		ids[i] = v.ID
+	}
+	// Query reviews whose attrs->>'structured_payload'->'reviewed_memory_id' is in the version set.
+	// The payload is stored as JSONB in attrs under key "structured_payload".
+	const q = `
+SELECT id,
+       attrs->'structured_payload'->>'reviewed_memory_id' AS reviewed_id
+FROM memories
+WHERE type = 'methodology.review'
+  AND attrs->'structured_payload'->>'reviewed_memory_id' = ANY($1)
+  AND status != 'redacted'
+`
+	rows, err := pool.Query(ctx, q, ids)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var reviewID, reviewedID string
+		if err := rows.Scan(&reviewID, &reviewedID); err != nil {
+			continue
+		}
+		if _, exists := result[reviewedID]; !exists {
+			result[reviewedID] = reviewID
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return result
+	}
+	return result
+}
+
+// ─── aihub#138: review viewer ────────────────────────────────────────────────
+
+// reviewPayload is the structured_payload shape for methodology.review memories.
+// Two shapes are supported:
+//
+//  1. Spec shape (pf-spec/pf-plan review): verdict + findings + checked + outcome +
+//     reviewed_memory_id + reviewed_version.
+//  2. Quick-review shape (pf-review quick): result + level + issues.
+//
+// Fields are intentionally all optional so partial payloads degrade gracefully.
+type reviewPayload struct {
+	// Spec-shape fields
+	Verdict          string          `json:"verdict,omitempty"`
+	Findings         []reviewFinding `json:"findings,omitempty"`
+	Checked          []string        `json:"checked,omitempty"`
+	Outcome          string          `json:"outcome,omitempty"`
+	ReviewedMemoryID string          `json:"reviewed_memory_id,omitempty"`
+	ReviewedVersion  string          `json:"reviewed_version,omitempty"`
+	// Quick-review shape fields (real deployed reviews use these)
+	Result string        `json:"result,omitempty"` // PASS|WARN|FAIL
+	Level  string        `json:"level,omitempty"`  // quick|deep
+	Issues []reviewIssue `json:"issues,omitempty"`
+}
+
+type reviewFinding struct {
+	Severity string `json:"severity"` // mustfix|should|nit
+	Title    string `json:"title"`
+	Body     string `json:"body"`
+	Section  string `json:"section,omitempty"` // optional target section link
+}
+
+type reviewIssue struct {
+	Severity string `json:"severity"` // warning|minor|info
+	Text     string `json:"text"`
+}
+
+// buildReviewHTML builds the /ui-only review viewer fragment for a
+// methodology.review artifact. Falls back to the plain markdown body when
+// structured_payload is absent or cannot be parsed.
+func buildReviewHTML(mem *domain.Memory) string {
+	var payload reviewPayload
+	hasPayload := false
+	if len(mem.Attrs) > 0 {
+		var attrsObj map[string]json.RawMessage
+		if err := json.Unmarshal(mem.Attrs, &attrsObj); err == nil {
+			if spRaw, ok := attrsObj["structured_payload"]; ok {
+				if err := json.Unmarshal(spRaw, &payload); err == nil {
+					hasPayload = payload.Verdict != "" || payload.Result != "" ||
+						len(payload.Findings) > 0 || len(payload.Issues) > 0
+				}
+			}
+		}
+	}
+	if !hasPayload {
+		// No usable structured payload — no review chrome injected.
+		// The bodyFragment is already rendered as the document body by the
+		// caller (renderArtifactBodyWithMeta). Return "" so the caller uses
+		// the plain document path.
+		return ""
+	}
+
+	var b strings.Builder
+
+	// Verdict / result banner.
+	verdict := payload.Verdict
+	if verdict == "" {
+		verdict = payload.Result // quick-review shape
+	}
+	if verdict != "" {
+		verdictClass := "pf-verdict-unknown"
+		lv := strings.ToLower(verdict)
+		switch {
+		case strings.HasPrefix(lv, "pass"):
+			verdictClass = "pf-verdict-pass"
+		case strings.HasPrefix(lv, "warn"):
+			verdictClass = "pf-verdict-warn"
+		case strings.HasPrefix(lv, "fail"):
+			verdictClass = "pf-verdict-fail"
+		}
+		b.WriteString("<div class=\"pf-review-verdict ")
+		b.WriteString(verdictClass)
+		b.WriteString("\">Verdict: ")
+		b.WriteString(html.EscapeString(verdict))
+		if payload.Level != "" {
+			b.WriteString(" (")
+			b.WriteString(html.EscapeString(payload.Level))
+			b.WriteString(")")
+		}
+		b.WriteString("</div>\n")
+	}
+
+	// Findings (spec-shape) — richer with title + body.
+	if len(payload.Findings) > 0 {
+		b.WriteString("<h2>Findings</h2>\n")
+		for _, f := range payload.Findings {
+			b.WriteString("<div class=\"pf-review-find\">\n")
+			b.WriteString("<div class=\"pf-review-find-head\">")
+			badgeClass := reviewSeverityBadgeClass(f.Severity)
+			b.WriteString("<span class=\"pf-badge ")
+			b.WriteString(badgeClass)
+			b.WriteString("\">")
+			b.WriteString(html.EscapeString(f.Severity))
+			b.WriteString("</span>")
+			if f.Title != "" {
+				b.WriteString("<b>")
+				b.WriteString(html.EscapeString(f.Title))
+				b.WriteString("</b>")
+			}
+			b.WriteString("</div>\n")
+			if f.Body != "" {
+				b.WriteString("<p>")
+				b.WriteString(html.EscapeString(f.Body))
+				if f.Section != "" {
+					b.WriteString(" <a href=\"#")
+					b.WriteString(html.EscapeString(f.Section))
+					b.WriteString("\">jump to section</a>")
+				}
+				b.WriteString("</p>\n")
+			}
+			b.WriteString("</div>\n")
+		}
+	}
+
+	// Issues (quick-review shape) — flat severity + text.
+	if len(payload.Issues) > 0 {
+		b.WriteString("<h2>Findings</h2>\n")
+		for _, issue := range payload.Issues {
+			b.WriteString("<div class=\"pf-review-find\">\n")
+			b.WriteString("<div class=\"pf-review-find-head\">")
+			badgeClass := reviewSeverityBadgeClass(issue.Severity)
+			b.WriteString("<span class=\"pf-badge ")
+			b.WriteString(badgeClass)
+			b.WriteString("\">")
+			b.WriteString(html.EscapeString(issue.Severity))
+			b.WriteString("</span>")
+			b.WriteString("</div>\n")
+			if issue.Text != "" {
+				b.WriteString("<p>")
+				b.WriteString(html.EscapeString(issue.Text))
+				b.WriteString("</p>\n")
+			}
+			b.WriteString("</div>\n")
+		}
+	}
+
+	// Checked list.
+	if len(payload.Checked) > 0 {
+		b.WriteString("<h2>Checked</h2>\n")
+		b.WriteString("<ul class=\"pf-review-checked-list\">\n")
+		for _, item := range payload.Checked {
+			b.WriteString("<li><span class=\"pf-review-check-ok\"></span>")
+			b.WriteString(html.EscapeString(item))
+			b.WriteString("</li>\n")
+		}
+		b.WriteString("</ul>\n")
+	}
+
+	// Outcome.
+	if payload.Outcome != "" {
+		b.WriteString("<h2>Outcome</h2>\n")
+		b.WriteString("<p class=\"pf-review-outcome\">")
+		b.WriteString(html.EscapeString(payload.Outcome))
+		b.WriteString("</p>\n")
+	}
+
+	return b.String()
+}
+
+// reviewSeverityBadgeClass maps a finding/issue severity string to a CSS badge class.
+func reviewSeverityBadgeClass(severity string) string {
+	switch strings.ToLower(severity) {
+	case "mustfix", "must-fix", "must_fix", "critical", "error":
+		return "pf-b-mustfix"
+	case "should", "suggestion", "warning":
+		return "pf-b-should"
+	case "nit", "minor", "note":
+		return "pf-b-nit"
+	case "info":
+		return "pf-b-info"
+	default:
+		return "pf-b-nit"
+	}
 }

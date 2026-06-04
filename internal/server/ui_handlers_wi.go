@@ -37,6 +37,12 @@ var getWorkItemFn = domain.GetWorkItem
 // listDependenciesFn is the package-level seam for tests.
 var listDependenciesFn = domain.ListDependencies
 
+// getParentRefFn / listChildrenFn are the package-level seams for the
+// parent/children navigation (aihub#142). Swappable in tests so the detail
+// handler runs without a live pool, mirroring listDependenciesFn.
+var getParentRefFn = domain.GetParentRef
+var listChildrenFn = domain.ListChildren
+
 // listEventsFn is the package-level seam for tests.
 var listEventsFn = domain.ListEvents
 
@@ -174,6 +180,8 @@ type wiDetailPageData struct {
 	OwnerActive    time.Time  // run_attempts.last_active_at of current attempt
 	OwnerHasActive bool       // true when OwnerActive is meaningful (non-zero)
 	Dependencies   *depView
+	Parent         *depEntry  // parent wi link (aihub#142); nil when this wi has no parent
+	Children       []depEntry // child wi links ordered by seq ASC (aihub#142); empty when none
 	Events         []eventView
 	Artifacts      []artifactLink
 	Err            string
@@ -727,10 +735,27 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			return renderTemplate(c, tmpl, "layout", data)
 		}
 
-		// Parallel fan-out for the four side-load queries.
+		// Cross-project visibility roles, computed ONCE and shared (read-only)
+		// across the dependency / parent / children fan-out goroutines.
+		// ListDependencies + GetParentRef + ListChildren all hide cross-project
+		// entries by checking `callerProjectRoles[entry.Project] != ""`. Admins
+		// have an empty ProjectRoles map by design (middleware.go ~L104-106), so
+		// synthesize a viewer role on every visible project so the admin sees the
+		// real slug instead of the hidden placeholder.
+		roles := u.ProjectRoles
+		if u.Role == "admin" {
+			roles = map[string]string{}
+			for _, p := range availableProjectsForUI(ctx, pool, u) {
+				roles[p] = "viewer"
+			}
+		}
+
+		// Parallel fan-out for the side-load queries.
 		var (
 			deps      *domain.DependenciesResponse
 			depsErr   *domain.AihubError
+			parentRef *domain.WIRef
+			childRefs []domain.WIRef
 			events    []eventView
 			eventsErr error
 			arts      []artifactLink
@@ -738,23 +763,25 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			wg        sync.WaitGroup
 		)
 
-		wg.Add(4)
+		wg.Add(6)
 
 		go func() {
 			defer wg.Done()
-			// ListDependencies hides cross-project entries by checking
-			// `callerProjectRoles[entry.Project] != ""`. Admins have an
-			// empty ProjectRoles map by design (middleware.go ~L104-106),
-			// so synthesize a viewer role on every visible project so the
-			// admin sees the real slug instead of "[hidden — cross-project]".
-			roles := u.ProjectRoles
-			if u.Role == "admin" {
-				roles = map[string]string{}
-				for _, p := range availableProjectsForUI(ctx, pool, u) {
-					roles[p] = "viewer"
-				}
-			}
 			deps, depsErr = listDependenciesFn(ctx, pool, wi.ID, roles)
+		}()
+
+		go func() {
+			defer wg.Done()
+			// Parent link — nil parentRef means "no parent" (not an error).
+			// Errors are best-effort: a failed lookup just drops the link.
+			parentRef, _ = getParentRefFn(ctx, pool, wi.ID, roles)
+		}()
+
+		go func() {
+			defer wg.Done()
+			// Children ordered by seq ASC. Best-effort: a failed lookup leaves
+			// the Children card empty.
+			childRefs, _ = listChildrenFn(ctx, pool, wi.ID, roles)
 		}()
 
 		go func() {
@@ -792,11 +819,44 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			data.Err = depsErr.Message
 		} else {
 			data.Dependencies = toDepView(deps)
-			// Enrich each linked dep with the wi's status + owner avatar so the
-			// sidebar lists read like the prototype (status badge + slug + owner).
-			// One batched query; best-effort (a miss just drops the adornments).
-			enrichDepView(data.Dependencies, fetchDepMeta(ctx, pool, depViewIDs(data.Dependencies)))
 		}
+
+		// Parent link (aihub#142): build the view entry straight from the domain
+		// ref — NOT via toDepView, which inverts blocking/blocked-by direction;
+		// parent/children are plain identity references with no direction to flip.
+		if parentRef != nil {
+			pe := wiRefToDepEntry(*parentRef)
+			data.Parent = &pe
+		}
+		// Children ordered by seq ASC (the domain query ordered them).
+		data.Children = make([]depEntry, 0, len(childRefs))
+		for _, r := range childRefs {
+			data.Children = append(data.Children, wiRefToDepEntry(r))
+		}
+
+		// Enrich every linked row (deps + parent + children) with the wi's status
+		// + owner avatar so the sidebar reads like the prototype (status badge +
+		// slug + owner). ONE batched query covering all directions; best-effort (a
+		// miss just drops the adornments). Hidden cross-project entries carry no ID
+		// and are skipped by the collectors below.
+		metaIDs := depViewIDs(data.Dependencies)
+		if data.Parent != nil && !data.Parent.Hidden && data.Parent.ID != "" {
+			metaIDs = append(metaIDs, data.Parent.ID)
+		}
+		for _, e := range data.Children {
+			if !e.Hidden && e.ID != "" {
+				metaIDs = append(metaIDs, e.ID)
+			}
+		}
+		meta := fetchDepMeta(ctx, pool, metaIDs)
+		enrichDepView(data.Dependencies, meta)
+		if data.Parent != nil {
+			enrichDepEntry(data.Parent, meta)
+		}
+		for i := range data.Children {
+			enrichDepEntry(&data.Children[i], meta)
+		}
+
 		if eventsErr != nil && data.Err == "" {
 			data.Err = "failed to load events: " + eventsErr.Error()
 		}
@@ -972,6 +1032,20 @@ func depEntryFrom(e domain.DependencyListEntry) depEntry {
 	return depEntry{ID: e.ID, Slug: *e.Slug, Kind: e.Kind}
 }
 
+// wiRefToDepEntry projects a domain.WIRef (parent/children navigation) into the
+// template-friendly depEntry. It reuses the SAME cross-project sentinel as
+// depEntryFrom (Slug==nil || ID=="hidden" → Hidden) so hidden refs render the
+// shared placeholder. Status + Assignee are left zero here; the view layer fills
+// them via fetchDepMeta/enrichDepView, identical to the dependency rows. There
+// is no direction inversion to worry about (unlike toDepView): parent/children
+// are plain identity references, so we build the entry straight from the row.
+func wiRefToDepEntry(r domain.WIRef) depEntry {
+	if r.Slug == nil || r.ID == "hidden" {
+		return depEntry{Hidden: true}
+	}
+	return depEntry{ID: r.ID, Slug: *r.Slug}
+}
+
 // depMeta is the per-wi status + owner display loaded by fetchDepMeta.
 type depMeta struct {
 	Status     string
@@ -1010,6 +1084,19 @@ func fetchDepMeta(ctx context.Context, pool *pgxpool.Pool, ids []string) map[str
 	return out
 }
 
+// enrichDepEntry fills a single visible dep entry's Status + Assignee from the
+// batch-loaded meta map. Hidden (cross-project) or ID-less entries are left
+// untouched. Shared by enrichDepView and the parent/children enrichment.
+func enrichDepEntry(e *depEntry, meta map[string]depMeta) {
+	if e == nil || e.Hidden || e.ID == "" {
+		return
+	}
+	if m, ok := meta[e.ID]; ok {
+		e.Status = m.Status
+		e.Assignee = chipFor(m.OwnerActor)
+	}
+}
+
 // enrichDepView fills each visible dep entry's Status + Assignee from the
 // batch-loaded meta map. Hidden (cross-project) entries are left untouched.
 func enrichDepView(v *depView, meta map[string]depMeta) {
@@ -1018,13 +1105,7 @@ func enrichDepView(v *depView, meta map[string]depMeta) {
 	}
 	fill := func(entries []depEntry) {
 		for i := range entries {
-			if entries[i].Hidden || entries[i].ID == "" {
-				continue
-			}
-			if m, ok := meta[entries[i].ID]; ok {
-				entries[i].Status = m.Status
-				entries[i].Assignee = chipFor(m.OwnerActor)
-			}
+			enrichDepEntry(&entries[i], meta)
 		}
 	}
 	fill(v.Blocking)

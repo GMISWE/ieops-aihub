@@ -2,20 +2,22 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Dependency mirrors a wi_dependencies row.
 type Dependency struct {
-	BlockedWIID  string     `json:"blocked_wi_id"`
-	BlockingWIID string     `json:"blocking_wi_id"`
-	Kind         string     `json:"kind"`
-	CreatedAt    time.Time  `json:"created_at"`
-	CreatedBy    *string    `json:"created_by"`
-	Note         *string    `json:"note"`
+	BlockedWIID  string    `json:"blocked_wi_id"`
+	BlockingWIID string    `json:"blocking_wi_id"`
+	Kind         string    `json:"kind"`
+	CreatedAt    time.Time `json:"created_at"`
+	CreatedBy    *string   `json:"created_by"`
+	Note         *string   `json:"note"`
 }
 
 // CreateDependencyRequest is the body for POST /v1/dependencies.
@@ -128,6 +130,80 @@ func detectCycle(ctx context.Context, pool *pgxpool.Pool, blockedWIID, blockingW
 		)
 	}
 	return nil
+}
+
+// WIRef is a minimal reference to a work item for the parent/children UI
+// navigation (aihub#142). It carries just enough to render a link + status
+// badge. Slug is nil when the caller cannot see the referenced wi's project —
+// the same cross-project masking sentinel ListDependencies uses (ID="hidden",
+// Slug=nil). Status is filled by the view layer (fetchDepMeta), not here, so
+// this struct stays a pure identity reference.
+type WIRef struct {
+	ID      string  `json:"id"`
+	Slug    *string `json:"slug,omitempty"`
+	Project string  `json:"project"`
+}
+
+// GetParentRef returns the parent work item reference for a child wi, or nil
+// when the wi has no parent (parent_work_item_id IS NULL). Cross-project
+// visibility is masked with the same sentinel ListDependencies uses: when the
+// caller lacks any role on the parent's project the returned ref has ID="hidden"
+// and Slug=nil so the view renders the cross-project placeholder.
+func GetParentRef(ctx context.Context, pool *pgxpool.Pool, childWiID string, callerProjectRoles map[string]string) (*WIRef, *AihubError) {
+	row := pool.QueryRow(ctx, `
+		SELECT parent.id, parent.slug, parent.project
+		FROM work_items child
+		JOIN work_items parent ON parent.id = child.parent_work_item_id
+		WHERE child.id = $1`, childWiID,
+	)
+	var ref WIRef
+	var slug string
+	if err := row.Scan(&ref.ID, &slug, &ref.Project); err != nil {
+		// No parent row (NULL parent_work_item_id) → no-parent, not an error.
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, NewErr(ErrInternalError, "failed to query parent work item")
+	}
+	if callerProjectRoles[ref.Project] != "" {
+		ref.Slug = &slug
+	} else {
+		ref.ID = "hidden"
+	}
+	return &ref, nil
+}
+
+// ListChildren returns the child work items of a parent wi, ordered by seq ASC
+// (creation order within the project). Cross-project children are masked with
+// the same sentinel as GetParentRef (ID="hidden", Slug=nil). Returns an empty
+// slice (never nil) when the wi has no children.
+func ListChildren(ctx context.Context, pool *pgxpool.Pool, parentWiID string, callerProjectRoles map[string]string) ([]WIRef, *AihubError) {
+	rows, err := pool.Query(ctx, `
+		SELECT id, slug, project
+		FROM work_items
+		WHERE parent_work_item_id = $1
+		ORDER BY seq ASC`, parentWiID,
+	)
+	if err != nil {
+		return nil, NewErr(ErrInternalError, "failed to query child work items")
+	}
+	defer rows.Close()
+
+	out := []WIRef{}
+	for rows.Next() {
+		var ref WIRef
+		var slug string
+		if err := rows.Scan(&ref.ID, &slug, &ref.Project); err != nil {
+			continue
+		}
+		if callerProjectRoles[ref.Project] != "" {
+			ref.Slug = &slug
+		} else {
+			ref.ID = "hidden"
+		}
+		out = append(out, ref)
+	}
+	return out, nil
 }
 
 // DeleteDependency removes a wi_dependency.

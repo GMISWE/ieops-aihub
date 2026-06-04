@@ -72,6 +72,21 @@
           <span class="v">{{template "person_chip" .Assignee}}</span>
         </div>
         <div class="meta-row"><span class="k">Project</span><span class="v mono">{{.WI.Project}}</span></div>
+        {{/* Parent link (aihub#142) — only when this wi has a parent. Hidden
+             cross-project parents show the placeholder instead of a link. */}}
+        {{if .Parent}}
+        <div class="meta-row">
+          <span class="k">Parent</span>
+          <span class="v">
+            {{if .Parent.Hidden}}
+              <span class="badge b-type">hidden</span>
+            {{else}}
+              {{if .Parent.Status}}<span class="badge b-{{.Parent.Status}}">{{.Parent.Status}}</span>{{end}}
+              <a class="link mono" href="{{wiref .Parent.Slug}}">{{.Parent.Slug}}</a>
+            {{end}}
+          </span>
+        </div>
+        {{end}}
         {{if .Milestone}}<div class="meta-row"><span class="k">Milestone</span><span class="v">{{.Milestone}}</span></div>{{end}}
         {{if .HumanMode}}<div class="meta-row"><span class="k">Mode</span><span class="v">{{.HumanMode}}</span></div>{{end}}
         <div class="meta-row"><span class="k">Created</span><span class="v mono">{{.WI.CreatedAt.Format "2006-01-02 15:04 MST"}}</span></div>
@@ -162,6 +177,21 @@
         {{end}}
       </div>
     </div>
+
+    {{/* Children — sub-items whose parent_work_item_id points at THIS wi
+         (aihub#142). Ordered by seq ASC. The pill is a plain count, not a
+         progress ratio. The card is omitted entirely when there are no
+         children so a leaf wi stays uncluttered. Rows reuse the shared dep_row
+         partial (slug link + status badge + owner avatar; hidden placeholder
+         for cross-project children). */}}
+    {{if .Children}}
+    <div class="card">
+      <div class="hd"><h3>Children</h3><span class="grp-n">{{len .Children}}</span></div>
+      <div class="bd">
+        {{range .Children}}{{template "dep_row" .}}{{end}}
+      </div>
+    </div>
+    {{end}}
   </aside>
 </div>
 {{end}}

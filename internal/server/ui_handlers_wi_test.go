@@ -69,6 +69,33 @@ func withFakeListDeps(t *testing.T, fn func(context.Context, *pgxpool.Pool, stri
 	t.Cleanup(func() { listDependenciesFn = prev })
 }
 
+func withFakeParentRef(t *testing.T, fn func(context.Context, *pgxpool.Pool, string, map[string]string) (*domain.WIRef, *domain.AihubError)) {
+	t.Helper()
+	prev := getParentRefFn
+	getParentRefFn = fn
+	t.Cleanup(func() { getParentRefFn = prev })
+}
+
+func withFakeListChildren(t *testing.T, fn func(context.Context, *pgxpool.Pool, string, map[string]string) ([]domain.WIRef, *domain.AihubError)) {
+	t.Helper()
+	prev := listChildrenFn
+	listChildrenFn = fn
+	t.Cleanup(func() { listChildrenFn = prev })
+}
+
+// noParentNoChildren wires both parent/children seams to empty results. The
+// detail handler's fan-out calls these on every request, so detail tests that
+// do not exercise the parent/children paths must still stub them (nil pool
+// would otherwise hit the real DB query). Call at the top of such tests.
+func noParentNoChildren(t *testing.T) {
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+		return nil, nil
+	})
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+		return []domain.WIRef{}, nil
+	})
+}
+
 func withFakeListEvents(t *testing.T, fn func(context.Context, *pgxpool.Pool, *domain.ListEventsFilter) (*domain.ListEventsResponse, error)) {
 	t.Helper()
 	prev := listEventsFn
@@ -490,6 +517,7 @@ func TestUIWIDetail_404_UnknownSlug(t *testing.T) {
 func TestUIWIDetail_200_RendersMarkdown(t *testing.T) {
 	now := time.Now()
 	content := "# hello\n\n- one\n- two"
+	noParentNoChildren(t)
 	withFakeGetWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string) (*domain.WorkItem, *domain.AihubError) {
 		return &domain.WorkItem{
 			ID:        "wi_test",
@@ -545,6 +573,7 @@ func TestUIWIDetail_200_RendersMarkdown(t *testing.T) {
 // mirror of /v1/artifacts/<id>/html).
 func TestUIWIDetail_RendersArtifactLinks(t *testing.T) {
 	now := time.Now()
+	noParentNoChildren(t)
 	withFakeGetWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string) (*domain.WorkItem, *domain.AihubError) {
 		return &domain.WorkItem{
 			ID:        "wi_a",
@@ -684,6 +713,201 @@ func TestUIWIDetail_403_NoProjectAccess(t *testing.T) {
 	}
 	if !strings.Contains(body, "no access") {
 		t.Errorf("body should explain no-access; got: %s", body)
+	}
+}
+
+// --- parent / children navigation (aihub#142) --------------------------------
+
+// detailFixtureWI stubs getWI + the always-on side-loads (deps/events/recall)
+// with empty results so a detail test only has to wire the parent/children
+// seams it cares about. Returns the wi the handler will render.
+func detailFixtureWI(t *testing.T, wiID, slug, project string) {
+	t.Helper()
+	now := time.Now()
+	withFakeGetWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string) (*domain.WorkItem, *domain.AihubError) {
+		return &domain.WorkItem{
+			ID: wiID, Slug: slug, Project: project, Goal: "g", Status: "running",
+			Priority: "normal", CreatedAt: now, UpdatedAt: now,
+		}, nil
+	})
+	withFakeListDeps(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.DependenciesResponse, *domain.AihubError) {
+		return &domain.DependenciesResponse{Blocking: []domain.DependencyListEntry{}, BlockedBy: []domain.DependencyListEntry{}}, nil
+	})
+	withFakeListEvents(t, func(_ context.Context, _ *pgxpool.Pool, _ *domain.ListEventsFilter) (*domain.ListEventsResponse, error) {
+		return &domain.ListEventsResponse{Events: []domain.EventRow{}}, nil
+	})
+	withFakeRecall(t, func(_ context.Context, _ *pgxpool.Pool, _ *domain.RecallRequest) (*domain.RecallResponse, error) {
+		return &domain.RecallResponse{Items: []domain.MemoryWithStrength{}}, nil
+	})
+}
+
+func getDetailBody(t *testing.T, u *UserContext, slug string) (int, string) {
+	t.Helper()
+	e := echo.New()
+	g := e.Group("/ui", wiInjectUser(u))
+	registerUIWIHandlers(g, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/ui/wi/"+slug, nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// TestUIWIDetail_RendersParentLink asserts a wi with a parent renders the
+// Parent meta row linking to the parent's slug.
+func TestUIWIDetail_RendersParentLink(t *testing.T) {
+	detailFixtureWI(t, "wi_child", "p1#9", "p1")
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+		slug := "p1#1"
+		return &domain.WIRef{ID: "wi_parent", Slug: &slug, Project: "p1"}, nil
+	})
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+		return []domain.WIRef{}, nil
+	})
+
+	code, body := getDetailBody(t, wiTestUser(), "p1#9")
+	if code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", code, body)
+	}
+	if !strings.Contains(body, "Parent") {
+		t.Errorf("expected a Parent meta row; body:\n%s", body)
+	}
+	// wiref path-escapes '#' as %23, so the href is /ui/wi/p1%231 while the
+	// visible link text stays the raw slug.
+	if !strings.Contains(body, `href="/ui/wi/p1%231"`) {
+		t.Errorf("expected parent slug link to p1%%231; body:\n%s", body)
+	}
+	if !strings.Contains(body, ">p1#1</a>") {
+		t.Errorf("expected parent slug text p1#1; body:\n%s", body)
+	}
+}
+
+// TestUIWIDetail_NoParent_OmitsParentRow asserts a wi with no parent does NOT
+// render the Parent meta row.
+func TestUIWIDetail_NoParent_OmitsParentRow(t *testing.T) {
+	detailFixtureWI(t, "wi_orphan", "p1#5", "p1")
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+		return nil, nil // no parent
+	})
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+		return []domain.WIRef{}, nil
+	})
+
+	code, body := getDetailBody(t, wiTestUser(), "p1#5")
+	if code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", code)
+	}
+	if strings.Contains(body, `<span class="k">Parent</span>`) {
+		t.Errorf("a parentless wi must not render the Parent meta row; body:\n%s", body)
+	}
+}
+
+// TestUIWIDetail_HiddenParent_Masked asserts a cross-project parent the caller
+// cannot see renders the hidden placeholder and never leaks the slug.
+func TestUIWIDetail_HiddenParent_Masked(t *testing.T) {
+	detailFixtureWI(t, "wi_child", "p1#9", "p1")
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+		// Cross-project mask: ID="hidden", Slug=nil (domain sentinel).
+		return &domain.WIRef{ID: "hidden", Slug: nil, Project: "p_secret"}, nil
+	})
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+		return []domain.WIRef{}, nil
+	})
+
+	code, body := getDetailBody(t, wiTestUser(), "p1#9")
+	if code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", code)
+	}
+	if !strings.Contains(body, "Parent") {
+		t.Errorf("hidden parent should still show the Parent row with a placeholder; body:\n%s", body)
+	}
+	if strings.Contains(body, "p_secret") {
+		t.Errorf("hidden parent must not leak the project; body:\n%s", body)
+	}
+}
+
+// TestUIWIDetail_RendersChildren_InSeqOrder asserts the Children card lists the
+// child slugs and preserves the order the domain layer returns (seq ASC).
+func TestUIWIDetail_RendersChildren_InSeqOrder(t *testing.T) {
+	detailFixtureWI(t, "wi_parent", "p1#1", "p1")
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+		return nil, nil
+	})
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+		s2, s3, s4 := "p1#2", "p1#3", "p1#4"
+		return []domain.WIRef{
+			{ID: "wi_c2", Slug: &s2, Project: "p1"},
+			{ID: "wi_c3", Slug: &s3, Project: "p1"},
+			{ID: "wi_c4", Slug: &s4, Project: "p1"},
+		}, nil
+	})
+
+	code, body := getDetailBody(t, wiTestUser(), "p1#1")
+	if code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", code, body)
+	}
+	if !strings.Contains(body, "<h3>Children</h3>") {
+		t.Errorf("expected a Children card; body:\n%s", body)
+	}
+	// Count pill is a plain integer, not a progress ratio.
+	if !strings.Contains(body, `<span class="grp-n">3</span>`) {
+		t.Errorf("expected Children count pill of 3; body:\n%s", body)
+	}
+	// Order preserved: p1#2 before p1#3 before p1#4.
+	i2 := strings.Index(body, "p1#2")
+	i3 := strings.Index(body, "p1#3")
+	i4 := strings.Index(body, "p1#4")
+	if i2 < 0 || i3 < 0 || i4 < 0 || !(i2 < i3 && i3 < i4) {
+		t.Errorf("children must render in seq order p1#2 < p1#3 < p1#4; got idx %d,%d,%d", i2, i3, i4)
+	}
+}
+
+// TestUIWIDetail_NoChildren_OmitsCard asserts a leaf wi (no children) does NOT
+// render the Children card at all.
+func TestUIWIDetail_NoChildren_OmitsCard(t *testing.T) {
+	detailFixtureWI(t, "wi_leaf", "p1#7", "p1")
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+		return nil, nil
+	})
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+		return []domain.WIRef{}, nil
+	})
+
+	code, body := getDetailBody(t, wiTestUser(), "p1#7")
+	if code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", code)
+	}
+	if strings.Contains(body, "<h3>Children</h3>") {
+		t.Errorf("a leaf wi must not render the Children card; body:\n%s", body)
+	}
+}
+
+// TestUIWIDetail_HiddenChild_Masked asserts a cross-project child renders the
+// hidden placeholder without leaking its slug/project.
+func TestUIWIDetail_HiddenChild_Masked(t *testing.T) {
+	detailFixtureWI(t, "wi_parent", "p1#1", "p1")
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+		return nil, nil
+	})
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+		visible := "p1#2"
+		return []domain.WIRef{
+			{ID: "wi_c2", Slug: &visible, Project: "p1"},
+			{ID: "hidden", Slug: nil, Project: "p_secret"}, // cross-project mask
+		}, nil
+	})
+
+	code, body := getDetailBody(t, wiTestUser(), "p1#1")
+	if code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", code)
+	}
+	if !strings.Contains(body, `<span class="grp-n">2</span>`) {
+		t.Errorf("Children count includes the hidden child; want pill 2; body:\n%s", body)
+	}
+	if strings.Contains(body, "p_secret") {
+		t.Errorf("hidden child must not leak the project; body:\n%s", body)
+	}
+	if !strings.Contains(body, "p1#2") {
+		t.Errorf("the visible child slug should render; body:\n%s", body)
 	}
 }
 

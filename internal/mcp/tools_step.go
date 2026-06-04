@@ -59,7 +59,7 @@ func (s *Server) registerStepTools() {
 			return errResult(fmt.Errorf("work_item_id is required"))
 		}
 		// Inject credentials from state file
-		sf, err := config.ReadStateFile(wiID)
+		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}

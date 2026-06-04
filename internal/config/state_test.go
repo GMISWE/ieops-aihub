@@ -169,6 +169,149 @@ func TestReadStateFile_BadJSON(t *testing.T) {
 	}
 }
 
+// TestWriteClaimState_BySlug_RemovesStubAndResolves is the aihub#141 end-to-end
+// regression at the state-file layer: it drives the exact sequence the
+// pf_claim_work_item handler uses when a work item is claimed BY SLUG, then
+// confirms a later by-slug credential op (complete/emit/update/pause) resolves
+// to the canonical credentials instead of the empty-attempt stub.
+func TestWriteClaimState_BySlug_RemovesStubAndResolves(t *testing.T) {
+	withTempHome(t)
+	slug := "aihub#42"
+	canonical := "wi_life0001"
+
+	// 1. C6-2 pre-claim partial stub keyed by the slug (empty attempt_id).
+	if err := WriteStateFile(&StateFile{WIID: slug, SessionSecret: "s", Claimed: false}); err != nil {
+		t.Fatal(err)
+	}
+	// 2. Server returns the canonical id + real credentials; claim finalizes.
+	canon := &StateFile{
+		WIID: canonical, Slug: slug, AttemptID: "ra_real042",
+		ClaimEpoch: 1, SessionSecret: "s", Claimed: true,
+	}
+	if err := WriteClaimState(slug, canonical, canon); err != nil {
+		t.Fatalf("WriteClaimState: %v", err)
+	}
+
+	// The orphan slug stub must be gone.
+	if _, err := ReadStateFile(slug); err == nil {
+		t.Error("orphan slug stub was not removed")
+	}
+	// A by-slug credential op must resolve to the canonical state (real attempt_id).
+	got, err := ResolveStateFile(slug)
+	if err != nil {
+		t.Fatalf("ResolveStateFile(slug) after claim: %v", err)
+	}
+	if got.AttemptID != "ra_real042" || got.WIID != canonical {
+		t.Errorf("by-slug resolve = {WIID:%q AttemptID:%q}, want canonical {%q ra_real042}", got.WIID, got.AttemptID, canonical)
+	}
+	// The canonical file is also directly addressable.
+	if _, err := ReadStateFile(canonical); err != nil {
+		t.Errorf("canonical state file missing: %v", err)
+	}
+}
+
+// TestWriteClaimState_ByCanonicalID_NoSpuriousDelete: claiming by the canonical
+// id must not delete anything (passedID == canonicalID).
+func TestWriteClaimState_ByCanonicalID_NoSpuriousDelete(t *testing.T) {
+	withTempHome(t)
+	id := "wi_life0002"
+	canon := &StateFile{
+		WIID: id, Slug: "aihub#43", AttemptID: "ra_real043",
+		ClaimEpoch: 1, SessionSecret: "s", Claimed: true,
+	}
+	if err := WriteClaimState(id, id, canon); err != nil {
+		t.Fatalf("WriteClaimState: %v", err)
+	}
+	got, err := ReadStateFile(id)
+	if err != nil {
+		t.Fatalf("canonical state file missing after claim-by-id: %v", err)
+	}
+	if got.AttemptID != "ra_real043" {
+		t.Errorf("attempt_id = %q, want ra_real043", got.AttemptID)
+	}
+}
+
+// TestResolveStateFile_ByCanonicalID: a direct canonical-id lookup returns the
+// file immediately.
+func TestResolveStateFile_ByCanonicalID(t *testing.T) {
+	withTempHome(t)
+	want := &StateFile{
+		WIID: "wi_canon001", Slug: "aihub#9", AttemptID: "ra_real001",
+		ClaimEpoch: 1, SessionSecret: "s", Claimed: true,
+	}
+	if err := WriteStateFile(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolveStateFile("wi_canon001")
+	if err != nil {
+		t.Fatalf("ResolveStateFile by id: %v", err)
+	}
+	if got.WIID != want.WIID || got.AttemptID != want.AttemptID {
+		t.Errorf("got %+v, want canonical %+v", got, want)
+	}
+}
+
+// TestResolveStateFile_BySlug_OnlyCanonical: addressing by slug resolves to the
+// canonical file via its Slug field when no slug-keyed file exists (the state
+// after pf_claim cleans up its orphan stub).
+func TestResolveStateFile_BySlug_OnlyCanonical(t *testing.T) {
+	withTempHome(t)
+	want := &StateFile{
+		WIID: "wi_canon002", Slug: "aihub#10", AttemptID: "ra_real002",
+		ClaimEpoch: 2, SessionSecret: "s", Claimed: true,
+	}
+	if err := WriteStateFile(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolveStateFile("aihub#10")
+	if err != nil {
+		t.Fatalf("ResolveStateFile by slug: %v", err)
+	}
+	if got.WIID != want.WIID || got.AttemptID != want.AttemptID {
+		t.Errorf("got %+v, want canonical %+v", got, want)
+	}
+}
+
+// TestResolveStateFile_BySlug_ShadowedByStub is the aihub#141 regression: a
+// slug-keyed stub with empty attempt_id sits alongside the canonical file (the
+// pre-fix claim-by-slug state). Resolving by slug must return the canonical file
+// with the real attempt_id, never the empty-attempt stub.
+func TestResolveStateFile_BySlug_ShadowedByStub(t *testing.T) {
+	withTempHome(t)
+	// Orphan C6-2 stub keyed by the slug, empty attempt_id.
+	if err := WriteStateFile(&StateFile{
+		WIID: "aihub#11", SessionSecret: "s", Claimed: false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Canonical file with the real credentials.
+	canon := &StateFile{
+		WIID: "wi_canon003", Slug: "aihub#11", AttemptID: "ra_real003",
+		ClaimEpoch: 3, SessionSecret: "s", Claimed: true,
+	}
+	if err := WriteStateFile(canon); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolveStateFile("aihub#11")
+	if err != nil {
+		t.Fatalf("ResolveStateFile shadowed: %v", err)
+	}
+	if got.AttemptID != "ra_real003" {
+		t.Errorf("resolved attempt_id = %q, want %q (must not return empty stub)", got.AttemptID, "ra_real003")
+	}
+	if got.WIID != "wi_canon003" {
+		t.Errorf("resolved WIID = %q, want canonical wi_canon003", got.WIID)
+	}
+}
+
+// TestResolveStateFile_Missing: unknown id/slug surfaces an error.
+func TestResolveStateFile_Missing(t *testing.T) {
+	withTempHome(t)
+	if _, err := ResolveStateFile("aihub#404"); err == nil {
+		t.Error("expected error for unknown id/slug")
+	}
+}
+
 func TestStateDir(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("POLYFORGE_WORKSPACE_ROOT", tmp)

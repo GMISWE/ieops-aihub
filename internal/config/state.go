@@ -90,6 +90,50 @@ func ReadStateFile(wiID string) (*StateFile, error) {
 	return &s, nil
 }
 
+// WriteClaimState persists the post-claim state file under the canonical id and
+// removes any orphan stub left by the C6-2 pre-claim write when the work item
+// was addressed by a non-canonical alias (e.g. a slug). passedID is the
+// work_item_id as the caller supplied it; canonicalID is the work_items.id the
+// server echoed back; sf is the complete state file (keyed by canonicalID).
+//
+// Without the cleanup, a later slug-addressed call would read the empty-attempt
+// stub and send a stale attempt_id, which the server rejects with 409
+// CONFLICT_EPOCH_MISMATCH. (aihub#141)
+func WriteClaimState(passedID, canonicalID string, sf *StateFile) error {
+	if err := WriteStateFile(sf); err != nil {
+		return err
+	}
+	if passedID != canonicalID {
+		_ = DeleteStateFile(passedID)
+	}
+	return nil
+}
+
+// ResolveStateFile loads the credential state file for a work item addressed by
+// either its canonical id (wi_xxx) or its slug (project#seq).
+//
+// A direct filename lookup is tried first. If it misses, or returns a partial
+// stub with no attempt_id (the C6-2 pre-claim write keyed by a slug — see
+// pf_claim_work_item), the state dir is scanned for a claimed file whose Slug
+// matches idOrSlug. This lets later lifecycle calls address a work item by slug
+// without reading the empty-attempt stub and sending a stale attempt_id, which
+// the server rejects with 409 CONFLICT_EPOCH_MISMATCH. (aihub#141)
+func ResolveStateFile(idOrSlug string) (*StateFile, error) {
+	if s, err := ReadStateFile(idOrSlug); err == nil && s.AttemptID != "" {
+		return s, nil
+	}
+	if states, scanErr := FindStateFiles(); scanErr == nil {
+		for _, s := range states {
+			if s.Slug == idOrSlug && s.AttemptID != "" {
+				return s, nil
+			}
+		}
+	}
+	// Nothing better found — re-read to surface the original error (clear
+	// "state file not found") or the partial stub, preserving prior behavior.
+	return ReadStateFile(idOrSlug)
+}
+
 // DeleteStateFile removes <workspace>/.polyforge/state/<wi_id>.json.
 func DeleteStateFile(wiID string) error {
 	return os.Remove(filepath.Join(StateDir(), wiID+".json"))

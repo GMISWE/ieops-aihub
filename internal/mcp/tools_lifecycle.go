@@ -355,7 +355,9 @@ func (s *Server) registerLifecycleTools() {
 			sf.Project = v
 		}
 
-		if err := config.WriteStateFile(sf); err != nil {
+		// Persist the canonical-keyed state file and remove any orphan slug stub
+		// the C6-2 pre-claim write left behind (see config.WriteClaimState). (aihub#141)
+		if err := config.WriteClaimState(wiID, canonicalWIID, sf); err != nil {
 			return errResult(fmt.Errorf("update state file: %w", err))
 		}
 
@@ -500,7 +502,7 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(fmt.Errorf("status is required"))
 		}
 
-		sf, err := config.ReadStateFile(wiID)
+		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
@@ -520,9 +522,14 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(err)
 		}
 
-		// Delete state file for terminal statuses; keep for paused
+		// Delete state file for terminal statuses; keep for paused. Delete by the
+		// resolved canonical key (sf.WIID), and best-effort the passed key too, so
+		// a slug-addressed completion cleans any stale slug-keyed stub. (aihub#141)
 		if status == "wrapped" || status == "failed" {
-			_ = config.DeleteStateFile(wiID)
+			_ = config.DeleteStateFile(sf.WIID)
+			if wiID != sf.WIID {
+				_ = config.DeleteStateFile(wiID)
+			}
 		}
 
 		return jsonResult(result)
@@ -677,7 +684,7 @@ func (s *Server) registerLifecycleTools() {
 		if wiID == "" {
 			return errResult(fmt.Errorf("work_item_id is required"))
 		}
-		sf, err := config.ReadStateFile(wiID)
+		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}

@@ -856,7 +856,7 @@ func TestUIWIDetail_RendersChildren_InSeqOrder(t *testing.T) {
 	i2 := strings.Index(body, "p1#2")
 	i3 := strings.Index(body, "p1#3")
 	i4 := strings.Index(body, "p1#4")
-	if i2 < 0 || i3 < 0 || i4 < 0 || !(i2 < i3 && i3 < i4) {
+	if i2 < 0 || i3 < 0 || i4 < 0 || i2 >= i3 || i3 >= i4 {
 		t.Errorf("children must render in seq order p1#2 < p1#3 < p1#4; got idx %d,%d,%d", i2, i3, i4)
 	}
 }

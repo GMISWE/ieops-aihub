@@ -99,16 +99,22 @@ func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	// We call render.AnnotatorJS() / render.AnnotJS() to avoid a separate FS
 	// handler; the render package owns the embed.
 	for _, entry := range []struct {
-		path string
-		data []byte
+		path        string
+		data        []byte
+		contentType string
 	}{
-		{"/static/annotator.js", render.AnnotatorJS()},
-		{"/static/annot.js", render.AnnotJS()},
+		{"/static/annotator.js", render.AnnotatorJS(), "text/javascript; charset=utf-8"},
+		{"/static/annot.js", render.AnnotJS(), "text/javascript; charset=utf-8"},
+		// aihub#138: /ui-only design-system override for the artifact viewer.
+		// Served separately from the embedded static/ FS so the render package
+		// owns both the embed and the exported bytes.
+		{"/static/viewer.css", render.ViewerCSS(), "text/css; charset=utf-8"},
 	} {
 		d := entry.data
+		ct := entry.contentType
 		uiGroup.GET(entry.path, func(c echo.Context) error {
 			c.Response().Header().Set("Cache-Control", "public, max-age=3600")
-			return c.Blob(http.StatusOK, "text/javascript; charset=utf-8", d)
+			return c.Blob(http.StatusOK, ct, d)
 		})
 	}
 }

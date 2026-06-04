@@ -30,6 +30,9 @@ var annotatorJS []byte
 //go:embed annot.js
 var annotJS []byte
 
+//go:embed viewer.css
+var viewerCSS []byte
+
 // AnnotatorJS returns the embedded annotator.js bundle bytes (served at
 // /ui/static/annotator.js). The bytes are the same across all calls — the
 // embed is loaded once at program startup.
@@ -39,12 +42,19 @@ func AnnotatorJS() []byte { return annotatorJS }
 // /ui/static/annot.js).
 func AnnotJS() []byte { return annotJS }
 
+// ViewerCSS returns the embedded viewer.css bytes (served at
+// /ui/static/viewer.css). This is the /ui-only design-system override layer
+// that reskins the artifact viewer using #129 tokens. Never embedded into
+// /v1 or /share output — those use only style.css (frozen).
+func ViewerCSS() []byte { return viewerCSS }
+
 // assetVersion is a content hash over the embedded JS assets, computed once at
 // startup. Appended as a ?v= cache-buster to the script URLs so a deploy with
 // changed JS invalidates browser caches immediately despite Cache-Control
 // max-age (aihub#125).
 var assetVersion = func() string {
-	sum := sha256.Sum256(append(append([]byte{}, annotatorJS...), annotJS...))
+	all := append(append(append([]byte{}, annotatorJS...), annotJS...), viewerCSS...)
+	sum := sha256.Sum256(all)
 	return hex.EncodeToString(sum[:4])
 }()
 

@@ -222,7 +222,7 @@ func initialsFor(name string) string {
 		first := fields[0]
 		seen := false
 		for _, r := range first {
-			if !(unicode.IsLetter(r) || unicode.IsDigit(r)) {
+			if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
 				continue
 			}
 			if !seen {

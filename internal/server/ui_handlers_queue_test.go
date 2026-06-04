@@ -143,11 +143,41 @@ func TestUIQueue_Redirects_PreservesProject(t *testing.T) {
 	}
 }
 
-// TestUIQueuePartial_RendersSixSections_NoLayout asserts the partial endpoint
-// renders all six LCRS sections (the coverage that used to live on the full
-// page) and omits layout chrome so htmx can innerHTML-swap it.
-func TestUIQueuePartial_RendersSixSections_NoLayout(t *testing.T) {
+// withListFnForStrip overrides listWorkItemsFn with a fixed item set so the
+// count strip can be asserted deterministically without a DB. Returns a
+// cleanup func. (The queue partial now derives Running / Needs you / Unclaimed
+// from the same grouping the wi list uses — aihub#129 review-round-2 #2.)
+func withListFnForStrip(items []*domain.WorkItem) func() {
+	prev := listWorkItemsFn
+	listWorkItemsFn = func(_ context.Context, _ *pgxpool.Pool, _ string, _ domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		return &domain.ListWorkItemsResult{Items: items}, nil
+	}
+	return func() { listWorkItemsFn = prev }
+}
+
+// TestUIQueuePartial_CountStripOnly asserts the partial endpoint renders ONLY
+// the four-cell count strip (Running / Needs you / Unclaimed / Stalled) and
+// omits layout chrome so htmx can innerHTML-swap it.
+//
+// aihub#129 review-round-1 #7: the queue partial used to also render the full
+// grouped row lists, which duplicated the wi list below it. The rows now live
+// ONLY in the wi list — so this test asserts the partial has the count cells
+// but does NOT re-render the individual fixture rows.
+//
+// review-round-2 #2: the strip counts are now sourced from groupListRows (the
+// same grouping the list uses), so the partial calls listWorkItemsFn — we fake
+// it here so the strip is deterministic and never hits the DB.
+func TestUIQueuePartial_CountStripOnly(t *testing.T) {
 	defer withQueueFnOverride(fixtureQueue())()
+	// A small ownerless item set — enough to exercise the strip without a DB.
+	// (With nil pool the current-attempt owner lookup is empty, so the queued
+	// item lands in Unclaimed; the structural assertions below don't depend on
+	// the exact per-cell numbers.)
+	defer withListFnForStrip([]*domain.WorkItem{
+		{ID: "wi_run", Slug: "row-run", Project: "testproject", Status: "running"},
+		{ID: "wi_pause", Slug: "row-pause", Project: "testproject", Status: "paused"},
+		{ID: "wi_pool", Slug: "row-pool", Project: "testproject", Status: "queued"},
+	})()
 
 	tmpl := partialTemplate("queue_section.html.tmpl")
 	c, rec := newQueueRequest(t, "/ui/queue/partial?project=testproject", userWithProjects("testproject"))
@@ -167,24 +197,41 @@ func TestUIQueuePartial_RendersSixSections_NoLayout(t *testing.T) {
 		t.Errorf("partial should NOT include <html>; got:\n%s", body)
 	}
 
-	wantSections := []string{"Running", "Items", "Needs you", "Stalled", "Paused", "Unclassified"}
-	for _, s := range wantSections {
+	// The four count-strip cells must be present.
+	wantCells := []string{"Running", "Needs you", "Unclaimed", "Stalled"}
+	for _, s := range wantCells {
 		if !strings.Contains(body, s) {
-			t.Errorf("partial missing section heading %q", s)
+			t.Errorf("count strip missing cell label %q", s)
 		}
 	}
 
-	// Spot check that fixture entries actually landed.
-	wantSlugs := []string{"running-one", "items-one", "needs-human-one", "stalled-one", "paused-one", "unc-one"}
-	for _, s := range wantSlugs {
-		if !strings.Contains(body, s) {
-			t.Errorf("partial missing fixture slug %q", s)
+	// The strip container is the only structural element — no grouped row list.
+	if !strings.Contains(body, `class="qstrip"`) {
+		t.Errorf("partial missing the .qstrip count strip")
+	}
+	if strings.Contains(body, `class="list"`) {
+		t.Errorf("partial should NOT render the grouped .list rows anymore; got:\n%s", body)
+	}
+	// No cell carries the old highlighted-background class anymore (#5).
+	if strings.Contains(body, `class="qcell hot"`) {
+		t.Errorf("Needs you cell must not be grey-highlighted (qcell hot); got:\n%s", body)
+	}
+
+	// The fixture row slugs must NOT be re-rendered here — they belong to the
+	// wi list below the strip.
+	notSlugs := []string{"row-run", "row-pause", "row-pool"}
+	for _, s := range notSlugs {
+		if strings.Contains(body, s) {
+			t.Errorf("count strip should NOT contain fixture row slug %q", s)
 		}
 	}
 }
 
 func TestUIQueueRoute_Mounted(t *testing.T) {
 	defer withQueueFnOverride(fixtureQueue())()
+	// The partial now derives strip counts from the wi list grouping, so it
+	// calls listWorkItemsFn — fake it to avoid a nil-pool DB hit.
+	defer withListFnForStrip([]*domain.WorkItem{})()
 
 	// Build a minimal echo with a /ui group that injects a user before our
 	// handler — same shape as RegisterUIRoutes but without the real session

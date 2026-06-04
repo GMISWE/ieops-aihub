@@ -3,12 +3,36 @@ package server
 import (
 	"context"
 	"sort"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/labstack/echo/v4"
 
 	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
+
+// themeCookieName is the cookie that carries the user's chosen UI theme.
+// It is set client-side by static/theme.js (non-HttpOnly, a UI preference)
+// and read here so the server can render <html data-theme="..."> with the
+// correct theme on first paint — no flash of the wrong theme.
+const themeCookieName = "theme"
+
+// themeFromCookie returns the validated UI theme mode for the request: one of
+// "auto", "light", or "dark". Any missing, malformed, or unrecognized cookie
+// value falls back to the "auto" default (follow the OS color scheme). Used by
+// every /ui page handler to thread .Theme into the layout template, which
+// renders <html data-theme="..."> so CSS resolves the colors on first paint.
+func themeFromCookie(c echo.Context) string {
+	if ck, err := c.Cookie(themeCookieName); err == nil && ck != nil {
+		switch ck.Value {
+		case "light", "dark", "auto":
+			return ck.Value
+		}
+	}
+	return "auto"
+}
 
 // attemptOwner is the slim projection of a run_attempts row used by /ui to
 // display "claimed by / last active" without pulling the whole attempt struct.
@@ -22,7 +46,7 @@ type attemptOwner struct {
 // query error so the caller can render "—" without branching on err.
 func fetchAttemptOwner(ctx context.Context, pool *pgxpool.Pool, attemptID string) attemptOwner {
 	var out attemptOwner
-	if attemptID == "" {
+	if pool == nil || attemptID == "" {
 		return out
 	}
 	_ = pool.QueryRow(ctx,
@@ -139,4 +163,131 @@ func availableProjectsForUI(ctx context.Context, pool *pgxpool.Pool, u *UserCont
 	}
 	sort.Strings(out)
 	return out
+}
+
+// personChip is the view-model for the prototype .who/.av person chip. Empty
+// Display means "unassigned" and the template renders the dashed ghost avatar.
+type personChip struct {
+	Display    string // full display name shown next to the avatar
+	Initials   string // 1-2 uppercase letters inside the avatar
+	ColorClass string // one of the .av-c0..7 palette classes (presentational only)
+}
+
+// chipFor builds a personChip from a display name. The color class is a stable
+// hash of the name into the fixed .av-c* palette — purely presentational, no
+// backend meaning. An empty name yields a zero chip (ghost avatar in the
+// template).
+func chipFor(display string) personChip {
+	display = strings.TrimSpace(display)
+	if display == "" {
+		return personChip{}
+	}
+	return personChip{
+		Display:    display,
+		Initials:   initialsFor(display),
+		ColorClass: avatarColorClass(display),
+	}
+}
+
+// initialsFor derives up to two uppercase initials from a display name. It
+// prefers the first letters of the first two whitespace-separated words; for a
+// single token it takes the first two letters. Non-letter leading characters
+// (e.g. "@") are skipped so "@monte" -> "MO".
+func initialsFor(name string) string {
+	fields := strings.Fields(name)
+	letters := make([]rune, 0, 2)
+	for _, f := range fields {
+		for _, r := range f {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				letters = append(letters, unicode.ToUpper(r))
+				break
+			}
+		}
+		if len(letters) == 2 {
+			break
+		}
+	}
+	if len(letters) == 0 {
+		// no word boundary produced a letter — fall back to first two runes.
+		for _, r := range name {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				letters = append(letters, unicode.ToUpper(r))
+			}
+			if len(letters) == 2 {
+				break
+			}
+		}
+	} else if len(letters) == 1 {
+		// single word: add its second letter for a fuller chip.
+		first := fields[0]
+		seen := false
+		for _, r := range first {
+			if !(unicode.IsLetter(r) || unicode.IsDigit(r)) {
+				continue
+			}
+			if !seen {
+				seen = true
+				continue
+			}
+			letters = append(letters, unicode.ToUpper(r))
+			break
+		}
+	}
+	if len(letters) == 0 {
+		return "?"
+	}
+	return string(letters)
+}
+
+// avatarColorClass maps a display name to one of the eight .av-c* palette
+// classes via a small deterministic hash (FNV-style). Same name always gets
+// the same color within and across renders.
+func avatarColorClass(name string) string {
+	var h uint32 = 2166136261
+	for i := 0; i < len(name); i++ {
+		h ^= uint32(name[i])
+		h *= 16777619
+	}
+	return avatarPalette[h%uint32(len(avatarPalette))]
+}
+
+// avatarPalette is the fixed set of person-color classes defined in ui.css.
+var avatarPalette = []string{
+	"av-c0", "av-c1", "av-c2", "av-c3", "av-c4", "av-c5", "av-c6", "av-c7",
+}
+
+// fetchProjectWICounts returns the per-project count of active (queued +
+// running + paused + blocked) work items across the given projects, plus the
+// total. Used to annotate the project-switcher dropdown. View-layer only — a
+// presentation count, not a domain/business change. An empty projects slice
+// means "all projects" (admin view-all). Errors degrade to an empty map so the
+// dropdown simply shows no counts rather than 500ing.
+func fetchProjectWICounts(ctx context.Context, pool *pgxpool.Pool, projects []string) (map[string]int, int) {
+	counts := map[string]int{}
+	total := 0
+	if pool == nil {
+		return counts, total
+	}
+	active := []string{"queued", "running", "paused", "blocked"}
+	query := `SELECT project, COUNT(*) FROM work_items WHERE status = ANY($1) GROUP BY project`
+	args := []any{active}
+	if len(projects) > 0 {
+		query = `SELECT project, COUNT(*) FROM work_items
+		         WHERE status = ANY($1) AND project = ANY($2) GROUP BY project`
+		args = append(args, projects)
+	}
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		return counts, total
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p string
+		var n int
+		if rows.Scan(&p, &n) == nil {
+			counts[p] = n
+			total += n
+		}
+	}
+	return counts, total
 }

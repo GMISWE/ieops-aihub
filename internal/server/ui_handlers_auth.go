@@ -18,6 +18,7 @@ import (
 type loginPageData struct {
 	Next  string
 	Error string
+	Theme string
 }
 
 // handleUILoginGet renders the login page.
@@ -27,7 +28,7 @@ func handleUILoginGet(tmpl *template.Template) echo.HandlerFunc {
 		if !isSafeNext(next) {
 			next = "/ui/queue"
 		}
-		return renderTemplate(c, tmpl, "login.html.tmpl", loginPageData{Next: next})
+		return renderTemplate(c, tmpl, "login.html.tmpl", loginPageData{Next: next, Theme: themeFromCookie(c)})
 	}
 }
 
@@ -48,6 +49,7 @@ func handleUILoginPost(pool *pgxpool.Pool, sm *SessionManager, tmpl *template.Te
 			return renderTemplate(c, tmpl, "login.html.tmpl", loginPageData{
 				Next:  next,
 				Error: "API key is required.",
+				Theme: themeFromCookie(c),
 			})
 		}
 
@@ -59,6 +61,7 @@ func handleUILoginPost(pool *pgxpool.Pool, sm *SessionManager, tmpl *template.Te
 			return renderTemplate(c, tmpl, "login.html.tmpl", loginPageData{
 				Next:  next,
 				Error: "Invalid or revoked API key.",
+				Theme: themeFromCookie(c),
 			})
 		}
 

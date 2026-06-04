@@ -1,16 +1,29 @@
 {{define "events_timeline.html.tmpl"}}
+{{/* Activity stream (prototype .feed / .fe). Each event renders an action tag
+     coloured by its semantic family (fam-ok | fam-good | fam-warn | fam-bad |
+     fam-info, mapped from event_type in the handler's eventFamily helper), the
+     actor person-chip when present, the raw event_type + short payload as the
+     body line, and a compact relative timestamp. Pinned events are surfaced
+     first by the query (PinnedFirst) and get the .fe-pinned highlight. The raw
+     event_type is kept verbatim so it stays searchable / unambiguous. */}}
 {{if .Events}}
-<ul class="pf-timeline pf-events">
+<div class="feed">
   {{range .Events}}
-  <li class="pf-event {{if .Pinned}}pf-event-pinned{{end}}">
-    <span class="ts">{{.CreatedAt.Format "2006-01-02 15:04:05"}}</span>
-    <span class="ev pf-event-type">{{.EventType}}</span>
-    {{if .ActorDisplay}}<span class="pf-event-actor">{{.ActorDisplay}}</span>{{end}}
-    {{if .Payload}}<span class="pf-event-body">{{truncate 200 .Payload}}</span>{{end}}
-  </li>
+  <div class="fe{{if eq .Family "ok"}} act{{end}}{{if .Pinned}} fe-pinned{{end}}">
+    <span class="ic fam-{{.Family}}">{{if eq .Family "ok"}}<span class="dot"></span>{{end}}{{.Tag}}</span>
+    <div class="ct">
+      <div class="t">
+        {{if .Actor.Display}}<span class="who"><span class="av sm {{.Actor.ColorClass}}">{{.Actor.Initials}}</span><b>{{.Actor.Display}}</b></span> {{end}}<span class="ev mono">{{.EventType}}</span>{{if .Payload}} <span class="ev-body">{{truncate 120 .Payload}}</span>{{end}}
+      </div>
+      <div class="ts">{{reltime .CreatedAt}}</div>
+    </div>
+  </div>
   {{end}}
-</ul>
+</div>
 {{else}}
-<p class="pf-empty">No events yet.</p>
+<div class="empty" style="max-width:none;padding:22px;border:0">
+  <div class="et">Nothing here</div>
+  No activity yet.
+</div>
 {{end}}
 {{end}}

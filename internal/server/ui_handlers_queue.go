@@ -22,6 +22,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -45,15 +46,18 @@ var getQueueFn = func(ctx context.Context, pool *pgxpool.Pool, project string, m
 	return domain.GetReadyQueue(ctx, pool, project, max)
 }
 
-// queuePageData is the template payload for both the full page and the
-// partial. .Q is always non-nil so the partial doesn't have to nil-guard.
+// queuePageData is the template payload for the count-strip partial. .Strip
+// carries the four headline counts. Running / Needs you / Unclaimed are derived
+// from the SAME grouping the wi list uses (single source of truth — annotation
+// #2); Stalled comes from the ready-queue path.
 type queuePageData struct {
 	Title             string
 	Active            string
+	Theme             string
 	User              *UserContext
 	Project           string
 	ProjectsAvailable []string
-	Q                 *domain.ReadyQueue
+	Strip             stripCounts
 	Now               time.Time
 	Err               string
 	NoAccess          bool // user has zero project memberships
@@ -71,40 +75,6 @@ func registerUIQueueHandlers(g *echo.Group, pool *pgxpool.Pool, _ *template.Temp
 	g.GET("/queue/partial", handleUIQueuePartial(pool, queueTmpl))
 }
 
-// emptyQueue returns a non-nil ReadyQueue with empty slices. Used for the
-// no-access / access-denied templates so the partial template doesn't have
-// to guard every range.
-func emptyQueue() *domain.ReadyQueue {
-	return &domain.ReadyQueue{
-		Items:             []domain.ReadyItem{},
-		Running:           []domain.RunningItem{},
-		Stalled:           []domain.StalledItem{},
-		Paused:            []domain.PausedItem{},
-		NeedsHumanSession: []domain.ReadyItem{},
-		Unclassified:      []domain.ReadyItem{},
-	}
-}
-
-// resolveProject picks the project to render. Order of preference:
-//
-//  1. ?project=<name> from the query string
-//  2. alphabetically-first project the caller can see (via
-//     availableProjectsForUI — admin sees all visible projects, others see
-//     their ProjectRoles keys)
-//
-// Returns "" when both are empty (the no-projects hint will fire).
-func resolveProject(ctx context.Context, pool *pgxpool.Pool, c echo.Context, u *UserContext) (string, []string) {
-	available := availableProjectsForUI(ctx, pool, u)
-	q := c.QueryParam("project")
-	if q != "" {
-		return q, available
-	}
-	if len(available) > 0 {
-		return available[0], available
-	}
-	return "", available
-}
-
 // handleUIQueue redirects the old standalone queue page to the wi list page,
 // where the ready queue now lives as an embedded collapsible block. The
 // ?project= query param is preserved so a bookmarked /ui/queue?project=x lands
@@ -119,32 +89,44 @@ func handleUIQueue() echo.HandlerFunc {
 	}
 }
 
-// handleUIQueuePartial renders just the section grid for the htmx
-// every-5s poll. No layout / no <!DOCTYPE> chrome.
+// handleUIQueuePartial renders just the count strip for the htmx every-5s poll.
+// No layout / no <!DOCTYPE> chrome.
+//
+// The strip's Running / Needs you / Unclaimed counts are derived from the SAME
+// grouping the wi list renders (groupCountsFromGroups) so the poll can never
+// drift away from the visible list. It supports ?project=__all__ by aggregating
+// across the caller's accessible projects, mirroring the list page.
 func handleUIQueuePartial(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
-		project, available := resolveProject(ctx, pool, c, u)
+
+		available := availableProjectsForUI(ctx, pool, u)
+		projectParam := strings.TrimSpace(c.QueryParam("project"))
+		allMode := projectParam == allProjectsSentinel
+		project := projectParam
+		if !allMode && project == "" && len(available) > 0 {
+			project = available[0]
+		}
 
 		data := queuePageData{
 			Title:             "Queue",
 			Active:            "queue",
+			Theme:             themeFromCookie(c),
 			User:              u,
 			Project:           project,
 			ProjectsAvailable: available,
-			Q:                 emptyQueue(),
 			Now:               time.Now(),
 		}
 
-		if project == "" && (u == nil || u.Role != "admin") {
+		if !allMode && project == "" && (u == nil || u.Role != "admin") {
 			data.NoAccess = true
 			data.Err = "no projects accessible"
 			return renderTemplate(c, tmpl, "queue_section.html.tmpl", data)
 		}
 
-		if u != nil && u.Role != "admin" {
+		if !allMode && u != nil && u.Role != "admin" {
 			if _, ok := u.ProjectRoles[project]; !ok {
 				data.AccessDenied = true
 				data.Err = "no access to project " + project
@@ -152,12 +134,35 @@ func handleUIQueuePartial(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 			}
 		}
 
-		q, aerr := getQueueFn(ctx, pool, project, 100)
+		// Mirror the list page's personal-dashboard defaults: Mine view scopes
+		// the personal sections to the viewer but still surfaces the Unclaimed
+		// pool, so we do NOT push an owner filter into the DB (groupListRows does
+		// the owner scoping in memory). The "all=1" opt-out switches to All view.
+		viewer := ""
+		if u != nil {
+			viewer = u.DisplayName
+		}
+		mine := viewer != "" && c.QueryParam("all") != "1"
+
+		filter := domain.ListWorkItemsFilter{Limit: 200, Status: activeStatuses}
+		queryProject := project
+		if allMode {
+			queryProject = ""
+			if u != nil && u.Role != "admin" {
+				filter.AccessibleProjects = available
+			}
+		}
+
+		// The strip always tallies the active-status set (Running / Needs you /
+		// Unclaimed); it never pre-seeds per-status buckets, so no selStatuses.
+		_, groups, aerr := fetchListGroups(ctx, pool, queryProject, filter, viewer, mine, nil)
 		if aerr != nil {
 			data.Err = "failed to load ready queue: " + aerr.Message
-		} else if q != nil {
-			data.Q = q
+			return renderTemplate(c, tmpl, "queue_section.html.tmpl", data)
 		}
+		data.Strip = groupCountsFromGroups(groups)
+		data.Strip.Stalled = stalledCount(ctx, pool, project, allMode, available, u)
+
 		return renderTemplate(c, tmpl, "queue_section.html.tmpl", data)
 	}
 }

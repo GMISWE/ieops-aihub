@@ -107,3 +107,31 @@ func TestUIRoutes_StaticHTMXServed(t *testing.T) {
 		t.Errorf("GET /ui/static/htmx.min.js: body does not look like htmx (no 'htmx' substring in first chunk)")
 	}
 }
+
+// TestUIRoutes_StaticCacheControl asserts the FOUT fix (round-3 #1): the static
+// handler stamps a long immutable Cache-Control on woff2 fonts and a shorter one
+// on css/js so the browser stops re-fetching (and re-swapping) them on every
+// navigation.
+func TestUIRoutes_StaticCacheControl(t *testing.T) {
+	cases := []struct {
+		path string
+		want string
+	}{
+		{"/ui/static/fonts/Geist-Variable.woff2", "public, max-age=31536000, immutable"},
+		{"/ui/static/fonts/GeistMono-Variable.woff2", "public, max-age=31536000, immutable"},
+		{"/ui/static/ui.css", "public, max-age=3600"},
+		{"/ui/static/htmx.min.js", "public, max-age=3600"},
+	}
+	for _, c := range cases {
+		e := NewRouter(nil, []byte("smoke-test-secret"))
+		req := httptest.NewRequest(http.MethodGet, c.path, nil)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: expected 200, got %d", c.path, rec.Code)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != c.want {
+			t.Errorf("GET %s: Cache-Control = %q, want %q", c.path, got, c.want)
+		}
+	}
+}

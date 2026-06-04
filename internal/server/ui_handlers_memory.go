@@ -95,6 +95,7 @@ func (c CommitEntry) IsResolved() bool {
 type memListPageData struct {
 	Title             string
 	Active            string
+	Theme             string
 	User              *UserContext
 	Project           string
 	ProjectsAvailable []string
@@ -131,6 +132,7 @@ type MemRelatedRef struct {
 type memDetailPageData struct {
 	Title      string
 	Active     string
+	Theme      string
 	User       *UserContext
 	Memory     *domain.Memory
 	BackQuery  string
@@ -186,6 +188,7 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		data := memListPageData{
 			Title:             "Memories",
 			Active:            "memories",
+			Theme:             themeFromCookie(c),
 			User:              u,
 			Project:           project,
 			ProjectsAvailable: projects,
@@ -333,6 +336,7 @@ func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 		data := memDetailPageData{
 			Title:      "Memory " + mem.ID,
 			Active:     "memories",
+			Theme:      themeFromCookie(c),
 			User:       u,
 			Memory:     mem,
 			BackQuery:  c.QueryParam("back"),

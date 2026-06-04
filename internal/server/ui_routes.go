@@ -67,9 +67,12 @@ func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	e.POST("/ui/login", handleUILoginPost(pool, sm, tmpl))
 	e.POST("/ui/logout", handleUILogout(sm))
 
-	// Static assets — served from embedded FS, no auth.
+	// Static assets — served from embedded FS, no auth. Wrapped so font/css/js
+	// responses carry a Cache-Control header: without it every navigation
+	// re-fetches the woff2 fonts and the browser re-runs the font swap, which is
+	// the visible FOUT the reviewer saw on refresh (aihub#129 round-3 #1).
 	staticHandler := http.StripPrefix("/ui/static/", http.FileServer(staticFSRoot()))
-	e.GET("/ui/static/*", echo.WrapHandler(staticHandler))
+	e.GET("/ui/static/*", echo.WrapHandler(cacheStatic(staticHandler)))
 
 	// Authed UI group. The peer subagents' register* functions attach to
 	// this group so /ui/queue, /ui/wi, /ui/memories all share the session

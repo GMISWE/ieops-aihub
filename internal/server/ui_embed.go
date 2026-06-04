@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -33,7 +34,12 @@ import (
 //go:embed templates
 var templateFS embed.FS
 
-//go:embed static/*
+// static holds the CSS, the vendored HTMX bundle, the theme-toggle JS, and the
+// self-hosted Geist / Geist Mono woff2 fonts under static/fonts/. The directive
+// embeds the whole static tree (not static/*) so nested subdirectories like
+// static/fonts/ are included recursively.
+//
+//go:embed static
 var staticFS embed.FS
 
 // staticFSRoot strips the "static/" prefix so /ui/static/foo.css resolves to
@@ -45,6 +51,28 @@ func staticFSRoot() http.FileSystem {
 		panic(fmt.Sprintf("ui: embed static: %v", err))
 	}
 	return http.FS(sub)
+}
+
+// cacheStatic wraps the embedded-static file server so responses carry a
+// Cache-Control header. The default http.FileServer emits none, so the browser
+// revalidates (often re-downloads) every asset on each navigation — for the
+// self-hosted woff2 fonts that means a visible font swap (FOUT) on refresh
+// (aihub#129 round-3 #1).
+//
+// Fonts are content-addressed by filename and never mutate in place, so they get
+// a one-year immutable cache. CSS/JS may change between deploys but the embed is
+// rebuilt each release, so a short max-age keeps them fresh without re-fetching
+// on every in-session navigation.
+func cacheStatic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, ".woff2"), strings.HasSuffix(r.URL.Path, ".woff"):
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		case strings.HasSuffix(r.URL.Path, ".css"), strings.HasSuffix(r.URL.Path, ".js"):
+			w.Header().Set("Cache-Control", "public, max-age=3600")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // parseTemplates parses layout + every page/partial template into a single
@@ -68,6 +96,14 @@ func parseTemplates() *template.Template {
 	}
 	return root
 }
+
+// assetVersion is a per-process cache-busting token appended to mutable static
+// asset URLs (?v=...). It changes on every binary restart, so a rebuilt
+// ui.css / dropdown.js / theme.js is fetched fresh on the next navigation
+// instead of being served from the browser's long-lived static cache
+// (Cache-Control: max-age=3600). Fonts are content-stable and stay immutable
+// without a token.
+var assetVersion = fmt.Sprintf("%d", time.Now().Unix())
 
 // uiFuncMap exposes a small set of helpers to all templates.
 //
@@ -107,6 +143,8 @@ func uiFuncMap() template.FuncMap {
 			return value
 		},
 		"hasPrefix": strings.HasPrefix,
+		// assetv returns the per-process cache-busting token for static asset URLs.
+		"assetv": func() string { return assetVersion },
 		// wiref builds an href for a wi detail page from a slug or wi_id.
 		// Slugs like "aihub#1" contain '#', which browsers treat as a URL
 		// fragment and strip from the request — the handler would then see
@@ -125,6 +163,68 @@ func uiFuncMap() template.FuncMap {
 		// inc adds 1 to an integer; used in range loops to convert 0-based indices
 		// to 1-based labels (e.g. {{inc $i}} → "1", "2", …) for version-history lists.
 		"inc": func(n int) int { return n + 1 },
+		// sub subtracts b from a; used to label a newest-first version list with
+		// its chronological version number (total - displayIndex).
+		"sub": func(a, b int) int { return a - b },
+		// reltime renders a time as a compact relative phrase ("12m ago",
+		// "3h ago", "2d ago") for the activity feed. Falls back to an absolute
+		// date for anything older than a week. Used by the wi-detail activity
+		// stream so each event reads like the prototype's ".ts" line.
+		"reltime": func(t time.Time) string { return relTime(t) },
+		// artifactInitial returns a single uppercase letter for an artifact's
+		// methodology type, used inside the .art .ico avatar (e.g.
+		// "methodology.spec" → "S", "methodology.wrap_summary" → "W"). It reads
+		// the segment after the last dot so it works for any methodology.* type.
+		"artifactInitial": func(t string) string {
+			seg := t
+			if i := strings.LastIndex(t, "."); i >= 0 && i+1 < len(t) {
+				seg = t[i+1:]
+			}
+			seg = strings.TrimSpace(seg)
+			if seg == "" {
+				return "?"
+			}
+			return strings.ToUpper(seg[:1])
+		},
+		// shortDate renders an RFC3339 timestamp string as "YYYY-MM-DD" for the
+		// artifact version-timeline rows. Empty / unparseable input yields "—".
+		"shortDate": func(s string) string {
+			if s == "" {
+				return "—"
+			}
+			if ts, err := time.Parse(time.RFC3339, s); err == nil {
+				return ts.UTC().Format("2006-01-02")
+			}
+			if len(s) >= 10 {
+				return s[:10]
+			}
+			return s
+		},
+	}
+}
+
+// relTime formats t as a compact relative phrase relative to now. Zero times
+// render as "—". The thresholds (minute / hour / day) match the prototype's
+// activity-feed timestamps; anything beyond a week falls back to an absolute
+// date so old events stay unambiguous.
+func relTime(t time.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
+	d := time.Since(t)
+	switch {
+	case d < 0:
+		return "just now"
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return strconv.Itoa(int(d.Minutes())) + "m ago"
+	case d < 24*time.Hour:
+		return strconv.Itoa(int(d.Hours())) + "h ago"
+	case d < 7*24*time.Hour:
+		return strconv.Itoa(int(d.Hours()/24)) + "d ago"
+	default:
+		return t.UTC().Format("2006-01-02")
 	}
 }
 

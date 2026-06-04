@@ -21,9 +21,13 @@
   // ---- helpers -------------------------------------------------------------
 
   // The shared filter form. Controls that live outside it (the project
-  // switcher) still drive it via this lookup.
+  // switcher) still drive it via this lookup. wi_list marks its form
+  // [data-wi-filters]; the memories list (aihub#137) marks its own
+  // [data-mem-filters]. Only one is present per page, so the combined selector
+  // keeps the wi page byte-identical while letting the memory page reuse the
+  // same dropdown -> pf-filter -> hx-get path.
   function filtersForm() {
-    return document.querySelector("[data-wi-filters]");
+    return document.querySelector("[data-wi-filters], [data-mem-filters]");
   }
 
   // Fire the form's hx-get in place. Debounced so a burst of checkbox toggles

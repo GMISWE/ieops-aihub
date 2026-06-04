@@ -1,80 +1,215 @@
 {{define "content"}}
-<section class="pf-page-header">
-  <h1>Memories{{if .Project}}: <span class="pf-queue-proj">{{.Project}}</span>{{end}}</h1>
+<section class="ph">
+  <h1>Memories</h1>
+  <span class="sub">team knowledge — experiences, facts, rules, specs</span>
   {{if and .Items (gt (len .Items) 0)}}
-    <span class="pf-meta">{{len .Items}} shown{{if gt .HiddenCount 0}}; {{.HiddenCount}} hidden by visibility{{end}}</span>
+    <span class="sub">· {{len .Items}} shown{{if gt .HiddenCount 0}}; {{.HiddenCount}} hidden by visibility{{end}}</span>
+  {{end}}
+  {{/* Project switcher — single-select dropdown driving the shared filter form
+       (mirrors wi_list). Selecting a project writes the hidden `project` input
+       and fires `pf-filter`, so the list reloads server-side via the existing
+       ?project= query param the handler already reads. */}}
+  {{if and (not .NoAccess) .ProjectsAvailable}}
+  <div class="dd" data-dd style="margin-left:auto">
+    <button type="button" class="dd-btn" data-dd-btn>
+      <span class="lbl">{{default "(no project)" .Project}}</span><span class="chev open" style="margin:0"></span>
+    </button>
+    <div class="dd-menu" hidden style="left:auto;right:0">
+      {{range .ProjectsAvailable}}
+      <div class="dd-it{{if eq . $.Project}} on{{end}}" data-dd-field="project" data-dd-value="{{.}}" data-dd-label="{{.}}">
+        {{.}}<span style="flex:1"></span><span class="ck"></span>
+      </div>
+      {{end}}
+    </div>
+  </div>
   {{end}}
 </section>
 
 {{if .NoAccess}}
-<div class="pf-err">no projects accessible — ask an admin to add you to a project.</div>
+<div class="empty">
+  <div class="ei">!</div>
+  <div class="et">No projects accessible</div>
+  no projects accessible — ask an admin to add you to a project.
+</div>
 {{else}}
 
-<form method="GET" action="/ui/memories" class="pf-filter-bar pf-mem-filters">
-  <label for="pf-mem-proj">project</label>
-  <select id="pf-mem-proj" name="project">
-    {{range .ProjectsAvailable}}
-    <option value="{{.}}" {{if eq . $.Project}}selected{{end}}>{{.}}</option>
-    {{end}}
-  </select>
+{{/* Filter bar. The server-side filters (project / type / search) drive an
+     in-place HTMX reload of #mem-list-body via the existing query params the
+     handler reads (?project, ?type, ?q). The custom dropdowns dispatch the
+     shared `pf-filter` event (see dropdown.js) — hyphen, never colon. The
+     client-side controls (sort, Mine/All) are wired by memories.js and operate
+     on the already-rendered cards within the current recall window, with no
+     server round-trip.
 
-  <label for="pf-mem-type">type</label>
-  <select id="pf-mem-type" name="type">
-    <option value="">all</option>
-    {{range .TypeOptions}}
-    <option value="{{.}}" {{if eq . $.Type}}selected{{end}}>{{.}}</option>
-    {{end}}
-  </select>
+     The memory handler (frozen) renders the FULL layout document for every
+     request — it has no HX-Request fragment branch like the wi handler. So we
+     ask HTMX to hx-select="#mem-list-body" out of that full response and swap
+     that one node (outerHTML) into the live #mem-list-body. This keeps the
+     in-place reload without any backend change. */}}
+<form method="GET" action="/ui/memories" class="filters" data-mem-filters
+      hx-get="/ui/memories"
+      hx-target="#mem-list-body"
+      hx-select="#mem-list-body"
+      hx-swap="outerHTML"
+      hx-push-url="true"
+      hx-include="this"
+      hx-trigger="pf-filter, keyup changed delay:300ms from:[data-mem-search], search from:[data-mem-search]">
+  <input type="hidden" name="project" value="{{.Project}}" data-dd-input="project">
+  <input type="hidden" name="type" value="{{.Type}}" data-dd-input="type">
+  <input type="hidden" name="strength_min" value="{{printf "%g" .StrengthMin}}">
+  {{if .WorkItemID}}<input type="hidden" name="wi" value="{{.WorkItemID}}">{{end}}
+  {{if and .Limit (ne .Limit 50)}}<input type="hidden" name="limit" value="{{.Limit}}">{{end}}
 
-  <label for="pf-mem-strength">strength &ge;</label>
-  <input id="pf-mem-strength" type="text" name="strength_min" value="{{printf "%g" .StrengthMin}}" size="5">
+  <label class="search">
+    <span>search</span>
+    <input type="text" name="q" value="{{.Query}}" placeholder="Semantic recall over team memory..." data-mem-search autocomplete="off" aria-label="Search memories">
+  </label>
 
-  <label for="pf-mem-q">search</label>
-  <input id="pf-mem-q" type="text" name="q" value="{{.Query}}" placeholder="(optional)">
+  {{/* Type filter — single-select, server-side. Reuses the handler's TypeOptions
+       (wildcards + the full enum). The empty value clears the ?type= param. */}}
+  <div class="dd" data-dd>
+    <button type="button" class="dd-btn" data-dd-btn>
+      <span class="lbl">{{default "All types" .Type}}</span><span class="chev open" style="margin:0"></span>
+    </button>
+    <div class="dd-menu" hidden>
+      <div class="dd-it{{if not .Type}} on{{end}}" data-dd-field="type" data-dd-value="" data-dd-label="All types">All types<span style="flex:1"></span><span class="ck"></span></div>
+      {{range .TypeOptions}}
+      <div class="dd-it{{if eq . $.Type}} on{{end}}" data-dd-field="type" data-dd-value="{{.}}" data-dd-label="{{.}}">{{.}}<span style="flex:1"></span><span class="ck"></span></div>
+      {{end}}
+    </div>
+  </div>
+
+  {{/* Sort — CLIENT-SIDE only. No data-dd-field, so dropdown.js will not write a
+       hidden input or fire a server reload; memories.js reads data-sort on each
+       item and reorders the rendered cards in place. */}}
+  <div class="dd" data-dd data-mem-sort>
+    <button type="button" class="dd-btn" data-dd-btn>
+      <span class="lbl">Newest first</span><span class="chev open" style="margin:0"></span>
+    </button>
+    <div class="dd-menu" hidden>
+      <div class="dd-it on" data-sort="newest" data-dd-label="Newest first">Newest first<span style="flex:1"></span><span class="ck"></span></div>
+      <div class="dd-it" data-sort="oldest" data-dd-label="Oldest first">Oldest first<span style="flex:1"></span><span class="ck"></span></div>
+      <div class="dd-it" data-sort="strength" data-dd-label="Strength: high to low">Strength: high to low<span style="flex:1"></span><span class="ck"></span></div>
+    </div>
+  </div>
+
+  {{/* Mine / All — CLIENT-SIDE only. memories.js compares each card's
+       data-author against the current user id and shows/hides accordingly. */}}
+  <div class="seg" data-mem-owner>
+    <button type="button" class="on" data-owner="all">All</button>
+    <button type="button" data-owner="mine">Mine</button>
+  </div>
 
   {{if .WorkItemID}}
-  <input type="hidden" name="wi" value="{{.WorkItemID}}">
-  <span class="pf-filter-chip">wi: {{.WorkItemID}} <a href="/ui/memories?project={{.Project}}">&times;</a></span>
+  <span class="badge b-normal" style="gap:6px">wi: {{.WorkItemID}}
+    <a href="/ui/memories?project={{.Project}}" style="color:inherit;text-decoration:none">×</a>
+  </span>
   {{end}}
 
-  <button type="submit">Apply</button>
+  <noscript><button type="submit" class="btn sm">Apply</button></noscript>
 </form>
 
+{{/* Current user id for the client-side Mine/All filter. Read by memories.js;
+     no backend round-trip. */}}
+<span data-mem-user="{{if .User}}{{.User.UserID}}{{end}}" hidden></span>
+
+{{/* List body. Wrapped in #mem-list-body so each server-side filter request
+     swaps just the cards while the header / filter bar above stay put. */}}
+<div id="mem-list-body">
+{{template "mem-list-body" .}}
+</div>
+
+{{/* Pager — CLIENT-SIDE, lives OUTSIDE #mem-list-body so it survives the HTMX
+     swap (bound once by dropdown.js + memories.js). memories.js fills .pinfo,
+     wires the per-page dropdown, builds the page buttons, and unhides this
+     strip only when the matched set spans more than one page. The per-page
+     dropdown opens upward (bottom:33px). */}}
+<div class="pager" data-mem-pager hidden>
+  <span class="pinfo" data-mem-pinfo></span>
+  <div class="dd" data-dd data-mem-perpage style="margin-left:10px">
+    <button type="button" class="dd-btn" data-dd-btn style="height:28px;font-size:12px"><span class="lbl">12 / page</span><span class="chev open" style="margin:0"></span></button>
+    <div class="dd-menu" hidden style="top:auto;bottom:33px">
+      <div class="dd-it on" data-perpage="12" data-dd-label="12 / page">12 / page<span style="flex:1"></span><span class="ck"></span></div>
+      <div class="dd-it" data-perpage="24" data-dd-label="24 / page">24 / page<span style="flex:1"></span><span class="ck"></span></div>
+      <div class="dd-it" data-perpage="48" data-dd-label="48 / page">48 / page<span style="flex:1"></span><span class="ck"></span></div>
+      <div class="dd-it" data-perpage="96" data-dd-label="96 / page">96 / page<span style="flex:1"></span><span class="ck"></span></div>
+    </div>
+  </div>
+  <span style="flex:1"></span>
+  <div class="grp-pager" data-mem-pages></div>
+</div>
+
+{{/* Page-local scripts — avatars.js exposes the shared window.pfPaintAvatars
+     (loaded FIRST so memories.js can call it); memories.js does client sort /
+     Mine-All / pagination and re-paints avatars. Both loaded once at page level
+     (NOT inside the swapped fragment) so they bind single listeners; memories.js
+     re-inits the freshly rendered cards on each swap. Cache-busted. */}}
+<script src="/ui/static/avatars.js?v={{assetv}}" defer></script>
+<script src="/ui/static/memories.js?v={{assetv}}" defer></script>
+{{end}}
+{{end}}
+
+{{/* Standalone list-body fragment. The full page embeds it inside
+     #mem-list-body above; an HX-Request swap re-renders just this block, after
+     which memories.js re-initialises (htmx:afterSwap). */}}
+{{define "mem-list-body"}}
 {{if .AccessDenied}}
-<div class="pf-err">no access to project {{default "(unspecified)" .Project}}; pick another above.</div>
+<div class="empty">
+  <div class="ei">!</div>
+  <div class="et">No access</div>
+  No access to project {{default "(unspecified)" .Project}}; pick another above.
+</div>
 {{else if .ErrMessage}}
-<div class="pf-err">{{.ErrMessage}}</div>
+<div class="empty" style="max-width:none">{{.ErrMessage}}</div>
 {{else if not .Items}}
-<div class="pf-empty">no memories match these filters.</div>
+<div class="empty">
+  <div class="ei">+</div>
+  <div class="et">No memories yet</div>
+  No memories match the current filters. Clear the filters or pick another project.
+</div>
 {{else}}
 
-<table class="pf-table pf-mem-table">
-  <thead>
-    <tr>
-      <th>Type</th>
-      <th>Strength</th>
-      <th>Activations</th>
-      <th>Created</th>
-      <th>Author</th>
-      <th>Work Item</th>
-      <th>Content</th>
-    </tr>
-  </thead>
-  <tbody>
-    {{range .Items}}
-    <tr>
-      <td><span class="pf-mem-type">{{.Type}}</span></td>
-      <td>{{printf "%.2f" .EffectiveStrength}}</td>
-      <td>{{.ActivationCount}}</td>
-      <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
-      <td>{{default "—" .AuthorDisplay}}</td>
-      <td>{{with .WorkItemID}}<a href="{{wiref .}}">{{.}}</a>{{else}}—{{end}}</td>
-      <td><a href="/ui/memories/{{.ID}}?back={{$.FilterQuery}}">{{truncate 120 .Content}}</a></td>
-    </tr>
-    {{end}}
-  </tbody>
-</table>
-
-{{end}}
+{{/* Card grid. Every card carries data-created / data-strength / data-author so
+     memories.js can sort, Mine/All-filter, and paginate entirely client-side
+     within the current recall window. The whole card is a link to the detail
+     page (back-link preserves the active filter query). */}}
+<div class="mgrid" data-mem-grid>
+  {{range .Items}}
+  <div class="mcard" data-mem-card
+     data-created="{{.CreatedAt.Unix}}"
+     data-strength="{{printf "%.4f" .EffectiveStrength}}"
+     data-author="{{.AuthorUserID}}">
+    {{/* Whole-card click target. A real nested <a> (e.g. the wi link below)
+         inside an outer <a> is invalid HTML and auto-closes the card anchor,
+         breaking the grid — so the card is a <div> with this absolutely
+         positioned overlay link, and the wi link / strength meter sit above it
+         (z-index) so they stay clickable / hoverable. */}}
+    <a class="mcard-link" href="/ui/memories/{{.ID}}?back={{$.FilterQuery}}" aria-label="Open memory {{.ID}}"></a>
+    <div class="top">
+      <span class="pf-mem-type">{{.Type}}</span>
+      <span class="pf-strength-bar" title="memory strength {{printf "%.2f" .EffectiveStrength}} (recall weight on a 1–5 scale; higher surfaces more strongly in recall)">
+        <i{{if ge .EffectiveStrength 0.25}} class="on"{{end}}></i><i{{if ge .EffectiveStrength 1.5}} class="on"{{end}}></i><i{{if ge .EffectiveStrength 2.5}} class="on"{{end}}></i><i{{if ge .EffectiveStrength 3.5}} class="on"{{end}}></i><i{{if ge .EffectiveStrength 4.5}} class="on"{{end}}></i>
+      </span>
+    </div>
+    <div class="snip">{{truncate 240 .Content}}</div>
+    <div class="ft">
+      <span class="who" title="{{default "unknown" .AuthorDisplay}}">
+        {{if .AuthorDisplay}}
+          {{/* Initials + av-cN color are filled by avatars.js (window.pfPaintAvatars
+               over [data-av-name]), which replicates the Go avatarColorClass
+               FNV-1a hash + initialsFor logic over this display name (the frozen
+               memory handler does not build a chip). */}}
+          <span class="av sm" data-av-name="{{.AuthorDisplay}}"></span>
+        {{else}}
+          <span class="av sm ghost">?</span>
+        {{end}}
+        <span class="nm">{{default "unknown" .AuthorDisplay}}</span>
+      </span>
+      {{with .WorkItemID}}<a class="wi" href="{{wiref .}}">{{.}}</a>{{else}}<span class="wi" style="color:var(--text-subtle)">—</span>{{end}}
+      <span style="margin-left:auto">{{reltime .CreatedAt}}</span>
+    </div>
+  </div>
+  {{end}}
+</div>
 {{end}}
 {{end}}

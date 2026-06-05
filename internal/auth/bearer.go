@@ -3,6 +3,7 @@ package auth
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"strings"
@@ -38,7 +39,7 @@ func ValidateBearer(authHeader string, apiKeys []APIKey) (keyID string, valid bo
 	}
 	h := HashKey(raw)
 	for _, k := range apiKeys {
-		if k.KeyHash == h && k.RevokedAt == nil {
+		if subtle.ConstantTimeCompare([]byte(k.KeyHash), []byte(h)) == 1 && k.RevokedAt == nil {
 			return k.ID, true
 		}
 	}

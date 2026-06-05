@@ -880,6 +880,9 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 	if max <= 0 {
 		max = 10
 	}
+	if max > 200 {
+		max = 200
+	}
 	result := &ReadyQueue{
 		Items:             []ReadyItem{},
 		Running:           []RunningItem{},

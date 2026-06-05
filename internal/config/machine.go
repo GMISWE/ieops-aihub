@@ -107,9 +107,16 @@ func EnsureMachineConfig() (*MachineConfig, error) {
 	return mc, nil
 }
 
-// ResolveAPIKey returns the API key from mc, consulting APIKeyEnv if APIKey
-// is empty. Falls back to the POLYFORGE_API_KEY env var last.
+// ResolveAPIKey returns the API key, in priority order:
+//  1. POLYFORGE_API_KEY env var (highest priority — explicit override,
+//     matching the `--help` contract and CLI-tool convention)
+//  2. config.toml [auth] api_key
+//  3. the env var named by config.toml [auth] api_key_env
 func (mc *MachineConfig) ResolveAPIKey() string {
+	// Global override wins (local dev key swap, CI / container env injection).
+	if v := os.Getenv("POLYFORGE_API_KEY"); v != "" {
+		return v
+	}
 	if mc.Auth.APIKey != "" {
 		return mc.Auth.APIKey
 	}
@@ -118,8 +125,7 @@ func (mc *MachineConfig) ResolveAPIKey() string {
 			return v
 		}
 	}
-	// Global fallback (CI / override)
-	return os.Getenv("POLYFORGE_API_KEY")
+	return ""
 }
 
 // ResolveBinaryChannel returns the configured binary channel ("stable" or "dev").
@@ -131,12 +137,20 @@ func (mc *MachineConfig) ResolveBinaryChannel() string {
 	return "stable"
 }
 
-// ResolveAihubURL returns the server URL from mc, or "" if not set.
+// ResolveAihubURL returns the aihub server URL, in priority order:
+//  1. POLYFORGE_AIHUB_URL env var (highest priority — explicit override,
+//     matching the `--help` contract)
+//  2. config.toml [server] url
+//
+// Returns "" if neither is set.
 func (mc *MachineConfig) ResolveAihubURL() string {
+	if v := os.Getenv("POLYFORGE_AIHUB_URL"); v != "" {
+		return v
+	}
 	if mc.Server != nil && mc.Server.URL != "" {
 		return mc.Server.URL
 	}
-	return os.Getenv("POLYFORGE_AIHUB_URL")
+	return ""
 }
 
 func newUUID() string {

@@ -516,12 +516,12 @@ type ListWorkItemsResult struct {
 //     non-admin caller
 //   - project == "" + AccessibleProjects empty → no project clause at all
 //     (admin "view all" across every project)
-func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f ListWorkItemsFilter) (*ListWorkItemsResult, *AihubError) {
-	if f.Limit <= 0 || f.Limit > 200 {
-		f.Limit = 50
-	}
-
-	args := []any{}
+// buildListWorkItemsWhere builds the WHERE clause, JOIN clause, and ordered
+// bound args for ListWorkItems from the given project scope and filter. It is
+// split out from ListWorkItems so the query construction (notably placeholder
+// numbering and the cursor predicate) is unit-testable without a live DB.
+func buildListWorkItemsWhere(project string, f ListWorkItemsFilter) (joinClause, where string, args []any) {
+	args = []any{}
 	conds := []string{}
 	argIdx := 1
 	if project != "" {
@@ -566,7 +566,6 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 	}
 	// OwnerDisplay needs a JOIN to run_attempts. Only inject the join when
 	// the filter is requested so the no-filter path stays at zero extra cost.
-	joinClause := ""
 	if f.OwnerDisplay != nil && *f.OwnerDisplay != "" {
 		joinClause = " LEFT JOIN run_attempts ra ON ra.id = wi.current_attempt_id"
 		conds = append(conds, fmt.Sprintf("ra.actor_display ILIKE '%%' || $%d || '%%'", argIdx))
@@ -581,13 +580,31 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 	if f.Since != nil {
 		conds = append(conds, fmt.Sprintf("wi.created_at >= $%d", argIdx))
 		args = append(args, *f.Since)
-		// argIdx not incremented: last optional clause, kept symmetric for future filters
+		argIdx++
+	}
+	// Cursor pagination: NextCursor is the last returned item's created_at
+	// (RFC3339Nano). ORDER BY wi.created_at DESC means the next page is the rows
+	// with created_at strictly less than the cursor. Mirrors ListEvents in
+	// memory.go (strict <, ::timestamptz cast, no secondary tie-breaker).
+	if f.Cursor != nil && *f.Cursor != "" {
+		conds = append(conds, fmt.Sprintf("wi.created_at < $%d::timestamptz", argIdx))
+		args = append(args, *f.Cursor)
+		argIdx++
 	}
 
-	where := ""
+	where = ""
 	if len(conds) > 0 {
 		where = "WHERE " + strings.Join(conds, " AND ")
 	}
+	return joinClause, where, args
+}
+
+func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f ListWorkItemsFilter) (*ListWorkItemsResult, *AihubError) {
+	if f.Limit <= 0 || f.Limit > 200 {
+		f.Limit = 50
+	}
+
+	joinClause, where, args := buildListWorkItemsWhere(project, f)
 	query := fmt.Sprintf(`
 		SELECT wi.id, wi.seq, wi.slug, wi.project, wi.scenario, wi.goal, wi.source,
 			   wi.wi_type, wi.priority, wi.requires_human_session, wi.milestone, wi.labels,

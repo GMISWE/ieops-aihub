@@ -733,6 +733,313 @@ func TestShareArtifact_Writer_200(t *testing.T) {
 	}
 }
 
+// ─── aihub#154: /ui artifact share button ────────────────────────────────────
+//
+// The share/unshare handlers are auth-agnostic and already covered for /v1 by
+// scenarios 1-7 above; these focus on the new /ui surface: that the same
+// handlers behave identically under cookie auth (happy + 403 + 412), and that
+// the /ui viewer injects the share control while /v1 + /share stay
+// byte-identical (no pf-share, no share.js).
+
+// withVersionChainOverride swaps versionChainFn so /ui handler tests don't hit
+// the DB (nil pool would panic in MemoryVersionChain). Returns an empty chain
+// so buildVersionHistoryHTML is a no-op.
+func withVersionChainOverride() func() {
+	prev := versionChainFn
+	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+		return nil, nil
+	}
+	return func() { versionChainFn = prev }
+}
+
+// uiShareContext builds an echo context whose registered path is the /ui share
+// route, so handlers that branch on c.Path() (none here, but kept symmetric
+// with the /ui html path) and the share handlers run as they would under /ui.
+func newUIContext(e *echo.Echo, method, target, id string) (echo.Context, *httptest.ResponseRecorder) {
+	req := httptest.NewRequest(method, target, nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(id)
+	return c, rec
+}
+
+// TestUIShareArtifact_Writer_200 covers acceptance 1: a writer sharing a
+// spec/plan with rendered_html over the /ui route → 200, body has share_url +
+// visibility:"public", and the visibility setter is invoked with "public".
+func TestUIShareArtifact_Writer_200(t *testing.T) {
+	mem := publicSharedMem()
+	mem.Visibility = "project" // not yet shared
+	defer withLoadMemoryOverride(mem, nil)()
+	gotID, gotVis, cleanup := withSetVisibilityOverride(nil)
+	defer cleanup()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodPost, "/ui/artifacts/mem_share1/share", "mem_share1")
+	c.SetPath("/ui/artifacts/:id/share")
+	setUser(c, authorUser()) // writer on testproj
+
+	if err := handleShareArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if *gotID != "mem_share1" || *gotVis != "public" {
+		t.Fatalf("share mutation: got (%q,%q), want (mem_share1,public)", *gotID, *gotVis)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "share_url") || !strings.Contains(body, "/share/mem_share1") {
+		t.Fatalf("response missing share_url: %s", body)
+	}
+	if !strings.Contains(body, "\"visibility\":\"public\"") {
+		t.Fatalf("response missing visibility:public: %s", body)
+	}
+}
+
+// TestUIUnshareArtifact_Writer_200 covers acceptance 2: DELETE over /ui → 200,
+// {ok:true}, visibility setter invoked with "project".
+func TestUIUnshareArtifact_Writer_200(t *testing.T) {
+	mem := publicSharedMem() // currently public
+	defer withLoadMemoryOverride(mem, nil)()
+	gotID, gotVis, cleanup := withSetVisibilityOverride(nil)
+	defer cleanup()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodDelete, "/ui/artifacts/mem_share1/share", "mem_share1")
+	c.SetPath("/ui/artifacts/:id/share")
+	setUser(c, authorUser())
+
+	if err := handleUnshareArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if *gotID != "mem_share1" || *gotVis != "project" {
+		t.Fatalf("unshare mutation: got (%q,%q), want (mem_share1,project)", *gotID, *gotVis)
+	}
+	if !strings.Contains(rec.Body.String(), "\"ok\":true") {
+		t.Fatalf("response missing ok:true: %s", rec.Body.String())
+	}
+}
+
+// TestUIShareArtifact_Viewer_403 covers acceptance 3a: non-writer over /ui → 403.
+func TestUIShareArtifact_Viewer_403(t *testing.T) {
+	mem := publicSharedMem()
+	mem.Visibility = "project"
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodPost, "/ui/artifacts/mem_share1/share", "mem_share1")
+	c.SetPath("/ui/artifacts/:id/share")
+	setUser(c, otherViewerUser()) // viewer only
+
+	if err := handleShareArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status: got %d, want 403 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUIShareArtifact_NoRenderedHTML_412 covers acceptance 3b: rendered_html=NULL
+// over /ui → 412.
+func TestUIShareArtifact_NoRenderedHTML_412(t *testing.T) {
+	mem := publicSharedMem()
+	mem.Visibility = "project"
+	mem.RenderedHTML = nil
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodPost, "/ui/artifacts/mem_share1/share", "mem_share1")
+	c.SetPath("/ui/artifacts/:id/share")
+	setUser(c, authorUser())
+
+	if err := handleShareArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("status: got %d, want 412 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUIArtifactHTML_ShareControlInjected covers acceptance 4: the /ui viewer
+// injects the share control when rendered_html != nil, with data-shared
+// reflecting visibility and a share.js script tag.
+func TestUIArtifactHTML_ShareControlInjected(t *testing.T) {
+	defer withVersionChainOverride()()
+
+	cases := []struct {
+		name       string
+		visibility string
+		wantShared string
+	}{
+		{"public_shared_true", "public", `data-shared="true"`},
+		{"project_shared_false", "project", `data-shared="false"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := publicSharedMem()
+			mem.Visibility = tc.visibility
+			mem.WorkItemID = strptr("aihub#154")
+			defer withLoadMemoryOverride(mem, nil)()
+
+			e := echo.New()
+			c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_share1/html", "mem_share1")
+			c.SetPath("/ui/artifacts/:id/html")
+			setUser(c, authorUser())
+
+			if err := handleArtifactHTML(nil)(c); err != nil {
+				e.HTTPErrorHandler(err, c)
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, `id="pf-share"`) {
+				t.Errorf("missing pf-share control; excerpt: %s", excerptStr(body))
+			}
+			if !strings.Contains(body, tc.wantShared) {
+				t.Errorf("missing %s; excerpt: %s", tc.wantShared, excerptStr(body))
+			}
+			if !strings.Contains(body, "/ui/static/share.js") {
+				t.Errorf("missing share.js script; excerpt: %s", excerptStr(body))
+			}
+			// aihub#154: the share control must sit BELOW the document title
+			// (the first </h1>), not above it.
+			h1End := strings.Index(body, "</h1>")
+			shareAt := strings.Index(body, `id="pf-share"`)
+			if h1End < 0 {
+				t.Fatalf("rendered body has no </h1>; excerpt: %s", excerptStr(body))
+			}
+			if shareAt < h1End {
+				t.Errorf("share control must follow the first </h1> (h1End=%d shareAt=%d); excerpt: %s",
+					h1End, shareAt, excerptStr(body))
+			}
+		})
+	}
+}
+
+// TestUIArtifactHTML_ShareAboveVersionHistory covers the multi-version layout
+// requirement (aihub#154 #3): when a spec has a >1-version chain, the share
+// control renders ABOVE the version-history dropdown, and both sit below the
+// title (title → share → version-history).
+func TestUIArtifactHTML_ShareAboveVersionHistory(t *testing.T) {
+	prev := versionChainFn
+	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+		return []domain.MemoryVersionRef{
+			{ID: "mem_share1", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
+			{ID: "mem_v2", CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+		}, nil
+	}
+	defer func() { versionChainFn = prev }()
+
+	mem := publicSharedMem()
+	mem.WorkItemID = strptr("aihub#154")
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_share1/html", "mem_share1")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	body := rec.Body.String()
+
+	h1End := strings.Index(body, "</h1>")
+	shareAt := strings.Index(body, `id="pf-share"`)
+	// Match the rendered version-history SECTION, not the bare class token — the
+	// latter also appears in the embedded style.css inside <head>, far above body.
+	versionAt := strings.Index(body, `<section class="pf-version-history"`)
+	if h1End < 0 || shareAt < 0 || versionAt < 0 {
+		t.Fatalf("expected title + share + version-history; h1End=%d shareAt=%d versionAt=%d; excerpt: %s",
+			h1End, shareAt, versionAt, excerptStr(body))
+	}
+	// Order must be: </h1> < pf-share < pf-version-history.
+	if h1End >= shareAt || shareAt >= versionAt {
+		t.Errorf("order must be title → share → version-history (h1End=%d shareAt=%d versionAt=%d); excerpt: %s",
+			h1End, shareAt, versionAt, excerptStr(body))
+	}
+}
+
+// TestUIArtifactHTML_NoRenderedHTML_NoShareControl covers acceptance 5: when
+// rendered_html == nil the /ui viewer must NOT inject the share control.
+func TestUIArtifactHTML_NoRenderedHTML_NoShareControl(t *testing.T) {
+	defer withVersionChainOverride()()
+
+	mem := retroMemNullHTML() // rendered_html = nil, lazy-rendered body
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_retro1/html", "mem_retro1")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `id="pf-share"`) {
+		t.Errorf("share control must be absent when rendered_html is nil; excerpt: %s", excerptStr(body))
+	}
+	if strings.Contains(body, "/ui/static/share.js") {
+		t.Errorf("share.js must be absent when rendered_html is nil; excerpt: %s", excerptStr(body))
+	}
+}
+
+// TestArtifactHTML_V1AndShare_NoShareControl covers acceptance 6 (byte-identical
+// conservation): the /v1 html output and the /share output must NOT contain the
+// share control nor the share.js script.
+func TestArtifactHTML_V1AndShare_NoShareControl(t *testing.T) {
+	// /v1 path.
+	mem := publicSharedMem() // rendered_html != nil
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/v1/artifacts/mem_share1/html", "mem_share1")
+	c.SetPath("/v1/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/v1 status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	v1Body := rec.Body.String()
+	if strings.Contains(v1Body, "pf-share") {
+		t.Errorf("/v1 output must not contain pf-share; excerpt: %s", excerptStr(v1Body))
+	}
+	if strings.Contains(v1Body, "share.js") {
+		t.Errorf("/v1 output must not contain share.js; excerpt: %s", excerptStr(v1Body))
+	}
+
+	// /share path (handleSharedArtifact). publicSharedMem is already public.
+	sc, srec := newUIContext(e, http.MethodGet, "/share/mem_share1", "mem_share1")
+	if err := handleSharedArtifact(nil)(sc); err != nil {
+		e.HTTPErrorHandler(err, sc)
+	}
+	if srec.Code != http.StatusOK {
+		t.Fatalf("/share status: got %d, want 200 (body=%s)", srec.Code, excerptStr(srec.Body.String()))
+	}
+	shareBody := srec.Body.String()
+	if strings.Contains(shareBody, "pf-share") {
+		t.Errorf("/share output must not contain pf-share; excerpt: %s", excerptStr(shareBody))
+	}
+	if strings.Contains(shareBody, "share.js") {
+		t.Errorf("/share output must not contain share.js; excerpt: %s", excerptStr(shareBody))
+	}
+}
+
 // ─── aihub#124: annotation UI tests ──────────────────────────────────────────
 
 // TestBuildAnnotationHTML_RouteAware is the core route-aware test:

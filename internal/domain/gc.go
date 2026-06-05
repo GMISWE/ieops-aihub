@@ -55,7 +55,23 @@ func tryAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, lockID int64) (boo
 
 // ─── Sweep 1: Orphan Lock Cleanup ────────────────────────────────────────────
 
-// RunOrphanLockSweep removes resource_locks whose owner_attempt_id points to a non-running attempt.
+// orphanLockSweepSQL deletes resource_locks whose owner attempt is no longer
+// holding them per the lock-retention contract. A lock is retained while its
+// owner attempt is 'running' OR 'paused': FnCompleteAttempt keeps the locks on
+// paused so resume can reclaim them (N4 / C5-3 design invariant), and the claim
+// conflict-check (run_attempts.go) treats the retention set as IN ('running',
+// 'paused'). The sweep predicate must match that set, otherwise the GC tick
+// deletes a paused attempt's locks within 60s — breaking the resume invariant
+// and allowing a concurrent claim to steal the resource (aihub#145).
+const orphanLockSweepSQL = `
+	DELETE FROM resource_locks rl
+	WHERE NOT EXISTS (
+		SELECT 1 FROM run_attempts ra
+		WHERE ra.id = rl.owner_attempt_id AND ra.status IN ('running', 'paused')
+	)`
+
+// RunOrphanLockSweep removes resource_locks whose owner_attempt_id points to an
+// attempt that is neither running nor paused (i.e. genuinely orphaned).
 func RunOrphanLockSweep(ctx context.Context, pool *pgxpool.Pool) GCResult {
 	result := GCResult{SweepType: "orphan_lock_cleanup"}
 	acquired, release, err := tryAdvisoryLock(ctx, pool, gcLockOrphanLocks)
@@ -69,12 +85,7 @@ func RunOrphanLockSweep(ctx context.Context, pool *pgxpool.Pool) GCResult {
 	}
 	defer release()
 
-	tag, err := pool.Exec(ctx, `
-		DELETE FROM resource_locks rl
-		WHERE NOT EXISTS (
-			SELECT 1 FROM run_attempts ra
-			WHERE ra.id = rl.owner_attempt_id AND ra.status = 'running'
-		)`)
+	tag, err := pool.Exec(ctx, orphanLockSweepSQL)
 	if err != nil {
 		result.Error = fmt.Sprintf("orphan lock sweep: %v", err)
 		return result

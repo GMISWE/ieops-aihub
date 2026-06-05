@@ -848,12 +848,17 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	if req.TopK <= 0 {
 		req.TopK = 20
 	}
+	if req.TopK > 200 {
+		req.TopK = 200
+	}
 	if req.MinStrength <= 0 {
 		req.MinStrength = 0.3
 	}
-	if req.RecencyWeight <= 0 {
-		req.RecencyWeight = 0.3
-	}
+	// NOTE: RecencyWeight is currently a reserved-but-unused knob. The text/tag
+	// recall path orders strictly by last_activated_at DESC NULLS LAST, created_at
+	// DESC (see ORDER BY below) and does not blend a recency score. The default is
+	// intentionally not set here so the field stays an explicit no-op rather than a
+	// misleading "applied" value; implementing recency blending is tracked separately.
 
 	args := []any{req.Project}
 	idx := 2

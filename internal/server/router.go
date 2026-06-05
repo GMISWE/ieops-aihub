@@ -795,13 +795,16 @@ func handleCreateAPIKey(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		newKeyJSON := must(marshalJSON(newKey))
 
-		_, err := pool.Exec(ctx, `
+		tag, err := pool.Exec(ctx, `
 			UPDATE users SET api_keys = api_keys || $1::jsonb
 			WHERE id=$2`,
 			"["+string(newKeyJSON)+"]", c.Param("id"),
 		)
 		if err != nil {
 			return internalError(c, "failed to add API key")
+		}
+		if tag.RowsAffected() == 0 {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "user not found"))
 		}
 
 		return c.JSON(http.StatusCreated, map[string]any{

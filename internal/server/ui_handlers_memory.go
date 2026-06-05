@@ -446,6 +446,12 @@ var doResolveCommitFn = func(ctx context.Context, pool *pgxpool.Pool, memID, com
 	return domain.ResolveCommit(ctx, pool, memID, commitID, reply, callerUserID, callerDisplay)
 }
 
+// doActivateFn wraps domain.Activate; swappable in tests so handleActivateMemory's
+// project-access gate can be unit-tested without a DB (aihub#146).
+var doActivateFn = func(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, callerDisplay string) (*domain.ActivateResponse, error) {
+	return domain.Activate(ctx, pool, memID, callerUserID, callerDisplay)
+}
+
 // handleUICommitMemory handles POST /ui/memories/:id/commit.
 //
 // Appends a human annotation to the memory's commits JSONB column.

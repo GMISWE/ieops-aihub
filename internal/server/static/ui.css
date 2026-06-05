@@ -384,12 +384,21 @@ a:hover { text-decoration: underline; }
   border-radius: 4px;
   font-family: var(--pf-mono);
   font-size: 0.9em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .pf-content-md pre code { background: transparent; padding: 0; }
 .pf-content-md table {
   border-collapse: collapse;
   width: 100%;
   margin: 1em 0;
+  /* Wide tables scroll within their own box instead of stretching the page
+     (mirrors .pf-content-raw's wrap intent, prevents horizontal page overflow).
+     display:block makes the <table> its own x-scroll container; narrow tables
+     still fill the container via width:100%. */
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
 }
 .pf-content-md th, .pf-content-md td {
   border: 1px solid var(--pf-border);

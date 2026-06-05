@@ -164,6 +164,20 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			// in the DOM; CSS grid `order` floats it to the top.
 			uiChrome := buildUIChrome(mem.WorkItemID, mem.Type, mem.ID)
 
+			// aihub#154: build the Share control + share.js — /ui path only, and
+			// only for artifacts that actually have stored rendered HTML (i.e.
+			// methodology.spec / plan / review). The handlers behind it 412 when
+			// rendered_html is NULL, so gating the control on the same condition
+			// keeps the UI honest. The fragment (control + script) is injected just
+			// after the first </h1> so it renders directly below the document title;
+			// it never reaches /v1 or /share, preserving their byte-identical output.
+			shareControlHTML := ""
+			if mem.RenderedHTML != nil {
+				shareURL := c.Scheme() + "://" + c.Request().Host + "/share/" + mem.ID
+				shared := mem.Visibility == "public"
+				shareControlHTML = buildShareControlHTML(mem.ID, shareURL, shared, av)
+			}
+
 			// aihub#138: review viewer — methodology.review gets a dedicated layout
 			// instead of the annotation scaffold. /v1 + /share stay plain document.
 			// The structured verdict/findings/checked/outcome chrome is appended to
@@ -173,6 +187,11 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			if mem.Type == "methodology.review" {
 				if chrome := buildReviewHTML(mem); chrome != "" {
 					bodyFragment = bodyFragment + "\n" + chrome
+				}
+				// review has no version-history chain — only the share control is
+				// injected, directly below the title.
+				if shareControlHTML != "" {
+					bodyFragment = insertAfterFirstH1(bodyFragment, shareControlHTML)
 				}
 				annotHTML = uiHead.String() + uiChrome
 			} else {
@@ -185,13 +204,17 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				// made on the version being viewed (cross-version feedback flow is
 				// pf-revise's job, which reads the old head explicitly by id).
 				annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits)
-				// aihub#138 version_history: prepend version history INSIDE the doc card
-				// (bodyFragment) so it appears at the top of #pf-doc-col per the #129 prototype.
-				// aihub#124: was previously prepended to annotHTML (outside the card).
+				// aihub#138 version_history: render version history INSIDE the doc card.
+				// aihub#154: the share control + version history are injected together
+				// just after the first </h1> — share above, version history below — so
+				// the order is title → share → version history → body. Empty pieces
+				// (single-version chain, or NULL rendered_html) collapse out cleanly.
+				vhHTML := ""
 				if versions, verErr := versionChainFn(ctx, pool, mem.ID); verErr == nil {
-					if vhHTML := buildVersionHistoryHTML(ctx, pool, mem.ID, versions); vhHTML != "" {
-						bodyFragment = vhHTML + bodyFragment
-					}
+					vhHTML = buildVersionHistoryHTML(ctx, pool, mem.ID, versions)
+				}
+				if inject := shareControlHTML + vhHTML; inject != "" {
+					bodyFragment = insertAfterFirstH1(bodyFragment, inject)
 				}
 				// aihub#125: inject client-side annotation scripts — /ui path only.
 				// ?v= content hash busts browser caches on deploys (assets are served
@@ -336,6 +359,74 @@ func buildUIChrome(workItemID *string, memType, memID string) string {
 	b.WriteString(html.EscapeString(memID))
 	b.WriteString("</span>")
 	b.WriteString("</nav>\n")
+
+	return b.String()
+}
+
+// insertAfterFirstH1 inserts inject right after the first closing </h1> tag in
+// body. If body has no <h1> (shouldn't happen for spec/plan/review, whose
+// rendered HTML always opens with the title heading), it falls back to
+// prepending so the injected control is never lost.
+func insertAfterFirstH1(body, inject string) string {
+	idx := strings.Index(strings.ToLower(body), "</h1>")
+	if idx < 0 {
+		return inject + body
+	}
+	cut := idx + len("</h1>")
+	return body[:cut] + inject + body[cut:]
+}
+
+// buildShareControlHTML builds the /ui-only Share control fragment for the
+// artifact viewer (aihub#154). It is injected just after the first </h1> so it
+// renders directly below the document title (above the version-history dropdown
+// when present); the share.js <script> is included in the fragment itself (with
+// a ?v= cache-buster) so it loads regardless of whether the annotation HTML is
+// present, without touching DocumentWithMeta.
+//
+// shared toggles the initial button label + whether the read-only link row is
+// shown pre-filled (so a refresh of an already-shared artifact still surfaces
+// the link). shareURL is the canonical /share/<id> link for the current host.
+// This fragment is NEVER emitted on /v1 or /share — only the /ui path calls it.
+func buildShareControlHTML(memID, shareURL string, shared bool, assetVersion string) string {
+	escID := html.EscapeString(memID)
+	var b strings.Builder
+	b.WriteString("<div id=\"pf-share\" data-mem-id=\"")
+	b.WriteString(escID)
+	b.WriteString("\" data-shared=\"")
+	if shared {
+		b.WriteString("true")
+	} else {
+		b.WriteString("false")
+	}
+	b.WriteString("\" class=\"pf-share\">\n")
+
+	b.WriteString("  <button type=\"button\" data-pf-share-btn class=\"pf-share-btn\">")
+	if shared {
+		b.WriteString("Stop sharing")
+	} else {
+		b.WriteString("Share")
+	}
+	b.WriteString("</button>\n")
+
+	b.WriteString("  <span data-pf-share-link class=\"pf-share-link\"")
+	if !shared {
+		b.WriteString(" hidden")
+	}
+	b.WriteString(">\n")
+	b.WriteString("    <input type=\"text\" readonly value=\"")
+	if shared {
+		b.WriteString(html.EscapeString(shareURL))
+	}
+	b.WriteString("\">\n")
+	b.WriteString("    <button type=\"button\" data-pf-share-copy class=\"pf-share-copy\">Copy</button>\n")
+	b.WriteString("  </span>\n")
+
+	b.WriteString("  <span data-pf-share-toast class=\"pf-share-toast\" role=\"status\" aria-live=\"polite\"></span>\n")
+	b.WriteString("</div>\n")
+
+	b.WriteString("<script src=\"/ui/static/share.js?v=")
+	b.WriteString(assetVersion)
+	b.WriteString("\" defer></script>\n")
 
 	return b.String()
 }

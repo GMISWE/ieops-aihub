@@ -441,6 +441,80 @@ mark.pf-annot-highlight.pf-flash {
 }
 .pf-annot-form button[type="submit"]:hover { background: var(--accent-hover); }
 
+/* ── Share control (aihub#154) ─────────────────────────────────────── */
+/* Sits directly below the doc title; visually aligned with the version-history
+   toggle (same height / border / radius / font) so the two controls read as a
+   single toolbar row. Lives inside #pf-doc-col, above .pf-version-history. */
+.pf-share {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  margin: var(--s4) 0;
+}
+.pf-share-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  font-family: var(--sans);
+}
+.pf-share-btn:hover { border-color: var(--border-strong); }
+/* Shared state: solid accent button so "Stop sharing" reads as the active toggle. */
+.pf-share[data-shared="true"] .pf-share-btn {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-color: var(--accent);
+}
+.pf-share[data-shared="true"] .pf-share-btn:hover { background: var(--accent-hover); }
+.pf-share-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.pf-share-link[hidden] { display: none; }
+.pf-share-link input {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+  padding: 0 10px;
+  height: 28px;
+  min-width: 260px;
+  max-width: 380px;
+  font-family: var(--mono, monospace);
+}
+.pf-share-copy {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  font-family: var(--sans);
+}
+.pf-share-copy:hover { border-color: var(--border-strong); }
+.pf-share-toast {
+  font-size: 12px;
+  color: var(--text-muted);
+  visibility: hidden;
+}
+.pf-share-toast.pf-share-toast--show { visibility: visible; }
+
 /* ── Version history (collapsible) ────────────────────────────────── */
 .pf-version-history {
   margin: var(--s5) 0 var(--s4);
@@ -662,5 +736,11 @@ body.pf-review-page #pf-doc-col{margin:0 auto}
 /* Note header: avatar + name + status pushed right (prototype .note .nh) */
 .pf-annot-status{margin-left:auto;font-size:10.5px;font-weight:650;text-transform:uppercase;letter-spacing:.04em}
 .pf-st-open{color:var(--warning)} .pf-st-resolved{color:var(--success)}
-/* version history at top inside card: tighten top margin */
-#pf-doc-col > .pf-version-history:first-child{margin-bottom:var(--s5)}
+/* aihub#154: title → share → version-history stack inside the doc card.
+   The share control follows the <h1> directly; the version-history dropdown
+   (multi-version only) follows the share control. Keep the three vertically
+   even: tighten the share top margin under the title, and drop the version
+   block's own top margin so it tucks just under share. */
+#pf-doc-col > .pf-share { margin-top: var(--s3); }
+#pf-doc-col > .pf-share + .pf-version-history { margin-top: 0; }
+#pf-doc-col > .pf-version-history { margin-bottom: var(--s5); }

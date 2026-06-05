@@ -89,6 +89,11 @@ func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	// the same way BearerAuth does.
 	uiGroup.GET("/artifacts/:id/html", handleArtifactHTML(pool))
 
+	// aihub#154: /ui mirror of /v1 share/unshare so the viewer Share button works
+	// under cookie auth. Reuses the auth-agnostic handlers (GetUser + checkProjectAccess).
+	uiGroup.POST("/artifacts/:id/share", handleShareArtifact(pool))
+	uiGroup.DELETE("/artifacts/:id/share", handleUnshareArtifact(pool))
+
 	// aihub#124: section-level annotation commit — /ui only (no /v1 mirror).
 	RegisterUIArtifactCommitRoute(uiGroup, pool)
 	// aihub#125: artifact-scoped reply + resolve — /ui only.
@@ -105,6 +110,8 @@ func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	}{
 		{"/static/annotator.js", render.AnnotatorJS(), "text/javascript; charset=utf-8"},
 		{"/static/annot.js", render.AnnotJS(), "text/javascript; charset=utf-8"},
+		// aihub#154: /ui-only artifact share-toggle glue.
+		{"/static/share.js", render.ShareJS(), "text/javascript; charset=utf-8"},
 		// aihub#138: /ui-only design-system override for the artifact viewer.
 		// Served separately from the embedded static/ FS so the render package
 		// owns both the embed and the exported bytes.

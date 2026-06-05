@@ -258,6 +258,27 @@
     wireLinking(anchored, bubbleMap, anchorMap);
   }
 
+  // ─── Avatar helpers ──────────────────────────────────────────────────────────
+
+  var _avPalette = ['#3a7ca5','#b5683a','#6a7f3a','#8a5cf0','#6b6b73','#3a8a6b'];
+
+  function initials(name) {
+    if (!name) return '?';
+    var words = name.trim().split(/\s+/);
+    var out = '';
+    for (var i = 0; i < Math.min(2, words.length); i++) {
+      if (words[i].length > 0) out += words[i][0].toUpperCase();
+    }
+    return out || '?';
+  }
+
+  function avatarColor(name) {
+    if (!name) return _avPalette[0];
+    var sum = 0;
+    for (var i = 0; i < name.length; i++) sum += name.charCodeAt(i);
+    return _avPalette[sum % _avPalette.length];
+  }
+
   // ─── Bubble DOM construction ─────────────────────────────────────────────────
 
   function buildBubble(commit, memID) {
@@ -268,18 +289,24 @@
       'data-status':     commit.status || 'open'
     });
 
-    // Header: author + time + optional resolved badge.
+    // Header: avatar + author + time + status (always shown).
     var header = el('div', { 'class': 'pf-margin-bubble-header' });
+    var authorName = commit.author_display || '';
+    var av = el('span', {
+      'class': 'pf-av',
+      'style': 'background:' + avatarColor(authorName)
+    });
+    av.appendChild(document.createTextNode(initials(authorName)));
+    header.appendChild(av);
     var authorStrong = el('strong');
-    authorStrong.appendChild(document.createTextNode(commit.author_display || ''));
+    authorStrong.appendChild(document.createTextNode(authorName));
     header.appendChild(authorStrong);
     header.appendChild(document.createTextNode(' · ' + relTime(commit.created_at)));
-    if (isResolved) {
-      var badge = el('span', { 'class': 'pf-annot-status' });
-      badge.appendChild(document.createTextNode('resolved'));
-      header.appendChild(document.createTextNode(' '));
-      header.appendChild(badge);
-    }
+    var statusClass = isResolved ? 'pf-annot-status pf-st-resolved' : 'pf-annot-status pf-st-open';
+    var statusLabel = isResolved ? 'resolved' : 'open';
+    var badge = el('span', { 'class': statusClass });
+    badge.appendChild(document.createTextNode(statusLabel));
+    header.appendChild(badge);
     bubble.appendChild(header);
 
     // Quote excerpt.

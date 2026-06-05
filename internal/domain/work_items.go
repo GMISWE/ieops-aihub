@@ -591,6 +591,10 @@ func buildListWorkItemsWhere(project string, f ListWorkItemsFilter) (joinClause,
 		args = append(args, *f.Cursor)
 		argIdx++
 	}
+	// Every clause above bumps argIdx uniformly so they can be reordered or
+	// extended without re-introducing a placeholder-numbering bug (cf. aihub#147).
+	// The final bump is otherwise unread; sink it so ineffassign stays happy.
+	_ = argIdx
 
 	where = ""
 	if len(conds) > 0 {

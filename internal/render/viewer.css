@@ -27,19 +27,48 @@ body {
 }
 .pf-doc-nav a:hover { color: var(--text); text-decoration: underline; }
 
-/* Two-column grid: doc card + rail */
-#pf-doc-col {
+/* Two-column layout: doc card (col 1) + annotation rail (col 2).
+   style.css already sets `body.pf-annot-active { display:grid }`; viewer.css
+   only tunes the track sizes + centering and pins each body child to a column.
+   The document body is emitted as raw blocks inside #pf-doc-col (it is NOT a
+   single nested grid cell), so #pf-doc-col must NOT itself be a grid — otherwise
+   the blocks auto-place across both columns and the headings scatter right. */
+body.pf-annot-active {
   display: grid;
-  grid-template-columns: minmax(0, 720px) 1fr;
-  gap: var(--s6);
+  grid-template-columns: minmax(0, 720px) 300px;
   justify-content: center;
-  max-width: 1120px;
-  margin: 0 auto;
   align-items: start;
+  gap: var(--s8);
+  padding: 74px var(--s6) var(--s8);
 }
+/* Pin every direct body child to col 1 (stacked); the rail alone is col 2. */
+body.pf-annot-active > * { grid-column: 1; }
+body.pf-annot-active > #pf-margin-rail { grid-column: 2; grid-row: 1; }
+/* The document is the centered card. */
+#pf-doc-col {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--s8);
+  box-shadow: var(--shadow);
+  min-width: 0;
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+/* Hide the legacy no-JS flat annotation list + its native-select add form when
+   the JS rail is active (the rail is the primary surface, per the #129 design).
+   Below the rail breakpoint the rail is hidden and the flat list returns. */
+body.pf-annot-active .pf-annotations { display: none; }
 @media (max-width: 1040px) {
-  #pf-doc-col { grid-template-columns: 1fr; }
-  #pf-margin-rail { display: none !important; }
+  body.pf-annot-active { grid-template-columns: 1fr; }
+  body.pf-annot-active > #pf-margin-rail { display: none; }
+  body.pf-annot-active .pf-annotations { display: block; }
+}
+/* Review viewer (and any non-annotated /ui artifact): single centered column.
+   No rail, so the card is just centered rather than placed in the grid. */
+body:not(.pf-annot-active) #pf-doc-col {
+  max-width: 760px;
+  margin: var(--s8) auto;
 }
 
 /* Metadata header strip */
@@ -51,11 +80,9 @@ body {
 .pf-doc-meta a { color: var(--text-muted); text-decoration: underline; }
 
 /* ── Doc card ──────────────────────────────────────────────────────── */
-/* Use class .doc if present (review viewer sets it); otherwise target
-   the <article> / the grid first column directly via #pf-doc-col > *:first-child */
-.doc,
-#pf-doc-col > article:first-child,
-#pf-doc-col > div.pf-doc-body:first-child {
+/* The annotated spec/plan viewer styles #pf-doc-col as the card (above).
+   The review viewer wraps its content in .doc. */
+.doc {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
@@ -105,25 +132,29 @@ mark.pf-annot-highlight.pf-flash {
 }
 
 /* ── Selection pill ("+Annotate" button) ───────────────────────────── */
+/* annot.js positions this with position:fixed viewport coords (left/top set
+   inline at the end of the text selection) and toggles it via inline
+   display:block / display:none. It MUST default to display:none here, or it
+   shows mis-placed before any selection. */
 .pf-selbtn {
-  position: absolute;
-  top: -36px;
-  right: 0;
-  height: 27px;
+  position: fixed;
+  display: none;
+  height: 28px;
+  line-height: 26px;
   padding: 0 12px;
+  border: none;
   border-radius: var(--pill);
   background: var(--accent);
   color: var(--accent-contrast);
+  font-family: var(--sans);
   font-size: 12px;
   font-weight: 600;
-  display: inline-flex;
-  align-items: center;
   box-shadow: var(--shadow-pop);
   cursor: pointer;
   white-space: nowrap;
-  z-index: 6;
-  border: none;
+  z-index: 900;
 }
+.pf-selbtn:hover { background: var(--accent-hover); }
 
 /* ── Selection form (annotate-on-selection popup) ──────────────────── */
 #pf-selform {
@@ -158,14 +189,15 @@ mark.pf-annot-highlight.pf-flash {
 }
 
 /* ── Margin rail ───────────────────────────────────────────────────── */
+/* The bubbles are position:absolute (style.css) with their `top` set by annot.js
+   to align with each highlight. The rail is only their positioning context, so
+   it must be position:relative with NO overflow/max-height — an overflow clip
+   collapses the rail (its children are out of flow, so it has ~0 height) and
+   hides the bubbles, leaving only a thin sliver. The grid already places the
+   rail in column 2 starting at the document top, so absolute offsets align. */
 #pf-margin-rail {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s3);
-  position: sticky;
-  top: var(--s6);
-  max-height: calc(100vh - var(--s10));
-  overflow-y: auto;
+  position: relative;
+  min-width: 0;
 }
 
 /* Margin bubble note cards */
@@ -178,28 +210,19 @@ mark.pf-annot-highlight.pf-flash {
   font-size: 12.5px;
   cursor: pointer;
 }
-.pf-margin-bubble.pf-annot-open {
-  border-left: 3px solid var(--warning);
+/* Open accent / resolved dim, via data-status (prototype .note.open/.resolved) */
+.pf-margin-bubble[data-status="open"]{border-left:3px solid var(--warning)}
+.pf-margin-bubble[data-status="resolved"]{opacity:.78}
+/* Inner elements — class names must match annot.js buildBubble output
+   (.pf-margin-bubble-header / .pf-annot-quote / .pf-annot-body /
+   .pf-annot-inline-forms); the active modifier is .pf-margin-bubble--active. */
+.pf-margin-bubble--active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
-.pf-margin-bubble.pf-annot-resolved {
-  opacity: .7;
-}
-.pf-margin-bubble .pf-bubble-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-.pf-margin-bubble .pf-bubble-status {
-  margin-left: auto;
-  font-size: 10.5px;
-  font-weight: 650;
-  text-transform: uppercase;
-  letter-spacing: .04em;
-}
-.pf-margin-bubble .pf-annot-open .pf-bubble-status { color: var(--warning); }
-.pf-margin-bubble .pf-annot-resolved .pf-bubble-status { color: var(--success); }
-.pf-margin-bubble .pf-bubble-quote {
+.pf-margin-bubble-header{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;color:var(--text-muted)}
+.pf-margin-bubble-header strong{color:var(--text);font-weight:600}
+.pf-margin-bubble .pf-annot-quote {
   font-size: 12px;
   color: var(--text-subtle);
   border-left: 2px solid var(--border-strong);
@@ -207,11 +230,48 @@ mark.pf-annot-highlight.pf-flash {
   margin-bottom: 7px;
   font-style: italic;
 }
-.pf-margin-bubble .pf-bubble-body {
+.pf-margin-bubble .pf-annot-body {
   font-size: 13px;
   color: var(--text);
   line-height: 1.5;
 }
+.pf-margin-bubble .pf-annot-body + .pf-annot-body {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+/* Reply + resolve input forms stay collapsed until the bubble is clicked
+   (annot.js toggles .pf-margin-bubble--active), keeping the rail compact like
+   the #129 prototype — otherwise every note shows two always-open textareas. */
+/* Scoped to .pf-margin-bubble so it beats the bare `.pf-annot-inline-forms`
+   rule in the flat-list section below (same class, shared by both surfaces). */
+.pf-margin-bubble .pf-annot-inline-forms { display: none; margin-top: 8px; }
+.pf-margin-bubble--active .pf-annot-inline-forms { display: block; }
+.pf-annot-inline-form { display: flex; gap: 6px; margin-top: 6px; }
+.pf-annot-inline-form textarea {
+  flex: 1;
+  min-height: 30px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 5px 7px;
+  box-sizing: border-box;
+}
+.pf-annot-inline-form button {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pf-annot-inline-form button:hover { border-color: var(--border-strong); }
 
 /* ── Annotation flat list / threads ────────────────────────────────── */
 .pf-annotations {
@@ -568,3 +628,39 @@ mark.pf-annot-highlight.pf-flash {
 .pf-review-outcome { color: var(--text-muted); font-size: 13px; line-height: 1.6; }
 .pf-review-meta { color: var(--text-subtle); font-size: 12px; margin-bottom: var(--s4); }
 .pf-review-meta a { color: var(--text-muted); }
+
+/* ── App-shell nav (prototype .nav) ───────────────────────────────── */
+/* Fixed full-viewport-width top bar (the centered body grid can't span the
+   whole viewport, so the nav is taken out of flow; body gets top padding to
+   clear it). */
+.pf-appnav{position:fixed;top:0;left:0;right:0;width:100%;box-sizing:border-box;z-index:50;height:54px;display:flex;align-items:center;gap:var(--s5);padding:0 var(--s6);background:var(--surface);border-bottom:1px solid var(--border)}
+.pf-appnav-brand{display:flex;align-items:center;gap:var(--s2);font-weight:650;letter-spacing:-.01em;color:var(--text)}
+.pf-appnav-mark{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--accent),var(--accent-hover));display:grid;place-items:center;color:var(--accent-contrast);font-size:13px;font-weight:700}
+.pf-appnav-links{display:flex;gap:2px;margin-left:var(--s3)}
+.pf-appnav-links a{padding:6px 10px;border-radius:var(--r-sm);color:var(--text-muted);font-weight:500;text-decoration:none}
+.pf-appnav-links a:hover{background:var(--surface-2);color:var(--text)}
+.pf-appnav-spacer{flex:1}
+.pf-appnav-themebtn{height:32px;padding:0 10px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--surface);color:var(--text-muted);cursor:pointer;font-size:13px;font-family:var(--sans)}
+.pf-appnav-themebtn:hover{color:var(--text);border-color:var(--border-strong)}
+/* Breadcrumb (prototype .crumb) */
+.pf-crumb{display:flex;align-items:center;gap:8px;color:var(--text-subtle);font-size:12.5px;padding:var(--s5) var(--s6) 0}
+.pf-crumb a{color:var(--text-subtle);text-decoration:none}
+.pf-crumb a:hover{color:var(--text-muted)}
+.pf-crumb-mono{font-family:var(--mono)}
+/* Float nav+crumb to the top, full width, in the doc grid */
+body.pf-annot-active > .pf-appnav, body.pf-review-page > .pf-appnav{order:-2;grid-column:1/-1}
+body.pf-annot-active > .pf-crumb, body.pf-review-page > .pf-crumb{order:-1;grid-column:1/-1}
+body.pf-annot-active > #pf-doc-col, body.pf-annot-active > #pf-margin-rail{order:0}
+/* Review page = centered single-column grid so order works */
+body.pf-review-page{display:grid;grid-template-columns:minmax(0,760px);justify-content:center;align-items:start;gap:var(--s4);padding:74px var(--s6) var(--s8)}
+body.pf-review-page > *{grid-column:1}
+body.pf-review-page #pf-doc-col{margin:0 auto}
+/* hide the old "Back to work item" nav (breadcrumb replaces it) */
+.pf-doc-nav{display:none}
+/* Avatar (prototype .av / .av.sm) */
+.pf-av{width:20px;height:20px;border-radius:var(--pill);display:grid;place-items:center;font-size:9.5px;font-weight:650;color:#fff;flex:none}
+/* Note header: avatar + name + status pushed right (prototype .note .nh) */
+.pf-annot-status{margin-left:auto;font-size:10.5px;font-weight:650;text-transform:uppercase;letter-spacing:.04em}
+.pf-st-open{color:var(--warning)} .pf-st-resolved{color:var(--success)}
+/* version history at top inside card: tighten top margin */
+#pf-doc-col > .pf-version-history:first-child{margin-bottom:var(--s5)}

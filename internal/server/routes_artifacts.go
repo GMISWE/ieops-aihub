@@ -130,10 +130,28 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			theme := themeFromCookie(c)
 			var uiHead strings.Builder
 			// Set data-theme on <html> immediately (inline script runs synchronously).
-			uiHead.WriteString("<script>(function(){document.documentElement.setAttribute('data-theme',")
-			uiHead.WriteString("'")
-			uiHead.WriteString(theme) // "auto", "light", or "dark" — server-validated
-			uiHead.WriteString("')})();</script>\n")
+			// For review pages, also add pf-review-page class so CSS grid + order work.
+			if mem.Type == "methodology.review" {
+				uiHead.WriteString("<script>(function(){document.documentElement.setAttribute('data-theme','")
+				uiHead.WriteString(theme)
+				uiHead.WriteString("');document.addEventListener('DOMContentLoaded',function(){document.body.classList.add('pf-review-page');});")
+				uiHead.WriteString("document.addEventListener('click',function(e){ if(e.target && e.target.id==='pf-theme-toggle'){ var r=document.documentElement; var cur=r.getAttribute('data-theme')==='dark'?'light':'dark'; r.setAttribute('data-theme',cur); document.cookie='theme='+cur+';path=/;max-age=31536000'; }});")
+				uiHead.WriteString("})();</script>\n")
+			} else {
+				uiHead.WriteString("<script>(function(){document.documentElement.setAttribute('data-theme','")
+				uiHead.WriteString(theme)
+				uiHead.WriteString("');")
+				// aihub#138: stabilise the /ui layout for spec/plan regardless of
+				// annotation count. annot.js only adds pf-annot-active when it anchors
+				// commits (and never for a zero-annotation or old version), which left
+				// such pages without the grid/card layout, with the legacy flat list +
+				// native select showing and the breadcrumb misplaced. Set it server-side
+				// so every spec/plan version renders in the new UI; annot.js's later add
+				// is then a no-op (the class is a pure CSS hook it never reads).
+				uiHead.WriteString("if(document.body){document.body.classList.add('pf-annot-active');}")
+				uiHead.WriteString("document.addEventListener('click',function(e){ if(e.target && e.target.id==='pf-theme-toggle'){ var r=document.documentElement; var cur=r.getAttribute('data-theme')==='dark'?'light':'dark'; r.setAttribute('data-theme',cur); document.cookie='theme='+cur+';path=/;max-age=31536000'; }});")
+				uiHead.WriteString("})();</script>\n")
+			}
 			uiHead.WriteString("<link rel=\"stylesheet\" href=\"/ui/static/ui.css?v=")
 			uiHead.WriteString(av)
 			uiHead.WriteString("\">\n")
@@ -141,10 +159,22 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			uiHead.WriteString(av)
 			uiHead.WriteString("\">\n")
 
+			// aihub#138: build the app-shell nav + breadcrumb for /ui pages.
+			// The chrome is prepended to annotHTML so it is emitted after #pf-doc-col
+			// in the DOM; CSS grid `order` floats it to the top.
+			uiChrome := buildUIChrome(mem.WorkItemID, mem.Type, mem.ID)
+
 			// aihub#138: review viewer — methodology.review gets a dedicated layout
 			// instead of the annotation scaffold. /v1 + /share stay plain document.
+			// The structured verdict/findings/checked/outcome chrome is appended to
+			// the body fragment so it renders INSIDE the single doc card (one
+			// centered column, matching the #129 prototype); uiHead (theme +
+			// stylesheet links) stays in annotHTML.
 			if mem.Type == "methodology.review" {
-				annotHTML = uiHead.String() + buildReviewHTML(mem)
+				if chrome := buildReviewHTML(mem); chrome != "" {
+					bodyFragment = bodyFragment + "\n" + chrome
+				}
+				annotHTML = uiHead.String() + uiChrome
 			} else {
 				// aihub#124: build annotation UI (section threads + add-comment form).
 				// Only for /ui — /v1 and /share must stay byte-for-byte pure.
@@ -155,20 +185,20 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				// made on the version being viewed (cross-version feedback flow is
 				// pf-revise's job, which reads the old head explicitly by id).
 				annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits)
-				// aihub#124 version_history: fetch supersede chain and build version-history block.
-				// Best-effort: an error is silently swallowed (non-fatal like other /ui enrichments).
+				// aihub#138 version_history: prepend version history INSIDE the doc card
+				// (bodyFragment) so it appears at the top of #pf-doc-col per the #129 prototype.
+				// aihub#124: was previously prepended to annotHTML (outside the card).
 				if versions, verErr := versionChainFn(ctx, pool, mem.ID); verErr == nil {
 					if vhHTML := buildVersionHistoryHTML(ctx, pool, mem.ID, versions); vhHTML != "" {
-						// Prepend version history before the annotation section.
-						annotHTML = vhHTML + annotHTML
+						bodyFragment = vhHTML + bodyFragment
 					}
 				}
 				// aihub#125: inject client-side annotation scripts — /ui path only.
 				// ?v= content hash busts browser caches on deploys (assets are served
 				// with Cache-Control max-age).
 				annotHTML += "\n<script src=\"/ui/static/annotator.js?v=" + av + "\" defer></script>\n<script src=\"/ui/static/annot.js?v=" + av + "\" defer></script>\n"
-				// Prepend ui.css + viewer.css links + theme setter.
-				annotHTML = uiHead.String() + annotHTML
+				// Prepend ui.css + viewer.css links + theme setter + chrome.
+				annotHTML = uiHead.String() + uiChrome + annotHTML
 			}
 		}
 		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBodyWithMeta(bodyFragment, title, backHref, ownerHref, ownerLabel, related, annotHTML)))
@@ -252,6 +282,62 @@ func artifactBackHref(routePath string, workItemID *string) string {
 		return "/ui/wi/" + url.PathEscape(*workItemID)
 	}
 	return ""
+}
+
+// buildUIChrome constructs the app-shell nav + breadcrumb HTML fragment for /ui
+// artifact pages (aihub#138). The fragment is emitted into annotHTML so it
+// lands AFTER #pf-doc-col in the DOM; CSS grid `order` rules float it to the
+// visual top without restructuring DocumentWithMeta's wrapper.
+//
+// The breadcrumb format varies by type:
+//   - methodology.spec → "<wi> / Spec <memID>"
+//   - methodology.plan → "<wi> / Plan <memID>"
+//   - methodology.review → "<wi> / Review <memID>"
+//   - other → "<wi> / <type> <memID>"
+//
+// When workItemID is nil the wi segment is rendered as plain text "artifact".
+// All interpolated values are HTML-escaped.
+func buildUIChrome(workItemID *string, memType, memID string) string {
+	var b strings.Builder
+	b.WriteString("<header class=\"pf-appnav\">\n")
+	b.WriteString("  <div class=\"pf-appnav-brand\"><span class=\"pf-appnav-mark\">p</span> polyforge</div>\n")
+	b.WriteString("  <nav class=\"pf-appnav-links\"><a href=\"/ui/wi\">Work Items</a><a href=\"/ui/memories\">Memories</a></nav>\n")
+	b.WriteString("  <span class=\"pf-appnav-spacer\"></span>\n")
+	b.WriteString("  <button type=\"button\" class=\"pf-appnav-themebtn\" id=\"pf-theme-toggle\" title=\"toggle light / dark\">light / dark</button>\n")
+	b.WriteString("</header>\n")
+
+	// Breadcrumb.
+	b.WriteString("<nav class=\"pf-crumb\">")
+	if workItemID != nil && *workItemID != "" {
+		b.WriteString("<a href=\"")
+		b.WriteString(html.EscapeString(wiHref(*workItemID)))
+		b.WriteString("\">")
+		b.WriteString(html.EscapeString(*workItemID))
+		b.WriteString("</a>")
+	} else {
+		b.WriteString("<span>artifact</span>")
+	}
+	b.WriteString(" <span>/</span> ")
+
+	var typeLabel string
+	switch memType {
+	case "methodology.spec":
+		typeLabel = "Spec"
+	case "methodology.plan":
+		typeLabel = "Plan"
+	case "methodology.review":
+		typeLabel = "Review"
+	default:
+		typeLabel = memType
+	}
+	b.WriteString("<span>")
+	b.WriteString(html.EscapeString(typeLabel))
+	b.WriteString("</span> <span class=\"pf-crumb-mono\">")
+	b.WriteString(html.EscapeString(memID))
+	b.WriteString("</span>")
+	b.WriteString("</nav>\n")
+
+	return b.String()
 }
 
 // handleSharedArtifact serves a publicly-shared artifact's rendered HTML with NO auth.

@@ -231,7 +231,7 @@ func (s *Server) registerCodingTools() {
 			return errResult(fmt.Errorf("repo is required"))
 		}
 
-		sf, err := config.ReadStateFile(wiID)
+		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
@@ -257,8 +257,14 @@ func (s *Server) registerCodingTools() {
 			return errResult(fmt.Errorf("complete_attempt: %w", err))
 		}
 
-		// Delete state file (terminal status)
-		_ = config.DeleteStateFile(wiID)
+		// Delete state file (terminal status). Delete by the resolved canonical key
+		// (sf.WIID), and best-effort the passed key too, so a slug-addressed wrap
+		// cleans any stale slug-keyed stub instead of orphaning the canonical file.
+		// Mirrors pf_complete_attempt's cleanup. (aihub#141 / #149)
+		_ = config.DeleteStateFile(sf.WIID)
+		if wiID != sf.WIID {
+			_ = config.DeleteStateFile(wiID)
+		}
 
 		return jsonResult(map[string]any{
 			"ok":             true,

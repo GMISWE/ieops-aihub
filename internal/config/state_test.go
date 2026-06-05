@@ -304,6 +304,45 @@ func TestResolveStateFile_BySlug_ShadowedByStub(t *testing.T) {
 	}
 }
 
+// TestForceTakeover_BySlug_WritesSlugResolvableState is the aihub#149 regression
+// at the state-file layer: it drives the exact write sequence the pf_force_takeover
+// handler now uses when a work item is force-taken BY SLUG. The pre-fix handler
+// wrote {WIID: slug} with an empty Slug, which ResolveStateFile's slug-scan could
+// never match. The fixed handler keys by the canonical id (from the takeover
+// result's `id`) and populates Slug/Project via WriteClaimState — so a later
+// by-slug credential op resolves to the canonical, non-empty-attempt state.
+func TestForceTakeover_BySlug_WritesSlugResolvableState(t *testing.T) {
+	withTempHome(t)
+	slug := "aihub#149"
+	canonical := "wi_take0149"
+
+	// pf_force_takeover, addressed by slug, with the server echoing the canonical
+	// id + slug + project. Mirrors the MCP handler's post-fix state-file write.
+	sf := &StateFile{
+		WIID: canonical, Slug: slug, Project: "aihub",
+		AttemptID: "ra_take149", ClaimEpoch: 5, SessionSecret: "s", Claimed: true,
+	}
+	if err := WriteClaimState(slug, canonical, sf); err != nil {
+		t.Fatalf("WriteClaimState: %v", err)
+	}
+
+	// The state file must NOT be keyed by the slug (no orphan slug-keyed file).
+	if _, err := ReadStateFile(slug); err == nil {
+		t.Error("force_takeover wrote a slug-keyed file; want canonical-keyed only")
+	}
+	// A later by-slug credential op must resolve to the canonical takeover state.
+	got, err := ResolveStateFile(slug)
+	if err != nil {
+		t.Fatalf("ResolveStateFile(slug) after force_takeover: %v", err)
+	}
+	if got.WIID != canonical || got.AttemptID != "ra_take149" {
+		t.Errorf("by-slug resolve = {WIID:%q AttemptID:%q}, want {%q ra_take149}", got.WIID, got.AttemptID, canonical)
+	}
+	if got.Slug != slug || got.Project != "aihub" {
+		t.Errorf("resolved Slug/Project = {%q %q}, want {%q aihub} (empty Slug breaks slug-scan)", got.Slug, got.Project, slug)
+	}
+}
+
 // TestResolveStateFile_Missing: unknown id/slug surfaces an error.
 func TestResolveStateFile_Missing(t *testing.T) {
 	withTempHome(t)

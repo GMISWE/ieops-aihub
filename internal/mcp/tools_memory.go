@@ -156,7 +156,7 @@ func (s *Server) registerMemoryTools() {
 		if wiID == "" {
 			return errResult(fmt.Errorf("work_item_id is required for credential injection"))
 		}
-		sf, err := config.ReadStateFile(wiID)
+		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
@@ -231,7 +231,7 @@ func (s *Server) registerMemoryTools() {
 			return errResult(fmt.Errorf("content is required"))
 		}
 
-		sf, err := config.ReadStateFile(wiID)
+		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
@@ -354,7 +354,7 @@ func (s *Server) emitArtifactAction(ctx context.Context, req *sdkmcp.CallToolReq
 		return errResult(fmt.Errorf("memory_id is required"))
 	}
 
-	sf, err := config.ReadStateFile(wiID)
+	sf, err := config.ResolveStateFile(wiID)
 	if err != nil {
 		return errResult(fmt.Errorf("read state file: %w", err))
 	}

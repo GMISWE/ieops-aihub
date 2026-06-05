@@ -834,6 +834,15 @@ type ForceTakeoverRequest struct {
 
 // ForceTakeoverResponse is returned by POST /v1/work_items/:id/force_takeover.
 type ForceTakeoverResponse struct {
+	// Canonical work item identity, echoed so the MCP layer can key the state file
+	// by the canonical id (the caller may have addressed the wi by slug) and
+	// populate Slug/Project — mirroring claim_work_item. Without these, a
+	// slug-addressed force_takeover writes a slug-keyed state file with an empty
+	// Slug that ResolveStateFile's slug-scan can never match. (aihub#149)
+	ID      string `json:"id"`
+	Slug    string `json:"slug"`
+	Project string `json:"project"`
+
 	PriorAttemptID    string `json:"prior_attempt_id"`
 	PriorActorDisplay string `json:"prior_actor_display"`
 	// H3: new attempt credentials — written to state file by MCP layer (never returned to LLM)
@@ -1002,6 +1011,9 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	}
 
 	return &ForceTakeoverResponse{
+		ID:                wi.ID,
+		Slug:              wi.Slug,
+		Project:           wi.Project,
 		PriorAttemptID:    priorID,
 		PriorActorDisplay: currentActorDisplay,
 		NewAttemptID:      newAttemptID,

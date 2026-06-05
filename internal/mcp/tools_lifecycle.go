@@ -994,9 +994,18 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(err)
 		}
 
-		// Write state file with new credentials
+		// Write state file with new credentials. Key by the canonical work_items.id
+		// the server returns (the input id may be a slug like "aihub#1"); persisting
+		// the slug would write a state file with an empty Slug that
+		// ResolveStateFile's slug-scan can never match, so a later canonical-id
+		// update would miss it. Populate Slug/Project too — mirror
+		// pf_claim_work_item. (aihub#149)
+		canonicalWIID := id
+		if v, ok := result["id"].(string); ok && v != "" {
+			canonicalWIID = v
+		}
 		sf := &config.StateFile{
-			WIID:          id,
+			WIID:          canonicalWIID,
 			SessionSecret: sessionSecret,
 			Claimed:       true,
 			ClaimedAt:     time.Now().UTC().Format(time.RFC3339),
@@ -1012,7 +1021,17 @@ func (s *Server) registerLifecycleTools() {
 				sf.ClaimEpoch = ce
 			}
 		}
-		_ = config.WriteStateFile(sf)
+		if v, ok := result["slug"].(string); ok {
+			sf.Slug = v
+		}
+		if v, ok := result["project"].(string); ok {
+			sf.Project = v
+		}
+		// Persist the canonical-keyed state file and remove any orphan slug stub a
+		// prior slug-keyed write left behind, mirroring claim's WriteClaimState.
+		if err := config.WriteClaimState(id, canonicalWIID, sf); err != nil {
+			return errResult(fmt.Errorf("write state file: %w", err))
+		}
 
 		// Return result without session_secret.
 		// v1.21 ownership-only: no expires_at; do not surface that field.

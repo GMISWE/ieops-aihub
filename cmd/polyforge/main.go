@@ -47,7 +47,7 @@ func main() {
 	}
 	cfg, _ := config.Load(wsRoot) // non-fatal: config.toml takes priority
 
-	// Resolve API key: config.toml [auth] > .polyforge.yaml api_key_env > POLYFORGE_API_KEY.
+	// Resolve API key: POLYFORGE_API_KEY > config.toml [auth] > .polyforge.yaml api_key_env.
 	apiKey := mc.ResolveAPIKey()
 	if apiKey == "" && cfg != nil {
 		apiKey = os.Getenv(cfg.AIHub.APIKeyEnv)
@@ -57,7 +57,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Resolve aihub URL: config.toml [server] > .polyforge.yaml > POLYFORGE_AIHUB_URL.
+	// Resolve aihub URL: POLYFORGE_AIHUB_URL > config.toml [server] > .polyforge.yaml.
 	aihubURL := mc.ResolveAihubURL()
 	if aihubURL == "" && cfg != nil {
 		aihubURL = cfg.AIHub.URL
@@ -89,7 +89,8 @@ func runCLI(ctx context.Context, args []string) {
 	mc, _ := config.EnsureMachineConfig()
 	cfg, cfgErr := config.Load(wsRoot)
 
-	// Build aihub client with config.toml priority chain (§9.5.3).
+	// Build aihub client; credential precedence resolved by ResolveAPIKey /
+	// ResolveAihubURL (env override > config.toml > .polyforge.yaml, §9.5.3).
 	var aihubClient *client.Client
 	apiKey := mc.ResolveAPIKey()
 	if apiKey == "" && cfg != nil {

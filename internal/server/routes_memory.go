@@ -180,7 +180,20 @@ func handleActivateMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "memory id is required"))
 		}
 
-		resp, aihubErr := domain.Activate(ctx, pool, memID, u.UserID, u.DisplayName)
+		// Enforce project-writer access before reinforcing — activate is a mutating
+		// reinforcement (bumps activation_count/stability and revives archived rows),
+		// so it requires the same writer gate as handleResolveCommit/handleV1ReplyCommit.
+		// Without this any authed user could strengthen/revive any memory (IDOR, aihub#146).
+		// A memory's project is immutable, so a pre-check has no TOCTOU concern.
+		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
+		if loadErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+		}
+		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+			return err
+		}
+
+		resp, aihubErr := doActivateFn(ctx, pool, memID, u.UserID, u.DisplayName)
 		if aihubErr != nil {
 			return domainErr(c, aihubErr)
 		}

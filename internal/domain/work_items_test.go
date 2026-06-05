@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -256,5 +257,79 @@ func TestCreateWorkItemRequest_JSONRoundtrip(t *testing.T) {
 	}
 	if got.Project != src.Project || got.Goal != src.Goal {
 		t.Errorf("roundtrip mismatch: %+v vs %+v", got, src)
+	}
+}
+
+// ─── ListWorkItems cursor pagination (aihub#147) ─────────────────────────────
+//
+// The domain test suite is pure-unit (no live DB / testcontainers wired into
+// the worktree), so ListWorkItems cannot be exercised against a real pool here.
+// Instead we assert on the WHERE clause + bound args that buildListWorkItemsWhere
+// produces (cf. aihub#145's gc_test, which pins the sweep SQL). The contract is
+// that when a cursor is supplied, the query gains a `wi.created_at < $n` predicate
+// (matching ORDER BY wi.created_at DESC) bound to the cursor value — so passing
+// back next_cursor advances to the NEXT page instead of re-returning page 1.
+
+func ptrStr(s string) *string { return &s }
+
+// Page 1: no cursor → the query MUST NOT contain a created_at upper-bound
+// predicate, so the first page starts at the newest rows.
+func TestBuildListWorkItemsWhere_NoCursor(t *testing.T) {
+	_, where, args := buildListWorkItemsWhere("proj", ListWorkItemsFilter{})
+	if strings.Contains(where, "wi.created_at <") {
+		t.Errorf("page 1 (no cursor) must not add a created_at upper bound; got WHERE: %q", where)
+	}
+	// project=proj is the only bound arg.
+	if len(args) != 1 || args[0] != "proj" {
+		t.Errorf("expected exactly [proj] bound args, got %#v", args)
+	}
+}
+
+// Page 2: cursor supplied → the query MUST add `wi.created_at < $N::timestamptz`
+// bound to the cursor value, so the next page is the rows strictly older than the
+// last item of page 1 (not page 1 again). This is the core regression guard.
+func TestBuildListWorkItemsWhere_CursorAppliesPredicate(t *testing.T) {
+	cursor := time.Date(2026, 6, 5, 8, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	_, where, args := buildListWorkItemsWhere("proj", ListWorkItemsFilter{Cursor: ptrStr(cursor)})
+
+	// project is $1, cursor predicate must use $2 (correct placeholder numbering).
+	want := "wi.created_at < $2::timestamptz"
+	if !strings.Contains(where, want) {
+		t.Errorf("cursor must add %q to WHERE; got: %q", want, where)
+	}
+	// Strict `<` (DESC order), not `<=` or `>`, and no secondary tie-breaker —
+	// matches ListEvents in memory.go.
+	if strings.Contains(where, "wi.created_at <=") || strings.Contains(where, "wi.created_at >") {
+		t.Errorf("cursor predicate must be a strict `<` on created_at; got: %q", where)
+	}
+	// Cursor value must be bound as arg $2 (index 1), unchanged.
+	if len(args) != 2 || args[1] != cursor {
+		t.Errorf("expected cursor %q bound as 2nd arg; got args %#v", cursor, args)
+	}
+}
+
+// Placeholder numbering must stay correct when other filters precede the cursor.
+// status ($2 via ANY) + cursor: cursor must land on $3, not collide with status.
+func TestBuildListWorkItemsWhere_CursorPlaceholderAfterOtherFilters(t *testing.T) {
+	cursor := time.Now().UTC().Format(time.RFC3339Nano)
+	_, where, args := buildListWorkItemsWhere("proj", ListWorkItemsFilter{
+		Status: []string{"queued"},
+		Cursor: ptrStr(cursor),
+	})
+	// $1=project, $2=status ANY, $3=cursor.
+	if !strings.Contains(where, "wi.created_at < $3::timestamptz") {
+		t.Errorf("cursor placeholder numbering broken with preceding filters; got WHERE: %q", where)
+	}
+	if len(args) != 3 || args[2] != cursor {
+		t.Errorf("expected cursor as $3 (3rd arg); got args %#v", args)
+	}
+}
+
+// Empty cursor string is treated as "no cursor" (first page), so a caller that
+// passes back an empty/nil next_cursor (the last page) does not wedge the query.
+func TestBuildListWorkItemsWhere_EmptyCursorIgnored(t *testing.T) {
+	_, where, _ := buildListWorkItemsWhere("proj", ListWorkItemsFilter{Cursor: ptrStr("")})
+	if strings.Contains(where, "wi.created_at <") {
+		t.Errorf("empty cursor must be ignored (no created_at upper bound); got WHERE: %q", where)
 	}
 }

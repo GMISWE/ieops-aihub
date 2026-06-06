@@ -9,6 +9,8 @@ import (
 	"oss.terrastruct.com/d2/d2layouts/d2dagrelayout"
 	"oss.terrastruct.com/d2/d2lib"
 	"oss.terrastruct.com/d2/d2renderers/d2svg"
+	"oss.terrastruct.com/d2/d2target"
+	"oss.terrastruct.com/d2/d2themes/d2themescatalog"
 	"oss.terrastruct.com/d2/lib/textmeasure"
 )
 
@@ -26,7 +28,25 @@ func RenderDiagram(src string) (string, error) {
 			return d2dagrelayout.DefaultLayout, nil
 		},
 	}
-	renderOpts := &d2svg.RenderOpts{}
+	// Base on NeutralGrey, then override every color slot with the #129 warm-grey
+	// ramp (text→surface) so the diagram is truly monochrome — NeutralGrey itself
+	// is blue-tinted. Pad trims D2's large default margin so the figure stays compact.
+	themeID := d2themescatalog.NeutralGrey.ID
+	pad := int64(20)
+	sp := func(s string) *string { return &s }
+	renderOpts := &d2svg.RenderOpts{
+		ThemeID: &themeID,
+		Pad:     &pad,
+		ThemeOverrides: &d2target.ThemeOverrides{
+			N1: sp("#1c1c20"), N2: sp("#646469"), N3: sp("#94949b"), N4: sp("#d6d5d0"), N5: sp("#e6e5e1"), N6: sp("#f6f6f4"), N7: sp("transparent"),
+			B1: sp("#646469"), B2: sp("#646469"), B3: sp("#94949b"), B4: sp("#d6d5d0"), B5: sp("#e6e5e1"), B6: sp("#ffffff"),
+			AA2: sp("#646469"), AA4: sp("#d6d5d0"), AA5: sp("#e6e5e1"),
+			AB4: sp("#d6d5d0"), AB5: sp("#e6e5e1"),
+		},
+	}
+	// Bump the default node font so labels stay legible after the figure is scaled
+	// down for display. Author d2 can still override per-shape.
+	src = "**.style.font-size: 24\n" + src
 	diagram, _, err := d2lib.Compile(context.Background(), src, compileOpts, renderOpts)
 	if err != nil {
 		return "", err

@@ -35,7 +35,7 @@ body {
    the blocks auto-place across both columns and the headings scatter right. */
 body.pf-annot-active {
   display: grid;
-  grid-template-columns: minmax(0, 720px) 300px;
+  grid-template-columns: minmax(0, 940px) 256px;
   justify-content: center;
   align-items: start;
   gap: var(--s8);
@@ -49,7 +49,7 @@ body.pf-annot-active > #pf-margin-rail { grid-column: 2; grid-row: 1; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
-  padding: var(--s8);
+  padding: var(--s8) 28px;
   box-shadow: var(--shadow);
   min-width: 0;
   font-size: 13.5px;
@@ -76,7 +76,14 @@ body:not(.pf-annot-active) #pf-doc-col {
   font-size: 12px;
   color: var(--text-subtle);
   margin-bottom: var(--s4);
+  /* aihub#159: match the top-right Share button's height + vertically center the
+     meta text so "Work item: …" and Share read as one aligned header row. */
+  min-height: 28px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
+.pf-doc-meta p { margin: 0; }
 .pf-doc-meta a { color: var(--text-muted); text-decoration: underline; }
 
 /* ── Doc card ──────────────────────────────────────────────────────── */
@@ -101,6 +108,15 @@ p, li { font-size: 13.5px; color: var(--text); line-height: 1.65; }
 ul { padding-left: 18px; }
 a { color: var(--text-muted); }
 a:hover { color: var(--text); }
+
+/* aihub#159: collapsible H2 sections (/ui readability; default-open) */
+.pf-sec { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 4px; }
+.pf-sec > .pf-sec-sum { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
+.pf-sec > .pf-sec-sum::-webkit-details-marker { display: none; }
+.pf-sec > .pf-sec-sum > h2 { margin: 0; border-top: none; padding-top: 0; flex: 1; }
+.pf-sec-chev { width: 7px; height: 7px; border-right: 1.5px solid var(--text-subtle); border-bottom: 1.5px solid var(--text-subtle); transform: rotate(-45deg); transition: transform .15s; flex: none; }
+.pf-sec[open] > .pf-sec-sum .pf-sec-chev { transform: rotate(45deg); }
+.pf-sec-body { padding-top: 2px; }
 
 /* ── Annotation highlights ─────────────────────────────────────────── */
 mark.pf-annot-highlight {
@@ -457,24 +473,25 @@ mark.pf-annot-highlight.pf-flash {
   align-items: center;
   gap: 6px;
   height: 28px;
-  padding: 0 12px;
+  padding: 0 14px;
   border-radius: var(--r-sm);
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
   font-size: 12px;
-  font-weight: 550;
+  font-weight: 600;
   cursor: pointer;
   font-family: var(--sans);
 }
-.pf-share-btn:hover { border-color: var(--border-strong); }
-/* Shared state: solid accent button so "Stop sharing" reads as the active toggle. */
+/* aihub#159: default Share = solid accent (prominent CTA). */
+.pf-share-btn:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+/* Shared state: outline button so "Stop sharing" reads as the subtler undo toggle. */
 .pf-share[data-shared="true"] .pf-share-btn {
-  background: var(--accent);
-  color: var(--accent-contrast);
-  border-color: var(--accent);
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border-strong);
 }
-.pf-share[data-shared="true"] .pf-share-btn:hover { background: var(--accent-hover); }
+.pf-share[data-shared="true"] .pf-share-btn:hover { background: var(--surface-2); }
 .pf-share-link {
   display: inline-flex;
   align-items: center;
@@ -514,6 +531,152 @@ mark.pf-annot-highlight.pf-flash {
   visibility: hidden;
 }
 .pf-share-toast.pf-share-toast--show { visibility: visible; }
+
+/* aihub#159: float the Share control to the top-right of the doc card (CSS-only;
+   #154 owns the control markup + share.js). Collapsed = a small corner button;
+   when shared, the link row stacks below it (right-aligned) so it never overlaps
+   the title. The title gets right padding (only when a Share control is present)
+   so a long H1 wraps before reaching the button. */
+#pf-doc-col { position: relative; }
+#pf-doc-col > #pf-share {
+  position: absolute;
+  top: var(--s8);
+  right: 28px;
+  margin: 0;
+  flex-direction: column;
+  align-items: flex-end;
+  z-index: 5;
+}
+#pf-doc-col:has(> #pf-share) > h1 { padding-right: 92px; }
+
+/* aihub#159 step4a: inline annotation markers + popover (replaces the margin rail).
+   The right column is freed for the consolidated side rail (step 4b). */
+body.pf-annot-active > #pf-margin-rail { display: none; }
+.pf-annot-marker {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; padding: 0 4px; margin: 0 1px 0 2px;
+  vertical-align: super; font: 700 10px/1 var(--mono);
+  border: none; border-radius: var(--pill);
+  background: var(--warning); color: #1c1c20; cursor: pointer;
+}
+.pf-annot-marker[data-status="resolved"] { background: var(--success); color: #fff; }
+.pf-annot-popover {
+  position: absolute; z-index: 80; width: 320px; max-width: calc(100vw - 16px);
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--r); box-shadow: var(--shadow-pop); padding: 12px;
+}
+.pf-annot-popover[hidden] { display: none; }
+.pf-annot-popover .pf-margin-bubble { position: static; width: auto; margin: 0; }
+/* Drop the rail-tuned card chrome inside the popover (the popover IS the card),
+   and restyle the reply/resolve forms to the signed-off prototype's clean look. */
+.pf-annot-popover .pf-margin-bubble,
+.pf-annot-popover .pf-margin-bubble--active {
+  border: none; border-left: none; border-radius: 0;
+  background: transparent; box-shadow: none; padding: 0; cursor: default;
+}
+.pf-annot-popover .pf-margin-bubble-header { margin-bottom: 8px; }
+.pf-annot-popover .pf-annot-status {
+  margin-left: auto; padding: 1px 7px; border-radius: var(--pill);
+  font-size: 10.5px; font-weight: 600;
+}
+.pf-annot-popover .pf-st-open { background: var(--warning-soft); color: var(--warning); }
+.pf-annot-popover .pf-st-resolved { background: var(--success-soft); color: var(--success); }
+.pf-annot-popover .pf-annot-body { font-size: 13px; line-height: 1.5; }
+.pf-annot-popover .pf-annot-inline-forms {
+  display: block; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+}
+.pf-annot-popover .pf-annot-inline-form {
+  display: flex; flex-direction: column; gap: 6px; margin-top: 8px;
+}
+.pf-annot-popover .pf-annot-inline-form textarea {
+  width: 100%; flex: none; min-height: 44px; resize: vertical; box-sizing: border-box;
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--surface-2); color: var(--text);
+  font: 12.5px/1.45 var(--sans); padding: 7px;
+}
+.pf-annot-popover .pf-annot-inline-form textarea:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.pf-annot-popover .pf-annot-inline-form button {
+  align-self: flex-end; height: 28px; padding: 0 14px; border-radius: var(--r-sm);
+  font: 600 12px var(--sans); cursor: pointer;
+}
+/* Reply form (first) = primary accent; Resolve form (second) = ghost outline. */
+.pf-annot-popover .pf-annot-inline-form:nth-of-type(1) button {
+  background: var(--accent); color: var(--accent-contrast); border: 1px solid var(--accent);
+}
+.pf-annot-popover .pf-annot-inline-form:nth-of-type(1) button:hover { background: var(--accent-hover); }
+.pf-annot-popover .pf-annot-inline-form:nth-of-type(2) button {
+  background: var(--surface); color: var(--text-muted); border: 1px solid var(--border);
+}
+.pf-annot-popover .pf-annot-inline-form:nth-of-type(2) button:hover { border-color: var(--border-strong); color: var(--text); }
+
+/* aihub#159 step4b: consolidated right rail (TOC + Details) in the freed column.
+   The breadcrumb spans both columns as a full-width header row (it floats to the
+   top via order); the doc + rail then auto-place on the row below it with aligned
+   tops. (The old margin rail used grid-row:1, which here would pin the rail to the
+   breadcrumb row and sit it above the doc card — the misalignment we hit.) */
+body.pf-annot-active > .pf-crumb { grid-column: 1 / -1; order: -1; }
+body.pf-annot-active > #pf-side-rail { grid-column: 2; }
+#pf-side-rail {
+  position: sticky; top: 74px; align-self: start; min-width: 0;
+  display: flex; flex-direction: column; gap: var(--s4); font-size: 13px;
+}
+@media (max-width: 1040px) { body.pf-annot-active > #pf-side-rail { display: none; } }
+.pf-side-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); box-shadow: var(--shadow);
+}
+.pf-side-hd {
+  padding: 10px var(--s4); border-bottom: 1px solid var(--border);
+  font-size: 11.5px; font-weight: 650; text-transform: uppercase;
+  letter-spacing: .03em; color: var(--text-muted);
+}
+.pf-side-toc { display: flex; flex-direction: column; padding: var(--s2) 0; }
+.pf-side-toc a {
+  padding: 4px var(--s4); border-left: 2px solid transparent;
+  color: var(--text-muted); font-size: 12.5px; line-height: 1.4; text-decoration: none;
+}
+.pf-side-toc a:hover { color: var(--text); border-left-color: var(--border-strong); }
+.pf-side-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px var(--s4); font-size: 12.5px; }
+.pf-side-row + .pf-side-row { border-top: 1px solid var(--surface-3); }
+.pf-side-row .k { color: var(--text-subtle); flex: none; }
+.pf-side-row .v { color: var(--text); text-align: right; min-width: 0; word-break: break-word; }
+.pf-side-hd .pf-side-n { margin-left: auto; font: 600 11px var(--mono); color: var(--text-subtle); text-transform: none; }
+/* version-history timeline */
+.pf-side-vh { list-style: none; margin: 0; padding: var(--s2) var(--s4); }
+.pf-side-vrow { position: relative; display: flex; align-items: center; gap: 7px; padding: 4px 0 4px 14px; font-size: 12px; }
+.pf-side-vrow::before { content: ""; position: absolute; left: 4px; top: 13px; bottom: -2px; width: 1px; background: var(--border); }
+.pf-side-vrow:last-child::before { display: none; }
+.pf-side-vdot { position: absolute; left: 0; top: 5px; width: 8px; height: 8px; border-radius: 50%; background: var(--surface); border: 2px solid var(--border-strong); }
+.pf-side-vrow.cur .pf-side-vdot { background: var(--text); border-color: var(--text); }
+.pf-side-vlabel { font-weight: 600; font-size: 12px; }
+.pf-side-vcur { font-size: 9.5px; background: var(--success-soft); color: var(--success); padding: 0 5px; border-radius: var(--pill); }
+.pf-side-vdate { margin-left: auto; color: var(--text-subtle); font-size: 11px; }
+/* comments list */
+.pf-side-cmt { padding: 0 var(--s4) var(--s2); font-size: 12.5px; color: var(--text-muted); }
+.pf-side-cmt-sum { font-size: 11.5px; color: var(--text-subtle); padding: 8px 0; }
+.pf-side-cmt-item { display: block; width: 100%; text-align: left; cursor: pointer; background: none;
+  border: none; border-top: 1px solid var(--surface-3); padding: 8px 0; font: inherit; }
+.pf-side-cmt-item:hover { background: var(--surface-2); }
+.pf-side-cmt-top { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.pf-side-cmt-top .who { font-size: 12px; color: var(--text); }
+.pf-side-cmt-st { margin-left: auto; font-size: 9.5px; padding: 0 6px; border-radius: var(--pill); }
+.pf-side-cmt-st.open { background: var(--warning-soft); color: var(--warning); }
+.pf-side-cmt-st.resolved { background: var(--success-soft); color: var(--success); }
+.pf-side-cmt-body { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+/* collapsible side-rail cards (aihub#159 step4c) — TOC default-open, rest closed */
+.pf-side-hd { display: flex; align-items: center; gap: 6px; }
+.pf-side-card > summary.pf-side-hd { cursor: pointer; list-style: none; }
+.pf-side-card > summary.pf-side-hd::-webkit-details-marker { display: none; }
+.pf-side-card > summary.pf-side-hd:hover { color: var(--text); }
+.pf-side-card:not([open]) > summary.pf-side-hd { border-bottom: none; }
+.pf-side-chev { width: 6px; height: 6px; flex: none; margin-left: auto;
+  border-right: 1.5px solid var(--text-subtle); border-bottom: 1.5px solid var(--text-subtle);
+  transform: rotate(-45deg); transition: transform .15s; }
+.pf-side-hd .pf-side-n + .pf-side-chev { margin-left: 6px; }
+.pf-side-card[open] > summary.pf-side-hd .pf-side-chev { transform: rotate(45deg); }
+.pf-side-toc a.active { color: var(--text); border-left-color: var(--text); font-weight: 550; }
 
 /* ── Version history (collapsible) ────────────────────────────────── */
 .pf-version-history {

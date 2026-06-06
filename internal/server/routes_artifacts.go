@@ -203,18 +203,33 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				// Annotations are strictly per-version: a page shows only the commits
 				// made on the version being viewed (cross-version feedback flow is
 				// pf-revise's job, which reads the old head explicitly by id).
+				// aihub#159: fold H2 sections into <details> for /ui readability (spec/plan).
+				// /ui-only — /v1 + /share keep the flat body. Default-open so annot.js
+				// text-quote anchoring (searches visible text) is unaffected.
+				bodyFragment = wrapH2SectionsForUI(bodyFragment)
 				annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits)
 				// aihub#138 version_history: render version history INSIDE the doc card.
 				// aihub#154: the share control + version history are injected together
 				// just after the first </h1> — share above, version history below — so
 				// the order is title → share → version history → body. Empty pieces
 				// (single-version chain, or NULL rendered_html) collapse out cleanly.
-				vhHTML := ""
-				if versions, verErr := versionChainFn(ctx, pool, mem.ID); verErr == nil {
-					vhHTML = buildVersionHistoryHTML(ctx, pool, mem.ID, versions)
+				// aihub#159 step4b: version history relocates into the side rail (below);
+				// only the share control stays injected in-card under the title.
+				var srVersions []sideRailVersion
+				if versions, verErr := versionChainFn(ctx, pool, mem.ID); verErr == nil && len(versions) > 1 {
+					for i, v := range versions {
+						sv := sideRailVersion{Label: "v" + strconv.Itoa(i+1), Current: v.IsCurrent}
+						if len(v.CreatedAt) >= 10 {
+							sv.Date = v.CreatedAt[:10]
+						}
+						if v.ID != mem.ID {
+							sv.Href = "/ui/artifacts/" + v.ID + "/html"
+						}
+						srVersions = append(srVersions, sv)
+					}
 				}
-				if inject := shareControlHTML + vhHTML; inject != "" {
-					bodyFragment = insertAfterFirstH1(bodyFragment, inject)
+				if shareControlHTML != "" {
+					bodyFragment = insertAfterFirstH1(bodyFragment, shareControlHTML)
 				}
 				// aihub#125: inject client-side annotation scripts — /ui path only.
 				// ?v= content hash busts browser caches on deploys (assets are served
@@ -222,10 +237,206 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				annotHTML += "\n<script src=\"/ui/static/annotator.js?v=" + av + "\" defer></script>\n<script src=\"/ui/static/annot.js?v=" + av + "\" defer></script>\n"
 				// Prepend ui.css + viewer.css links + theme setter + chrome.
 				annotHTML = uiHead.String() + uiChrome + annotHTML
+				// aihub#159 step4b: consolidated right rail (TOC + Details) in the
+				// column freed by the inline-marker annotation rework.
+				srMeta := sideRailMeta{
+					Author:     mem.AuthorDisplay,
+					Type:       mem.Type,
+					Project:    mem.Project,
+					Visibility: mem.Visibility,
+					Strength:   fmt.Sprintf("%.2f", mem.BaseStrength),
+					Created:    mem.CreatedAt.Format("2006-01-02"),
+					Updated:    mem.UpdatedAt.Format("2006-01-02"),
+				}
+				if mem.WorkItemID != nil {
+					srMeta.WorkItemHref = wiHref(*mem.WorkItemID)
+					srMeta.WorkItemLabel = *mem.WorkItemID
+				}
+				var srComments []sideRailComment
+				if len(mem.Commits) > 0 {
+					var cl []CommitEntry
+					if json.Unmarshal(mem.Commits, &cl) == nil {
+						for _, c := range cl {
+							srComments = append(srComments, sideRailComment{ID: c.ID, Author: c.AuthorDisplay, Body: c.Body, Status: c.Status})
+						}
+					}
+				}
+				annotHTML += buildSideRail(render.ExtractHeadings(mem.Content), srMeta, srVersions, srComments)
 			}
 		}
 		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBodyWithMeta(bodyFragment, title, backHref, ownerHref, ownerLabel, related, annotHTML)))
 	}
+}
+
+// wrapH2SectionsForUI wraps each top-level H2 section of a rendered artifact body
+// in a <details open> block so the /ui viewer can fold long sections (aihub#159).
+// /ui-only: /v1 + /share keep the flat rendered body, so byte-identical output is
+// preserved. Default-open keeps every section's text in the visible DOM, so annot.js
+// text-quote anchoring (which searches rendered text) is unaffected. Content before
+// the first H2 (the H1 + intro + any injected share/version chrome) is left as-is.
+func wrapH2SectionsForUI(body string) string {
+	const open = "<h2"
+	first := strings.Index(body, open)
+	if first < 0 {
+		return body
+	}
+	var b strings.Builder
+	b.Grow(len(body) + 256)
+	b.WriteString(body[:first])
+	rest := body[first:]
+	for rest != "" {
+		// rest begins with "<h2"; find the next section boundary.
+		nextRel := strings.Index(rest[len(open):], open)
+		var section string
+		if nextRel < 0 {
+			section, rest = rest, ""
+		} else {
+			cut := len(open) + nextRel
+			section, rest = rest[:cut], rest[cut:]
+		}
+		hClose := strings.Index(section, "</h2>")
+		if hClose < 0 {
+			b.WriteString(section) // malformed; pass through untouched
+			continue
+		}
+		heading := section[:hClose+len("</h2>")]
+		secBody := section[hClose+len("</h2>"):]
+		b.WriteString(`<details open class="pf-sec"><summary class="pf-sec-sum">`)
+		b.WriteString(heading)
+		b.WriteString(`<span class="pf-sec-chev" aria-hidden="true"></span></summary><div class="pf-sec-body">`)
+		b.WriteString(secBody)
+		b.WriteString(`</div></details>`)
+	}
+	return b.String()
+}
+
+// sideRailMeta carries the pre-formatted Details fields for the /ui side rail so
+// buildSideRail stays decoupled from *domain.Memory (and trivially testable).
+type sideRailMeta struct {
+	Author, Type, Project, Visibility string
+	WorkItemHref, WorkItemLabel       string
+	Strength, Created, Updated        string
+}
+
+// buildSideRail builds the consolidated /ui artifact-viewer right rail (aihub#159
+// step4b): an "On this page" TOC (from the rendered heading anchors) + a Details
+// card. It occupies the right grid column freed by the inline-marker annotation
+// rework. /ui-only — never emitted on /v1 or /share.
+// sideRailVersion is one row of the side rail's version-history timeline.
+type sideRailVersion struct {
+	Label   string // e.g. "v3"
+	Date    string // YYYY-MM-DD
+	Current bool
+	Href    string // /ui/artifacts/<id>/html for other versions; "" for the viewed one
+}
+
+// sideRailComment is one entry in the side rail's Comments card.
+type sideRailComment struct {
+	ID, Author, Body, Status string
+}
+
+func buildSideRail(headings []render.HeadingRef, m sideRailMeta, versions []sideRailVersion, comments []sideRailComment) string {
+	var b strings.Builder
+	b.WriteString("<aside id=\"pf-side-rail\">\n")
+	// chev is the collapse caret appended to each card's <summary>.
+	const chev = "<span class=\"pf-side-chev\" aria-hidden=\"true\"></span>"
+	if len(headings) >= 2 {
+		b.WriteString("<details class=\"pf-side-card\" open><summary class=\"pf-side-hd\">On this page" + chev + "</summary><nav class=\"pf-side-toc\">")
+		for _, h := range headings {
+			b.WriteString("<a href=\"#")
+			b.WriteString(html.EscapeString(h.ID))
+			b.WriteString("\">")
+			b.WriteString(html.EscapeString(h.Text))
+			b.WriteString("</a>")
+		}
+		b.WriteString("</nav></details>\n")
+	}
+	b.WriteString("<details class=\"pf-side-card\"><summary class=\"pf-side-hd\">Details" + chev + "</summary>")
+	row := func(k, vHTML string) {
+		if vHTML == "" {
+			return
+		}
+		b.WriteString("<div class=\"pf-side-row\"><span class=\"k\">")
+		b.WriteString(html.EscapeString(k))
+		b.WriteString("</span><span class=\"v\">")
+		b.WriteString(vHTML)
+		b.WriteString("</span></div>")
+	}
+	mono := func(s string) string {
+		if s == "" {
+			return ""
+		}
+		return "<span class=\"mono\">" + html.EscapeString(s) + "</span>"
+	}
+	row("Author", html.EscapeString(m.Author))
+	row("Type", mono(m.Type))
+	row("Project", html.EscapeString(m.Project))
+	row("Visibility", html.EscapeString(m.Visibility))
+	if m.WorkItemHref != "" {
+		row("Work item", "<a class=\"link mono\" href=\""+html.EscapeString(m.WorkItemHref)+"\">"+html.EscapeString(m.WorkItemLabel)+"</a>")
+	}
+	row("Strength", mono(m.Strength))
+	row("Created", mono(m.Created))
+	row("Updated", mono(m.Updated))
+	b.WriteString("</details>\n") // close Details card
+
+	if len(versions) > 1 {
+		b.WriteString("<details class=\"pf-side-card\"><summary class=\"pf-side-hd\">Version history <span class=\"pf-side-n\">")
+		b.WriteString(strconv.Itoa(len(versions)))
+		b.WriteString("</span>" + chev + "</summary><ol class=\"pf-side-vh\">")
+		for _, v := range versions {
+			b.WriteString("<li class=\"pf-side-vrow")
+			if v.Current {
+				b.WriteString(" cur")
+			}
+			b.WriteString("\"><span class=\"pf-side-vdot\"></span>")
+			if v.Href != "" {
+				b.WriteString("<a class=\"link mono pf-side-vlabel\" href=\"" + html.EscapeString(v.Href) + "\">" + html.EscapeString(v.Label) + "</a>")
+			} else {
+				b.WriteString("<span class=\"mono pf-side-vlabel\">" + html.EscapeString(v.Label) + "</span>")
+			}
+			if v.Current {
+				b.WriteString("<span class=\"pf-side-vcur\">current</span>")
+			}
+			b.WriteString("<span class=\"pf-side-vdate\">" + html.EscapeString(v.Date) + "</span></li>")
+		}
+		b.WriteString("</ol></details>\n")
+	}
+
+	if len(comments) > 0 {
+		open := 0
+		for _, c := range comments {
+			if c.Status == "" || c.Status == "open" {
+				open++
+			}
+		}
+		b.WriteString("<details class=\"pf-side-card\"><summary class=\"pf-side-hd\">Comments <span class=\"pf-side-n\">")
+		b.WriteString(strconv.Itoa(len(comments)))
+		b.WriteString("</span>" + chev + "</summary><div class=\"pf-side-cmt\"><div class=\"pf-side-cmt-sum\">")
+		b.WriteString(strconv.Itoa(open) + " open · " + strconv.Itoa(len(comments)-open) + " resolved")
+		b.WriteString("</div>")
+		for _, c := range comments {
+			st := c.Status
+			if st == "" {
+				st = "open"
+			}
+			body := c.Body
+			if r := []rune(body); len(r) > 84 {
+				body = string(r[:84]) + "…"
+			}
+			b.WriteString("<button type=\"button\" class=\"pf-side-cmt-item\" data-commit-id=\"" + html.EscapeString(c.ID) + "\">")
+			b.WriteString("<span class=\"pf-side-cmt-top\"><span class=\"who\"><span class=\"av sm\" data-av-name=\"" + html.EscapeString(c.Author) + "\"></span><b>" + html.EscapeString(c.Author) + "</b></span><span class=\"pf-side-cmt-st " + st + "\">" + st + "</span></span>")
+			b.WriteString("<span class=\"pf-side-cmt-body\">" + html.EscapeString(body) + "</span>")
+			b.WriteString("</button>")
+		}
+		b.WriteString("</div></details>\n")
+	}
+
+	b.WriteString("</aside>\n")
+	// aihub#159 step4c: TOC scroll-spy — highlight the side-rail link for the
+	// section currently in view (/ui-only; no-op without IntersectionObserver).
+	b.WriteString(`<script>(function(){var ls=document.querySelectorAll('#pf-side-rail .pf-side-toc a');if(!ls.length||!window.IntersectionObserver)return;var m={};ls.forEach(function(a){m[a.getAttribute('href').slice(1)]=a;});var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){for(var k in m){m[k].classList.remove('active');}var a=m[e.target.id];if(a){a.classList.add('active');}}});},{rootMargin:'-80px 0px -70% 0px'});Object.keys(m).forEach(function(id){var el=document.getElementById(id);if(el){io.observe(el);}});})();(function(){document.querySelectorAll('#pf-side-rail .pf-side-cmt-item').forEach(function(btn){btn.addEventListener('click',function(e){e.stopPropagation();var id=btn.getAttribute('data-commit-id');var mk=document.querySelector('.pf-annot-marker[data-commit-id="'+id+'"]')||document.querySelector('mark[data-commit-id="'+id+'"]');if(mk){mk.scrollIntoView({behavior:'smooth',block:'center'});mk.click();}});});})();</script>` + "\n")
+	return b.String()
 }
 
 // renderArtifactBody returns the HTML body to serve for a stored rendered_html

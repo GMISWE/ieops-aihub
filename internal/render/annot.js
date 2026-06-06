@@ -161,8 +161,8 @@
       }
     }
 
-    if (anchored.length > 0 && rail) {
-      buildRail(anchored, memID, rail);
+    if (anchored.length > 0) {
+      buildMarkers(anchored, memID);
     }
     // Selection flow is independent of existing annotations.
     initSelectionFlow(scope, memID);
@@ -256,6 +256,69 @@
 
     // Two-way linking.
     wireLinking(anchored, bubbleMap, anchorMap);
+  }
+
+  // ─── Inline markers + popover (aihub#159 step4a) ─────────────────────────────
+  // Replaces the margin rail: each anchored commit gets a small numbered marker
+  // inserted right after its highlight; clicking the marker (or the highlight)
+  // opens a single shared popover whose content reuses buildBubble. This frees the
+  // right column for the consolidated side rail (TOC/Details/Version/Comments).
+  function buildMarkers(anchored, memID) {
+    anchored.sort(function (a, b) {
+      return offsetTopInDoc(a.anchorEl) - offsetTopInDoc(b.anchorEl);
+    });
+    document.body.classList.add('pf-annot-active');
+
+    var pop = el('div', { 'class': 'pf-annot-popover' });
+    pop.hidden = true;
+    pop.addEventListener('click', function (e) { e.stopPropagation(); });
+    document.body.appendChild(pop);
+    var openId = null;
+
+    function hidePop() { pop.hidden = true; openId = null; }
+    function showPop(commit, nearEl) {
+      while (pop.firstChild) pop.removeChild(pop.firstChild);
+      var bub = buildBubble(commit, memID);
+      // The reply/resolve inline forms are gated behind .pf-margin-bubble--active
+      // (collapsed in the rail by default); the popover always shows them.
+      bub.classList.add('pf-margin-bubble--active');
+      pop.appendChild(bub);
+      pop.hidden = false;
+      var r = nearEl.getBoundingClientRect();
+      var left = Math.min(window.scrollX + r.left, window.scrollX + window.innerWidth - 332);
+      pop.style.top = (window.scrollY + r.bottom + 6) + 'px';
+      pop.style.left = Math.max(8, left) + 'px';
+      openId = commit.id;
+    }
+
+    for (var i = 0; i < anchored.length; i++) {
+      (function (item, n) {
+        var marker = el('button', {
+          'class':          'pf-annot-marker',
+          'type':           'button',
+          'data-commit-id': item.commit.id,
+          'data-status':    item.commit.status || 'open',
+          'aria-label':     'annotation ' + n
+        });
+        marker.appendChild(document.createTextNode(String(n)));
+        if (item.anchorEl.parentNode) {
+          item.anchorEl.parentNode.insertBefore(marker, item.anchorEl.nextSibling);
+        }
+        marker.addEventListener('click', function (e) {
+          e.stopPropagation();
+          if (openId === item.commit.id) { hidePop(); return; }
+          showPop(item.commit, marker);
+        });
+        item.anchorEl.addEventListener('click', function () {
+          showPop(item.commit, item.anchorEl);
+        });
+      })(anchored[i], i + 1);
+
+      var fe = document.querySelector('.pf-annot-entry[data-commit-id="' + anchored[i].commit.id + '"]');
+      if (fe) fe.hidden = true;
+    }
+
+    document.addEventListener('click', hidePop);
   }
 
   // ─── Avatar helpers ──────────────────────────────────────────────────────────

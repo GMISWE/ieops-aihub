@@ -311,6 +311,86 @@ func publicSharedMem() *domain.Memory {
 	}
 }
 
+// TestArtifactViewer_UIvsV1Share_BytePurity locks the aihub#159 invariant: every
+// new viewer affordance (side rail, section folding, annotation data island,
+// viewer.css/ui.css links, app chrome, share control) is /ui-only — the /v1 API
+// and the public /share output must contain NONE of those bytes (spec mem_5kxhPqA2).
+func TestArtifactViewer_UIvsV1Share_BytePurity(t *testing.T) {
+	defer withVersionChainOverride()()
+
+	mem := publicSharedMem()
+	mem.WorkItemID = strptr("aihub#159")
+	mem.Content = "# Title\n\nintro paragraph\n\n## Section A\n\nbody A\n\n## Section B\n\nbody B"
+	mem.RenderedHTML = htmlPtr(`<h1 id="title">Title</h1><p>intro paragraph</p>` +
+		`<h2 id="section-a">Section A</h2><p>body A</p>` +
+		`<h2 id="section-b">Section B</h2><p>body B</p>`)
+	mem.Commits = []byte(`[{"id":"c1","author_display":"monte","body":"q","status":"open","anchor":{"quote":"body A"}}]`)
+	defer withLoadMemoryOverride(mem, nil)()
+
+	// Bytes that exist ONLY on the /ui artifact viewer.
+	uiOnly := []string{
+		`id="pf-side-rail"`,
+		`class="pf-side-card"`,
+		`<details open class="pf-sec"`, // section folding
+		`id="pf-annot-data"`,
+		`/ui/static/viewer.css`,
+		`/ui/static/ui.css`,
+		`class="pf-appnav"`,
+		`id="pf-share"`,
+		`/ui/static/annot.js`,
+	}
+
+	renderPath := func(path string) string {
+		e := echo.New()
+		c, rec := newUIContext(e, http.MethodGet, path, "mem_share1")
+		c.SetPath(path) // drives the HasPrefix(c.Path(), "/ui") gate
+		setUser(c, authorUser())
+		if err := handleArtifactHTML(nil)(c); err != nil {
+			e.HTTPErrorHandler(err, c)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d (body=%s)", path, rec.Code, excerptStr(rec.Body.String()))
+		}
+		return rec.Body.String()
+	}
+
+	// /ui: the affordances MUST be present (proves the gate adds them).
+	uiBody := renderPath("/ui/artifacts/:id/html")
+	for _, s := range uiOnly {
+		if !strings.Contains(uiBody, s) {
+			t.Errorf("/ui output should contain %q (affordance missing)", s)
+		}
+	}
+
+	// /v1: NONE of them — byte-identical to the pre-#159 pure document.
+	v1Body := renderPath("/v1/artifacts/:id/html")
+	for _, s := range uiOnly {
+		if strings.Contains(v1Body, s) {
+			t.Errorf("/v1 output must NOT contain /ui-only bytes; found %q", s)
+		}
+	}
+
+	// /share (public, no auth): NONE of them + the strict CSP stays.
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/share/mem_share1", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_share1")
+	if err := handleSharedArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	shareBody := rec.Body.String()
+	for _, s := range uiOnly {
+		if strings.Contains(shareBody, s) {
+			t.Errorf("/share output must NOT contain /ui-only bytes; found %q", s)
+		}
+	}
+	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'none'") {
+		t.Errorf("/share must keep its strict CSP")
+	}
+}
+
 // Scenario 1: public artifact + rendered_html non-null →
 // GET /share/:id returns 200, text/html, body contains the fragment, NO auth set.
 func TestSharedArtifact_Public_200(t *testing.T) {
@@ -954,17 +1034,22 @@ func TestUIArtifactHTML_ShareAboveVersionHistory(t *testing.T) {
 
 	h1End := strings.Index(body, "</h1>")
 	shareAt := strings.Index(body, `id="pf-share"`)
-	// Match the rendered version-history SECTION, not the bare class token — the
-	// latter also appears in the embedded style.css inside <head>, far above body.
-	versionAt := strings.Index(body, `<section class="pf-version-history"`)
-	if h1End < 0 || shareAt < 0 || versionAt < 0 {
-		t.Fatalf("expected title + share + version-history; h1End=%d shareAt=%d versionAt=%d; excerpt: %s",
-			h1End, shareAt, versionAt, excerptStr(body))
+	railAt := strings.Index(body, `id="pf-side-rail"`)
+	vhRailAt := strings.Index(body, `class="pf-side-vh"`)
+	if h1End < 0 || shareAt < 0 || railAt < 0 || vhRailAt < 0 {
+		t.Fatalf("expected in-card share + side-rail version history; h1End=%d shareAt=%d railAt=%d vhRailAt=%d; excerpt: %s",
+			h1End, shareAt, railAt, vhRailAt, excerptStr(body))
 	}
-	// Order must be: </h1> < pf-share < pf-version-history.
-	if h1End >= shareAt || shareAt >= versionAt {
-		t.Errorf("order must be title → share → version-history (h1End=%d shareAt=%d versionAt=%d); excerpt: %s",
-			h1End, shareAt, versionAt, excerptStr(body))
+	// aihub#159: share stays in the doc card below the title; version history moved
+	// out of the card into the consolidated side rail (#pf-side-rail).
+	if h1End >= shareAt {
+		t.Errorf("share must render below the title (h1End=%d shareAt=%d)", h1End, shareAt)
+	}
+	if strings.Contains(body, `<section class="pf-version-history"`) {
+		t.Errorf("version history should live in the side rail, not an in-card <section>")
+	}
+	if vhRailAt < railAt {
+		t.Errorf("version-history timeline must live inside #pf-side-rail (railAt=%d vhRailAt=%d)", railAt, vhRailAt)
 	}
 }
 

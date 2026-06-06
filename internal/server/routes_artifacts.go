@@ -203,6 +203,10 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				// Annotations are strictly per-version: a page shows only the commits
 				// made on the version being viewed (cross-version feedback flow is
 				// pf-revise's job, which reads the old head explicitly by id).
+				// aihub#160: render ```d2 code blocks to inline SVG (/ui-only; /v1 + /share
+				// keep the raw code block). Done before folding so the figure lands inside
+				// its section.
+				bodyFragment = render.RenderDiagramsForUI(bodyFragment)
 				// aihub#159: fold H2 sections into <details> for /ui readability (spec/plan).
 				// /ui-only — /v1 + /share keep the flat body. Default-open so annot.js
 				// text-quote anchoring (searches visible text) is unaffected.

@@ -323,6 +323,7 @@ func TestArtifactViewer_UIvsV1Share_BytePurity(t *testing.T) {
 	mem.Content = "# Title\n\nintro paragraph\n\n## Section A\n\nbody A\n\n## Section B\n\nbody B"
 	mem.RenderedHTML = htmlPtr(`<h1 id="title">Title</h1><p>intro paragraph</p>` +
 		`<h2 id="section-a">Section A</h2><p>body A</p>` +
+		`<pre><code class="language-d2">a -&gt; b</code></pre>` +
 		`<h2 id="section-b">Section B</h2><p>body B</p>`)
 	mem.Commits = []byte(`[{"id":"c1","author_display":"monte","body":"q","status":"open","anchor":{"quote":"body A"}}]`)
 	defer withLoadMemoryOverride(mem, nil)()
@@ -338,6 +339,7 @@ func TestArtifactViewer_UIvsV1Share_BytePurity(t *testing.T) {
 		`class="pf-appnav"`,
 		`id="pf-share"`,
 		`/ui/static/annot.js`,
+		`<figure class="pf-diagram"`, // aihub#160: d2 → inline SVG; /v1+/share keep the code block
 	}
 
 	renderPath := func(path string) string {

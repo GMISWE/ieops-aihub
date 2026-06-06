@@ -665,6 +665,10 @@ body.pf-annot-active > #pf-side-rail { grid-column: 2; }
 .pf-side-cmt-st.open { background: var(--warning-soft); color: var(--warning); }
 .pf-side-cmt-st.resolved { background: var(--success-soft); color: var(--success); }
 .pf-side-cmt-body { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+/* aihub#160: d2 diagram figures (/ui-only) */
+.pf-diagram { margin: var(--s5) 0; padding: var(--s4); border: 1px solid var(--border);
+  border-radius: var(--r-lg); background: var(--surface-2); text-align: center; overflow-x: auto; }
+.pf-diagram svg { max-width: min(100%, 600px); height: auto; }
 /* collapsible side-rail cards (aihub#159 step4c) — TOC default-open, rest closed */
 .pf-side-hd { display: flex; align-items: center; gap: 6px; }
 .pf-side-card > summary.pf-side-hd { cursor: pointer; list-style: none; }

@@ -2,8 +2,13 @@ package render
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"html"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"oss.terrastruct.com/d2/d2graph"
 	"oss.terrastruct.com/d2/d2layouts/d2dagrelayout"
@@ -14,10 +19,84 @@ import (
 	"oss.terrastruct.com/d2/lib/textmeasure"
 )
 
+// diagramEntry caches one RenderDiagram result. ok=false means the src failed to
+// compile/render — that outcome is cached too, so a malformed block isn't retried
+// on every request.
+type diagramEntry struct {
+	svg string
+	ok  bool
+}
+
+// diagramCache memoizes RenderDiagram by src. Rendering is pure (theme/font/pad
+// are compile-time constants), so a given src always yields byte-identical SVG.
+var diagramCache = struct {
+	mu sync.RWMutex
+	m  map[string]diagramEntry
+}{m: make(map[string]diagramEntry)}
+
+const diagramCacheCap = 512
+
+// diagramCacheMisses is incremented on every cache miss; only read by tests
+// (to assert a second render of the same src is served from cache).
+var diagramCacheMisses atomic.Int64
+
+// errDiagramCached is returned on a hit of a previously-failed src, so callers
+// keep their err != nil fallback path without re-running the compiler.
+var errDiagramCached = errors.New("d2 diagram failed to render")
+
 // RenderDiagram compiles a d2 source string into an inline <svg> (aihub#160).
 // Pure Go (D2 lays out via goja). Used /ui-only — see RenderDiagramsForUI; the
 // /v1 + /share paths keep the raw code block so their byte output is unchanged.
+// Results are memoized in diagramCache keyed by src (success and failure both).
+//
+// Callers must treat a render as successful only when err == nil AND the result
+// contains an <svg> element: on a cache hit of a previously-failed src this
+// returns ("", errDiagramCached), not the first call's raw (svg, err).
+// RenderDiagramsForUI already gates on both conditions.
 func RenderDiagram(src string) (string, error) {
+	sum := sha256.Sum256([]byte(src))
+	key := hex.EncodeToString(sum[:])
+
+	diagramCache.mu.RLock()
+	e, hit := diagramCache.m[key]
+	diagramCache.mu.RUnlock()
+	if hit {
+		if e.ok {
+			return e.svg, nil
+		}
+		return "", errDiagramCached
+	}
+
+	diagramCacheMisses.Add(1)
+	svg, err := renderDiagramUncached(src)
+
+	if err == nil && strings.Contains(svg, "<svg") {
+		diagramCachePut(key, diagramEntry{svg: svg, ok: true})
+	} else {
+		// Cache failures too, so a malformed d2 block isn't recompiled on every
+		// request. Trade-off: a rare transient/env error (e.g. textmeasure ruler
+		// init) is also pinned to this src until the cache flushes — acceptable
+		// since d2 render failures are overwhelmingly deterministic syntax errors.
+		diagramCachePut(key, diagramEntry{ok: false})
+	}
+
+	return svg, err
+}
+
+// diagramCachePut stores one entry, flushing the whole cache first if it has
+// reached diagramCacheCap. Flush is the simplest bounded policy — rendering is
+// idempotent, so a cold cache only costs recompute, never correctness.
+func diagramCachePut(key string, e diagramEntry) {
+	diagramCache.mu.Lock()
+	defer diagramCache.mu.Unlock()
+	if len(diagramCache.m) >= diagramCacheCap {
+		diagramCache.m = make(map[string]diagramEntry)
+	}
+	diagramCache.m[key] = e
+}
+
+// renderDiagramUncached holds the original (uncached) compile+render pipeline.
+func renderDiagramUncached(src string) (string, error) {
 	ruler, err := textmeasure.NewRuler()
 	if err != nil {
 		return "", err

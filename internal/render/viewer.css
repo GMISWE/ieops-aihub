@@ -38,8 +38,14 @@ body.pf-annot-active {
   grid-template-columns: minmax(0, 940px) 256px;
   justify-content: center;
   align-items: start;
-  gap: var(--s8);
-  padding: 74px var(--s6) var(--s8);
+  /* Override style.css's `margin: 2em auto` on body.pf-annot-active — that 2em top
+     margin pushed the breadcrumb ~32px lower than the app-shell (.pf-main has no top
+     margin), making the viewer's breadcrumb band taller. /ui-only class; /v1+/share
+     are never .pf-annot-active, so this does not affect their frozen output. */
+  margin: 0 auto;
+  row-gap: var(--s4);
+  column-gap: var(--s8);
+  padding: 68px var(--s6) var(--s8);
 }
 /* Pin every direct body child to col 1 (stacked); the rail alone is col 2. */
 body.pf-annot-active > * { grid-column: 1; }
@@ -870,24 +876,11 @@ body.pf-annot-active > #pf-side-rail { grid-column: 2; }
 .pf-review-meta { color: var(--text-subtle); font-size: 12px; margin-bottom: var(--s4); }
 .pf-review-meta a { color: var(--text-muted); }
 
-/* ── App-shell nav (prototype .nav) ───────────────────────────────── */
-/* Fixed full-viewport-width top bar (the centered body grid can't span the
-   whole viewport, so the nav is taken out of flow; body gets top padding to
-   clear it). */
-.pf-appnav{position:fixed;top:0;left:0;right:0;width:100%;box-sizing:border-box;z-index:50;height:54px;display:flex;align-items:center;gap:var(--s5);padding:0 var(--s6);background:var(--surface);border-bottom:1px solid var(--border)}
-.pf-appnav-brand{display:flex;align-items:center;gap:var(--s2);font-weight:650;letter-spacing:-.01em;color:var(--text)}
-.pf-appnav-mark{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--accent),var(--accent-hover));display:grid;place-items:center;color:var(--accent-contrast);font-size:13px;font-weight:700}
-.pf-appnav-links{display:flex;gap:2px;margin-left:var(--s3)}
-.pf-appnav-links a{padding:6px 10px;border-radius:var(--r-sm);color:var(--text-muted);font-weight:500;text-decoration:none}
-.pf-appnav-links a:hover{background:var(--surface-2);color:var(--text)}
-.pf-appnav-spacer{flex:1}
-.pf-appnav-themebtn{height:32px;padding:0 10px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--surface);color:var(--text-muted);cursor:pointer;font-size:13px;font-family:var(--sans)}
-.pf-appnav-themebtn:hover{color:var(--text);border-color:var(--border-strong)}
-/* Breadcrumb (prototype .crumb) */
-.pf-crumb{display:flex;align-items:center;gap:8px;color:var(--text-subtle);font-size:12.5px;padding:var(--s5) var(--s6) 0}
-.pf-crumb a{color:var(--text-subtle);text-decoration:none}
-.pf-crumb a:hover{color:var(--text-muted)}
-.pf-crumb-mono{font-family:var(--mono)}
+/* ── Breadcrumb (prototype .crumb) ────────────────────────────────── */
+/* .pf-crumb* rules moved to ui.css (aihub#167 follow-up) so both the app-shell
+   and the artifact viewer share the same CSS from one source. The padding override
+   below applies only inside the viewer's body context (the app-shell uses margin). */
+.pf-crumb { padding: 0; margin-bottom: 0; }
 /* Float nav+crumb to the top, full width, in the doc grid */
 body.pf-annot-active > .pf-appnav, body.pf-review-page > .pf-appnav{order:-2;grid-column:1/-1}
 body.pf-annot-active > .pf-crumb, body.pf-review-page > .pf-crumb{order:-1;grid-column:1/-1}

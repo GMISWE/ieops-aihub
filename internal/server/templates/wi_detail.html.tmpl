@@ -9,11 +9,11 @@
 </div>
 {{else}}
 
-<div class="crumb">
-  <a class="link" href="/ui/wi">Work Items</a>
+<nav class="pf-crumb">
+  <a href="/ui/wi">Work Items</a>
   <span>/</span>
-  <span class="mono">{{or .WI.Slug .WI.ID}}</span>
-</div>
+  <span class="pf-crumb-mono">{{or .WI.Slug .WI.ID}}</span>
+</nav>
 
 {{if .NeedsYou}}
 {{/* needs-you bar — this item is awaiting the current user (they own the
@@ -26,7 +26,7 @@
 
 <div class="detail">
   {{/* ---------- main column ---------- */}}
-  <div>
+  <div class="pf-doc-card">
     <div class="metaline">
       {{if .WIType}}<span class="badge b-{{.WIType}}">{{.WIType}}</span>{{end}}
       <span class="badge b-{{or .WI.Priority "normal"}}">{{or .WI.Priority "normal"}}</span>
@@ -36,24 +36,25 @@
     <h1 class="h-title">{{.WI.Goal}}</h1>
 
     {{if .Content}}
-    <div class="card">
-      <div class="hd"><h3>Background</h3></div>
-      <div class="bd prose">{{md .Content}}</div>
+    <div class="pf-doc-section">
+      <div class="pf-doc-section-hd"><h3>Background</h3></div>
+      <div class="prose">{{md .Content}}</div>
     </div>
     {{end}}
 
-    <div class="card">
-      <div class="hd"><h3>Activity</h3><span class="role mono" style="font-size:11px">live</span></div>
-      <div class="bd">
-        {{/* HTMX poll: refresh the activity feed in place every 5s. The target
-             swaps only the feed fragment so the card chrome stays put. */}}
-        <div id="pf-events"
-             hx-get="{{wiref (or .WI.Slug .WI.ID)}}/events/partial"
-             hx-trigger="every 5s"
-             hx-target="#pf-events"
-             hx-swap="innerHTML">
-          {{template "events_timeline.html.tmpl" .}}
-        </div>
+    <div class="pf-doc-section">
+      <div class="pf-doc-section-hd">
+        <h3>Activity</h3>
+        <span class="role mono" style="font-size:11px">live</span>
+      </div>
+      {{/* HTMX poll: refresh the activity feed in place every 5s. The target
+           swaps only the feed fragment so the section body stays put. */}}
+      <div id="pf-events"
+           hx-get="{{wiref (or .WI.Slug .WI.ID)}}/events/partial"
+           hx-trigger="every 5s"
+           hx-target="#pf-events"
+           hx-swap="innerHTML">
+        {{template "events_timeline.html.tmpl" .}}
       </div>
     </div>
   </div>

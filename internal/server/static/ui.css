@@ -136,45 +136,24 @@ a:hover { text-decoration: underline; }
 .mono { font-family: var(--mono); }
 [hidden] { display: none !important; }
 
-/* ---------- top nav ---------- */
-.pf-nav {
-  border-bottom: 1px solid var(--pf-border);
-  background: var(--pf-bg-soft);
-  padding: 0;
-}
-.pf-nav-inner {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 0.6em 1.5em;
-  display: flex;
-  align-items: center;
-  gap: 1.5em;
-}
-.pf-nav-brand {
-  font-weight: 700;
-  font-size: 1.1em;
-  color: var(--pf-fg);
-}
-.pf-nav-links {
-  display: flex;
-  gap: 1em;
-  flex: 1;
-}
-.pf-nav-links a {
-  color: var(--pf-fg);
-  padding: 4px 6px;
-  border-radius: 4px;
-}
-.pf-nav-links a { color: var(--text-muted); }
-.pf-nav-links a:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
-.pf-nav-links a.pf-active {
-  background: var(--selected);
-  color: var(--text);
-  font-weight: 500;
-}
-.pf-nav-user { display: flex; align-items: center; gap: 0.75em; }
+/* ---------- top nav (unified .pf-appnav — aihub#167) ----------
+   Fixed full-viewport-width top bar shared by both the app-shell
+   (layout.html.tmpl → {{appnav}}) and the artifact viewer
+   (buildUIChrome → buildAppNav). Moved from viewer.css so the app-
+   shell and viewer both get the identical rules from one source. */
+.pf-appnav{position:fixed;top:0;left:0;right:0;width:100%;box-sizing:border-box;z-index:50;height:54px;display:flex;align-items:center;gap:var(--s5);padding:0 var(--s6);background:var(--surface);border-bottom:1px solid var(--border)}
+.pf-appnav-brand{display:flex;align-items:center;gap:var(--s2);font-weight:650;letter-spacing:-.01em;color:var(--text);text-decoration:none}
+.pf-appnav-brand:hover{text-decoration:none}
+.pf-appnav-mark{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--accent),var(--accent-hover));display:grid;place-items:center;color:var(--accent-contrast);font-size:13px;font-weight:700}
+.pf-appnav-links{display:flex;gap:2px;margin-left:var(--s3)}
+.pf-appnav-links a{padding:6px 10px;border-radius:var(--r-sm);color:var(--text-muted);font-weight:500;text-decoration:none}
+.pf-appnav-links a:hover{background:var(--surface-2);color:var(--text)}
+.pf-appnav-links a.pf-active{background:var(--selected);color:var(--text);font-weight:600}
+.pf-appnav-spacer{flex:1}
+/* user name + logout reuse pf-nav-who / pf-nav-logout so the shared buildAppNav
+   output styles correctly in both the app-shell and the artifact viewer. */
 .pf-nav-who {
-  color: var(--pf-fg-muted);
+  color: var(--text-muted);
   font-size: 0.88em;
 }
 .pf-nav-logout button {
@@ -191,7 +170,8 @@ a:hover { text-decoration: underline; }
 /* Theme mode control in the nav: a compact 3-segment rectangle
    (Auto | Light | Dark), styled like the prototype .seg control. Vanilla-JS
    sets the `theme` cookie + data-theme on click; the active segment is rendered
-   server-side from .Theme so it is correct on first paint. */
+   server-side from .Theme so it is correct on first paint.
+   Shared between app-shell and artifact viewer (aihub#167). */
 .pf-theme-seg {
   display: inline-flex;
   height: 30px;
@@ -217,13 +197,17 @@ a:hover { text-decoration: underline; }
 /* ---------- main + footer ---------- */
 .pf-main {
   max-width: 1100px;
-  margin: 1.5em auto 3em;
-  padding: 0 1.5em;
+  /* padding-top reserves space for the fixed .pf-appnav (height 54px + 6px gap). */
+  margin: 0 auto 3em;
+  padding: 60px 1.5em 0;
 }
-/* Scoped override: the .detail grid only appears on the WI detail page;
-   widen the container so the wider grid + gap fits without clipping.
-   This does not affect other pages using .pf-main. */
-.pf-main:has(.detail) { max-width: 1232px; }
+/* Scoped override: the .detail grid only appears on the WI detail page. Size the
+   container so its inner width equals the 940+256+gap grid (~1228px) PLUS the
+   .pf-main 1.5em side padding — so the doc column is the full 940px (matching the
+   artifact viewer) AND the breadcrumb/notices above the grid align with the doc
+   card's left edge (everything sits in one centered container, not the viewport).
+   Does not affect other pages using .pf-main. */
+.pf-main:has(.detail) { max-width: 1276px; padding-top: 68px; }
 .pf-footer {
   border-top: 1px solid var(--pf-border);
   color: var(--pf-fg-muted);
@@ -1129,9 +1113,13 @@ details.card[open] > summary.hd .chev { transform: rotate(45deg); }
    All classes mirror the prototype; tokens are reused from above.
    ============================================================ */
 
-/* breadcrumb */
-.crumb { display: flex; align-items: center; gap: 8px; color: var(--text-subtle); font-size: 12.5px; margin-bottom: var(--s4); }
-.crumb a:hover { color: var(--text-muted); }
+/* breadcrumb — unified across app-shell and artifact viewer (aihub#167 follow-up).
+   Moved from viewer.css so the single rule set covers both surfaces.
+   App-shell templates use <nav class="pf-crumb">; viewer uses the same via buildUIChrome. */
+.pf-crumb { display: flex; align-items: center; gap: 8px; color: var(--text-subtle); font-size: 12.5px; margin-bottom: var(--s4); }
+.pf-crumb a { color: var(--text-subtle); text-decoration: none; }
+.pf-crumb a:hover { color: var(--text-muted); }
+.pf-crumb-mono { font-family: var(--mono); }
 
 /* needs-you bar — subtle grey, mirrors the list's needs-you treatment */
 .needs {
@@ -1151,6 +1139,31 @@ details.card[open] > summary.hd .chev { transform: rotate(45deg); }
 /* header: badge metaline + goal title */
 .metaline { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; margin-bottom: var(--s4); }
 .h-title { font-size: 21px; line-height: 1.3; font-weight: 650; letter-spacing: -.012em; margin: 0 0 var(--s5); }
+
+/* doc card — shared surface used by the wi detail main column and the artifact
+   viewer's #pf-doc-col. A clean reusable class; does NOT carry the viewer's grid
+   placement (that stays on #pf-doc-col in viewer.css). aihub#167 follow-up. */
+.pf-doc-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow);
+  padding: var(--s8) 28px;
+}
+
+/* doc section — borderless section used inside a .pf-doc-card. Replaces nested
+   .card chrome (Background / Activity) so there is no card-inside-card visual.
+   The first section has no divider; subsequent sections get a top divider. */
+.pf-doc-section { }
+.pf-doc-section + .pf-doc-section { border-top: 1px solid var(--border); margin-top: var(--s6); padding-top: var(--s6); }
+.pf-doc-section-hd {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: var(--s4);
+}
+.pf-doc-section-hd h3 {
+  margin: 0; font-size: 12px; font-weight: 650; color: var(--text-muted);
+  letter-spacing: .03em; text-transform: uppercase;
+}
 
 /* prose (markdown background body) */
 .prose { font-size: 13.5px; min-width: 0; }

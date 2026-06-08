@@ -120,6 +120,12 @@ var assetVersion = fmt.Sprintf("%d", time.Now().Unix())
 //     timestamps line up with the rest of the page.
 func uiFuncMap() template.FuncMap {
 	return template.FuncMap{
+		// appnav renders the canonical top navigation bar (aihub#167).
+		// Signature matches buildAppNav so the template call
+		// {{appnav .Active .Theme .User}} maps directly.
+		"appnav": func(active, theme string, user *UserContext) template.HTML {
+			return buildAppNav(active, theme, user)
+		},
 		"md": func(src string) template.HTML {
 			out, err := render.Markdown(src)
 			if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	htmltemplate "html/template"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -135,7 +136,6 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				uiHead.WriteString("<script>(function(){document.documentElement.setAttribute('data-theme','")
 				uiHead.WriteString(theme)
 				uiHead.WriteString("');document.addEventListener('DOMContentLoaded',function(){document.body.classList.add('pf-review-page');});")
-				uiHead.WriteString("document.addEventListener('click',function(e){ if(e.target && e.target.id==='pf-theme-toggle'){ var r=document.documentElement; var cur=r.getAttribute('data-theme')==='dark'?'light':'dark'; r.setAttribute('data-theme',cur); document.cookie='theme='+cur+';path=/;max-age=31536000'; }});")
 				uiHead.WriteString("})();</script>\n")
 			} else {
 				uiHead.WriteString("<script>(function(){document.documentElement.setAttribute('data-theme','")
@@ -149,7 +149,6 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				// so every spec/plan version renders in the new UI; annot.js's later add
 				// is then a no-op (the class is a pure CSS hook it never reads).
 				uiHead.WriteString("if(document.body){document.body.classList.add('pf-annot-active');}")
-				uiHead.WriteString("document.addEventListener('click',function(e){ if(e.target && e.target.id==='pf-theme-toggle'){ var r=document.documentElement; var cur=r.getAttribute('data-theme')==='dark'?'light':'dark'; r.setAttribute('data-theme',cur); document.cookie='theme='+cur+';path=/;max-age=31536000'; }});")
 				uiHead.WriteString("})();</script>\n")
 			}
 			uiHead.WriteString("<link rel=\"stylesheet\" href=\"/ui/static/ui.css?v=")
@@ -158,11 +157,19 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			uiHead.WriteString("<link rel=\"stylesheet\" href=\"/ui/static/viewer.css?v=")
 			uiHead.WriteString(av)
 			uiHead.WriteString("\">\n")
+			// aihub#167: load theme.js so the 3-segment theme control (now unified
+			// with the app-shell nav) works on the viewer. The inline single-toggle
+			// handler was removed; theme.js is the canonical theme handler for all /ui.
+			uiHead.WriteString("<script src=\"/ui/static/theme.js?v=")
+			uiHead.WriteString(av)
+			uiHead.WriteString("\" defer></script>\n")
 
-			// aihub#138: build the app-shell nav + breadcrumb for /ui pages.
+			// aihub#138 / #167: build the unified app-shell nav + breadcrumb for /ui
+			// pages. Uses buildAppNav (same function as layout.html.tmpl) so the nav
+			// is byte-identical across the app-shell and the artifact viewer.
 			// The chrome is prepended to annotHTML so it is emitted after #pf-doc-col
 			// in the DOM; CSS grid `order` floats it to the top.
-			uiChrome := buildUIChrome(mem.WorkItemID, mem.Type, mem.ID)
+			uiChrome := buildUIChrome(mem.WorkItemID, mem.Type, mem.ID, "", theme, u)
 
 			// aihub#154: build the Share control + share.js — /ui path only, and
 			// only for artifacts that actually have stored rendered HTML (i.e.
@@ -522,27 +529,83 @@ func artifactBackHref(routePath string, workItemID *string) string {
 	return ""
 }
 
-// buildUIChrome constructs the app-shell nav + breadcrumb HTML fragment for /ui
-// artifact pages (aihub#138). The fragment is emitted into annotHTML so it
-// lands AFTER #pf-doc-col in the DOM; CSS grid `order` rules float it to the
-// visual top without restructuring DocumentWithMeta's wrapper.
+// buildAppNav constructs the canonical <header class="pf-appnav"> HTML for the
+// /ui top navigation bar (aihub#167). It is the single source for the nav so
+// that both the app-shell (layout.html.tmpl via the {{appnav}} template func)
+// and the artifact viewer (buildUIChrome) render the same markup from one place.
 //
-// The breadcrumb format varies by type:
+//   - active: "wi" | "memories" | "" — drives the .pf-active class on nav links.
+//   - theme:  "auto" | "light" | "dark" — drives the .on class on the 3-segment
+//     theme control.
+//   - user:   when non-nil the display-name + logout form are emitted; pass nil
+//     to omit (anonymous / non-authenticated views).
+//
+// All user-supplied strings are HTML-escaped. Returns template.HTML so it is
+// safe to inject directly into a template with {{appnav .Active .Theme .User}}.
+func buildAppNav(active, theme string, user *UserContext) htmltemplate.HTML {
+	var b strings.Builder
+	b.WriteString("<header class=\"pf-appnav\">\n")
+	b.WriteString("  <a class=\"pf-appnav-brand\" href=\"/ui/\"><span class=\"pf-appnav-mark\">p</span> polyforge</a>\n")
+	b.WriteString("  <nav class=\"pf-appnav-links\">")
+	if active == "wi" {
+		b.WriteString("<a href=\"/ui/wi\" class=\"pf-active\">Work Items</a>")
+	} else {
+		b.WriteString("<a href=\"/ui/wi\">Work Items</a>")
+	}
+	if active == "memories" {
+		b.WriteString("<a href=\"/ui/memories\" class=\"pf-active\">Memories</a>")
+	} else {
+		b.WriteString("<a href=\"/ui/memories\">Memories</a>")
+	}
+	b.WriteString("</nav>\n")
+	b.WriteString("  <span class=\"pf-appnav-spacer\"></span>\n")
+	b.WriteString("  <div class=\"pf-theme-seg\" id=\"pf-theme-seg\" role=\"group\" aria-label=\"Color theme\">\n")
+	if theme == "auto" {
+		b.WriteString("    <button type=\"button\" data-theme-mode=\"auto\" class=\"on\">Auto</button>\n")
+	} else {
+		b.WriteString("    <button type=\"button\" data-theme-mode=\"auto\">Auto</button>\n")
+	}
+	if theme == "light" {
+		b.WriteString("    <button type=\"button\" data-theme-mode=\"light\" class=\"on\">Light</button>\n")
+	} else {
+		b.WriteString("    <button type=\"button\" data-theme-mode=\"light\">Light</button>\n")
+	}
+	if theme == "dark" {
+		b.WriteString("    <button type=\"button\" data-theme-mode=\"dark\" class=\"on\">Dark</button>\n")
+	} else {
+		b.WriteString("    <button type=\"button\" data-theme-mode=\"dark\">Dark</button>\n")
+	}
+	b.WriteString("  </div>\n")
+	if user != nil {
+		b.WriteString("  <span class=\"pf-nav-who\">")
+		b.WriteString(html.EscapeString(user.DisplayName))
+		b.WriteString("</span>\n")
+		b.WriteString("  <form method=\"POST\" action=\"/ui/logout\" class=\"pf-nav-logout\">\n")
+		b.WriteString("    <button type=\"submit\">Logout</button>\n")
+		b.WriteString("  </form>\n")
+	}
+	b.WriteString("</header>\n")
+	return htmltemplate.HTML(b.String()) //nolint:gosec // intentionally pre-escaped above
+}
+
+// buildUIChrome constructs the app-shell nav + breadcrumb HTML fragment for /ui
+// artifact pages (aihub#138, unified in aihub#167). The fragment is emitted
+// into annotHTML so it lands AFTER #pf-doc-col in the DOM; CSS grid `order`
+// rules float it to the visual top without restructuring DocumentWithMeta's wrapper.
+//
+// The nav is now produced by buildAppNav so it is byte-identical to the nav
+// rendered by the app-shell (layout.html.tmpl). The breadcrumb format varies:
 //   - methodology.spec → "<wi> / Spec <memID>"
 //   - methodology.plan → "<wi> / Plan <memID>"
 //   - methodology.review → "<wi> / Review <memID>"
 //   - other → "<wi> / <type> <memID>"
 //
 // When workItemID is nil the wi segment is rendered as plain text "artifact".
+// active is typically "" for artifact pages (no nav link is highlighted).
 // All interpolated values are HTML-escaped.
-func buildUIChrome(workItemID *string, memType, memID string) string {
+func buildUIChrome(workItemID *string, memType, memID, active, theme string, user *UserContext) string {
 	var b strings.Builder
-	b.WriteString("<header class=\"pf-appnav\">\n")
-	b.WriteString("  <div class=\"pf-appnav-brand\"><span class=\"pf-appnav-mark\">p</span> polyforge</div>\n")
-	b.WriteString("  <nav class=\"pf-appnav-links\"><a href=\"/ui/wi\">Work Items</a><a href=\"/ui/memories\">Memories</a></nav>\n")
-	b.WriteString("  <span class=\"pf-appnav-spacer\"></span>\n")
-	b.WriteString("  <button type=\"button\" class=\"pf-appnav-themebtn\" id=\"pf-theme-toggle\" title=\"toggle light / dark\">light / dark</button>\n")
-	b.WriteString("</header>\n")
+	b.WriteString(string(buildAppNav(active, theme, user)))
 
 	// Breadcrumb.
 	b.WriteString("<nav class=\"pf-crumb\">")

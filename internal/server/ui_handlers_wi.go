@@ -370,11 +370,14 @@ func registerUIWIHandlers(g *echo.Group, pool *pgxpool.Pool, _ *template.Templat
 
 // handleUIWIList renders the work-item list page.
 //
-// Project selection mirrors the queue page: query ?project= wins; otherwise
-// the first project (alphabetical) the caller can see. For non-admins this
-// comes from their ProjectRoles map; for admins (empty map by design — see
-// middleware.go ~L104-106) availableProjectsForUI falls back to all visible
-// projects via domain.ListProjects.
+// Project selection: an explicit ?project= wins — a concrete name narrows to a
+// single project, __all__ selects the cross-project view. With no ?project= we
+// default to the "All projects" view so the top-nav Work Items link always lands
+// on every accessible project (not an arbitrary first one). The one exception is a
+// non-admin with zero accessible projects: it falls through to the no-access guard
+// below. availableProjectsForUI is the project set — non-admins get their
+// ProjectRoles map; for admins (empty map by design — see middleware.go ~L104-106)
+// it falls back to all visible projects via domain.ListProjects.
 func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -406,15 +409,17 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 
 		// project resolution:
 		//   "__all__"  → view across every project the caller can see
-		//   ""         → default to first available
+		//   ""         → default to the cross-project "All projects" view (the
+		//                top-nav Work Items link lands here); a non-admin with zero
+		//                accessible projects stays "" so the no-access guard fires
 		//   "<name>"   → single project
 		projectParam := strings.TrimSpace(c.QueryParam("project"))
-		allMode := projectParam == allProjectsSentinel
+		isAdmin := u != nil && u.Role == "admin"
+		allMode := projectParam == allProjectsSentinel ||
+			(projectParam == "" && (isAdmin || len(projects) > 0))
 		project := projectParam
 		if allMode {
 			project = allProjectsSentinel // keep sentinel for the template's selected-option check
-		} else if project == "" && len(projects) > 0 {
-			project = projects[0]
 		}
 		data.Project = project
 		data.AllMode = allMode

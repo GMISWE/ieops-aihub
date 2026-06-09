@@ -675,6 +675,19 @@ body.pf-annot-active > #pf-side-rail { grid-column: 2; }
 .pf-diagram { margin: var(--s5) 0; padding: var(--s4); border: 1px solid var(--border);
   border-radius: var(--r-lg); background: var(--surface-2); text-align: center; overflow-x: auto; }
 .pf-diagram svg { max-width: min(100%, 600px); height: auto; }
+/* aihub#161: theme the d2 diagram for light/dark. d2 bakes the #129 LIGHT ramp as
+   presentation attributes (fill="#1c1c20" …) — var() is invalid in presentation
+   attributes, but an external CSS rule overrides them. Map each fixed hex (set in
+   render/diagram.go's ThemeOverrides) to the page's theme token, which switches on
+   data-theme: light resolves to the same hex (diagram unchanged), dark resolves to
+   the dark token (diagram follows the page). Instant toggle, no re-render, no Go change. */
+.pf-diagram [fill="#1c1c20"]{fill:var(--text)} .pf-diagram [stroke="#1c1c20"]{stroke:var(--text)}
+.pf-diagram [fill="#646469"]{fill:var(--text-muted)} .pf-diagram [stroke="#646469"]{stroke:var(--text-muted)}
+.pf-diagram [fill="#94949b"]{fill:var(--text-subtle)} .pf-diagram [stroke="#94949b"]{stroke:var(--text-subtle)}
+.pf-diagram [fill="#d6d5d0"]{fill:var(--border-strong)} .pf-diagram [stroke="#d6d5d0"]{stroke:var(--border-strong)}
+.pf-diagram [fill="#e6e5e1"]{fill:var(--border)} .pf-diagram [stroke="#e6e5e1"]{stroke:var(--border)}
+.pf-diagram [fill="#f6f6f4"]{fill:var(--surface-2)} .pf-diagram [stroke="#f6f6f4"]{stroke:var(--surface-2)}
+.pf-diagram [fill="#ffffff"]{fill:var(--surface)} .pf-diagram [stroke="#ffffff"]{stroke:var(--surface)}
 /* collapsible side-rail cards (aihub#159 step4c) — TOC default-open, rest closed */
 .pf-side-hd { display: flex; align-items: center; gap: 6px; }
 .pf-side-card > summary.pf-side-hd { cursor: pointer; list-style: none; }

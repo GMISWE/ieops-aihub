@@ -115,6 +115,13 @@ ul { padding-left: 18px; }
 a { color: var(--text-muted); }
 a:hover { color: var(--text); }
 
+/* aihub#171: hide the markdown `---` rule on /ui. The viewer already separates
+   sections via the h2 / .pf-sec border-top above, so an authored <hr> renders a
+   redundant second divider. Overrides the frozen style.css hr (border-top + 2em
+   margin) — equal specificity, loaded later so display:none wins. /v1 + /share
+   never load viewer.css, so their byte output keeps the <hr> unchanged. */
+hr { display: none; }
+
 /* aihub#159: collapsible H2 sections (/ui readability; default-open) */
 .pf-sec { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 4px; }
 .pf-sec > .pf-sec-sum { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }

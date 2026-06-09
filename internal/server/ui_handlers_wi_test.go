@@ -306,6 +306,33 @@ func TestUIWIList_NoProject_OmitsQueueEmbed(t *testing.T) {
 	}
 }
 
+// TestUIWIList_NoProject_DefaultsToAllProjects asserts that hitting /ui/wi with no
+// ?project= param defaults to the cross-project "All projects" view, so the top-nav
+// Work Items link always lands on every accessible project rather than silently
+// selecting the first one. A user with at least one project must enter all-mode.
+func TestUIWIList_NoProject_DefaultsToAllProjects(t *testing.T) {
+	withFakeListWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		return &domain.ListWorkItemsResult{Items: []*domain.WorkItem{}}, nil
+	})
+
+	e := echo.New()
+	g := e.Group("/ui", wiInjectUser(wiTestUser())) // wiTestUser can see project p1
+	registerUIWIHandlers(g, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/wi", nil) // no ?project=
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// All-mode strip polls the partial with the __all__ sentinel; single-project
+	// mode would poll ?project=p1. This is the discriminator for the default view.
+	if !strings.Contains(rec.Body.String(), "/ui/queue/partial?project=__all__") {
+		t.Errorf("no-param /ui/wi should default to All projects (all-mode); body:\n%s", rec.Body.String())
+	}
+}
+
 // TestUIWIList_RendersGroupWrapWithTotalCount asserts the per-section markup:
 // each section renders as a .grp-wrap with a .grp-n total-count pill and a
 // per-block pager container, so the client can paginate each block independently.

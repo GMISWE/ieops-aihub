@@ -280,7 +280,28 @@ func renderTemplate(c echo.Context, tmpl *template.Template, name string, data a
 	if err := tmpl.ExecuteTemplate(&buf, name, data); err != nil {
 		return c.String(http.StatusInternalServerError, "template error: "+err.Error())
 	}
+	setRenderHeaders(c)
 	return c.HTMLBlob(http.StatusOK, []byte(buf.String()))
+}
+
+// setRenderHeaders applies cache-hygiene headers so an htmx fragment response
+// (layout-less, no <head>/CSS) can never be cached under the same URL key as a
+// full-page response and then served for a later full-page navigation
+// (the /ui/wi unstyled-on-Back bug).
+//
+// Vary: HX-Request keys caches on the header the handler branches on, so a
+// full-page navigation (no HX-Request) and an htmx fragment (HX-Request: true)
+// are distinct cache entries. Cache-Control: no-store additionally opts htmx
+// responses out of caching entirely. We key no-store on the REQUEST being an
+// htmx request (a fragment is only ever produced for one) rather than on the
+// template name, so normal full-page renders (e.g. the login page, which does
+// not reuse the "layout" block name) are never wrongly marked no-store.
+func setRenderHeaders(c echo.Context) {
+	h := c.Response().Header()
+	h.Set("Vary", "HX-Request")
+	if c.Request().Header.Get("HX-Request") == "true" {
+		h.Set("Cache-Control", "no-store")
+	}
 }
 
 // parseRelatedIDs extracts the "related_ids" string array from a mem.Attrs

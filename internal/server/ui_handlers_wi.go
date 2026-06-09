@@ -1330,6 +1330,7 @@ func renderHTMLStatus(c echo.Context, tmpl *template.Template, name string, data
 	if err := tmpl.ExecuteTemplate(&buf, name, data); err != nil {
 		return c.String(http.StatusInternalServerError, "template error: "+err.Error())
 	}
+	setRenderHeaders(c)
 	return c.HTMLBlob(status, []byte(buf.String()))
 }
 

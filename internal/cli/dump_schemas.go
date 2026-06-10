@@ -85,7 +85,7 @@ func enumerateMCPTools(ctx context.Context) ([]*sdkmcp.Tool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("client connect: %w", err)
 	}
-	defer clientSession.Close()
+	defer func() { _ = clientSession.Close() }()
 
 	// List all tools (paginated).
 	var allTools []*sdkmcp.Tool

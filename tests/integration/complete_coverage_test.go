@@ -700,23 +700,28 @@ func TestMultiLevelDependencyChain(t *testing.T) {
 	waitForHealth(t, c, 30*time.Second)
 
 	suffix := time.Now().UnixNano()
+	// requires_human_session=false so items appear in items[] (not unclassified[])
+	// now that scenario_phase_configs auto-classification was removed (migration 0017).
 	a := mustCreateWorkItem(t, c, ctx, map[string]any{
-		"goal":     fmt.Sprintf("multi-dep-A %d", suffix),
-		"project":  testProject,
-		"scenario": "coding",
-		"wi_type":  "fix_bug",
+		"goal":                   fmt.Sprintf("multi-dep-A %d", suffix),
+		"project":                testProject,
+		"scenario":               "coding",
+		"wi_type":                "fix_bug",
+		"requires_human_session": false,
 	})
 	b := mustCreateWorkItem(t, c, ctx, map[string]any{
-		"goal":     fmt.Sprintf("multi-dep-B %d", suffix),
-		"project":  testProject,
-		"scenario": "coding",
-		"wi_type":  "fix_bug",
+		"goal":                   fmt.Sprintf("multi-dep-B %d", suffix),
+		"project":                testProject,
+		"scenario":               "coding",
+		"wi_type":                "fix_bug",
+		"requires_human_session": false,
 	})
 	cWI := mustCreateWorkItem(t, c, ctx, map[string]any{
-		"goal":     fmt.Sprintf("multi-dep-C %d", suffix),
-		"project":  testProject,
-		"scenario": "coding",
-		"wi_type":  "fix_bug",
+		"goal":                   fmt.Sprintf("multi-dep-C %d", suffix),
+		"project":                testProject,
+		"scenario":               "coding",
+		"wi_type":                "fix_bug",
+		"requires_human_session": false,
 	})
 	defer cancelWorkItem(t, c, ctx, a)
 	defer cancelWorkItem(t, c, ctx, b)

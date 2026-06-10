@@ -1,13 +1,16 @@
 -- +goose Up
 
 -- Step 1: backfill projects from work_items/memories DISTINCT project
+-- Skipped on fresh databases (no admin user yet) — backfill only runs when an admin
+-- already exists (i.e. existing production databases that ran this migration after bootstrap).
 -- +goose StatementBegin
 DO $$
 DECLARE fallback_admin TEXT;
 BEGIN
     SELECT id INTO fallback_admin FROM users WHERE role='admin' ORDER BY created_at ASC LIMIT 1;
     IF fallback_admin IS NULL THEN
-        RAISE EXCEPTION 'no admin user exists; bootstrap admin first';
+        -- No admin user: fresh database, nothing to backfill. Skip silently.
+        RETURN;
     END IF;
     INSERT INTO projects(name, owner_user_id, visible, scenario)
     SELECT DISTINCT project, fallback_admin, true, 'coding'
@@ -17,10 +20,12 @@ END $$;
 -- +goose StatementEnd
 
 -- Step 2: users.project_roles keys → projects table (ensure all referenced projects exist)
+-- Only runs when an admin exists; no-op on fresh databases.
 INSERT INTO projects(name, owner_user_id, visible, scenario)
 SELECT key, (SELECT id FROM users WHERE role='admin' ORDER BY created_at LIMIT 1), true, 'coding'
 FROM users, jsonb_each(project_roles)
-WHERE NOT EXISTS (SELECT 1 FROM projects WHERE name=key)
+WHERE (SELECT id FROM users WHERE role='admin' ORDER BY created_at LIMIT 1) IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM projects WHERE name=key)
 ON CONFLICT(name) DO NOTHING;
 
 -- members migration: copy users.project_roles into projects.members JSONB

@@ -45,3 +45,18 @@ VALUES (
         "name":     "test-maintainer-key"
     }]'
 ) ON CONFLICT (id) DO NOTHING;
+
+-- "aihub" project — required by FK constraint (fk_wi_project / fk_mem_project added in 0013)
+-- and assumed to exist by all integration tests (testProject = "aihub" in helpers_test.go).
+-- The writer and maintainer users are granted writer access via projects.members.
+INSERT INTO projects (name, owner_user_id, visible, scenario, members)
+VALUES (
+    'aihub',
+    'u_test_admin_001',
+    true,
+    'coding',
+    '[
+        {"user_id": "u_test_writer_001",     "role": "writer"},
+        {"user_id": "u_test_maintainer_001", "role": "writer"}
+    ]'::jsonb
+) ON CONFLICT (name) DO NOTHING;

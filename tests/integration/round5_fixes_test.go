@@ -20,20 +20,24 @@ func TestDependencyBlocksReadyQueue(t *testing.T) {
 	c := newTestClient(t)
 	waitForHealth(t, c, 30*time.Second)
 
-	// 1. Create two fix_bug work items
+	// 1. Create two fix_bug work items.
+	// requires_human_session=false so they appear in items[] (not unclassified[])
+	// after the scenario_phase_configs system was removed (migration 0017).
 	blockerID := mustCreateWorkItem(t, c, ctx, map[string]any{
-		"goal":     fmt.Sprintf("Dep-test blocker %d", time.Now().UnixNano()),
-		"project":  testProject,
-		"scenario": "coding",
-		"wi_type":  "fix_bug",
-		"priority": "high",
+		"goal":                   fmt.Sprintf("Dep-test blocker %d", time.Now().UnixNano()),
+		"project":                testProject,
+		"scenario":               "coding",
+		"wi_type":                "fix_bug",
+		"priority":               "high",
+		"requires_human_session": false,
 	})
 	blockedID := mustCreateWorkItem(t, c, ctx, map[string]any{
-		"goal":     fmt.Sprintf("Dep-test blocked %d", time.Now().UnixNano()),
-		"project":  testProject,
-		"scenario": "coding",
-		"wi_type":  "fix_bug",
-		"priority": "normal",
+		"goal":                   fmt.Sprintf("Dep-test blocked %d", time.Now().UnixNano()),
+		"project":                testProject,
+		"scenario":               "coding",
+		"wi_type":                "fix_bug",
+		"priority":               "normal",
+		"requires_human_session": false,
 	})
 	t.Logf("blocker=%s blocked=%s", blockerID, blockedID)
 	defer cancelWorkItem(t, c, ctx, blockerID)

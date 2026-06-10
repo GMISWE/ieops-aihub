@@ -125,6 +125,15 @@ func runCLI(ctx context.Context, args []string) {
 			fatalf("config: %v\n", cfgErr)
 		}
 		cli.RunUpdateStep(ctx, aihubClient, args[1:])
+	case "dump-mcp-schemas":
+		gitSHA := ""
+		if len(args) > 1 {
+			gitSHA = args[1]
+		}
+		if err := cli.RunDumpMCPSchemas(ctx, gitSHA, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "dump-mcp-schemas: %v\n", err)
+			os.Exit(1)
+		}
 	case "commit":
 		cli.RunCommit(ctx, args[1:])
 	case "push":
@@ -161,6 +170,9 @@ Workspace commands:
   init                        Set up/repair workspace (usage.md, session hook, clone repos, CLAUDE.md)
   doctor [--fix]              5-item health check
   version                     Print version
+
+Schema export:
+  dump-mcp-schemas [<git-sha>]   Print all registered MCP tool schemas as contract JSON
 
 Step management (machine-user):
   get-step [--wi-id=<id>]     Get current step

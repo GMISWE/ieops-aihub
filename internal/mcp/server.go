@@ -80,7 +80,20 @@ func (s *Server) startupScan() {
 	}
 }
 
+// Connect connects the underlying SDK server to the given transport and returns
+// the server session. This is used by the dump-mcp-schemas CLI command to
+// enumerate tools via an in-memory transport without a real aihub connection.
+func (s *Server) Connect(ctx context.Context, transport sdkmcp.Transport) (*sdkmcp.ServerSession, error) {
+	return s.mcp.Connect(ctx, transport, nil)
+}
+
 // registerAll registers all pf_ tools.
+//
+// Invariant: registration must work with nil dependencies (s.client/s.cfg are
+// only touched inside handler closures). cmd/polyforge's dump-mcp-schemas and
+// the CI publish-schemas job rely on this — do NOT read deps or register
+// conditionally here, or the exported schema will silently drift from the
+// running server's toolset.
 func (s *Server) registerAll() {
 	s.registerLifecycleTools()
 	s.registerEventTools()

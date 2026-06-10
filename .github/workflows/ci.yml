@@ -48,6 +48,47 @@ jobs:
         run: go test -count=1 -race ./...
         # Note: integration tests require docker-compose; run locally: cd tests/integration && make test
 
+  publish-schemas:
+    name: Publish MCP Schemas
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # Serialize force-pushes to the orphan branch — concurrent main pushes would
+    # race last-writer-wins on pf-schemas.
+    concurrency:
+      group: publish-schemas
+      cancel-in-progress: false
+    permissions:
+      contents: write   # needed for force-pushing orphan branch pf-schemas
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+          cache: true
+
+      - name: Export MCP tool schemas
+        run: |
+          SHA=$(git rev-parse HEAD)
+          go build -o /tmp/polyforge ./cmd/polyforge/
+          /tmp/polyforge dump-mcp-schemas "${SHA}" > /tmp/pf-tool-schemas.json
+          echo "Generated schemas for commit ${SHA}"
+          python3 -c "import json,sys; json.load(open('/tmp/pf-tool-schemas.json')); print('JSON valid')"
+
+      - name: Publish to pf-schemas orphan branch
+        run: |
+          git config user.email "ci@gmi.com"
+          git config user.name "CI"
+          COMMIT_SHA=$(git rev-parse HEAD)
+          git checkout --orphan pf-schemas
+          git rm -rf .
+          cp /tmp/pf-tool-schemas.json pf-tool-schemas.json
+          git add pf-tool-schemas.json
+          git commit -m "schemas: ${COMMIT_SHA}"
+          git push --force origin HEAD:refs/heads/pf-schemas
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

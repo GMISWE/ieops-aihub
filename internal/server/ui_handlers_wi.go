@@ -510,6 +510,13 @@ func registerUIWIHandlers(g *echo.Group, pool *pgxpool.Pool, _ *template.Templat
 func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
+		// u is populated by RequireUISession middleware, so it is never nil here in
+		// practice. Guard defensively anyway so the rest of the handler can deref it
+		// freely without a nil check on every access (and so staticcheck does not
+		// flag SA5011 possible-nil-dereference on the bare u.Role / u.DisplayName uses).
+		if u == nil {
+			return c.NoContent(http.StatusUnauthorized)
+		}
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 

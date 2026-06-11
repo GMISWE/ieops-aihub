@@ -319,6 +319,23 @@
     });
   });
 
+  // ---- keep the filter form's seg param fresh (aihub#185 fix) --------------
+  // The sidebar segment links swap only #wi-list-body, so the form's hidden
+  // `seg` input (which lives OUTSIDE the swap, in the page header) never updates
+  // when you switch segments — it stays at the initial value. So a Mine/All
+  // toggle or project switch (which reloads via this form) would send the STALE
+  // seg and reset you to it (e.g. Unclaimed). Fix: at request time, read the live
+  // selected segment from the sidebar's .on item (which IS re-rendered on every
+  // swap) and inject it, so the segment is always preserved.
+  document.body.addEventListener("htmx:configRequest", function (e) {
+    var el = e.target;
+    if (!el || !el.matches || !el.matches("form[data-wi-filters]")) return;
+    var on = document.querySelector(".seg-nav .seg-item.on[data-seg-key]");
+    if (on && e.detail && e.detail.parameters) {
+      e.detail.parameters.seg = on.getAttribute("data-seg-key");
+    }
+  });
+
   // ---- per-section pagination ---------------------------------------------
 
   // Each .grp-wrap paginates its rows independently: at most PAGE_SIZE rows are

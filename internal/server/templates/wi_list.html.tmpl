@@ -40,12 +40,11 @@
   <input type="hidden" name="project" value="{{if .AllMode}}__all__{{else}}{{.Project}}{{end}}" data-dd-input="project">
   <input type="hidden" name="kind" value="{{.Kind}}">
   <input type="hidden" name="reporter" value="{{.Reporter}}">
-  <input type="hidden" name="owner" value="{{.Owner}}" data-seg-input="owner">
-  {{/* all=1 is the explicit "show everyone" opt-out so the handler does not
-       re-default the empty owner filter back to Mine. */}}
-  <input type="hidden" name="all" value="{{if .Mine}}{{else}}1{{end}}" data-seg-input="all">
-  {{/* The selected segment rides along on every form-driven reload so switching
-       project / Mine-All keeps you on the same segment. */}}
+  {{/* owner: no-JS fallback / initial. With JS the header "me" toggle's live state
+       is injected at request time (dropdown.js htmx:configRequest). Empty = All. */}}
+  <input type="hidden" name="owner" value="{{.Owner}}">
+  {{/* seg: no-JS fallback; with JS the live selected segment (active sidebar item)
+       is injected at request time so a project/owner reload preserves it. */}}
   <input type="hidden" name="seg" value="{{.SelectedSeg}}" data-seg-keep>
 
   <label class="search">
@@ -53,14 +52,8 @@
     <input type="text" name="q" placeholder="Filter by title, id, label..." data-wi-search autocomplete="off" aria-label="Filter work items in this segment">
   </label>
 
-  {{/* Mine / All / Watching. Mine is the default personal view; Mine + All drive
-       the existing owner filter (Watching stays inert — aihub#143). */}}
-  <div class="seg" data-seg>
-    <button type="button" class="{{if .Mine}}on{{end}}" data-seg-owner="{{if .User}}{{.User.DisplayName}}{{end}}">Mine</button>
-    <button type="button" class="{{if not .Mine}}on{{end}}" data-seg-owner="" data-seg-all="1">All</button>
-    <button type="button" disabled title="Watching is not yet available">Watching</button>
-  </div>
-
+  {{/* Owner scope moved to the header "me" toggle (aihub#185 follow-up); default
+       view is All. Watching removed — re-added by aihub#143 when it lands. */}}
   <noscript><button type="submit" class="btn sm">Apply</button></noscript>
 </form>
 
@@ -86,6 +79,7 @@
       <div class="grp-wrap" data-grp>
       <div class="grp">
         {{range .Segments}}{{if .On}}<span class="grp-l">{{.Label}}</span>{{end}}{{end}}
+        {{if .User}}<button type="button" class="grp-me{{if .Mine}} on{{end}}" data-me-toggle data-me-owner="{{.User.DisplayName}}" title="只看我认领的(关闭=全部)">me</button>{{end}}
         <button type="button" class="grp-sort" data-wi-sort title="按创建时间排序(点击切换最新/最旧在前)" aria-label="toggle sort order">↓</button>
         <span class="grp-n">{{index .SegCounts .SelectedSeg}}</span>
       </div>
@@ -148,12 +142,11 @@
   <aside class="seg-nav">
     <div class="seg-title">Status</div>
     {{$proj := "__all__"}}{{if not .AllMode}}{{$proj = .Project}}{{end}}
-    {{$all := "1"}}{{if .Mine}}{{$all = ""}}{{end}}
     {{range .Segments}}
     {{if .Divider}}<div class="seg-div"></div>{{end}}
     <a class="seg-item{{if .On}} on{{end}}" data-seg-key="{{.Key}}"
-       href="/ui/wi?seg={{.Key}}&project={{$proj}}&all={{$all}}"
-       hx-get="/ui/wi?seg={{.Key}}&project={{$proj}}&all={{$all}}"
+       href="/ui/wi?seg={{.Key}}&project={{$proj}}&owner={{$.Owner}}"
+       hx-get="/ui/wi?seg={{.Key}}&project={{$proj}}"
        hx-target="#wi-list-body" hx-swap="innerHTML" hx-push-url="true">
       {{.Label}}<span class="cnt">{{.Count}}</span>
     </a>

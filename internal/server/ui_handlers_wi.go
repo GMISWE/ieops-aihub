@@ -510,6 +510,13 @@ func registerUIWIHandlers(g *echo.Group, pool *pgxpool.Pool, _ *template.Templat
 func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
+		// u is populated by RequireUISession middleware, so it is never nil here in
+		// practice. Guard defensively anyway so the rest of the handler can deref it
+		// freely without a nil check on every access (and so staticcheck does not
+		// flag SA5011 possible-nil-dereference on the bare u.Role / u.DisplayName uses).
+		if u == nil {
+			return c.NoContent(http.StatusUnauthorized)
+		}
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
@@ -543,7 +550,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		//                accessible projects stays "" so the no-access guard fires
 		//   "<name>"   → single project
 		projectParam := strings.TrimSpace(c.QueryParam("project"))
-		isAdmin := u != nil && u.Role == "admin"
+		isAdmin := u.Role == "admin"
 		allMode := projectParam == allProjectsSentinel ||
 			(projectParam == "" && (isAdmin || len(projects) > 0))
 		project := projectParam
@@ -595,19 +602,14 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		data.Reporter = strings.TrimSpace(c.QueryParam("reporter"))
 		data.StatusLabel = statusFilterLabel(statusList)
 
-		// "Mine" segment is the owner filter pinned to the current user's
-		// display name. There is no separate domain concept — it reuses the
-		// existing ?owner= filter. This list is a PERSONAL dashboard, so when
-		// the caller has not explicitly chosen a segment (no ?owner= and no
-		// explicit ?all=1 opt-out) we DEFAULT to "Mine".
+		// Owner filter (aihub#185 follow-up): the list now DEFAULTS to All
+		// (everyone's items). The header "me" toggle opts into a personal view by
+		// setting ?owner=<my display name>; unset/empty = All. There is no separate
+		// domain concept — it reuses the existing ?owner= filter. data.Mine drives
+		// the in-memory owner scoping in segmentListRows + the toggle's on-state.
 		ownerParam := strings.TrimSpace(c.QueryParam("owner"))
-		_, ownerExplicit := c.QueryParams()["owner"]
-		allOptOut := c.QueryParam("all") == "1"
-		if ownerParam == "" && !ownerExplicit && !allOptOut && u != nil && u.DisplayName != "" {
-			ownerParam = u.DisplayName // default view = Mine
-		}
 		data.Owner = ownerParam
-		if u != nil && ownerParam != "" && ownerParam == u.DisplayName {
+		if ownerParam != "" && ownerParam == u.DisplayName {
 			data.Mine = true
 		}
 
@@ -685,10 +687,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		data.ReporterOptions = facets.Reporters
 		data.OwnerOptions = facets.Owners
 
-		viewer := ""
-		if u != nil {
-			viewer = u.DisplayName
-		}
+		viewer := u.DisplayName
 		// Headline strip counts come from the grouping (single source of truth —
 		// annotation #2). The strip is a STABLE overview and must NOT shift with
 		// the display status filter: when a status filter is active, compute it

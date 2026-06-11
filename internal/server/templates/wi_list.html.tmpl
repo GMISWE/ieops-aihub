@@ -151,7 +151,7 @@
     {{$all := "1"}}{{if .Mine}}{{$all = ""}}{{end}}
     {{range .Segments}}
     {{if .Divider}}<div class="seg-div"></div>{{end}}
-    <a class="seg-item{{if .On}} on{{end}}"
+    <a class="seg-item{{if .On}} on{{end}}" data-seg-key="{{.Key}}"
        href="/ui/wi?seg={{.Key}}&project={{$proj}}&all={{$all}}"
        hx-get="/ui/wi?seg={{.Key}}&project={{$proj}}&all={{$all}}"
        hx-target="#wi-list-body" hx-swap="innerHTML" hx-push-url="true">

@@ -550,7 +550,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		//                accessible projects stays "" so the no-access guard fires
 		//   "<name>"   → single project
 		projectParam := strings.TrimSpace(c.QueryParam("project"))
-		isAdmin := u != nil && u.Role == "admin"
+		isAdmin := u.Role == "admin"
 		allMode := projectParam == allProjectsSentinel ||
 			(projectParam == "" && (isAdmin || len(projects) > 0))
 		project := projectParam
@@ -609,7 +609,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		// the in-memory owner scoping in segmentListRows + the toggle's on-state.
 		ownerParam := strings.TrimSpace(c.QueryParam("owner"))
 		data.Owner = ownerParam
-		if u != nil && ownerParam != "" && ownerParam == u.DisplayName {
+		if ownerParam != "" && ownerParam == u.DisplayName {
 			data.Mine = true
 		}
 
@@ -687,10 +687,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		data.ReporterOptions = facets.Reporters
 		data.OwnerOptions = facets.Owners
 
-		viewer := ""
-		if u != nil {
-			viewer = u.DisplayName
-		}
+		viewer := u.DisplayName
 		// Headline strip counts come from the grouping (single source of truth —
 		// annotation #2). The strip is a STABLE overview and must NOT shift with
 		// the display status filter: when a status filter is active, compute it

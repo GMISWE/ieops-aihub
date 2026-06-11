@@ -298,25 +298,17 @@
     closeAllMenus(null);
   });
 
-  // ---- segmented control (All / Mine / Watching) --------------------------
+  // ---- "me" owner toggle (header) -----------------------------------------
 
-  document.querySelectorAll("[data-seg]").forEach(function (seg) {
-    var input = document.querySelector('[data-seg-input="owner"]');
-    var allInput = document.querySelector('[data-seg-input="all"]');
-    seg.querySelectorAll("button").forEach(function (b) {
-      if (b.disabled) return; // Watching is inert — no backend relationship.
-      b.addEventListener("click", function () {
-        if (!input) return;
-        seg.querySelectorAll("button").forEach(function (x) {
-          x.classList.toggle("on", x === b);
-        });
-        input.value = b.dataset.segOwner || "";
-        // The "All" segment carries data-seg-all="1" so the handler does not
-        // re-default the empty owner filter back to Mine.
-        if (allInput) allInput.value = b.dataset.segAll === "1" ? "1" : "";
-        fireFilter(0);
-      });
-    });
+  // Header pill ([data-me-toggle]): on = only my items, off = all (the list
+  // defaults to All). Delegated because the header is re-rendered on every swap.
+  // Fires the filter form; htmx:configRequest below injects the owner from this
+  // toggle's live state (there is no owner segment / hidden owner driver anymore).
+  document.body.addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("[data-me-toggle]") : null;
+    if (!b) return;
+    b.classList.toggle("on");
+    fireFilter(0);
   });
 
   // ---- keep the filter form's seg param fresh (aihub#185 fix) --------------
@@ -329,10 +321,20 @@
   // swap) and inject it, so the segment is always preserved.
   document.body.addEventListener("htmx:configRequest", function (e) {
     var el = e.target;
-    if (!el || !el.matches || !el.matches("form[data-wi-filters]")) return;
-    var on = document.querySelector(".seg-nav .seg-item.on[data-seg-key]");
-    if (on && e.detail && e.detail.parameters) {
-      e.detail.parameters.seg = on.getAttribute("data-seg-key");
+    if (!el || !el.matches) return;
+    var isForm = el.matches("form[data-wi-filters]");
+    var isSeg = el.matches(".seg-nav .seg-item[data-seg-key]");
+    if ((!isForm && !isSeg) || !e.detail || !e.detail.parameters) return;
+    // owner: inject the live "me" toggle state for BOTH the form reload and the
+    // sidebar segment links, so switching segment / project keeps the personal
+    // filter. Empty = All (the default view).
+    var me = document.querySelector("[data-me-toggle]");
+    e.detail.parameters.owner = (me && me.classList.contains("on")) ? (me.getAttribute("data-me-owner") || "") : "";
+    // seg: for the form reload, read the live active sidebar item (the form's
+    // hidden seg input lives outside the swap and would be stale).
+    if (isForm) {
+      var on = document.querySelector(".seg-nav .seg-item.on[data-seg-key]");
+      if (on) e.detail.parameters.seg = on.getAttribute("data-seg-key");
     }
   });
 

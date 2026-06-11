@@ -595,17 +595,12 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		data.Reporter = strings.TrimSpace(c.QueryParam("reporter"))
 		data.StatusLabel = statusFilterLabel(statusList)
 
-		// "Mine" segment is the owner filter pinned to the current user's
-		// display name. There is no separate domain concept — it reuses the
-		// existing ?owner= filter. This list is a PERSONAL dashboard, so when
-		// the caller has not explicitly chosen a segment (no ?owner= and no
-		// explicit ?all=1 opt-out) we DEFAULT to "Mine".
+		// Owner filter (aihub#185 follow-up): the list now DEFAULTS to All
+		// (everyone's items). The header "me" toggle opts into a personal view by
+		// setting ?owner=<my display name>; unset/empty = All. There is no separate
+		// domain concept — it reuses the existing ?owner= filter. data.Mine drives
+		// the in-memory owner scoping in segmentListRows + the toggle's on-state.
 		ownerParam := strings.TrimSpace(c.QueryParam("owner"))
-		_, ownerExplicit := c.QueryParams()["owner"]
-		allOptOut := c.QueryParam("all") == "1"
-		if ownerParam == "" && !ownerExplicit && !allOptOut && u != nil && u.DisplayName != "" {
-			ownerParam = u.DisplayName // default view = Mine
-		}
 		data.Owner = ownerParam
 		if u != nil && ownerParam != "" && ownerParam == u.DisplayName {
 			data.Mine = true

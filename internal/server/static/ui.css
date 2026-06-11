@@ -1107,10 +1107,22 @@ details.card[open] > summary.hd .chev { transform: rotate(45deg); }
 .seg-item .cnt { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--text-subtle); }
 .seg-item.on .cnt { color: var(--text); }
 .seg-div { height: 1px; background: var(--border); margin: 6px 6px; }
+/* Align the status sidebar's top with the search box. The filter row's right
+   column is empty (the Mine/All seg was removed → aihub#185 follow-up), so pull
+   the sidebar up into it by the search row's height: search box (32px) + the
+   .filters bottom margin (--s4). Desktop only — the two-column layout collapses
+   to one column below 921px, where there is nothing to align to. */
+@media (min-width: 921px) { .wi-layout .seg-nav { margin-top: calc(-32px - var(--s4)); } }
 
 /* sort toggle in the list group header (next to the count). */
 .grp-sort { border: 0; background: none; cursor: pointer; color: var(--text-subtle); font-family: var(--mono); font-size: 13px; line-height: 1; padding: 2px 5px; margin-right: 4px; border-radius: var(--r-sm); }
 .grp-sort:hover { background: var(--surface-2); color: var(--text); }
+
+/* "me" owner toggle in the group header (aihub#185 follow-up): on = only my
+   items, off = all. A small pill before the sort arrow. */
+.grp-me { border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); font-family: inherit; font-size: 11.5px; font-weight: 600; line-height: 1; height: 22px; padding: 0 9px; border-radius: var(--pill); cursor: pointer; margin-right: 6px; }
+.grp-me:hover { background: var(--surface-2); color: var(--text); }
+.grp-me.on { background: var(--selected); color: var(--text); border-color: var(--border-strong); }
 
 /* in-list pager footer (aihub#185): one clean footer row inside the .list card
    — page-info + per-page picker + numbered page buttons. */

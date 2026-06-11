@@ -1,11 +1,10 @@
 {{define "content"}}
 <section class="ph">
   <h1>Work Items</h1>
-  {{/* Project switcher — custom dropdown. Selecting an option sets the hidden
-       `project` field on the filter form and fires the shared HTMX request, so
-       the list updates in place while CARRYING the current status / search /
-       owner params (problem #1: switching project no longer resets the status
-       filter). Counts come from ProjectCounts. */}}
+  {{/* Project switcher — custom dropdown (unchanged by aihub#185). Selecting an
+       option sets the hidden `project` field on the filter form and fires the
+       shared HTMX request, so the list updates in place while carrying the
+       current seg / owner params. Counts come from ProjectCounts. */}}
   <div class="dd" data-dd>
     <button type="button" class="dd-btn" data-dd-btn>
       <span class="lbl">{{.ProjectLabel}}</span><span class="chev open" style="margin:0"></span>
@@ -23,193 +22,144 @@
   </div>
 </section>
 
-{{if ne .Project ""}}
-{{/* Headline count strip. Rendered server-side from .Strip on first paint so it
-     is never blank — including __all__ mode, where the counts aggregate across
-     accessible projects. The HTMX poll refreshes it every 5s and works for
-     __all__ too (the partial accepts the same project + all params). Running /
-     Needs you / Unclaimed are sourced from the same grouping as the list below,
-     so the numbers always match the visible sections. */}}
-<div class="pf-queue-embed"
-     hx-get="/ui/queue/partial?project={{if .AllMode}}__all__{{else}}{{.Project}}{{end}}&all={{if .Mine}}{{else}}1{{end}}"
-     hx-trigger="load delay:5s, every 5s"
-     hx-swap="innerHTML">
-  <div class="qstrip">
-    <div class="qcell"><div class="n">{{.Strip.Running}}</div><div class="l">Running</div></div>
-    <div class="qcell"><div class="n">{{.Strip.NeedsYou}}</div><div class="l">Needs you</div></div>
-    <div class="qcell"><div class="n">{{.Strip.Unclaimed}}</div><div class="l">Unclaimed</div></div>
-    <div class="qcell"><div class="n">{{.Strip.Stalled}}</div><div class="l">Stalled</div></div>
-  </div>
-</div>
-{{end}}
-
-{{/* Filter bar. Every filter change updates the list IN PLACE via HTMX: the
-     form is the single hx-get source, and hx-include="this" makes each request
-     carry the COMPLETE current param set (project + every checked status + kind
-     + owner/all + search). That is what makes a project switch preserve the
-     status selection (problem #1) and a status toggle auto-apply (problem #2).
-     hx-push-url keeps the address bar in sync so refresh / back reproduce the
-     state from the query params (the server already renders it).
-
-     Triggers: the custom dropdowns and segmented control are JS-driven, so they
-     dispatch a `pf-filter` event on this form (see dropdown.js) instead of a
-     full navigation; the search box fires on its own keyup/search events. The
-     legacy <noscript> submit button still does a plain GET. */}}
+{{/* Filter bar (aihub#185). The status multi-select dropdown + count strip are
+     gone — status is now the right sidebar (LCRS segments), rendered inside
+     #wi-list-body below. The form still drives an in-place HTMX reload for the
+     project switcher and the Mine/All segment (they fire `pf-filter`); search and
+     sort are CLIENT-SIDE (dropdown.js filters/reorders the rendered rows, no
+     server round-trip — decision A: search is scoped to the current segment).
+     hx-include="this" carries project + owner/all + the selected seg, so a
+     project switch or Mine/All toggle preserves the chosen segment. */}}
 <form method="GET" action="/ui/wi" class="filters" data-wi-filters
       hx-get="/ui/wi"
       hx-target="#wi-list-body"
       hx-swap="innerHTML"
       hx-push-url="true"
       hx-include="this"
-      hx-trigger="pf-filter, keyup changed delay:300ms from:[data-wi-search], search from:[data-wi-search]">
+      hx-trigger="pf-filter">
   <input type="hidden" name="project" value="{{if .AllMode}}__all__{{else}}{{.Project}}{{end}}" data-dd-input="project">
-  {{/* The legacy single ?status= hidden field is kept for back-compat consumers
-       but is NOT the multi-select source: the dropdown injects one hidden
-       <input name="status"> per checked box (data-dd-multi-field) so every
-       checked value travels with the request. It is left empty so it never
-       double-applies a status. */}}
-  <input type="hidden" name="status" value="" data-dd-input="status" disabled>
   <input type="hidden" name="kind" value="{{.Kind}}">
   <input type="hidden" name="reporter" value="{{.Reporter}}">
   <input type="hidden" name="owner" value="{{.Owner}}" data-seg-input="owner">
   {{/* all=1 is the explicit "show everyone" opt-out so the handler does not
        re-default the empty owner filter back to Mine. */}}
   <input type="hidden" name="all" value="{{if .Mine}}{{else}}1{{end}}" data-seg-input="all">
-  {{/* One hidden status input per currently-selected status, rendered
-       server-side so the FIRST in-place request (and a no-JS GET) already
-       carries the full multi-status set. dropdown.js keeps this list in sync as
-       boxes toggle. */}}
-  <span data-status-params>
-    {{range $s, $on := .Statuses}}<input type="hidden" name="status" value="{{$s}}">{{end}}
-  </span>
+  {{/* The selected segment rides along on every form-driven reload so switching
+       project / Mine-All keeps you on the same segment. */}}
+  <input type="hidden" name="seg" value="{{.SelectedSeg}}" data-seg-keep>
 
   <label class="search">
     <span>search</span>
-    <input type="text" name="q" placeholder="Filter by title, id, label..." data-wi-search autocomplete="off" aria-label="Filter work items">
+    <input type="text" name="q" placeholder="Filter by title, id, label..." data-wi-search autocomplete="off" aria-label="Filter work items in this segment">
   </label>
 
-  {{/* Mine / All / Watching. Mine is first and is the default view (a personal
-       dashboard). Mine + All drive the existing owner filter via the hidden
-       owner field; the "All" segment sets ?all=1 so the handler does not
-       re-default to Mine. Watching has no backend relationship — inert. */}}
+  {{/* Mine / All / Watching. Mine is the default personal view; Mine + All drive
+       the existing owner filter (Watching stays inert — aihub#143). */}}
   <div class="seg" data-seg>
     <button type="button" class="{{if .Mine}}on{{end}}" data-seg-owner="{{if .User}}{{.User.DisplayName}}{{end}}">Mine</button>
     <button type="button" class="{{if not .Mine}}on{{end}}" data-seg-owner="" data-seg-all="1">All</button>
     <button type="button" disabled title="Watching is not yet available">Watching</button>
   </div>
 
-  {{/* Status filter — multi-select dropdown. Each item is a checkbox; toggling
-       stays open. On close the JS rebuilds the URL with one ?status= param per
-       checked box and navigates (server filters via status IN (...)). The
-       selection is also persisted to localStorage keyed to this page. The
-       legacy hidden status field is kept for the single-value back-compat path
-       but the multi path drives navigation directly.
-
-       The status rows are drag-reorderable: the chosen order is persisted
-       (localStorage) and drives the display order of the middle status blocks
-       in the list below (both Mine and All views). Each row carries a grip
-       handle and draggable=true; the order region is data-dd-sortable. */}}
-  <div class="dd" data-dd data-dd-multi="status">
-    <button type="button" class="dd-btn" data-dd-btn>
-      <span class="lbl">{{.StatusLabel}}</span><span class="chev open" style="margin:0"></span>
-    </button>
-    <div class="dd-menu" hidden style="left:auto;right:0">
-      <div class="dd-it{{if not .Status}} on{{end}}" data-dd-multi-clear data-dd-label="All status">All status<span style="flex:1"></span><span class="ck"></span></div>
-      <div data-dd-sortable>
-        <div class="dd-it{{if .StatusOn "queued"}} on{{end}}" draggable="true" data-dd-multi-value="queued"><span class="dd-grip" aria-hidden="true"></span>Queued<span style="flex:1"></span><span class="ck"></span></div>
-        <div class="dd-it{{if .StatusOn "running"}} on{{end}}" draggable="true" data-dd-multi-value="running"><span class="dd-grip" aria-hidden="true"></span>Running<span style="flex:1"></span><span class="ck"></span></div>
-        <div class="dd-it{{if .StatusOn "paused"}} on{{end}}" draggable="true" data-dd-multi-value="paused"><span class="dd-grip" aria-hidden="true"></span>Paused<span style="flex:1"></span><span class="ck"></span></div>
-        <div class="dd-it{{if .StatusOn "blocked"}} on{{end}}" draggable="true" data-dd-multi-value="blocked"><span class="dd-grip" aria-hidden="true"></span>Blocked<span style="flex:1"></span><span class="ck"></span></div>
-        <div class="dd-it{{if .StatusOn "wrapped"}} on{{end}}" draggable="true" data-dd-multi-value="wrapped"><span class="dd-grip" aria-hidden="true"></span>Wrapped<span style="flex:1"></span><span class="ck"></span></div>
-        <div class="dd-it{{if .StatusOn "cancelled"}} on{{end}}" draggable="true" data-dd-multi-value="cancelled"><span class="dd-grip" aria-hidden="true"></span>Cancelled<span style="flex:1"></span><span class="ck"></span></div>
-      </div>
-    </div>
-  </div>
-
   <noscript><button type="submit" class="btn sm">Apply</button></noscript>
 </form>
 
-{{/* List body. Wrapped in #wi-list-body so every in-place HTMX request can swap
-     just the grouped sections (innerHTML) while the filter bar / project
-     switcher / count strip above stay put. The same block is rendered standalone
-     by the handler for HX-Request fragment responses — ONE grouping pipeline,
-     no duplicated logic. */}}
+{{/* Two-column body lives ENTIRELY inside #wi-list-body so a segment click (or a
+     project / Mine-All change) re-renders BOTH the sidebar (selected highlight +
+     counts) and the middle list in one swap. The handler renders this same block
+     standalone for HX-Request fragment responses. */}}
 <div id="wi-list-body">
 {{template "wi-list-body" .}}
 </div>
 {{end}}
 
-{{/* Standalone list-body fragment. The full page embeds it inside
-     #wi-list-body above; the handler renders it directly (no layout) for
-     HX-Request swaps. */}}
+{{/* Standalone list-body fragment — the full two-column layout. */}}
 {{define "wi-list-body"}}
-{{if .Err}}<div class="empty" style="max-width:none">{{.Err}}</div>{{end}}
+{{if .Err}}<div class="empty" style="max-width:none">{{.Err}}</div>{{else}}
+<div class="wi-layout">
 
-{{if .Groups}}
-{{/* Each group is a self-contained .grp-wrap so the client can (a) paginate its
-     rows independently (PAGE_SIZE per page, with a per-block pager) and (b)
-     reorder the "status"-kind blocks by the persisted drag order. The smart
-     sections (Needs you / Unclaimed) keep their pinned top/bottom position. The
-     group header carries the TOTAL row count so paged-out rows are never
-     invisible. */}}
-<div class="list" data-wi-list>
-  {{range .Groups}}
-  <div class="grp-wrap" data-grp data-grp-kind="{{.Kind}}"{{if eq .Kind "status"}} data-grp-status="{{.Status}}"{{end}}>
-    <div class="grp">
-      <span class="grp-l">{{.Label}}</span>
-      <span class="grp-n">{{len .Rows}}</span>
-    </div>
-    <div class="grp-rows" data-grp-rows>
-    {{if .Rows}}
-    {{range .Rows}}
-    <a class="row{{if .NeedsYou}} hot{{end}}" href="{{wiref (or .Slug .ID)}}" data-wi-row data-wi-text="{{.Slug}} {{.Goal}} {{.Project}}">
-      <span class="id">{{or .Slug .ID}}</span>
-      <span class="ti">
-        <div class="t">{{.Goal}}</div>
-        <div class="m">
-          {{if .WIType}}<span class="badge b-{{.WIType}}">{{.WIType}}</span>{{end}}
-          <span class="badge b-{{or .Priority "normal"}}">{{or .Priority "normal"}}</span>
-          {{if $.AllMode}}<span class="mono">{{.Project}}</span>{{end}}
+  {{/* LEFT — the selected segment's rows. The .grp header carries the segment
+       label, the client-side sort toggle (newest ↓ / oldest ↑, wired by
+       dropdown.js over data-created), and the segment's live total count. */}}
+  <div class="wi-main">
+    <div class="list" data-wi-list>
+      <div class="grp-wrap" data-grp>
+      <div class="grp">
+        {{range .Segments}}{{if .On}}<span class="grp-l">{{.Label}}</span>{{end}}{{end}}
+        <button type="button" class="grp-sort" data-wi-sort title="按创建时间排序(点击切换最新/最旧在前)" aria-label="toggle sort order">↓</button>
+        <span class="grp-n">{{index .SegCounts .SelectedSeg}}</span>
+      </div>
+      <div class="grp-rows" data-grp-rows>
+      {{if .SegRows}}
+      {{range .SegRows}}
+      <a class="row{{if .NeedsYou}} hot{{end}}" href="{{wiref (or .Slug .ID)}}"
+         data-wi-row
+         data-created="{{.CreatedAt.Unix}}"
+         data-wi-text="{{.Slug}} {{.Goal}} {{.Project}} {{.WIType}} {{or .Priority "normal"}}">
+        <span class="id">{{or .Slug .ID}}</span>
+        <span class="ti">
+          <div class="t">{{.Goal}}</div>
+          <div class="m">
+            {{if .WIType}}<span class="badge b-{{.WIType}}">{{.WIType}}</span>{{end}}
+            <span class="badge b-{{or .Priority "normal"}}">{{or .Priority "normal"}}</span>
+            {{if $.AllMode}}<span class="mono">{{.Project}}</span>{{end}}
+          </div>
+        </span>
+        <span class="rt">
+          <span class="badge b-{{.Status}}">{{if or (eq .Status "running") (eq .Status "queued")}}<span class="dot"></span>{{end}}{{.Status}}</span>
+          {{if .Assignee.Display}}
+            <span class="who" title="{{.Assignee.Display}}"><span class="av lg {{.Assignee.ColorClass}}">{{.Assignee.Initials}}</span></span>
+          {{else}}
+            <span class="who" title="unassigned"><span class="av lg ghost">?</span></span>
+          {{end}}
+        </span>
+      </a>
+      {{end}}
+      {{else}}
+      {{/* Empty segment — full-width empty-state inside the list card. */}}
+      <div class="empty" style="max-width:none;border:0;padding:26px 18px;margin:0">
+        <div class="et">Nothing here</div>
+        {{range .Segments}}{{if .On}}No work items in “{{.Label}}”.{{end}}{{end}}
+      </div>
+      {{end}}
+      </div>
+      {{/* Pager footer (aihub#185): page-info + per-page picker (default 10) +
+           numbered page buttons. dropdown.js fills it; the footer shows whenever
+           the segment has rows, the page buttons only when the rows span >1 page. */}}
+      <div class="pager" data-wi-pager hidden>
+        <span class="pinfo" data-grp-pinfo></span>
+        <span class="pp-label">每页</span>
+        <div class="seg" data-wi-perpage title="每页条数">
+          <button type="button" class="on" data-perpage="10">10</button>
+          <button type="button" data-perpage="25">25</button>
+          <button type="button" data-perpage="50">50</button>
+          <button type="button" data-perpage="100">100</button>
         </div>
-      </span>
-      <span class="rt">
-        <span class="badge b-{{.Status}}">{{if or (eq .Status "running") (eq .Status "queued")}}<span class="dot"></span>{{end}}{{.Status}}</span>
-        {{if .Assignee.Display}}
-          <span class="who" title="{{.Assignee.Display}}"><span class="av lg {{.Assignee.ColorClass}}">{{.Assignee.Initials}}</span></span>
-        {{else}}
-          <span class="who" title="unassigned"><span class="av lg ghost">?</span></span>
-        {{end}}
-      </span>
+        <span style="flex:1"></span>
+        <div class="grp-pager" data-grp-pager></div>
+      </div>
+      </div>
+    </div>
+  </div>
+
+  {{/* RIGHT — LCRS segment sidebar. Single-select; each item is an HTMX link that
+       swaps #wi-list-body (re-rendering this whole layout, so the .on highlight +
+       middle update together). Carries project + all so the view is preserved. */}}
+  <aside class="seg-nav">
+    <div class="seg-title">Status</div>
+    {{$proj := "__all__"}}{{if not .AllMode}}{{$proj = .Project}}{{end}}
+    {{$all := "1"}}{{if .Mine}}{{$all = ""}}{{end}}
+    {{range .Segments}}
+    {{if .Divider}}<div class="seg-div"></div>{{end}}
+    <a class="seg-item{{if .On}} on{{end}}"
+       href="/ui/wi?seg={{.Key}}&project={{$proj}}&all={{$all}}"
+       hx-get="/ui/wi?seg={{.Key}}&project={{$proj}}&all={{$all}}"
+       hx-target="#wi-list-body" hx-swap="innerHTML" hx-push-url="true">
+      {{.Label}}<span class="cnt">{{.Count}}</span>
     </a>
     {{end}}
-    {{else}}
-    {{/* Empty sections render the design-system empty-state so they stay
-         perceptible instead of vanishing: the smart sections (Needs you /
-         Unclaimed) are always emitted, and a status block is emitted for every
-         selected status (or all six when none is selected) even with zero rows. */}}
-    <div class="row" data-wi-empty>
-      <span></span>
-      <span class="ti">
-        <div class="empty" style="max-width:none;padding:18px;border:0">
-          <div class="et">Nothing here</div>
-          No work items in this section.
-        </div>
-      </span>
-      <span></span>
-    </div>
-    {{end}}
-    </div>
-    {{/* Per-section pager — JS builds the page controls inside and unhides it
-         only when the row count exceeds one page (PAGE_SIZE). */}}
-    <div class="grp-pager" data-grp-pager hidden></div>
-  </div>
-  {{end}}
-</div>
-{{else if not .Err}}
-<div class="empty">
-  <div class="ei">+</div>
-  <div class="et">No work items yet</div>
-  No items match the current filters. Clear the filters or pick another project.
+  </aside>
+
 </div>
 {{end}}
 {{end}}

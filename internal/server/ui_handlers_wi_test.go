@@ -44,6 +44,73 @@ func wiInjectUser(u *UserContext) echo.MiddlewareFunc {
 // stringPtr returns a pointer to s. Convenience for *string fields.
 func wiStrPtr(s string) *string { return &s }
 
+// TestSegmentFor pins the LCRS segment precedence (aihub#185): terminal -> stalled
+// -> running -> unclaimed -> needsyou -> paused -> (fallback) unclaimed.
+func TestSegmentFor(t *testing.T) {
+	stalled := map[string]bool{"wi_stall": true}
+	cases := []struct {
+		name   string
+		row    *wiListRow
+		viewer string
+		want   string
+	}{
+		{"queued unowned -> unclaimed", &wiListRow{ID: "a", Status: "queued"}, "Alice", "unclaimed"},
+		{"blocked unowned -> unclaimed", &wiListRow{ID: "b", Status: "blocked"}, "Alice", "unclaimed"},
+		{"running alive -> running", &wiListRow{ID: "c", Status: "running", OwnerDisplay: "Alice"}, "Alice", "running"},
+		{"running stalled -> stalled", &wiListRow{ID: "wi_stall", Status: "running", OwnerDisplay: "Bob"}, "Alice", "stalled"},
+		{"paused mine -> needsyou", &wiListRow{ID: "d", Status: "paused", OwnerDisplay: "Alice"}, "Alice", "needsyou"},
+		{"blocked mine -> needsyou", &wiListRow{ID: "e", Status: "blocked", OwnerDisplay: "Alice"}, "Alice", "needsyou"},
+		{"paused other -> paused", &wiListRow{ID: "f", Status: "paused", OwnerDisplay: "Bob"}, "Alice", "paused"},
+		{"blocked other -> unclaimed (fallback)", &wiListRow{ID: "g", Status: "blocked", OwnerDisplay: "Bob"}, "Alice", "unclaimed"},
+		{"wrapped -> done", &wiListRow{ID: "h", Status: "wrapped"}, "Alice", "done"},
+		{"cancelled -> done", &wiListRow{ID: "i", Status: "cancelled"}, "Alice", "done"},
+		{"failed -> done", &wiListRow{ID: "j", Status: "failed", OwnerDisplay: "Bob"}, "Alice", "done"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := segmentFor(tc.row, tc.viewer, stalled); got != tc.want {
+				t.Errorf("segmentFor(%+v) = %q, want %q", tc.row, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSegmentListRows pins the segment bucketing + counts (aihub#185), including
+// Mine-view owner scoping: others' rows drop from every segment except unclaimed,
+// and the needsyou rows get the NeedsYou flag (the .row.hot left bar).
+func TestSegmentListRows(t *testing.T) {
+	newRows := func() []*wiListRow {
+		return []*wiListRow{
+			{ID: "1", Status: "queued"},                        // unclaimed
+			{ID: "2", Status: "queued"},                        // unclaimed
+			{ID: "3", Status: "running", OwnerDisplay: "Alice"}, // running (mine)
+			{ID: "4", Status: "running", OwnerDisplay: "Bob"},   // running (other)
+			{ID: "5", Status: "paused", OwnerDisplay: "Alice"},  // needsyou
+			{ID: "6", Status: "paused", OwnerDisplay: "Bob"},    // paused (other)
+		}
+	}
+	stalled := map[string]bool{}
+
+	// All view: every segment populated.
+	cAll, byAll := segmentListRows(newRows(), "Alice", false, stalled)
+	for seg, want := range map[string]int{"unclaimed": 2, "running": 2, "needsyou": 1, "paused": 1} {
+		if cAll[seg] != want {
+			t.Errorf("All view: count[%q] = %d, want %d", seg, cAll[seg], want)
+		}
+	}
+	if len(byAll["needsyou"]) != 1 || !byAll["needsyou"][0].NeedsYou {
+		t.Errorf("All view: needsyou row should carry NeedsYou=true")
+	}
+
+	// Mine view: Bob's running + paused drop; the unclaimed pool stays.
+	cMine, _ := segmentListRows(newRows(), "Alice", true, stalled)
+	for seg, want := range map[string]int{"unclaimed": 2, "running": 1, "needsyou": 1, "paused": 0} {
+		if cMine[seg] != want {
+			t.Errorf("Mine view: count[%q] = %d, want %d", seg, cMine[seg], want)
+		}
+	}
+}
+
 // --- ListWorkItems fakes -----------------------------------------------------
 
 // withFakeListWI swaps the package-level listWorkItemsFn for the duration of
@@ -242,11 +309,15 @@ func TestUIWIList_SingleProject_RendersQueueEmbed(t *testing.T) {
 		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "pf-queue-embed") {
-		t.Errorf("single-project list should embed the ready queue block; body:\n%s", body)
+	// aihub#185: the count strip is gone; status counts moved into the right
+	// sidebar (LCRS segments).
+	if strings.Contains(body, "pf-queue-embed") || strings.Contains(body, `class="qstrip"`) {
+		t.Errorf("aihub#185: the count strip should be removed; body:\n%s", body)
 	}
-	if !strings.Contains(body, `hx-get="/ui/queue/partial`) {
-		t.Errorf("queue embed should poll /ui/queue/partial; body:\n%s", body)
+	for _, want := range []string{`class="wi-layout"`, `class="seg-nav"`, "Unclaimed"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("single-project list should render the LCRS segment sidebar (missing %q); body:\n%s", want, body)
+		}
 	}
 }
 
@@ -271,11 +342,13 @@ func TestUIWIList_AllMode_RendersQueueEmbed(t *testing.T) {
 		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "pf-queue-embed") {
-		t.Errorf("view-all mode SHOULD render the count strip; body:\n%s", body)
+	// aihub#185: view-all renders the segment sidebar; its links carry the
+	// __all__ project sentinel so segment switches preserve the cross-project view.
+	if !strings.Contains(body, `class="seg-nav"`) {
+		t.Errorf("view-all mode should render the segment sidebar; body:\n%s", body)
 	}
-	if !strings.Contains(body, "/ui/queue/partial?project=__all__") {
-		t.Errorf("view-all strip should poll the partial with the __all__ sentinel; body:\n%s", body)
+	if !strings.Contains(body, "project=__all__") {
+		t.Errorf("view-all sidebar links should carry the __all__ sentinel; body:\n%s", body)
 	}
 }
 
@@ -326,9 +399,10 @@ func TestUIWIList_NoProject_DefaultsToAllProjects(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	// All-mode strip polls the partial with the __all__ sentinel; single-project
-	// mode would poll ?project=p1. This is the discriminator for the default view.
-	if !strings.Contains(rec.Body.String(), "/ui/queue/partial?project=__all__") {
+	// aihub#185: all-mode carries the __all__ project sentinel (form hidden input +
+	// sidebar segment links); single-project mode would carry project=p1. This is
+	// the discriminator for the default view.
+	if !strings.Contains(rec.Body.String(), "project=__all__") {
 		t.Errorf("no-param /ui/wi should default to All projects (all-mode); body:\n%s", rec.Body.String())
 	}
 }
@@ -358,15 +432,18 @@ func TestUIWIList_RendersGroupWrapWithTotalCount(t *testing.T) {
 		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"grp-wrap", "data-grp", `class="grp-n"`, "data-grp-pager", "data-grp-rows"} {
+	for _, want := range []string{`class="wi-layout"`, `class="seg-nav"`, `class="seg-item`, "data-grp-rows", `class="grp-n"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("list body missing %q; body:\n%s", want, body)
 		}
 	}
-	// Both queued items land in Unclaimed (ownerless + queued) — its count pill
-	// must read 2.
+	// Both queued items are ownerless+queued → Unclaimed=2: the sidebar segment
+	// count and the selected-segment header count (default seg = unclaimed) read 2.
+	if !strings.Contains(body, `Unclaimed<span class="cnt">2</span>`) {
+		t.Errorf("expected Unclaimed sidebar count of 2; body:\n%s", body)
+	}
 	if !strings.Contains(body, `<span class="grp-n">2</span>`) {
-		t.Errorf("expected Unclaimed total-count pill of 2; body:\n%s", body)
+		t.Errorf("expected selected-segment header count of 2; body:\n%s", body)
 	}
 }
 
@@ -401,7 +478,7 @@ func TestUIWIList_FullPage_WiresHTMXFilterBar(t *testing.T) {
 		`hx-target="#wi-list-body"`,
 		`hx-include="this"`,
 		`hx-push-url="true"`,
-		"data-status-params",
+		`class="seg-nav"`, // aihub#185: status is now the sidebar, not data-status-params
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("full page missing %q; body:\n%s", want, body)
@@ -445,9 +522,10 @@ func TestUIWIList_HXRequest_ReturnsFragmentOnly(t *testing.T) {
 	if strings.Contains(body, `id="wi-list-body"`) {
 		t.Errorf("HX fragment is the inner content; it must not re-emit the #wi-list-body wrapper; body:\n%s", body)
 	}
-	// But it MUST carry the grouped rows it is meant to swap in.
-	if !strings.Contains(body, "grp-wrap") || !strings.Contains(body, "data-grp-rows") {
-		t.Errorf("HX fragment should contain the grouped list rows; body:\n%s", body)
+	// But it MUST carry the two-column layout (sidebar + the segment's rows) it is
+	// meant to swap in — so the sidebar highlight + middle update together.
+	if !strings.Contains(body, `class="wi-layout"`) || !strings.Contains(body, `class="seg-nav"`) || !strings.Contains(body, "data-grp-rows") {
+		t.Errorf("HX fragment should contain the two-column layout + rows; body:\n%s", body)
 	}
 }
 

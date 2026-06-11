@@ -62,8 +62,14 @@ var fetchWIFacetsFn = fetchWIFacets
 // project switcher. Swappable in tests (nil pool returns empty map).
 var fetchProjectWICountsFn = fetchProjectWICounts
 
+// fetchDoneCountFn is the package-level seam for the terminal (Done) count query
+// (aihub#185). Swappable in tests (nil pool returns 0).
+var fetchDoneCountFn = fetchDoneCount
+
 // validWIStatuses enumerates the values accepted in the ?status= filter.
 // The empty string maps to "active" = queued + running + paused + blocked.
+// "failed" is included (aihub#185) so the Done segment can surface failed wi's,
+// which were previously absent from the enum and therefore invisible in any view.
 var validWIStatuses = map[string]bool{
 	"queued":    true,
 	"running":   true,
@@ -71,6 +77,110 @@ var validWIStatuses = map[string]bool{
 	"blocked":   true,
 	"cancelled": true,
 	"wrapped":   true,
+	"failed":    true,
+}
+
+// doneStatuses are the terminal statuses folded into the "Done" sidebar segment
+// (aihub#185). failed is included here so previously-invisible failed wi's get a
+// home; the row still renders its own real status badge.
+var doneStatuses = []string{"wrapped", "cancelled", "failed"}
+
+// segmentOrder is the canonical top->bottom order of the LCRS sidebar segments
+// (aihub#185), replacing the old raw-status statusBlockOrder for the list view.
+// "done" is rendered below a divider in the sidebar.
+var segmentOrder = []string{"running", "needsyou", "unclaimed", "stalled", "paused", "done"}
+
+// segmentLabels maps each segment key to its sidebar display label.
+var segmentLabels = map[string]string{
+	"running":   "Running",
+	"needsyou":  "Needs you",
+	"unclaimed": "Unclaimed",
+	"stalled":   "Stalled",
+	"paused":    "Paused",
+	"done":      "Done",
+}
+
+// segmentFor returns the LCRS segment (aihub#185) a row belongs to, by precedence:
+//
+//	done      — terminal: status in {wrapped, cancelled, failed}
+//	stalled   — running but flagged stalled by the ready-queue path
+//	running   — running and alive
+//	unclaimed — no current-attempt owner AND status in {queued, blocked}
+//	needsyou  — owner == viewer AND status in {paused, blocked} (your work, waiting on you)
+//	paused    — paused (owned by someone else; yours went to needsyou above)
+//	(fallback) unclaimed — the only residual is "blocked owned by another", rare;
+//	            fold into the claimable pool so it is never silently dropped.
+//
+// viewer is the current user's display name; stalled is the set of stalled wi IDs.
+func segmentFor(r *wiListRow, viewer string, stalled map[string]bool) string {
+	switch {
+	case r.Status == "wrapped" || r.Status == "cancelled" || r.Status == "failed":
+		return "done"
+	case r.Status == "running" && stalled[r.ID]:
+		return "stalled"
+	case r.Status == "running":
+		return "running"
+	case r.OwnerDisplay == "" && (r.Status == "queued" || r.Status == "blocked"):
+		return "unclaimed"
+	case viewer != "" && r.OwnerDisplay == viewer && (r.Status == "paused" || r.Status == "blocked"):
+		return "needsyou"
+	case r.Status == "paused":
+		return "paused"
+	default:
+		return "unclaimed"
+	}
+}
+
+// segmentListRows buckets active-status rows into LCRS segments (aihub#185),
+// returning per-segment counts and the rows in each. In Mine view, rows owned by
+// another user are dropped from every segment EXCEPT unclaimed (the claimable pool
+// is always shown) — mirroring groupListRows' owner scoping. stalled is the set of
+// wi IDs flagged stalled by the ready-queue path. Terminal rows are not expected
+// here (the active query excludes them); Done is counted/loaded separately.
+func segmentListRows(rows []*wiListRow, viewer string, mine bool, stalled map[string]bool) (map[string]int, map[string][]*wiListRow) {
+	counts := map[string]int{}
+	bySeg := map[string][]*wiListRow{}
+	for _, r := range rows {
+		seg := segmentFor(r, viewer, stalled)
+		if mine && seg != "unclaimed" && r.OwnerDisplay != viewer {
+			continue
+		}
+		if seg == "needsyou" {
+			r.NeedsYou = true // drives the .row.hot left bar
+		}
+		counts[seg]++
+		bySeg[seg] = append(bySeg[seg], r)
+	}
+	return counts, bySeg
+}
+
+// stalledSet returns the set of wi IDs that are stalled (running-but-gone-quiet),
+// sourced from the ready-queue path. Single-project mode queries that project;
+// __all__ mode unions across accessible projects (admins: every visible project).
+// Best-effort: query errors contribute nothing. Mirrors stalledCount's scoping.
+func stalledSet(ctx context.Context, pool *pgxpool.Pool, project string, allMode bool, accessible []string, u *UserContext) map[string]bool {
+	out := map[string]bool{}
+	if pool == nil {
+		return out
+	}
+	scope := []string{project}
+	if allMode {
+		scope = accessible
+		if u != nil && u.Role == "admin" {
+			scope = availableProjectsForUI(ctx, pool, u)
+		}
+	}
+	for _, p := range scope {
+		if p == "" {
+			continue
+		}
+		if q, aerr := getQueueFn(ctx, pool, p, 100); aerr == nil && q != nil {
+			for _, it := range q.Stalled {
+				out[it.ID] = true
+			}
+		}
+	}
+	return out
 }
 
 // validWIKinds enumerates the values accepted in the ?kind= filter.
@@ -115,7 +225,26 @@ type wiListPageData struct {
 	Items             []*wiListRow  // flat list, kept for tests / fallback
 	Groups            []wiListGroup // grouped rows for display (Needs you / status blocks / Unclaimed)
 	Strip             stripCounts   // headline count strip — derived from Groups (single source of truth)
-	Err               string
+	// LCRS segment sidebar (aihub#185). SegCounts is the per-segment count for the
+	// right sidebar nav; SelectedSeg is the single-selected segment; SegRows is the
+	// rows the middle pane renders (only the selected segment).
+	SegCounts   map[string]int
+	SelectedSeg string
+	SegRows     []*wiListRow
+	Segments    []segNav // ordered sidebar nav (label + count + selected + divider)
+	Err         string
+}
+
+// segNav is one entry in the LCRS sidebar (aihub#185): a segment's display label,
+// its live count, whether it is the selected segment, and whether a divider is
+// drawn above it (the terminal "Done" segment sits below a divider). Built in the
+// handler because Go templates can't reach the package-level segmentOrder/labels.
+type segNav struct {
+	Key     string
+	Label   string
+	Count   int
+	On      bool
+	Divider bool
 }
 
 // StatusOn reports whether the given status value is currently selected in the
@@ -593,6 +722,61 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		// aggregated across projects in __all__ mode.
 		data.Strip = groupCountsFromGroups(stripGroups)
 		data.Strip.Stalled = stalledCount(ctx, pool, project, allMode, projects, u)
+
+		// --- LCRS segment sidebar (aihub#185) -------------------------------
+		// Single-select sidebar: ?seg= picks which segment the middle pane shows
+		// (default: the actionable Unclaimed pool). The five active segments +
+		// their counts come from the active rows already loaded; Done is terminal
+		// — counted via aggregate (never load 100s of rows to count) and its rows
+		// loaded only when it is the selected segment.
+		selectedSeg := strings.TrimSpace(c.QueryParam("seg"))
+		if _, ok := segmentLabels[selectedSeg]; !ok {
+			selectedSeg = "unclaimed"
+		}
+		data.SelectedSeg = selectedSeg
+
+		stalled := stalledSet(ctx, pool, project, allMode, projects, u)
+		segCounts, segRows := segmentListRows(rows, viewer, data.Mine, stalled)
+
+		// Done count is project-scoped (the archive is shown project-wide, not
+		// owner-scoped like the active segments). Empty scope = all projects.
+		doneScope := []string{project}
+		if allMode {
+			doneScope = nil
+			if u.Role != "admin" {
+				doneScope = projects
+			}
+		}
+		segCounts["done"] = fetchDoneCountFn(ctx, pool, doneScope)
+		data.SegCounts = segCounts
+
+		// Ordered sidebar nav for the template (Done sits below a divider).
+		data.Segments = make([]segNav, 0, len(segmentOrder))
+		for _, k := range segmentOrder {
+			data.Segments = append(data.Segments, segNav{
+				Key:     k,
+				Label:   segmentLabels[k],
+				Count:   segCounts[k],
+				On:      k == selectedSeg,
+				Divider: k == "done",
+			})
+		}
+
+		if selectedSeg == "done" {
+			df := filter
+			df.Status = doneStatuses
+			// Load the full terminal archive (up to the 200 cap) so the sidebar /
+			// header Done count matches the rendered + paginated rows. The active
+			// segments don't need this — their counts derive from the same loaded
+			// rows. A project with >200 terminal items would need server-side
+			// pagination (follow-up).
+			df.Limit = 200
+			if dr, _, derr := fetchListGroups(ctx, pool, queryProject, df, viewer, data.Mine, nil); derr == nil {
+				data.SegRows = dr
+			}
+		} else {
+			data.SegRows = segRows[selectedSeg]
+		}
 
 		return renderTemplate(c, tmpl, renderName, data)
 	}

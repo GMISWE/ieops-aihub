@@ -291,3 +291,25 @@ func fetchProjectWICounts(ctx context.Context, pool *pgxpool.Pool, projects []st
 	}
 	return counts, total
 }
+
+// fetchDoneCount returns the count of terminal (wrapped + cancelled + failed) work
+// items for the Done sidebar segment (aihub#185). Mirrors fetchProjectWICounts'
+// scoping: an empty projects slice means "all projects" (admin view-all). View-layer
+// only — a presentation count; errors degrade to 0 so the sidebar simply shows no
+// Done count rather than 500ing.
+func fetchDoneCount(ctx context.Context, pool *pgxpool.Pool, projects []string) int {
+	if pool == nil {
+		return 0
+	}
+	query := `SELECT COUNT(*) FROM work_items WHERE status = ANY($1)`
+	args := []any{[]string{"wrapped", "cancelled", "failed"}}
+	if len(projects) > 0 {
+		query += ` AND project = ANY($2)`
+		args = append(args, projects)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, query, args...).Scan(&n); err != nil {
+		return 0
+	}
+	return n
+}

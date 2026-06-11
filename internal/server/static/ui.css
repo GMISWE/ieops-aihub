@@ -1079,6 +1079,46 @@ details.card[open] > summary.hd .chev { transform: rotate(45deg); }
   .qcell:nth-child(n+3) { border-top: 1px solid var(--border); }
 }
 
+/* ============================================================
+   aihub#185 — wi list two-column layout + LCRS segment sidebar.
+   Scoped to the wi list ([data-wi-filters] / .wi-layout / .seg-nav) so the
+   shared .filters / .seg rules above stay intact for the memories page.
+   The .qstrip count strip is no longer rendered by the wi list (counts moved
+   into the sidebar); its rules above are kept for any other consumer.
+   ============================================================ */
+
+/* filter row aligned to the body grid: search fills the left (list) column,
+   Mine/All/Watching fills the right (sidebar) column. */
+.filters[data-wi-filters] { display: grid; grid-template-columns: minmax(0, 1fr) 232px; gap: var(--s6); align-items: center; }
+@media (max-width: 920px) { .filters[data-wi-filters] { grid-template-columns: 1fr; } }
+.filters[data-wi-filters] > .seg { width: 100%; }
+.filters[data-wi-filters] > .seg button { flex: 1; }
+
+/* two-column body: list (left) + segment sidebar (right). */
+.wi-layout { display: grid; grid-template-columns: minmax(0, 1fr) 232px; gap: var(--s6); align-items: start; }
+@media (max-width: 920px) { .wi-layout { grid-template-columns: 1fr; } }
+
+/* right sidebar — vertical single-select segment nav (items are HTMX <a> links). */
+.seg-nav { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); padding: 6px; position: sticky; top: 18px; box-shadow: var(--shadow); }
+.seg-title { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-subtle); padding: 6px 10px 4px; }
+.seg-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; border: 0; background: none; cursor: pointer; padding: 8px 10px; border-radius: var(--r); color: var(--text-muted); font-size: 13px; font-weight: 550; font-family: inherit; text-decoration: none; }
+.seg-item:hover { background: var(--surface-2); }
+.seg-item.on { background: var(--selected); color: var(--text); }
+.seg-item .cnt { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--text-subtle); }
+.seg-item.on .cnt { color: var(--text); }
+.seg-div { height: 1px; background: var(--border); margin: 6px 6px; }
+
+/* sort toggle in the list group header (next to the count). */
+.grp-sort { border: 0; background: none; cursor: pointer; color: var(--text-subtle); font-family: var(--mono); font-size: 13px; line-height: 1; padding: 2px 5px; margin-right: 4px; border-radius: var(--r-sm); }
+.grp-sort:hover { background: var(--surface-2); color: var(--text); }
+
+/* in-list pager footer (aihub#185): one clean footer row inside the .list card
+   — page-info + per-page picker + numbered page buttons. */
+.list .pager { margin: 0; padding: 8px var(--s3); border-top: 1px solid var(--border); background: var(--surface); }
+.list .pager .grp-pager { border-top: 0; padding: 0; background: none; }
+.list .pager .pp-label { color: var(--text-subtle); font-size: 12px; margin-left: 6px; }
+.list .pager .seg button { height: 26px; padding: 0 9px; font-size: 12px; }
+
 /* needs-you list-row highlight (prototype .row.hot) */
 .row.hot { box-shadow: inset 3px 0 0 var(--accent); }
 

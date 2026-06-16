@@ -670,7 +670,7 @@ func (s *Server) registerLifecycleTools() {
 	// pf_pause_attempt
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_pause_attempt",
-		Description: "Pause the current attempt (releases lease + locks, status → paused). State file is preserved for resume.",
+		Description: "Pause the current attempt (releases file_scope locks acquired mid-attempt; git_branch/deploy_env locks are retained for resume; status → paused). State file is preserved for resume.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID (used to find state file)"),
 			"pause_reason": prop("string", "Optional reason for pausing"),
@@ -701,6 +701,38 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(err)
 		}
 		// State file is kept for paused status (C5-3: resume needs credentials)
+		return jsonResult(result)
+	})
+
+	// pf_acquire_locks
+	s.mcp.AddTool(&sdkmcp.Tool{
+		Name:        "pf_acquire_locks",
+		Description: "Acquire file_scope locks for the current running attempt from the work item's declared_resources (reconcile mid-attempt; blocks on conflict, never steals).",
+		InputSchema: objectSchema(map[string]any{
+			"work_item_id": prop("string", "Work item ID (used to find state file)"),
+		}, []string{"work_item_id"}),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		args, err := parseArgs(req.Params.Arguments)
+		if err != nil {
+			return errResult(err)
+		}
+		wiID := strArg(args, "work_item_id")
+		if wiID == "" {
+			return errResult(fmt.Errorf("work_item_id is required"))
+		}
+		sf, err := config.ResolveStateFile(wiID)
+		if err != nil {
+			return errResult(fmt.Errorf("read state file: %w", err))
+		}
+		body := map[string]any{
+			"attempt_id":     sf.AttemptID,
+			"claim_epoch":    sf.ClaimEpoch,
+			"session_secret": sf.SessionSecret,
+		}
+		result, err := s.client.AcquireLocks(ctx, sf.WIID, body)
+		if err != nil {
+			return errResult(err)
+		}
 		return jsonResult(result)
 	})
 }

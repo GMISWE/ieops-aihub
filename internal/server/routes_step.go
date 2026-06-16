@@ -41,6 +41,7 @@ func RegisterStepRoutes(v1 *echo.Group, pool *pgxpool.Pool) {
 	v1.PATCH("/work_items/:id/step", handleUpdateStep(pool))
 	v1.PATCH("/work_items/:id/renew", handleRenewLease(pool))
 	v1.POST("/work_items/:id/pause", handlePauseAttempt(pool))
+	v1.POST("/work_items/:id/acquire_locks", handleAcquireLocks(pool))
 	// Phase 2 stubs
 	v1.POST("/releases/alpha", handleCutAlpha())
 	v1.POST("/releases/promote", handlePromote())
@@ -262,6 +263,31 @@ func handlePauseAttempt(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, map[string]string{"status": "paused"})
+	}
+}
+
+func handleAcquireLocks(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		wiID := c.Param("id")
+		var req domain.AcquireLocksRequest
+		if err := c.Bind(&req); err != nil {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, err.Error()))
+		}
+
+		wi, err := domain.GetWorkItem(c.Request().Context(), pool, wiID)
+		if err != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "work item not found"))
+		}
+		if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
+			return err
+		}
+
+		resp, aihubErr := domain.FnAcquireLocks(c.Request().Context(), pool, wi.ID, &req)
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		return c.JSON(http.StatusOK, resp)
 	}
 }
 

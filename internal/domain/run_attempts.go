@@ -591,12 +591,23 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 		return NewErr(ErrInternalError, "failed to update run_attempt status")
 	}
 
-	// N4: on paused, keep resource_locks so resume can reclaim them (C5-3 design invariant)
-	// on wrapped/failed: release locks
+	// N4 (revised): on paused, release only file_scope locks (acquired mid-attempt via
+	// FnAcquireLocks); git_branch/deploy_env locks are retained so resume can continue
+	// holding the branch/env. On terminal (wrapped/failed), release all locks.
+	// NOTE: resume re-acquires released file_scope locks via the claim path. Claim's
+	// INSERT uses DO UPDATE, but the advisory conflict check (status IN running,paused)
+	// runs first in the same tx and hard-fails if another attempt took the file while
+	// paused — so resume surfaces a conflict rather than stealing. This ordering is
+	// load-bearing: do not move the DO UPDATE ahead of the conflict check.
 	if req.Status != "paused" {
 		_, err = tx.Exec(ctx, `DELETE FROM resource_locks WHERE owner_attempt_id=$1`, req.AttemptID)
 		if err != nil {
 			return NewErr(ErrInternalError, "failed to release resource locks")
+		}
+	} else {
+		_, err = tx.Exec(ctx, acquireLocksReleasePausedSQL, req.AttemptID)
+		if err != nil {
+			return NewErr(ErrInternalError, "failed to release file_scope locks on pause")
 		}
 	}
 
@@ -1017,4 +1028,220 @@ func VerifyAttemptCredentialPool(ctx context.Context, pool *pgxpool.Pool, wiID, 
 	}
 	tx.Commit(ctx) //nolint:errcheck
 	return nil
+}
+
+// ─── Acquire-locks SQL constants ─────────────────────────────────────────────
+//
+// These are package-level consts so the domain tests can inspect them without
+// a live DB (same pattern as orphanLockSweepSQL in gc.go).
+
+// acquireLocksCollisionSQL is the SELECT used to detect lock conflicts during
+// FnAcquireLocks. It mirrors the claim-time conflict check (:290-298) exactly
+// so collision semantics are identical.
+const acquireLocksCollisionSQL = `
+	SELECT rl.owner_attempt_id, ra.actor_display, wi2.slug
+	FROM resource_locks rl
+	JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
+	JOIN work_items wi2 ON wi2.id = ra.work_item_id
+	WHERE rl.resource_type = $1 AND rl.resource_key = $2
+	  AND ra.status IN ('running', 'paused')`
+
+// acquireLocksInsertSQL inserts a lock without stealing (DO NOTHING on conflict).
+// A non-zero RowsAffected means we took a free key; 0 means a row already exists
+// (held by us, by another live attempt, or an un-GC'd orphan) and the caller must
+// re-check the owner to decide no-op / conflict / reclaim.
+const acquireLocksInsertSQL = `
+	INSERT INTO resource_locks (resource_type, resource_key, owner_attempt_id, claim_epoch)
+	VALUES ($1, $2, $3, $4)
+	ON CONFLICT (resource_type, resource_key) DO NOTHING`
+
+// acquireLocksReleasePausedSQL releases only file_scope locks when an attempt
+// transitions to paused (git_branch / deploy_env locks are kept for resume).
+const acquireLocksReleasePausedSQL = `DELETE FROM resource_locks WHERE owner_attempt_id=$1 AND resource_type='file_scope'`
+
+// ─── AcquireLocks request / response ────────────────────────────────────────
+
+// AcquireLocksRequest is the body for POST /v1/work_items/:id/acquire_locks.
+type AcquireLocksRequest struct {
+	AttemptID     string `json:"attempt_id"`
+	ClaimEpoch    int64  `json:"claim_epoch"`
+	SessionSecret string `json:"session_secret"`
+}
+
+// AcquireLocksResponse is returned by FnAcquireLocks.
+type AcquireLocksResponse struct {
+	Acquired    []ResourceLock `json:"acquired"`
+	AlreadyHeld []ResourceLock `json:"already_held"`
+}
+
+// FnAcquireLocks acquires file_scope write-intent locks for a running attempt
+// from the work item's current declared_resources. It never steals locks from
+// other attempts (DO NOTHING on conflict; hard-fail on collision).
+func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *AcquireLocksRequest) (*AcquireLocksResponse, *AihubError) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return nil, NewErr(ErrInternalError, "failed to begin transaction")
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Load and lock the work item row.
+	var wi WorkItem
+	err = tx.QueryRow(ctx, `
+		SELECT id, project, status, declared_resources,
+		       current_attempt_id, current_attempt_epoch
+		FROM work_items WHERE (id = $1 OR slug = $1) FOR UPDATE`, wiID,
+	).Scan(
+		&wi.ID, &wi.Project, &wi.Status, &wi.DeclaredResources,
+		&wi.CurrentAttemptID, &wi.CurrentAttemptEpoch,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, NewErr(ErrNotFound, fmt.Sprintf("work item %q not found", wiID))
+		}
+		return nil, NewErr(ErrInternalError, "failed to lock work_item")
+	}
+
+	// Only running work items can acquire additional locks.
+	if wi.Status != "running" {
+		return nil, NewErr(ErrAttemptMismatch, fmt.Sprintf("work item status is %q; only running work items can acquire locks", wi.Status))
+	}
+
+	// Verify credentials; also confirms attempt is running and matches current.
+	if aihubErr := verifyAttemptCredential(ctx, tx, wi, req.AttemptID, req.ClaimEpoch, req.SessionSecret); aihubErr != nil {
+		return nil, aihubErr
+	}
+
+	// Derive target locks: file_scope + write-intent only.
+	var declared []DeclaredResourceItem
+	if len(wi.DeclaredResources) > 0 {
+		if jsonErr := json.Unmarshal(wi.DeclaredResources, &declared); jsonErr != nil {
+			return nil, NewErr(ErrInternalError, "failed to parse declared_resources")
+		}
+	}
+
+	type targetLock struct {
+		lockType string
+		lockKey  string
+	}
+	var targets []targetLock
+	for _, d := range declared {
+		if d.Intent == "read" {
+			continue // read-only resources never need a write lock
+		}
+		lType, lKey := resourceToLock(d)
+		if lType != "file_scope" {
+			continue // this endpoint handles file_scope only
+		}
+		if lKey == "" {
+			continue
+		}
+		targets = append(targets, targetLock{lType, lKey})
+	}
+
+	acquired := make([]ResourceLock, 0)
+	alreadyHeld := make([]ResourceLock, 0)
+
+	for _, t := range targets {
+		var ownerAttemptID, ownerActorDisplay, ownerWISlug string
+		scanErr := tx.QueryRow(ctx, acquireLocksCollisionSQL, t.lockType, t.lockKey).
+			Scan(&ownerAttemptID, &ownerActorDisplay, &ownerWISlug)
+
+		if scanErr == nil {
+			// A live attempt holds this lock.
+			if ownerAttemptID == req.AttemptID {
+				// Already held by this very attempt — no-op.
+				alreadyHeld = append(alreadyHeld, ResourceLock{
+					ResourceType:   t.lockType,
+					ResourceKey:    t.lockKey,
+					OwnerAttemptID: req.AttemptID,
+					ClaimEpoch:     req.ClaimEpoch,
+				})
+			} else {
+				// Held by a different live attempt — conflict; rollback and error.
+				return nil, NewErrDetails(ErrConflictLockTaken,
+					fmt.Sprintf("resource %s:%s is already locked", t.lockType, t.lockKey),
+					map[string]any{
+						"conflict_with": map[string]any{
+							"attempt_id":     ownerAttemptID,
+							"actor_display":  ownerActorDisplay,
+							"work_item_slug": ownerWISlug,
+						},
+					},
+				)
+			}
+			continue
+		}
+		if !errors.Is(scanErr, pgx.ErrNoRows) {
+			return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to check lock collision for %s:%s", t.lockType, t.lockKey))
+		}
+
+		// No existing lock — attempt to insert (DO NOTHING on conflict to avoid stealing).
+		tag, execErr := tx.Exec(ctx, acquireLocksInsertSQL, t.lockType, t.lockKey, req.AttemptID, req.ClaimEpoch)
+		if execErr != nil {
+			return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to acquire lock %s:%s: %v", t.lockType, t.lockKey, execErr))
+		}
+		if tag.RowsAffected() == 0 {
+			// DO NOTHING hit an existing row. Re-check who owns it (live attempts only).
+			var raceOwnerID, raceActorDisplay, raceWISlug string
+			reScanErr := tx.QueryRow(ctx, acquireLocksCollisionSQL, t.lockType, t.lockKey).
+				Scan(&raceOwnerID, &raceActorDisplay, &raceWISlug)
+			switch {
+			case reScanErr == nil && raceOwnerID == req.AttemptID:
+				// We already own it — no-op.
+				alreadyHeld = append(alreadyHeld, ResourceLock{
+					ResourceType:   t.lockType,
+					ResourceKey:    t.lockKey,
+					OwnerAttemptID: req.AttemptID,
+					ClaimEpoch:     req.ClaimEpoch,
+				})
+				continue
+			case reScanErr == nil:
+				// A different live attempt owns it — conflict.
+				return nil, NewErrDetails(ErrConflictLockTaken,
+					fmt.Sprintf("resource %s:%s is already locked", t.lockType, t.lockKey),
+					map[string]any{
+						"conflict_with": map[string]any{
+							"attempt_id":     raceOwnerID,
+							"actor_display":  raceActorDisplay,
+							"work_item_slug": raceWISlug,
+						},
+					},
+				)
+			case errors.Is(reScanErr, pgx.ErrNoRows):
+				// Row exists but its owner is NOT a live attempt: an orphan lock from a
+				// crashed/expired attempt the orphan-sweep (gc.go) has not yet reclaimed.
+				// Reclaim it: delete the dead row and insert for this attempt. Matches the
+				// orphan-sweep contract (a lock owned by a non-live attempt is free).
+				if _, delErr := tx.Exec(ctx,
+					`DELETE FROM resource_locks WHERE resource_type=$1 AND resource_key=$2`,
+					t.lockType, t.lockKey); delErr != nil {
+					return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to reclaim orphan lock %s:%s", t.lockType, t.lockKey))
+				}
+				if _, insErr := tx.Exec(ctx, acquireLocksInsertSQL,
+					t.lockType, t.lockKey, req.AttemptID, req.ClaimEpoch); insErr != nil {
+					return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to acquire reclaimed lock %s:%s", t.lockType, t.lockKey))
+				}
+				acquired = append(acquired, ResourceLock{
+					ResourceType:   t.lockType,
+					ResourceKey:    t.lockKey,
+					OwnerAttemptID: req.AttemptID,
+					ClaimEpoch:     req.ClaimEpoch,
+				})
+				continue
+			default:
+				return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to re-check lock owner for %s:%s", t.lockType, t.lockKey))
+			}
+		}
+		acquired = append(acquired, ResourceLock{
+			ResourceType:   t.lockType,
+			ResourceKey:    t.lockKey,
+			OwnerAttemptID: req.AttemptID,
+			ClaimEpoch:     req.ClaimEpoch,
+		})
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, NewErr(ErrInternalError, "failed to commit acquire_locks")
+	}
+	return &AcquireLocksResponse{Acquired: acquired, AlreadyHeld: alreadyHeld}, nil
 }

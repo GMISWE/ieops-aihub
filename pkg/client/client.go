@@ -213,6 +213,12 @@ func (c *Client) PauseAttempt(ctx context.Context, wiID string, body any) (map[s
 	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/pause", body, &out)
 }
 
+// AcquireLocks calls POST /v1/work_items/:wiID/acquire_locks.
+func (c *Client) AcquireLocks(ctx context.Context, wiID string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/acquire_locks", body, &out)
+}
+
 // ─── Events ────────────────────────────────────────────────────────────────
 
 // EmitEvent calls POST /v1/events.

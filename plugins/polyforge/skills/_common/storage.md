@@ -12,7 +12,7 @@
 pf_save_artifact(
   type="@@ARTIFACT_TYPE@@",
   work_item_id=<current>,
-  content=<the markdown the engine produced>,
+  content=<the markdown the engine produced>,   # OR path="<abs path to the doc file>" to read from disk (no inlining)
   structured_payload={ ... },   # spec: feature / decisions / acceptance_criteria / non_goals
                                  # plan: steps[]
   supersedes_memory_id=<prior artifact id, if revising>,
@@ -37,7 +37,8 @@ pf_emit_event(work_item_id=<current>, event_type="note",
 > **superpowers branch**: the `pf-superpowers-bridge` PostToolUse hook saves the doc into aihub
 > **deterministically** (it reads the wi state + config and POSTs directly). You do NOT need to call
 > `pf_save_artifact` yourself; only do so if the bridge's output reports it could not save (missing
-> creds / network), in which case follow the bridge's fallback instruction.
+> creds / network) — and when you do, pass `path="<abs path to the doc file>"` (NOT inline content) so the
+> file is read locally and kept out of the agent context.
 
 ## execute steps
 

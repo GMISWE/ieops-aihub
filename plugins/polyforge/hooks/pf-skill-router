@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# PreToolUse(Skill) router hook for polyforge v1.
+# Fires right before a Skill tool call (there is no dedicated SkillStart event). When the
+# skill being invoked is one of {polyforge:pf-spec, pf-plan, pf-execute}, this hook ASSEMBLES
+# that step's body at the call site and injects it via hookSpecificOutput.additionalContext —
+# the SKILL.md files themselves are stubs, so this injection IS the step body.
+#
+# Composition (see skills/_common/*.md and skills/pf-<skill>/engine.native.md):
+#   additionalContext = header
+#                     + _common/memory.md      (Memory-First recall + team-memory sync)
+#                     + <engine fragment>       (superpowers pointer  |  engine.native.md)
+#                     + _common/storage.md      (save_artifact)
+#                     + _common/lifecycle.md    (step reporting / ownership / wrap)
+# The _common/* fragments are injected in BOTH branches — lifecycle never depends on which
+# engine writes the content. Only the engine fragment branches on whether superpowers is enabled.
+#
+# Inert (exit 0, no output) for any non-target skill, and FAIL-SILENT on any error: if this
+# hook emits nothing, the stub's load-bearing pointer line routes the model to engine.native.md
+# + _common/*.md (the fallback). It never blocks or denies a skill call.
+#
+# NOTE: the PreToolUse payload arrives on this script's stdin. We capture it into an env var
+# FIRST, because the python program is delivered to python3 via a heredoc on python3's stdin —
+# so python's sys.stdin is the heredoc, NOT the hook payload (mirrors pf-superpowers-bridge).
+
+set -euo pipefail
+command -v python3 >/dev/null 2>&1 || exit 0  # no python3 -> inert, never block
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+
+PF_PAYLOAD="$(cat)" PF_PLUGIN_ROOT="$PLUGIN_ROOT" python3 <<'PY'
+import json, os, re, sys
+
+def read(p):
+    try:
+        return open(p, encoding="utf-8").read()
+    except OSError:
+        return None
+
+raw = os.environ.get("PF_PAYLOAD", "")
+try:
+    payload = json.loads(raw) if raw.strip() else {}
+except ValueError:
+    sys.exit(0)  # unparseable payload -> inert
+if not isinstance(payload, dict):
+    sys.exit(0)
+
+ti = payload.get("tool_input") or {}
+skill = (ti.get("skill") or "").strip()
+if not skill:
+    sys.exit(0)
+base = skill.split(":")[-1]  # "polyforge:pf-spec" -> "pf-spec"
+
+# Per-skill parameters: (step_id, artifact_type, recall_type_filter, superpowers_engine_pointer)
+TARGETS = {
+    "pf-spec": (
+        "spec", "methodology.spec", "methodology.spec|fact.*|rule.*",
+        "Use `superpowers:brainstorming` as the engine to produce the spec content (honor its "
+        "HARD-GATE and its default of writing `docs/superpowers/specs/<date>-<topic>-design.md`; "
+        "do not block or rewrite that). After superpowers writes that file, RECORD its content into "
+        "polyforge: call `pf_save_artifact(type=\"methodology.spec\", work_item_id=<current wi>, "
+        "content=<the file's contents>)`; on repeated re-writes of the same source file, pass "
+        "`supersedes_memory_id` to overwrite the prior version instead of duplicating. "
+        "The pf-superpowers-bridge hook saves this artifact deterministically; only call pf_save_artifact yourself if the bridge reports it failed."
+        " The spec artifact MUST include at least one fenced ```d2 architecture/data-flow diagram "
+        "(components + data flow); aihub renders ```d2 blocks to SVG in /ui, so use D2 syntax (a -> b: label), not mermaid.",
+    ),
+    "pf-plan": (
+        "plan", "methodology.plan", "methodology.plan|experience.*",
+        "Use `superpowers:writing-plans` as the engine to produce the plan content (honor its default "
+        "of writing `docs/superpowers/plans/<date>-<feature>.md`; do not block or rewrite that). After "
+        "superpowers writes that file, RECORD its content into polyforge: call `pf_save_artifact("
+        "type=\"methodology.plan\", work_item_id=<current wi>, content=<the file's contents>)`; on "
+        "repeated re-writes of the same source file, pass `supersedes_memory_id` to overwrite the prior "
+        "version instead of duplicating. "
+        "The pf-superpowers-bridge hook saves this artifact deterministically; only call pf_save_artifact yourself if the bridge reports it failed."
+        " The plan artifact MUST include at least one fenced ```d2 architecture/data-flow diagram "
+        "(components + data flow); aihub renders ```d2 blocks to SVG in /ui, so use D2 syntax (a -> b: label), not mermaid.",
+    ),
+    "pf-execute": (
+        "execute", "", "experience.*|rule.*",
+        "Delegate each scenario step's implementation to `superpowers:subagent-driven-development` "
+        "(with TDD / systematic-debugging / code-review / verification as sub-engines per step). "
+        "**Stop before `superpowers:finishing-a-development-branch`** — commit/PR/wrap/CI go back to polyforge.\n\n"
+        "**Model policy for dispatched subagents.** subagent-driven-development selects a model per role by "
+        "relative tier (cheap / standard / most-capable); resolve those tiers to concrete models and pass "
+        "`model` explicitly on every Task dispatch:\n"
+        "- explore/search code, mechanical or trivial edits, coding/implementation, multi-file integration, debugging -> model: sonnet\n"
+        "- spec-compliance review, code-quality review, architecture/design judgement -> model: opus\n"
+        "In short: sonnet for everything except review/architecture, which use opus. Steering, not a hard "
+        "guarantee: a coding task that genuinely needs architectural reasoning may use opus; a BLOCKED re-dispatch may escalate.",
+    ),
+}
+if base not in TARGETS:
+    sys.exit(0)  # not a target skill -> inert (let the call through untouched)
+step_id, artifact_type, recall_type, sp_pointer = TARGETS[base]
+
+plugin_root = os.environ.get("PF_PLUGIN_ROOT", "")
+skills_dir = os.path.join(plugin_root, "skills")
+
+# --- detect superpowers: walk payload.cwd up to .polyforge.yaml, scan 4 settings layers ---
+def find_ws(start):
+    d = start or ""
+    seen = set()
+    while d and d != "/" and d not in seen:
+        seen.add(d)
+        if os.path.isfile(os.path.join(d, ".polyforge.yaml")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return ""
+
+ws = find_ws(payload.get("cwd") or os.getcwd())
+home = os.path.expanduser("~")
+settings_layers = [
+    os.path.join(home, ".claude", "settings.json"),
+    os.path.join(home, ".claude", "settings.local.json"),
+]
+if ws:
+    settings_layers += [
+        os.path.join(ws, ".claude", "settings.json"),
+        os.path.join(ws, ".claude", "settings.local.json"),
+    ]
+
+def plugin_enabled(prefix):
+    val = None
+    for f in settings_layers:
+        if not os.path.isfile(f):
+            continue
+        try:
+            data = json.load(open(f, encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        ep = data.get("enabledPlugins")
+        if not isinstance(ep, dict):
+            continue
+        for k, v in ep.items():
+            if k.startswith(prefix):
+                val = bool(v)  # highest-precedence layer wins
+    return val
+
+superpowers_on = plugin_enabled("superpowers@") is True
+
+# --- assemble fragments ---
+def common(name):
+    txt = read(os.path.join(skills_dir, "_common", name)) or ""
+    return txt.replace("@@RECALL_TYPE@@", recall_type).replace("@@ARTIFACT_TYPE@@", artifact_type)
+
+memory_frag  = common("memory.md")
+storage_frag = common("storage.md")
+lifecycle_frag = common("lifecycle.md")
+
+if superpowers_on:
+    engine_frag = (
+        f"## Engine fragment (superpowers enabled)\n\n{sp_pointer}\n\n"
+        "This is not a lifecycle bypass: polyforge still owns claim / step reporting / save_artifact / "
+        "commit / PR / wrap."
+    )
+    engine_label = f"superpowers ({base})"
+else:
+    native = read(os.path.join(skills_dir, base, "engine.native.md"))
+    if not native:
+        sys.exit(0)  # no native engine fragment to inject -> inert (stub fallback takes over)
+    engine_frag = native
+    engine_label = "native (engine.native.md)"
+
+# Any missing common fragment -> fail silent (let the stub fallback route to repo files).
+if not (memory_frag and storage_frag and lifecycle_frag):
+    sys.exit(0)
+
+header = (
+    f"[polyforge router] `/{base}` step `{step_id}` — engine: {engine_label}. "
+    "The SKILL.md is a stub; the text below is the step body the router assembled and injected at the "
+    "call site (it takes precedence). The common fragments (memory / storage / lifecycle) are injected "
+    "in BOTH branches; only the engine fragment depends on whether superpowers is enabled."
+)
+
+ctx = "\n\n---\n\n".join([
+    header,
+    memory_frag.rstrip("\n"),
+    engine_frag.rstrip("\n"),
+    storage_frag.rstrip("\n"),
+    lifecycle_frag.rstrip("\n"),
+])
+
+# Default ALLOW + inject: additionalContext with no permissionDecision lets the Skill call
+# proceed and adds the assembled body to context.
+out = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": ctx}}
+print(json.dumps(out))
+PY
+exit 0

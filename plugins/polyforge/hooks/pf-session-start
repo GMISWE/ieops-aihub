@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# SessionStart hook for polyforge v1.
+# ASSEMBLES the using-polyforge skill at session start from the @include manifest in
+# skills/using-polyforge/SKILL.md: each `@include: <path>` pulls a fragment, an optional
+# immediately-following `when: <cond>` makes it conditional. Conditions are evaluated
+# against enabledPlugins across the user (~/.claude) and project (<workspace>/.claude)
+# settings layers (low->high precedence), so a fragment like superpowers-bridge is added
+# only when that plugin is ENABLED for the workspace. No-op outside a polyforge workspace
+# (.polyforge.yaml walk-up). Skill tree is the plugin's own, so injection travels with it.
+#
+# JSON is emitted via python3 json.dumps so every control character escapes correctly.
+
+set -euo pipefail
+
+# Detect a polyforge workspace: walk up looking for .polyforge.yaml.
+dir="${CLAUDE_PROJECT_DIR:-$PWD}"
+ws=""
+while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+  if [ -f "$dir/.polyforge.yaml" ]; then
+    ws="$dir"
+    break
+  fi
+  parent="$(dirname "$dir")"
+  [ "$parent" = "$dir" ] && break
+  dir="$parent"
+done
+[ -z "$ws" ] && exit 0
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SKILL_DIR="${PLUGIN_ROOT}/skills/using-polyforge"
+[ -f "${SKILL_DIR}/SKILL.md" ] || exit 0
+command -v python3 >/dev/null 2>&1 || exit 0  # python3 unavailable -> no-op, never block startup
+
+SKILL_DIR="$SKILL_DIR" PF_WS="$ws" python3 <<'PY'
+import json, os, re, sys
+
+def read(p):
+    try:
+        return open(p, encoding="utf-8").read()
+    except OSError:
+        return None
+
+skill_dir = os.environ["SKILL_DIR"]
+manifest = read(os.path.join(skill_dir, "SKILL.md"))
+if manifest is None:
+    sys.exit(0)  # unreadable manifest -> no-op, never block the session
+
+ws = os.environ.get("PF_WS", "")
+home = os.path.expanduser("~")
+settings_layers = [
+    os.path.join(home, ".claude", "settings.json"),
+    os.path.join(home, ".claude", "settings.local.json"),
+]
+if ws:
+    settings_layers += [
+        os.path.join(ws, ".claude", "settings.json"),
+        os.path.join(ws, ".claude", "settings.local.json"),
+    ]
+
+def plugin_enabled(prefix):
+    val = None
+    for f in settings_layers:
+        if not os.path.isfile(f):
+            continue
+        try:
+            data = json.load(open(f, encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        ep = data.get("enabledPlugins")
+        if not isinstance(ep, dict):
+            continue
+        for k, v in ep.items():
+            if k.startswith(prefix):
+                val = bool(v)  # highest-precedence layer wins
+    return val
+
+def cond_met(cond):
+    cond = cond.strip()
+    if cond == "superpowers":
+        return plugin_enabled("superpowers@") is True
+    return False  # unknown condition -> not met (fail-closed; only known conds ship)
+
+# Strip YAML frontmatter from the manifest.
+body = manifest
+if body.startswith("---"):
+    rest = body.split("\n")
+    end = None
+    for i in range(1, len(rest)):
+        if rest[i].strip() == "---":
+            end = i
+            break
+    if end is not None:
+        body = "\n".join(rest[end + 1:])
+
+inc_re = re.compile(r'^@include:\s*(\S+)\s*$')
+when_re = re.compile(r'^when:\s*(\S+)\s*$')
+lines = body.split("\n")
+parts = []
+i = 0
+while i < len(lines):
+    m = inc_re.match(lines[i].strip())
+    if not m:
+        i += 1
+        continue
+    path = m.group(1)
+    cond = None
+    if i + 1 < len(lines):
+        w = when_re.match(lines[i + 1].strip())
+        if w:
+            cond = w.group(1)
+            i += 1
+    i += 1
+    if cond is not None and not cond_met(cond):
+        continue
+    full = os.path.normpath(os.path.join(skill_dir, path))
+    if full != skill_dir and not full.startswith(skill_dir + os.sep):
+        continue  # @include path must stay under the skill dir
+    frag = read(full)
+    if frag:
+        parts.append(frag.rstrip("\n"))
+
+if not parts:
+    sys.exit(0)  # nothing assembled -> no-op, never block startup
+
+assembled = "\n\n".join(parts)
+ctx = (
+    "<EXTREMELY_IMPORTANT>\n"
+    "You are in a polyforge workspace (.polyforge.yaml detected). "
+    "Lifecycle skills /pf-* and `mcp__plugin_polyforge_polyforge__*` MCP tools are "
+    "authoritative; do not bypass them with raw git / Edit / Bash on work_items. "
+    "Using superpowers skills as the content *engine* inside a /pf-* step (when superpowers "
+    "is enabled) is NOT a bypass — the prohibition is about skipping the wi lifecycle "
+    "(claim / step / artifact / commit / PR / wrap), not about which engine authors the content.\n\n"
+    "**Below is the assembled `using-polyforge` skill (fragments per the SKILL.md manifest):**\n\n"
+    + assembled
+    + "\n</EXTREMELY_IMPORTANT>"
+)
+
+if os.environ.get("CURSOR_PLUGIN_ROOT"):
+    out = {"additional_context": ctx}
+elif os.environ.get("CLAUDE_PLUGIN_ROOT") and not os.environ.get("COPILOT_CLI"):
+    out = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}}
+else:
+    out = {"additionalContext": ctx}
+
+print(json.dumps(out))
+PY
+exit 0

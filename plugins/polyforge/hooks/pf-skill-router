@@ -59,9 +59,10 @@ TARGETS = {
         "HARD-GATE and its default of writing `docs/superpowers/specs/<date>-<topic>-design.md`; "
         "do not block or rewrite that). After superpowers writes that file, RECORD its content into "
         "polyforge: call `pf_save_artifact(type=\"methodology.spec\", work_item_id=<current wi>, "
-        "content=<the file's contents>)`; on repeated re-writes of the same source file, pass "
-        "`supersedes_memory_id` to overwrite the prior version instead of duplicating. "
-        "The pf-superpowers-bridge hook saves this artifact deterministically; only call pf_save_artifact yourself if the bridge reports it failed."
+        "path=\"<absolute path to the file superpowers just wrote>\")`; on repeated re-writes of the same "
+        "source file, pass `supersedes_memory_id` to overwrite the prior version instead of duplicating. "
+        "The pf-superpowers-bridge hook saves this artifact deterministically; if it reports it failed, call "
+        "pf_save_artifact yourself with path= (not inline content)."
         " The spec artifact MUST include at least one fenced ```d2 architecture/data-flow diagram "
         "(components + data flow); aihub renders ```d2 blocks to SVG in /ui, so use D2 syntax (a -> b: label), not mermaid.",
     ),
@@ -70,10 +71,11 @@ TARGETS = {
         "Use `superpowers:writing-plans` as the engine to produce the plan content (honor its default "
         "of writing `docs/superpowers/plans/<date>-<feature>.md`; do not block or rewrite that). After "
         "superpowers writes that file, RECORD its content into polyforge: call `pf_save_artifact("
-        "type=\"methodology.plan\", work_item_id=<current wi>, content=<the file's contents>)`; on "
+        "type=\"methodology.plan\", work_item_id=<current wi>, path=\"<absolute path to the file superpowers just wrote>\")`; on "
         "repeated re-writes of the same source file, pass `supersedes_memory_id` to overwrite the prior "
         "version instead of duplicating. "
-        "The pf-superpowers-bridge hook saves this artifact deterministically; only call pf_save_artifact yourself if the bridge reports it failed."
+        "The pf-superpowers-bridge hook saves this artifact deterministically; if it reports it failed, call "
+        "pf_save_artifact yourself with path= (not inline content)."
         " The plan artifact MUST include at least one fenced ```d2 architecture/data-flow diagram "
         "(components + data flow); aihub renders ```d2 blocks to SVG in /ui, so use D2 syntax (a -> b: label), not mermaid.",
     ),

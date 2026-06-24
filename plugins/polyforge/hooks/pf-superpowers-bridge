@@ -69,7 +69,7 @@ def claimed_state(ws):
 def fallback():
     msg = (f"[polyforge bridge] A superpowers {label} doc was written at `{path}` but the bridge could "
            f"NOT save it automatically. If a wi is claimed, call pf_save_artifact(type=\"{art_type}\", "
-           f"work_item_id=<current wi>, content=<file contents>, visibility=\"project\") (pass "
+           f"work_item_id=<current wi>, path=\"{path}\", visibility=\"project\") (pass "
            f"supersedes_memory_id of the prior same-type artifact if re-editing).")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": msg}}))
     sys.exit(0)

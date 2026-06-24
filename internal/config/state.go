@@ -25,17 +25,18 @@ type StateFile struct {
 	Worktrees     map[string]string `json:"worktrees,omitempty"` // repo -> abs path
 }
 
-// StateDir returns the workspace-scoped state directory: <wsRoot>/.polyforge/state/
-// Per design §9.5.4, state files are workspace-local (not in ~/), so different
-// workspaces don't bleed credentials into each other.
-// Uses POLYFORGE_WORKSPACE_ROOT env (set by Claude Code), falling back to
-// FindWorkspaceRoot (walks up from cwd looking for .polyforge.yaml).
-func StateDir() string {
-	wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
-	if wsRoot == "" {
-		wsRoot = FindWorkspaceRoot()
+// WorkspaceRoot returns the workspace root: POLYFORGE_WORKSPACE_ROOT env (set by
+// Claude Code) if present, else FindWorkspaceRoot (walk up for .polyforge.yaml).
+func WorkspaceRoot() string {
+	if r := os.Getenv("POLYFORGE_WORKSPACE_ROOT"); r != "" {
+		return r
 	}
-	return filepath.Join(wsRoot, ".polyforge", "state")
+	return FindWorkspaceRoot()
+}
+
+// StateDir returns the workspace-scoped state directory: <wsRoot>/.polyforge/state/
+func StateDir() string {
+	return filepath.Join(WorkspaceRoot(), ".polyforge", "state")
 }
 
 // FindWorkspaceRoot walks up from the current working directory looking for a

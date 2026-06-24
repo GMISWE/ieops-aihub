@@ -208,12 +208,13 @@ func (s *Server) registerMemoryTools() {
 		InputSchema: objectSchema(map[string]any{
 			"type":                 prop("string", "Artifact type (methodology.spec, methodology.plan, etc.)"),
 			"work_item_id":         prop("string", "Work item ID"),
-			"content":              prop("string", "Artifact content"),
+			"content":              prop("string", "Artifact content (inline). Provide content OR path, not both."),
+			"path":                 prop("string", "Local filesystem path to a UTF-8 markdown file to read as the artifact content (read by the local MCP process; must resolve within the workspace, <=1 MiB). Provide content OR path, not both."),
 			"structured_payload":   prop("object", "Optional structured payload"),
 			"visibility":           prop("string", "private|project|team|admin (default: project)"),
 			"supersedes_memory_id": prop("string", "Memory ID this supersedes"),
 			"html":                 prop("string", "Optional pre-rendered HTML stored verbatim in rendered_html (full standalone document or body fragment). Overrides server-side markdown auto-render; use for custom-styled artifact views served by the artifact HTML viewer."),
-		}, []string{"type", "work_item_id", "content"}),
+		}, []string{"type", "work_item_id"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -227,8 +228,9 @@ func (s *Server) registerMemoryTools() {
 		if wiID == "" {
 			return errResult(fmt.Errorf("work_item_id is required"))
 		}
-		if strArg(args, "content") == "" {
-			return errResult(fmt.Errorf("content is required"))
+		artifactContent, err := resolveArtifactContent(args, config.WorkspaceRoot())
+		if err != nil {
+			return errResult(err)
 		}
 
 		sf, err := config.ReadStateFile(wiID)
@@ -239,7 +241,7 @@ func (s *Server) registerMemoryTools() {
 		body := map[string]any{
 			"type":           artifactType,
 			"work_item_id":   wiID,
-			"content":        strArg(args, "content"),
+			"content":        artifactContent,
 			"attempt_id":     sf.AttemptID,
 			"claim_epoch":    sf.ClaimEpoch,
 			"session_secret": sf.SessionSecret,

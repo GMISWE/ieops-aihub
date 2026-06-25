@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# PreToolUse guard hook for polyforge v1 — AI-attribution commit/PR guard.
+# Turns the CLAUDE.md <undercover> SOFT rule into a HARD hook-layer guard: before a tool
+# writes git-visible text, scan the commit message / PR title+body and DENY the call if it
+# contains an AI-attribution string (Claude / Anthropic / AI / LLM / model names / the
+# Co-Authored-By / Generated-by / AI-assisted trailers). On a hit we deny with a feedback
+# reason so the model rewrites in a plain human-authored tone — we never silently strip the
+# human-intended message.
+#
+# Intercepted tools (matcher in hooks.json) and the fields scanned:
+#   pf_commit -> message ; pf_pr -> title,body ; pf_wrap -> pr_title,pr_body ;
+#   Bash      -> command, ONLY when it is a `git commit`/`gh pr` invocation (else inert).
+#
+# FAIL-OPEN on any internal error (no python3, unparseable payload): exit 0, never block a
+# legitimate commit. The guard backstops a soft rule; its own failure must not wedge work.
+#
+# NOTE: the PreToolUse payload arrives on this script's stdin. We capture it into an env var
+# FIRST, because the python program is delivered to python3 via a heredoc on python3's stdin
+# — so python's sys.stdin is the heredoc, NOT the hook payload (mirrors the sibling hooks).
+
+set -euo pipefail
+command -v python3 >/dev/null 2>&1 || exit 0  # no python3 -> inert, never block
+
+PF_PAYLOAD="$(cat)" python3 <<'PY'
+import json, os, re, sys
+
+raw = os.environ.get("PF_PAYLOAD", "")
+try:
+    payload = json.loads(raw) if raw.strip() else {}
+except ValueError:
+    sys.exit(0)  # unparseable payload -> fail-open
+if not isinstance(payload, dict):
+    sys.exit(0)
+
+tool = payload.get("tool_name") or ""
+ti = payload.get("tool_input") or {}
+if not isinstance(ti, dict):
+    sys.exit(0)
+
+# --- which (field, value) text pairs to scan, per tool ---
+def field(name):
+    v = ti.get(name)
+    return (name, v) if isinstance(v, str) and v else None
+
+# A Bash command is scanned only when it is a git-commit or gh-pr invocation; we must not
+# scan unrelated shell. Best-effort: pf_* are the primary surface, this is a backstop.
+GIT_PR_RE = re.compile(r"\bgit\b[^\n]*\bcommit\b|\bgh\b\s+pr\b", re.IGNORECASE)
+
+fields = []
+if tool == "mcp__plugin_polyforge_polyforge__pf_commit":
+    fields = [field("message")]
+elif tool == "mcp__plugin_polyforge_polyforge__pf_pr":
+    fields = [field("title"), field("body")]
+elif tool == "mcp__plugin_polyforge_polyforge__pf_wrap":
+    fields = [field("pr_title"), field("pr_body")]
+elif tool == "Bash":
+    cmd = ti.get("command")
+    if isinstance(cmd, str) and GIT_PR_RE.search(cmd):
+        fields = [("command", cmd)]
+fields = [f for f in fields if f]
+if not fields:
+    sys.exit(0)  # nothing to scan -> let the call through untouched
+
+# --- the matcher: case-insensitive, custom word boundaries (only [A-Za-z0-9] is a "word"
+# char, so hyphenated attribution trailers still bound correctly). The boundaries are why
+# `ai` inside maintain/contain/detail/email/domain/chain/explain/again does NOT match: those
+# have alphanumerics on both sides of `ai`. Single-word names match only as whole tokens. ---
+B  = r"(?<![A-Za-z0-9])"   # left boundary
+B2 = r"(?![A-Za-z0-9])"    # right boundary
+ALTS = [
+    r"claude",            # also catches claude-opus-4-8, claude code (word "claude")
+    r"anthropic",
+    r"opus",
+    r"sonnet",
+    r"haiku",
+    r"llm",
+    r"ai",                # standalone token only
+    r"co[\s-]?authored[\s-]?by",
+    r"generated[\s-]+(?:by|with)",
+    r"ai[\s-]+assisted",
+]
+BANNED = re.compile(B + r"(?:" + r"|".join(ALTS) + r")" + B2, re.IGNORECASE)
+
+def first_hit(text):
+    m = BANNED.search(text)
+    return m.group(0) if m else None
+
+for fname, value in fields:
+    term = first_hit(value)
+    if term:
+        reason = (
+            f"[polyforge commit-guard] BLOCKED: the {fname} contains the AI-attribution "
+            f"string \"{term}\". Per the <undercover> rule, all git output (commit message, "
+            f"PR title/body) must read as written by a human developer — no mention of "
+            f"Claude / Anthropic / AI / LLM / model names, and no Co-Authored-By / Generated-by "
+            f"/ AI-assisted trailers. Rewrite the text to describe only what the change does "
+            f"and why, in a plain human-authored tone, then retry."
+        )
+        out = {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }}
+        print(json.dumps(out))
+        sys.exit(0)
+
+# no hit -> no output, call proceeds
+sys.exit(0)
+PY
+exit 0

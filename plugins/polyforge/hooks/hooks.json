@@ -10,6 +10,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Bash|mcp__plugin_polyforge_polyforge__pf_(commit|pr|wrap)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-commit-guard\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "SessionStart": [

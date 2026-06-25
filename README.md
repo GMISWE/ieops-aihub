@@ -1,4 +1,4 @@
-# ieops-aihub
+# aihub
 
 The **polyforge** backend and plugin host.
 
@@ -98,15 +98,11 @@ A read-only browser UI is served at `http://<aihub-host>/ui/`.
 `plugins/polyforge/` is the Claude Code plugin that talks to this backend:
 the `/pf-*` lifecycle skills, session hooks, and the MCP launcher
 (`bin/polyforge-mcp.sh`, which downloads the matching `polyforge` binary on
-first run). `.claude-plugin/marketplace.json` lists it so a workspace can:
+first run). `.claude-plugin/marketplace.json` lists it as a Claude Code
+marketplace so a workspace can install the plugin straight from this repo.
 
-```
-/plugin marketplace add GMISWE/ieops-aihub
-/plugin install polyforge@ieops-aihub
-```
-
-The full newcomer flow (API key -> install -> first work item) is in
-[`docs/onboarding.md`](docs/onboarding.md).
+The full newcomer flow (API key -> install -> first work item), including the
+exact `/plugin` commands, is in [`docs/onboarding.md`](docs/onboarding.md).
 
 ## Build, test, deploy
 

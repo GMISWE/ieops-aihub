@@ -7,6 +7,22 @@
 
 ---
 
+> ⚠️ **勘误（最后核对 2026-06-25，基准 origin/main `39be871`）**
+>
+> 本文档是 v1 编码前的设计契约，部分内容已与实现漂移。下表列出已知偏差；正文未逐条回改，**以代码为准**。
+>
+> | # | 文档处 | 文档说法 | 实际 |
+> |---|---|---|---|
+> | 1 | 头部版本 | `版本: v1.15` | Changelog 已到 **v1.24**，头部版本号未同步更新 |
+> | 2 | §1 仓库结构 | 两个仓库（aihub + GMI-marketplace 插件） | 插件已 vendored 进本仓（aihub#193，2026-06-24）：`plugins/polyforge/` + 根 `.claude-plugin/marketplace.json`；本仓同时是该插件的 marketplace 宿主 |
+> | 3 | §1.1 文件树 | 迁移 `0001`-`0006`（`0002_ownership_only` / `0006_memory_v2` 等）、MCP SDK `mark3labs/mcp-go`、`mcp/tools_locks.go` / `tools_actors.go`、`scenario/registry.go` | 实际 **25 个迁移**（`0001`-`0025`，命名不同）、MCP SDK 为 `modelcontextprotocol/go-sdk v1.6.0`、tools 文件为 `tools_users/projects/dependency.go`、`scenario/` 仅 `protocol.go` |
+> | 4 | 表数量 | "12→10 表"（memory_embeddings 并入 memories） | 最终 schema **11 张逻辑表**：另加 `projects`、`memory_relations`（均在本文定稿后新增；`scenario_phase_configs` 见 #5）；`agent_events` 另含 6 个月度分区子表 |
+> | 5 | `scenario_phase_configs`（v1.23/v1.24） | scenario 级 SoT，驱动分类 | 已在迁移 `0017` **删除**（aihub#38）；`wi_type` / `requires_human_session` 分类改为**客户端职责**，server 直接读 wi 行，`phase_config_version` 恒 NULL |
+> | 6 | 工具数量 | "38→32 工具" | 实际 **46 个 `pf_*` MCP 工具**（见 `docs/mcp-tools.md`） |
+> | 7 | §16 EmbeddingProvider / 向量召回 | provider 抽象 + 语义召回 | 仅铺底、**从未接通**：provider 从未实例化、`Remember` 不写 `emb_vector`（恒 NULL）、HNSW 索引被注释、`RecallWithVector` 仅是一句注释。当前 recall = 文本/标签 + 近因排序。向量召回作为 **aihub#192** 在飞 |
+
+---
+
 ## Changelog
 
 - v1.24: 综合 Opus R9 Part A：C-R9-1 migration seed 默认数据；C-R9-2 CAS 冲突禁止自动 merge，强制手工确认；C-R9-3 scenario config 不存在→503；C-R9-4 classification_rules.set.wi_type 写入时校验；C-R9-5 zombie sweeper 改为 system force_takeover + lost 状态（释放 locks）；C-R9-6 wi.wi_type=NULL 时禁止 claim；C-R9-7 Wi Agent = 角色，两种载体明确区分；C-R9-10 fn_claim 时验证 wi_type 仍存在；H-R9-8 pf-add-type 先 server 后本地；H-R9-9 agent_events.work_item_id 改 NULLABLE；H-R9-11 paused 时 fn_complete_attempt 自动 force_terminate；H-R9-12 mode=resume 同 user 隐式 takeover；M-R9-20 GC sweep 7 SQL 语法修正；Part B 精简：memory_embeddings 合并进 memories（12→10 表）；wi_sequences 删除；pf_acquire_lock/pf_release_lock/pf_update_artifact/pf_reconcile_artifacts/pf_manage_actors 删除（38→32 工具）；execute-scenario 推 v2；pf-debug/pf-event/pf-review stub 内联（skill 18→12）；pf-add-type 合并到 NL 路由

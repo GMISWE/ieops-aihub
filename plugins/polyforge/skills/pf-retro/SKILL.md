@@ -1,9 +1,9 @@
 ---
 name: pf-retro
 description: >
-  Post-wrap retrospective — reads the full wi event timeline, compares planned vs.
-  actual, extracts learnings, and batch-saves to team memory. Can be run standalone
-  after /pf-stop --wrap or is dispatched automatically by /pf-execute.
+  Use when a wi has just been wrapped and its outcome should be reviewed for learnings
+  to save to team memory, whether run standalone or dispatched by /pf-execute. Triggers
+  include retro, lessons learned, and what did we learn.
 ---
 
 # pf-retro — Retrospective & Knowledge Distillation

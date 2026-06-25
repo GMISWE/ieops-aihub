@@ -1,8 +1,8 @@
 ---
 name: pf-status
 description: >
-  Show work item status. Two views: single wi detail (timeline + step progress) and
-  global LCRS six-segment ready-queue view for the whole project.
+  Use when the user wants to know what is happening: progress on a claimed wi, the
+  project ready queue, or which items are stalled, blocked, or need attention.
 ---
 
 # pf-status — Work Item Status & Ready Queue

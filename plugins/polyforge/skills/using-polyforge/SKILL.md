@@ -1,10 +1,8 @@
 ---
 name: using-polyforge
 description: >
-  Meta skill — loaded automatically at session start. Establishes Iron Rules
-  (IR1-IR3), routes natural-language intent to the correct /pf-* skill, enforces
-  Memory-First before every action, and defines the mandatory three-segment output
-  format for all polyforge skills.
+  Use at the start of any polyforge session and before any /pf-* skill, work-item, or
+  memory operation; loaded automatically at session start.
 ---
 
 <!--

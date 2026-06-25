@@ -1,10 +1,8 @@
 ---
 name: pf-revise
 description: >
-  Annotation-driven revision — reads OPEN section annotations on a spec/plan artifact,
-  revises the artifact accordingly, supersedes a new version, then resolves each
-  annotation via pf_resolve_commit. Run after a human has annotated a spec or plan
-  artifact in the /ui viewer and wants the agent to act on the feedback.
+  Use when a human reviewer has left open annotations on a spec or plan artifact in
+  the /ui viewer and wants the agent to apply that feedback and resolve the annotations.
 ---
 
 # pf-revise — Annotation-Driven Artifact Revision

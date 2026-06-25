@@ -1,9 +1,9 @@
 ---
 name: pf-work
 description: >
-  Start, claim, resume, or force-takeover a work item. Four modes: (A) create new wi
-  (decoupled from claim — dialog mode asks, silent mode queues), (B) claim existing
-  queued wi, (C) resume paused wi, (D) force-takeover an idle/expired wi.
+  Use when the user wants to begin working on something: start a new work item, claim
+  a queued one, resume a paused one, or take over a stalled or idle one from another
+  agent.
 ---
 
 # pf-work — Work Item Lifecycle Entry

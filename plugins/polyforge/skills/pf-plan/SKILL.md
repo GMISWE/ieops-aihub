@@ -1,9 +1,8 @@
 ---
 name: pf-plan
 description: >
-  Layer 2 step — write the plan artifact for the current wi. Reads the spec, breaks
-  implementation into ordered steps, optionally spawns child wi's for parallel subtasks
-  with blocked_by dependencies.
+  Use when a claimed wi has a spec and needs an implementation plan broken into ordered
+  steps before coding, or the user says plan, break this down, or create subtasks.
 ---
 
 # pf-plan — Plan & Child Wi Creation
@@ -19,7 +18,15 @@ description: >
 > `../_common/{memory,storage,lifecycle}.md` and follow those, or run `/pf-doctor`. When an
 > injected body is present, it takes precedence over this stub.
 
-**Pattern**: `/pf-plan` · **Required**: a currently-claimed wi with a completed spec step.
+## Usage
+
+**Purpose**: Write the plan artifact for the current wi, breaking implementation into ordered steps.
+
+**Pattern**: `/pf-plan`
+
+**Required**: a currently-claimed wi with a completed spec step.
+
+**Flags**: none
 
 ## NL Triggers
 

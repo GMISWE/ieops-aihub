@@ -1,9 +1,9 @@
 ---
 name: pf-spec
 description: >
-  Layer 2 step — write the spec artifact for the current wi. Guides scope definition,
-  non-goals, design decisions, and acceptance criteria. Also handles debug-variant
-  requests (root cause analysis for bugs).
+  Use when a claimed feature or bug wi needs its scope, non-goals, design, and
+  acceptance criteria defined, or when a bug needs root-cause analysis, e.g. write a
+  spec, scope this out, debug, or root cause.
 ---
 
 # pf-spec — Spec & Debug Analysis
@@ -19,7 +19,15 @@ description: >
 > `../_common/{memory,storage,lifecycle}.md` and follow those, or run `/pf-doctor`. When an
 > injected body is present, it takes precedence over this stub.
 
-**Pattern**: `/pf-spec` · **Required**: a currently-claimed `feature` / `critical_bug` wi.
+## Usage
+
+**Purpose**: Write the spec artifact for the current wi (scope, non-goals, design, acceptance), or run root-cause analysis for a bug.
+
+**Pattern**: `/pf-spec`
+
+**Required**: a currently-claimed `feature` / `critical_bug` wi.
+
+**Flags**: none
 
 ## NL Triggers
 

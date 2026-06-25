@@ -1,10 +1,8 @@
 ---
 name: pf-help
 description: >
-  Print standardized help for the polyforge skill set. With no arg, lists every /pf-*
-  skill with its purpose and pattern; with one arg, prints that single skill's full
-  ## Usage block. Use this as a quick-reference contract — do not dispatch other skills
-  from here, just print.
+  Use when the user asks how to use a /pf-* skill, what flags it takes, or wants a
+  quick reference of the available polyforge skills.
 ---
 
 # pf-help — /pf-* Skill Quick Reference
@@ -21,9 +19,10 @@ description: >
 
 ## When to use
 
-Any time the user asks "how do I use /pf-X?" or wants a quick reference of available
-pf skills. This skill is a **read-only contract** — it prints help and stops. It does
-NOT dispatch other skills or perform any wi-lifecycle action.
+Any time the user asks "how do I use /pf-X?", "what flags does /pf-X take?", or wants a
+quick reference of available pf skills — when a quick reference is faster than reading
+the whole SKILL.md. This skill is a **read-only contract** — it prints help and stops.
+It does NOT dispatch other skills or perform any wi-lifecycle action.
 
 ## Mechanic
 
@@ -86,14 +85,6 @@ This skill is short on purpose. The calling agent (you, when the user invokes
    Full docs: plugins/polyforge/skills/<normalized>/SKILL.md
               (sections: When to use, Mechanic, NL Triggers)
    ```
-
-## When to use
-
-- "how do I use /pf-X?"
-- "what flags does /pf-X take?"
-- "list pf skills" / "what pf skills are there"
-- "quick help for pf-stop" — any time a quick reference is faster than reading the
-  whole SKILL.md
 
 ## Non-goals
 

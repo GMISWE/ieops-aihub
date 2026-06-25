@@ -1,9 +1,8 @@
 ---
 name: pf-sync
 description: >
-  External system sync — pull Jira/GitHub issues into aihub as wi's, or push a
-  wrapped wi back to Jira/GitHub. Phase 2 feature: v1 stubs both directions and
-  emits a note event.
+  Use when the user wants to sync work items between polyforge and an external tracker
+  such as Jira or GitHub Issues, pulling issues in or pushing a wrapped wi back out.
 ---
 
 # pf-sync — External System Sync (Phase 2 stub)

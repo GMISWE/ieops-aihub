@@ -5,10 +5,10 @@ a team-visible memory. Bob (writer) later recalls it before starting similar wor
 Carol (viewer) can recall team-visible memories but not private ones.
 
 ## Users
-- ALICE_KEY=pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V  (Test Agent Alice, writer)
-- BOB_KEY=pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR  (Test Writer Bob, writer)
-- CAROL_KEY=pf_k1_2j5gcKsUTBRazaEWydEQ1i4bDRwdR6Bh  (Test Viewer Carol, viewer)
-- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig  (admin)
+- ALICE_KEY=$ALICE_KEY  (Test Agent Alice, writer)
+- BOB_KEY=$BOB_KEY  (Test Writer Bob, writer)
+- CAROL_KEY=$CAROL_KEY  (Test Viewer Carol, viewer)
+- ADMIN_KEY=$ADMIN_KEY  (admin)
 
 ## Steps
 

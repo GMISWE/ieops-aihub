@@ -4,8 +4,8 @@ Tests that `/work_items/:id/renew` returns 410 Gone. The lease renewal mechanism
 was removed in aihub#36: claim is now static ownership, no heartbeat required.
 
 ## Users
-- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
-- ALICE_KEY=pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V
+- ADMIN_KEY=$ADMIN_KEY
+- ALICE_KEY=$ALICE_KEY
 
 ## Steps
 

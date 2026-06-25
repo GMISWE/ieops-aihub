@@ -8,7 +8,7 @@ Skip if a viewer API key is not available.
 
 ## Preconditions
 
-- ADMIN_KEY: baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig (admin)
+- ADMIN_KEY: $ADMIN_KEY (admin)
 - VIEWER_KEY: <a key belonging to a user with only "viewer" role on marketplace>
   If not available, create one: POST /v1/users + grant viewer role via admin
 

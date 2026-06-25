@@ -5,11 +5,11 @@ Alice and Bob are auto-agents picking up tasks from the ready queue concurrently
 
 ## Users
 - ADMIN (Orchestrator, Session 1): creates wi's, monitors
-  API key: baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
+  API key: $ADMIN_KEY
 - ALICE (Agent, Session 1): picks up fix_bug tasks automatically
-  API key: pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V
+  API key: $ALICE_KEY
 - BOB (Agent, Session 1): picks up chore tasks automatically
-  API key: pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR
+  API key: $BOB_KEY
 
 ## Scenario
 

@@ -5,9 +5,9 @@ It should NOT appear in auto-agent Alice's ready queue items[]. Only Bob can cla
 Tests the Session 1 (auto) vs Session 2 (human-led) routing.
 
 ## Users
-- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig  (admin, orchestrator)
-- ALICE_KEY=pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V  (Test Agent Alice, auto-agent)
-- BOB_KEY=pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR  (Test Writer Bob, human developer)
+- ADMIN_KEY=$ADMIN_KEY  (admin, orchestrator)
+- ALICE_KEY=$ALICE_KEY  (Test Agent Alice, auto-agent)
+- BOB_KEY=$BOB_KEY  (Test Writer Bob, human developer)
 
 ## Steps
 

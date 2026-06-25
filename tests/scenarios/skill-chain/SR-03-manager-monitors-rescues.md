@@ -6,9 +6,9 @@ and completes the work.
 
 ## Users
 - ALICE (writer/agent): starts work, then "crashes"
-  API key: pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V
+  API key: $ALICE_KEY
 - ADMIN (manager/orchestrator): monitors and rescues
-  API key: baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
+  API key: $ADMIN_KEY
 
 ## Scenario
 

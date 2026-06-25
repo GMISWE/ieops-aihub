@@ -5,9 +5,9 @@ She can read wi state, events, ready queue, memories — but cannot claim, updat
 or create wi's.
 
 ## Users
-- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig  (xiaokang.w, admin)
-- BOB_KEY=pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR  (Test Writer Bob, writer)
-- CAROL_KEY=pf_k1_2j5gcKsUTBRazaEWydEQ1i4bDRwdR6Bh  (Test Viewer Carol, viewer on marketplace)
+- ADMIN_KEY=$ADMIN_KEY  (xiaokang.w, admin)
+- BOB_KEY=$BOB_KEY  (Test Writer Bob, writer)
+- CAROL_KEY=$CAROL_KEY  (Test Viewer Carol, viewer on marketplace)
 
 ## Steps
 

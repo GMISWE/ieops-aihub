@@ -5,9 +5,9 @@ API refactor). B stays blocked and out of ready queue until A wraps.
 Tests the dependency enforcement and auto-unblock flow.
 
 ## Users
-- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig  (admin, creates wi's)
-- ALICE_KEY=pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V  (Test Agent Alice, does WI_A)
-- BOB_KEY=pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR  (Test Writer Bob, waits for WI_B)
+- ADMIN_KEY=$ADMIN_KEY  (admin, creates wi's)
+- ALICE_KEY=$ALICE_KEY  (Test Agent Alice, does WI_A)
+- BOB_KEY=$BOB_KEY  (Test Writer Bob, waits for WI_B)
 
 ## Steps
 

@@ -6,7 +6,7 @@ but must NOT create duplicate events or corrupt state.
 Reference: FnCompleteAttempt idempotency via attempt status check.
 
 ## Users
-- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
+- ADMIN_KEY=$ADMIN_KEY
 
 ## Steps
 

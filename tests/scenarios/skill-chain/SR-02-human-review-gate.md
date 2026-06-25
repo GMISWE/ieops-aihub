@@ -6,11 +6,11 @@ An auto-agent (Alice) cannot pick it up.
 
 ## Users
 - ADMIN: creates critical_bug wi
-  API key: baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
+  API key: $ADMIN_KEY
 - ALICE (auto-agent, Session 1): should NOT pick up the critical wi
-  API key: pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V
+  API key: $ALICE_KEY
 - BOB (human developer, Session 2): claims and resolves it
-  API key: pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR
+  API key: $BOB_KEY
 
 ## Scenario
 

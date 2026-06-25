@@ -43,10 +43,14 @@ Always execute CLEANUP steps regardless of pass/fail.
 
 | Role | User | API Key |
 |------|------|---------|
-| admin | xiaokang.w | `baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig` |
-| machine/writer | Test Agent Alice | `pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V` |
-| human/writer | Test Writer Bob | `pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR` |
-| human/viewer(project) | Test Viewer Carol | `pf_k1_2j5gcKsUTBRazaEWydEQ1i4bDRwdR6Bh` |
+| admin | xiaokang.w | `$ADMIN_KEY` |
+| machine/writer | Test Agent Alice | `$ALICE_KEY` |
+| human/writer | Test Writer Bob | `$BOB_KEY` |
+| human/viewer(project) | Test Viewer Carol | `$CAROL_KEY` |
+
+> The `$ADMIN_KEY` / `$ALICE_KEY` / `$BOB_KEY` / `$CAROL_KEY` values are **not committed**.
+> Export them in your shell before running a scenario (obtain the keys from a project
+> admin). The scenario files reference these env vars, never the literal keys.
 
 Carol's project_roles = {marketplace: "viewer"} — can GET but not POST/PATCH on project resources.
 

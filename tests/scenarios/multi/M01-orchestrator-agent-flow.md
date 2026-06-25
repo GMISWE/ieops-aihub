@@ -4,8 +4,8 @@ Real-world scenario: Admin (xiaokang.w) acts as Orchestrator in Session 1,
 creates wi's and monitors queue. Agent Alice (machine/writer) claims and executes.
 
 ## Users
-- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig  (xiaokang.w, admin)
-- ALICE_KEY=pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V  (Test Agent Alice, machine/writer)
+- ADMIN_KEY=$ADMIN_KEY  (xiaokang.w, admin)
+- ALICE_KEY=$ALICE_KEY  (Test Agent Alice, machine/writer)
 
 ## Steps
 

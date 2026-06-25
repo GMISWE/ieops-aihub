@@ -7,8 +7,8 @@ The zombie sweep was removed in aihub#36.
 NOTE: This scenario requires DB manipulation to backdate updated_at.
 
 ## Users
-- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
-- ALICE_KEY=pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V
+- ADMIN_KEY=$ADMIN_KEY
+- ALICE_KEY=$ALICE_KEY
 
 ## Manual verification steps
 

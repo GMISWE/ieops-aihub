@@ -95,9 +95,12 @@ Human wi's flow: Session 2 → pf-execute runs spec/plan inline, dispatches codi
 
 | Role | User | API key |
 |------|------|---------|
-| admin | xiaokang.w | `baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig` |
-| machine/writer | Test Agent Alice | `pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V` |
-| human/writer | Test Writer Bob | `pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR` |
+| admin | xiaokang.w | `$ADMIN_KEY` |
+| machine/writer | Test Agent Alice | `$ALICE_KEY` |
+| human/writer | Test Writer Bob | `$BOB_KEY` |
+
+> Key values are **not committed** — export `$ADMIN_KEY` / `$ALICE_KEY` / `$BOB_KEY`
+> before running (obtain them from a project admin). See `tests/scenarios/README.md`.
 
 ## Prerequisites
 

@@ -5,7 +5,7 @@ get expires_at set to closed_at + 90 days (not immortal).
 Reference: FnCompleteWorkItem sets expires_at on linked memories.
 
 ## Users
-- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
+- ADMIN_KEY=$ADMIN_KEY
 
 ## Steps
 

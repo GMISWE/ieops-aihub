@@ -5,8 +5,8 @@ Admin (as maintainer) force-takes over the wi, picks up from where Alice left of
 completes and wraps. Tests the cross-user force_takeover flow.
 
 ## Users
-- ALICE_KEY=pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V  (Test Agent Alice, writer)
-- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig  (xiaokang.w, admin)
+- ALICE_KEY=$ALICE_KEY  (Test Agent Alice, writer)
+- ADMIN_KEY=$ADMIN_KEY  (xiaokang.w, admin)
 
 ## Steps
 

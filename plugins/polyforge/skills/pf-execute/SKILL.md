@@ -1,9 +1,8 @@
 ---
 name: pf-execute
 description: >
-  Wi Agent main loop — reads {wi_type}.{project}.md from the scenario repo and runs its
-  ## Step: sections in order. rhs=false dispatches a subagent per step; rhs=true walks the
-  user through step by step. The server only calls pf_complete_attempt.
+  Use when a claimed wi is ready to be carried out step by step against its scenario
+  step graph, e.g. the user says execute, run it, or go.
 ---
 
 # pf-execute — Wi Agent Main Loop
@@ -21,9 +20,15 @@ description: >
 > `../_common/{memory,storage,lifecycle}.md` and follow those, or run `/pf-doctor`. When an
 > injected body is present, it takes precedence over this stub.
 
-**Pattern**: `/pf-execute` · **Required**: a currently-claimed wi (state file at
-`<workspace>/.polyforge/state/<wi_id>.json`). **Mode**: from the wi's `requires_human_session`
-(`false` → auto dispatch; `true` → interactive step-by-step).
+## Usage
+
+**Purpose**: Run the wi's scenario step graph to completion (the main execution loop).
+
+**Pattern**: `/pf-execute`
+
+**Required**: a currently-claimed wi (state file at `<workspace>/.polyforge/state/<wi_id>.json`).
+
+**Flags**: Mode is derived from the wi's `requires_human_session` (`false` -> auto dispatch per step; `true` -> interactive step-by-step).
 
 ## NL Triggers
 

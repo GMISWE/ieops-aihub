@@ -1,10 +1,8 @@
 ---
 name: pf-user
 description: >
-  Manage polyforge users and API keys — whoami, list users, invite (create user + issue
-  initial key), update user role, issue and revoke API keys. Use when the user wants to
-  check their own identity, list all team members, add a team member, change a user's
-  role, or manage API keys.
+  Use when the user wants to check their identity, list team members, invite a member,
+  change a user's role, or issue or revoke API keys.
 ---
 
 # pf-user — User Management

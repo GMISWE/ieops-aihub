@@ -1,8 +1,8 @@
 ---
 name: pf-stop
 description: >
-  Stop work on the current wi. Three modes: pause (release lease, keep locks, status →
-  paused), wrap (terminal success), or fail (terminal failure).
+  Use when the user is done working on the current wi and wants to pause it, wrap it
+  as a terminal success, or mark it a terminal failure.
 ---
 
 # pf-stop — Stop / Complete Work Item

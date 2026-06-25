@@ -1,8 +1,8 @@
 ---
 name: pf-release
 description: >
-  Release management — cut an alpha release (tag + manifest) or promote an alpha
-  channel to stable. Shows current release state.
+  Use when the team is ready to cut a versioned alpha release, promote an alpha
+  channel to stable, or check the current release state.
 ---
 
 # pf-release — Release Management

@@ -1,6 +1,8 @@
 ---
 name: pf-project
-description: Manage polyforge projects — create, update, rotate identifier, list. Use when the user wants to create a new project, update project repos/description, rotate an access identifier, or list available projects.
+description: >
+  Use when the user wants to create, update, or list polyforge projects, or rotate
+  a project access identifier.
 ---
 
 # pf-project — Project Management

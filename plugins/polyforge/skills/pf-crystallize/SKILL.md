@@ -1,9 +1,9 @@
 ---
 name: pf-crystallize
 description: >
-  Post-wrap skill — crystallize this wi session's operation flow into a reusable
-  {wi_type}.{project}.md workflow file, write it into the scenario repo and push to main.
-  Triggered by pf-stop --wrap.
+  Use when a wi has just been wrapped via /pf-stop --wrap and its operation flow should
+  be captured as a reusable scenario workflow for future wis of the same type. Dispatched
+  automatically by pf-stop --wrap, not invoked directly by the user.
 ---
 
 # pf-crystallize — Workflow Crystallization

@@ -1,6 +1,9 @@
 ---
 name: pf-init
-description: Set up or repair a polyforge workspace. Handles project sync, repo cloning, description generation, and CLAUDE.md updates. Two user types: owner (has .polyforge.yaml) and member (pulls from server).
+description: >
+  Use when setting up a polyforge workspace for the first time on a new machine,
+  adding repos to an existing workspace, refreshing repo descriptions, or repairing
+  a workspace after /pf-doctor reports failures.
 ---
 
 # pf-init — Workspace Initialization

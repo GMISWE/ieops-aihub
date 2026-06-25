@@ -363,18 +363,38 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	// decision 3). Other memory types leave rendered_html NULL.
 	renderedHTML := resolveRenderedHTML(req.RenderedHTML, req.Type, req.Content)
 
+	// aihub#192: compute embedding vector for embeddable types.
+	// Best-effort: a provider error logs a warning and leaves emb_vector NULL.
+	var embVecLit *string // nil → SQL NULL
+	var embModel *string
+	var embDims *int
+	if embeddableType(req.Type) {
+		if vec, embErr := embProvider.Embed(ctx, req.Content); embErr != nil {
+			fmt.Fprintf(os.Stderr, "remember: embed failed for type=%s: %v\n", req.Type, embErr)
+		} else if len(vec) > 0 {
+			lit := vecToPGLiteral(vec)
+			embVecLit = &lit
+			m := embProvider.ModelID()
+			embModel = &m
+			d := embProvider.Dims()
+			embDims = &d
+		}
+	}
+
 	mem := &Memory{}
 	err := pool.QueryRow(ctx, `
 		INSERT INTO memories (
 			id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			activation_count, expires_at, tags, source_artifact_id,
+			emb_model, emb_dims, emb_vector,
 			status, attrs, rendered_html, supersedes_id, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11,
 			0, $12, $13, $14,
-			'active', $15, $16, $17, clock_timestamp(), clock_timestamp()
+			$15, $16, $17::vector,
+			'active', $18, $19, $20, clock_timestamp(), clock_timestamp()
 		)
 		RETURNING id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
@@ -383,8 +403,9 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			rendered_html, commits, created_at, updated_at`,
 		NewID("mem"), req.Project, req.Type, req.Content, req.CallerUserID, req.CallerDisplay,
 		req.WorkItemID, req.Visibility, immortal, baseStrength, stabilityDays,
-		req.ExpiresAt, req.Tags, nil, // source_artifact_id = nil
-		req.Attrs, renderedHTML, req.SupersedesMemID,
+		req.ExpiresAt, req.Tags, nil, // source_artifact_id = nil ($14)
+		embModel, embDims, embVecLit, // $15, $16, $17 — emb_model/dims/vector
+		req.Attrs, renderedHTML, req.SupersedesMemID, // $18, $19, $20
 	).Scan(
 		&mem.ID, &mem.Project, &mem.Type, &mem.Content, &mem.AuthorUserID, &mem.AuthorDisplay,
 		&mem.WorkItemID, &mem.Visibility, &mem.IsImmortal, &mem.BaseStrength, &mem.StabilityDays,
@@ -854,6 +875,26 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	if req.MinStrength <= 0 {
 		req.MinStrength = 0.3
 	}
+
+	// aihub#192: route to vector path when embedding is active, a query is present,
+	// and there is no work_item_id filter (wi-scoped recalls are deterministic, not
+	// semantic — skip the vector path to avoid pulling unrelated memories).
+	if !isNoopProvider(embProvider) && req.Query != "" && req.WorkItemID == nil {
+		r, vecErr := RecallWithVector(ctx, pool, req)
+		switch {
+		case vecErr != nil:
+			fmt.Fprintf(os.Stderr, "recall: vector path failed, falling through to text path: %v\n", vecErr)
+		case len(r.Items) == 0 && req.SimilarityThreshold <= 0:
+			// No embedded candidates matched — e.g. the corpus is not yet backfilled,
+			// or every stored emb_model differs from the current provider. Fall through
+			// to the text/tag path so recall is never silently empty during the embedding
+			// rollout window. (A caller-set SimilarityThreshold means empty is intended.)
+			fmt.Fprintln(os.Stderr, "recall: vector path returned 0 items, falling through to text path")
+		default:
+			return r, nil
+		}
+	}
+
 	// NOTE: RecencyWeight is currently a reserved-but-unused knob. The text/tag
 	// recall path orders strictly by last_activated_at DESC NULLS LAST, created_at
 	// DESC (see ORDER BY below) and does not blend a recency score. The default is

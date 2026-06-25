@@ -14,6 +14,7 @@ import (
 
 	"github.com/GMISWE/ieops-aihub/internal/db"
 	"github.com/GMISWE/ieops-aihub/internal/domain"
+	"github.com/GMISWE/ieops-aihub/internal/embedding"
 	"github.com/GMISWE/ieops-aihub/internal/server"
 	"github.com/GMISWE/ieops-aihub/internal/version"
 )
@@ -41,6 +42,25 @@ func main() {
 	// RENDER_MEMORY_TYPES is comma-separated, e.g. "methodology.spec,methodology.plan".
 	// When unset, defaults to "methodology.spec,methodology.plan" (backward-compatible).
 	domain.InitRenderTypes(os.Getenv("RENDER_MEMORY_TYPES"))
+
+	// aihub#192: initialise embedding provider from env.
+	// EMBEDDING_ENABLED=true/1 activates; on error or unreachable backend we
+	// degrade to NoopProvider so the server still starts.
+	{
+		p, embErr := embedding.FromEnv()
+		if embErr != nil {
+			fmt.Fprintf(os.Stderr, "warn: embedding.FromEnv: %v — falling back to NoopProvider\n", embErr)
+			p = &embedding.NoopProvider{}
+		} else if p != nil {
+			pingCtx, pingCancel := context.WithTimeout(ctx, 10*time.Second)
+			if pingErr := p.Ping(pingCtx); pingErr != nil {
+				fmt.Fprintf(os.Stderr, "warn: embedding backend unreachable: %v — falling back to NoopProvider\n", pingErr)
+				p = &embedding.NoopProvider{}
+			}
+			pingCancel()
+		}
+		domain.InitEmbeddingProvider(p)
+	}
 
 	// GC background scheduler: runs all sweeps every 60s.
 	go func() {

@@ -20,12 +20,17 @@ type OpenAIProvider struct {
 
 // NewOpenAI creates an OpenAI embedding provider.
 // model is typically "text-embedding-3-small"; dims is the output dimension (e.g. 1536).
-func NewOpenAI(apiKey, model string, dims int) *OpenAIProvider {
+// baseURL defaults to "https://api.openai.com" when empty — set it to a self-hosted
+// OpenAI-compatible endpoint (e.g. a vLLM/TEI server) for non-OpenAI providers.
+func NewOpenAI(apiKey, model string, dims int, baseURL string) *OpenAIProvider {
+	if baseURL == "" {
+		baseURL = "https://api.openai.com"
+	}
 	return &OpenAIProvider{
 		apiKey:  apiKey,
 		model:   model,
 		dims:    dims,
-		baseURL: "https://api.openai.com",
+		baseURL: baseURL,
 		client:  &http.Client{Timeout: 30 * time.Second},
 	}
 }

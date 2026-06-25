@@ -666,14 +666,14 @@ to direct HTTP calls. Use /reload-plugins or restart to reconnect.
 
 ---
 
-## Wi 创建规则
+## Wi creation rules
 
-**所有 wi 创建必须通过 ` + "`" + `/pf-work` + "`" + ` skill**，不管是人还是 AI。
+**All wi creation MUST go through the ` + "`" + `/pf-work` + "`" + ` skill**, whether human or AI.
 
-- **对话模式**（默认）：人/AI 在 session 讨论中决定建 wi → 创建后询问是否认领
-- **静默模式**：AI 在 step 执行中途发现问题 → 调用 pf-work 时说明"静默模式" → 只创建放 queue，不询问
+- **dialog mode** (default): a human/AI decides to create a wi during a session discussion -> after creation, ask whether to claim it
+- **silent mode**: an AI finds an issue mid-step -> when calling pf-work, state "silent mode" -> create and queue only, no prompt
 
-不要直接调用 ` + "`" + `pf_create_work_item` + "`" + ` MCP tool 创建 wi，统一走 pf-work 以保持行为一致。
+Do not call the ` + "`" + `pf_create_work_item` + "`" + ` MCP tool directly; always go through pf-work for consistent behavior.
 
 ---
 
@@ -699,48 +699,48 @@ url = "http://your-aihub-host"
 
 ## NL Routing
 
-| 说什么 | 对应操作 |
+| intent | operation |
 |--------|---------|
-| 今天有哪些活 / 派活 / ready queue | ` + "`" + `pf_get_ready_queue` + "`" + ` + fan-out subagents |
-| 哪些活需要我拍板 / needs attention | ` + "`" + `pf_get_ready_queue` + "`" + ` → ` + "`" + `needs_human_session[]` + "`" + ` |
-| 开始 / 新任务 / new / start | ` + "`" + `/pf-work` + "`" + ` (Mode A) |
-| 认领 / claim + slug | ` + "`" + `/pf-work <slug>` + "`" + ` (Mode B) |
-| 继续 / resume + slug | ` + "`" + `/pf-work <slug> --resume` + "`" + ` (Mode C) |
-| 接管 / takeover + slug | ` + "`" + `/pf-work <slug> --force` + "`" + ` (Mode D) |
-| 暂停 / pause | ` + "`" + `/pf-stop --pause` + "`" + ` |
-| 完成 / done / wrap / 搞定 | ` + "`" + `/pf-stop --wrap` + "`" + ` |
-| 失败 / abandon | ` + "`" + `/pf-stop --fail` + "`" + ` |
-| 状态 / status / 进度 | ` + "`" + `/pf-status` + "`" + ` |
-| 设计 / spec / brainstorm | ` + "`" + `/pf-spec` + "`" + ` |
-| 计划 / plan | ` + "`" + `/pf-plan` + "`" + ` |
-| 执行 / execute / run it | ` + "`" + `/pf-execute` + "`" + ` |
-| 回顾 / retro | ` + "`" + `/pf-retro` + "`" + ` |
-| 这个 bug / 调试 / debug | ` + "`" + `/pf-spec` + "`" + ` (debug variant) |
-| 记录 / note / log | ` + "`" + `pf_emit_event(event_type="note", ...)` + "`" + ` |
-| 初始化 / init / setup workspace | ` + "`" + `/pf-init` + "`" + ` |
-| 诊断 / doctor / 连不上 | ` + "`" + `/pf-doctor` + "`" + ` |
-| 发布 / release / cut | ` + "`" + `/pf-release` + "`" + ` |
+| what's ready today / dispatch work / ready queue | ` + "`" + `pf_get_ready_queue` + "`" + ` + fan-out subagents |
+| what needs my decision / needs attention | ` + "`" + `pf_get_ready_queue` + "`" + ` → ` + "`" + `needs_human_session[]` + "`" + ` |
+| begin / new task / new / start | ` + "`" + `/pf-work` + "`" + ` (Mode A) |
+| claim + slug | ` + "`" + `/pf-work <slug>` + "`" + ` (Mode B) |
+| resume + slug | ` + "`" + `/pf-work <slug> --resume` + "`" + ` (Mode C) |
+| takeover + slug | ` + "`" + `/pf-work <slug> --force` + "`" + ` (Mode D) |
+| pause | ` + "`" + `/pf-stop --pause` + "`" + ` |
+| done / wrap / finished | ` + "`" + `/pf-stop --wrap` + "`" + ` |
+| fail / abandon | ` + "`" + `/pf-stop --fail` + "`" + ` |
+| status / progress | ` + "`" + `/pf-status` + "`" + ` |
+| design / spec / brainstorm | ` + "`" + `/pf-spec` + "`" + ` |
+| plan | ` + "`" + `/pf-plan` + "`" + ` |
+| execute / run it | ` + "`" + `/pf-execute` + "`" + ` |
+| retro | ` + "`" + `/pf-retro` + "`" + ` |
+| this bug / debug | ` + "`" + `/pf-spec` + "`" + ` (debug variant) |
+| note / log | ` + "`" + `pf_emit_event(event_type="note", ...)` + "`" + ` |
+| init / setup workspace | ` + "`" + `/pf-init` + "`" + ` |
+| doctor / can't connect | ` + "`" + `/pf-doctor` + "`" + ` |
+| release / cut | ` + "`" + `/pf-release` + "`" + ` |
 
 ---
 
 ## Memory Type Reference
 
-手动调用 ` + "`" + `pf_remember` + "`" + ` 时，按**消费方**选 type，不按内容描述选。
-` + "`" + `experience.*` + "`" + ` 由 pf-retro 自动写入，手动存记忆优先用 ` + "`" + `rule.*` + "`" + ` / ` + "`" + `fact.*` + "`" + `。
+When calling ` + "`" + `pf_remember` + "`" + ` manually, pick the type by **consumer**, not by content description.
+` + "`" + `experience.*` + "`" + ` is written automatically by pf-retro; for manual memories prefer ` + "`" + `rule.*` + "`" + ` / ` + "`" + `fact.*` + "`" + `.
 
-| 内容 | Type | 被哪些 skill 召回 |
+| content | Type | recalled by which skills |
 |------|------|-----------------|
-| init/setup 经验 | ` + "`" + `experience.init` + "`" + ` | pf-init |
-| 执行中发现的 bug 模式 | ` + "`" + `experience.debug` + "`" + ` | pf-plan, pf-execute, pf-retro |
-| 成功解决某类问题的方案 | ` + "`" + `experience.approach` + "`" + ` | pf-plan, pf-execute, pf-retro |
-| 需要避开的坑 | ` + "`" + `experience.pitfall` + "`" + ` | pf-plan, pf-execute, pf-retro |
-| wi 生命周期操作规则 | ` + "`" + `rule.work` + "`" + ` | using-polyforge, pf-spec |
-| init 阶段操作规则 | ` + "`" + `rule.init` + "`" + ` | pf-init |
-| 调度/排期规则 | ` + "`" + `rule.scheduling` + "`" + ` | pf-init (managed block) |
-| 领域事实 | ` + "`" + `fact.<subtopic>` + "`" + ` | pf-spec |
-| spec 产出 | ` + "`" + `methodology.spec` + "`" + ` | pf-plan, pf-execute, pf-retro |
-| plan 产出 | ` + "`" + `methodology.plan` + "`" + ` | pf-execute, pf-retro |
-| release 记录 | ` + "`" + `methodology.release` + "`" + ` | pf-release |
+| init/setup experience | ` + "`" + `experience.init` + "`" + ` | pf-init |
+| bug patterns found during execution | ` + "`" + `experience.debug` + "`" + ` | pf-plan, pf-execute, pf-retro |
+| an approach that solved a class of problem | ` + "`" + `experience.approach` + "`" + ` | pf-plan, pf-execute, pf-retro |
+| pitfalls to avoid | ` + "`" + `experience.pitfall` + "`" + ` | pf-plan, pf-execute, pf-retro |
+| wi lifecycle operating rules | ` + "`" + `rule.work` + "`" + ` | using-polyforge, pf-spec |
+| init-phase operating rules | ` + "`" + `rule.init` + "`" + ` | pf-init |
+| scheduling rules | ` + "`" + `rule.scheduling` + "`" + ` | pf-init (managed block) |
+| domain facts | ` + "`" + `fact.<subtopic>` + "`" + ` | pf-spec |
+| spec output | ` + "`" + `methodology.spec` + "`" + ` | pf-plan, pf-execute, pf-retro |
+| plan output | ` + "`" + `methodology.plan` + "`" + ` | pf-execute, pf-retro |
+| release record | ` + "`" + `methodology.release` + "`" + ` | pf-release |
 `
 	if _, err := os.Stat(path); err == nil {
 		return nil // already exists — don't overwrite user edits

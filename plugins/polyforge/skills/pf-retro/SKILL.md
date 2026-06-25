@@ -157,8 +157,8 @@ pf_save_artifact(
 
 ### Step 8: Output three-segment format
 
-"结果" lists how many memories were saved/reinforced.
-"下一步" is `_none_` (wi is complete) or suggests creating follow-up wi's for items
+"Result" lists how many memories were saved/reinforced.
+"Next steps" is `_none_` (wi is complete) or suggests creating follow-up wi's for items
 noted in the retro.
 
 ## Retro Markdown Format
@@ -191,6 +191,6 @@ noted in the retro.
 
 ## NL Triggers
 
-- "回顾" / "retro" / "retrospective"
+- "review" / "retro" / "retrospective"
 - "lessons learned" / "what did we learn"
 - "save learnings" / "document what happened"

@@ -23,6 +23,6 @@ description: >
 
 ## NL Triggers
 
-- "计划" / "plan" / "plan this out"
-- "写 plan" / "break this down" / "create subtasks"
+- "plan" / "make a plan" / "plan this out"
+- "write a plan" / "break this down" / "create subtasks"
 - "how should we approach this" / "next steps"

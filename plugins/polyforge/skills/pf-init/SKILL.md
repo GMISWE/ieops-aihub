@@ -337,8 +337,8 @@ Example: `pf.aihub-23/aihub/`
 
 ## NL Triggers
 
-- "初始化 workspace" / "init workspace" / "setup"
-- "clone repos" / "克隆仓库"
-- "repair workspace" / "修复工作区"
-- "refresh description" / "更新描述"
+- "initialize workspace" / "init workspace" / "setup"
+- "clone repos" / "clone repositories"
+- "repair workspace" / "fix the workspace"
+- "refresh description" / "update descriptions"
 - "polyforge init" / "pf init"

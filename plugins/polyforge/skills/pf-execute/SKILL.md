@@ -27,4 +27,4 @@ description: >
 
 ## NL Triggers
 
-- "执行" / "execute" / "run it" / "开始执行" / "go"
+- "execute" / "run it" / "start executing" / "go"

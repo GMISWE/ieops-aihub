@@ -26,22 +26,23 @@ description: >
 Any time the user wants to begin working on something — new task, picking up a queued
 item, resuming yesterday's work, or taking over a stalled wi from another agent.
 
-## 架构规则
+## Architecture rules
 
-pf-work 是 wi 生命周期的**唯一创建入口**。不管是人还是 AI（包括 step 执行中途发现问题），
-创建 wi 都必须通过本 skill。
+pf-work is the **only creation entry point** for the wi lifecycle. Whether human or AI
+(including a problem discovered mid-step during execution), creating a wi must go through
+this skill.
 
-调用模式：
-- **对话模式**（默认）：人/AI 在 session 讨论中创建 wi → 创建后询问是否认领
-- **静默模式**：AI 在 step 执行中途创建 wi → 调用时说明"使用静默模式"或"静默创建" → 只创建放 queue，不询问
+Invocation modes:
+- **dialog mode** (default): a human/AI creates a wi during session discussion -> after creation, ask whether to claim
+- **silent mode**: an AI creates a wi mid-step during execution -> state "use silent mode" or "silent create" when invoking -> only create and put on the queue, do not ask
 
 ## Mechanic
 
 ### Post-claim routing
 
-See `## Post-claim 下一步 Routing` in `using-polyforge/SKILL.md` — that section is the
-**single source of truth** for what to suggest in "下一步" after any claim, and applies
-to **all** skills that emit 三段式 output (not just `pf-work`). `using-polyforge` is
+See `## Post-claim Next steps Routing` in `using-polyforge/SKILL.md` — that section is the
+**single source of truth** for what to suggest in "Next steps" after any claim, and applies
+to **all** skills that emit three-segment output (not just `pf-work`). `using-polyforge` is
 auto-loaded into every session's context, so this backreference resolves reliably
 (unlike an in-file anchor jump, which the LLM does not consistently follow at
 generation time — see `mem_5obNUSSR`).
@@ -61,20 +62,20 @@ generation time — see `mem_5obNUSSR`).
 
    // Scenario not cloned yet?
    if scenario_path does not exist:
-       STOP: "⚠️ Scenario repo 尚未克隆，请先运行 polyforge init。"
+       STOP: "⚠️ Scenario repo not cloned yet; please run polyforge init first."
 
-   // 从 .md 文件名推断合法 wi_type
-   // 列出 scenario_path 下所有 *.md 文件，提取 {wi_type} 前缀（第一个 . 之前）
-   // 排除 "default"
+   // Infer valid wi_type from .md file names
+   // List all *.md files under scenario_path, extract the {wi_type} prefix (before the first .)
+   // Exclude "default"
    available_wi_types = [
        f.split(".")[0]
        for f in os.listdir(scenario_path)
        if f.endswith(".md") and not f.startswith("default")
    ]
 
-   // 验证（创建 wi 时）：
-   // 检查 {wi_type}.{project}.md 或 {wi_type}.md 至少存在一个
-   // has_step_sections：文件中至少含一个 ^## Step: 行
+   // Validation (when creating a wi):
+   // Check that at least one of {wi_type}.{project}.md or {wi_type}.md exists
+   // has_step_sections: the file contains at least one ^## Step: line
    def has_step_sections(filepath):
        with open(filepath) as f:
            return any(re.match(r"^## Step: \w+", line) for line in f)
@@ -86,19 +87,19 @@ generation time — see `mem_5obNUSSR`).
            full = f"{scenario_path}/{path}"
            if os.path.exists(full):
                if not has_step_sections(full):
-                   return "error", None  # 文件存在但无 ## Step: sections
+                   return "error", None  # file exists but has no ## Step: sections
                return tag, path
-       return "error", None      # 拒绝创建
+       return "error", None      # reject creation
 
-   // requires_human_session：从 .md 文件 frontmatter 读取
-   // project-specific 文件优先；fallback 到通用文件；都没有则默认 true
+   // requires_human_session: read from the .md file frontmatter
+   // project-specific file takes priority; fallback to the generic file; default true if neither exists
    def get_rhs(wi_type, project, scenario_path):
        for path in [f"{wi_type}.{project}.md", f"{wi_type}.md"]:
            full = f"{scenario_path}/{path}"
            if os.path.exists(full):
                fm = parse_frontmatter(full)
                return fm.get("requires_human_session", True)
-       return True  # 默认
+       return True  # default
    ```
 
    AI infers wi_type from goal description + complexity, **matching against available_wi_types**:
@@ -110,11 +111,11 @@ generation time — see `mem_5obNUSSR`).
 
    **If no project scenario configured** OR **validate_wi_type returns "error"**:
    → Fall back to built-in `default` wi_type (`requires_human_session=true`, steps=[]).
-   Notify user: "⚠️ 无法匹配 wi_type，使用 default（需人工介入）。"
+   Notify user: "⚠️ Could not match wi_type, using default (requires human session)."
 
    **If validate_wi_type returns "warn"**:
    → Proceed with the generic .md flow; notify user:
-   "⚠️ 未找到 {wi_type}.{project}.md，将使用通用流程 {wi_type}.md。"
+   "⚠️ {wi_type}.{project}.md not found, will use the generic flow {wi_type}.md."
 
 2b. **AI extracts content draft from conversation**:
     From the current session conversation, extract a content draft describing the problem:
@@ -155,12 +156,12 @@ generation time — see `mem_5obNUSSR`).
    - `409 DUPLICATE` → show existing wi, ask: "Continue new / Claim existing / Cancel"
    - `409 CANDIDATES` → show candidate list, ask user to choose
 
-5. **Interactive confirmation** (对话模式) / **Silent** (静默模式):
+5. **Interactive confirmation** (dialog mode) / **Silent** (silent mode):
 
-   **对话模式**（默认）：
-   Output: "已创建 <slug>（<goal[:40]>）。要现在认领并继续处理吗？"
+   **dialog mode** (default):
+   Output: "Created <slug> (<goal[:40]>). Claim and start working on it now?"
    
-   → 人说"是"/"要"/"claim" → 直接认领（跳过 predict_conflicts，wi 刚创建无锁）：
+   → human says "yes" / "do it" / "claim" → claim directly (skip predict_conflicts, the wi was just created and has no locks):
      ```
      pf_claim_work_item(
        work_item_id=<wi_id>,
@@ -168,18 +169,18 @@ generation time — see `mem_5obNUSSR`).
        mode="fresh"
      )
      ```
-     然后召回 wi 关联记忆：
+     then recall wi-linked memories:
      ```
      pf_recall(project=<wi.project>, work_item_id=<wi_id>, top_k=10)
      ```
-     **rhs 路由**（wi.requires_human_session）：
-     - `false` → 不输出三段式；立即以 subagent 方式 dispatch `/pf-execute`（subagent 自己输出执行进度）。
-     - `true`  → 输出三段式（"下一步" 按 `using-polyforge` 的 `## Post-claim 下一步 Routing` 决定），等待人工介入。
+     **rhs routing** (wi.requires_human_session):
+     - `false` → do not emit three-segment output; immediately dispatch `/pf-execute` as a subagent (the subagent emits its own execution progress).
+     - `true`  → emit three-segment output ("Next steps" decided per `using-polyforge`'s `## Post-claim Next steps Routing`), wait for human session.
    
-   → 人说"否"/"不用"/"放着" → 输出三段式，wi 留 queue。
+   → human says "no" / "not now" / "leave it" → emit three-segment output, wi stays on the queue.
 
-   **静默模式**（调用时说明"使用静默模式"或"静默创建"）：
-   直接输出三段式，不询问，不 claim，wi 留 queue。
+   **silent mode** (state "use silent mode" or "silent create" when invoking):
+   emit three-segment output directly, do not ask, do not claim, wi stays on the queue.
 
 6. Output three-segment format.
 
@@ -200,9 +201,9 @@ generation time — see `mem_5obNUSSR`).
    Display any results so the agent has full historical context for this wi.
    This call is made in ALL claim modes (A/B/C/D) to ensure memories linked by previous
    claimers (including after force_takeover) are always surfaced.
-4. **rhs 路由**（wi.requires_human_session）：
-   - `false` → 不输出三段式；立即以 subagent 方式 dispatch `/pf-execute`（subagent 自己输出执行进度）。
-   - `true`  → 输出三段式（"下一步" 按 `using-polyforge` 的 `## Post-claim 下一步 Routing` 决定），等待人工介入。
+4. **rhs routing** (wi.requires_human_session):
+   - `false` → do not emit three-segment output; immediately dispatch `/pf-execute` as a subagent (the subagent emits its own execution progress).
+   - `true`  → emit three-segment output ("Next steps" decided per `using-polyforge`'s `## Post-claim Next steps Routing`), wait for human session.
 
 ---
 
@@ -233,9 +234,9 @@ generation time — see `mem_5obNUSSR`).
    This call is made in ALL claim modes (A/B/C/D) to ensure memories linked by previous
    claimers (including after force_takeover) are always surfaced.
 3. Show step progress: "Resuming at step 2/4 (review)".
-4. **rhs 路由**（wi.requires_human_session）：
-   - `false` → 不输出三段式；立即以 subagent 方式 dispatch `/pf-execute`（subagent 自己输出执行进度）。
-   - `true`  → 输出三段式（含步骤进度；"下一步" 按 `using-polyforge` 的 `## Post-claim 下一步 Routing` 决定），等待人工介入。
+4. **rhs routing** (wi.requires_human_session):
+   - `false` → do not emit three-segment output; immediately dispatch `/pf-execute` as a subagent (the subagent emits its own execution progress).
+   - `true`  → emit three-segment output (including step progress; "Next steps" decided per `using-polyforge`'s `## Post-claim Next steps Routing`), wait for human session.
 
 ---
 
@@ -259,9 +260,9 @@ Steps:
    Display any results so the agent has full historical context for this wi.
    This call is made in ALL claim modes (A/B/C/D) to ensure memories linked by previous
    claimers (including after force_takeover) are always surfaced.
-5. **rhs 路由**（wi.requires_human_session）：
-   - `false` → 不输出三段式；立即以 subagent 方式 dispatch `/pf-execute`（subagent 自己输出执行进度）。
-   - `true`  → 输出三段式（"下一步" 按 `using-polyforge` 的 `## Post-claim 下一步 Routing` 决定），等待人工介入。
+5. **rhs routing** (wi.requires_human_session):
+   - `false` → do not emit three-segment output; immediately dispatch `/pf-execute` as a subagent (the subagent emits its own execution progress).
+   - `true`  → emit three-segment output ("Next steps" decided per `using-polyforge`'s `## Post-claim Next steps Routing`), wait for human session.
 
 ---
 
@@ -282,7 +283,7 @@ After a successful claim, `<workspace>/.polyforge/state/<wi_id>.json` contains:
 
 ## NL Triggers
 
-- "开始" / "新任务" / "new task" / "let's start" / "I want to work on"
-- "认领 [slug]" / "claim [slug]" / "pick up [slug]"
-- "继续 [slug]" / "resume [slug]" / "pick this back up"
-- "接管 [slug]" / "takeover [slug]" / "force claim [slug]"
+- "start" / "new task" / "let's start" / "I want to work on"
+- "claim [slug]" / "pick up [slug]"
+- "resume [slug]" / "continue [slug]" / "pick this back up"
+- "takeover [slug]" / "take over [slug]" / "force claim [slug]"

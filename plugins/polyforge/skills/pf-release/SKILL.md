@@ -157,24 +157,24 @@ Display recent releases with status, version, included wi count, and tags.
 ## Output Format
 
 ```
-## 结果
+## Result
 Alpha v1.0.0-alpha.1 cut successfully. 3 repos tagged.
 
-## 状态
+## Status
 | version | v1.0.0-alpha.1                   |
 | channel | alpha                             |
 | repos   | aihub @ abc1234, marketplace @ def5678, ieops-v2 @ ghi9012 |
 | wi's    | 12 wrapped wi's included          |
 | release wi | marketplace#42               |
 
-## 下一步
+## Next steps
 - Monitor staging with the alpha build
 - `/pf-release promote` when ready for stable
 ```
 
 ## NL Triggers
 
-- "发布" / "release" / "cut release" / "切版"
-- "切 alpha" / "cut alpha" / "alpha release"
-- "promote" / "晋升到正式版" / "promote alpha to stable"
-- "release status" / "当前版本"
+- "release" / "release" / "cut release" / "cut a version"
+- "cut alpha" / "cut alpha" / "alpha release"
+- "promote" / "promote to stable" / "promote alpha to stable"
+- "release status" / "current version"

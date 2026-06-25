@@ -23,7 +23,7 @@ description: >
 
 ## NL Triggers
 
-- "设计" / "spec" / "brainstorm" / "讨论方案"
-- "写 spec" / "define requirements" / "scope this out"
-- "调试" / "debug" / "这个 bug 是什么情况" / "analyze this issue"
+- "design" / "spec" / "brainstorm" / "discuss the approach"
+- "write a spec" / "define requirements" / "scope this out"
+- "debug" / "what's going on with this bug" / "analyze this issue"
 - "root cause" / "why is this failing"

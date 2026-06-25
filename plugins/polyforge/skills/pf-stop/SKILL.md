@@ -92,12 +92,12 @@ encounters a terminal failure that cannot be resolved in this session (fail).
 
 4. Suggest: "Run `/pf-retro` to save learnings to team memory."
 
-5. Output: "✨ 这次的操作流程值得固化为 wi_type 吗？（输入名称固化，或回车跳过）"
+5. Output: "Is this session's workflow worth crystallizing as a wi_type? (enter a name to crystallize, or press Enter to skip)"
 
-   - 用户输入名称 → 调用 pf-crystallize，传入：
+   - User enters a name → call pf-crystallize, passing:
      - source_wi_id=<wrapped_wi_id>
-     - wi_type_name=<用户输入>
-   - 跳过/空输入 → 结束
+     - wi_type_name=<user input>
+   - Skip / empty input → end
 
 6. Output three-segment format with wrap summary:
    - Goal achieved
@@ -135,6 +135,6 @@ encounters a terminal failure that cannot be resolved in this session (fail).
 
 ## NL Triggers
 
-- "暂停" / "pause" / "save and come back later" / "take a break"
-- "完成" / "done" / "wrap" / "搞定了" / "ship it" / "finished"
-- "失败" / "failed" / "give up" / "abandon" / "this is broken"
+- "pause" / "pause" / "save and come back later" / "take a break"
+- "complete" / "done" / "wrap" / "all set" / "ship it" / "finished"
+- "fail" / "failed" / "give up" / "abandon" / "this is broken"

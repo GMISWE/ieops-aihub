@@ -54,4 +54,4 @@ spec content follows the debug format:
 
 `_common/storage.md` saves it as a `methodology.spec` artifact and emits the note;
 `_common/lifecycle.md` marks the step completed and renders the three-segment output whose
-next-step ("下一步") section suggests `/pf-plan` to decompose the spec into implementation steps.
+next-step ("Next steps") section suggests `/pf-plan` to decompose the spec into implementation steps.

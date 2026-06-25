@@ -1,10 +1,10 @@
-## Post-claim 下一步 Routing
+## Post-claim Next steps Routing
 
-When a `requires_human_session=true` wi is being viewed or operated on — any 三段式
-output that lists "下一步" (post-claim via `/pf-work`, status view via `/pf-status`,
+When a `requires_human_session=true` wi is being viewed or operated on — any three-segment
+output that lists "Next steps" (post-claim via `/pf-work`, status view via `/pf-status`,
 mid-flow output from `/pf-spec`, `/pf-plan`, `/pf-retro`, `/pf-stop`, etc.) — the
-"下一步" section is **mechanically populated** from the table below. No LLM judgment,
-no session-context inference. This rule applies to **all skills** emitting 三段式
+"Next steps" section is **mechanically populated** from the table below. No LLM judgment,
+no session-context inference. This rule applies to **all skills** emitting three-segment
 output when the user is operating inside a claimed wi.
 
 ### Source of `wi_type` (CRITICAL)
@@ -23,7 +23,7 @@ that edits a release scenario file has `wi_type=chore` even though its goal ment
 
 ### Routing table
 
-| wi_type | primary 下一步 | alternates |
+| wi_type | primary next step | alternates |
 |---|---|---|
 | `chore` | `/pf-execute` — iterate step graph directly | `/pf-stop --pause` |
 | `fix_bug` | `/pf-execute` — start from prepare_context | `/pf-spec --debug` (if root cause unclear); `/pf-stop --pause` |
@@ -32,9 +32,9 @@ that edits a release scenario file has `wi_type=chore` even though its goal ment
 | `release` | `/pf-release` (or `/pf-execute` against release graph) | `/pf-stop --pause` |
 | _(no match — default)_ | `/pf-spec` — define scope before acting | `/pf-stop --pause` |
 
-### Mandatory output rules for "下一步"
+### Mandatory output rules for "Next steps"
 
-1. The **first** item under "下一步" MUST be the table's `primary` cell for the matched
+1. The **first** item under "Next steps" MUST be the table's `primary` cell for the matched
    `wi_type`, copied verbatim (slash-command + its description).
 2. **No suggestion may appear before the primary** — not `/pf-spec`, not `/pf-plan`,
    not any LLM-improvised option. The primary is always row 1.
@@ -50,27 +50,27 @@ that edits a release scenario file has `wi_type=chore` even though its goal ment
 
 A wi has `wi_type=chore`, `requires_human_session=true`, goal `"feat: add CI hook for
 descriptions"`. Despite the misleading "feat:" prefix in the goal, the API field says
-`chore`. The "下一步" output — from `/pf-work` post-claim, from `/pf-status`, or from
-any other 三段式 skill — is:
+`chore`. The "Next steps" output — from `/pf-work` post-claim, from `/pf-status`, or from
+any other three-segment skill — is:
 
 ```
-## 下一步
+## Next steps
 - `/pf-execute` — iterate step graph directly
 - `/pf-stop --pause`
 ```
 
-That is the entire "下一步" — primary on row 1, the sole alternate on row 2, nothing
+That is the entire "Next steps" — primary on row 1, the sole alternate on row 2, nothing
 inserted before. If `wi.content` happened to invite `/pf-spec`, it would appear on
 row 3 marked `_(from wi.content)_`, never on row 1.
 
 ### Revision after review
 
 When a human reviewer has added section annotations to a spec or plan artifact in the /ui
-viewer, the "下一步" for the reviewing session should include `/pf-revise`. This applies
-in any skill output (三段式) after a spec/plan is saved and sent for review:
+viewer, the "Next steps" for the reviewing session should include `/pf-revise`. This applies
+in any skill output (three-segment) after a spec/plan is saved and sent for review:
 
 ```
-## 下一步
+## Next steps
 - ...  (primary from routing table above)
 - `/pf-revise` — if reviewer has annotated the spec/plan, run this to apply the feedback
                   and resolve all open annotations in one round
@@ -89,4 +89,5 @@ escape valves — listed as alternates, never as primary for `chore`/`fix_bug`/`
 because their scenario step graphs start with code-side steps, not a spec discussion.
 
 The `rhs=false` auto-dispatch path (which calls `/pf-execute` as a subagent without
-emitting 三段式) is unaffected by this table — it is already correct by construction.
+emitting three-segment output) is unaffected by this table — it is already correct by
+construction.

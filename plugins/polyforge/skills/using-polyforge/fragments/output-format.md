@@ -3,11 +3,11 @@
 Every polyforge skill response MUST follow this format exactly. Violations = bug.
 
 ```markdown
-## 结果
+## Result
 <1-2 sentences, verb-first. State errors here explicitly.>
 
-## 状态
-| 字段    | 值                                          |
+## Status
+| field   | value                                       |
 |---------|---------------------------------------------|
 | wi      | <project#seq>                               |
 | goal    | <truncated to 60 chars>                     |
@@ -18,7 +18,7 @@ Every polyforge skill response MUST follow this format exactly. Violations = bug
 | step    | 2/4 review                                  |
 | expires | 28min                                       |
 
-## 下一步
+## Next steps
 - `/pf-spec` — write spec, AI guides scope definition
 - `/pf-stop --pause` — pause and release locks
 (max 5 items; write _none_ if no actions available)

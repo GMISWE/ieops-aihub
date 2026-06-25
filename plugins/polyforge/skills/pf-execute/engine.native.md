@@ -148,18 +148,18 @@ for step_id, content in sections:
     output: f"## Step {step_id}\n\n{expanded}"
 
     wait for user input:
-      "继续" / "done" / "ok"  -> fall through to the completed report below, then move to the next step
-      "跳过" / "skip"         -> record in .pf_steps.json; **do NOT report this step**; continue to the next step
-      "失败" / "fail"         -> pf_update_step(step_id, status="failed", step_attempt_id=sa_id);
-                                pf_complete_attempt(failed); break (stop the whole loop)
+      "continue" / "done" / "ok"  -> fall through to the completed report below, then move to the next step
+      "skip"                      -> record in .pf_steps.json; **do NOT report this step**; continue to the next step
+      "fail"                      -> pf_update_step(step_id, status="failed", step_attempt_id=sa_id);
+                                     pf_complete_attempt(failed); break (stop the whole loop)
 
     if step_id.endswith("_review") or step_id in ("review", "code_review", "release_review"):
-        "PASS" / "继续"    -> fall through to the completed report below
-        "WARN <desc>"      -> record the warning, ask whether to continue; if yes, report completed as usual
-        "FAIL <desc>"      -> pf_update_step(step_id, status="failed", step_attempt_id=sa_id,
-                              error_type="review_fail"); pf_complete_attempt(failed); break
+        "PASS" / "continue"  -> fall through to the completed report below
+        "WARN <desc>"        -> record the warning, ask whether to continue; if yes, report completed as usual
+        "FAIL <desc>"        -> pf_update_step(step_id, status="failed", step_attempt_id=sa_id,
+                                error_type="review_fail"); pf_complete_attempt(failed); break
 
-    # only the "继续/done/ok" path (or review PASS / WARN-continue) reaches here: report this step completed (status only).
+    # only the "continue/done/ok" path (or review PASS / WARN-continue) reaches here: report this step completed (status only).
     pf_update_step(work_item_id=<current>, step_id=step_id, status="completed",
                    step_attempt_id=sa_id,
                    artifact_summary=read_json(".pf_steps.json").get(step_id, ""))
@@ -187,16 +187,16 @@ def parse_review_result(output):
 ## Output three-segment format (at startup)
 
 ```
-## 结果
+## Result
 Started executing <slug>, N steps total.
 
-## 状态
+## Status
 | wi     | <slug>     |
 | steps  | N steps    |
 | mode   | auto/human |
 | status | running    |
 
-## 下一步
+## Next steps
 - Running; monitor with /pf-status
 - Pause with /pf-stop --pause
 ```

@@ -105,4 +105,4 @@ This skill is short on purpose. The calling agent (you, when the user invokes
 
 - "/pf-help" / "/pf-help pf-work" / "pf help"
 - "show pf commands" / "list polyforge skills"
-- "怎么用 /pf-X" / "pf-X 用法" / "polyforge 帮助"
+- "how do I use /pf-X" / "pf-X usage" / "polyforge help"

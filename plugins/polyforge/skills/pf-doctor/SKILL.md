@@ -119,11 +119,11 @@ disable the polyforge plugin. `--uninstall` only undoes the statusLine takeover.
 ## Output (three-segment format)
 
 ```markdown
-## 结果
+## Result
 <pass/fail summary; list any FAIL items>
 
-## 状态
-| 字段      | 值              |
+## Status
+| field     | value           |
 |-----------|-----------------|
 | workspace | ok              |
 | config    | ok              |
@@ -132,7 +132,7 @@ disable the polyforge plugin. `--uninstall` only undoes the statusLine takeover.
 | version   | ok (1.0.0)      |
 | statusLine| ok (chain installed, refreshInterval 3) |
 
-## 下一步
+## Next steps
 - `polyforge init --apply` — clone missing repos
 - `/pf-work` — resume work once health is green
 ```

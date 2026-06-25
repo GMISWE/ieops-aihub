@@ -23,7 +23,7 @@ description: >
 
 - After a human reviewer has added section annotations to a spec or plan artifact in the
   polyforge /ui viewer and wants the agent to act on the feedback.
-- Triggered by "修订 spec/plan" / "按批注修改" / "处理批注" / "resolve the review comments"
+- Triggered by "revise the spec/plan" / "edit per annotations" / "handle the annotations" / "resolve the review comments"
   / "revise per annotations" / "handle the review" / "apply reviewer feedback".
 - The reviewer does **not** have to mark the wi or claim anything — `/pf-revise` is always
   run by the agent inside the claimed wi session.
@@ -118,7 +118,7 @@ c. **Neither resolves** → treat as document-level; apply as best you can; note
 `anchor.quote`) follow rule (b) exactly as before. Entries with no anchor at all go
 straight to (c). No behavioral change for either legacy shape.
 
-**Edge case — no open annotations found**: print a 结果 block stating "No open
+**Edge case — no open annotations found**: print a Result block stating "No open
 annotations on the current head spec/plan — nothing to revise." then mark step completed
 and stop. Do NOT create a spurious new artifact version.
 
@@ -267,7 +267,7 @@ pf_update_step(
 
 ### Step 10: Output three-segment format
 
-"下一步" follows the Post-claim Routing table in `using-polyforge` for the current
+"Next steps" follows the Post-claim Routing table in `using-polyforge` for the current
 `wi_type`, with these revision-specific additions appended after the table-derived rows:
 
 - If the spec was revised: offer `/pf-plan` (if the plan was not auto-re-derived or
@@ -291,9 +291,9 @@ pf_update_step(
 
 ## NL Triggers
 
-- "修订 spec" / "修订 plan" / "按批注修改" / "修订 artifact"
-- "处理批注" / "处理审阅意见" / "apply the annotations"
+- "revise the spec" / "revise the plan" / "edit per annotations" / "revise the artifact"
+- "handle the annotations" / "address the review comments" / "apply the annotations"
 - "revise per annotations" / "revise per review" / "act on the review comments"
 - "resolve the review comments" / "handle reviewer feedback"
-- "批注修好了吗" / "改好了吗"
+- "are the annotations addressed?" / "is it fixed yet?"
 - After a review round: "reviewer has annotated the new version, please revise again"

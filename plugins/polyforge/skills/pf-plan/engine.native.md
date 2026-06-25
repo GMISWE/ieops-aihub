@@ -97,4 +97,4 @@ For sequential steps in the same repo, keep them as steps in the parent wi, not 
 `_common/storage.md` saves it as a `methodology.plan` artifact (check for a prior plan and
 pass `supersedes_memory_id` if one exists); `_common/lifecycle.md` marks the step completed
 (status only — never upload plan content there) and renders the three-segment output whose
-next-step ("下一步") section suggests `/pf-execute`.
+next-step ("Next steps") section suggests `/pf-execute`.

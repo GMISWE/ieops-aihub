@@ -43,15 +43,15 @@ and tracks the sync request as a follow-up work item.
 
 2. Output three-segment format:
    ```
-   ## 结果
+   ## Result
    pf-sync pull is not yet implemented in v1.
    
-   ## 状态
+   ## Status
    | feature | pf-sync pull         |
    | status  | Phase 2 backlog      |
    | tracker | External sync (Jira / GitHub Issues) |
    
-   ## 下一步
+   ## Next steps
    - Manually create wi's with `/pf-work --goal "..."` for urgent items
    - Track this feature request: create wi with `/pf-work --goal "implement pf-sync pull"`
    ```
@@ -92,7 +92,7 @@ When implemented, `pf-sync pull` will:
 
 ## NL Triggers
 
-- "同步" / "sync" / "同步到 jira" / "sync to github"
-- "从 jira 导入" / "import from jira"
-- "推送到 github" / "push to github"
+- "sync" / "sync" / "sync to jira" / "sync to github"
+- "import from jira" / "import from jira"
+- "push to github" / "push to github"
 - `/pf-sync pull` / `/pf-sync push`

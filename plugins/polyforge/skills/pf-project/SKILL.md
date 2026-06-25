@@ -22,10 +22,10 @@ description: Manage polyforge projects — create, update, rotate identifier, li
 
 ## When to use
 
-- "创建 project" / "new project" / "create project"
-- "更新 project" / "update project repos"
-- "轮换 identifier" / "rotate identifier" / "reset access token"
-- "列出 project" / "list projects" / "show projects"
+- "create project" / "new project" / "make a project"
+- "update project" / "update project repos"
+- "rotate identifier" / "rotate identifier" / "reset access token"
+- "list projects" / "list projects" / "show projects"
 
 ## Mechanic
 
@@ -41,9 +41,9 @@ pf_create_project(
 )
 ```
 
-- 任意 writer+ 可创建
-- `visible=false` → 私有 project，需通过 identifier 授权给他人访问
-- name 全局唯一，创建后不可更改
+- Any writer+ can create
+- `visible=false` → private project; access must be granted to others via the identifier
+- name is globally unique and cannot be changed after creation
 
 ### Mode B — Update project
 
@@ -56,8 +56,8 @@ pf_update_project(
 )
 ```
 
-- 只有 owner/admin 可操作
-- repos 内 name/url 在同一 project 内必须唯一
+- Only owner/admin can perform this
+- Within a project, repo name/url must be unique
 
 ### Mode C — Rotate identifier
 
@@ -66,15 +66,15 @@ result = pf_rotate_identifier(name=<project name>)
 # result: {plain: "pi_xxx...", prefix: "pi_ab12"}
 ```
 
-- 只有 owner/admin 可操作
-- 轮换后旧 identifier **立即失效**
-- `plain` 是明文 token，**只展示一次**，请用户立即保存
-- `prefix` 用于标识此 token（如有多处使用）
+- Only owner/admin can perform this
+- After rotation the old identifier is **invalidated immediately**
+- `plain` is the plaintext token, **shown only once** — tell the user to save it immediately
+- `prefix` identifies this token (useful if it is used in multiple places)
 
-**展示给用户：**
+**Show to the user:**
 ```
-✅ Identifier 已轮换
-Token: pi_xxxxxxxxxxxxx...  ← 请立即保存，此后无法再查看
+Identifier rotated
+Token: pi_xxxxxxxxxxxxx...  <- save it now; it cannot be viewed again
 Prefix: pi_ab12
 ```
 
@@ -82,10 +82,10 @@ Prefix: pi_ab12
 
 ```
 projects = pf_list_projects()
-# 返回 caller 可见的 projects
+# returns the projects visible to the caller
 ```
 
-展示格式：
+Display format:
 ```
 | name        | visible | owner    | repos |
 |-------------|---------|----------|-------|
@@ -95,27 +95,27 @@ projects = pf_list_projects()
 
 ## Output (three-segment format)
 
-**Create/Update/Rotate：**
+**Create/Update/Rotate:**
 ```
-## 结果
-Project '<name>' 已[创建/更新/identifier 已轮换]。
+## Result
+Project '<name>' has been [created / updated / identifier rotated].
 
-## 状态
-| 字段    | 值              |
+## Status
+| field   | value           |
 |---------|-----------------|
 | name    | <name>          |
 | visible | public/private  |
 | owner   | <display>       |
 | repos   | <count>         |
 
-## 下一步
-- 用 /pf-work --goal "..." 在此 project 下创建 wi
-- 如需授权他人访问私有 project：分享 project name + identifier token
+## Next steps
+- Use /pf-work --goal "..." to create a wi under this project
+- To grant others access to a private project: share the project name + identifier token
 ```
 
 ## NL Triggers
 
-- "创建 project" / "new project" / "create project"
-- "更新 project" / "修改 repos" / "update project"
-- "轮换 identifier" / "reset token" / "rotate access"
-- "列出 project" / "show projects" / "list projects"
+- "create project" / "new project" / "make a project"
+- "update project" / "change repos" / "update project"
+- "rotate identifier" / "reset token" / "rotate access"
+- "list projects" / "show projects" / "list projects"

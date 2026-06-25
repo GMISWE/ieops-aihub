@@ -75,7 +75,7 @@ ready queue, or which items are stalled/blocked.
    - `stalled` → show blocker wi slug
    - Expired leases in `running` → flag with ⏰
 
-4. Output three-segment format. "下一步" section suggests the most important next action
+4. Output three-segment format. "Next steps" section suggests the most important next action
    (e.g., "2 items need human-led sessions — run `/pf-work <slug>` to start").
 
 ## Output format notes
@@ -88,8 +88,8 @@ ready queue, or which items are stalled/blocked.
 
 ## NL Triggers
 
-- "状态" / "status" / "进度" / "什么情况"
-- "今天有哪些活" (also triggers Session 1 Orchestrator round via using-polyforge)
-- "哪些活需要我" / "needs my attention"
+- "status" / "progress" / "what's going on"
+- "what work is there today" (also triggers Session 1 Orchestrator round via using-polyforge)
+- "what needs me" / "needs my attention"
 - "ready queue" / "show queue" / "show all"
 - `/pf-status` (direct command)

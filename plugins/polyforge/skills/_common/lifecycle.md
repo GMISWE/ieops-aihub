@@ -110,15 +110,15 @@ contains `conflict_with: {attempt_id, actor_display, work_item_slug}`):
 - **STOP. Do NOT enter the execute loop.**
 - Report to the user:
   ```
-  ## 结果
+  ## Result
   Cannot execute: file lock conflict.
 
-  ## 状态
+  ## Status
   | file        | <conflicting file path(s)>        |
   | held by     | <actor_display> (<work_item_slug>) |
   | attempt_id  | <attempt_id>                      |
 
-  ## 下一步
+  ## Next steps
   - Coordinate with <actor_display> or wait for their wi (<work_item_slug>) to wrap.
   - Use `/pf-stop --pause` to release your lease while waiting.
   - Or use `/pf-status` to check when the blocking wi finishes.
@@ -136,6 +136,6 @@ branch, because `_common/lifecycle.md` is injected by the router for both.
 ## Three-segment output
 
 Every pf-* response follows the mandatory three-segment format — its literal section labels are
-`结果` / `状态` / `下一步` (see the session-start `output-format` and `post-claim-routing`
-fragments). The next-step ("下一步") section is mechanically populated from the routing table
+`Result` / `Status` / `Next steps` (see the session-start `output-format` and `post-claim-routing`
+fragments). The next-step ("Next steps") section is mechanically populated from the routing table
 for `requires_human_session=true` wi's.

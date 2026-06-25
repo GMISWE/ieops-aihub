@@ -24,50 +24,50 @@ description: >
 
 ## When to use
 
-- "我是谁" / "whoami" / "查身份" / "my identity" → **whoami mode**
-- "列出用户" / "list users" / "有哪些用户" → **list mode**
-- "邀请用户" / "invite user" / "加人" / "add member" → **invite mode**
-- "改用户" / "update user" / "修改角色" / "change role" → **update mode**
-- "再发 key" / "issue another key" / "new key" → **key-add mode**
-- "撤销 key" / "revoke key" / "删除 key" / "吊销" → **key-revoke mode**
+- "who am I" / "whoami" / "check my identity" / "my identity" → **whoami mode**
+- "list users" / "show all users" / "which users exist" → **list mode**
+- "invite user" / "invite a user" / "add a person" / "add member" → **invite mode**
+- "edit user" / "update user" / "change role" → **update mode**
+- "issue another key" / "new key" → **key-add mode**
+- "revoke key" / "delete key" / "revoke" → **key-revoke mode**
 
 ## Mechanic
 
 ### Mode: whoami
 
-**权限**: 所有用户可用
+**Permissions**: available to all users
 
 ```
 result = pf_whoami()
 ```
 
-返回当前调用者的身份信息，包括 display_name、role、user_type 及 API key 数量摘要。
+Returns the current caller's identity information, including display_name, role, user_type, and a summary of the API key count.
 
 ---
 
 ### Mode: list
 
-**权限**: admin only
+**Permissions**: admin only
 
 ```
 users = pf_list_users()
 ```
 
-返回所有用户列表，含 id、display_name、user_type、role、email。
-`id` 字段供后续 update / key-add / key-revoke 操作使用。
+Returns the list of all users, including id, display_name, user_type, role, and email.
+The `id` field is used for subsequent update / key-add / key-revoke operations.
 
 ---
 
 ### Mode: invite
 
-**权限**: admin only
+**Permissions**: admin only
 
-**触发词**: "邀请用户" / "invite user" / "加人" / "add member"
+**NL Triggers**: "invite user" / "invite a user" / "add a person" / "add member"
 
-顺序调用两个 MCP tool，一步完成用户创建和初始 key 发放：
+Call two MCP tools in sequence to create the user and issue the initial key in one step:
 
 ```
-# Step 1: 创建用户
+# Step 1: create the user
 user = pf_create_user(
   display_name=<required>,
   user_type=<"human"|"machine", default: "human">,
@@ -76,7 +76,7 @@ user = pf_create_user(
   author_aliases=<optional, array of strings>
 )
 
-# Step 2: 为新用户发放初始 API key
+# Step 2: issue the initial API key for the new user
 key = pf_create_api_key(
   user_id=<user.id from Step 1>,
   name=<optional, default: "initial">,
@@ -84,29 +84,29 @@ key = pf_create_api_key(
 )
 ```
 
-**输入字段**:
+**Input fields**:
 
-| 字段 | 必填 | 默认值 | 说明 |
+| field | required | default | description |
 |------|------|--------|------|
-| display_name | yes | — | 用户显示名 |
-| user_type | no | "human" | "human" 或 "machine" |
-| role | no | "writer" | "writer" 或 "admin" |
-| email | yes (human) / auto (machine) | — | human 用户必填；machine 用户自动生成 |
-| key_name | no | "initial" | 初始 key 名称 |
-| project_scope | no | — | 限制 key 可访问的单个 project（单个字符串；留空 = 全局） |
-| author_aliases | no | — | git 提交作者别名，用于归因 |
+| display_name | yes | — | user display name |
+| user_type | no | "human" | "human" or "machine" |
+| role | no | "writer" | "writer" or "admin" |
+| email | yes (human) / auto (machine) | — | required for human users; auto-generated for machine users |
+| key_name | no | "initial" | initial key name |
+| project_scope | no | — | restrict the key to a single project it can access (single string; leave empty = global) |
+| author_aliases | no | — | git commit author aliases, used for attribution |
 
-**token 只展示一次**：`pf_create_api_key` 返回的 `token` 明文仅在此次响应中展示，请用户立即保存。
+**Token is shown only once**: the plaintext `token` returned by `pf_create_api_key` is displayed only in this response — ask the user to save it immediately.
 
-> invite vs key-add 区别：`invite` 同时创建新用户 + 发放首个 key；`key-add` 只为**已存在**用户补发额外 key，不创建用户。
+> invite vs key-add difference: `invite` creates a new user AND issues the first key; `key-add` only issues an extra key for an **existing** user and does not create a user.
 
 ---
 
 ### Mode: update
 
-**权限**: admin only
+**Permissions**: admin only
 
-**触发词**: "改用户" / "update user" / "修改角色" / "change role"
+**NL Triggers**: "edit user" / "update user" / "change role"
 
 ```
 pf_update_user(
@@ -116,25 +116,25 @@ pf_update_user(
 )
 ```
 
-**输入字段**:
+**Input fields**:
 
-| 字段 | 必填 | 说明 |
+| field | required | description |
 |------|------|------|
-| id | yes | 用户 ID，通过 list mode 获取 |
-| display_name | no | 新的显示名 |
-| role | no | 新角色："writer" 或 "admin" |
+| id | yes | user ID, obtained via list mode |
+| display_name | no | new display name |
+| role | no | new role: "writer" or "admin" |
 
-**缺少 user_id 时**：提示用户先运行 list mode（"我需要先列出用户获取 ID，请确认是否执行？"），再执行 update。
+**When user_id is missing**: prompt the user to run list mode first ("I need to list users first to get the ID — please confirm whether to proceed?"), then perform the update.
 
 ---
 
 ### Mode: key-add
 
-**权限**: admin only
+**Permissions**: admin only
 
-**触发词**: "再发 key" / "issue another key" / "new key"
+**NL Triggers**: "issue another key" / "new key"
 
-为已存在的用户补发额外 API key：
+Issue an extra API key for an existing user:
 
 ```
 key = pf_create_api_key(
@@ -144,23 +144,23 @@ key = pf_create_api_key(
 )
 ```
 
-**输入字段**:
+**Input fields**:
 
-| 字段 | 必填 | 说明 |
+| field | required | description |
 |------|------|------|
-| user_id | yes | 目标用户 ID，通过 list mode 获取 |
-| name | yes | key 名称，便于识别用途 |
-| project_scope | no | 限制 key 可访问的单个 project（单个字符串；留空 = 全局） |
+| user_id | yes | target user ID, obtained via list mode |
+| name | yes | key name, to make its purpose easy to identify |
+| project_scope | no | restrict the key to a single project it can access (single string; leave empty = global) |
 
-**token 只展示一次**：同 invite mode，请用户立即保存。
+**Token is shown only once**: same as invite mode — ask the user to save it immediately.
 
 ---
 
 ### Mode: key-revoke
 
-**权限**: admin only
+**Permissions**: admin only
 
-**触发词**: "撤销 key" / "revoke key" / "删除 key" / "吊销"
+**NL Triggers**: "revoke key" / "delete key" / "revoke"
 
 ```
 pf_revoke_api_key(
@@ -169,51 +169,51 @@ pf_revoke_api_key(
 )
 ```
 
-**输入字段**:
+**Input fields**:
 
-| 字段 | 必填 | 说明 |
+| field | required | description |
 |------|------|------|
-| user_id | yes | 目标用户 ID，通过 list mode 获取 |
-| key_id | yes | 要撤销的 key ID；通过 whoami（自己的 key）或 list mode 返回的 `api_keys` 字段获取 |
+| user_id | yes | target user ID, obtained via list mode |
+| key_id | yes | the key ID to revoke; obtained via whoami (your own key) or the `api_keys` field returned by list mode |
 
-撤销后 key 立即失效，无法恢复。
+Once revoked, the key is invalidated immediately and cannot be restored.
 
-**缺少 key_id 时**：提示用户先运行 whoami（查自己的 key）或 list mode（查其他用户的 key）获取 key_id。
+**When key_id is missing**: prompt the user to run whoami first (to look up their own key) or list mode (to look up another user's key) to obtain the key_id.
 
 ---
 
 ## Output
 
-所有响应遵循三段式格式：
+All responses follow the three-segment format:
 
-### whoami 示例
+### whoami example
 
 ```markdown
-## 结果
-已获取当前用户身份信息。
+## Result
+Current user identity information has been retrieved.
 
-## 状态
-| 字段         | 值                  |
+## Status
+| field        | value               |
 |--------------|---------------------|
 | display_name | Alice               |
 | role         | admin               |
 | user_type    | human               |
 | email        | alice@example.com   |
-| api_keys     | 2 个（active）      |
+| api_keys     | 2 (active)          |
 
-## 下一步
-- `/pf-user` list — 查看所有用户
-- `/pf-user` invite — 邀请新成员
+## Next steps
+- `/pf-user` list — view all users
+- `/pf-user` invite — invite a new member
 ```
 
-### invite 示例
+### invite example
 
 ```markdown
-## 结果
-用户 'Bob' 已创建，初始 API key 已发放。
+## Result
+User 'Bob' has been created, and the initial API key has been issued.
 
-## 状态
-| 字段         | 值                                          |
+## Status
+| field        | value                                       |
 |--------------|---------------------------------------------|
 | user_id      | usr_abc123                                  |
 | display_name | Bob                                         |
@@ -222,59 +222,59 @@ pf_revoke_api_key(
 | key_name     | initial                                     |
 | token        | ak_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx         |
 
-⚠️ **请立即保存 token，此后无法再查看。**
+⚠️ **Save the token immediately — it cannot be viewed again afterward.**
 
-## 下一步
-- 将 token 通过安全渠道发送给 Bob
-- 如需补发 key：`/pf-user` key-add
-- 如需修改角色：`/pf-user` update
+## Next steps
+- Send the token to Bob through a secure channel
+- To issue another key: `/pf-user` key-add
+- To change the role: `/pf-user` update
 ```
 
-### list 示例
+### list example
 
 ```markdown
-## 结果
-找到 3 个用户。
+## Result
+Found 3 users.
 
-## 状态
+## Status
 | id          | display_name | type    | role   | email              |
 |-------------|--------------|---------|--------|--------------------|
 | usr_abc123  | Alice        | human   | admin  | alice@example.com  |
 | usr_def456  | Bob          | human   | writer | bob@example.com    |
 | usr_ghi789  | CI Agent     | machine | writer | —                  |
 
-## 下一步
-- `/pf-user` invite — 邀请新成员
-- `/pf-user` update — 修改用户角色（需提供 id）
-- `/pf-user` key-revoke — 撤销某用户的 key（需提供 user_id + key_id）
+## Next steps
+- `/pf-user` invite — invite a new member
+- `/pf-user` update — change a user's role (requires id)
+- `/pf-user` key-revoke — revoke a user's key (requires user_id + key_id)
 ```
 
-### update 示例
+### update example
 
 ```markdown
-## 结果
-用户 'Bob' 已更新。
+## Result
+User 'Bob' has been updated.
 
-## 状态
-| 字段         | 值         |
+## Status
+| field        | value      |
 |--------------|------------|
 | user_id      | usr_def456 |
 | display_name | Bob        |
 | role         | admin      |
 
-## 下一步
-- `/pf-user` list — 确认变更
-- `/pf-user` key-revoke — 如需撤销该用户 key
+## Next steps
+- `/pf-user` list — confirm the change
+- `/pf-user` key-revoke — to revoke this user's key
 ```
 
-### key-add 示例
+### key-add example
 
 ```markdown
-## 结果
-API key 'laptop' 已为用户 'Bob' 创建。
+## Result
+API key 'laptop' has been created for user 'Bob'.
 
-## 状态
-| 字段         | 值                                     |
+## Status
+| field        | value                                  |
 |--------------|----------------------------------------|
 | user_id      | usr_def456                             |
 | key_id       | k_xxxxxxxx                             |
@@ -282,38 +282,38 @@ API key 'laptop' 已为用户 'Bob' 创建。
 | project_scope| —                                      |
 | token        | ak_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx    |
 
-⚠️ **请立即保存 token，此后无法再查看。**
+⚠️ **Save the token immediately — it cannot be viewed again afterward.**
 
-## 下一步
-- 将 token 通过安全渠道发送给 Bob
-- `/pf-user` key-revoke — 如需撤销此 key
+## Next steps
+- Send the token to Bob through a secure channel
+- `/pf-user` key-revoke — to revoke this key
 ```
 
-### key-revoke 示例
+### key-revoke example
 
 ```markdown
-## 结果
-API key 'k_xxxxxxxx' 已撤销，立即失效。
+## Result
+API key 'k_xxxxxxxx' has been revoked and is invalidated immediately.
 
-## 状态
-| 字段    | 值          |
+## Status
+| field   | value       |
 |---------|-------------|
 | user_id | usr_def456  |
 | key_id  | k_xxxxxxxx  |
 | status  | revoked ✓   |
 
-## 下一步
-- `/pf-user` key-add — 如需重新为该用户发放 key
-- `/pf-user` list — 查看用户列表
+## Next steps
+- `/pf-user` key-add — to issue a new key for this user again
+- `/pf-user` list — view the user list
 ```
 
 ## NL Triggers
 
-| 触发词 | Mode |
+| NL Triggers | Mode |
 |--------|------|
-| "我是谁" / "whoami" / "查身份" / "my identity" | whoami |
-| "列出用户" / "list users" / "有哪些用户" / "show users" | list |
-| "邀请用户" / "invite user" / "加人" / "add member" | invite |
-| "改用户" / "update user" / "修改角色" / "change role" | update |
-| "再发 key" / "issue another key" / "new key" / "补发 key" | key-add |
-| "撤销 key" / "revoke key" / "删除 key" / "吊销" | key-revoke |
+| "who am I" / "whoami" / "check my identity" / "my identity" | whoami |
+| "list users" / "show all users" / "which users exist" / "show users" | list |
+| "invite user" / "invite a user" / "add a person" / "add member" | invite |
+| "edit user" / "update user" / "change role" | update |
+| "issue another key" / "new key" / "issue an extra key" | key-add |
+| "revoke key" / "delete key" / "revoke" | key-revoke |

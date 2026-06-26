@@ -36,8 +36,8 @@ source of truth:
   item that produced them. Semantic recall over pgvector is available when an
   embedding provider is configured (see `EMBEDDING_*` in Configuration).
 - **MCP server** - the `polyforge` binary exposes the `pf_*` tool family over
-  stdio MCP, so an agent (for example, in Claude Code) drives the whole
-  lifecycle from chat. See [`docs/mcp-tools.md`](docs/mcp-tools.md).
+  stdio MCP, so an agent (for example, in Claude Code or Codex) drives the
+  whole lifecycle from chat. See [`docs/mcp-tools.md`](docs/mcp-tools.md).
 - **Resource locks + conflict prediction** - a task declares the files or branch
   it touches; the server predicts conflicts before work starts and blocks
   double-claims.
@@ -68,6 +68,8 @@ AI agent drive it all:
         |
   Web UI       read-only, in a browser
 ```
+
+The plugin also runs under Codex (codex-cli); see [`docs/onboarding.md`](docs/onboarding.md).
 
 - **`aihub`** - an Echo HTTP server. It owns every side effect and all state.
   `internal/domain/` holds the business logic and invariants (lifecycle, claim /
@@ -158,7 +160,7 @@ internal/
   embedding/       # pluggable embedding provider interface
   render/          # markdown -> HTML (goldmark + chroma)
 pkg/client/        # Go HTTP client used by the CLI and MCP server
-plugins/polyforge/ # the Claude Code plugin (skills, hooks, MCP launcher)
+plugins/polyforge/ # the Claude Code / Codex plugin (skills, hooks, MCP launcher)
 .claude-plugin/    # marketplace.json - lists the polyforge plugin
 v0/                # archived first-generation Python implementation (read-only)
 ```

@@ -85,6 +85,26 @@ The plugin itself ships only an MCP launcher
 binary is downloaded by that launcher on the first MCP start (next step),
 using the `gh` token from step 3.
 
+### Codex (codex-cli)
+
+The same plugin runs under Codex. Codex does not use Claude Code's
+`/plugin install`; once the plugin is available on disk (so
+`$CLAUDE_PLUGIN_ROOT` is set), register the MCP server once — Codex does not
+register it from the manifest:
+
+```
+codex mcp add polyforge -- "$CLAUDE_PLUGIN_ROOT/bin/polyforge-mcp.sh"
+```
+
+(If `$CLAUDE_PLUGIN_ROOT` is unset, pass the absolute path to
+`<plugin-root>/bin/polyforge-mcp.sh`.) The launcher downloads the `polyforge`
+binary on first start, the same as Claude Code. Skills load natively — type
+`$pf-work` or run `/skills` (there is no `Skill` tool). MCP tools surface as
+`mcp__polyforge__pf_*`. Verify with `codex mcp list` (or `/mcp` in session),
+then ask Codex to run `pf_whoami`. See
+`plugins/polyforge/skills/using-polyforge/references/codex-tools.md` for the
+full Claude Code -> Codex tool mapping.
+
 ## 5. Restart Claude Code and verify
 
 Restart Claude Code so the plugin's `mcpServers.polyforge` entry is picked up.
@@ -95,8 +115,9 @@ so the shell sees the same version as the MCP server. Subsequent starts skip
 the download and do a daily update check.
 
 Once the MCP server reconnects, every `mcp__plugin_polyforge_polyforge__*`
-tool is available. `pf_whoami` is an MCP tool (not a shell command) — just
-ask Claude for it in chat:
+tool is available. (Codex users: tools surface as `mcp__polyforge__pf_*`;
+verify with `codex mcp list` or `/mcp` in session.) `pf_whoami` is an MCP
+tool (not a shell command) — just ask the agent for it in chat:
 
 ```
 pf_whoami

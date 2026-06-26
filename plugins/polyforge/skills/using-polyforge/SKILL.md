@@ -33,5 +33,6 @@ description: >
 @include: fragments/memory-conventions.md
 @include: fragments/repo-routing.md
 @include: fragments/diagram-convention.md
+@include: fragments/platform-adaptation.md
 @include: fragments/superpowers-bridge.md
 when: superpowers

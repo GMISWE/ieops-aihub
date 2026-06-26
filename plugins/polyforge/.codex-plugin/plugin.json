@@ -1,0 +1,28 @@
+{
+  "name": "polyforge",
+  "version": "1.1.0",
+  "description": "polyforge v1 — Go-native multi-agent AI coding coordination. Implements Iron Rules (IR1-IR4), the full wi lifecycle (work/stop/status/spec/plan/execute/retro), and a memory system. Requires the ieops-aihub backend.",
+  "author": {
+    "name": "GMI Engineering"
+  },
+  "skills": "./skills/",
+  "hooks": "./codex-hooks.json",
+  "keywords": [
+    "polyforge",
+    "v1",
+    "coding",
+    "multi-agent",
+    "wi-lifecycle"
+  ],
+  "interface": {
+    "displayName": "polyforge",
+    "shortDescription": "Multi-agent AI coding coordination with a full work-item lifecycle.",
+    "longDescription": "polyforge brings Iron-Rule-governed work-item lifecycle (work / stop / status / spec / plan / execute / retro) and a memory system to Codex. The MCP server is NOT registered from this manifest; register it once with `codex mcp add polyforge -- \"$CLAUDE_PLUGIN_ROOT/bin/polyforge-mcp.sh\"` (see skills/using-polyforge/references/codex-tools.md). The Claude Code Skill-router hook is intentionally omitted on Codex (no Skill tool); /pf-spec|plan|execute load their step body from each SKILL.md natively.",
+    "developerName": "GMI Engineering",
+    "category": "Coding",
+    "capabilities": [
+      "Read",
+      "Write"
+    ]
+  }
+}

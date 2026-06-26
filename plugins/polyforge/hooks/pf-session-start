@@ -127,7 +127,8 @@ assembled = "\n\n".join(parts)
 ctx = (
     "<EXTREMELY_IMPORTANT>\n"
     "You are in a polyforge workspace (.polyforge.yaml detected). "
-    "Lifecycle skills /pf-* and `mcp__plugin_polyforge_polyforge__*` MCP tools are "
+    "Lifecycle skills /pf-* and the polyforge MCP tools (`mcp__plugin_polyforge_polyforge__*` "
+    "in Claude Code, `mcp__polyforge__*` in Codex) are "
     "authoritative; do not bypass them with raw git / Edit / Bash on work_items. "
     "Using superpowers skills as the content *engine* inside a /pf-* step (when superpowers "
     "is enabled) is NOT a bypass — the prohibition is about skipping the wi lifecycle "

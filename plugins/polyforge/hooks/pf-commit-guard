@@ -46,12 +46,17 @@ def field(name):
 # scan unrelated shell. Best-effort: pf_* are the primary surface, this is a backstop.
 GIT_PR_RE = re.compile(r"\bgit\b[^\n]*\bcommit\b|\bgh\b\s+pr\b", re.IGNORECASE)
 
+# Tool name is prefix-agnostic: Claude Code exposes the plugin MCP tools as
+# mcp__plugin_polyforge_polyforge__pf_*, Codex as mcp__polyforge__pf_*. Match on the bare
+# tool name after the last "__" so the guard fires identically under both runtimes (Bash has
+# no "__", so it falls through to the Bash branch unchanged).
+base_tool = tool.rsplit("__", 1)[-1]
 fields = []
-if tool == "mcp__plugin_polyforge_polyforge__pf_commit":
+if base_tool == "pf_commit":
     fields = [field("message")]
-elif tool == "mcp__plugin_polyforge_polyforge__pf_pr":
+elif base_tool == "pf_pr":
     fields = [field("title"), field("body")]
-elif tool == "mcp__plugin_polyforge_polyforge__pf_wrap":
+elif base_tool == "pf_wrap":
     fields = [field("pr_title"), field("pr_body")]
 elif tool == "Bash":
     cmd = ti.get("command")

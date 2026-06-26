@@ -54,6 +54,11 @@ test('full prefix tool name is handled', () => {
   assert.ok(s.completed.includes('spec'));
 });
 
+test('Codex prefix tool name (mcp__polyforge__) is handled', () => {
+  const s = applyEvent(base(), 'mcp__polyforge__pf_save_artifact', { type: 'spec' }, {});
+  assert.ok(s.completed.includes('spec'));
+});
+
 // ─── execute is a multi-step phase (event-driven sub-progress, no premature green) ───
 
 test('execute in_progress keeps execute active + records exec.active (not in completed)', () => {

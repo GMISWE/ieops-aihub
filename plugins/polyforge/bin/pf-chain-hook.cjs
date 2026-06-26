@@ -18,7 +18,9 @@ function addUniq(arr, v) { return arr.includes(v) ? arr : arr.concat([v]); }
 
 // Pure: given current chain state + an event, return the next state (null = delete the file).
 function applyEvent(chain, toolName, toolInput, toolResponse) {
-  const name = toolName.replace(/^mcp__plugin_polyforge_polyforge__/, '');
+  // Prefix-agnostic: Claude Code uses mcp__plugin_polyforge_polyforge__, Codex uses
+  // mcp__polyforge__. Strip either so the transition fires identically under both runtimes.
+  const name = toolName.replace(/^mcp__(?:plugin_polyforge_polyforge|polyforge)__/, '');
   switch (name) {
     case 'pf_update_step': {
       const station = mapStep(toolInput.step_id);
@@ -95,7 +97,7 @@ function main() {
   const cwd = evt.cwd || process.cwd();
   const dir = path.join(cwd, '.polyforge', 'state');
 
-  const shortName = toolName.replace(/^mcp__plugin_polyforge_polyforge__/, '');
+  const shortName = toolName.replace(/^mcp__(?:plugin_polyforge_polyforge|polyforge)__/, '');
   const st = findActiveState(dir);
   const wiId = resolveWiId(shortName, toolInput, st);
   if (!wiId) return; // no target wi

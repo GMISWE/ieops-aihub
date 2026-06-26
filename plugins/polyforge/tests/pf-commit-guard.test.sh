@@ -57,6 +57,14 @@ block_ck "git commit -m banned"           "$(p_bash 'git commit -m "Co-Authored-
 block_ck "gh pr create banned"            "$(p_bash 'gh pr create --title "AI-assisted fix" --body x')"
 
 echo ""
+echo "== Codex tool-name prefix (mcp__polyforge__*) must guard identically =="
+block_ck "Codex pf_commit banned"     '{"tool_name":"mcp__polyforge__pf_commit","tool_input":{"message":"Co-Authored-By: Claude"}}'
+block_ck "Codex pf_pr banned"         '{"tool_name":"mcp__polyforge__pf_pr","tool_input":{"title":"ok","body":"AI-assisted fix"}}'
+block_ck "Codex pf_wrap banned"       '{"tool_name":"mcp__polyforge__pf_wrap","tool_input":{"pr_title":"reviewed by sonnet","pr_body":"ok"}}'
+pass_ck  "Codex unrelated tool inert" '{"tool_name":"mcp__polyforge__pf_get_work_item","tool_input":{"work_item_id":"AI-assisted"}}'
+pass_ck  "Codex clean commit"         '{"tool_name":"mcp__polyforge__pf_commit","tool_input":{"message":"fix race in reconnect logic"}}'
+
+echo ""
 echo "== MUST-PASS: legit lookalikes and clean text (zero false positives) =="
 pass_ck "maintain/contain/detail"   "$(p_commit 'maintain the contained detail in the handler')"
 pass_ck "email + domain"            "$(p_commit 'validate email against the allowed domain')"

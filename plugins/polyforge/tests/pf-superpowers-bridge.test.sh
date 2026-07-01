@@ -39,4 +39,10 @@ o="$(printf '%s' "$p" | env -u POLYFORGE_API_KEY -u POLYFORGE_AIHUB_URL "$bridge
 ck "$o" "pf_save_artifact" "no creds -> falls back to model reminder"
 
 echo ""
+echo "== large payload does not blow argv (E2BIG regression) =="
+big="$(head -c 300000 /dev/zero | tr '\0' 'x')"
+bigpayload="$(printf '{"tool_name":"Write","tool_input":{"file_path":"/x/docs/superpowers/specs/big.md","old_string":"%s"},"cwd":"/tmp"}' "$big")"
+ck "$(run "$bigpayload")" "methodology.spec" "300KB payload processed, no 'Argument list too long'"
+
+echo ""
 [ "$fails" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "$fails FAILED" >&2; exit 1; }

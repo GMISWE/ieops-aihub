@@ -408,13 +408,17 @@ func TestUpdateMemory(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestConcurrentUpdateSingleHead is the S2 regression test: two concurrent
-// UpdateMemory calls racing on the SAME v1 head must serialize into a linear
-// chain (v1 -> Y1 -> Y2) with exactly one active row, never two active heads
-// from a split lineage. Run with -race to also catch data races in the retry
-// loop itself:
+// TestConcurrentUpdateSingleHead is the S2/BUG1 regression test: N concurrent
+// UpdateMemory calls racing on the SAME v1 head must serialize into ONE
+// linear chain, never branch into multiple active heads. This asserts the
+// WHOLE-LINEAGE invariant over every row in the test's project (not just the
+// subset reachable via a single, possibly-stale latest_id or a recursive
+// supersedes_id walk seeded from v1) — a real branch produces extra rows
+// with a distinct latest_id and/or a second active row that a narrower query
+// could miss. Run with -race to also catch data races in the retry loop
+// itself, and -count=3+ since it's inherently a race:
 //
-//	AIHUB_TEST_DB=... go test ./internal/domain/ -run TestConcurrentUpdateSingleHead -race -count=1 -v
+//	AIHUB_TEST_DB=... go test ./internal/domain/ -run TestConcurrentUpdateSingleHead -race -count=3 -v
 func TestConcurrentUpdateSingleHead(t *testing.T) {
 	pool := setupLatestTestDB(t)
 	u := testUser(t, pool)
@@ -427,7 +431,7 @@ func TestConcurrentUpdateSingleHead(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	const n = 2
+	const n = 8
 	var wg sync.WaitGroup
 	errs := make([]error, n)
 	for i := 0; i < n; i++ {
@@ -448,42 +452,109 @@ func TestConcurrentUpdateSingleHead(t *testing.T) {
 		require.NoError(t, e, "goroutine %d", i)
 	}
 
-	// Walk the whole lineage from v1 via the latest_id cursor (all rows in one
-	// component share it after the fix) and via supersedes_id to be thorough.
+	// Every row in the test's project belongs to this lineage (testProject
+	// wipes prior rows and each test uses its own project name), so scanning
+	// the whole project is equivalent to scanning the whole lineage without
+	// assuming any particular reachability path from v1.
 	rows, qerr := pool.Query(context.Background(), `
-		WITH RECURSIVE lineage AS (
-			SELECT id, status, latest_id, supersedes_id FROM memories WHERE id = $1
-			UNION ALL
-			SELECT m.id, m.status, m.latest_id, m.supersedes_id
-			FROM memories m
-			JOIN lineage l ON m.supersedes_id = l.id
-		)
-		SELECT id, status, latest_id FROM lineage`, v1.ID)
+		SELECT id, status, latest_id, supersedes_id FROM memories WHERE project = $1`, project)
 	require.NoError(t, qerr)
 	defer rows.Close()
 
+	type row struct {
+		id, status, latest string
+		supersedes         *string
+	}
+	var all []row
 	activeCount := 0
 	latestIDs := map[string]bool{}
-	rowCount := 0
 	for rows.Next() {
-		var id, status, latest string
-		require.NoError(t, rows.Scan(&id, &status, &latest))
-		rowCount++
-		if status == "active" {
+		var r row
+		require.NoError(t, rows.Scan(&r.id, &r.status, &r.latest, &r.supersedes))
+		all = append(all, r)
+		if r.status == "active" {
 			activeCount++
 		}
-		latestIDs[latest] = true
+		latestIDs[r.latest] = true
 	}
 	require.NoError(t, rows.Err())
 
-	assert.Equal(t, n+1, rowCount, "expected v1 plus %d concurrent updates in the lineage", n)
+	// (c) total rows == N+1 (linear chain, no branch).
+	assert.Equal(t, n+1, len(all), "expected v1 plus %d concurrent updates, no branch rows", n)
+	// (a) exactly one row is active.
 	assert.Equal(t, 1, activeCount, "exactly one row in the lineage must be active")
-	assert.Len(t, latestIDs, 1, "all rows in the lineage must share one latest_id")
-
-	// The single shared latest_id must point at the single active row.
+	// (b) exactly one distinct latest_id, and it equals the active row's id.
+	require.Len(t, latestIDs, 1, "all rows in the lineage must share one latest_id")
 	var sharedLatest string
 	for k := range latestIDs {
 		sharedLatest = k
 	}
 	assert.Equal(t, "active", statusOf(t, pool, sharedLatest))
+	var activeID string
+	for _, r := range all {
+		if r.status == "active" {
+			activeID = r.id
+		}
+	}
+	assert.Equal(t, activeID, sharedLatest, "shared latest_id must point at the active row")
+
+	// (d) the non-root supersedes_id values must all be distinct and each
+	// must reference a row that actually exists in this lineage — i.e. no two
+	// rows share a parent (which would mean the archived head was superseded
+	// twice, branching the chain) and no row supersedes a ghost id.
+	knownIDs := map[string]bool{}
+	for _, r := range all {
+		knownIDs[r.id] = true
+	}
+	seenParents := map[string]bool{}
+	for _, r := range all {
+		if r.supersedes == nil {
+			continue // the root (v1) has no parent
+		}
+		parent := *r.supersedes
+		assert.False(t, seenParents[parent], "supersedes_id %s claimed by more than one row (branch)", parent)
+		seenParents[parent] = true
+		assert.True(t, knownIDs[parent], "supersedes_id %s does not exist in this lineage", parent)
+	}
+}
+
+// TestRedactHeadRepointsCursor is the BUG2 regression test: redacting a
+// lineage's active head must repoint the whole lineage's latest_id cursor at
+// the newest surviving (non-redacted) row, otherwise GetLatestByID resolves
+// every id in the lineage — including ones that were never redacted — to a
+// row that GetMemoryByID filters out, 404ing the entire lineage.
+func TestRedactHeadRepointsCursor(t *testing.T) {
+	pool := setupLatestTestDB(t)
+	u := testUser(t, pool)
+	project := testProject(t, pool, u)
+
+	v1, _, err := Remember(context.Background(), pool, &RememberRequest{
+		Project: project, Type: "fact.note", Content: "v1",
+		Visibility: "project", DedupMode: "off",
+		CallerUserID: u, CallerDisplay: u,
+	})
+	require.NoError(t, err)
+
+	v2, err := UpdateMemory(context.Background(), pool, v1.ID, &UpdateMemoryRequest{
+		Content:       strp("v2"),
+		CallerUserID:  u,
+		CallerDisplay: u,
+	})
+	require.NoError(t, err)
+	require.Equal(t, v2.ID, latestOf(t, pool, v1.ID), "precondition: v2 is the active head")
+
+	// Redact the active head (v2). v1 is the newest surviving row.
+	aerr := Redact(context.Background(), pool, v2.ID, u, "writer")
+	require.Nil(t, aerr)
+
+	assert.Equal(t, "redacted", statusOf(t, pool, v2.ID))
+	assert.Equal(t, v1.ID, latestOf(t, pool, v1.ID),
+		"lineage cursor must repoint to v1 (newest non-redacted) after v2 is redacted")
+	assert.Equal(t, v1.ID, latestOf(t, pool, v2.ID),
+		"resolving via the redacted row's own id must also see the repointed cursor")
+
+	got, gerr := GetLatestByID(context.Background(), pool, v1.ID)
+	require.Nil(t, gerr, "GetLatestByID(v1) must resolve, not 404, after v2's redaction")
+	assert.Equal(t, v1.ID, got.ID)
+	assert.Equal(t, "v1", got.Content)
 }

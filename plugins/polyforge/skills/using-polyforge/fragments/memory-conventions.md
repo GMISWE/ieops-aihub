@@ -16,6 +16,10 @@ Conventions:
   link. Do NOT hand-write "belongs to wi X" in the body — that metadata is surfaced by the UI.
 - **Memory type** → an aihub enum type (`experience.*` / `fact.*` / `rule.*` /
   `methodology.*`), not the local `user/feedback/project/reference` vocabulary.
+- **Updating a memory** → use `pf_update_memory` to revise an existing memory: it creates a
+  new version superseding the current head and advances the `latest_id` cursor, so any id you
+  already hold still resolves to the latest. `pf_reinforce_memory` only appends context to the
+  same row (no new version); artifacts still revise via `pf_save_artifact(..., supersedes_memory_id=…)`.
 - **Cross-system link discipline** (keep separate): aihub artifacts/memories link via aihub
   `related` + owning-wi; repo docs/PRs (e.g. ieops-doc) link via GitHub relative paths.
   Never put an aihub `mem_…` ref in a repo doc, nor a repo path inside an aihub memory.

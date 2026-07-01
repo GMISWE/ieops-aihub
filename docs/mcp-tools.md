@@ -40,14 +40,15 @@ follows those files.
 | `pf_pause_attempt` | Pause: release `file_scope` locks, retain `git_branch`/`deploy_env` for resume. |
 | `pf_acquire_locks` | Acquire declared `file_scope` locks mid-attempt (blocks on conflict, never steals). |
 
-## Memory and artifacts (10) - `tools_memory.go`
+## Memory and artifacts (11) - `tools_memory.go`
 
 | tool | purpose |
 |---|---|
 | `pf_remember` | Store a memory (type, visibility, strength, expiry). Rejects `methodology.*` types - use `pf_save_artifact`. |
 | `pf_recall` | Recall memories with filters. **Note:** ranking is recency-based today; semantic/vector recall is in flight (aihub#192). |
 | `pf_activate_memory` | Increment activation count and update stability. |
-| `pf_reinforce_memory` | Add context and adjust strength. |
+| `pf_reinforce_memory` | Add context and adjust strength (same row, no new version). |
+| `pf_update_memory` | Update a memory: create a new version superseding the current head and advance the `latest_id` cursor, so an id you already hold still resolves to the latest. |
 | `pf_redact_memory` | Soft-delete a memory. |
 | `pf_save_artifact` | Save a methodology artifact (`spec`/`plan`/`review`/`execute`/`retro`/`wrap_summary`), optionally with pre-rendered HTML. |
 | `pf_adopt_artifact` | Mark an artifact adopted. |

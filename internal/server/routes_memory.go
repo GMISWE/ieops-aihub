@@ -36,6 +36,7 @@ func RegisterMemoryRoutes(v1 *echo.Group, pool *pgxpool.Pool) {
 	v1.POST("/memories/:id/commit/:commit_id/resolve", handleResolveCommit(pool))
 	v1.POST("/memories/:id/commit/:commit_id/reply", handleV1ReplyCommit(pool))
 	v1.PATCH("/memories/:id/reinforce", handleReinforceMemory(pool))
+	v1.PATCH("/memories/:id/update", handleUpdateMemory(pool))
 
 	// Events (§4.3) — POST is write; GET is read
 	v1.POST("/events", handleEmitEvent(pool))
@@ -546,6 +547,99 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			"activation_count": newActivationCount,
 			"base_strength":    newBaseStrength,
 		})
+	}
+}
+
+// handleUpdateMemory handles PATCH /v1/memories/:id/update (aihub#201).
+// Creates a new version superseding the current lineage head resolved from
+// :id, inheriting any field the caller didn't override, and advances the
+// latest_id cursor across the whole lineage. Mirrors handleReinforceMemory's
+// auth/credential shape.
+func handleUpdateMemory(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		memID := c.Param("id")
+
+		var req struct {
+			Content       *string  `json:"content,omitempty"`
+			Visibility    *string  `json:"visibility,omitempty"`
+			Tags          []string `json:"tags,omitempty"`
+			BaseStrength  *float64 `json:"base_strength,omitempty"`
+			AttemptID     string   `json:"attempt_id"`
+			ClaimEpoch    int64    `json:"claim_epoch"`
+			SessionSecret string   `json:"session_secret"`
+			WorkItemID    string   `json:"work_item_id,omitempty"`
+		}
+		if err := c.Bind(&req); err != nil {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, err.Error()))
+		}
+
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		// Load current lineage head for the access check (project) and to know
+		// which memory record actually gets superseded.
+		head, aerr := domain.GetLatestByID(ctx, pool, memID)
+		if aerr != nil {
+			return writeError(c, aerr)
+		}
+		if head.Status == "redacted" {
+			return writeError(c, domain.NewErr(domain.ErrForbidden,
+				"cannot update a redacted memory"))
+		}
+
+		if err := checkProjectAccess(c, u, head.Project, "writer"); err != nil {
+			return err
+		}
+
+		// Verify attempt credential when caller supplied one (mutating ops should carry it).
+		if req.AttemptID != "" || req.SessionSecret != "" {
+			if req.WorkItemID == "" {
+				return writeError(c, domain.NewErr(domain.ErrBadRequest,
+					"work_item_id is required when attempt_id/session_secret are provided"))
+			}
+			if credErr := domain.VerifyAttemptCredentialPool(
+				ctx, pool, req.WorkItemID, req.AttemptID, req.ClaimEpoch, req.SessionSecret,
+			); credErr != nil {
+				return writeError(c, credErr)
+			}
+		}
+
+		newHead, err := domain.UpdateMemory(ctx, pool, memID, &domain.UpdateMemoryRequest{
+			Content:       req.Content,
+			Visibility:    req.Visibility,
+			Tags:          req.Tags,
+			BaseStrength:  req.BaseStrength,
+			CallerUserID:  u.UserID,
+			CallerDisplay: u.DisplayName,
+		})
+		if err != nil {
+			return domainErr(c, err)
+		}
+
+		// Emit memory_updated event (best effort — memory_updated is not in
+		// chk_evt_work_item_id's whitelist, so this only lands when the memory
+		// carries a work_item_id; a constraint violation here must not fail
+		// the request, matching handleReinforceMemory's memory_reinforced emission).
+		payload, _ := json.Marshal(map[string]any{
+			"memory_id":     memID,
+			"new_memory_id": newHead.ID,
+		})
+		if head.WorkItemID != nil && *head.WorkItemID != "" {
+			_, _ = pool.Exec(ctx, `
+				INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
+				VALUES ($1, $2, $3, $4, 'memory_updated', $5, $6)`,
+				domain.NewID("evt"), *head.WorkItemID, u.UserID, u.DisplayName, payload, head.Project,
+			)
+		} else {
+			_, _ = pool.Exec(ctx, `
+				INSERT INTO agent_events (id, actor_user_id, actor_display, event_type, payload, project)
+				VALUES ($1, $2, $3, 'memory_updated', $4, $5)`,
+				domain.NewID("evt"), u.UserID, u.DisplayName, payload, head.Project,
+			)
+		}
+
+		return c.JSON(http.StatusOK, newHead)
 	}
 }
 

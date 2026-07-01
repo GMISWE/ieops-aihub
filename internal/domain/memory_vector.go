@@ -22,6 +22,12 @@ import (
 // Only memories that have emb_model matching the current provider and a non-NULL
 // emb_vector are candidates — unembedded memories fall through to the text path.
 //
+// aihub#201: this is a 7th full-Memory read path alongside Remember's INSERT
+// RETURNING, Recall's text-path SELECT, scanMemoryLite, GetMemoryByID, and the
+// two callers of those — its SELECT column list and .Scan(...) carry latest_id
+// at the same relative position (between commits and created_at) as those
+// sites, keeping all lockstep Scan sites in sync.
+//
 // ponytail: fusion weights (0.7 similarity / 0.3 strength) are tunable; adjust
 // when the recall quality tradeoff between freshness and semantic match shifts.
 func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*RecallResponse, error) {
@@ -125,7 +131,7 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 			id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
-			tags, source_artifact_id, status, attrs, commits, created_at, updated_at,
+			tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at,
 			1 - (emb_vector <=> %s) AS similarity,
 			base_strength * exp(
 				-extract(epoch from (clock_timestamp() - COALESCE(last_activated_at, created_at)))/86400.0
@@ -157,7 +163,7 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 			&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
 			&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
 			&m.Tags, &m.SourceArtifactID, &m.Status,
-			&m.Attrs, &m.Commits, &m.CreatedAt, &m.UpdatedAt,
+			&m.Attrs, &m.Commits, &m.LatestID, &m.CreatedAt, &m.UpdatedAt,
 			&similarity, &effStrength,
 		); scanErr != nil {
 			fmt.Fprintf(os.Stderr, "recallWithVector: scan error: %v\n", scanErr)

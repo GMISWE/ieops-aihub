@@ -176,6 +176,53 @@ func (s *Server) registerMemoryTools() {
 		return jsonResult(result)
 	})
 
+	// pf_update_memory (aihub#201)
+	s.mcp.AddTool(&sdkmcp.Tool{
+		Name:        "pf_update_memory",
+		Description: "Update a memory (creates a new version and advances the latest_id cursor). Credentials injected from state file.",
+		InputSchema: objectSchema(map[string]any{
+			"memory_id":     prop("string", "Memory ID (any id in the lineage)"),
+			"content":       prop("string", "New content (omit to keep current)"),
+			"visibility":    prop("string", "New visibility (omit to keep current)"),
+			"tags":          prop("array", "New tags (omit to keep current)"),
+			"base_strength": prop("number", "New base strength (omit to keep current)"),
+			"work_item_id":  prop("string", "Work item ID (for credential injection)"),
+		}, []string{"memory_id", "work_item_id"}),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		args, err := parseArgs(req.Params.Arguments)
+		if err != nil {
+			return errResult(err)
+		}
+		memID := strArg(args, "memory_id")
+		if memID == "" {
+			return errResult(fmt.Errorf("memory_id is required"))
+		}
+		wiID := strArg(args, "work_item_id")
+		if wiID == "" {
+			return errResult(fmt.Errorf("work_item_id is required for credential injection"))
+		}
+		sf, err := config.ReadStateFile(wiID)
+		if err != nil {
+			return errResult(fmt.Errorf("read state file: %w", err))
+		}
+		body := map[string]any{
+			"attempt_id":     sf.AttemptID,
+			"claim_epoch":    sf.ClaimEpoch,
+			"session_secret": sf.SessionSecret,
+			"work_item_id":   wiID,
+		}
+		for _, k := range []string{"content", "visibility", "tags", "base_strength"} {
+			if v, ok := args[k]; ok {
+				body[k] = v
+			}
+		}
+		result, err := s.client.UpdateMemory(ctx, memID, body)
+		if err != nil {
+			return errResult(err)
+		}
+		return jsonResult(result)
+	})
+
 	// pf_redact_memory
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_redact_memory",

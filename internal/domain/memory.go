@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GMISWE/ieops-aihub/internal/render"
@@ -250,6 +251,14 @@ func computeStabilityDays(memType string, activationCount int) float64 {
 
 // ─── Remember ─────────────────────────────────────────────────────────────────
 
+// Querier is satisfied by both *pgxpool.Pool and pgx.Tx, letting the shared
+// INSERT (and other supersede-path statements) run against either a bare
+// pool connection or an in-flight transaction without duplicating the SQL.
+type Querier interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // Remember creates a new memory per §7 / §4.3.
 // Returns (memory, isNew, error). isNew=false if dedup hit in suggest mode.
 // Strict mode returns ErrConflictSimilarMemory on high-similarity match.
@@ -352,58 +361,14 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		req.Attrs = merged
 	}
 
-	// N1 / aihub#201 / S2: if SupersedesMemID is set, resolve it to the CURRENT
-	// head of that lineage via the latest_id cursor (the caller may have
-	// passed a stale/older id in the chain), archive the head, and rewrite
-	// req.SupersedesMemID to the head so the new row's supersedes_id keeps
-	// the chain linear. The old lineage's latest_id cursor is advanced to
-	// the new row's id after the insert (below), once the new id is known.
-	//
-	// S2: two concurrent callers can resolve the SAME oldHead before either
-	// archives it. The guarded UPDATE (`WHERE status='active'`) is row-locked
-	// by Postgres, so only one of them actually flips active->archived — but
-	// the loser must NOT proceed against a head it never confirmed archiving,
-	// or it inserts a second row superseding an already-archived head, split
-	// from the winner's chain (two active heads, one orphaned branch). Retry:
-	// re-resolve oldHead (now pointing past the winner's new row, since the
-	// winner's own Remember call propagates latest_id before this loser could
-	// have raced past its own archive attempt) and retry the guarded archive,
-	// bounded so a genuinely-gone head (e.g. redacted mid-race) can't spin
-	// forever.
-	var oldHead string
-	if req.SupersedesMemID != nil && *req.SupersedesMemID != "" {
-		startID := *req.SupersedesMemID
-		const maxAttempts = 5
-		for attempt := 0; attempt < maxAttempts; attempt++ {
-			var head string
-			if err := pool.QueryRow(ctx, `
-				SELECT COALESCE(latest_id, id) FROM memories WHERE id=$1`, startID,
-			).Scan(&head); err != nil || head == "" {
-				break
-			}
-			tag, err := pool.Exec(ctx, `
-				UPDATE memories SET status='archived', updated_at=clock_timestamp()
-				WHERE id=$1 AND status='active'`, head)
-			if err != nil {
-				break
-			}
-			if tag.RowsAffected() == 1 {
-				oldHead = head
-				req.SupersedesMemID = &head
-				break
-			}
-			// Lost the race (or head was already non-active for another reason,
-			// e.g. redacted): re-resolve from the same starting id and retry —
-			// latest_id should have moved on if a concurrent Remember won.
-		}
-	}
-
 	// aihub#27 / IEBE-1694: render markdown to HTML for configured types only.
 	// Render is best-effort — a render failure must NOT block the insert (spec
 	// decision 3). Other memory types leave rendered_html NULL.
 	renderedHTML := resolveRenderedHTML(req.RenderedHTML, req.Type, req.Content)
 
-	// aihub#192: compute embedding vector for embeddable types.
+	// aihub#192: compute embedding vector for embeddable types. This is a
+	// network call to the embedding provider, so it MUST run before any
+	// transaction below begins — never hold a DB tx open across it.
 	// Best-effort: a provider error logs a warning and leaves emb_vector NULL.
 	var embVecLit *string // nil → SQL NULL
 	var embModel *string
@@ -427,8 +392,116 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	// lineage when this insert supersedes a prior version.
 	newID := NewID("mem")
 
+	// N1 / aihub#201 / S2 / BUG1: when SupersedesMemID is set, the head
+	// resolve + archive + insert + latest_id propagation must be one atomic,
+	// serialized unit — otherwise concurrent supersedes can branch the
+	// lineage (see the historical bug note below). Everything from here to
+	// tx.Commit runs on `q` (the tx when superseding, the bare pool
+	// otherwise) so the big INSERT below is never duplicated.
+	//
+	// Historical bug (fixed here): the OLD code ran the head-resolve/archive
+	// retry loop and the latest_id propagation UPDATE as separate,
+	// non-transactional statements against the pool. A concurrent loser could
+	// resolve the same stale head, lose the archive race, retry, and still
+	// see the old (pre-propagation) cursor because the winner hadn't
+	// committed/propagated yet — exhausting all retries and falling through
+	// with oldHead="", inserting a branch off a stale supersedes_id with no
+	// archive and no propagation. Wrapping the whole sequence in one tx makes
+	// the loser's archive UPDATE block on the winner's row lock instead of
+	// racing it: by the time the loser's statement unblocks, the winner has
+	// either committed (loser sees 0 rows, re-resolves the now-current head)
+	// or rolled back (loser retries the same head cleanly).
+	var q Querier = pool
+	var tx pgx.Tx
+	if req.SupersedesMemID != nil && *req.SupersedesMemID != "" {
+		var txErr error
+		tx, txErr = pool.Begin(ctx)
+		if txErr != nil {
+			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to begin tx: %v", txErr))
+		}
+		defer func() {
+			if tx != nil {
+				_ = tx.Rollback(ctx)
+			}
+		}()
+		q = tx
+
+		// Deadlock fix: row-level locks alone cannot give N-way concurrent
+		// supersedes a total order. With N transactions each racing to
+		// archive-then-relink one link in the SAME chain, each ends up
+		// holding a lock on a different row while waiting on a different
+		// transaction's row — a genuine multi-party wait-for cycle (Postgres
+		// 40P01, reproduced deterministically with N=8 concurrent supersedes
+		// in TestConcurrentUpdateSingleHead even after making the individual
+		// SELECT/UPDATE steps blocking rather than racy). The standard fix
+		// for "chain of dependent row locks with no global order" is to
+		// serialize the whole resolve→archive→insert→propagate sequence
+		// with a single mutex per lineage, so only one transaction is ever
+		// inside the critical section for a given lineage. A Postgres
+		// session-independent transaction-scoped advisory lock does exactly
+		// that (auto-released on commit/rollback, no cleanup needed) — keyed
+		// on the lineage's ROOT id (walked up supersedes_id to the row with
+		// supersedes_id IS NULL), which is the only identifier that is
+		// invariant across every step of every concurrent call, unlike
+		// latest_id/head which is exactly what's racing.
+		var rootID string
+		if err := q.QueryRow(ctx, `
+			WITH RECURSIVE up(id, supersedes_id, depth) AS (
+				SELECT id, supersedes_id, 0 FROM memories WHERE id = $1
+				UNION ALL
+				SELECT m.id, m.supersedes_id, up.depth + 1
+				FROM memories m
+				JOIN up ON m.id = up.supersedes_id
+				WHERE up.depth < 10000
+			)
+			SELECT id FROM up WHERE supersedes_id IS NULL
+			ORDER BY depth DESC LIMIT 1`, *req.SupersedesMemID,
+		).Scan(&rootID); err != nil {
+			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to resolve lineage root: %v", err))
+		}
+		if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, rootID); err != nil {
+			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to acquire lineage lock: %v", err))
+		}
+	}
+
+	var oldHead string
+	if req.SupersedesMemID != nil && *req.SupersedesMemID != "" {
+		startID := *req.SupersedesMemID
+		const maxAttempts = 8
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			// With the per-lineage advisory lock held above, at most one
+			// transaction is ever inside this loop for a given lineage, so a
+			// plain (non-locking) read is sufficient and safe here.
+			var head string
+			if err := q.QueryRow(ctx, `
+				SELECT COALESCE(latest_id, id) FROM memories WHERE id=$1`, startID,
+			).Scan(&head); err != nil || head == "" {
+				break
+			}
+			tag, err := q.Exec(ctx, `
+				UPDATE memories SET status='archived', updated_at=clock_timestamp()
+				WHERE id=$1 AND status='active'`, head)
+			if err != nil {
+				return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to archive head: %v", err))
+			}
+			if tag.RowsAffected() == 1 {
+				oldHead = head
+				req.SupersedesMemID = &head
+				break
+			}
+			// Lost the race (or head was already non-active for another reason,
+			// e.g. redacted): re-resolve from the same starting id and retry. In
+			// a tx, this UPDATE only reaches here after any concurrent winner's
+			// row lock has been released (commit or rollback), so latest_id is
+			// guaranteed to reflect the winner's outcome on the next iteration.
+		}
+		if oldHead == "" {
+			return nil, false, NewErr(ErrInternalError, "failed to resolve and archive supersede head after retries")
+		}
+	}
+
 	mem := &Memory{}
-	err := pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		INSERT INTO memories (
 			id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
@@ -465,10 +538,36 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 
 	// aihub#201: advance the old lineage's cursor to the new head. Every row
 	// that used to point latest_id at oldHead (the whole prior chain) now
-	// points at newID instead.
+	// points at newID instead. Runs on the same tx as the archive+insert above
+	// so the whole supersede sequence commits or rolls back together.
+	//
+	// BUG1 deadlock fix: this UPDATE's WHERE clause matches an unindexed
+	// column (latest_id) and can therefore touch multiple rows (the whole
+	// prior chain shares one cursor). Plain `UPDATE ... WHERE latest_id=$2`
+	// lets Postgres acquire those row locks in scan order, which is not
+	// guaranteed consistent across concurrent transactions — under N-way
+	// concurrency two txs can each hold a lock the other needs, in opposite
+	// order, and deadlock (40P01; reproduced with N=8 concurrent supersedes
+	// in TestConcurrentUpdateSingleHead before this fix). Driving the update
+	// off an explicit `SELECT ... ORDER BY id FOR UPDATE` forces every
+	// transaction to acquire the same rows in the same (id-sorted) order, so
+	// the wait graph can only ever be a chain, never a cycle.
 	if oldHead != "" {
-		_, _ = pool.Exec(ctx, `
-			UPDATE memories SET latest_id=$1 WHERE latest_id=$2`, newID, oldHead)
+		if _, err := q.Exec(ctx, `
+			WITH targets AS (
+				SELECT id FROM memories WHERE latest_id=$2 ORDER BY id FOR UPDATE
+			)
+			UPDATE memories SET latest_id=$1
+			WHERE id IN (SELECT id FROM targets)`, newID, oldHead); err != nil {
+			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to propagate latest_id: %v", err))
+		}
+	}
+
+	if tx != nil {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to commit supersede tx: %v", err))
+		}
+		tx = nil // the deferred Rollback becomes a no-op after a successful Commit
 	}
 
 	// aihub#74 Stream A: dual-write related links into memory_relations.
@@ -1386,6 +1485,77 @@ func Redact(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, caller
 		WHERE id = $1`, memID)
 	if err != nil {
 		return NewErr(ErrInternalError, fmt.Sprintf("failed to redact memory: %v", err))
+	}
+
+	// aihub#201 BUG2: if the row we just redacted was a lineage head (some row
+	// — possibly itself — has latest_id = memID), that cursor now points at a
+	// redacted row. GetMemoryByID filters out status='redacted', so the whole
+	// lineage would 404 via GetLatestByID until repointed. Reuse migration
+	// 0026's component/head-selection logic (root_walk up, down_walk down,
+	// newest-non-redacted-first) scoped to just this row's component.
+	if err := repointHeadIfRedacted(ctx, pool, memID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// repointHeadIfRedacted checks whether redactedID was a lineage head (i.e.
+// some row's latest_id still points at it) and, if so, repoints every such
+// row's latest_id at the newest non-redacted row in the connected component.
+// If the whole component is now redacted, latest_id is left pointing at
+// redactedID — the lineage is fully deleted, so a 404 is correct.
+func repointHeadIfRedacted(ctx context.Context, pool *pgxpool.Pool, redactedID string) error {
+	var wasHead bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM memories WHERE latest_id = $1)`, redactedID,
+	).Scan(&wasHead); err != nil {
+		return NewErr(ErrInternalError, fmt.Sprintf("failed to check lineage head: %v", err))
+	}
+	if !wasHead {
+		return nil
+	}
+
+	var newHead string
+	err := pool.QueryRow(ctx, `
+		WITH RECURSIVE root_walk(cur_id) AS (
+			SELECT id FROM memories WHERE id = $1
+			UNION ALL
+			SELECT m.supersedes_id
+			FROM root_walk rw
+			JOIN memories m ON m.id = rw.cur_id
+			WHERE m.supersedes_id IS NOT NULL
+		),
+		root AS (
+			SELECT rw.cur_id AS root_id
+			FROM root_walk rw
+			JOIN memories m ON m.id = rw.cur_id
+			WHERE m.supersedes_id IS NULL
+		),
+		down_walk(member_id) AS (
+			SELECT root_id FROM root
+			UNION ALL
+			SELECT m.id
+			FROM down_walk dw
+			JOIN memories m ON m.supersedes_id = dw.member_id
+		)
+		SELECT m.id
+		FROM down_walk dw
+		JOIN memories m ON m.id = dw.member_id
+		ORDER BY (m.status = 'redacted') ASC, m.created_at DESC
+		LIMIT 1`, redactedID,
+	).Scan(&newHead)
+	if err != nil {
+		return NewErr(ErrInternalError, fmt.Sprintf("failed to resolve component head: %v", err))
+	}
+	if newHead == redactedID {
+		// Every member is redacted (or this row has no component) — nothing to repoint.
+		return nil
+	}
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE memories SET latest_id = $1 WHERE latest_id = $2`, newHead, redactedID,
+	); err != nil {
+		return NewErr(ErrInternalError, fmt.Sprintf("failed to repoint lineage head: %v", err))
 	}
 	return nil
 }

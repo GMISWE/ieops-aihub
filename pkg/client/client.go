@@ -273,6 +273,14 @@ func (c *Client) RedactMemory(ctx context.Context, memoryID string, body any) (m
 	return out, c.do(ctx, "PATCH", "/v1/memories/"+seg(memoryID)+"/redact", body, &out)
 }
 
+// UpdateMemory calls PATCH /v1/memories/:id/update — creates a new version
+// superseding the current lineage head and advances the latest_id cursor
+// (aihub#201).
+func (c *Client) UpdateMemory(ctx context.Context, memoryID string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "PATCH", "/v1/memories/"+seg(memoryID)+"/update", body, &out)
+}
+
 // ResolveCommit calls POST /v1/memories/:id/commit/:commit_id/resolve.
 // body should be map[string]any{"reply": "..."}.
 func (c *Client) ResolveCommit(ctx context.Context, memoryID, commitID string, body any) (map[string]any, error) {

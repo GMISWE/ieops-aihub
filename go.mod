@@ -8,6 +8,7 @@ require (
 	github.com/labstack/echo/v4 v4.15.2
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/pelletier/go-toml/v2 v2.3.1
+	github.com/stretchr/testify v1.11.1
 	github.com/yuin/goldmark v1.8.2
 	github.com/yuin/goldmark-highlighting/v2 v2.0.0-20230729083705-37449abec8cc
 	golang.org/x/crypto v0.51.0
@@ -19,6 +20,7 @@ require (
 	github.com/PuerkitoBio/goquery v1.10.0 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/andybalholm/cascadia v1.3.2 // indirect
+	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dlclark/regexp2 v1.11.4 // indirect
 	github.com/dlclark/regexp2/v2 v2.1.0 // indirect
 	github.com/dop251/goja v0.0.0-20240927123429-241b342198c2 // indirect
@@ -34,6 +36,7 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/mazznoer/csscolorparser v0.1.5 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect

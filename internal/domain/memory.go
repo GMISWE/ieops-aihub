@@ -120,6 +120,7 @@ type Memory struct {
 	Attrs            json.RawMessage `json:"attrs,omitempty"`
 	RenderedHTML     *string         `json:"rendered_html,omitempty"`
 	Commits          json.RawMessage `json:"commits"`
+	LatestID         *string         `json:"latest_id,omitempty"`
 	CreatedAt        time.Time       `json:"created_at"`
 	UpdatedAt        time.Time       `json:"updated_at"`
 	// populated post-scan from memory_relations (aihub#74); NOT part of any SELECT/Scan — do not add to the 6 lockstep sites.
@@ -351,11 +352,50 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		req.Attrs = merged
 	}
 
-	// N1: if SupersedesMemID is set, archive the superseded memory first
+	// N1 / aihub#201 / S2: if SupersedesMemID is set, resolve it to the CURRENT
+	// head of that lineage via the latest_id cursor (the caller may have
+	// passed a stale/older id in the chain), archive the head, and rewrite
+	// req.SupersedesMemID to the head so the new row's supersedes_id keeps
+	// the chain linear. The old lineage's latest_id cursor is advanced to
+	// the new row's id after the insert (below), once the new id is known.
+	//
+	// S2: two concurrent callers can resolve the SAME oldHead before either
+	// archives it. The guarded UPDATE (`WHERE status='active'`) is row-locked
+	// by Postgres, so only one of them actually flips active->archived — but
+	// the loser must NOT proceed against a head it never confirmed archiving,
+	// or it inserts a second row superseding an already-archived head, split
+	// from the winner's chain (two active heads, one orphaned branch). Retry:
+	// re-resolve oldHead (now pointing past the winner's new row, since the
+	// winner's own Remember call propagates latest_id before this loser could
+	// have raced past its own archive attempt) and retry the guarded archive,
+	// bounded so a genuinely-gone head (e.g. redacted mid-race) can't spin
+	// forever.
+	var oldHead string
 	if req.SupersedesMemID != nil && *req.SupersedesMemID != "" {
-		_, _ = pool.Exec(ctx, `
-			UPDATE memories SET status='archived', updated_at=clock_timestamp()
-			WHERE id=$1 AND status='active'`, *req.SupersedesMemID)
+		startID := *req.SupersedesMemID
+		const maxAttempts = 5
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			var head string
+			if err := pool.QueryRow(ctx, `
+				SELECT COALESCE(latest_id, id) FROM memories WHERE id=$1`, startID,
+			).Scan(&head); err != nil || head == "" {
+				break
+			}
+			tag, err := pool.Exec(ctx, `
+				UPDATE memories SET status='archived', updated_at=clock_timestamp()
+				WHERE id=$1 AND status='active'`, head)
+			if err != nil {
+				break
+			}
+			if tag.RowsAffected() == 1 {
+				oldHead = head
+				req.SupersedesMemID = &head
+				break
+			}
+			// Lost the race (or head was already non-active for another reason,
+			// e.g. redacted): re-resolve from the same starting id and retry —
+			// latest_id should have moved on if a concurrent Remember won.
+		}
 	}
 
 	// aihub#27 / IEBE-1694: render markdown to HTML for configured types only.
@@ -381,6 +421,12 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		}
 	}
 
+	// aihub#201: hoisted so the new row's id can double as its own latest_id
+	// (self-head trick — a freshly inserted row is always the head of its
+	// lineage) and be reused below to propagate the cursor across the old
+	// lineage when this insert supersedes a prior version.
+	newID := NewID("mem")
+
 	mem := &Memory{}
 	err := pool.QueryRow(ctx, `
 		INSERT INTO memories (
@@ -388,20 +434,20 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			activation_count, expires_at, tags, source_artifact_id,
 			emb_model, emb_dims, emb_vector,
-			status, attrs, rendered_html, supersedes_id, created_at, updated_at
+			status, attrs, rendered_html, supersedes_id, latest_id, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11,
 			0, $12, $13, $14,
 			$15, $16, $17::vector,
-			'active', $18, $19, $20, clock_timestamp(), clock_timestamp()
+			'active', $18, $19, $20, $1, clock_timestamp(), clock_timestamp()
 		)
 		RETURNING id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
 			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
-			rendered_html, commits, created_at, updated_at`,
-		NewID("mem"), req.Project, req.Type, req.Content, req.CallerUserID, req.CallerDisplay,
+			rendered_html, commits, latest_id, created_at, updated_at`,
+		newID, req.Project, req.Type, req.Content, req.CallerUserID, req.CallerDisplay,
 		req.WorkItemID, req.Visibility, immortal, baseStrength, stabilityDays,
 		req.ExpiresAt, req.Tags, nil, // source_artifact_id = nil ($14)
 		embModel, embDims, embVecLit, // $15, $16, $17 — emb_model/dims/vector
@@ -411,10 +457,18 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		&mem.WorkItemID, &mem.Visibility, &mem.IsImmortal, &mem.BaseStrength, &mem.StabilityDays,
 		&mem.LastActivatedAt, &mem.LastActivatedBy, &mem.ActivationCount, &mem.ExpiresAt,
 		&mem.Tags, &mem.SourceArtifactID, &mem.EmbModel, &mem.EmbDims, &mem.Status,
-		&mem.Attrs, &mem.RenderedHTML, &mem.Commits, &mem.CreatedAt, &mem.UpdatedAt,
+		&mem.Attrs, &mem.RenderedHTML, &mem.Commits, &mem.LatestID, &mem.CreatedAt, &mem.UpdatedAt,
 	)
 	if err != nil {
 		return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to insert memory: %v", err))
+	}
+
+	// aihub#201: advance the old lineage's cursor to the new head. Every row
+	// that used to point latest_id at oldHead (the whole prior chain) now
+	// points at newID instead.
+	if oldHead != "" {
+		_, _ = pool.Exec(ctx, `
+			UPDATE memories SET latest_id=$1 WHERE latest_id=$2`, newID, oldHead)
 	}
 
 	// aihub#74 Stream A: dual-write related links into memory_relations.
@@ -976,7 +1030,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		SELECT id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
-			tags, source_artifact_id, status, attrs, commits, created_at, updated_at
+			tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at
 		FROM memories
 		WHERE %s
 		ORDER BY last_activated_at DESC NULLS LAST, created_at DESC
@@ -1050,7 +1104,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 //	id, project, type, content, author_user_id, author_display,
 //	work_item_id, visibility, is_immortal, base_strength, stability_days,
 //	last_activated_at, last_activated_by, activation_count, expires_at,
-//	tags, source_artifact_id, status, attrs, commits, created_at, updated_at
+//	tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at
 func scanMemoryLite(rows pgx.Rows) (*Memory, error) {
 	m := &Memory{}
 	err := rows.Scan(
@@ -1058,7 +1112,7 @@ func scanMemoryLite(rows pgx.Rows) (*Memory, error) {
 		&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
 		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
 		&m.Tags, &m.SourceArtifactID, &m.Status,
-		&m.Attrs, &m.Commits, &m.CreatedAt, &m.UpdatedAt,
+		&m.Attrs, &m.Commits, &m.LatestID, &m.CreatedAt, &m.UpdatedAt,
 	)
 	return m, err
 }
@@ -1119,7 +1173,7 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
 			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
-			rendered_html, commits, created_at, updated_at
+			rendered_html, commits, latest_id, created_at, updated_at
 		FROM memories
 		WHERE id = $1 AND status != 'redacted'`, id,
 	).Scan(
@@ -1127,7 +1181,7 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 		&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
 		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
 		&m.Tags, &m.SourceArtifactID, &m.EmbModel, &m.EmbDims, &m.Status,
-		&m.Attrs, &m.RenderedHTML, &m.Commits, &m.CreatedAt, &m.UpdatedAt,
+		&m.Attrs, &m.RenderedHTML, &m.Commits, &m.LatestID, &m.CreatedAt, &m.UpdatedAt,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -1142,6 +1196,86 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 	// predicate would leak private/admin/cross-project memories. Recall enriches forward
 	// links with full scoping (see loadForwardRelations).
 	return m, nil
+}
+
+// GetLatestByID resolves id to the current head of its supersede lineage via
+// the latest_id cursor, then loads that head through GetMemoryByID (so it
+// never duplicates GetMemoryByID's column list — avoiding a 7th lockstep
+// drift site). If id does not exist at all, the initial COALESCE(latest_id,
+// id) lookup itself returns pgx.ErrNoRows and this returns ErrNotFound
+// directly — it never reaches GetMemoryByID. The "fall back to id itself"
+// behavior (COALESCE) only applies to an EXISTING row whose latest_id is
+// NULL (pre-migration data written before latest_id was backfilled/self-set).
+func GetLatestByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory, *AihubError) {
+	var head string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(latest_id, id) FROM memories WHERE id = $1`, id,
+	).Scan(&head)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, NewErr(ErrNotFound, "memory not found")
+		}
+		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to resolve latest memory: %v", err))
+	}
+	return GetMemoryByID(ctx, pool, head)
+}
+
+// UpdateMemoryRequest is the body for PATCH /v1/memories/:id/update. Any nil
+// (or empty-slice, for Tags) field inherits the current lineage head's value.
+type UpdateMemoryRequest struct {
+	Content      *string
+	Visibility   *string
+	Tags         []string
+	BaseStrength *float64
+	Attrs        json.RawMessage
+	// Set by handler from Bearer token — not from JSON body.
+	CallerUserID  string
+	CallerDisplay string
+}
+
+// UpdateMemory creates a NEW version superseding the lineage head resolved
+// from id (any id in the lineage), inheriting unchanged fields from that
+// head, and advances the latest_id cursor across the whole lineage (via
+// Remember's supersede-propagation logic). Returns the new head.
+func UpdateMemory(ctx context.Context, pool *pgxpool.Pool, id string, req *UpdateMemoryRequest) (*Memory, error) {
+	head, aerr := GetLatestByID(ctx, pool, id)
+	if aerr != nil {
+		return nil, aerr
+	}
+	rr := &RememberRequest{
+		Project:         head.Project,
+		Type:            head.Type,
+		WorkItemID:      head.WorkItemID,
+		Visibility:      head.Visibility,
+		Tags:            head.Tags,
+		Content:         head.Content,
+		DedupMode:       "off", // updating a memory is an explicit edit, not a fresh dedup-checked remember
+		CallerUserID:    req.CallerUserID,
+		CallerDisplay:   req.CallerDisplay,
+		SupersedesMemID: &head.ID,
+	}
+	if req.Content != nil {
+		rr.Content = *req.Content
+	}
+	if req.Visibility != nil {
+		rr.Visibility = *req.Visibility
+	}
+	if req.Tags != nil {
+		rr.Tags = req.Tags
+	}
+	if req.BaseStrength != nil {
+		rr.BaseStrength = req.BaseStrength
+	} else {
+		bs := head.BaseStrength
+		rr.BaseStrength = &bs
+	}
+	if len(req.Attrs) > 0 {
+		rr.Attrs = req.Attrs
+	} else {
+		rr.Attrs = head.Attrs
+	}
+	m, _, err := Remember(ctx, pool, rr)
+	return m, err
 }
 
 // SetMemoryVisibility updates a single memory's visibility tier. Used by the artifact

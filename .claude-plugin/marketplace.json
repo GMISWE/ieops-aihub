@@ -12,7 +12,7 @@
       "name": "polyforge",
       "source": "./plugins/polyforge",
       "description": "polyforge v1 — Go-native multi-agent AI coding coordination. Implements Iron Rules (IR1-IR4), the full wi lifecycle (work/stop/status/spec/plan/execute/retro), and MCP server registration. Requires the ieops-aihub backend.",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "author": {
         "name": "GMI Engineering"
       },
@@ -25,7 +25,8 @@
         "wi-lifecycle",
         "mcp",
         "aihub"
-      ]
+      ],
+      "catalog_revision": "d4d089d0100c"
     }
   ]
 }

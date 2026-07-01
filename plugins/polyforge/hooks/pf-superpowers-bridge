@@ -7,17 +7,25 @@
 #
 # Matched on Write|Edit (see hooks.json); the path check below is the real gate.
 #
-# NOTE: the PostToolUse payload arrives on this script's stdin. We capture it into an env
-# var FIRST, because the python program itself is delivered to python3 via a heredoc on
-# python3's stdin — so python's sys.stdin is the heredoc, NOT the hook payload.
+# NOTE: the PostToolUse payload arrives on this script's stdin. We spool it to a temp file
+# FIRST, because the python program itself is delivered to python3 via a heredoc on
+# python3's stdin — so python's sys.stdin is the heredoc, NOT the hook payload. The payload
+# must NOT ride in an env var (the old approach): a large-file edit blows MAX_ARG_STRLEN
+# (128KiB per arg/env string) and execve fails with "Argument list too long". A path stays tiny.
 
 set -euo pipefail
 command -v python3 >/dev/null 2>&1 || exit 0
 
-PF_PAYLOAD="$(cat)" python3 <<'PY'
+PF_PAYLOAD_FILE="$(mktemp)"
+trap 'rm -f "$PF_PAYLOAD_FILE"' EXIT
+cat > "$PF_PAYLOAD_FILE"
+PF_PAYLOAD_FILE="$PF_PAYLOAD_FILE" python3 <<'PY'
 import json, os, re, sys, urllib.request
 
-raw = os.environ.get("PF_PAYLOAD", "")
+try:
+    raw = open(os.environ["PF_PAYLOAD_FILE"], encoding="utf-8").read()
+except (KeyError, OSError):
+    raw = ""
 try:
     payload = json.loads(raw) if raw.strip() else {}
 except ValueError:

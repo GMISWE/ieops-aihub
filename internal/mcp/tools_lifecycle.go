@@ -476,9 +476,7 @@ func (s *Server) registerLifecycleTools() {
 				safeResult[k] = v
 			}
 		}
-		if len(sf.Worktrees) > 0 {
-			safeResult["worktrees"] = sf.Worktrees
-		}
+		addWorktrees(safeResult, sf.Worktrees)
 		return jsonResult(safeResult)
 	})
 
@@ -487,9 +485,9 @@ func (s *Server) registerLifecycleTools() {
 		Name:        "pf_complete_attempt",
 		Description: "Complete the current run attempt (wrapped|failed|paused). Deletes state file for terminal statuses.",
 		InputSchema: objectSchema(map[string]any{
-			"work_item_id":           prop("string", "Work item ID (used to find state file)"),
-			"status":                 prop("string", "wrapped|failed|paused"),
-			"force_terminate_step":   prop("boolean", "Force terminate in-progress step"),
+			"work_item_id":         prop("string", "Work item ID (used to find state file)"),
+			"status":               prop("string", "wrapped|failed|paused"),
+			"force_terminate_step": prop("boolean", "Force terminate in-progress step"),
 		}, []string{"work_item_id", "status"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -524,6 +522,11 @@ func (s *Server) registerLifecycleTools() {
 		if err != nil {
 			return errResult(err)
 		}
+
+		// Surface the worktree paths from the state file we're about to delete,
+		// for all statuses, so the caller doesn't need to have read the state
+		// file itself before calling pf_complete_attempt (aihub#207).
+		addWorktrees(result, sf.Worktrees)
 
 		// Delete state file for terminal statuses; keep for paused. Delete by the
 		// resolved canonical key (sf.WIID), and best-effort the passed key too, so

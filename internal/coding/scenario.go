@@ -49,31 +49,50 @@ func WorktreePath(wiID, repo, workspaceRoot string) (string, error) {
 }
 
 // Wrap executes the wrap sequence for a work item:
-// 1. Check if PR already exists (idempotent)
-// 2. If not, push + create PR
-// 3. Call pf_complete_attempt(wrapped)
-// 4. Cleanup state file
+//  1. Check if PR already exists (idempotent)
+//  2. If it's already MERGED, or still open, return it as-is (never push again —
+//     pushing after merge would resurrect a deleted head branch)
+//  3. Otherwise push + create PR
+//  4. Call pf_complete_attempt(wrapped)
+//  5. Cleanup state file
 func Wrap(ctx context.Context, sf *config.StateFile, repo, workspaceRoot, prTitle, prBody string) (map[string]any, error) {
 	worktreePath, err := WorktreePath(sf.WIID, repo, workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check for existing PR (idempotent: W24)
-	existingPR, _ := GHGetPR(ctx, worktreePath)
-	if existingPR == nil {
-		// Push then create PR
-		if _, err := GitPush(ctx, worktreePath); err != nil {
-			return nil, fmt.Errorf("push: %w", err)
-		}
-		if prTitle == "" {
-			prTitle = fmt.Sprintf("feat: %s", sf.WIID)
-		}
-		existingPR, err = GHCreatePR(ctx, worktreePath, prTitle, prBody, "", "")
-		if err != nil {
-			return nil, fmt.Errorf("create PR: %w", err)
-		}
+	branch, err := GitCurrentBranch(ctx, worktreePath)
+	if err != nil {
+		return nil, fmt.Errorf("current branch: %w", err)
 	}
 
-	return existingPR, nil
+	// Check for existing PR (idempotent: W24). A real gh error is not
+	// swallowed — the merged/open/absent cases below all need to trust that
+	// existingPR == nil genuinely means "no PR".
+	existingPR, err := GHGetPR(ctx, worktreePath, branch)
+	if err != nil {
+		return nil, fmt.Errorf("check existing PR: %w", err)
+	}
+	if existingPR != nil {
+		if state, _ := existingPR["state"].(string); strings.EqualFold(state, "MERGED") {
+			// Already merged: never push (the head branch may already be
+			// deleted on the remote) and never create a duplicate PR.
+			return existingPR, nil
+		}
+		// Open (or any other non-merged) PR already exists: idempotent no-op.
+		return existingPR, nil
+	}
+
+	// No existing PR: push then create.
+	if _, err := GitPush(ctx, worktreePath); err != nil {
+		return nil, fmt.Errorf("push: %w", err)
+	}
+	if prTitle == "" {
+		prTitle = fmt.Sprintf("feat: %s", sf.WIID)
+	}
+	newPR, err := GHCreatePR(ctx, worktreePath, prTitle, prBody, "", "")
+	if err != nil {
+		return nil, fmt.Errorf("create PR: %w", err)
+	}
+	return newPR, nil
 }

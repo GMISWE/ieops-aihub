@@ -9,7 +9,7 @@ description: >
 
 > **Stub.** The real body of this step is injected at call time by the `PreToolUse(Skill)`
 > router (`hooks/pf-skill-router`): with superpowers enabled it tells you to delegate each
-> step's implementation to `superpowers:subagent-driven-development` / `executing-plans` and
+> step's implementation to `superpowers:subagent-driven-development` and
 > **stop before finishing-a-development-branch**; without it, it injects this folder's
 > `engine.native.md` (the native main loop). In both cases it also injects
 > `../_common/{memory,storage,lifecycle}.md` (step reporting; commit/PR/wrap/CI owned by

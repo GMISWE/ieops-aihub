@@ -47,6 +47,14 @@ The CLI runs 5 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per chec
 | 4 | worktrees | `pf.*` dirs cross-checked vs server wi list; flags orphans | `polyforge doctor --fix` |
 | 5 | version | Server `min_client_version` vs local binary; prompts upgrade if behind | `pf-init` skill |
 
+Then run the seam-check probe (read-only, pinned to the cached `superpowers` plugin version):
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/bin/pf-seam-check"
+```
+
+Treat any `[WARN]` line in its output as a `warn` on the report below (it always exits 0, so the exit code carries no signal -- parse the printed lines).
+
 ## Interpretation Guide
 
 ### Check 1 — workspace FAIL
@@ -116,6 +124,21 @@ notify("statusLine restored to its pre-polyforge state.")
 The plugin hook (`pf-chain-hook.cjs`) keeps shipping with the plugin; to fully stop it,
 disable the polyforge plugin. `--uninstall` only undoes the statusLine takeover.
 
+### Check 7 - seam-check (superpowers)
+
+`pf-seam-check` pins the 6.1.1 baseline of the cached `superpowers` plugin that several
+polyforge consumers hardcode against: 5 skill names -- the 3 the router's engine pointers
+depend on (`brainstorming`, `writing-plans`, `subagent-driven-development`),
+`finishing-a-development-branch` (`_common/lifecycle.md`'s D6 boundary), and the one the
+router test's negative assertion checks stays absent from the execute pointer -- plus the 2
+output paths `pf-superpowers-bridge`'s regex watches (`docs/superpowers/specs/`,
+`docs/superpowers/plans/`), and the `superpowers@` prefix `pf-skill-router:146` scans for in
+`enabledPlugins`. Any `[WARN]` line means the installed superpowers version drifted from one
+of these assumptions and the dependent polyforge seam may now silently no-op (e.g. the
+router falls back to native engine without telling you, or the bridge stops mirroring docs).
+Treat a WARN as: re-verify the seam by hand against the new superpowers version, then update
+the pin (`PIN_VERSION` in `bin/pf-seam-check`) and any regex/name it names.
+
 ## Output (three-segment format)
 
 ```markdown
@@ -131,6 +154,7 @@ disable the polyforge plugin. `--uninstall` only undoes the statusLine takeover.
 | worktrees | ok (2 active)   |
 | version   | ok (1.0.0)      |
 | statusLine| ok (chain installed, refreshInterval 3) |
+| seamcheck | ok (verified against superpowers 6.1.1) |
 
 ## Next steps
 - `polyforge init --apply` — clone missing repos

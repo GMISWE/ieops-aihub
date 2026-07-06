@@ -35,7 +35,7 @@ which engine authors the content.
 ## execute boundary (D6)
 
 When superpowers drives an execute step, let it run its implementation loop
-(subagent-driven-development / executing-plans / TDD / systematic-debugging / code-review /
+(subagent-driven-development / TDD / systematic-debugging / code-review /
 verification) but **stop before `superpowers:finishing-a-development-branch`**. Commit,
 push, PR, wrap, and CI gating are done by polyforge (the scenario `commit_and_pr` step +
 `pf_wrap`), never by the superpowers branch-finishing skill.

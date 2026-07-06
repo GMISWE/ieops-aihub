@@ -122,17 +122,27 @@ Present it to the user:
 Confirm write (Enter) / Revise (enter revision notes) / Cancel (skip):
 ```
 
-### Step 6: Write + commit + push (inside the worktree)
+### Step 6: Write + commit + PR (inside the worktree)
+
+The scenario repo (polyforge-coding) holds fleet-executable prompt content, so it must land
+via a PR, not a direct push to `main` -- use the crystallize chore wi's own claim (from Step
+2; its worktree is `pf.<project>-<seq>/polyforge-coding/`, branch `polyforge/<wi_id>`).
 
 After the user confirms:
 
-1. Write `{wi_type}[.{project}].md` (and any new `common/` files) into the polyforge-coding worktree
-2. ```bash
-   git add .
-   git commit -m "feat(scenario): crystallize {wi_type}[.{project}] from {source_slug}"
-   git push origin main
+1. Write `{wi_type}[.{project}].md` (and any new `common/` files) into the polyforge-coding worktree.
+2. Commit, push, and open a PR through the chore wi's own claim (pass `paths=` so only the
+   target files are staged -- the worktree parent may hold `.pf_*` scratch):
    ```
-3. Output: "✅ Crystallized and pushed `{filename}`; takes effect on other machines after `polyforge init`."
+   pf_commit(work_item_id=<crystallize chore wi_id>, repo="polyforge-coding",
+             workspace_root=<ws>, paths=[<the new/changed .md files only>],
+             message="feat(scenario): crystallize {wi_type}[.{project}] from {source_slug}")
+   pf_push(work_item_id=<crystallize chore wi_id>, repo="polyforge-coding", workspace_root=<ws>)
+   pf_pr(work_item_id=<crystallize chore wi_id>, repo="polyforge-coding", workspace_root=<ws>,
+         base="main", title="feat(scenario): crystallize {wi_type}[.{project}]",
+         body="<short summary of the crystallized workflow + link to source_wi_id>")
+   ```
+3. Output: "Crystallized `{filename}` and opened PR `<url>`; takes effect on other machines after the PR merges and they run `polyforge init`."
 4. Call `/pf-stop --wrap` to finish the crystallize chore wi
 
 ### Step 7: User cancel path (cancel at the draft stage)

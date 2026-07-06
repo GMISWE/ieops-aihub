@@ -170,6 +170,14 @@ type RememberRequest struct {
 	// standalone HTML document (or fragment) for any artifact type — e.g.
 	// pf_save_artifact html=. Empty/whitespace falls back to auto-render.
 	RenderedHTML *string `json:"rendered_html,omitempty"`
+	// aihub#210: attempt credentials for methodology.* artifact writes. Bound to
+	// WorkItemID and verified in handleRemember. Previously absent, so echo's
+	// c.Bind silently dropped the credentials pf_save_artifact sends, leaving
+	// project-writer as the only gate on spec/plan writes. Empty for
+	// non-methodology memories, which stay project-writer gated.
+	AttemptID     string `json:"attempt_id,omitempty"`
+	ClaimEpoch    int64  `json:"claim_epoch,omitempty"`
+	SessionSecret string `json:"session_secret,omitempty"`
 	// Set by handler from Bearer token — not from JSON body.
 	CallerUserID  string `json:"-"`
 	CallerDisplay string `json:"-"`
@@ -259,6 +267,21 @@ type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// validateSupersedeScope enforces aihub#210: a supersede may only target a memory
+// in the SAME project, and methodology.* artifacts may only supersede within the
+// SAME work item — otherwise any project writer could re-home or clobber another
+// wi's (or project's) spec/plan lineage. reqWI/tgtWI are canonical work_item ids
+// ("" when unset). Pure so it is unit-testable without a DB.
+func validateSupersedeScope(memType, reqProject, reqWI, tgtProject, tgtWI string) *AihubError {
+	if tgtProject != reqProject {
+		return NewErr(ErrForbidden, "supersedes_memory_id belongs to a different project")
+	}
+	if strings.HasPrefix(memType, "methodology.") && (tgtWI == "" || tgtWI != reqWI) {
+		return NewErr(ErrForbidden, "methodology.* artifacts may only supersede a memory bound to the same work item")
+	}
+	return nil
+}
+
 // Remember creates a new memory per §7 / §4.3.
 // Returns (memory, isNew, error). isNew=false if dedup hit in suggest mode.
 // Strict mode returns ErrConflictSimilarMemory on high-similarity match.
@@ -294,6 +317,31 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		}
 		canonical := wi.ID
 		req.WorkItemID = &canonical
+	}
+
+	// C5 (aihub#210): validate supersede scope before any lineage work — the
+	// target must be in the same project, and methodology.* must stay within the
+	// same wi. Guards against a project-writer re-homing or clobbering another
+	// wi's (or project's) spec/plan lineage.
+	if req.SupersedesMemID != nil && *req.SupersedesMemID != "" {
+		var tgtProject string
+		var tgtWorkItemID *string
+		if err := pool.QueryRow(ctx,
+			`SELECT project, work_item_id FROM memories WHERE id=$1`, *req.SupersedesMemID,
+		).Scan(&tgtProject, &tgtWorkItemID); err != nil {
+			return nil, false, NewErr(ErrNotFound, "supersedes_memory_id not found")
+		}
+		reqWI := ""
+		if req.WorkItemID != nil {
+			reqWI = *req.WorkItemID
+		}
+		tgtWI := ""
+		if tgtWorkItemID != nil {
+			tgtWI = *tgtWorkItemID
+		}
+		if scopeErr := validateSupersedeScope(req.Type, req.Project, reqWI, tgtProject, tgtWI); scopeErr != nil {
+			return nil, false, scopeErr
+		}
 	}
 
 	// Dedup check (skip for "off" mode).
@@ -703,6 +751,20 @@ var MemoryTypeEnum = []string{
 	"methodology.spec", "methodology.plan", "methodology.review",
 	"methodology.execute", "methodology.retro", "methodology.wrap_summary",
 }
+
+// PfRememberTypeEnum is MemoryTypeEnum minus methodology.* — pf_remember refuses
+// methodology artifacts (they must be written via pf_save_artifact: wi-bound and
+// credentialed, see handleRemember's methodology gate, aihub#210). Derived from
+// MemoryTypeEnum so the two lists never drift.
+var PfRememberTypeEnum = func() []string {
+	out := make([]string, 0, len(MemoryTypeEnum))
+	for _, t := range MemoryTypeEnum {
+		if !strings.HasPrefix(t, "methodology.") {
+			out = append(out, t)
+		}
+	}
+	return out
+}()
 
 // ─── Commit (human annotation) ────────────────────────────────────────────────
 

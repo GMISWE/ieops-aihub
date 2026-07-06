@@ -63,7 +63,7 @@ func Wrap(ctx context.Context, sf *config.StateFile, repo, workspaceRoot, prTitl
 	existingPR, _ := GHGetPR(ctx, worktreePath)
 	if existingPR == nil {
 		// Push then create PR
-		if _, err := GitPush(ctx, worktreePath, false); err != nil {
+		if _, err := GitPush(ctx, worktreePath); err != nil {
 			return nil, fmt.Errorf("push: %w", err)
 		}
 		if prTitle == "" {

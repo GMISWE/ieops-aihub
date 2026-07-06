@@ -53,21 +53,27 @@ func GitCommit(ctx context.Context, worktreePath, message string, paths []string
 	return strings.TrimSpace(string(shaOut)), nil
 }
 
-// GitPush runs `git -C path push --force-with-lease origin HEAD`.
-// Pre-push: verifies we're not pushing to the base branch ancestor.
-func GitPush(ctx context.Context, worktreePath string, skipBaseCheck bool) (string, error) {
-	if !skipBaseCheck {
-		// Get current branch
-		branchOut, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD").Output()
-		if err != nil {
-			return "", fmt.Errorf("get current branch: %w", err)
-		}
-		branch := strings.TrimSpace(string(branchOut))
+// protectedBranches lists branches GitPush refuses to push to directly.
+var protectedBranches = map[string]bool{
+	"main":   true,
+	"master": true,
+	"dev":    true,
+	"tot":    true,
+}
 
-		// Refuse to push to main/master
-		if branch == "main" || branch == "master" {
-			return "", fmt.Errorf("refusing to push to %s branch; use a task branch", branch)
-		}
+// GitPush runs `git -C path push --force-with-lease origin HEAD`.
+// Pre-push: always verifies we're not pushing to a protected branch.
+func GitPush(ctx context.Context, worktreePath string) (string, error) {
+	// Get current branch
+	branchOut, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return "", fmt.Errorf("get current branch: %w", err)
+	}
+	branch := strings.TrimSpace(string(branchOut))
+
+	// Refuse to push to a protected branch
+	if protectedBranches[branch] {
+		return "", fmt.Errorf("refusing to push to %s branch; use a task branch", branch)
 	}
 
 	out, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "push", "--force-with-lease", "origin", "HEAD").CombinedOutput()

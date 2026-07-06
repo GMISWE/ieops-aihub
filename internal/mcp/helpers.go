@@ -56,6 +56,21 @@ func setIfNonempty(params url.Values, key, value string) {
 	}
 }
 
+// prPayload builds the pr_opened event payload from GHCreatePR's result map,
+// pulling "url"/"number" defensively — gh's output shape varies (a fresh PR
+// has both; an "already exists" response has neither, just "existing"/
+// "message") so we only include the keys that are actually present.
+func prPayload(repo, title string, result map[string]any) map[string]any {
+	payload := map[string]any{"repo": repo, "title": title}
+	if url, ok := result["url"]; ok {
+		payload["url"] = url
+	}
+	if number, ok := result["number"]; ok {
+		payload["number"] = number
+	}
+	return payload
+}
+
 // addWorktrees sets result["worktrees"] from a state file's worktree map, if
 // non-empty. Used by pf_wrap / pf_complete_attempt / pf_claim_work_item so
 // callers get the worktree paths back without needing to have read the state

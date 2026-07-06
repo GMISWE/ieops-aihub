@@ -1,7 +1,7 @@
 package server
 
 import (
-	"fmt"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -25,14 +25,17 @@ type StepState struct {
 
 // UpdateStepRequest is the body for PATCH /v1/work_items/:id/step.
 type UpdateStepRequest struct {
-	AttemptID     string         `json:"attempt_id"`
-	ClaimEpoch    int64          `json:"claim_epoch"`
-	SessionSecret string         `json:"session_secret"`
-	Status        string         `json:"status"` // "in_progress" | "completed" | "failed"
-	Step          *string        `json:"step,omitempty"`
-	StepAttemptID *string        `json:"step_attempt_id,omitempty"`
-	Outcome       map[string]any `json:"outcome,omitempty"`
-	Heartbeat     bool           `json:"heartbeat,omitempty"`
+	AttemptID       string         `json:"attempt_id"`
+	ClaimEpoch      int64          `json:"claim_epoch"`
+	SessionSecret   string         `json:"session_secret"`
+	Status          string         `json:"status"` // "in_progress" | "completed" | "failed"
+	Step            *string        `json:"step,omitempty"`
+	StepAttemptID   *string        `json:"step_attempt_id,omitempty"`
+	Outcome         map[string]any `json:"outcome,omitempty"`
+	Heartbeat       bool           `json:"heartbeat,omitempty"`
+	ArtifactSummary *string        `json:"artifact_summary,omitempty"`
+	ErrorType       *string        `json:"error_type,omitempty"`
+	Escalated       bool           `json:"escalated,omitempty"`
 }
 
 // RegisterStepRoutes adds step / release / attempt lifecycle routes.
@@ -170,9 +173,9 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				// not abort the surrounding transaction.
 				tx.Exec(c.Request().Context(), `SAVEPOINT bp`) //nolint:errcheck
 				if _, bpErr := tx.Exec(c.Request().Context(), `
-					INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status)
-					VALUES ($1, $2, $3, $4, $5, 'completed')`,
-					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep)); bpErr != nil {
+					INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status, artifact_summary)
+					VALUES ($1, $2, $3, $4, $5, 'completed', $6)`,
+					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep), req.ArtifactSummary); bpErr != nil {
 					tx.Exec(c.Request().Context(), `ROLLBACK TO SAVEPOINT bp`) //nolint:errcheck
 				} else {
 					tx.Exec(c.Request().Context(), `RELEASE SAVEPOINT bp`) //nolint:errcheck
@@ -193,23 +196,71 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				// does not abort the surrounding transaction.
 				tx.Exec(c.Request().Context(), `SAVEPOINT bp`) //nolint:errcheck
 				if _, bpErr := tx.Exec(c.Request().Context(), `
-					INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status)
-					VALUES ($1, $2, $3, $4, $5, 'failed')`,
-					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep)); bpErr != nil {
+					INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status, artifact_summary, error_type)
+					VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7)`,
+					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep), req.ArtifactSummary, req.ErrorType); bpErr != nil {
 					tx.Exec(c.Request().Context(), `ROLLBACK TO SAVEPOINT bp`) //nolint:errcheck
 				} else {
 					tx.Exec(c.Request().Context(), `RELEASE SAVEPOINT bp`) //nolint:errcheck
 				}
 			}
 			eventType = "step_failed"
+
+			// Escalated stall (spec A-1): an escalated failure means the agent gave up
+			// and a human must triage — it is NOT the same kind of "blocked" as a
+			// dependency block. Dependency-blocked wis have a wi_dependencies row and
+			// RunUnblockDependentWI() auto-requeues them once their blockers reach a
+			// terminal status (see gc.go). Stalled-blocked wis have NO dependency row,
+			// so they are excluded from that dependency-unblock GC sweep and stay
+			// blocked for human triage via the ready-queue "stalled" segment. This
+			// distinction is deliberate design (spec A-1), not a bug.
+			//
+			// The status='blocked' UPDATE and the wi_stalled event must be atomic:
+			// the stalled segment requires BOTH (it JOINs wi.status='blocked' to a
+			// wi_stalled event), so a wi that is blocked with no event would vanish
+			// from both the queued and stalled segments. Gate the whole block on
+			// u != nil and wrap both writes in ONE savepoint — they commit or roll
+			// back together.
+			if req.Escalated && u != nil {
+				tx.Exec(c.Request().Context(), `SAVEPOINT bp`) //nolint:errcheck
+				_, upErr := tx.Exec(c.Request().Context(), `
+					UPDATE work_items SET status='blocked' WHERE id=$1`, wiID)
+				var evErr error
+				if upErr == nil {
+					stallPayload, _ := json.Marshal(map[string]any{
+						"step":         derefStr(req.Step),
+						"error_type":   req.ErrorType,
+						"stall_reason": derefStr(req.ErrorType),
+					})
+					_, evErr = tx.Exec(c.Request().Context(), `
+						INSERT INTO agent_events
+						    (id, work_item_id, run_attempt_id, actor_user_id, api_key_id, event_type, payload, project)
+						VALUES ($1, $2, $3, $4, $5, 'wi_stalled', $6::jsonb,
+						    (SELECT project FROM work_items WHERE id=$2))`,
+						domain.NewID("evt"), wiID, req.AttemptID, u.UserID, u.APIKeyID, stallPayload)
+				}
+				if upErr != nil || evErr != nil {
+					tx.Exec(c.Request().Context(), `ROLLBACK TO SAVEPOINT bp`) //nolint:errcheck
+				} else {
+					tx.Exec(c.Request().Context(), `RELEASE SAVEPOINT bp`) //nolint:errcheck
+				}
+			}
 		default:
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "status must be in_progress|completed|failed"))
 		}
 
 		// Emit step event inside transaction — best-effort; SAVEPOINT ensures a
 		// failed insert (e.g. FK violation on run_attempt_id) does not abort the
-		// main transaction. JSON payload uses fmt.Sprintf(%q) for safe escaping.
+		// main transaction. JSON payload uses json.Marshal of a map to avoid
+		// manual-escaping bugs (fmt.Sprintf(%q) is fine for a single string but
+		// does not compose safely once a second field is added).
 		if eventType != "" && u != nil {
+			evtPayloadMap := map[string]any{"step": derefStr(req.Step)}
+			if req.Status == "completed" && req.ArtifactSummary != nil {
+				evtPayloadMap["artifact_summary"] = *req.ArtifactSummary
+			}
+			evtPayload, _ := json.Marshal(evtPayloadMap)
+
 			tx.Exec(c.Request().Context(), `SAVEPOINT bp`) //nolint:errcheck
 			if _, bpErr := tx.Exec(c.Request().Context(), `
 				INSERT INTO agent_events
@@ -217,7 +268,7 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb,
 				    (SELECT project FROM work_items WHERE id=$2))`,
 				domain.NewID("evt"), wiID, req.AttemptID, u.UserID, u.APIKeyID, eventType,
-				fmt.Sprintf(`{"step":%q}`, derefStr(req.Step))); bpErr != nil {
+				evtPayload); bpErr != nil {
 				tx.Exec(c.Request().Context(), `ROLLBACK TO SAVEPOINT bp`) //nolint:errcheck
 			} else {
 				tx.Exec(c.Request().Context(), `RELEASE SAVEPOINT bp`) //nolint:errcheck

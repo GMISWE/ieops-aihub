@@ -125,10 +125,11 @@ type StalledItem struct {
 
 // PausedItem is a work item in the paused segment.
 type PausedItem struct {
-	ID               string `json:"id"`
-	Slug             string `json:"slug"`
-	PausedSince      string `json:"paused_since"`
-	LastActorDisplay string `json:"last_actor_display"`
+	ID               string  `json:"id"`
+	Slug             string  `json:"slug"`
+	PausedSince      string  `json:"paused_since"`
+	LastActorDisplay string  `json:"last_actor_display"`
+	PauseReason      *string `json:"pause_reason,omitempty"`
 }
 
 // newWorkItemID generates a new wi_ prefixed ID.
@@ -516,6 +517,7 @@ type ListWorkItemsResult struct {
 //     non-admin caller
 //   - project == "" + AccessibleProjects empty → no project clause at all
 //     (admin "view all" across every project)
+//
 // buildListWorkItemsWhere builds the WHERE clause, JOIN clause, and ordered
 // bound args for ListWorkItems from the given project scope and filter. It is
 // split out from ListWorkItems so the query construction (notably placeholder
@@ -993,12 +995,19 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		for stalledRows.Next() {
 			var item StalledItem
 			var stalledAt time.Time
-			var stall *string
-			if err := stalledRows.Scan(&item.ID, &item.Slug, &stall, &stalledAt, &item.LastActorDisplay); err != nil {
+			var stall, actorDisplay *string
+			// aihub#206: actor_display on the wi_stalled event can be NULL
+			// (e.g. escalated-stall events emitted without a display name
+			// set), which can't scan into item.LastActorDisplay's plain
+			// string directly — scan through a nullable local instead.
+			if err := stalledRows.Scan(&item.ID, &item.Slug, &stall, &stalledAt, &actorDisplay); err != nil {
 				continue
 			}
 			if stall != nil {
 				item.StallReason = *stall
+			}
+			if actorDisplay != nil {
+				item.LastActorDisplay = *actorDisplay
 			}
 			item.StalledSince = stalledAt.Format(time.RFC3339)
 			result.Stalled = append(result.Stalled, item)
@@ -1008,7 +1017,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 
 	// paused[]: status=paused
 	pausedRows, err := pool.Query(ctx, `
-		SELECT wi.id, wi.slug, ra.last_active_at, ra.actor_display
+		SELECT wi.id, wi.slug, ra.last_active_at, ra.actor_display, ra.pause_reason
 		FROM work_items wi
 		LEFT JOIN run_attempts ra ON ra.id = wi.current_attempt_id
 		WHERE wi.project = $1 AND wi.status = 'paused'
@@ -1021,7 +1030,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 			var item PausedItem
 			var lat *time.Time
 			var actorDisplay *string
-			if err := pausedRows.Scan(&item.ID, &item.Slug, &lat, &actorDisplay); err != nil {
+			if err := pausedRows.Scan(&item.ID, &item.Slug, &lat, &actorDisplay, &item.PauseReason); err != nil {
 				continue
 			}
 			if lat != nil {

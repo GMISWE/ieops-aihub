@@ -12,14 +12,14 @@ import (
 // Advisory lock IDs for GC sweeps (pg_try_advisory_lock).
 // Each sweep has its own lock ID to allow independent concurrent sweeps.
 const (
-	gcLockOrphanLocks        = int64(2001)
-	gcLockMemoryExpired      = int64(2002)
-	gcLockMethodologyExpiry  = int64(2003)
-	gcLockEventPayloadTrunc  = int64(2004)
-	gcLockUnblockDependent   = int64(2005)
-	gcLockPartitionCreate    = int64(2006)
-	gcLockNeedsHumanAging    = int64(2007)
-	gcLockUnclassifiedAlert  = int64(2008)
+	gcLockOrphanLocks       = int64(2001)
+	gcLockMemoryExpired     = int64(2002)
+	gcLockMethodologyExpiry = int64(2003)
+	gcLockEventPayloadTrunc = int64(2004)
+	gcLockUnblockDependent  = int64(2005)
+	gcLockPartitionCreate   = int64(2006)
+	gcLockNeedsHumanAging   = int64(2007)
+	gcLockUnclassifiedAlert = int64(2008)
 )
 
 // GCResult summarizes what a single GC sweep did.
@@ -218,10 +218,23 @@ func RunUnblockDependentWI(ctx context.Context, pool *pgxpool.Pool) GCResult {
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
+	// aihub#206: only requeue wis that were actually *dependency*-blocked, i.e.
+	// have at least one 'blocks' dependency row (CreateWorkItem inserts one per
+	// blocked_by entry). Escalated-stalled wis are also status='blocked' but
+	// carry NO dependency row, so without the EXISTS guard they would match the
+	// NOT EXISTS clause and get auto-requeued within 60s — silently emptying the
+	// stalled segment and defeating human triage. The EXISTS guard leaves them
+	// blocked; the NOT EXISTS clause still requeues dependency-blocked wis once
+	// all their blockers reach a terminal status.
 	tag, err := tx.Exec(ctx, `
 		UPDATE work_items wi
 		SET status = 'queued', updated_at = clock_timestamp()
 		WHERE wi.status = 'blocked'
+		  AND EXISTS (
+		    SELECT 1 FROM wi_dependencies dep
+		    WHERE dep.blocked_wi_id = wi.id
+		      AND dep.kind = 'blocks'
+		  )
 		  AND NOT EXISTS (
 		    SELECT 1 FROM wi_dependencies dep
 		    JOIN work_items blocker ON dep.blocking_wi_id = blocker.id
@@ -334,12 +347,12 @@ func RunNeedsHumanSessionAging(ctx context.Context, pool *pgxpool.Pool) GCResult
 	affected := int64(0)
 	for _, w := range wis {
 		payload, _ := json.Marshal(map[string]any{
-			"wi_id":     w.ID,
-			"wi_slug":   w.Slug,
-			"wi_type":   w.WIType,
-			"priority":  w.Priority,
+			"wi_id":         w.ID,
+			"wi_slug":       w.Slug,
+			"wi_type":       w.WIType,
+			"priority":      w.Priority,
 			"waiting_since": w.CreatedAt,
-			"reason":    "requires_human_session=true, no claim after aging threshold",
+			"reason":        "requires_human_session=true, no claim after aging threshold",
 		})
 		_, err := pool.Exec(ctx, `
 			INSERT INTO agent_events (id, work_item_id, event_type, payload, project, created_at)

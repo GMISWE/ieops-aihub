@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -83,6 +84,34 @@ func handleRemember(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
+		// C5 (aihub#210): methodology.* artifacts (spec/plan/review/...) are
+		// wi-scoped and may only be written by the session holding the target wi's
+		// current attempt. Project-writer alone is not enough — otherwise any writer
+		// (including a drifted subagent or a fleet machine user) could overwrite or
+		// supersede another wi's spec/plan. Require the attempt credential AND bind
+		// it to the memory's work_item_id: VerifyAttemptCredentialPool confirms the
+		// attempt is the CURRENT attempt for that wi. Non-methodology memories are
+		// unaffected and stay project-writer gated.
+		if strings.HasPrefix(req.Type, "methodology.") {
+			wiID := ""
+			if req.WorkItemID != nil {
+				wiID = *req.WorkItemID
+			}
+			if wiID == "" {
+				return writeError(c, domain.NewErr(domain.ErrBadRequest,
+					"work_item_id is required for methodology.* artifacts"))
+			}
+			if req.AttemptID == "" || req.SessionSecret == "" {
+				return writeError(c, domain.NewErr(domain.ErrForbidden,
+					"methodology.* artifacts require attempt credentials; write them via pf_save_artifact from the claiming session"))
+			}
+			if credErr := domain.VerifyAttemptCredentialPool(
+				ctx, pool, wiID, req.AttemptID, req.ClaimEpoch, req.SessionSecret,
+			); credErr != nil {
+				return writeError(c, credErr)
+			}
+		}
+
 		req.CallerUserID = u.UserID
 		req.CallerDisplay = u.DisplayName
 
@@ -105,6 +134,46 @@ func handleRemember(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 		return c.JSON(http.StatusCreated, resp)
 	}
+}
+
+// enforceMethodologyAttemptGate is the aihub#210 wi-binding gate for MUTATING an
+// existing methodology.* memory (supersede-via-update, or in-place reinforce).
+// Such artifacts may only be mutated by the session holding the TARGET memory's
+// own work-item attempt — project-writer is not enough, otherwise pf_update_memory
+// / pf_reinforce_memory become a back door around handleRemember's create-time
+// gate. memType/memWorkItemID come from the LOADED target memory (never from the
+// caller). Returns a non-nil AihubError to write on rejection; nil to proceed.
+// Non-methodology memories keep the pre-existing verify-if-supplied contract.
+func enforceMethodologyAttemptGate(
+	ctx context.Context, pool *pgxpool.Pool,
+	memType string, memWorkItemID *string,
+	attemptID, sessionSecret string, claimEpoch int64, reqWorkItemID string,
+) *domain.AihubError {
+	if strings.HasPrefix(memType, "methodology.") {
+		wiID := ""
+		if memWorkItemID != nil {
+			wiID = *memWorkItemID
+		}
+		if wiID == "" {
+			return domain.NewErr(domain.ErrForbidden,
+				"methodology.* artifact is not bound to a work item and cannot be mutated")
+		}
+		if attemptID == "" || sessionSecret == "" {
+			return domain.NewErr(domain.ErrForbidden,
+				"mutating a methodology.* artifact requires its work item's attempt credentials")
+		}
+		// Bind to the target memory's wi, not the caller-supplied one.
+		return domain.VerifyAttemptCredentialPool(ctx, pool, wiID, attemptID, claimEpoch, sessionSecret)
+	}
+	// Non-methodology: verify only if the caller supplied a credential.
+	if attemptID != "" || sessionSecret != "" {
+		if reqWorkItemID == "" {
+			return domain.NewErr(domain.ErrBadRequest,
+				"work_item_id is required when attempt_id/session_secret are provided")
+		}
+		return domain.VerifyAttemptCredentialPool(ctx, pool, reqWorkItemID, attemptID, claimEpoch, sessionSecret)
+	}
+	return nil
 }
 
 // handleRecall handles GET /v1/memories.
@@ -437,13 +506,14 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		// Load existing memory metadata (project for access check, attrs/strength for mutation).
 		var memProject, memType, memStatus string
+		var memWorkItemID *string
 		var memAttrsRaw []byte
 		var memBaseStrength float64
 		var memActivationCount int
 		if err := pool.QueryRow(ctx, `
-			SELECT project, type, status, attrs, base_strength, activation_count
+			SELECT project, type, status, work_item_id, attrs, base_strength, activation_count
 			FROM memories WHERE id=$1`, memID,
-		).Scan(&memProject, &memType, &memStatus, &memAttrsRaw, &memBaseStrength, &memActivationCount); err != nil {
+		).Scan(&memProject, &memType, &memStatus, &memWorkItemID, &memAttrsRaw, &memBaseStrength, &memActivationCount); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
 		}
 		if memStatus == "redacted" {
@@ -455,17 +525,11 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		// Verify attempt credential when caller supplied one (mutating ops should carry it).
-		if req.AttemptID != "" || req.SessionSecret != "" {
-			if req.WorkItemID == "" {
-				return writeError(c, domain.NewErr(domain.ErrBadRequest,
-					"work_item_id is required when attempt_id/session_secret are provided"))
-			}
-			if credErr := domain.VerifyAttemptCredentialPool(
-				ctx, pool, req.WorkItemID, req.AttemptID, req.ClaimEpoch, req.SessionSecret,
-			); credErr != nil {
-				return writeError(c, credErr)
-			}
+		// C5 (aihub#210): methodology.* memories require the target wi's attempt
+		// credential (mandatory + wi-bound); non-methodology keeps verify-if-supplied.
+		if gateErr := enforceMethodologyAttemptGate(ctx, pool, memType, memWorkItemID,
+			req.AttemptID, req.SessionSecret, req.ClaimEpoch, req.WorkItemID); gateErr != nil {
+			return writeError(c, gateErr)
 		}
 
 		// Append the reinforcement record to attrs.reinforcements.
@@ -592,17 +656,13 @@ func handleUpdateMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		// Verify attempt credential when caller supplied one (mutating ops should carry it).
-		if req.AttemptID != "" || req.SessionSecret != "" {
-			if req.WorkItemID == "" {
-				return writeError(c, domain.NewErr(domain.ErrBadRequest,
-					"work_item_id is required when attempt_id/session_secret are provided"))
-			}
-			if credErr := domain.VerifyAttemptCredentialPool(
-				ctx, pool, req.WorkItemID, req.AttemptID, req.ClaimEpoch, req.SessionSecret,
-			); credErr != nil {
-				return writeError(c, credErr)
-			}
+		// C5 (aihub#210): superseding a methodology.* memory via update requires the
+		// TARGET memory's own wi attempt credential (mandatory + bound to head.WorkItemID,
+		// not the caller-supplied work_item_id) — closes the pf_update_memory back door
+		// around handleRemember's create-time gate. Non-methodology keeps verify-if-supplied.
+		if gateErr := enforceMethodologyAttemptGate(ctx, pool, head.Type, head.WorkItemID,
+			req.AttemptID, req.SessionSecret, req.ClaimEpoch, req.WorkItemID); gateErr != nil {
+			return writeError(c, gateErr)
 		}
 
 		newHead, err := domain.UpdateMemory(ctx, pool, memID, &domain.UpdateMemoryRequest{

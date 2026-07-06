@@ -16,10 +16,10 @@ func (s *Server) registerMemoryTools() {
 	// pf_remember
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_remember",
-		Description: "Store a memory in aihub. type must use full name (e.g. experience.debug). Rejects methodology.* types.",
+		Description: "Store a memory in aihub. type must use full name (e.g. experience.debug). Rejects methodology.* types — write spec/plan/review/execute/retro/wrap_summary via pf_save_artifact.",
 		InputSchema: objectSchema(map[string]any{
 			"project":              prop("string", "Project name"),
-			"type":                 propEnum("string", "Memory type (select from enum; full name e.g. experience.debug)", domain.MemoryTypeEnum),
+			"type":                 propEnum("string", "Memory type (full name e.g. experience.debug). methodology.* is not accepted here — use pf_save_artifact.", domain.PfRememberTypeEnum),
 			"content":              prop("string", "Memory content"),
 			"visibility":           prop("string", "private|project|team|admin"),
 			"work_item_id":         prop("string", "Associated work item ID"),
@@ -36,10 +36,8 @@ func (s *Server) registerMemoryTools() {
 		if err != nil {
 			return errResult(err)
 		}
-		for _, f := range []string{"project", "type", "content", "visibility"} {
-			if strArg(args, f) == "" {
-				return errResult(fmt.Errorf("%s is required", f))
-			}
+		if err := validatePfRememberArgs(args); err != nil {
+			return errResult(err)
 		}
 		result, err := s.client.Remember(ctx, args)
 		if err != nil {
@@ -386,6 +384,21 @@ func (s *Server) registerMemoryTools() {
 		}
 		return jsonResult(result)
 	})
+}
+
+// validatePfRememberArgs enforces pf_remember's contract before the HTTP call:
+// required fields present, and methodology.* rejected — those are wi-bound,
+// credentialed artifacts that must be written via pf_save_artifact (aihub#210).
+func validatePfRememberArgs(args map[string]any) error {
+	for _, f := range []string{"project", "type", "content", "visibility"} {
+		if strArg(args, f) == "" {
+			return fmt.Errorf("%s is required", f)
+		}
+	}
+	if strings.HasPrefix(strArg(args, "type"), "methodology.") {
+		return fmt.Errorf("pf_remember does not accept methodology.* types; save spec/plan/review/execute/retro/wrap_summary artifacts via pf_save_artifact instead")
+	}
+	return nil
 }
 
 // emitArtifactAction is the shared implementation for adopt/close/ignore artifact wrappers.

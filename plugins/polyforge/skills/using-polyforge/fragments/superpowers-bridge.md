@@ -24,8 +24,8 @@ Engine routing is enforced **mechanically by the `PreToolUse(Skill)` router hook
 (`hooks/pf-skill-router`), which fires the moment `/pf-spec`, `/pf-plan`, or `/pf-execute`
 is invoked and injects that step's body at the call site (the SKILL.md files are stubs).
 With superpowers enabled it points the step at `superpowers:brainstorming` (spec) /
-`superpowers:writing-plans` (plan) / `superpowers:subagent-driven-development` +
-`executing-plans` (execute — stopping before `finishing-a-development-branch`); without
+`superpowers:writing-plans` (plan) / `superpowers:subagent-driven-development`
+(execute — stopping before `finishing-a-development-branch`); without
 superpowers it injects each skill's `engine.native.md`. In **both** cases the
 `_common/{memory,storage,lifecycle}.md` fragments are injected so the polyforge lifecycle
 (recall / save_artifact / step reporting / commit / PR / wrap) always runs. You don't route

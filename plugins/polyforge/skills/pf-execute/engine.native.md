@@ -3,7 +3,7 @@
 > **Injected by the `PreToolUse(Skill)` router** (`hooks/pf-skill-router`) when the
 > `superpowers` plugin is **absent**. When superpowers IS enabled, the router instead
 > instructs you to delegate the **per-step implementation** to
-> `superpowers:subagent-driven-development` / `superpowers:executing-plans` (TDD,
+> `superpowers:subagent-driven-development` (TDD,
 > systematic-debugging, code-review, verification), while **this loop's scenario-step
 > iteration, step-status reporting, and wrap still run** — and you **stop before
 > `superpowers:finishing-a-development-branch`** (commit/PR/wrap/CI belong to polyforge —

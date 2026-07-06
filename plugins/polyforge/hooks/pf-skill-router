@@ -64,7 +64,10 @@ TARGETS = {
         "The pf-superpowers-bridge hook saves this artifact deterministically; if it reports it failed, call "
         "pf_save_artifact yourself with path= (not inline content)."
         " The spec artifact MUST include at least one fenced ```d2 architecture/data-flow diagram "
-        "(components + data flow); aihub renders ```d2 blocks to SVG in /ui, so use D2 syntax (a -> b: label), not mermaid.",
+        "(components + data flow); aihub renders ```d2 blocks to SVG in /ui, so use D2 syntax (a -> b: label), not mermaid."
+        " Do NOT change the output path (docs/superpowers/specs/ for specs) -- the bridge only watches "
+        "the default path. If the user insists on a different path, YOU must call pf_save_artifact(path=...) "
+        "yourself, or the aihub mirror is silently skipped.",
     ),
     "pf-plan": (
         "plan", "methodology.plan", "methodology.plan|experience.*",
@@ -77,7 +80,10 @@ TARGETS = {
         "The pf-superpowers-bridge hook saves this artifact deterministically; if it reports it failed, call "
         "pf_save_artifact yourself with path= (not inline content)."
         " The plan artifact MUST include at least one fenced ```d2 architecture/data-flow diagram "
-        "(components + data flow); aihub renders ```d2 blocks to SVG in /ui, so use D2 syntax (a -> b: label), not mermaid.",
+        "(components + data flow); aihub renders ```d2 blocks to SVG in /ui, so use D2 syntax (a -> b: label), not mermaid."
+        " Do NOT change the output path (docs/superpowers/plans/ for plans) -- the bridge only watches "
+        "the default path. If the user insists on a different path, YOU must call pf_save_artifact(path=...) "
+        "yourself, or the aihub mirror is silently skipped.",
     ),
     "pf-execute": (
         "execute", "", "experience.*|rule.*",
@@ -90,7 +96,8 @@ TARGETS = {
         "- explore/search code, mechanical or trivial edits, coding/implementation, multi-file integration, debugging -> model: sonnet\n"
         "- spec-compliance review, code-quality review, architecture/design judgement -> model: opus\n"
         "In short: sonnet for everything except review/architecture, which use opus. Steering, not a hard "
-        "guarantee: a coding task that genuinely needs architectural reasoning may use opus; a BLOCKED re-dispatch may escalate.",
+        "guarantee: a coding task that genuinely needs architectural reasoning may use opus; a BLOCKED re-dispatch may escalate.\n\n"
+        "Parallel dispatch is only for independent investigation; parallel implementation must be split into child work items.",
     ),
 }
 if base not in TARGETS:

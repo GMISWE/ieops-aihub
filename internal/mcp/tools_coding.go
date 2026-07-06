@@ -109,12 +109,11 @@ func (s *Server) registerCodingTools() {
 	// pf_push
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_push",
-		Description: "Push the current branch to origin with --force-with-lease. Refuses to push to main/master.",
+		Description: "Push the current branch to origin with --force-with-lease. Refuses to push to main/master/dev/tot.",
 		InputSchema: objectSchema(map[string]any{
-			"workspace_root":  prop("string", "Workspace root path"),
-			"work_item_id":    prop("string", "Work item ID"),
-			"repo":            prop("string", "Repository name"),
-			"skip_base_check": prop("boolean", "Skip base branch protection check"),
+			"workspace_root": prop("string", "Workspace root path"),
+			"work_item_id":   prop("string", "Work item ID"),
+			"repo":           prop("string", "Repository name"),
 		}, []string{"work_item_id", "repo"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -140,7 +139,7 @@ func (s *Server) registerCodingTools() {
 			return errResult(err)
 		}
 
-		baseSHA, err := coding.GitPush(ctx, worktreePath, boolArg(args, "skip_base_check"))
+		baseSHA, err := coding.GitPush(ctx, worktreePath)
 		if err != nil {
 			if strings.Contains(err.Error(), "base_moved") {
 				return jsonResult(map[string]any{

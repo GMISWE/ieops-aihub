@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# PreToolUse guard hook for polyforge v1 — AI-attribution commit/PR guard.
-# Turns the CLAUDE.md <undercover> SOFT rule into a HARD hook-layer guard: before a tool
-# writes git-visible text, scan the commit message / PR title+body and DENY the call if it
-# contains an AI-attribution string (Claude / Anthropic / AI / LLM / model names / the
-# Co-Authored-By / Generated-by / AI-assisted trailers). On a hit we deny with a feedback
-# reason so the model rewrites in a plain human-authored tone — we never silently strip the
-# human-intended message.
+# PreToolUse guard hook for polyforge v1 — AI-attribution commit/PR guard, plus a small
+# belt of git-workflow guards (worktree gate / protected-branch push / finishing-ops gate).
+# Before a tool writes git-visible text or performs a git-workflow-sensitive operation, this
+# guard inspects the call and DENYs it with a feedback reason so the model corrects course.
 #
 # Intercepted tools (matcher in hooks.json) and the fields scanned:
 #   pf_commit -> message ; pf_pr -> title,body ; pf_wrap -> pr_title,pr_body ;
-#   Bash      -> command, ONLY when it is a `git commit`/`gh pr` invocation (else inert).
+#   Bash      -> command. The attribution scan only fires for `git commit`/`git merge -m`/
+#                `git tag -m`/`gh pr` invocations (else inert). The git-workflow rules below
+#                fire for any Bash `git commit`/`git push`/`git merge`/`git branch -D|-d`/
+#                `git worktree remove` invocation.
 #
-# FAIL-OPEN on any internal error (no python3, unparseable payload): exit 0, never block a
-# legitimate commit. The guard backstops a soft rule; its own failure must not wedge work.
+# FAIL-OPEN on any internal error (no python3, unparseable payload, filesystem surprises):
+# exit 0, never block a legitimate call. Every rule here backstops a soft convention; a bug
+# in the guard must never wedge real work — so each new rule is wrapped so an exception in it
+# can only fall through to "allow", never "deny".
 #
 # NOTE: the PreToolUse payload arrives on this script's stdin. We capture it into an env var
 # FIRST, because the python program is delivered to python3 via a heredoc on python3's stdin
@@ -22,7 +24,7 @@ set -euo pipefail
 command -v python3 >/dev/null 2>&1 || exit 0  # no python3 -> inert, never block
 
 PF_PAYLOAD="$(cat)" python3 <<'PY'
-import json, os, re, sys
+import json, os, re, shlex, sys
 
 raw = os.environ.get("PF_PAYLOAD", "")
 try:
@@ -37,14 +39,358 @@ ti = payload.get("tool_input") or {}
 if not isinstance(ti, dict):
     sys.exit(0)
 
+def deny(reason):
+    out = {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }}
+    print(json.dumps(out))
+    sys.exit(0)
+
+PROTECTED_BRANCHES = {"main", "master", "dev", "tot"}
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers for the Bash git-workflow rules. All are best-effort and must
+# never raise past their caller — every call site below is wrapped in
+# try/except so a helper bug degrades to fail-open, not a false deny.
+# ---------------------------------------------------------------------------
+
+def split_command(cmd):
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        return cmd.split()
+
+def dash_c_dir(cmd):
+    """Best-effort extraction of a `-C <path>` argument from a git invocation."""
+    try:
+        toks = split_command(cmd)
+    except Exception:
+        return None
+    for i, t in enumerate(toks):
+        if t == "-C" and i + 1 < len(toks):
+            return toks[i + 1]
+        if t.startswith("-C") and len(t) > 2:
+            return t[2:]
+    return None
+
+def effective_dir(cmd, payload):
+    d = dash_c_dir(cmd)
+    if d:
+        return d
+    cwd = payload.get("cwd")
+    return cwd if isinstance(cwd, str) and cwd else None
+
+def find_workspace_root(start_dir):
+    """Walk up from start_dir looking for .polyforge.yaml; None if not found."""
+    try:
+        cur = os.path.abspath(start_dir)
+    except Exception:
+        return None
+    seen = 0
+    while seen < 64:  # sane bound against symlink loops / bad input
+        candidate = os.path.join(cur, ".polyforge.yaml")
+        if os.path.isfile(candidate):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+        seen += 1
+    return None
+
+def _indent_of(line):
+    return len(line) - len(line.lstrip(" "))
+
+def parse_project_repo_names(ws_root):
+    """Minimal line-scan parse of projects.*.repos[].name out of .polyforge.yaml.
+    No YAML library dependency — the file has a known, simple shape (see pf init
+    output), but indentation width can vary, so this tracks indent depth
+    generically rather than hardcoding column counts. Returns a set of repo
+    names, or an empty set on any parse trouble (caller must treat an empty
+    set as "cannot determine", i.e. fail-open)."""
+    names = set()
+    path = os.path.join(ws_root, ".polyforge.yaml")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw_lines = f.readlines()
+    except OSError:
+        return names
+
+    # Drop blank/comment lines; keep (indent, stripped_text) pairs.
+    lines = []
+    for line in raw_lines:
+        text = line.rstrip("\n")
+        if not text.strip() or text.lstrip().startswith("#"):
+            continue
+        lines.append((_indent_of(text), text.strip()))
+
+    projects_indent = None
+    repos_indent = None
+    name_re = re.compile(r'^-\s*name:\s*(.+?)\s*$')
+    in_repos = False
+    for indent, text in lines:
+        if projects_indent is None:
+            if text == "projects:":
+                projects_indent = indent
+            continue
+        if indent <= projects_indent:
+            break  # dedented back out of (or past) the projects: block
+
+        if in_repos:
+            if indent > repos_indent:
+                m = name_re.match(text)
+                if m:
+                    names.add(m.group(1).strip().strip('"\''))
+                continue
+            in_repos = False  # dedented out of the repos: list
+
+        if text == "repos:":
+            in_repos = True
+            repos_indent = indent
+    return names
+
+# git global flags that consume the following token as a value (must be skipped
+# when scanning for the subcommand, e.g. `git -C <path> commit ...`).
+GIT_GLOBAL_VALUE_FLAGS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+
+def is_git_commit_or_push(toks):
+    if not toks or toks[0] != "git":
+        return None
+    skip_next = False
+    for t in toks[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if t in ("commit", "push"):
+            return t
+        if t in GIT_GLOBAL_VALUE_FLAGS:
+            skip_next = True
+            continue
+        if t.startswith("-"):
+            continue
+        # first non-flag, non-known-global token that isn't commit/push -> not our command
+        break
+    return None
+
+def worktree_gate_check(cmd, payload):
+    """Rule 1a: deny git commit/push whose effective dir sits inside a project's
+    shared .repo/<name> clone rather than a claimed pf.*/<name> worktree."""
+    toks = split_command(cmd)
+    if is_git_commit_or_push(toks) is None:
+        return None
+    edir = effective_dir(cmd, payload)
+    if not edir:
+        return None
+    ws_root = find_workspace_root(edir)
+    if not ws_root:
+        return None
+    repo_names = parse_project_repo_names(ws_root)
+    if not repo_names:
+        return None
+    abs_edir = os.path.abspath(edir)
+    repo_root = os.path.join(ws_root, ".repo")
+    try:
+        rel = os.path.relpath(abs_edir, repo_root)
+    except ValueError:
+        return None  # different drive etc. -> fail-open
+    if rel.startswith(".."):
+        return None  # not under .repo at all
+    first_seg = rel.split(os.sep, 1)[0]
+    if first_seg in repo_names:
+        return (
+            "[polyforge commit-guard] BLOCKED: this git write targets the shared "
+            f"clone `.repo/{first_seg}` instead of a claimed worktree. All git commits/"
+            "pushes must happen inside a claimed worktree (`pf.<slug>/{}/`), never in "
+            "the shared `.repo/<name>` clone shared by every session. Run /pf-work to "
+            "claim a work item and get a worktree, then retry there.".format(first_seg)
+        )
+    return None
+
+def parse_push_target_branch(toks):
+    """Best-effort extraction of the branch a `git push` targets. Returns None if
+    it cannot be determined confidently (fail-open is the caller's job)."""
+    if not toks or toks[0] != "git":
+        return None
+    if "push" not in toks:
+        return None
+    i = toks.index("push")
+    rest = toks[i + 1:]
+    # Drop flags (bail on -C's argument etc. — not expected after `push` but be safe).
+    positional = []
+    skip_next = False
+    for t in rest:
+        if skip_next:
+            skip_next = False
+            continue
+        if t in ("-C",):
+            skip_next = True
+            continue
+        if t.startswith("-"):
+            continue
+        positional.append(t)
+    if not positional:
+        return None  # `git push` with no args -> pushes current branch to its upstream; can't tell here
+    if len(positional) == 1:
+        # Could be a remote alone, or a refspec alone (rare without a remote). Treat
+        # a bare single token as ambiguous unless it contains ':' or looks like a branch.
+        target = positional[0]
+    else:
+        # <remote> <refspec>
+        target = positional[1]
+    # refspec forms: "branch", "HEAD:branch", "local:branch", "+local:branch",
+    # "main:refs/heads/dev"
+    target = target.lstrip("+")
+    if ":" in target:
+        target = target.split(":", 1)[1]
+    # Normalize a fully-qualified ref down to the bare branch name.
+    if target.startswith("refs/heads/"):
+        target = target[len("refs/heads/"):]
+    elif target.startswith("refs/"):
+        target = target[len("refs/"):]
+    return target or None
+
+def protected_branch_push_check(cmd):
+    """Rule 1b: deny `git push` whose target branch is a protected branch."""
+    toks = split_command(cmd)
+    branch = parse_push_target_branch(toks)
+    if not branch:
+        return None
+    if branch in PROTECTED_BRANCHES:
+        return (
+            "[polyforge commit-guard] BLOCKED: direct pushes to the protected branch "
+            f"`{branch}` are forbidden. Push a task branch and open a PR instead."
+        )
+    return None
+
+def is_pf_worktree_path(path):
+    """True if any path segment looks like a claimed worktree dir (`pf.<slug>`)."""
+    try:
+        parts = os.path.normpath(path).split(os.sep)
+    except Exception:
+        return False
+    return any(p.startswith("pf.") for p in parts)
+
+def pf_dir_of(path):
+    """Return the worktree root: the path prefix up to and including the first
+    `pf.<...>` segment (e.g. /data/comp/pf.aihub-205). None if there's none."""
+    try:
+        norm = os.path.normpath(os.path.abspath(path))
+    except Exception:
+        return None
+    parts = norm.split(os.sep)
+    for i, p in enumerate(parts):
+        if p.startswith("pf."):
+            return os.sep.join(parts[: i + 1]) or os.sep
+    return None
+
+# Sidecar state files persist after wrap and are NOT credentials — only the bare
+# <wi_id>.json carries the wi's live claim + worktrees map.
+_STATE_SIDECAR_SUFFIXES = (".chain.json", ".steps.json", ".artifacts.json")
+
+def owning_state_active(ws_root, pf_dir):
+    """True iff a live credential state file OWNS the targeted pf.<...> worktree
+    dir — i.e. some wi's `worktrees` map still points inside pf_dir. Lingering
+    sidecars (.chain.json/.steps.json/.artifacts.json) are ignored: they persist
+    after wrap. Fail-open: any trouble -> False (do not deny)."""
+    if not pf_dir:
+        return False
+    try:
+        state_dir = os.path.join(ws_root, ".polyforge", "state")
+        if not os.path.isdir(state_dir):
+            return False
+        pf_dir = os.path.normpath(pf_dir)
+        for entry in os.listdir(state_dir):
+            if not entry.endswith(".json"):
+                continue
+            if entry.endswith(_STATE_SIDECAR_SUFFIXES):
+                continue  # sidecar, not a credential file
+            try:
+                with open(os.path.join(state_dir, entry), "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                continue  # unreadable/unparseable credential -> skip, fail-open
+            if not isinstance(data, dict):
+                continue
+            wts = data.get("worktrees")
+            if not isinstance(wts, dict):
+                continue
+            for wt in wts.values():
+                if not isinstance(wt, str) or not wt:
+                    continue
+                awt = os.path.normpath(os.path.abspath(wt))
+                if awt == pf_dir or awt.startswith(pf_dir + os.sep):
+                    return True
+        return False
+    except OSError:
+        return False
+
+FINISHING_OPS_RE = re.compile(
+    r'^git\s+(?:.*\s)?(?:'
+    r'merge(?!\s+(?:--abort|--continue)\b)\s+\S'
+    r'|branch\s+-[dD]\b'
+    r'|worktree\s+remove\b'
+    r')'
+)
+
+def finishing_ops_check(cmd, payload):
+    """Rule 1c: deny finishing-integration git ops (merge/branch -d|-D/worktree
+    remove) run against a claimed pf.* worktree while its state file is still
+    active — those steps belong to the polyforge wrap flow. Once the state file
+    is gone (post-wrap cleanup) the same commands must pass."""
+    if not FINISHING_OPS_RE.search(cmd):
+        return None
+    edir = effective_dir(cmd, payload)
+    # Also consider any bare path arguments in the command itself (e.g.
+    # `git worktree remove pf.foo/bar` relative to edir, or an absolute path).
+    candidates = [edir] if edir else []
+    try:
+        for t in split_command(cmd):
+            if "pf." in t and not t.startswith("-"):
+                candidates.append(t if os.path.isabs(t) else os.path.join(edir or "", t))
+    except Exception:
+        pass
+    pf_targets = [c for c in candidates if c and is_pf_worktree_path(c)]
+    if not pf_targets:
+        return None
+    # Resolve the targeted worktree root (up to the first pf.<...> segment).
+    pf_dir = None
+    for c in pf_targets:
+        pf_dir = pf_dir_of(c)
+        if pf_dir:
+            break
+    if not pf_dir:
+        return None
+    ws_root = find_workspace_root(pf_dir)
+    if not ws_root:
+        return None
+    if not owning_state_active(ws_root, pf_dir):
+        return None  # post-wrap (credential gone) or another wi -> allow
+    return (
+        "[polyforge commit-guard] BLOCKED: this integration step (merge/branch delete/"
+        "worktree remove) targets a claimed worktree that still has an active work-item "
+        "state file. These steps belong to the polyforge wrap flow — run `/pf-stop --wrap` "
+        "instead of finishing the branch manually."
+    )
+
+
 # --- which (field, value) text pairs to scan, per tool ---
 def field(name):
     v = ti.get(name)
     return (name, v) if isinstance(v, str) and v else None
 
-# A Bash command is scanned only when it is a git-commit or gh-pr invocation; we must not
-# scan unrelated shell. Best-effort: pf_* are the primary surface, this is a backstop.
-GIT_PR_RE = re.compile(r"\bgit\b[^\n]*\bcommit\b|\bgh\b\s+pr\b", re.IGNORECASE)
+# A Bash command is scanned for attribution only when it is a git-commit, git-merge -m,
+# git-tag -m, or gh-pr invocation; we must not scan unrelated shell. Best-effort: pf_* are
+# the primary surface, this is a backstop.
+GIT_PR_RE = re.compile(
+    r"\bgit\b[^\n]*\bcommit\b"
+    r"|\bgit\b[^\n]*\bmerge\b[^\n]*(?:-m\b|--message\b)"
+    r"|\bgit\b[^\n]*\btag\b[^\n]*(?:-m\b|--message\b)"
+    r"|\bgh\b\s+pr\b",
+    re.IGNORECASE,
+)
 
 # Tool name is prefix-agnostic: Claude Code exposes the plugin MCP tools as
 # mcp__plugin_polyforge_polyforge__pf_*, Codex as mcp__polyforge__pf_*. Match on the bare
@@ -52,6 +398,7 @@ GIT_PR_RE = re.compile(r"\bgit\b[^\n]*\bcommit\b|\bgh\b\s+pr\b", re.IGNORECASE)
 # no "__", so it falls through to the Bash branch unchanged).
 base_tool = tool.rsplit("__", 1)[-1]
 fields = []
+bash_cmd = None
 if base_tool == "pf_commit":
     fields = [field("message")]
 elif base_tool == "pf_pr":
@@ -60,8 +407,51 @@ elif base_tool == "pf_wrap":
     fields = [field("pr_title"), field("pr_body")]
 elif tool == "Bash":
     cmd = ti.get("command")
-    if isinstance(cmd, str) and GIT_PR_RE.search(cmd):
-        fields = [("command", cmd)]
+    if isinstance(cmd, str) and cmd:
+        bash_cmd = cmd
+
+# --- Bash-only git-workflow rules (1a/1b/1c), each independently fail-open ---
+if bash_cmd is not None:
+    for check in (worktree_gate_check, protected_branch_push_check):
+        try:
+            reason = check(bash_cmd, payload) if check is worktree_gate_check else check(bash_cmd)
+            if reason:
+                deny(reason)
+        except Exception:
+            pass  # any internal error in a new rule -> never block
+
+    try:
+        reason = finishing_ops_check(bash_cmd, payload)
+        if reason:
+            deny(reason)
+    except Exception:
+        pass
+
+    if GIT_PR_RE.search(bash_cmd):
+        fields = [("command", bash_cmd)]
+        # -F <file> / --file <file>: message comes from a file; scan its contents too.
+        try:
+            toks = split_command(bash_cmd)
+            edir = effective_dir(bash_cmd, payload) or "."
+            for i, t in enumerate(toks):
+                msgfile = None
+                if t in ("-F", "--file") and i + 1 < len(toks):
+                    msgfile = toks[i + 1]
+                elif t.startswith("--file="):
+                    msgfile = t[len("--file="):]
+                if not msgfile or msgfile == "-":
+                    continue
+                fpath = msgfile if os.path.isabs(msgfile) else os.path.join(edir, msgfile)
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
+                        content = fh.read()
+                    if content:
+                        fields.append(("command -F file: " + msgfile, content))
+                except OSError:
+                    pass  # unreadable -> fail-open on this specific enrichment
+        except Exception:
+            pass
+
 fields = [f for f in fields if f]
 if not fields:
     sys.exit(0)  # nothing to scan -> let the call through untouched
@@ -101,13 +491,7 @@ for fname, value in fields:
             f"/ AI-assisted trailers. Rewrite the text to describe only what the change does "
             f"and why, in a plain human-authored tone, then retry."
         )
-        out = {"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }}
-        print(json.dumps(out))
-        sys.exit(0)
+        deny(reason)
 
 # no hit -> no output, call proceeds
 sys.exit(0)

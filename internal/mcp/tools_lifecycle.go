@@ -412,6 +412,7 @@ func (s *Server) registerLifecycleTools() {
 							// If the worktree directory already exists, reuse it directly.
 							if _, statErr := os.Stat(wtPath); statErr == nil {
 								worktrees[repo.Name] = wtPath
+								writeWorktreeExcludes(wtPath)
 								continue
 							}
 
@@ -439,6 +440,7 @@ func (s *Server) registerLifecycleTools() {
 								} else {
 									// Success on first try; record and continue.
 									worktrees[repo.Name] = wtPath
+									writeWorktreeExcludes(wtPath)
 									continue
 								}
 							}
@@ -447,6 +449,7 @@ func (s *Server) registerLifecycleTools() {
 								fmt.Fprintf(os.Stderr, "polyforge: worktree add for %s: %s\n", repo.Name, string(out))
 							} else {
 								worktrees[repo.Name] = wtPath
+								writeWorktreeExcludes(wtPath)
 							}
 						}
 
@@ -735,6 +738,60 @@ func (s *Server) registerLifecycleTools() {
 		}
 		return jsonResult(result)
 	})
+}
+
+// writeWorktreeExcludes adds polyforge scratch-file patterns to a worktree's
+// per-worktree git exclude file, so they never get accidentally staged.
+// Best-effort and non-fatal: a worktree must still be usable if this fails.
+func writeWorktreeExcludes(wtPath string) {
+	out, err := exec.Command("git", "-C", wtPath, "rev-parse", "--git-path", "info/exclude").Output()
+	if err != nil {
+		return
+	}
+	excludePath := strings.TrimSpace(string(out))
+	if excludePath == "" {
+		return
+	}
+	if !filepath.IsAbs(excludePath) {
+		excludePath = filepath.Join(wtPath, excludePath)
+	}
+
+	patterns := []string{".superpowers/", ".pf_meta.json", ".pf_steps.json"}
+
+	existing := ""
+	if b, err := os.ReadFile(excludePath); err == nil {
+		existing = string(b)
+	}
+	existingLines := strings.Split(existing, "\n")
+	have := make(map[string]bool, len(existingLines))
+	for _, l := range existingLines {
+		have[strings.TrimSpace(l)] = true
+	}
+
+	var toAdd []string
+	for _, p := range patterns {
+		if !have[p] {
+			toAdd = append(toAdd, p)
+		}
+	}
+	if len(toAdd) == 0 {
+		return
+	}
+
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	if existing != "" && !strings.HasSuffix(existing, "\n") {
+		_, _ = f.WriteString("\n")
+	}
+	for _, p := range toAdd {
+		_, _ = f.WriteString(p + "\n")
+	}
 }
 
 // generateSessionSecret generates a 64-hex random session secret.

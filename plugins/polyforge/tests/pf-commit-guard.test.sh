@@ -84,4 +84,86 @@ echo "== fail-open on bad payload =="
 pass_ck "unparseable payload"      'not json at all'
 
 echo ""
+echo "== git-workflow rules: hermetic fixture (worktree gate / protected push / finishing ops) =="
+FIXTURE="$(mktemp -d)"
+cleanup_fixture() { rm -rf "$FIXTURE"; }
+trap cleanup_fixture EXIT
+
+mkdir -p "$FIXTURE/.repo/aihub" "$FIXTURE/.repo/polyforge-coding" \
+         "$FIXTURE/pf.aihub-1/aihub" "$FIXTURE/pf.B-2/aihub" "$FIXTURE/.polyforge/state"
+cat > "$FIXTURE/.polyforge.yaml" <<EOF
+version: 1
+scenario: coding
+projects:
+    aihub:
+        repos:
+            - name: aihub
+              url: git@github.com:GMISWE/ieops-aihub.git
+            - name: marketplace
+              url: git@github.com:GMISWE/GMI-marketplace.git
+        description: ""
+EOF
+git init -q "$FIXTURE/.repo/aihub"
+git init -q "$FIXTURE/pf.aihub-1/aihub"
+
+# Credential state files carry a `worktrees` map of absolute paths — that map is
+# what ties a live wi to a pf.<...> dir. wi_a owns pf.aihub-1, wi_b owns pf.B-2.
+CRED_A="$FIXTURE/.polyforge/state/wi_a.json"
+CRED_B="$FIXTURE/.polyforge/state/wi_b.json"
+printf '{"wi_id":"wi_a","worktrees":{"aihub":"%s"}}\n' "$FIXTURE/pf.aihub-1/aihub" > "$CRED_A"
+printf '{"wi_id":"wi_b","worktrees":{"aihub":"%s"}}\n' "$FIXTURE/pf.B-2/aihub"    > "$CRED_B"
+
+p_bash_c() { printf '{"tool_name":"Bash","tool_input":{"command":%s},"cwd":"/tmp"}' "$(esc "$1")"; }
+
+block_ck "worktree gate: commit in .repo/aihub" \
+  "$(p_bash_c "git -C $FIXTURE/.repo/aihub commit -m msg")"
+pass_ck "worktree gate: non-project .repo/polyforge-coding" \
+  "$(p_bash_c "git -C $FIXTURE/.repo/polyforge-coding commit -m msg")"
+pass_ck "worktree gate: claimed pf.* worktree" \
+  "$(p_bash_c "git -C $FIXTURE/pf.aihub-1/aihub commit -m msg")"
+
+block_ck "protected branch push: origin main" \
+  "$(p_bash_c 'git push origin main')"
+block_ck "protected branch push: fully-qualified refs/heads/dev" \
+  "$(p_bash_c 'git push origin main:refs/heads/dev')"
+pass_ck "protected branch push: task branch" \
+  "$(p_bash_c 'git push origin polyforge/abc')"
+pass_ck "protected branch push: fully-qualified non-protected ref" \
+  "$(p_bash_c 'git push origin feat:refs/heads/mybranch')"
+
+# --- Rule 3: owning credential present (wi_a owns pf.aihub-1) -> DENY finishing ops ---
+block_ck "finishing ops: merge in pf.aihub-1 (owning cred present)" \
+  "$(p_bash_c "git -C $FIXTURE/pf.aihub-1/aihub merge origin/main")"
+block_ck "finishing ops: branch -D in pf.aihub-1 (owning cred present)" \
+  "$(p_bash_c "git -C $FIXTURE/pf.aihub-1/aihub branch -D old-branch")"
+block_ck "finishing ops: worktree remove pf.aihub-1 (owning cred present)" \
+  "$(p_bash_c "git worktree remove $FIXTURE/pf.aihub-1/aihub")"
+block_ck "attribution via git merge -m (independent of Rule 3)" \
+  "$(p_bash_c "git -C $FIXTURE/pf.aihub-1/aihub merge -m \"Co-Authored-By: Claude\" origin/main")"
+
+# --- Multi-wi: removing pf.B-2 must ALLOW once B's cred is gone, even though A's
+#     cred still exists. (The old any-*.json check wrongly denied this.) ---
+rm -f "$CRED_B"
+pass_ck "multi-wi: worktree remove pf.B-2 after wi_b cred gone (wi_a still present)" \
+  "$(p_bash_c "git worktree remove $FIXTURE/pf.B-2/aihub")"
+block_ck "multi-wi: pf.aihub-1 still denied while wi_a cred present" \
+  "$(p_bash_c "git worktree remove $FIXTURE/pf.aihub-1/aihub")"
+
+# --- Transition: delete pf.aihub-1's OWN credential -> the SAME command ALLOWS ---
+rm -f "$CRED_A"
+pass_ck "transition: worktree remove pf.aihub-1 after wi_a cred gone (post-wrap)" \
+  "$(p_bash_c "git worktree remove $FIXTURE/pf.aihub-1/aihub")"
+pass_ck "transition: merge in pf.aihub-1 after wi_a cred gone (post-wrap)" \
+  "$(p_bash_c "git -C $FIXTURE/pf.aihub-1/aihub merge origin/main")"
+
+# --- Sidecar-lingers: only a .chain.json remains (wrap deletes the credential but
+#     leaves the chain sidecar). Must be treated as post-wrap -> ALLOW. ---
+printf '{"wi_id":"wi_x","step":"done"}\n' > "$FIXTURE/.polyforge/state/wi_x.chain.json"
+pass_ck "sidecar: worktree remove pf.aihub-1 with only wi_x.chain.json present" \
+  "$(p_bash_c "git worktree remove $FIXTURE/pf.aihub-1/aihub")"
+
+cleanup_fixture
+trap - EXIT
+
+echo ""
 [ "$fails" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "$fails FAILED" >&2; exit 1; }

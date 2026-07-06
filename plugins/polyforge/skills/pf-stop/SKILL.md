@@ -76,7 +76,9 @@ encounters a terminal failure that cannot be resolved in this session (fail).
      work_item_id=<current>
    )
    ```
-   `pf_wrap` = `on_wrap` hook + `pf_complete_attempt(wrapped)` + workspace cleanup.
+   `pf_wrap` = push + PR (idempotent if the PR already exists) + `pf_complete_attempt(wrapped)`
+   + delete the state file. It does NOT remove the `pf.<slug>/` worktree dirs — clean those up
+   manually or with `polyforge doctor --fix`.
    Credentials (`attempt_id`, `claim_epoch`, `session_secret`) are injected automatically
    by the MCP server from the state file.
 

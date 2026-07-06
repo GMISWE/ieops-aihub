@@ -11,6 +11,26 @@ import (
 	"github.com/GMISWE/ieops-aihub/internal/config"
 )
 
+// emitCodingEvent resolves the state file and emits an event, best-effort.
+// A failure here (bad wi_id, no state file, network error) must never fail
+// the calling tool — the git/gh operation already succeeded by the time this
+// runs, so we just skip the emit silently.
+func (s *Server) emitCodingEvent(ctx context.Context, wiID, eventType string, payload map[string]any) {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil {
+		return
+	}
+	body := map[string]any{
+		"work_item_id":   wiID,
+		"attempt_id":     sf.AttemptID,
+		"claim_epoch":    sf.ClaimEpoch,
+		"session_secret": sf.SessionSecret,
+		"event_type":     eventType,
+		"payload":        payload,
+	}
+	_, _ = s.client.EmitEvent(ctx, body)
+}
+
 func (s *Server) registerCodingTools() {
 	// pf_diff
 	s.mcp.AddTool(&sdkmcp.Tool{
@@ -53,7 +73,7 @@ func (s *Server) registerCodingTools() {
 	// pf_commit
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_commit",
-		Description: "Commit staged changes in the work item's worktree. Credentials injected from state file.",
+		Description: "Commit staged changes in the work item's worktree and emit a commit event on the wi timeline.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
 			"work_item_id":   prop("string", "Work item ID"),
@@ -99,6 +119,12 @@ func (s *Server) registerCodingTools() {
 		if err != nil {
 			return errResult(err)
 		}
+		s.emitCodingEvent(ctx, wiID, "commit", map[string]any{
+			"repo":    repo,
+			"sha":     sha,
+			"message": message,
+			"files":   paths,
+		})
 		return jsonResult(map[string]any{
 			"sha":   sha,
 			"repo":  repo,
@@ -109,7 +135,7 @@ func (s *Server) registerCodingTools() {
 	// pf_push
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_push",
-		Description: "Push the current branch to origin with --force-with-lease. Refuses to push to main/master/dev/tot.",
+		Description: "Push the current branch to origin with --force-with-lease and emit a push event on the wi timeline. Refuses to push to main/master/dev/tot.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
 			"work_item_id":   prop("string", "Work item ID"),
@@ -150,6 +176,10 @@ func (s *Server) registerCodingTools() {
 			return errResult(err)
 		}
 
+		s.emitCodingEvent(ctx, wiID, "push", map[string]any{
+			"repo":   repo,
+			"branch": branch,
+		})
 		return jsonResult(map[string]any{
 			"ok":               true,
 			"branch":           branch,
@@ -160,7 +190,7 @@ func (s *Server) registerCodingTools() {
 	// pf_pr
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_pr",
-		Description: "Create a GitHub PR for the work item's task branch",
+		Description: "Create a GitHub PR for the work item's task branch and emit a pr_opened event on the wi timeline.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
 			"work_item_id":   prop("string", "Work item ID"),
@@ -202,6 +232,7 @@ func (s *Server) registerCodingTools() {
 		if err != nil {
 			return errResult(err)
 		}
+		s.emitCodingEvent(ctx, wiID, "pr_opened", prPayload(repo, title, result))
 		return jsonResult(result)
 	})
 

@@ -74,12 +74,11 @@ func (s *Server) registerStepTools() {
 			}
 			result, err := s.client.UpdateStep(ctx, wiID, body)
 			if err != nil {
-				errMsg := err.Error()
-				if strings.Contains(errMsg, "CONFLICT_EPOCH_MISMATCH") || strings.Contains(errMsg, "ATTEMPT_MISMATCH") {
+				outErr, deleteState := classifyStepUpdateErr(err)
+				if deleteState {
 					_ = config.DeleteStateFile(wiID)
-					return errResult(fmt.Errorf("STALE_LOCAL_CREDENTIAL: state file deleted — please re-claim this work item"))
 				}
-				return errResult(err)
+				return errResult(outErr)
 			}
 			return jsonResult(result)
 		}
@@ -110,13 +109,34 @@ func (s *Server) registerStepTools() {
 
 		result, err := s.client.UpdateStep(ctx, wiID, body)
 		if err != nil {
-			errMsg := err.Error()
-			if strings.Contains(errMsg, "CONFLICT_EPOCH_MISMATCH") || strings.Contains(errMsg, "ATTEMPT_MISMATCH") {
+			outErr, deleteState := classifyStepUpdateErr(err)
+			if deleteState {
 				_ = config.DeleteStateFile(wiID)
-				return errResult(fmt.Errorf("STALE_LOCAL_CREDENTIAL: state file deleted — please re-claim this work item"))
 			}
-			return errResult(err)
+			return errResult(outErr)
 		}
 		return jsonResult(result)
 	})
+}
+
+// classifyStepUpdateErr maps an UpdateStep error to the MCP-facing error and
+// whether the local state file should be deleted:
+//   - ATTEMPT_PAUSED (distinct server code, aihub#209): the attempt is only
+//     paused, so KEEP the state file and point the user at resume.
+//   - CONFLICT_EPOCH_MISMATCH / ATTEMPT_MISMATCH: the credential is stale
+//     (superseded / wrong attempt), so delete the file and ask for a re-claim.
+//   - anything else: pass the error through untouched, keep the file.
+//
+// The ATTEMPT_PAUSED case is checked first; its code shares no substring with
+// the mismatch codes, so ordering only affects clarity, not correctness.
+func classifyStepUpdateErr(err error) (out error, deleteState bool) {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "ATTEMPT_PAUSED"):
+		return fmt.Errorf("attempt is paused — resume it first with `/pf-work <slug> --resume` before continuing (local state file kept)"), false
+	case strings.Contains(msg, "CONFLICT_EPOCH_MISMATCH") || strings.Contains(msg, "ATTEMPT_MISMATCH"):
+		return fmt.Errorf("STALE_LOCAL_CREDENTIAL: state file deleted — please re-claim this work item"), true
+	default:
+		return err, false
+	}
 }

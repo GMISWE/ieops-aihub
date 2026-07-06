@@ -969,9 +969,13 @@ func generateSessionSecret() (string, error) {
 // verifyAttemptCredential validates attempt_id, claim_epoch, and session_secret
 // against the DB. Matches §21 of the design doc.
 func verifyAttemptCredential(ctx context.Context, tx pgx.Tx, wi WorkItem, attemptID string, claimEpoch int64, sessionSecret string) *AihubError {
-	// 1. Verify attempt is the current attempt for the wi
+	// 1. Verify attempt is the current attempt for the wi. When the caller's own
+	// attempt was superseded (e.g. by a force-takeover), enrich the 409 with who
+	// took over and when, so the losing session can explain itself (aihub#209).
 	if wi.CurrentAttemptID == nil || *wi.CurrentAttemptID != attemptID {
-		return NewErr(ErrConflictEpochMismatch, "attempt_id does not match current attempt for this work item")
+		return NewErrDetails(ErrConflictEpochMismatch,
+			"attempt_id does not match current attempt for this work item",
+			supersededByDetails(ctx, tx, attemptID, wi.CurrentAttemptID))
 	}
 
 	// 2. Load the attempt
@@ -1006,8 +1010,13 @@ func verifyAttemptCredential(ctx context.Context, tx pgx.Tx, wi WorkItem, attemp
 		return NewErr(ErrUnauthorized, "invalid session_secret")
 	}
 
-	// 5. Attempt must be running
+	// 5. Attempt must be running. A paused attempt gets a distinct code so the
+	// client keeps its state file and points the user at resume, instead of
+	// treating it as a stale-credential mismatch and deleting it (aihub#209).
 	if storedStatus != "running" {
+		if storedStatus == "paused" {
+			return NewErr(ErrAttemptPaused, "attempt is paused; resume it before continuing")
+		}
 		return NewErr(ErrAttemptMismatch, fmt.Sprintf("attempt status is %q; only running attempts can be used", storedStatus))
 	}
 
@@ -1015,6 +1024,33 @@ func verifyAttemptCredential(ctx context.Context, tx pgx.Tx, wi WorkItem, attemp
 	tx.Exec(ctx, `UPDATE run_attempts SET last_active_at=clock_timestamp() WHERE id=$1`, attemptID) //nolint:errcheck
 
 	return nil
+}
+
+// supersededByDetails returns {"superseded_by": {"actor_display", "at"}} when the
+// caller's attempt has been superseded (its row exists with status 'superseded'),
+// otherwise nil so unrelated epoch mismatches carry no details. Best-effort: any
+// query error yields nil rather than masking the original credential error.
+func supersededByDetails(ctx context.Context, tx pgx.Tx, callerAttemptID string, currentAttemptID *string) any {
+	var callerStatus string
+	var endedAt *time.Time
+	if err := tx.QueryRow(ctx,
+		`SELECT status, ended_at FROM run_attempts WHERE id=$1`, callerAttemptID,
+	).Scan(&callerStatus, &endedAt); err != nil || callerStatus != "superseded" {
+		return nil
+	}
+	sb := map[string]any{}
+	if currentAttemptID != nil {
+		var actor string
+		if err := tx.QueryRow(ctx,
+			`SELECT actor_display FROM run_attempts WHERE id=$1`, *currentAttemptID,
+		).Scan(&actor); err == nil {
+			sb["actor_display"] = actor
+		}
+	}
+	if endedAt != nil {
+		sb["at"] = endedAt.UTC().Format(time.RFC3339)
+	}
+	return map[string]any{"superseded_by": sb}
 }
 
 // VerifyAttemptCredentialPool is the exported pool-based variant used by HTTP handlers

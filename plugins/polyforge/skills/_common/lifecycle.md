@@ -49,15 +49,19 @@ or pass `pf_commit(paths=[...])` to stage only intended files. (team memory: mem
 
 ## Wrap & cleanup (end of execute loop)
 
+`pf_complete_attempt` returns the state file's `worktrees` map before deleting it, so
+there is no need to read the state file yourself first:
+
 ```
-# read worktree paths BEFORE wrap (pf_complete_attempt deletes the state file)
-state = read_json(<workspace_root>/.polyforge/state/<wi_id>.json)
-worktrees = state.get("worktrees", {})
-worktree_parent = state.get("worktree_parent")
-pf_complete_attempt(work_item_id=<current>, status="wrapped")
+result = pf_complete_attempt(work_item_id=<current>, status="wrapped")
+worktrees = result.get("worktrees", {})
 for repo_name, wt in worktrees.items():
     git -C <workspace_root>/.repo/<repo_name> worktree remove --force <wt>
-if worktree_parent and os.path.isdir(worktree_parent): rm -rf <worktree_parent>
+# all of a wi's worktrees live under one parent (pf.<slug>/); remove it once, after
+# the loop — never inside it, or the shared parent vanishes before later repos' removes
+if worktrees:
+    parent = os.path.dirname(next(iter(worktrees.values())))
+    if os.path.isdir(parent): rm -rf <parent>
 ```
 
 ## Plan-step only: derive and write declared_resources

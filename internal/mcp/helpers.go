@@ -56,6 +56,16 @@ func setIfNonempty(params url.Values, key, value string) {
 	}
 }
 
+// addWorktrees sets result["worktrees"] from a state file's worktree map, if
+// non-empty. Used by pf_wrap / pf_complete_attempt / pf_claim_work_item so
+// callers get the worktree paths back without needing to have read the state
+// file themselves first (aihub#207).
+func addWorktrees(result map[string]any, worktrees map[string]string) {
+	if len(worktrees) > 0 {
+		result["worktrees"] = worktrees
+	}
+}
+
 // parseArgs unmarshals the raw MCP arguments into a map.
 func parseArgs(raw json.RawMessage) (map[string]any, error) {
 	if len(raw) == 0 {

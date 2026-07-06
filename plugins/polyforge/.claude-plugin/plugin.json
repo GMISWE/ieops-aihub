@@ -1,6 +1,6 @@
 {
   "name": "polyforge",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "description": "polyforge v1 — Go-native multi-agent AI coding coordination. Implements Iron Rules (IR1-IR4), three-layer L1/L2/L3 architecture, and the full wi lifecycle (work/stop/status/spec/plan/execute/retro).",
   "author": {
     "name": "GMI Engineering"
@@ -18,5 +18,5 @@
     "multi-agent",
     "wi-lifecycle"
   ],
-  "catalog_revision": "e4d02e8e7992"
+  "catalog_revision": "3a04037987a8"
 }

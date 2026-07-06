@@ -151,8 +151,8 @@ func (s *Server) registerCodingTools() {
 		}
 
 		return jsonResult(map[string]any{
-			"ok":              true,
-			"branch":          branch,
+			"ok":               true,
+			"branch":           branch,
 			"base_sha_at_push": baseSHA,
 		})
 	})
@@ -259,10 +259,12 @@ func (s *Server) registerCodingTools() {
 		// Delete state file (terminal status)
 		_ = config.DeleteStateFile(wiID)
 
-		return jsonResult(map[string]any{
-			"ok":             true,
-			"pr":             prResult,
+		wrapResult := map[string]any{
+			"ok":              true,
+			"pr":              prResult,
 			"complete_result": completeResult,
-		})
+		}
+		addWorktrees(wrapResult, sf.Worktrees)
+		return jsonResult(wrapResult)
 	})
 }

@@ -33,6 +33,7 @@ const (
 
 	// HTTP 409
 	ErrConflictEpochMismatch        ErrCode = "CONFLICT_EPOCH_MISMATCH"
+	ErrAttemptPaused                ErrCode = "ATTEMPT_PAUSED"
 	ErrConflictStepInProgress       ErrCode = "CONFLICT_STEP_IN_PROGRESS"
 	ErrConflictStepAttemptMismatch  ErrCode = "CONFLICT_STEP_ATTEMPT_MISMATCH"
 	ErrConflictCASFailed            ErrCode = "CONFLICT_CAS_FAILED"
@@ -113,7 +114,7 @@ func codeToHTTPStatus(code ErrCode) int {
 		return 404
 	case ErrNotImplemented:
 		return 405
-	case ErrConflictEpochMismatch, ErrConflictStepInProgress,
+	case ErrConflictEpochMismatch, ErrAttemptPaused, ErrConflictStepInProgress,
 		ErrConflictStepAttemptMismatch, ErrConflictCASFailed,
 		ErrConflictWIAlreadyClaimed, ErrConflictHardBlock,
 		ErrConflictDuplicate, ErrConflictCandidates,

@@ -17,25 +17,24 @@ import (
 	"github.com/GMISWE/ieops-aihub/internal/auth"
 )
 
-
 // RunAttempt mirrors the run_attempts table.
 type RunAttempt struct {
-	ID                  string     `json:"id"`
-	WorkItemID          string     `json:"work_item_id"`
-	Status              string     `json:"status"`
-	ClaimEpoch          int64      `json:"claim_epoch"`
-	IdempotencyKey      string     `json:"idempotency_key"`
-	LastActiveAt        time.Time  `json:"last_active_at"`
-	ActorUserID         string     `json:"actor_user_id"`
-	APIKeyID            string     `json:"api_key_id"`
-	ActorDisplay        string     `json:"actor_display"`
-	MachineID           string     `json:"machine_id"`
-	SessionSecretHash   string     `json:"session_secret_hash"`
-	ParentAttemptID     *string    `json:"parent_attempt_id"`
-	PhaseConfigVersion  *int       `json:"phase_config_version"` // kept as audit field; always NULL since scenario_phase_configs was removed (aihub#38)
-	PreparedWorkspace   *json.RawMessage `json:"prepared_workspace"`
-	StartedAt           time.Time  `json:"started_at"`
-	EndedAt             *time.Time `json:"ended_at"`
+	ID                 string           `json:"id"`
+	WorkItemID         string           `json:"work_item_id"`
+	Status             string           `json:"status"`
+	ClaimEpoch         int64            `json:"claim_epoch"`
+	IdempotencyKey     string           `json:"idempotency_key"`
+	LastActiveAt       time.Time        `json:"last_active_at"`
+	ActorUserID        string           `json:"actor_user_id"`
+	APIKeyID           string           `json:"api_key_id"`
+	ActorDisplay       string           `json:"actor_display"`
+	MachineID          string           `json:"machine_id"`
+	SessionSecretHash  string           `json:"session_secret_hash"`
+	ParentAttemptID    *string          `json:"parent_attempt_id"`
+	PhaseConfigVersion *int             `json:"phase_config_version"` // kept as audit field; always NULL since scenario_phase_configs was removed (aihub#38)
+	PreparedWorkspace  *json.RawMessage `json:"prepared_workspace"`
+	StartedAt          time.Time        `json:"started_at"`
+	EndedAt            *time.Time       `json:"ended_at"`
 }
 
 // ResourceLock mirrors a resource_locks row.
@@ -48,12 +47,12 @@ type ResourceLock struct {
 
 // ClaimRequest is the parsed body for POST /v1/work_items/:id/claim.
 type ClaimRequest struct {
-	IdempotencyKey string        `json:"idempotency_key"`
-	SessionInfo    SessionInfo   `json:"session_info"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	SessionInfo    SessionInfo       `json:"session_info"`
 	RequestedLocks []ResourceLockReq `json:"requested_locks"`
-	Mode           string        `json:"mode"` // "fresh" | "resume"
-	ForceOver      bool          `json:"force_takeover"`
-	ScenarioRef    *string       `json:"scenario_ref,omitempty"` // git SHA of local scenario clone at claim time
+	Mode           string            `json:"mode"` // "fresh" | "resume"
+	ForceOver      bool              `json:"force_takeover"`
+	ScenarioRef    *string           `json:"scenario_ref,omitempty"` // git SHA of local scenario clone at claim time
 }
 
 // SessionInfo carries machine_id and session_secret.
@@ -70,16 +69,16 @@ type ResourceLockReq struct {
 
 // ClaimResponse is returned by POST /v1/work_items/:id/claim.
 type ClaimResponse struct {
-	AttemptID             string         `json:"attempt_id"`
-	ClaimEpoch            int64          `json:"claim_epoch"`
-	AcquiredLocks         []ResourceLock `json:"acquired_locks"`
-	CurrentAttemptEpoch   int64          `json:"current_attempt_epoch"`
-	StepRecoveryHint      string         `json:"step_recovery_hint,omitempty"`
-	RequiresHumanSession  *bool          `json:"requires_human_session"`
-	WIType                *string        `json:"wi_type"`
-	Slug                  string         `json:"slug,omitempty"`
-	Project               string         `json:"project,omitempty"`
-	ID                    string         `json:"id,omitempty"`
+	AttemptID            string         `json:"attempt_id"`
+	ClaimEpoch           int64          `json:"claim_epoch"`
+	AcquiredLocks        []ResourceLock `json:"acquired_locks"`
+	CurrentAttemptEpoch  int64          `json:"current_attempt_epoch"`
+	StepRecoveryHint     string         `json:"step_recovery_hint,omitempty"`
+	RequiresHumanSession *bool          `json:"requires_human_session"`
+	WIType               *string        `json:"wi_type"`
+	Slug                 string         `json:"slug,omitempty"`
+	Project              string         `json:"project,omitempty"`
+	ID                   string         `json:"id,omitempty"`
 }
 
 // FnClaimWorkItem implements the atomic claim transaction per §7 / §8.4 of the design doc.
@@ -235,9 +234,9 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 					fmt.Sprintf("work item is already claimed by %s", currentActorDisplay),
 					map[string]any{
 						"current_attempt": map[string]any{
-							"id":            *wi.CurrentAttemptID,
-							"actor_display": currentActorDisplay,
-							"claim_epoch":   currentEpoch,
+							"id":             *wi.CurrentAttemptID,
+							"actor_display":  currentActorDisplay,
+							"claim_epoch":    currentEpoch,
 							"last_active_at": currentLastActive.Format(time.RFC3339),
 						},
 					},
@@ -355,8 +354,8 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		supEvtID := NewID("evt")
 		supPayload, _ := json.Marshal(map[string]any{
 			"superseded_by_attempt_id": newAttemptID,
-			"reason":                  "claim by same user or explicit takeover",
-			"actor_user_id":           callerUserID,
+			"reason":                   "claim by same user or explicit takeover",
+			"actor_user_id":            callerUserID,
 		})
 		_, _ = tx.Exec(ctx, `
 			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
@@ -451,9 +450,9 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			fmt.Sprintf("wi.requires_human_session=%v but phase config says %v for wi_type %q",
 				*wi.RequiresHumanSession, resolvedRHS, *wi.WIType),
 			map[string]any{
-				"db_value":        *wi.RequiresHumanSession,
+				"db_value":         *wi.RequiresHumanSession,
 				"phase_yaml_value": resolvedRHS,
-				"wi_type":         *wi.WIType,
+				"wi_type":          *wi.WIType,
 			},
 		)
 	}
@@ -523,11 +522,12 @@ func HashSecret(secret string) string {
 
 // CompleteAttemptRequest is the parsed body for POST /v1/work_items/:id/complete.
 type CompleteAttemptRequest struct {
-	AttemptID          string `json:"attempt_id"`
-	ClaimEpoch         int64  `json:"claim_epoch"`
-	SessionSecret      string `json:"session_secret"`
-	Status             string `json:"status"` // "wrapped" | "failed" | "paused"
-	ForceTerminateStep bool   `json:"force_terminate_step"`
+	AttemptID          string  `json:"attempt_id"`
+	ClaimEpoch         int64   `json:"claim_epoch"`
+	SessionSecret      string  `json:"session_secret"`
+	Status             string  `json:"status"` // "wrapped" | "failed" | "paused"
+	ForceTerminateStep bool    `json:"force_terminate_step"`
+	PauseReason        *string `json:"pause_reason,omitempty"`
 }
 
 // FnCompleteAttempt implements the complete_attempt transaction.
@@ -582,10 +582,12 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 		}
 	}
 
-	// Set run_attempt status
+	// Set run_attempt status. pause_reason is only meaningful for status=paused
+	// but is written unconditionally from req (nil for wrapped/failed), matching
+	// the column's nullable, informational-only nature.
 	_, err = tx.Exec(ctx, `
-		UPDATE run_attempts SET status=$1, ended_at=clock_timestamp() WHERE id=$2`,
-		req.Status, req.AttemptID,
+		UPDATE run_attempts SET status=$1, ended_at=clock_timestamp(), pause_reason=$2 WHERE id=$3`,
+		req.Status, req.PauseReason, req.AttemptID,
 	)
 	if err != nil {
 		return NewErr(ErrInternalError, "failed to update run_attempt status")
@@ -627,9 +629,13 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 
 	// Emit attempt_completed event
 	evtID := NewID("evt")
-	evtPayload, _ := json.Marshal(map[string]any{
+	evtPayloadMap := map[string]any{
 		"status": req.Status,
-	})
+	}
+	if req.PauseReason != nil {
+		evtPayloadMap["pause_reason"] = *req.PauseReason
+	}
+	evtPayload, _ := json.Marshal(evtPayloadMap)
 	_, _ = tx.Exec(ctx, `
 		INSERT INTO agent_events (id, work_item_id, run_attempt_id, event_type, payload, project)
 		VALUES ($1, $2, $3, 'attempt_completed', $4, $5)`,
@@ -779,12 +785,12 @@ type ForceTakeoverResponse struct {
 	PriorAttemptID    string `json:"prior_attempt_id"`
 	PriorActorDisplay string `json:"prior_actor_display"`
 	// H3: new attempt credentials — written to state file by MCP layer (never returned to LLM)
-	NewAttemptID    string `json:"new_attempt_id"`
-	NewClaimEpoch   int64  `json:"new_claim_epoch"`
+	NewAttemptID  string `json:"new_attempt_id"`
+	NewClaimEpoch int64  `json:"new_claim_epoch"`
 	// NewSessionSecret is intentionally NOT in JSON (Decision A): the client supplied it
 	// in the request body and already knows the plaintext.
 	NewSessionSecret string `json:"-"`
-	OK              bool   `json:"ok"`
+	OK               bool   `json:"ok"`
 }
 
 // FnForceTakeover implements the force_takeover operation (H-R7-4).
@@ -949,7 +955,6 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		OK:                true,
 	}, nil
 }
-
 
 // generateSessionSecret returns (plaintext, nil) for a new 32-byte session secret.
 func generateSessionSecret() (string, error) {

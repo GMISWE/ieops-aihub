@@ -7,9 +7,12 @@ import (
 	"strings"
 )
 
-// marshalJSON marshals v to JSON bytes.
+// marshalJSON marshals v to compact JSON bytes. Compact (not indented) is the
+// single marshal point behind all ~51 jsonResult call sites; the indentation
+// whitespace was ~15-25% of every MCP tool response for no consumer benefit —
+// the client parses the JSON, it does not read it pretty-printed (aihub#212).
 func marshalJSON(v any) ([]byte, error) {
-	b, err := json.MarshalIndent(v, "", "  ")
+	b, err := json.Marshal(v)
 	if err != nil {
 		return nil, fmt.Errorf("marshal JSON: %w", err)
 	}

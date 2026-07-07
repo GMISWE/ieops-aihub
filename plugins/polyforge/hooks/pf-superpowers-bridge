@@ -31,8 +31,27 @@ try:
 except ValueError:
     sys.exit(0)
 
-ti = payload.get("tool_input") or {}
+def emit(msg):
+    # Both shapes: Claude Code / Codex read hookSpecificOutput.additionalContext; Copilot
+    # CLI reads the top-level additionalContext. Each ignores the key it does not use.
+    return json.dumps({
+        "additionalContext": msg,
+        "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": msg},
+    })
+
+ti = payload.get("tool_input")
+if not isinstance(ti, dict):
+    ti = {}
 path = ti.get("file_path") or ti.get("path") or ""
+if not path:
+    # Copilot CLI writes files via a single `apply_patch` tool whose target path lives in
+    # the toolArgs patch envelope (`*** Add File: <p>` / `*** Update File: <p>`), not a
+    # file_path field.
+    ta = payload.get("toolArgs")
+    if isinstance(ta, str) and ta:
+        pm = re.search(r"\*\*\* (?:Add|Update) File:\s*(.+)", ta)
+        if pm:
+            path = pm.group(1).strip()
 if not path:
     sys.exit(0)
 
@@ -79,7 +98,7 @@ def fallback():
            f"NOT save it automatically. If a wi is claimed, call pf_save_artifact(type=\"{art_type}\", "
            f"work_item_id=<current wi>, path=\"{path}\", visibility=\"project\") (pass "
            f"supersedes_memory_id of the prior same-type artifact if re-editing).")
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": msg}}))
+    print(emit(msg))
     sys.exit(0)
 
 base = (os.environ.get("POLYFORGE_AIHUB_URL") or cfg_get("server", "url")).rstrip("/")
@@ -107,8 +126,7 @@ body = {"type": art_type, "work_item_id": st["wi_id"], "project": st.get("projec
 if prior.get(art_type): body["supersedes_memory_id"] = prior[art_type]
 
 if os.environ.get("PF_BRIDGE_DRYRUN"):
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
-        "additionalContext": f"[bridge dryrun] POST {base}/v1/memories {json.dumps({k:body[k] for k in ('type','work_item_id','project')})}"}}))
+    print(emit(f"[bridge dryrun] POST {base}/v1/memories {json.dumps({k:body[k] for k in ('type','work_item_id','project')})}"))
     sys.exit(0)
 
 req = urllib.request.Request(base + "/v1/memories", data=json.dumps(body).encode(),
@@ -120,8 +138,7 @@ try:
     prior[art_type] = mem_id
     try: json.dump(prior, open(side, "w", encoding="utf-8"))
     except OSError: pass
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
-        "additionalContext": f"[polyforge bridge] {label} doc mirrored to aihub as {mem_id}. Do NOT call pf_save_artifact for this doc."}}))
+    print(emit(f"[polyforge bridge] {label} doc mirrored to aihub as {mem_id}. Do NOT call pf_save_artifact for this doc."))
 except Exception:
     fallback()
 PY

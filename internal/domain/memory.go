@@ -1472,8 +1472,21 @@ func SetMemoryVisibility(ctx context.Context, pool *pgxpool.Pool, id, visibility
 
 // ─── Activate (§7.3) ──────────────────────────────────────────────────────────
 
+// activationTargetStatus returns the status an activated memory should take.
+// Activation normally revives a memory to "active" (it was just used). The one
+// exception (aihub#214): a superseded (archived) methodology.* artifact stays
+// archived — activate is an unauthenticated read-side recall signal and must not
+// resurrect a stale spec/plan head over its successor.
+func activationTargetStatus(curStatus, memType string) string {
+	if curStatus == "archived" && strings.HasPrefix(memType, "methodology.") {
+		return "archived"
+	}
+	return "active"
+}
+
 // Activate reinforces a memory: increments activation_count, recomputes stability_days,
-// resets last_activated_at, and revives archived memories.
+// resets last_activated_at, and revives archived memories (except a superseded
+// methodology.* artifact, which stays archived — see activationTargetStatus).
 func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, callerDisplay string) (*ActivateResponse, error) {
 	var memType string
 	var baseStrength, stabilityDays float64
@@ -1498,6 +1511,13 @@ func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, call
 	newCount := activationCount + 1
 	newStability := computeStabilityDays(memType, newCount)
 
+	// aihub#214: activation revives an archived memory to active — correct for
+	// experience/fact/rule (used again -> live again), but WRONG for a superseded
+	// (archived) methodology.* artifact: activate is an unauthenticated read-side
+	// recall signal, so it must not resurrect a stale spec/plan head. Keep an
+	// archived methodology.* archived; every other case still revives to active.
+	newStatus := activationTargetStatus(status, memType)
+
 	var newLastActivatedAt time.Time
 	err = pool.QueryRow(ctx, `
 		UPDATE memories
@@ -1505,11 +1525,11 @@ func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, call
 		    stability_days     = $2,
 		    last_activated_at  = clock_timestamp(),
 		    last_activated_by  = $3,
-		    status             = 'active',
+		    status             = $4,
 		    updated_at         = clock_timestamp()
-		WHERE id = $4
+		WHERE id = $5
 		RETURNING last_activated_at`,
-		newCount, newStability, callerUserID, memID,
+		newCount, newStability, callerUserID, newStatus, memID,
 	).Scan(&newLastActivatedAt)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to activate memory: %v", err))

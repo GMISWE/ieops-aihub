@@ -251,7 +251,7 @@ func (s *Server) registerMemoryTools() {
 		Name:        "pf_save_artifact",
 		Description: "Save a methodology artifact (methodology.spec|plan|review|execute|retro|wrap_summary). Credentials injected from state file.",
 		InputSchema: objectSchema(map[string]any{
-			"type":                 prop("string", "Artifact type (methodology.spec, methodology.plan, etc.)"),
+			"type":                 propEnum("string", "Artifact type (must be one of the methodology.* kinds)", domain.MethodologyTypeEnum),
 			"work_item_id":         prop("string", "Work item ID"),
 			"content":              prop("string", "Artifact content (inline). Provide content OR path, not both."),
 			"path":                 prop("string", "Local filesystem path to a UTF-8 markdown file to read as the artifact content (read by the local MCP process; must resolve within the workspace, <=1 MiB). Provide content OR path, not both."),

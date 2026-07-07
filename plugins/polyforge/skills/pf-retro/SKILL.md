@@ -133,7 +133,7 @@ Memory types to use:
 
 ```
 pf_save_artifact(
-  type="retro",
+  type="methodology.retro",
   work_item_id=<current>,
   content=<full markdown retro>,
   structured_payload={

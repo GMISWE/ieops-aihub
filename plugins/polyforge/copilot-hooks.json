@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "matcher": ".*",
+        "bash": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-session-start\"",
+        "timeoutSec": 15
+      }
+    ],
+    "preToolUse": [
+      {
+        "matcher": "bash|Bash|polyforge-pf_(commit|pr|wrap)",
+        "bash": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-commit-guard\"",
+        "timeoutSec": 10
+      }
+    ],
+    "postToolUse": [
+      {
+        "matcher": "polyforge-pf_(claim_work_item|update_step|save_artifact|wrap|complete_attempt)",
+        "bash": "node \"${CLAUDE_PLUGIN_ROOT}/bin/pf-chain-hook.cjs\"",
+        "timeoutSec": 10
+      },
+      {
+        "matcher": "apply_patch",
+        "bash": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-superpowers-bridge\"",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}

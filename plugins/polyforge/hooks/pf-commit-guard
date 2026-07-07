@@ -34,17 +34,37 @@ except ValueError:
 if not isinstance(payload, dict):
     sys.exit(0)
 
-tool = payload.get("tool_name") or ""
-ti = payload.get("tool_input") or {}
+tool = payload.get("tool_name") or payload.get("toolName") or ""
+ti = payload.get("tool_input")
+if ti is None:
+    # Copilot CLI delivers tool args as a JSON-encoded string under `toolArgs` (MCP
+    # tools) — decode it. (Non-JSON toolArgs, e.g. an apply_patch envelope, is not a
+    # commit/PR surface and simply parses to {}.)
+    ta = payload.get("toolArgs")
+    if isinstance(ta, str):
+        try:
+            ti = json.loads(ta) if ta.strip() else {}
+        except ValueError:
+            ti = {}
+    else:
+        ti = ta
 if not isinstance(ti, dict):
     sys.exit(0)
 
 def deny(reason):
-    out = {"hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
+    # Emit both shapes: Claude Code / Codex read hookSpecificOutput.permissionDecision;
+    # Copilot CLI reads the top-level permissionDecision (verified on 1.0.68 — the nested
+    # shape is ignored there and exit code 2 does nothing). Each runtime ignores the
+    # key it does not use.
+    out = {
         "permissionDecision": "deny",
         "permissionDecisionReason": reason,
-    }}
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        },
+    }
     print(json.dumps(out))
     sys.exit(0)
 
@@ -397,6 +417,10 @@ GIT_PR_RE = re.compile(
 # tool name after the last "__" so the guard fires identically under both runtimes (Bash has
 # no "__", so it falls through to the Bash branch unchanged).
 base_tool = tool.rsplit("__", 1)[-1]
+# Copilot CLI names MCP tools `<server>-<tool>` (e.g. polyforge-pf_commit) with no "__";
+# strip that server prefix so the guard fires identically under all three harnesses.
+if base_tool.startswith("polyforge-"):
+    base_tool = base_tool[len("polyforge-"):]
 fields = []
 bash_cmd = None
 if base_tool == "pf_commit":
@@ -405,7 +429,7 @@ elif base_tool == "pf_pr":
     fields = [field("title"), field("body")]
 elif base_tool == "pf_wrap":
     fields = [field("pr_title"), field("pr_body")]
-elif tool == "Bash":
+elif tool in ("Bash", "bash"):
     cmd = ti.get("command")
     if isinstance(cmd, str) and cmd:
         bash_cmd = cmd

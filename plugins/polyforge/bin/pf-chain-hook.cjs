@@ -20,7 +20,7 @@ function addUniq(arr, v) { return arr.includes(v) ? arr : arr.concat([v]); }
 function applyEvent(chain, toolName, toolInput, toolResponse) {
   // Prefix-agnostic: Claude Code uses mcp__plugin_polyforge_polyforge__, Codex uses
   // mcp__polyforge__. Strip either so the transition fires identically under both runtimes.
-  const name = toolName.replace(/^mcp__(?:plugin_polyforge_polyforge|polyforge)__/, '');
+  const name = toolName.replace(/^(?:mcp__(?:plugin_polyforge_polyforge|polyforge)__|polyforge-)/, '');
   switch (name) {
     case 'pf_update_step': {
       const station = mapStep(toolInput.step_id);
@@ -92,12 +92,17 @@ function main() {
   let evt = {};
   try { evt = JSON.parse(raw); } catch {}
   const toolName = evt.tool_name || evt.toolName || '';
-  const toolInput = evt.tool_input || evt.toolInput || {};
+  let toolInput = evt.tool_input || evt.toolInput;
+  if (toolInput == null && typeof evt.toolArgs === 'string') {
+    // Copilot CLI delivers MCP tool args as a JSON-encoded string under `toolArgs`.
+    try { toolInput = JSON.parse(evt.toolArgs || '{}'); } catch { toolInput = {}; }
+  }
+  toolInput = toolInput || {};
   const toolResponse = evt.tool_response || evt.toolResponse || {};
   const cwd = evt.cwd || process.cwd();
   const dir = path.join(cwd, '.polyforge', 'state');
 
-  const shortName = toolName.replace(/^mcp__(?:plugin_polyforge_polyforge|polyforge)__/, '');
+  const shortName = toolName.replace(/^(?:mcp__(?:plugin_polyforge_polyforge|polyforge)__|polyforge-)/, '');
   const st = findActiveState(dir);
   const wiId = resolveWiId(shortName, toolInput, st);
   if (!wiId) return; // no target wi

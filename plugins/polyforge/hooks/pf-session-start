@@ -51,11 +51,13 @@ home = os.path.expanduser("~")
 settings_layers = [
     os.path.join(home, ".claude", "settings.json"),
     os.path.join(home, ".claude", "settings.local.json"),
+    os.path.join(home, ".copilot", "settings.json"),  # Copilot CLI enabledPlugins
 ]
 if ws:
     settings_layers += [
         os.path.join(ws, ".claude", "settings.json"),
         os.path.join(ws, ".claude", "settings.local.json"),
+        os.path.join(ws, ".github", "copilot", "settings.json"),  # Copilot project layer
     ]
 
 def plugin_enabled(prefix):
@@ -128,7 +130,7 @@ ctx = (
     "<EXTREMELY_IMPORTANT>\n"
     "You are in a polyforge workspace (.polyforge.yaml detected). "
     "Lifecycle skills /pf-* and the polyforge MCP tools (`mcp__plugin_polyforge_polyforge__*` "
-    "in Claude Code, `mcp__polyforge__*` in Codex) are "
+    "in Claude Code, `mcp__polyforge__*` in Codex, `polyforge(pf_*)` in Copilot CLI) are "
     "authoritative; do not bypass them with raw git / Edit / Bash on work_items. "
     "Using superpowers skills as the content *engine* inside a /pf-* step (when superpowers "
     "is enabled) is NOT a bypass — the prohibition is about skipping the wi lifecycle "
@@ -140,10 +142,15 @@ ctx = (
 
 if os.environ.get("CURSOR_PLUGIN_ROOT"):
     out = {"additional_context": ctx}
-elif os.environ.get("CLAUDE_PLUGIN_ROOT") and not os.environ.get("COPILOT_CLI"):
-    out = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}}
 else:
-    out = {"additionalContext": ctx}
+    # Emit BOTH shapes so one script serves every harness: Claude Code reads
+    # hookSpecificOutput.additionalContext; Copilot CLI and Codex read the top-level
+    # additionalContext. Each runtime ignores the key it does not use (verified on
+    # copilot 1.0.68 — nested is silently dropped there, top-level is injected).
+    out = {
+        "additionalContext": ctx,
+        "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx},
+    }
 
 print(json.dumps(out))
 PY

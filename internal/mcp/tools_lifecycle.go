@@ -184,9 +184,10 @@ func (s *Server) registerLifecycleTools() {
 	// pf_get_work_item
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_get_work_item",
-		Description: "Get a work item by ID or slug",
+		Description: "Get a work item by ID or slug. Pass brief=true to omit the (potentially large) content field.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID or slug"),
+			"brief":        prop("boolean", "Omit the content field from the response (default false)"),
 		}, []string{"work_item_id"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -200,6 +201,11 @@ func (s *Server) registerLifecycleTools() {
 		result, err := s.client.GetWorkItem(ctx, id)
 		if err != nil {
 			return errResult(err)
+		}
+		// brief=true drops the (potentially ~20K-char) content field; default
+		// false preserves the current response shape for mixed-version safety (aihub#212).
+		if boolArg(args, "brief") {
+			delete(result, "content")
 		}
 		return jsonResult(result)
 	})

@@ -10,6 +10,11 @@
     ],
     "preToolUse": [
       {
+        "matcher": "skill",
+        "bash": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-skill-router\"",
+        "timeoutSec": 10
+      },
+      {
         "matcher": "bash|Bash|polyforge-pf_(commit|pr|wrap)",
         "bash": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-commit-guard\"",
         "timeoutSec": 10

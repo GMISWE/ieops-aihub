@@ -1,7 +1,7 @@
-## Platform adaptation (Codex / non-Claude runtimes)
+## Platform adaptation (Codex / Copilot / non-Claude runtimes)
 
-polyforge ships as a Claude Code plugin and also runs under Codex (codex-cli). Tool names and
-skill invocation differ slightly by runtime:
+polyforge ships as a Claude Code plugin and also runs under Codex (codex-cli) and GitHub
+Copilot CLI. Tool names and skill invocation differ slightly by runtime:
 
 - **Claude Code**: invoke `/pf-*` skills via the `Skill` tool; the polyforge MCP tools are
   `mcp__plugin_polyforge_polyforge__pf_*`.
@@ -9,6 +9,11 @@ skill invocation differ slightly by runtime:
   `/skills`, or let Codex select it by description, then follow its instructions. The polyforge
   MCP tools are `mcp__polyforge__pf_*`, and the MCP server must be registered once with
   `codex mcp add polyforge -- "$CLAUDE_PLUGIN_ROOT/bin/polyforge-mcp.sh"`.
+- **Copilot CLI**: installs as a native plugin
+  (`copilot plugin install polyforge@<marketplace>`), which auto-registers the MCP server from
+  the plugin's `.mcp.json`. There is no `Skill` tool — skills load natively (`/skills` or by
+  description). The polyforge MCP tools are addressed as `polyforge(pf_*)` in permission flags
+  and appear as `polyforge-pf_*` to hooks.
 
-For the full Claude Code -> Codex tool-name mapping and the MCP registration step, see
-`references/codex-tools.md` in this skill.
+For the full tool-name mappings and per-runtime install / MCP-registration steps, see
+`references/codex-tools.md` and `references/copilot-tools.md` in this skill.

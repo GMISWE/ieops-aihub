@@ -4,8 +4,7 @@
     "name": "GMI SWE Team"
   },
   "metadata": {
-    "description": "polyforge plugin marketplace for GitHub Copilot CLI, hosted alongside the ieops-aihub backend",
-    "pluginRoot": "./plugins"
+    "description": "polyforge plugin marketplace for GitHub Copilot CLI, hosted alongside the ieops-aihub backend"
   },
   "plugins": [
     {

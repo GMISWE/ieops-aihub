@@ -766,6 +766,21 @@ var PfRememberTypeEnum = func() []string {
 	return out
 }()
 
+// MethodologyTypeEnum is the methodology.* subset of MemoryTypeEnum — the only
+// types pf_save_artifact accepts. Exposing it as the tool's `type` enum lets
+// contract-lint catch server-400 calls like pf_save_artifact(type="spec") /
+// type="retro" (aihub#211). Derived from MemoryTypeEnum so the two never drift;
+// mirror of PfRememberTypeEnum.
+var MethodologyTypeEnum = func() []string {
+	out := make([]string, 0, 6)
+	for _, t := range MemoryTypeEnum {
+		if strings.HasPrefix(t, "methodology.") {
+			out = append(out, t)
+		}
+	}
+	return out
+}()
+
 // ─── Commit (human annotation) ────────────────────────────────────────────────
 
 // CommitAnchorArgs carries the optional anchor fields for CommitMemory (aihub#125).

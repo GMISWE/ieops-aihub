@@ -1,0 +1,50 @@
+name: Contract Lint
+
+# Lints the in-tree polyforge plugin (plugins/polyforge/**) against the MCP tool
+# contract. Unlike the marketplace/polyforge-coding copies — which curl the schema
+# from the pf-schemas orphan branch and therefore lag one merge behind in-flight
+# PRs — this job builds the polyforge binary from THIS PR's source and dumps the
+# schema fresh, so the plugin is always checked against the server code it ships
+# with (aihub#211).
+
+on:
+  pull_request:
+    paths:
+      - 'plugins/polyforge/**'
+      # Server-side MCP contract surface: a tool/param change here can break the
+      # plugin's references, so re-lint against the freshly-built schema. (A pure
+      # internal/domain enum change without an internal/mcp edit is the one gap.)
+      - 'internal/mcp/**'
+      - 'cmd/polyforge/**'
+      - 'scripts/pf_contract_lint.py'
+      - 'scripts/pf_contract_lint_baseline.json'
+      - '.github/workflows/contract-lint.yml'
+
+jobs:
+  contract-lint:
+    name: Contract Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+          cache: true
+
+      - name: Build polyforge and dump MCP schemas (fresh, in-repo)
+        run: |
+          go build -o /tmp/polyforge ./cmd/polyforge
+          /tmp/polyforge dump-mcp-schemas "$(git rev-parse HEAD)" > /tmp/pf-tool-schemas.json
+          python3 -c "import json; json.load(open('/tmp/pf-tool-schemas.json')); print('schema JSON valid')"
+
+      - name: Linter self-test
+        run: python3 scripts/pf_contract_lint.py --self-test
+
+      - name: Contract-lint the polyforge plugin
+        run: |
+          python3 scripts/pf_contract_lint.py \
+            --schemas /tmp/pf-tool-schemas.json \
+            --target plugins/ \
+            --baseline scripts/pf_contract_lint_baseline.json

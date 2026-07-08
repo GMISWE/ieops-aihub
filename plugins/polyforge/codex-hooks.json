@@ -33,16 +33,6 @@
             "timeout": 10
           }
         ]
-      },
-      {
-        "matcher": "apply_patch|Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-superpowers-bridge\"",
-            "timeout": 10
-          }
-        ]
       }
     ]
   }

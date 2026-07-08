@@ -16,7 +16,7 @@ has()     { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
 ck()      { if has "$1" "$2"; then echo "  PASS: $3"; else echo "  FAIL: $3 (missing: $2)" >&2; fails=$((fails+1)); fi; }
 ck_not()  { if has "$1" "$2"; then echo "  FAIL: $3 (unexpected: $2)" >&2; fails=$((fails+1)); else echo "  PASS: $3"; fi; }
 
-names=(brainstorming writing-plans subagent-driven-development executing-plans finishing-a-development-branch)
+names=(subagent-driven-development executing-plans finishing-a-development-branch)
 
 # make_fake_cache <dir> builds a green (all-correct) fake superpowers 6.1.1 cache under <dir>/mkt/superpowers/6.1.1/skills/
 make_fake_cache() {
@@ -27,12 +27,6 @@ make_fake_cache() {
     mkdir -p "$skdir/$n"
     printf -- "---\nname: %s\n---\n\nBody text.\n" "$n" > "$skdir/$n/SKILL.md"
   done
-  {
-    echo "See docs/superpowers/specs/<date>-<topic>-design.md for output."
-  } >> "$skdir/brainstorming/SKILL.md"
-  {
-    echo "See docs/superpowers/plans/<date>-<feature>.md for output."
-  } >> "$skdir/writing-plans/SKILL.md"
   printf '{"enabledPlugins":{"superpowers@mkt":true}}\n' > "$root/home/.claude/settings.json"
 }
 
@@ -61,8 +55,8 @@ rm -rf "$tmp"
 echo "== drift (ii): change a name: frontmatter value =="
 tmp="$(mktemp -d)"
 make_fake_cache "$tmp"
-printf -- "---\nname: brainstorming-wrong\n---\n\nSee docs/superpowers/specs/ for output.\n" \
-  > "$tmp/mkt/superpowers/6.1.1/skills/brainstorming/SKILL.md"
+printf -- "---\nname: subagent-driven-development-wrong\n---\n\nBody text.\n" \
+  > "$tmp/mkt/superpowers/6.1.1/skills/subagent-driven-development/SKILL.md"
 o="$(run_probe "$tmp" "$tmp/home")"
 ck "$o" "[WARN]" "mismatched frontmatter name produces a warning"
 rm -rf "$tmp"
@@ -74,15 +68,6 @@ cp -r "$tmp/mkt/superpowers/6.1.1" "$tmp/mkt/superpowers/7.0.0"
 o="$(run_probe "$tmp" "$tmp/home")"
 ck "$o" "[WARN]" "newer version present produces a warning"
 ck "$o" "7.0.0" "warning names the found version"
-rm -rf "$tmp"
-
-echo "== drift (iv): remove docs/superpowers/specs/ from brainstorming =="
-tmp="$(mktemp -d)"
-make_fake_cache "$tmp"
-printf -- "---\nname: brainstorming\n---\n\nNo output path mentioned here.\n" \
-  > "$tmp/mkt/superpowers/6.1.1/skills/brainstorming/SKILL.md"
-o="$(run_probe "$tmp" "$tmp/home")"
-ck "$o" "[WARN]" "missing output path string produces a warning"
 rm -rf "$tmp"
 
 echo "== drift (v): settings with no superpowers@ key =="

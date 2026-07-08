@@ -60,9 +60,7 @@ hook schema with `polyforge-pf_*` / `apply_patch` matchers:
   protected-branch / worktree git guards). A block is emitted as a top-level
   `{"permissionDecision":"deny", "permissionDecisionReason":"..."}` — the only form Copilot
   honors (the nested shape and a bare exit code 2 are ignored).
-- `postToolUse` -> `pf-chain-hook.cjs` (lifecycle chain visualization) and
-  `pf-superpowers-bridge` (mirrors a superpowers spec/plan doc into aihub; it reads the target
-  path from the `apply_patch` patch envelope, since Copilot has no `file_path` field).
+- `postToolUse` -> `pf-chain-hook.cjs` (lifecycle chain visualization).
 
 ## Caveats
 
@@ -72,6 +70,9 @@ hook schema with `polyforge-pf_*` / `apply_patch` matchers:
 - `${CLAUDE_PLUGIN_ROOT}` works unchanged under Copilot: it also exports `COPILOT_PLUGIN_ROOT`
   and `PLUGIN_ROOT` with the same value, so manifests and hook commands need no env-var rewrite.
 - Hooks and MCP servers DO fire under `-p` (non-interactive) — verified on 1.0.68.
-- The `PreToolUse(Skill)` skill-router does not run under Copilot (no `Skill` tool). `/pf-*`
-  skills load their step body from each `SKILL.md` fallback pointer, same as Codex. The wi
-  lifecycle (claim / step / artifact / commit / PR / wrap) is unchanged, via `polyforge(pf_*)`.
+- The `PreToolUse(Skill)` skill-router does not run under Copilot (no `Skill` tool). Under
+  Claude Code that router only ever injects for `/pf-execute` (fallback pointer to
+  `SKILL.md`'s `engine.native.md`); `/pf-spec` and `/pf-plan` are self-sufficient `SKILL.md`
+  files with no router involvement in any harness. Under Copilot `/pf-execute` loads its
+  step body from `SKILL.md`'s fallback pointer directly, same as Codex. The wi lifecycle
+  (claim / step / artifact / commit / PR / wrap) is unchanged, via `polyforge(pf_*)`.

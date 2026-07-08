@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Test suite for hooks/pf-commit-guard. Feeds synthetic PreToolUse payloads on stdin and
 # asserts on the emitted JSON: banned attribution strings must DENY, legit lookalikes must
-# pass (no output). Assert-based, no framework — mirrors pf-superpowers-bridge.test.sh.
+# pass (no output). Assert-based, no framework — mirrors tests/pf-skill-router.test.sh.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 guard="$here/../hooks/pf-commit-guard"

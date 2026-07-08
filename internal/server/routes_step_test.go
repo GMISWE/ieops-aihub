@@ -100,6 +100,8 @@ func seedStepTestWI(t *testing.T, pool *pgxpool.Pool, project, userID string) *d
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `DELETE FROM run_attempts WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1)`, project)
 	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `DELETE FROM memories WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1)`, project)
+	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `DELETE FROM work_items WHERE project=$1`, project)
 	require.NoError(t, err)
 	wi, aerr := domain.CreateWorkItem(context.Background(), pool, &domain.CreateWorkItemRequest{
@@ -129,6 +131,18 @@ func seedStepTestAttempt(t *testing.T, pool *pgxpool.Pool, wiID, userID string) 
 		attemptID, wiID)
 	require.NoError(t, err)
 	return attemptID
+}
+
+// seedStepTestMemory inserts a minimal active memory row of the given type
+// for wiID directly via SQL. The gate is existence-only (never reads
+// content), so a minimal row is sufficient.
+func seedStepTestMemory(t *testing.T, pool *pgxpool.Pool, wiID, project, userID, memType string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO memories (id, project, author_user_id, work_item_id, type, content, status)
+		VALUES ($1, $2, $3, $4, $5, 'seed content', 'active')`,
+		domain.NewID("mem"), project, userID, wiID, memType)
+	require.NoError(t, err)
 }
 
 // newStepUpdateRequest builds an authenticated echo.Context for
@@ -278,4 +292,77 @@ func TestHandleUpdateStep_EscalatedStall(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, gotErrType)
 	assert.Equal(t, "compile_error", *gotErrType)
+}
+
+// TestHandleUpdateStep_MandatoryRecordGate is the aihub#221 regression test:
+// spec/plan steps must not complete without their corresponding
+// methodology.spec/methodology.plan artifact already recorded. Other steps
+// (e.g. code_change) are unaffected.
+func TestHandleUpdateStep_MandatoryRecordGate(t *testing.T) {
+	pool := setupStepTestDB(t)
+
+	// setup returns a fresh wi + attempt + authenticated UserContext, keyed by
+	// the subtest name so each case is isolated (no cross-subtest state leak).
+	setup := func(t *testing.T) (*domain.WorkItem, string, *UserContext, string) {
+		t.Helper()
+		uid, project := seedStepTestUserAndProject(t, pool)
+		wi := seedStepTestWI(t, pool, project, uid)
+		attemptID := seedStepTestAttempt(t, pool, wi.ID, uid)
+		uc := &UserContext{
+			UserID:       uid,
+			DisplayName:  uid,
+			Role:         "writer",
+			ProjectRoles: map[string]string{project: "writer"},
+		}
+		return wi, attemptID, uc, uid
+	}
+
+	complete := func(t *testing.T, wiID, attemptID string, uc *UserContext, step string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"attempt_id":  attemptID,
+			"claim_epoch": 0,
+			"status":      "completed",
+			"step":        step,
+		})
+		require.NoError(t, err)
+		c, rec := newStepUpdateRequest(t, wiID, string(body), uc)
+		herr := handleUpdateStep(pool)(c)
+		require.NoError(t, herr)
+		return rec
+	}
+
+	t.Run("spec step rejected without methodology.spec", func(t *testing.T) {
+		wi, attemptID, uc, _ := setup(t)
+		rec := complete(t, wi.ID, attemptID, uc, "spec")
+		require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "methodology.spec")
+	})
+
+	t.Run("spec step succeeds with methodology.spec recorded", func(t *testing.T) {
+		wi, attemptID, uc, uid := setup(t)
+		seedStepTestMemory(t, pool, wi.ID, wi.Project, uid, "methodology.spec")
+		rec := complete(t, wi.ID, attemptID, uc, "spec")
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("plan step rejected without methodology.plan", func(t *testing.T) {
+		wi, attemptID, uc, _ := setup(t)
+		rec := complete(t, wi.ID, attemptID, uc, "plan")
+		require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "methodology.plan")
+	})
+
+	t.Run("plan step succeeds with methodology.plan recorded", func(t *testing.T) {
+		wi, attemptID, uc, uid := setup(t)
+		seedStepTestMemory(t, pool, wi.ID, wi.Project, uid, "methodology.plan")
+		rec := complete(t, wi.ID, attemptID, uc, "plan")
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("non-gated step succeeds with no artifact", func(t *testing.T) {
+		wi, attemptID, uc, _ := setup(t)
+		rec := complete(t, wi.ID, attemptID, uc, "code_change")
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	})
 }

@@ -1,8 +1,10 @@
-# _common/lifecycle.md — step lifecycle & ownership (always injected)
+# _common/lifecycle.md — step lifecycle & ownership (injected for pf-execute)
 
-> Injected by `hooks/pf-skill-router` for EVERY pf-spec / pf-plan / pf-execute step, in
-> **BOTH** branches. polyforge owns the wi lifecycle end-to-end; superpowers (when present)
-> is only the content **engine** — it never owns any of the calls below.
+> Injected by `hooks/pf-skill-router` for every pf-execute step. polyforge owns the wi
+> lifecycle end-to-end; superpowers (when present) is only the content **engine** — it never
+> owns any of the calls below. (pf-spec and pf-plan inline their own step-bracket calls —
+> including, for pf-plan, the `declared_resources` derivation that used to live here — see
+> their SKILL.md; they no longer depend on this fragment or router injection.)
 
 ## Bracket every step with status reporting
 
@@ -63,38 +65,6 @@ if worktrees:
     parent = os.path.dirname(next(iter(worktrees.values())))
     if os.path.isdir(parent): rm -rf <parent>
 ```
-
-## Plan-step only: derive and write declared_resources
-
-> This block runs ONLY at the end of the **plan step**, after the plan artifact has been saved
-> (i.e. after `pf_save_artifact` and the note emit described in `_common/storage.md`). It does
-> NOT run for spec or execute steps.
-
-Parse the plan's per-step `Touched files:` lines to build a `declared_resources` list:
-- Files the step will MODIFY → `{"type": "path", "uri": "file:<repo-relative-path>", "intent": "write"}`
-- Files the step will only READ → `{"type": "path", "uri": "file:<repo-relative-path>", "intent": "read"}`
-- Steps that say `(no file edits)` or `(read-only)` → skip (no resource entry)
-
-Collect all unique file entries across all steps, then call:
-
-```
-pf_update_work_item(
-  work_item_id=<current>,
-  declared_resources=[
-    {"type": "path", "uri": "file:<repo-relative-path>", "intent": "write"},
-    ...
-  ]
-)
-```
-
-**IMPORTANT**:
-- Do NOT pass `resources_version` — it triggers a 400 error (known aihub issue).
-- Deduplicate: if the same path appears as both write and read across steps, emit only the
-  `write` entry (write is the stronger intent).
-- If the plan has no file changes at all (all steps read-only or no-edit), still call
-  `pf_update_work_item` with an empty list to clear any stale resources.
-- This is a lifecycle call — it runs in both the superpowers branch and the native branch,
-  because `_common/lifecycle.md` is injected by the router for both.
 
 ---
 

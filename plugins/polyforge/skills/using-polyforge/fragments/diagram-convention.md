@@ -5,8 +5,8 @@ block in **D2** syntax. aihub's `/ui` artifact viewer compiles ` ```d2 ` blocks 
 SVG server-side (aihub#160). Other diagram syntaxes (mermaid, etc.) are **not** rendered —
 they stay as plain code blocks.
 
-This applies to every artifact that lands in aihub: `/pf-spec` and `/pf-plan` output, any
-`methodology.*` artifact, and superpowers design/plan docs once the bridge mirrors them.
+This applies to every artifact that lands in aihub: `/pf-spec` and `/pf-plan` output, and any
+`methodology.*` artifact.
 
 - Use D2 syntax (`a -> b: label`, `node: { ... }`), not mermaid.
 - Rendering is `/ui`-only; `/v1` + `/share` keep the raw fenced block (byte-stable).

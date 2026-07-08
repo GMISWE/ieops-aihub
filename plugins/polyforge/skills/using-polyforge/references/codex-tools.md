@@ -31,8 +31,10 @@ Verify with `codex mcp list` or the in-session `/mcp` command. The tools then su
 
 ## Skill-router note
 
-Under Claude Code a PreToolUse(`Skill`) hook injects the step body for `/pf-spec`, `/pf-plan`,
-and `/pf-execute`. Codex has no `Skill` tool, so that hook does not run. Under Codex these
-skills load their step body from each `SKILL.md` directly (the stub's fallback pointer routes
-to `engine.native.md` + `_common/*`). The wi lifecycle (claim / step / artifact / commit / PR /
-wrap) is unchanged — it runs through the `mcp__polyforge__pf_*` tools.
+Under Claude Code a PreToolUse(`Skill`) hook injects the step body for `/pf-execute` only
+(its stub's fallback pointer routes to `engine.native.md` + `_common/*`). `/pf-spec` and
+`/pf-plan` are self-sufficient `SKILL.md` files with no router involvement. Codex has no
+`Skill` tool, so the router hook does not run at all under Codex — `/pf-execute` loads its
+step body from `SKILL.md`'s fallback pointer directly, same as `/pf-spec` and `/pf-plan`.
+The wi lifecycle (claim / step / artifact / commit / PR / wrap) is unchanged — it runs
+through the `mcp__polyforge__pf_*` tools.

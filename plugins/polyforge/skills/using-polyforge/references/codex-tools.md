@@ -3,19 +3,27 @@
 polyforge ships as a Claude Code plugin. Codex (codex-cli) is largely compatible, but a few
 tool names and one install step differ. When running under Codex, apply this mapping.
 
-## MCP server registration (one-time, required)
+## MCP server registration (automatic)
 
-Codex does NOT register an MCP server from the plugin manifest. Register the polyforge MCP
-server explicitly (this writes `~/.codex/config.toml [mcp_servers.polyforge]`):
+The plugin manifest auto-registers the polyforge MCP server on install, as a **local stdio
+command** — no manual step. This works via `.codex-plugin/plugin.json`'s
+`"mcpServers": "./.codex-plugin/mcp.json"` pointer (Codex's manifest MCP form is a path to a
+direct server-map file, not Claude's inline `mcpServers` object). Verify with
+`codex mcp list` or the in-session `/mcp` command; tools surface as `mcp__polyforge__pf_*`.
+
+**"Auth: Unsupported" is expected and harmless.** Codex only reports an auth status for
+OAuth / streamable-HTTP servers; every *local stdio* server shows "Unsupported" in that
+column. It does NOT block tool calls (openai/codex#15609). polyforge authenticates to the
+backend internally through `~/.polyforge/config.toml` ([auth] api_key + [server] url), never
+via MCP transport auth — so there is nothing for Codex to "support" here.
+
+**Fallback (only if auto-registration did not happen).** Register by hand, but with an
+ABSOLUTE path: in an interactive shell `$CLAUDE_PLUGIN_ROOT` is empty, so the
+`$CLAUDE_PLUGIN_ROOT/...` form records a truncated path and the server fails to start.
 
 ```bash
-codex mcp add polyforge -- "$CLAUDE_PLUGIN_ROOT/bin/polyforge-mcp.sh"
-# CLAUDE_PLUGIN_ROOT is set by Codex for installed plugins. If unset, pass the absolute path
-# to <plugin-root>/bin/polyforge-mcp.sh instead.
+codex mcp add polyforge -- /absolute/path/to/<plugin-cache>/bin/polyforge-mcp.sh
 ```
-
-Verify with `codex mcp list` or the in-session `/mcp` command. The tools then surface as
-`mcp__polyforge__pf_*`.
 
 ## Tool-name mapping (Claude Code -> Codex)
 

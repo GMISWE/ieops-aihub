@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # PreToolUse(Skill) router hook for polyforge v1.
 # Fires right before a Skill tool call (there is no dedicated SkillStart event). When the
-# skill being invoked is one of {polyforge:pf-spec, pf-plan, pf-execute}, this hook ASSEMBLES
-# that step's body at the call site and injects it via hookSpecificOutput.additionalContext —
-# the SKILL.md files themselves are stubs, so this injection IS the step body.
+# skill being invoked is polyforge:pf-execute, this hook ASSEMBLES that step's body at the
+# call site and injects it via hookSpecificOutput.additionalContext — the SKILL.md file
+# itself is a stub, so this injection IS the step body. pf-spec and pf-plan are
+# self-sufficient SKILL.md files (no stub, no injection) and are not routed by this hook.
 #
-# Composition (see skills/_common/*.md and skills/pf-<skill>/engine.native.md):
+# Composition (see skills/_common/*.md and skills/pf-execute/engine.native.md):
 #   additionalContext = header
 #                     + _common/memory.md      (Memory-First recall + team-memory sync)
 #                     + <engine fragment>       (superpowers pointer  |  engine.native.md)
@@ -14,13 +15,14 @@
 # The _common/* fragments are injected in BOTH branches — lifecycle never depends on which
 # engine writes the content. Only the engine fragment branches on whether superpowers is enabled.
 #
-# Inert (exit 0, no output) for any non-target skill, and FAIL-SILENT on any error: if this
-# hook emits nothing, the stub's load-bearing pointer line routes the model to engine.native.md
-# + _common/*.md (the fallback). It never blocks or denies a skill call.
+# Inert (exit 0, no output) for any non-target skill (including pf-spec/pf-plan), and
+# FAIL-SILENT on any error: if this hook emits nothing for pf-execute, the stub's
+# load-bearing pointer line routes the model to engine.native.md + _common/*.md (the
+# fallback). It never blocks or denies a skill call.
 #
 # NOTE: the PreToolUse payload arrives on this script's stdin. We capture it into an env var
 # FIRST, because the python program is delivered to python3 via a heredoc on python3's stdin —
-# so python's sys.stdin is the heredoc, NOT the hook payload (mirrors pf-superpowers-bridge).
+# so python's sys.stdin is the heredoc, NOT the hook payload.
 
 set -euo pipefail
 command -v python3 >/dev/null 2>&1 || exit 0  # no python3 -> inert, never block
@@ -62,42 +64,10 @@ if not isinstance(ti, dict):
 skill = (ti.get("skill") or "").strip()
 if not skill:
     sys.exit(0)
-base = skill.split(":")[-1]  # "polyforge:pf-spec" -> "pf-spec"
+base = skill.split(":")[-1]  # "polyforge:pf-execute" -> "pf-execute"
 
 # Per-skill parameters: (step_id, artifact_type, recall_type_filter, superpowers_engine_pointer)
 TARGETS = {
-    "pf-spec": (
-        "spec", "methodology.spec", "methodology.spec|fact.*|rule.*",
-        "Use `superpowers:brainstorming` as the engine to produce the spec content (honor its "
-        "HARD-GATE and its default of writing `docs/superpowers/specs/<date>-<topic>-design.md`; "
-        "do not block or rewrite that). After superpowers writes that file, RECORD its content into "
-        "polyforge: call `pf_save_artifact(type=\"methodology.spec\", work_item_id=<current wi>, "
-        "path=\"<absolute path to the file superpowers just wrote>\")`; on repeated re-writes of the same "
-        "source file, pass `supersedes_memory_id` to overwrite the prior version instead of duplicating. "
-        "The pf-superpowers-bridge hook saves this artifact deterministically; if it reports it failed, call "
-        "pf_save_artifact yourself with path= (not inline content)."
-        " The spec artifact MUST include at least one fenced ```d2 architecture/data-flow diagram "
-        "(components + data flow); aihub renders ```d2 blocks to SVG in /ui, so use D2 syntax (a -> b: label), not mermaid."
-        " Do NOT change the output path (docs/superpowers/specs/ for specs) -- the bridge only watches "
-        "the default path. If the user insists on a different path, YOU must call pf_save_artifact(path=...) "
-        "yourself, or the aihub mirror is silently skipped.",
-    ),
-    "pf-plan": (
-        "plan", "methodology.plan", "methodology.plan|experience.*",
-        "Use `superpowers:writing-plans` as the engine to produce the plan content (honor its default "
-        "of writing `docs/superpowers/plans/<date>-<feature>.md`; do not block or rewrite that). After "
-        "superpowers writes that file, RECORD its content into polyforge: call `pf_save_artifact("
-        "type=\"methodology.plan\", work_item_id=<current wi>, path=\"<absolute path to the file superpowers just wrote>\")`; on "
-        "repeated re-writes of the same source file, pass `supersedes_memory_id` to overwrite the prior "
-        "version instead of duplicating. "
-        "The pf-superpowers-bridge hook saves this artifact deterministically; if it reports it failed, call "
-        "pf_save_artifact yourself with path= (not inline content)."
-        " The plan artifact MUST include at least one fenced ```d2 architecture/data-flow diagram "
-        "(components + data flow); aihub renders ```d2 blocks to SVG in /ui, so use D2 syntax (a -> b: label), not mermaid."
-        " Do NOT change the output path (docs/superpowers/plans/ for plans) -- the bridge only watches "
-        "the default path. If the user insists on a different path, YOU must call pf_save_artifact(path=...) "
-        "yourself, or the aihub mirror is silently skipped.",
-    ),
     "pf-execute": (
         "execute", "", "experience.*|rule.*",
         "Delegate each scenario step's implementation to `superpowers:subagent-driven-development` "

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Read-only drift probe: warns when the cached `superpowers` plugin no longer matches the
-# assumptions polyforge hardcodes against version 6.1.1 (skill names the router/SDD depend
-# on, the bridge's hardcoded output-path regex, and the router's `superpowers@` settings
-# prefix scan). Never blocks -- always exits 0; pf-doctor interprets the [WARN] lines.
+# assumptions polyforge hardcodes against version 6.1.1 (skill names the pf-execute engine
+# pointer depends on, and the router's `superpowers@` settings prefix scan). Never blocks --
+# always exits 0; pf-doctor interprets the [WARN] lines.
 #
 # Usage: bash pf-seam-check
 # Env overrides (for tests): PF_SEAM_CACHE_DIR (plugin cache root), PF_SEAM_WS (workspace
@@ -49,12 +49,12 @@ if [ "$highest" != "$PIN_VERSION" ]; then
 fi
 
 # --- Probe A: skill names + frontmatter ---
-names=(brainstorming writing-plans subagent-driven-development executing-plans finishing-a-development-branch)
+names=(subagent-driven-development executing-plans finishing-a-development-branch)
 for name in "${names[@]}"; do
     f="$target_dir/$name/SKILL.md"
     if [ ! -f "$f" ]; then
         case "$name" in
-            brainstorming|writing-plans|subagent-driven-development)
+            subagent-driven-development)
                 warn "skill name: $name" "SKILL.md missing; pf-skill-router's engine pointer for this skill will not resolve" ;;
             finishing-a-development-branch)
                 warn "skill name: $name" "SKILL.md missing; _common/lifecycle.md's D6 execute boundary references this terminal skill" ;;
@@ -66,7 +66,7 @@ for name in "${names[@]}"; do
     fm_name="$(sed -n '2p' "$f" | sed -n 's/^name: *//p')"
     if [ "$fm_name" != "$name" ]; then
         case "$name" in
-            brainstorming|writing-plans|subagent-driven-development)
+            subagent-driven-development)
                 warn "skill name: $name" "frontmatter name is '$fm_name'; pf-skill-router's engine pointer for this skill will not resolve" ;;
             finishing-a-development-branch)
                 warn "skill name: $name" "frontmatter name is '$fm_name'; _common/lifecycle.md's D6 execute boundary references this terminal skill" ;;
@@ -77,21 +77,6 @@ for name in "${names[@]}"; do
     fi
     ok "skill name: $name"
 done
-
-# --- Probe B: bridge output paths ---
-brainstorming_md="$target_dir/brainstorming/SKILL.md"
-if [ -f "$brainstorming_md" ] && grep -q "docs/superpowers/specs/" "$brainstorming_md"; then
-    ok "output path: brainstorming -> docs/superpowers/specs/"
-else
-    warn "output path: brainstorming" "bridge mirror path drifted; pf-superpowers-bridge regex will not match => silent mirror miss"
-fi
-
-writing_plans_md="$target_dir/writing-plans/SKILL.md"
-if [ -f "$writing_plans_md" ] && grep -q "docs/superpowers/plans/" "$writing_plans_md"; then
-    ok "output path: writing-plans -> docs/superpowers/plans/"
-else
-    warn "output path: writing-plans" "bridge mirror path drifted; pf-superpowers-bridge regex will not match => silent mirror miss"
-fi
 
 # --- Probe C: settings prefix scan ---
 # Mirror pf-skill-router's resolution exactly: scan $HOME/.claude AND the workspace's
@@ -139,7 +124,7 @@ fi
 if [ "$found_prefix" -eq 1 ]; then
     ok "settings prefix: superpowers@ found"
 else
-    warn "settings prefix" "pf-skill-router:146 superpowers@ prefix will not detect superpowers"
+    warn "settings prefix" "pf-skill-router's superpowers@ prefix will not detect superpowers"
 fi
 
 if [ "$warnings" -eq 0 ]; then

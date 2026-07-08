@@ -158,6 +158,23 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			}
 			eventType = "step_started"
 		case "completed":
+			// Mandatory-record gate (aihub#221): spec/plan steps cannot complete
+			// without the corresponding methodology.* artifact already recorded.
+			// Existence-only check — never reads content — so it stays cheap and
+			// does not route through scanMemory.
+			if req.Step != nil && (*req.Step == "spec" || *req.Step == "plan") {
+				requiredType := "methodology." + *req.Step
+				var exists bool
+				if qErr := tx.QueryRow(c.Request().Context(), `
+					SELECT EXISTS(SELECT 1 FROM memories WHERE work_item_id=$1 AND type=$2 AND status='active')`,
+					wiID, requiredType).Scan(&exists); qErr != nil {
+					return writeError(c, domain.NewErr(domain.ErrInternalError, qErr.Error()))
+				}
+				if !exists {
+					return writeError(c, domain.NewErr(domain.ErrBadRequest,
+						*req.Step+" step cannot complete without a "+requiredType+" artifact; record it first"))
+				}
+			}
 			if _, execErr := tx.Exec(c.Request().Context(), `
 				UPDATE wi_step_state
 				SET current_step = $2, current_step_status = 'idle',

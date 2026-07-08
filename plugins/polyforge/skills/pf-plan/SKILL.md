@@ -7,26 +7,147 @@ description: >
 
 # pf-plan — Plan & Child Wi Creation
 
-> **Stub.** The real body of this step is injected at call time by the `PreToolUse(Skill)`
-> router (`hooks/pf-skill-router`): with superpowers enabled it points planning at
-> `superpowers:writing-plans`; without it, it injects this folder's `engine.native.md`.
-> In both cases it also injects `../_common/{memory,storage,lifecycle}.md` (Memory-First
-> recall, save_artifact, step reporting and wrap — all owned by polyforge).
->
-> ⚠️ **Fallback:** if you are reading this line and did NOT receive an injected step body
-> (the router did not fire), read this folder's `engine.native.md` plus
-> `../_common/{memory,storage,lifecycle}.md` and follow those, or run `/pf-doctor`. When an
-> injected body is present, it takes precedence over this stub.
-
 ## Usage
 
-**Purpose**: Write the plan artifact for the current wi, breaking implementation into ordered steps.
+**Purpose**: Write the plan artifact for the current wi — OpenSpec requirements + scenarios,
+plus ordered implementation steps with declared touched files.
 
 **Pattern**: `/pf-plan`
 
 **Required**: a currently-claimed wi with a completed spec step.
 
 **Flags**: none
+
+## Contract
+
+The plan MUST be written in OpenSpec grammar:
+
+- `## Requirements`
+- `### Requirement: <title>` — phrase each with an RFC-2119 keyword (MUST / SHALL / SHOULD)
+- `#### Scenario: <title>` — at least one per requirement, in GIVEN/WHEN/THEN form
+
+Additionally, the plan groups the work into ordered implementation steps. Every step MUST
+carry a `Touched files: <repo-relative path> (write|read), ...` line, or `Touched files: (no
+file edits)` when the step makes no changes — this list drives Step 5 below.
+
+Example:
+
+```markdown
+## Requirements
+
+### Requirement: The scheduler MUST defer pods with an unbound PVC
+#### Scenario: Pod references an unbound PVC
+- GIVEN a pod spec references a PVC that is not yet bound
+- WHEN the scheduler evaluates the pod for placement
+- THEN scheduling MUST be deferred until the PVC is bound
+
+## Steps
+
+1. **implement_pvc_guard** (m) — add the bound-PVC check to the scheduler predicate
+   - Touched files: `pkg/scheduler/predicates.go` (write)
+2. **write_tests** (s) — unit tests for the guard
+   - Touched files: `pkg/scheduler/predicates_test.go` (write)
+3. **ship** (xs) — commit, push, PR
+   - Touched files: (no file edits)
+```
+
+## Produce with your engine
+
+Polyforge does not pick or drive an authoring engine — use whatever your harness has
+installed, or write it by hand. Examples only, no auto-detection:
+
+- `superpowers:writing-plans` (if the superpowers plugin is installed)
+- mattpocok's `to-issues`
+- OpenSpec's `/opsx:propose`
+- by hand, following the Contract above directly
+
+Whichever you use, the output markdown must satisfy the Contract above before you record it.
+
+## Mechanic
+
+### Step 1: Memory-First recall
+
+```
+pf_recall(project=<current>, query=<wi.goal>, type="methodology.plan|experience.*", top_k=5)
+```
+
+Display results with `effective_strength >= 0.3` (💡 prefix). For any memory the model
+judges actually useful, call `pf_activate_memory(id)`.
+
+### Step 2: Mark the step in_progress
+
+```
+version = pf_get_step(work_item_id=<current>).version
+sa_id    = new_ulid()
+pf_update_step(work_item_id=<current>, step_id="plan", status="in_progress",
+               expected_version=version)
+```
+
+### Step 3: Write the plan
+
+Produce the markdown per the Contract above (read the head `methodology.spec` artifact first
+via `pf_recall(project=<current>, work_item_id=<current>, type="methodology.spec", top_k=1)` to ground the
+requirements), using the engine you picked in the previous section.
+
+### Step 4: Record the artifact
+
+There is no superpowers-bridge hook watching for this anymore — recording is always this
+explicit call, whichever engine wrote the content:
+
+```
+pf_save_artifact(
+  type="methodology.plan",
+  work_item_id=<current>,
+  content=<the markdown>,          # OR path="<abs path to the doc>" to read from disk (no inlining)
+  structured_payload={"steps": [<step ids>]},
+  supersedes_memory_id=<prior plan id, if revising>,
+  visibility="project"
+)
+pf_emit_event(work_item_id=<current>, event_type="note", payload={text: "plan saved: mem_<id>"})
+```
+
+Use the literal string `"methodology.plan"` shown above — there is no router to substitute a
+placeholder for you.
+
+### Step 5: Derive and write `declared_resources` (plan only)
+
+Parse the plan's per-step `Touched files:` lines into a `declared_resources` list:
+
+- Files a step will MODIFY → `{"type": "path", "uri": "file:<repo-relative-path>", "intent": "write"}`
+- Files a step will only READ → `{"type": "path", "uri": "file:<repo-relative-path>", "intent": "read"}`
+- Steps marked `(no file edits)` → skip (no resource entry)
+
+Collect unique file entries across all steps — if the same path appears as both write and
+read, keep only the `write` entry (write is the stronger intent) — then:
+
+```
+pf_update_work_item(
+  work_item_id=<current>,
+  declared_resources=[
+    {"type": "path", "uri": "file:<repo-relative-path>", "intent": "write"},
+    ...
+  ]
+)
+```
+
+- Do NOT pass `resources_version` — it triggers a 400 error (known aihub issue).
+- If the plan has no file changes at all, still call `pf_update_work_item` with an empty
+  list to clear any stale resources.
+
+### Step 6: Mark the step completed
+
+```
+pf_update_step(work_item_id=<current>, step_id="plan", status="completed",
+               step_attempt_id=sa_id, artifact_summary="<one sentence, status only>")
+```
+
+If the run surfaced a pitfall or reusable approach worth remembering across sessions,
+capture it (don't over-save):
+
+```
+pf_remember(type="experience.*|fact.*|rule.*", project=<current>, content=<finding>,
+            work_item_id=<current>, visibility="project")
+```
 
 ## NL Triggers
 

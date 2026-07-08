@@ -5,9 +5,9 @@
 # json.dumps with ensure_ascii=True, so all assertions match ASCII substrings only (Chinese
 # prose is \uXXXX-escaped and never asserted on).
 #
-# Covers: three-skill identification, composition (common + engine), superpowers branch vs
-# native fallback, common fragments injected in BOTH branches, prefix stripping, non-target
-# inert, empty/bad payload safety.
+# Covers: pf-execute identification, composition (common + engine), superpowers branch vs
+# native fallback, common fragments injected in BOTH branches, pf-spec/pf-plan no longer
+# routed (self-sufficient SKILL.md, no injection), non-target inert, empty/bad payload safety.
 
 set -uo pipefail
 
@@ -44,37 +44,13 @@ ck()      { if has "$1" "$2"; then echo "  PASS: $3"; else echo "  FAIL: $3 (mis
 ck_not()  { if has "$1" "$2"; then echo "  FAIL: $3 (unexpected: $2)" >&2; fails=$((fails+1)); else echo "  PASS: $3"; fi; }
 ck_empty(){ if [ -z "$1" ]; then echo "  PASS: $2"; else echo "  FAIL: $2 (expected empty, got ${#1} chars)" >&2; fails=$((fails+1)); fi; }
 
-echo "== pf-spec, superpowers OFF (native) =="
-o="$(run polyforge:pf-spec "$ws_off")"
-ck "$o" "Guide spec definition" "native engine fragment injected"
-ck "$o" "methodology.spec"      "storage common: artifact type substituted"
-ck "$o" "Memory-First recall"   "memory common injected"
-ck "$o" "Bracket every step"    "lifecycle common injected"
-ck "$o" "engine: native"        "router header labels engine=native"
-ck_not "$o" "engine: superpowers" "native branch not labelled superpowers"
+echo "== pf-spec is no longer routed (self-sufficient SKILL.md) =="
+ck_empty "$(run polyforge:pf-spec "$ws_off")" "pf-spec, superpowers off -> no injection"
+ck_empty "$(run polyforge:pf-spec "$ws_on")"  "pf-spec, superpowers on -> no injection"
 
-echo "== pf-spec, superpowers ON =="
-o="$(run polyforge:pf-spec "$ws_on")"
-ck "$o" "superpowers:brainstorming" "superpowers engine pointer injected"
-ck "$o" "docs/superpowers/specs"    "pointer tells model where superpowers writes the doc"
-ck "$o" "pf_save_artifact"          "pointer says record the doc into polyforge after writing"
-ck "$o" "methodology.spec"          "storage common present in superpowers branch (both-branch invariant)"
-ck "$o" "Memory-First recall"       "memory common present in superpowers branch (both-branch invariant)"
-ck "$o" "Bracket every step"        "lifecycle common present in superpowers branch (both-branch invariant)"
-ck_not "$o" "Guide spec definition" "native engine fragment NOT injected when superpowers on"
-ck "$o" "MUST include"             "spec pointer mandates a diagram"
-ck "$o" "d2"                       "spec pointer names d2 format"
-
-echo "== pf-plan =="
-o="$(run polyforge:pf-plan "$ws_off")"
-ck "$o" "Draft plan steps" "plan native engine injected"
-ck "$o" "methodology.plan" "plan storage artifact type"
-o="$(run polyforge:pf-plan "$ws_on")"
-ck "$o" "superpowers:writing-plans" "plan superpowers pointer"
-ck "$o" "docs/superpowers/plans"    "plan pointer tells where superpowers writes + record into polyforge"
-ck "$o" "Bracket every step"        "plan lifecycle common in superpowers branch"
-ck "$o" "MUST include"             "plan pointer mandates a diagram"
-ck "$o" "d2"                       "plan pointer names d2 format"
+echo "== pf-plan is no longer routed (self-sufficient SKILL.md) =="
+ck_empty "$(run polyforge:pf-plan "$ws_off")" "pf-plan, superpowers off -> no injection"
+ck_empty "$(run polyforge:pf-plan "$ws_on")"  "pf-plan, superpowers on -> no injection"
 
 echo "== pf-execute =="
 o="$(run polyforge:pf-execute "$ws_off")"
@@ -90,8 +66,7 @@ ck "$o" "model: opus"                      "execute pointer: review/architecture
 ck_not "$o" "superpowers:executing-plans"  "execute pointer fixed on SDD (executing-plans removed)"
 
 echo "== prefix stripping (skill without 'polyforge:' prefix) =="
-o="$(run pf-spec "$ws_off")"
-ck "$o" "Guide spec definition" "bare 'pf-spec' recognised"
+ck_empty "$(run pf-spec "$ws_off")" "bare 'pf-spec' still not routed"
 
 echo "== non-target skill is inert =="
 o="$(run polyforge:pf-help "$ws_off")"

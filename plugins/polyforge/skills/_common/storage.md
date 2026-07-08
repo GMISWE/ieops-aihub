@@ -1,44 +1,10 @@
-# _common/storage.md — artifact storage (always injected)
+# _common/storage.md — artifact storage (injected for pf-execute)
 
-> Injected by `hooks/pf-skill-router` for EVERY pf-spec / pf-plan / pf-execute step, in
-> **BOTH** branches. Persisting the engine's output into aihub is a polyforge lifecycle
-> concern — it happens whether the content was authored by superpowers or the native engine.
+> Injected by `hooks/pf-skill-router` for every pf-execute step. pf-spec and pf-plan are
+> self-contained thin skills now — they call `pf_save_artifact` inline with a literal type
+> string (see their SKILL.md) and no longer depend on this fragment or router injection.
 
 **Artifact type for this step**: `@@ARTIFACT_TYPE@@`
-
-## spec / plan steps — save the artifact
-
-```
-pf_save_artifact(
-  type="@@ARTIFACT_TYPE@@",
-  work_item_id=<current>,
-  content=<the markdown the engine produced>,   # OR path="<abs path to the doc file>" to read from disk (no inlining)
-  structured_payload={ ... },   # spec: feature / decisions / acceptance_criteria / non_goals
-                                 # plan: steps[]
-  supersedes_memory_id=<prior artifact id, if revising>,
-  visibility="project"
-)
-```
-
-Then emit the note:
-```
-pf_emit_event(work_item_id=<current>, event_type="note",
-              payload={text: "<spec|plan> saved: mem_<id>"})
-```
-
-> **Plan step only — touched files requirement**: the plan content saved above MUST include,
-> for every step, a `Touched files:` line listing files that step will modify (write) or only
-> read, using repo-relative paths. Example: `Touched files: cmd/bff/main.go (write), pkg/api/types.go (read)`.
-> Steps with no file changes write `(no file edits)`. This list is consumed by the plan-step
-> lifecycle block in `_common/lifecycle.md` to derive `declared_resources`. When using
-> `superpowers:writing-plans` as the engine, instruct it to include this `Touched files:` line
-> per step before it writes its output file.
-
-> **superpowers branch**: the `pf-superpowers-bridge` PostToolUse hook saves the doc into aihub
-> **deterministically** (it reads the wi state + config and POSTs directly). You do NOT need to call
-> `pf_save_artifact` yourself; only do so if the bridge's output reports it could not save (missing
-> creds / network) — and when you do, pass `path="<abs path to the doc file>"` (NOT inline content) so the
-> file is read locally and kept out of the agent context.
 
 ## execute steps
 

@@ -1,8 +1,10 @@
-# _common/memory.md — Memory-First + team-memory sync (always injected)
+# _common/memory.md — Memory-First + team-memory sync (injected for pf-execute)
 
-> Injected by `hooks/pf-skill-router` for EVERY pf-spec / pf-plan / pf-execute step, in
-> **BOTH** the superpowers branch and the native branch. Recall and remember are polyforge
-> lifecycle — they run regardless of which engine writes the content.
+> Injected by `hooks/pf-skill-router` for every pf-execute step, in both the superpowers
+> branch and the native branch. Recall and remember are polyforge lifecycle — they run
+> regardless of which engine writes the content. (pf-spec and pf-plan inline their own
+> Memory-First recall with a literal type filter — see their SKILL.md; they no longer depend
+> on this fragment or router injection.)
 
 ## Before the engine — Memory-First recall
 

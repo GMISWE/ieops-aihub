@@ -126,18 +126,18 @@ disable the polyforge plugin. `--uninstall` only undoes the statusLine takeover.
 
 ### Check 7 - seam-check (superpowers)
 
-`pf-seam-check` pins the 6.1.1 baseline of the cached `superpowers` plugin that several
-polyforge consumers hardcode against: 5 skill names -- the 3 the router's engine pointers
-depend on (`brainstorming`, `writing-plans`, `subagent-driven-development`),
-`finishing-a-development-branch` (`_common/lifecycle.md`'s D6 boundary), and the one the
-router test's negative assertion checks stays absent from the execute pointer -- plus the 2
-output paths `pf-superpowers-bridge`'s regex watches (`docs/superpowers/specs/`,
-`docs/superpowers/plans/`), and the `superpowers@` prefix `pf-skill-router:146` scans for in
-`enabledPlugins`. Any `[WARN]` line means the installed superpowers version drifted from one
-of these assumptions and the dependent polyforge seam may now silently no-op (e.g. the
-router falls back to native engine without telling you, or the bridge stops mirroring docs).
-Treat a WARN as: re-verify the seam by hand against the new superpowers version, then update
-the pin (`PIN_VERSION` in `bin/pf-seam-check`) and any regex/name it names.
+`pf-seam-check` pins the 6.1.1 baseline of the cached `superpowers` plugin that pf-execute's
+engine pointer hardcodes against: `subagent-driven-development` (the engine pointer itself),
+`finishing-a-development-branch` (`_common/lifecycle.md`'s D6 boundary), and
+`executing-plans` (the one the router test's negative assertion checks stays absent from the
+execute pointer) -- plus the `superpowers@` prefix `pf-skill-router` scans for in
+`enabledPlugins`. pf-spec and pf-plan are self-sufficient SKILL.md files with no router
+injection and no superpowers dependency, so they are out of scope for this check. Any
+`[WARN]` line means the installed superpowers version drifted from one of these assumptions
+and pf-execute's engine pointer may now silently no-op (the router falls back to native
+engine without telling you). Treat a WARN as: re-verify the seam by hand against the new
+superpowers version, then update the pin (`PIN_VERSION` in `bin/pf-seam-check`) and any
+name it references.
 
 ## Output (three-segment format)
 

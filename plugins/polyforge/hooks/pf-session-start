@@ -4,8 +4,8 @@
 # skills/using-polyforge/SKILL.md: each `@include: <path>` pulls a fragment, an optional
 # immediately-following `when: <cond>` makes it conditional. Conditions are evaluated
 # against enabledPlugins across the user (~/.claude) and project (<workspace>/.claude)
-# settings layers (low->high precedence), so a fragment like superpowers-bridge is added
-# only when that plugin is ENABLED for the workspace. No-op outside a polyforge workspace
+# settings layers (low->high precedence), so a conditional fragment is only added when the
+# plugin it depends on is ENABLED for the workspace. No-op outside a polyforge workspace
 # (.polyforge.yaml walk-up). Skill tree is the plugin's own, so injection travels with it.
 #
 # JSON is emitted via python3 json.dumps so every control character escapes correctly.

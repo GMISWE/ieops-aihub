@@ -149,7 +149,7 @@ func availableProjectsForUI(ctx context.Context, pool *pgxpool.Pool, u *UserCont
 		return nil
 	}
 	if u.Role == "admin" {
-		projs, _ := domain.ListProjects(ctx, pool, &domain.UserRecord{ID: u.UserID, Role: u.Role})
+		projs, _ := domain.ListProjects(ctx, pool, &domain.UserRecord{ID: u.UserID, Role: u.Role, ProjectScope: u.ProjectScope})
 		out := make([]string, 0, len(projs))
 		for _, p := range projs {
 			out = append(out, p.Name)
@@ -163,6 +163,13 @@ func availableProjectsForUI(ctx context.Context, pool *pgxpool.Pool, u *UserCont
 	}
 	sort.Strings(out)
 	return out
+}
+
+// uiScopeBlocks reports whether the caller's api-key project_scope forbids
+// this project. A scoped key (any role, including admin) may touch only its
+// one project on the /ui plane.
+func uiScopeBlocks(u *UserContext, project string) bool {
+	return u != nil && u.ProjectScope != nil && *u.ProjectScope != project
 }
 
 // personChip is the view-model for the prototype .who/.av person chip. Empty

@@ -156,6 +156,7 @@ func loadUserByAPIKeyID(ctx context.Context, pool *pgxpool.Pool, apiKeyID string
 		return nil, errSessionExpired
 	}
 	uc.APIKeyID = apiKeyID
+	uc.ProjectScope = projectScope
 	uc.ProjectRoles = make(map[string]string)
 	if uc.Role != "admin" {
 		prows, perr := pool.Query(ctx, `

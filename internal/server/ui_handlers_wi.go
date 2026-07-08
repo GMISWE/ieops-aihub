@@ -568,7 +568,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		// Per-project active-wi counts for the switcher dropdown. Scope to the
 		// projects the user can see; nil for admins means "all projects".
 		var countScope []string
-		if u.Role != "admin" {
+		if u.Role != "admin" || u.ProjectScope != nil {
 			countScope = projects
 		}
 		data.ProjectCounts, data.TotalCount = fetchProjectWICountsFn(ctx, pool, countScope)
@@ -667,12 +667,12 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		var facetScope []string
 		if allMode {
 			queryProject = ""
-			if u.Role != "admin" {
-				// non-admin view-all is bounded to their member projects
+			if u.Role != "admin" || u.ProjectScope != nil {
+				// non-admin (or scoped admin) view-all is bounded to their member/scoped projects
 				filter.AccessibleProjects = projects
 				facetScope = projects
 			}
-			// admin view-all: AccessibleProjects empty + facetScope nil = every project
+			// unscoped admin view-all: AccessibleProjects empty + facetScope nil = every project
 		} else {
 			// single project — access check (admin bypasses)
 			if err := checkProjectAccessSoft(u, project); err != nil {
@@ -742,7 +742,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		doneScope := []string{project}
 		if allMode {
 			doneScope = nil
-			if u.Role != "admin" {
+			if u.Role != "admin" || u.ProjectScope != nil {
 				doneScope = projects
 			}
 		}
@@ -1529,6 +1529,9 @@ func renderHTMLStatus(c echo.Context, tmpl *template.Template, name string, data
 func checkProjectAccessSoft(u *UserContext, project string) error {
 	if u == nil {
 		return errSoft("not authenticated")
+	}
+	if u.ProjectScope != nil && *u.ProjectScope != project {
+		return errSoft("no access to project " + project)
 	}
 	if u.Role == "admin" {
 		return nil

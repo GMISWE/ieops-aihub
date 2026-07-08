@@ -232,6 +232,10 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			data.AccessDenied = true
 			return renderTemplate(c, tmpl, "layout", data)
 		}
+		if uiScopeBlocks(u, project) {
+			data.AccessDenied = true
+			return renderTemplate(c, tmpl, "layout", data)
+		}
 		if u.Role != "admin" {
 			if _, ok := u.ProjectRoles[project]; !ok {
 				data.AccessDenied = true

@@ -254,6 +254,11 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	// §4.3 + §15: locks are derived from wi.declared_resources at claim time.
 	// If the client did not pass RequestedLocks explicitly, derive them from the
 	// work_item's declared_resources via resourceToLock mapping (§25 C-R3-8).
+	// Server-derived file_scope keys are project-namespaced (aihub#222). NOTE: a
+	// client that passes RequestedLocks explicitly is trusted verbatim and its
+	// file_scope keys are NOT re-namespaced here; the standard polyforge flow always
+	// leaves RequestedLocks empty and derives server-side, so this raw-API path is
+	// a known, low-exposure limitation rather than a normal code path.
 	if len(req.RequestedLocks) == 0 && len(wi.DeclaredResources) > 0 {
 		var declared []struct {
 			Type       string `json:"type"`
@@ -265,7 +270,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			for _, d := range declared {
 				lockType, lockKey := resourceToLock(DeclaredResourceItem{
 					Type: d.Type, URI: d.URI, Intent: d.Intent, TaskBranch: d.TaskBranch,
-				})
+				}, wi.Project)
 				if lockType == "" {
 					continue
 				}
@@ -923,7 +928,7 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		json.Unmarshal(wi.DeclaredResources, &declaredRes) //nolint:errcheck
 	}
 	for _, res := range declaredRes {
-		lockType, lockKey := resourceToLock(DeclaredResourceItem{Type: res.Type, URI: res.URI, TaskBranch: res.TaskBranch})
+		lockType, lockKey := resourceToLock(DeclaredResourceItem{Type: res.Type, URI: res.URI, TaskBranch: res.TaskBranch}, wi.Project)
 		if lockType == "" {
 			continue
 		}
@@ -1170,7 +1175,7 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 		if d.Intent == "read" {
 			continue // read-only resources never need a write lock
 		}
-		lType, lKey := resourceToLock(d)
+		lType, lKey := resourceToLock(d, wi.Project)
 		if lType != "file_scope" {
 			continue // this endpoint handles file_scope only
 		}

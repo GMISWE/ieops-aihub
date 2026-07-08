@@ -19,20 +19,25 @@ const (
 
 // ConflictPrediction is a single prediction result.
 type ConflictPrediction struct {
-	Rule        int              `json:"rule"`
-	Severity    ConflictSeverity `json:"severity"`
-	Description string           `json:"description"`
-	ResourceType string          `json:"resource_type,omitempty"`
-	ResourceKey  string          `json:"resource_key,omitempty"`
-	AttemptID   string           `json:"attempt_id,omitempty"`
-	ActorDisplay string          `json:"actor_display,omitempty"`
-	WIID        string           `json:"work_item_id,omitempty"`
-	WISlug      string           `json:"work_item_slug,omitempty"`
+	Rule         int              `json:"rule"`
+	Severity     ConflictSeverity `json:"severity"`
+	Description  string           `json:"description"`
+	ResourceType string           `json:"resource_type,omitempty"`
+	ResourceKey  string           `json:"resource_key,omitempty"`
+	AttemptID    string           `json:"attempt_id,omitempty"`
+	ActorDisplay string           `json:"actor_display,omitempty"`
+	WIID         string           `json:"work_item_id,omitempty"`
+	WISlug       string           `json:"work_item_slug,omitempty"`
 }
 
 // PredictConflictsRequest is the body for POST /v1/conflicts/predict.
 type PredictConflictsRequest struct {
-	WorkItemID        *string         `json:"work_item_id"`
+	WorkItemID *string `json:"work_item_id"`
+	// Project namespaces file_scope lock keys (aihub#222). When WorkItemID is set
+	// the wi's own project takes precedence; Project is the fallback for a
+	// create-preview predict issued before the wi exists. Empty yields a bare key,
+	// which only matches legacy pre-migration rows.
+	Project           string          `json:"project"`
 	DeclaredResources json.RawMessage `json:"declared_resources"`
 	DryRun            bool            `json:"dry_run"`
 }
@@ -76,11 +81,26 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		WillUnlock:  []WillUnlockItem{},
 	}
 
+	// Resolve the project whose namespace the declared file_scope resources live
+	// in. file_scope lock keys are "<project>:<path>" (aihub#222) so byte-identical
+	// relative paths in different projects (e.g. a fork repo and its parent) do not
+	// collide. Prefer the wi's own project (authoritative); fall back to req.Project
+	// for a create-preview issued before the wi exists.
+	effectiveProject := req.Project
+	if req.WorkItemID != nil && *req.WorkItemID != "" {
+		var p string
+		if lookupErr := pool.QueryRow(ctx,
+			`SELECT project FROM work_items WHERE id=$1 OR slug=$1`, *req.WorkItemID,
+		).Scan(&p); lookupErr == nil && p != "" {
+			effectiveProject = p
+		}
+	}
+
 	// Rule 1: resource_lock conflict (hard_block)
 	// Skip if dry_run=true (advisory only)
 	if !req.DryRun {
 		for _, res := range resources {
-			lockType, lockKey := resourceToLock(res)
+			lockType, lockKey := resourceToLock(res, effectiveProject)
 			if lockType == "" {
 				continue
 			}
@@ -157,7 +177,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			continue
 		}
 		uri := res.URI
-		lockKey := fileURIToLockKey(uri)
+		lockKey := fileScopeLockKey(effectiveProject, uri)
 		rows, err := pool.Query(ctx, `
 			SELECT rl.resource_key, ra.actor_display, wi.slug, wi.id
 			FROM resource_locks rl
@@ -324,7 +344,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 }
 
 // resourceToLock converts a DeclaredResourceItem to a (resource_type, resource_key) pair per §25 mapping.
-func resourceToLock(res DeclaredResourceItem) (lockType, lockKey string) {
+// project namespaces file_scope keys (aihub#222); it is ignored for git_branch/deploy_env.
+func resourceToLock(res DeclaredResourceItem, project string) (lockType, lockKey string) {
 	switch res.Type {
 	case "repo":
 		repoName := strings.TrimPrefix(res.URI, "repo:")
@@ -334,7 +355,7 @@ func resourceToLock(res DeclaredResourceItem) (lockType, lockKey string) {
 		}
 		return "git_branch", repoName + "/" + branch
 	case "path", "document", "section":
-		return "file_scope", fileURIToLockKey(res.URI)
+		return "file_scope", fileScopeLockKey(project, res.URI)
 	case "service":
 		svc := strings.TrimPrefix(res.URI, "service:")
 		return "deploy_env", svc
@@ -344,7 +365,21 @@ func resourceToLock(res DeclaredResourceItem) (lockType, lockKey string) {
 	return "", ""
 }
 
-// fileURIToLockKey converts a file: URI to a file_scope lock key.
+// fileScopeLockKey builds a file_scope lock key namespaced by the owning wi's
+// project: "<project>:<path>". The bare relative path alone is unsafe as a lock
+// key — a fork repo whose paths are byte-identical to its parent (a different
+// project) would share keys and hard-block the parent even though they are
+// physically distinct repositories (aihub#222). Namespacing by project isolates
+// them, while two wi's in the SAME project touching the same file still share a
+// key and still conflict. Only file_scope keys are namespaced: git_branch keys
+// are already repo-qualified (repo/branch), and deploy_env keys (service) are
+// intentionally global so cross-project deploys to one environment still conflict.
+func fileScopeLockKey(project, uri string) string {
+	return project + ":" + fileURIToLockKey(uri)
+}
+
+// fileURIToLockKey strips the "file:" scheme, yielding the bare relative path
+// embedded inside a file_scope lock key. Callers namespace it via fileScopeLockKey.
 func fileURIToLockKey(uri string) string {
 	return strings.TrimPrefix(uri, "file:")
 }

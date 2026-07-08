@@ -60,7 +60,7 @@ func TestMemoryVersionChainDB(t *testing.T) {
 	mk := func(content string, supersedes *string) string {
 		t.Helper()
 		mem, _, err := domain.Remember(ctx, pool, &domain.RememberRequest{
-			Project: project, Type: "methodology.spec", Content: content,
+			Project: project, Type: "fact.note", Content: content,
 			Visibility: "project", DedupMode: "off",
 			CallerUserID: userID, CallerDisplay: "version-chain-test",
 			SupersedesMemID: supersedes,
@@ -131,8 +131,8 @@ func TestResolveCommitDB(t *testing.T) {
 
 	mem, _, err := domain.Remember(ctx, pool, &domain.RememberRequest{
 		Project: project, Type: "methodology.spec",
-		Content:      fmt.Sprintf("# resolve-test %d\n\n## Overview\nbody", time.Now().UnixNano()),
-		Visibility:   "project", DedupMode: "off",
+		Content:    fmt.Sprintf("# resolve-test %d\n\n## Overview\nbody", time.Now().UnixNano()),
+		Visibility: "project", DedupMode: "off",
 		CallerUserID: userID, CallerDisplay: "resolve-test",
 	})
 	if err != nil {

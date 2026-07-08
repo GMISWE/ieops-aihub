@@ -22,8 +22,9 @@ func RegisterProjectRoutes(v1 *echo.Group, pool *pgxpool.Pool) {
 // callerToUserRecord converts a UserContext to a domain.UserRecord.
 func callerToUserRecord(u *UserContext) *domain.UserRecord {
 	return &domain.UserRecord{
-		ID:   u.UserID,
-		Role: u.Role,
+		ID:           u.UserID,
+		Role:         u.Role,
+		ProjectScope: u.ProjectScope,
 	}
 }
 

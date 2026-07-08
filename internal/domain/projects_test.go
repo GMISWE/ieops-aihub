@@ -338,6 +338,24 @@ func TestValidateScenario_Normalizes(t *testing.T) {
 
 // ─── joinStrings ──────────────────────────────────────────────────────────────
 
+// ─── applyProjectScope ────────────────────────────────────────────────────────
+
+func TestApplyProjectScope(t *testing.T) {
+	ps := []Project{{Name: "projA"}, {Name: "projB"}, {Name: "projC"}}
+	scope := "projB"
+	got := applyProjectScope(ps, &scope)
+	if len(got) != 1 || got[0].Name != "projB" {
+		t.Fatalf("scoped filter = %v, want [projB]", got)
+	}
+	if all := applyProjectScope(ps, nil); len(all) != 3 {
+		t.Fatalf("nil scope must pass all, got %d", len(all))
+	}
+	miss := "projZ"
+	if none := applyProjectScope(ps, &miss); len(none) != 0 {
+		t.Fatalf("scope with no match must be empty, got %d", len(none))
+	}
+}
+
 func TestJoinStrings(t *testing.T) {
 	if got := joinStrings(nil, ", "); got != "" {
 		t.Errorf("got %q, want empty", got)

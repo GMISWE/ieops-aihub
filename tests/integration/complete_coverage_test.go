@@ -402,6 +402,9 @@ func TestSaveArtifactAndRecall(t *testing.T) {
 		"content":            content,
 		"visibility":         "project",
 		"work_item_id":       wiID,
+		"attempt_id":         claim["attempt_id"],
+		"claim_epoch":        claim["claim_epoch"],
+		"session_secret":     claim["session_secret"],
 		"dedup_mode":         "off",
 		"structured_payload": map[string]any{"acceptance": []string{"AC1", "AC2"}, "goal": "concise"},
 	})
@@ -598,8 +601,8 @@ func TestStepRecoveryHintCrashedInProgress(t *testing.T) {
 	case "active_in_progress_conflict":
 		t.Logf("OK: step_recovery_hint=%s (active conflict path)", hint)
 	case "clean":
-		t.Logf("NOTE: step_recovery_hint=clean — server resets step_state to idle "+
-			"before computing the hint (FnClaimWorkItem L426 vs L492); "+
+		t.Logf("NOTE: step_recovery_hint=clean — server resets step_state to idle " +
+			"before computing the hint (FnClaimWorkItem L426 vs L492); " +
 			"crashed_in_progress is currently unreachable via re-claim.")
 	default:
 		t.Logf("NOTE: unexpected step_recovery_hint=%q", hint)
@@ -631,12 +634,15 @@ func TestMethodologyMemoryExpiryOnWrap(t *testing.T) {
 
 	content := fmt.Sprintf("methodology-expiry plan content %d", time.Now().UnixNano())
 	memResp, err := c.Remember(ctx, map[string]any{
-		"project":      testProject,
-		"type":         "methodology.plan",
-		"content":      content,
-		"visibility":   "project",
-		"work_item_id": wiID,
-		"dedup_mode":   "off",
+		"project":        testProject,
+		"type":           "methodology.plan",
+		"content":        content,
+		"visibility":     "project",
+		"work_item_id":   wiID,
+		"attempt_id":     claim["attempt_id"],
+		"claim_epoch":    claim["claim_epoch"],
+		"session_secret": claim["session_secret"],
+		"dedup_mode":     "off",
 	})
 	if err != nil {
 		t.Fatalf("Remember methodology.plan: %v", err)

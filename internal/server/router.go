@@ -556,6 +556,14 @@ func handleListDependencies(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "work_item_id required"))
 		}
 
+		wi, aihubErr := domain.GetWorkItem(ctx, pool, wiID)
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		if err := checkProjectAccess(c, u, wi.Project, "viewer"); err != nil {
+			return err
+		}
+
 		resp, aihubErr := domain.ListDependencies(ctx, pool, wiID, u.ProjectRoles)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)

@@ -1,0 +1,6 @@
+{
+  "polyforge": {
+    "command": "${CLAUDE_PLUGIN_ROOT}/bin/polyforge-mcp.sh",
+    "cwd": "${CLAUDE_PLUGIN_ROOT}"
+  }
+}

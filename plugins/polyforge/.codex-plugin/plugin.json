@@ -7,6 +7,7 @@
   },
   "skills": "./skills/",
   "hooks": "./codex-hooks.json",
+  "mcpServers": "./.codex-plugin/mcp.json",
   "keywords": [
     "polyforge",
     "v1",
@@ -17,7 +18,7 @@
   "interface": {
     "displayName": "polyforge",
     "shortDescription": "Multi-agent AI coding coordination with a full work-item lifecycle.",
-    "longDescription": "polyforge brings Iron-Rule-governed work-item lifecycle (work / stop / status / spec / plan / execute / retro) and a memory system to Codex. The MCP server is NOT registered from this manifest; register it once with `codex mcp add polyforge -- \"$CLAUDE_PLUGIN_ROOT/bin/polyforge-mcp.sh\"` (see skills/using-polyforge/references/codex-tools.md). The Claude Code Skill-router hook is intentionally omitted on Codex (no Skill tool); /pf-spec|plan|execute load their step body from each SKILL.md natively.",
+    "longDescription": "polyforge brings Iron-Rule-governed work-item lifecycle (work / stop / status / spec / plan / execute / retro) and a memory system to Codex. The MCP server auto-registers from this manifest (mcpServers -> .codex-plugin/mcp.json) as a local stdio command; no manual codex mcp add is needed. The Claude Code Skill-router hook is intentionally omitted on Codex (no Skill tool); /pf-spec|plan|execute load their step body from each SKILL.md natively.",
     "developerName": "GMI Engineering",
     "category": "Coding",
     "capabilities": [

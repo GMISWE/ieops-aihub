@@ -142,11 +142,16 @@ ctx = (
 
 if os.environ.get("CURSOR_PLUGIN_ROOT"):
     out = {"additional_context": ctx}
+elif os.environ.get("PLUGIN_ROOT"):
+    # Codex (codex-cli) sets the bare PLUGIN_ROOT env var for plugin hooks and validates
+    # SessionStart output with deny_unknown_fields: a top-level additionalContext is
+    # rejected ("invalid session start JSON output"). Codex reads the nested
+    # hookSpecificOutput.additionalContext, so emit only that shape.
+    out = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}}
 else:
-    # Emit BOTH shapes so one script serves every harness: Claude Code reads
-    # hookSpecificOutput.additionalContext; Copilot CLI and Codex read the top-level
-    # additionalContext. Each runtime ignores the key it does not use (verified on
-    # copilot 1.0.68 — nested is silently dropped there, top-level is injected).
+    # Claude Code + Copilot CLI. Emit BOTH shapes: Claude Code reads
+    # hookSpecificOutput.additionalContext; Copilot CLI reads the top-level additionalContext
+    # (and silently drops the nested key). Both tolerate the extra key.
     out = {
         "additionalContext": ctx,
         "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx},

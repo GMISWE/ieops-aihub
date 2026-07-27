@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# SessionStart hook (OPT build) — refresh each .repo/<repo> base clone to its origin default
+# branch, so code ANALYSIS in a fresh session reads the LATEST code, not the pf-init-time snapshot.
+#
+# Why this hook: polyforge only syncs .repo/<repo> at `pf init` (cloneOrSync). Analysis done in a
+# new session (before/without claiming a wi) reads the base clone directly -> stale. Claim-time
+# fetch doesn't help (it's post-claim and only cuts a worktree). This runs the same fetch+reset
+# cloneOrSync does, but on every SessionStart.
+#
+# Safe: base clones hold no uncommitted work (work happens in worktrees pf.*/); `reset --hard` on
+# a base clone does NOT touch worktrees (separate working dirs + branches). Fetch/reset are scoped
+# to .repo/*; nothing else is modified. Fails silent (never blocks session start).
+set -uo pipefail
+
+dir="${CLAUDE_PROJECT_DIR:-$PWD}"; ws=""
+while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+  [ -f "$dir/.polyforge.yaml" ] && { ws="$dir"; break; }
+  parent="$(dirname "$dir")"; [ "$parent" = "$dir" ] && break; dir="$parent"
+done
+[ -z "$ws" ] && exit 0
+[ -d "$ws/.repo" ] || exit 0
+
+for repo in "$ws"/.repo/*/; do
+  [ -d "${repo}.git" ] || continue
+  git -C "$repo" fetch origin --quiet 2>/dev/null || continue
+  def="origin/main"
+  if ref="$(git -C "$repo" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)"; then
+    def="origin/${ref##*/}"
+  fi
+  git -C "$repo" reset --hard "$def" --quiet 2>/dev/null || true
+done
+exit 0

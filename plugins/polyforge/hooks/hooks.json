@@ -30,6 +30,12 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-session-start\"",
             "async": false
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-repo-sync\"",
+            "async": false,
+            "timeout": 60
           }
         ]
       }

@@ -195,6 +195,7 @@ type RecallRequest struct {
 	MinStrength         float64  `json:"min_strength"`
 	IncludeArchived     bool     `json:"include_archived,omitempty"`
 	RecencyWeight       float64  `json:"recency_weight"`
+	RecallAlgo          string   `json:"recall_algo,omitempty"`
 	Cursor              string   `json:"cursor,omitempty"`
 	CallerUserID        string   `json:"-"`
 	CallerRole          string   `json:"-"`
@@ -1200,9 +1201,34 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		idx++
 	}
 
-	args = append(args, req.TopK+1)
-
-	query := fmt.Sprintf(`
+	// opt③ L1 recall precision (RecallAlgo=="lexical"): fuse lexical relevance
+	// (ts_rank over content_tsv vs the query) with the strength/recency prior via
+	// Reciprocal Rank Fusion, so req.Query actually drives ranking. Default
+	// (""/"recency") keeps the query-blind recency order verbatim — a zero-behavior-
+	// change opt-in. Lexical path skips cursor paging (fusion score is incompatible
+	// with the timestamp cursor); query terms that match nothing tie rlex, so ranking
+	// falls back to the strength prior and recall is preserved.
+	var query string
+	if req.RecallAlgo == "lexical" && req.Query != "" {
+		limitIdx := idx
+		args = append(args, req.TopK)
+		qIdx := idx + 1
+		args = append(args, req.Query)
+		query = fmt.Sprintf(`
+		SELECT id, project, type, content, author_user_id, author_display,
+			work_item_id, visibility, is_immortal, base_strength, stability_days,
+			last_activated_at, last_activated_by, activation_count, expires_at,
+			tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at
+		FROM memories
+		WHERE %s
+		ORDER BY ts_rank(content_tsv, replace(plainto_tsquery('english', $%d)::text, ' & ', ' | ')::tsquery) DESC,
+			tanh(base_strength * exp(
+				-extract(epoch from (clock_timestamp() - COALESCE(last_activated_at, created_at)))/86400.0
+				/ NULLIF(stability_days, 0))) DESC
+		LIMIT $%d`, where, qIdx, limitIdx)
+	} else {
+		args = append(args, req.TopK+1)
+		query = fmt.Sprintf(`
 		SELECT id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
@@ -1211,6 +1237,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		WHERE %s
 		ORDER BY last_activated_at DESC NULLS LAST, created_at DESC
 		LIMIT $%d`, where, idx)
+	}
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {

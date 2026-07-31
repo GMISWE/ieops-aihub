@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -101,11 +102,19 @@ func (s *Server) registerMemoryTools() {
 		if boolArg(args, "include_archived") {
 			params.Set("include_archived", "true")
 		}
+		// recall_algo: explicit arg wins, else env (POLYFORGE_RECALL_ALGO) lets a plugin
+		// build opt into the opt③ L1 lexical-relevance recall path server-side without
+		// changing the tool contract. Empty -> server default (recency).
+		if algo := strArg(args, "recall_algo"); algo != "" {
+			params.Set("recall_algo", algo)
+		} else if algo := os.Getenv("POLYFORGE_RECALL_ALGO"); algo != "" {
+			params.Set("recall_algo", algo)
+		}
 		result, err := s.client.Recall(ctx, params)
 		if err != nil {
 			return errResult(err)
 		}
-		return jsonResult(result)
+		return jsonResultCompact(slimRecallResult(result))
 	})
 
 	// pf_activate_memory

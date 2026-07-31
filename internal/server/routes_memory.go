@@ -229,6 +229,9 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 		if c.QueryParam("include_archived") == "true" {
 			req.IncludeArchived = true
 		}
+		if algo := c.QueryParam("recall_algo"); algo != "" {
+			req.RecallAlgo = algo
+		}
 
 		resp, aihubErr := domain.Recall(ctx, pool, req)
 		if aihubErr != nil {

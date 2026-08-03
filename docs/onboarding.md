@@ -105,6 +105,41 @@ then ask Codex to run `pf_whoami`. See
 `plugins/polyforge/skills/using-polyforge/references/codex-tools.md` for the
 full Claude Code -> Codex tool mapping.
 
+### Updating the plugin, skills, and binary
+
+polyforge ships in **two layers that update independently** — know which one your
+change lives in:
+
+- **Skills + hooks** (the `/pf-*` workflow instructions) live in the plugin
+  package, versioned by the marketplace `catalog_revision`. Pull the latest with:
+  ```
+  /plugin marketplace update GMISWE/GMI-marketplace   # refresh the catalog
+  /plugin install polyforge@gmi-marketplace           # re-install to the new revision
+  ```
+  (or use the interactive `/plugin` menu). Publishing a skill change: edit
+  `plugins/polyforge/skills/*`, merge to `main`, then bump `version` +
+  `catalog_revision` in `.claude-plugin/marketplace.json`.
+
+- **The `polyforge` binary** (the MCP server — ALL `pf_*` tool behavior, e.g.
+  `pf_recall` result-slimming) is NOT in the plugin package. The launcher
+  auto-downloads it once per day from the `bins-<channel>` branch, where
+  `<channel>` is the `[binary] channel` in `~/.polyforge/config.toml`
+  (`stable` by default; `dev` = latest `main`).
+  - **Channels**: a push to `main` publishes the binary to `bins-dev`; cutting a
+    `v*` tag (via `/pf-release`) publishes to `bins-stable`. So `main` changes
+    reach **dev** users automatically, but reach **stable** users only after a
+    tagged release.
+  - **Force an update now** (skip the daily wait):
+    ```
+    rm -f ~/.polyforge/.last_binary_check    # forces the version check on next MCP start
+    ```
+    then restart Claude Code. Confirm with `polyforge version` (prints the
+    published commit SHA).
+
+> Rule of thumb: **skill / workflow change → update the plugin (marketplace);
+> tool behavior / token or recall changes → update the binary (channel +
+> force-refresh).**
+
 ## 5. Restart Claude Code and verify
 
 Restart Claude Code so the plugin's `mcpServers.polyforge` entry is picked up.

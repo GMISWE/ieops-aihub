@@ -1226,7 +1226,10 @@ details.card[open] > summary.hd .chev { transform: rotate(45deg); }
 .prose h1 { font-size: 16px; }
 .prose code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); padding: 1px 5px; border-radius: 5px; overflow-wrap: anywhere; word-break: break-word; }
 .prose pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r); padding: var(--s3); overflow: auto; max-width: 100%; }
-.prose table { display: block; max-width: 100%; overflow: auto; border-collapse: collapse; }
+.prose table { display: block; width: max-content; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 0 0 10px; font-size: 13px; }
+.prose th, .prose td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+.prose th { background: var(--surface-2); color: var(--text); font-weight: 600; }
+.prose tbody tr:nth-child(even) { background: var(--surface-2); }
 .prose pre code { background: none; border: 0; padding: 0; }
 .prose ul, .prose ol { margin: 0 0 10px; padding-left: 18px; }
 .prose li { margin: 3px 0; color: var(--text-muted); }

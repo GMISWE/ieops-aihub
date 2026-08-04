@@ -955,21 +955,21 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 
 		go func() {
 			defer wg.Done()
-			deps, depsErr = listDependenciesFn(ctx, pool, wi.ID, roles)
+			deps, depsErr = listDependenciesFn(ctx, pool, wi.ID, roles, u.Role)
 		}()
 
 		go func() {
 			defer wg.Done()
 			// Parent link — nil parentRef means "no parent" (not an error).
 			// Errors are best-effort: a failed lookup just drops the link.
-			parentRef, _ = getParentRefFn(ctx, pool, wi.ID, roles)
+			parentRef, _ = getParentRefFn(ctx, pool, wi.ID, roles, u.Role)
 		}()
 
 		go func() {
 			defer wg.Done()
 			// Children ordered by seq ASC. Best-effort: a failed lookup leaves
 			// the Children card empty.
-			childRefs, _ = listChildrenFn(ctx, pool, wi.ID, roles)
+			childRefs, _ = listChildrenFn(ctx, pool, wi.ID, roles, u.Role)
 		}()
 
 		go func() {

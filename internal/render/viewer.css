@@ -131,6 +131,17 @@ hr { display: none; }
    /v1 + /share don't load viewer.css, so their tables are unchanged. */
 #pf-doc-col table { display: block; width: max-content; max-width: 100%; overflow-x: auto; }
 
+/* aihub#229: theme the rendered-content tables with design tokens so dark
+   mode is readable. style.css (frozen, inlined in <head>) hardcodes light
+   colors (#f6f8fa header + even-row / #d0d7de borders); in dark mode the
+   near-white row bg under light text is nearly invisible. viewer.css loads
+   only on the /ui artifact page (never /v1 + /share), so those stay
+   byte-identical. */
+#pf-doc-col th, #pf-doc-col td { border-color: var(--border); }
+#pf-doc-col th { background: var(--surface); color: var(--text); }
+#pf-doc-col tbody tr:nth-child(odd) { background: var(--bg); }
+#pf-doc-col tbody tr:nth-child(even) { background: var(--surface-2); }
+
 /* aihub#159: collapsible H2 sections (/ui readability; default-open) */
 .pf-sec { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 4px; }
 .pf-sec > .pf-sec-sum { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }

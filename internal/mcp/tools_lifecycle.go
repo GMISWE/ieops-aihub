@@ -396,11 +396,7 @@ func (s *Server) registerLifecycleTools() {
 
 				// Derive ulid8: last 8 chars of wi_id after stripping "wi_" prefix.
 				// Used only for the branch name; directory name uses the readable slug.
-				ulid8 := ""
-				bare := strings.TrimPrefix(wiID, "wi_")
-				if len(bare) >= 8 {
-					ulid8 = bare[len(bare)-8:]
-				}
+				ulid8 := claimBranchULID8(canonicalWIID)
 
 				if effectiveCfg != nil && seq != "" && ulid8 != "" {
 					// Directory name uses readable format: pf.<project>-<seq>
@@ -843,4 +839,18 @@ func propEnum(typ, description string, enum []string) map[string]any {
 	p := prop(typ, description)
 	p["enum"] = enum
 	return p
+}
+
+// claimBranchULID8 derives the 8-char branch suffix (polyforge/<ulid8>) from a
+// work item's canonical id. Callers must pass the canonical wi id (wi_<ulid>),
+// not a raw slug such as "aihub#225": for a slug the "wi_" prefix is absent, so
+// the last-8-chars slice would leak slug characters into the branch name (e.g.
+// "ihub#225"). Returns "" when the canonical id is shorter than 8 chars, which
+// the caller treats as "skip worktree creation". (aihub#225)
+func claimBranchULID8(canonicalWIID string) string {
+	bare := strings.TrimPrefix(canonicalWIID, "wi_")
+	if len(bare) < 8 {
+		return ""
+	}
+	return bare[len(bare)-8:]
 }

@@ -81,8 +81,8 @@ func TestSegmentFor(t *testing.T) {
 func TestSegmentListRows(t *testing.T) {
 	newRows := func() []*wiListRow {
 		return []*wiListRow{
-			{ID: "1", Status: "queued"},                        // unclaimed
-			{ID: "2", Status: "queued"},                        // unclaimed
+			{ID: "1", Status: "queued"},                         // unclaimed
+			{ID: "2", Status: "queued"},                         // unclaimed
 			{ID: "3", Status: "running", OwnerDisplay: "Alice"}, // running (mine)
 			{ID: "4", Status: "running", OwnerDisplay: "Bob"},   // running (other)
 			{ID: "5", Status: "paused", OwnerDisplay: "Alice"},  // needsyou
@@ -129,21 +129,21 @@ func withFakeGetWI(t *testing.T, fn func(context.Context, *pgxpool.Pool, string)
 	t.Cleanup(func() { getWorkItemFn = prev })
 }
 
-func withFakeListDeps(t *testing.T, fn func(context.Context, *pgxpool.Pool, string, map[string]string) (*domain.DependenciesResponse, *domain.AihubError)) {
+func withFakeListDeps(t *testing.T, fn func(context.Context, *pgxpool.Pool, string, map[string]string, string) (*domain.DependenciesResponse, *domain.AihubError)) {
 	t.Helper()
 	prev := listDependenciesFn
 	listDependenciesFn = fn
 	t.Cleanup(func() { listDependenciesFn = prev })
 }
 
-func withFakeParentRef(t *testing.T, fn func(context.Context, *pgxpool.Pool, string, map[string]string) (*domain.WIRef, *domain.AihubError)) {
+func withFakeParentRef(t *testing.T, fn func(context.Context, *pgxpool.Pool, string, map[string]string, string) (*domain.WIRef, *domain.AihubError)) {
 	t.Helper()
 	prev := getParentRefFn
 	getParentRefFn = fn
 	t.Cleanup(func() { getParentRefFn = prev })
 }
 
-func withFakeListChildren(t *testing.T, fn func(context.Context, *pgxpool.Pool, string, map[string]string) ([]domain.WIRef, *domain.AihubError)) {
+func withFakeListChildren(t *testing.T, fn func(context.Context, *pgxpool.Pool, string, map[string]string, string) ([]domain.WIRef, *domain.AihubError)) {
 	t.Helper()
 	prev := listChildrenFn
 	listChildrenFn = fn
@@ -155,10 +155,10 @@ func withFakeListChildren(t *testing.T, fn func(context.Context, *pgxpool.Pool, 
 // do not exercise the parent/children paths must still stub them (nil pool
 // would otherwise hit the real DB query). Call at the top of such tests.
 func noParentNoChildren(t *testing.T) {
-	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) (*domain.WIRef, *domain.AihubError) {
 		return nil, nil
 	})
-	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) ([]domain.WIRef, *domain.AihubError) {
 		return []domain.WIRef{}, nil
 	})
 }
@@ -637,7 +637,7 @@ func TestUIWIDetail_200_RendersMarkdown(t *testing.T) {
 			UpdatedAt: now,
 		}, nil
 	})
-	withFakeListDeps(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.DependenciesResponse, *domain.AihubError) {
+	withFakeListDeps(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) (*domain.DependenciesResponse, *domain.AihubError) {
 		return &domain.DependenciesResponse{
 			Blocking:  []domain.DependencyListEntry{},
 			BlockedBy: []domain.DependencyListEntry{},
@@ -690,7 +690,7 @@ func TestUIWIDetail_RendersArtifactLinks(t *testing.T) {
 			UpdatedAt: now,
 		}, nil
 	})
-	withFakeListDeps(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.DependenciesResponse, *domain.AihubError) {
+	withFakeListDeps(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) (*domain.DependenciesResponse, *domain.AihubError) {
 		return &domain.DependenciesResponse{}, nil
 	})
 	withFakeListEvents(t, func(_ context.Context, _ *pgxpool.Pool, _ *domain.ListEventsFilter) (*domain.ListEventsResponse, error) {
@@ -835,7 +835,7 @@ func detailFixtureWI(t *testing.T, wiID, slug, project string) {
 			Priority: "normal", CreatedAt: now, UpdatedAt: now,
 		}, nil
 	})
-	withFakeListDeps(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.DependenciesResponse, *domain.AihubError) {
+	withFakeListDeps(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) (*domain.DependenciesResponse, *domain.AihubError) {
 		return &domain.DependenciesResponse{Blocking: []domain.DependencyListEntry{}, BlockedBy: []domain.DependencyListEntry{}}, nil
 	})
 	withFakeListEvents(t, func(_ context.Context, _ *pgxpool.Pool, _ *domain.ListEventsFilter) (*domain.ListEventsResponse, error) {
@@ -861,11 +861,11 @@ func getDetailBody(t *testing.T, u *UserContext, slug string) (int, string) {
 // Parent meta row linking to the parent's slug.
 func TestUIWIDetail_RendersParentLink(t *testing.T) {
 	detailFixtureWI(t, "wi_child", "p1#9", "p1")
-	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) (*domain.WIRef, *domain.AihubError) {
 		slug := "p1#1"
 		return &domain.WIRef{ID: "wi_parent", Slug: &slug, Project: "p1"}, nil
 	})
-	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) ([]domain.WIRef, *domain.AihubError) {
 		return []domain.WIRef{}, nil
 	})
 
@@ -890,10 +890,10 @@ func TestUIWIDetail_RendersParentLink(t *testing.T) {
 // render the Parent meta row.
 func TestUIWIDetail_NoParent_OmitsParentRow(t *testing.T) {
 	detailFixtureWI(t, "wi_orphan", "p1#5", "p1")
-	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) (*domain.WIRef, *domain.AihubError) {
 		return nil, nil // no parent
 	})
-	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) ([]domain.WIRef, *domain.AihubError) {
 		return []domain.WIRef{}, nil
 	})
 
@@ -910,11 +910,11 @@ func TestUIWIDetail_NoParent_OmitsParentRow(t *testing.T) {
 // cannot see renders the hidden placeholder and never leaks the slug.
 func TestUIWIDetail_HiddenParent_Masked(t *testing.T) {
 	detailFixtureWI(t, "wi_child", "p1#9", "p1")
-	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) (*domain.WIRef, *domain.AihubError) {
 		// Cross-project mask: ID="hidden", Slug=nil (domain sentinel).
 		return &domain.WIRef{ID: "hidden", Slug: nil, Project: "p_secret"}, nil
 	})
-	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) ([]domain.WIRef, *domain.AihubError) {
 		return []domain.WIRef{}, nil
 	})
 
@@ -934,10 +934,10 @@ func TestUIWIDetail_HiddenParent_Masked(t *testing.T) {
 // child slugs and preserves the order the domain layer returns (seq ASC).
 func TestUIWIDetail_RendersChildren_InSeqOrder(t *testing.T) {
 	detailFixtureWI(t, "wi_parent", "p1#1", "p1")
-	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) (*domain.WIRef, *domain.AihubError) {
 		return nil, nil
 	})
-	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) ([]domain.WIRef, *domain.AihubError) {
 		s2, s3, s4 := "p1#2", "p1#3", "p1#4"
 		return []domain.WIRef{
 			{ID: "wi_c2", Slug: &s2, Project: "p1"},
@@ -970,10 +970,10 @@ func TestUIWIDetail_RendersChildren_InSeqOrder(t *testing.T) {
 // render the Children card at all.
 func TestUIWIDetail_NoChildren_OmitsCard(t *testing.T) {
 	detailFixtureWI(t, "wi_leaf", "p1#7", "p1")
-	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) (*domain.WIRef, *domain.AihubError) {
 		return nil, nil
 	})
-	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) ([]domain.WIRef, *domain.AihubError) {
 		return []domain.WIRef{}, nil
 	})
 
@@ -990,10 +990,10 @@ func TestUIWIDetail_NoChildren_OmitsCard(t *testing.T) {
 // hidden placeholder without leaking its slug/project.
 func TestUIWIDetail_HiddenChild_Masked(t *testing.T) {
 	detailFixtureWI(t, "wi_parent", "p1#1", "p1")
-	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) (*domain.WIRef, *domain.AihubError) {
+	withFakeParentRef(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) (*domain.WIRef, *domain.AihubError) {
 		return nil, nil
 	})
-	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string) ([]domain.WIRef, *domain.AihubError) {
+	withFakeListChildren(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ map[string]string, _ string) ([]domain.WIRef, *domain.AihubError) {
 		visible := "p1#2"
 		return []domain.WIRef{
 			{ID: "wi_c2", Slug: &visible, Project: "p1"},

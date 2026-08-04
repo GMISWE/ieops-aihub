@@ -44,7 +44,7 @@ type DependenciesResponse struct {
 }
 
 // CreateDependency inserts a new wi_dependency row after cycle detection.
-func CreateDependency(ctx context.Context, pool *pgxpool.Pool, req *CreateDependencyRequest, callerUserID string, callerProjectRoles map[string]string) *AihubError {
+func CreateDependency(ctx context.Context, pool *pgxpool.Pool, req *CreateDependencyRequest, callerUserID string, callerProjectRoles map[string]string, callerRole string) *AihubError {
 	if req.BlockedWIID == "" || req.BlockingWIID == "" {
 		return NewErr(ErrBadRequest, "blocked_wi_id and blocking_wi_id are required")
 	}
@@ -70,8 +70,9 @@ func CreateDependency(ctx context.Context, pool *pgxpool.Pool, req *CreateDepend
 		return NewErr(ErrNotFound, fmt.Sprintf("blocking work item %s not found", req.BlockingWIID))
 	}
 	if blockingProject != blockedProject {
-		role := callerProjectRoles[blockingProject]
-		if role == "" {
+		// Admin users have an empty ProjectRoles map by design, so gate on the
+		// global role before per-project viewer access. (aihub#227)
+		if callerRole != "admin" && callerProjectRoles[blockingProject] == "" {
 			return NewErr(ErrForbidden, fmt.Sprintf("you need at least viewer access to project %q to create a cross-project dependency", blockingProject))
 		}
 	}
@@ -149,7 +150,7 @@ type WIRef struct {
 // visibility is masked with the same sentinel ListDependencies uses: when the
 // caller lacks any role on the parent's project the returned ref has ID="hidden"
 // and Slug=nil so the view renders the cross-project placeholder.
-func GetParentRef(ctx context.Context, pool *pgxpool.Pool, childWiID string, callerProjectRoles map[string]string) (*WIRef, *AihubError) {
+func GetParentRef(ctx context.Context, pool *pgxpool.Pool, childWiID string, callerProjectRoles map[string]string, callerRole string) (*WIRef, *AihubError) {
 	row := pool.QueryRow(ctx, `
 		SELECT parent.id, parent.slug, parent.project
 		FROM work_items child
@@ -165,7 +166,7 @@ func GetParentRef(ctx context.Context, pool *pgxpool.Pool, childWiID string, cal
 		}
 		return nil, NewErr(ErrInternalError, "failed to query parent work item")
 	}
-	if callerProjectRoles[ref.Project] != "" {
+	if callerRole == "admin" || callerProjectRoles[ref.Project] != "" {
 		ref.Slug = &slug
 	} else {
 		ref.ID = "hidden"
@@ -177,7 +178,7 @@ func GetParentRef(ctx context.Context, pool *pgxpool.Pool, childWiID string, cal
 // (creation order within the project). Cross-project children are masked with
 // the same sentinel as GetParentRef (ID="hidden", Slug=nil). Returns an empty
 // slice (never nil) when the wi has no children.
-func ListChildren(ctx context.Context, pool *pgxpool.Pool, parentWiID string, callerProjectRoles map[string]string) ([]WIRef, *AihubError) {
+func ListChildren(ctx context.Context, pool *pgxpool.Pool, parentWiID string, callerProjectRoles map[string]string, callerRole string) ([]WIRef, *AihubError) {
 	rows, err := pool.Query(ctx, `
 		SELECT id, slug, project
 		FROM work_items
@@ -196,7 +197,7 @@ func ListChildren(ctx context.Context, pool *pgxpool.Pool, parentWiID string, ca
 		if err := rows.Scan(&ref.ID, &slug, &ref.Project); err != nil {
 			continue
 		}
-		if callerProjectRoles[ref.Project] != "" {
+		if callerRole == "admin" || callerProjectRoles[ref.Project] != "" {
 			ref.Slug = &slug
 		} else {
 			ref.ID = "hidden"
@@ -223,7 +224,7 @@ func DeleteDependency(ctx context.Context, pool *pgxpool.Pool, blockedWIID, bloc
 
 // ListDependencies returns blocking and blocked_by dependencies for a work item.
 // Respects cross-project visibility rules.
-func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, callerProjectRoles map[string]string) (*DependenciesResponse, *AihubError) {
+func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, callerProjectRoles map[string]string, callerRole string) (*DependenciesResponse, *AihubError) {
 	resp := &DependenciesResponse{
 		Blocking:  []DependencyListEntry{},
 		BlockedBy: []DependencyListEntry{},
@@ -246,7 +247,7 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		if err := blockingRows.Scan(&entry.ID, &slug, &entry.Project, &entry.Kind, &entry.Note); err != nil {
 			continue
 		}
-		if callerProjectRoles[entry.Project] != "" {
+		if callerRole == "admin" || callerProjectRoles[entry.Project] != "" {
 			entry.Slug = &slug
 		} else {
 			entry.ID = "hidden"
@@ -272,7 +273,7 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		if err := blockedByRows.Scan(&entry.ID, &slug, &entry.Project, &entry.Kind, &entry.Note); err != nil {
 			continue
 		}
-		if callerProjectRoles[entry.Project] != "" {
+		if callerRole == "admin" || callerProjectRoles[entry.Project] != "" {
 			entry.Slug = &slug
 		} else {
 			entry.ID = "hidden"

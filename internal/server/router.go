@@ -534,7 +534,7 @@ func handleCreateDependency(pool *pgxpool.Pool) echo.HandlerFunc {
 			}
 		}
 
-		if aihubErr := domain.CreateDependency(ctx, pool, &req, u.UserID, u.ProjectRoles); aihubErr != nil {
+		if aihubErr := domain.CreateDependency(ctx, pool, &req, u.UserID, u.ProjectRoles, u.Role); aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
 		return c.JSON(http.StatusCreated, map[string]bool{"ok": true})
@@ -564,7 +564,7 @@ func handleListDependencies(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		resp, aihubErr := domain.ListDependencies(ctx, pool, wiID, u.ProjectRoles)
+		resp, aihubErr := domain.ListDependencies(ctx, pool, wiID, u.ProjectRoles, u.Role)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
 		}

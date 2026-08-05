@@ -107,9 +107,12 @@ var assetVersion = fmt.Sprintf("%d", time.Now().Unix())
 
 // uiFuncMap exposes a small set of helpers to all templates.
 //
-//   - md       : render a string as markdown -> safe HTML. Used for wi.Content
-//     and memory.content fields. Falls back to escaped plain text
-//     on renderer error.
+//   - md       : render a string as markdown -> safe HTML, then post-process
+//     any ```d2 fenced block into an inline <svg> figure (aihub#231),
+//     matching the artifact viewer's diagram rendering. Used for
+//     wi.Content and memory.content fields. Falls back to escaped
+//     plain text on renderer error; a d2 block that fails to compile
+//     degrades to its original code block (RenderDiagramsForUI).
 //   - truncate : clip a long string with an ellipsis. Useful for wi list views.
 //   - default  : replace empty strings with a placeholder.
 //   - hasPrefix: strings.HasPrefix.
@@ -131,7 +134,20 @@ func uiFuncMap() template.FuncMap {
 			if err != nil {
 				return template.HTML("<pre>" + html.EscapeString(src) + "</pre>")
 			}
-			return template.HTML(out)
+			// Post-process ```d2 fences into inline SVG (aihub#231). goldmark
+			// (render.Markdown) has no idea about d2, so without this a d2
+			// block just sits there as an unrendered <pre><code
+			// class="language-d2"> block on every /ui page that calls md
+			// (memory_detail.html.tmpl, wi_detail.html.tmpl) -- unlike the
+			// artifact viewer (routes_artifacts.go), which already runs this
+			// same diagram pass. RenderDiagramsForUI degrades gracefully to
+			// the original code block on a compile failure, and is /ui-only
+			// by construction: uiFuncMap is only wired into parseTemplates and
+			// pageTemplate, both only reachable from handlers registered under
+			// the /ui echo.Group (ui_routes.go) -- /v1 and /share never touch
+			// this closure, so their raw fenced-block output stays
+			// byte-identical (aihub#160 boundary).
+			return template.HTML(render.RenderDiagramsForUI(out))
 		},
 		"truncate": func(n int, s string) string {
 			// n is the maximum number of runes (user-visible characters),

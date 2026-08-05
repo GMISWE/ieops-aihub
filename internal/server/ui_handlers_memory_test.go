@@ -681,3 +681,159 @@ func TestUIResolveCommit_EmptyReply(t *testing.T) {
 		t.Fatalf("doResolveCommitFn should be called even with empty reply; got %d calls", len(*calls))
 	}
 }
+
+// d2FixtureContent is an architecture-doc shaped body: prose, a d2 diagram, and
+// a non-d2 code block. The d2 block must come out as inline SVG; the go block
+// must be left alone.
+const d2FixtureContent = "# Gateway overview\n\n" +
+	"Request path:\n\n" +
+	"```d2\nclient -> gateway: request\ngateway -> upstream: proxy\n```\n\n" +
+	"And some code:\n\n" +
+	"```go\nfunc main() {}\n```\n"
+
+// TestUIMemoryDetail_D2CompilesForNonMethodologyType is the end-to-end guard for
+// aihub#231: a fact.* memory does NOT redirect to the artifact viewer, so before
+// the fix its d2 fence reached the browser as raw <code class="language-d2">
+// source. Asserting on the real handler + real template response body (not just
+// the md FuncMap in isolation) is what actually proves the user-visible bug is
+// gone -- mem_smmQ3OyW: a green unit test on a helper is not evidence that the
+// page works.
+func TestUIMemoryDetail_D2CompilesForNonMethodologyType(t *testing.T) {
+	for _, memType := range []string{"fact.architecture", "experience.pitfall", "rule.process"} {
+		t.Run(memType, func(t *testing.T) {
+			mem := memFixture("mem_d2_"+memType, memType, d2FixtureContent)
+			cleanup := withLoadMemoryOverride(&mem, nil)
+			defer cleanup()
+
+			tmpl := pageTemplate("memory_detail.html.tmpl")
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodGet, "/ui/memories/"+mem.ID, nil)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+			c.SetParamNames("id")
+			c.SetParamValues(mem.ID)
+			setUser(c, userWithProjects("testproject"))
+
+			if err := handleUIMemoryDetail(nil, tmpl)(c); err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			// Guard the premise: these types must render in place, not 302 to
+			// the artifact viewer. If this ever starts redirecting, the d2
+			// assertions below would pass vacuously on an empty body.
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status: got %d, want 200 (%s must render in place, not redirect)", rec.Code, memType)
+			}
+			body := rec.Body.String()
+
+			// Assert on data-d2-version, NOT on a bare "<svg": the page chrome
+			// ships its own inline icon SVGs, so a "<svg" check would pass
+			// vacuously even with the fix reverted.
+			if n := strings.Count(body, "data-d2-version"); n != 1 {
+				t.Errorf("%s detail page: got %d d2-rendered SVGs, want exactly 1", memType, n)
+			}
+			if strings.Contains(body, "language-d2") {
+				t.Errorf("%s detail page still contains a raw language-d2 code block", memType)
+			}
+			// Collateral-damage guard: the non-d2 fence must survive untouched.
+			// chroma tokenizes it, so match on the highlighted spans rather
+			// than the raw source text.
+			if !strings.Contains(body, `<pre class="chroma">`) || !strings.Contains(body, `<span class="nf">main</span>`) {
+				t.Errorf("%s detail page lost or mangled the non-d2 go code block", memType)
+			}
+		})
+	}
+}
+
+// TestUIMemoryDetail_D2CompilesWhenContentStartsWithProse closes the gap the
+// aihub#231 code review found: RenderAsMD comes from looksLikeMarkdown, which
+// used to test only the FIRST characters of the body. An architecture note that
+// opens with a sentence and only then draws a diagram took the raw <pre> branch,
+// so md -- and therefore RenderDiagramsForUI -- never ran and the reader still
+// saw d2 source. Every other d2 fixture in this file opens with "# ", so none of
+// them can see this.
+func TestUIMemoryDetail_D2CompilesWhenContentStartsWithProse(t *testing.T) {
+	proseFirst := "The ieops gateway routes every request through three stages.\n\n" +
+		"```d2\nclient -> gateway: request\n```\n"
+	mem := memFixture("mem_d2_prose", "fact.architecture", proseFirst)
+	cleanup := withLoadMemoryOverride(&mem, nil)
+	defer cleanup()
+
+	tmpl := pageTemplate("memory_detail.html.tmpl")
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/ui/memories/mem_d2_prose", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_d2_prose")
+	setUser(c, userWithProjects("testproject"))
+
+	if err := handleUIMemoryDetail(nil, tmpl)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	if strings.Contains(body, `<pre class="pf-content-raw">`) {
+		t.Errorf("prose-first content took the raw <pre> branch; looksLikeMarkdown missed the d2 fence")
+	}
+	if n := strings.Count(body, "data-d2-version"); n != 1 {
+		t.Errorf("got %d d2-rendered SVGs, want exactly 1", n)
+	}
+	if strings.Contains(body, "language-d2") {
+		t.Errorf("still contains a raw language-d2 code block")
+	}
+}
+
+// TestLooksLikeMarkdown_D2Fence unit-pins the heuristic change, including the
+// negative cases that keep raw logs / JSON on the <pre> path.
+func TestLooksLikeMarkdown_D2Fence(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"prose then d2 fence", "Overview text.\n\n```d2\na -> b\n```\n", true},
+		{"indented d2 fence", "Text\n\n  ```d2\na -> b\n```\n", true},
+		{"uppercase info string", "Text\n\n```D2\na -> b\n```\n", true},
+		{"leading heading still works", "# Title\nbody", true},
+		{"plain prose stays raw", "just a sentence about things", false},
+		{"json payload stays raw", "{\"key\": \"value\", \"n\": 1}", false},
+		{"non-d2 fence mid-body stays raw", "prose\n\n```go\nfunc main() {}\n```\n", false},
+		{"inline mention is not a fence", "we write diagrams as ```d2 blocks inline", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := looksLikeMarkdown(tc.in); got != tc.want {
+				t.Errorf("looksLikeMarkdown(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUIMemories_ListDoesNotCompileD2 pins the CPU-cost boundary from aihub#231:
+// d2 layout runs goja, so it must happen on the detail page only. The list view
+// truncates content as plain text and must never emit an SVG.
+func TestUIMemories_ListDoesNotCompileD2(t *testing.T) {
+	mem := memFixture("mem_d2_list", "fact.architecture", d2FixtureContent)
+	_, cleanup := withRecallOverride([]domain.MemoryWithStrength{
+		{Memory: mem, EffectiveStrength: 3.0},
+	})
+	defer cleanup()
+
+	tmpl := pageTemplate("memories.html.tmpl")
+	c, rec := newMemoriesRequest(t, "/ui/memories", userWithProjects("testproject"))
+
+	if err := handleUIMemories(nil, tmpl)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "<svg viewBox") || strings.Contains(body, "data-d2-version") {
+		t.Errorf("memory list page compiled a d2 diagram; it must stay plain truncated text")
+	}
+}

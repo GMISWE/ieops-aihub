@@ -646,6 +646,15 @@ func handleUIResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 // looksLikeMarkdown is a very rough heuristic: if the content starts with a
 // heading / list / code fence marker we render through goldmark; otherwise we
 // fall back to a <pre> block to avoid corrupting raw logs or JSON payloads.
+//
+// The prefix test alone is not enough for diagrams (aihub#231): an architecture
+// note that opens with a sentence of prose and only then draws a ```d2 block
+// would take the raw <pre> branch, so the diagram never reaches the md ->
+// RenderDiagramsForUI path and the reader still sees d2 source. A d2 fence
+// anywhere in the body is therefore treated as markdown on its own. The check
+// stays deliberately narrow -- a d2 fence specifically, anchored to a line
+// start -- so raw logs and JSON payloads keep their <pre> treatment unless they
+// really do contain a fenced d2 diagram.
 func looksLikeMarkdown(s string) bool {
 	t := strings.TrimLeft(s, " \t\r\n")
 	if t == "" {
@@ -653,6 +662,23 @@ func looksLikeMarkdown(s string) bool {
 	}
 	for _, p := range []string{"# ", "## ", "### ", "- ", "* ", "> ", "```", "1. ", "|"} {
 		if strings.HasPrefix(t, p) {
+			return true
+		}
+	}
+	return containsD2Fence(t)
+}
+
+// containsD2Fence reports whether any line opens a ```d2 fenced block. Matching
+// at a line start avoids firing on prose that merely mentions "```d2" mid-
+// sentence.
+func containsD2Fence(s string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if !strings.HasPrefix(trimmed, "```") {
+			continue
+		}
+		info := strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
+		if strings.EqualFold(info, "d2") {
 			return true
 		}
 	}

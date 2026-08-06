@@ -112,10 +112,19 @@ func renderDiagramUncached(src string) (string, error) {
 	// is blue-tinted. Pad trims D2's large default margin so the figure stays compact.
 	themeID := d2themescatalog.NeutralGrey.ID
 	pad := int64(20)
+	// aihub#234: Scale=1 makes d2 emit width/height on the outer <svg> alongside the
+	// viewBox. Without them the SVG has no intrinsic size, so CSS resolves its width
+	// to 100% of whatever box it lands in — the figure was *upscaled* to fill the
+	// column (a 264-wide flowchart stretched to 600px and 3400px of vertical scroll)
+	// while wide diagrams were squeezed by the same rule. With an intrinsic size it
+	// behaves like an image: `max-width:100%; height:auto` scales it down to fit the
+	// column and never blows it up past 1:1.
+	scale := 1.0
 	sp := func(s string) *string { return &s }
 	renderOpts := &d2svg.RenderOpts{
 		ThemeID: &themeID,
 		Pad:     &pad,
+		Scale:   &scale,
 		ThemeOverrides: &d2target.ThemeOverrides{
 			N1: sp("#1c1c20"), N2: sp("#646469"), N3: sp("#94949b"), N4: sp("#d6d5d0"), N5: sp("#e6e5e1"), N6: sp("#f6f6f4"), N7: sp("transparent"),
 			B1: sp("#646469"), B2: sp("#646469"), B3: sp("#94949b"), B4: sp("#d6d5d0"), B5: sp("#e6e5e1"), B6: sp("#ffffff"),
@@ -123,8 +132,8 @@ func renderDiagramUncached(src string) (string, error) {
 			AB4: sp("#d6d5d0"), AB5: sp("#e6e5e1"),
 		},
 	}
-	// Bump the default node font so labels stay legible after the figure is scaled
-	// down for display. Author d2 can still override per-shape.
+	// Bump the default node font so labels stay legible when a wide figure still has
+	// to be scaled down to the column width. Author d2 can still override per-shape.
 	src = "**.style.font-size: 24\n" + src
 	diagram, _, err := d2lib.Compile(context.Background(), src, compileOpts, renderOpts)
 	if err != nil {

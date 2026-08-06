@@ -151,8 +151,16 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				uiHead.WriteString("if(document.body){document.body.classList.add('pf-annot-active');}")
 				uiHead.WriteString("})();</script>\n")
 			}
+			// aihub#234: assets served from the server package's embedded static/ FS
+			// (ui.css, theme.js, diagram.js) are versioned with THIS package's
+			// assetVersion, not render.AssetVersion(). The latter is a content hash
+			// over the render package's own bytes (annotator.js, annot.js, viewer.css,
+			// share.js) and cannot see static/ at all, so a ui.css-only edit shipped
+			// under an unchanged ?v= and the browser kept the cached copy for up to
+			// the hour of its max-age. This mattered little while ui.css and viewer.css
+			// changed together; it matters now that the diagram styling lives in ui.css.
 			uiHead.WriteString("<link rel=\"stylesheet\" href=\"/ui/static/ui.css?v=")
-			uiHead.WriteString(av)
+			uiHead.WriteString(assetVersion)
 			uiHead.WriteString("\">\n")
 			uiHead.WriteString("<link rel=\"stylesheet\" href=\"/ui/static/viewer.css?v=")
 			uiHead.WriteString(av)
@@ -161,7 +169,15 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			// with the app-shell nav) works on the viewer. The inline single-toggle
 			// handler was removed; theme.js is the canonical theme handler for all /ui.
 			uiHead.WriteString("<script src=\"/ui/static/theme.js?v=")
-			uiHead.WriteString(av)
+			uiHead.WriteString(assetVersion)
+			uiHead.WriteString("\" defer></script>\n")
+			// aihub#234: click-to-zoom for d2 figures. Inline, a diagram is capped at
+			// the column width (ui.css); this is the only way to read a wide one at
+			// full size without page-zooming the prose along with it. Inside the /ui
+			// gate like every other viewer affordance — /v1 and /share never compile
+			// d2 in the first place.
+			uiHead.WriteString("<script src=\"/ui/static/diagram.js?v=")
+			uiHead.WriteString(assetVersion)
 			uiHead.WriteString("\" defer></script>\n")
 
 			// aihub#138 / #167: build the unified app-shell nav + breadcrumb for /ui

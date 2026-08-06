@@ -12,6 +12,9 @@
 <script src="/ui/static/htmx.min.js" defer></script>
 <script src="/ui/static/theme.js?v={{assetv}}" defer></script>
 <script src="/ui/static/dropdown.js?v={{assetv}}" defer></script>
+{{/* aihub#234: click-to-zoom for d2 figures. Harmless on pages without one — the
+     script marks nothing zoomable if no .pf-diagram is present. */}}
+<script src="/ui/static/diagram.js?v={{assetv}}" defer></script>
 </head>
 <body>
 {{appnav .Active .Theme .User}}

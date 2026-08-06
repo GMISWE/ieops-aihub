@@ -1,6 +1,7 @@
 package server
 
 import (
+	"html/template"
 	"regexp"
 	"strings"
 	"testing"
@@ -20,12 +21,11 @@ func readStatic(t *testing.T, name string) string {
 // TestDiagramStyles_LiveInUICSS locks the aihub#234 relocation: the .pf-diagram
 // rules must live in ui.css, not viewer.css.
 //
-// viewer.css is linked only by the artifact viewer; the memory and wi detail
-// pages link ui.css alone (they render d2 too — aihub#231). While the rules sat
-// in viewer.css those pages got an unstyled figure and, because the light/dark
-// theming is a set of exact-hex descendant rules, a diagram stuck on d2's baked-in
-// light ramp over a dark page. The artifact viewer links ui.css as well, so moving
-// them costs it nothing.
+// viewer.css is linked only by the artifact viewer; the memory and wi detail pages
+// link ui.css alone, and since aihub#231 they compile d2 as well. While the rules
+// sat in viewer.css those pages emitted a figure with no rules behind it — no frame,
+// and no light/dark map, so the diagram kept d2's baked-in light ramp on a dark
+// page. The artifact viewer links ui.css too, so moving them costs it nothing.
 func TestDiagramStyles_LiveInUICSS(t *testing.T) {
 	ui := readStatic(t, "ui.css")
 	viewer := string(render.ViewerCSS())
@@ -256,11 +256,11 @@ func TestDiagramThemeMap_CoversAllFourFamilies(t *testing.T) {
 	}
 }
 
-// TestDiagramJS_LoadedOnBothSurfaces — the zoom script is wired into the artifact
-// viewer (the only surface compiling d2 today) and into the app shell, where the
-// memory/wi detail pages will render d2 once aihub#231 lands. The viewer half is
-// asserted end-to-end by TestArtifactViewer_UIvsV1Share_BytePurity; this covers
-// the app-shell half.
+// TestDiagramJS_LoadedOnBothSurfaces — both surfaces compile d2: the artifact viewer,
+// and the memory/wi detail pages via uiFuncMap's md helper since aihub#231. The zoom
+// script has to be wired into both. The viewer half is asserted end-to-end by
+// TestArtifactViewer_UIvsV1Share_BytePurity; this covers the app-shell half, plus the
+// CSS/JS pairing that makes a detail-page figure zoomable at all.
 func TestDiagramJS_LoadedOnBothSurfaces(t *testing.T) {
 	if _, err := staticFS.ReadFile("static/diagram.js"); err != nil {
 		t.Fatalf("static/diagram.js must be embedded: %v", err)
@@ -269,9 +269,22 @@ func TestDiagramJS_LoadedOnBothSurfaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read layout template: %v", err)
 	}
-	if !strings.Contains(string(layout), "/ui/static/diagram.js") {
-		t.Error("layout.html.tmpl must load diagram.js so d2 figures on the " +
-			"memory/wi detail pages are zoomable too")
+	for _, asset := range []string{"/ui/static/diagram.js", "/ui/static/ui.css"} {
+		if !strings.Contains(string(layout), asset) {
+			t.Errorf("layout.html.tmpl must load %s — it is what makes a d2 figure on the "+
+				"memory/wi detail pages styled and zoomable", asset)
+		}
+	}
+
+	// And the app-shell surface really does emit such a figure: uiFuncMap's md
+	// helper runs RenderDiagramsForUI (aihub#231), which is the whole reason the
+	// diagram CSS had to leave viewer.css.
+	md, ok := uiFuncMap()["md"].(func(string) template.HTML)
+	if !ok {
+		t.Fatal("uiFuncMap has no md(string) helper")
+	}
+	if out := string(md("intro\n\n```d2\na -> b\n```\n")); !strings.Contains(out, `<figure class="pf-diagram"`) {
+		t.Errorf("the detail-page md helper does not emit a pf-diagram figure; got %.200s", out)
 	}
 }
 

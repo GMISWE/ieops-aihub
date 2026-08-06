@@ -17,9 +17,11 @@
 // way to render the wrong arrowheads. Moving keeps the document unambiguous, and
 // the vacated figure is hidden behind the overlay anyway.
 //
-// Loaded on the artifact viewer via the /ui-gated head block in routes_artifacts.go,
-// and on the app-shell pages via layout.html.tmpl — those do not compile d2 yet
-// (aihub#231), where it is inert: no .pf-diagram, nothing marked, no listeners fire.
+// Loaded on both surfaces that compile d2: the artifact viewer, via the /ui-gated
+// head block in routes_artifacts.go, and the app-shell pages (memory / wi detail),
+// via layout.html.tmpl — those render d2 through uiFuncMap's md helper as of
+// aihub#231. On an app-shell page with no diagram it is inert: nothing is marked
+// zoomable and no listener ever fires.
 (function () {
   "use strict";
 

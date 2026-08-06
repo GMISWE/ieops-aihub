@@ -1381,11 +1381,11 @@ details.card[open] > summary.hd .chev { transform: rotate(45deg); }
 
 /* ---------- d2 diagram figures (aihub#160 / #161 / #234) ---------- */
 /* Moved here from render/viewer.css by aihub#234. viewer.css is linked only by the
-   artifact viewer, which is also the only surface compiling d2 today. The memory and
-   wi detail pages link ui.css alone, and aihub#231 is wiring d2 compilation into them;
-   parked here so that lands styled — and, more to the point, so it lands with the
-   light/dark map below, whose absence is silent rather than obviously broken. The
-   artifact viewer links ui.css too, so nothing is lost by the move. */
+   artifact viewer, but since aihub#231 the memory and wi detail pages compile d2 too
+   — and they link ui.css alone, so they were emitting <figure class="pf-diagram"> with
+   no rules behind it at all: no frame, and (the part that fails quietly) no light/dark
+   map, leaving a light diagram on a dark page. The artifact viewer links ui.css as
+   well, so one copy here serves every surface. */
 
 .pf-diagram {
   position: relative;

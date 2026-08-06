@@ -340,6 +340,7 @@ func TestArtifactViewer_UIvsV1Share_BytePurity(t *testing.T) {
 		`id="pf-share"`,
 		`/ui/static/annot.js`,
 		`<figure class="pf-diagram"`, // aihub#160: d2 → inline SVG; /v1+/share keep the code block
+		`/ui/static/diagram.js`,      // aihub#234: click-to-zoom for those figures
 	}
 
 	renderPath := func(path string) string {

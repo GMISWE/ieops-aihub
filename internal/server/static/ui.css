@@ -1378,3 +1378,137 @@ details.card[open] > summary.hd .chev { transform: rotate(45deg); }
 .mcard-link { position: absolute; inset: 0; z-index: 0; border-radius: inherit; }
 .mcard .ft .wi { position: relative; z-index: 1; }
 .mcard .pf-strength-bar { position: relative; z-index: 1; }
+
+/* ---------- d2 diagram figures (aihub#160 / #161 / #234) ---------- */
+/* Moved here from render/viewer.css by aihub#234. viewer.css is linked only by the
+   artifact viewer, but since aihub#231 the memory and wi detail pages compile d2 too
+   — and they link ui.css alone, so they were emitting <figure class="pf-diagram"> with
+   no rules behind it at all: no frame, and (the part that fails quietly) no light/dark
+   map, leaving a light diagram on a dark page. The artifact viewer links ui.css as
+   well, so one copy here serves every surface. */
+
+.pf-diagram {
+  position: relative;
+  margin: var(--s5) 0; padding: var(--s4);
+  border: 1px solid var(--border); border-radius: var(--r-lg);
+  background: var(--surface-2); text-align: center;
+}
+
+/* aihub#234: this was `max-width: min(100%, 600px)` — a hard 600px cap unrelated to
+   the viewport, which squeezed wide diagrams to ~1/3 label size with no way to
+   enlarge them, so authors ended up reshaping the diagram to fit the renderer.
+   Paired with Scale=1 in render/diagram.go (which gives the SVG an intrinsic size),
+   this is now plain image sizing: a diagram wider than the document column scales
+   down to fit it, everything else renders 1:1 and is never blown up. Anything still
+   too small to read at column width is served by the zoom overlay below. */
+.pf-diagram svg { max-width: 100%; height: auto; }
+
+/* Zoom affordance. diagram.js adds .pf-diagram--zoomable (plus role/tabindex) at
+   runtime, so a page without JS never advertises a click target that does nothing. */
+.pf-diagram--zoomable { cursor: zoom-in; }
+.pf-diagram--zoomable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The hint MUST be generated content, not a DOM node. annot.js anchors reviewer
+   annotations by text-quote over the visible text of #pf-doc-col, so a real
+   "click to enlarge" text node inside a figure would join the quote haystack and
+   could break the anchoring of any annotation spanning a diagram — silently, since
+   a failed anchor just drops the annotation. ::after content is not part of
+   Range.toString(), and neither aria-hidden nor opacity:0 would have been. */
+.pf-diagram--zoomable::after {
+  content: "click to enlarge";
+  position: absolute; right: 10px; bottom: 8px; pointer-events: none;
+  font-size: 11px; color: var(--text-subtle); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--pill); padding: 1px 8px;
+  opacity: 0; transition: opacity .14s ease;
+}
+.pf-diagram--zoomable:hover::after,
+.pf-diagram--zoomable:focus-visible::after { opacity: 1; }
+
+/* Overlay. The zoomed figure keeps the .pf-diagram class so the theme map below
+   still matches inside the overlay — without it the diagram would fall back to d2's
+   baked-in light ramp on a dark page. */
+.pf-diagram-ovl {
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--s6); box-sizing: border-box;
+  background: rgba(0, 0, 0, .62); backdrop-filter: blur(2px);
+}
+.pf-diagram-ovl .pf-diagram {
+  margin: 0; max-width: 100%; max-height: 100%; overflow: auto;
+  background: var(--surface); box-shadow: var(--shadow-pop); cursor: default;
+}
+/* Sized in px by diagram.js: scaled up to fill the viewport when the diagram is
+   smaller than it, kept at natural size when it is larger — which is the case the
+   overlay exists for, and the only place a diagram is ever allowed to overflow its
+   box (hence the `overflow: auto` above; the inline figure can never overflow, since
+   there max-width is 100% of that same box). */
+.pf-diagram-ovl .pf-diagram svg { max-width: none; max-height: none; }
+.pf-diagram-ovl-close {
+  position: fixed; top: 14px; right: 16px;
+  width: 32px; height: 32px; line-height: 1; font-size: 20px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: var(--r);
+  background: var(--surface); color: var(--text); cursor: pointer; padding: 0;
+}
+.pf-diagram-ovl-close:hover { background: var(--surface-2); }
+body.pf-diagram-zoomed { overflow: hidden; }
+
+/* aihub#161: theme the d2 diagram for light/dark. d2 bakes the #129 LIGHT ramp (set
+   in render/diagram.go's ThemeOverrides) into the SVG, so each fixed hex is mapped
+   here to the page's theme token: light resolves to the same hex (diagram unchanged),
+   dark resolves to the dark token (diagram follows the page). Instant toggle, no
+   re-render, no Go change.
+
+   aihub#234 — these rules used to be written as `.pf-diagram [fill="#1c1c20"]`, and
+   they never actually fired. d2 colors every element BOTH ways: a presentation
+   attribute (fill="#1c1c20") and a class (fill-N1), and it emits its own stylesheet
+   INSIDE the <svg>: `.d2-<hash> .fill-N1{fill:#1c1c20}`. That is specificity (0,2,0),
+   identical to `.pf-diagram [fill=…]`, and it sits in the body — later in document
+   order than the head-linked ui.css — so d2 won every tie and dark pages rendered
+   light diagrams. Adding the `svg` type selector lifts these to (0,2,1), which beats
+   d2's rule on specificity regardless of order. Both the class and the attribute form
+   are mapped: the class form is what d2 actually emits today, the attribute form
+   covers any element it colors without one. Keep the `svg` in every selector — drop it
+   and the whole block silently stops applying again.
+
+   d2 emits FOUR property families per theme slot — fill-, stroke-, color- and
+   background-color-. Mapping only fill/stroke is worse than mapping none: a markdown
+   label (`a: |md **x** |`) renders as <div class="md color-N1"> inside a foreignObject
+   over a rect.fill-B6, so remapping the rect alone puts near-black text on a dark
+   surface. Every slot below therefore maps all four families to the same token. */
+.pf-diagram svg [fill="#1c1c20"], .pf-diagram svg .fill-N1 { fill: var(--text) }
+.pf-diagram svg [stroke="#1c1c20"], .pf-diagram svg .stroke-N1 { stroke: var(--text) }
+.pf-diagram svg .color-N1 { color: var(--text) }
+.pf-diagram svg .background-color-N1 { background-color: var(--text) }
+.pf-diagram svg [fill="#646469"], .pf-diagram svg .fill-N2, .pf-diagram svg .fill-B1, .pf-diagram svg .fill-B2,
+.pf-diagram svg .fill-AA2 { fill: var(--text-muted) }
+.pf-diagram svg [stroke="#646469"], .pf-diagram svg .stroke-N2, .pf-diagram svg .stroke-B1, .pf-diagram svg .stroke-B2,
+.pf-diagram svg .stroke-AA2 { stroke: var(--text-muted) }
+.pf-diagram svg .color-N2, .pf-diagram svg .color-B1, .pf-diagram svg .color-B2, .pf-diagram svg .color-AA2, { color: var(--text-muted) }
+.pf-diagram svg .background-color-N2, .pf-diagram svg .background-color-B1, .pf-diagram svg .background-color-B2,
+.pf-diagram svg .background-color-AA2 { background-color: var(--text-muted) }
+.pf-diagram svg [fill="#94949b"], .pf-diagram svg .fill-N3, .pf-diagram svg .fill-B3 { fill: var(--text-subtle) }
+.pf-diagram svg [stroke="#94949b"], .pf-diagram svg .stroke-N3, .pf-diagram svg .stroke-B3 { stroke: var(--text-subtle) }
+.pf-diagram svg .color-N3, .pf-diagram svg .color-B3 { color: var(--text-subtle) }
+.pf-diagram svg .background-color-N3, .pf-diagram svg .background-color-B3 { background-color: var(--text-subtle) }
+.pf-diagram svg [fill="#d6d5d0"], .pf-diagram svg .fill-N4, .pf-diagram svg .fill-B4, .pf-diagram svg .fill-AA4,
+.pf-diagram svg .fill-AB4 { fill: var(--border-strong) }
+.pf-diagram svg [stroke="#d6d5d0"], .pf-diagram svg .stroke-N4, .pf-diagram svg .stroke-B4, .pf-diagram svg .stroke-AA4,
+.pf-diagram svg .stroke-AB4 { stroke: var(--border-strong) }
+.pf-diagram svg .color-N4, .pf-diagram svg .color-B4, .pf-diagram svg .color-AA4, .pf-diagram svg .color-AB4, { color: var(--border-strong) }
+.pf-diagram svg .background-color-N4, .pf-diagram svg .background-color-B4, .pf-diagram svg .background-color-AA4,
+.pf-diagram svg .background-color-AB4 { background-color: var(--border-strong) }
+.pf-diagram svg [fill="#e6e5e1"], .pf-diagram svg .fill-N5, .pf-diagram svg .fill-B5, .pf-diagram svg .fill-AA5,
+.pf-diagram svg .fill-AB5 { fill: var(--border) }
+.pf-diagram svg [stroke="#e6e5e1"], .pf-diagram svg .stroke-N5, .pf-diagram svg .stroke-B5, .pf-diagram svg .stroke-AA5,
+.pf-diagram svg .stroke-AB5 { stroke: var(--border) }
+.pf-diagram svg .color-N5, .pf-diagram svg .color-B5, .pf-diagram svg .color-AA5, .pf-diagram svg .color-AB5, { color: var(--border) }
+.pf-diagram svg .background-color-N5, .pf-diagram svg .background-color-B5, .pf-diagram svg .background-color-AA5,
+.pf-diagram svg .background-color-AB5 { background-color: var(--border) }
+.pf-diagram svg [fill="#f6f6f4"], .pf-diagram svg .fill-N6 { fill: var(--surface-2) }
+.pf-diagram svg [stroke="#f6f6f4"], .pf-diagram svg .stroke-N6 { stroke: var(--surface-2) }
+.pf-diagram svg .color-N6 { color: var(--surface-2) }
+.pf-diagram svg .background-color-N6 { background-color: var(--surface-2) }
+.pf-diagram svg [fill="#ffffff"], .pf-diagram svg .fill-B6 { fill: var(--surface) }
+.pf-diagram svg [stroke="#ffffff"], .pf-diagram svg .stroke-B6 { stroke: var(--surface) }
+.pf-diagram svg .color-B6 { color: var(--surface) }
+.pf-diagram svg .background-color-B6 { background-color: var(--surface) }

@@ -1,9 +1,86 @@
 package server
 
 import (
+	"html/template"
 	"strings"
 	"testing"
 )
+
+// TestUIFuncMap_MD_D2Diagram guards aihub#231: the memory/wi detail page
+// renders markdown via the shared "md" template func, but goldmark
+// (render.Markdown) doesn't know about d2 fences -- without the
+// RenderDiagramsForUI post-process, a ```d2 block just sits there as an
+// unrendered <pre><code class="language-d2"> block. This must inline-render
+// to an <svg>, matching what the artifact viewer (routes_artifacts.go)
+// already does.
+func TestUIFuncMap_MD_D2Diagram(t *testing.T) {
+	funcs := uiFuncMap()
+	md, ok := funcs["md"].(func(string) template.HTML)
+	if !ok {
+		t.Fatalf("md not registered in uiFuncMap or wrong signature")
+	}
+
+	src := "# Title\n\n```d2\na -> b\n```\n"
+	got := string(md(src))
+
+	if !strings.Contains(got, "<svg") {
+		t.Errorf("md(%q) = %q; want an inline <svg> for the d2 block", src, got)
+	}
+	if strings.Contains(got, `language-d2`) {
+		t.Errorf("md(%q) = %q; still contains an unrendered language-d2 code block", src, got)
+	}
+}
+
+// TestUIFuncMap_MD_InvalidD2Degrades guards the graceful-degradation
+// invariant: a syntactically broken d2 block must fall back to a normal
+// code block, never error out and never emit a partial/empty <svg>.
+func TestUIFuncMap_MD_InvalidD2Degrades(t *testing.T) {
+	funcs := uiFuncMap()
+	md, ok := funcs["md"].(func(string) template.HTML)
+	if !ok {
+		t.Fatalf("md not registered in uiFuncMap or wrong signature")
+	}
+
+	// Unterminated shape/edge syntax -- d2lib.Compile should reject this.
+	src := "```d2\na -> {\n```\n"
+	got := string(md(src))
+
+	if strings.Contains(got, "<svg") {
+		t.Errorf("md(%q) = %q; invalid d2 must not produce an <svg>", src, got)
+	}
+	if !strings.Contains(got, "<code") {
+		t.Errorf("md(%q) = %q; want the block to degrade to a plain code block", src, got)
+	}
+}
+
+// TestUIFuncMap_MD_NonD2Untouched is a collateral-damage guard: the
+// RenderDiagramsForUI post-process must only ever rewrite language-d2 blocks,
+// so ordinary markdown (heading, table, non-d2 fenced code) must still render
+// to its usual elements. Spot-checks the structural output rather than
+// asserting byte-equality with the pre-fix rendering.
+func TestUIFuncMap_MD_NonD2Untouched(t *testing.T) {
+	funcs := uiFuncMap()
+	md, ok := funcs["md"].(func(string) template.HTML)
+	if !ok {
+		t.Fatalf("md not registered in uiFuncMap or wrong signature")
+	}
+
+	src := "# Heading\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```go\nfunc main() {}\n```\n"
+	got := string(md(src))
+
+	if strings.Contains(got, "<svg") {
+		t.Errorf("md(%q) = %q; non-d2 content must not produce an <svg>", src, got)
+	}
+	if !strings.Contains(got, "<table") {
+		t.Errorf("md(%q) = %q; want the markdown table rendered as <table>", src, got)
+	}
+	if !strings.Contains(got, `<pre class="chroma">`) {
+		t.Errorf("md(%q) = %q; want the go code block preserved via chroma syntax highlighting", src, got)
+	}
+	if !strings.Contains(got, "<h1") {
+		t.Errorf("md(%q) = %q; want the heading rendered as <h1>", src, got)
+	}
+}
 
 // TestUIFuncMap_Truncate guards against the mid-rune byte-cut regression:
 // the old s[:n] + "..." implementation would slice CJK strings in the

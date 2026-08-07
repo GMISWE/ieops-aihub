@@ -61,6 +61,17 @@ func handleRemember(pool *pgxpool.Pool) echo.HandlerFunc {
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
 		}
+		// aihub#236: activation state is server-derived and must never come from
+		// the request. `json:"-"` on those fields is NOT sufficient — echo's
+		// DefaultBinder routes application/xml and text/xml bodies to
+		// encoding/xml, which ignores json tags and falls back to the Go field
+		// name, so <ActivationCount>9999</ActivationCount> binds straight through.
+		// Zero the trio here, before any use, exactly as CallerUserID/CallerDisplay
+		// are overwritten below. Only UpdateMemory may populate these, and it
+		// constructs the struct directly rather than binding it.
+		req.LastActivatedAt = nil
+		req.LastActivatedBy = nil
+		req.ActivationCount = 0
 		// If project is not provided but work_item_id is, back-fill project from the work item.
 		if req.Project == "" && req.WorkItemID != nil && *req.WorkItemID != "" {
 			wi, wiErr := domain.GetWorkItem(ctx, pool, *req.WorkItemID)

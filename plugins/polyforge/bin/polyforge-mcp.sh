@@ -65,7 +65,11 @@ download_binary() {
   trap 'rm -f "$tmp"' EXIT
   trap 'exit 143' INT TERM
 
-  if curl -fsSL \
+  # Bounded like the version check at check_for_update: this also runs before
+  # exec, so an unreachable or black-holed host would otherwise hang MCP
+  # startup forever. --max-time is generous because this transfers a ~13MB
+  # binary, not a 41-byte version file.
+  if curl -fsSL --connect-timeout 10 --max-time 120 \
       -H "Authorization: Bearer ${_gh_token}" \
       "$url" \
       -o "$tmp" \
@@ -80,6 +84,102 @@ download_binary() {
     return 1
   fi
 }
+
+# Daily update check. Split into a function so it can be unit-tested without
+# docker or network (tests/launcher-update-check.test.sh) — the previous inline
+# form could only be exercised by running the real launcher, which is why the
+# aihub#237 bug survived unnoticed.
+#
+# Every branch below either updates or SAYS WHY IT DID NOT. The bug this
+# replaces collapsed "versions match", "cannot read the published version" and
+# "cannot read my own version" into one `else` commented "already up to date",
+# which then stamped LAST_CHECK_FILE. A binary that could not report its own
+# SHA was therefore pinned to its current build permanently, reporting success
+# every time.
+#
+# LAST_CHECK_FILE is still stamped on the paths we cannot act on, so the daily
+# cadence (and the once-per-day warning) is preserved rather than warning on
+# every MCP session. It is NOT stamped when a download was attempted and
+# failed, so that case retries on the next launch.
+check_for_update() {
+  local now last
+  now=$(date +%s)
+  last=$(cat "$LAST_CHECK_FILE" 2>/dev/null || echo 0)
+  # Treat any non-numeric content as "never checked". Without this, a file
+  # containing e.g. `abc` makes `set -u` reject the arithmetic below as an
+  # unbound variable and the launcher aborts rc=1 — the MCP server never
+  # starts, from nothing worse than a corrupt cache file.
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  [ $((now - last)) -gt 86400 ] || return 0
+
+  # gh gates access to the private bins branch. Its three failure modes were
+  # previously one silent skip; the dev box that surfaced aihub#237 hit the
+  # third (gh 2.4.0 predates `gh auth token`, so the guard failed with
+  # "unknown command" rather than any auth problem, and printed nothing).
+  local gh_token
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "polyforge: skipping update check — gh CLI not found (https://cli.github.com). Retrying in 24h." >&2
+    echo "$now" > "$LAST_CHECK_FILE"
+    return 0
+  fi
+  if ! gh_token=$(gh auth token 2>/dev/null) || [ -z "$gh_token" ]; then
+    echo "polyforge: skipping update check — 'gh auth token' failed. Run 'gh auth login'; if that subcommand is unknown, upgrade gh (it needs >= 2.7). Retrying in 24h." >&2
+    echo "$now" > "$LAST_CHECK_FILE"
+    return 0
+  fi
+
+  local latest current
+  # --max-time bounds the check: this runs before exec, so a black-holed
+  # network would otherwise hang MCP startup indefinitely.
+  latest=$(curl -fsSL --max-time 10 \
+    -H "Authorization: Bearer ${gh_token}" \
+    "https://raw.githubusercontent.com/GMISWE/ieops-aihub/bins-${CHANNEL}/bin/version.txt" \
+    2>/dev/null | grep -oE '[a-f0-9]{40}' | head -1 || echo "")
+  current=$("$INSTALL_PATH" version 2>/dev/null | grep -oE '[a-f0-9]{40}' | head -1 || echo "")
+
+  if [ -z "$latest" ]; then
+    echo "polyforge: skipping update check — could not read the published version from bins-${CHANNEL}. Retrying in 24h." >&2
+    echo "$now" > "$LAST_CHECK_FILE"
+    return 0
+  fi
+
+  if [ -z "$current" ]; then
+    # THE aihub#237 BUG. Not knowing our own version is not evidence of being
+    # current — it is evidence of a binary built outside publish-bins.yml (a
+    # plain `make build` stamped a 7-char SHA, which never matches [a-f0-9]{40}).
+    # Update rather than pin; a published binary reports a full SHA, so the
+    # next run compares normally and this self-heals.
+    echo "polyforge: installed binary reports no commit SHA (likely a local build); updating to ${latest:0:8} to recover update capability." >&2
+    if download_binary; then
+      echo "$now" > "$LAST_CHECK_FILE"
+    fi
+    return 0
+  fi
+
+  if [ "$current" = "$latest" ]; then
+    echo "$now" > "$LAST_CHECK_FILE"   # genuinely up to date
+    return 0
+  fi
+
+  echo "polyforge: updating ${current:0:8} → ${latest:0:8}..." >&2
+  if download_binary; then
+    echo "$now" > "$LAST_CHECK_FILE"   # only stamp after a successful download
+  fi
+  return 0
+}
+
+# Tests source this file to drive the functions above in isolation. Everything
+# below would download a binary and exec it, which a unit test must not do.
+#
+# The BASH_SOURCE check is load-bearing, not defensive style. Without it, a user
+# who happens to have POLYFORGE_LAUNCHER_SOURCE_ONLY exported gets a launcher
+# that exits 0 with no output and never execs the server — `return` outside a
+# function fails, `|| exit 0` swallows it, and the MCP server silently does not
+# start. That is precisely the silent-success failure mode this file is being
+# changed to eliminate. BASH_SOURCE is bash 3.0+, so macOS bash 3.2 is fine.
+if [ -n "${POLYFORGE_LAUNCHER_SOURCE_ONLY:-}" ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
 
 # Sweep stale download temps left by a previous run that was hard-killed
 # (e.g. kill -9) before its own EXIT trap could fire. Only remove temps not
@@ -106,24 +206,7 @@ if [ ! -x "$INSTALL_PATH" ] || [ -L "$INSTALL_PATH" ]; then
   fi
 else
   # Binary exists and is a real file — daily update check
-  NOW=$(date +%s)
-  LAST=$(cat "$LAST_CHECK_FILE" 2>/dev/null || echo 0)
-  if [ $((NOW - LAST)) -gt 86400 ] && gh auth token &>/dev/null 2>&1; then
-    _check_token=$(gh auth token 2>/dev/null)
-    LATEST=$(curl -fsSL \
-      -H "Authorization: Bearer ${_check_token}" \
-      "https://raw.githubusercontent.com/GMISWE/ieops-aihub/bins-${CHANNEL}/bin/version.txt" \
-      2>/dev/null | grep -oE '[a-f0-9]{40}' | head -1 || echo "")
-    CURRENT=$("$INSTALL_PATH" version 2>/dev/null | grep -oE '[a-f0-9]{40}' | head -1 || echo "")
-    if [ -n "$LATEST" ] && [ -n "$CURRENT" ] && [ "$CURRENT" != "$LATEST" ]; then
-      echo "polyforge: updating ${CURRENT:0:8} → ${LATEST:0:8}..." >&2
-      if download_binary; then
-        echo "$NOW" > "$LAST_CHECK_FILE"   # only stamp after successful download
-      fi
-    else
-      echo "$NOW" > "$LAST_CHECK_FILE"     # already up to date
-    fi
-  fi
+  check_for_update
 fi
 
 unset _path_bin 2>/dev/null || true

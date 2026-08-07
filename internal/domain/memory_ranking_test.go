@@ -50,7 +50,7 @@ func recallAll(t *testing.T, pool *pgxpool.Pool, project, userID string, topK in
 
 func rankOf(items []MemoryWithStrength, id string) int {
 	for i := range items {
-		if items[i].Memory.ID == id {
+		if items[i].ID == id {
 			return i
 		}
 	}
@@ -134,7 +134,7 @@ func TestRecallRanking_CursorSkipsNoRows(t *testing.T) {
 			t.Fatalf("Recall page %d: %v", page, aerr)
 		}
 		for i := range resp.Items {
-			seen[resp.Items[i].Memory.ID]++
+			seen[resp.Items[i].ID]++
 		}
 		if resp.NextCursor == nil {
 			break

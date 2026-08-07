@@ -93,10 +93,15 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 		where += " AND (" + strings.Join(typeClauses, " OR ") + ")"
 	}
 
-	// H9: min_strength SQL filter (Ebbinghaus) — same expression as Recall.
+	// H9: min_strength SQL filter (Ebbinghaus) — same expression as Recall,
+	// including memRefTimeSQL for reference time. The text and vector paths MUST
+	// agree here: a divergence means the same row is visible on one path and
+	// filtered out on the other, and reports a different effective_strength
+	// depending on whether an embedding provider happens to be configured
+	// (aihub#236).
 	where += fmt.Sprintf(` AND (is_immortal = true OR (stability_days > 0 AND
 		base_strength * exp(
-			-extract(epoch from (clock_timestamp() - COALESCE(last_activated_at, created_at)))/86400.0
+			-extract(epoch from (clock_timestamp() - `+memRefTimeSQL+`))/86400.0
 			/ NULLIF(stability_days, 0)
 		) >= $%d))`, idx)
 	args = append(args, minStrength)
@@ -134,7 +139,7 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 			tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at,
 			1 - (emb_vector <=> %s) AS similarity,
 			base_strength * exp(
-				-extract(epoch from (clock_timestamp() - COALESCE(last_activated_at, created_at)))/86400.0
+				-extract(epoch from (clock_timestamp() - `+memRefTimeSQL+`))/86400.0
 				/ NULLIF(stability_days, 0)
 			) AS eff_strength
 		FROM memories
@@ -142,7 +147,7 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 		ORDER BY
 			0.7 * (1 - (emb_vector <=> %s)) +
 			0.3 * tanh(base_strength * exp(
-				-extract(epoch from (clock_timestamp() - COALESCE(last_activated_at, created_at)))/86400.0
+				-extract(epoch from (clock_timestamp() - `+memRefTimeSQL+`))/86400.0
 				/ NULLIF(stability_days, 0)
 			)) DESC
 		LIMIT $%d`, qvecPlaceholder, where, qvecPlaceholder, limitIdx)

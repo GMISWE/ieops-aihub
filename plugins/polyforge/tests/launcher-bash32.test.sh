@@ -15,8 +15,14 @@ here=$(cd "$(dirname "$0")" && pwd)
 launcher="$here/../bin/polyforge-mcp.sh"
 [ -f "$launcher" ] || { echo "FAIL: launcher not found at $launcher" >&2; exit 1; }
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "SKIP: docker unavailable; cannot exercise bash 3.2 (CI provides it)."
+# Probe the DAEMON, not just the client. `command -v docker` alone is not
+# enough: WSL installs a Docker Desktop shim that is on PATH and exits
+# non-zero with "The command 'docker' could not be found in this WSL 2
+# distro", so this suite reported a hard FAIL where it should have SKIPped.
+# That false failure is what made aihub#237 believe bash 3.2 was untestable
+# locally — a broken skip guard reads as a broken launcher.
+if ! docker info >/dev/null 2>&1; then
+  echo "SKIP: docker daemon unavailable; cannot exercise bash 3.2 (CI provides it)."
   exit 0
 fi
 

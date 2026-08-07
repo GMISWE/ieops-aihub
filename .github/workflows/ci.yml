@@ -48,6 +48,19 @@ jobs:
         run: go test -count=1 -race ./...
         # Note: integration tests require docker-compose; run locally: cd tests/integration && make test
 
+      # aihub#237: the launcher's update check is shell, so `go test` cannot see
+      # it — a silent-pin regression there would ship green. This suite is
+      # hermetic (no docker, no network: it stubs gh/curl/binary and drives
+      # check_for_update directly), so it is safe to gate on.
+      #
+      # Deliberately narrow: the other suites under plugins/polyforge/tests/
+      # (launcher-bash32, pf-commit-guard, pf-seam-check, pf-skill-router) are
+      # ALSO unwired here and are not enabled by this step. launcher-bash32 in
+      # particular needs docker and would newly gate PRs, so turning them all on
+      # at once belongs in its own change rather than riding along with a bugfix.
+      - name: Launcher update-check regression suite
+        run: bash plugins/polyforge/tests/launcher-update-check.test.sh
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test
@@ -222,7 +235,13 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           TAG="${{ github.ref_name }}"
-          SHA=$(git rev-parse --short HEAD)
+          # Full 40-char SHA, NOT --short. polyforge-mcp.sh's update check reads
+          # the running binary's commit with `grep -oE '[a-f0-9]{40}'`; a 7-char
+          # SHA never matches, so a binary installed from a GitHub Release would
+          # be classified "cannot read version" and told it is "likely a local
+          # build". Same reason publish-bins.yml and the Makefile use the full
+          # SHA (aihub#237).
+          SHA=$(git rev-parse HEAD)
           NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           CGO_ENABLED=0 go build \
             -ldflags "-s -w -X github.com/GMISWE/ieops-aihub/internal/version.Version=${TAG} -X github.com/GMISWE/ieops-aihub/internal/version.GitCommit=${SHA} -X github.com/GMISWE/ieops-aihub/internal/version.BuildTime=${NOW}" \

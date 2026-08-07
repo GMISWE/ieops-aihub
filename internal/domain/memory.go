@@ -181,6 +181,18 @@ type RememberRequest struct {
 	// Set by handler from Bearer token — not from JSON body.
 	CallerUserID  string `json:"-"`
 	CallerDisplay string `json:"-"`
+	// aihub#236: activation state carried forward by UpdateMemory so that
+	// editing a memory does not reset its lineage's activation history (which
+	// previously dropped every new version into the NULLS-LAST ranking tier).
+	//
+	// json:"-" is REQUIRED, not stylistic. handleRemember binds the request body
+	// directly into this struct (internal/server/routes_memory.go:60) with no
+	// intermediate DTO, so a JSON-named field here would let any project writer
+	// POST /v1/memories with activation_count=9999 and pin their memory to the
+	// top of every recall in the project. Only UpdateMemory sets these.
+	LastActivatedAt *time.Time `json:"-"`
+	LastActivatedBy *string    `json:"-"`
+	ActivationCount int        `json:"-"`
 }
 
 // RecallRequest is the query for GET /v1/memories.
@@ -237,18 +249,42 @@ func isImmortalType(memType string) bool {
 	return strings.HasPrefix(memType, "rule.")
 }
 
+// memoryRefTime returns the reference timestamp used for BOTH decay and
+// ranking: the most recent of last_activated_at and created_at. It is the Go
+// mirror of memRefTimeSQL and the two MUST stay in agreement — recall filters
+// rows in SQL and reports effective_strength from Go, so a divergence makes the
+// score shown to clients disagree with the order rows come back in (aihub#236).
+//
+// Deliberately NOT "activation if set, else created": UpdateMemory carries a
+// lineage's last_activated_at onto each new version, so a freshly created head
+// can hold an old activation timestamp. Taking the later of the two keeps that
+// head as fresh as it actually is.
+func memoryRefTime(lastActivatedAt *time.Time, createdAt time.Time) time.Time {
+	if lastActivatedAt != nil && lastActivatedAt.After(createdAt) {
+		return *lastActivatedAt
+	}
+	return createdAt
+}
+
+// memRefTimeSQL is the SQL mirror of memoryRefTime. PostgreSQL's GREATEST
+// IGNORES NULL arguments (returning NULL only when every argument is NULL) and
+// memories.created_at is NOT NULL, so this expression is total: it can never
+// yield NULL, and therefore can never produce a NULLS-ordering tier.
+//
+// Do NOT rewrite this as COALESCE(last_activated_at, created_at). COALESCE
+// prefers a stale activation timestamp over a fresher created_at, which
+// reintroduces aihub#236 in the min_strength filter — a freshly edited fact.*
+// memory would be decayed against its old activation and filtered out.
+const memRefTimeSQL = `GREATEST(last_activated_at, created_at)`
+
 // MemoryStrength calculates effective_strength (raw) per §7.2.
 // Formula: base_strength × exp(-days_since / stability_days)
-// days_since uses last_activated_at if set, else created_at (M8).
+// days_since is measured from memoryRefTime (M8, revised by aihub#236).
 func MemoryStrength(baseStrength, stabilityDays float64, lastActivatedAt *time.Time, createdAt time.Time) float64 {
 	if stabilityDays <= 0 {
 		return 0
 	}
-	ref := createdAt
-	if lastActivatedAt != nil {
-		ref = *lastActivatedAt
-	}
-	daysSince := time.Since(ref).Hours() / 24
+	daysSince := time.Since(memoryRefTime(lastActivatedAt, createdAt)).Hours() / 24
 	return baseStrength * math.Exp(-daysSince/stabilityDays)
 }
 
@@ -381,7 +417,7 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		baseStrength = *req.BaseStrength
 	}
 	immortal := isImmortalType(req.Type)
-	stabilityDays := computeStabilityDays(req.Type, 0)
+	stabilityDays := computeStabilityDays(req.Type, req.ActivationCount)
 	if req.Tags == nil {
 		req.Tags = []string{}
 	}
@@ -554,15 +590,15 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		INSERT INTO memories (
 			id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
-			activation_count, expires_at, tags, source_artifact_id,
+			activation_count, last_activated_at, last_activated_by, expires_at, tags, source_artifact_id,
 			emb_model, emb_dims, emb_vector,
 			status, attrs, rendered_html, supersedes_id, latest_id, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11,
-			0, $12, $13, $14,
-			$15, $16, $17::vector,
-			'active', $18, $19, $20, $1, clock_timestamp(), clock_timestamp()
+			$12, $13, $14, $15, $16, $17,
+			$18, $19, $20::vector,
+			'active', $21, $22, $23, $1, clock_timestamp(), clock_timestamp()
 		)
 		RETURNING id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
@@ -571,9 +607,10 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			rendered_html, commits, latest_id, created_at, updated_at`,
 		newID, req.Project, req.Type, req.Content, req.CallerUserID, req.CallerDisplay,
 		req.WorkItemID, req.Visibility, immortal, baseStrength, stabilityDays,
-		req.ExpiresAt, req.Tags, nil, // source_artifact_id = nil ($14)
-		embModel, embDims, embVecLit, // $15, $16, $17 — emb_model/dims/vector
-		req.Attrs, renderedHTML, req.SupersedesMemID, // $18, $19, $20
+		req.ActivationCount, req.LastActivatedAt, req.LastActivatedBy, // $12, $13, $14
+		req.ExpiresAt, req.Tags, nil, // $15, $16, $17 — source_artifact_id = nil
+		embModel, embDims, embVecLit, // $18, $19, $20 — emb_model/dims/vector
+		req.Attrs, renderedHTML, req.SupersedesMemID, // $21, $22, $23
 	).Scan(
 		&mem.ID, &mem.Project, &mem.Type, &mem.Content, &mem.AuthorUserID, &mem.AuthorDisplay,
 		&mem.WorkItemID, &mem.Visibility, &mem.IsImmortal, &mem.BaseStrength, &mem.StabilityDays,
@@ -1127,10 +1164,10 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	}
 
 	// NOTE: RecencyWeight is currently a reserved-but-unused knob. The text/tag
-	// recall path orders strictly by last_activated_at DESC NULLS LAST, created_at
-	// DESC (see ORDER BY below) and does not blend a recency score. The default is
-	// intentionally not set here so the field stays an explicit no-op rather than a
-	// misleading "applied" value; implementing recency blending is tracked separately.
+	// recall path orders by memRefTimeSQL (see ORDER BY below) and does not blend
+	// a separate recency score. The default is intentionally not set here so the
+	// field stays an explicit no-op rather than a misleading "applied" value;
+	// implementing recency blending is tracked separately.
 
 	args := []any{req.Project}
 	idx := 2
@@ -1182,21 +1219,20 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	// Formula: base_strength * exp(-days_since / stability_days) >= min_strength
 	where += fmt.Sprintf(` AND (is_immortal = true OR (stability_days > 0 AND
 		base_strength * exp(
-			-extract(epoch from (clock_timestamp() - COALESCE(last_activated_at, created_at)))/86400.0
+			-extract(epoch from (clock_timestamp() - `+memRefTimeSQL+`))/86400.0
 			/ stability_days
 		) >= $%d))`, idx)
 	args = append(args, req.MinStrength)
 	idx++
 
-	// C5 fix: cursor-based pagination using timestamp, not id.
-	// ORDER BY last_activated_at DESC NULLS LAST, created_at DESC means we need
-	// AND (last_activated_at < cursor_ts OR (last_activated_at IS NULL AND created_at < cursor_ts))
-	// Cursor value is an RFC3339Nano timestamp string of the last item's sort key.
+	// Cursor-based pagination. ORDER BY is a single total expression
+	// (memRefTimeSQL), so the cursor is one comparison against that same
+	// expression — no NULL branch. The previous two-branch form could not
+	// express "the next row after this one" once ordering crossed the
+	// activated/never-activated boundary, and silently skipped rows (aihub#236).
+	// Cursor value is an RFC3339Nano timestamp of the last item's sort key.
 	if req.Cursor != "" {
-		where += fmt.Sprintf(` AND (
-			last_activated_at < $%d::timestamptz
-			OR (last_activated_at IS NULL AND created_at < $%d::timestamptz)
-		)`, idx, idx)
+		where += fmt.Sprintf(` AND `+memRefTimeSQL+` < $%d::timestamptz`, idx)
 		args = append(args, req.Cursor)
 		idx++
 	}
@@ -1223,7 +1259,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		WHERE %s
 		ORDER BY ts_rank(content_tsv, replace(plainto_tsquery('english', $%d)::text, ' & ', ' | ')::tsquery) DESC,
 			tanh(base_strength * exp(
-				-extract(epoch from (clock_timestamp() - COALESCE(last_activated_at, created_at)))/86400.0
+				-extract(epoch from (clock_timestamp() - `+memRefTimeSQL+`))/86400.0
 				/ NULLIF(stability_days, 0))) DESC
 		LIMIT $%d`, where, qIdx, limitIdx)
 	} else {
@@ -1235,7 +1271,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 			tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at
 		FROM memories
 		WHERE %s
-		ORDER BY last_activated_at DESC NULLS LAST, created_at DESC
+		ORDER BY `+memRefTimeSQL+` DESC, id DESC
 		LIMIT $%d`, where, idx)
 	}
 
@@ -1265,14 +1301,9 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	if len(items) > req.TopK {
 		items = items[:req.TopK]
 		last := items[len(items)-1]
-		// C5 fix: cursor is the sort-key timestamp, not the id.
-		// Use last_activated_at when set, else created_at (mirrors ORDER BY logic).
-		var cursorVal string
-		if last.LastActivatedAt != nil {
-			cursorVal = last.LastActivatedAt.Format(time.RFC3339Nano)
-		} else {
-			cursorVal = last.CreatedAt.Format(time.RFC3339Nano)
-		}
+		// Cursor is the sort-key timestamp, computed by the same rule as
+		// memRefTimeSQL so the next page resumes exactly where this one ended.
+		cursorVal := memoryRefTime(last.LastActivatedAt, last.CreatedAt).Format(time.RFC3339Nano)
 		nextCursor = &cursorVal
 	}
 
@@ -1456,6 +1487,12 @@ func UpdateMemory(ctx context.Context, pool *pgxpool.Pool, id string, req *Updat
 		CallerUserID:    req.CallerUserID,
 		CallerDisplay:   req.CallerDisplay,
 		SupersedesMemID: &head.ID,
+		// aihub#236: a new version inherits the lineage's activation history.
+		// Without this each edit reset the head to activation_count=0 /
+		// last_activated_at=NULL, stranding the history on the archived row.
+		LastActivatedAt: head.LastActivatedAt,
+		LastActivatedBy: head.LastActivatedBy,
+		ActivationCount: head.ActivationCount,
 	}
 	if req.Content != nil {
 		rr.Content = *req.Content

@@ -111,6 +111,13 @@ func RunMemoryExpiredSweep(ctx context.Context, pool *pgxpool.Pool) GCResult {
 	}
 	defer release()
 
+	// Reference time MUST be memRefTimeSQL, not COALESCE. This sweep ARCHIVES
+	// rows, so getting it wrong loses data: UpdateMemory carries a lineage's
+	// last_activated_at onto each new version (aihub#236), so a freshly edited
+	// memory holds an old activation timestamp. Under COALESCE that stale value
+	// wins over the new created_at and the brand-new head is decayed as if it
+	// were months old — an edit made minutes ago would be archived on the next
+	// 60s tick while Recall still reports it at full strength.
 	tag, err := pool.Exec(ctx, `
 		UPDATE memories
 		SET status = 'archived', updated_at = clock_timestamp()
@@ -118,7 +125,7 @@ func RunMemoryExpiredSweep(ctx context.Context, pool *pgxpool.Pool) GCResult {
 		  AND is_immortal = FALSE
 		  AND (
 		    base_strength * exp(
-		      -extract(epoch FROM (clock_timestamp() - COALESCE(last_activated_at, created_at))) / 86400.0
+		      -extract(epoch FROM (clock_timestamp() - `+memRefTimeSQL+`)) / 86400.0
 		      / NULLIF(stability_days, 0)
 		    )
 		  ) < 0.1`)

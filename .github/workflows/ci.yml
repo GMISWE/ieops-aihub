@@ -70,10 +70,27 @@ jobs:
         # on $(go env GOPATH)/bin being on PATH in this job.
         run: go run github.com/pressly/goose/v3/cmd/goose@latest -dir internal/db/migrations postgres "$AIHUB_TEST_DB" up
 
+      # Runs with -v and then asserts both cases actually reported PASS, rather
+      # than trusting the exit code. `go test` prints "ok" and exits 0 when
+      # every selected test SKIPs, and setupLatestTestDB skips whenever
+      # AIHUB_TEST_DB is empty — so without this guard, anything that stops the
+      # env var from reaching this step (a rename, a moved job, an edited env
+      # block) would silently restore the zero-coverage state these steps exist
+      # to fix, while CI stayed green. The guard converts that silent
+      # regression into a hard failure.
       - name: aihub#242 dependency-requeue DB tests
         env:
           AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
-        run: go test ./internal/domain/ -run 'TestDeleteDependency' -count=1
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestDeleteDependency' -count=1 -v 2>&1 | tee dep_requeue.log
+          for want in TestDeleteDependency_LastBlockerRemoved_Requeues \
+                      TestDeleteDependency_OtherBlockerRemains_StaysBlocked; do
+            grep -q -- "--- PASS: $want" dep_requeue.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the DB-gated requeue coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' dep_requeue.log \
+            || { echo "::error::a TestDeleteDependency case SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#237: the launcher's update check is shell, so `go test` cannot see
       # it — a silent-pin regression there would ship green. This suite is

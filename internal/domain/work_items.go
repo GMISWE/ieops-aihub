@@ -868,6 +868,35 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 	return GetWorkItem(ctx, pool, wi.ID)
 }
 
+// cancelGate is CancelWorkItem's pure decision function (aihub#242). State is
+// checked BEFORE permission so a state rejection is never reported as a
+// permission failure: 409 means "wrong state", 403 means "wrong caller", and
+// the two are no longer conflated.
+//
+// Before this fix, CancelWorkItem computed canCancel with a status check
+// hard-wired to (queued|paused) and only checked wi.Status afterward. A
+// blocked wi therefore always fell into the "insufficient permissions" 403
+// branch — even for its own reporter — even though the real problem was
+// state, not permission. Because a blocked wi (once its last dependency is
+// removed) has no other exit — pf_claim_work_item also rejects status=blocked
+// — that made such wis permanently stuck. Reporters may now cancel a blocked
+// wi: that is the missing exit.
+func cancelGate(status string, isReporter bool, callerRole, projectRole string) *AihubError {
+	switch status {
+	case "running":
+		return NewErr(ErrConflictWIAlreadyClaimed, "work item is running; force_takeover first, then cancel")
+	case "wrapped", "failed", "cancelled":
+		return NewErr(ErrConflictTerminalState, fmt.Sprintf("work item is already in terminal state: %s", status))
+	}
+
+	// Remaining statuses (queued, paused, blocked): permission-only gate.
+	canCancel := callerRole == "admin" || projectRole == "maintainer" || isReporter
+	if !canCancel {
+		return NewErr(ErrForbidden, "insufficient permissions: only the reporter, a project maintainer, or an admin may cancel this work item")
+	}
+	return nil
+}
+
 // CancelWorkItem sets a work item's status to cancelled if it's not running.
 func CancelWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug, callerUserID, callerRole string, callerProjectRoles map[string]string) *AihubError {
 	wi, aihubErr := GetWorkItem(ctx, pool, idOrSlug)
@@ -875,20 +904,10 @@ func CancelWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug, callerUse
 		return aihubErr
 	}
 
-	// Permission check
 	isReporter := wi.ReporterUserID == callerUserID
 	projectRole := callerProjectRoles[wi.Project]
-	canCancel := callerRole == "admin" || projectRole == "maintainer" ||
-		(isReporter && (wi.Status == "queued" || wi.Status == "paused"))
-	if !canCancel {
-		return NewErr(ErrForbidden, "insufficient permissions to cancel this work item")
-	}
-
-	if wi.Status == "running" {
-		return NewErr(ErrConflictWIAlreadyClaimed, "work item is running; force_takeover first, then cancel")
-	}
-	if wi.Status == "wrapped" || wi.Status == "failed" || wi.Status == "cancelled" {
-		return NewErr(ErrConflictTerminalState, fmt.Sprintf("work item is already in terminal state: %s", wi.Status))
+	if gateErr := cancelGate(wi.Status, isReporter, callerRole, projectRole); gateErr != nil {
+		return gateErr
 	}
 
 	_, err := pool.Exec(ctx, `UPDATE work_items SET status='cancelled' WHERE id=$1`, wi.ID)

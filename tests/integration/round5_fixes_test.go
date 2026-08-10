@@ -86,6 +86,88 @@ func TestDependencyBlocksReadyQueue(t *testing.T) {
 	}
 }
 
+// TestRemoveDependencyUnblocksWorkItem verifies the aihub#242 fix end-to-end:
+// a wi blocked by a 'blocks' dependency must be requeued (and claimable
+// again) once that dependency is removed via pf_remove_dependency, even
+// though the blocker itself never reaches a terminal status. Before the fix,
+// DeleteDependency only removed the wi_dependencies row and never recomputed
+// work_items.status, so the blocked wi stayed status='blocked' forever —
+// unclaimable (409) and, depending on caller, uncancellable (403) — see
+// ieops#444.
+func TestRemoveDependencyUnblocksWorkItem(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClient(t)
+	waitForHealth(t, c, 30*time.Second)
+
+	blockerID := mustCreateWorkItem(t, c, ctx, map[string]any{
+		"goal":                   fmt.Sprintf("Dep-removal-test blocker %d", time.Now().UnixNano()),
+		"project":                testProject,
+		"scenario":               "coding",
+		"wi_type":                "fix_bug",
+		"priority":               "high",
+		"requires_human_session": false,
+	})
+	blockedID := mustCreateWorkItem(t, c, ctx, map[string]any{
+		"goal":                   fmt.Sprintf("Dep-removal-test blocked %d", time.Now().UnixNano()),
+		"project":                testProject,
+		"scenario":               "coding",
+		"wi_type":                "fix_bug",
+		"priority":               "normal",
+		"requires_human_session": false,
+	})
+	t.Logf("blocker=%s blocked=%s", blockerID, blockedID)
+	defer cancelWorkItem(t, c, ctx, blockerID)
+	defer cancelWorkItem(t, c, ctx, blockedID)
+
+	// 1. Create dependency: blockedID is blocked by blockerID (blocker stays
+	//    queued/unclaimed throughout — it never reaches a terminal status).
+	if _, err := c.CreateDependency(ctx, map[string]any{
+		"blocked_wi_id":  blockedID,
+		"blocking_wi_id": blockerID,
+		"kind":           "blocks",
+	}); err != nil {
+		t.Fatalf("CreateDependency: %v", err)
+	}
+
+	blockedWI := mustGetWorkItem(t, c, ctx, blockedID)
+	if blockedWI["status"] != "blocked" {
+		t.Fatalf("expected blocked wi status=blocked after CreateDependency, got %v", blockedWI["status"])
+	}
+
+	// 2. Claiming while blocked must fail (this is the deadlock this test guards
+	//    against escaping the wrong way — via a permissive claim rather than
+	//    the dependency-removal path under test).
+	if _, err := c.ClaimWorkItem(ctx, blockedID, map[string]any{
+		"idempotency_key": "dep-removal-test-should-fail",
+		"session_info":    newSessionInfo(),
+		"mode":            "fresh",
+	}); err == nil {
+		t.Fatalf("ClaimWorkItem on a blocked wi unexpectedly succeeded")
+	}
+
+	// 3. Remove the dependency WITHOUT the blocker ever reaching a terminal
+	//    status — this is exactly the aihub#242 scenario.
+	if _, err := c.RemoveDependency(ctx, map[string]any{
+		"blocked_wi_id":  blockedID,
+		"blocking_wi_id": blockerID,
+		"kind":           "blocks",
+	}); err != nil {
+		t.Fatalf("RemoveDependency: %v", err)
+	}
+
+	// 4. The wi must be requeued and claimable again.
+	blockedWI2 := mustGetWorkItem(t, c, ctx, blockedID)
+	if blockedWI2["status"] != "queued" {
+		t.Fatalf("expected blocked wi status=queued after RemoveDependency, got %v", blockedWI2["status"])
+	}
+	claim := mustClaimWorkItem(t, c, ctx, blockedID, "dep-removal-test-claim-001")
+	if claim["attempt_id"] == nil || claim["attempt_id"] == "" {
+		t.Fatalf("expected a valid attempt_id after claiming newly-unblocked wi, got %v", claim["attempt_id"])
+	}
+	mustCompleteAttempt(t, c, ctx, blockedID, claim, "wrapped")
+	t.Logf("OK: wi %s requeued and claimable after RemoveDependency removed its last blocker", blockedID)
+}
+
 // TestMemoryDedupThresholds verifies the two-threshold dedup model from design §7.7 / §11:
 // - similarity ≥ 0.85 (strict) → 409 CONFLICT_SIMILAR_MEMORY
 // - similarity ≥ 0.65 (suggest) → 200 with attrs.similar_to annotation

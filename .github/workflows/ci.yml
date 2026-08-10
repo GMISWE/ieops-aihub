@@ -47,6 +47,50 @@ jobs:
       - name: Unit tests
         run: go test -count=1 -race ./...
         # Note: integration tests require docker-compose; run locally: cd tests/integration && make test
+        # AIHUB_TEST_DB is deliberately NOT set here — see the "aihub#242
+        # dependency-requeue DB tests" step below for why.
+
+      # aihub#242: exercise the DeleteDependency requeue regression (Change A)
+      # against the real Postgres service already started for this job, which
+      # the "Unit tests" step above leaves unused (AIHUB_TEST_DB unset there).
+      #
+      # Deliberately scoped to `-run 'TestDeleteDependency'` rather than
+      # setting AIHUB_TEST_DB on the "Unit tests" step: this domain package has
+      # several other AIHUB_TEST_DB-gated suites (memory ranking, cross-project
+      # resume, conflict prediction, ...) that would also switch on if the var
+      # were set package-wide, and this change did not verify those pass —
+      # widening the gate here could newly fail CI for unrelated reasons. This
+      # step applies migrations itself (setupLatestTestDB in
+      # memory_latest_test.go assumes an already-migrated DB, it does not
+      # migrate) via goose, matching tests/integration/Makefile's `seed` target.
+      - name: Apply migrations (aihub#242 DB tests)
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        # `go run` (rather than `go install` + bare `goose`) sidesteps relying
+        # on $(go env GOPATH)/bin being on PATH in this job.
+        run: go run github.com/pressly/goose/v3/cmd/goose@latest -dir internal/db/migrations postgres "$AIHUB_TEST_DB" up
+
+      # Runs with -v and then asserts both cases actually reported PASS, rather
+      # than trusting the exit code. `go test` prints "ok" and exits 0 when
+      # every selected test SKIPs, and setupLatestTestDB skips whenever
+      # AIHUB_TEST_DB is empty — so without this guard, anything that stops the
+      # env var from reaching this step (a rename, a moved job, an edited env
+      # block) would silently restore the zero-coverage state these steps exist
+      # to fix, while CI stayed green. The guard converts that silent
+      # regression into a hard failure.
+      - name: aihub#242 dependency-requeue DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestDeleteDependency' -count=1 -v 2>&1 | tee dep_requeue.log
+          for want in TestDeleteDependency_LastBlockerRemoved_Requeues \
+                      TestDeleteDependency_OtherBlockerRemains_StaysBlocked; do
+            grep -q -- "--- PASS: $want" dep_requeue.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the DB-gated requeue coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' dep_requeue.log \
+            || { echo "::error::a TestDeleteDependency case SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#237: the launcher's update check is shell, so `go test` cannot see
       # it — a silent-pin regression there would ship green. This suite is

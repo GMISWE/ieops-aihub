@@ -244,6 +244,19 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			}
 		}
 	} else if wi.Status == "blocked" {
+		// aihub#242: removing a blocked wi's last active dependency now
+		// auto-requeues it (DeleteDependency / requeueIfUnblocked in
+		// dependencies.go), so this rejection is no longer a dead end — the
+		// caller (or its blockers' owners) has a real path out via
+		// pf_remove_dependency, or the reporter can cancel it (CancelWorkItem /
+		// cancelGate now allows cancelling from status=blocked).
+		//
+		// force_takeover deliberately does NOT bypass this gate: router.go's
+		// force_takeover permission check only applies when wi.CurrentAttemptID
+		// is set, and a blocked wi has none, so any writer could otherwise
+		// bypass the block by claiming with force_takeover=true. Do not "fix"
+		// this by moving the blocked check after the force_takeover check
+		// without first adding a role gate here too.
 		return nil, NewErr(ErrConflictTerminalState, "work item is blocked by dependencies; resolve blockers first")
 	} else if wi.Status == "paused" || wi.Status == "queued" {
 		// Normal claim — no extra checks required.
@@ -748,30 +761,27 @@ func unblockDependentWI(ctx context.Context, tx pgx.Tx, wiID, project string) *A
 	rows.Close()
 
 	for _, blockedID := range candidateIDs {
-		// Check if all other blockers are terminal
-		var stillBlocked int
-		tx.QueryRow(ctx, `
-			SELECT COUNT(*) FROM wi_dependencies dep
-			JOIN work_items blocker ON dep.blocking_wi_id = blocker.id
-			WHERE dep.blocked_wi_id = $1
-			  AND dep.kind = 'blocks'
-			  AND dep.blocking_wi_id != $2
-			  AND blocker.status NOT IN ('wrapped','cancelled','failed')`,
-			blockedID, wiID,
-		).Scan(&stillBlocked) //nolint:errcheck
-
-		if stillBlocked == 0 {
-			// All blockers done — move to queued
-			tx.Exec(ctx, `UPDATE work_items SET status='queued' WHERE id=$1`, blockedID) //nolint:errcheck
-
-			// Emit wi_unblocked event
-			evtID := NewID("evt")
+		// aihub#242: status recompute now lives in the shared requeueIfUnblocked
+		// helper (also used by DeleteDependency). Pass wiID as the excluded
+		// blocker, matching this function's pre-refactor SQL exactly.
+		unblocked, err := requeueIfUnblocked(ctx, tx, blockedID, wiID)
+		if err != nil {
+			// Fail closed: skip this blockedID and leave it blocked. This is a
+			// deliberate behaviour change from the pre-refactor code, not a
+			// continuation of it — the old inline query did
+			// `.Scan(&stillBlocked)` with the error ignored, so a Scan failure
+			// silently left stillBlocked at its zero value (0) and the old code
+			// went ahead and requeued the wi anyway (fail-open). Here, a
+			// requeueIfUnblocked error means we couldn't verify no active
+			// blocker remains, so leaving the wi blocked is the safer choice.
+			continue
+		}
+		if unblocked {
+			// Emit wi_unblocked event, SAVEPOINT-isolated (see
+			// emitWIUnblockedEvent in dependencies.go) so a failed insert
+			// cannot roll back the requeue above.
 			evtPayload, _ := json.Marshal(map[string]any{"unblocked_by_wi": wiID})
-			_, _ = tx.Exec(ctx, `
-				INSERT INTO agent_events (id, work_item_id, event_type, payload, project)
-				VALUES ($1, $2, 'wi_unblocked', $3, $4)`,
-				evtID, blockedID, evtPayload, project,
-			)
+			emitWIUnblockedEvent(ctx, tx, blockedID, project, evtPayload)
 		}
 	}
 	return nil

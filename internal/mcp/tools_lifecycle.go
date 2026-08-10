@@ -16,6 +16,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
 func (s *Server) registerLifecycleTools() {
@@ -106,7 +107,7 @@ func (s *Server) registerLifecycleTools() {
 			"requires_human_session": prop("boolean", "Whether this wi requires a human session"),
 			"milestone":              prop("string", "Milestone name"),
 			"labels":                 prop("array", "Labels"),
-			"declared_resources":     prop("array", "Declared resource locks"),
+			"declared_resources":     declaredResourcesProp("Declared resource locks"),
 			"parent_work_item_id":    prop("string", "Parent work item ID"),
 			"source":                 prop("string", "Source reference"),
 			"attrs":                  prop("object", "Additional attributes"),
@@ -225,7 +226,7 @@ func (s *Server) registerLifecycleTools() {
 			"requires_human_session": prop("boolean", "Updated requires_human_session"),
 			"reclassify_reason":      prop("string", "Reason for wi_type change (min 10 chars)"),
 			"labels":                 prop("array", "Updated labels"),
-			"declared_resources":     prop("array", "Updated declared resources"),
+			"declared_resources":     declaredResourcesProp("Updated declared resources"),
 			"resources_version":      prop("string", "Current resources version for CAS"),
 			"attrs":                  prop("object", "Updated attributes"),
 			"content":                prop("string", "Background context for this wi (markdown, max 20000 chars)"),
@@ -261,7 +262,7 @@ func (s *Server) registerLifecycleTools() {
 			"work_item_id":    prop("string", "Work item ID or slug"),
 			"idempotency_key": prop("string", "Idempotency key for DB dedup"),
 			"mode":            prop("string", "fresh|resume (default: fresh)"),
-			"requested_locks": prop("array", "Resource locks to acquire"),
+			"requested_locks": requestedLocksProp("Resource locks to acquire"),
 			"force_takeover":  prop("boolean", "Force takeover if already claimed"),
 			"scenario_ref":    prop("string", "Git SHA of local scenario clone at claim time (optional)"),
 		}, []string{"work_item_id", "idempotency_key"}),
@@ -472,8 +473,14 @@ func (s *Server) registerLifecycleTools() {
 			"claim_epoch": sf.ClaimEpoch,
 			"ok":          true,
 		}
-		// Pass through other non-secret fields
-		for _, k := range []string{"expires_at", "acquired_locks", "current_attempt_epoch", "slug", "project"} {
+		// Pass through other non-secret fields.
+		//
+		// aihub#238: `unrecognized_resources` MUST stay in this list. It is the only
+		// signal that a declared resource is holding no lock, and reporting at claim
+		// is the only remedy available on the stored-data path (rejecting there would
+		// make historical mistyped work items unclaimable). Dropped here, the whole
+		// remedy is inert and the caller sees exactly the pre-fix output.
+		for _, k := range []string{"expires_at", "acquired_locks", "current_attempt_epoch", "slug", "project", "unrecognized_resources"} {
 			if v, ok := result[k]; ok {
 				safeResult[k] = v
 			}
@@ -838,6 +845,71 @@ func prop(typ, description string) map[string]any {
 func propEnum(typ, description string, enum []string) map[string]any {
 	p := prop(typ, description)
 	p["enum"] = enum
+	return p
+}
+
+// declaredResourcesProp describes the declared_resources array *including its
+// entry shape* (aihub#238).
+//
+// Before this, all three declared_resources schemas were a bare
+// prop("array", ...) and the only written record of the real shape was
+// pf-plan/SKILL.md Step 5 — invisible to every caller that does not go through
+// pf-plan, even though the MCP schema is their sole contract. Combined with a
+// server that silently skipped unrecognized types, a wrong guess cost nothing at
+// the call and everything later.
+//
+// The enum is taken from domain.DeclaredResourceTypeList() rather than written
+// out here, so the published contract cannot drift from the validator that
+// enforces it.
+func declaredResourcesProp(description string) map[string]any {
+	p := prop("array", description+
+		` — entries are {"type","uri","intent"}. NOTE: type takes a DECLARED type (repo/path/document/section/service/external_ref), NOT a lock type: file_scope/git_branch/worktree/tcp_port/deploy_env are resource_locks.resource_type values the server derives. A file path is type="path", uri="file:<repo-relative-path>". The path field is `+"`uri`"+`, not value/path/scope.`)
+	p["items"] = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"type": propEnum("string", "Declared resource type (NOT a lock type)", domain.DeclaredResourceTypeList()),
+			"uri": prop("string",
+				`Resource URI. Scheme by type: "file:<repo-relative-path>" for path/document/section, "repo:<repo-name>" for repo, "service:<name>" for service, a plain URL for external_ref.`),
+			// Deliberately NOT an enum. The server does not validate `intent` at all;
+			// only two values change behaviour ("read" suppresses the write lock and
+			// downgrades path conflicts to info; "refactor" on a repo entry triggers
+			// conflict rule 4). Meanwhile this repo's own fixtures use "exclusive" more
+			// often than "write". Publishing a closed set would state a contract the
+			// server does not keep — the exact failure this wi is about — so describe
+			// the semantics instead and let unknown values through as inert. (aihub#238)
+			"intent": prop("string",
+				`Access intent. Not validated by the server; only two values carry behaviour: "read" (takes no write lock, and path overlaps report as info instead of soft_block) and "refactor" (on a repo entry, flags other refactors of the same repo). "write" is the conventional default; other values are accepted but inert.`),
+			"base_branch": prop("string", "Base branch (repo entries only)"),
+			"task_branch": prop("string", "Task branch (repo entries only); defaults to main for lock-key derivation"),
+		},
+		"required": []string{"type", "uri"},
+	}
+	return p
+}
+
+// requestedLocksProp describes the requested_locks array including its entry
+// shape (aihub#238).
+//
+// This array had no item schema and was passed through to the server verbatim, so
+// a caller had to guess domain.ResourceLockReq's {resource_type, resource_key}.
+// Guessing the neighbouring declared_resources {type, value} shape produced an
+// empty resource_type, tripped the resource_locks CHECK constraint, and returned
+// 500 INTERNAL_ERROR with a bare SQLSTATE.
+//
+// Normal polyforge flow leaves this unset and lets the server derive locks from
+// the work item's declared_resources.
+func requestedLocksProp(description string) map[string]any {
+	p := prop("array", description+
+		` — usually OMIT this and let the server derive locks from the wi's declared_resources. Entries are {"resource_type","resource_key"} (NOT declared_resources' type/uri).`)
+	p["items"] = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"resource_type": propEnum("string", "Lock type (NOT a declared_resources type)", domain.ResourceLockTypeList()),
+			"resource_key": prop("string",
+				`Lock key. file_scope is project-namespaced "<project>:<repo-relative-path>" (aihub#222); git_branch is "<repo>/<branch>"; deploy_env is the bare service name.`),
+		},
+		"required": []string{"resource_type", "resource_key"},
+	}
 	return p
 }
 

@@ -15,7 +15,7 @@ func (s *Server) registerConflictTools() {
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id":       prop("string", "Work item ID (optional, for context)"),
 			"project":            prop("string", "Project the declared resources belong to; namespaces file_scope conflict checks (aihub#222). Optional when work_item_id is set (the wi own project takes precedence)."),
-			"declared_resources": prop("array", "Resources to check for conflicts"),
+			"declared_resources": declaredResourcesProp("Resources to check for conflicts"),
 			"dry_run":            prop("boolean", "Dry run — do not mutate state"),
 		}, []string{"declared_resources"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {

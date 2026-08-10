@@ -171,6 +171,13 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	if len(req.DeclaredResources) == 0 {
 		req.DeclaredResources = json.RawMessage("[]")
 	}
+	// aihub#238: reject resource types the lock mapper cannot understand at the
+	// point of entry. Before this, a mistyped entry was stored happily, showed up
+	// in the UI as "resources declared", and acquired no lock — the wi looked
+	// guarded and was not.
+	if aihubErr := ValidateDeclaredResources(req.DeclaredResources); aihubErr != nil {
+		return nil, aihubErr
+	}
 	if len(req.Attrs) == 0 {
 		req.Attrs = json.RawMessage("{}")
 	}
@@ -670,6 +677,14 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 	wi, aihubErr := GetWorkItem(ctx, pool, idOrSlug)
 	if aihubErr != nil {
 		return nil, aihubErr
+	}
+
+	// aihub#238: same entry-point validation as CreateWorkItem — an update must
+	// not be able to replace good declared_resources with silently lockless ones.
+	if req.DeclaredResources != nil {
+		if vErr := ValidateDeclaredResources(req.DeclaredResources); vErr != nil {
+			return nil, vErr
+		}
 	}
 
 	// Permission checks for goal change

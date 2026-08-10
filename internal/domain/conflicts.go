@@ -68,6 +68,18 @@ type PredictConflictsResponse struct {
 // PredictConflicts applies the 5 conflict rules and returns predictions.
 // Implements §23 of the design doc.
 func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConflictsRequest, callerProjectRoles map[string]string) (*PredictConflictsResponse, *AihubError) {
+	// aihub#238: validate BEFORE any database access. This is the call pf-work
+	// uses as its pre-claim gate, and an unrecognized type used to fall through
+	// resourceToLock into `continue`, so the response was
+	// {"predictions":[],"severity":"info"} — a fake all-clear that reads exactly
+	// like a genuine one. Refusing is the only safe answer for input we cannot
+	// map to locks. Ordering matters: the test for this passes a nil pool, so if
+	// validation ever moves below the first query the test panics instead of
+	// passing.
+	if aihubErr := ValidateDeclaredResources(req.DeclaredResources); aihubErr != nil {
+		return nil, aihubErr
+	}
+
 	var resources []DeclaredResourceItem
 	if len(req.DeclaredResources) > 0 && string(req.DeclaredResources) != "null" {
 		if err := json.Unmarshal(req.DeclaredResources, &resources); err != nil {

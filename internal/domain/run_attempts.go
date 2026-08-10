@@ -69,16 +69,22 @@ type ResourceLockReq struct {
 
 // ClaimResponse is returned by POST /v1/work_items/:id/claim.
 type ClaimResponse struct {
-	AttemptID            string         `json:"attempt_id"`
-	ClaimEpoch           int64          `json:"claim_epoch"`
-	AcquiredLocks        []ResourceLock `json:"acquired_locks"`
-	CurrentAttemptEpoch  int64          `json:"current_attempt_epoch"`
-	StepRecoveryHint     string         `json:"step_recovery_hint,omitempty"`
-	RequiresHumanSession *bool          `json:"requires_human_session"`
-	WIType               *string        `json:"wi_type"`
-	Slug                 string         `json:"slug,omitempty"`
-	Project              string         `json:"project,omitempty"`
-	ID                   string         `json:"id,omitempty"`
+	AttemptID           string         `json:"attempt_id"`
+	ClaimEpoch          int64          `json:"claim_epoch"`
+	AcquiredLocks       []ResourceLock `json:"acquired_locks"`
+	CurrentAttemptEpoch int64          `json:"current_attempt_epoch"`
+	StepRecoveryHint    string         `json:"step_recovery_hint,omitempty"`
+	// UnrecognizedResources lists declared_resources entries whose type the lock
+	// mapper could not understand and which are therefore holding NO lock
+	// (aihub#238). Stored data cannot be rejected at claim time without making
+	// historical work items unclaimable, so the claim succeeds and says so here
+	// rather than staying silent. Empty on a healthy work item.
+	UnrecognizedResources []string `json:"unrecognized_resources,omitempty"`
+	RequiresHumanSession  *bool    `json:"requires_human_session"`
+	WIType                *string  `json:"wi_type"`
+	Slug                  string   `json:"slug,omitempty"`
+	Project               string   `json:"project,omitempty"`
+	ID                    string   `json:"id,omitempty"`
 }
 
 // FnClaimWorkItem implements the atomic claim transaction per §7 / §8.4 of the design doc.
@@ -176,16 +182,19 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			return nil, NewErr(ErrInternalError, "failed to commit idempotent claim")
 		}
 		return &ClaimResponse{
-			AttemptID:            existingAttemptID,
-			ClaimEpoch:           existingEpoch,
-			AcquiredLocks:        existingLocks,
-			CurrentAttemptEpoch:  existingEpoch,
-			StepRecoveryHint:     idemHint,
-			RequiresHumanSession: wi.RequiresHumanSession,
-			WIType:               wi.WIType,
-			Slug:                 wi.Slug,
-			Project:              wi.Project,
-			ID:                   wi.ID,
+			AttemptID:           existingAttemptID,
+			ClaimEpoch:          existingEpoch,
+			AcquiredLocks:       existingLocks,
+			CurrentAttemptEpoch: existingEpoch,
+			StepRecoveryHint:    idemHint,
+			// aihub#238: an idempotent replay must repeat the warning too, or the
+			// signal disappears on retry — exactly when a confused caller looks again.
+			UnrecognizedResources: UnrecognizedDeclaredResources(wi.DeclaredResources),
+			RequiresHumanSession:  wi.RequiresHumanSession,
+			WIType:                wi.WIType,
+			Slug:                  wi.Slug,
+			Project:               wi.Project,
+			ID:                    wi.ID,
 		}, nil
 	}
 
@@ -264,6 +273,19 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		return nil, NewErr(ErrConflictTerminalState, fmt.Sprintf("work item is in terminal state: %s", wi.Status))
 	}
 
+	// aihub#238: validate the CLIENT-SUPPLIED locks, before the derivation block
+	// below can append server-derived entries to the same slice.
+	//
+	// Ordering is load-bearing. Validating the merged slice instead would apply
+	// input rules to server-derived entries, and derivation can legitimately
+	// produce a well-typed lock with an empty key from bad stored data — e.g. a
+	// stored {"type":"service"} with no uri maps to ("deploy_env", ""). That would
+	// 400 the claim and make an existing work item unclaimable, which is exactly
+	// the outcome this change exists to avoid.
+	if aihubErr := ValidateRequestedLocks(req.RequestedLocks); aihubErr != nil {
+		return nil, aihubErr
+	}
+
 	// §4.3 + §15: locks are derived from wi.declared_resources at claim time.
 	// If the client did not pass RequestedLocks explicitly, derive them from the
 	// work_item's declared_resources via resourceToLock mapping (§25 C-R3-8).
@@ -284,7 +306,12 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 				lockType, lockKey := resourceToLock(DeclaredResourceItem{
 					Type: d.Type, URI: d.URI, Intent: d.Intent, TaskBranch: d.TaskBranch,
 				}, wi.Project)
-				if lockType == "" {
+				// aihub#238: an empty key is possible from bad stored data (a
+				// `service`/`path` entry with no uri). Never insert it — the row is
+				// meaningless as a lock and would collide with every other empty-key
+				// row of the same type. Skipping keeps the wi claimable; the entry is
+				// reported via unrecognizedResources below rather than dropped silently.
+				if lockType == "" || lockKey == "" {
 					continue
 				}
 				req.RequestedLocks = append(req.RequestedLocks, ResourceLockReq{
@@ -293,6 +320,14 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			}
 		}
 	}
+
+	// aihub#238: this path reads ALREADY-STORED declared_resources, so it cannot
+	// reject a mistyped entry without making historical work items unclaimable
+	// (~14% of entries in aihub's own recent wis are mistyped). Report instead of
+	// failing, so the claimer at least learns that something they declared is
+	// holding no lock. New bad data is prevented upstream, by the create/update
+	// validation in work_items.go.
+	unrecognizedResources := UnrecognizedDeclaredResources(wi.DeclaredResources)
 
 	// Check lock conflicts (advisory — actual conflict resolution in claim)
 	if len(req.RequestedLocks) > 0 && !isTakeover {
@@ -513,16 +548,17 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	}
 
 	return &ClaimResponse{
-		AttemptID:            newAttemptID,
-		ClaimEpoch:           newEpoch,
-		AcquiredLocks:        acquiredLocks,
-		CurrentAttemptEpoch:  newEpoch,
-		StepRecoveryHint:     stepRecoveryHint,
-		RequiresHumanSession: wi.RequiresHumanSession,
-		WIType:               wi.WIType,
-		Slug:                 wi.Slug,
-		Project:              wi.Project,
-		ID:                   wi.ID,
+		AttemptID:             newAttemptID,
+		ClaimEpoch:            newEpoch,
+		AcquiredLocks:         acquiredLocks,
+		CurrentAttemptEpoch:   newEpoch,
+		StepRecoveryHint:      stepRecoveryHint,
+		UnrecognizedResources: unrecognizedResources,
+		RequiresHumanSession:  wi.RequiresHumanSession,
+		WIType:                wi.WIType,
+		Slug:                  wi.Slug,
+		Project:               wi.Project,
+		ID:                    wi.ID,
 	}, nil
 }
 
@@ -937,6 +973,9 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	if len(wi.DeclaredResources) > 0 {
 		json.Unmarshal(wi.DeclaredResources, &declaredRes) //nolint:errcheck
 	}
+	// aihub#238: entries the mapper cannot understand yield no lock here either.
+	// Stored data, so this must not fail the takeover; the subsequent fresh claim
+	// reports them via ClaimResponse.unrecognized_resources.
 	for _, res := range declaredRes {
 		lockType, lockKey := resourceToLock(DeclaredResourceItem{Type: res.Type, URI: res.URI, TaskBranch: res.TaskBranch}, wi.Project)
 		if lockType == "" {

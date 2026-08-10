@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -207,9 +208,109 @@ func ListChildren(ctx context.Context, pool *pgxpool.Pool, parentWiID string, ca
 	return out, nil
 }
 
-// DeleteDependency removes a wi_dependency.
+// requeueIfUnblocked recomputes whether a blocked work item still has any
+// active 'blocks' dependency and, if not, moves it from 'blocked' back to
+// 'queued'. It is the shared inverse of CreateDependency's forward derivation
+// (queued -> blocked) and is used by both DeleteDependency (a dependency row
+// was removed) and unblockDependentWI (a blocking wi reached a terminal
+// status). Before aihub#242 this recompute only existed on the forward path,
+// so a wi could enter 'blocked' but never leave it once its dependencies were
+// gone — see ieops#444.
+//
+// excludeBlockerWIID lets a caller exclude one specific blocker from the
+// "does an active blocker remain" check, for callers where that blocker's own
+// row has not yet been updated to a terminal status within the current
+// transaction (unblockDependentWI passes the wi that just completed). Pass ""
+// to exclude nothing (DeleteDependency: the dependency row is already deleted
+// earlier in the same transaction, so it is naturally excluded from the
+// EXISTS check without needing this parameter).
+//
+// Returns whether the UPDATE actually requeued the wi (RowsAffected == 1), so
+// callers can conditionally emit their own wi_unblocked event. Does not set
+// updated_at explicitly — the trg_wi_updated_at trigger (migration 0002)
+// maintains it.
+func requeueIfUnblocked(ctx context.Context, tx pgx.Tx, blockedWIID, excludeBlockerWIID string) (bool, error) {
+	tag, err := tx.Exec(ctx, `
+		UPDATE work_items
+		SET status = 'queued'
+		WHERE id = $1
+		  AND status = 'blocked'
+		  AND NOT EXISTS (
+		    SELECT 1 FROM wi_dependencies dep
+		    JOIN work_items blocker ON dep.blocking_wi_id = blocker.id
+		    WHERE dep.blocked_wi_id = $1
+		      AND dep.kind = 'blocks'
+		      AND ($2 = '' OR dep.blocking_wi_id != $2)
+		      AND blocker.status NOT IN ('wrapped', 'cancelled', 'failed')
+		  )`,
+		blockedWIID, excludeBlockerWIID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// emitWIUnblockedEvent inserts a wi_unblocked agent_events row, isolated by a
+// SAVEPOINT so a failed INSERT cannot abort the caller's transaction. This
+// event write really is best-effort (losing it does not affect wi state, and
+// callers already treat it that way), but under pgx v5 / Postgres that is
+// only true when the INSERT is wrapped like this: a plain
+// `_, _ = tx.Exec(ctx, "INSERT ...")` does NOT make a failure harmless —
+// Postgres aborts the whole transaction on any failed statement, so the
+// later tx.Commit would return ErrTxCommitRollback and roll back the
+// requeue this event exists to report, which is the exact deadlock aihub#242
+// fixes. A realistic trigger: agent_events is PARTITION BY RANGE(created_at)
+// (migration 0006) with partitions pre-created only some months ahead, so a
+// missing partition makes this INSERT fail. SAVEPOINT/ROLLBACK TO SAVEPOINT
+// is the established idiom for this in this codebase — see the step-completion
+// and escalated-stall inserts in routes_step.go.
+func emitWIUnblockedEvent(ctx context.Context, tx pgx.Tx, wiID, project string, payload []byte) {
+	tx.Exec(ctx, `SAVEPOINT bp_wi_unblocked`) //nolint:errcheck
+	_, err := tx.Exec(ctx, `
+		INSERT INTO agent_events (id, work_item_id, event_type, payload, project)
+		VALUES ($1, $2, 'wi_unblocked', $3, $4)`,
+		NewID("evt"), wiID, payload, project,
+	)
+	if err != nil {
+		tx.Exec(ctx, `ROLLBACK TO SAVEPOINT bp_wi_unblocked`) //nolint:errcheck
+		return
+	}
+	tx.Exec(ctx, `RELEASE SAVEPOINT bp_wi_unblocked`) //nolint:errcheck
+}
+
+// DeleteDependency removes a wi_dependency and, for kind='blocks' rows,
+// requeues the blocked wi if this was its last remaining active blocker
+// (aihub#242). CreateDependency derives status='blocked' when a 'blocks'
+// dependency is added (queued -> blocked); until this fix, DeleteDependency
+// never derived the inverse, so a wi whose last blocker was removed stayed
+// status='blocked' forever — it could not be claimed (blocked) or cancelled
+// (permission logic treated blocked as non-cancellable), a dead end fixed
+// alongside this change in CancelWorkItem/cancelGate. See ieops#444.
+//
+// Note on stalled-blocked wis: a status='blocked' wi that a fresh escalated
+// step failure produces (routes_step.go, spec A-1) has no wi_dependencies row
+// at the moment it is set that way, so this DELETE cannot directly hit it
+// (RowsAffected stays 0, returning 404). But a wi CAN legitimately end up
+// both stalled AND carrying a residual 'blocks' row: unblockDependentWI
+// requeues a dependency-blocked wi once its blocker goes terminal WITHOUT
+// deleting the wi_dependencies row; if that requeued wi is then claimed and
+// escalates a step failure, it goes back to status='blocked' while the old
+// (now-inert) 'blocks' row is still sitting there. Deleting that row here
+// would requeue such a wi out of the human-triage "stalled" segment. This is
+// not a new hole introduced by this change, though: gc.go's
+// RunUnblockDependentWI sweep (aihub#206, ~L237-251) has the identical EXISTS
+// guard and already requeues this exact wi within ~60s regardless of this
+// code path, so this function's behavior here stays consistent with the
+// existing GC sweep rather than introducing a new inconsistency.
 func DeleteDependency(ctx context.Context, pool *pgxpool.Pool, blockedWIID, blockingWIID, kind string) *AihubError {
-	result, err := pool.Exec(ctx, `
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return NewErr(ErrInternalError, "failed to begin transaction")
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	result, err := tx.Exec(ctx, `
 		DELETE FROM wi_dependencies WHERE blocked_wi_id=$1 AND blocking_wi_id=$2 AND kind=$3`,
 		blockedWIID, blockingWIID, kind,
 	)
@@ -218,6 +319,29 @@ func DeleteDependency(ctx context.Context, pool *pgxpool.Pool, blockedWIID, bloc
 	}
 	if result.RowsAffected() == 0 {
 		return NewErr(ErrNotFound, "dependency not found")
+	}
+
+	if kind == "blocks" {
+		unblocked, uerr := requeueIfUnblocked(ctx, tx, blockedWIID, "")
+		if uerr != nil {
+			return NewErr(ErrInternalError, fmt.Sprintf("failed to recompute blocked status: %v", uerr))
+		}
+		if unblocked {
+			var project string
+			if perr := tx.QueryRow(ctx, `SELECT project FROM work_items WHERE id=$1`, blockedWIID).Scan(&project); perr == nil {
+				payload, _ := json.Marshal(map[string]any{
+					"unblocked_by":          "dependency_removed",
+					"removed_blocker_wi_id": blockingWIID,
+				})
+				// SAVEPOINT-isolated (see emitWIUnblockedEvent) so a failed
+				// insert cannot roll back the requeue above.
+				emitWIUnblockedEvent(ctx, tx, blockedWIID, project, payload)
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return NewErr(ErrInternalError, "failed to commit dependency deletion")
 	}
 	return nil
 }

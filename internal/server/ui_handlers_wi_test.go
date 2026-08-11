@@ -662,14 +662,18 @@ func TestUIWIDetail_200_RendersMarkdown(t *testing.T) {
 		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "<h1") {
-		t.Errorf("markdown # should render to <h1>; body did not contain <h1>")
-	}
-	if !strings.Contains(body, "<ul>") && !strings.Contains(body, "<ul ") {
-		t.Errorf("markdown bullets should render to <ul>; body did not contain <ul>")
-	}
+	// The goal is page chrome and stays in the page. The Background markdown is rendered
+	// inside a sandboxed iframe (aihub#240), so its elements are asserted on the frame's
+	// inner document — in the page body they are attribute-escaped srcdoc bytes.
 	if !strings.Contains(body, "do the thing") {
 		t.Errorf("goal text missing from body")
+	}
+	doc := innerDoc(t, body)
+	if !strings.Contains(doc, "<h1") {
+		t.Errorf("markdown # should render to <h1>; embedded document did not contain <h1>")
+	}
+	if !strings.Contains(doc, "<ul>") && !strings.Contains(doc, "<ul ") {
+		t.Errorf("markdown bullets should render to <ul>; embedded document did not contain <ul>")
 	}
 }
 

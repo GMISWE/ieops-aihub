@@ -1,7 +1,6 @@
 package server
 
 import (
-	"html/template"
 	"regexp"
 	"strings"
 	"testing"
@@ -256,11 +255,17 @@ func TestDiagramThemeMap_CoversAllFourFamilies(t *testing.T) {
 	}
 }
 
-// TestDiagramJS_LoadedOnBothSurfaces — both surfaces compile d2: the artifact viewer,
-// and the memory/wi detail pages via uiFuncMap's md helper since aihub#231. The zoom
-// script has to be wired into both. The viewer half is asserted end-to-end by
-// TestArtifactViewer_UIvsV1Share_BytePurity; this covers the app-shell half, plus the
-// CSS/JS pairing that makes a detail-page figure zoomable at all.
+// TestDiagramJS_LoadedOnBothSurfaces — both surfaces compile d2: the artifact viewer, and
+// the memory/wi detail pages via uiFuncMap's md helper since aihub#231.
+//
+// KNOWN REGRESSION, asserted rather than left to be discovered (aihub#240 D3; the remaining
+// work is aihub#245): the detail-page figure now renders inside a sandboxed iframe, so neither
+// diagram.js nor ui.css reaches it. Click-to-zoom is unavailable on those two pages, and
+// the figure's sizing comes from render.innerBaseCSS instead.
+//
+// This test keeps asserting the parent-side wiring, because it still governs the artifact
+// viewer, and adds the frame-side equivalent so the embedded figure is not left unstyled by
+// both stylesheets at once — which is what a silent version of this change would produce.
 func TestDiagramJS_LoadedOnBothSurfaces(t *testing.T) {
 	if _, err := staticFS.ReadFile("static/diagram.js"); err != nil {
 		t.Fatalf("static/diagram.js must be embedded: %v", err)
@@ -272,19 +277,22 @@ func TestDiagramJS_LoadedOnBothSurfaces(t *testing.T) {
 	for _, asset := range []string{"/ui/static/diagram.js", "/ui/static/ui.css"} {
 		if !strings.Contains(string(layout), asset) {
 			t.Errorf("layout.html.tmpl must load %s — it is what makes a d2 figure on the "+
-				"memory/wi detail pages styled and zoomable", asset)
+				"artifact viewer styled and zoomable", asset)
 		}
 	}
 
-	// And the app-shell surface really does emit such a figure: uiFuncMap's md
-	// helper runs RenderDiagramsForUI (aihub#231), which is the whole reason the
-	// diagram CSS had to leave viewer.css.
-	md, ok := uiFuncMap()["md"].(func(string) template.HTML)
-	if !ok {
-		t.Fatal("uiFuncMap has no md(string) helper")
+	// The app-shell surface still emits the figure; it is now one frame further in.
+	md := mdHelper(t)
+	doc := innerDoc(t, string(md("intro\n\n```d2\na -> b\n```\n", "https://aihub.test", "auto")))
+	if !strings.Contains(doc, `<figure class="pf-diagram"`) {
+		t.Errorf("the detail-page md helper does not emit a pf-diagram figure; got %.200s", doc)
 	}
-	if out := string(md("intro\n\n```d2\na -> b\n```\n")); !strings.Contains(out, `<figure class="pf-diagram"`) {
-		t.Errorf("the detail-page md helper does not emit a pf-diagram figure; got %.200s", out)
+
+	// Inside the frame, sizing has to come from the frame's own stylesheet, since ui.css
+	// cannot be fetched there (inner CSP is default-src 'none').
+	if !strings.Contains(doc, "max-width:100%") {
+		t.Error("the embedded document has no svg sizing rule of its own; a d2 figure with a " +
+			"viewBox and no width/height would be blown up to the column width (mem_0v7S0TTo)")
 	}
 }
 

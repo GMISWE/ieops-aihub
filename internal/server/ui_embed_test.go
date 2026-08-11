@@ -1,7 +1,6 @@
 package server
 
 import (
-	"html/template"
 	"strings"
 	"testing"
 )
@@ -14,14 +13,13 @@ import (
 // to an <svg>, matching what the artifact viewer (routes_artifacts.go)
 // already does.
 func TestUIFuncMap_MD_D2Diagram(t *testing.T) {
-	funcs := uiFuncMap()
-	md, ok := funcs["md"].(func(string) template.HTML)
-	if !ok {
-		t.Fatalf("md not registered in uiFuncMap or wrong signature")
-	}
+	md := mdHelper(t)
 
 	src := "# Title\n\n```d2\na -> b\n```\n"
-	got := string(md(src))
+	// {{md}} embeds the document in a sandboxed frame now, so the assertions below are made
+	// against the frame's inner document. Testing the outer markup would compare against
+	// attribute-escaped bytes and pass for the wrong reason.
+	got := innerDoc(t, string(md(src, "https://aihub.test", "auto")))
 
 	if !strings.Contains(got, "<svg") {
 		t.Errorf("md(%q) = %q; want an inline <svg> for the d2 block", src, got)
@@ -35,15 +33,14 @@ func TestUIFuncMap_MD_D2Diagram(t *testing.T) {
 // invariant: a syntactically broken d2 block must fall back to a normal
 // code block, never error out and never emit a partial/empty <svg>.
 func TestUIFuncMap_MD_InvalidD2Degrades(t *testing.T) {
-	funcs := uiFuncMap()
-	md, ok := funcs["md"].(func(string) template.HTML)
-	if !ok {
-		t.Fatalf("md not registered in uiFuncMap or wrong signature")
-	}
+	md := mdHelper(t)
 
 	// Unterminated shape/edge syntax -- d2lib.Compile should reject this.
 	src := "```d2\na -> {\n```\n"
-	got := string(md(src))
+	// {{md}} embeds the document in a sandboxed frame now, so the assertions below are made
+	// against the frame's inner document. Testing the outer markup would compare against
+	// attribute-escaped bytes and pass for the wrong reason.
+	got := innerDoc(t, string(md(src, "https://aihub.test", "auto")))
 
 	if strings.Contains(got, "<svg") {
 		t.Errorf("md(%q) = %q; invalid d2 must not produce an <svg>", src, got)
@@ -59,14 +56,13 @@ func TestUIFuncMap_MD_InvalidD2Degrades(t *testing.T) {
 // to its usual elements. Spot-checks the structural output rather than
 // asserting byte-equality with the pre-fix rendering.
 func TestUIFuncMap_MD_NonD2Untouched(t *testing.T) {
-	funcs := uiFuncMap()
-	md, ok := funcs["md"].(func(string) template.HTML)
-	if !ok {
-		t.Fatalf("md not registered in uiFuncMap or wrong signature")
-	}
+	md := mdHelper(t)
 
 	src := "# Heading\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```go\nfunc main() {}\n```\n"
-	got := string(md(src))
+	// {{md}} embeds the document in a sandboxed frame now, so the assertions below are made
+	// against the frame's inner document. Testing the outer markup would compare against
+	// attribute-escaped bytes and pass for the wrong reason.
+	got := innerDoc(t, string(md(src, "https://aihub.test", "auto")))
 
 	if strings.Contains(got, "<svg") {
 		t.Errorf("md(%q) = %q; non-d2 content must not produce an <svg>", src, got)

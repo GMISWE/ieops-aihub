@@ -133,6 +133,7 @@ type memDetailPageData struct {
 	Title      string
 	Active     string
 	Theme      string
+	Origin     string // scheme://host of this request; frames post their height to it
 	User       *UserContext
 	Memory     *domain.Memory
 	BackQuery  string
@@ -341,6 +342,7 @@ func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 			Title:      "Memory " + mem.ID,
 			Active:     "memories",
 			Theme:      themeFromCookie(c),
+			Origin:     pageOrigin(c),
 			User:       u,
 			Memory:     mem,
 			BackQuery:  c.QueryParam("back"),

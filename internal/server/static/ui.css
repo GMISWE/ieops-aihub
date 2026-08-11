@@ -1218,6 +1218,13 @@ details.card[open] > summary.hd .chev { transform: rotate(45deg); }
 }
 
 /* prose (markdown background body) */
+/* aihub#240: an embedded agent document. The frame is transparent and borderless so it
+   reads as part of the page, and it starts at a modest height that embedframe.js replaces
+   with the height the document reports for itself. The starting value matters: it is what
+   a reader sees if script is unavailable, so it is a readable box rather than 0. */
+iframe.pf-embed { display: block; width: 100%; height: 220px; border: 0; background: transparent; color-scheme: normal; }
+.pf-embed-wrap { min-width: 0; }
+
 .prose { font-size: 13.5px; min-width: 0; }
 .prose > :first-child { margin-top: 0; }
 .prose > :last-child { margin-bottom: 0; }

@@ -723,21 +723,26 @@ func TestUIMemoryDetail_D2CompilesForNonMethodologyType(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status: got %d, want 200 (%s must render in place, not redirect)", rec.Code, memType)
 			}
-			body := rec.Body.String()
+			// aihub#240: the rendered content lives in a sandboxed iframe's srcdoc now, so
+			// assert against the frame's inner document. Matching the page body directly
+			// would compare against attribute-escaped bytes — which is why the chroma check
+			// below is the one that noticed: `<pre class="chroma">` becomes
+			// `<pre class=&#34;chroma&#34;` in an attribute value.
+			doc := innerDoc(t, rec.Body.String())
 
 			// Assert on data-d2-version, NOT on a bare "<svg": the page chrome
 			// ships its own inline icon SVGs, so a "<svg" check would pass
 			// vacuously even with the fix reverted.
-			if n := strings.Count(body, "data-d2-version"); n != 1 {
+			if n := strings.Count(doc, "data-d2-version"); n != 1 {
 				t.Errorf("%s detail page: got %d d2-rendered SVGs, want exactly 1", memType, n)
 			}
-			if strings.Contains(body, "language-d2") {
+			if strings.Contains(doc, "language-d2") {
 				t.Errorf("%s detail page still contains a raw language-d2 code block", memType)
 			}
 			// Collateral-damage guard: the non-d2 fence must survive untouched.
 			// chroma tokenizes it, so match on the highlighted spans rather
 			// than the raw source text.
-			if !strings.Contains(body, `<pre class="chroma">`) || !strings.Contains(body, `<span class="nf">main</span>`) {
+			if !strings.Contains(doc, `<pre class="chroma">`) || !strings.Contains(doc, `<span class="nf">main</span>`) {
 				t.Errorf("%s detail page lost or mangled the non-d2 go code block", memType)
 			}
 		})

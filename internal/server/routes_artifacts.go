@@ -52,6 +52,62 @@ var setMemoryVisibilityFn memVisibilitySetterFn = domain.SetMemoryVisibility
 //  2. If that fails or content is empty — fallback: serve content in a <pre>.
 //
 // No DB write is performed on a GET; render-on-view only.
+// Content-Security-Policy for authed artifact/document responses (aihub#240,
+// resolves #144). Until now only the anonymous /share path sent a CSP; /ui and /v1
+// sent none, which meant a project member — the reader with a session — was the least
+// protected of the three.
+//
+// Two policies, because the two surfaces load genuinely different things.
+const (
+	// artifactV1CSP locks down /v1/artifacts/:id/html AND /share/:id. Both responses are
+	// pure content documents: no first-party stylesheet, no script, no fetch. So both run
+	// the lockdown /share has used since the share feature shipped.
+	//
+	// handleSharedArtifact references this identifier rather than restating the policy. It
+	// used to hold its own copy of the same string, under a comment here claiming the two
+	// were kept identical so they could not drift — a claim nothing checked, since the
+	// equality test only compared substrings of this constant and never read /share's copy.
+	// One identifier makes it structural; TestArtifactV1CSP_MatchesSharePolicy now compares
+	// the headers both handlers actually emit.
+	artifactV1CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; " +
+		"form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+
+	// uiPageCSP covers every /ui page: the artifact viewer and the memory/wi detail
+	// pages that render agent markdown through the {{md}} template helper.
+	//
+	// It cannot be as strict as artifactV1CSP because /ui serves its own assets
+	// (ui.css, viewer.css, annot.js, annotator.js, share.js, theme.js, diagram.js)
+	// and emits inline <script> for the synchronous theme setter and the side-rail
+	// IntersectionObserver.
+	//
+	// 'unsafe-inline' in script-src is a KNOWN WEAKENING and is called out rather than
+	// buried: it means CSP alone would not stop an inline script in agent content.
+	// That is why agent content on /ui is sanitized (SanitizeArtifactHTML) rather than
+	// merely policed — sanitization is the primary control here and CSP is the second
+	// layer, not the reverse.
+	//
+	// Removing it is tracked as aihub#243 and is REQUIRED before P1/P2 productionization
+	// — not optional. It was deferred out of aihub#240 because every inline <script> on
+	// the /ui path (the synchronous theme setter, the side-rail IntersectionObserver,
+	// and the page templates) has to take the same per-response nonce, and missing one
+	// fails silently as a blank page or a dead interaction. That is browser-verified
+	// work, so it was scheduled rather than done blind.
+	//
+	// What this policy does buy, even with 'unsafe-inline': no external origin may be
+	// contacted or loaded from, object/embed are dead, <base> cannot be rewritten, and
+	// the page cannot be framed cross-origin.
+	uiPageCSP = "default-src 'none'; " +
+		"script-src 'self' 'unsafe-inline'; " +
+		"style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data:; " +
+		"font-src 'self' data:; " +
+		"connect-src 'self'; " +
+		"form-action 'self'; " +
+		"base-uri 'none'; " +
+		"object-src 'none'; " +
+		"frame-ancestors 'self'"
+)
+
 func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -95,6 +151,31 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				// Empty content: serve a minimal placeholder.
 				bodyFragment = "<pre></pre>"
 			}
+		}
+
+		// aihub#240 (resolves #144): agent-authored HTML reaches an authed reader here.
+		//
+		// Two different treatments, because the two routes have different contracts:
+		//
+		//   /ui — the body is sanitized in place, before any chrome is injected below.
+		//         Sanitizing here and not later matters: everything after this point
+		//         appends OUR OWN markup (share control, annotation scaffold, side rail,
+		//         first-party <script> tags), and running the sanitizer over that would
+		//         strip the viewer's own behaviour.
+		//
+		//   /v1 — the body is left exactly as-is. aihub#138 makes /v1 and /share
+		//         contractually byte-identical and TestArtifactViewer_UIvsV1Share_
+		//         BytePurity enforces it, so the payload is neutralised by the response
+		//         CSP instead (set below) rather than by rewriting bytes. This is the
+		//         same trade /share itself already makes.
+		if strings.HasPrefix(c.Path(), "/ui") {
+			bodyFragment = render.SanitizeArtifactHTML(bodyFragment)
+		} else {
+			// /ui gets its policy from the uiGroup middleware (ui_routes.go), which
+			// also covers the {{md}} memory/wi detail pages. /v1 has no such group.
+			h := c.Response().Header()
+			h.Set("Content-Security-Policy", artifactV1CSP)
+			h.Set("X-Content-Type-Options", "nosniff")
 		}
 
 		title := mem.ID + " (" + mem.Type + ")"
@@ -744,12 +825,19 @@ func handleSharedArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 		// goldmark's unsafe renderer) and we now serve it to anonymous viewers, so a
 		// malicious artifact author could embed <script>/onerror handlers. Lock the
 		// public response down: a strict CSP blocks script execution and any external
-		// fetch/form, and nosniff prevents content-type confusion. The authed /v1 path
-		// keeps the original (trusted, project-member-only) behavior.
+		// fetch/form, and nosniff prevents content-type confusion.
+		//
+		// artifactV1CSP is the same policy, referenced rather than restated. It used to be
+		// duplicated here as a literal, with a comment on the constant claiming the two were
+		// "kept deliberately identical so they cannot drift apart" — which nothing enforced:
+		// the equality test only compared substrings of the constant and never read this
+		// string at all. Sharing the identifier is what makes the claim true.
+		//
+		// /v1 now sends this too (aihub#240 / #144), so both authed and anonymous artifact
+		// responses carry it; the difference between the routes is that /ui sanitizes its
+		// body while /v1 and /share serve byte-identical stored bytes (aihub#138).
 		h := c.Response().Header()
-		h.Set("Content-Security-Policy",
-			"default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; "+
-				"form-action 'none'; base-uri 'none'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", artifactV1CSP)
 		h.Set("X-Content-Type-Options", "nosniff")
 		title := mem.ID + " (" + mem.Type + ")"
 		// renderArtifactBody (not render.Document) so a custom full-document artifact

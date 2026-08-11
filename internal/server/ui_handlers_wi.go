@@ -294,6 +294,7 @@ type wiDetailPageData struct {
 	Title          string
 	Active         string
 	Theme          string
+	Origin         string // scheme://host of this request; frames post their height to it
 	User           *UserContext
 	WI             *domain.WorkItem
 	WIType         string     // flattened *WI.WIType
@@ -879,6 +880,7 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			Title:  "Work item",
 			Active: "wi",
 			Theme:  themeFromCookie(c),
+			Origin: pageOrigin(c),
 			User:   u,
 		}
 

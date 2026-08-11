@@ -227,7 +227,7 @@ func (s *Server) registerLifecycleTools() {
 			"reclassify_reason":      prop("string", "Reason for wi_type change (min 10 chars)"),
 			"labels":                 prop("array", "Updated labels"),
 			"declared_resources":     declaredResourcesProp("Updated declared resources"),
-			"resources_version":      prop("string", "Current resources version for CAS"),
+			"resources_version":      prop("integer", "Compare-and-set guard for declared_resources: the resources_version you last read from this work item. The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version. Omit to overwrite unconditionally. Every write of declared_resources increments this counter."),
 			"attrs":                  prop("object", "Updated attributes"),
 			"content":                prop("string", "Background context for this wi (markdown, max 20000 chars)"),
 		}, []string{"work_item_id"}),
@@ -239,6 +239,13 @@ func (s *Server) registerLifecycleTools() {
 		id := strArg(args, "work_item_id")
 		if id == "" {
 			return errResult(fmt.Errorf("work_item_id is required"))
+		}
+		// aihub#241: resources_version is an INT column and *int on the wire.
+		// Coerce before building the body so a quoted "0" from a mixed-version
+		// client becomes a JSON number here, instead of failing c.Bind two
+		// layers away as an opaque 400 "invalid request body".
+		if err := normalizeIntArg(args, "resources_version"); err != nil {
+			return errResult(err)
 		}
 		// Remove work_item_id from body
 		body := make(map[string]any)

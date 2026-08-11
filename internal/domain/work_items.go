@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -672,6 +673,146 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 	return result, nil
 }
 
+// workItemUpdate is the compiled UPDATE statement for UpdateWorkItem.
+//
+// It is produced by buildWorkItemUpdate, a pure function, so the two aihub#241
+// invariants below have coverage that actually executes. UpdateWorkItem itself
+// reads the database before it reaches this logic, so a behavioural test of it
+// would have to be DB-gated — and a DB-gated test in this repo runs nowhere
+// (AIHUB_TEST_DB is unset locally and on CI's "Unit tests" step), so it would
+// SKIP while reading as coverage (mem_I98xpPgY). Same technique as cancelGate
+// in aihub#242.
+type workItemUpdate struct {
+	Query string
+	Args  []any
+	// CAS is true when the WHERE clause carries a resources_version predicate,
+	// i.e. the caller asked for compare-and-set. RowsAffected()==0 is then a
+	// version conflict rather than a missing row.
+	CAS bool
+}
+
+// buildWorkItemUpdate compiles the SET/WHERE clauses for UpdateWorkItem.
+//
+// aihub#241 fixes two defects that lived here:
+//
+//   - The counter never advanced. resources_version was written only when the
+//     caller supplied one, as `= <caller value> + 1`; the ordinary path (no
+//     version passed) left it at its old value forever. Every caller therefore
+//     read 0, so even a working CAS could never detect a conflict. It is now
+//     incremented in the database — `resources_version = resources_version + 1`
+//     — on every write of declared_resources, independent of what the caller
+//     sent, so concurrent writers cannot both compute the same next value.
+//
+//   - There was no compare-and-set at all. Passing resources_version changed
+//     what got stored but added no predicate, so a stale writer silently
+//     overwrote a fresher one. The version is now a WHERE precondition.
+//
+// The two are deliberately orthogonal: the increment is keyed on
+// declared_resources being written, the precondition on the caller supplying a
+// version. Passing resources_version alone is a plain guard ("only apply this
+// patch if nobody has touched declared_resources since I read it") and is
+// never wrong; omitting it keeps the historical unconditional behaviour, which
+// callers depend on today.
+func buildWorkItemUpdate(req *UpdateWorkItemRequest, wiID string) workItemUpdate {
+	setClauses := []string{"updated_at = clock_timestamp()"}
+	args := []any{}
+	argIdx := 1
+
+	add := func(clause string, val any) {
+		setClauses = append(setClauses, fmt.Sprintf(clause, argIdx))
+		args = append(args, val)
+		argIdx++
+	}
+
+	if req.Priority != nil {
+		add("priority = $%d", *req.Priority)
+	}
+	if req.Milestone != nil {
+		add("milestone = $%d", *req.Milestone)
+	}
+	if req.WIType != nil {
+		add("wi_type = $%d", *req.WIType)
+	}
+	if req.RequiresHumanSession != nil {
+		add("requires_human_session = $%d", *req.RequiresHumanSession)
+	}
+	if req.Labels != nil {
+		add("labels = $%d", req.Labels)
+	}
+	if req.DeclaredResources != nil {
+		add("declared_resources = $%d", req.DeclaredResources)
+		// Computed by Postgres from the stored value, not from anything the
+		// caller sent — that is what makes it a usable CAS counter.
+		setClauses = append(setClauses, "resources_version = resources_version + 1")
+	}
+	if req.Attrs != nil {
+		add("attrs = $%d", req.Attrs)
+	}
+	if req.Goal != nil {
+		add("goal = $%d", *req.Goal)
+	}
+	if req.Content != nil {
+		add("content = $%d", *req.Content)
+	}
+
+	whereClauses := []string{fmt.Sprintf("id = $%d", argIdx)}
+	args = append(args, wiID)
+	argIdx++
+
+	cas := req.ResourcesVersion != nil
+	if cas {
+		whereClauses = append(whereClauses, fmt.Sprintf("resources_version = $%d", argIdx))
+		args = append(args, *req.ResourcesVersion)
+	}
+
+	return workItemUpdate{
+		Query: fmt.Sprintf("UPDATE work_items SET %s WHERE %s",
+			strings.Join(setClauses, ", "), strings.Join(whereClauses, " AND ")),
+		Args: args,
+		CAS:  cas,
+	}
+}
+
+// casVersionUnknown is the placeholder reported when the current
+// resources_version could not be re-read after a failed compare-and-set.
+const casVersionUnknown = -1
+
+// isCASConflict reports whether a completed UPDATE must be rejected as a
+// compare-and-set conflict (aihub#241).
+//
+// Split out so the decision has coverage that actually executes: review of this
+// change found that deleting the branch in UpdateWorkItem left `go test ./...`
+// entirely green, because the only behavioural check of it lives in the
+// DB-gated suite that SKIPs everywhere except its own scoped CI step
+// (mem_I98xpPgY). The branch is a one-liner; the failure it would let through
+// is not — a failed CAS silently returning 200 is exactly the silent
+// unprotected overwrite this work item exists to remove.
+//
+// Zero rows is only meaningful when the caller asked for CAS. Without a
+// version the WHERE clause is `id = $n` alone, and a work item whose row
+// vanished between GetWorkItem and here is a 404, not a conflict — the caller
+// of this helper distinguishes those two.
+func isCASConflict(cas bool, rowsAffected int64) bool {
+	return cas && rowsAffected == 0
+}
+
+// casConflictErr builds the 409 for a failed compare-and-set. Never a 400: the
+// caller's payload was well-formed, someone else simply wrote
+// declared_resources first. `current` may be casVersionUnknown when the re-read
+// failed, which must not stop the conflict from being reported.
+func casConflictErr(expected, current int) *AihubError {
+	currentText := strconv.Itoa(current)
+	if current == casVersionUnknown {
+		currentText = "unknown"
+	}
+	return NewErrDetails(ErrConflictCASFailed,
+		fmt.Sprintf("declared_resources CAS failed: resources_version is %s, not the expected %d — reread the work item and retry with its current resources_version", currentText, expected),
+		map[string]any{
+			"expected_resources_version": expected,
+			"current_resources_version":  current,
+		})
+}
+
 // UpdateWorkItem applies a patch to a work item.
 func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, callerUserID, callerRole string, callerProjectRoles map[string]string, req *UpdateWorkItemRequest) (*WorkItem, *AihubError) {
 	wi, aihubErr := GetWorkItem(ctx, pool, idOrSlug)
@@ -734,72 +875,41 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	setClauses := []string{"updated_at = clock_timestamp()"}
-	args := []any{}
-	argIdx := 1
-
-	if req.Priority != nil {
-		setClauses = append(setClauses, fmt.Sprintf("priority = $%d", argIdx))
-		args = append(args, *req.Priority)
-		argIdx++
-	}
-	if req.Milestone != nil {
-		setClauses = append(setClauses, fmt.Sprintf("milestone = $%d", argIdx))
-		args = append(args, *req.Milestone)
-		argIdx++
-	}
-	if req.WIType != nil {
-		setClauses = append(setClauses, fmt.Sprintf("wi_type = $%d", argIdx))
-		args = append(args, *req.WIType)
-		argIdx++
-	}
-	if req.RequiresHumanSession != nil {
-		setClauses = append(setClauses, fmt.Sprintf("requires_human_session = $%d", argIdx))
-		args = append(args, *req.RequiresHumanSession)
-		argIdx++
-	}
-	if req.Labels != nil {
-		setClauses = append(setClauses, fmt.Sprintf("labels = $%d", argIdx))
-		args = append(args, req.Labels)
-		argIdx++
-	}
-	if req.DeclaredResources != nil {
-		setClauses = append(setClauses, fmt.Sprintf("declared_resources = $%d", argIdx))
-		args = append(args, req.DeclaredResources)
-		argIdx++
-		if req.ResourcesVersion != nil {
-			setClauses = append(setClauses, fmt.Sprintf("resources_version = $%d", argIdx))
-			args = append(args, *req.ResourcesVersion+1)
-			argIdx++
-		}
-	}
-	if req.Attrs != nil {
-		setClauses = append(setClauses, fmt.Sprintf("attrs = $%d", argIdx))
-		args = append(args, req.Attrs)
-		argIdx++
-	}
-	if req.Goal != nil {
-		setClauses = append(setClauses, fmt.Sprintf("goal = $%d", argIdx))
-		args = append(args, *req.Goal)
-		argIdx++
-	}
 	if req.Content != nil {
 		// Content may be updated in any non-terminal status
 		nonTerminal := wi.Status == "queued" || wi.Status == "paused" || wi.Status == "running" || wi.Status == "blocked"
 		if !nonTerminal {
 			return nil, NewErr(ErrConflictTerminalState, fmt.Sprintf("cannot update content when work item is in terminal state: %s", wi.Status))
 		}
-		setClauses = append(setClauses, fmt.Sprintf("content = $%d", argIdx))
-		args = append(args, *req.Content)
-		argIdx++
 	}
 
-	args = append(args, wi.ID)
-	query := fmt.Sprintf("UPDATE work_items SET %s WHERE id = $%d",
-		strings.Join(setClauses, ", "), argIdx)
-	_, err = tx.Exec(ctx, query, args...)
+	upd := buildWorkItemUpdate(req, wi.ID)
+	tag, err := tx.Exec(ctx, upd.Query, upd.Args...)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to update work_item: %v", err))
+	}
+	if isCASConflict(upd.CAS, tag.RowsAffected()) {
+		// Re-read inside the same transaction to find out what the row actually
+		// holds, so the caller is told what to retry with.
+		//
+		// Isolation matters here and is worth stating: this transaction runs at
+		// pool.Begin's default READ COMMITTED, so each statement takes a fresh
+		// snapshot and this SELECT sees the value the winning writer committed.
+		// Under Serializable it would instead see the snapshot from before the
+		// conflict and report "is 0, not the expected 0" — nonsense. If this
+		// function is ever moved onto pgx.Serializable (as run_attempts.go uses),
+		// this read has to move outside the transaction.
+		current := casVersionUnknown
+		scanErr := tx.QueryRow(ctx, `SELECT resources_version FROM work_items WHERE id = $1`, wi.ID).Scan(&current)
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			// Not a conflict: the row is gone. GetWorkItem above ran on the pool
+			// BEFORE this transaction opened, so there is a window — narrow, and
+			// nothing outside tests deletes work items today, but reporting a
+			// vanished row as a version conflict would send the caller into a
+			// retry loop that can never succeed.
+			return nil, NewErr(ErrNotFound, fmt.Sprintf("work item %q not found", wi.ID))
+		}
+		return nil, casConflictErr(*req.ResourcesVersion, current)
 	}
 
 	// Emit goal_updated event if goal changed

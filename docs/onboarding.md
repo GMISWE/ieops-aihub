@@ -215,9 +215,6 @@ repos, ~250 MB, ~30 s on a good connection) and also drops in:
 - `.polyforge.yaml` — workspace config pulled from the server
 - `CLAUDE.md` — managed repo-map block Claude Code reads at session start
 - `.polyforge/usage.md` — Iron Rules + command cheatsheet
-- `~/.claude/hooks/pf-session-start.sh` — a per-user Claude Code hook that
-  auto-loads the polyforge skill in every Claude session (installed once
-  per machine, idempotent — `polyforge init` re-registers it each time)
 
 You may see a warning like `pf init: skipping scenario "coding" for project
 ieops` near the end — that is a harmless server-side config quirk, not an

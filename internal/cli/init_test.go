@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // readSettings parses settings.json into a generic map for assertions.
@@ -48,105 +50,162 @@ func findHookEntry(t *testing.T, settings map[string]any, hookCmd string) map[st
 	return nil
 }
 
-// TestEnsureSettingsHook_FreshInstall covers the case where settings.json does
-// not exist yet: the file should be created with a single SessionStart hook
-// entry whose timeout matches sessionStartHookTimeoutMs (5000 ms).
-func TestEnsureSettingsHook_FreshInstall(t *testing.T) {
+// seedSettings writes a settings.json fixture and backdates its mtime so that
+// "was this file rewritten?" assertions are deterministic rather than relying
+// on filesystem timestamp resolution.
+func seedSettings(t *testing.T, path string, v map[string]any) time.Time {
+	t.Helper()
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal settings fixture: %v", err)
+	}
+	if err := os.WriteFile(path, append(b, '\n'), 0644); err != nil {
+		t.Fatalf("seed settings.json: %v", err)
+	}
+	past := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatalf("backdate settings.json: %v", err)
+	}
+	return past
+}
+
+// sessionStartGroups returns the raw hooks.SessionStart array.
+func sessionStartGroups(t *testing.T, settings map[string]any) []any {
+	t.Helper()
+	hooks, _ := settings["hooks"].(map[string]any)
+	if hooks == nil {
+		return nil
+	}
+	groups, _ := hooks["SessionStart"].([]any)
+	return groups
+}
+
+// TestRemoveSettingsHook_RemovesExactCommandMatch covers the primary reverse
+// cleanup: the legacy pf-session-start.sh entry is dropped from
+// hooks.SessionStart while its enclosing group stays in place.
+// TestRemoveSettingsHook_PreservesFileMode: the rewrite goes through a temp
+// file + rename, which swaps in a new inode. Without explicitly carrying the
+// old mode over, a user who ran `chmod 600 ~/.claude/settings.json` would have
+// it silently widened to 0644 — that file can hold an env block with API keys,
+// so quietly relaxing it is well outside what this cleanup is entitled to do.
+func TestRemoveSettingsHook_PreservesFileMode(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
 	hookCmd := "/home/u/.claude/hooks/pf-session-start.sh"
 
-	if err := ensureSettingsHook(settingsPath, hookCmd); err != nil {
-		t.Fatalf("ensureSettingsHook: %v", err)
+	seedSettings(t, settingsPath, map[string]any{
+		"hooks": map[string]any{
+			"SessionStart": []any{map[string]any{"hooks": []any{
+				map[string]any{"type": "command", "command": hookCmd},
+			}}},
+		},
+	})
+	if err := os.Chmod(settingsPath, 0600); err != nil {
+		t.Fatalf("chmod seed settings: %v", err)
 	}
 
-	settings := readSettings(t, settingsPath)
-	entry := findHookEntry(t, settings, hookCmd)
-	if entry == nil {
-		t.Fatal("expected SessionStart hook entry to be created")
+	removed, err := removeSettingsHook(settingsPath, hookCmd)
+	if err != nil {
+		t.Fatalf("removeSettingsHook: %v", err)
+	}
+	if !removed {
+		t.Fatal("removed = false, want true")
 	}
 
-	if entry["type"] != "command" {
-		t.Errorf(`type = %v, want "command"`, entry["type"])
+	fi, err := os.Stat(settingsPath)
+	if err != nil {
+		t.Fatalf("stat settings after rewrite: %v", err)
 	}
-	ms, ok := entry["timeout"].(float64)
-	if !ok {
-		t.Fatalf("timeout has wrong type: %T", entry["timeout"])
-	}
-	if int(ms) != sessionStartHookTimeoutMs {
-		t.Errorf("timeout = %v, want %d", ms, sessionStartHookTimeoutMs)
+	if got := fi.Mode().Perm(); got != 0600 {
+		t.Errorf("settings.json mode = %04o after rewrite, want 0600 (permissions must not be widened)", got)
 	}
 }
 
-// TestEnsureSettingsHook_ReconcileTimeout covers the regression case: an
-// existing settings.json with a polyforge hook entry whose timeout is the
-// old buggy value (5) must be reconciled to the current value (5000) when
-// init is re-run. The fix relies on this — without reconcile, legacy installs
-// stay broken forever.
-func TestEnsureSettingsHook_ReconcileTimeout(t *testing.T) {
+func TestRemoveSettingsHook_RemovesExactCommandMatch(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
 	hookCmd := "/home/u/.claude/hooks/pf-session-start.sh"
 
-	// Seed settings.json with the legacy timeout-5 shape.
-	legacy := map[string]any{
+	seedSettings(t, settingsPath, map[string]any{
 		"hooks": map[string]any{
 			"SessionStart": []any{
 				map[string]any{
 					"hooks": []any{
-						map[string]any{
-							"type":    "command",
-							"command": hookCmd,
-							"timeout": 5,
-						},
+						map[string]any{"type": "command", "command": hookCmd, "timeout": 5000},
 					},
 				},
 			},
 		},
-	}
-	b, _ := json.MarshalIndent(legacy, "", "  ")
-	if err := os.WriteFile(settingsPath, b, 0644); err != nil {
-		t.Fatalf("seed settings.json: %v", err)
-	}
+	})
 
-	if err := ensureSettingsHook(settingsPath, hookCmd); err != nil {
-		t.Fatalf("ensureSettingsHook: %v", err)
+	if _, err := removeSettingsHook(settingsPath, hookCmd); err != nil {
+		t.Fatalf("removeSettingsHook: %v", err)
 	}
 
 	settings := readSettings(t, settingsPath)
-	entry := findHookEntry(t, settings, hookCmd)
-	if entry == nil {
-		t.Fatal("expected polyforge SessionStart hook entry to still be present")
-	}
-	ms, ok := entry["timeout"].(float64)
-	if !ok {
-		t.Fatalf("timeout has wrong type: %T", entry["timeout"])
-	}
-	if int(ms) != sessionStartHookTimeoutMs {
-		t.Errorf("timeout = %v after reconcile, want %d", ms, sessionStartHookTimeoutMs)
+	if entry := findHookEntry(t, settings, hookCmd); entry != nil {
+		t.Fatalf("legacy hook entry still registered: %#v", entry)
 	}
 
-	// Calling again with the correct shape must be a no-op (no rewrite).
-	stat1, err := os.Stat(settingsPath)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
+	// The now-empty group must survive — we do not prune containers.
+	groups := sessionStartGroups(t, settings)
+	if len(groups) != 1 {
+		t.Fatalf("SessionStart groups = %d, want 1 (empty group must be kept)", len(groups))
 	}
-	if err := ensureSettingsHook(settingsPath, hookCmd); err != nil {
-		t.Fatalf("ensureSettingsHook idempotent call: %v", err)
+	g, _ := groups[0].(map[string]any)
+	entries, ok := g["hooks"].([]any)
+	if !ok {
+		t.Fatalf("group.hooks has wrong type: %T", g["hooks"])
 	}
-	stat2, err := os.Stat(settingsPath)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if !stat1.ModTime().Equal(stat2.ModTime()) {
-		t.Error("ensureSettingsHook rewrote settings.json on an idempotent call")
+	if len(entries) != 0 {
+		t.Errorf("group.hooks = %#v, want empty slice", entries)
 	}
 }
 
-// TestEnsureSettingsHook_PreservesUnrelatedEntries verifies that calling
-// ensureSettingsHook does not touch other SessionStart hook entries (e.g.
-// superpowers, session-restore) or unrelated top-level settings.
-func TestEnsureSettingsHook_PreservesUnrelatedEntries(t *testing.T) {
+// TestRemoveSettingsHook_OnlyExactCommandMatch guards against substring or
+// prefix matching: entries that merely contain the legacy path must survive.
+func TestRemoveSettingsHook_OnlyExactCommandMatch(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	hookCmd := "/home/u/.claude/hooks/pf-session-start.sh"
+
+	lookalikes := []string{
+		hookCmd + " --verbose",
+		"bash " + hookCmd,
+		"/home/u/.claude/hooks/pf-session-start.sh.bak",
+		"/home/u/.claude/hooks/pf-session-start",
+	}
+	var entries []any
+	for _, cmd := range lookalikes {
+		entries = append(entries, map[string]any{"type": "command", "command": cmd, "timeout": float64(5000)})
+	}
+	entries = append(entries, map[string]any{"type": "command", "command": hookCmd, "timeout": float64(5000)})
+
+	seedSettings(t, settingsPath, map[string]any{
+		"hooks": map[string]any{
+			"SessionStart": []any{map[string]any{"hooks": entries}},
+		},
+	})
+
+	if _, err := removeSettingsHook(settingsPath, hookCmd); err != nil {
+		t.Fatalf("removeSettingsHook: %v", err)
+	}
+
+	settings := readSettings(t, settingsPath)
+	if entry := findHookEntry(t, settings, hookCmd); entry != nil {
+		t.Fatal("exact-match entry was not removed")
+	}
+	for _, cmd := range lookalikes {
+		if findHookEntry(t, settings, cmd) == nil {
+			t.Errorf("non-exact match %q was wrongly removed", cmd)
+		}
+	}
+}
+
+// TestRemoveSettingsHook_PreservesUnrelatedEntries is the adapted form of the
+// old hook-registration coverage: sibling hook entries in the same group and
+// unrelated top-level keys must come through the surgery untouched.
+func TestRemoveSettingsHook_PreservesUnrelatedEntries(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
 	hookCmd := "/home/u/.claude/hooks/pf-session-start.sh"
@@ -156,44 +215,392 @@ func TestEnsureSettingsHook_PreservesUnrelatedEntries(t *testing.T) {
 		"command": "/somewhere/other-hook.sh",
 		"timeout": float64(10000),
 	}
-	original := map[string]any{
-		"theme": "dark",
+	otherEvent := []any{
+		map[string]any{"hooks": []any{
+			map[string]any{"type": "command", "command": hookCmd},
+		}},
+	}
+	seedSettings(t, settingsPath, map[string]any{
+		"theme":                  "dark",
+		"enabledPlugins":         map[string]any{"polyforge@ieops-aihub": true},
+		"extraKnownMarketplaces": map[string]any{"ieops-aihub": map[string]any{"source": "github"}},
+		"permissions":            map[string]any{"allow": []any{"Bash(go test:*)"}},
 		"hooks": map[string]any{
 			"SessionStart": []any{
 				map[string]any{
-					"hooks": []any{unrelatedHook},
+					"hooks": []any{
+						unrelatedHook,
+						map[string]any{"type": "command", "command": hookCmd, "timeout": float64(5000)},
+					},
 				},
 			},
+			// A same-command entry under a different event must not be touched:
+			// the cleanup is scoped to SessionStart.
+			"SessionEnd": otherEvent,
 		},
-	}
-	b, _ := json.MarshalIndent(original, "", "  ")
-	if err := os.WriteFile(settingsPath, b, 0644); err != nil {
-		t.Fatalf("seed settings.json: %v", err)
-	}
+	})
 
-	if err := ensureSettingsHook(settingsPath, hookCmd); err != nil {
-		t.Fatalf("ensureSettingsHook: %v", err)
+	if _, err := removeSettingsHook(settingsPath, hookCmd); err != nil {
+		t.Fatalf("removeSettingsHook: %v", err)
 	}
 
 	settings := readSettings(t, settingsPath)
 	if settings["theme"] != "dark" {
 		t.Errorf("unrelated top-level setting 'theme' changed: %v", settings["theme"])
 	}
+	for _, key := range []string{"enabledPlugins", "extraKnownMarketplaces", "permissions"} {
+		if _, ok := settings[key]; !ok {
+			t.Errorf("unrelated top-level key %q was dropped", key)
+		}
+	}
 
 	other := findHookEntry(t, settings, "/somewhere/other-hook.sh")
 	if other == nil {
-		t.Fatal("unrelated hook entry was removed")
+		t.Fatal("sibling hook entry was removed")
 	}
 	if !reflect.DeepEqual(other, unrelatedHook) {
-		t.Errorf("unrelated hook entry mutated:\n got: %#v\nwant: %#v", other, unrelatedHook)
+		t.Errorf("sibling hook entry mutated:\n got: %#v\nwant: %#v", other, unrelatedHook)
 	}
 
-	added := findHookEntry(t, settings, hookCmd)
-	if added == nil {
-		t.Fatal("polyforge hook entry was not appended")
+	if findHookEntry(t, settings, hookCmd) != nil {
+		t.Error("legacy SessionStart hook entry was not removed")
 	}
-	if int(added["timeout"].(float64)) != sessionStartHookTimeoutMs {
-		t.Errorf("polyforge hook timeout = %v, want %d", added["timeout"], sessionStartHookTimeoutMs)
+
+	hooks, _ := settings["hooks"].(map[string]any)
+	if !reflect.DeepEqual(hooks["SessionEnd"], otherEvent) {
+		t.Errorf("hooks under an unrelated event changed:\n got: %#v\nwant: %#v", hooks["SessionEnd"], otherEvent)
+	}
+}
+
+// TestRemoveSettingsHook_NoOpDoesNotRewrite verifies the changed-guard: when
+// there is nothing to remove (already-clean file, or a second idempotent run)
+// settings.json must not be rewritten at all.
+func TestRemoveSettingsHook_NoOpDoesNotRewrite(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	hookCmd := "/home/u/.claude/hooks/pf-session-start.sh"
+
+	clean := map[string]any{
+		"theme": "dark",
+		"hooks": map[string]any{
+			"SessionStart": []any{
+				map[string]any{"hooks": []any{
+					map[string]any{"type": "command", "command": "/somewhere/other-hook.sh"},
+				}},
+			},
+		},
+	}
+	past := seedSettings(t, settingsPath, clean)
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+
+	if _, err := removeSettingsHook(settingsPath, hookCmd); err != nil {
+		t.Fatalf("removeSettingsHook on clean file: %v", err)
+	}
+
+	st, err := os.Stat(settingsPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !st.ModTime().Truncate(time.Second).Equal(past) {
+		t.Error("removeSettingsHook rewrote settings.json when there was nothing to remove")
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("removeSettingsHook altered the bytes of an already-clean settings.json")
+	}
+}
+
+// TestRemoveSettingsHook_IdempotentSecondCall verifies that once the entry has
+// been removed, running init again does not touch settings.json.
+func TestRemoveSettingsHook_IdempotentSecondCall(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	hookCmd := "/home/u/.claude/hooks/pf-session-start.sh"
+
+	seedSettings(t, settingsPath, map[string]any{
+		"hooks": map[string]any{
+			"SessionStart": []any{map[string]any{"hooks": []any{
+				map[string]any{"type": "command", "command": hookCmd, "timeout": float64(5000)},
+			}}},
+		},
+	})
+
+	if _, err := removeSettingsHook(settingsPath, hookCmd); err != nil {
+		t.Fatalf("removeSettingsHook: %v", err)
+	}
+
+	past := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(settingsPath, past, past); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	if _, err := removeSettingsHook(settingsPath, hookCmd); err != nil {
+		t.Fatalf("removeSettingsHook second call: %v", err)
+	}
+	st, err := os.Stat(settingsPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !st.ModTime().Truncate(time.Second).Equal(past) {
+		t.Error("removeSettingsHook rewrote settings.json on an idempotent second call")
+	}
+}
+
+// TestRemoveSettingsHook_MissingFile: a machine that never had a
+// ~/.claude/settings.json must not have one created by the cleanup.
+func TestRemoveSettingsHook_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+
+	if _, err := removeSettingsHook(settingsPath, "/home/u/.claude/hooks/pf-session-start.sh"); err != nil {
+		t.Fatalf("removeSettingsHook with no settings.json: %v", err)
+	}
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Errorf("settings.json was created by the cleanup (stat err = %v)", err)
+	}
+}
+
+// legacyHookBody is a stand-in for the dead hook polyforge used to self-install:
+// what matters is that it carries the stale-marketplace marker.
+const legacyHookBody = "#!/usr/bin/env bash\nplugin_base=\"$HOME/.claude/plugins/cache/gmi-marketplace/polyforge\"\n"
+
+// seedLegacyHome lays out a fake $HOME containing .claude/hooks and a
+// settings.json registering the given hook body (when non-empty).
+func seedLegacyHome(t *testing.T, body string) (home, hookPath, settingsPath string) {
+	t.Helper()
+	home = t.TempDir()
+	hooksDir := filepath.Join(home, ".claude", "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		t.Fatalf("mkdir fake home: %v", err)
+	}
+	hookPath = filepath.Join(hooksDir, "pf-session-start.sh")
+	if body != "" {
+		if err := os.WriteFile(hookPath, []byte(body), 0755); err != nil {
+			t.Fatalf("seed hook: %v", err)
+		}
+	}
+	settingsPath = filepath.Join(home, ".claude", "settings.json")
+	seedSettings(t, settingsPath, map[string]any{
+		"theme": "dark",
+		"hooks": map[string]any{
+			"SessionStart": []any{map[string]any{"hooks": []any{
+				map[string]any{"type": "command", "command": "/somewhere/other-hook.sh"},
+				map[string]any{"type": "command", "command": hookPath, "timeout": float64(5000)},
+			}}},
+		},
+	})
+	return home, hookPath, settingsPath
+}
+
+// TestRemoveLegacySessionStartHook_RenamesAndUnregisters is the happy path:
+// a marker-bearing hook is moved aside (never deleted) and unregistered.
+func TestRemoveLegacySessionStartHook_RenamesAndUnregisters(t *testing.T) {
+	home, hookPath, settingsPath := seedLegacyHome(t, legacyHookBody)
+
+	removed, err := removeLegacySessionStartHookIn(home)
+	if err != nil {
+		t.Fatalf("removeLegacySessionStartHookIn: %v", err)
+	}
+	if !removed {
+		t.Fatal("removed = false, want true for a marker-bearing legacy hook")
+	}
+
+	if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
+		t.Errorf("legacy hook still at %s (stat err = %v)", hookPath, err)
+	}
+	bak := hookPath + ".removed-by-polyforge.bak"
+	b, err := os.ReadFile(bak)
+	if err != nil {
+		t.Fatalf("expected backup at %s: %v", bak, err)
+	}
+	if string(b) != legacyHookBody {
+		t.Error("backup content does not match the original hook body")
+	}
+
+	settings := readSettings(t, settingsPath)
+	if findHookEntry(t, settings, hookPath) != nil {
+		t.Error("legacy hook is still registered in settings.json")
+	}
+	if findHookEntry(t, settings, "/somewhere/other-hook.sh") == nil {
+		t.Error("sibling hook entry was removed")
+	}
+	if settings["theme"] != "dark" {
+		t.Errorf("unrelated top-level setting changed: %v", settings["theme"])
+	}
+}
+
+// TestRemoveLegacySessionStartHook_LeavesHandRolledHookAlone: if the file at
+// that path is not the dead polyforge script (no marker), polyforge must not
+// touch it — not the file, not its settings.json registration.
+func TestRemoveLegacySessionStartHook_LeavesHandRolledHookAlone(t *testing.T) {
+	const handRolled = "#!/usr/bin/env bash\n# my own session hook\nexit 0\n"
+	home, hookPath, settingsPath := seedLegacyHome(t, handRolled)
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read seed settings: %v", err)
+	}
+
+	removed, err := removeLegacySessionStartHookIn(home)
+	if err != nil {
+		t.Fatalf("removeLegacySessionStartHookIn: %v", err)
+	}
+	if removed {
+		t.Error("removed = true, want false for a hand-rolled hook")
+	}
+
+	b, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("hand-rolled hook was moved or deleted: %v", err)
+	}
+	if string(b) != handRolled {
+		t.Error("hand-rolled hook content was modified")
+	}
+	if _, err := os.Stat(hookPath + ".removed-by-polyforge.bak"); !os.IsNotExist(err) {
+		t.Error("a backup was created for a hand-rolled hook")
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings after: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("settings.json was rewritten for a hand-rolled hook")
+	}
+}
+
+// TestRemoveLegacySessionStartHook_DanglingRegistration: the script is already
+// gone (someone stopped the bleeding by hand with `rm`) but settings.json still
+// points at it. That dangling entry is "residual registration" and must be
+// cleared too, otherwise the machine keeps a permanently failing SessionStart
+// entry that no amount of re-running init would ever heal.
+func TestRemoveLegacySessionStartHook_DanglingRegistration(t *testing.T) {
+	home, hookPath, settingsPath := seedLegacyHome(t, "")
+
+	removed, err := removeLegacySessionStartHookIn(home)
+	if err != nil {
+		t.Fatalf("removeLegacySessionStartHookIn: %v", err)
+	}
+	if !removed {
+		t.Error("removed = false, want true for a dangling registration")
+	}
+
+	settings := readSettings(t, settingsPath)
+	if entry := findHookEntry(t, settings, hookPath); entry != nil {
+		t.Errorf("dangling registration for %s survived cleanup", hookPath)
+	}
+	// The sibling entry and unrelated keys are still none of our business.
+	if entry := findHookEntry(t, settings, "/somewhere/other-hook.sh"); entry == nil {
+		t.Error("unrelated sibling hook entry was removed")
+	}
+	if got := settings["theme"]; got != "dark" {
+		t.Errorf("unrelated top-level key clobbered: theme = %v, want dark", got)
+	}
+}
+
+// TestRemoveLegacySessionStartHook_AlreadyClean: no script and no registration
+// — nothing to do, and in particular no settings.json rewrite.
+func TestRemoveLegacySessionStartHook_AlreadyClean(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "hooks"), 0755); err != nil {
+		t.Fatalf("mkdir fake home: %v", err)
+	}
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	seedSettings(t, settingsPath, map[string]any{
+		"theme": "dark",
+		"hooks": map[string]any{
+			"SessionStart": []any{map[string]any{"hooks": []any{
+				map[string]any{"type": "command", "command": "/somewhere/other-hook.sh"},
+			}}},
+		},
+	})
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read seed settings: %v", err)
+	}
+
+	removed, err := removeLegacySessionStartHookIn(home)
+	if err != nil {
+		t.Fatalf("removeLegacySessionStartHookIn: %v", err)
+	}
+	if removed {
+		t.Error("removed = true, want false on an already-clean home")
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings after: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("settings.json was rewritten on an already-clean home")
+	}
+}
+
+// TestRemoveLegacySessionStartHook_OverwritesStaleBackup: a pre-existing
+// backup of the same name holds the same dead content, so it is safe (and
+// necessary, for idempotency) to overwrite it.
+func TestRemoveLegacySessionStartHook_OverwritesStaleBackup(t *testing.T) {
+	home, hookPath, _ := seedLegacyHome(t, legacyHookBody)
+	bak := hookPath + ".removed-by-polyforge.bak"
+	if err := os.WriteFile(bak, []byte("stale backup\n"), 0755); err != nil {
+		t.Fatalf("seed stale backup: %v", err)
+	}
+
+	removed, err := removeLegacySessionStartHookIn(home)
+	if err != nil {
+		t.Fatalf("removeLegacySessionStartHookIn: %v", err)
+	}
+	if !removed {
+		t.Fatal("removed = false, want true")
+	}
+	b, err := os.ReadFile(bak)
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if string(b) != legacyHookBody {
+		t.Errorf("stale backup was not overwritten: %q", string(b))
+	}
+}
+
+// TestRemoveLegacySessionStartHook_IsIdempotent: the second `polyforge init`
+// on an already-cleaned machine must be a complete no-op.
+func TestRemoveLegacySessionStartHook_IsIdempotent(t *testing.T) {
+	home, _, settingsPath := seedLegacyHome(t, legacyHookBody)
+
+	if _, err := removeLegacySessionStartHookIn(home); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	past := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(settingsPath, past, past); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	removed, err := removeLegacySessionStartHookIn(home)
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if removed {
+		t.Error("removed = true on the second pass, want false")
+	}
+	st, err := os.Stat(settingsPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !st.ModTime().Truncate(time.Second).Equal(past) {
+		t.Error("second pass rewrote settings.json")
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings after: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("second pass changed settings.json content")
 	}
 }
 

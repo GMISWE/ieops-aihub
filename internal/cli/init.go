@@ -482,11 +482,19 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 		fmt.Printf("ok .polyforge/usage.md written\n")
 	}
 
-	// Write pf-session-start.sh and register it in ~/.claude/settings.json.
-	if err := ensureSessionStartHook(); err != nil {
-		fmt.Fprintf(os.Stderr, "pf init: session start hook: %v\n", err)
-	} else {
-		fmt.Printf("ok ~/.claude/hooks/pf-session-start.sh registered\n")
+	// One-time cleanup of the legacy self-installed SessionStart hook. The
+	// polyforge plugin now ships its own ${CLAUDE_PLUGIN_ROOT}/hooks/
+	// pf-session-start, so the copy in ~/.claude/hooks/ is dead code that
+	// aborted with exit 2 on every session start. Silent when there is
+	// nothing to clean up.
+	if removed, err := removeLegacySessionStartHook(); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init: legacy session start hook cleanup: %v\n", err)
+	} else if removed {
+		// Deliberately does not claim the script itself was moved aside: this
+		// also fires when only a dangling registration was cleared and no
+		// script existed, and pointing users at a .bak that is not there is
+		// worse than saying less.
+		fmt.Printf("ok legacy pf-session-start hook cleaned up (superseded by the polyforge plugin hook)\n")
 	}
 
 	// Ensure .gitignore covers .polyforge.yaml and .polyforge/ secrets.
@@ -801,173 +809,182 @@ func ensureClaudeMdRef(claudeMd string) error {
 	return nil
 }
 
-// pfSessionStartScript is written to ~/.claude/hooks/pf-session-start.sh.
-// It injects the using-polyforge SKILL.md into the Claude Code session context
-// whenever the session is opened inside a polyforge workspace.
-const pfSessionStartScript = `#!/usr/bin/env bash
-# SessionStart hook: inject polyforge v1 using-polyforge SKILL.md as
-# additionalContext when the session is opened inside a polyforge workspace.
+// legacySessionStartHookName is the hook file that `polyforge init` used to
+// self-install into ~/.claude/hooks/. It is fully superseded by the
+// plugin-bundled ${CLAUDE_PLUGIN_ROOT}/hooks/pf-session-start, which
+// self-locates instead of hardcoding a plugin cache path.
+const legacySessionStartHookName = "pf-session-start.sh"
 
-set -euo pipefail
+// legacySessionStartHookMarker is the giveaway string inside the dead script:
+// it pointed at the pre-rename `gmi-marketplace` plugin cache, so after the
+// marketplace was renamed to `ieops-aihub` the path never resolved — and under
+// `set -euo pipefail` the failed lookup aborted the hook with exit 2 and no
+// stderr on every session start. Only a file containing this marker is ours to
+// clean up; anything else at that path is the user's own hook, left untouched.
+const legacySessionStartHookMarker = "plugins/cache/gmi-marketplace/polyforge"
 
-# Walk up from $PWD looking for .polyforge.yaml.
-dir="${CLAUDE_PROJECT_DIR:-$PWD}"
-in_workspace=0
-while [ -n "$dir" ] && [ "$dir" != "/" ]; do
-  if [ -f "$dir/.polyforge.yaml" ]; then
-    in_workspace=1
-    break
-  fi
-  parent="$(dirname "$dir")"
-  [ "$parent" = "$dir" ] && break
-  dir="$parent"
-done
-[ "$in_workspace" = "0" ] && exit 0
+// legacySessionStartHookBackupSuffix is appended to the legacy hook when it is
+// moved aside. The cleanup renames rather than deletes so the removal stays
+// reversible by hand.
+const legacySessionStartHookBackupSuffix = ".removed-by-polyforge.bak"
 
-# Locate the most recently modified polyforge v1 plugin install.
-plugin_base="$HOME/.claude/plugins/cache/gmi-marketplace/polyforge"
-plugin_root="$(ls -td "$plugin_base"/*/ 2>/dev/null | head -1)"
-plugin_root="${plugin_root%/}"
-[ -z "$plugin_root" ] && exit 0
-
-skill="$plugin_root/skills/using-polyforge/SKILL.md"
-[ -f "$skill" ] || exit 0
-
-SKILL_PATH="$skill" python3 <<'PY'
-import json, os
-skill = open(os.environ["SKILL_PATH"]).read()
-ctx = (
-    "<EXTREMELY_IMPORTANT>\n"
-    "You are in a polyforge workspace (.polyforge.yaml detected). "
-    "Lifecycle skills /pf-* and ` + "`" + `mcp__plugin_polyforge_polyforge__*` + "`" + ` MCP tools are "
-    "authoritative; do not bypass them with raw git / Edit / Bash on work_items.\n\n"
-    "**Below is the full content of the ` + "`" + `using-polyforge` + "`" + ` skill:**\n\n"
-    + skill
-    + "\n</EXTREMELY_IMPORTANT>"
-)
-print(json.dumps({
-    "hookSpecificOutput": {
-        "hookEventName": "SessionStart",
-        "additionalContext": ctx,
-    }
-}))
-PY
-`
-
-// ensureSessionStartHook writes pf-session-start.sh to ~/.claude/hooks/ and
-// registers it in ~/.claude/settings.json. Idempotent.
-func ensureSessionStartHook() error {
+// removeLegacySessionStartHook runs the one-time reverse cleanup of the legacy
+// self-installed SessionStart hook against the current user's home directory.
+// It reports whether anything was actually removed. Silent and idempotent: on
+// an already-clean machine it returns (false, nil) without touching a byte.
+func removeLegacySessionStartHook() (removed bool, err error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		return false, err
 	}
-
-	hooksDir := filepath.Join(homeDir, ".claude", "hooks")
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
-		return err
-	}
-
-	hookPath := filepath.Join(hooksDir, "pf-session-start.sh")
-	if err := os.WriteFile(hookPath, []byte(pfSessionStartScript), 0755); err != nil {
-		return err
-	}
-
-	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
-	return ensureSettingsHook(settingsPath, hookPath)
+	return removeLegacySessionStartHookIn(homeDir)
 }
 
-// sessionStartHookTimeoutMs is the Claude Code SessionStart hook timeout in
-// milliseconds. The pf-session-start.sh script forks bash and python3, so it
-// needs enough headroom for cold start — anything below ~1s tends to get the
-// hook SIGKILL'd before it can write additionalContext.
-const sessionStartHookTimeoutMs = 5000
+// removeLegacySessionStartHookIn is removeLegacySessionStartHook with an
+// explicit home directory, so the cleanup can be exercised against a fake HOME.
+func removeLegacySessionStartHookIn(homeDir string) (removed bool, err error) {
+	hookPath := filepath.Join(homeDir, ".claude", "hooks", legacySessionStartHookName)
+	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
 
-// ensureSettingsHook adds hookCmd to the SessionStart hooks in settings.json,
-// or reconciles the timeout/type fields of an existing entry. Idempotent: a
-// no-op when the existing entry already matches the desired shape.
-func ensureSettingsHook(settingsPath, hookCmd string) error {
-	var settings map[string]any
-
-	b, err := os.ReadFile(settingsPath)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err == nil {
-		if err := json.Unmarshal(b, &settings); err != nil {
-			return err
+	body, err := os.ReadFile(hookPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// The script is already gone but its registration may not be —
+			// e.g. someone stopped the bleeding by hand with `rm` and left
+			// settings.json pointing at a path that no longer exists. That
+			// dangling entry is exactly the "residual registration" the
+			// cleanup is meant to clear, so drop it. Safe without the content
+			// gate below: there is no file to gate on, and an entry naming a
+			// missing script is broken no matter who wrote it.
+			return removeSettingsHook(settingsPath, hookPath)
 		}
-	} else {
-		settings = make(map[string]any)
+		return false, err
+	}
+	// Content gate: never touch a hook we did not write.
+	if !strings.Contains(string(body), legacySessionStartHookMarker) {
+		return false, nil
 	}
 
-	// Navigate to hooks.SessionStart[0].hooks, creating the path if needed.
+	// Unregister first, move the file aside second. If the second step fails
+	// the leftover is an orphan script nothing invokes; the reverse order would
+	// leave settings.json pointing at a missing file.
+	if _, err := removeSettingsHook(settingsPath, hookPath); err != nil {
+		return false, err
+	}
+	// Overwrites a pre-existing backup of the same name — it holds the same
+	// dead content, and keeping the rename unconditional keeps this idempotent.
+	if err := os.Rename(hookPath, hookPath+legacySessionStartHookBackupSuffix); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// removeSettingsHook deletes the SessionStart hook entries whose command is
+// exactly hookCmd from settings.json, leaving every sibling entry, the
+// enclosing group (even when it ends up empty), other hook events and all
+// unrelated top-level keys alone. It reports whether an entry was actually
+// removed. A no-op — including a missing settings.json — writes nothing at all,
+// so re-running init does not disturb the file's mtime.
+func removeSettingsHook(settingsPath, hookCmd string) (removed bool, err error) {
+	b, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	var settings map[string]any
+	if err := json.Unmarshal(b, &settings); err != nil {
+		return false, err
+	}
+
 	hooks, _ := settings["hooks"].(map[string]any)
-	if hooks == nil {
-		hooks = make(map[string]any)
-		settings["hooks"] = hooks
-	}
-
 	sessionStart, _ := hooks["SessionStart"].([]any)
-	if len(sessionStart) == 0 {
-		sessionStart = []any{map[string]any{"hooks": []any{}}}
-		hooks["SessionStart"] = sessionStart
-	}
 
-	group, _ := sessionStart[0].(map[string]any)
-	if group == nil {
-		group = map[string]any{"hooks": []any{}}
-		sessionStart[0] = group
-	}
-
-	entries, _ := group["hooks"].([]any)
-
-	const desiredType = "command"
-	desiredTimeout := sessionStartHookTimeoutMs
-
-	// Find existing entry by command; reconcile its fields if found, otherwise
-	// append a new entry. Reconcile (not early-return) so legacy installs that
-	// captured a wrong timeout get healed when the user re-runs init.
-	found := false
 	changed := false
-	for _, e := range entries {
-		m, ok := e.(map[string]any)
+	for _, grp := range sessionStart {
+		g, _ := grp.(map[string]any)
+		if g == nil {
+			continue
+		}
+		entries, ok := g["hooks"].([]any)
 		if !ok {
 			continue
 		}
-		if cmd, _ := m["command"].(string); cmd != hookCmd {
-			continue
+		kept := make([]any, 0, len(entries))
+		for _, e := range entries {
+			// Exact command match only — never substring or prefix.
+			if m, _ := e.(map[string]any); m != nil {
+				if cmd, _ := m["command"].(string); cmd == hookCmd {
+					continue
+				}
+			}
+			kept = append(kept, e)
 		}
-		found = true
-		if t, _ := m["type"].(string); t != desiredType {
-			m["type"] = desiredType
+		if len(kept) != len(entries) {
+			// Keep the group itself: pruning empty containers would edit more
+			// of the user's file than this cleanup is entitled to.
+			g["hooks"] = kept
 			changed = true
 		}
-		// JSON unmarshal turns numbers into float64; coerce before comparing.
-		if ms, ok := m["timeout"].(float64); !ok || int(ms) != desiredTimeout {
-			m["timeout"] = desiredTimeout
-			changed = true
-		}
-		break
-	}
-	if !found {
-		entries = append(entries, map[string]any{
-			"type":    desiredType,
-			"command": hookCmd,
-			"timeout": desiredTimeout,
-		})
-		group["hooks"] = entries
-		changed = true
 	}
 
 	if !changed {
-		return nil
+		return false, nil
 	}
 
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
+		return false, err
+	}
+	if err := writeFileAtomic(settingsPath, append(out, '\n'), 0644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// writeFileAtomic writes data to path via a temp file in the same directory
+// followed by a rename, so an interrupted write cannot leave settings.json
+// truncated or half-written.
+//
+// The replacement inherits the existing file's permissions. The rename swaps in
+// a new inode, so without this a user who ran `chmod 600 ~/.claude/settings.json`
+// — reasonable, since that file can carry an env block with API keys — would
+// silently get it widened back. fallbackPerm applies only when path does not
+// exist yet.
+func writeFileAtomic(path string, data []byte, fallbackPerm os.FileMode) error {
+	perm := fallbackPerm
+	if fi, err := os.Stat(path); err == nil {
+		perm = fi.Mode().Perm()
+	}
+
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.WriteFile(settingsPath, append(out, '\n'), 0644)
+	tmp := f.Name()
+	// No-op once the rename below has succeeded.
+	defer func() { _ = os.Remove(tmp) }()
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	// Flush before the rename so a crash cannot leave the new name pointing at
+	// an empty file on filesystems that would otherwise defer the data write.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 const managedBlockStart = `<!-- polyforge:managed:version="1.0" -->`

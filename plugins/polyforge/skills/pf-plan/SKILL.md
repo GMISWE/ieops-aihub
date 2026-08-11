@@ -130,7 +130,15 @@ pf_update_work_item(
 )
 ```
 
-- Do NOT pass `resources_version` — it triggers a 400 error (known aihub issue).
+- `resources_version` is optional. Omit it to overwrite unconditionally (the normal plan-step
+  case — you are the only writer). Pass the `resources_version` you last read from the wi when
+  another session might be editing the same declaration concurrently: the write then applies
+  only if nobody has changed `declared_resources` since, and otherwise fails with
+  **409 `CONFLICT_CAS_FAILED`** reporting the current version, instead of silently clobbering
+  the other writer. Every successful write of `declared_resources` increments the counter.
+  (Before aihub#241 this argument always returned 400 and the counter never advanced, so the
+  earlier instruction here was "never pass it" — that is fixed; re-read the version from the
+  response rather than assuming it is still 0.)
 - If the plan has no file changes at all, still call `pf_update_work_item` with an empty
   list to clear any stale resources.
 

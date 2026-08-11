@@ -3,7 +3,9 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -50,6 +52,62 @@ func numArg(args map[string]any, key string) float64 {
 		}
 	}
 	return 0
+}
+
+// normalizeIntArg rewrites args[key] in place to a Go int so it serializes into
+// the request body as a JSON number.
+//
+// aihub#241: pf_update_work_item published `resources_version` as JSON-schema
+// type "string" while domain.UpdateWorkItemRequest.ResourcesVersion is *int, so
+// the value reached echo's c.Bind as `"0"` and every request carrying it failed
+// with 400 BAD_REQUEST "invalid request body" — CAS was unusable on the only
+// path that could have provided it. The schema now says "integer", but a
+// mixed-version client (or a human calling the tool by hand) can still send the
+// quoted form, so coerce here as well rather than trusting the schema alone: a
+// wrong type must not turn into an opaque 400 two layers away.
+//
+// Returns an error naming the field when the value is present but not an
+// integer. Absent keys are left untouched and report no error.
+func normalizeIntArg(args map[string]any, key string) error {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return nil
+	}
+	switch n := v.(type) {
+	case int:
+		return nil
+	case float64:
+		// encoding/json decodes every JSON number into float64.
+		if n != math.Trunc(n) {
+			return fmt.Errorf("%s must be an integer, got %v", key, n)
+		}
+		// Out-of-range float64 -> int is implementation-defined in Go, so reject
+		// rather than silently binding a garbage value into the request body.
+		if n > math.MaxInt32 || n < math.MinInt32 {
+			return fmt.Errorf("%s is out of range for an integer, got %v", key, n)
+		}
+		args[key] = int(n)
+		return nil
+	case json.Number:
+		// Not reachable through parseArgs today (it uses a plain json.Unmarshal,
+		// which yields float64), but cheap insurance if a caller ever switches to
+		// a decoder with UseNumber — a silent regression to the original bug.
+		i, err := n.Int64()
+		if err != nil {
+			return fmt.Errorf("%s must be an integer, got %q", key, n.String())
+		}
+		args[key] = int(i)
+		return nil
+	case string:
+		i, err := strconv.Atoi(strings.TrimSpace(n))
+		if err != nil {
+			return fmt.Errorf("%s must be an integer, got %q", key, n)
+		}
+		args[key] = i
+		return nil
+	default:
+		return fmt.Errorf("%s must be an integer, got %T", key, v)
+	}
 }
 
 // setIfNonempty adds key=value to params if value is non-empty.

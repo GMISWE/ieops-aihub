@@ -19,6 +19,15 @@ on:
       - 'scripts/pf_contract_lint.py'
       - 'scripts/pf_contract_lint_baseline.json'
       - '.github/workflows/contract-lint.yml'
+      # Version-stamp consistency (aihub#232). Both catalogs live outside
+      # plugins/**, so a catalog-only version edit would otherwise not run this
+      # job at all — which is exactly the drift the check exists to catch. The
+      # repo-root marketplace.json is the Copilot CLI catalog and carries its own
+      # version stamp; it was one of the files left at 1.1.6 by the original
+      # incident, so it needs the trigger just as much as the Claude one.
+      - '.claude-plugin/marketplace.json'
+      - 'marketplace.json'
+      - 'scripts/pf_version_check.py'
 
 jobs:
   contract-lint:
@@ -26,6 +35,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Cheap and Go-independent, so it runs first: a version bump that updates
+      # only some of the four stamps fails here in seconds rather than after the
+      # build (aihub#232).
+      - name: Plugin version-stamp consistency
+        run: |
+          python3 scripts/pf_version_check.py --self-test
+          python3 scripts/pf_version_check.py --root .
 
       - name: Set up Go
         uses: actions/setup-go@v5

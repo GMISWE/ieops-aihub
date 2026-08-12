@@ -354,12 +354,12 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		BlockedBy: []DependencyListEntry{},
 	}
 
-	// blocking: wi that are being blocked BY our wi (blocked_wi_id=wiID)
+	// blocking: wi that are being blocked BY our wi (blocking_wi_id=wiID)
 	blockingRows, err := pool.Query(ctx, `
-		SELECT d.blocking_wi_id, wi.slug, wi.project, d.kind, d.note
+		SELECT d.blocked_wi_id, wi.slug, wi.project, d.kind, d.note
 		FROM wi_dependencies d
-		JOIN work_items wi ON wi.id = d.blocking_wi_id
-		WHERE d.blocked_wi_id = $1`, wiID,
+		JOIN work_items wi ON wi.id = d.blocked_wi_id
+		WHERE d.blocking_wi_id = $1`, wiID,
 	)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, "failed to query dependencies")
@@ -380,12 +380,12 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 	}
 	blockingRows.Close()
 
-	// blocked_by: wi that block our wi (blocking_wi_id=wiID)
+	// blocked_by: wi that block our wi (blocked_wi_id=wiID)
 	blockedByRows, err := pool.Query(ctx, `
-		SELECT d.blocked_wi_id, wi.slug, wi.project, d.kind, d.note
+		SELECT d.blocking_wi_id, wi.slug, wi.project, d.kind, d.note
 		FROM wi_dependencies d
-		JOIN work_items wi ON wi.id = d.blocked_wi_id
-		WHERE d.blocking_wi_id = $1`, wiID,
+		JOIN work_items wi ON wi.id = d.blocking_wi_id
+		WHERE d.blocked_wi_id = $1`, wiID,
 	)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, "failed to query blocked_by dependencies")

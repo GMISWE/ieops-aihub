@@ -128,6 +128,41 @@ jobs:
           ! grep -q -- '--- SKIP' wi_cas.log \
             || { echo "::error::a TestUpdateWorkItemCAS case SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#230: exercise the ListDependencies blocking/blocked_by direction
+      # fix against the same Postgres service, already migrated by the "Apply
+      # migrations (aihub#242 DB tests)" step above — reused here rather than
+      # running goose a third time.
+      #
+      # Deliberately scoped to `-run 'TestListDependencies_Direction'` rather
+      # than setting AIHUB_TEST_DB on the "Unit tests" step, for the same reason
+      # as the two steps above: this domain package has several other
+      # AIHUB_TEST_DB-gated suites that would also switch on if the var were set
+      # package-wide, and this change did not verify those pass.
+      #
+      # The direction assertions are the whole point of this test: counting
+      # entries alone passes against the pre-fix (inverted) SQL, so the test
+      # asserts the identity AND slug of the wi in each list, plus that the
+      # opposite list is empty. Verified by mutation locally: it FAILs against
+      # the pre-fix SQL, against either half of a partially-applied swap
+      # (predicate-only or projection-only), against one query left un-swapped,
+      # and against a JOIN column that diverges from the projected column.
+      #
+      # Runs with -v and then asserts the case actually reported PASS, rather
+      # than trusting the exit code — `go test` prints "ok" and exits 0 when
+      # every selected test SKIPs, and setupLatestTestDB skips whenever
+      # AIHUB_TEST_DB is empty, so without this guard a broken env block would
+      # silently restore the zero-coverage state that let this inversion ship.
+      - name: aihub#230 dependency-direction DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestListDependencies_Direction' -count=1 -v 2>&1 | tee dep_direction.log
+          grep -q -- "--- PASS: TestListDependencies_Direction" dep_direction.log \
+            || { echo "::error::TestListDependencies_Direction did not run (expected '--- PASS: TestListDependencies_Direction'); the DB-gated direction coverage is not actually executing"; exit 1; }
+          ! grep -q -- '--- SKIP' dep_direction.log \
+            || { echo "::error::TestListDependencies_Direction SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#237: the launcher's update check is shell, so `go test` cannot see
       # it — a silent-pin regression there would ship green. This suite is
       # hermetic (no docker, no network: it stubs gh/curl/binary and drives

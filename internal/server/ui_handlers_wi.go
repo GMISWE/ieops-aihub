@@ -1010,8 +1010,8 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		}
 
 		// Parent link (aihub#142): build the view entry straight from the domain
-		// ref — NOT via toDepView, which inverts blocking/blocked-by direction;
-		// parent/children are plain identity references with no direction to flip.
+		// ref — parent/children are plain identity references, not dependency
+		// edges, so they do not go through the blocking/blocked-by projection.
 		if parentRef != nil {
 			pe := wiRefToDepEntry(*parentRef)
 			data.Parent = &pe
@@ -1193,21 +1193,17 @@ func toDepView(d *domain.DependenciesResponse) *depView {
 	if d == nil {
 		return nil
 	}
-	// NOTE: domain.DependenciesResponse uses inverted field semantics —
-	// `Blocking` is populated from rows where this wi is the *blocked* side
-	// (so it actually lists the wi's that block us), and `BlockedBy` lists
-	// the wi's we are blocking. Swap them here so the template labels mean
-	// what a human reader expects:
-	//   depView.BlockedBy = "who blocks us" (domain.Blocking)
-	//   depView.Blocking  = "who we block"  (domain.BlockedBy)
+	// domain.DependenciesResponse field semantics match the template labels
+	// directly: `Blocking` lists the wi's our wi blocks, `BlockedBy` lists the
+	// wi's that block our wi. Copy straight across — no direction swap.
 	v := &depView{
-		Blocking:  make([]depEntry, 0, len(d.BlockedBy)),
-		BlockedBy: make([]depEntry, 0, len(d.Blocking)),
-	}
-	for _, e := range d.BlockedBy {
-		v.Blocking = append(v.Blocking, depEntryFrom(e))
+		Blocking:  make([]depEntry, 0, len(d.Blocking)),
+		BlockedBy: make([]depEntry, 0, len(d.BlockedBy)),
 	}
 	for _, e := range d.Blocking {
+		v.Blocking = append(v.Blocking, depEntryFrom(e))
+	}
+	for _, e := range d.BlockedBy {
 		v.BlockedBy = append(v.BlockedBy, depEntryFrom(e))
 	}
 	return v
@@ -1224,9 +1220,9 @@ func depEntryFrom(e domain.DependencyListEntry) depEntry {
 // template-friendly depEntry. It reuses the SAME cross-project sentinel as
 // depEntryFrom (Slug==nil || ID=="hidden" → Hidden) so hidden refs render the
 // shared placeholder. Status + Assignee are left zero here; the view layer fills
-// them via fetchDepMeta/enrichDepView, identical to the dependency rows. There
-// is no direction inversion to worry about (unlike toDepView): parent/children
-// are plain identity references, so we build the entry straight from the row.
+// them via fetchDepMeta/enrichDepView, identical to the dependency rows.
+// parent/children are plain identity references, so we build the entry straight
+// from the row.
 func wiRefToDepEntry(r domain.WIRef) depEntry {
 	if r.Slug == nil || r.ID == "hidden" {
 		return depEntry{Hidden: true}

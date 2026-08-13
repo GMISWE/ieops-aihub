@@ -238,7 +238,11 @@ func runClone(url, destPath string) error {
 //  3. Clones/syncs all repos.
 //  4. PATCHes server with merged repo list.
 //  5. GETs refreshed project for CLAUDE.md block.
-func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, repoDir string, sp serverProject) projectBlock {
+//
+// Returns the CLAUDE.md block plus the reconciled repo list (server ∪ local-only
+// appends) — the same list the clone loop walks, so .polyforge.yaml can be
+// refreshed from it instead of from the pre-PATCH server snapshot (aihub#228).
+func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, repoDir string, sp serverProject) (projectBlock, []serverRepoEntry) {
 	localRepos := []config.Repo{}
 	if cfg != nil {
 		if lp, ok := cfg.Projects[sp.Name]; ok {
@@ -352,26 +356,82 @@ func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, rep
 			block.Repos = repoEntriesFromServer(parseServerRepos(refreshed.Repos))
 		}
 	}
-	return block
+	// The yaml gets `merged`, not the refreshed GET: if the PATCH above failed,
+	// the refreshed response would be missing the local-only repos and writing
+	// from it would delete them from the workspace config.
+	return block, merged
 }
 
-// writeMemberPolyforgeYAML generates .polyforge.yaml for a member workspace
-// as a local cache of the server's project+repo list. The file is written
-// only when it does not already exist. It applies the same callerHasRole
-// filter as the clone loop so the cache declares only projects the caller has
-// a role in — listing a visible project in GET /v1/projects does not imply the
-// caller should treat its repos as part of their workspace.
-func writeMemberPolyforgeYAML(path string, projects []serverProject, currentUserID string) error {
-	mc, err := config.LoadMachineConfig()
-	if err != nil {
-		return err
+// writePolyforgeYAML generates .polyforge.yaml as a local cache of the server's
+// project+repo list. It applies the same callerHasRole filter as the clone loop
+// so the cache declares only projects the caller has a role in — listing a
+// visible project in GET /v1/projects does not imply the caller should treat its
+// repos as part of their workspace.
+//
+// It runs on EVERY init, rewriting an existing file, which is what the generated
+// header has always promised ("Re-run polyforge init to refresh"). Before
+// aihub#228 the call was gated on os.IsNotExist, so a repo added to a project
+// server-side never reached .polyforge.yaml and claim therefore never built a
+// worktree for it.
+//
+// Refreshing an existing file must not destroy local state that the server does
+// not carry, so three things are preserved from the file on disk:
+//
+//   - the aihub block — ResolveAihubURL() returns "" when there is no
+//     POLYFORGE_AIHUB_URL and no ~/.polyforge/config.toml server URL, so
+//     rebuilding it from scratch would blank a working workspace's endpoint;
+//   - project blocks the server did not return (caller lost visibility, or a
+//     hand-authored entry) — dropping them silently would break those repos;
+//   - a project description when the server has none.
+//
+// For projects the server DID return, the repos list is replaced wholesale
+// rather than merged, so a repo removed server-side does not linger.
+//
+// reconciledRepos optionally supplies a per-project repo list that overrides the
+// project's server snapshot. The owner path needs this: runOwnerInit merges
+// local-only repos into the server list and PATCHes them up, but the `projects`
+// slice the caller holds is still the pre-PATCH GET response, so writing from it
+// would drop the repo that was just appended.
+func writePolyforgeYAML(path string, projects []serverProject, currentUserID string, reconciledRepos map[string][]serverRepoEntry) error {
+	// Existing on-disk config, if any. A missing file is the normal first-init
+	// case and not an error. A file that exists but does not parse is different:
+	// everything this function preserves (the aihub block, unmanaged project
+	// blocks) is about to be overwritten, so say so rather than silently
+	// clobbering a file the user could otherwise have repaired by hand.
+	prev, loadErr := config.Load(filepath.Dir(path))
+	if loadErr != nil {
+		if _, statErr := os.Stat(path); statErr == nil {
+			fmt.Fprintf(os.Stderr, "pf init: warning: %s exists but could not be parsed (%v); "+
+				"rewriting it from the server — the previous aihub block and any project "+
+				"entries the server does not return will be lost\n", path, loadErr)
+		}
+		prev = nil
 	}
 
 	cfg := config.Config{
 		Version:  1,
-		AIHub:    config.AIHubConfig{URL: mc.ResolveAihubURL()},
 		Projects: make(map[string]config.Project),
 	}
+
+	// Carry the aihub block over verbatim when it is already populated.
+	if prev != nil {
+		cfg.AIHub = prev.AIHub
+	}
+	if cfg.AIHub.URL == "" {
+		mc, err := config.LoadMachineConfig()
+		if err != nil {
+			return err
+		}
+		cfg.AIHub.URL = mc.ResolveAihubURL()
+	}
+
+	// Preserve project blocks that the server did not return.
+	if prev != nil {
+		for name, p := range prev.Projects {
+			cfg.Projects[name] = p
+		}
+	}
+
 	for _, sp := range projects {
 		if !sp.Visible {
 			continue
@@ -383,7 +443,11 @@ func writeMemberPolyforgeYAML(path string, projects []serverProject, currentUser
 		if !callerHasRole(sp, currentUserID) {
 			continue
 		}
-		serverRepos := parseServerRepos(sp.Repos)
+
+		serverRepos, ok := reconciledRepos[sp.Name]
+		if !ok {
+			serverRepos = parseServerRepos(sp.Repos)
+		}
 		repos := make([]config.Repo, 0, len(serverRepos))
 		for _, r := range serverRepos {
 			var ghOwnerRepo, desc string
@@ -400,9 +464,16 @@ func writeMemberPolyforgeYAML(path string, projects []serverProject, currentUser
 				Description:     desc,
 			})
 		}
-		proj := config.Project{Repos: repos}
+
+		// Start from the existing block so fields the server does not own are
+		// kept, then overwrite what the server is authoritative for.
+		proj := cfg.Projects[sp.Name]
+		proj.Repos = repos
 		if sp.Scenario != nil {
 			proj.Scenario = *sp.Scenario
+		}
+		if sp.Description != nil && *sp.Description != "" {
+			proj.Description = *sp.Description
 		}
 		cfg.Projects[sp.Name] = proj
 	}
@@ -411,7 +482,7 @@ func writeMemberPolyforgeYAML(path string, projects []serverProject, currentUser
 	if err != nil {
 		return err
 	}
-	header := "# polyforge workspace config — auto-generated by pf init (member)\n" +
+	header := "# polyforge workspace config — auto-generated by pf init\n" +
 		"# Source of truth is the server. Re-run polyforge init to refresh.\n\n"
 	return os.WriteFile(path, append([]byte(header), b...), 0644)
 }
@@ -427,8 +498,9 @@ func projectFromRaw(raw map[string]any) (*serverProject, error) {
 }
 
 // runMemberInit performs the member-side init for a single project:
-// uses server repos directly, clones/syncs them.
-func runMemberInit(repoDir string, sp serverProject) projectBlock {
+// uses server repos directly, clones/syncs them. Returns the CLAUDE.md block plus
+// the repo list it cloned, so .polyforge.yaml can be refreshed from the same list.
+func runMemberInit(repoDir string, sp serverProject) (projectBlock, []serverRepoEntry) {
 	serverRepos := parseServerRepos(sp.Repos)
 	for _, r := range serverRepos {
 		if r.URL == "" {
@@ -440,7 +512,7 @@ func runMemberInit(repoDir string, sp serverProject) projectBlock {
 		Name:        sp.Name,
 		Description: sp.Description,
 		Repos:       repoEntriesFromServer(serverRepos),
-	}
+	}, serverRepos
 }
 
 // RunInit sets up (or repairs) the workspace: it ensures ~/.polyforge/config.toml,
@@ -542,6 +614,10 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 	}
 
 	var blocks []projectBlock
+	// Per-project reconciled repo lists, keyed by project name — what each init
+	// path actually cloned. .polyforge.yaml is refreshed from these rather than
+	// from the pre-PATCH GET /v1/projects snapshot (aihub#228).
+	reconciledRepos := make(map[string][]serverRepoEntry)
 	for _, sp := range projects {
 		if !sp.Visible {
 			continue
@@ -553,22 +629,30 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 			continue
 		}
 		var blk projectBlock
+		var repos []serverRepoEntry
 		if currentUserID != "" && sp.OwnerUserID == currentUserID {
-			blk = runOwnerInit(ctx, c, cfg, repoDir, sp)
+			blk, repos = runOwnerInit(ctx, c, cfg, repoDir, sp)
 		} else {
-			blk = runMemberInit(repoDir, sp)
+			blk, repos = runMemberInit(repoDir, sp)
 		}
 		blocks = append(blocks, blk)
+		reconciledRepos[sp.Name] = repos
 	}
 
-	// For member workspaces: generate .polyforge.yaml as a local cache if it
-	// doesn't exist yet. Owners already have it as their source of truth.
+	// Refresh .polyforge.yaml from the server on every init — this is what the
+	// generated header promises. Previously gated on the file not existing, which
+	// meant repos added to a project server-side never reached the local config
+	// and claim never built worktrees for them (aihub#228). The writer preserves
+	// the aihub block, unmanaged project blocks, and local-only descriptions.
+	// Guard on the post-role-filter set, not the raw server list: if the caller
+	// holds no role in any returned project there is nothing authoritative to
+	// write, and rewriting the file from an empty set would be pure churn.
 	polyforgeYAMLPath := filepath.Join(wsRoot, ".polyforge.yaml")
-	if _, yerr := os.Stat(polyforgeYAMLPath); os.IsNotExist(yerr) && len(projects) > 0 {
-		if werr := writeMemberPolyforgeYAML(polyforgeYAMLPath, projects, currentUserID); werr != nil {
+	if len(reconciledRepos) > 0 {
+		if werr := writePolyforgeYAML(polyforgeYAMLPath, projects, currentUserID, reconciledRepos); werr != nil {
 			fmt.Fprintf(os.Stderr, "pf init: write .polyforge.yaml: %v\n", werr)
 		} else {
-			fmt.Printf("ok .polyforge.yaml generated (member workspace)\n")
+			fmt.Printf("ok .polyforge.yaml refreshed from server (%d project(s))\n", len(reconciledRepos))
 		}
 	}
 

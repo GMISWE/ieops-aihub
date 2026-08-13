@@ -384,15 +384,7 @@ func (s *Server) registerLifecycleTools() {
 				wsRoot = config.FindWorkspaceRoot()
 			}
 			if wsRoot != "" {
-				// Resolve workspace config: use server-level cfg if available, otherwise
-				// load fresh from wsRoot. This handles the case where the MCP server
-				// started without POLYFORGE_WORKSPACE_ROOT set (e.g. a background session
-				// whose cwd has no .polyforge.yaml ancestor), so s.cfg is nil even though
-				// wsRoot is now correctly resolved at claim time.
-				effectiveCfg := s.cfg
-				if effectiveCfg == nil {
-					effectiveCfg, _ = config.Load(wsRoot) // non-fatal; stays nil if not found
-				}
+				effectiveCfg := resolveWorkspaceConfig(wsRoot, s.cfg)
 
 				// Derive seq from slug (e.g. "marketplace#42" → "42").
 				seq := ""
@@ -918,6 +910,27 @@ func requestedLocksProp(description string) map[string]any {
 		"required": []string{"resource_type", "resource_key"},
 	}
 	return p
+}
+
+// resolveWorkspaceConfig returns the workspace config to build claim worktrees
+// from, reading .polyforge.yaml fresh out of wsRoot rather than trusting the
+// snapshot the MCP process loaded at startup.
+//
+// startupCfg (the server's s.cfg) is read once when the process starts, so a repo
+// added to a project mid-session was silently missing from every subsequent claim
+// in that session — the worktree loop iterates this config, and users saw a claim
+// come back short without any error (aihub#228).
+//
+// startupCfg remains the fallback for two cases: the fresh read failing, and the
+// server having started without POLYFORGE_WORKSPACE_ROOT (cwd with no
+// .polyforge.yaml ancestor), where s.cfg is nil but the caller has since resolved
+// a usable wsRoot. Returns nil when neither source yields a config, which the
+// caller treats as "skip worktree creation".
+func resolveWorkspaceConfig(wsRoot string, startupCfg *config.Config) *config.Config {
+	if cfg, err := config.Load(wsRoot); err == nil && cfg != nil {
+		return cfg
+	}
+	return startupCfg
 }
 
 // claimBranchULID8 derives the 8-char branch suffix (polyforge/<ulid8>) from a

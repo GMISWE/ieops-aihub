@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GMISWE/ieops-aihub/internal/config"
 )
 
 // readSettings parses settings.json into a generic map for assertions.
@@ -652,7 +654,7 @@ func TestParseServerProjects_PreservesScenario(t *testing.T) {
 // line whenever the server returned one. Without this, re-running pf init
 // loses the scenario binding and downstream tools (pf-execute) can't
 // resolve the scenario repo.
-func TestWriteMemberPolyforgeYAML_IncludesScenario(t *testing.T) {
+func TestWritePolyforgeYAML_IncludesScenario(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
@@ -675,8 +677,8 @@ func TestWriteMemberPolyforgeYAML_IncludesScenario(t *testing.T) {
 
 	path := filepath.Join(tmp, ".polyforge.yaml")
 	// Caller owns both projects (u_xxx), so both pass the callerHasRole filter.
-	if err := writeMemberPolyforgeYAML(path, projects, "u_xxx"); err != nil {
-		t.Fatalf("writeMemberPolyforgeYAML: %v", err)
+	if err := writePolyforgeYAML(path, projects, "u_xxx", nil); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
 	}
 
 	b, err := os.ReadFile(path)
@@ -702,7 +704,7 @@ func TestWriteMemberPolyforgeYAML_IncludesScenario(t *testing.T) {
 // Visible-but-role-less projects (e.g. infra, tether) were previously written
 // into the yaml while their repos were never cloned, producing spurious
 // "missing repos" warnings in doctor/teammate checks.
-func TestWriteMemberPolyforgeYAML_FiltersRoleless(t *testing.T) {
+func TestWritePolyforgeYAML_FiltersRoleless(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
@@ -735,8 +737,8 @@ func TestWriteMemberPolyforgeYAML_FiltersRoleless(t *testing.T) {
 	}
 
 	path := filepath.Join(tmp, ".polyforge.yaml")
-	if err := writeMemberPolyforgeYAML(path, projects, "u_caller"); err != nil {
-		t.Fatalf("writeMemberPolyforgeYAML: %v", err)
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -755,6 +757,300 @@ func TestWriteMemberPolyforgeYAML_FiltersRoleless(t *testing.T) {
 		if strings.Contains(got, notWant) {
 			t.Errorf("rendered yaml includes role-less project %q; got:\n%s", notWant, got)
 		}
+	}
+}
+
+// ─── writePolyforgeYAML refresh (aihub#228) ──────────────────────────────────
+
+// writeYAMLFixture writes a pre-existing .polyforge.yaml and returns its path.
+func writeYAMLFixture(t *testing.T, dir, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, ".polyforge.yaml")
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	return path
+}
+
+// loadYAML reads the generated file back through the real config loader, so the
+// assertions exercise the same parse path pf-execute / claim use.
+func loadYAML(t *testing.T, dir string) *config.Config {
+	t.Helper()
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	return cfg
+}
+
+func repoNames(p config.Project) []string {
+	names := make([]string, 0, len(p.Repos))
+	for _, r := range p.Repos {
+		names = append(names, r.Name)
+	}
+	return names
+}
+
+// TestWritePolyforgeYAML_RefreshesStaleRepos is the core aihub#228 regression:
+// the generated header promises "Re-run polyforge init to refresh", but the
+// write was gated on os.IsNotExist, so an existing file was never rewritten and
+// repos added to the project server-side never reached .polyforge.yaml.
+func TestWritePolyforgeYAML_RefreshesStaleRepos(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// Stale local snapshot: only one repo.
+	path := writeYAMLFixture(t, tmp, `version: 1
+aihub:
+    url: http://localhost:8081
+projects:
+    aihub:
+        repos:
+            - name: aihub
+              url: git@github.com:GMISWE/ieops-aihub.git
+`)
+
+	// Server now has two repos for the same project.
+	projects := []serverProject{{
+		Name:        "aihub",
+		OwnerUserID: "u_caller",
+		Visible:     true,
+		Repos: json.RawMessage(`[
+			{"name":"aihub","url":"git@github.com:GMISWE/ieops-aihub.git"},
+			{"name":"ieops-core","url":"git@github.com:GMISWE/ieops-core.git"}
+		]`),
+	}}
+
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
+	}
+
+	got := repoNames(loadYAML(t, tmp).Projects["aihub"])
+	want := []string{"aihub", "ieops-core"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("repos = %v, want %v (server-added repo must reach the yaml on re-init)", got, want)
+	}
+}
+
+// TestWritePolyforgeYAML_DropsServerRemovedRepos proves the write is a true
+// refresh from the server, not a union with the stale local list.
+func TestWritePolyforgeYAML_DropsServerRemovedRepos(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	path := writeYAMLFixture(t, tmp, `version: 1
+projects:
+    aihub:
+        repos:
+            - name: aihub
+              url: git@github.com:GMISWE/ieops-aihub.git
+            - name: retired
+              url: git@github.com:GMISWE/retired.git
+`)
+
+	projects := []serverProject{{
+		Name:        "aihub",
+		OwnerUserID: "u_caller",
+		Visible:     true,
+		Repos:       json.RawMessage(`[{"name":"aihub","url":"git@github.com:GMISWE/ieops-aihub.git"}]`),
+	}}
+
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
+	}
+
+	got := repoNames(loadYAML(t, tmp).Projects["aihub"])
+	want := []string{"aihub"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("repos = %v, want %v (repo removed server-side must not linger)", got, want)
+	}
+}
+
+// TestWritePolyforgeYAML_PreservesAihubBlock guards the landmine that makes an
+// unconditional rewrite dangerous: ResolveAihubURL() returns "" when there is no
+// POLYFORGE_AIHUB_URL and no ~/.polyforge/config.toml server URL, so rebuilding
+// the aihub block from scratch would blank a working workspace's endpoint.
+func TestWritePolyforgeYAML_PreservesAihubBlock(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)               // no config.toml → ResolveAihubURL() == ""
+	t.Setenv("POLYFORGE_AIHUB_URL", "") // and no env override
+
+	path := writeYAMLFixture(t, tmp, `version: 1
+aihub:
+    url: http://localhost:8081
+    api_key_env: PF_API_KEY
+projects:
+    aihub:
+        repos:
+            - name: aihub
+              url: git@github.com:GMISWE/ieops-aihub.git
+`)
+
+	projects := []serverProject{{
+		Name:        "aihub",
+		OwnerUserID: "u_caller",
+		Visible:     true,
+		Repos:       json.RawMessage(`[{"name":"aihub","url":"git@github.com:GMISWE/ieops-aihub.git"}]`),
+	}}
+
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
+	}
+
+	cfg := loadYAML(t, tmp)
+	if cfg.AIHub.URL != "http://localhost:8081" {
+		t.Errorf("aihub.url = %q, want the existing %q preserved (refresh must not blank the endpoint)",
+			cfg.AIHub.URL, "http://localhost:8081")
+	}
+	if cfg.AIHub.APIKeyEnv != "PF_API_KEY" {
+		t.Errorf("aihub.api_key_env = %q, want %q preserved", cfg.AIHub.APIKeyEnv, "PF_API_KEY")
+	}
+}
+
+// TestWritePolyforgeYAML_PreservesUnmanagedProjects: a project block the server
+// did not return (caller lost visibility, or a hand-authored entry) must survive
+// the refresh rather than being silently deleted.
+func TestWritePolyforgeYAML_PreservesUnmanagedProjects(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	path := writeYAMLFixture(t, tmp, `version: 1
+projects:
+    aihub:
+        repos:
+            - name: aihub
+              url: git@github.com:GMISWE/ieops-aihub.git
+    handrolled:
+        repos:
+            - name: local-only
+              url: git@github.com:example/local-only.git
+`)
+
+	projects := []serverProject{{
+		Name:        "aihub",
+		OwnerUserID: "u_caller",
+		Visible:     true,
+		Repos:       json.RawMessage(`[{"name":"aihub","url":"git@github.com:GMISWE/ieops-aihub.git"}]`),
+	}}
+
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
+	}
+
+	cfg := loadYAML(t, tmp)
+	if _, ok := cfg.Projects["handrolled"]; !ok {
+		t.Errorf("project %q was dropped; unmanaged blocks must be preserved. got projects: %v",
+			"handrolled", cfg.Projects)
+	}
+}
+
+// TestWritePolyforgeYAML_PrefersReconciledRepos: on the owner path runOwnerInit
+// merges local-only repos into the server list and PATCHes them up, but the
+// caller's `projects` slice still holds the pre-PATCH snapshot. The refresh must
+// use the reconciled list so a just-appended local repo is not dropped.
+func TestWritePolyforgeYAML_PrefersReconciledRepos(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	path := filepath.Join(tmp, ".polyforge.yaml")
+
+	projects := []serverProject{{
+		Name:        "aihub",
+		OwnerUserID: "u_caller",
+		Visible:     true,
+		// Pre-PATCH server state: one repo.
+		Repos: json.RawMessage(`[{"name":"aihub","url":"git@github.com:GMISWE/ieops-aihub.git"}]`),
+	}}
+	reconciled := map[string][]serverRepoEntry{
+		"aihub": {
+			{Name: "aihub", URL: "git@github.com:GMISWE/ieops-aihub.git"},
+			{Name: "marketplace", URL: "git@github.com:GMISWE/GMI-marketplace.git"},
+		},
+	}
+
+	if err := writePolyforgeYAML(path, projects, "u_caller", reconciled); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
+	}
+
+	got := repoNames(loadYAML(t, tmp).Projects["aihub"])
+	want := []string{"aihub", "marketplace"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("repos = %v, want %v (reconciled list must win over the pre-PATCH snapshot)", got, want)
+	}
+}
+
+// TestWritePolyforgeYAML_ProjectDescription: the server description is written,
+// and an existing local one is kept when the server has none (the old writer
+// dropped project descriptions entirely).
+func TestWritePolyforgeYAML_ProjectDescription(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	path := writeYAMLFixture(t, tmp, `version: 1
+projects:
+    aihub:
+        repos: []
+        description: local description
+    keepsmine:
+        repos: []
+        description: only local knows this
+`)
+
+	serverDesc := "server description"
+	projects := []serverProject{
+		{
+			Name:        "aihub",
+			OwnerUserID: "u_caller",
+			Visible:     true,
+			Description: &serverDesc,
+			Repos:       json.RawMessage(`[]`),
+		},
+		{
+			Name:        "keepsmine",
+			OwnerUserID: "u_caller",
+			Visible:     true,
+			Description: nil, // server has none → keep the local one
+			Repos:       json.RawMessage(`[]`),
+		},
+	}
+
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
+	}
+
+	cfg := loadYAML(t, tmp)
+	if got := cfg.Projects["aihub"].Description; got != serverDesc {
+		t.Errorf("aihub description = %q, want %q from server", got, serverDesc)
+	}
+	if got := cfg.Projects["keepsmine"].Description; got != "only local knows this" {
+		t.Errorf("keepsmine description = %q, want the local value preserved", got)
+	}
+}
+
+// TestWritePolyforgeYAML_CorruptExistingFile: an existing file that does not
+// parse must not abort the refresh — the server list still lands, so `pf init`
+// remains the documented way to repair a mangled workspace config. (The user is
+// warned on stderr that unpreservable local state is being dropped.)
+func TestWritePolyforgeYAML_CorruptExistingFile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	path := writeYAMLFixture(t, tmp, "projects: [this is not: a map\n\x00garbage")
+
+	projects := []serverProject{{
+		Name:        "aihub",
+		OwnerUserID: "u_caller",
+		Visible:     true,
+		Repos:       json.RawMessage(`[{"name":"aihub","url":"git@github.com:GMISWE/ieops-aihub.git"}]`),
+	}}
+
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+		t.Fatalf("writePolyforgeYAML on corrupt file: %v (must repair, not fail)", err)
+	}
+
+	got := repoNames(loadYAML(t, tmp).Projects["aihub"])
+	want := []string{"aihub"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("repos = %v, want %v after repairing a corrupt file", got, want)
 	}
 }
 

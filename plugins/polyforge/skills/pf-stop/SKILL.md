@@ -76,9 +76,14 @@ encounters a terminal failure that cannot be resolved in this session (fail).
      work_item_id=<current>
    )
    ```
-   `pf_wrap` = push + PR (idempotent if the PR already exists) + `pf_complete_attempt(wrapped)`
-   + delete the state file. It does NOT remove the `pf.<slug>/` worktree dirs — clean those up
-   manually or with `polyforge doctor --fix`.
+   `pf_wrap` = push + PR + `pf_complete_attempt(wrapped)` + delete the state file. It does NOT
+   remove the `pf.<slug>/` worktree dirs — clean those up manually or with
+   `polyforge doctor --fix`.
+   It is idempotent only when a PR on the branch already covers local HEAD; commits no PR
+   covers are pushed, and a new PR is opened if the only PR is merged/closed (aihub#226).
+   Check `pr_action` in the response (`reused_existing_pr` / `pushed_to_existing_pr` /
+   `pushed_and_created_pr`) to see which happened — `ok:true` alone does not mean anything
+   was delivered, and by then the credentials are gone.
    Credentials (`attempt_id`, `claim_epoch`, `session_secret`) are injected automatically
    by the MCP server from the state file.
 

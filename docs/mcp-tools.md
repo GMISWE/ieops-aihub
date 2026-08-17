@@ -93,9 +93,9 @@ worktree.
 |---|---|
 | `pf_diff` | Git diff for the worktree (vs HEAD or base). |
 | `pf_commit` | Commit staged changes in the worktree. |
-| `pf_push` | Push the branch with `--force-with-lease` (refuses main/master). |
+| `pf_push` | Push the branch, lease-protected when it already exists on origin (refuses main/master/dev/tot). |
 | `pf_pr` | Create a GitHub PR for the task branch. |
-| `pf_wrap` | Push + PR (idempotent) + `complete_attempt(wrapped)` + delete state file. |
+| `pf_wrap` | Push + PR + `complete_attempt(wrapped)` + delete state file. Idempotent only when a PR already covers local HEAD; see `pr_action` in the response. |
 
 ## Projects (4) - `tools_projects.go`
 

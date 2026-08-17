@@ -239,7 +239,7 @@ func (s *Server) registerCodingTools() {
 	// pf_wrap
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_wrap",
-		Description: "Wrap a work item: push + PR (idempotent if PR exists) + complete_attempt(wrapped) + delete state file",
+		Description: "Wrap a work item: push + PR + complete_attempt(wrapped) + delete state file. Idempotent only when a PR on the branch already covers local HEAD; local commits no PR covers are pushed, and a new PR is opened if the existing one is merged/closed. The response's pr_action says which happened.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
 			"work_item_id":   prop("string", "Work item ID"),
@@ -266,13 +266,30 @@ func (s *Server) registerCodingTools() {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
 
-		// Execute wrap: push + PR (idempotent)
-		prResult, err := coding.Wrap(ctx, sf, repo,
+		// Execute wrap: push + PR (idempotent only when the existing PR
+		// already covers HEAD).
+		wrap, err := coding.Wrap(ctx, sf, repo,
 			strArg(args, "workspace_root"),
 			strArg(args, "pr_title"),
 			strArg(args, "pr_body"))
 		if err != nil {
 			return errResult(fmt.Errorf("wrap sequence (push+PR): %w", err))
+		}
+
+		// Emit the same timeline events pf_push / pf_pr emit, so a wrap that
+		// actually delivered something is auditable afterwards — by then the
+		// state file and credentials are gone, and the timeline is all that is
+		// left to tell delivery apart from a no-op replay (aihub#226).
+		if wrap.Pushed {
+			s.emitCodingEvent(ctx, wiID, "push", map[string]any{
+				"repo":   repo,
+				"branch": wrap.Branch,
+				"sha":    wrap.PushedSHA,
+			})
+		}
+		if wrap.Action == coding.WrapActionPushedAndCreatedPR {
+			s.emitCodingEvent(ctx, wiID, "pr_opened",
+				prPayload(repo, strArg(args, "pr_title"), wrap.PR))
 		}
 
 		// Complete attempt — server expects wi_id in URL path; attempt_id in body for credential check.
@@ -292,8 +309,13 @@ func (s *Server) registerCodingTools() {
 
 		wrapResult := map[string]any{
 			"ok":              true,
-			"pr":              prResult,
+			"pr":              wrap.PR,
+			"pr_action":       wrap.Action,
+			"pushed":          wrap.Pushed,
 			"complete_result": completeResult,
+		}
+		if wrap.PushedSHA != "" {
+			wrapResult["pushed_sha"] = wrap.PushedSHA
 		}
 		addWorktrees(wrapResult, sf.Worktrees)
 		return jsonResult(wrapResult)

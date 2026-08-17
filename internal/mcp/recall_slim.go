@@ -85,6 +85,14 @@ func slimRecallResult(result map[string]any) map[string]any {
 	if nc, ok := result["next_cursor"]; ok && nc != nil {
 		res["next_cursor"] = nc
 	}
+	// aihub#249: total (count of memories matching the request's filters,
+	// independent of pagination) must survive slimming — otherwise pf_recall
+	// callers have no way to distinguish "that's everything" from "keep
+	// paging", the exact gap this wi exists to close. Same conditional-copy
+	// pattern as next_cursor above.
+	if total, ok := result["total"]; ok && total != nil {
+		res["total"] = total
+	}
 	return res
 }
 

@@ -121,9 +121,16 @@ type Memory struct {
 	Attrs            json.RawMessage `json:"attrs,omitempty"`
 	RenderedHTML     *string         `json:"rendered_html,omitempty"`
 	Commits          json.RawMessage `json:"commits"`
-	LatestID         *string         `json:"latest_id,omitempty"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
+	// LatestID is the authoritative version-lineage pointer: nil while this
+	// row is the current head of its supersede chain, otherwise the id of the
+	// row that currently is. It is transactionally maintained by UpdateMemory
+	// and propagated across the whole lineage on every supersede/redact (see
+	// GetLatestByID). Do NOT confuse this with attrs["similar_to"] — that is
+	// an unrelated, one-shot write-time content-similarity dedup hint set by
+	// Remember (see the dedup block above); it carries no lineage meaning.
+	LatestID  *string   `json:"latest_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 	// populated post-scan from memory_relations (aihub#74); NOT part of any SELECT/Scan — do not add to the 6 lockstep sites.
 	Related   []RelatedRef `json:"related,omitempty"`
 	Backlinks []RelatedRef `json:"backlinks,omitempty"`
@@ -224,6 +231,16 @@ type ActivateResponse struct {
 type RecallResponse struct {
 	Items      []MemoryWithStrength `json:"items"`
 	NextCursor *string              `json:"next_cursor,omitempty"`
+	// Total is the count of memories matching every filter in the request
+	// (project/status/visibility/type/work_item/min_strength, and, on the
+	// vector path, similarity_threshold) — computed independently of
+	// pagination (top_k/limit/cursor). aihub#249: without this a caller
+	// cannot tell "that's everything" from "you haven't paged far enough";
+	// NextCursor being nil already answers that for the text path, but Total
+	// lets a caller size a UI/progress bar without walking every page.
+	// Populated on both the text path (Recall) and the vector path
+	// (RecallWithVector) — see countMemories.
+	Total int `json:"total"`
 }
 
 // ─── Forgetting Curve (§7.2) ──────────────────────────────────────────────────
@@ -384,6 +401,17 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	// Dedup check (skip for "off" mode).
 	// Design §7.7 / §11: strict mode rejects only at HIGH similarity (≥ 0.85);
 	// suggest mode annotates attrs.similar_to between LOW (0.65) and HIGH.
+	//
+	// aihub#249: attrs.similar_to is NOT a version/lineage pointer. It is a
+	// write-time content-similarity annotation (Jaccard, computed by
+	// textDedupCheck below) recording that THIS new memory looked similar to
+	// an existing one at the moment it was created — a one-shot dedup hint,
+	// never updated again after this write, and it can point to any memory
+	// with similar content regardless of type or lineage. The actual,
+	// transactionally-maintained "what supersedes what" chain pointer is
+	// Memory.LatestID (see its doc comment and UpdateMemory) — that field is
+	// authoritative for lineage; attrs.similar_to is not and must not be
+	// treated as one.
 	if req.DedupMode != "off" {
 		existing, err := textDedupCheck(ctx, pool, req.Project, req.Type, req.Content)
 		if err != nil {
@@ -1225,6 +1253,20 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	args = append(args, req.MinStrength)
 	idx++
 
+	// aihub#249: total is COUNT(*) over every filter above, taken BEFORE the
+	// cursor predicate is appended below — it must report the size of the whole
+	// matching set, not "rows remaining from this cursor onward". `where`/`args`
+	// are safe to reuse here even though both are extended further down: `where`
+	// is a Go string (immutable — later `+=` rebinds the variable, it doesn't
+	// mutate this value) and `args` is only ever appended to, never rewritten at
+	// an existing index, so this snapshot's contents can't be altered by later
+	// appends. This total applies to both the plain and lexical branches below,
+	// since the lexical branch's own comment notes it doesn't use the cursor.
+	total, terr := countMemories(ctx, pool, where, args)
+	if terr != nil {
+		return nil, NewErr(ErrInternalError, fmt.Sprintf("recall count query: %v", terr))
+	}
+
 	// Cursor-based pagination. ORDER BY is a single total expression
 	// (memRefTimeSQL), so the cursor is one comparison against that same
 	// expression — no NULL branch. The previous two-branch form could not
@@ -1326,7 +1368,17 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		}
 	}
 
-	return &RecallResponse{Items: items, NextCursor: nextCursor}, nil
+	return &RecallResponse{Items: items, NextCursor: nextCursor, Total: total}, nil
+}
+
+// countMemories runs a COUNT(*) over the memories table with the given WHERE
+// clause/args, shared by Recall (text path) and RecallWithVector (vector path)
+// so the reported `total` always reflects exactly the predicate that produced
+// the page of items, and the two paths cannot silently drift apart (aihub#249).
+func countMemories(ctx context.Context, pool *pgxpool.Pool, where string, args []any) (int, error) {
+	var n int
+	err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM memories WHERE `+where, args...).Scan(&n)
+	return n, err
 }
 
 // scanMemoryLite scans a lightweight memory row for LLM recall (aihub#102).

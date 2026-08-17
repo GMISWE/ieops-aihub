@@ -119,6 +119,27 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 		idx++
 	}
 
+	// aihub#249: total is COUNT(*) over every filter above (including the
+	// similarity threshold, if set), taken before the LIMIT is applied — see
+	// countMemories / Recall's identical snapshot-before-append reasoning.
+	//
+	// `args` always carries the bound query-vector value (appended above,
+	// unconditionally), but `where` only REFERENCES that placeholder when
+	// SimilarityThreshold > 0 (inside the block above). Postgres's bind
+	// protocol errors ("bind message supplies N parameters, but prepared
+	// statement requires M") if a query is given more parameter values than
+	// placeholders it actually references, so when the threshold is unset we
+	// must drop that trailing, unreferenced qvec value before counting —
+	// it's always the last element appended at this point.
+	countArgs := args
+	if req.SimilarityThreshold <= 0 {
+		countArgs = args[:len(args)-1]
+	}
+	total, terr := countMemories(ctx, pool, where, countArgs)
+	if terr != nil {
+		return nil, fmt.Errorf("recallWithVector count query: %w", terr)
+	}
+
 	// Limit placeholder ($idx — topK is appended at this 1-based position).
 	limitIdx := idx
 	args = append(args, topK)
@@ -199,7 +220,7 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 		}
 	}
 
-	return &RecallResponse{Items: items}, nil
+	return &RecallResponse{Items: items, Total: total}, nil
 }
 
 // isNoopProvider reports whether p is a NoopProvider (used in Recall routing).

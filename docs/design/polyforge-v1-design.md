@@ -1331,6 +1331,17 @@ POST   /v1/memories
   dedup_mode=suggest → 写入，attrs.similar_to 记录已有 memory ID
   dedup_mode=off     → 强制写入（methodology.* 使用）
   → {memory_id} 或 409 {code:SIMILAR_EXISTS, existing:{id,content,similarity}}
+  -- aihub#249: attrs.similar_to 不是版本链指针，只是写入时刻的一次性内容相似度
+  --   提示（Jaccard，dedup_mode=suggest），写入后不再更新，可能指向类型/lineage
+  --   都无关的另一条 memory。真正权威的"谁取代了谁"链指针是 Memory.latest_id
+  --   （由 PATCH .../update 维护，见下）——不要把 similar_to 当成 lineage 用。
+
+GET    /v1/memories/{id}
+  -- aihub#249: 返回完整 Memory 对象（含 status、latest_id，list 接口的精简
+  --   scan 不带这两个字段）。鉴权与可见性过滤与 GET /v1/memories 完全一致：
+  --   private 只有 author 可见，admin 档只有 admin 可见，无权限一律 404
+  --   （不是 403，避免探测某条 memory 是否存在）。
+  → 200 Memory（见 §19.6）或 404
 
 POST   /v1/memories/{id}/activate
   body: {}    -- M3: actor_user_id 从 Bearer token 推导，不由 client 传入
@@ -1349,6 +1360,8 @@ GET    /v1/memories
   -- M10: visibility 过滤语义：仅返回 visibility=X 的 memory
   --      server 另外强制 access control：private 只返回 author=caller 的条目
   work_item_id, query(语义/文本), top_k,
+  -- aihub#249: limit 是 top_k 的别名（历史上只解析 top_k，?limit=N 会被静默
+  --   忽略）；两者都传时 top_k 优先。上限/默认值不变（默认 20，clamp 200）。
   similarity_threshold,
   min_strength(default 0.3, M7),  ← 改为 0.3（原 1.0 几乎过滤所有 memory）
   include_archived(default false), recency_weight(default 0.3), cursor
@@ -1358,7 +1371,11 @@ GET    /v1/memories
       last_activated_by_display?,      -- 快照，如 "Alice (machine)"
       effective_strength, activation_count,
       last_activated_at, created_at
-    }], next_cursor}
+    }], next_cursor, total}
+    -- aihub#249: total = 满足本次请求全部过滤条件（project/status/visibility/
+    --   type/work_item_id/min_strength，向量路径下还包括 similarity_threshold）
+    --   的 memory 总数，与分页（top_k/limit/cursor）无关，两条 recall 路径
+    --   （文本/向量）都会填充。用于让调用方判断"还有多少页"而不必翻到底。
 
 PATCH  /v1/memories/{id}/redact
   body: {reason}
@@ -3298,7 +3315,9 @@ interface Memory {
       context: string
     }>
     context_snippet?: string       // max 500 chars
-    similar_to?: string[]          // memory id list（dedup_mode=suggest 时填）
+    similar_to?: string           // 写入时刻一次性 dedup 相似度提示（Jaccard，
+                                   // dedup_mode=suggest），写入后不再更新；
+                                   // 不是版本链，不要与 latest_id 混用（aihub#249）
   }
   base_strength: number            // 1-5
   stability_days: number
@@ -3310,6 +3329,9 @@ interface Memory {
   status: "active"|"archived"|"redacted"
   effective_strength: number
   supersedes_id: string | null
+  latest_id: string | null         // 权威的版本链指针：本行仍是链头时为 null，
+                                    // 否则是当前链头的 id（PATCH .../update 维护，
+                                    // supersede/redact 时在整条链上传播，aihub#249）
   expires_at: string | null
   created_at: string
   // 查询时额外嵌入

@@ -32,6 +32,7 @@ func RegisterMemoryRoutes(v1 *echo.Group, pool *pgxpool.Pool) {
 	// Memories (§4.3, §7)
 	v1.POST("/memories", handleRemember(pool))
 	v1.GET("/memories", handleRecall(pool))
+	v1.GET("/memories/:id", handleGetMemory(pool))
 	v1.POST("/memories/:id/activate", handleActivateMemory(pool))
 	v1.PATCH("/memories/:id/redact", handleRedactMemory(pool))
 	v1.POST("/memories/:id/commit/:commit_id/resolve", handleResolveCommit(pool))
@@ -222,10 +223,19 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 		if wiID := c.QueryParam("work_item_id"); wiID != "" {
 			req.WorkItemID = &wiID
 		}
-		if topK := c.QueryParam("top_k"); topK != "" {
-			if n, err := strconv.Atoi(topK); err == nil {
-				req.TopK = n
-			}
+		// aihub#249: `limit` is accepted as an alias for `top_k` — clients were
+		// silently ignored when they sent `?limit=N` because only `top_k` was ever
+		// parsed here (Recall()'s TopK still defaults to 20 / clamps to 200
+		// regardless of which name supplied it). When both are sent, `top_k` wins.
+		//
+		// A malformed `top_k` falls THROUGH to `limit` rather than discarding it:
+		// silently dropping a caller-supplied page size is the exact failure mode
+		// this wi exists to remove, so we must not reintroduce it here. Atoi("")
+		// errors, so the empty case needs no separate guard.
+		if n, err := strconv.Atoi(c.QueryParam("top_k")); err == nil {
+			req.TopK = n
+		} else if n, err := strconv.Atoi(c.QueryParam("limit")); err == nil {
+			req.TopK = n
 		}
 		if minS := c.QueryParam("min_strength"); minS != "" {
 			if f, err := strconv.ParseFloat(minS, 64); err == nil {
@@ -249,6 +259,83 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 			return domainErr(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, resp)
+	}
+}
+
+// hasProjectAccess reports whether u has at least minRole on project, WITHOUT
+// writing a response — it mirrors checkProjectAccess's access decision exactly
+// (same ProjectScope/admin/ProjectRoles/roleLevel rules) but leaves the caller
+// free to choose the status code. handleGetMemory needs this because it must
+// answer a denied caller with 404, not checkProjectAccess's 403, so the
+// endpoint never confirms or denies that a memory exists to someone who can't
+// see it (aihub#249).
+func hasProjectAccess(u *UserContext, project, minRole string) bool {
+	if u == nil {
+		return false
+	}
+	if u.ProjectScope != nil && *u.ProjectScope != project {
+		return false
+	}
+	if u.Role == "admin" {
+		return true
+	}
+	if project == "" {
+		return false
+	}
+	userRole, ok := u.ProjectRoles[project]
+	if !ok || userRole == "" {
+		return false
+	}
+	return roleLevel[userRole] >= roleLevel[minRole]
+}
+
+// handleGetMemory handles GET /v1/memories/:id (aihub#249).
+//
+// Returns the full memory object (including status and latest_id, which the
+// list endpoint's lite scan omits). Applies the IDENTICAL project-access +
+// visibility/private filtering that domain.Recall's text-path predicate
+// applies (memory.go's `req.CallerRole != "admin"` block: private memories are
+// visible only to their author, admin-tier memories only to admins) — a
+// caller who cannot see a memory via GET /v1/memories must not be able to see
+// it here either.
+//
+// Every denial path — project access, private-not-author, admin-tier-not-
+// admin, and a genuinely missing/redacted id — returns 404, never 403, so the
+// endpoint can't be used to probe for the existence of a memory the caller
+// may not see.
+func handleGetMemory(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		memID := c.Param("id")
+		if memID == "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, "memory id is required"))
+		}
+
+		mem, aerr := domain.GetMemoryByID(ctx, pool, memID)
+		if aerr != nil {
+			// domain.GetMemoryByID already returns ErrNotFound for a missing or
+			// redacted row (its own 404), and ErrInternalError otherwise —
+			// writeError maps each to its proper status without us guessing here.
+			return writeError(c, aerr)
+		}
+
+		notFound := domain.NewErr(domain.ErrNotFound, "memory not found")
+		if !hasProjectAccess(u, mem.Project, "viewer") {
+			return writeError(c, notFound)
+		}
+		if u.Role != "admin" {
+			if mem.Visibility == "private" && mem.AuthorUserID != u.UserID {
+				return writeError(c, notFound)
+			}
+			if mem.Visibility == "admin" {
+				return writeError(c, notFound)
+			}
+		}
+
+		return c.JSON(http.StatusOK, mem)
 	}
 }
 

@@ -173,6 +173,35 @@ jobs:
       # ALSO unwired here and are not enabled by this step. launcher-bash32 in
       # particular needs docker and would newly gate PRs, so turning them all on
       # at once belongs in its own change rather than riding along with a bugfix.
+      # aihub#249: GET /v1/memories previously parsed only `top_k` (a `?limit=N`
+      # caller was silently ignored) and RecallResponse carried no `total`; and
+      # GET /v1/memories/:id did not exist at all. These run against the
+      # internal/server package (not internal/domain, so no widening-gate
+      # concern with that package's other AIHUB_TEST_DB suites) and reuse the
+      # same already-migrated Postgres service.
+      #
+      # Runs with -v and then asserts every case actually reported PASS, rather
+      # than trusting the exit code, for the same reason as the DB-test steps
+      # above: `go test` exits 0 when every selected test SKIPs, and these all
+      # skip whenever AIHUB_TEST_DB is empty.
+      - name: aihub#249 recall pagination + get-by-id DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run 'TestHandleRecall_TotalAndLimitAlias|TestHandleGetMemory' -count=1 -v 2>&1 | tee recall_getbyid.log
+          for want in TestHandleRecall_TotalAndLimitAlias \
+                      TestHandleGetMemory_HappyPath \
+                      TestHandleGetMemory_NotFound \
+                      TestHandleGetMemory_AuthzDenied_PrivateNotAuthor \
+                      TestHandleGetMemory_AuthzDenied_NoProjectAccess \
+                      TestHandleGetMemory_AdminSeesPrivate; do
+            grep -q -- "--- PASS: $want" recall_getbyid.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#249 DB-gated coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' recall_getbyid.log \
+            || { echo "::error::an aihub#249 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: Launcher update-check regression suite
         run: bash plugins/polyforge/tests/launcher-update-check.test.sh
 

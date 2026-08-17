@@ -106,7 +106,7 @@ func DocumentWithMeta(body, title, backHref, ownerWIHref, ownerWILabel string, r
 	// and auto-placement scatters the document across both columns.
 	annotated := len(annotationsHTML) > 0 && annotationsHTML[0] != ""
 	if annotated {
-		b.WriteString("<div id=\"pf-doc-col\">\n")
+		b.WriteString("<div id=\"pf-doc-col\" data-pf-chrome>\n")
 	}
 	// Metadata header: owning wi + related memories.
 	if ownerWIHref != "" || len(related) > 0 {

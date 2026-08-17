@@ -7,7 +7,32 @@
 //   - Definition lists
 //   - Auto heading IDs (so the viewer can deep-link sections)
 //   - Inline raw HTML / SVG passthrough via the Unsafe renderer option
-//     (artifact author == artifact reader, so XSS is not in scope)
+//
+// NOTE ON THE UNSAFE RENDERER (aihub#240, resolves #144).
+//
+// This package used to justify html.WithUnsafe() with "artifact author == artifact
+// reader, so XSS is not in scope". That premise was wrong, and aihub#144 is the proof:
+// artifacts are authored by agents and read by every project member, the authed /ui and
+// /v1 responses carried no CSP at all, and only the anonymous /share path was locked
+// down — so logged-in users were the *least* protected readers.
+//
+// WithUnsafe stays, because raw HTML and inline SVG passthrough is the whole point of
+// the renderer. What changed is that its output is no longer trusted on the way out:
+//
+//   - SanitizeArtifactHTML (sanitize.go) strips script, event handlers, javascript:
+//     URIs, <style> elements, XML DTD declarations, and every network form of an image
+//     source (images must be data: or a same-document fragment). Anchors are the deliberate
+//     exception: they may still carry http(s) destinations, because navigating away is what
+//     a link is for. So "no external resources" holds for anything the page LOADS, not for
+//     anything the reader can choose to click;
+//   - SafeEmbedDocument (safeembed.go) isolates a finished agent document in a
+//     sandboxed iframe;
+//   - the authed /ui and /v1 artifact responses now send a Content-Security-Policy.
+//
+// Callers rendering agent-authored markdown into an authed page must run the output
+// through SanitizeArtifactHTML. Markdown() itself deliberately does not sanitize: the
+// /v1 and /share responses are contractually byte-identical (aihub#138), so the
+// decision belongs at the call site that knows which path it is serving.
 //   - chroma syntax highlighting on fenced code blocks (CSS-class mode so the
 //     consumer can theme via a stylesheet later)
 package render
@@ -55,7 +80,6 @@ func Markdown(src string) (string, error) {
 	}
 	return buf.String(), nil
 }
-
 
 // HeadingRef is a (id, text) pair extracted from a markdown source by ExtractHeadings.
 // The id value matches what goldmark's parser.WithAutoHeadingID produces in the

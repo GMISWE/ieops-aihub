@@ -15,6 +15,11 @@
 {{/* aihub#234: click-to-zoom for d2 figures. Harmless on pages without one — the
      script marks nothing zoomable if no .pf-diagram is present. */}}
 <script src="/ui/static/diagram.js?v={{assetv}}" defer></script>
+{{/* aihub#240: applies the height a sandboxed embedded document reports for itself.
+     Required because a frame with an opaque origin cannot be measured from here.
+     Handles only the height message; the annotation half of the protocol is not
+     wired yet. Harmless on pages with no iframe.pf-embed. */}}
+<script src="/ui/static/embedframe.js?v={{assetv}}" defer></script>
 </head>
 <body>
 {{appnav .Active .Theme .User}}

@@ -30,6 +30,16 @@
       var b = buttons[i];
       b.classList.toggle("on", b.getAttribute("data-theme-mode") === mode);
     }
+    // aihub#240: this attribute only reaches THIS document. An embedded artifact lives in a
+    // sandboxed iframe with its own document, whose data-theme was stamped server-side from
+    // the cookie at render time — so before this announcement existed, clicking Dark turned
+    // the page dark and left the document inside the frame light. The frame is transparent,
+    // so that read as near-invisible text rather than as a stale theme.
+    //
+    // Announce rather than reach in: this file knows about themes, embedframe.js knows about
+    // frames, and neither needs to grow the other's knowledge. A reload would also fix it,
+    // and is what this file's header says it deliberately avoids.
+    document.dispatchEvent(new CustomEvent("pf-theme-change", { detail: mode }));
   }
 
   seg.addEventListener("click", function (e) {

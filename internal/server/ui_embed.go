@@ -97,6 +97,25 @@ func parseTemplates() *template.Template {
 	return root
 }
 
+// pageOrigin is the origin the embedded-document frames post their height to.
+//
+// It is derived from the request, which needs justifying because the Host header is
+// attacker-influenceable and this value ends up inside first-party script.
+//
+//   - Injection is handled elsewhere: AnnotationBridgeFor JSON-encodes it into the config
+//     prologue rather than concatenating it, so no Host value can break out of the string.
+//   - Misdelivery is not possible. The bridge uses this as postMessage's targetOrigin, and
+//     targetOrigin is a filter applied to the ACTUAL recipient window (always `parent`), not
+//     an address the message is routed to. A forged Host therefore causes the browser to
+//     discard the height message — the frame keeps its default height — and cannot cause
+//     document text to reach a window of the attacker's choosing.
+//
+// A configured canonical origin would be marginally better and there is no config field for
+// one today; adding it is not worth widening this change, given the above.
+func pageOrigin(c echo.Context) string {
+	return c.Scheme() + "://" + c.Request().Host
+}
+
 // assetVersion is a per-process cache-busting token appended to mutable static
 // asset URLs (?v=...). It changes on every binary restart, so a rebuilt
 // ui.css / dropdown.js / theme.js is fetched fresh on the next navigation
@@ -107,12 +126,16 @@ var assetVersion = fmt.Sprintf("%d", time.Now().Unix())
 
 // uiFuncMap exposes a small set of helpers to all templates.
 //
-//   - md       : render a string as markdown -> safe HTML, then post-process
-//     any ```d2 fenced block into an inline <svg> figure (aihub#231),
-//     matching the artifact viewer's diagram rendering. Used for
-//     wi.Content and memory.content fields. Falls back to escaped
-//     plain text on renderer error; a d2 block that fails to compile
-//     degrades to its original code block (RenderDiagramsForUI).
+//   - md       : render agent-authored markdown and return it as a SANDBOXED
+//     IFRAME (aihub#240 D3), not as inline page markup. Sanitizing
+//     happens first, then ```d2 fences compile to <svg> (aihub#231) —
+//     that order is required, not preferred, because the sanitizer
+//     drops <style> and d2 keeps its whole theme there. Used for
+//     wi.Content and memory.content. Falls back to escaped plain text
+//     on renderer error; a d2 block that fails to compile degrades to
+//     its original code block (RenderDiagramsForUI).
+//     Takes (src, parentOrigin, theme): the frame has an opaque origin
+//     and can derive neither for itself.
 //   - truncate : clip a long string with an ellipsis. Useful for wi list views.
 //   - default  : replace empty strings with a placeholder.
 //   - hasPrefix: strings.HasPrefix.
@@ -129,9 +152,29 @@ func uiFuncMap() template.FuncMap {
 		"appnav": func(active, theme string, user *UserContext) template.HTML {
 			return buildAppNav(active, theme, user)
 		},
-		"md": func(src string) template.HTML {
+		// md renders agent-authored markdown into a SANDBOXED IFRAME, not into this page.
+		//
+		// parentOrigin and theme are parameters rather than closure state because this
+		// funcmap is built once per process (parseTemplates / pageTemplate) while both
+		// values are per-request. The frame cannot derive either one itself: sandbox
+		// without allow-same-origin gives it an opaque origin, so it can read neither the
+		// parent's location nor its theme cookie. Callers pass them explicitly, the same way
+		// {{appnav .Active .Theme .User}} already does.
+		//
+		// parentOrigin is consumed by the bridge as postMessage's targetOrigin. See pageOrigin
+		// for why deriving it from the request Host is safe here despite that header being
+		// attacker-influenceable — the short version is that targetOrigin filters the real
+		// recipient rather than choosing one, so a forged value drops the message instead of
+		// redirecting it.
+		"md": func(src, parentOrigin, theme string) template.HTML {
 			out, err := render.Markdown(src)
 			if err != nil {
+				// The one path that returns inline markup rather than a frame, deliberately.
+				// The content is fully escaped, so there is nothing for the sandbox to
+				// contain; goldmark only errors on writer failure, which for a bytes.Buffer
+				// does not happen, so this is close to dead code. Kept inline because an
+				// embed here would need a frame, a height protocol and a stylesheet in order
+				// to display text we have already made inert.
 				return template.HTML("<pre>" + html.EscapeString(src) + "</pre>")
 			}
 			// Post-process ```d2 fences into inline SVG (aihub#231). goldmark
@@ -147,7 +190,65 @@ func uiFuncMap() template.FuncMap {
 			// the /ui echo.Group (ui_routes.go) -- /v1 and /share never touch
 			// this closure, so their raw fenced-block output stays
 			// byte-identical (aihub#160 boundary).
-			return template.HTML(render.RenderDiagramsForUI(out))
+			// aihub#240 (resolves #144): sanitize BEFORE compiling d2 fences, not after.
+			//
+			//  1. What needs sanitizing is the agent's markdown output. The SVG that
+			//     RenderDiagramsForUI produces is ours — it comes out of the in-process
+			//     d2 engine, not from the artifact author — and there is no reason to
+			//     launder trusted output through a whitelist built for untrusted input.
+			//  2. A d2 fence at this point is still <pre><code class="language-d2">,
+			//     which the sanitizer preserves verbatim, so compiling afterwards is
+			//     unaffected.
+			//
+			// The ordering is now a correctness requirement, not a preference. It used to be
+			// the latter: the sanitizer's <style> filter had been taught to keep data: URLs,
+			// so compiling first cost only ~102 bytes of 13,526 on a two-node diagram. That
+			// filter is gone — <style> and its body are dropped outright — so compiling
+			// first now costs d2 its entire stylesheet: every .fill-*/.stroke-* class and
+			// its embedded webfont, i.e. the figure renders with no paint at all.
+			//
+			// SafeEmbedDocument performs both steps internally, in that order, which is why
+			// the raw markdown output goes in here rather than a pre-processed string.
+			//
+			// This closes the second render path. handleArtifactHTML covers the artifact
+			// viewer; this closure covers the memory and wi detail pages, which are a wholly
+			// separate path into the same untrusted content (aihub#231 is the precedent for
+			// one of the two being missed).
+			//
+			// The frame is what makes the sanitizer stop being the only control on this
+			// surface: inside it the only script that may run is our own nonced bridge
+			// (script-src 'nonce-<per-document>', not 'none' — this path supplies a
+			// BridgeScript), no origin can be contacted, and nothing can escape into this
+			// page. Agent script is refused twice over: stripped by the sanitizer, and
+			// unable to name the nonce even if it survived. On the artifact viewer the body is still
+			// inlined, because moving it into a frame requires rehoming annot.js, viewer.css
+			// and diagram.js across the boundary. That is aihub#245, and it is a tracked P1
+			// task rather than an open question.
+			return template.HTML(render.SafeEmbedDocument(out, render.EmbedOptions{
+				Title:        "document",
+				BridgeScript: render.AnnotationBridgeFor(parentOrigin),
+				FrameClass:   "pf-embed",
+				Theme:        theme,
+			}))
+		},
+		// agentdoc renders the agent-authored HTML half of a twin pair into the SAME sandboxed
+		// frame the markdown half gets from {{md}}. It differs from {{md}} in exactly one way:
+		// the input is already HTML, so there is no goldmark pass. Sanitising, d2 compilation,
+		// the nonced bridge, the height protocol and the isolation guarantees are identical
+		// because they all live inside SafeEmbedDocument, which is called with the same options.
+		//
+		// aihub#240 D7: before this existed, the agent's html half was rendered ONLY by the
+		// artifact viewer, and the artifact viewer inlines it into the page. That was the single
+		// gap in the sandbox story — the half most likely to contain hand-written markup was the
+		// half with no frame around it. Routing it through here closes that gap for the page the
+		// reader now lands on by default; the viewer's own inlining is aihub#245.
+		"agentdoc": func(rawHTML, parentOrigin, theme string) template.HTML {
+			return template.HTML(render.SafeEmbedDocument(rawHTML, render.EmbedOptions{
+				Title:        "document",
+				BridgeScript: render.AnnotationBridgeFor(parentOrigin),
+				FrameClass:   "pf-embed",
+				Theme:        theme,
+			}))
 		},
 		"truncate": func(n int, s string) string {
 			// n is the maximum number of runes (user-visible characters),

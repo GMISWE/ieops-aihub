@@ -38,7 +38,7 @@
     {{if .Content}}
     <div class="pf-doc-section">
       <div class="pf-doc-section-hd"><h3>Background</h3></div>
-      <div class="prose">{{md .Content}}</div>
+      <div class="pf-embed-wrap">{{md .Content .Origin .Theme}}</div>
     </div>
     {{end}}
 

@@ -698,6 +698,124 @@ const d2FixtureContent = "# Gateway overview\n\n" +
 // the md FuncMap in isolation) is what actually proves the user-visible bug is
 // gone -- mem_smmQ3OyW: a green unit test on a helper is not evidence that the
 // page works.
+// TestUIMemoryDetail_TwinPairViewSwitch covers the rule that the agent's HTML is what a
+// reader lands on, and that the markdown twin is one click away on the SAME page.
+//
+// Both halves matter and they fail differently. Defaulting to the markdown (the old
+// behaviour) means the finished artifact the agent authored is never what anyone sees
+// unless they know to go looking for it. Sending the reader to /ui/artifacts/<id>/html for
+// the other half — the previous "Agent HTML →" link — means the comparison costs a
+// navigation and drops the page's Comments and Details on the way.
+//
+// The assertions deliberately reach into the frame's srcdoc: both halves render inside the
+// same sandbox, so "which half is on screen" is only answerable from the inner document.
+func TestUIMemoryDetail_TwinPairViewSwitch(t *testing.T) {
+	const mdHalf = "# markdown twin\n\nthe source half, in *markdown*.\n"
+	// No data-* marker on the html half: SanitizeArtifactHTML drops attributes outside its
+	// allowlist, so a marker attribute would vanish and the assertions below would compare
+	// against bytes the sanitizer already removed. Distinct TEXT survives, and is what tells
+	// the two halves apart.
+	const htmlHalf = `<h1>html twin</h1><p>the authored half.</p>`
+
+	// fact.architecture is the type the D7 gate treats as agent-authored: it is absent from
+	// renderTypes, so a non-NULL rendered_html on it cannot have been auto-filled.
+	newFixture := func() domain.Memory {
+		mem := memFixture("mem_twin", "fact.architecture", mdHalf)
+		h := htmlHalf
+		mem.RenderedHTML = &h
+		return mem
+	}
+
+	get := func(t *testing.T, query string) string {
+		t.Helper()
+		mem := newFixture()
+		cleanup := withLoadMemoryOverride(&mem, nil)
+		defer cleanup()
+
+		tmpl := pageTemplate("memory_detail.html.tmpl")
+		e := echo.New()
+		req := httptest.NewRequest(http.MethodGet, "/ui/memories/"+mem.ID+query, nil)
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+		c.SetParamNames("id")
+		c.SetParamValues(mem.ID)
+		setUser(c, userWithProjects("testproject"))
+
+		if err := handleUIMemoryDetail(nil, tmpl)(c); err != nil {
+			t.Fatalf("handler error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want 200 — this page must render both halves itself, "+
+				"not redirect to the artifact viewer", rec.Code)
+		}
+		return rec.Body.String()
+	}
+
+	t.Run("bare URL shows the agent html", func(t *testing.T) {
+		body := get(t, "")
+		doc := innerDoc(t, body)
+		if !strings.Contains(doc, "the authored half") {
+			t.Errorf("default view is not the agent's html half; inner document was:\n%s", doc)
+		}
+		if strings.Contains(doc, "the source half") {
+			t.Error("default view rendered the markdown twin as well as the html half")
+		}
+		if !strings.Contains(body, `class="pf-seg-item on"`) {
+			t.Error("the view switch does not mark a current half")
+		}
+	})
+
+	t.Run("?view=md shows the markdown twin", func(t *testing.T) {
+		doc := innerDoc(t, get(t, "?view=md"))
+		if !strings.Contains(doc, "the source half") {
+			t.Errorf("?view=md did not render the markdown twin; inner document was:\n%s", doc)
+		}
+		if strings.Contains(doc, "the authored half") {
+			t.Error("?view=md still rendered the agent's html half")
+		}
+	})
+
+	t.Run("?source=1 shows the markdown unrendered", func(t *testing.T) {
+		body := get(t, "?source=1")
+		// The raw branch emits no frame at all, so assert on the page body. The markdown
+		// must arrive escaped rather than rendered — that is the whole point of the view.
+		if !strings.Contains(body, `<pre class="pf-content-raw">`) {
+			t.Error("?source=1 did not take the unrendered branch")
+		}
+		if strings.Contains(body, "the authored half") {
+			t.Error("?source=1 rendered the html half; source is the markdown's source, not the page's")
+		}
+	})
+
+	t.Run("no switch when rendered_html was not agent-authored", func(t *testing.T) {
+		mem := memFixture("mem_plain", "experience.pitfall", mdHalf)
+		h := "<p>auto-rendered from the markdown</p>"
+		mem.RenderedHTML = &h
+		cleanup := withLoadMemoryOverride(&mem, nil)
+		defer cleanup()
+
+		tmpl := pageTemplate("memory_detail.html.tmpl")
+		e := echo.New()
+		req := httptest.NewRequest(http.MethodGet, "/ui/memories/"+mem.ID, nil)
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+		c.SetParamNames("id")
+		c.SetParamValues(mem.ID)
+		setUser(c, userWithProjects("testproject"))
+		if err := handleUIMemoryDetail(nil, tmpl)(c); err != nil {
+			t.Fatalf("handler error: %v", err)
+		}
+		body := rec.Body.String()
+		if strings.Contains(body, "pf-seg-toggle") {
+			t.Error("offered a twin-pair switch for a type whose rendered_html is auto-filled — " +
+				"the two halves would be the same content, and the switch a lie")
+		}
+		if !strings.Contains(innerDoc(t, body), "the source half") {
+			t.Error("a non-twin memory should still render its markdown")
+		}
+	})
+}
+
 func TestUIMemoryDetail_D2CompilesForNonMethodologyType(t *testing.T) {
 	for _, memType := range []string{"fact.architecture", "experience.pitfall", "rule.process"} {
 		t.Run(memType, func(t *testing.T) {
@@ -723,21 +841,26 @@ func TestUIMemoryDetail_D2CompilesForNonMethodologyType(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status: got %d, want 200 (%s must render in place, not redirect)", rec.Code, memType)
 			}
-			body := rec.Body.String()
+			// aihub#240: the rendered content lives in a sandboxed iframe's srcdoc now, so
+			// assert against the frame's inner document. Matching the page body directly
+			// would compare against attribute-escaped bytes — which is why the chroma check
+			// below is the one that noticed: `<pre class="chroma">` becomes
+			// `<pre class=&#34;chroma&#34;` in an attribute value.
+			doc := innerDoc(t, rec.Body.String())
 
 			// Assert on data-d2-version, NOT on a bare "<svg": the page chrome
 			// ships its own inline icon SVGs, so a "<svg" check would pass
 			// vacuously even with the fix reverted.
-			if n := strings.Count(body, "data-d2-version"); n != 1 {
+			if n := strings.Count(doc, "data-d2-version"); n != 1 {
 				t.Errorf("%s detail page: got %d d2-rendered SVGs, want exactly 1", memType, n)
 			}
-			if strings.Contains(body, "language-d2") {
+			if strings.Contains(doc, "language-d2") {
 				t.Errorf("%s detail page still contains a raw language-d2 code block", memType)
 			}
 			// Collateral-damage guard: the non-d2 fence must survive untouched.
 			// chroma tokenizes it, so match on the highlighted spans rather
 			// than the raw source text.
-			if !strings.Contains(body, `<pre class="chroma">`) || !strings.Contains(body, `<span class="nf">main</span>`) {
+			if !strings.Contains(doc, `<pre class="chroma">`) || !strings.Contains(doc, `<span class="nf">main</span>`) {
 				t.Errorf("%s detail page lost or mangled the non-d2 go code block", memType)
 			}
 		})

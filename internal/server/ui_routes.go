@@ -47,6 +47,29 @@ import (
 //	  GET  /ui/wi/:id           -> wi detail    (peer subagent)
 //	  GET  /ui/memories         -> memory index (peer subagent)
 //	  GET  /ui/memories/:id     -> memory view  (peer subagent)
+//
+// uiSecurityHeaders attaches the CSP (and nosniff) to every authed /ui response
+// (aihub#240, resolves #144).
+//
+// It lives on the group rather than in individual handlers so that a page added later
+// is covered by default. That matters here specifically: aihub#231 was exactly the
+// failure of adding a second render path (the {{md}} memory/wi detail pages) and not
+// wiring it into what the first one had. Opt-out-by-default beats opt-in when the thing
+// being opted into is a security control.
+//
+// Static assets under /ui/static are registered outside this group and are unaffected.
+func uiSecurityHeaders() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			h := c.Response().Header()
+			h.Set("Content-Security-Policy", uiPageCSP)
+			h.Set("X-Content-Type-Options", "nosniff")
+			h.Set("Referrer-Policy", "no-referrer")
+			return next(c)
+		}
+	}
+}
+
 func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	sm := NewSessionManager(cookieSecret)
 	tmpl := parseTemplates()
@@ -63,9 +86,14 @@ func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	e.GET("/ui/", func(c echo.Context) error {
 		return c.Redirect(http.StatusFound, "/ui/wi")
 	})
-	e.GET("/ui/login", handleUILoginGet(tmpl))
-	e.POST("/ui/login", handleUILoginPost(pool, sm, tmpl))
-	e.POST("/ui/logout", handleUILogout(sm))
+	// The unauthenticated entry points get the same headers as the authed group. They
+	// render a form and set a session cookie, so leaving them without a CSP, nosniff or
+	// referrer policy meant the one page that handles a credential was the one page with
+	// no baseline hardening.
+	sec := uiSecurityHeaders()
+	e.GET("/ui/login", handleUILoginGet(tmpl), sec)
+	e.POST("/ui/login", handleUILoginPost(pool, sm, tmpl), sec)
+	e.POST("/ui/logout", handleUILogout(sm), sec)
 
 	// Static assets — served from embedded FS, no auth. Wrapped so font/css/js
 	// responses carry a Cache-Control header: without it every navigation
@@ -77,7 +105,17 @@ func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	// Authed UI group. The peer subagents' register* functions attach to
 	// this group so /ui/queue, /ui/wi, /ui/memories all share the session
 	// middleware + the parsed template tree.
-	uiGroup := e.Group("/ui", RequireUISession(sm, pool))
+	// Order matters: uiSecurityHeaders() runs BEFORE RequireUISession, not after.
+	//
+	// Reversed, the session check short-circuits an unauthenticated request with a 302 before
+	// the header middleware ever runs, so the login redirect — the one response in this group
+	// that is guaranteed to reach an unauthenticated client — carried no CSP, no nosniff and
+	// no Referrer-Policy. This ordering also makes the attachment observable without a
+	// database, which is why TestUISecurityHeaders_AttachedToAuthedGroup can pin it at all;
+	// the previous arrangement needed a seam in the identity-resolution path just to be
+	// testable. Both middlewares are order-independent in effect (this one only writes
+	// response headers), so nothing is traded for it.
+	uiGroup := e.Group("/ui", uiSecurityHeaders(), RequireUISession(sm, pool))
 	registerUIQueueHandlers(uiGroup, pool, tmpl)
 	registerUIWIHandlers(uiGroup, pool, tmpl)
 	registerUIMemoryHandlers(uiGroup, pool, tmpl)

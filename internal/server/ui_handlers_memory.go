@@ -133,12 +133,35 @@ type memDetailPageData struct {
 	Title      string
 	Active     string
 	Theme      string
+	Origin     string // scheme://host of this request; frames post their height to it
 	User       *UserContext
 	Memory     *domain.Memory
 	BackQuery  string
 	RenderAsMD bool
-	Commits    []CommitEntry
-	Related    []MemRelatedRef
+	// ViewingSource reports that ?source=1 asked for the unrendered content. Kept separate
+	// from RenderAsMD because they answer different questions: RenderAsMD is "would this
+	// content render as markdown at all", ViewingSource is "did the reader ask not to".
+	// The template needs both to label the toggle correctly for content that is not
+	// markdown in the first place, where there is nothing to toggle to.
+	ViewingSource bool
+	// AgentHTML is this memory's rendered_html when it is AGENT-AUTHORED rather than
+	// server-rendered from the markdown. Empty otherwise, and the view toggle is then not
+	// shown at all: for an auto-rendered row the two views are the same content by two
+	// routes, so offering a switch would imply a second authored artifact that does not
+	// exist. The condition mirrors the D7 gate in routes_artifacts.go — fact.architecture is
+	// not in renderTypes, so a non-NULL rendered_html on that type came from the author.
+	//
+	// aihub#240: this used to be AgentHTMLHref, a link off to /ui/artifacts/<id>/html. The
+	// twin's two halves now live on one page behind a [HTML | Markdown] switch, because
+	// sending the reader to a different URL to see the other half of the same artifact is
+	// not a comparison — it is navigation, and it loses the page's Comments and Details.
+	AgentHTML string
+	// ShowAgentHTML is which half is on screen. It defaults to the agent's HTML whenever
+	// there is one: that half is the artifact the agent actually authored for a reader,
+	// while the markdown is its source twin.
+	ShowAgentHTML bool
+	Commits       []CommitEntry
+	Related       []MemRelatedRef
 }
 
 // Package-level template cache. Initialised by registerUIMemoryHandlers.
@@ -337,16 +360,34 @@ func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 			_ = json.Unmarshal(mem.Commits, &commits)
 		}
 
+		// aihub#240: the twin pair on one page. agentHTML is non-empty only for an
+		// agent-authored rendered_html; ?view=md asks for the markdown half, and ?source=1
+		// (the raw-content view) implies the markdown half because that is the half it is
+		// the source of. Everything else lands on the HTML half, including a bare URL —
+		// that is the "agent HTML is the default view" rule.
+		agentHTML := agentAuthoredHTML(mem)
+		viewingSource := c.QueryParam("source") != ""
+		showAgentHTML := agentHTML != "" && c.QueryParam("view") != "md" && !viewingSource
+
 		data := memDetailPageData{
-			Title:      "Memory " + mem.ID,
-			Active:     "memories",
-			Theme:      themeFromCookie(c),
-			User:       u,
-			Memory:     mem,
-			BackQuery:  c.QueryParam("back"),
-			RenderAsMD: looksLikeMarkdown(mem.Content),
-			Commits:    commits,
-			Related:    parseMemRelatedRefs(mem.Attrs),
+			Title:     "Memory " + mem.ID,
+			Active:    "memories",
+			Theme:     themeFromCookie(c),
+			Origin:    pageOrigin(c),
+			User:      u,
+			Memory:    mem,
+			BackQuery: c.QueryParam("back"),
+			// aihub#240: ?source=1 shows the stored content unrendered. The twin-pair
+			// architecture makes "what the agent wrote" and "what the reader sees" two
+			// different artifacts, and the rendered view alone cannot show which is which
+			// — a d2 fence in the source arrives as a figure, so the source is not
+			// recoverable by eye from the rendered page.
+			RenderAsMD:    !showAgentHTML && looksLikeMarkdown(mem.Content) && !viewingSource,
+			ViewingSource: viewingSource,
+			AgentHTML:     agentHTML,
+			ShowAgentHTML: showAgentHTML,
+			Commits:       commits,
+			Related:       parseMemRelatedRefs(mem.Attrs),
 		}
 		return renderTemplate(c, tmpl, "layout", data)
 	}
@@ -683,4 +724,23 @@ func containsD2Fence(s string) bool {
 		}
 	}
 	return false
+}
+
+// agentAuthoredHTML returns mem's rendered_html when the AGENT wrote it, or "" when it did not.
+//
+// aihub#240: the twin-pair architecture gives one memory two authored halves — the markdown
+// (Content) and the finished page (rendered_html). Both now render on this page, one at a time.
+// The predecessor of this function returned a link to the artifact viewer instead; the viewer
+// still exists and still serves the same bytes at /ui/artifacts/<id>/html, but it is no longer
+// the only way to see the html half, and it is no longer where the reader is sent by default.
+//
+// The gate matches routes_artifacts.go's sandboxBody. fact.architecture is absent from
+// renderTypes, so resolveRenderedHTML never auto-fills it — a non-NULL value on this type came
+// from the author. For an auto-rendered type the two halves are the same content by two routes,
+// and a switch implying a second authored artifact would be a lie.
+func agentAuthoredHTML(mem *domain.Memory) string {
+	if mem == nil || mem.RenderedHTML == nil || mem.Type != "fact.architecture" {
+		return ""
+	}
+	return *mem.RenderedHTML
 }

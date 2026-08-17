@@ -20,6 +20,7 @@
 //   iframe -> parent   {source:'pf-annot-bridge', v:1, type:'height',    height}
 //   parent -> iframe   {source:'pf-annot-host',   v:1, type:'highlight', anchor, commitId}
 //   parent -> iframe   {source:'pf-annot-host',   v:1, type:'clear'}
+//   parent -> iframe   {source:'pf-annot-host',   v:1, type:'theme',     mode}
 (function () {
   'use strict';
 
@@ -205,6 +206,24 @@
 
     if (d.type === 'clear') {
       clearHighlights();
+      return;
+    }
+
+    // Theme follows the parent's live switch. The inner document is stamped server-side from
+    // the cookie, which is right on load and wrong the moment the reader clicks Light/Dark:
+    // this document cannot see that click, cannot read the cookie (opaque origin), and is
+    // transparent over the parent's surface, so a stale theme here is unreadable text rather
+    // than a merely inconsistent one.
+    //
+    // The vocabulary is closed to the three values the stylesheet resolves. Anything else is
+    // dropped rather than written through: data-theme is an attribute the agent's own document
+    // shares a DOM with, and a pass-through would let a forged message write arbitrary
+    // attribute text on <html>.
+    if (d.type === 'theme') {
+      if (d.mode !== 'light' && d.mode !== 'dark' && d.mode !== 'auto') { return; }
+      if (document.documentElement) {
+        document.documentElement.setAttribute('data-theme', d.mode);
+      }
     }
   }, false);
 
@@ -228,13 +247,31 @@
     postToParent({ source: 'pf-annot-bridge', v: PROTOCOL_VERSION, type: 'height', height: h });
   }
 
-  if (document.readyState === 'complete' || document.readyState === 'interactive') {
-    reportHeight();
-  } else {
-    document.addEventListener('DOMContentLoaded', reportHeight, false);
-  }
-  window.addEventListener('load', reportHeight, false);
-  if (typeof ResizeObserver === 'function' && document.body) {
+  // Observe the body for later layout changes. This MUST be deferred until a body exists:
+  // this script is injected into <head>, so at top level document.body is still null and the
+  // guard below silently skipped installation entirely — the frame then reported once at
+  // DOMContentLoaded, once at load, and never again.
+  //
+  // That is not merely a missed refinement. The parent's listener (embedframe.js) is a
+  // deferred script, so it can attach AFTER both of those reports have already been posted,
+  // and with no observer there is no third report to catch: the frame stays at the
+  // stylesheet's default height with an inner scrollbar while a correct height sits in a
+  // message nobody was listening for. The observer closes that race, because it also fires
+  // once on observe() and again when the embedded webfonts swap in — both comfortably after
+  // the parent is ready.
+  function observeBody() {
+    if (typeof ResizeObserver !== 'function' || !document.body) { return; }
     new ResizeObserver(reportHeight).observe(document.body);
   }
+
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    reportHeight();
+    observeBody();
+  } else {
+    document.addEventListener('DOMContentLoaded', function () {
+      reportHeight();
+      observeBody();
+    }, false);
+  }
+  window.addEventListener('load', reportHeight, false);
 })();

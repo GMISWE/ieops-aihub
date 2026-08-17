@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	htmlparse "golang.org/x/net/html"
+
+	"github.com/GMISWE/ieops-aihub/internal/render"
 )
 
 // aihub#240 (resolves #144). Until this change the anonymous /share path was the only
@@ -481,4 +484,139 @@ func TestUIFuncMap_MD_ThemeIsNormalised(t *testing.T) {
 	if !strings.Contains(doc, `data-theme="auto"`) {
 		t.Errorf("unrecognised theme should fall back to auto: %s", doc)
 	}
+}
+
+// TestArtifactUI_AnnotationIslandCannotBeClobbered pins the server-side half of a DOM
+// clobbering fix.
+//
+// The viewer inlines the sanitized agent body BEFORE its own chrome, and the sanitizer allows
+// `id` globally — it has to, because d2 figures reference their own gradients and clip paths by
+// fragment. getElementById returns the first element in document order with a given id
+// regardless of tag, so an artifact containing <div id="pf-annot-data">{"mem_id":"…"}</div> was
+// read by annot.js instead of the real island, and payload.mem_id decides the reply/resolve POST
+// targets. An artifact author could choose which artifact a reviewer's comment landed on.
+//
+// annot.js now selects `script#pf-annot-data[type="application/json"]`. That is unforgeable
+// only if two things hold on this side, and both are asserted here rather than assumed:
+// the real island really is a <script type="application/json">, and agent content cannot
+// produce one. The behavioural half (that the browser picks ours) belongs to the T7 checklist.
+func TestArtifactUI_AnnotationIslandCannotBeClobbered(t *testing.T) {
+	defer withVersionChainOverride()()
+	mem := publicSharedMem()
+	mem.WorkItemID = strptr("aihub#240")
+	// A heading WITH AN id is required for the annotation chrome to exist at all:
+	// extractHeadingsFromHTML skips headings without one, and buildAnnotationHTML returns ""
+	// when there are no commits and no headings. goldmark emits those ids automatically; a
+	// hand-written rendered_html has to include them or the island is never built and this
+	// test passes for the wrong reason.
+	mem.RenderedHTML = htmlPtr(
+		`<h1>t</h1><h2 id="section">Section</h2><p>keep</p>` +
+			// Vector 1: same id, different tag, emitted before our chrome.
+			`<div id="pf-annot-data">{"mem_id":"mem_attacker","commits":[]}</div>` +
+			// Vector 2: forge the real thing outright. The sanitizer drops <script>.
+			`<script type="application/json" id="pf-annot-data">{"mem_id":"mem_attacker"}</script>` +
+			// Vector 3 — the one that actually defeated the first version of this fix. A d2 fence
+			// survives sanitization as inert markup and is compiled AFTERWARDS, and d2's |md block
+			// emits caller text as real markup inside <foreignObject>. That produced a genuine
+			// <script id="pf-annot-data" type="application/json"> ahead of the server's, with the
+			// attributes in the opposite order to the literal this test used to count.
+			`<pre><code class="language-d2">x: |md &lt;script id=&#34;pf-annot-data&#34; ` +
+			`type=&#34;application/json&#34;&gt;{&#34;mem_id&#34;:&#34;mem_attacker&#34;}` +
+			`&lt;/script&gt; |</code></pre>`)
+	defer withLoadMemoryOverride(mem, nil)()
+
+	body := renderArtifactAt(t, "/ui/artifacts/:id/html").Body.String()
+
+	// 1. Exactly one element matches the selector annot.js uses — evaluated with DOM semantics,
+	//    not by counting a literal string.
+	//
+	//    Counting `<script type="application/json" id="pf-annot-data">` was how the first version
+	//    of this guard worked, and it was blind: querySelector does not care about attribute
+	//    order, and the d2 compile path emitted `<script id="…" type="…">`, so the literal count
+	//    was 1 while a forged island preceded the real one in document order. The test passed
+	//    with the clobber live. Anything asserting a DOM property has to be evaluated as a DOM.
+	matches := islandCandidates(t, body)
+	if len(matches) != 1 {
+		t.Errorf("%d elements match script#pf-annot-data[type=\"application/json\"], want exactly "+
+			"1 (the server's). Matches in document order: %v", len(matches), matches)
+	}
+	if len(matches) > 0 && strings.Contains(matches[0], "mem_attacker") {
+		t.Errorf("the FIRST match in document order is the agent's — that is the one "+
+			"querySelector returns: %s", matches[0])
+	}
+
+	// 2. No <script> anywhere in the response carries the attacker's payload. This is the
+	//    assertion that would fail if <script> were ever added to the element allowlist.
+	for i := 0; i < len(body); {
+		j := strings.Index(body[i:], "<script")
+		if j < 0 {
+			break
+		}
+		i += j
+		end := strings.Index(body[i:], "</script>")
+		if end < 0 {
+			end = len(body) - i
+		}
+		if strings.Contains(body[i:i+end], "mem_attacker") {
+			t.Errorf("a <script> element carries the agent's payload:\n%.300s", body[i:i+end])
+		}
+		i += end
+	}
+
+	// 3. The lookup in annot.js must stay qualified. A revert to getElementById is invisible
+	//    from the server side, and it is the whole fix.
+	js := string(render.AnnotJS())
+	if !strings.Contains(js, `querySelector('script#pf-annot-data[type="application/json"]')`) {
+		t.Error("annot.js no longer uses the type-qualified selector for the data island; " +
+			"getElementById returns the first element with that id regardless of tag, and the " +
+			"agent body is emitted before this chrome (aihub#240)")
+	}
+	if !strings.Contains(body, "keep") {
+		t.Error("legitimate content was lost")
+	}
+}
+
+// islandCandidates returns the text of every element matching
+// `script#pf-annot-data[type="application/json"]`, in document order, evaluated by parsing the
+// response rather than by matching bytes.
+//
+// x/net/html is already an indirect dependency of this module (bluemonday uses it), so this adds
+// no dependency and gets real tokenization: attribute order, quoting style, whitespace and case
+// all stop mattering, which is the whole point — every one of those is a way a byte-level guard
+// misses a DOM-level property.
+func islandCandidates(t *testing.T, body string) []string {
+	t.Helper()
+	doc, err := htmlparse.Parse(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	var out []string
+	var walk func(*htmlparse.Node)
+	walk = func(n *htmlparse.Node) {
+		if n.Type == htmlparse.ElementNode && n.Data == "script" {
+			var id, typ string
+			for _, a := range n.Attr {
+				switch strings.ToLower(a.Key) {
+				case "id":
+					id = a.Val
+				case "type":
+					typ = a.Val
+				}
+			}
+			if id == "pf-annot-data" && typ == "application/json" {
+				var text strings.Builder
+				for c := n.FirstChild; c != nil; c = c.NextSibling {
+					if c.Type == htmlparse.TextNode {
+						text.WriteString(c.Data)
+					}
+				}
+				out = append(out, text.String())
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return out
 }

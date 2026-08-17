@@ -18,9 +18,38 @@
     </div>
 
     <div class="pf-doc-section">
-      <div class="pf-doc-section-hd"><h3>Content</h3></div>
+      <div class="pf-doc-section-hd">
+        <h3>Content</h3>
+        {{/* aihub#240: source/rendered toggle. Only offered when the content would
+             actually render as markdown — for anything else the two views are identical
+             and a toggle that does nothing is worse than no toggle. */}}
+        <span class="pf-hd-actions">
+          {{/* aihub#240: the twin pair's two halves, switched in place. Only offered when
+               rendered_html was written by the agent rather than auto-rendered from this
+               markdown — see agentAuthoredHTML. HTML is the default, so ?view=md is the only
+               half that needs naming in a URL. */}}
+          {{if $.AgentHTML}}
+            <span class="pf-seg-toggle" role="group" aria-label="Document view">
+              <a class="pf-seg-item{{if $.ShowAgentHTML}} on{{end}}"
+                 href="?view=html"{{if $.ShowAgentHTML}} aria-current="true"{{end}}>HTML</a>
+              <a class="pf-seg-item{{if not $.ShowAgentHTML}} on{{end}}"
+                 href="?view=md"{{if not $.ShowAgentHTML}} aria-current="true"{{end}}>Markdown</a>
+            </span>
+          {{end}}
+          {{if or $.RenderAsMD $.ViewingSource}}
+            {{if $.ViewingSource}}
+              <a class="pf-src-toggle" href="?view=md">View rendered</a>
+            {{else}}
+              <a class="pf-src-toggle" href="?view=md&amp;source=1">View source</a>
+            {{end}}
+          {{end}}
+        </span>
+      </div>
       <div class="bd">
-        {{if $.RenderAsMD}}
+        {{if $.ShowAgentHTML}}
+          {{/* The agent's finished page, in the same sandboxed frame the markdown half uses. */}}
+          <div class="pf-embed-wrap">{{agentdoc $.AgentHTML $.Origin $.Theme}}</div>
+        {{else if $.RenderAsMD}}
           <div class="pf-embed-wrap">{{md .Content $.Origin $.Theme}}</div>
         {{else}}
           <pre class="pf-content-raw">{{.Content}}</pre>

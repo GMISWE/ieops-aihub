@@ -3,6 +3,8 @@ package render
 import (
 	"html"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -99,11 +101,12 @@ func TestSafeEmbed_InnerDocumentCarriesCSP(t *testing.T) {
 		"default-src 'none'",
 		"connect-src 'none'",
 		"object-src 'none'",
-		// 'self' and data: only. 'self' is required because the sanitizer admits
-		// root-relative <img src="/..."> (reSafeImageURL), and without it the two controls
-		// disagreed about the same input: such an image rendered on the un-sandboxed
-		// artifact viewer and silently failed inside a frame.
-		"img-src 'self' data:",
+		// data: only, matching the sanitizer, which no longer admits any network form for
+		// images. An earlier revision had `'self' data:` here on the reasoning that the frame
+		// inherits the parent's base URL; that conflated base URL with the policy's
+		// self-origin, and since the frame is sandboxed without allow-same-origin its origin
+		// is opaque, so `'self'` matched nothing at all.
+		"img-src data:",
 		// No bridge script was requested, so nothing may execute.
 		"script-src 'none'",
 	} {
@@ -112,10 +115,10 @@ func TestSafeEmbed_InnerDocumentCarriesCSP(t *testing.T) {
 		}
 	}
 
-	// What must NOT be reachable: any external origin. 'self' widened img-src by exactly one
-	// origin — our own — and this pins that it went no further, since an external image URL in
-	// a private document is a read receipt.
-	for _, forbidden := range []string{"img-src *", "https:", "http:"} {
+	// What must NOT be reachable: any network form at all. An external image URL in a private
+	// document is a read receipt, and a protocol-relative one (//host) is the form that
+	// slipped past the sanitizer's own allowlist for three revisions.
+	for _, forbidden := range []string{"img-src *", "img-src 'self'", "https:", "http:"} {
 		if strings.Contains(decoded, "img-src") && strings.Contains(decoded, forbidden) {
 			t.Errorf("inner CSP admits an external image source (%q): %s", forbidden, decoded)
 		}
@@ -134,65 +137,157 @@ func TestSafeEmbed_InnerDocumentCarriesCSP(t *testing.T) {
 // It deliberately does not require the two to be identical — innerBaseCSS legitimately omits
 // rules that cannot apply inside the frame. It requires that where both define the same
 // property for the same selector, the values agree.
-func TestInnerBaseCSS_ProseRulesTrackUICSS(t *testing.T) {
-	uiCSS := readUICSSFromDisk(t)
+func TestInnerBaseCSS_IsADocumentStylesheet(t *testing.T) {
+	// This replaces TestInnerBaseCSS_ProseRulesTrackUICSS, which asserted innerBaseCSS
+	// transcribed ui.css's .prose block declaration-for-declaration.
+	//
+	// That coupling was a means to an end — "an embedded document must not look accidentally
+	// different from its surroundings" — and the end changed. ui.css's .prose styles a compact
+	// card inside a page; it set h1..h4 all to 14px against 13.5px body text, so a long report
+	// rendered with no hierarchy whatsoever. The frame now carries a DOCUMENT sheet whose
+	// proportions follow render/style.css, the sheet behind /v1 and /share, so an embedded
+	// report and a shared one read as the same product. The guard therefore checks the
+	// properties that make it a document sheet, not equality with a card sheet.
 
-	shared := map[string]string{} // "selector|property" -> value, from ui.css
-	for _, line := range strings.Split(uiCSS, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, ".prose") {
-			continue
+	// Matched against the raw const, not normaliseCSS output: that helper strips every space,
+	// which turns ".prose h1{" into ".proseh1{" and makes every expectation below unreadable.
+	css := innerBaseCSS
+
+	// Anchored on the standalone size rule. A plain Index(".prose h2{") would match inside the
+	// combined ".prose h1,.prose h2{" selector, whose block carries the border but no size.
+	sizeOf := func(sel string) float64 {
+		t.Helper()
+		re := regexp.MustCompile(`(?:^|;|\})` + regexp.QuoteMeta(sel) + `\{font-size:([0-9.]+)em\}`)
+		m := re.FindStringSubmatch(css)
+		if m == nil {
+			t.Fatalf("innerBaseCSS has no standalone %s{font-size:…em} rule", sel)
 		}
-		open := strings.Index(line, "{")
-		closeAt := strings.LastIndex(line, "}")
-		if open < 0 || closeAt < open {
-			continue
+		v, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			t.Fatalf("%s font-size unparseable: %v", sel, err)
 		}
-		sel := normaliseCSS(line[:open])
-		for _, decl := range strings.Split(line[open+1:closeAt], ";") {
-			i := strings.Index(decl, ":")
-			if i < 0 {
-				continue
-			}
-			prop := strings.TrimSpace(decl[:i])
-			val := normaliseCSS(decl[i+1:])
-			if prop != "" && val != "" {
-				shared[sel+"|"+prop] = val
-			}
-		}
-	}
-	if len(shared) < 20 {
-		t.Fatalf("only %d .prose declarations parsed out of ui.css; the parser or the file "+
-			"changed shape and this guard is no longer looking at anything", len(shared))
+		return v
 	}
 
-	inner := normaliseCSS(innerBaseCSS)
-	checked, mismatched := 0, 0
-	for key, uiVal := range shared {
-		parts := strings.SplitN(key, "|", 2)
-		sel, prop := parts[0], parts[1]
-		// Only consider selector blocks innerBaseCSS actually carries.
-		at := strings.Index(inner, sel+"{")
-		if at < 0 {
-			continue
-		}
-		block := inner[at+len(sel)+1:]
-		if end := strings.Index(block, "}"); end >= 0 {
-			block = block[:end]
-		}
-		if !strings.Contains(block, prop+":") {
-			continue
-		}
-		checked++
-		if !strings.Contains(block, prop+":"+uiVal) {
-			mismatched++
-			t.Errorf("innerBaseCSS drifted from ui.css for %s { %s }: ui.css says %q, "+
-				"innerBaseCSS block is %q", sel, prop, uiVal, block)
+	// 1. Hierarchy is strictly decreasing. This is the assertion the old flat-14px sheet
+	//    would fail, and it is the whole reason for the rewrite.
+	h1, h2, h3 := sizeOf(".prose h1"), sizeOf(".prose h2"), sizeOf(".prose h3")
+	if !(h1 > h2 && h2 > h3) {
+		t.Errorf("headings must form a strict hierarchy, got h1=%v h2=%v h3=%v", h1, h2, h3)
+	}
+	if h1 <= 1.0 {
+		t.Errorf("h1 must be larger than body text, got %vem", h1)
+	}
+
+	// 2. h1/h2 carry the section rule that makes boundaries visible in a long document —
+	//    the one affordance render/style.css leans on hardest.
+	if !strings.Contains(css, ".prose h1,.prose h2{border-bottom:1px solid") {
+		t.Error("h1/h2 should carry a bottom border, as render/style.css does")
+	}
+
+	// 3. No figure ever gets a horizontal scrollbar, and every figure fits the column.
+	//    Over-wide graphs are re-laid-out vertically upstream (narrowerLayout); the sheet's
+	//    job is only to make sure nothing here reintroduces a second scroll axis.
+	if !strings.Contains(css, ".prose figure{overflow-x:hidden}") {
+		t.Error("figures must not scroll horizontally")
+	}
+	if strings.Contains(css, "overflow-x:auto") && !strings.Contains(css, ".prose table{") {
+		t.Error("unexpected overflow-x:auto outside the table rule")
+	}
+	if !strings.Contains(css, ".pf-doc svg{max-width:100%") {
+		t.Error("figures must scale to fit the column")
+	}
+	if strings.Contains(css, "max-width:none") {
+		t.Error("nothing may opt out of the column width")
+	}
+
+	// 4. Self-contained: the inner CSP is default-src 'none', so anything fetched is a blank.
+	for _, bad := range []string{"@import", "url(http", "url(//"} {
+		if strings.Contains(css, bad) {
+			t.Errorf("innerBaseCSS must not reference external resources, found %q", bad)
 		}
 	}
-	if checked < 15 {
-		t.Errorf("only %d shared declarations compared; innerBaseCSS no longer transcribes "+
-			"enough of .prose for this guard to mean anything (mismatches: %d)", checked, mismatched)
+
+	// 5. Dark palette defined in all three theme states (explicit dark, explicit light under a
+	//    dark OS, and system default) — a token defined in only one is a flash or a wrong theme.
+	for _, need := range []string{
+		`html[data-theme="dark"]{`,
+		`@media(prefers-color-scheme:dark){html:not([data-theme="light"]){`,
+	} {
+		if !strings.Contains(css, need) {
+			t.Errorf("missing theme state: %s", need)
+		}
+	}
+}
+
+// TestInnerBaseCSS_ColourTokensTrackUICSS is the drift guard for the colour half of the
+// duplication innerBaseCSS admits to. TestInnerBaseCSS_IsADocumentStylesheet covers the
+// typography half, and deliberately does NOT require equality there — the sizes follow
+// render/style.css. The colours are the opposite case: the frame is transparent over the
+// parent's surface, so any divergence reads as a document that does not belong to the page.
+//
+// This test exists because the claim was false when it was written. innerBaseCSS carried
+// GitHub's palette while its own comment said "transcribed from ui.css"; nothing checked, so
+// nothing noticed (aihub#240). A comment cannot hold a duplication in step — this can.
+//
+// --link is excluded: ui.css has no such token (it paints .prose a with --text plus an
+// underline), so there is nothing to track. See the comment on innerBaseCSS.
+func TestInnerBaseCSS_ColourTokensTrackUICSS(t *testing.T) {
+	tokens := []string{"--surface-2", "--border", "--text", "--text-muted", "--text-subtle"}
+
+	// block returns the declarations between opener and the next "}". Both sheets declare
+	// their palettes as one flat block per theme, so a brace counter would be over-built.
+	block := func(css, opener, where string) string {
+		i := strings.Index(css, opener)
+		if i < 0 {
+			t.Fatalf("%s: no %q block — repoint this guard rather than deleting it", where, opener)
+		}
+		rest := css[i+len(opener):]
+		j := strings.Index(rest, "}")
+		if j < 0 {
+			t.Fatalf("%s: %q block is unterminated", where, opener)
+		}
+		return rest[:j]
+	}
+
+	// valueOf reads one custom property out of a block. Matching on ";--token:" (after
+	// normalising whitespace away) keeps "--text" from matching inside "--text-muted".
+	valueOf := func(blk, token, where string) string {
+		re := regexp.MustCompile(`(?:^|[;{])` + regexp.QuoteMeta(token) + `:([^;}]+)`)
+		m := re.FindStringSubmatch(normaliseCSS(blk))
+		if m == nil {
+			t.Fatalf("%s: %s is not declared", where, token)
+		}
+		return m[1]
+	}
+
+	// Comments first: ui.css documents these very tokens by name right inside the palette
+	// blocks, and prose like "--text-subtle was #94949b" otherwise parses as a declaration.
+	uiCSS := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(readUICSSFromDisk(t), "")
+	for _, pair := range []struct{ theme, uiOpener, frameOpener string }{
+		{"light", `html[data-theme="light"], :root {`, `:root{`},
+		{"dark", `html[data-theme="dark"] {`, `html[data-theme="dark"]{`},
+	} {
+		ui := block(uiCSS, pair.uiOpener, "ui.css "+pair.theme)
+		frame := block(innerBaseCSS, pair.frameOpener, "innerBaseCSS "+pair.theme)
+		for _, tok := range tokens {
+			want := valueOf(ui, tok, "ui.css "+pair.theme)
+			got := valueOf(frame, tok, "innerBaseCSS "+pair.theme)
+			if got != want {
+				t.Errorf("%s %s: innerBaseCSS has %s, ui.css has %s — the frame paints over the "+
+					"page's own surface, so these must agree", pair.theme, tok, got, want)
+			}
+		}
+	}
+
+	// The frame declares its dark palette twice (explicit dark, and system-dark for anything
+	// not explicitly light). Half-updating one of them is the exact mistake this catches.
+	explicit := block(innerBaseCSS, `html[data-theme="dark"]{`, "innerBaseCSS dark")
+	system := block(innerBaseCSS, `@media(prefers-color-scheme:dark){html:not([data-theme="light"]){`, "innerBaseCSS system-dark")
+	for _, tok := range append(tokens, "--link") {
+		if a, b := valueOf(explicit, tok, "explicit dark"), valueOf(system, tok, "system dark"); a != b {
+			t.Errorf("dark %s: explicit block has %s, system block has %s", tok, a, b)
+		}
 	}
 }
 

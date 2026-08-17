@@ -156,7 +156,7 @@ func TestSpikeArtifact_FigureIsActuallyDense(t *testing.T) {
 	// would either fail for the wrong reason or have to be lowered to a number that no
 	// longer means anything. What the criterion is actually about is what the reader
 	// receives.
-	out := RenderDiagramsForUI(SanitizeArtifactHTML(h))
+	out := RenderDiagramsGated(SanitizeArtifactHTML(h))
 	const minServed = 40 * 1024
 	if len(out) < minServed {
 		t.Errorf("served document is %d bytes, want >= %d — the dense figure and the compiled "+
@@ -200,7 +200,7 @@ func TestSpikeArtifact_CarriesBothDiagramTracks(t *testing.T) {
 	}
 
 	// Served form: sanitize first, compile second — the production ordering.
-	out := RenderDiagramsForUI(SanitizeArtifactHTML(h))
+	out := RenderDiagramsGated(SanitizeArtifactHTML(h))
 
 	if n := strings.Count(out, "<svg"); n < 3 {
 		t.Errorf("served document has %d <svg>, want >= 3 — the fence did not compile", n)

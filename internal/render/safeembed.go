@@ -159,7 +159,7 @@ func buildInnerDocument(agentHTML string, opt EmbedOptions, nonce string) string
 	// when the policy runs, so sanitizing cannot damage it, and RenderDiagramsForUI's output
 	// never passes through the policy. Same order as ui_embed.go's {{md}} path, for the same
 	// reason.
-	body := RenderDiagramsForUI(SanitizeArtifactHTML(agentHTML))
+	body := RenderDiagramsGated(SanitizeArtifactHTML(agentHTML))
 
 	var b strings.Builder
 	b.WriteString(`<!doctype html><html data-theme="` + html.EscapeString(opt.themeAttr()) +
@@ -202,7 +202,7 @@ func buildInnerDocument(agentHTML string, opt EmbedOptions, nonce string) string
 //
 //	style-src   uiPageCSP 'self' 'unsafe-inline'  ∧  'unsafe-inline'  → inline OK, d2 paints
 //	font-src    'self' data:                      ∧  data:           → data: OK, webfont loads
-//	img-src     'self' data:                      ∧  data:           → data: only
+//	img-src     data:                             ∧  data:           → data: only
 //	script-src  'self' 'unsafe-inline'            ∧  'nonce-N'       → only our nonced bridge
 //
 // # aihub#243 will break this if it is not accounted for
@@ -226,13 +226,14 @@ func innerCSP(nonce string, withScript bool) string {
 		// data: and same-origin only. An EXTERNAL image URL in a private document is a
 		// read receipt, which is why no scheme/host form is admitted here.
 		//
-		// 'self' is present because the sanitizer admits root-relative sources
-		// (reSafeImageURL allows /path), so without it a first-party <img src="/ui/..."> in
-		// agent content rendered fine on the un-sandboxed artifact viewer and silently failed
-		// inside a frame — the two controls disagreeing about the same input. The frame's base
-		// URL is the embedding page's, so 'self' resolves to our own origin; this admits no
-		// destination the parent page could not already load.
-		"img-src 'self' data:",
+		// 'self' is deliberately NOT here. An earlier version admitted it, reasoning that the
+		// frame's base URL is the embedding page's so 'self' would resolve to our own origin
+		// and re-admit the root-relative sources the sanitizer allows (reSafeImageURL permits
+		// /path). That conflates the document's base URL with the policy's self-origin: this
+		// frame is sandboxed WITHOUT allow-same-origin, so its origin is opaque and 'self'
+		// matches nothing. The directive was a no-op, and writing it made the policy read as
+		// though root-relative images work inside the frame when they never did.
+		"img-src data:",
 		"font-src data:",
 		"form-action 'none'",
 		"base-uri 'none'",
@@ -255,60 +256,148 @@ func innerCSPForTest() string { return innerCSP("N", true) }
 // is default-src 'none' with style-src 'unsafe-inline', so no <link> can be fetched — an
 // embedded document cannot share ui.css with the page around it.
 //
-// The token values and the .prose rules below are transcribed from ui.css. That is a real
-// duplication and worth naming: the alternative is an embedded document whose typography
-// does not match the page it sits in, which is what a naive port of these surfaces into a
-// frame produces. Keep them in step; the numbers are deliberately identical, not merely
-// similar.
+// The colour tokens below are transcribed from ui.css. That is a real duplication and worth
+// naming: the alternative is an embedded document whose colours do not match the page it sits
+// in, which is what a naive port of these surfaces into a frame produces. Keep them in step;
+// the values are deliberately identical, not merely similar, and
+// TestInnerBaseCSS_ColourTokensTrackUICSS fails the build when they drift.
+//
+// They were NOT identical until aihub#240 caught it: this sheet carried GitHub's palette
+// (--text #e6edf3 / --surface-2 #161b22 / --border #30363d) while claiming to mirror ui.css
+// (#ededf0 / #1c1c20 / #2a2a2f). Small numbers, but the frame is transparent over the page's
+// own surface, so the mismatch showed up as a document that read as slightly foreign.
+//
+// --link is the one token with no ui.css counterpart: ui.css paints .prose a as var(--text)
+// plus a subtle underline, which works in a card surrounded by chrome. An embedded document
+// has no chrome, so links here keep a colour of their own. That is a deliberate divergence,
+// not drift, and the drift guard excludes it for exactly that reason.
+//
+// --fig-* are the figure palette (aihub#240): the three semantic hues an agent-authored diagram
+// uses for its subsystem borders and titles. They exist as tokens rather than as literals inside
+// each SVG because NO single hue clears 4.5:1 on both a white and a near-black surface —
+// measured: #177c36 is 5.29:1 on white and 3.45:1 on --surface, so a figure with its colours
+// baked in can only be accessible in one theme. The dark values are ui.css's own
+// --success / --danger / --link dark values, so a figure stays inside the product's palette.
+// Figures reference them as var(--fig-data,#177c36): the literal fallback keeps a figure
+// looking right when it is viewed outside this frame (a raw .svg file, /v1, a saved page).
+//
+// The .prose SIZES below are not from ui.css — they follow render/style.css. See
+// TestInnerBaseCSS_IsADocumentStylesheet for why.
 //
 // Theme is resolved in CSS across all three states, mirroring ui.css so the server can emit
 // data-theme="auto" and the correct colours paint on first load — no flash, no script. An
 // explicit light choice must still win under a dark OS, which is why the media query is
 // guarded on :not([data-theme="dark"]) rather than applied bare.
-const innerBaseCSS = `:root{--mono:"Geist Mono",ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;` +
-	`--r:7px;--s3:12px;` +
-	`--surface-2:#f6f6f4;--border:#e6e5e1;--text:#1c1c20;--text-muted:#646469;--text-subtle:#94949b}` +
+// It is also the ONLY stylesheet an embedded document gets. SanitizeArtifactHTML drops
+// <style> and its body outright (D1), so an agent cannot ship CSS with its document and must
+// not try: it authors semantic HTML — h1..h4, p, table, pre, blockquote, figure — and this
+// sheet paints it. That is the classless-framework contract, and it is what makes the trade
+// D1 made survivable. A figure needing per-shape colour uses presentation attributes
+// (fill=, stroke=) or the allowlisted style="" attribute, never a scoped stylesheet.
+//
+// The proportions below follow render/style.css, the sheet that gives /v1 and /share their
+// look, because an embedded document and a shared one should not read as different products.
+// The previous version of this sheet set h1..h4 all to 14px against 13.5px body text, i.e. no
+// hierarchy at all; a long report rendered as an undifferentiated wall.
+const innerBaseCSS = `:root{--mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;` +
+	`--r:6px;--s3:12px;` +
+	`--surface-2:#f6f6f4;--border:#e6e5e1;--text:#1c1c20;--text-muted:#646469;` +
+	`--text-subtle:#6e6e77;--link:#0969da;` +
+	`--fig-data:#177c36;--fig-state:#a94f48;--fig-ctrl:#4a6c90}` +
 	`html[data-theme="dark"]{--surface-2:#1c1c20;--border:#2a2a2f;--text:#ededf0;` +
-	`--text-muted:#a0a0a8;--text-subtle:#6e6e77}` +
+	`--text-muted:#a0a0a8;--text-subtle:#8a8a94;--link:#4493f8;` +
+	`--fig-data:#3fcf78;--fig-state:#f2655a;--fig-ctrl:#4493f8}` +
 	`@media(prefers-color-scheme:dark){html:not([data-theme="light"]){` +
-	`--surface-2:#1c1c20;--border:#2a2a2f;--text:#ededf0;--text-muted:#a0a0a8;--text-subtle:#6e6e77}}` +
+	`--surface-2:#1c1c20;--border:#2a2a2f;--text:#ededf0;--text-muted:#a0a0a8;` +
+	`--text-subtle:#8a8a94;--link:#4493f8;` +
+	`--fig-data:#3fcf78;--fig-state:#f2655a;--fig-ctrl:#4493f8}}` +
 
 	// The frame paints no background of its own: it must read as part of the parent page,
 	// and the iframe element is transparent so the parent's surface shows through.
-	`html,body{margin:0;padding:0;background:transparent;` +
-	`font:14px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--text)}` +
+	`html,body{margin:0;padding:0;background:transparent;color:var(--text);` +
+	`font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",` +
+	`"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif}` +
 	`.pf-doc{padding:0}` +
-
-	// Diagrams scale down to fit and are never upscaled. d2's outer <svg> may carry a
-	// viewBox with no width/height, which CSS otherwise resolves to 100% of the column
-	// and blows the figure up (mem_0v7S0TTo).
-	`.pf-doc svg{max-width:100%;height:auto}` +
-	`.pf-doc img{max-width:100%;height:auto}` +
-
-	// --- transcribed from ui.css .prose (keep in step) ---
-	`.prose{font-size:13.5px;min-width:0}` +
+	`.prose{min-width:0}` +
 	`.prose>:first-child{margin-top:0}` +
 	`.prose>:last-child{margin-bottom:0}` +
-	`.prose p{margin:0 0 10px}` +
-	`.prose h1,.prose h2,.prose h3,.prose h4{margin:14px 0 6px;font-size:14px;font-weight:650}` +
-	`.prose h1{font-size:16px}` +
-	`.prose code{font-family:var(--mono);font-size:12px;background:var(--surface-2);` +
-	`border:1px solid var(--border);padding:1px 5px;border-radius:5px;` +
+
+	// Headings carry the hierarchy. h1/h2 take the rule under them that style.css uses, which
+	// is what makes section boundaries visible in a long document without extra markup.
+	`.prose h1,.prose h2{border-bottom:1px solid var(--border);padding-bottom:.3em;` +
+	`margin:1.6em 0 .6em;font-weight:600;line-height:1.3}` +
+	`.prose h1{font-size:1.85em}` +
+	`.prose h2{font-size:1.4em}` +
+	`.prose h3,.prose h4,.prose h5,.prose h6{margin:1.4em 0 .5em;font-weight:600;line-height:1.35}` +
+	`.prose h3{font-size:1.15em}` +
+	`.prose h4{font-size:1em}` +
+	`.prose h5,.prose h6{font-size:.92em;color:var(--text-muted)}` +
+
+	`.prose p{margin:0 0 .9em}` +
+	`.prose strong{font-weight:600}` +
+	`.prose hr{border:0;border-top:1px solid var(--border);margin:1.8em 0}` +
+	`.prose blockquote{margin:1em 0;padding:0 1em;border-left:4px solid var(--border);` +
+	`color:var(--text-muted)}` +
+	`.prose blockquote>:first-child{margin-top:0}` +
+	`.prose blockquote>:last-child{margin-bottom:0}` +
+
+	`.prose code{font-family:var(--mono);font-size:.88em;background:var(--surface-2);` +
+	`border:1px solid var(--border);padding:.1em .35em;border-radius:4px;` +
 	`overflow-wrap:anywhere;word-break:break-word}` +
 	`.prose pre{background:var(--surface-2);border:1px solid var(--border);` +
-	`border-radius:var(--r);padding:var(--s3);overflow:auto;max-width:100%}` +
-	`.prose pre code{background:none;border:0;padding:0}` +
-	`.prose table{display:block;width:max-content;max-width:100%;overflow-x:auto;` +
-	`border-collapse:collapse;margin:0 0 10px;font-size:13px}` +
-	`.prose th,.prose td{border:1px solid var(--border);padding:6px 10px;` +
-	`text-align:left;vertical-align:top}` +
-	`.prose th{background:var(--surface-2);color:var(--text);font-weight:600}` +
+	`border-radius:var(--r);padding:var(--s3);overflow-x:auto;max-width:100%;` +
+	`margin:0 0 1em;line-height:1.45}` +
+	`.prose pre code{background:none;border:0;padding:0;font-size:.86em}` +
+
+	// Tables get the full column and scroll inside their own box when they cannot fit, rather
+	// than stretching the document — the rule style.css already states for /v1.
+	//
+	// Two bugs lived in the previous version of this rule, both reported as "the tables look
+	// squeezed" and both measured on a real document before being changed:
+	//
+	//  1. `width:max-content` together with `max-width:100%` resolves to the container width,
+	//     which means the table could never be wider than its column — so `overflow-x:auto`
+	//     was DEAD CODE. A table that did not fit was compressed, never scrolled. A synthetic
+	//     10-column table was crushed to 88px per column with no scrollbar; it now scrolls.
+	//  2. CJK text has a break opportunity between every pair of characters, so a Chinese
+	//     column's min-content width is ONE GLYPH. Auto table layout is free to crush such a
+	//     column to nothing and reflow its contents one character per line, which is exactly
+	//     what happened: 42px and 58px columns in a 4-column table, cells four lines deep.
+	//     min-width puts a floor under that. 5.5em is the narrowest value that stopped the
+	//     crush without taking so much width from the prose column that IT started wrapping.
+	//
+	// The density is deliberately unchanged otherwise: raising font-size and padding at the
+	// same time (the first attempt) made a table that previously fit on one line per row wrap
+	// on 9 of 24 cells. The floor is the fix; the padding is not.
+	`.prose table{display:block;overflow-x:auto;max-width:100%;` +
+	`border-collapse:collapse;margin:0 0 1.15em;font-size:.93em}` +
+	`.prose th,.prose td{border:1px solid var(--border);padding:8px 12px;` +
+	`text-align:left;vertical-align:top;min-width:5.5em;overflow-wrap:anywhere}` +
+	// A header that wraps reads as two columns; it is short by nature, so it never needs to.
+	`.prose th{background:var(--surface-2);font-weight:600;white-space:nowrap}` +
 	`.prose tbody tr:nth-child(even){background:var(--surface-2)}` +
-	`.prose ul,.prose ol{margin:0 0 10px;padding-left:18px}` +
-	`.prose li{margin:3px 0;color:var(--text-muted)}` +
-	`.prose a{color:var(--text);text-decoration:underline;text-underline-offset:2px;` +
-	`text-decoration-color:var(--text-subtle)}` +
-	`.prose a:hover{text-decoration-color:var(--text)}`
+
+	`.prose ul,.prose ol{margin:0 0 .9em;padding-left:1.6em}` +
+	`.prose li{margin:.25em 0}` +
+	`.prose li>p{margin:.3em 0}` +
+	`.prose a{color:var(--link);text-decoration:none}` +
+	`.prose a:hover{text-decoration:underline}` +
+
+	// Figures scale down to fit and are never upscaled. d2's outer <svg> may carry a viewBox
+	// with no width/height, which CSS otherwise resolves to 100% of the column and blows the
+	// figure up (mem_0v7S0TTo).
+	`.pf-doc svg{max-width:100%;height:auto}` +
+	`.pf-doc img{max-width:100%;height:auto}` +
+	`.prose figure{margin:1.2em 0}` +
+	`.prose figcaption{margin-top:.5em;font-size:.88em;color:var(--text-muted)}` +
+
+	// Figures never get a horizontal scrollbar. A figure that scrolls sideways inside a
+	// document that scrolls downwards hides part of the shape behind an axis the reader is
+	// not looking for, and a diagram is the one element whose whole point is being seen at
+	// once. Over-wide graphs are handled upstream instead, by re-running the layout
+	// vertically — see narrowerLayout in diagram_gate.go. Anything still too wide after that
+	// scales to fit, which is degraded but complete.
+	`.prose figure{overflow-x:hidden}`
 
 // failsafeFrame is what a caller gets if embedding panicked. It is still a sandboxed
 // frame: degrading to unisolated rendering would turn a display bug into an XSS.

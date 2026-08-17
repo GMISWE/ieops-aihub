@@ -168,8 +168,34 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 		//         BytePurity enforces it, so the payload is neutralised by the response
 		//         CSP instead (set below) rather than by rewriting bytes. This is the
 		//         same trade /share itself already makes.
+		// aihub#240 D7: an architecture-doc artifact carries agent-AUTHORED HTML — it is
+		// the Step 1 output of the three-step design (agent writes md + html; the viewer
+		// renders the html half). That half is the one case on this page where the body is
+		// untrusted rich content rather than our own markdown render, so it goes inside the
+		// sandboxed frame instead of being inlined. This is what makes Step 3 real here.
+		//
+		// Gated on type rather than a stored flag: resolveRenderedHTML (domain/memory.go:77)
+		// distinguishes agent-supplied HTML from auto-rendered markdown at WRITE time, but
+		// does not persist which one it took. fact.architecture is not in renderTypes, so a
+		// non-NULL rendered_html on this type can only have come from the author — the
+		// condition below is exactly "agent-authored html", with no schema change. Promoting
+		// it to an explicit contract flag is P1 (proposal §7 open question 3).
+		//
+		// The frame is NOT given the pre-processed body: SafeEmbedDocument sanitizes and
+		// THEN compiles d2 internally, and that order is load-bearing (compiling first costs
+		// d2 its entire stylesheet — see ui_embed.go). So the sanitize + compile + fold steps
+		// below are all skipped for this path and the raw body is handed over untouched.
+		//
+		// Annotation, viewer.css and diagram.js do not cross the frame boundary yet, so they
+		// are inert on this artifact type. That is aihub#245, tracked as P1 and explicitly
+		// accepted for the P0 demo (mem_YlnN3R8H).
+		sandboxBody := strings.HasPrefix(c.Path(), "/ui") &&
+			mem.Type == "fact.architecture" && mem.RenderedHTML != nil
+
 		if strings.HasPrefix(c.Path(), "/ui") {
-			bodyFragment = render.SanitizeArtifactHTML(bodyFragment)
+			if !sandboxBody {
+				bodyFragment = render.SanitizeArtifactHTML(bodyFragment)
+			}
 		} else {
 			// /ui gets its policy from the uiGroup middleware (ui_routes.go), which
 			// also covers the {{md}} memory/wi detail pages. /v1 has no such group.
@@ -252,6 +278,18 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			uiHead.WriteString("<script src=\"/ui/static/theme.js?v=")
 			uiHead.WriteString(assetVersion)
 			uiHead.WriteString("\" defer></script>\n")
+			// aihub#240 D7: embedframe.js is the PARENT half of the frame's height protocol —
+			// the framed document measures itself and postMessages the height; this listener
+			// applies it. The app shell gets it from layout.html.tmpl, but the artifact viewer
+			// builds its own head and never included it, so a framed body here sat at the
+			// stylesheet's default 220px with an inner scrollbar while the bridge posted a
+			// correct 1589 into a page with nobody listening. Only needed when the body is
+			// actually framed.
+			if sandboxBody {
+				uiHead.WriteString("<script src=\"/ui/static/embedframe.js?v=")
+				uiHead.WriteString(assetVersion)
+				uiHead.WriteString("\" defer></script>\n")
+			}
 			// aihub#234: click-to-zoom for d2 figures. Inline, a diagram is capped at
 			// the column width (ui.css); this is the only way to read a wide one at
 			// full size without page-zooming the prose along with it. Inside the /ui
@@ -276,7 +314,11 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			// after the first </h1> so it renders directly below the document title;
 			// it never reaches /v1 or /share, preserving their byte-identical output.
 			shareControlHTML := ""
-			if mem.RenderedHTML != nil {
+			// aihub#240 D7: the control is injected INTO the body, and the framed body is
+			// a separate document whose CSP admits no script but our nonced bridge — the
+			// control would render inert inside the frame. Suppressed rather than shipped
+			// broken; rehoming it to the parent chrome is part of aihub#245 (P1).
+			if mem.RenderedHTML != nil && !sandboxBody {
 				shareURL := c.Scheme() + "://" + c.Request().Host + "/share/" + mem.ID
 				shared := mem.Visibility == "public"
 				shareControlHTML = buildShareControlHTML(mem.ID, shareURL, shared, av)
@@ -310,11 +352,20 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				// aihub#160: render ```d2 code blocks to inline SVG (/ui-only; /v1 + /share
 				// keep the raw code block). Done before folding so the figure lands inside
 				// its section.
-				bodyFragment = render.RenderDiagramsForUI(bodyFragment)
+				// aihub#240 D7: skipped when the body is going into the frame —
+				// SafeEmbedDocument does sanitize-then-compile itself, in that order.
+				if !sandboxBody {
+					bodyFragment = render.RenderDiagramsGated(bodyFragment)
+				}
 				// aihub#159: fold H2 sections into <details> for /ui readability (spec/plan).
 				// /ui-only — /v1 + /share keep the flat body. Default-open so annot.js
 				// text-quote anchoring (searches visible text) is unaffected.
-				bodyFragment = wrapH2SectionsForUI(bodyFragment)
+				// aihub#240 D7: folding rewrites the body's section structure, which is a
+				// parent-page readability affordance. Inside the frame it would only mangle
+				// the agent's own layout, so the framed body is left exactly as authored.
+				if !sandboxBody {
+					bodyFragment = wrapH2SectionsForUI(bodyFragment)
+				}
 				annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits)
 				// aihub#138 version_history: render version history INSIDE the doc card.
 				// aihub#154: the share control + version history are injected together
@@ -371,6 +422,21 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				}
 				annotHTML += buildSideRail(render.ExtractHeadings(mem.Content), srMeta, srVersions, srComments)
 			}
+		}
+		// aihub#240 D7: hand the body to the sandbox last, so everything above operated on
+		// the authored bytes and nothing downstream can re-process the frame markup.
+		// SafeEmbedDocument sanitizes, compiles d2, and wraps the result in
+		// <iframe srcdoc sandbox="allow-scripts"> (no allow-same-origin) with its own inner
+		// CSP — the same call the {{md}} pages already use (ui_embed.go).
+		if sandboxBody {
+			bodyFragment = render.SafeEmbedDocument(bodyFragment, render.EmbedOptions{
+				Title:        "document",
+				BridgeScript: render.AnnotationBridgeFor(c.Scheme() + "://" + c.Request().Host),
+				FrameClass:   "pf-embed",
+				// Read again rather than reusing the /ui block's local: that one is scoped to
+				// the chrome builder above, and themeFromCookie is a pure cookie read.
+				Theme: themeFromCookie(c),
+			})
 		}
 		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBodyWithMeta(bodyFragment, title, backHref, ownerHref, ownerLabel, related, annotHTML)))
 	}
@@ -1242,11 +1308,16 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage)
 
 	// ─── Margin rail scaffold ─────────────────────────────────────────────────
 	// JS removes [hidden] and populates bubbles from the data island.
-	b.WriteString("<div id=\"pf-margin-rail\" hidden></div>\n")
+	// data-pf-chrome is an unforgeable marker: `data-*` is not on the sanitizer's attribute
+	// allowlist, so agent content cannot carry it (verified for the quoted, valueless and
+	// upper-case forms). annot.js requires it, which is what stops an artifact from supplying a
+	// <div id="pf-margin-rail"> that wins document order — the agent body is inlined BEFORE this
+	// chrome, and getElementById returns the first match regardless of tag.
+	b.WriteString("<div id=\"pf-margin-rail\" data-pf-chrome hidden></div>\n")
 
 	// ─── Hidden selection-comment form ────────────────────────────────────────
 	// JS reveals + positions this on text selection.
-	b.WriteString("<form id=\"pf-selform\" hidden method=\"POST\" action=\"/ui/artifacts/")
+	b.WriteString("<form id=\"pf-selform\" data-pf-chrome hidden method=\"POST\" action=\"/ui/artifacts/")
 	b.WriteString(html.EscapeString(memID))
 	b.WriteString("/commit\">\n")
 	b.WriteString("<input type=\"hidden\" name=\"quote\" value=\"\">\n")

@@ -5,6 +5,9 @@
     "01-static-html-render-engine-research.md 2.6 'SVG 专属安全清单', plus style_block, which",
     "was added after two consecutive review rounds found the sanitizer bypassable there and",
     "nowhere else -- the corpus had zero cases in the one place the code actually failed.",
+    "external_resource carries protocol-relative (//host) forms as well as scheme forms:",
+    "the three scheme cases all passed while //host slipped through the same regex branch,",
+    "so the category guard reported coverage the class did not have.",
     "",
     "Each case asserts on the SANITIZER output only. The sandboxed iframe and the CSP header",
     "are separate, independent layers -- a payload that survives sanitization is still expected",
@@ -413,6 +416,52 @@
         "<svg",
         "<rect",
         "class=\"fill-N1\""
+      ]
+    },
+    {
+      "name": "external_resource_img_protocol_relative",
+      "category": "external_resource",
+      "input": "<p>ok</p><img src=\"//evil.example/px.gif?leak=1\" width=\"1\" height=\"1\">",
+      "forbidden": [
+        "evil.example"
+      ],
+      "required": [
+        "ok"
+      ]
+    },
+    {
+      "name": "external_resource_svg_image_protocol_relative",
+      "category": "external_resource",
+      "input": "<svg viewBox=\"0 0 10 10\"><image href=\"//evil.example/x.svg\" width=\"10\" height=\"10\"/><rect width=\"10\" height=\"10\"/></svg>",
+      "forbidden": [
+        "evil.example"
+      ],
+      "required": [
+        "<svg",
+        "<rect"
+      ]
+    },
+    {
+      "name": "external_resource_svg_image_xlink_protocol_relative",
+      "category": "external_resource",
+      "input": "<svg viewBox=\"0 0 10 10\"><image xlink:href=\"//evil.example/x.svg\" width=\"10\" height=\"10\"/><rect width=\"10\" height=\"10\"/></svg>",
+      "forbidden": [
+        "evil.example"
+      ],
+      "required": [
+        "<svg",
+        "<rect"
+      ]
+    },
+    {
+      "name": "external_resource_img_root_relative_also_dropped",
+      "category": "external_resource",
+      "input": "<p>ok</p><img src=\"/ui/static/first-party.png\" alt=\"a\">",
+      "forbidden": [
+        "/ui/static/first-party.png"
+      ],
+      "required": [
+        "ok"
       ]
     }
   ]

@@ -216,12 +216,34 @@ func uiFuncMap() template.FuncMap {
 			// one of the two being missed).
 			//
 			// The frame is what makes the sanitizer stop being the only control on this
-			// surface: inside it, script-src is 'none', no origin can be contacted, and
-			// nothing can escape into this page. On the artifact viewer the body is still
+			// surface: inside it the only script that may run is our own nonced bridge
+			// (script-src 'nonce-<per-document>', not 'none' — this path supplies a
+			// BridgeScript), no origin can be contacted, and nothing can escape into this
+			// page. Agent script is refused twice over: stripped by the sanitizer, and
+			// unable to name the nonce even if it survived. On the artifact viewer the body is still
 			// inlined, because moving it into a frame requires rehoming annot.js, viewer.css
 			// and diagram.js across the boundary. That is aihub#245, and it is a tracked P1
 			// task rather than an open question.
 			return template.HTML(render.SafeEmbedDocument(out, render.EmbedOptions{
+				Title:        "document",
+				BridgeScript: render.AnnotationBridgeFor(parentOrigin),
+				FrameClass:   "pf-embed",
+				Theme:        theme,
+			}))
+		},
+		// agentdoc renders the agent-authored HTML half of a twin pair into the SAME sandboxed
+		// frame the markdown half gets from {{md}}. It differs from {{md}} in exactly one way:
+		// the input is already HTML, so there is no goldmark pass. Sanitising, d2 compilation,
+		// the nonced bridge, the height protocol and the isolation guarantees are identical
+		// because they all live inside SafeEmbedDocument, which is called with the same options.
+		//
+		// aihub#240 D7: before this existed, the agent's html half was rendered ONLY by the
+		// artifact viewer, and the artifact viewer inlines it into the page. That was the single
+		// gap in the sandbox story — the half most likely to contain hand-written markup was the
+		// half with no frame around it. Routing it through here closes that gap for the page the
+		// reader now lands on by default; the viewer's own inlining is aihub#245.
+		"agentdoc": func(rawHTML, parentOrigin, theme string) template.HTML {
+			return template.HTML(render.SafeEmbedDocument(rawHTML, render.EmbedOptions{
 				Title:        "document",
 				BridgeScript: render.AnnotationBridgeFor(parentOrigin),
 				FrameClass:   "pf-embed",

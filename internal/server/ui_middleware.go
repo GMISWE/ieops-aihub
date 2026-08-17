@@ -1,26 +1,12 @@
 package server
 
 import (
-	"context"
 	"net/http"
 	"net/url"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 )
-
-// uiUserLoaderFn is the seam tests replace to exercise the authed /ui middleware chain
-// without a database.
-//
-// It exists because the chain itself carries a security property that was otherwise
-// unobservable: uiSecurityHeaders() is attached to the /ui group and runs AFTER this
-// middleware, so an unauthenticated request never reaches it and no test could prove the
-// CSP is actually wired to authed pages. Removing uiSecurityHeaders() from the group left
-// the whole suite green — which is aihub#144 (authed /ui with no CSP) reintroduced in one
-// line. Same shape of seam as loadMemoryFn and freezeRenderFn.
-type uiUserLoaderFn func(ctx context.Context, pool *pgxpool.Pool, apiKeyID string) (*UserContext, error)
-
-var uiUserLoader uiUserLoaderFn = loadUserByAPIKeyID
 
 // RequireUISession verifies the session cookie, rebuilds the UserContext, and
 // stores it on the echo context. On any failure (no cookie, bad sig, expired,
@@ -38,7 +24,7 @@ func RequireUISession(sm *SessionManager, pool *pgxpool.Pool) echo.MiddlewareFun
 			if verr != nil {
 				return redirectToLogin(c)
 			}
-			uc, lerr := uiUserLoader(c.Request().Context(), pool, apiKeyID)
+			uc, lerr := loadUserByAPIKeyID(c.Request().Context(), pool, apiKeyID)
 			if lerr != nil {
 				return redirectToLogin(c)
 			}

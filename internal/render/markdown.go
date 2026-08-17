@@ -20,7 +20,11 @@
 // the renderer. What changed is that its output is no longer trusted on the way out:
 //
 //   - SanitizeArtifactHTML (sanitize.go) strips script, event handlers, javascript:
-//     URIs, external resource references and XML DTD declarations;
+//     URIs, <style> elements, XML DTD declarations, and every network form of an image
+//     source (images must be data: or a same-document fragment). Anchors are the deliberate
+//     exception: they may still carry http(s) destinations, because navigating away is what
+//     a link is for. So "no external resources" holds for anything the page LOADS, not for
+//     anything the reader can choose to click;
 //   - SafeEmbedDocument (safeembed.go) isolates a finished agent document in a
 //     sandboxed iframe;
 //   - the authed /ui and /v1 artifact responses now send a Content-Security-Policy.

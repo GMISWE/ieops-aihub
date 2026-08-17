@@ -10,6 +10,23 @@
 (function () {
   'use strict';
 
+  // chromeEl resolves one of OUR OWN elements, never one the artifact supplied.
+  //
+  // aihub#240: the viewer inlines the sanitized agent body BEFORE this chrome, and the sanitizer
+  // allows `id` globally — it must, because d2 figures reference their own gradients and clip
+  // paths by fragment. getElementById returns the first element in document order with a given
+  // id regardless of tag, so an artifact carrying <div id="pf-selform"> was handed to the code
+  // below, which then wrote position:fixed / z-index onto it. That is our own JS granting
+  // attacker-chosen content the placement properties the sanitizer exists to withhold — the
+  // whitelist defeated from the inside rather than bypassed.
+  //
+  // data-pf-chrome is unforgeable because `data-*` is not on the sanitizer's attribute
+  // allowlist: it is stripped from agent content in every form, including valueless and
+  // upper-case. Only the server-rendered chrome carries it.
+  function chromeEl(id) {
+    return document.querySelector('[data-pf-chrome][id="' + id + '"]');
+  }
+
   // ─── Guards ────────────────────────────────────────────────────────────────
 
   // Bail early on /share or /v1 paths (island won't exist, but be explicit).
@@ -79,7 +96,7 @@
   function buildContentScope() {
     // Preferred: the server-emitted content column (/ui path) — cleanly
     // excludes the annotation chrome without walking body children.
-    var col = document.getElementById('pf-doc-col');
+    var col = chromeEl('pf-doc-col');
     if (col) {
       var colRange = document.createRange();
       colRange.selectNodeContents(col);
@@ -123,7 +140,20 @@
   function main() {
     if (!window.matchMedia('(min-width:1100px)').matches) return;
 
-    var islandEl = document.getElementById('pf-annot-data');
+    // Type-qualified, NOT getElementById — the id alone is forgeable by artifact content.
+    //
+    // aihub#240: the artifact viewer inlines the sanitized agent body into this page, and the
+    // sanitizer allows `id` globally (it has to: d2 figures reference their own gradients and
+    // clip paths by fragment). getElementById returns the FIRST element in document order with
+    // the id regardless of tag, and the agent's body is emitted BEFORE this chrome — so an
+    // artifact containing <div id="pf-annot-data">{"mem_id":"…"}</div> was read instead of the
+    // real island, and payload.mem_id flows into the reply/resolve POST targets below. That let
+    // an artifact author choose which artifact a reviewer's comment landed on.
+    //
+    // What makes this selector unforgeable is that <script> is not on the sanitizer's element
+    // allowlist, so agent content cannot produce a <script id="pf-annot-data"> at all — only
+    // the server-rendered island matches.
+    var islandEl = document.querySelector('script#pf-annot-data[type="application/json"]');
     if (!islandEl) return;
 
     var payload;
@@ -136,7 +166,7 @@
 
     // rail is only required for bubbles; the selection flow must work even on
     // a document with zero existing annotations (creating the first one).
-    var rail = document.getElementById('pf-margin-rail');
+    var rail = chromeEl('pf-margin-rail');
 
     var scope = buildContentScope();
     if (!scope) return;
@@ -463,7 +493,7 @@
     var GAP = 8;
     // Bubble tops are relative to the rail's content box — convert document
     // offsets into rail-local coordinates.
-    var rail = document.getElementById('pf-margin-rail');
+    var rail = chromeEl('pf-margin-rail');
     var railTop = rail ? offsetTopInDoc(rail) : 0;
     for (var i = 0; i < anchored.length; i++) {
       var item   = anchored[i];
@@ -528,7 +558,7 @@
 
   function scrollBubbleIntoView(bubble) {
     if (!bubble) return;
-    var rail = document.getElementById('pf-margin-rail');
+    var rail = chromeEl('pf-margin-rail');
     if (!rail) { bubble.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); return; }
     var bTop = bubble.offsetTop;
     var bH   = bubble.offsetHeight;
@@ -564,7 +594,7 @@
     _selbtn.appendChild(document.createTextNode('+ Annotate'));
     document.body.appendChild(_selbtn);
 
-    _selform = document.getElementById('pf-selform');
+    _selform = chromeEl('pf-selform');
     if (!_selform) return;
 
     // Show/hide selection button on mouseup.

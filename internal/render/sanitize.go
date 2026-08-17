@@ -167,8 +167,23 @@ var (
 	// against frame-busting.
 	reSafeLinkURL = regexp.MustCompile(`(?i)^(?:https?://[^\s"']+|mailto:[^\s"']+|/[^\s"']*|#[^\s"']*)$`)
 	// Images must not reach the network: an artifact-embedded external image URL is a
-	// pixel-grade read receipt on a private document (01 §2.6).
-	reSafeImageURL = regexp.MustCompile(`(?i)^(?:data:image/(?:png|jpeg|gif|webp|svg\+xml);base64,[a-z0-9+/=]+|/[^\s"']*|#[^\s"']*)$`)
+	// pixel-grade read receipt on a private document (01 §2.6). Inline data: or a
+	// same-document fragment only.
+	//
+	// This used to also admit `/[^\s"']*` for "root-relative, therefore first-party". That
+	// branch made the sentence above false in two ways, and the second was a real bypass:
+	//
+	//   1. A root-relative URL still performs a network fetch. Same-origin, but the request
+	//      happens, so "must not reach the network" was aspirational rather than enforced.
+	//   2. `//evil.example/px.gif` matches `/[^\s"']*` — one slash, then more characters —
+	//      and a protocol-relative URL resolves against the PAGE's scheme, i.e. straight to
+	//      an external host. `<img src="//evil.example/px.gif">` survived verbatim, which is
+	//      exactly the read receipt this rule exists to prevent.
+	//
+	// Dropping the branch closes (2) and makes (1) true. Nothing in the repo depended on it:
+	// the first-party <script src="/ui/static/...">/<link> tags on the viewer are injected
+	// AFTER sanitization and never pass through this policy.
+	reSafeImageURL = regexp.MustCompile(`(?i)^(?:data:image/(?:png|jpeg|gif|webp|svg\+xml);base64,[a-z0-9+/=]+|#[^\s"']*)$`)
 	// Paint values: a literal colour, or a reference to a def in this same document.
 	// Named colours are matched as a bare word, which is why "burlywood" cannot be
 	// confused with a url( ... ) form.

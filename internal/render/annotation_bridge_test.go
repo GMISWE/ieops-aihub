@@ -119,6 +119,32 @@ func TestAnnotationBridge_ValidatesInboundMessages(t *testing.T) {
 	}
 }
 
+// The theme message is the one inbound type that WRITES to the document the agent's content
+// shares. Its vocabulary must stay closed: data-theme is set from d.mode, so a pass-through
+// would let a forged message put arbitrary attribute text on <html>.
+//
+// Structural, like the guard test above — that the check is present in the shipped source.
+// Whether a real cross-frame message lands is browser work, and it is what caught the bug
+// this handler fixes: cookie-preset dark passed every server-side check while clicking the
+// Dark button left the frame light.
+func TestAnnotationBridge_ThemeVocabularyIsClosed(t *testing.T) {
+	if !strings.Contains(annotationBridgeJS, "d.type === 'theme'") {
+		t.Fatal("bridge does not handle the theme message; a live theme switch cannot reach the frame")
+	}
+	for _, mode := range []string{"'light'", "'dark'", "'auto'"} {
+		if !strings.Contains(annotationBridgeJS, "d.mode !== "+mode) {
+			t.Errorf("theme handler does not check for %s — the vocabulary must be enumerated, not validated by shape", mode)
+		}
+	}
+	// The three stylesheet states are exactly what EmbedOptions.themeAttr normalises to. If
+	// one grows a fourth value, this pins the two lists together.
+	for _, mode := range []string{"light", "dark", "auto"} {
+		if got := (EmbedOptions{Theme: mode}).themeAttr(); got != mode {
+			t.Errorf("themeAttr(%q) = %q; the bridge accepts a value the embed cannot stamp", mode, got)
+		}
+	}
+}
+
 // End-to-end through the embed: the bridge must arrive inside the frame under the nonce
 // the inner CSP grants, otherwise our own script is blocked by our own policy.
 func TestSafeEmbed_CarriesConfiguredBridge(t *testing.T) {

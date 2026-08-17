@@ -105,7 +105,17 @@ func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {
 	// Authed UI group. The peer subagents' register* functions attach to
 	// this group so /ui/queue, /ui/wi, /ui/memories all share the session
 	// middleware + the parsed template tree.
-	uiGroup := e.Group("/ui", RequireUISession(sm, pool), uiSecurityHeaders())
+	// Order matters: uiSecurityHeaders() runs BEFORE RequireUISession, not after.
+	//
+	// Reversed, the session check short-circuits an unauthenticated request with a 302 before
+	// the header middleware ever runs, so the login redirect — the one response in this group
+	// that is guaranteed to reach an unauthenticated client — carried no CSP, no nosniff and
+	// no Referrer-Policy. This ordering also makes the attachment observable without a
+	// database, which is why TestUISecurityHeaders_AttachedToAuthedGroup can pin it at all;
+	// the previous arrangement needed a seam in the identity-resolution path just to be
+	// testable. Both middlewares are order-independent in effect (this one only writes
+	// response headers), so nothing is traded for it.
+	uiGroup := e.Group("/ui", uiSecurityHeaders(), RequireUISession(sm, pool))
 	registerUIQueueHandlers(uiGroup, pool, tmpl)
 	registerUIWIHandlers(uiGroup, pool, tmpl)
 	registerUIMemoryHandlers(uiGroup, pool, tmpl)

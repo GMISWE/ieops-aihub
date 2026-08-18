@@ -225,7 +225,7 @@ func TestSpikeArtifact_EmbedsIntoSandboxIntact(t *testing.T) {
 	out := SafeEmbedDocument(h, EmbedOptions{
 		Title:        "aihub#240 spike",
 		BridgeScript: AnnotationBridgeFor("https://aihub.example"),
-		nonce:        "SPIKE",
+		Nonce:        "SPIKE",
 	})
 
 	if got := sandboxAttrOf(t, out); got != "allow-scripts" {

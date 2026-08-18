@@ -139,7 +139,7 @@ func TestEscapeJSONForScriptTag_Basic(t *testing.T) {
 // path) contains none of them.
 func TestAnnotHTML_V2_DataIslandAndScaffold(t *testing.T) {
 	commits := marshalCommits(t, []CommitEntry{openCommitWithQuote(), resolvedCommit()})
-	annotHTML := buildAnnotationHTML("mem_42", annotSpecBody, commits)
+	annotHTML := buildAnnotationHTML("mem_42", annotSpecBody, commits, "TESTNONCE")
 
 	if annotHTML == "" {
 		t.Fatal("buildAnnotationHTML returned empty string")
@@ -181,7 +181,7 @@ func TestAnnotHTML_V2_DataIslandAndScaffold(t *testing.T) {
 // the annotator.js and annot.js script tags.
 func TestAnnotHTML_V2_UIPathHasScripts(t *testing.T) {
 	commits := marshalCommits(t, []CommitEntry{openCommitWithQuote()})
-	annotHTML := buildAnnotationHTML("mem_42", annotSpecBody, commits)
+	annotHTML := buildAnnotationHTML("mem_42", annotSpecBody, commits, "TESTNONCE")
 	// Append the script tags as the /ui path does.
 	annotHTML += "\n<script src=\"/ui/static/annotator.js\" defer></script>\n<script src=\"/ui/static/annot.js\" defer></script>\n"
 
@@ -212,7 +212,7 @@ func TestAnnotHTML_V2_UIPathHasScripts(t *testing.T) {
 //   - The body text is also HTML-escaped in the flat list.
 func TestAnnotHTML_V2_IslandEscaping(t *testing.T) {
 	commits := marshalCommits(t, []CommitEntry{xssCommit()})
-	annotHTML := buildAnnotationHTML("mem_xss", annotSpecBody, commits)
+	annotHTML := buildAnnotationHTML("mem_xss", annotSpecBody, commits, "TESTNONCE")
 
 	if annotHTML == "" {
 		t.Fatal("buildAnnotationHTML returned empty for xss commit")
@@ -258,7 +258,7 @@ func TestAnnotHTML_V2_IslandEscaping(t *testing.T) {
 //   - resolved commit has legacy AI reply + no inline forms
 func TestAnnotHTML_V2_FlatList(t *testing.T) {
 	commits := marshalCommits(t, []CommitEntry{openCommitWithQuote(), resolvedCommit()})
-	annotHTML := buildAnnotationHTML("mem_spec_99", annotSpecBody, commits)
+	annotHTML := buildAnnotationHTML("mem_spec_99", annotSpecBody, commits, "TESTNONCE")
 
 	// Quote excerpt.
 	if !strings.Contains(annotHTML, "exact selected text") {
@@ -321,7 +321,7 @@ func TestAnnotHTML_V2_QuoteTruncation(t *testing.T) {
 		},
 	}
 	commits := marshalCommits(t, []CommitEntry{e})
-	annotHTML := buildAnnotationHTML("mem_lq", annotSpecBody, commits)
+	annotHTML := buildAnnotationHTML("mem_lq", annotSpecBody, commits, "TESTNONCE")
 
 	// Extract the flat list portion (after the data island </script>) so we
 	// do not accidentally match the full quote in the island JSON.
@@ -832,7 +832,7 @@ func TestBuildVersionHistoryHTML_ReviewLink(t *testing.T) {
 		{ID: "mem_v2", CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
 	}
 	// With nil pool, buildVersionReviewLinks returns empty → no review links.
-	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v2", versions)
+	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v2", versions, "TESTNONCE")
 	if got == "" {
 		t.Fatal("buildVersionHistoryHTML returned empty for 2-version chain")
 	}
@@ -861,7 +861,7 @@ func TestBuildVersionHistoryHTML_CollapsibleToggle(t *testing.T) {
 		{ID: "mem_v1", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
 		{ID: "mem_v2", CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
 	}
-	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions)
+	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions, "TESTNONCE")
 	if !strings.Contains(got, "pf-version-history-toggle") {
 		t.Errorf("missing toggle button class; got: %s", excerptStr(got))
 	}

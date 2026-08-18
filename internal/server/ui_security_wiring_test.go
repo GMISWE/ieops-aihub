@@ -50,6 +50,39 @@ func registeredUI(t *testing.T) func(method, target string) *httptest.ResponseRe
 	}
 }
 
+// assertPageCSP checks that an emitted /ui policy is exactly what uiPageCSPWithNonce builds
+// for the nonce the policy itself carries, and returns that nonce.
+//
+// The policy is no longer a constant a test can compare against: it is minted per response
+// (aihub#243), so the comparable property is "this header is the real builder's output for
+// some nonce", plus the nonce assertions below. Comparing against a rebuilt string rather
+// than spot-checking directives keeps the old tests' strength — a dropped directive still
+// fails here.
+func assertPageCSP(t *testing.T, got, label string) string {
+	t.Helper()
+	if got == "" {
+		t.Fatalf("%s carries no CSP at all — uiSecurityHeaders() is not attached and every "+
+			"page in the group is served without a policy (aihub#144)", label)
+	}
+	nonce := ""
+	for _, src := range parseCSP(got)["script-src"] {
+		if strings.HasPrefix(src, "'nonce-") {
+			nonce = strings.TrimSuffix(strings.TrimPrefix(src, "'nonce-"), "'")
+		}
+		if src == "'unsafe-inline'" {
+			t.Errorf("%s: script-src still admits 'unsafe-inline' — aihub#243 removed it, and "+
+				"with it back CSP stops being a second layer over the sanitizer", label)
+		}
+	}
+	if nonce == "" {
+		t.Fatalf("%s: no nonce in script-src of %q", label, got)
+	}
+	if want := uiPageCSPWithNonce(nonce); got != want {
+		t.Errorf("%s CSP = %q, want %q", label, got, want)
+	}
+	return nonce
+}
+
 // TestUISecurityHeaders_AttachedToAuthedGroup is the test whose absence let the mutation
 // through: a response from the /ui group must carry the policy.
 func TestUISecurityHeaders_AttachedToAuthedGroup(t *testing.T) {
@@ -62,11 +95,7 @@ func TestUISecurityHeaders_AttachedToAuthedGroup(t *testing.T) {
 		t.Run(target, func(t *testing.T) {
 			rec := do(http.MethodGet, target)
 
-			if got := rec.Header().Get("Content-Security-Policy"); got != uiPageCSP {
-				t.Errorf("%s carries CSP %q, want uiPageCSP %q — if empty, uiSecurityHeaders() "+
-					"is not attached to the /ui group and every page in it is served without a "+
-					"policy (aihub#144)", target, got, uiPageCSP)
-			}
+			assertPageCSP(t, rec.Header().Get("Content-Security-Policy"), target)
 			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 				t.Errorf("%s: nosniff = %q, want %q", target, got, "nosniff")
 			}
@@ -108,11 +137,36 @@ func TestUISecurityHeaders_OnUnauthenticatedRedirect(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("expected a redirect to the login page without a session, got %d", rec.Code)
 	}
-	if got := rec.Header().Get("Content-Security-Policy"); got != uiPageCSP {
-		t.Errorf("login redirect CSP = %q, want uiPageCSP", got)
-	}
+	assertPageCSP(t, rec.Header().Get("Content-Security-Policy"), "login redirect")
 	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Errorf("login redirect nosniff = %q", got)
+	}
+}
+
+// TestUISecurityHeaders_NonceIsFreshPerResponse pins the property that makes the nonce worth
+// anything at all.
+//
+// A nonce policy is only stronger than 'unsafe-inline' while the value is unguessable and not
+// reused: if it were a constant, anyone who can get markup onto the page could simply write
+// the nonce into their own <script> and aihub#243 would have bought nothing while reading as
+// though it had. Mutation-verified — replacing newCSPNonce() with a fixed string left every
+// other test in this package green.
+func TestUISecurityHeaders_NonceIsFreshPerResponse(t *testing.T) {
+	do := registeredUI(t)
+	seen := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		n := assertPageCSP(t, do(http.MethodGet, "/ui/wi").Header().Get("Content-Security-Policy"), "/ui/wi")
+		if seen[n] {
+			t.Fatalf("nonce %q reused across responses — a nonce that repeats is a password "+
+				"an attacker only has to read once", n)
+		}
+		seen[n] = true
+		// 16 bytes base64url-encoded, unpadded. Short-circuits the other way this goes wrong:
+		// a "nonce" of a couple of characters is enumerable.
+		if len(n) < 22 {
+			t.Errorf("nonce %q is %d chars, want at least 22 (128 bits base64url) — too little "+
+				"entropy to be unguessable", n, len(n))
+		}
 	}
 }
 
@@ -130,10 +184,7 @@ func TestUISecurityHeaders_AttachedToLoginPages(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/ui/login status %d, want 200 (it must render without a DB)", rec.Code)
 	}
-	if got := rec.Header().Get("Content-Security-Policy"); got != uiPageCSP {
-		t.Errorf("/ui/login CSP = %q, want uiPageCSP — the credential-handling page must not be "+
-			"the one page without a policy", got)
-	}
+	assertPageCSP(t, rec.Header().Get("Content-Security-Policy"), "/ui/login")
 	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Errorf("/ui/login nosniff = %q", got)
 	}
@@ -143,7 +194,7 @@ func TestUISecurityHeaders_AttachedToLoginPages(t *testing.T) {
 //
 // An `about:srcdoc` frame is a local scheme: it fetches no document of its own, so it inherits
 // the policy container of the document that created it. The frame is therefore governed by the
-// CONJUNCTION of uiPageCSP and its own <meta> policy, and safeembed.go carries a hand-written
+// CONJUNCTION of the page policy and its own <meta> policy, and safeembed.go carries a hand-written
 // table of what that conjunction yields per directive.
 //
 // That table went stale within one revision — the inner img-src was widened and the table was
@@ -154,10 +205,18 @@ func TestUISecurityHeaders_AttachedToLoginPages(t *testing.T) {
 // The inner policy is read out of the document SafeEmbedDocument actually emits, so nothing
 // test-only has to be exported from the render package for this to work.
 func TestInnerCSP_IsNoWiderThanThePage(t *testing.T) {
-	frame := render.SafeEmbedDocument("<p>x</p>", render.EmbedOptions{Title: "t"})
+	// The frame carries a bridge and runs on the PAGE's nonce, which is how /ui builds it
+	// (aihub#243). Without the bridge the inner script-src is 'none', which every page policy
+	// trivially admits — so the directive that actually needs checking would go unexercised.
+	const nonce = "PAGENONCE"
+	frame := render.SafeEmbedDocument("<p>x</p>", render.EmbedOptions{
+		Title:        "t",
+		BridgeScript: render.AnnotationBridgeFor("https://aihub.test"),
+		Nonce:        nonce,
+	})
 	inner := metaCSPOf(t, innerDoc(t, frame))
 
-	page := parseCSP(uiPageCSP)
+	page := parseCSP(uiPageCSPWithNonce(nonce))
 	for directive, innerSources := range parseCSP(inner) {
 		pageSources, governed := page[directive]
 		if !governed {
@@ -251,7 +310,7 @@ func cspSourceAdmitted(pageSources []string, innerSource string) bool {
 
 // TestCSPSourceAdmitted_NonceSemantics pins the rule above directly, because the property is
 // easy to state and easy to get backwards, and because TestInnerCSP_IsNoWiderThanThePage only
-// exercises whichever combination uiPageCSP happens to carry today.
+// exercises whichever combination the page policy happens to carry today.
 func TestCSPSourceAdmitted_NonceSemantics(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -275,39 +334,56 @@ func TestCSPSourceAdmitted_NonceSemantics(t *testing.T) {
 	}
 }
 
-// TestInnerCSP_SurvivesTheAihub243Switch is the scenario the conjunction check exists for.
+// TestInnerCSP_FrameBridgeRunsOnThePageNonce is the guard aihub#243 leaves behind.
 //
-// It does not assert that the switch is safe — it is not. It asserts that the check NOTICES,
-// so that whoever implements aihub#243 finds out from a red test rather than from a user
-// reporting that every embedded document is 220 pixels tall. Verified against a real browser:
-// with a page nonce R and a frame nonce N, Chromium refuses the frame's bridge outright.
-func TestInnerCSP_SurvivesTheAihub243Switch(t *testing.T) {
-	frame := render.SafeEmbedDocument("<p>x</p>", render.EmbedOptions{
+// It replaces the pre-change tripwire (TestInnerCSP_SurvivesTheAihub243Switch), which existed
+// to make the switch fail loudly rather than silently. The switch is done; what needs guarding
+// now is that nobody undoes the part of it that is invisible.
+//
+// An `about:srcdoc` frame inherits the embedding page's policy container, so it is governed by
+// the CONJUNCTION of the page policy and its own <meta> policy. Both halves therefore have to name
+// the SAME nonce. If someone drops the Nonce field from either SafeEmbedDocument call site,
+// the frame mints its own value, the conjunction admits neither, annotation-bridge.js never
+// executes, and every embedded document on /ui/wi/:id and /ui/memories/:id silently stops
+// reporting its height and sits at ui.css's 220px starting size with an inner scrollbar.
+// Nothing errors and nothing logs — which is exactly why this is a test and not a comment.
+// Verified against Chromium 131 before the change (mem_XZqSVGRu).
+func TestInnerCSP_FrameBridgeRunsOnThePageNonce(t *testing.T) {
+	const pageNonce = "PAGENONCE"
+	page := parseCSP(uiPageCSPWithNonce(pageNonce))["script-src"]
+
+	// Built the way /ui builds it: the frame is handed the page's nonce.
+	shared := render.SafeEmbedDocument("<p>x</p>", render.EmbedOptions{
+		Title:        "t",
+		BridgeScript: render.AnnotationBridgeFor("https://aihub.test"),
+		Nonce:        pageNonce,
+	})
+	sharedScript := parseCSP(metaCSPOf(t, innerDoc(t, shared)))["script-src"]
+	if len(sharedScript) == 0 || !strings.HasPrefix(sharedScript[0], "'nonce-") {
+		t.Fatalf("expected the frame to carry a nonced script-src, got %v", sharedScript)
+	}
+	if !cspSourceAdmitted(page, sharedScript[0]) {
+		t.Error("the page policy refuses the frame's bridge even though both were given the " +
+			"same nonce — the height protocol is dead and every embedded document is 220px tall")
+	}
+
+	// The regression: a frame that mints its own nonce must NOT be admitted. If this ever
+	// passes, the conjunction has been widened back open and the guard above proves nothing.
+	own := render.SafeEmbedDocument("<p>x</p>", render.EmbedOptions{
 		Title:        "t",
 		BridgeScript: render.AnnotationBridgeFor("https://aihub.test"),
 	})
-	inner := parseCSP(metaCSPOf(t, innerDoc(t, frame)))
-	innerScript := inner["script-src"]
-	if len(innerScript) == 0 || !strings.HasPrefix(innerScript[0], "'nonce-") {
-		t.Fatalf("expected the frame to carry a nonced script-src, got %v", innerScript)
+	ownScript := parseCSP(metaCSPOf(t, innerDoc(t, own)))["script-src"]
+	if len(ownScript) == 0 || !strings.HasPrefix(ownScript[0], "'nonce-") {
+		t.Fatalf("expected a self-minted nonced script-src, got %v", ownScript)
 	}
-
-	// Today's page policy admits it.
-	if !cspSourceAdmitted(parseCSP(uiPageCSP)["script-src"], innerScript[0]) {
-		t.Error("today's uiPageCSP should admit the frame's nonced bridge")
+	if ownScript[0] == sharedScript[0] {
+		t.Fatal("a frame built without an explicit Nonce produced the same value as the page " +
+			"nonce — newNonce is not random and this test cannot distinguish the two cases")
 	}
-
-	// aihub#243's page policy does not — and that must be visible here.
-	after := strings.Replace(uiPageCSP, "script-src 'self' 'unsafe-inline'",
-		"script-src 'self' 'nonce-PAGEVALUE'", 1)
-	if after == uiPageCSP {
-		t.Fatal("uiPageCSP no longer matches the string aihub#243 is expected to replace; " +
-			"re-derive this scenario against the current policy")
-	}
-	if cspSourceAdmitted(parseCSP(after)["script-src"], innerScript[0]) {
-		t.Error("the conjunction check does not notice aihub#243's nonce switch. The frame's " +
-			"bridge would be refused by the inherited policy, the height protocol would stop " +
-			"silently, and this test — whose whole purpose is to warn about that — would be green")
+	if cspSourceAdmitted(page, ownScript[0]) {
+		t.Error("the page policy admits a frame nonce it never issued — script-src is wider " +
+			"than a nonce policy should be (has 'unsafe-inline' come back?)")
 	}
 }
 

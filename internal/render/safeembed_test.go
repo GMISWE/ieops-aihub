@@ -358,7 +358,7 @@ func TestSafeEmbed_BridgeScriptIsNonced(t *testing.T) {
 	out := SafeEmbedDocument("<p>x</p>", EmbedOptions{
 		Title:        "t",
 		BridgeScript: "console.log(1)",
-		nonce:        "TESTNONCE",
+		Nonce:        "TESTNONCE",
 	})
 	if doc := innerDoc(t, out); !strings.Contains(doc, `<script nonce="TESTNONCE">`) {
 		t.Errorf("bridge script not nonced\ndocument: %s", doc)
@@ -369,7 +369,7 @@ func TestSafeEmbed_BridgeScriptIsNonced(t *testing.T) {
 }
 
 func TestSafeEmbed_NoBridgeMeansNoScriptSrc(t *testing.T) {
-	out := SafeEmbedDocument("<p>x</p>", EmbedOptions{Title: "t", nonce: "N"})
+	out := SafeEmbedDocument("<p>x</p>", EmbedOptions{Title: "t", Nonce: "N"})
 	if strings.Contains(out, "nonce-N") {
 		t.Errorf("granted a script nonce with no bridge script to run: %s", out)
 	}

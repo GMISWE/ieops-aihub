@@ -1,16 +1,20 @@
 package server
 
 import (
+	"context"
 	"html"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 	htmlparse "golang.org/x/net/html"
 
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 	"github.com/GMISWE/ieops-aihub/internal/render"
 )
 
@@ -163,9 +167,11 @@ func TestArtifactUI_BodyIsSanitized(t *testing.T) {
 // The first two cases are the working stored XSS. Inside <svg>, `style` is foreign content, so
 // a conformant parser treats its contents as markup; the sanitizer's <style> lifter used a
 // bare tokenizer, which sets RAWTEXT unconditionally, and carried a live <img>/<script> out
-// as a CSS body and spliced it back past the policy. uiPageCSP still carries
-// script-src 'unsafe-inline' (aihub#243), so the second layer did not stop it either — which
-// is why this is asserted on the response bytes and not left to CSP.
+// as a CSS body and spliced it back past the policy. When this was written the page policy
+// still carried script-src 'unsafe-inline', so the second layer did not stop it either.
+// aihub#243 has since replaced that with a per-response nonce, which would now refuse the
+// spliced script — but this stays asserted on the response bytes, because sanitization is the
+// control that must hold on its own and CSP is the layer behind it, not the other way round.
 //
 // The remaining cases are the UI-redress half: ordinary CSS that defeated the property
 // allowlist and produced a full-page overlay primitive on an authed viewer.
@@ -285,23 +291,35 @@ func TestArtifactUI_D2StillCompilesAfterSanitizing(t *testing.T) {
 // The /ui policy admits first-party assets, so it cannot be default-src 'none'. What it
 // must still do is refuse every external origin and kill the object/base vectors.
 func TestUIPageCSP_NoExternalOriginsAllowed(t *testing.T) {
+	policy := uiPageCSPWithNonce("TESTNONCE")
 	for _, want := range []string{
 		"default-src 'none'",
-		"script-src 'self' 'unsafe-inline'",
+		// A nonce, not 'unsafe-inline' (aihub#243): an inline script must name this
+		// response's value to run, so agent content cannot execute even if it survives
+		// the sanitizer.
+		"script-src 'self' 'nonce-TESTNONCE'",
 		"connect-src 'self'",
 		"object-src 'none'",
 		"base-uri 'none'",
 		"frame-ancestors 'self'",
 	} {
-		if !strings.Contains(uiPageCSP, want) {
-			t.Errorf("uiPageCSP missing %q: %s", want, uiPageCSP)
+		if !strings.Contains(policy, want) {
+			t.Errorf("policy missing %q: %s", want, policy)
+		}
+	}
+	// 'unsafe-inline' must not creep back into script-src. A browser ignores it once a nonce
+	// is present, so re-adding it would be inert on modern engines and a hole on old ones —
+	// and it would make the policy read as though inline script were allowed.
+	for _, src := range parseCSP(policy)["script-src"] {
+		if src == "'unsafe-inline'" {
+			t.Errorf("script-src admits 'unsafe-inline' again, undoing aihub#243: %s", policy)
 		}
 	}
 	// No scheme-wildcard or wildcard source may appear: those are how a policy quietly
 	// stops constraining anything.
 	for _, forbidden := range []string{" *", "http:", "https:", "data: *"} {
-		if strings.Contains(uiPageCSP, forbidden) {
-			t.Errorf("uiPageCSP admits %q, which defeats origin restriction: %s", forbidden, uiPageCSP)
+		if strings.Contains(policy, forbidden) {
+			t.Errorf("policy admits %q, which defeats origin restriction: %s", forbidden, policy)
 		}
 	}
 }
@@ -316,9 +334,7 @@ func TestUISecurityHeaders_Middleware(t *testing.T) {
 	if err := h(e.NewContext(req, rec)); err != nil {
 		t.Fatal(err)
 	}
-	if got := rec.Header().Get("Content-Security-Policy"); got != uiPageCSP {
-		t.Errorf("CSP = %q, want uiPageCSP", got)
-	}
+	assertPageCSP(t, rec.Header().Get("Content-Security-Policy"), "uiSecurityHeaders")
 	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Error("missing nosniff")
 	}
@@ -333,14 +349,248 @@ func TestUISecurityHeaders_Middleware(t *testing.T) {
 // the whole suite, because the artifact-viewer ordering test exercises a different
 // function entirely. aihub#231 was the same shape of gap: a second render path that
 // nobody wired up to what the first one had.
-// mdHelper resolves the {{md}} closure with its current signature.
+// inlineHandlerRe matches an on*= event-handler attribute inside an opening tag.
+//
+// Anchored on "<" + non-">" so it cannot fire on prose that merely contains the text; the
+// leading \s stops it matching the tail of an ordinary attribute name (content=, action=).
+var inlineHandlerRe = regexp.MustCompile(`<[^>]*\s(on[a-z]+)\s*=`)
+
+// TestUIPage_EveryExecutableInlineScriptCarriesTheNonce closes the gap that mutation testing
+// found and nothing else covered.
+//
+// Removing the nonce attribute from the side-rail script left the ENTIRE suite green, which is
+// the same silent-failure shape aihub#243 exists to eliminate: under a nonce policy an inline
+// script without the attribute is simply refused, so the theme setter stops resolving
+// data-theme (a flash of the wrong palette, or the wrong palette outright) and the side-rail
+// scroll-spy and comment jumps quietly stop working. Nothing errors server-side, the page
+// still renders, and no assertion anywhere notices.
+//
+// So this walks the real response bytes and requires every <script> that the browser would
+// EXECUTE to name the nonce. Two kinds are exempt and both are checked for explicitly rather
+// than skipped loosely:
+//   - <script src="..."> — an external first-party asset, admitted by 'self'. A nonce would be
+//     harmless but is not required, and none of them carry one today.
+//   - <script type="application/json"> — the annotation data island. It is data, not code; the
+//     browser never executes it and script-src does not govern it.
+func TestUIPage_EveryExecutableInlineScriptCarriesTheNonce(t *testing.T) {
+	// Both artifact layouts, because the theme setter is emitted from two DIFFERENT branches
+	// (review pages add the pf-review-page class, spec/plan pages add pf-annot-active) and a
+	// single fixture only ever exercises one of them. Mutation testing found exactly this:
+	// stripping the nonce from the review branch left the suite green while a spec fixture
+	// was the only thing under test.
+	total := 0
+	for _, memType := range []string{"methodology.spec", "methodology.review"} {
+		t.Run(memType, func(t *testing.T) {
+			mem := publicSharedMem()
+			mem.Type = memType
+			mem.WorkItemID = strptr("aihub#243")
+			mem.Content = "# Heading one\n\ntext\n\n## Heading two\n\nmore text\n"
+			// id-BEARING headings, deliberately. buildAnnotationHTML derives its section
+			// dropdown from headings in the rendered HTML, so the default fixture's lone
+			// id-less <h1> makes it return "" — and then the annotation form, which is the
+			// surface that carried the aihub#243 inline-handler bug, never renders and this
+			// scan silently checks nothing. That vacuity is exactly how the bug reached review.
+			mem.RenderedHTML = htmlPtr(
+				`<h1 id="intro">Intro</h1><p>x</p><h2 id="design">Design</h2><p>y</p>`)
+			defer withLoadMemoryOverride(mem, nil)()
+
+			// The side rail reaches for the version chain, which needs a pool this test
+			// does not have.
+			prevVCF := versionChainFn
+			versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+				return nil, nil
+			}
+			defer func() { versionChainFn = prevVCF }()
+
+			e := echo.New()
+			c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/:id/html", "mem_share1")
+			c.SetPath("/ui/artifacts/:id/html")
+			setUser(c, authorUser())
+			// Through the real middleware, because that is what mints the nonce and publishes
+			// it in the header. Calling the handler bare would hand every script an empty
+			// nonce and the assertions below would compare "" against "" and pass on a
+			// broken page.
+			h := uiSecurityHeaders()(handleArtifactHTML(nil))
+			if err := h(c); err != nil {
+				e.HTTPErrorHandler(err, c)
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status %d", rec.Code)
+			}
+			nonce := assertPageCSP(t, rec.Header().Get("Content-Security-Policy"), memType)
+
+			body := rec.Body.String()
+			var executable, external, data int
+			for i := 0; ; {
+				j := strings.Index(body[i:], "<script")
+				if j < 0 {
+					break
+				}
+				start := i + j
+				end := strings.Index(body[start:], ">")
+				if end < 0 {
+					t.Fatalf("unterminated <script tag at %d", start)
+				}
+				tag := body[start : start+end+1]
+				i = start + end + 1
+
+				switch {
+				case strings.Contains(tag, " src="):
+					external++
+				case strings.Contains(tag, `type="application/json"`):
+					data++
+				default:
+					executable++
+					if !strings.Contains(tag, `nonce="`+nonce+`"`) {
+						t.Errorf("executable inline script is not nonced, so the page policy "+
+							"will refuse to run it and whatever it does will silently stop "+
+							"working:\n  %s", tag)
+					}
+				}
+			}
+
+			// aihub#243 review finding: scanning <script> tags ALONE is not enough, and this
+			// test passing while the page shipped a broken handler is the proof. A nonce
+			// authorises script ELEMENTS; script-src-attr falls back to script-src, which
+			// admits an event-handler ATTRIBUTE only via 'unsafe-inline'/'unsafe-hashes'.
+			// Neither is in this policy, so ANY on*= attribute on a /ui page is dead code that
+			// fails on interaction rather than on load — invisible to a load-time probe.
+			for _, m := range inlineHandlerRe.FindAllStringSubmatch(body, -1) {
+				t.Errorf("inline event handler %s= on the %s layout: a CSP nonce cannot "+
+					"authorise handler attributes, so this is refused at interaction time and "+
+					"whatever it does silently stops working. Move it into a nonced <script>.\n  %s",
+					m[1], memType, strings.TrimSpace(m[0]))
+			}
+
+			// The annotation form is only built for the non-review layout; when it is there,
+			// its nonced mirror script must have been among the scripts walked above.
+			if memType != "methodology.review" && !strings.Contains(body, `id="pf-annot-heading"`) {
+				t.Error("the annotation section dropdown did not render, so neither the handler " +
+					"scan nor the script scan covered it — fix the fixture, not the assertion")
+			}
+
+			// Anti-vacuity per layout: each one must at least emit its theme setter.
+			if executable < 1 {
+				t.Errorf("no executable inline scripts on the %s layout — has the fixture "+
+					"stopped exercising the theme setter?", memType)
+			}
+			total += executable
+			t.Logf("%s: %d executable inline, %d external, %d data-island", memType, executable, external, data)
+		})
+	}
+
+	// Across both layouts the known sites (two theme-setter branches, the side rail, and the
+	// annotation form's select mirror) must all have been walked.
+	if total < 3 {
+		t.Errorf("only %d executable inline scripts across both layouts; expected at least 3 "+
+			"(theme setter x2 branches + side rail) — coverage has regressed", total)
+	}
+}
+
+// TestArtifactViewer_SandboxedFrameRunsOnThePageNonce covers the third SafeEmbedDocument call
+// site — the artifact viewer's own frame, reached only by fact.architecture artifacts that
+// carry stored rendered HTML.
+//
+// The {{md}} / {{agentdoc}} helpers on the detail pages are covered by
+// TestUIFuncMap_FramesRunOnThePageNonce, but this one lives in a different file and a
+// different branch, and mutation testing confirmed nothing else notices when its Nonce field
+// is removed: the frame then mints its own value, the inherited page policy refuses the
+// bridge, and the diagram sits at 220px with an inner scrollbar (aihub#243).
+func TestArtifactViewer_SandboxedFrameRunsOnThePageNonce(t *testing.T) {
+	mem := publicSharedMem()
+	mem.Type = "fact.architecture"
+	mem.RenderedHTML = htmlPtr(`<h1>arch</h1><p>body</p>`)
+	defer withLoadMemoryOverride(mem, nil)()
+
+	prevVCF := versionChainFn
+	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+		return nil, nil
+	}
+	defer func() { versionChainFn = prevVCF }()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/:id/html", "mem_share1")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+	h := uiSecurityHeaders()(handleArtifactHTML(nil))
+	if err := h(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	nonce := assertPageCSP(t, rec.Header().Get("Content-Security-Policy"), "artifact viewer")
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "<iframe") {
+		t.Fatal("fact.architecture body was not framed — this test no longer covers the " +
+			"sandboxed viewer path and the mutation it guards would go unnoticed")
+	}
+	// Two levels of escaping: the srcdoc attribute's, then the inner document's own.
+	doc := html.UnescapeString(html.UnescapeString(body))
+	if !strings.Contains(doc, "script-src 'nonce-"+nonce+"'") {
+		t.Errorf("the viewer's frame does not run on the page nonce %q — the inherited page "+
+			"policy will refuse its bridge and the document will stay 220px tall", nonce)
+	}
+	if !strings.Contains(doc, `<script nonce="`+nonce+`">`) {
+		t.Error("the frame's bridge script is not tagged with the page nonce")
+	}
+}
+
+// mdTestNonce is the page nonce the {{md}} / {{agentdoc}} helpers are handed in tests.
+const mdTestNonce = "MDTESTNONCE"
+
+// mdHelper resolves the {{md}} closure and binds the nonce argument, so the callers below —
+// which care about sanitization and diagram ordering, not CSP — keep reading in terms of the
+// three arguments they actually vary. TestUIFuncMap_FramesRunOnThePageNonce covers the bound
+// one.
 func mdHelper(t *testing.T) func(src, origin, theme string) template.HTML {
 	t.Helper()
-	md, ok := uiFuncMap()["md"].(func(string, string, string) template.HTML)
+	md, ok := uiFuncMap()["md"].(func(string, string, string, string) template.HTML)
 	if !ok {
 		t.Fatal("md not registered in uiFuncMap or wrong signature")
 	}
-	return md
+	return func(src, origin, theme string) template.HTML {
+		return md(src, origin, theme, mdTestNonce)
+	}
+}
+
+// TestUIFuncMap_FramesRunOnThePageNonce covers the wiring TestInnerCSP_FrameBridgeRunsOnThePageNonce
+// cannot see.
+//
+// That test proves render.SafeEmbedDocument does the right thing when it is GIVEN the page
+// nonce. This one proves the two /ui template helpers actually give it one. Drop the Nonce
+// field from either closure and the frame mints its own value, the inherited page policy
+// refuses the bridge, and every embedded document on the wi and memory detail pages silently
+// stops reporting its height and sits at 220px (aihub#243).
+func TestUIFuncMap_FramesRunOnThePageNonce(t *testing.T) {
+	agentdoc, ok := uiFuncMap()["agentdoc"].(func(string, string, string, string) template.HTML)
+	if !ok {
+		t.Fatal("agentdoc not registered in uiFuncMap or wrong signature")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		frame string
+	}{
+		{"md", string(mdHelper(t)("hello", "https://aihub.test", "dark"))},
+		{"agentdoc", string(agentdoc("<p>hello</p>", "https://aihub.test", "dark", mdTestNonce))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Two levels of escaping to undo: the srcdoc attribute's, and then the inner
+			// document's own attribute escaping. Stopping after one leaves the policy
+			// reading `script-src &#39;nonce-...&#39;` and the assertion below never matches.
+			doc := html.UnescapeString(html.UnescapeString(tc.frame))
+			if !strings.Contains(doc, "script-src 'nonce-"+mdTestNonce+"'") {
+				t.Errorf("frame CSP does not run on the page nonce %q — the inherited page "+
+					"policy will refuse the bridge and the frame will stay 220px tall\nframe: %.600s",
+					mdTestNonce, doc)
+			}
+			if !strings.Contains(doc, `<script nonce="`+mdTestNonce+`">`) {
+				t.Errorf("bridge script is not tagged with the page nonce\nframe: %.600s", doc)
+			}
+		})
+	}
 }
 
 // attrOf reads a double-quoted attribute value off the opening tag of frame.

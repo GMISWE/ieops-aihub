@@ -1167,7 +1167,7 @@ func TestBuildAnnotationHTML_RouteAware(t *testing.T) {
 	commitsRaw := json.RawMessage(commitsJSON)
 
 	// --- /ui path: buildAnnotationHTML should return non-empty HTML ---
-	annotHTML := buildAnnotationHTML("mem_spec_42", specBody, commitsRaw)
+	annotHTML := buildAnnotationHTML("mem_spec_42", specBody, commitsRaw, "TESTNONCE")
 
 	if annotHTML == "" {
 		t.Fatal("buildAnnotationHTML returned empty string for non-empty commits")
@@ -1220,7 +1220,7 @@ func TestBuildAnnotationHTML_RouteAware(t *testing.T) {
 // TestBuildAnnotationHTML_NoCommitsNoHeadings verifies that an artifact with
 // neither commits nor headings returns an empty annotation fragment.
 func TestBuildAnnotationHTML_NoCommitsNoHeadings(t *testing.T) {
-	got := buildAnnotationHTML("mem_x", "<p>no headings here</p>", nil)
+	got := buildAnnotationHTML("mem_x", "<p>no headings here</p>", nil, "TESTNONCE")
 	if got != "" {
 		t.Errorf("expected empty annotation fragment, got: %s", excerptStr(got))
 	}
@@ -1238,7 +1238,7 @@ func TestBuildAnnotationHTML_UnanchoredGroup(t *testing.T) {
 		// No Anchor set — unanchored.
 	}
 	commitsJSON, _ := jsonMarshal([]CommitEntry{entry})
-	got := buildAnnotationHTML("mem_y", "<h1 id=\"intro\">Intro</h1>", json.RawMessage(commitsJSON))
+	got := buildAnnotationHTML("mem_y", "<h1 id=\"intro\">Intro</h1>", json.RawMessage(commitsJSON), "TESTNONCE")
 	if !strings.Contains(got, "general") {
 		t.Errorf("unanchored commit should appear in general group; got: %s", excerptStr(got))
 	}
@@ -1319,7 +1319,7 @@ func TestBuildVersionHistoryHTML_SingleVersion(t *testing.T) {
 	versions := []domain.MemoryVersionRef{
 		{ID: "mem_v1", CreatedAt: "2024-01-01T00:00:00Z", Status: "active", IsCurrent: true},
 	}
-	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions)
+	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions, "TESTNONCE")
 	if got != "" {
 		t.Errorf("single-version chain must produce empty HTML, got: %s", excerptStr(got))
 	}
@@ -1336,7 +1336,7 @@ func TestBuildVersionHistoryHTML_MultiVersion(t *testing.T) {
 		{ID: "mem_v2", CreatedAt: "2024-06-01T12:00:00Z", Status: "active", IsCurrent: true},
 	}
 	// Viewing mem_v1 (the older version).
-	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions)
+	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions, "TESTNONCE")
 
 	if !strings.Contains(got, "pf-version-history") {
 		t.Errorf("missing pf-version-history class; got: %s", excerptStr(got))
@@ -1372,7 +1372,7 @@ func TestVersionHistoryHTML_RouteAware(t *testing.T) {
 		{ID: "mem_v1", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
 		{ID: "mem_v2", CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
 	}
-	vhHTML := buildVersionHistoryHTML(context.TODO(), nil, "mem_v2", versions)
+	vhHTML := buildVersionHistoryHTML(context.TODO(), nil, "mem_v2", versions, "TESTNONCE")
 	if vhHTML == "" {
 		t.Fatal("buildVersionHistoryHTML returned empty for 2-version chain")
 	}
@@ -1392,10 +1392,10 @@ func TestVersionHistoryHTML_RouteAware(t *testing.T) {
 
 // TestVersionHistoryHTML_NilVersions verifies that a nil/empty slice returns "".
 func TestVersionHistoryHTML_NilVersions(t *testing.T) {
-	if got := buildVersionHistoryHTML(context.TODO(), nil, "mem_x", nil); got != "" {
+	if got := buildVersionHistoryHTML(context.TODO(), nil, "mem_x", nil, "TESTNONCE"); got != "" {
 		t.Errorf("nil versions must produce empty HTML, got: %s", excerptStr(got))
 	}
-	if got := buildVersionHistoryHTML(context.TODO(), nil, "mem_x", []domain.MemoryVersionRef{}); got != "" {
+	if got := buildVersionHistoryHTML(context.TODO(), nil, "mem_x", []domain.MemoryVersionRef{}, "TESTNONCE"); got != "" {
 		t.Errorf("empty versions must produce empty HTML, got: %s", excerptStr(got))
 	}
 }

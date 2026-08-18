@@ -38,9 +38,12 @@ package render
 // <foreignObject> is an HTML integration point, so a <script> inside it is a real HTML script
 // element — and it is on SanitizeArtifactHTML's explicit deny list, which is exactly the point:
 // the sanitizer would have removed it, and the figure is inserted after the sanitizer has run.
-// On the artifact viewer, where the document is inlined into the page rather than framed,
-// uiPageCSP's `script-src 'self' 'unsafe-inline'` then permits it. The same channel forges
-// elements the viewer's own chrome looks up by id.
+// On the artifact viewer, where the document is inlined into the page rather than framed, the
+// page policy used to permit it outright: script-src carried 'unsafe-inline'. aihub#243 has
+// since replaced that with a per-response nonce, so a forged inline script can no longer name
+// a value it is allowed to run under — but this gate stays, and stays load-bearing. It is what
+// stops the injection reaching the bytes at all, and the same channel still forges non-script
+// elements the viewer's own chrome looks up by id, which no script policy governs.
 //
 // # Why a gate rather than sanitizing the output
 //

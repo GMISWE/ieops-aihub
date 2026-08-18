@@ -19,6 +19,8 @@ package server
 // Do not stub these out in ui_routes.go.
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -61,13 +63,55 @@ import (
 func uiSecurityHeaders() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
+			// One nonce per response, minted before the handler runs so everything
+			// downstream — the inline scripts this package emits and the sandboxed frames
+			// render builds — can read the same value off the context (aihub#243).
+			nonce := newCSPNonce()
+			c.Set(uiNonceKey, nonce)
+
 			h := c.Response().Header()
-			h.Set("Content-Security-Policy", uiPageCSP)
+			h.Set("Content-Security-Policy", uiPageCSPWithNonce(nonce))
 			h.Set("X-Content-Type-Options", "nosniff")
 			h.Set("Referrer-Policy", "no-referrer")
 			return next(c)
 		}
 	}
+}
+
+// uiNonceKey is the echo-context key holding this response's CSP nonce.
+//
+// A context value rather than a parameter threaded through every handler: the nonce is
+// per-RESPONSE, and the middleware that mints it is also the one that publishes it in the
+// header, so the two cannot drift. A handler that forgets to read it emits a script without
+// the attribute, which fails loudly in the browser console rather than silently widening the
+// policy — the safe direction for this particular mistake.
+const uiNonceKey = "pf_ui_csp_nonce"
+
+// uiNonce returns the CSP nonce minted for this response by uiSecurityHeaders.
+//
+// Returns "" when called outside the /ui middleware chain. An empty nonce renders as
+// script-src 'nonce-', which matches nothing, so inline scripts are refused rather than
+// admitted — the failure is a dead theme setter, never an open policy.
+func uiNonce(c echo.Context) string {
+	n, _ := c.Get(uiNonceKey).(string)
+	return n
+}
+
+// newCSPNonce mints 128 bits of crypto/rand, base64url-encoded.
+//
+// It must be unpredictable AND fresh per response: a constant or guessable value would let
+// an attacker who can get markup onto the page name the nonce themselves, which is the whole
+// protection aihub#243 bought. TestUISecurityHeaders_NonceIsFreshPerResponse pins both.
+//
+// Fails CLOSED: if the entropy source errors, the empty string yields a policy that admits
+// no inline script at all rather than a guessable nonce that admits an attacker's. Same
+// posture as render.newNonce, and rand.Read does not fail in practice.
+func newCSPNonce() string {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(buf[:])
 }
 
 func RegisterUIRoutes(e *echo.Echo, pool *pgxpool.Pool, cookieSecret []byte) {

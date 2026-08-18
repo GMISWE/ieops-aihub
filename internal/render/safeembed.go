@@ -84,8 +84,21 @@ type EmbedOptions struct {
 	// no flash — the same mechanism ui.css uses on the parent.
 	Theme string
 
-	// nonce is a test seam. Empty means "generate a fresh one".
-	nonce string
+	// Nonce is the CSP nonce the frame's bridge script runs under, and it must be the
+	// SAME per-response nonce the embedding page puts in its own script-src (aihub#243).
+	//
+	// This is not a preference. `about:srcdoc` is a local scheme, so the frame inherits the
+	// embedding document's policy container and is governed by the CONJUNCTION of the page
+	// policy and the inner <meta> one. Once the page moved off 'unsafe-inline' to a nonce,
+	// a frame that minted its own value would present 'nonce-N' against the page's
+	// 'nonce-R': the conjunction admits neither, the bridge never executes, and every
+	// embedded document silently stops reporting its height and sits at ui.css's 220px
+	// starting size with an inner scrollbar. Nothing errors, nothing logs.
+	//
+	// Empty means "mint a fresh one", which is correct ONLY for a frame that is not
+	// embedded in a nonce-carrying page (tests, and the failsafe path). Callers rendering
+	// into a /ui response must pass the page nonce — see uiPageCSPWithNonce.
+	Nonce string
 }
 
 // themeAttr normalises Theme to one of the three values the stylesheet handles.
@@ -118,7 +131,7 @@ func SafeEmbedDocument(agentHTML string, opt EmbedOptions) (out string) {
 		}
 	}()
 
-	nonce := opt.nonce
+	nonce := opt.Nonce
 	if nonce == "" && opt.BridgeScript != "" {
 		nonce = newNonce()
 	}
@@ -194,29 +207,31 @@ func buildInnerDocument(agentHTML string, opt EmbedOptions, nonce string) string
 // `about:srcdoc` is a local scheme, so the frame does not fetch its own document and gets no
 // policy delivery of its own: it INHERITS the policy container of the document that created
 // it. The frame is therefore governed by the conjunction of the embedding page's policy and
-// this one — on /ui that means uiPageCSP AND innerCSP, with the more restrictive directive
+// this one — on /ui that means uiPageCSPWithNonce AND innerCSP, with the more restrictive directive
 // winning in each case. Reading this function as the whole story is wrong, and the mistake is
 // invisible until something breaks.
 //
-// Today the conjunction is benign and each directive still lands where intended:
+// The conjunction is benign and each directive lands where intended:
 //
-//	style-src   uiPageCSP 'self' 'unsafe-inline'  ∧  'unsafe-inline'  → inline OK, d2 paints
-//	font-src    'self' data:                      ∧  data:           → data: OK, webfont loads
-//	img-src     data:                             ∧  data:           → data: only
-//	script-src  'self' 'unsafe-inline'            ∧  'nonce-N'       → only our nonced bridge
+//	style-src   page 'self' 'unsafe-inline'  ∧  'unsafe-inline'  → inline OK, d2 paints
+//	font-src    'self' data:                 ∧  data:            → data: OK, webfont loads
+//	img-src     data:                        ∧  data:            → data: only
+//	script-src  'self' 'nonce-N'             ∧  'nonce-N'        → only our nonced bridge
 //
-// # aihub#243 will break this if it is not accounted for
+// # The script-src row is the one that had to be arranged, not observed
 //
-// aihub#243 replaces uiPageCSP's `script-src 'unsafe-inline'` with a per-response nonce. The
-// page nonce R and this frame's bridge nonce N are different values, so the inherited
-// script-src becomes `'nonce-R'` while the frame's is `'nonce-N'`: the conjunction admits
-// NEITHER, the bridge does not execute, and every embedded document silently stops reporting
-// its height and sits at its 220px starting size with an inner scrollbar. Nothing errors.
+// aihub#243 replaced the page's `script-src 'unsafe-inline'` with a per-response nonce. Had the
+// frame kept minting its own value, the page would present 'nonce-R' and the frame 'nonce-N',
+// the conjunction would admit NEITHER, the bridge would not execute, and every embedded
+// document would silently stop reporting its height and sit at its 220px starting size with an
+// inner scrollbar. Nothing errors and nothing logs; it was reproduced on Chromium 131 before
+// the change.
 //
-// Whoever does aihub#243 must either mint the frame's bridge nonce from the same per-response
-// nonce the page uses, or keep frames on a nonce-compatible script-src. This paragraph exists
-// so that requirement is discovered by reading the code rather than by a user reporting that
-// every document is 220 pixels tall.
+// So the two values are deliberately ONE value: /ui hands the page nonce to SafeEmbedDocument
+// through EmbedOptions.Nonce, and both rows above read 'nonce-N' because they are the same N.
+// A caller that omits it gets a self-minted nonce, which is correct only outside a
+// nonce-carrying page. TestInnerCSP_FrameBridgeRunsOnThePageNonce and
+// TestUIFuncMap_FramesRunOnThePageNonce hold both halves of that in place.
 func innerCSP(nonce string, withScript bool) string {
 	parts := []string{
 		"default-src 'none'",

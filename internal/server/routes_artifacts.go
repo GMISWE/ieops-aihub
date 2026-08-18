@@ -71,33 +71,41 @@ const (
 	// the headers both handlers actually emit.
 	artifactV1CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; " +
 		"form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+)
 
-	// uiPageCSP covers every /ui page: the artifact viewer and the memory/wi detail
-	// pages that render agent markdown through the {{md}} template helper.
-	//
-	// It cannot be as strict as artifactV1CSP because /ui serves its own assets
-	// (ui.css, viewer.css, annot.js, annotator.js, share.js, theme.js, diagram.js)
-	// and emits inline <script> for the synchronous theme setter and the side-rail
-	// IntersectionObserver.
-	//
-	// 'unsafe-inline' in script-src is a KNOWN WEAKENING and is called out rather than
-	// buried: it means CSP alone would not stop an inline script in agent content.
-	// That is why agent content on /ui is sanitized (SanitizeArtifactHTML) rather than
-	// merely policed — sanitization is the primary control here and CSP is the second
-	// layer, not the reverse.
-	//
-	// Removing it is tracked as aihub#243 and is REQUIRED before P1/P2 productionization
-	// — not optional. It was deferred out of aihub#240 because every inline <script> on
-	// the /ui path (the synchronous theme setter, the side-rail IntersectionObserver,
-	// and the page templates) has to take the same per-response nonce, and missing one
-	// fails silently as a blank page or a dead interaction. That is browser-verified
-	// work, so it was scheduled rather than done blind.
-	//
-	// What this policy does buy, even with 'unsafe-inline': no external origin may be
-	// contacted or loaded from, object/embed are dead, <base> cannot be rewritten, and
-	// the page cannot be framed cross-origin.
-	uiPageCSP = "default-src 'none'; " +
-		"script-src 'self' 'unsafe-inline'; " +
+// uiPageCSPWithNonce builds the policy for ONE /ui response: the artifact viewer and the
+// memory/wi detail pages that render agent markdown through the {{md}} / {{agentdoc}} helpers.
+//
+// It cannot be as strict as artifactV1CSP because /ui serves its own assets
+// (ui.css, viewer.css, annot.js, annotator.js, share.js, theme.js, diagram.js)
+// and emits inline <script> for the synchronous theme setter and the side-rail
+// IntersectionObserver.
+//
+// script-src carries a per-response nonce instead of 'unsafe-inline' (aihub#243). That
+// closes the weakening #240 shipped knowingly: with 'unsafe-inline', CSP alone would not
+// stop an inline script in agent content, so sanitization (SanitizeArtifactHTML) was the
+// only real control and CSP was decoration. Now an inline script must name this response's
+// nonce to run, and the nonce is 128 bits of crypto/rand minted per request — an agent
+// authoring content cannot know it, and it is never reused across responses.
+//
+// Note what a nonce does and does not neuter. Adding a nonce to script-src makes browsers
+// IGNORE 'unsafe-inline' (which is why it is now removed rather than left as a fallback for
+// older browsers — leaving it would be a lie in modern ones and a hole in ancient ones), but
+// it does NOT affect 'self'. Every <script src="/ui/static/..."> tag on these pages keeps
+// loading under 'self' untouched; only the three inline blocks this package emits need the
+// attribute.
+//
+// The nonce is ALSO handed to the sandboxed srcdoc frames, and that is load-bearing rather
+// than tidy — see EmbedOptions.Nonce in internal/render/safeembed.go. A srcdoc frame inherits
+// the embedding page's policy container, so a frame minting its own nonce would be refused by
+// this policy and its height-reporting bridge would die silently.
+//
+// What this policy buys beyond script-src: no external origin may be contacted or loaded
+// from, object/embed are dead, <base> cannot be rewritten, and the page cannot be framed
+// cross-origin.
+func uiPageCSPWithNonce(nonce string) string {
+	return "default-src 'none'; " +
+		"script-src 'self' 'nonce-" + nonce + "'; " +
 		"style-src 'self' 'unsafe-inline'; " +
 		"img-src 'self' data:; " +
 		"font-src 'self' data:; " +
@@ -106,7 +114,7 @@ const (
 		"base-uri 'none'; " +
 		"object-src 'none'; " +
 		"frame-ancestors 'self'"
-)
+}
 
 func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
@@ -236,16 +244,20 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			// token vars declared by ui.css.
 			av := render.AssetVersion()
 			theme := themeFromCookie(c)
+			// This response's CSP nonce (aihub#243). Every inline <script> below must carry
+			// it or the policy refuses to run it; the value comes from uiSecurityHeaders,
+			// which put the same nonce in the header.
+			nonce := uiNonce(c)
 			var uiHead strings.Builder
 			// Set data-theme on <html> immediately (inline script runs synchronously).
 			// For review pages, also add pf-review-page class so CSS grid + order work.
 			if mem.Type == "methodology.review" {
-				uiHead.WriteString("<script>(function(){document.documentElement.setAttribute('data-theme','")
+				uiHead.WriteString("<script nonce=\"" + html.EscapeString(nonce) + "\">(function(){document.documentElement.setAttribute('data-theme','")
 				uiHead.WriteString(theme)
 				uiHead.WriteString("');document.addEventListener('DOMContentLoaded',function(){document.body.classList.add('pf-review-page');});")
 				uiHead.WriteString("})();</script>\n")
 			} else {
-				uiHead.WriteString("<script>(function(){document.documentElement.setAttribute('data-theme','")
+				uiHead.WriteString("<script nonce=\"" + html.EscapeString(nonce) + "\">(function(){document.documentElement.setAttribute('data-theme','")
 				uiHead.WriteString(theme)
 				uiHead.WriteString("');")
 				// aihub#138: stabilise the /ui layout for spec/plan regardless of
@@ -366,7 +378,7 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				if !sandboxBody {
 					bodyFragment = wrapH2SectionsForUI(bodyFragment)
 				}
-				annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits)
+				annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits, nonce)
 				// aihub#138 version_history: render version history INSIDE the doc card.
 				// aihub#154: the share control + version history are injected together
 				// just after the first </h1> — share above, version history below — so
@@ -420,7 +432,7 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 						}
 					}
 				}
-				annotHTML += buildSideRail(render.ExtractHeadings(mem.Content), srMeta, srVersions, srComments)
+				annotHTML += buildSideRail(render.ExtractHeadings(mem.Content), srMeta, srVersions, srComments, nonce)
 			}
 		}
 		// aihub#240 D7: hand the body to the sandbox last, so everything above operated on
@@ -436,6 +448,11 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				// Read again rather than reusing the /ui block's local: that one is scoped to
 				// the chrome builder above, and themeFromCookie is a pure cookie read.
 				Theme: themeFromCookie(c),
+				// The frame inherits THIS page's policy container, so its bridge has to run
+				// under THIS page's nonce. Letting SafeEmbedDocument mint its own would leave
+				// the conjunction admitting neither value and kill the height protocol
+				// silently (aihub#243).
+				Nonce: uiNonce(c),
 			})
 		}
 		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBodyWithMeta(bodyFragment, title, backHref, ownerHref, ownerLabel, related, annotHTML)))
@@ -509,7 +526,7 @@ type sideRailComment struct {
 	ID, Author, Body, Status string
 }
 
-func buildSideRail(headings []render.HeadingRef, m sideRailMeta, versions []sideRailVersion, comments []sideRailComment) string {
+func buildSideRail(headings []render.HeadingRef, m sideRailMeta, versions []sideRailVersion, comments []sideRailComment, nonce string) string {
 	var b strings.Builder
 	b.WriteString("<aside id=\"pf-side-rail\">\n")
 	// chev is the collapse caret appended to each card's <summary>.
@@ -609,7 +626,7 @@ func buildSideRail(headings []render.HeadingRef, m sideRailMeta, versions []side
 	b.WriteString("</aside>\n")
 	// aihub#159 step4c: TOC scroll-spy — highlight the side-rail link for the
 	// section currently in view (/ui-only; no-op without IntersectionObserver).
-	b.WriteString(`<script>(function(){var ls=document.querySelectorAll('#pf-side-rail .pf-side-toc a');if(!ls.length||!window.IntersectionObserver)return;var m={};ls.forEach(function(a){m[a.getAttribute('href').slice(1)]=a;});var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){for(var k in m){m[k].classList.remove('active');}var a=m[e.target.id];if(a){a.classList.add('active');}}});},{rootMargin:'-80px 0px -70% 0px'});Object.keys(m).forEach(function(id){var el=document.getElementById(id);if(el){io.observe(el);}});})();(function(){document.querySelectorAll('#pf-side-rail .pf-side-cmt-item').forEach(function(btn){btn.addEventListener('click',function(e){e.stopPropagation();var id=btn.getAttribute('data-commit-id');var mk=document.querySelector('.pf-annot-marker[data-commit-id="'+id+'"]')||document.querySelector('mark[data-commit-id="'+id+'"]');if(mk){mk.scrollIntoView({behavior:'smooth',block:'center'});mk.click();}});});})();</script>` + "\n")
+	b.WriteString(`<script nonce="` + html.EscapeString(nonce) + `">(function(){var ls=document.querySelectorAll('#pf-side-rail .pf-side-toc a');if(!ls.length||!window.IntersectionObserver)return;var m={};ls.forEach(function(a){m[a.getAttribute('href').slice(1)]=a;});var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){for(var k in m){m[k].classList.remove('active');}var a=m[e.target.id];if(a){a.classList.add('active');}}});},{rootMargin:'-80px 0px -70% 0px'});Object.keys(m).forEach(function(id){var el=document.getElementById(id);if(el){io.observe(el);}});})();(function(){document.querySelectorAll('#pf-side-rail .pf-side-cmt-item').forEach(function(btn){btn.addEventListener('click',function(e){e.stopPropagation();var id=btn.getAttribute('data-commit-id');var mk=document.querySelector('.pf-annot-marker[data-commit-id="'+id+'"]')||document.querySelector('mark[data-commit-id="'+id+'"]');if(mk){mk.scrollIntoView({behavior:'smooth',block:'center'});mk.click();}});});})();</script>` + "\n")
 	return b.String()
 }
 
@@ -1035,7 +1052,7 @@ func escapeJSONForScriptTag(b []byte) []byte {
 //
 // Annotations are per-version: only the commits stored on this memory row are
 // rendered (no supersede-chain inheritance — decided 2026-06-03).
-func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage) string {
+func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage, nonce string) string {
 	// Parse commits.
 	var commits []CommitEntry
 	if len(commitsRaw) > 0 {
@@ -1280,8 +1297,9 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage)
 
 	if len(headings) > 0 {
 		b.WriteString("<label for=\"pf-annot-heading\">Section:</label>\n")
-		b.WriteString("<select id=\"pf-annot-heading\" name=\"heading_id\"")
-		b.WriteString(" onchange=\"document.getElementById('pf-annot-htxt').value=this.options[this.selectedIndex].dataset.text\">\n")
+		// data-pf-chrome marks this as OUR element, not the artifact's — see the wiring
+		// script below and chromeEl() in annot.js for why the id alone is not trustworthy.
+		b.WriteString("<select id=\"pf-annot-heading\" data-pf-chrome name=\"heading_id\">\n")
 		b.WriteString("<option value=\"\" data-text=\"\">— general —</option>\n")
 		for _, h := range headings {
 			b.WriteString("<option value=\"")
@@ -1293,7 +1311,33 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage)
 			b.WriteString("</option>\n")
 		}
 		b.WriteString("</select>\n")
-		b.WriteString("<input type=\"hidden\" id=\"pf-annot-htxt\" name=\"heading_text\" value=\"\">\n")
+		b.WriteString("<input type=\"hidden\" id=\"pf-annot-htxt\" data-pf-chrome name=\"heading_text\" value=\"\">\n")
+		// aihub#243: this mirror used to be an inline `onchange=` attribute on the <select>.
+		// A CSP nonce authorises <script> ELEMENTS; it cannot authorise event-handler
+		// ATTRIBUTES — script-src-attr falls back to script-src, and only 'unsafe-inline'
+		// (or 'unsafe-hashes') admits a handler attribute, neither of which this policy has.
+		// So dropping 'unsafe-inline' silently killed the handler: heading_text submitted
+		// empty and the empty value persisted into the stored anchor. Same behaviour, moved
+		// into a nonced element.
+		//
+		// NOT put in annot.js: that file's main() returns unless the viewport is ≥1100px,
+		// while viewer.css only SHOWS this form at ≤1040px. The two windows are disjoint, so
+		// a listener installed there would never run on the pages where this form is visible.
+		//
+		// Queried by [data-pf-chrome] rather than getElementById: the sanitizer allows `id`
+		// globally (d2 figures need it) and the agent body is emitted BEFORE this chrome, so
+		// an artifact carrying id="pf-annot-htxt" would otherwise be written into instead.
+		// data-* is not on the sanitizer's attribute allowlist, so this marker is unforgeable.
+		b.WriteString("<script nonce=\"" + html.EscapeString(nonce) + "\">")
+		b.WriteString("(function(){")
+		b.WriteString("var s=document.querySelector('select[data-pf-chrome][id=\"pf-annot-heading\"]');")
+		b.WriteString("var t=document.querySelector('input[data-pf-chrome][id=\"pf-annot-htxt\"]');")
+		b.WriteString("if(!s||!t)return;")
+		b.WriteString("s.addEventListener('change',function(){")
+		b.WriteString("var o=s.options[s.selectedIndex];t.value=o?(o.getAttribute('data-text')||''):'';")
+		b.WriteString("});")
+		b.WriteString("})();")
+		b.WriteString("</script>\n")
 	} else {
 		b.WriteString("<input type=\"hidden\" name=\"heading_id\" value=\"\">\n")
 		b.WriteString("<input type=\"hidden\" name=\"heading_text\" value=\"\">\n")
@@ -1590,7 +1634,7 @@ var versionChainFn = func(ctx context.Context, pool *pgxpool.Pool, memID string)
 // For versions that have a linked review (keyed via attrs.structured_payload
 // .reviewed_memory_id), a "Review" link is emitted.
 // aihub#138: converted to collapsible <details> and added per-version review link.
-func buildVersionHistoryHTML(ctx context.Context, pool *pgxpool.Pool, memID string, versions []domain.MemoryVersionRef) string {
+func buildVersionHistoryHTML(ctx context.Context, pool *pgxpool.Pool, memID string, versions []domain.MemoryVersionRef, nonce string) string {
 	if len(versions) <= 1 {
 		return ""
 	}
@@ -1602,9 +1646,15 @@ func buildVersionHistoryHTML(ctx context.Context, pool *pgxpool.Pool, memID stri
 	var b strings.Builder
 	b.WriteString("<section class=\"pf-version-history\">\n")
 	nVers := len(versions)
-	b.WriteString("<button type=\"button\" class=\"pf-version-history-toggle\" onclick=\"")
-	b.WriteString("var p=this.nextElementSibling;var c=this.querySelector('.pf-vchev');")
-	b.WriteString("p.hidden=!p.hidden;if(c)c.classList.toggle('open',!p.hidden);\">")
+	// aihub#243: this was an inline `onclick=` attribute. A CSP nonce cannot authorise
+	// event-handler attributes (script-src-attr falls back to script-src, which admits only
+	// 'unsafe-inline'/'unsafe-hashes'), so it would be refused under the current policy.
+	//
+	// This function has no production caller today — aihub#159 moved version history into the
+	// side rail — so nothing was actually broken. It is fixed rather than annotated because a
+	// comment does not survive someone re-wiring it, and a dead inline handler is exactly the
+	// kind of thing that gets re-wired and then silently does nothing.
+	b.WriteString("<button type=\"button\" class=\"pf-version-history-toggle\" data-pf-chrome>")
 	b.WriteString("<span class=\"pf-vchev\"></span>History &mdash; ")
 	b.WriteString(strconv.Itoa(nVers))
 	b.WriteString(" version")
@@ -1612,6 +1662,17 @@ func buildVersionHistoryHTML(ctx context.Context, pool *pgxpool.Pool, memID stri
 		b.WriteString("s")
 	}
 	b.WriteString("</button>\n")
+	b.WriteString("<script nonce=\"" + html.EscapeString(nonce) + "\">")
+	b.WriteString("(function(){")
+	b.WriteString("var b=document.querySelector('button[data-pf-chrome].pf-version-history-toggle');")
+	b.WriteString("if(!b)return;")
+	b.WriteString("b.addEventListener('click',function(){")
+	b.WriteString("var p=b.nextElementSibling;while(p&&p.tagName==='SCRIPT'){p=p.nextElementSibling;}")
+	b.WriteString("if(!p)return;var c=b.querySelector('.pf-vchev');")
+	b.WriteString("p.hidden=!p.hidden;if(c)c.classList.toggle('open',!p.hidden);")
+	b.WriteString("});")
+	b.WriteString("})();")
+	b.WriteString("</script>\n")
 	b.WriteString("<div class=\"pf-version-history-panel\" hidden>\n")
 	b.WriteString("<ol class=\"pf-version-list\">\n")
 	for i, v := range versions {

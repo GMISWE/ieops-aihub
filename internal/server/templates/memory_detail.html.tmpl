@@ -48,9 +48,9 @@
       <div class="bd">
         {{if $.ShowAgentHTML}}
           {{/* The agent's finished page, in the same sandboxed frame the markdown half uses. */}}
-          <div class="pf-embed-wrap">{{agentdoc $.AgentHTML $.Origin $.Theme}}</div>
+          <div class="pf-embed-wrap">{{agentdoc $.AgentHTML $.Origin $.Theme $.Nonce}}</div>
         {{else if $.RenderAsMD}}
-          <div class="pf-embed-wrap">{{md .Content $.Origin $.Theme}}</div>
+          <div class="pf-embed-wrap">{{md .Content $.Origin $.Theme $.Nonce}}</div>
         {{else}}
           <pre class="pf-content-raw">{{.Content}}</pre>
         {{end}}

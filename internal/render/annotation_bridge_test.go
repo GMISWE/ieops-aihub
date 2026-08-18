@@ -151,7 +151,7 @@ func TestSafeEmbed_CarriesConfiguredBridge(t *testing.T) {
 	out := SafeEmbedDocument("<p>hello</p>", EmbedOptions{
 		Title:        "t",
 		BridgeScript: AnnotationBridgeFor("https://aihub.example"),
-		nonce:        "NONCE1",
+		Nonce:        "NONCE1",
 	})
 
 	doc := innerDoc(t, out)

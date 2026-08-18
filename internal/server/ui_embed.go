@@ -166,7 +166,7 @@ func uiFuncMap() template.FuncMap {
 		// attacker-influenceable — the short version is that targetOrigin filters the real
 		// recipient rather than choosing one, so a forged value drops the message instead of
 		// redirecting it.
-		"md": func(src, parentOrigin, theme string) template.HTML {
+		"md": func(src, parentOrigin, theme, nonce string) template.HTML {
 			out, err := render.Markdown(src)
 			if err != nil {
 				// The one path that returns inline markup rather than a frame, deliberately.
@@ -229,6 +229,10 @@ func uiFuncMap() template.FuncMap {
 				BridgeScript: render.AnnotationBridgeFor(parentOrigin),
 				FrameClass:   "pf-embed",
 				Theme:        theme,
+				// The page nonce, not one of the frame's own: a srcdoc frame inherits the
+				// embedding page's policy container, so a self-minted value would be refused
+				// by the page policy and the height protocol would stop silently (aihub#243).
+				Nonce: nonce,
 			}))
 		},
 		// agentdoc renders the agent-authored HTML half of a twin pair into the SAME sandboxed
@@ -242,12 +246,13 @@ func uiFuncMap() template.FuncMap {
 		// gap in the sandbox story — the half most likely to contain hand-written markup was the
 		// half with no frame around it. Routing it through here closes that gap for the page the
 		// reader now lands on by default; the viewer's own inlining is aihub#245.
-		"agentdoc": func(rawHTML, parentOrigin, theme string) template.HTML {
+		"agentdoc": func(rawHTML, parentOrigin, theme, nonce string) template.HTML {
 			return template.HTML(render.SafeEmbedDocument(rawHTML, render.EmbedOptions{
 				Title:        "document",
 				BridgeScript: render.AnnotationBridgeFor(parentOrigin),
 				FrameClass:   "pf-embed",
 				Theme:        theme,
+				Nonce:        nonce,
 			}))
 		},
 		"truncate": func(n int, s string) string {

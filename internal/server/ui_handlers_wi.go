@@ -295,6 +295,7 @@ type wiDetailPageData struct {
 	Active         string
 	Theme          string
 	Origin         string // scheme://host of this request; frames post their height to it
+	Nonce          string // this response's CSP nonce; the frame's bridge must run under it (aihub#243)
 	User           *UserContext
 	WI             *domain.WorkItem
 	WIType         string     // flattened *WI.WIType
@@ -881,6 +882,7 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			Active: "wi",
 			Theme:  themeFromCookie(c),
 			Origin: pageOrigin(c),
+			Nonce:  uiNonce(c),
 			User:   u,
 		}
 

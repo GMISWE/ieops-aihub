@@ -134,6 +134,7 @@ type memDetailPageData struct {
 	Active     string
 	Theme      string
 	Origin     string // scheme://host of this request; frames post their height to it
+	Nonce      string // this response's CSP nonce; the frame's bridge must run under it (aihub#243)
 	User       *UserContext
 	Memory     *domain.Memory
 	BackQuery  string
@@ -374,6 +375,7 @@ func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 			Active:    "memories",
 			Theme:     themeFromCookie(c),
 			Origin:    pageOrigin(c),
+			Nonce:     uiNonce(c),
 			User:      u,
 			Memory:    mem,
 			BackQuery: c.QueryParam("back"),

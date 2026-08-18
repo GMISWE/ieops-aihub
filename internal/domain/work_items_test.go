@@ -71,9 +71,46 @@ func TestNgrams_ShortString(t *testing.T) {
 
 // ─── setOverlap ────────────────────────────────────────────────────────────
 
+// aihub#251: both sides declaring nothing is an ABSENCE of evidence, not
+// evidence of similarity. The pre-fix code returned 1.0 here, which meant
+// "neither wi has labels" (or "neither has declared_resources") silently
+// contributed a full +0.2 (or +0.2) to the composite dedup score for every
+// single candidate that also had no labels/resources -- a major driver of
+// the reported false-positive collisions. Deliberately changed from the
+// previous expectation of 1.0 to 0: no overlap can be demonstrated between
+// two empty sets, so none should be credited.
 func TestSetOverlap_BothEmpty(t *testing.T) {
-	if got := setOverlap(nil, nil); got != 1.0 {
-		t.Errorf("got %v, want 1.0", got)
+	if got := setOverlap(nil, nil); got != 0 {
+		t.Errorf("got %v, want 0 (absence of evidence is not evidence of similarity)", got)
+	}
+}
+
+// aihub#251 defect 1 regression: setOverlap must de-duplicate BOTH sides
+// before computing intersection/union, so duplicate entries in either input
+// can never push the ratio above 1.0. Pre-fix, this exact shape
+// (setOverlap(["repo:ieops"], five copies of "repo:ieops")) returned 5.0.
+func TestSetOverlap_DuplicateLadenInputsStayBounded(t *testing.T) {
+	got := setOverlap([]string{"repo:ieops"}, []string{"repo:ieops", "repo:ieops", "repo:ieops", "repo:ieops", "repo:ieops"})
+	if got < 0 || got > 1 {
+		t.Fatalf("setOverlap must stay within [0,1], got %v", got)
+	}
+	// Both sides dedup to the single-element set {"repo:ieops"} -> exact match.
+	if got != 1.0 {
+		t.Errorf("got %v, want 1.0 (both sides are the same set once deduplicated)", got)
+	}
+}
+
+// A duplicate-laden input that is only a PARTIAL match must still land on the
+// correct deduplicated Jaccard value, not merely "somewhere in [0,1]" -- a
+// clamp that discarded the real ratio would pass a bounds-only check while
+// still being wrong.
+func TestSetOverlap_DuplicateLadenPartialMatch(t *testing.T) {
+	// setA dedups to {a,b}; setB dedups to {b,c} regardless of how many times
+	// "b" is repeated. intersection={b} (1), union={a,b,c} (3) -> 1/3.
+	got := setOverlap([]string{"a", "b"}, []string{"b", "b", "b", "c"})
+	want := 1.0 / 3.0
+	if math.Abs(got-want) > 1e-9 {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 
@@ -98,6 +135,172 @@ func TestSetOverlap_HalfMatch(t *testing.T) {
 	want := 1.0 / 3.0
 	if math.Abs(got-want) > 1e-9 {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// ─── declaredResourceKeys / candidateScore (aihub#251 defect 2 & 3) ────────
+//
+// req.DeclaredResources / c.Resources hold an array of OBJECTS (the current
+// {"type","uri","intent"} shape, and the legacy pre-aihub#238
+// {"type":"file_scope","value":...} shape that may still live on old rows --
+// see TestCreateWorkItem_RejectsUnknownTypeBeforeTouchingDB in
+// declared_resources_wiring_test.go). The pre-fix code unmarshalled these
+// straight into []string, which always failed silently (`_ = json.Unmarshal`)
+// and left both sides nil -- and setOverlap(nil, nil) then returned 1.0,
+// adding a constant +0.2 to every candidate's score regardless of whether the
+// resources actually matched.
+
+func TestDeclaredResourceKeys_ObjectShapeParsesAndCompares(t *testing.T) {
+	a, aOK := declaredResourceKeys(json.RawMessage(`[{"type":"path","uri":"file:internal/a.go","intent":"write"}]`))
+	if !aOK {
+		t.Fatalf("expected ok=true for well-formed object-shaped resources")
+	}
+	b, bOK := declaredResourceKeys(json.RawMessage(`[{"type":"path","uri":"file:internal/b.go","intent":"write"}]`))
+	if !bOK {
+		t.Fatalf("expected ok=true for well-formed object-shaped resources")
+	}
+	// Two DIFFERENT files must not be treated as a match.
+	if got := setOverlap(a, b); got == 1.0 {
+		t.Errorf("unrelated resources scored as a perfect match: %v", got)
+	}
+
+	same, sameOK := declaredResourceKeys(json.RawMessage(`[{"type":"path","uri":"file:internal/a.go","intent":"write"}]`))
+	if !sameOK {
+		t.Fatalf("expected ok=true")
+	}
+	if got := setOverlap(a, same); got != 1.0 {
+		t.Errorf("identical resource entries should score 1.0, got %v", got)
+	}
+}
+
+func TestDeclaredResourceKeys_LegacyFileScopeShapeParses(t *testing.T) {
+	keys, ok := declaredResourceKeys(json.RawMessage(`[{"type":"file_scope","value":"aihub:internal/a.go"}]`))
+	if !ok {
+		t.Fatalf("expected ok=true for legacy file_scope/value shape")
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key, got %#v", keys)
+	}
+}
+
+func TestDeclaredResourceKeys_EmptyIsOKNotAFailure(t *testing.T) {
+	for _, raw := range []json.RawMessage{nil, json.RawMessage(""), json.RawMessage("[]"), json.RawMessage("null")} {
+		keys, ok := declaredResourceKeys(raw)
+		if !ok {
+			t.Errorf("raw=%q: expected ok=true for empty/absent resources", string(raw))
+		}
+		if len(keys) != 0 {
+			t.Errorf("raw=%q: expected no keys, got %#v", string(raw), keys)
+		}
+	}
+}
+
+func TestDeclaredResourceKeys_UnparseableReturnsNotOK(t *testing.T) {
+	_, ok := declaredResourceKeys(json.RawMessage(`not json`))
+	if ok {
+		t.Fatalf("expected ok=false for unparseable resource JSON")
+	}
+}
+
+func TestDeclaredResourceKeys_EntryMatchingNeitherShapeIsSkippedNotFatal(t *testing.T) {
+	// An entry with neither `uri` nor `value` matches neither known shape --
+	// it must be skipped, not crash and not silently count as a match.
+	keys, ok := declaredResourceKeys(json.RawMessage(`[{"type":"path"}]`))
+	if !ok {
+		t.Fatalf("expected ok=true (the payload itself is valid JSON)")
+	}
+	if len(keys) != 0 {
+		t.Errorf("expected the unmatched entry to be skipped, got %#v", keys)
+	}
+}
+
+// TestCandidateScore_UnrelatedItemsSharingLabelAndResourceStayBelowDuplicateThreshold
+// is the composite-score-level regression: two topically UNRELATED work items
+// that happen to share one label and one declared resource -- where the
+// shared label and resource are each represented with heavy duplicate entries
+// on the candidate side, exactly the shape that produced 122-125% scores in
+// production -- must not reach the 0.90 CONFLICT_DUPLICATE threshold, and the
+// score must never exceed 1.0.
+//
+// checkDedup itself needs a live work_items table (AIHUB_TEST_DB), so this
+// exercises the composite scoring logic through candidateScore, the pure
+// helper the fix factors it into, instead.
+func TestCandidateScore_UnrelatedItemsSharingLabelAndResourceStayBelowDuplicateThreshold(t *testing.T) {
+	req := &CreateWorkItemRequest{
+		Goal:              "Fix the login page CSS spacing bug",
+		Labels:            []string{"bug"},
+		DeclaredResources: json.RawMessage(`[{"type":"path","uri":"file:internal/a.go","intent":"write"}]`),
+	}
+	// Topically unrelated goal text, but the SAME label repeated 8x and the
+	// SAME resource repeated 5x -- the duplicate-laden shape that inflated
+	// setOverlap far past 1.0 pre-fix (labelSim alone would have been 8.0).
+	candidateGoal := "Add GPU billing CSV export format"
+	candidateLabels := []string{"bug", "bug", "bug", "bug", "bug", "bug", "bug", "bug"}
+	candidateResources := json.RawMessage(`[
+		{"type":"path","uri":"file:internal/a.go","intent":"write"},
+		{"type":"path","uri":"file:internal/a.go","intent":"write"},
+		{"type":"path","uri":"file:internal/a.go","intent":"write"},
+		{"type":"path","uri":"file:internal/a.go","intent":"write"},
+		{"type":"path","uri":"file:internal/a.go","intent":"write"}
+	]`)
+
+	score, valid := candidateScore(req, candidateGoal, candidateLabels, candidateResources)
+	if !valid {
+		t.Fatalf("expected a valid in-range score, candidateScore reported invalid")
+	}
+	if score > 1.0 {
+		t.Fatalf("score exceeds 100%%: %v", score)
+	}
+	if score >= 0.90 {
+		t.Errorf("unrelated work items falsely flagged as CONFLICT_DUPLICATE: score=%v", score)
+	}
+}
+
+// TestCandidateScore_IdenticalGoalNoLabelsNoResourcesReachesDuplicateThreshold
+// is the review WARN-finding regression (mem_veTEPhFm, aihub#251 follow-up):
+// when NEITHER side declares labels NOR declared_resources, that dimension is
+// genuinely inapplicable (no evidence either way), so its 0.2+0.2 weight must
+// be dropped and renormalized onto the 0.6 goal-similarity weight rather than
+// scored as a hard 0. Byte-identical goal text with nothing else declared is
+// about as strong a duplicate signal as this system can ever see; pre-fix it
+// scored a flat 0.6 (below even the 0.65 candidates gate) because the
+// composite was structurally capped by two zeroed-out, still-included terms.
+func TestCandidateScore_IdenticalGoalNoLabelsNoResourcesReachesDuplicateThreshold(t *testing.T) {
+	req := &CreateWorkItemRequest{
+		Goal:              "Fix the login page CSS spacing bug",
+		Labels:            []string{},
+		DeclaredResources: json.RawMessage(`[]`),
+	}
+	score, valid := candidateScore(req, req.Goal, []string{}, json.RawMessage(`[]`))
+	if !valid {
+		t.Fatalf("expected a valid in-range score, candidateScore reported invalid")
+	}
+	if score < 0.90 {
+		t.Errorf("byte-identical goal with no labels/resources on either side should reach the duplicate threshold; got %v (want >= 0.90, ideally 1.0)", score)
+	}
+}
+
+// TestCandidateScore_UnrelatedGoalsSharingOnlyALabelStayBelowCandidateThreshold
+// guards the renormalization tradeoff the review explicitly called out:
+// renormalizing weights onto applicable components increases the influence
+// of whichever component IS present, so this checks that two topically
+// UNRELATED work items that merely share one label -- with neither side
+// declaring any resources, so the resource term drops out and its weight
+// moves onto goal+label -- still stay well below the 0.65 "candidates" gate.
+// This is the aihub#251 false-positive regression that started this whole
+// work item; renormalization must not resurrect it.
+func TestCandidateScore_UnrelatedGoalsSharingOnlyALabelStayBelowCandidateThreshold(t *testing.T) {
+	req := &CreateWorkItemRequest{
+		Goal:              "Fix the login page CSS spacing bug",
+		Labels:            []string{"bug"},
+		DeclaredResources: json.RawMessage(`[]`),
+	}
+	score, valid := candidateScore(req, "Add GPU billing CSV export format", []string{"bug"}, json.RawMessage(`[]`))
+	if !valid {
+		t.Fatalf("expected a valid in-range score, candidateScore reported invalid")
+	}
+	if score >= 0.65 {
+		t.Errorf("unrelated work items sharing only a label falsely reached the candidates gate: score=%v (want < 0.65)", score)
 	}
 }
 

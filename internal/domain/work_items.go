@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -323,25 +324,186 @@ func ngrams(s string, n int) map[string]bool {
 	return out
 }
 
+// setOverlap computes the Jaccard index |A∩B|/|A∪B| over the sets obtained by
+// DE-DUPLICATING both a and b. Both sides must be deduplicated before
+// intersection and union are computed, so duplicate entries in either input
+// can never push the ratio above 1.0.
+//
+// aihub#251 defect 1: the previous version only deduplicated side a into a
+// set, then counted the intersection by iterating the RAW (non-deduplicated)
+// slice b and sized the union from raw slice lengths (len(a)+len(b)). A
+// duplicate-laden b (e.g. an existing candidate's stored labels containing
+// the same label 5+ times) could then push intersection above len(a) and the
+// ratio arbitrarily far past 1.0 -- the reported ">100% similar" scores.
+//
+// Empty-case semantics: both-empty returns 0, not 1. "Neither side declared
+// anything" is an ABSENCE of evidence, not evidence of similarity -- treating
+// it as a perfect match manufactured a constant score bonus for every
+// candidate that also happened to have no labels/resources, which was a
+// second major driver of the false-positive collisions (aihub#251).
 func setOverlap(a, b []string) float64 {
-	if len(a) == 0 && len(b) == 0 {
-		return 1.0
-	}
 	setA := make(map[string]bool, len(a))
 	for _, v := range a {
 		setA[v] = true
 	}
-	intersection := 0
+	setB := make(map[string]bool, len(b))
 	for _, v := range b {
-		if setA[v] {
+		setB[v] = true
+	}
+	if len(setA) == 0 && len(setB) == 0 {
+		return 0
+	}
+	intersection := 0
+	for v := range setA {
+		if setB[v] {
 			intersection++
 		}
 	}
-	union := len(a) + len(b) - intersection
+	union := len(setA) + len(setB) - intersection
 	if union == 0 {
 		return 0
 	}
 	return float64(intersection) / float64(union)
+}
+
+// weightedComponent decides whether one non-goal dedup dimension (labels or
+// resources) is APPLICABLE and, if so, what it scores.
+//
+// aihub#251 review follow-up (mem_veTEPhFm, WARN): a dimension is
+// inapplicable ONLY when BOTH sides are empty -- neither side offers any
+// evidence at all, so it should carry no weight in the composite score
+// rather than being scored a hard 0 (which structurally capped the score at
+// 0.6 whenever neither side declared labels/resources, even for a
+// byte-identical goal). When exactly ONE side is empty and the other is not,
+// that IS genuine evidence of difference -- the dimension is applicable and
+// legitimately contributes a real 0, not a dropped weight.
+//
+// setOverlap alone cannot distinguish these two cases: it returns 0 for both
+// the both-empty and the one-empty shape. That distinction has to be made
+// here, from the raw (pre-overlap) inputs, before calling setOverlap.
+func weightedComponent(a, b []string, weight float64) (score float64, appliedWeight float64) {
+	if len(a) == 0 && len(b) == 0 {
+		return 0, 0
+	}
+	return setOverlap(a, b), weight
+}
+
+// declaredResourceKeys parses a declared_resources JSON payload into a slice
+// of canonical per-entry keys suitable for setOverlap. It handles both the
+// current entry shape ({"type":"path","uri":"file:...","intent":"write"}) and
+// the legacy pre-aihub#238 shape that may still be stored on old rows
+// ({"type":"file_scope","value":"..."} -- see
+// TestCreateWorkItem_RejectsUnknownTypeBeforeTouchingDB in
+// declared_resources_wiring_test.go, which confirms new requests can no
+// longer create this shape but says nothing about what is already stored).
+// Entries matching neither shape are skipped rather than causing a crash or
+// being silently treated as a match.
+//
+// ok is false ONLY when raw is non-empty and is not parseable as a JSON array
+// of objects -- a genuine parse failure. It is true (with a nil/empty key
+// slice) for absent, empty-array, or null input, since declaring no resources
+// at all is not a parse error.
+//
+// aihub#251 defect 2: the previous code unmarshalled this same object-array
+// JSON directly into []string, which always fails for object entries; the
+// error was discarded (`_ = json.Unmarshal(...)`), leaving both sides nil.
+// setOverlap(nil, nil) then hit its both-empty branch (formerly 1.0),
+// silently adding a constant +0.2 to the composite score for every candidate
+// regardless of whether resources actually matched. Callers here MUST treat
+// ok=false as "not comparable" (contribute no similarity), never as a match.
+func declaredResourceKeys(raw json.RawMessage) (keys []string, ok bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" || trimmed == "[]" {
+		return nil, true
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, false
+	}
+	keys = make([]string, 0, len(items))
+	for _, item := range items {
+		typ, _ := item["type"].(string)
+		if typ == "" {
+			continue
+		}
+		if uri, ok := item["uri"].(string); ok && uri != "" {
+			keys = append(keys, typ+":"+uri)
+			continue
+		}
+		if val, ok := item["value"].(string); ok && val != "" {
+			keys = append(keys, typ+":"+val)
+			continue
+		}
+		// Matches neither the current (`uri`) nor legacy (`value`) shape --
+		// skip it rather than crash or let it silently vanish into a
+		// both-empty comparison.
+	}
+	return keys, true
+}
+
+// candidateScore computes the F3 composite dedup similarity score for one
+// existing candidate work item against an incoming create request. It has no
+// DB access, so it is directly unit-testable without a live work_items table
+// (checkDedup itself needs AIHUB_TEST_DB; the scoring math does not).
+//
+// The nominal weights are goal 0.6 / labels 0.2 / resources 0.2. Goal
+// similarity is always applicable (Goal is a required non-empty field --
+// CreateWorkItem rejects an empty goal before dedup ever runs). Labels and
+// resources are each applicable UNLESS both sides are empty for that
+// dimension (weightedComponent decides this from the raw inputs -- see its
+// doc comment). An inapplicable dimension drops its weight entirely rather
+// than contributing a hard 0, and the remaining applicable weights are
+// renormalized to sum to 1.0, so an absent dimension neither manufactures a
+// spurious match (the pre-aihub#251 bug) nor dilutes the score toward zero
+// for the common case of a minimal work item with no labels/resources at all
+// (aihub#251 review follow-up, mem_veTEPhFm WARN finding).
+//
+// An unparseable declared_resources payload on either side (reqOK or cOK
+// false) is treated as APPLICABLE-but-zero, not inapplicable: malformed JSON
+// in a stored column is abnormal/corrupt data, not mere absence of
+// information, so it must never be dropped in a way that could inflate the
+// score -- it stays a real, weighted 0 (matches the existing "unparseable
+// never counts as a match" rule from defect 2).
+//
+// valid is false if the computed score falls outside [0,1] -- structurally
+// this should still be impossible, since sim/labelScore/resScore are each
+// bounded to [0,1] and the composite is a weighted average over weights that
+// are re-scaled to sum to totalWeight (never zero: goalWeight alone is
+// 0.6), but this is a defensive backstop (aihub#251 defect 3): an
+// out-of-range score is a programming bug in one of the sub-scores, not
+// something that should ever be compared to the 0.90/0.65 thresholds or
+// formatted into a user-facing ">100% similar" string. Callers must fail
+// OPEN on valid=false (skip this candidate), consistent with the existing
+// "dedup is best-effort" philosophy applied when the candidate query itself
+// fails.
+func candidateScore(req *CreateWorkItemRequest, goal string, labels []string, resources json.RawMessage) (score float64, valid bool) {
+	sim := jaccardNGram(req.Goal, goal, 3)
+
+	labelScore, labelWeight := weightedComponent(req.Labels, labels, 0.2)
+
+	reqRes, reqOK := declaredResourceKeys(req.DeclaredResources)
+	cRes, cOK := declaredResourceKeys(resources)
+	var resScore, resWeight float64
+	if !reqOK || !cOK {
+		resScore, resWeight = 0, 0.2
+	} else {
+		resScore, resWeight = weightedComponent(reqRes, cRes, 0.2)
+	}
+
+	const goalWeight = 0.6
+	totalWeight := goalWeight + labelWeight + resWeight
+	if totalWeight <= 0 {
+		// Unreachable today: goalWeight alone keeps totalWeight >= 0.6,
+		// since Goal is required non-empty. Guarded anyway rather than ever
+		// dividing by zero if that invariant is ever relaxed.
+		return 0, false
+	}
+
+	score = (goalWeight*sim + labelWeight*labelScore + resWeight*resScore) / totalWeight
+	if score < 0 || score > 1 {
+		return score, false
+	}
+	return score, true
 }
 
 // checkDedup performs the F3 dedup check within a transaction.
@@ -403,20 +565,24 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 		}
 		c.Labels = labelsRaw
 
-		sim := jaccardNGram(req.Goal, c.Goal, 3)
-		labelSim := setOverlap(req.Labels, c.Labels)
 		// C7: include resource overlap (resSim) per design §11 formula.
-		// JSON errors here just degrade dedup to label+goal scoring — they
-		// must not abort the create-work-item flow.
-		var reqRes, cRes []string
-		if req.DeclaredResources != nil {
-			_ = json.Unmarshal(req.DeclaredResources, &reqRes)
+		// candidateScore is a pure helper (aihub#251) so the scoring math is
+		// unit-testable without a live DB; it also carries the setOverlap and
+		// declared_resources fixes for defects 1 and 2 (see their doc
+		// comments above).
+		score, valid := candidateScore(req, c.Goal, c.Labels, c.Resources)
+		if !valid {
+			// aihub#251 defect 3: an out-of-range score is a programming bug
+			// in a sub-score, not a real signal. Fail OPEN — skip scoring
+			// this one candidate — consistent with the existing "dedup is
+			// best-effort" philosophy applied above when the query itself
+			// fails, and never let a >100% (or negative) score reach a
+			// threshold comparison or a user-facing message.
+			fmt.Fprintf(os.Stderr,
+				"aihub: checkDedup: candidate %s produced out-of-range score %.4f, skipping (aihub#251)\n",
+				c.Slug, score)
+			continue
 		}
-		if c.Resources != nil {
-			_ = json.Unmarshal(c.Resources, &cRes)
-		}
-		resSim := setOverlap(reqRes, cRes)
-		score := 0.6*sim + 0.2*labelSim + 0.2*resSim
 
 		if score >= 0.90 {
 			return NewErrDetails(ErrConflictDuplicate,

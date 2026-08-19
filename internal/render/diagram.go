@@ -46,7 +46,10 @@ func (e diagramEntry) expired(now time.Time) bool {
 //   - Never caching a timeout means every request re-enters a compile that is,
 //     by hypothesis, wedged — and because a wedged goja layout cannot be
 //     interrupted (see renderDiagramUncached), each of those abandons a
-//     goroutine. That turns one bad figure into an unbounded leak under load.
+//     goroutine. That turns one bad figure into a leak that scales with request
+//     rate. Since aihub#244 the abandoned count is also hard-capped, so the leak
+//     is bounded either way — but hitting that cap refuses compiles for EVERY
+//     src, so keeping the pressure off it is still worth a cache entry.
 //   - Caching it permanently is the bug this wi exists to prevent: one slow
 //     moment demotes a valid figure to a code block for the life of the cache.
 //
@@ -67,6 +70,20 @@ func (e diagramEntry) expired(now time.Time) bool {
 // scheduler admits before the negative entry lands, so there is no fixed number
 // to rely on, only a burst bound. It is still far better than one-per-request,
 // which is the comparison that justifies the TTL.
+//
+// aihub#244 bounds what that spread can ACCUMULATE to, and nothing more. Be
+// precise about which half it fixes, because the obvious reading is wrong:
+// maxAbandonedCompiles refuses a compile once too many abandoned ones are
+// already counted, and a compile is only counted after its caller has timed out.
+// Callers arriving together therefore all read the same pre-timeout count and are
+// all admitted — the burst above is unchanged, and the numbers measured there
+// would NOT be clipped to the cap. Verified, not reasoned:
+// TestAbandonedCapDoesNotBoundASimultaneousBurst admits 8 workers at a cap of 2.
+//
+// What the cap does stop is the next window, and the one after that: once the
+// burst has timed out, the count is up and further compiles are refused until
+// those workers drain. So the leak stops scaling with elapsed time; it still
+// scales with the width of a single arrival burst.
 //
 // Closing the gap needs single-flight (concurrent callers for one key waiting on
 // one compile). That is deliberately not done here: it changes the concurrency
@@ -101,6 +118,23 @@ var errDiagramCached = errors.New("d2 diagram failed to render")
 // slow render into a permanently degraded figure.
 var errDiagramTimeout = errors.New("d2 compile exceeded deadline")
 
+// errDiagramPanic wraps a panic recovered from inside the compile goroutine.
+//
+// It exists because aihub#250 moved the compile off the caller's stack. A panic
+// in a detached goroutine is caught by nobody: not net/http's per-request
+// recover on the read path, and not FreezeDiagram's own recover on the write
+// path (diagram_freeze.go recovers in the goroutine that calls this function,
+// which is no longer the goroutine that runs goja). An unrecovered panic there
+// takes the process down. Recovering at the site and reporting it as an error
+// restores what both callers already documented as their behaviour.
+var errDiagramPanic = errors.New("d2 compile panicked")
+
+// errDiagramOverloaded is returned instead of starting a compile when too many
+// abandoned compiles are still running. It describes the process at this moment,
+// never the source — see abandonedCompiles, and RenderDiagram for why it is the
+// one failure that is not cached at all.
+var errDiagramOverloaded = errors.New("too many abandoned d2 compiles in flight")
+
 // DefaultDiagramCompileTimeout bounds a single d2 compile. Normal compiles finish
 // in milliseconds to low hundreds of milliseconds, so 5s is loose enough never to
 // cut a legitimate figure while still reclaiming a wedged one promptly.
@@ -124,7 +158,10 @@ const MaxDiagramCompileTimeout = 30 * time.Second
 // and written by InitDiagramCompileTimeout at startup and by tests.
 var diagramCompileTimeout atomic.Int64
 
-func init() { diagramCompileTimeout.Store(int64(DefaultDiagramCompileTimeout)) }
+func init() {
+	diagramCompileTimeout.Store(int64(DefaultDiagramCompileTimeout))
+	maxAbandonedCompiles.Store(defaultMaxAbandonedCompiles)
+}
 
 // DiagramCompileTimeout reports the current per-compile budget.
 func DiagramCompileTimeout() time.Duration {
@@ -202,6 +239,17 @@ func RenderDiagram(src string) (string, error) {
 		// compile on every request and abandon a goroutine each time. See
 		// timeoutNegativeTTL for that trade in full.
 		diagramCachePut(key, diagramEntry{ok: false, until: diagramNow().Add(timeoutNegativeTTL)})
+	case errors.Is(err, errDiagramOverloaded):
+		// Not cached at all — not even briefly. A refusal is a fact about the
+		// process at this instant and says nothing whatever about this src, which
+		// never reached the compiler. Writing any entry under this key would let a
+		// pile-up caused by some OTHER figure demote this one, and the negative TTL
+		// exists for a src that was actually tried and was actually slow. Retried on
+		// the next request, by which time the pile may well have drained.
+		//
+		// Cost of not caching: while the cap is saturated every request for every
+		// uncached src takes this branch. That is a cheap counter read and no
+		// compile, so it is a rejection cost, not a compile cost.
 	default:
 		// Cache failures too, so a malformed d2 block isn't recompiled on every
 		// request. Trade-off: a rare transient/env error (e.g. textmeasure ruler
@@ -225,6 +273,83 @@ func diagramCachePut(key string, e diagramEntry) {
 	diagramCache.m[key] = e
 }
 
+// abandonedCompiles counts compile goroutines that outlived the caller that
+// started them. It is the residue aihub#250 could not clean up and the thing
+// aihub#244 exists to bound.
+//
+// A timed-out compile is abandoned, not killed: goja layout has no cancellation
+// checkpoint, so the goroutine runs until it finishes or the process exits. The
+// counter is incremented when a caller gives up on one and decremented when that
+// goroutine finally returns, so it measures what is still burning CPU right now,
+// not how many timeouts have ever happened. A src that wedges transiently
+// therefore drains back to zero on its own.
+//
+// Two properties this buys, neither of which existed before:
+//
+//   - The leak stops accumulating. Once maxAbandonedCompiles are counted, further
+//     compiles are refused with errDiagramOverloaded instead of adding to the
+//     pile, so a poisoned src no longer spawns a fresh goja evaluation every
+//     timeoutNegativeTTL window forever. Read that narrowly: admission tests a
+//     count that only rises AFTER a caller times out, so callers arriving
+//     together are all admitted before any of them can raise it. The cap bounds
+//     growth over time, NOT the width of one simultaneous burst — see
+//     TestAbandonedCapDoesNotBoundASimultaneousBurst, which pins that limit so
+//     this comment cannot quietly drift into claiming more.
+//   - goja concurrency is bounded with it. Abandoned workers keep running goja
+//     next to whatever compiles after them, which is precisely the property
+//     compileGate (diagram_freeze.go) is written to guarantee and cannot — that
+//     gate does not cover this path, or the read path, at all. A cap on abandoned
+//     workers is the only bound that applies to both.
+//
+// This is a backstop, not the cure. The cure is an interruptible layout; until
+// d2 or goja offers one, "reclaim it" is not on the menu and "do not accumulate"
+// is.
+var abandonedCompiles atomic.Int64
+
+// defaultMaxAbandonedCompiles is how many abandoned compiles may be in flight
+// before new ones are refused.
+//
+// Sized against what an abandoned worker costs — a goja runtime, a
+// textmeasure.Ruler, and a core's worth of layout — not against a throughput
+// target, and deliberately NOT sized to sit above a burst.
+//
+// Sitting above a burst is not available: the widths measured under
+// timeoutNegativeTTL (11 and 35 for one src) are admitted regardless of this
+// value, because admission runs before any of them has timed out. A cap chosen to
+// clear them would buy nothing at the moment of the burst and would only delay
+// the point at which accumulation stops.
+//
+// So the only question this number answers is how much residue may sit in the
+// process between bursts, and there the trade is asymmetric: refusal is cheap,
+// self-clearing, and degrades a figure to the code block it came from, whereas an
+// abandoned worker holds a goja runtime for as long as it runs. Erring low is the
+// safe direction. 8 leaves room for a handful of genuinely slow-but-finishing
+// layouts to drain without refusing anything.
+const defaultMaxAbandonedCompiles = 8
+
+// maxAbandonedCompiles is the live cap, atomic so tests can lower it without
+// racing an in-flight compile.
+var maxAbandonedCompiles atomic.Int64
+
+// diagramOverloadRefusals counts compiles refused because the cap was reached.
+//
+// Saturating the cap with workers that never return degrades EVERY src in the
+// process, not just the one that wedged, so the one thing worse than that
+// happening is it happening invisibly. This is the same counter idiom as
+// diagramCacheMisses and carries the same caveat: it is inspectable from inside
+// the process, and nothing exports it. This repo has no logger and no metrics
+// registry of its own to hang it on (the slog warnings seen during these tests come
+// from d2's vendored util-go/lib/log, not from anything callable here), and adding
+// one belongs with the wi that wires the first FreezeDiagram caller rather than
+// with this one. So the honest statement is that the refusal path is recorded but
+// not yet observable to an operator.
+var diagramOverloadRefusals atomic.Int64
+
+// compileDiagramFn is the seam tests replace to drive the timeout, overload and
+// panic paths without needing a d2 source that genuinely wedges. Production never
+// reassigns it.
+var compileDiagramFn = compileDiagram
+
 // renderDiagramUncached runs the compile+render pipeline under a deadline
 // (aihub#250). Before this the pipeline ran on context.Background(): a layout
 // that wedged inside d2's goja runtime held its request goroutine forever, with
@@ -245,13 +370,35 @@ func diagramCachePut(key string, e diagramEntry) {
 //     degrades to its original code block, and the connection is freed.
 //   - It does NOT reclaim the WEDGED GOROUTINE. goja layout cannot be interrupted
 //     mid-execution; the abandoned goroutine runs until it finishes or the process
-//     exits. That is the root cause tracked in aihub#244 and deliberately out of
-//     scope here — this wi is the backstop, not the cure.
+//     exits. That is still the open root cause in aihub#244.
+//
+// # What aihub#244 added on top
+//
+// Since the goroutine cannot be reclaimed, it is counted and capped instead:
+// abandonedCompiles tracks the ones still running and a compile is refused
+// outright once maxAbandonedCompiles of them are counted. The leak per wedging src
+// therefore stops growing with elapsed time — it no longer adds one worker per
+// timeoutNegativeTTL window indefinitely — and the count falls back to zero by
+// itself when the workers finish. It does NOT bound one simultaneous burst;
+// see abandonedCompiles.
+//
+// A panic inside the compile is recovered here rather than in the caller, because
+// after aihub#250 the caller is on a different goroutine and its recover no
+// longer covers this code. See errDiagramPanic.
 //
 // The abandoned goroutine writes to a buffered channel, so it never blocks on a
 // receiver that has already gone away. timeoutNegativeTTL bounds how often a
-// wedging src can spawn a fresh one.
+// wedging src can spawn a fresh one; the cap bounds how many can exist at once.
 func renderDiagramUncached(src string) (string, error) {
+	if inFlight, limit := abandonedCompiles.Load(), maxAbandonedCompiles.Load(); inFlight >= limit {
+		// Refuse rather than pile on. The caller degrades this figure to its code
+		// block, which is the same outcome a timeout produces and strictly better
+		// than adding another uninterruptible goja evaluation to a process that
+		// already has more than it can account for.
+		diagramOverloadRefusals.Add(1)
+		return "", fmt.Errorf("%w: %d in flight (cap %d)", errDiagramOverloaded, inFlight, limit)
+	}
+
 	budget := DiagramCompileTimeout()
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
@@ -262,15 +409,51 @@ func renderDiagramUncached(src string) (string, error) {
 	}
 	// Buffered: the abandoned goroutine must be able to finish its send.
 	done := make(chan outcome, 1)
+
+	// Resolve the seam HERE, in the caller's goroutine, not inside the worker. On
+	// timeout the worker outlives this call, so a package-level read from inside it
+	// would race any test that substitutes the seam. (Same hazard, same fix, as
+	// freezeRenderFn in diagram_freeze.go.)
+	compile := compileDiagramFn
+
+	// state is the caller/worker handshake for the abandonment count. Exactly one
+	// side wins its CompareAndSwap, so the counter is incremented at most once per
+	// compile and decremented exactly once for each increment — including when the
+	// worker finishes in the same instant the deadline fires, which a plain flag
+	// would either double-count or leak.
+	const (
+		stateRunning = iota
+		stateAbandoned
+		stateFinished
+	)
+	var state atomic.Int32
+
 	go func() {
-		svg, err := compileDiagram(ctx, src)
-		done <- outcome{svg: svg, err: err}
+		// settle records this worker's exit exactly once: it hands the result back,
+		// and if the caller has already given up it stops counting this goroutine as
+		// in flight.
+		settle := func(o outcome) {
+			if !state.CompareAndSwap(stateRunning, stateFinished) {
+				abandonedCompiles.Add(-1)
+			}
+			done <- o
+		}
+		defer func() {
+			if r := recover(); r != nil {
+				settle(outcome{err: fmt.Errorf("%w: %v", errDiagramPanic, r)})
+			}
+		}()
+		svg, err := compile(ctx, src)
+		settle(outcome{svg: svg, err: err})
 	}()
 
 	select {
 	case o := <-done:
 		return o.svg, o.err
 	case <-ctx.Done():
+		if state.CompareAndSwap(stateRunning, stateAbandoned) {
+			abandonedCompiles.Add(1)
+		}
 		return "", fmt.Errorf("%w after %s", errDiagramTimeout, budget)
 	}
 }
@@ -280,6 +463,11 @@ func renderDiagramUncached(src string) (string, error) {
 // a future d2 version begins checking it — but see renderDiagramUncached: as of
 // v0.7.1 nothing here observes ctx, which is why the deadline is enforced by the
 // caller racing this function rather than by ctx alone.
+//
+// It may also panic: goja can panic on malformed input, and nothing here recovers.
+// The recover lives in renderDiagramUncached, on the goroutine that actually runs
+// this function — see errDiagramPanic for why that placement is load-bearing after
+// aihub#250.
 func compileDiagram(ctx context.Context, src string) (string, error) {
 	ruler, err := textmeasure.NewRuler()
 	if err != nil {

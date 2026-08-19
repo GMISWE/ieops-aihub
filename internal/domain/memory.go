@@ -294,6 +294,34 @@ func memoryRefTime(lastActivatedAt *time.Time, createdAt time.Time) time.Time {
 // memory would be decayed against its old activation and filtered out.
 const memRefTimeSQL = `GREATEST(last_activated_at, created_at)`
 
+// recallCursorSep separates the two halves of a Recall cursor. Neither half can
+// contain it: the left half is RFC3339Nano (digits, '-', ':', '.', 'T', and a
+// 'Z'/'+'/'-' offset) and the right half is a NewID (base62 plus one '_').
+const recallCursorSep = "|"
+
+// formatRecallCursor encodes Recall's full sort position. Recall orders by
+// `memRefTimeSQL DESC, id DESC` — TWO keys — so a cursor that carried only the
+// timestamp could not express "the row after this one" among rows sharing a
+// reference time. With a strict `<` on the timestamp alone, every row tied with
+// the last row of a page was skipped on all subsequent pages (aihub#236 finding
+// 7, deferred to aihub#239). Ties are rare because created_at defaults to
+// clock_timestamp() at microsecond resolution, but a bulk import or a backfill
+// that stamps many rows identically reaches them.
+func formatRecallCursor(refTime time.Time, id string) string {
+	return refTime.Format(time.RFC3339Nano) + recallCursorSep + id
+}
+
+// parseRecallCursor splits a cursor into its timestamp and id halves. Cursors
+// issued before aihub#239 carry the timestamp alone; those return id == "" and
+// the caller must fall back to the single-key comparison so an in-flight cursor
+// keeps paginating instead of erroring or silently restarting.
+func parseRecallCursor(cursor string) (ts, id string) {
+	if i := strings.LastIndex(cursor, recallCursorSep); i >= 0 {
+		return cursor[:i], cursor[i+len(recallCursorSep):]
+	}
+	return cursor, ""
+}
+
 // MemoryStrength calculates effective_strength (raw) per §7.2.
 // Formula: base_strength × exp(-days_since / stability_days)
 // days_since is measured from memoryRefTime (M8, revised by aihub#236).
@@ -610,6 +638,45 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		}
 		if oldHead == "" {
 			return nil, false, NewErr(ErrInternalError, "failed to resolve and archive supersede head after retries")
+		}
+
+		// aihub#239: inherit the lineage's activation history on EVERY supersede
+		// path, not just UpdateMemory's. aihub#236 made UpdateMemory carry the
+		// trio, but pf_save_artifact and any POST /v1/memories with
+		// supersedes_memory_id reach here through Remember instead
+		// (internal/mcp/tools_memory.go), so they used to mint a head with
+		// activation_count=0 / last_activated_at=NULL and strand the history on
+		// the row we just archived. That made #236's guarantee path-dependent.
+		//
+		// handleRemember zeroes the trio right after c.Bind (the #236 finding-3
+		// fix, routes_memory.go), so an external caller can never supply it —
+		// which is exactly why the inheritance has to happen down here in the
+		// domain layer rather than being left to the caller.
+		//
+		// Read from oldHead, the row this call actually archived, rather than
+		// from a head the caller resolved earlier: under concurrent supersedes
+		// the archive loop above may have landed on a different row than the
+		// caller saw. An explicitly supplied trio still wins (UpdateMemory
+		// passes one), so this only fills the gap.
+		if req.LastActivatedAt == nil && req.LastActivatedBy == nil && req.ActivationCount == 0 {
+			var inhAt *time.Time
+			var inhBy *string
+			var inhCount int
+			if err := q.QueryRow(ctx, `
+				SELECT last_activated_at, last_activated_by, activation_count
+				FROM memories WHERE id=$1`, oldHead,
+			).Scan(&inhAt, &inhBy, &inhCount); err != nil {
+				return nil, false, NewErr(ErrInternalError,
+					fmt.Sprintf("failed to inherit activation state from supersede head: %v", err))
+			}
+			req.LastActivatedAt, req.LastActivatedBy, req.ActivationCount = inhAt, inhBy, inhCount
+			// stabilityDays was computed above from a zero ActivationCount, so it
+			// must be recomputed now that the count is inherited — otherwise the
+			// new head stores a non-zero activation_count alongside a
+			// stability_days derived from zero. Only bites experience.* and the
+			// default bucket: fn_mem_immortal (migration 0006) overwrites
+			// stability_days for rule.* / fact.* / methodology.* on INSERT.
+			stabilityDays = computeStabilityDays(req.Type, req.ActivationCount)
 		}
 	}
 
@@ -1267,16 +1334,32 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("recall count query: %v", terr))
 	}
 
-	// Cursor-based pagination. ORDER BY is a single total expression
-	// (memRefTimeSQL), so the cursor is one comparison against that same
-	// expression — no NULL branch. The previous two-branch form could not
-	// express "the next row after this one" once ordering crossed the
-	// activated/never-activated boundary, and silently skipped rows (aihub#236).
-	// Cursor value is an RFC3339Nano timestamp of the last item's sort key.
+	// Cursor-based pagination. memRefTimeSQL is a single total expression (no
+	// NULL branch — the previous two-branch form could not express "the next row
+	// after this one" once ordering crossed the activated/never-activated
+	// boundary, and silently skipped rows, aihub#236), but it is not by itself
+	// unique, so the cursor must carry the `id DESC` tiebreaker from the ORDER BY
+	// too. A row-value comparison is the exact inverse of that two-key ordering:
+	// it admits rows strictly older by reference time, plus rows at the SAME
+	// reference time with a smaller id — the ones a timestamp-only `<` dropped
+	// from every page after the tie (aihub#239). `id` is already the ORDER BY
+	// tiebreaker, so this needs no index or ordering change, and both halves are
+	// NOT NULL (created_at is NOT NULL, so GREATEST is total) which keeps the
+	// comparison from going NULL.
 	if req.Cursor != "" {
-		where += fmt.Sprintf(` AND `+memRefTimeSQL+` < $%d::timestamptz`, idx)
-		args = append(args, req.Cursor)
-		idx++
+		curTS, curID := parseRecallCursor(req.Cursor)
+		if curID != "" {
+			where += fmt.Sprintf(` AND (`+memRefTimeSQL+`, id) < ($%d::timestamptz, $%d)`, idx, idx+1)
+			args = append(args, curTS, curID)
+			idx += 2
+		} else {
+			// Pre-aihub#239 cursor: timestamp only. Keep the old single-key
+			// semantics rather than inventing an id bound — `(ts, id) < (ts0, '')`
+			// would drop every row at ts0, which is worse than the tie bug.
+			where += fmt.Sprintf(` AND `+memRefTimeSQL+` < $%d::timestamptz`, idx)
+			args = append(args, curTS)
+			idx++
+		}
 	}
 
 	// opt③ L1 recall precision (RecallAlgo=="lexical"): fuse lexical relevance
@@ -1343,9 +1426,11 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	if len(items) > req.TopK {
 		items = items[:req.TopK]
 		last := items[len(items)-1]
-		// Cursor is the sort-key timestamp, computed by the same rule as
-		// memRefTimeSQL so the next page resumes exactly where this one ended.
-		cursorVal := memoryRefTime(last.LastActivatedAt, last.CreatedAt).Format(time.RFC3339Nano)
+		// Cursor is the last row's full sort position — reference time (computed
+		// by the same rule as memRefTimeSQL) AND the id tiebreaker — so the next
+		// page resumes exactly where this one ended even when several rows share
+		// that reference time (aihub#239).
+		cursorVal := formatRecallCursor(memoryRefTime(last.LastActivatedAt, last.CreatedAt), last.ID)
 		nextCursor = &cursorVal
 	}
 
@@ -1539,12 +1624,19 @@ func UpdateMemory(ctx context.Context, pool *pgxpool.Pool, id string, req *Updat
 		CallerUserID:    req.CallerUserID,
 		CallerDisplay:   req.CallerDisplay,
 		SupersedesMemID: &head.ID,
-		// aihub#236: a new version inherits the lineage's activation history.
-		// Without this each edit reset the head to activation_count=0 /
+		// aihub#236: a new version inherits the lineage's activation history —
+		// without it each edit reset the head to activation_count=0 /
 		// last_activated_at=NULL, stranding the history on the archived row.
-		LastActivatedAt: head.LastActivatedAt,
-		LastActivatedBy: head.LastActivatedBy,
-		ActivationCount: head.ActivationCount,
+		//
+		// aihub#239 moved that carry INTO Remember, which now inherits the trio
+		// from the head it actually archives, so this request deliberately leaves
+		// the three fields unset. Passing head's values from here would be worse,
+		// not merely redundant: the `head` above comes from an unlocked
+		// GetLatestByID taken before Remember opens its transaction and acquires
+		// the per-lineage advisory lock, so a pf_activate_memory bump landing in
+		// that window would be silently overwritten by the pre-bump values.
+		// Remember reads under the lock, after the archive, and is the single
+		// source of truth for the trio.
 	}
 	if req.Content != nil {
 		rr.Content = *req.Content

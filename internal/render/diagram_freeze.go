@@ -21,7 +21,9 @@ package render
 //	R2 a new Ruler per render            -> NOT fixed here; see the note at the foot of
 //	                                        this file. Freezing runs once per write, so the
 //	                                        per-request cost that made R2 bite does not apply
-//	R3 dagre-in-goja is concurrency-frail-> compiles are serialized
+//	R3 dagre-in-goja is concurrency-frail-> gated compiles are serialized. Read that narrowly:
+//	                                        the gate covers this file only, never the read path
+//	                                        and never an abandoned worker. See compileGate.
 //	R4 no retry                          -> one retry, transient failures only
 //	backlog: no timeout, no size ceiling -> context deadline + explicit input caps
 //
@@ -97,7 +99,7 @@ type FrozenDiagram struct {
 // old path's defining bug was treating a failed render as a cacheable result, and the
 // write path must not repeat that by storing something half-made.
 type FreezeError struct {
-	Stage     string // validate | compile | render | panic | timeout | canceled
+	Stage     string // validate | compile | render | panic | overloaded | timeout | canceled
 	Transient bool
 	Attempts  int
 	Err       error
@@ -113,10 +115,33 @@ func (e *FreezeError) Unwrap() error { return e.Err }
 // ErrDiagramTooLarge is returned when the source exceeds the configured caps.
 var ErrDiagramTooLarge = errors.New("diagram source exceeds configured limits")
 
-// compileGate serializes layout. dagre runs inside goja, whose concurrency safety is not
-// guaranteed and which the research doc identifies as a live source of first-render
-// failures (R3). Freezing is a write-path operation, so trading throughput for
-// determinism is the right way round — the read path no longer compiles at all.
+// compileGate serializes layout on this path. dagre runs inside goja, whose concurrency
+// safety is not guaranteed and which the research doc identifies as a live source of
+// first-render failures (R3). Freezing is a write-path operation, so trading throughput for
+// determinism is the right way round.
+//
+// # What it does not give you (aihub#244)
+//
+// Two things read as guarantees here and are not. Both were true before aihub#250 as well;
+// stating them because "compiles are serialized" is the kind of claim a later reader builds
+// on.
+//
+//  1. It is not process-wide. RenderDiagram — the /ui read path — never acquires this gate;
+//     this file holds every reference to compileGate there is. goja has therefore never been
+//     serialized across the process, only across concurrent FreezeDiagram calls, and the
+//     header's "the read path no longer compiles at all" describes the intended end state of
+//     the refactor, not diagram.go as it stands.
+//  2. It does not cover abandoned work. renderDiagramUncached races its own compile against
+//     DiagramCompileTimeout and abandons the loser, which is still inside goja and runs on
+//     outside any gate — including concurrently with the next gated compile. The bound that
+//     does apply to it is abandonedCompiles/maxAbandonedCompiles in diagram.go, and that is
+//     a cap on how many, not serialization.
+//
+// Net: at most one GATED layout is in flight. The gate is cheap and worth keeping for that,
+// but do not record R3 as answered anywhere. R3 is that dagre-in-goja is concurrency-frail;
+// the cap in diagram.go permits maxAbandonedCompiles evaluations at once, which is the
+// condition R3 names, not a remedy for it. The cap bounds the blast radius. On the read path
+// R3 is not addressed at all.
 var compileGate = make(chan struct{}, 1)
 
 // freezeRenderFn is the seam the tests replace to exercise timeout, retry and failure
@@ -232,8 +257,9 @@ func freezeOnce(ctx context.Context, src string, opt FreezeOptions) (svg, stage 
 	case <-attemptCtx.Done():
 		// Same distinction the post-layout branch below makes: a caller that cancelled did
 		// not hit our timeout budget, and reporting it as "timeout" sends someone hunting a
-		// performance problem that never happened. Reaching this branch at all usually means
-		// the gate is held by an earlier wedged layout — see the note there.
+		// performance problem that never happened. Reaching this branch means an earlier
+		// layout still holds the gate — which since aihub#250 is a bounded wait, not the
+		// permanent wedge the note below used to describe.
 		if ctx.Err() != nil {
 			return "", "canceled", true, ctx.Err()
 		}
@@ -279,20 +305,40 @@ func freezeOnce(ctx context.Context, src string, opt FreezeOptions) (svg, stage 
 	select {
 	case <-attemptCtx.Done():
 		// The worker is left to finish and its result discarded: a goja evaluation cannot be
-		// killed mid-flight in Go, and it still holds compileGate, so at most one is ever in
-		// flight.
+		// killed mid-flight in Go.
 		//
-		// KNOWN LIMITATION (aihub#244), stated accurately because an earlier version of this
-		// comment understated it as "leaking one bounded goroutine beats blocking the write
-		// path indefinitely" — which describes a per-request cost. The real blast radius is
-		// process-wide and permanent: if the layout never returns (the wedged-goja case this
-		// gate exists for), compileGate is never released, and every subsequent FreezeDiagram
-		// in this process fails after MaxAttempts × Timeout. One poisoned diagram source
-		// disables freezing for everyone until restart.
+		// KNOWN LIMITATION (aihub#244). This comment has been wrong twice, in opposite
+		// directions, so it describes the code as it stands rather than the design's
+		// intent. It first understated the cost as "leaking one bounded goroutine beats
+		// blocking the write path indefinitely" — a per-request framing. aihub#240 corrected
+		// that to process-wide and permanent, reasoning that the gate is released by the
+		// worker, so a worker that never returns holds it forever and every later
+		// FreezeDiagram fails after MaxAttempts × Timeout. That was accurate when written and
+		// was invalidated the next day by aihub#250, which is the version this replaces.
 		//
-		// Not fixed here deliberately: the honest fix is either a generation counter so a
-		// timed-out worker's slot can be reclaimed, or an interruptible layout, and the latter
-		// is the real root cause (goja cannot be force-interrupted). Tracked in aihub#244.
+		// What is true now: freezeRenderFn is renderDiagramUncached, and since aihub#250 that
+		// function races its own compile against DiagramCompileTimeout and always returns. So
+		// the worker below always returns, and its `defer func() { <-compileGate }()` always
+		// runs — the gate cannot be wedged permanently, and no poisoned source disables
+		// freezing until restart.
+		//
+		// The gate can still be held past OUR deadline. The worker returns within the inner
+		// budget, not within opt.Timeout, so when opt.Timeout < DiagramCompileTimeout (default
+		// 15s vs 5s, so not by default, but reachable — the inner budget is configurable up to
+		// MaxDiagramCompileTimeout = 30s) a following attempt can block on the gate for the
+		// difference and report stage "timeout". Bounded and self-clearing, not permanent.
+		//
+		// What remains, and why aihub#244 stays open: renderDiagramUncached abandons the
+		// goroutine it raced, so a wedging source leaks one goja evaluation per timeout — and
+		// that evaluation runs OUTSIDE this gate, next to whatever compiles after it, which is
+		// the property the gate is supposed to provide (see compileGate). It is now counted
+		// and capped (abandonedCompiles / maxAbandonedCompiles in diagram.go): past the cap
+		// compiles are refused instead of piling up, so the leak no longer grows without
+		// limit. A capped leak is not a reclaimed one. The root cause is that goja layout
+		// cannot be interrupted; the honest fix is an interruptible layout. A generation
+		// counter — the other option the original wi named — buys much less than it did before
+		// aihub#250, since the slot now frees itself.
+		//
 		// This is an availability limit, not a security one — no untrusted output escapes.
 		//
 		// Distinguish the two ways we get here. A caller that cancelled did not hit our
@@ -306,6 +352,25 @@ func freezeOnce(ctx context.Context, src string, opt FreezeOptions) (svg, stage 
 		if r.err != nil {
 			if r.panicked {
 				return "", "panic", true, r.err
+			}
+			// The three sentinels below all come from renderDiagramUncached and all describe
+			// the moment rather than the source, so they are the transient class R4 exists
+			// for. They are matched explicitly because the fallthrough is "deterministic
+			// syntax error", and none of them is one.
+			//
+			// errDiagramPanic in particular is why the recover above is no longer sufficient
+			// on its own: since aihub#250 goja runs on a goroutine inside
+			// renderDiagramUncached, so a layout panic never unwinds through this worker and
+			// arrives here as an ordinary error. Without this branch it would be classified
+			// "compile", reported as non-transient, and skip the retry that was written for
+			// exactly it.
+			switch {
+			case errors.Is(r.err, errDiagramPanic):
+				return "", "panic", true, r.err
+			case errors.Is(r.err, errDiagramOverloaded):
+				return "", "overloaded", true, r.err
+			case errors.Is(r.err, errDiagramTimeout):
+				return "", "timeout", true, r.err
 			}
 			// d2 compile failures are overwhelmingly deterministic syntax errors.
 			return "", "compile", false, r.err
@@ -322,8 +387,12 @@ func freezeOnce(ctx context.Context, src string, opt FreezeOptions) (svg, stage 
 
 // On R2 (a fresh textmeasure.Ruler per render, both costly and a named source of
 // first-render failures): the freeze path inherits whatever renderDiagramUncached does,
-// which today builds its own. Hoisting it to a shared instance means editing diagram.go,
-// and diagram.go is read-only for this wi — the runtime path is P2. Recorded here as a
-// known, deliberate non-fix rather than silently counted as handled: freezing runs once
-// per artifact write, so the per-render cost that made R2 matter on the request path
-// does not apply at this call site.
+// which today builds its own. Recorded here as a known, deliberate non-fix rather than
+// silently counted as handled: freezing runs once per artifact write, so the per-render
+// cost that made R2 matter on the request path does not apply at this call site.
+//
+// The original text of this note added "and diagram.go is read-only for this wi — the
+// runtime path is P2", which was true of aihub#240 and is no longer true of this file's
+// neighbours: aihub#250 and aihub#244 both edit diagram.go. Hoisting the Ruler is still
+// unclaimed work, but no longer for that reason — nothing forbids the edit, it is simply
+// out of scope here.

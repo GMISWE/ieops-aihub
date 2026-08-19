@@ -3,6 +3,7 @@ package render
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -408,5 +409,60 @@ func TestFreezeDiagram_GateHeldAcrossTimeout(t *testing.T) {
 
 	if got > 1 {
 		t.Errorf("%d layouts ran concurrently after timeouts; R3 serialization is defeated", got)
+	}
+}
+
+// The real freezeRenderFn is renderDiagramUncached, and since aihub#250 that
+// function never panics out to its caller and never blocks past its own budget —
+// it recovers, or times out, and reports the outcome as an ordinary error value.
+// So the three failures freezeOnce most needs to classify correctly no longer
+// arrive as a panic or a stalled call: they arrive as wrapped sentinels that look
+// exactly like a syntax error unless matched.
+//
+// Getting this wrong is silent. "compile" is non-transient, so a misclassified
+// panic or overload skips the retry that R4 exists for, and TestFreezeDiagram_
+// PanicIsContained keeps passing because it panics in the seam itself, which the
+// real render function no longer does.
+func TestFreezeDiagram_InnerSentinelsAreTransient(t *testing.T) {
+	cases := []struct {
+		name  string
+		err   error
+		stage string
+	}{
+		{"panic recovered inside renderDiagramUncached", fmt.Errorf("%w: boom", errDiagramPanic), "panic"},
+		{"refused because too many abandoned compiles", fmt.Errorf("%w: 8 in flight (cap 8)", errDiagramOverloaded), "overloaded"},
+		{"inner compile budget expired", fmt.Errorf("%w after 5s", errDiagramTimeout), "timeout"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			var mu sync.Mutex
+			defer withFreezeRenderFn(func(string) (string, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				calls++
+				return "", tc.err
+			})()
+
+			_, err := FreezeDiagram(context.Background(), "a -> b", FreezeOptions{MaxAttempts: 2})
+			if err == nil {
+				t.Fatal("expected a failure")
+			}
+			var fe *FreezeError
+			if !errors.As(err, &fe) {
+				t.Fatalf("want *FreezeError, got %T: %v", err, err)
+			}
+			if !fe.Transient {
+				t.Errorf("classified non-transient, so the retry R4 exists for was skipped: %v", fe)
+			}
+			if fe.Stage != tc.stage {
+				t.Errorf("stage = %q, want %q", fe.Stage, tc.stage)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if calls != 2 {
+				t.Errorf("a transient failure must use its one retry: %d attempt(s)", calls)
+			}
+		})
 	}
 }

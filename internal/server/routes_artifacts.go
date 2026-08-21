@@ -140,6 +140,46 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
+		// aihub#248: /ui only — if this id has been superseded (mem.LatestID !=
+		// nil and != mem.ID), 302 to the lineage head's /ui URL instead of
+		// silently serving stale content. /v1 and /share stay exact-ID and
+		// byte-identical (mem_A6540SyP), hence the path-prefix gate — same
+		// pattern already used below for sanitization/CSP branching.
+		//
+		// The head is re-authorized here with the PURE predicates
+		// hasProjectAccess/memoryVisibleTo, never the side-effecting
+		// checkProjectAccess/checkMemoryVisibility above: those commit a
+		// 403/401 response to c on denial, which would leak "a newer version
+		// exists but you can't see it" on the very path meant to silently fall
+		// back to mem. UpdateMemory lets a new version's Visibility (and, in
+		// principle, Project) diverge from its predecessor's, so reusing the
+		// authorization decision already made for mem would be a privilege
+		// escalation onto the head. Any failure to resolve or authorize the
+		// head falls back to serving mem exactly as today — never a 404/403.
+		//
+		// aihub#248 review (W2): head.ID != mem.ID only rules out a self-redirect;
+		// also require head.LatestID == nil || *head.LatestID == head.ID so a head
+		// whose own cursor points elsewhere (multi-hop, or a 2-cycle) does not
+		// redirect again — defensive even though normal write-path invariants
+		// keep every real head self-headed.
+		//
+		// aihub#248 review (blocking, spec amendment to non-goal 6): a caller
+		// that followed a deliberate past-version link — the side rail's
+		// "Version history" rows below, or wi_detail.html.tmpl's per-version
+		// "View" link — arrives with ?pf_exact=1 and must see that exact
+		// revision, not the head. isExactVersionRequest skips head resolution
+		// only; it never bypasses the checkProjectAccess/checkMemoryVisibility
+		// gates on mem above.
+		if strings.HasPrefix(c.Path(), "/ui") && !isExactVersionRequest(c) &&
+			mem.LatestID != nil && *mem.LatestID != mem.ID {
+			if head, aerr := resolveLatestFn(ctx, pool, mem.ID); aerr == nil && head != nil &&
+				head.ID != mem.ID &&
+				(head.LatestID == nil || *head.LatestID == head.ID) &&
+				hasProjectAccess(u, head.Project, "viewer") && memoryVisibleTo(u, head) {
+				return c.Redirect(http.StatusFound, appendQueryString(c, "/ui/artifacts/"+url.PathEscape(head.ID)+"/html"))
+			}
+		}
+
 		// Resolve the HTML body fragment to serve. Prefer the stored rendered_html;
 		// if NULL, lazy-render on the fly so no renderable artifact ever 404s.
 		var bodyFragment string
@@ -378,7 +418,7 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				if !sandboxBody {
 					bodyFragment = wrapH2SectionsForUI(bodyFragment)
 				}
-				annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits, nonce)
+				annotHTML = buildAnnotationHTMLWithExact(mem.ID, bodyFragment, mem.Commits, nonce, isExactVersionRequest(c))
 				// aihub#138 version_history: render version history INSIDE the doc card.
 				// aihub#154: the share control + version history are injected together
 				// just after the first </h1> — share above, version history below — so
@@ -388,13 +428,53 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				// only the share control stays injected in-card under the title.
 				var srVersions []sideRailVersion
 				if versions, verErr := versionChainFn(ctx, pool, mem.ID); verErr == nil && len(versions) > 1 {
-					for i, v := range versions {
-						sv := sideRailVersion{Label: "v" + strconv.Itoa(i+1), Current: v.IsCurrent}
+					for _, v := range versions {
+						// aihub#248 review (W1): domain.MemoryVersionChain's SQL filters
+						// only status != 'redacted' — no project/visibility predicate — so
+						// its rows (domain.MemoryVersionRef: id/created_at/status/is_current
+						// only) are not enough on their own to answer "can THIS caller see
+						// this row". Without this check a caller denied a lineage member
+						// would still see that row's id, date, and link rendered in this
+						// side rail — exactly the leak spec decision 4 exists to prevent.
+						// v.ID == mem.ID is always safe to include as-is: mem was already
+						// authorized above via the side-effecting
+						// checkProjectAccess/checkMemoryVisibility. Every other row needs
+						// its own full record — MemoryVersionRef carries no Project or
+						// Visibility — loaded via the same loadMemoryFn seam used for the
+						// primary record, then checked with the same pure predicates
+						// (hasProjectAccess/memoryVisibleTo) used for the head redirect
+						// above, so a denied row is omitted entirely rather than merely
+						// stripped of its link.
+						if v.ID != mem.ID {
+							full, ferr := loadMemoryFn(ctx, pool, v.ID)
+							// aihub#248 review (minor 5): ferr != nil is deliberately treated
+							// the same as "denied" (fail-closed), not a bug to be "fixed" into
+							// fail-open. This loop is on a leak-prevention path (W1): a
+							// transient load failure that instead rendered the row would risk
+							// showing an id/date/link the caller may not be authorized for.
+							// Losing one row on a rare transient DB hiccup is an acceptable
+							// cost for never leaking on a permissions path.
+							if ferr != nil || full == nil ||
+								!hasProjectAccess(u, full.Project, "viewer") || !memoryVisibleTo(u, full) {
+								continue
+							}
+						}
+						// aihub#248 review (minor 4): label from the FILTERED slice
+						// (len(srVersions), the count of rows already kept), not the
+						// unfiltered chain index. Numbering from the unfiltered index
+						// would render e.g. v1, v3, v4 after a v2 is filtered out above —
+						// disclosing that a hidden version exists, the same class of leak
+						// W1 fixed for id/date/href.
+						sv := sideRailVersion{Label: "v" + strconv.Itoa(len(srVersions)+1), Current: v.IsCurrent}
 						if len(v.CreatedAt) >= 10 {
 							sv.Date = v.CreatedAt[:10]
 						}
 						if v.ID != mem.ID {
-							sv.Href = "/ui/artifacts/" + v.ID + "/html"
+							// aihub#248: this row deliberately targets a specific past
+							// revision, not the lineage head, so it carries the pf_exact
+							// marker to opt out of the /ui redirect above (spec amendment
+							// to non-goal 6).
+							sv.Href = "/ui/artifacts/" + url.PathEscape(v.ID) + "/html?" + exactVersionParam + "=1"
 						}
 						srVersions = append(srVersions, sv)
 					}
@@ -1052,7 +1132,33 @@ func escapeJSONForScriptTag(b []byte) []byte {
 //
 // Annotations are per-version: only the commits stored on this memory row are
 // rendered (no supersede-chain inheritance — decided 2026-06-03).
+//
+// buildAnnotationHTML is the stable 4-arg entry point kept for existing
+// callers/tests; it always renders write-form actions without the pf_exact
+// marker (equivalent to "viewing the head"). Production /ui rendering goes
+// through buildAnnotationHTMLWithExact so a POST made from a marked
+// past-version page round-trips back to that same version — see aihub#248
+// review warning 1 (annotation round-trip dropped pf_exact).
 func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage, nonce string) string {
+	return buildAnnotationHTMLWithExact(memID, renderedHTML, commitsRaw, nonce, false)
+}
+
+// buildAnnotationHTMLWithExact is buildAnnotationHTML plus the exact-version
+// marker: when exact is true, every write-form action this function emits
+// (add-annotation, hidden selection form, inline reply, inline resolve)
+// carries ?pf_exact=1 so the resulting POST's redirect (artifactRedirectURL)
+// lands back on the same past version instead of the lineage head (aihub#248
+// review warning 1). This is NOT a new marker emission site in the sense
+// non-goal 6 restricts (side rail + wi-detail "View" link only): those two
+// are the only places a link may be minted to a DIFFERENT memory id with the
+// marker attached. Here the marker is preserved on forms that submit back to
+// the SAME memID the page is already (rightfully) showing, carrying forward
+// intent the caller already established by following one of those two links.
+func buildAnnotationHTMLWithExact(memID, renderedHTML string, commitsRaw json.RawMessage, nonce string, exact bool) string {
+	exactSuffix := ""
+	if exact {
+		exactSuffix = "?" + exactVersionParam + "=1"
+	}
 	// Parse commits.
 	var commits []CommitEntry
 	if len(commitsRaw) > 0 {
@@ -1265,8 +1371,8 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage,
 
 			// Inline reply + resolve forms for open commits (aihub#125).
 			if e.IsOpen() {
-				replyAction := "/ui/artifacts/" + html.EscapeString(memID) + "/commit/" + html.EscapeString(e.ID) + "/reply"
-				resolveAction := "/ui/artifacts/" + html.EscapeString(memID) + "/commit/" + html.EscapeString(e.ID) + "/resolve"
+				replyAction := "/ui/artifacts/" + html.EscapeString(memID) + "/commit/" + html.EscapeString(e.ID) + "/reply" + exactSuffix
+				resolveAction := "/ui/artifacts/" + html.EscapeString(memID) + "/commit/" + html.EscapeString(e.ID) + "/resolve" + exactSuffix
 				b.WriteString("<div class=\"pf-annot-inline-forms\">\n")
 				b.WriteString("<form method=\"POST\" action=\"")
 				b.WriteString(replyAction)
@@ -1293,7 +1399,7 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage,
 	b.WriteString("<h3 class=\"pf-annot-form-title\">Add annotation</h3>\n")
 	b.WriteString("<form method=\"POST\" action=\"/ui/artifacts/")
 	b.WriteString(html.EscapeString(memID))
-	b.WriteString("/commit\">\n")
+	b.WriteString("/commit" + exactSuffix + "\">\n")
 
 	if len(headings) > 0 {
 		b.WriteString("<label for=\"pf-annot-heading\">Section:</label>\n")
@@ -1363,7 +1469,7 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage,
 	// JS reveals + positions this on text selection.
 	b.WriteString("<form id=\"pf-selform\" data-pf-chrome hidden method=\"POST\" action=\"/ui/artifacts/")
 	b.WriteString(html.EscapeString(memID))
-	b.WriteString("/commit\">\n")
+	b.WriteString("/commit" + exactSuffix + "\">\n")
 	b.WriteString("<input type=\"hidden\" name=\"quote\" value=\"\">\n")
 	b.WriteString("<input type=\"hidden\" name=\"prefix\" value=\"\">\n")
 	b.WriteString("<input type=\"hidden\" name=\"suffix\" value=\"\">\n")
@@ -1491,9 +1597,23 @@ func RegisterUIArtifactReplyResolveRoutes(uiGroup *echo.Group, pool *pgxpool.Poo
 }
 
 // artifactRedirectURL builds the 303 redirect target for artifact-scoped write
-// operations: always back to the artifact HTML page.
-func artifactRedirectURL(memID string) string {
-	return "/ui/artifacts/" + url.PathEscape(memID) + "/html"
+// operations: back to the artifact HTML page.
+//
+// aihub#248 review warning 1: preserves the exact-version marker from the
+// incoming request. Without this, annotating (or replying/resolving on) a
+// past version reached via the side-rail's marked link 303s back to a
+// marker-less URL, which then falls into the lineage-head redirect above and
+// bounces the author to head — silently "hiding" the comment they just wrote
+// on that past version (annotations are strictly per-version, :385). The
+// marker only ever round-trips back to the SAME memID this request already
+// wrote to; it is not a new mint site under non-goal 6's "two link sites"
+// restriction (see buildAnnotationHTMLWithExact's doc comment).
+func artifactRedirectURL(c echo.Context, memID string) string {
+	path := "/ui/artifacts/" + url.PathEscape(memID) + "/html"
+	if isExactVersionRequest(c) {
+		path += "?" + exactVersionParam + "=1"
+	}
+	return path
 }
 
 // handleUIArtifactReplyCommit handles POST /ui/artifacts/:id/commit/:commit_id/reply.
@@ -1530,7 +1650,7 @@ func handleUIArtifactReplyCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		if err := doReplyCommitFn(ctx, pool, memID, commitID, u.UserID, u.DisplayName, body); err != nil {
 			return domainErr(c, err)
 		}
-		return c.Redirect(http.StatusSeeOther, artifactRedirectURL(memID))
+		return c.Redirect(http.StatusSeeOther, artifactRedirectURL(c, memID))
 	}
 }
 
@@ -1564,7 +1684,7 @@ func handleUIArtifactResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		if err := doResolveCommitFn(ctx, pool, memID, commitID, reply, u.UserID, u.DisplayName); err != nil {
 			return domainErr(c, err)
 		}
-		return c.Redirect(http.StatusSeeOther, artifactRedirectURL(memID))
+		return c.Redirect(http.StatusSeeOther, artifactRedirectURL(c, memID))
 	}
 }
 
@@ -1614,7 +1734,7 @@ func handleUIArtifactCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 			return domainErr(c, err)
 		}
 
-		return c.Redirect(http.StatusSeeOther, "/ui/artifacts/"+url.PathEscape(memID)+"/html")
+		return c.Redirect(http.StatusSeeOther, artifactRedirectURL(c, memID))
 	}
 }
 

@@ -132,6 +132,13 @@
                    number is total - displayIndex so labels stay chronological
                    (v{N} current on top ... v1 oldest at the bottom). */}}
               {{$n := len $a.Versions}}
+              {{/* aihub#248: this "View" link deliberately targets a specific
+                   past revision, not the lineage head, so it carries the
+                   pf_exact=1 marker to opt out of the /ui head redirect
+                   (spec amendment to non-goal 6). The "Open" link above (for
+                   the current artifact row) is an ordinary cross-link and
+                   must keep self-healing to the head — it does NOT carry the
+                   marker. */}}
               <div class="vlist">
                 {{range $vi, $v := $a.Versions}}
                 <div class="vrow{{if $v.IsCurrent}} cur{{end}}">
@@ -140,7 +147,7 @@
                     <b>v{{sub $n $vi}}</b>{{if $v.IsCurrent}}<span class="vcur">current</span>{{end}}
                     <div class="vmeta">{{shortDate $v.CreatedAt}}{{if $v.Status}} · {{$v.Status}}{{end}}</div>
                   </div>
-                  <a class="link" href="/ui/artifacts/{{$v.ID}}/html" target="_blank" rel="noopener" style="font-size:11px">View</a>
+                  <a class="link" href="/ui/artifacts/{{$v.ID}}/html?pf_exact=1" target="_blank" rel="noopener" style="font-size:11px">View</a>
                 </div>
                 {{end}}
               </div>

@@ -551,12 +551,29 @@ paths:
         - {name: user_id, in: query, schema: {type: string}}
         - {name: source, in: query, schema: {type: string}}
         - {name: since, in: query, schema: {type: string, format: date-time}}
-        - {name: cursor, in: query, schema: {type: string}}
+        - name: cursor
+          in: query
+          schema: {type: string}
+          description: >-
+            Pagination cursor. Carries the value of the column named by `sort`, so pass it
+            back unchanged and do not mix cursors between different sort orders.
         - {name: limit, in: query, schema: {type: integer, default: 50, maximum: 200}}
+        - name: sort
+          in: query
+          schema: {type: string, enum: [created_at, closed_at], default: created_at}
+          description: >-
+            Ordering column. `closed_at` returns ONLY closed items (wrapped/failed/cancelled),
+            because a NULL close time has no position in that ordering; use the default
+            `created_at` to include open items. An unrecognised value is a 400.
+        - name: order
+          in: query
+          schema: {type: string, enum: [desc, asc], default: desc}
+          description: Sort direction. An unrecognised value is a 400.
       responses:
         '200':
           description: list
           content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemListResponse'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
   /v1/work_items/{work_item_id}:

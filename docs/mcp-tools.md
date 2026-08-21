@@ -29,7 +29,7 @@ follows those files.
 |---|---|
 | `pf_whoami` | Caller identity plus accessible projects and roles. |
 | `pf_create_work_item` | Create a work item. Runs F3 dedup; `force_create` bypasses on a soft-conflict. |
-| `pf_list_work_items` | List work items with filters (status, kind, label, milestone, user, source, ...). |
+| `pf_list_work_items` | List work items with filters (status, kind, label, milestone, user, source, ...). `sort=created_at\|closed_at` + `order=desc\|asc` control the ordering; `sort=closed_at` returns only closed items. |
 | `pf_get_work_item` | Fetch one work item by id or slug. |
 | `pf_update_work_item` | Patch goal, wi_type, priority, labels, declared_resources, content (status must be queued or paused). |
 | `pf_claim_work_item` | Claim a queued/paused wi -> new run attempt + resource locks. `mode=fresh|resume`. |

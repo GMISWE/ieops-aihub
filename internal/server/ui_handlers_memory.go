@@ -27,6 +27,14 @@ var recallMemoriesFn recallMemoryFn = domain.Recall
 // loadMemoryFn is the production-wired GetMemoryByID — swappable in tests.
 var loadMemoryFn memLoaderFn = domain.GetMemoryByID
 
+// resolveLatestFn is the production-wired GetLatestByID — swappable in tests.
+// Used ONLY on /ui responses (handleArtifactHTML, handleUIMemoryDetail) to
+// resolve a possibly-superseded memory id to the current head of its
+// supersede lineage (aihub#248). Kept as a seam separate from loadMemoryFn so
+// tests can inject a head that differs from the originally-requested record
+// and assert on each seam's call count independently.
+var resolveLatestFn memLoaderFn = domain.GetLatestByID
+
 // CommitAnchor identifies the section of a spec/plan artifact that a CommitEntry
 // is anchored to. Both fields come from the UI at annotation time; they are
 // stored verbatim and never re-derived server-side.
@@ -313,6 +321,38 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 // memLoaderFn lets tests inject a fake memory loader.
 type memLoaderFn func(ctx context.Context, pool *pgxpool.Pool, id string) (*domain.Memory, *domain.AihubError)
 
+// appendQueryString appends c's raw query string (verbatim, as Echo already
+// received it — NOT re-encoded from c.QueryParams()) to path, if present.
+// Used by the /ui-only lineage-head redirects in handleArtifactHTML and
+// handleUIMemoryDetail so a preserved param like ?back=... or ?view=md is
+// never subtly mangled by a decode/re-encode round trip (aihub#248).
+func appendQueryString(c echo.Context, path string) string {
+	if qs := c.QueryString(); qs != "" {
+		return path + "?" + qs
+	}
+	return path
+}
+
+// exactVersionParam is the /ui-only marker that opts a link out of the
+// lineage-head redirect (aihub#248 spec amendment to non-goal 6, following
+// deep review mem_eCIctvsx). It exists SOLELY so the two shipped
+// deliberate-past-version surfaces — the artifact viewer's side-rail
+// "Version history" links (routes_artifacts.go, buildSideRail's srVersions)
+// and the wi-detail page's per-version "View" link
+// (templates/wi_detail.html.tmpl) — can still reach a specific superseded
+// revision once every non-head row's LatestID resolves to the head. It is
+// NOT a general-purpose "disable the redirect" switch: no other link site may
+// emit it, and honoring it never bypasses the authorization already applied
+// to the requested record (checkProjectAccess/checkMemoryVisibility on mem
+// still run first, unconditionally, in both handlers) — it only skips head
+// resolution.
+const exactVersionParam = "pf_exact"
+
+// isExactVersionRequest reports whether c carries the exact-version marker.
+func isExactVersionRequest(c echo.Context) bool {
+	return c.QueryParam(exactVersionParam) == "1"
+}
+
 // handleUIMemoryDetail renders a single memory's detail page. Spec/plan
 // artifacts redirect to /ui/artifacts/<id>/html, the cookie-authed mirror of
 // /v1/artifacts/<id>/html (same handler — handleArtifactHTML — mounted under
@@ -346,12 +386,74 @@ func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 			return err
 		}
 
+		// aihub#248: this id may have been superseded (mem.LatestID != nil and
+		// != mem.ID) by a later pf_update_memory/pf_save_artifact call. On /ui
+		// (this handler is only ever mounted there) we want the reader to land
+		// on the lineage head instead of silently viewing stale content — but
+		// ONLY once the head is re-authorized for THIS caller; reusing the
+		// authorization already established above for mem would be a privilege
+		// escalation, since UpdateMemory lets a new version's Visibility diverge
+		// from its predecessor's. hasProjectAccess/memoryVisibleTo are the pure
+		// (non-response-writing) mirrors of checkProjectAccess/checkMemoryVisibility
+		// — calling the side-effecting originals against head would commit a
+		// 403/401 to c even on the "fall back to mem" path, leaking that a newer,
+		// inaccessible version exists. Any failure to resolve or authorize the
+		// head — including a genuinely nonexistent lineage — silently falls back
+		// to rendering the originally-requested mem exactly as today.
+		//
+		// This MUST happen before the spec/plan-type redirect immediately below:
+		// resolving the head first means a stale spec/plan id whose head is also
+		// spec/plan reaches /ui/artifacts/<head>/html in one hop, and the type
+		// check below is driven by the head (once resolved) rather than by the
+		// stale id's own type, so a spec superseded by a non-spec (or vice versa)
+		// never redirects on the wrong type.
+		//
+		// aihub#248 review (W2): head.ID != mem.ID only rules out a self-redirect;
+		// it says nothing about the TARGET's own cursor. Also require
+		// head.LatestID == nil || *head.LatestID == head.ID, so a head whose own
+		// latest_id points elsewhere (multi-hop, or a 2-cycle) does not redirect
+		// again — the normal write-path invariants keep every real head
+		// self-headed, but this handler stays defensive rather than trusting that.
+		//
+		// aihub#248 review (blocking, spec amendment): isExactVersionRequest skips
+		// resolution entirely when the caller followed a deliberate past-version
+		// link (side rail / wi-detail "View") that carries pf_exact=1 — see
+		// exactVersionParam's doc comment. It does NOT bypass the
+		// checkProjectAccess/checkMemoryVisibility gates on mem above; it only
+		// skips head resolution.
+		target := mem
+		resolvedHead := false
+		if !isExactVersionRequest(c) && mem.LatestID != nil && *mem.LatestID != mem.ID {
+			if head, aerr := resolveLatestFn(ctx, pool, mem.ID); aerr == nil && head != nil &&
+				head.ID != mem.ID &&
+				(head.LatestID == nil || *head.LatestID == head.ID) &&
+				hasProjectAccess(u, head.Project, "viewer") && memoryVisibleTo(u, head) {
+				target = head
+				resolvedHead = true
+			}
+		}
+
 		// Spec / plan: hand off to the artifact viewer that already wraps the
 		// cached rendered_html in a chroma-styled document. If rendered_html is
 		// missing (legacy row), the artifact endpoint will return a clear 404 —
 		// preferable to re-rendering markdown a second time here.
-		if mem.Type == "methodology.spec" || mem.Type == "methodology.plan" {
-			return c.Redirect(http.StatusFound, "/ui/artifacts/"+mem.ID+"/html")
+		//
+		// aihub#248 review (minor): forwarding the query string here even when
+		// resolvedHead is false is intentional, not an oversight left over from
+		// the head-redirect case — it predates this feature (any ?back=... or
+		// ?view=md on the /ui/memories request must survive the hop) and is now
+		// load-bearing for a second reason: pf_exact must also survive this hop,
+		// or a deliberate exact-version link that happens to land on this handler
+		// (e.g. a superseded spec/plan id requested with ?pf_exact=1) would lose
+		// its exactness the moment it hands off to the artifact viewer. Pinned by
+		// TestUIMemoryDetail_SpecRedirect_ForwardsQueryString.
+		if target.Type == "methodology.spec" || target.Type == "methodology.plan" {
+			return c.Redirect(http.StatusFound, appendQueryString(c, "/ui/artifacts/"+url.PathEscape(target.ID)+"/html"))
+		}
+		// Non-spec/plan head resolved: redirect so the address bar self-heals to
+		// the canonical id rather than rendering head content under the stale URL.
+		if resolvedHead {
+			return c.Redirect(http.StatusFound, appendQueryString(c, "/ui/memories/"+url.PathEscape(target.ID)))
 		}
 
 		// Parse commits from the JSONB column; failures yield an empty slice

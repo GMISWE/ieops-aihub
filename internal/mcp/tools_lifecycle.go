@@ -19,6 +19,53 @@ import (
 	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
+// pf_list_work_items forwarding tables.
+//
+// Publishing a param in the InputSchema while forgetting it in the forwarding
+// loop makes the schema state a contract the transport does not keep — the
+// caller sends the param, nothing rejects it, and it is silently dropped
+// (mem_1SJ12mCz). Keeping the two as named tables lets
+// TestListWorkItemsToolForwardsEveryPublishedParam assert they agree, so the
+// next param added cannot drift.
+var (
+	// listWorkItemsStringParams are forwarded verbatim when non-empty.
+	listWorkItemsStringParams = []string{
+		"project", "status", "kind", "milestone", "label", "user_id",
+		"source", "since", "limit", "cursor", "sort", "order",
+	}
+	// listWorkItemsBoolParams are forwarded as "true" when set.
+	listWorkItemsBoolParams = []string{"ready_only", "include_step_state"}
+)
+
+// listWorkItemsSchema is the published input schema for pf_list_work_items,
+// split out so the forwarding test can read the same value the tool registers.
+func listWorkItemsSchema() json.RawMessage {
+	return objectSchema(map[string]any{
+		"project":            prop("string", "Project name"),
+		"status":             prop("string", "Filter by status"),
+		"kind":               prop("string", "Filter by kind"),
+		"milestone":          prop("string", "Filter by milestone"),
+		"label":              prop("string", "Filter by label"),
+		"user_id":            prop("string", "Filter by user ID"),
+		"source":             prop("string", "Filter by source"),
+		"ready_only":         prop("boolean", "Only return ready items"),
+		"include_step_state": prop("boolean", "Include step state"),
+		"since":              prop("string", "Since timestamp (RFC3339)"),
+		"limit":              prop("string", "Max items to return"),
+		"cursor": prop("string", "Pagination cursor. Carries the value of the column named by `sort`, "+
+			"so pass it back unchanged and do not mix cursors between different sort orders."),
+		// The enums come from the server's enforced sets (aihub#224) rather than
+		// being retyped here, so the published contract cannot drift from the
+		// validator that rejects everything outside them.
+		"sort": propEnum("string", fmt.Sprintf(
+			"Sort column (default %s). %s returns ONLY closed items — a NULL close time has no position in that ordering.",
+			domain.ListWorkItemsSortCreatedAt, domain.ListWorkItemsSortClosedAt),
+			domain.ListWorkItemsSortValues()),
+		"order": propEnum("string", fmt.Sprintf("Sort direction (default %s)", domain.ListWorkItemsOrderDesc),
+			domain.ListWorkItemsOrderValues()),
+	}, nil)
+}
+
 func (s *Server) registerLifecycleTools() {
 	// pf_whoami
 	s.mcp.AddTool(&sdkmcp.Tool{
@@ -146,34 +193,20 @@ func (s *Server) registerLifecycleTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_list_work_items",
 		Description: "List work items with optional filters",
-		InputSchema: objectSchema(map[string]any{
-			"project":            prop("string", "Project name"),
-			"status":             prop("string", "Filter by status"),
-			"kind":               prop("string", "Filter by kind"),
-			"milestone":          prop("string", "Filter by milestone"),
-			"label":              prop("string", "Filter by label"),
-			"user_id":            prop("string", "Filter by user ID"),
-			"source":             prop("string", "Filter by source"),
-			"ready_only":         prop("boolean", "Only return ready items"),
-			"include_step_state": prop("boolean", "Include step state"),
-			"since":              prop("string", "Since timestamp (RFC3339)"),
-			"limit":              prop("string", "Max items to return"),
-			"cursor":             prop("string", "Pagination cursor"),
-		}, nil),
+		InputSchema: listWorkItemsSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
 			return errResult(err)
 		}
 		params := url.Values{}
-		for _, k := range []string{"project", "status", "kind", "milestone", "label", "user_id", "source", "since", "limit", "cursor"} {
+		for _, k := range listWorkItemsStringParams {
 			setIfNonempty(params, k, strArg(args, k))
 		}
-		if boolArg(args, "ready_only") {
-			params.Set("ready_only", "true")
-		}
-		if boolArg(args, "include_step_state") {
-			params.Set("include_step_state", "true")
+		for _, k := range listWorkItemsBoolParams {
+			if boolArg(args, k) {
+				params.Set(k, "true")
+			}
 		}
 		result, err := s.client.ListWorkItems(ctx, params)
 		if err != nil {

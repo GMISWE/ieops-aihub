@@ -674,6 +674,111 @@ type ListWorkItemsFilter struct {
 	Since              *time.Time
 	Limit              int
 	Cursor             *string
+	// Sort selects the ordering column, one of ListWorkItemsSortValues; ""
+	// means created_at. Order is "desc" (default) or "asc". Both also key the
+	// cursor predicate and the emitted next_cursor — see buildListWorkItemsWhere
+	// and listWorkItemsNextCursor. Prefer NormalizeListWorkItemsSort to fill
+	// these from caller input; unrecognised values fall back to the defaults
+	// rather than reaching the query.
+	Sort  string
+	Order string
+}
+
+// Legal `sort` and `order` values for ListWorkItems (aihub#224).
+const (
+	ListWorkItemsSortCreatedAt = "created_at"
+	ListWorkItemsSortClosedAt  = "closed_at"
+
+	ListWorkItemsOrderDesc = "desc"
+	ListWorkItemsOrderAsc  = "asc"
+)
+
+// listWorkItemsSortColumns maps each legal `sort` value to its qualified column.
+// This map is the *enforced* set: nothing outside it can reach ORDER BY, and the
+// published enum below is derived from it so contract and enforcement cannot
+// drift (cf. mem_X8JDSC96).
+var listWorkItemsSortColumns = map[string]string{
+	ListWorkItemsSortCreatedAt: "wi.created_at",
+	ListWorkItemsSortClosedAt:  "wi.closed_at",
+}
+
+// ListWorkItemsSortValues returns the legal `sort` values in a stable order, for
+// callers that publish the enum (the HTTP 400 message, the MCP tool schema).
+func ListWorkItemsSortValues() []string {
+	return []string{ListWorkItemsSortCreatedAt, ListWorkItemsSortClosedAt}
+}
+
+// ListWorkItemsOrderValues returns the legal `order` values in a stable order.
+func ListWorkItemsOrderValues() []string {
+	return []string{ListWorkItemsOrderDesc, ListWorkItemsOrderAsc}
+}
+
+// NormalizeListWorkItemsSort validates caller-supplied sort/order and fills in
+// the defaults (created_at / desc) for empty input, returning the lowercased
+// values to store on the filter.
+//
+// Empty means "the caller did not ask" and must default, since every pre-aihub#224
+// caller sends neither param. A *non-empty* unrecognised value is caller-supplied
+// input and gets a hard reject naming the offending value and enumerating the
+// legal ones, so the mistake is fixed at its source.
+func NormalizeListWorkItemsSort(sort, order string) (string, string, *AihubError) {
+	sort = strings.ToLower(strings.TrimSpace(sort))
+	order = strings.ToLower(strings.TrimSpace(order))
+	if sort == "" {
+		sort = ListWorkItemsSortCreatedAt
+	}
+	if order == "" {
+		order = ListWorkItemsOrderDesc
+	}
+	if _, ok := listWorkItemsSortColumns[sort]; !ok {
+		return "", "", NewErr(ErrBadRequest, fmt.Sprintf(
+			"invalid sort %q: must be one of %s",
+			sort, strings.Join(ListWorkItemsSortValues(), ", ")))
+	}
+	if order != ListWorkItemsOrderDesc && order != ListWorkItemsOrderAsc {
+		return "", "", NewErr(ErrBadRequest, fmt.Sprintf(
+			"invalid order %q: must be one of %s",
+			order, strings.Join(ListWorkItemsOrderValues(), ", ")))
+	}
+	return sort, order, nil
+}
+
+// listWorkItemsSort resolves a filter's Sort/Order to the qualified ORDER BY
+// column, the SQL direction keyword, and the strict cursor comparison operator
+// that matches that direction (DESC → `<`, ASC → `>`).
+//
+// Empty or unrecognised values fall back to the defaults, so the domain layer is
+// safe even for a caller that skipped NormalizeListWorkItemsSort — the column
+// always comes from listWorkItemsSortColumns and caller text is never
+// interpolated into the query.
+func listWorkItemsSort(f ListWorkItemsFilter) (col, dir, cursorOp string) {
+	col, ok := listWorkItemsSortColumns[strings.ToLower(strings.TrimSpace(f.Sort))]
+	if !ok {
+		col = listWorkItemsSortColumns[ListWorkItemsSortCreatedAt]
+	}
+	if strings.EqualFold(strings.TrimSpace(f.Order), ListWorkItemsOrderAsc) {
+		return col, "ASC", ">"
+	}
+	return col, "DESC", "<"
+}
+
+// listWorkItemsNextCursor returns the pagination cursor for the last row of a
+// page: the value of the column the page was ordered by. Emitting created_at for
+// a page ordered by closed_at would make page 2 an arbitrary slice of the table.
+//
+// A NULL sort value cannot be encoded as a cursor. buildListWorkItemsWhere
+// excludes those rows so this is unreachable, but ending pagination is the
+// correct degradation — a cursor read off a different column is not.
+func listWorkItemsNextCursor(last *WorkItem, sortCol string) *string {
+	t := last.CreatedAt
+	if sortCol == listWorkItemsSortColumns[ListWorkItemsSortClosedAt] {
+		if last.ClosedAt == nil {
+			return nil
+		}
+		t = *last.ClosedAt
+	}
+	s := t.Format(time.RFC3339Nano)
+	return &s
 }
 
 // ListWorkItemsResult holds paginated results.
@@ -758,12 +863,29 @@ func buildListWorkItemsWhere(project string, f ListWorkItemsFilter) (joinClause,
 		args = append(args, *f.Since)
 		argIdx++
 	}
-	// Cursor pagination: NextCursor is the last returned item's created_at
-	// (RFC3339Nano). ORDER BY wi.created_at DESC means the next page is the rows
-	// with created_at strictly less than the cursor. Mirrors ListEvents in
-	// memory.go (strict <, ::timestamptz cast, no secondary tie-breaker).
+	sortCol, _, cursorOp := listWorkItemsSort(f)
+	// sort=closed_at restricts the set to rows that HAVE a close time. Two
+	// reasons, both load-bearing:
+	//   1. A NULL sort key is unreachable by any cursor — `closed_at < $n` is
+	//      never true for NULL — so open wis would silently vanish after page 1.
+	//      Excluding them up front keeps the ordering total and the cursor exact.
+	//   2. It loses nothing for the terminal statuses this sort is for: the
+	//      trg_wi_closed_at trigger (migration 0002) stamps closed_at on every
+	//      transition into wrapped/failed/cancelled, and INSERT always starts at
+	//      'queued', so status-terminal implies closed_at IS NOT NULL. Verified
+	//      against live data at aihub#224: 0 of 200 terminal aihub wis had a NULL.
+	// It also makes the query eligible for the partial index idx_wi_closed.
+	// Callers that want open items must sort by created_at (the default).
+	if sortCol == listWorkItemsSortColumns[ListWorkItemsSortClosedAt] {
+		conds = append(conds, "wi.closed_at IS NOT NULL")
+	}
+	// Cursor pagination: NextCursor is the last returned item's *sort column*
+	// value (RFC3339Nano), so the predicate must be on that same column, with a
+	// strict comparison following the sort direction (DESC → `<`, ASC → `>`).
+	// Mirrors ListEvents in memory.go (strict comparison, ::timestamptz cast, no
+	// secondary tie-breaker).
 	if f.Cursor != nil && *f.Cursor != "" {
-		conds = append(conds, fmt.Sprintf("wi.created_at < $%d::timestamptz", argIdx))
+		conds = append(conds, fmt.Sprintf("%s %s $%d::timestamptz", sortCol, cursorOp, argIdx))
 		args = append(args, *f.Cursor)
 		argIdx++
 	}
@@ -779,13 +901,22 @@ func buildListWorkItemsWhere(project string, f ListWorkItemsFilter) (joinClause,
 	return joinClause, where, args
 }
 
-func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f ListWorkItemsFilter) (*ListWorkItemsResult, *AihubError) {
-	if f.Limit <= 0 || f.Limit > 200 {
-		f.Limit = 50
-	}
+// buildListWorkItemsQuery assembles the full SELECT for ListWorkItems, returning
+// it alongside the bound args and the sort column the page is ordered by (which
+// listWorkItemsNextCursor needs to emit the right cursor).
+//
+// Split out from ListWorkItems for the same reason buildListWorkItemsWhere was:
+// the domain suite is pure-unit, so the assembled statement — clause order, the
+// ORDER BY built from two interpolated fragments, the LIMIT — has no coverage
+// unless it can be inspected without a live pool (cf. gc_test pinning the sweep
+// SQL). Assumes f.Limit is already clamped.
+func buildListWorkItemsQuery(project string, f ListWorkItemsFilter) (query string, args []any, sortCol string) {
+	// The column and direction come from listWorkItemsSortColumns, never from
+	// caller text, so this stays injection-safe despite the Sprintf.
+	sortCol, sortDir, _ := listWorkItemsSort(f)
 
 	joinClause, where, args := buildListWorkItemsWhere(project, f)
-	query := fmt.Sprintf(`
+	query = fmt.Sprintf(`
 		SELECT wi.id, wi.seq, wi.slug, wi.project, wi.scenario, wi.goal, wi.source,
 			   wi.wi_type, wi.priority, wi.requires_human_session, wi.milestone, wi.labels,
 			   wi.status, wi.declared_resources, wi.resources_version,
@@ -795,8 +926,18 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 			   wi.parent_work_item_id, wi.attrs, wi.created_at, wi.updated_at, wi.closed_at
 		FROM work_items wi%s
 		%s
-		ORDER BY wi.created_at DESC
-		LIMIT %d`, joinClause, where, f.Limit+1)
+		ORDER BY %s %s
+		LIMIT %d`, joinClause, where, sortCol, sortDir, f.Limit+1)
+
+	return query, args, sortCol
+}
+
+func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f ListWorkItemsFilter) (*ListWorkItemsResult, *AihubError) {
+	if f.Limit <= 0 || f.Limit > 200 {
+		f.Limit = 50
+	}
+
+	query, args, sortCol := buildListWorkItemsQuery(project, f)
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
@@ -829,8 +970,7 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 	result := &ListWorkItemsResult{}
 	if len(items) > f.Limit {
 		items = items[:f.Limit]
-		nextCursor := items[len(items)-1].CreatedAt.Format(time.RFC3339Nano)
-		result.NextCursor = &nextCursor
+		result.NextCursor = listWorkItemsNextCursor(items[len(items)-1], sortCol)
 	}
 	result.Items = items
 	if result.Items == nil {

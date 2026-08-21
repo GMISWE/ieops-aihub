@@ -220,8 +220,21 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		if cursor := c.QueryParam("cursor"); cursor != "" {
 			filter.Cursor = &cursor
 		}
+		// sort/order (aihub#224). Both default to the historical behaviour
+		// (created_at desc); an unrecognised value is rejected rather than
+		// silently ignored. sort=closed_at returns only closed items, since a
+		// NULL close time has no position in that ordering.
+		sortBy, order, sortErr := domain.NormalizeListWorkItemsSort(
+			c.QueryParam("sort"), c.QueryParam("order"))
+		if sortErr != nil {
+			return writeError(c, sortErr)
+		}
+		filter.Sort = sortBy
+		filter.Order = order
 
-		result, aihubErr := domain.ListWorkItems(ctx, pool, project, filter)
+		// Via the package-level seam (ui_handlers_wi.go) so the query-param →
+		// filter wiring is testable without a live pool.
+		result, aihubErr := listWorkItemsFn(ctx, pool, project, filter)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
 		}

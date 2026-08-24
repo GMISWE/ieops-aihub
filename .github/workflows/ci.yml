@@ -169,10 +169,16 @@ jobs:
       # check_for_update directly), so it is safe to gate on.
       #
       # Deliberately narrow: the other suites under plugins/polyforge/tests/
-      # (launcher-bash32, pf-commit-guard, pf-seam-check, pf-skill-router) are
-      # ALSO unwired here and are not enabled by this step. launcher-bash32 in
-      # particular needs docker and would newly gate PRs, so turning them all on
-      # at once belongs in its own change rather than riding along with a bugfix.
+      # (launcher-bash32, pf-commit-guard, pf-repo-sync, pf-seam-check,
+      # pf-skill-router) are ALSO unwired here and are not enabled by this step.
+      # launcher-bash32 in particular needs docker and would newly gate PRs, so
+      # turning them all on at once belongs in its own change rather than riding
+      # along with a bugfix.
+      # NOTE (aihub#254): this gap has a cost, now demonstrated — pf-repo-sync
+      # regressed session-start latency and shipped with no baseline because no
+      # gate covered it. pf-repo-sync.test.sh carries the static assertion that
+      # the hook stays `async: true`, and while unwired that guard is advisory:
+      # it only runs when someone invokes it by hand.
       # aihub#249: GET /v1/memories previously parsed only `top_k` (a `?limit=N`
       # caller was silently ignored) and RecallResponse carried no `total`; and
       # GET /v1/memories/:id did not exist at all. These run against the

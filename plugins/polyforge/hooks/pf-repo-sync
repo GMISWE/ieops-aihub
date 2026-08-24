@@ -1,16 +1,63 @@
 #!/usr/bin/env bash
-# SessionStart hook (OPT build) — refresh each .repo/<repo> base clone to its origin default
-# branch, so code ANALYSIS in a fresh session reads the LATEST code, not the pf-init-time snapshot.
+# SessionStart hook (OPT build) — BEST-EFFORT refresh of each .repo/<repo> base clone toward its
+# origin default branch, so code ANALYSIS in a fresh session usually reads recent code rather than
+# the pf-init-time snapshot.
 #
 # Why this hook: polyforge only syncs .repo/<repo> at `pf init` (cloneOrSync). Analysis done in a
 # new session (before/without claiming a wi) reads the base clone directly -> stale. Claim-time
 # fetch doesn't help (it's post-claim and only cuts a worktree). This runs the same fetch+reset
 # cloneOrSync does, but on every SessionStart.
 #
+# FRESHNESS CONTRACT — deliberately weaker than "latest" (aihub#254). Read this before relying on
+# what a session sees; the guarantee was traded away for TTFT and the trade is intentional:
+#   - Within PF_REPO_SYNC_TTL of the last successful sync this hook does NOTHING, so a session can
+#     legitimately read a clone that is up to a TTL old (plus whatever landed since).
+#   - The hook is async, so it runs CONCURRENTLY with the first turns of the session. A session may
+#     therefore observe the clone before the reset, or mid-`reset --hard` (a torn read: index and
+#     working tree being rewritten under it).
+#   - Skipping the reset when HEAD already equals the target (below) removes the write in the
+#     common case, but it does NOT shrink the window on the branch that actually rewrites the
+#     tree — when the clone IS behind, that concurrent rewrite still happens.
+#   - A failed or timed-out fetch is silent (see below), so "no error" does not mean "synced".
+# If you need a guaranteed-current tree, do not depend on this hook: claim a wi (the worktree is
+# cut from a fresh fetch) or fetch explicitly.
+#
+# LATENCY CONTRACT (aihub#254). This hook does real network I/O, so it is registered
+# "async": true in hooks.json and MUST stay that way: a synchronous SessionStart hook holds
+# up the first user turn for as long as it runs, which is exactly how this hook regressed
+# cc TTFT between its introduction (12b0320) and aihub#254. Three further bounds keep the
+# background work itself cheap:
+#   - repos are fetched in PARALLEL, up to PF_REPO_SYNC_JOBS at a time, so the cost is the slowest
+#     repo per wave rather than the sum of all of them;
+#   - each fetch is bounded by PF_REPO_SYNC_TIMEOUT seconds, so one unreachable remote
+#     (VPN/proxy flake) cannot stall the whole sweep;
+#   - a per-repo TTL stamp skips repos already synced within PF_REPO_SYNC_TTL seconds, so
+#     opening several sessions back-to-back re-fetches nothing.
+# Note on error handling vs. latency: the `|| :` / `2>/dev/null` below make this hook fail
+# SILENTLY (a broken remote never surfaces an error to the session). Silence is NOT the same
+# as being free — before this hook went async, slow fetches still delayed session start
+# without reporting anything. Keep both properties in mind when editing.
+#
+# Knobs (all optional):
+#   PF_REPO_SYNC_DISABLE=1   skip entirely (use this to A/B the hook's TTFT cost)
+#   PF_REPO_SYNC_TTL=900     seconds a fetched repo is considered fresh (0 = always fetch)
+#   PF_REPO_SYNC_TIMEOUT=8   per-repo wall-clock budget for `git fetch`
+#   PF_REPO_SYNC_JOBS=8      max concurrent per-repo fetches (0/invalid -> 8)
+#
 # Safe: base clones hold no uncommitted work (work happens in worktrees pf.*/); `reset --hard` on
 # a base clone does NOT touch worktrees (separate working dirs + branches). Fetch/reset are scoped
-# to .repo/*; nothing else is modified. Fails silent (never blocks session start).
+# to .repo/*; nothing else is modified.
+#
+# Portability: must run under macOS stock GNU bash 3.2 (see tests/launcher-bash32.test.sh), so no
+# bash>=4 syntax and no `wait -n`. macOS also ships no timeout(1), hence run_bounded's fallback.
 set -uo pipefail
+
+: "${PF_REPO_SYNC_DISABLE:=0}"
+: "${PF_REPO_SYNC_TTL:=900}"
+: "${PF_REPO_SYNC_TIMEOUT:=8}"
+: "${PF_REPO_SYNC_JOBS:=8}"
+
+[ "$PF_REPO_SYNC_DISABLE" = "1" ] && exit 0
 
 dir="${CLAUDE_PROJECT_DIR:-$PWD}"; ws=""
 while [ -n "$dir" ] && [ "$dir" != "/" ]; do
@@ -20,13 +67,132 @@ done
 [ -z "$ws" ] && exit 0
 [ -d "$ws/.repo" ] || exit 0
 
+# Sanitize the numeric knobs: a non-numeric value would make the arithmetic below abort the
+# whole hook, so fall back to the documented defaults instead.
+case "$PF_REPO_SYNC_TTL" in ''|*[!0-9]*) PF_REPO_SYNC_TTL=900;; esac
+case "$PF_REPO_SYNC_TIMEOUT" in ''|*[!0-9]*|0) PF_REPO_SYNC_TIMEOUT=8;; esac
+case "$PF_REPO_SYNC_JOBS" in ''|*[!0-9]*|0) PF_REPO_SYNC_JOBS=8;; esac
+
+stamp_dir="$ws/.polyforge/cache/repo-sync"
+mkdir -p "$stamp_dir" 2>/dev/null || :
+
+now="$(date +%s)"
+
+# Prefer a real timeout(1) (GNU coreutils on Linux, gtimeout via brew on macOS). Stock macOS has
+# neither, so fall back to a background watchdog rather than silently running unbounded.
+# Also probe for -k/--kill-after support: git ignoring SIGTERM would otherwise defeat the bound on
+# this branch, while the fallback below is TERM-then-KILL. Probing (rather than assuming) keeps a
+# timeout(1) without -k -- e.g. BusyBox -- from failing every fetch on a usage error.
+timeout_bin=""; timeout_kill=""
+for _c in timeout gtimeout; do
+  if command -v "$_c" >/dev/null 2>&1; then
+    timeout_bin="$_c"
+    if "$_c" -k 1 1 true >/dev/null 2>&1; then timeout_kill="-k 1"; fi
+    break
+  fi
+done
+
+# run_bounded <seconds> <cmd...> — returns 124 if the command had to be killed.
+run_bounded() {
+  _secs="$1"; shift
+  if [ -n "$timeout_bin" ]; then
+    # shellcheck disable=SC2086  # $timeout_kill is an intentional pair of unquoted words
+    "$timeout_bin" $timeout_kill "$_secs" "$@"
+    return $?
+  fi
+  # Fallback watchdog for platforms with no timeout(1) (stock macOS is the only one in practice).
+  #
+  # Completion is detected by the rc file the wrapper writes, NOT by `kill -0 $_pid`: a child that
+  # has exited but not yet been reaped is a zombie, and `kill -0` reports a zombie as alive. Polling
+  # `kill -0` therefore mis-reads a FAST, SUCCESSFUL fetch as still-running, burns the whole budget,
+  # and returns 124 -> caller skips the reset and the stamp, and the error is swallowed. That is the
+  # common case on the very platform this branch exists for, so completion detection must not depend
+  # on SIGCHLD reaping timing (bash 3.2's reaping is exactly what launcher-bash32.test.sh guards).
+  #
+  # The 1s poll granularity does impose ~1s on an instant fetch. Harmless: the hook is async.
+  _rc="${TMPDIR:-/tmp}/pf-repo-sync.$$.${_rcname:-0}.rc"
+  rm -f "$_rc" 2>/dev/null || :
+  ( "$@"; echo $? > "$_rc" ) &
+  _pid=$!
+  _waited=0
+  while [ ! -f "$_rc" ] && [ "$_waited" -lt "$_secs" ]; do
+    sleep 1
+    _waited=$((_waited + 1))
+  done
+  if [ -f "$_rc" ]; then
+    _code="$(cat "$_rc" 2>/dev/null)"
+    rm -f "$_rc" 2>/dev/null || :
+    wait "$_pid" 2>/dev/null || :
+    case "$_code" in ''|*[!0-9]*) _code=1;; esac
+    return "$_code"
+  fi
+  if kill -0 "$_pid" 2>/dev/null; then
+    kill -TERM "$_pid" 2>/dev/null || :
+    sleep 1
+    kill -KILL "$_pid" 2>/dev/null || :
+    wait "$_pid" 2>/dev/null || :
+    rm -f "$_rc" 2>/dev/null || :
+    return 124
+  fi
+  # No rc file and the child is already gone: it died without recording a status (killed from
+  # outside, or the rc write failed). Report failure so the caller skips the stamp and retries next
+  # session, rather than inheriting `wait`'s status for an already-reaped pid (127 on bash 3.2).
+  wait "$_pid" 2>/dev/null || :
+  rm -f "$_rc" 2>/dev/null || :
+  return 1
+}
+
+sync_one() {
+  _repo="$1"
+  _name="$(basename "$_repo")"
+  _stamp="$stamp_dir/$_name.stamp"
+  _rcname="$_name"   # keeps concurrent repos' watchdog rc files distinct (see run_bounded)
+
+  # TTL throttle: skip a repo fetched recently. Only successful fetches are stamped, so a
+  # failed/timed-out sync is retried on the next session instead of being suppressed for the TTL.
+  if [ "$PF_REPO_SYNC_TTL" -gt 0 ] && [ -f "$_stamp" ]; then
+    _last="$(cat "$_stamp" 2>/dev/null || echo 0)"
+    case "$_last" in ''|*[!0-9]*) _last=0;; esac
+    if [ "$_last" -gt 0 ] && [ "$((now - _last))" -lt "$PF_REPO_SYNC_TTL" ]; then
+      return 0
+    fi
+  fi
+
+  run_bounded "$PF_REPO_SYNC_TIMEOUT" git -C "$_repo" fetch origin --quiet 2>/dev/null || return 0
+
+  _def="origin/main"
+  if _ref="$(git -C "$_repo" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)"; then
+    _def="origin/${_ref##*/}"
+  fi
+
+  # Only reset when the clone is actually behind. Now that this hook runs in the background, a
+  # session can be reading the base clone while we work; skipping the no-op `reset --hard`
+  # (the common case, since the TTL already filtered out recent syncs) keeps that window rare.
+  _head="$(git -C "$_repo" rev-parse HEAD 2>/dev/null || echo unknown-head)"
+  _target="$(git -C "$_repo" rev-parse "$_def" 2>/dev/null || echo unknown-target)"
+  if [ "$_head" != "$_target" ]; then
+    git -C "$_repo" reset --hard "$_def" --quiet 2>/dev/null || true
+  fi
+
+  printf '%s\n' "$now" > "$_stamp" 2>/dev/null || :
+  return 0
+}
+
+# Fan out: one background job per repo, so the sweep costs the slowest repo rather than the sum.
+# Bounded to PF_REPO_SYNC_JOBS concurrent fetches in waves -- an unbounded fan-out would open one
+# connection per repo at once, which is fine at 2 repos but not at the couple dozen a large
+# workspace can hold. Waves (rather than a sliding window) because bash 3.2 has no `wait -n`, so
+# the cost is ceil(repos / JOBS) * slowest-in-wave instead of the true slowest.
+_pids=""; _jobs=0
 for repo in "$ws"/.repo/*/; do
   [ -d "${repo}.git" ] || continue
-  git -C "$repo" fetch origin --quiet 2>/dev/null || continue
-  def="origin/main"
-  if ref="$(git -C "$repo" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)"; then
-    def="origin/${ref##*/}"
+  sync_one "$repo" &
+  _pids="$_pids $!"
+  _jobs=$((_jobs + 1))
+  if [ "$_jobs" -ge "$PF_REPO_SYNC_JOBS" ]; then
+    wait $_pids 2>/dev/null
+    _pids=""; _jobs=0
   fi
-  git -C "$repo" reset --hard "$def" --quiet 2>/dev/null || true
 done
+[ -n "$_pids" ] && wait $_pids 2>/dev/null
 exit 0

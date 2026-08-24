@@ -34,8 +34,8 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-repo-sync\"",
-            "async": false,
-            "timeout": 60
+            "async": true,
+            "timeout": 30
           }
         ]
       }

@@ -35,6 +35,14 @@
 // decision belongs at the call site that knows which path it is serving.
 //   - chroma syntax highlighting on fenced code blocks (CSS-class mode so the
 //     consumer can theme via a stylesheet later)
+//   - a custom block parser (svg_block.go, aihub#262) that treats a top-level
+//     <svg>...</svg> as one raw HTML block even when it contains blank lines or
+//     indented lines. Without it, CommonMark's stock HTML-block rules end a
+//     line-initial <svg> at the first blank line, and everything after that point
+//     gets re-parsed as markdown — an indented line becomes a code block, and an
+//     open tag with trailing content becomes a <p>, which force-closes the <svg> per
+//     the HTML5 foreign-content breakout rule. See svg_block.go's package-level
+//     comment for the full mechanism and why it fails closed.
 package render
 
 import (
@@ -49,6 +57,7 @@ import (
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer/html"
 	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 )
 
 // md is the shared goldmark engine. goldmark.Markdown is safe for concurrent use
@@ -63,7 +72,22 @@ var md = goldmark.New(
 			highlighting.WithFormatOptions(chromahtml.WithClasses(true)),
 		),
 	),
-	goldmark.WithParserOptions(parser.WithAutoHeadingID()),
+	goldmark.WithParserOptions(
+		parser.WithAutoHeadingID(),
+		// Priority numbers below are goldmark v1.8.2's own, read from
+		// parser.DefaultBlockParsers() (parser/parser.go):
+		//   SetextHeading 100, ThematicBreak 200, List 300, ListItem 400,
+		//   CodeBlock (indented) 500, ATXHeading 600, FencedCodeBlock 700,
+		//   Blockquote 800, HTMLBlock 900, Paragraph 1000.
+		// 850 sits strictly between Blockquote/FencedCodeBlock (700/800) and
+		// HTMLBlock (900): our svg block parser must run BEFORE the stock
+		// HTML-block parser so it gets first refusal on a line-initial <svg>,
+		// but AFTER FencedCodeBlock so an ```svg fence still wins first (and,
+		// inherently, so a <svg> already inside an open fenced/indented code
+		// block is never even offered to us — goldmark only tries new block
+		// parsers when no block is currently open and continuing).
+		parser.WithBlockParsers(util.Prioritized(newSVGBlockParser(), 850)),
+	),
 	goldmark.WithRendererOptions(html.WithUnsafe()),
 )
 

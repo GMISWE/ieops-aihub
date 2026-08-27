@@ -134,6 +134,9 @@ type Memory struct {
 	// populated post-scan from memory_relations (aihub#74); NOT part of any SELECT/Scan — do not add to the 6 lockstep sites.
 	Related   []RelatedRef `json:"related,omitempty"`
 	Backlinks []RelatedRef `json:"backlinks,omitempty"`
+	// opt3 P1: recall returns content truncated to a snippet; full via GET /v1/memories/:id.
+	ContentTruncated bool `json:"content_truncated,omitempty"`
+	ContentFullLen   int  `json:"content_full_len,omitempty"`
 }
 
 // RelatedRef is a lightweight reference to a related memory, used in

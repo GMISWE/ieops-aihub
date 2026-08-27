@@ -83,7 +83,14 @@ func main() {
 	fmt.Printf("backfill: %d memories to embed with model=%q dims=%d\n", len(todo), model, dims)
 	var ok, fail int
 	for i, it := range todo {
-		vec, embErr := prov.Embed(ctx, it.content)
+		// opt3: truncate over-long content before embedding — the model/ollama context
+		// caps input; giant memories (some >300KB) otherwise fail with "input length
+		// exceeds the context length". Embedding the leading 6000 runes captures the gist.
+		embInput := it.content
+		if rr := []rune(embInput); len(rr) > 6000 {
+			embInput = string(rr[:6000])
+		}
+		vec, embErr := prov.Embed(ctx, embInput)
 		if embErr != nil || len(vec) == 0 {
 			fail++
 			fmt.Fprintf(os.Stderr, "  embed failed id=%s: %v\n", it.id, embErr)

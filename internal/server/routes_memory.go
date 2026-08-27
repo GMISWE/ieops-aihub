@@ -190,9 +190,8 @@ func enforceMethodologyAttemptGate(
 
 // handleRecall handles GET /v1/memories.
 const (
-	recallTopKDefault = 5
-	recallTopKMax     = 10
-	recallContentMax  = 800
+	recallTopKMax    = 10
+	recallContentMax = 800
 )
 
 func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
@@ -260,10 +259,12 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 			req.RecallAlgo = algo
 		}
 
-		// opt3 P1: clamp top_k (default 5, max 10)
-		if req.TopK <= 0 {
-			req.TopK = recallTopKDefault
-		} else if req.TopK > recallTopKMax {
+		// opt3 P1: cap top_k (max 10). No forced default here: when the caller
+		// supplies neither param (or only malformed values), TopK stays 0 and
+		// domain.Recall applies its own default page size (20) — preserving the
+		// aihub#249 contract that bad input falls back to the default, not to a
+		// smaller page.
+		if req.TopK > recallTopKMax {
 			req.TopK = recallTopKMax
 		}
 		resp, aihubErr := domain.Recall(ctx, pool, req)

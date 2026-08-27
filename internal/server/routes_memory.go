@@ -189,6 +189,12 @@ func enforceMethodologyAttemptGate(
 }
 
 // handleRecall handles GET /v1/memories.
+const (
+	recallTopKDefault = 5
+	recallTopKMax     = 10
+	recallContentMax  = 800
+)
+
 func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -254,9 +260,24 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 			req.RecallAlgo = algo
 		}
 
+		// opt3 P1: clamp top_k (default 5, max 10)
+		if req.TopK <= 0 {
+			req.TopK = recallTopKDefault
+		} else if req.TopK > recallTopKMax {
+			req.TopK = recallTopKMax
+		}
 		resp, aihubErr := domain.Recall(ctx, pool, req)
 		if aihubErr != nil {
 			return domainErr(c, aihubErr)
+		}
+		// opt3 P1: truncate each item content to a snippet; full via GET /v1/memories/:id
+		for i := range resp.Items {
+			rr := []rune(resp.Items[i].Content)
+			if len(rr) > recallContentMax {
+				resp.Items[i].ContentFullLen = len(rr)
+				resp.Items[i].Content = string(rr[:recallContentMax])
+				resp.Items[i].ContentTruncated = true
+			}
 		}
 		return c.JSON(http.StatusOK, resp)
 	}

@@ -60,7 +60,9 @@ Whichever you use, the output markdown must satisfy the Contract above before yo
 ### Step 1: Memory-First recall
 
 ```
-pf_recall(project=<current>, query=<wi.goal>, type="methodology.spec|fact.*|rule.*", top_k=5)
+# opt3 P2: merged Memory-First recall — covers BOTH spec and plan phases; the plan phase
+# reuses these results (no second recall). See pf-plan Step 1.
+pf_recall(project=<current>, query=<wi.goal>, type="methodology.spec|methodology.plan|fact.*|rule.*|experience.*", top_k=8)
 ```
 
 Display results with `effective_strength >= 0.3` (💡 prefix). For any memory the model

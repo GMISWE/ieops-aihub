@@ -47,6 +47,11 @@ type WorkItem struct {
 	CreatedAt            time.Time       `json:"created_at"`
 	UpdatedAt            time.Time       `json:"updated_at"`
 	ClosedAt             *time.Time      `json:"closed_at"`
+	// Similarity is populated only on the semantic-search path
+	// (GET /v1/work_items?query=..., aihub#273): cosine similarity between the
+	// query embedding and this wi's embedding. omitempty keeps every non-query
+	// response byte-identical to before.
+	Similarity *float64 `json:"similarity,omitempty"`
 }
 
 // CreateWorkItemRequest is the parsed body for POST /v1/work_items.
@@ -189,6 +194,16 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		return nil, NewErr(ErrNotImplemented, fmt.Sprintf("scenario %q is not yet implemented", req.Scenario))
 	}
 
+	// aihub#273: compute the embedding before the transaction below begins —
+	// it is a network call and must never run inside an open tx (same rule as
+	// Remember, aihub#192). Best-effort: failure leaves the emb_* columns NULL
+	// and the wi is still findable via the ILIKE text fallback.
+	wiContent := ""
+	if req.Content != nil {
+		wiContent = *req.Content
+	}
+	embVecLit, embModel, embDims := embedWorkItemBestEffort(ctx, req.Goal, wiContent)
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, "failed to begin transaction")
@@ -235,16 +250,19 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 			id, seq, project, scenario, goal, source, wi_type, priority,
 			requires_human_session, milestone, labels, status,
 			declared_resources, reporter_user_id, reporter_display,
-			parent_work_item_id, attrs, content
+			parent_work_item_id, attrs, content,
+			emb_model, emb_dims, emb_vector
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8,
 			$9, $10, $11, 'queued',
 			$12, $13, $14,
-			$15, $16, $17
+			$15, $16, $17,
+			$18, $19, $20::vector
 		)`,
 		wiID, seq, req.Project, req.Scenario, req.Goal, req.Source, wiType, req.Priority,
 		requiresHumanSession, req.Milestone, req.Labels, req.DeclaredResources,
 		callerUserID, callerDisplay, req.ParentWorkItemID, req.Attrs, req.Content,
+		embModel, embDims, embVecLit,
 	)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to insert work_item: %v", err))
@@ -672,8 +690,12 @@ type ListWorkItemsFilter struct {
 	ReadyOnly          bool
 	IDs                []string
 	Since              *time.Time
-	Limit              int
-	Cursor             *string
+	// Query is a semantic search over goal+content (aihub#273): pgvector
+	// cosine when an embedding provider is active, ILIKE fallback otherwise.
+	// Not combinable with Sort/Order/Cursor — the handler rejects those.
+	Query  *string
+	Limit  int
+	Cursor *string
 	// Sort selects the ordering column, one of ListWorkItemsSortValues; ""
 	// means created_at. Order is "desc" (default) or "asc". Both also key the
 	// cursor predicate and the emitted next_cursor — see buildListWorkItemsWhere
@@ -863,6 +885,15 @@ func buildListWorkItemsWhere(project string, f ListWorkItemsFilter) (joinClause,
 		args = append(args, *f.Since)
 		argIdx++
 	}
+	// aihub#273 text path: substring match over goal+content. The vector path
+	// (listWorkItemsByVector) clears Query before calling this builder, so the
+	// guard only ever applies to the fallback.
+	if f.Query != nil && *f.Query != "" {
+		conds = append(conds, fmt.Sprintf(
+			"(wi.goal ILIKE '%%' || $%d || '%%' OR wi.content ILIKE '%%' || $%d || '%%')", argIdx, argIdx))
+		args = append(args, *f.Query)
+		argIdx++
+	}
 	sortCol, _, cursorOp := listWorkItemsSort(f)
 	// sort=closed_at restricts the set to rows that HAVE a close time. Two
 	// reasons, both load-bearing:
@@ -935,6 +966,24 @@ func buildListWorkItemsQuery(project string, f ListWorkItemsFilter) (query strin
 func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f ListWorkItemsFilter) (*ListWorkItemsResult, *AihubError) {
 	if f.Limit <= 0 || f.Limit > 200 {
 		f.Limit = 50
+	}
+
+	// aihub#273: semantic path first when the caller sent query= and an
+	// embedding provider is active. Any error or an empty result falls through
+	// to the ILIKE text path below (via buildListWorkItemsWhere's Query guard)
+	// — the aihub#270 lesson: a non-empty vector shortcut must never make
+	// unembedded rows structurally unreachable, and pre-backfill "0 embedded"
+	// must never read as "no matches".
+	if f.Query != nil && strings.TrimSpace(*f.Query) != "" && !isNoopProvider(embProvider) {
+		res, vecErr := listWorkItemsByVector(ctx, pool, project, f)
+		switch {
+		case vecErr != nil:
+			fmt.Fprintf(os.Stderr, "list work_items: vector path failed, falling through to text path: %v\n", vecErr)
+		case len(res.Items) == 0:
+			// nothing embedded matched — fall through to ILIKE
+		default:
+			return res, nil
+		}
 	}
 
 	query, args, sortCol := buildListWorkItemsQuery(project, f)
@@ -1294,6 +1343,12 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, NewErr(ErrInternalError, "failed to commit update")
+	}
+
+	// aihub#273: goal/content changed — refresh the wi embedding outside the
+	// committed tx (network call), best-effort like the create path.
+	if req.Goal != nil || req.Content != nil {
+		refreshWorkItemEmbeddingBestEffort(ctx, pool, wi.ID)
 	}
 
 	return GetWorkItem(ctx, pool, wi.ID)

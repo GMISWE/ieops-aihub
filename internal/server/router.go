@@ -220,6 +220,16 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		if cursor := c.QueryParam("cursor"); cursor != "" {
 			filter.Cursor = &cursor
 		}
+		// aihub#273: semantic search. Similarity ordering has no stable
+		// pagination key and overrides sort — reject the combinations loudly
+		// instead of silently ignoring a parameter (the aihub#267/#271 family).
+		if q := c.QueryParam("query"); q != "" {
+			if c.QueryParam("sort") != "" || c.QueryParam("order") != "" || c.QueryParam("cursor") != "" {
+				return writeError(c, domain.NewErr(domain.ErrBadRequest,
+					"query (semantic search) does not combine with sort, order, or cursor"))
+			}
+			filter.Query = &q
+		}
 		// sort/order (aihub#224). Both default to the historical behaviour
 		// (created_at desc); an unrecognised value is rejected rather than
 		// silently ignored. sort=closed_at returns only closed items, since a
@@ -980,13 +990,13 @@ func handleBootstrap(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 
 		return c.JSON(http.StatusCreated, map[string]any{
-			"user_id":     userID,
-			"email":       req.Email,
+			"user_id":      userID,
+			"email":        req.Email,
 			"display_name": req.DisplayName,
-			"role":        "admin",
-			"api_key":     rawKey,
-			"api_key_id":  keyID,
-			"note":        "save api_key — it will not be shown again",
+			"role":         "admin",
+			"api_key":      rawKey,
+			"api_key_id":   keyID,
+			"note":         "save api_key — it will not be shown again",
 		})
 	}
 }

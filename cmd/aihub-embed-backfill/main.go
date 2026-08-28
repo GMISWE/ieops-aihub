@@ -109,8 +109,63 @@ func main() {
 			fmt.Printf("  ... %d/%d\n", i+1, len(todo))
 		}
 	}
-	fmt.Printf("backfill done: %d ok, %d failed\n", ok, fail)
-	if fail > 0 {
+	fmt.Printf("backfill done (memories): %d ok, %d failed\n", ok, fail)
+
+	// aihub#273: same pass for work_items (goal + content). All statuses on
+	// purpose — the point of wi semantic search is finding similar HISTORICAL
+	// work, which is mostly wrapped/cancelled rows.
+	type wiRow struct{ id, goal, content string }
+	var wtodo []wiRow
+	wrows, err := pool.Query(ctx, `
+		SELECT id, goal, COALESCE(content, '') FROM work_items
+		WHERE emb_vector IS NULL OR emb_model IS DISTINCT FROM $1`, model)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "query work_items:", err)
+		os.Exit(1)
+	}
+	for wrows.Next() {
+		var r wiRow
+		if err := wrows.Scan(&r.id, &r.goal, &r.content); err != nil {
+			fmt.Fprintln(os.Stderr, "scan work_items:", err)
+			os.Exit(1)
+		}
+		wtodo = append(wtodo, r)
+	}
+	wrows.Close()
+
+	fmt.Printf("backfill: %d work_items to embed with model=%q dims=%d\n", len(wtodo), model, dims)
+	var wok, wfail int
+	for i, r := range wtodo {
+		embInput := r.goal
+		if r.content != "" {
+			embInput += "\n\n" + r.content
+		}
+		if rr := []rune(embInput); len(rr) > 6000 {
+			embInput = string(rr[:6000])
+		}
+		vec, embErr := prov.Embed(ctx, embInput)
+		if embErr != nil || len(vec) == 0 {
+			wfail++
+			fmt.Fprintf(os.Stderr, "  embed failed id=%s: %v\n", r.id, embErr)
+			continue
+		}
+		// No updated_at bump: work_items.updated_at keys nothing here and a
+		// backfill must not look like a content edit.
+		if _, err := pool.Exec(ctx,
+			`UPDATE work_items SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3 WHERE id = $4`,
+			vecLiteral(vec), model, dims, r.id,
+		); err != nil {
+			wfail++
+			fmt.Fprintf(os.Stderr, "  update failed id=%s: %v\n", r.id, err)
+			continue
+		}
+		wok++
+		if (i+1)%50 == 0 {
+			fmt.Printf("  ... %d/%d\n", i+1, len(wtodo))
+		}
+	}
+	fmt.Printf("backfill done (work_items): %d ok, %d failed\n", wok, wfail)
+	if fail > 0 || wfail > 0 {
 		os.Exit(1)
 	}
 }

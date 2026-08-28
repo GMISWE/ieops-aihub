@@ -31,7 +31,7 @@ var (
 	// listWorkItemsStringParams are forwarded verbatim when non-empty.
 	listWorkItemsStringParams = []string{
 		"project", "status", "kind", "milestone", "label", "user_id",
-		"source", "since", "limit", "cursor", "sort", "order",
+		"source", "since", "limit", "cursor", "sort", "order", "query",
 	}
 	// listWorkItemsBoolParams are forwarded as "true" when set.
 	listWorkItemsBoolParams = []string{"ready_only", "include_step_state"}
@@ -51,7 +51,10 @@ func listWorkItemsSchema() json.RawMessage {
 		"ready_only":         prop("boolean", "Only return ready items"),
 		"include_step_state": prop("boolean", "Include step state"),
 		"since":              prop("string", "Since timestamp (RFC3339)"),
-		"limit":              prop("string", "Max items to return"),
+		"query": prop("string", "Semantic search over goal+content (aihub#273): "+
+			"embedding cosine when the server has a provider, ILIKE fallback otherwise. "+
+			"Results are similarity-ordered; not combinable with sort/order/cursor."),
+		"limit": prop("string", "Max items to return"),
 		"cursor": prop("string", "Pagination cursor. Carries the value of the column named by `sort`, "+
 			"so pass it back unchanged and do not mix cursors between different sort orders."),
 		// The enums come from the server's enforced sets (aihub#224) rather than

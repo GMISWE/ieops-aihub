@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/GMISWE/ieops-aihub/internal/db"
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 	"github.com/GMISWE/ieops-aihub/internal/embedding"
 )
 
@@ -52,14 +53,26 @@ func main() {
 	}
 	defer pool.Close()
 
-	// Embeddable types only (mirrors domain.embeddableType); skip methodology.*
-	// which is fetched deterministically by work_item_id. Re-embed rows with a
-	// stale emb_model so a provider switch can be backfilled.
-	rows, err := pool.Query(ctx, `
+	// Embeddable types only; skip methodology.* which is fetched deterministically by
+	// work_item_id. Re-embed rows with a stale emb_model so a provider switch can be
+	// backfilled.
+	//
+	// The prefix list comes from domain.EmbeddablePrefixes rather than being spelled out
+	// here: recall (aihub#270) now hands every non-embeddable type to the text path, so a
+	// prefix this backfill disagreed with would be a row that no path embeds and no path
+	// text-searches — invisible on both. One list, no drift.
+	embClauses := make([]string, 0, len(domain.EmbeddablePrefixes))
+	embArgs := []any{model}
+	for _, pfx := range domain.EmbeddablePrefixes {
+		embArgs = append(embArgs, pfx+"%")
+		embClauses = append(embClauses, fmt.Sprintf("type LIKE $%d", len(embArgs)))
+	}
+	rows, err := pool.Query(ctx, fmt.Sprintf(`
 		SELECT id, content FROM memories
 		WHERE status = 'active'
-		  AND (type LIKE 'experience.%' OR type LIKE 'fact.%' OR type LIKE 'rule.%')
-		  AND (emb_vector IS NULL OR emb_model IS DISTINCT FROM $1)`, model)
+		  AND (%s)
+		  AND (emb_vector IS NULL OR emb_model IS DISTINCT FROM $1)`,
+		strings.Join(embClauses, " OR ")), embArgs...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "query:", err)
 		os.Exit(1)

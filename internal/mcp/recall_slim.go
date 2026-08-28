@@ -18,10 +18,25 @@ func slimRecallResult(result map[string]any) map[string]any {
 	if !ok {
 		return result
 	}
+	// INVARIANT: this whitelist is opt-in, so a field added to the REST response
+	// downstream is dropped here by default until it is listed. That has now bitten
+	// twice — `total` (aihub#249) and the truncation pair below (aihub#269). When you
+	// add a field to RecallResponse or domain.Memory, decide here whether the model
+	// needs it; do NOT widen it wholesale, the dropped bookkeeping columns are the
+	// bulk of the opt3 Phase 1 token saving (locked by
+	// TestSlimRecallResult_StillDropsBookkeeping; attrs and commits are rewritten
+	// rather than dropped, locked by TestSlimRecallResult_RewritesAttrsAndCommits).
 	keep := map[string]bool{
 		"id": true, "type": true, "content": true, "effective_strength": true,
 		"similarity": true, "work_item_id": true, "tags": true, "related": true,
 		"created_at": true,
+		// aihub#269: content is truncated to 800 runes by handleRecall (PR #245), which
+		// flags the cut with these two. Without them the model reasons on a snippet
+		// believing it is the whole memory, and has no full length to tell it a
+		// pf_get_memory follow-up is warranted — the escape hatch PR #245 declared,
+		// which aihub#269 also gave a tool. Both are `omitempty`, so untruncated
+		// items pay nothing.
+		"content_truncated": true, "content_full_len": true,
 	}
 	slim := make([]any, 0, len(items))
 	for _, it := range items {

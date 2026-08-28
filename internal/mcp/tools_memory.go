@@ -50,7 +50,7 @@ func (s *Server) registerMemoryTools() {
 	// pf_recall
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_recall",
-		Description: "Recall memories from aihub with optional semantic search. type supports wildcards (experience.*).",
+		Description: "Recall memories from aihub with optional semantic search. type supports wildcards (experience.*). An item with content_truncated=true holds only the first 800 runes of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest.",
 		InputSchema: objectSchema(map[string]any{
 			"project":              prop("string", "Project name"),
 			"query":                prop("string", "Semantic search query"),
@@ -115,6 +115,34 @@ func (s *Server) registerMemoryTools() {
 			return errResult(err)
 		}
 		return jsonResultCompact(slimRecallResult(result))
+	})
+
+	// pf_get_memory — aihub#269. pf_recall truncates content to 800 runes and
+	// flags it with content_truncated/content_full_len; without a by-id read those
+	// flags would tell the model its text is incomplete while giving it no way to
+	// complete it. This is the tool half of that escape hatch.
+	s.mcp.AddTool(&sdkmcp.Tool{
+		Name:        "pf_get_memory",
+		Description: "Fetch one memory by id with its FULL, untruncated content — the follow-up read for a pf_recall item whose content_truncated is true.",
+		InputSchema: objectSchema(map[string]any{
+			"memory_id": prop("string", "Memory ID (the `id` of a pf_recall item)"),
+		}, []string{"memory_id"}),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		args, err := parseArgs(req.Params.Arguments)
+		if err != nil {
+			return errResult(err)
+		}
+		memID := strArg(args, "memory_id")
+		if memID == "" {
+			return errResult(fmt.Errorf("memory_id is required"))
+		}
+		result, err := s.client.GetMemory(ctx, memID)
+		if err != nil {
+			return errResult(err)
+		}
+		// compact, not indented: this payload is read by the model, and it is
+		// reached precisely when the content is long (same rationale as pf_recall).
+		return jsonResultCompact(result)
 	})
 
 	// pf_activate_memory

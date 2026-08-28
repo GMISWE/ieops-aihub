@@ -279,6 +279,16 @@ func (c *Client) Recall(ctx context.Context, params url.Values) (map[string]any,
 	return out, c.do(ctx, "GET", path, nil, &out)
 }
 
+// GetMemory calls GET /v1/memories/:id. Unlike the list endpoint, this returns
+// the memory's FULL content — the list endpoint truncates content to 800 runes
+// and flags the cut with content_truncated / content_full_len (aihub#244), and
+// this is the escape hatch that PR #245 declared for reading the rest
+// (aihub#269).
+func (c *Client) GetMemory(ctx context.Context, memoryID string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "GET", "/v1/memories/"+seg(memoryID), nil, &out)
+}
+
 // ActivateMemory calls POST /v1/memories/:id/activate.
 func (c *Client) ActivateMemory(ctx context.Context, memoryID string) (map[string]any, error) {
 	var out map[string]any

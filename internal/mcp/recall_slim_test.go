@@ -62,3 +62,158 @@ func TestSlimRecallResult_NoTotalKeyOmitsIt(t *testing.T) {
 		t.Errorf("slimRecallResult synthesized a `total` key that wasn't in the input: %+v", out)
 	}
 }
+
+// TestSlimRecallResult_CarriesTruncationFlags guards aihub#269. PR #245
+// (aihub#244) truncates every recall item's content to 800 runes server-side and
+// announces it with content_truncated / content_full_len, declaring
+// GET /v1/memories/:id the escape hatch for the full text. Those two fields were
+// never added to slimRecallResult's `keep` whitelist, so over MCP the agent got
+// an 800-rune snippet with nothing marking it as a snippet — it would reason on
+// 40% of a memory believing it had all of it, and had no full-length pointer to
+// know a fetch was even warranted. Same failure class as
+// TestSlimRecallResult_CarriesTotal above: the whitelist is opt-in, so any field
+// added downstream is dropped by default.
+func TestSlimRecallResult_CarriesTruncationFlags(t *testing.T) {
+	result := map[string]any{
+		"items": []any{
+			map[string]any{
+				"id":                "mem_trunc",
+				"type":              "fact.architecture",
+				"content":           "800 runes of prefix...",
+				"content_truncated": true,
+				"content_full_len":  float64(2194),
+			},
+		},
+	}
+
+	out := slimRecallResult(result)
+
+	items, ok := out["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items not preserved: %+v", out)
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("item is not a map: %+v", items[0])
+	}
+	if got, ok := item["content_truncated"]; !ok || got != true {
+		t.Errorf("content_truncated = %v (present=%v), want true — the agent cannot "+
+			"tell a snippet from a whole memory without it", got, ok)
+	}
+	if got, ok := item["content_full_len"]; !ok || got != float64(2194) {
+		t.Errorf("content_full_len = %v (present=%v), want 2194 — without it there is "+
+			"no pointer to GET /v1/memories/:id", got, ok)
+	}
+}
+
+// TestSlimRecallResult_StillDropsBookkeeping locks in the other half of the
+// aihub#269 contract: the fix is "add the two truncation fields", NOT "widen the
+// projection". These columns are dropped on purpose (opt3 Phase 1) and are the
+// bulk of the token saving; this test fails loudly if a future whitelist edit
+// lets any of them back in. rendered_html matters most by volume — it is a full
+// HTML document on methodology.* memories.
+//
+// Note what is NOT in this list: `attrs` and `commits` are not dropped, they are
+// REWRITTEN (attrs down to structured_payload, commits down to body/by/replies)
+// by the transform blocks in slimRecallResult. Asserting they vanish would encode
+// a false invariant, so they get their own test below. Every field here is seeded
+// with a realistic value, not a type-mismatched sentinel — a sentinel that fails
+// an internal type assertion would make this test pass for the wrong reason.
+func TestSlimRecallResult_StillDropsBookkeeping(t *testing.T) {
+	dropped := map[string]any{
+		"author_user_id":     "u_5dFjeaMZ",
+		"author_display":     "xiaokang.w",
+		"base_strength":      float64(0.9),
+		"stability_days":     float64(10.5),
+		"status":             "active",
+		"visibility":         "project",
+		"project":            "ieops",
+		"updated_at":         "2026-08-27T05:02:27Z",
+		"latest_id":          "mem_newer",
+		"is_immortal":        false,
+		"activation_count":   float64(3),
+		"last_activated_at":  "2026-08-27T05:02:27Z",
+		"expires_at":         "2027-01-01T00:00:00Z",
+		"source_artifact_id": "mem_src",
+		"emb_model":          "bge-m3",
+		"emb_dims":           float64(1024),
+		"rendered_html":      "<html><body>a very large rendered artifact</body></html>",
+		"backlinks":          []any{map[string]any{"id": "mem_b", "type": "fact.note", "summary": "x"}},
+	}
+	item := map[string]any{
+		"id": "mem_1", "type": "fact.note", "content": "hello",
+		"content_truncated": true, "content_full_len": float64(900),
+	}
+	for k, v := range dropped {
+		item[k] = v
+	}
+
+	out := slimRecallResult(map[string]any{"items": []any{item}})
+
+	got := out["items"].([]any)[0].(map[string]any)
+	for k := range dropped {
+		if v, ok := got[k]; ok {
+			t.Errorf("bookkeeping field %q leaked through the whitelist (=%v); the "+
+				"aihub#269 fix must not widen the projection", k, v)
+		}
+	}
+	// and the fields that must survive are still there
+	for _, k := range []string{"id", "type", "content", "content_truncated", "content_full_len"} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("kept field %q went missing", k)
+		}
+	}
+}
+
+// TestSlimRecallResult_RewritesAttrsAndCommits pins the two fields that are
+// neither kept whole nor dropped, so nobody "simplifies" them into the keep map
+// (which would drag the full attrs blob and whole comment threads back onto the
+// wire) or into the drop list (which would lose real human insight).
+func TestSlimRecallResult_RewritesAttrsAndCommits(t *testing.T) {
+	item := map[string]any{
+		"id": "mem_1", "type": "fact.note", "content": "hello",
+		"attrs": map[string]any{
+			"structured_payload": map[string]any{"result": "WARN"},
+			"similar_to":         "mem_other", // internal bookkeeping, must not survive
+		},
+		"commits": []any{
+			map[string]any{
+				"id": "cm_1", "author_user_id": "u_1", "created_at": "2026-08-27T00:00:00Z",
+				"body": "this assumption is wrong", "author_display": "dahe.p",
+				"replies": []any{map[string]any{"id": "cm_2", "body": "agreed, fixed"}},
+			},
+		},
+	}
+
+	out := slimRecallResult(map[string]any{"items": []any{item}})
+	got := out["items"].([]any)[0].(map[string]any)
+
+	attrs, ok := got["attrs"].(map[string]any)
+	if !ok {
+		t.Fatalf("attrs missing or wrong shape: %#v", got["attrs"])
+	}
+	if _, ok := attrs["structured_payload"]; !ok {
+		t.Errorf("attrs.structured_payload dropped: %#v", attrs)
+	}
+	if _, ok := attrs["similar_to"]; ok {
+		t.Errorf("attrs passed through whole; only structured_payload should survive: %#v", attrs)
+	}
+
+	commits, ok := got["commits"].([]any)
+	if !ok || len(commits) != 1 {
+		t.Fatalf("commits missing or wrong shape: %#v", got["commits"])
+	}
+	note := commits[0].(map[string]any)
+	if note["body"] != "this assumption is wrong" || note["by"] != "dahe.p" {
+		t.Errorf("commit insight not preserved: %#v", note)
+	}
+	for _, k := range []string{"id", "author_user_id", "created_at", "replies_ids"} {
+		if _, ok := note[k]; ok {
+			t.Errorf("commit bookkeeping %q survived: %#v", k, note)
+		}
+	}
+	reps, ok := note["replies"].([]any)
+	if !ok || len(reps) != 1 || reps[0] != "agreed, fixed" {
+		t.Errorf("reply bodies not flattened as expected: %#v", note["replies"])
+	}
+}

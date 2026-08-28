@@ -1,7 +1,7 @@
 # MCP tool reference
 
 The polyforge MCP server (the `polyforge` binary in MCP mode, see
-[`../README.md`](../README.md)) exposes **46 `pf_*` tools**. Every tool maps to
+[`../README.md`](../README.md)) exposes **48 `pf_*` tools**. Every tool maps to
 an HTTP endpoint through the Go SDK in one path:
 
 ```
@@ -40,12 +40,13 @@ follows those files.
 | `pf_pause_attempt` | Pause: release `file_scope` locks, retain `git_branch`/`deploy_env` for resume. |
 | `pf_acquire_locks` | Acquire declared `file_scope` locks mid-attempt (blocks on conflict, never steals). |
 
-## Memory and artifacts (11) - `tools_memory.go`
+## Memory and artifacts (12) - `tools_memory.go`
 
 | tool | purpose |
 |---|---|
 | `pf_remember` | Store a memory (type, visibility, strength, expiry). Rejects `methodology.*` types - use `pf_save_artifact`. |
-| `pf_recall` | Recall memories with filters. **Note:** ranking is recency-based today; semantic/vector recall is in flight (aihub#192). |
+| `pf_recall` | Recall memories with filters. Item `content` is truncated to 800 runes; such items carry `content_truncated: true` and `content_full_len` (full rune length) — read the rest with `pf_get_memory` (aihub#269). **Note:** ranking is recency-based today; semantic/vector recall is in flight (aihub#192). |
+| `pf_get_memory` | Fetch one memory by id with its full, untruncated content. The follow-up read for a `pf_recall` item whose `content_truncated` is true. |
 | `pf_activate_memory` | Increment activation count and update stability. |
 | `pf_reinforce_memory` | Add context and adjust strength (same row, no new version). |
 | `pf_update_memory` | Update a memory: create a new version superseding the current head and advance the `latest_id` cursor, so an id you already hold still resolves to the latest. |

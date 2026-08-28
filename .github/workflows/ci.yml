@@ -230,6 +230,15 @@ jobs:
       # Runs with -v and then asserts every case actually reported PASS rather
       # than trusting the exit code: `go test` exits 0 when every selected test
       # SKIPs, and all of these skip whenever AIHUB_TEST_DB is empty.
+      - name: aihub#273 wi semantic-search DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run 'TestHandleListWorkItems_Query' -count=1 -v 2>&1 | tee wi_query.log
+          grep -q -- "--- PASS: TestHandleListWorkItems_Query" wi_query.log             || { echo "::error::TestHandleListWorkItems_Query did not run; the aihub#273 DB-gated coverage is not executing"; exit 1; }
+          ! grep -q -- '--- SKIP' wi_query.log             || { echo "::error::an aihub#273 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: aihub#239 recall cursor tie + supersede carry DB tests
         env:
           AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable

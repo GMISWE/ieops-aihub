@@ -256,6 +256,41 @@ jobs:
           ! grep -q -- '--- SKIP' cursor_carry.log \
             || { echo "::error::an aihub#239 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#270: exercise the recall router split against the same Postgres service,
+      # already migrated by the "Apply migrations (aihub#242 DB tests)" step above.
+      #
+      # These need a DB rather than a pure unit test because the fix is a routing decision
+      # plus a SQL complement spliced into a hand-built WHERE with hand-threaded $N
+      # placeholders — a placeholder that drifts out of step with its args list is a
+      # runtime bind error, not a compile error, so nothing short of executing the query
+      # catches it. TestRecallRouterComplementPlaceholdersBindAcrossOptions exists purely
+      # to run that query under every combination of the optional clauses around it.
+      #
+      # Unlike TestRecallWithVector_Live these need no EMBEDDING_BASE_URL: a deterministic
+      # stub provider stands in for the embedding service, so the vector path runs offline.
+      # That is what makes the aihub#270 regression coverage CI-executable at all.
+      #
+      # Same -v + grep guard as the steps above: `go test` prints "ok" and exits 0 when
+      # every selected test SKIPs, and these skip whenever AIHUB_TEST_DB is empty.
+      - name: aihub#270 recall router split DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestRecallRouter' -count=1 -v 2>&1 | tee recall_router.log
+          for want in TestRecallRouterMixedUnionReturnsBothHalves \
+                      TestRecallRouterPureEmbeddableStaysOnVectorPath \
+                      TestRecallRouterPureNonEmbeddableSkipsVectorPath \
+                      TestRecallRouterEmptyTypeFilterStaysSemantic \
+                      TestRecallRouterThresholdGatesEmbeddableHalfOnly \
+                      TestRecallRouterWorkItemScopedBypassesVectorPath \
+                      TestRecallRouterComplementPlaceholdersBindAcrossOptions; do
+            grep -q -- "--- PASS: $want" recall_router.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#270 router coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' recall_router.log \
+            || { echo "::error::an aihub#270 router test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: Launcher update-check regression suite
         run: bash plugins/polyforge/tests/launcher-update-check.test.sh
 

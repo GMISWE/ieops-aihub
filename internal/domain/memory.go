@@ -1229,8 +1229,9 @@ func ReplyCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, autho
 
 // ─── Recall ───────────────────────────────────────────────────────────────────
 
-// Recall retrieves memories per §7.5 (text/tag search path).
-// pgvector cosine search is handled in RecallWithVector when embedding is available.
+// Recall retrieves memories per §7.5. It is the router: it decides between the pgvector
+// path (RecallWithVector) and the text/tag path (recallText), and — because those two
+// paths own disjoint halves of the corpus — merges them when a request spans both.
 func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*RecallResponse, error) {
 	if req.TopK <= 0 {
 		req.TopK = 20
@@ -1246,21 +1247,170 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	// and there is no work_item_id filter (wi-scoped recalls are deterministic, not
 	// semantic — skip the vector path to avoid pulling unrelated memories).
 	if !isNoopProvider(embProvider) && req.Query != "" && req.WorkItemID == nil {
-		r, vecErr := RecallWithVector(ctx, pool, req)
-		switch {
-		case vecErr != nil:
-			fmt.Fprintf(os.Stderr, "recall: vector path failed, falling through to text path: %v\n", vecErr)
-		case len(r.Items) == 0 && req.SimilarityThreshold <= 0:
-			// No embedded candidates matched — e.g. the corpus is not yet backfilled,
-			// or every stored emb_model differs from the current provider. Fall through
-			// to the text/tag path so recall is never silently empty during the embedding
-			// rollout window. (A caller-set SimilarityThreshold means empty is intended.)
-			fmt.Fprintln(os.Stderr, "recall: vector path returned 0 items, falling through to text path")
-		default:
-			return r, nil
+		// aihub#270: the vector path's WHERE carries `emb_vector IS NOT NULL`, so it can
+		// only ever return rows whose type is embeddable. Splitting the caller's filter
+		// tells us which half of the request each path is actually able to answer.
+		embTypes, nonEmbTypes := partitionTypesByEmbeddable(req.Types)
+
+		// The complement runs only when the caller NAMED a type the vector path cannot
+		// serve. An empty type filter deliberately does not qualify: a semantic recall with
+		// no filter is asking "what is relevant to this query", and the text path has no
+		// answer to that — it cannot score relevance, it only orders by reference time. So
+		// topping such a request up would spend half its budget on whichever methodology.*
+		// rows happen to be newest, regardless of the query, and spec/plan bodies are large.
+		// Asking for methodology.spec by name is a different request, and gets the top-up.
+		// (The common "experience.*|rule.*" recall names no such type either, so it also
+		// pays nothing extra here.)
+		needsTextComplement := len(nonEmbTypes) > 0
+
+		// How SimilarityThreshold interacts with all of this, stated once:
+		//
+		//   A caller-set threshold gates the EMBEDDABLE half only.
+		//
+		// That half is the only one a cosine score can be computed for, so it is the only
+		// one the threshold can mean anything about. Concretely: a threshold still
+		// suppresses the "vector came back empty, retry over everything as text" fallback
+		// (the case below) — that fallback is what the "empty is intended" rule was written
+		// to prevent. It does not suppress rows of a non-embeddable type the caller named
+		// explicitly, because those rows were never candidates for similarity filtering in
+		// the first place. Requests with a purely embeddable filter — the only shape that
+		// existed before non-embeddable types could be returned at all — behave exactly as
+		// they did before aihub#270.
+
+		// A filter naming *only* non-embeddable types (e.g. "methodology.spec|
+		// methodology.plan") has no vector candidates at all. Skip straight to the text
+		// path rather than paying for an embed call whose result can only be empty. Note
+		// this reaches the text path even when a threshold is set — same rule as above:
+		// nothing in this request could ever carry a similarity score.
+		if len(req.Types) == 0 || len(embTypes) > 0 {
+			vreq := *req
+			// When req.Types is empty this stays empty, i.e. "no type filter" — correct,
+			// because `emb_vector IS NOT NULL` already restricts that query to the
+			// embeddable half on its own.
+			vreq.Types = embTypes
+
+			r, vecErr := RecallWithVector(ctx, pool, &vreq)
+			switch {
+			case vecErr != nil:
+				fmt.Fprintf(os.Stderr, "recall: vector path failed, falling through to text path: %v\n", vecErr)
+			case len(r.Items) == 0 && req.SimilarityThreshold <= 0:
+				// No embedded candidates matched — e.g. the corpus is not yet backfilled,
+				// or every stored emb_model differs from the current provider. Fall through
+				// to the text/tag path so recall is never silently empty during the embedding
+				// rollout window. (A caller-set SimilarityThreshold means empty is intended.)
+				fmt.Fprintln(os.Stderr, "recall: vector path returned 0 items, falling through to text path")
+			case needsTextComplement:
+				// aihub#270: the vector half came back non-empty, which used to short-circuit
+				// the whole call — and that is exactly how the non-embeddable types the caller
+				// also asked for got dropped, silently, with a plausible-looking result set.
+				// Top up from the text path instead.
+				//
+				// This branch also catches "empty vector half, but SimilarityThreshold > 0",
+				// and that is deliberate: the threshold's "empty is intended" rule is about
+				// suppressing the *semantic* fallback, and the non-embeddable half was never
+				// subject to a similarity score in the first place (it has no vector to score).
+				// So we still return its rows, and we still never run a full text query for
+				// the embeddable types the threshold was meant to gate.
+				return recallHybrid(ctx, pool, req, r, nonEmbTypes)
+			default:
+				return r, nil
+			}
 		}
 	}
 
+	return recallText(ctx, pool, req, false)
+}
+
+// recallHybrid completes a recall whose vector half (vec) is already in hand but whose
+// type filter also names rows the vector path can never return. It runs the text path
+// over exactly the non-embeddable complement and interleaves the two result lists.
+//
+// nonEmbTypes is the caller's filter narrowed to its non-embeddable entries, and is always
+// non-empty here — Recall only reaches this path when the caller named such a type.
+func recallHybrid(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, vec *RecallResponse, nonEmbTypes []string) (*RecallResponse, error) {
+	creq := *req
+	creq.Types = nonEmbTypes
+	// A merged page has no coherent cursor position (the two halves are ordered by
+	// different keys), so neither consume an incoming cursor nor emit one — same reasoning
+	// the vector path already documents for its fusion ordering.
+	creq.Cursor = ""
+
+	txt, err := recallText(ctx, pool, &creq, true)
+	if err != nil {
+		// Degrade to vector-only rather than failing a recall that already has results.
+		// This is the pre-aihub#270 behaviour, so the worst case is the old bug, not an error.
+		fmt.Fprintf(os.Stderr, "recall: text complement failed, returning vector results only: %v\n", err)
+		return vec, nil
+	}
+
+	return mergeRecallHalves(vec, txt, req.TopK), nil
+}
+
+// mergeRecallHalves interleaves two disjoint recall result lists round-robin and truncates
+// to topK.
+//
+// Interleaving rather than concatenating is the point: the two halves are ranked by
+// incomparable keys (the vector half by 0.7*cosine + 0.3*tanh(strength), the text half by
+// reference time), so there is no honest way to sort them into one list — and any scheme
+// that appends one after the other reintroduces the aihub#270 starvation as soon as the
+// first half alone fills topK. Round-robin guarantees each half gets its share of the
+// budget while preserving the internal order of both.
+func mergeRecallHalves(vec, txt *RecallResponse, topK int) *RecallResponse {
+	merged := make([]MemoryWithStrength, 0, topK)
+	seen := make(map[string]bool, topK)
+
+	// The halves are disjoint by construction (embeddable vs non-embeddable types), but
+	// dedupe anyway so a future change to the partition can't produce duplicate rows.
+	push := func(m MemoryWithStrength) {
+		if len(merged) >= topK || seen[m.ID] {
+			return
+		}
+		seen[m.ID] = true
+		merged = append(merged, m)
+	}
+
+	for i := 0; i < len(vec.Items) || i < len(txt.Items); i++ {
+		if len(merged) >= topK {
+			break
+		}
+		if i < len(vec.Items) {
+			push(vec.Items[i])
+		}
+		if i < len(txt.Items) {
+			push(txt.Items[i])
+		}
+	}
+
+	if len(merged) == 0 {
+		// Match the text path, which leaves Items nil rather than empty, so the JSON is
+		// `null` on both paths instead of varying with which one served the request.
+		merged = nil
+	}
+
+	return &RecallResponse{
+		Items: merged,
+		// The halves count disjoint sets, so summing double-counts nothing. It is still
+		// the size of what these two queries can see, not of the whole corpus: the vector
+		// half's own filter excludes rows with a NULL or stale emb_model, so during a
+		// backfill window an embeddable row that neither half matched is counted by
+		// neither. That is the vector path's pre-existing blind spot, inherited here.
+		Total: vec.Total + txt.Total,
+		// NextCursor stays nil: see the cursor note in recallHybrid.
+	}
+}
+
+// recallText is the text/tag search path (§7.5).
+//
+// nonEmbeddableOnly restricts the query to rows embeddableType reports false for. Recall
+// sets it when this query is the complement half of a hybrid recall, so the text half
+// cannot re-return rows the vector half already covers.
+//
+// The narrowed type filter recallHybrid passes already implies that restriction today (a
+// non-embeddable filter entry cannot match an embeddable row). This flag enforces it at
+// the SQL level anyway, so the disjointness that mergeRecallHalves' deduping and the
+// summed Total both rely on is a property of the query rather than of a subtle argument
+// about the partition — and stays true if that partition is ever reworked.
+func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, nonEmbeddableOnly bool) (*RecallResponse, error) {
 	// NOTE: RecencyWeight is currently a reserved-but-unused knob. The text/tag
 	// recall path orders by memRefTimeSQL (see ORDER BY below) and does not blend
 	// a separate recency score. The default is intentionally not set here so the
@@ -1304,6 +1454,17 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 			idx++
 		}
 		where += " AND (" + strings.Join(typeClauses, " OR ") + ")"
+	}
+
+	// aihub#270: when this query is the complement half of a hybrid recall, restrict it to
+	// the rows the vector half structurally cannot return. This is what makes the two
+	// halves disjoint — and it is placed here, above the count, so Total counts the same
+	// set the SELECT returns.
+	if nonEmbeddableOnly {
+		clause, clauseArgs, nextIdx := nonEmbeddableTypeClause(idx)
+		where += " AND " + clause
+		args = append(args, clauseArgs...)
+		idx = nextIdx
 	}
 
 	if req.WorkItemID != nil {

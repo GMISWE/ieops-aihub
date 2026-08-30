@@ -43,9 +43,11 @@ description: >
     gate:             REQUIRED iff kind is rule; FORBIDDEN otherwise. Comma-separated
                       mechanism names, or the literal `none`. FAIL-CLOSED: if even one
                       rule inside the fragment is unenforced, the whole fragment is
-                      `none`. Names are checked against the mechanisms that actually
-                      exist on disk (hooks/* and tests/*.test.*), so an invented gate
-                      name is a lint failure, not a comforting label.
+                      `none`. Names are checked against a CURATED list of mechanisms
+                      that genuinely make a violation observable (today: exactly one,
+                      hooks/pf-commit-guard) — not against what exists on disk. Merely
+                      existing is not enforcing: an assembler, an injector or a test
+                      that reads repo content cannot notice an agent ignoring a rule.
     gate-partial:     OPTIONAL, only with `gate: none`. Records mechanisms that cover
                       SOME of the fragment's rules, without weakening the tier rule.
     authority:        REQUIRED. `self` if this file is the maintained copy; otherwise
@@ -60,8 +62,11 @@ description: >
 
   THE TIER RULE:  kind: rule + gate: none  =>  must NOT leave the resident tier.
   An unenforced rule that is not in context has no observable failure mode at all.
-  tests/using-polyforge-manifest.test.sh enforces this, with a documented baseline of
-  pre-existing violations that may only shrink.
+  tests/using-polyforge-manifest.test.sh checks this, with a documented baseline of
+  pre-existing violations that may only shrink. ⚠️ That suite is NOT in CI yet
+  (aihub#293) — so today it is a check someone must run by hand, not an enforcement.
+  By this manifest's own argument a lint nobody runs is itself an ungated rule; do not
+  describe it as a guarantee until #293 lands.
 
   WHERE THE CURRENT `kind` VALUES CAME FROM — so they can be challenged, not inherited
   aihub#295 measured the rules this skill ships: SIX of them, of which exactly ONE has
@@ -70,14 +75,20 @@ description: >
   partial coverage is fail-closed, because IR2 and IR3 are in the same file and nothing
   catches either. The other four ungated rules are the three-segment output format, NL
   routing, and post-claim Next-steps routing.
-  Those six rules span four fragments, so those four are `kind: rule` and the remaining
-  eight are `kind: info`. That line was NOT re-derived here. Four fragments sit close to
-  it and a later measurement may well move them: memory-first.md ("pf_recall before
-  every substantive action"), memory-conventions.md ("never put a mem_… id in a repo
-  doc"), bootstrap.md (the session startup scan) and repo-routing.md all prescribe
-  behaviour whose violation is silent. Reclassifying any of them ENLARGES the resident
-  lower bound below — which is the honest direction, and the reason to do it with a
-  measurement rather than in passing while moving a fragment.
+  Those six rules span four fragments. memory-conventions.md is a FIFTH: it did not
+  appear in that table, but three places in this tree call its content a rule —
+  on-demand-index.md (resident, injected every session) says "the hard rule that a
+  `mem_…` id never goes in a repo doc"; the on-demand rationale below concedes that the
+  link-discipline rule "live[s] only in the fragment"; and the fragment itself says
+  "Never put an aihub `mem_…` ref in a repo doc". Marking it `info` would have
+  contradicted all three, so it is `rule`, and it is the second BASELINE entry.
+  The remaining seven are `kind: info`. That line is still not settled: an independent
+  review of aihub#295 applied the wi's own discriminator — is the violation observable?
+  — and also made memory-first.md ("pf_recall before every substantive action"),
+  bootstrap.md (the session startup scan) and repo-routing.md rules, which would take
+  the lower bound below from 11,489 to 14,993. Reclassifying only ever ENLARGES that
+  bound, which is the honest direction; aihub#296 owns settling it with a measurement
+  rather than deciding it in passing while moving a fragment.
 
   BACKWARD COMPATIBILITY (why `@ondemand:` and not `tier: on-demand`)
   The plugin and the polyforge binary update through independent channels, so a
@@ -221,7 +232,8 @@ gate: none
 authority: self
 
 @ondemand: fragments/memory-conventions.md
-kind: info
+kind: rule
+gate: none
 authority: self
 
 @ondemand: fragments/diagram-convention.md

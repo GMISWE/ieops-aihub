@@ -16,7 +16,9 @@
 # Measured basis (aihub#295, 2026-08-30): 6 rules ship in this skill; exactly ONE has an
 # enforcing mechanism (IR1, via hooks/pf-commit-guard's worktree + attribution gates).
 # The other five — IR2, IR3, the three-segment output format, NL routing, and post-claim
-# Next-steps routing — have none.
+# Next-steps routing — have none. memory-conventions.md's link discipline is a seventh,
+# added on review: three places in this tree already call its content a rule. The kind:
+# line is not settled and only ever moves one way, outward; aihub#296 owns settling it.
 #
 # WHAT IS ASSERTED
 #   0. Coverage:  every file under fragments/ is declared exactly once, and every
@@ -25,9 +27,11 @@
 #                 kind is rule; gate-partial only alongside `gate: none`; authority
 #                 is always present; resident-because is present iff a RESIDENT entry
 #                 has a non-`self` authority.
-#   2. Gates:     every mechanism named in gate/gate-partial actually exists on disk
-#                 (hooks/* or tests/*.test.*). Discovered, not hardcoded — an invented
-#                 gate name fails, and the list cannot rot.
+#   2. Gates:     every mechanism named in gate/gate-partial is on the CURATED list of
+#                 things that genuinely make a violation observable — today exactly one,
+#                 hooks/pf-commit-guard. Existing on disk is deliberately NOT the test
+#                 (see ENFORCEMENT_MECHANISMS for why that was tried and was wrong), but
+#                 each curated entry is checked against disk so the list cannot rot.
 #   3. TIER RULE: kind: rule + gate: none  =>  must NOT leave the resident tier.
 #                 Pre-existing violations live in a BASELINE that may only shrink:
 #                 a new one fails, and a resolved one fails until it is removed.
@@ -170,14 +174,34 @@ if undeclared:
 else:
     ok("no undeclared fragment under fragments/ (%d files)" % len(on_disk))
 
-# --- gate vocabulary, discovered from disk --------------------------------
-known_gates = {"none"}
-hooks_dir = os.path.join(root, "hooks")
-if os.path.isdir(hooks_dir):
-    known_gates |= {f for f in os.listdir(hooks_dir) if f != "hooks.json"}
-tests_dir = os.path.join(root, "tests")
-if os.path.isdir(tests_dir):
-    known_gates |= {f for f in os.listdir(tests_dir) if ".test." in f}
+# --- gate vocabulary: CURATED, then checked against disk -------------------
+# This list was originally DISCOVERED (everything in hooks/ plus every tests/*.test.*).
+# That was wrong in a way worth recording, because it is the same defect as the
+# `authority: self` hole below: a field that validates SHAPE but not SUBSTANCE is
+# cheapest to satisfy by weakening the claim, not by complying. Discovery admitted 15
+# names of which exactly ONE enforces anything; `gate: pf-session-start` (the assembler),
+# `gate: pf-skill-router` (an injector that by its own header "never blocks or denies")
+# and even `gate: using-polyforge-manifest.test.sh` (this file — a rule gated by the lint
+# that checks it is gated) all passed green. Compare the other escape hatch, BASELINE:
+# that one is deliberately loud, a constant in a test file. A fake gate name was strictly
+# quieter — one line in the manifest you are already editing — and came with a green tick.
+#
+# So: to be nameable as a gate, a mechanism must actually make a violation OBSERVABLE.
+# Adding to this list is a deliberate edit to a test file, and the claim must be true.
+ENFORCEMENT_MECHANISMS = {
+    # hooks/pf-commit-guard — PreToolUse on Bash + pf_commit/pf_pr/pf_wrap/pf_ship.
+    # It DENYs (three deny sites), so violating IR1 fails loudly at the tool call.
+    "pf-commit-guard": "hooks/pf-commit-guard",
+    # Nothing else in this plugin enforces agent BEHAVIOUR. hooks/pf-session-start and
+    # hooks/pf-skill-router inject context; hooks/pf-repo-sync syncs repos; every
+    # tests/*.test.* gates repo CONTENT at review time, which cannot observe an agent
+    # ignoring a rule mid-session. A test may be listed here only if a rule's violation
+    # really does show up as a red test.
+}
+known_gates = set(ENFORCEMENT_MECHANISMS) | {"none"}
+# Existence check, so a curated entry cannot outlive the mechanism it names.
+rotted = [n for n, rel in sorted(ENFORCEMENT_MECHANISMS.items())
+          if not os.path.exists(os.path.join(root, rel))]
 
 # --- 1./2. schema + gate vocabulary ---------------------------------------
 print()
@@ -214,8 +238,13 @@ for e in entries:
             continue
         for mech in [x.strip() for x in raw.split(",") if x.strip()]:
             if mech not in known_gates:
-                bad("%s: %s names `%s`, which is not a mechanism in hooks/ or tests/. "
-                    "Known: %s" % (tag, field, mech, ", ".join(sorted(known_gates))))
+                bad("%s: %s names `%s`, which is not an ENFORCEMENT mechanism. Existing "
+                    "on disk is not enough — an assembler, an injector or a test that "
+                    "reads repo content cannot observe an agent ignoring a rule, so "
+                    "naming one would claim a gate that does not exist. Enforcing "
+                    "today: %s. If `%s` really does make a violation observable, add it "
+                    "to ENFORCEMENT_MECHANISMS in this file and say how."
+                    % (tag, field, mech, ", ".join(sorted(ENFORCEMENT_MECHANISMS)), mech))
 
     authority = d.get("authority")
     if not authority:
@@ -241,7 +270,13 @@ for e in entries:
                 "it silently loses the condition and injects unconditionally." % tag)
 if not fails:
     ok("all %d entries carry a well-formed attribute block" % len(entries))
-print("     (gate vocabulary discovered on disk: %s)" % ", ".join(sorted(known_gates)))
+for n in rotted:
+    bad("ENFORCEMENT_MECHANISMS names `%s`, but %s is not on disk — the curated list "
+        "has rotted, and every `gate: %s` in the manifest is now a false claim."
+        % (n, ENFORCEMENT_MECHANISMS[n], n))
+if not rotted:
+    ok("every curated enforcement mechanism still exists on disk (%s)"
+       % ", ".join("%s -> %s" % (n, p) for n, p in sorted(ENFORCEMENT_MECHANISMS.items())))
 
 # --- 3. the tier rule -----------------------------------------------------
 # BASELINE: pre-existing violations, each with the work item that owns the fix.
@@ -251,8 +286,14 @@ print("     (gate vocabulary discovered on disk: %s)" % ", ".join(sorted(known_g
 BASELINE = {
     "fragments/post-claim-routing.md":
         "moved on-demand by aihub#285 to stop the payload being truncated. It cannot "
-        "come back until the resident tier is slimmed (aihub#296): at 4,771 chars it "
-        "does not fit under the 10,000-char harness limit alongside the current tier.",
+        "come back until the resident tier is slimmed (aihub#296): making it resident "
+        "measures 14,544 chars, against a 10,000-char harness limit.",
+    "fragments/memory-conventions.md":
+        "moved on-demand by aihub#285 on the grounds that memory-first.md states the "
+        "memory-lives-in-aihub half more strictly. True for that half — but the "
+        "link-discipline half (never put a `mem_...` id in a repo doc, nor a repo path "
+        "in a memory) has NO resident copy, as SKILL.md's own on-demand rationale "
+        "admits, and on-demand-index.md calls it 'the hard rule'. Also aihub#296.",
 }
 
 print()
@@ -270,8 +311,12 @@ for e in entries:
 for p in sorted(violations - set(BASELINE)):
     bad("%s is `kind: rule` + `gate: none` but is NOT resident. Nothing enforces it, "
         "so out of context it has no observable failure mode: 'never read it' and "
-        "'read it and ignored it' look identical. Either keep it resident, or name a "
-        "real mechanism in `gate:`." % p)
+        "'read it and ignored it' look identical. Keep it resident. Naming something "
+        "in `gate:` is NOT the way out of this: only a mechanism that genuinely makes "
+        "the violation observable counts (see ENFORCEMENT_MECHANISMS), and if one "
+        "existed this fragment would not be here. If it truly cannot be resident, that "
+        "is a budget problem — add it to BASELINE with the work item that owns the "
+        "fix." % p)
 for p in sorted(set(BASELINE) - violations):
     bad("%s is in the tier-rule BASELINE but no longer violates it. Delete its entry "
         "from BASELINE in this file — the baseline is a ratchet and must only shrink."
@@ -424,7 +469,15 @@ r="$(fixture gated_ondemand "${PROBE_WRITE/GATE/pf-commit-guard}")"
 expect pass "...the same fragment with a real gate named is accepted" "$r"
 
 r="$(fixture bogus_gate "${PROBE_WRITE/GATE/worktree-check}")"
-expect fail "a gate name that is not a mechanism on disk" "$r"
+expect fail "a gate name that exists nowhere at all" "$r"
+
+# The three names below all EXIST on disk and all enforce nothing. When the vocabulary
+# was discovered rather than curated, every one of them turned this lint green — which
+# made `gate:` a shape check, satisfiable by weakening the claim instead of complying.
+for fake in pf-session-start pf-skill-router using-polyforge-manifest.test.sh; do
+  r="$(fixture "fake_gate_${fake//./_}" "${PROBE_WRITE/GATE/$fake}")"
+  expect fail "gate: $fake — exists on disk, enforces nothing" "$r"
+done
 
 r="$(fixture no_kind '
 import sys, os, re
@@ -452,6 +505,12 @@ s = s.replace("@include: fragments/memory-first.md\nkind: info\nauthority: self\
 open(p, "w", encoding="utf-8").write(s)
 ')"
 expect fail "a resident fragment whose authority is elsewhere, with no justification" "$r"
+
+r="$(fixture rotted_curation '
+import sys, os
+os.remove(os.path.join(os.path.dirname(sys.argv[1]), "..", "hooks", "pf-commit-guard"))
+')"
+expect fail "a curated enforcement mechanism that is no longer on disk" "$r"
 
 r="$(fixture orphan_fragment '
 import sys, os

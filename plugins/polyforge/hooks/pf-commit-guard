@@ -6,6 +6,7 @@
 #
 # Intercepted tools (matcher in hooks.json) and the fields scanned:
 #   pf_commit -> message ; pf_pr -> title,body ; pf_wrap -> pr_title,pr_body ;
+#   pf_ship   -> message,pr_title,pr_body (it fuses all three, aihub#286) ;
 #   Bash      -> command. The attribution scan only fires for `git commit`/`git merge -m`/
 #                `git tag -m`/`gh pr` invocations (else inert). The git-workflow rules below
 #                fire for any Bash `git commit`/`git push`/`git merge`/`git branch -D|-d`/
@@ -429,6 +430,13 @@ elif base_tool == "pf_pr":
     fields = [field("title"), field("body")]
 elif base_tool == "pf_wrap":
     fields = [field("pr_title"), field("pr_body")]
+elif base_tool == "pf_ship":
+    # pf_ship (aihub#286) fuses commit + push + PR, so it writes ALL THREE kinds
+    # of git-visible text in one call and must be scanned for all of them.
+    # Fusing tools is exactly how text slips out from under a guard that is
+    # keyed on tool name: the guard is not a property of the git operation, it
+    # is a property of the entry point, and a new entry point starts unguarded.
+    fields = [field("message"), field("pr_title"), field("pr_body")]
 elif tool in ("Bash", "bash"):
     cmd = ti.get("command")
     if isinstance(cmd, str) and cmd:

@@ -265,8 +265,11 @@ pf_update_step(
 
 ### Step 10: Output three-segment format
 
-"Next steps" follows the Post-claim Routing table in `using-polyforge` for the current
-`wi_type`, with these revision-specific additions appended after the table-derived rows:
+"Next steps" follows the Post-claim Routing table for the current `wi_type`. That table is
+**not** in your session context — `Read` `fragments/post-claim-routing.md` under the
+`using-polyforge` skill directory first (it is on-demand by design; see
+`using-polyforge/SKILL.md`). Append these revision-specific additions after the
+table-derived rows:
 
 - If the spec was revised: offer `/pf-plan` (if the plan was not auto-re-derived or
   needs manual reconcile) and offer another review round ("reviewer may annotate the new

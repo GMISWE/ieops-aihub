@@ -2,7 +2,7 @@
 
 **IR1 — Work-item-gated writes**
 Every write operation (`git commit`, `git push`, `gh pr create`, `Edit`/`Write` under
-`.repo/`) must occur inside a claimed work-item worktree (`pf.<shortid>/<repo>/`).
+`.repo/`) must occur inside a claimed work-item worktree (`pf.<project>-<seq>/<repo>/`).
 No env-var bypass.
 
 > Engine choice ≠ bypass. Using the `superpowers` plugin's skills as the **engine** inside a

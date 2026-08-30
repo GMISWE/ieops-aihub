@@ -40,12 +40,18 @@ Invocation modes:
 
 ### Post-claim routing
 
-See `## Post-claim Next steps Routing` in `using-polyforge/SKILL.md` — that section is the
-**single source of truth** for what to suggest in "Next steps" after any claim, and applies
-to **all** skills that emit three-segment output (not just `pf-work`). `using-polyforge` is
-auto-loaded into every session's context, so this backreference resolves reliably
-(unlike an in-file anchor jump, which the LLM does not consistently follow at
-generation time — see `mem_5obNUSSR`).
+`## Post-claim Next steps Routing` is the **single source of truth** for what to suggest in
+"Next steps" after any claim, and applies to **all** skills that emit three-segment output
+(not just `pf-work`). It lives in `fragments/post-claim-routing.md` under the
+`using-polyforge` skill directory.
+
+🔴 **`Read` that file before emitting the list — do not answer from session context.** It is
+deliberately NOT part of the auto-injected session-start payload (that payload has a hard
+size budget; see `using-polyforge/SKILL.md`), so it is *not* already in your context.
+This SKILL.md previously claimed the backreference "resolves reliably" because
+`using-polyforge` is auto-loaded; that was false — the section sat at character 5,856 of an
+18,286-character payload that the harness truncated to a ~2,000-character preview, so it
+reached no model at all (aihub#285). Resolve it by reading the file, not by recall.
 
 ### Mode A — New wi (default, triggered by intent to start something new)
 
@@ -175,7 +181,7 @@ generation time — see `mem_5obNUSSR`).
      ```
      **rhs routing** (wi.requires_human_session):
      - `false` → do not emit three-segment output; immediately dispatch `/pf-execute` as a subagent (the subagent emits its own execution progress).
-     - `true`  → emit three-segment output ("Next steps" decided per `using-polyforge`'s `## Post-claim Next steps Routing`), wait for human session.
+     - `true`  → emit three-segment output ("Next steps" decided per the Post-claim routing table — `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
    
    → human says "no" / "not now" / "leave it" → emit three-segment output, wi stays on the queue.
 
@@ -203,7 +209,7 @@ generation time — see `mem_5obNUSSR`).
    claimers (including after force_takeover) are always surfaced.
 4. **rhs routing** (wi.requires_human_session):
    - `false` → do not emit three-segment output; immediately dispatch `/pf-execute` as a subagent (the subagent emits its own execution progress).
-   - `true`  → emit three-segment output ("Next steps" decided per `using-polyforge`'s `## Post-claim Next steps Routing`), wait for human session.
+   - `true`  → emit three-segment output ("Next steps" decided per the Post-claim routing table — `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
 
 ---
 
@@ -236,7 +242,7 @@ generation time — see `mem_5obNUSSR`).
 3. Show step progress: "Resuming at step 2/4 (review)".
 4. **rhs routing** (wi.requires_human_session):
    - `false` → do not emit three-segment output; immediately dispatch `/pf-execute` as a subagent (the subagent emits its own execution progress).
-   - `true`  → emit three-segment output (including step progress; "Next steps" decided per `using-polyforge`'s `## Post-claim Next steps Routing`), wait for human session.
+   - `true`  → emit three-segment output (including step progress; "Next steps" decided per the Post-claim routing table — `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
 
 ---
 
@@ -262,7 +268,7 @@ Steps:
    claimers (including after force_takeover) are always surfaced.
 5. **rhs routing** (wi.requires_human_session):
    - `false` → do not emit three-segment output; immediately dispatch `/pf-execute` as a subagent (the subagent emits its own execution progress).
-   - `true`  → emit three-segment output ("Next steps" decided per `using-polyforge`'s `## Post-claim Next steps Routing`), wait for human session.
+   - `true`  → emit three-segment output ("Next steps" decided per the Post-claim routing table — `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
 
 ---
 

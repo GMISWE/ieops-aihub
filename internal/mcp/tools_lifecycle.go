@@ -264,7 +264,9 @@ func (s *Server) registerLifecycleTools() {
 			"labels":                 prop("array", "Updated labels"),
 			"declared_resources":     declaredResourcesProp("Updated declared resources"),
 			"resources_version":      prop("integer", "Compare-and-set guard for declared_resources: the resources_version you last read from this work item. The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version. Omit to overwrite unconditionally. Every write of declared_resources increments this counter."),
-			"attrs":                  prop("object", "Updated attributes"),
+			"attrs":                  prop("object", "REPLACES the whole attrs object: every key you do not resend is DELETED. Use it only when you intend to overwrite attrs wholesale (e.g. after reading the current value). To add or change keys without destroying the others, use attrs_patch. Cannot be combined with attrs_patch/attrs_unset."),
+			"attrs_patch":            prop("object", "Merge these keys into attrs, leaving every other key untouched (aihub#288). Shallow: a top-level key in the patch replaces that key's stored value outright, it is NOT merged into it recursively, and null STORES a JSON null rather than deleting. To delete keys use attrs_unset. Cannot be combined with attrs."),
+			"attrs_unset":            prop("array", "Top-level attrs keys to delete (array of strings). Applied AFTER attrs_patch, so a key in both ends up deleted. Cannot be combined with attrs."),
 			"content":                prop("string", "Background context for this wi (markdown, max 20000 chars)"),
 		}, []string{"work_item_id"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {

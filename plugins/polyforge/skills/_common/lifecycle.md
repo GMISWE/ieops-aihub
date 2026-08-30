@@ -137,6 +137,10 @@ authenticate with. Folding it in removes that ordering hazard along with the rou
 `note_emitted` says whether it landed; a failed note does **not** fail the wrap, so check the
 field rather than assuming.
 
+⚠️ Because the note precedes the completion, a terminal call that fails *at the completion*
+has already recorded it. **Drop `note=` when retrying**, unless the error says the note was
+not recorded either.
+
 > **Compatibility**: if `pf_complete_attempt` / `pf_wrap` do not publish a `note` parameter,
 > the binary predates aihub#290 — emit the note with a separate `pf_emit_event(event_type="note",
 > payload={text: ...})` **before** the terminal call, as `pf-stop` describes.

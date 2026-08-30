@@ -444,6 +444,15 @@ func TestFusedUpdateStepForwardsNextStep(t *testing.T) {
 	const wiID = "wi_advance"
 	seedStateFile(t, wiID)
 	f := newFakeAihub(t)
+	// Answer the way a server that HONOURS next_step does — echoing it back.
+	// The default fake handler returns a bare {"ok":true}, which is exactly the
+	// pre-aihub#290 shape and now (correctly) trips the too-old guard; that case
+	// has its own test.
+	f.on("/v1/work_items/"+wiID+"/step", func(map[string]any) (int, any) {
+		return http.StatusOK, map[string]any{
+			"status": "completed", "next_step": "commit_and_pr", "next_step_status": "in_progress",
+		}
+	})
 
 	result, isErr := callTool(t, f, "pf_update_step", map[string]any{
 		"work_item_id":         wiID,
@@ -475,6 +484,100 @@ func TestFusedUpdateStepForwardsNextStep(t *testing.T) {
 	}
 	if _, present := body["expected_version"]; present {
 		t.Errorf("expected_version is still being sent: %v", body["expected_version"])
+	}
+}
+
+// TestFusedUpdateStepDetectsAServerThatDroppedNextStep is the cross-deployment
+// guard, and it is not hypothetical: this binary republishes on every push to
+// main and self-updates through its own channel, while the aihub HTTP server is
+// deployed by hand. At the time this landed the deployed server was four commits
+// behind the PR base, so merging alone produces exactly this pairing — a new
+// binary sending next_step to a server that has never heard of it.
+//
+// The consequence of missing it is worse than a no-op. A pre-aihub#290 server
+// binds nothing, echo drops the parameter, the completion commits, and the call
+// answers 200 {"status":"completed"}. current_step never advances; the server
+// derives each completion row's step_id from current_step; so every later
+// completion in the walk is filed under the FIRST step's name, silently. This
+// test pins the detection, because "the local schema publishes next_step" is a
+// fact about this binary and says nothing about what the peer binds.
+func TestFusedUpdateStepDetectsAServerThatDroppedNextStep(t *testing.T) {
+	const wiID = "wi_oldserver"
+	seedStateFile(t, wiID)
+	f := newFakeAihub(t)
+	// Exactly what the pre-aihub#290 handler returns: success, no echo.
+	f.on("/v1/work_items/"+wiID+"/step", func(map[string]any) (int, any) {
+		return http.StatusOK, map[string]any{"status": "completed"}
+	})
+
+	result, isErr := callTool(t, f, "pf_update_step", map[string]any{
+		"work_item_id": wiID, "step_id": "alpha", "status": "completed",
+		"step_attempt_id": "sa_alpha",
+		"next_step":       "beta", "next_step_attempt_id": "sa_beta",
+	})
+	if !isErr {
+		t.Fatalf("a server that dropped next_step must be reported, not treated as success: %v", result)
+	}
+	raw, _ := result["_raw"].(string)
+	for _, want := range []string{
+		"SERVER_TOO_OLD_FOR_NEXT_STEP",
+		"beta",        // which step failed to start
+		"sa_beta",     // the attempt id to reuse on the recovery call
+		"in_progress", // the recovery call itself
+	} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("the error must contain %q so the caller can recover; got %q", want, raw)
+		}
+	}
+	// The completion DID land. Telling the caller to re-send it would duplicate
+	// a completion row, so the message must say so explicitly.
+	if !strings.Contains(raw, "already landed") {
+		t.Errorf("the error must say the completion already landed, got %q", raw)
+	}
+}
+
+// TestFusedUpdateStepAcceptsAServerThatHonouredNextStep is the control: a server
+// that echoes next_step must not be flagged, or the guard above would make the
+// fused path unusable everywhere.
+func TestFusedUpdateStepAcceptsAServerThatHonouredNextStep(t *testing.T) {
+	const wiID = "wi_newserver"
+	seedStateFile(t, wiID)
+	f := newFakeAihub(t)
+	f.on("/v1/work_items/"+wiID+"/step", func(map[string]any) (int, any) {
+		return http.StatusOK, map[string]any{
+			"status": "completed", "next_step": "beta", "next_step_status": "in_progress",
+		}
+	})
+
+	result, isErr := callTool(t, f, "pf_update_step", map[string]any{
+		"work_item_id": wiID, "step_id": "alpha", "status": "completed",
+		"next_step": "beta", "next_step_attempt_id": "sa_beta",
+	})
+	if isErr {
+		t.Fatalf("a server that honoured next_step must not be flagged: %v", result)
+	}
+	if got := result["next_step"]; got != "beta" {
+		t.Errorf("the server's confirmation must reach the caller, got %v", got)
+	}
+}
+
+// TestCheckNextStepHonouredIgnoresUnfusedCalls: an ordinary completion sends no
+// next_step, so the guard must be inert there — otherwise every non-fused call
+// against any server would start failing.
+func TestCheckNextStepHonouredIgnoresUnfusedCalls(t *testing.T) {
+	const wiID = "wi_unfused"
+	seedStateFile(t, wiID)
+	f := newFakeAihub(t)
+	f.on("/v1/work_items/"+wiID+"/step", func(map[string]any) (int, any) {
+		return http.StatusOK, map[string]any{"status": "completed"}
+	})
+
+	result, isErr := callTool(t, f, "pf_update_step", map[string]any{
+		"work_item_id": wiID, "step_id": "alpha", "status": "completed",
+		"step_attempt_id": "sa_alpha",
+	})
+	if isErr {
+		t.Fatalf("a plain completion must not be flagged: %v", result)
 	}
 }
 

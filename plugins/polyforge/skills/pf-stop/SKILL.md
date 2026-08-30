@@ -77,6 +77,15 @@ encounters a terminal failure that cannot be resolved in this session (fail).
    ```
    Check `note_emitted` in the response: a note that failed to record does **not** fail the
    wrap, so it is reported rather than raised.
+
+   ⚠️ **Retrying is not free of the note.** The note is emitted *before* the completion, so a
+   `pf_wrap` that fails at `complete_attempt` has already recorded it — and this is the
+   common failure, because `pf_wrap` never sets `force_terminate_step`, so wrapping with a
+   step still `in_progress` always fails there. **On any retry, drop `note=`** (or the note
+   lands twice). The error text tells you which case you are in: *"the closing note WAS
+   already recorded"* → retry without `note=`; *"the closing note was NOT recorded either"* →
+   retry with it.
+
    `pf_wrap` = push + PR + `pf_complete_attempt(wrapped)` + delete the state file. It does NOT
    remove the `pf.<slug>/` worktree dirs — clean those up manually or with
    `polyforge doctor --fix`.
@@ -136,6 +145,10 @@ encounters a terminal failure that cannot be resolved in this session (fail).
    ```
    `note_emitted` in the response says whether the note landed; a failed note does not fail
    the terminal call.
+
+   ⚠️ The note is emitted *before* the completion, so a call that fails at the completion has
+   already recorded it. **On any retry, drop `note=`** unless the error says the note was NOT
+   recorded either.
 
 2. State file is deleted by `pf_complete_attempt`; no manual delete needed.
 

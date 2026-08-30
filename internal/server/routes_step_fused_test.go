@@ -201,6 +201,8 @@ func TestHandleUpdateStep_NextStepFusesCompleteAndStart(t *testing.T) {
 	require.NotNil(t, st.CurrentAttempt)
 	assert.Equal(t, saVerify, *st.CurrentAttempt,
 		"current_step_attempt must be the SUCCESSOR's attempt id, not the completed step's")
+	assert.Equal(t, int64(3), st.Version,
+		"one fused call must perform BOTH version bumps (INSERT=1, completion=2, successor start=3)")
 
 	// The completion row belongs to the step that completed. Conflating the two
 	// attempt ids would file this history row under "verify", which has not
@@ -279,13 +281,24 @@ func TestHandleUpdateStep_FusedEqualsTwoCalls(t *testing.T) {
 	assert.Equal(t, saFused2, *fusedState.CurrentAttempt,
 		"the fused arm must record the successor's attempt id, not the completed step's")
 	assert.Equal(t, saSplit2, *splitState.CurrentAttempt)
+	// Pin the version ABSOLUTELY, on both arms, before comparing them.
+	//
+	// A relative comparison is blind to anything the two arms share, and they
+	// share startStep: break its `version = wi_step_state.version + 1` into
+	// `= wi_step_state.version` and both arms degrade together, so the comparison
+	// below still passes. Nothing else in this package asserts on version at all.
+	// 3 = the INSERT (1), the completion (+1), the successor's start (+1).
+	assert.Equal(t, int64(3), fusedState.Version,
+		"fused arm: INSERT + completion + successor start must each bump version")
+	assert.Equal(t, int64(3), splitState.Version,
+		"split arm must reach the same version through three separate calls")
+
 	marker := "<successor-attempt>"
 	fusedState.CurrentAttempt = &marker
 	splitState.CurrentAttempt = &marker
 
 	assert.Equal(t, splitState, fusedState,
-		"fused and split arms must leave identical wi_step_state — including version, "+
-			"since the fused path performs both increments")
+		"fused and split arms must leave identical wi_step_state")
 	assert.Equal(t, readStepEvents(t, pool, wiSplit.ID), readStepEvents(t, pool, wiFused.ID),
 		"fused and split arms must leave identical step timelines")
 

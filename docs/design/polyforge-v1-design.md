@@ -1293,8 +1293,11 @@ PATCH  /v1/work_items/{id}/step
          artifact_summary?,   ← max 4096 chars
          error_type?,
          escalated?,          ← true → server emit step_failed + wi stalled
-         expected_version}    ← CAS，失败返回 412 + {current_version, current_state}
-  → {step_attempt_id?, next_step?, version}
+         next_step?,          ← 完成一步的同时启动下一步（aihub#290）
+         next_step_attempt_id?}
+  ⚠️ 勘误 #8：本文档原设计的 `expected_version` CAS（失败返回 412）**从未实现**，已于 aihub#290 从
+     schema 与 CLI 中删除。并发保护是服务端的 `WHERE current_step_status='idle'` 谓词。
+  → {status, next_step?, next_step_status?}
 ```
 
 #### Conflicts
@@ -1679,7 +1682,7 @@ pf_get_step(work_item_id)
 pf_update_step(work_item_id, attempt_id, claim_epoch, session_secret,
                step_id, status:in_progress|completed|failed,
                step_attempt_id?, artifact_summary?, error_type?,
-               escalated?, expected_version)
+               escalated?, next_step?, next_step_attempt_id?)  ⚠️ 见勘误 #8：expected_version 从未实现，已于 aihub#290 删除
   -- M17: server 在状态转移时自动 emit step_started/step_completed/step_failed event
   --      client 无需显式调用 pf_emit_event 记录 step 事件
   → {step_attempt_id?, next_step?, version}
@@ -2820,7 +2823,7 @@ pf claim <id_or_slug>                   # → pf_claim_work_item
 pf get-step [--wi-id=<id>]             # → pf_get_step
 pf update-step --status=<in_progress|completed|failed> --step-id=<id>
                [--step-attempt-id=<sa>] [--artifact-summary=<json>]
-               [--escalated] [--error-type=<type>] [--expected-version=<n>]
+               [--escalated] [--error-type=<type>]  ⚠️ 见勘误 #8：expected_version 从未实现，已于 aihub#290 删除
 pf commit [--message=<msg>]            # → pf_commit
 pf push                                # → pf_push
 pf pr --title=<t> --body=<b>           # → pf_pr
@@ -3064,8 +3067,9 @@ HTTP 409
   WI_RECLASSIFY_FORBIDDEN         PATCH wi_type 时权限不足或 wi.status 不允许（需 queued/paused）
 
 HTTP 412
-  PRECONDITION_FAILED      CAS version 前置条件失败（用于 step state）
-                           details: {current_version: N, current_state: "..."}
+  PRECONDITION_FAILED      ⚠️ 勘误 #8：从未实现。原计划用于 step state 的 CAS，但
+                           expected_version 从未被服务端绑定，代码里没有任何 412 路径。
+                           已于 aihub#290 连同该参数一并删除。
 
 HTTP 413
   PAYLOAD_TOO_LARGE        event payload 超 64KB / artifact_summary 超 4096 chars
@@ -3259,7 +3263,7 @@ interface StepStartRequest {
   session_secret: string
   step_id: string
   status: "in_progress"
-  expected_version: number
+  // expected_version: number  ← 勘误 #8：从未实现，aihub#290 已删
 }
 interface StepStartResponse {
   step_attempt_id: string    // server 生成，后续 completed/failed 时必须带回
@@ -3275,7 +3279,9 @@ interface StepCompleteRequest {
   status: "completed"
   step_attempt_id: string    // 必须与 in_progress 时拿到的一致
   artifact_summary?: string  // max 4096 chars
-  expected_version: number
+  next_step?: string         // aihub#290：完成本步的同时启动下一步
+  next_step_attempt_id?: string
+  // expected_version: number  ← 勘误 #8：从未实现，aihub#290 已删
 }
 interface StepCompleteResponse {
   next_step: string | null   // null = 所有步骤完成
@@ -3292,17 +3298,17 @@ interface StepFailRequest {
   step_attempt_id: string
   error_type: string         // "timeout"|"tool_error"|"external_dependency"|"agent_error" 等
   escalated: boolean         // true → server emit step_failed + wi→stalled
-  expected_version: number
+  // expected_version: number  ← 勘误 #8：从未实现，aihub#290 已删
 }
 interface StepFailResponse {
   version: number
 }
 
-// CAS 失败（412 PRECONDITION_FAILED）
-interface StepCASError {
-  code: "PRECONDITION_FAILED"
-  details: { current_version: number; current_state: string }
-}
+// ⚠️ 勘误 #8：CAS 失败（412 PRECONDITION_FAILED）从未实现——服务端从不返回此码。
+// interface StepCASError {
+//   code: "PRECONDITION_FAILED"
+//   details: { current_version: number; current_state: string }
+// }
 ```
 
 ### 19.6 Memory 对象
@@ -3847,10 +3853,9 @@ review/代码审查          → /pf-review
    }
 
 -- C5-1 + Alice-1 WALL-6.1: start_step 必须先 in_progress 再 completed
--- expected_version 必须从 pf_get_step 获取（不能从 pf_list_work_items 拿，那里没有 version 字段）
-4.5. version_info = pf_get_step(wi_id)  ← 先拿 version（list_work_items 不含此字段）
-5a. pf_update_step(step_id="start_step", status="in_progress",
-      expected_version=version_info.version)
+-- ⚠️ 勘误 #8：原设计要求先 pf_get_step 取 version 再作为 expected_version 回传。该 CAS **从未实现**，
+--    aihub#290 已删除该参数；step bracket 不需要 version，故这里也不再有 pf_get_step 这一跳。
+5a. pf_update_step(step_id="start_step", status="in_progress")
     → 得到 step_attempt_id + 新 version
 
 5b. pf_update_step(step_id="start_step",
@@ -4096,7 +4101,8 @@ pf_commit(workspace_root, work_item_id, repo, message, paths?)
 pf_push(workspace_root, work_item_id, repo, skip_base_check?)
 pf_pr(workspace_root, work_item_id, repo, title, body, head?, base?)
 pf_update_step(work_item_id, step_id, status, step_attempt_id?,
-               artifact_summary?, error_type?, escalated?, expected_version)
+               artifact_summary?, error_type?, escalated?,
+               next_step?, next_step_attempt_id?)  ⚠️ 见勘误 #8：expected_version 从未实现，已于 aihub#290 删除
 ```
 
 所有工具 `attempt_id / claim_epoch / session_secret` 参数从 client 传入改为 MCP server 自动注入。

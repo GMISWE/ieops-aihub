@@ -128,6 +128,42 @@ jobs:
           ! grep -q -- '--- SKIP' wi_cas.log \
             || { echo "::error::a TestUpdateWorkItemCAS case SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#288: exercise the work_items.attrs merge path (attrs_patch /
+      # attrs_unset) against the same Postgres service, already migrated by the
+      # "Apply migrations (aihub#242 DB tests)" step above.
+      #
+      # Scoped to `-run 'TestUpdateWorkItemAttrs'` for the same reason as the
+      # aihub#241 step: setting AIHUB_TEST_DB on the "Unit tests" step would
+      # switch on every other gated suite in this package, which this change did
+      # not verify.
+      #
+      # The statement SHAPE has ordinary, always-executing coverage in
+      # work_items_attrs_test.go. What only a real Postgres can show is the
+      # thing this work item is actually about — that a patch does not destroy
+      # the keys it did not mention, that eight concurrent patches all survive,
+      # and that `attrs` alone still REPLACEs. Without this step those
+      # assertions SKIP, and a suite that SKIPs still prints "ok" and exits 0,
+      # so the PASS/SKIP guards below are what makes the step mean anything.
+      - name: aihub#288 attrs merge DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestUpdateWorkItemAttrs' -count=1 -v 2>&1 | tee wi_attrs.log
+          for want in TestUpdateWorkItemAttrsPatch_DoesNotDestroyOtherKeys \
+                      TestUpdateWorkItemAttrs_ReplaceStillDestroysUnsentKeys \
+                      TestUpdateWorkItemAttrsUnset_DeletesNamedKeys \
+                      TestUpdateWorkItemAttrsPatch_ConcurrentDisjointKeysAllSurvive \
+                      TestUpdateWorkItemAttrsPatch_WorksOnTerminalWorkItem \
+                      TestUpdateWorkItemAttrsPatch_SurvivesANonObjectStoredValue \
+                      TestUpdateWorkItemAttrs_NullFilledPatchIsNotAConflict \
+                      TestUpdateWorkItemAttrs_RejectsAttrsCombinedWithPatch; do
+            grep -q -- "--- PASS: $want" wi_attrs.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the DB-gated attrs merge coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' wi_attrs.log \
+            || { echo "::error::a TestUpdateWorkItemAttrs case SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#230: exercise the ListDependencies blocking/blocked_by direction
       # fix against the same Postgres service, already migrated by the "Apply
       # migrations (aihub#242 DB tests)" step above — reused here rather than

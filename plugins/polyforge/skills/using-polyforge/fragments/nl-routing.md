@@ -1,14 +1,13 @@
 ## NL Routing
 
-This table **indexes** the non-obvious intent → operation mappings; it is **not** an
-exhaustive keyword classifier. Infer the user's intent and route to the nearest match — if
-nothing fits or the intent is ambiguous, **ask rather than guess**. Each `/pf-*` skill's own
-`NL Triggers` section is the authoritative source for its triggers; this table is a
-convenience index and may lag. NL Routing decides *what operation*; **Repo Routing** (below)
-decides *which repo* the work lands in.
+This table **indexes** non-obvious intent → operation mappings; it is **not** an exhaustive
+keyword classifier. Infer the user's intent and route to the nearest match — if nothing fits
+or intent is ambiguous, **ask rather than guess**. Each `/pf-*` skill's own `NL Triggers`
+section is authoritative for its triggers (this index may lag). NL Routing decides *what
+operation*; **Repo Routing** (below) decides *which repo*.
 
 | intent | operation |
-|--------|---------|
+|---|---|
 | what's ready today / dispatch work / ready queue | `pf_get_ready_queue` |
 | what needs my decision / needs attention | `pf_get_ready_queue` → `needs_human_session[]` |
 | begin / new task / new / start | `/pf-work` (Mode A) |

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -85,9 +86,14 @@ type UpdateWorkItemRequest struct {
 	DeclaredResources    json.RawMessage `json:"declared_resources"`
 	ResourcesVersion     *int            `json:"resources_version"`
 	Attrs                json.RawMessage `json:"attrs"`
-	Goal                 *string         `json:"goal"`
-	GoalChangeReason     *string         `json:"goal_change_reason"`
-	Content              *string         `json:"content"`
+	// AttrsPatch and AttrsUnset are the aihub#288 merge path. Attrs stays a
+	// whole-column REPLACE; these two are the opt-in, non-destructive
+	// alternative. See buildWorkItemUpdate for the exact semantics.
+	AttrsPatch       json.RawMessage `json:"attrs_patch"`
+	AttrsUnset       []string        `json:"attrs_unset"`
+	Goal             *string         `json:"goal"`
+	GoalChangeReason *string         `json:"goal_change_reason"`
+	Content          *string         `json:"content"`
 }
 
 // ReadyQueue is the six-segment LCRS response for GET /v1/work_items/ready.
@@ -1068,6 +1074,42 @@ type workItemUpdate struct {
 // patch if nobody has touched declared_resources since I read it") and is
 // never wrong; omitting it keeps the historical unconditional behaviour, which
 // callers depend on today.
+//
+// # aihub#288: the attrs merge path
+//
+// `attrs` was — and still is — a whole-column REPLACE: `attrs = $n` drops every
+// key the caller did not resend. That is not a hypothetical. On 2026-08-30 an
+// update carrying 2 keys destroyed 3 unrelated keys on aihub#284, with no
+// error and no conflict, because two agents were annotating the same work item
+// and the second one had only ever seen its own two keys.
+//
+// The fix is additive, not a change of meaning:
+//
+//   - `attrs` keeps REPLACE, byte for byte. Changing its default to merge would
+//     silently rewrite the behaviour of every caller that exists today (the Web
+//     UI, pkg/client, the MCP tool, anything scripted against the REST API) and
+//     would remove the only way to delete a key. A silent semantic change is a
+//     worse defect than the one being fixed.
+//   - `attrs_patch` is the opt-in merge: `attrs = attrs || $n::jsonb`. Shallow,
+//     i.e. a top-level key present in the patch replaces the stored value for
+//     that key outright and is NOT merged into it recursively. `null` in the
+//     patch therefore STORES a JSON null; it does not delete.
+//   - `attrs_unset` deletes top-level keys: `attrs = attrs - $n::text[]`.
+//     Deletion has to be spelled out precisely because the merge is shallow —
+//     without it the merge path would be a capability regression against
+//     "resend the whole object".
+//
+// Shallow, not RFC 7396 deep merge: the only way to spell RFC 7396 in plain SQL
+// is `jsonb_strip_nulls(attrs || $n)`, which strips nulls recursively out of the
+// WHOLE merged document — so an unrelated patch would silently delete a
+// pre-existing key whose value happened to be null. Explicit `attrs_unset` costs
+// one parameter and has no such blast radius.
+//
+// Both may be sent together; the merge is applied first and the unset second
+// (composed inside one SET expression), so a key named in both ends up deleted.
+// `attrs` together with `attrs_patch`/`attrs_unset` is rejected as a 400 by
+// UpdateWorkItem — the two are contradictory instructions for one column, and
+// silently picking a winner is how this class of bug starts.
 func buildWorkItemUpdate(req *UpdateWorkItemRequest, wiID string) workItemUpdate {
 	setClauses := []string{"updated_at = clock_timestamp()"}
 	args := []any{}
@@ -1103,6 +1145,34 @@ func buildWorkItemUpdate(req *UpdateWorkItemRequest, wiID string) workItemUpdate
 	if req.Attrs != nil {
 		add("attrs = $%d", req.Attrs)
 	}
+	// aihub#288: the non-destructive path, composed into ONE SET expression so
+	// merge-then-delete happens in a single statement (two SET clauses for the
+	// same column is a syntax error in Postgres, and two statements would
+	// reintroduce a window where a concurrent reader sees the half-applied
+	// state).
+	//
+	// The parentheses are load-bearing. Postgres assigns precedence by operator
+	// SPELLING, not by operand type: binary `-` sits at the addition/subtraction
+	// level, which binds TIGHTER than `||` ("any other operator"). Unparenthesised,
+	// `attrs || $1::jsonb - $2::text[]` parses as `attrs || ($1::jsonb - $2::text[])`
+	// — the keys would be stripped out of the incoming patch and nothing would be
+	// removed from the stored value, with no error at all. Verified on PG 18.4:
+	// `'{"a":1,"gone":9}'::jsonb || '{"b":2}'::jsonb - ARRAY['gone']::text[]` keeps
+	// "gone". TestBuildWorkItemUpdate_MergeThenUnsetIsParenthesised locks this.
+	if req.AttrsPatch != nil || req.AttrsUnset != nil {
+		expr := attrsAsObject
+		if req.AttrsPatch != nil {
+			expr = fmt.Sprintf("(%s || $%d::jsonb)", expr, argIdx)
+			args = append(args, req.AttrsPatch)
+			argIdx++
+		}
+		if req.AttrsUnset != nil {
+			expr = fmt.Sprintf("(%s - $%d::text[])", expr, argIdx)
+			args = append(args, req.AttrsUnset)
+			argIdx++
+		}
+		setClauses = append(setClauses, "attrs = "+expr)
+	}
 	if req.Goal != nil {
 		add("goal = $%d", *req.Goal)
 	}
@@ -1126,6 +1196,83 @@ func buildWorkItemUpdate(req *UpdateWorkItemRequest, wiID string) workItemUpdate
 		Args: args,
 		CAS:  cas,
 	}
+}
+
+// attrsAsObject is the left operand of the aihub#288 merge: the stored attrs,
+// coerced to an object if it somehow is not one.
+//
+// The column is `JSONB NOT NULL DEFAULT '{}'` and every reader unmarshals it
+// into a map, but nothing enforces that it holds an OBJECT — `attrs` REPLACE
+// takes any JSON, and JSON null is not SQL NULL, so `{"attrs":null}` stores a
+// jsonb null past the NOT NULL constraint. Merging onto such a value is not a
+// no-op, it is corruption, and both halves misbehave differently (verified on
+// PG 18.4):
+//
+//	'null'::jsonb  || '{"a":1}'::jsonb        -> [null, {"a": 1}]      -- silent
+//	'[1,2]'::jsonb || '{"a":1}'::jsonb        -> [1, 2, {"a": 1}]      -- silent
+//	'null'::jsonb  -  ARRAY['a']::text[]      -> ERROR: cannot delete from scalar
+//
+// So a row that is already outside the column's intended type would either turn
+// into an array nobody can read or 500 the request. Coercing to '{}' keeps the
+// type invariant the rest of the codebase assumes; a caller who wants the old
+// value back can still overwrite it wholesale with `attrs`.
+const attrsAsObject = `CASE WHEN jsonb_typeof(attrs) = 'object' THEN attrs ELSE '{}'::jsonb END`
+
+// normalizeAttrsPatch treats a literal JSON `null`, and an empty attrs_unset, as
+// "field not supplied" (aihub#288).
+//
+// json.RawMessage keeps the four bytes `null` rather than staying nil, so
+// `{"attrs":{…},"attrs_patch":null}` — a request that carries no patch at all —
+// would otherwise trip the "cannot be combined" check and come back as a 400
+// describing something the caller did not do. Clients that null-fill optional
+// parameters are common enough that this must not be an error, and attrs_patch
+// is a brand-new field, so nothing can be relying on it rejecting null: being
+// permissive here cannot regress a caller, being strict can.
+//
+// An empty attrs_unset is normalised for a smaller reason — `attrs - '{}'::text[]`
+// is a self-assignment, and a caller who asked for nothing should not write the
+// column at all.
+func normalizeAttrsPatch(req *UpdateWorkItemRequest) {
+	if req.AttrsPatch != nil && bytes.Equal(bytes.TrimSpace(req.AttrsPatch), []byte("null")) {
+		req.AttrsPatch = nil
+	}
+	if req.AttrsUnset != nil && len(req.AttrsUnset) == 0 {
+		req.AttrsUnset = nil
+	}
+}
+
+// validateAttrsPatch rejects the two attrs payloads that must never reach
+// Postgres (aihub#288). Run normalizeAttrsPatch first.
+//
+// Extracted as a pure function for the same reason isCASConflict was: the only
+// behavioural test of a check living inline in UpdateWorkItem would be DB-gated,
+// and a DB-gated test in this repo runs only in its own scoped CI step — deleting
+// the check would leave `go test ./...` entirely green (mem_I98xpPgY).
+//
+//  1. An `attrs_patch` that is not a JSON object. `jsonb || jsonb` accepts
+//     arrays and scalars but does something quite different with them —
+//     `'{"a":1}'::jsonb || '[1]'::jsonb` yields an ARRAY, not an object — and
+//     malformed JSON would surface as a 500 from the driver. A caller error
+//     must be a 400. Checked BEFORE the combination rule below so a bad patch is
+//     reported as a bad patch rather than as a conflict.
+//
+//  2. `attrs` together with `attrs_patch`/`attrs_unset`. They are contradictory
+//     instructions for one column — REPLACE everything vs. keep everything and
+//     amend it. Applying both would make the result depend on clause order,
+//     which is exactly the kind of silent, order-dependent outcome this work
+//     item exists to remove. Fail loudly instead.
+func validateAttrsPatch(req *UpdateWorkItemRequest) *AihubError {
+	if req.AttrsPatch != nil {
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(req.AttrsPatch, &probe); err != nil || probe == nil {
+			return NewErr(ErrBadRequest, "attrs_patch must be a JSON object")
+		}
+	}
+	if req.Attrs != nil && (req.AttrsPatch != nil || req.AttrsUnset != nil) {
+		return NewErr(ErrBadRequest,
+			"attrs cannot be combined with attrs_patch/attrs_unset: attrs REPLACES the whole object, attrs_patch/attrs_unset amend it — send one or the other")
+	}
+	return nil
 }
 
 // casVersionUnknown is the placeholder reported when the current
@@ -1181,6 +1328,13 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 		if vErr := ValidateDeclaredResources(req.DeclaredResources); vErr != nil {
 			return nil, vErr
 		}
+	}
+
+	// aihub#288: fold null-filled optionals away, then reject contradictory or
+	// malformed attrs instructions — both before any write happens.
+	normalizeAttrsPatch(req)
+	if vErr := validateAttrsPatch(req); vErr != nil {
+		return nil, vErr
 	}
 
 	// Permission checks for goal change

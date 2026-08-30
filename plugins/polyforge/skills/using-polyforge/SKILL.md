@@ -87,6 +87,15 @@ description: >
                                        runtimes, move that one clause into the preamble.
     fragments/diagram-convention.md      702 B — only applies while authoring an artifact
                                        that contains a diagram (/pf-spec, /pf-plan).
+    fragments/repo-detail.md           ~2,2xx B — where a repo's main_modules /
+                                       change_scenarios / tech_stack live now that the
+                                       `## Workspace` block carries only a one-line
+                                       positioning per repo plus a per-project pointer
+                                       (aihub#291). Deliberately on-demand: the pointer
+                                       is emitted by the same code that writes
+                                       .polyforge/repo-map/<project>.md, so the block
+                                       itself routes you to the detail and no resident
+                                       prose is needed to describe the layout.
 
   Nothing was deleted: every file above still ships and is still readable. It moved
   from a channel that silently dropped it to one that does not.

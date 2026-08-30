@@ -37,7 +37,7 @@ polyforge doctor
 polyforge doctor --fix
 ```
 
-The CLI runs 5 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per check:
+The CLI runs 6 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per check:
 
 | # | Check | What it tests | Auto-fix |
 |---|-------|---------------|----------|
@@ -46,6 +46,7 @@ The CLI runs 5 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per chec
 | 3 | repos | `.repo/<name>/` exists for each project repo; remote URL matches `.polyforge.yaml` | `polyforge init --apply` |
 | 4 | worktrees | `pf.*` dirs cross-checked vs server wi list; flags orphans | `polyforge doctor --fix` |
 | 5 | version | Server `min_client_version` vs local binary; prompts upgrade if behind | `pf-init` skill |
+| 6 | claude_md | CLAUDE.md `## Workspace` block format (slim vs legacy inline) + `.polyforge/repo-map/<project>.md` present for every project | `polyforge init` |
 
 Then run the seam-check probe (read-only, pinned to the cached `superpowers` plugin version):
 
@@ -79,7 +80,23 @@ Orphan `pf.*` directories found (no matching running/paused wi on server).
 ### Check 5 — version warn
 Local binary is behind `min_client_version`. Run `/pf-init` skill to reinstall the latest plugin.
 
-### Check 6 — statusLine (pf-work chain)
+### Check 6 — claude_md warn
+Two distinct warnings, both fixed by re-running `polyforge init` in the workspace:
+
+- **"managed block is the legacy inline format"** — the block still repeats every repo's
+  `stack` / `modules` / `changes` / `generated` inline. That text sits at context position
+  0, is re-read on every request, and compaction cannot drop it. `polyforge init` moves it
+  to `.polyforge/repo-map/<project>.md`, read on demand at routing time. Measured on the
+  gmi-ws workspace: 29,650 of the block's 34,606 bytes. This never auto-fixes — say what it
+  costs and let the user decide when to re-init.
+- **"repo map missing …"** — the block is already slim but `.polyforge/repo-map/` is
+  absent, empty, or has no file for some project. Routing then has only the one-line
+  positioning, which is not enough to locate code inside a repo. Surface it rather than
+  letting an agent guess; `codegraph_*` / `Grep` in the worktree are the interim fallback.
+
+Never a FAIL: a stale block is a cost, not a broken workspace.
+
+### Check 7 — statusLine (pf-work chain)
 Verify the wi-progress chain takeover is healthy:
 - `<ws>/.claude/settings.json` `statusLine.command` contains `pf-statusline.cjs`.
 - `<ws>/.claude/helpers/pf/pf-statusline.cjs` and `pf-chain-render.cjs` both exist.
@@ -124,7 +141,7 @@ notify("statusLine restored to its pre-polyforge state.")
 The plugin hook (`pf-chain-hook.cjs`) keeps shipping with the plugin; to fully stop it,
 disable the polyforge plugin. `--uninstall` only undoes the statusLine takeover.
 
-### Check 7 - seam-check (superpowers)
+### Check 8 - seam-check (superpowers)
 
 `pf-seam-check` pins the 6.1.1 baseline of the cached `superpowers` plugin that pf-execute's
 engine pointer hardcodes against: `subagent-driven-development` (the engine pointer itself),
@@ -153,6 +170,7 @@ name it references.
 | repos     | warn (missing: ieops-v2) |
 | worktrees | ok (2 active)   |
 | version   | ok (1.0.0)      |
+| claude_md | warn (legacy inline block, 34,606 B) |
 | statusLine| ok (chain installed, refreshInterval 3) |
 | seamcheck | ok (verified against superpowers 6.1.1) |
 

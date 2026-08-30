@@ -126,6 +126,22 @@ if not parts:
     sys.exit(0)  # nothing assembled -> no-op, never block startup
 
 assembled = "\n\n".join(parts)
+
+# aihub#291 deliberately does NOT add a "your managed block is still the legacy
+# format" nudge here. It was tried and reverted, for two measured reasons:
+#
+#   1. The payload has a hard 10,000-character budget (aihub#285). On top of
+#      #253's 9,756-character baseline the nudge measured 386 characters, so it
+#      busted the budget on its own — and it only fired on legacy workspaces,
+#      i.e. exactly the ones it was meant to help.
+#   2. It was concatenated at the very END of ctx, so every time it fired it sat
+#      past the truncation point: it turned an intact payload into a truncated
+#      one and still delivered none of itself.
+#
+# `polyforge doctor` (check 6, claude_md) reports the same state with no budget
+# cost. If a session-start nudge is ever revived, it must be measured against
+# the budget AND placed in the preamble, not appended.
+
 ctx = (
     "<EXTREMELY_IMPORTANT>\n"
     "You are in a polyforge workspace (.polyforge.yaml detected). "

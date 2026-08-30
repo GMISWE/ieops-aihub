@@ -9,6 +9,7 @@ Session-start has a hard size budget, so these ship as files, not context:
 - **`memory-conventions.md`** — writing a memory: types, `related`, `work_item_id`,
   update-vs-reinforce; **and the hard rule that a `mem_…` id never goes in a repo doc nor a
   repo path in a memory.**
+- **`repo-detail.md`** — a repo's modules / changes / stack (the block has only a pointer).
 - **`diagram-convention.md`** — authoring an artifact with a diagram (aihub renders d2 only).
 - **`platform-adaptation.md`** — under Codex / Copilot CLI: **no `Skill` tool there**, and
   MCP tool names differ.

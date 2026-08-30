@@ -16,9 +16,8 @@ On session start, before responding to any user message:
 
 **Step 0 — Repo map first.** Your context already includes CLAUDE.md's `## Workspace`
 managed block (auto-loaded by the harness). Consult it *before* anything else as your
-**repo map**: each repo's `positioning` / `tech_stack` / `main_modules` /
-`change_scenarios` tells you at a glance what every repo is and where things live. Use it
-to route work — see [Repo Routing](#repo-routing-task--repo) below. Do **not** re-read the
+**repo map**: each repo's one-line `positioning` tells you at a glance what every repo is.
+Use it to route work — see [Repo Routing](#repo-routing-task--repo) below. Do **not** re-read the
 file; it's already in context. Only if the `## Workspace` block is absent (a subagent
 without injection, or a member who hasn't run `polyforge init`) → `Read` the workspace
 `CLAUDE.md`, or run `/pf-init` to generate it.

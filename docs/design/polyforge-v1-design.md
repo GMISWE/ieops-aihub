@@ -314,7 +314,7 @@ aihub/
 │   │
 │   ├── cli/
 │   │   ├── init.go                     # pf init / pf init --apply
-│   │   ├── doctor.go                   # pf doctor（5 项检查）
+│   │   ├── doctor.go                   # pf doctor（6 项检查）
 │   │   ├── ready.go                    # pf ready [--view=lcrs]
 │   │   └── stalled.go                  # pf stalled
 │   │
@@ -2796,7 +2796,7 @@ pf init --apply      # clone repos + 填充 CLAUDE.md managed 区块
                      # 失败处理：clone 失败的 repo 跳过+记录，不 abort 整次 init；
                      #           可重复运行（idempotent，已 clone 的 repo 跳过）
 
-pf doctor            # 5 项健康检查（见 §12.1）
+pf doctor            # 6 项健康检查（见 §12.1）
 pf doctor --fix      # 自动修复
 
 pf ready [--view=lcrs] [--max=N] [--non-conflicting]
@@ -2826,7 +2826,7 @@ pf pr --title=<t> --body=<b>           # → pf_pr
 pf wrap [--wi-id=<id>]                 # → pf_wrap（coding scenario）
 ```
 
-### 12.1 doctor 5 项检查
+### 12.1 doctor 6 项检查
 
 ```
 1. workspace  从任意子目录能找到 .polyforge.yaml（向上搜索）
@@ -2834,6 +2834,14 @@ pf wrap [--wi-id=<id>]                 # → pf_wrap（coding scenario）
 3. repos      所有 .repo/<name>/ 存在且 remote 匹配 .polyforge.yaml
 4. worktrees  pf.<xxx>/ 列表 vs server wi 列表，标红 orphan
 5. version    GET /v1/version，比对 min_client_version 与本地 binary
+6. claude_md  CLAUDE.md 托管块的格式 + .polyforge/repo-map/ 的完整性（aihub#291）
+              - 块里仍内联 `  - stack:` / `  - modules:` / `  - changes:` / `  - generated:`
+                ⇒ 旧格式，warn 并报字节数（这些明细在上下文位置 0，每个请求都被重读）
+              - 块已瘦身但缺 repo-map/<project>.md ⇒ warn「地图缺失」，因为此时路由
+                只剩一行定位，不足以定位仓内代码
+              - 期望的 map 集合取自块自身的 `### <project>` 标题，不取 .polyforge.yaml
+                （init 只渲染 caller 有角色的项目，按 config 判会误报）
+              - 永远不返回 error：块过期是成本问题，不是工作区坏了
 ```
 
 ### 12.2 CLAUDE.md 两阶段生成

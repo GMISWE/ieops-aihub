@@ -47,7 +47,7 @@ The CLI runs 7 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per chec
 | 4 | worktrees | `pf.*` dirs cross-checked vs server wi list; flags orphans | `polyforge doctor --fix` |
 | 5 | version | Server `min_client_version` vs local binary; prompts upgrade if behind | `pf-init` skill |
 | 6 | claude_md | CLAUDE.md `## Workspace` block format (slim vs legacy inline) + `.polyforge/repo-map/<project>.md` present for every project | `polyforge init` |
-| 7 | usage_md | `.polyforge/usage.md` still carrying rule sections the `using-polyforge` skill owns (Iron Rules / NL Routing / Memory Type Reference). That file is never regenerated, so the copy there cannot be corrected and a session sees two (aihub#294) | `polyforge doctor --fix` (rewrites the file; keeps a `usage.md.bak`) |
+| 7 | usage_md | `.polyforge/usage.md` still carrying rule sections the `using-polyforge` skill owns (Iron Rules / NL Routing / Memory Type Reference). That file is never regenerated, so the copy there cannot be corrected and a session sees two (aihub#294) | **manual** — `--fix` does not touch it |
 
 Then run the seam-check probe (read-only, pinned to the cached `superpowers` plugin version):
 
@@ -105,10 +105,19 @@ Routing and the memory-type table into `usage.md` as well as shipping them in th
 template change cannot reach this workspace and the session gets both copies — of which
 only the skill's can ever be corrected. They have already drifted once.
 
-`polyforge doctor --fix` removes just those sections and keeps the original as
-`.polyforge/usage.md.bak`. It is not done during `init`: deleting silently from a file
-polyforge has promised not to write to would replace a silent duplicate with a silent
-deletion. Never a FAIL — the workspace works, it is just being told the rules twice.
+**Report-only — `--fix` deliberately does not touch this file.** Tell the user to open
+`.polyforge/usage.md` and delete the named `## ` sections; the maintained copy ships with
+the skill. Automating it means inferring each section's extent from the structure of a
+file the user may have edited, and review found six input classes where that destroyed
+their content — three of them leaving an unterminated fence or HTML comment that swallows
+the rest of the document. Doing it only when a span is byte-identical to a known template
+version is the correct primitive and is left to a follow-up.
+
+A second warning, **"unterminated code fence or HTML comment"**, means the scan could not
+read to the end of the file, so it is reporting "did not look" rather than "found
+nothing". Fix the markdown, then re-run.
+
+Never a FAIL — the workspace works, it is just being told the rules twice.
 
 ### Check 8 — statusLine (pf-work chain)
 Verify the wi-progress chain takeover is healthy:

@@ -86,17 +86,23 @@ description: >
   review of aihub#295 applied the wi's own discriminator — is the violation observable?
   — and also made memory-first.md ("pf_recall before every substantive action"),
   bootstrap.md (the session startup scan) and repo-routing.md rules, which would take
-  the lower bound below from 13,563 to 17,073. Reclassifying only ever ENLARGES that
+  the lower bound below from 14,175 to 17,685. Reclassifying only ever ENLARGES that
   bound, which is the honest direction; aihub#296 owns settling it with a measurement
   rather than deciding it in passing while moving a fragment.
-  (Both figures were 11,489 / 14,993 when aihub#295 wrote them. aihub#294 moved the
-  11-row memory-type table into memory-conventions.md, +2,074 chars on a fragment that
-  is already `kind: rule`, so the bound moved with it. Recomputed, not adjusted: the
-  first number is what tests/using-polyforge-manifest.test.sh prints today. Neither
-  number is resident — both these fragments are on-demand — so the payload is unaffected.
-  ⚠️ Every figure in this block is CHARACTERS, like the budget itself, not bytes. These
-  fragments contain CJK and em-dashes, so `wc -c` reads high — memory-first is 891 chars
-  but 909 bytes. Mixing the units once already put 17,127 here where 17,073 was right.)
+  (Both figures were 11,489 / 14,993 when aihub#295 wrote them. aihub#294 grew
+  memory-conventions.md from 2,155 to 4,841 chars — the 11-row memory-type table, then a
+  correction to it — and that fragment is already `kind: rule`, so the bound moved with
+  it. Neither number is resident: both fragments are on-demand, so the payload is
+  unaffected.
+  ⚠️ DO NOT hand-adjust these. Re-run the suite and copy what it prints:
+      bash tests/using-polyforge-manifest.test.sh | grep 'SUM(kind:rule'
+  This block has now been wrong twice for two different reasons. First 17,127, from
+  adding three BYTE sizes to a CHARACTER total — every figure here is characters, like
+  the budget, and these fragments carry CJK and em-dashes, so `wc -c` reads high
+  (memory-first is 891 chars but 909 bytes). Then 13,563, because the commit that fixed
+  the units added 612 more characters to memory-conventions.md and did not recompute.
+  A derived number copied by hand goes stale on the next edit to its inputs, including
+  the edit that is fixing it.)
 
   ==========================================================================
   WHICH CHANNEL OWNS A RULE (aihub#294)
@@ -159,9 +165,8 @@ description: >
   which makes aihub#296's slimming the prerequisite, not a nice-to-have. Until then,
   treat channel 3 as a LOCAL OVERRIDE LAYER and know that nothing on it propagates.
 
-  Nothing in this change regenerates usage.md or rewrites the workspace CLAUDE.md's
-  hand-written region. writeUsageMd keeps its existence guard; `doctor --fix` touches
-  only .polyforge/usage.md and leaves a .bak; ensureClaudeMdRef is additive — it prepends
+  Nothing in this change rewrites ANY user-owned file. writeUsageMd keeps its existence
+  guard; the usage_md doctor check only reads; ensureClaudeMdRef is additive — it prepends
   the missing `@import` line and deletes nothing. The guard's original reason (do not
   overwrite user edits) is still intact; the fix was to stop putting rules behind it.
 
@@ -170,7 +175,17 @@ description: >
   section is delivered twice, that a section dropped from usage.md still has a home in a
   fragment (moved, not deleted), and that no delivered surface spells the legacy worktree
   path. Existing workspaces keep their frozen copy — a template edit cannot reach them —
-  so `polyforge doctor` reports it and `polyforge doctor --fix` removes it.
+  so `polyforge doctor`'s usage_md check REPORTS it and a human deletes it.
+  Reporting, not removing, and that was learned the hard way: this change first removed
+  the sections under `--fix`, deciding each one's extent from markdown structure. Review
+  found six input classes where that destroyed content the user owned, three of them
+  leaving an unterminated fence or HTML comment — which swallows the rest of the document.
+  The live run against a real frozen workspace caught none of them, because a pristine
+  generated template is the one input that cannot exhibit any of them. Deleting a span
+  only when it is byte-identical to a known template version is the right primitive; it
+  needs the historical template bodies and is left to a follow-up. Detection is what this
+  work item actually required — it is what stops the duplicate being silent — and removal
+  was a convenience that had bought a data-loss path.
 
   ONE OF THE THREE WAS DEMOTED, NOT JUST MOVED. Iron Rules and NL Routing were already
   resident here, so dropping the usage.md copy loses no reach. The memory-type table was
@@ -189,9 +204,12 @@ description: >
     - usage.md's IR3 named `/reload-plugins` as the remedy; iron-rules.md names `pf doctor`.
       The fragment is right: `/reload-plugins` exists only under Claude Code, and this skill
       ships a platform-adaptation fragment precisely because Codex/Copilot are supported.
-    - usage.md's NL Routing appended "+ fan-out subagents" to the ready-queue row. That is
-      an orchestration pattern, not an intent → operation mapping, which is all that table
-      claims to index.
+    - usage.md's NL Routing appended "+ fan-out subagents" to the ready-queue row. The ROW
+      survives here; that PHRASE does not, and it survives nowhere else in the plugin — so
+      unlike the item above this is a deletion, not a better surviving wording. Deliberate:
+      it is an orchestration pattern rather than an intent → operation mapping, which is
+      all that table claims to index, and re-adding it costs 20 of the 22 free resident
+      characters.
 
   KNOWN RESIDUAL: usage.md still carries "Wi creation rules", which is a rule with no
   fragment copy. It is not part of this defect (one copy cannot diverge from itself) and

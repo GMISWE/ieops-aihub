@@ -2826,7 +2826,7 @@ pf pr --title=<t> --body=<b>           # → pf_pr
 pf wrap [--wi-id=<id>]                 # → pf_wrap（coding scenario）
 ```
 
-### 12.1 doctor 6 项检查
+### 12.1 doctor 7 项检查
 
 ```
 1. workspace  从任意子目录能找到 .polyforge.yaml（向上搜索）
@@ -2842,6 +2842,18 @@ pf wrap [--wi-id=<id>]                 # → pf_wrap（coding scenario）
               - 期望的 map 集合取自块自身的 `### <project>` 标题，不取 .polyforge.yaml
                 （init 只渲染 caller 有角色的项目，按 config 判会误报）
               - 永远不返回 error：块过期是成本问题，不是工作区坏了
+7. usage_md   .polyforge/usage.md 仍带着 using-polyforge 拥有的规则段落（aihub#294）
+              - Iron Rules / NL Routing / Memory Type Reference 三段现在归插件侧的
+                fragment 所有；writeUsageMd 不再生成它们
+              - 但 writeUsageMd 有存在性守卫（文件存在就不重写），所以存量工作区仍留着
+                一份冻结的副本 ⇒ 一个 session 收到两份，而只有 fragment 那份能被修好
+              - **只报告，不自动删除**：删除范围要从 markdown 结构反推，而用户可能已经
+                编辑过这个文件；评审在六类输入上验证过那样会毁掉用户内容（其中三类还会
+                留下未闭合的 fence / HTML 注释，吞掉全文后续）。正确的原语是「与某个已知
+                模板版本逐字节相同才删」，那需要历史模板正文，留作后续 wi
+              - 扫描器忽略 fence / 缩进代码块 / HTML 注释里的假标题；若走到文件尾时 fence
+                或注释仍未闭合 ⇒ warn「没看完」，不能报 ok
+              - 永远不返回 error：多一份副本是成本问题，不是工作区坏了
 ```
 
 ### 12.2 CLAUDE.md 两阶段生成

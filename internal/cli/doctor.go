@@ -42,7 +42,7 @@ func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot
 		checkWorktrees(ctx, c, cfg, wsRoot, fix),
 		checkVersion(ctx, c),
 		checkClaudeMd(wsRoot),
-		checkUsageMd(wsRoot, fix),
+		checkUsageMd(wsRoot),
 	}
 
 	allOk := true
@@ -281,11 +281,27 @@ func checkWorktrees(ctx context.Context, c *client.Client, cfg *config.Config, w
 // agree. They already did not: IR1's worktree path was wrong in one of them for three
 // months and nothing anywhere reported it.
 //
-// The removal is NOT done during `polyforge init`. Silently deleting from a file whose
-// entire contract is "polyforge does not write here once it exists" would trade a silent
-// duplicate for a silent deletion, which is the same class of defect this check exists to
-// end. `--fix` is an explicit request from the operator, so it is allowed to rewrite.
-func checkUsageMd(wsRoot string, fix bool) checkResult {
+// REPORT-ONLY, ON PURPOSE — and this is the second time that conclusion was reached the
+// hard way. The first cut of this check also removed the sections under `--fix`, deciding
+// each section's extent from markdown structure. Review found six input classes where
+// that destroyed content the user owned, three of them leaving the file structurally
+// broken (an unterminated fence or HTML comment swallows the rest of the document). The
+// live check against a real frozen workspace missed all six, because a pristine generated
+// template is the one input that cannot exhibit any of them.
+//
+// Inferring the extent of a generated section from the shape of a file a user has since
+// edited is the wrong primitive. The right one is to delete a span only when it is
+// byte-identical to something a known template version emitted, and otherwise say so and
+// stop. That is a real piece of work — it needs the historical template bodies — and it
+// is NOT what this work item is about, which is that a rule was on a channel that could
+// never be corrected. Detection is what makes that stop being silent; removal was a
+// convenience that cost a data-loss path.
+//
+// `--fix` deliberately does not reach here. It is also not the operator's considered
+// choice as often as it looks: plugins/polyforge/skills/pf-stop/SKILL.md tells agents to
+// run `polyforge doctor --fix` to clean up worktrees, so the caller asking for it has
+// very likely never read this file.
+func checkUsageMd(wsRoot string) checkResult {
 	const name = "usage_md"
 	path := filepath.Join(wsRoot, ".polyforge", "usage.md")
 
@@ -302,153 +318,114 @@ func checkUsageMd(wsRoot string, fix bool) checkResult {
 			Message: fmt.Sprintf(".polyforge/usage.md not readable: %v", err)}
 	}
 
-	found := usageSectionsOwnedBySkill(string(b))
+	found, wellFormed := scanUsageSections(string(b))
+	if !wellFormed {
+		// An unterminated fence or HTML comment means everything after it was skipped,
+		// so a clean result here would mean "stopped looking", not "looked and found
+		// nothing". In a check whose entire subject is silent failure, that green would
+		// be the very defect it exists to report.
+		return checkResult{Name: name, Status: "warning",
+			Message: ".polyforge/usage.md has an unterminated code fence or HTML comment — " +
+				"the scan could not read past it, so this is 'did not look', not 'found nothing'"}
+	}
 	if len(found) == 0 {
 		return checkResult{Name: name, Status: "ok",
 			Message: ".polyforge/usage.md carries no rule section owned by using-polyforge"}
-	}
-	if fix {
-		stripped, n := stripUsageSections(string(b))
-		// Back the original up first. This rewrite deletes from a file the user owns,
-		// and the section boundary is inferred from markdown structure, not from a
-		// record of what the generator actually wrote — so it can be wrong on a file
-		// edited in a way we did not anticipate. `--fix` is also reached by agents told
-		// to run it for unrelated reasons (pf-stop runs it to clean worktrees), so the
-		// operator asking for it has not necessarily read this file. Recoverable beats
-		// clever.
-		mode := os.FileMode(0644)
-		if fi, serr := os.Stat(path); serr == nil {
-			mode = fi.Mode().Perm()
-		}
-		backup := path + ".bak"
-		if werr := os.WriteFile(backup, b, mode); werr != nil {
-			return checkResult{Name: name, Status: "error",
-				Message: fmt.Sprintf("refusing to rewrite .polyforge/usage.md — could not write %s first: %v",
-					filepath.Base(backup), werr)}
-		}
-		if werr := os.WriteFile(path, []byte(stripped), mode); werr != nil {
-			return checkResult{Name: name, Status: "error",
-				Message: fmt.Sprintf("could not rewrite .polyforge/usage.md: %v", werr)}
-		}
-		return checkResult{Name: name, Status: "ok",
-			Message: fmt.Sprintf("removed %d duplicated rule section(s) from .polyforge/usage.md: %s "+
-				"(the maintained copy ships with the using-polyforge skill; original saved as %s)",
-				n, strings.Join(found, ", "), filepath.Base(backup))}
 	}
 	return checkResult{Name: name, Status: "warning",
 		Message: fmt.Sprintf(".polyforge/usage.md still carries %d rule section(s) that using-polyforge "+
 			"owns (%s) — that file is never regenerated, so this copy cannot be corrected and a "+
 			"session sees both",
 			len(found), strings.Join(found, ", ")),
-		FixCmd: "polyforge doctor --fix"}
+		FixCmd: "edit .polyforge/usage.md and delete those sections by hand — the maintained " +
+			"copy ships with the using-polyforge skill (not automated: see checkUsageMd)"}
 }
 
-// isMarkdownFence reports whether a line opens or closes a fenced code block.
-func isMarkdownFence(line string) bool {
-	t := strings.TrimSpace(line)
-	return strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~")
-}
-
-// isATXHeading reports whether a line is a markdown ATX heading of any level.
-// Any level, not just `## `: a user following this file's own closing invitation to
-// "add workspace-specific notes" is as likely to write `# Notes` or `### Notes`, and a
-// terminator that only recognises `## ` would swallow all of it.
-func isATXHeading(line string) bool {
-	t := strings.TrimSpace(line)
+// fenceDelim reports the fence character and run length that opens or closes a fenced
+// code block, or (0, 0) for any other line. `line` must already have leading space
+// stripped. Character AND length both matter: per CommonMark a fence is closed only by a
+// run of the SAME character at least as long as the one that opened it, so a ``` inside a
+// ```` block, or a ~~~ inside a ``` block, is content rather than a terminator. Treating
+// every ```/~~~ prefix as a toggle got both of those backwards.
+func fenceDelim(line string) (byte, int) {
+	if line == "" {
+		return 0, 0
+	}
+	c := line[0]
+	if c != '`' && c != '~' {
+		return 0, 0
+	}
 	n := 0
-	for n < len(t) && t[n] == '#' {
+	for n < len(line) && line[n] == c {
 		n++
 	}
-	return n >= 1 && n <= 6 && n < len(t) && (t[n] == ' ' || t[n] == '\t')
-}
-
-// usageSectionsOwnedBySkill lists, in template order, the skillOwnedUsageSections
-// headings present in a usage.md body (reported without the leading "## ").
-// Fence-aware, so a heading quoted inside a ``` block is not mistaken for a real one.
-func usageSectionsOwnedBySkill(body string) []string {
-	var found []string
-	for _, h := range skillOwnedUsageSections {
-		fence := false
-		for _, line := range strings.Split(body, "\n") {
-			if isMarkdownFence(line) {
-				fence = !fence
-				continue
-			}
-			if !fence && strings.TrimSpace(line) == h {
-				found = append(found, strings.TrimPrefix(h, "## "))
-				break
-			}
-		}
+	if n < 3 {
+		return 0, 0
 	}
-	return found
+	return c, n
 }
 
-// stripUsageSections removes every skillOwnedUsageSections section from a usage.md body
-// and reports how many it removed. The `---` rule the template puts *between* sections is
-// carried off with the section above it, and the run of blank/`---` lines left dangling
-// before a removed heading collapses to a single blank line.
+// scanUsageSections walks a usage.md body once and reports which skillOwnedUsageSections
+// headings it really carries, in template order, plus whether the document parsed cleanly.
 //
-// A section runs from its heading to the next ATX heading OF ANY LEVEL, or EOF. Both
-// halves of that matter and neither is cosmetic:
+// "Really" is doing work here. A line that merely looks like an owned heading does not
+// count when it is inside a fenced block, inside an indented code block (4+ spaces is a
+// code block, and CommonMark allows an ATX heading at most 3), or inside an HTML comment.
+// Each of those is an example or a note ABOUT the heading, not the heading.
 //
-//   - Any level, because `## Memory Type Reference` is the LAST section the template
-//     emits and the line right above it invites the user to append notes. A terminator
-//     keyed on `## ` alone deleted every appended `# Appendix` / `### note` with it.
-//   - Fence-aware, because a `## ` inside a ``` block is an example, not a heading.
-//     Without this, quoting a heading either got the quote stripped as if it were real
-//     (leaving an unterminated fence, which swallows the rest of the document) or ended
-//     an owned section early, letting content escape that should have gone.
-//
-// Prose appended directly under an owned section with no heading of its own is still
-// indistinguishable from that section's body and goes with it — which is why the caller
-// writes a .bak before applying this.
-func stripUsageSections(body string) (string, int) {
+// wellFormed is false when the walk ends inside a fence or a comment, i.e. when the tail
+// of the file was never examined. The caller must not report a clean bill in that case.
+func scanUsageSections(body string) (found []string, wellFormed bool) {
 	owned := make(map[string]bool, len(skillOwnedUsageSections))
 	for _, h := range skillOwnedUsageSections {
 		owned[h] = true
 	}
+	seen := make(map[string]bool, len(skillOwnedUsageSections))
 
-	lines := strings.Split(body, "\n")
-	out := make([]string, 0, len(lines))
-	removed := 0
-	fence := false
-	for i := 0; i < len(lines); i++ {
-		if isMarkdownFence(lines[i]) {
-			fence = !fence
-			out = append(out, lines[i])
+	var fenceChar byte
+	fenceLen := 0
+	inComment := false
+
+	for _, line := range strings.Split(body, "\n") {
+		stripped := strings.TrimLeft(line, " \t")
+		indent := len(line) - len(stripped)
+
+		if inComment {
+			if strings.Contains(line, "-->") {
+				inComment = false
+			}
 			continue
 		}
-		if fence || !owned[strings.TrimSpace(lines[i])] {
-			out = append(out, lines[i])
+		if fenceLen > 0 {
+			if c, n := fenceDelim(stripped); c == fenceChar && n >= fenceLen && indent <= 3 {
+				fenceLen = 0
+			}
 			continue
 		}
-		removed++
-		for len(out) > 0 {
-			if t := strings.TrimSpace(out[len(out)-1]); t == "" || t == "---" {
-				out = out[:len(out)-1]
-				continue
-			}
-			break
+		if c, n := fenceDelim(stripped); n > 0 && indent <= 3 {
+			fenceChar, fenceLen = c, n
+			continue
 		}
-		if len(out) > 0 {
-			// Only if something precedes it — an owned heading on line 1 must not
-			// leave the file starting with a blank line.
-			out = append(out, "")
-		}
-		// Consume the section body, tracking fences opened inside it so that a heading
-		// quoted in an example cannot end the section early, and so the fence state is
-		// balanced again for the lines that follow.
-		inner := false
-		for i+1 < len(lines) {
-			if isMarkdownFence(lines[i+1]) {
-				inner = !inner
-			} else if !inner && isATXHeading(lines[i+1]) {
-				break // the next section starts here
+		if i := strings.Index(line, "<!--"); i >= 0 {
+			if !strings.Contains(line[i:], "-->") {
+				inComment = true
 			}
-			i++
+			continue
+		}
+		if indent >= 4 {
+			continue // indented code block, not a heading
+		}
+		if s := strings.TrimSpace(line); owned[s] {
+			seen[s] = true
 		}
 	}
-	return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n", removed
+
+	for _, h := range skillOwnedUsageSections {
+		if seen[h] {
+			found = append(found, strings.TrimPrefix(h, "## "))
+		}
+	}
+	return found, fenceLen == 0 && !inComment
 }
 
 // checkClaudeMd inspects the CLAUDE.md managed block that `polyforge init`

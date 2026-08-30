@@ -292,6 +292,129 @@ func TestStripUsageSections(t *testing.T) {
 	}
 }
 
+// TestStripUsageSectionsPreservesUserContent is the regression suite for the boundary
+// bug: the first cut of stripUsageSections ended a section only at a `## ` heading, so
+// everything the user appended after the LAST owned section — and `## Memory Type
+// Reference` is last, right under the template's own "add workspace-specific notes"
+// invitation — was deleted with it.
+func TestStripUsageSectionsPreservesUserContent(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		keep []string
+		gone []string
+	}{
+		{
+			name: "notes appended under a level-1 heading after the last owned section",
+			in: "# guide\n\n## Memory Type Reference\n\n| a | b |\n\n" +
+				"# Appendix (mine)\n\nDO NOT LOSE ME\n\n### sub note\n\nalso mine\n",
+			keep: []string{"# Appendix (mine)", "DO NOT LOSE ME", "### sub note", "also mine"},
+			gone: []string{"## Memory Type Reference", "| a | b |"},
+		},
+		{
+			name: "notes under a level-3 heading",
+			in:   "# guide\n\n## NL Routing\n\ntable\n\n### my machine\n\nport 9999\n",
+			keep: []string{"### my machine", "port 9999"},
+			gone: []string{"## NL Routing", "table"},
+		},
+		{
+			name: "an owned heading quoted inside a fenced block is not a heading",
+			in: "# guide\n\n## Daily workflow\n\n```markdown\n## Iron Rules\nexample\n```\n\n" +
+				"after the fence\n\n## Wi creation rules\n\nkeep me\n",
+			keep: []string{"## Daily workflow", "```markdown", "## Iron Rules", "example",
+				"after the fence", "## Wi creation rules", "keep me"},
+		},
+		{
+			name: "a fenced heading inside an owned section does not end it early",
+			in: "# guide\n\n## Iron Rules\n\n```md\n## Daily workflow\n```\n\nmore rules\n\n" +
+				"---\n\n## Wi creation rules\n\nkeep me\n",
+			keep: []string{"## Wi creation rules", "keep me"},
+			gone: []string{"## Iron Rules", "more rules", "## Daily workflow", "```md"},
+		},
+		{
+			name: "an owned heading on line 1 leaves no leading blank",
+			in:   "## Iron Rules\n\nIR1\n\n# mine\n\nkeep\n",
+			keep: []string{"# mine", "keep"},
+			gone: []string{"## Iron Rules", "IR1"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := stripUsageSections(tc.in)
+			for _, k := range tc.keep {
+				if !strings.Contains(got, k) {
+					t.Errorf("destroyed content it does not own: %q is gone.\ngot:\n%s", k, got)
+				}
+			}
+			for _, g := range tc.gone {
+				if strings.Contains(got, g) {
+					t.Errorf("left owned content behind: %q survived.\ngot:\n%s", g, got)
+				}
+			}
+			if strings.HasPrefix(got, "\n") {
+				t.Errorf("output starts with a blank line:\n%q", got)
+			}
+			if n := strings.Count(got, "```") + strings.Count(got, "~~~"); n%2 != 0 {
+				t.Errorf("left an unterminated code fence (%d delimiters), which swallows "+
+					"the rest of the document:\n%s", n, got)
+			}
+		})
+	}
+}
+
+// TestOnDemandRuleSectionsAreIndexed closes the demotion gap. "Moved, not deleted" is
+// satisfied by a fragment that is never injected, so a section can silently go from
+// always-in-context (usage.md rode the CLAUDE.md @import unconditionally) to
+// read-it-if-you-think-to. That is a legitimate trade under the size budget, but only
+// if something tells an agent the file exists — which is on-demand-index.md's whole job.
+func TestOnDemandRuleSectionsAreIndexed(t *testing.T) {
+	skillDir := usingPolyforgeDir(t)
+	index, err := os.ReadFile(filepath.Join(skillDir, "fragments", "on-demand-index.md"))
+	if err != nil {
+		t.Fatalf("read on-demand-index.md: %v", err)
+	}
+	delivered := deliveredSurfaces(t)
+
+	for _, heading := range skillOwnedUsageSections {
+		title := strings.TrimPrefix(heading, "## ")
+		inContext := false
+		for _, body := range delivered {
+			if headingCount(body, title) > 0 {
+				inContext = true
+				break
+			}
+		}
+		if inContext {
+			continue
+		}
+		// Not delivered: find which on-demand fragment owns it, and require the index
+		// to name that file.
+		entries, rerr := os.ReadDir(filepath.Join(skillDir, "fragments"))
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		var owner string
+		for _, e := range entries {
+			b, _ := os.ReadFile(filepath.Join(skillDir, "fragments", e.Name()))
+			if headingCount(string(b), title) > 0 {
+				owner = e.Name()
+				break
+			}
+		}
+		if owner == "" {
+			t.Errorf("%q is delivered nowhere and lives in no fragment", title)
+			continue
+		}
+		if !strings.Contains(string(index), owner) {
+			t.Errorf("%q was moved out of the always-delivered channel into %s, which is "+
+				"on-demand — but on-demand-index.md never names %s, so no session is told "+
+				"it exists. That is a demotion to unreachable, not a move.",
+				title, owner, owner)
+		}
+	}
+}
+
 func TestCheckUsageMd(t *testing.T) {
 	newWorkspace := func(t *testing.T, body string) string {
 		t.Helper()
@@ -306,7 +429,8 @@ func TestCheckUsageMd(t *testing.T) {
 	}
 
 	t.Run("legacy file warns and names the sections", func(t *testing.T) {
-		got := checkUsageMd(newWorkspace(t, legacyUsageMd), false)
+		root := newWorkspace(t, legacyUsageMd)
+		got := checkUsageMd(root, false)
 		if got.Status != "warning" {
 			t.Fatalf("status = %q, want warning (msg: %s)", got.Status, got.Message)
 		}
@@ -319,10 +443,18 @@ func TestCheckUsageMd(t *testing.T) {
 		if got.FixCmd == "" {
 			t.Error("a warning with no fix command leaves the operator nothing to do")
 		}
-		// The check must not mutate without --fix.
-		b, _ := os.ReadFile(filepath.Join(newWorkspace(t, legacyUsageMd), ".polyforge", "usage.md"))
-		if !strings.Contains(string(b), "## Iron Rules") {
-			t.Error("checkUsageMd rewrote the file without --fix")
+		// The check must not mutate without --fix. Read back THE ROOT IT RAN AGAINST:
+		// re-deriving a fresh fixture here would assert only that the fixture contains
+		// what the fixture contains, and would pass even if the check rewrote the file.
+		b, err := os.ReadFile(filepath.Join(root, ".polyforge", "usage.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(b) != legacyUsageMd {
+			t.Errorf("checkUsageMd modified the file without --fix:\n%s", b)
+		}
+		if _, err := os.Stat(filepath.Join(root, ".polyforge", "usage.md.bak")); err == nil {
+			t.Error("checkUsageMd wrote a backup without --fix")
 		}
 	})
 
@@ -356,6 +488,35 @@ func TestCheckUsageMd(t *testing.T) {
 		}
 		if got := checkUsageMd(root, false); got.Status != "ok" {
 			t.Fatalf("after --fix the check still reports %q: %s", got.Status, got.Message)
+		}
+	})
+
+	t.Run("--fix leaves a recoverable backup", func(t *testing.T) {
+		root := newWorkspace(t, legacyUsageMd)
+		got := checkUsageMd(root, true)
+		bak, err := os.ReadFile(filepath.Join(root, ".polyforge", "usage.md.bak"))
+		if err != nil {
+			t.Fatalf("--fix rewrote the user's file without leaving a backup: %v", err)
+		}
+		if string(bak) != legacyUsageMd {
+			t.Error("the backup is not a faithful copy of the original")
+		}
+		if !strings.Contains(got.Message, "usage.md.bak") {
+			t.Errorf("the operator is not told where the backup went: %s", got.Message)
+		}
+	})
+
+	t.Run("an unreadable existing path does not report green", func(t *testing.T) {
+		// A directory rather than a chmod: os.ReadFile fails with EISDIR for every user
+		// including root, so this case runs everywhere instead of skipping — and a
+		// skip that counts as a pass is the exact failure mode this file exists to end.
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, ".polyforge", "usage.md"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		got := checkUsageMd(root, false)
+		if got.Status == "ok" {
+			t.Errorf(`"could not look" reported as "looked and found nothing": %s`, got.Message)
 		}
 	})
 

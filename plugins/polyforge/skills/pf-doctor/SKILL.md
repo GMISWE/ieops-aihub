@@ -37,7 +37,7 @@ polyforge doctor
 polyforge doctor --fix
 ```
 
-The CLI runs 6 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per check:
+The CLI runs 7 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per check:
 
 | # | Check | What it tests | Auto-fix |
 |---|-------|---------------|----------|
@@ -47,6 +47,7 @@ The CLI runs 6 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per chec
 | 4 | worktrees | `pf.*` dirs cross-checked vs server wi list; flags orphans | `polyforge doctor --fix` |
 | 5 | version | Server `min_client_version` vs local binary; prompts upgrade if behind | `pf-init` skill |
 | 6 | claude_md | CLAUDE.md `## Workspace` block format (slim vs legacy inline) + `.polyforge/repo-map/<project>.md` present for every project | `polyforge init` |
+| 7 | usage_md | `.polyforge/usage.md` still carrying rule sections the `using-polyforge` skill owns (Iron Rules / NL Routing / Memory Type Reference). That file is never regenerated, so the copy there cannot be corrected and a session sees two (aihub#294) | `polyforge doctor --fix` (rewrites the file; keeps a `usage.md.bak`) |
 
 Then run the seam-check probe (read-only, pinned to the cached `superpowers` plugin version):
 
@@ -96,7 +97,20 @@ Two distinct warnings, both fixed by re-running `polyforge init` in the workspac
 
 Never a FAIL: a stale block is a cost, not a broken workspace.
 
-### Check 7 — statusLine (pf-work chain)
+### Check 7 — usage_md warn
+**".polyforge/usage.md still carries N rule section(s) that using-polyforge owns"** — the
+workspace was created before aihub#294, when `polyforge init` wrote the Iron Rules, NL
+Routing and the memory-type table into `usage.md` as well as shipping them in the skill.
+`writeUsageMd` refuses to overwrite an existing `usage.md` (it is the user's file), so a
+template change cannot reach this workspace and the session gets both copies — of which
+only the skill's can ever be corrected. They have already drifted once.
+
+`polyforge doctor --fix` removes just those sections and keeps the original as
+`.polyforge/usage.md.bak`. It is not done during `init`: deleting silently from a file
+polyforge has promised not to write to would replace a silent duplicate with a silent
+deletion. Never a FAIL — the workspace works, it is just being told the rules twice.
+
+### Check 8 — statusLine (pf-work chain)
 Verify the wi-progress chain takeover is healthy:
 - `<ws>/.claude/settings.json` `statusLine.command` contains `pf-statusline.cjs`.
 - `<ws>/.claude/helpers/pf/pf-statusline.cjs` and `pf-chain-render.cjs` both exist.
@@ -141,7 +155,7 @@ notify("statusLine restored to its pre-polyforge state.")
 The plugin hook (`pf-chain-hook.cjs`) keeps shipping with the plugin; to fully stop it,
 disable the polyforge plugin. `--uninstall` only undoes the statusLine takeover.
 
-### Check 8 - seam-check (superpowers)
+### Check 9 - seam-check (superpowers)
 
 `pf-seam-check` pins the 6.1.1 baseline of the cached `superpowers` plugin that pf-execute's
 engine pointer hardcodes against: `subagent-driven-development` (the engine pointer itself),
@@ -171,6 +185,7 @@ name it references.
 | worktrees | ok (2 active)   |
 | version   | ok (1.0.0)      |
 | claude_md | warn (legacy inline block, 34,606 B) |
+| usage_md  | warn (3 duplicated rule sections) |
 | statusLine| ok (chain installed, refreshInterval 3) |
 | seamcheck | ok (verified against superpowers 6.1.1) |
 

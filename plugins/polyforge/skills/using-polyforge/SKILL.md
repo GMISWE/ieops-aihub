@@ -86,31 +86,49 @@ description: >
   review of aihub#295 applied the wi's own discriminator — is the violation observable?
   — and also made memory-first.md ("pf_recall before every substantive action"),
   bootstrap.md (the session startup scan) and repo-routing.md rules, which would take
-  the lower bound below from 13,563 to 17,127. Reclassifying only ever ENLARGES that
+  the lower bound below from 13,563 to 17,073. Reclassifying only ever ENLARGES that
   bound, which is the honest direction; aihub#296 owns settling it with a measurement
   rather than deciding it in passing while moving a fragment.
   (Both figures were 11,489 / 14,993 when aihub#295 wrote them. aihub#294 moved the
   11-row memory-type table into memory-conventions.md, +2,074 chars on a fragment that
   is already `kind: rule`, so the bound moved with it. Recomputed, not adjusted: the
   first number is what tests/using-polyforge-manifest.test.sh prints today. Neither
-  number is resident — both these fragments are on-demand — so the payload is unaffected.)
+  number is resident — both these fragments are on-demand — so the payload is unaffected.
+  ⚠️ Every figure in this block is CHARACTERS, like the budget itself, not bytes. These
+  fragments contain CJK and em-dashes, so `wc -c` reads high — memory-first is 891 chars
+  but 909 bytes. Mixing the units once already put 17,127 here where 17,073 was right.)
 
   ==========================================================================
   WHICH CHANNEL OWNS A RULE (aihub#294)
   ==========================================================================
-  Two channels put text in front of a model, and their properties are exact inverses:
+  THREE channels put rule text in front of a model — not two. They differ on two axes
+  that trade off against each other, reach and repairability:
 
-    .polyforge/usage.md   workspace-scoped, user-owned, NO size cap, delivered through
-                          the workspace CLAUDE.md `@import` — and never regenerated
-                          (internal/cli/init.go's writeUsageMd returns early if the file
-                          exists). A wrong rule here cannot be corrected in the field.
-    fragments/*.md        plugin-versioned, injected on every session, hard 10,000-char
-                          budget. A wrong rule here is corrected by the next release.
+    1. fragments/*.md     plugin-versioned, injected every session, hard 10,000-char
+       (this skill)       budget. Reaches EVERY install; corrected by the next release.
+    2. .polyforge/usage.md  generated once by internal/cli/init.go's writeUsageMd, which
+                          returns early if the file exists. Reaches every workspace that
+                          ran init; NO size cap; and never regenerated, so a wrong rule
+                          here cannot be corrected in the field.
+    3. hand-written prose  everything in the workspace CLAUDE.md OUTSIDE the
+       in workspace       `polyforge:managed` markers. No cap, edit any time, effective
+       CLAUDE.md          immediately — and reaches EXACTLY ONE MACHINE, forever.
 
-  Both carried Iron Rules, NL Routing and the memory-type table. So the copy that was
-  maintained was not the copy that could be fixed where it runs, and they drifted: IR1's
-  worktree path read `pf.<shortid>` in one and `pf.<project>-<seq>` in the other for
-  three months, silently, because nothing had ever compared the two channels.
+  Channel 3 is neither a bug nor a feature. It is the residue of the same guard that
+  freezes channel 2: init owns the managed block and usage.md, and everything else in
+  that file belongs to the user — which also means it can never propagate. Verified on
+  this workspace: the `@import` is line 1, the managed block spans lines 3-453, and two
+  hand-written rule sections sit at 455 and 474, outside it.
+
+  Note what that costs the reader: channels 2 and 3 arrive in the SAME file at the same
+  context position, and the model cannot tell them apart. One is generated and frozen,
+  one is hand-written and live. Identical appearance, opposite lifecycles, and no marker
+  distinguishes them.
+
+  Channels 1 and 2 both carried Iron Rules, NL Routing and the memory-type table. So the
+  copy that was maintained was not the copy that could be fixed where it runs, and they
+  drifted: IR1's worktree path read `pf.<shortid>` in one and `pf.<project>-<seq>` in the
+  other for three months, silently, because nothing had ever compared the two.
 
   RULES LIVE HERE. Not because this channel is versioned — that is the weaker half of
   the argument — but because it is UNCONDITIONALLY PRESENT and NOT USER-OWNED. usage.md
@@ -126,12 +144,44 @@ description: >
   measures the spend, and that instrument is what found this bug. Choosing a channel
   because it has no gauge is how the payload reached 18,286 characters unnoticed.
 
+  WHAT HAPPENS TO CHANNEL 3. Nothing here, deliberately — the workspace CLAUDE.md is a
+  machine-local file in no repo, so this change cannot and must not touch it. But the
+  same criterion applies and gives a clean test: a line belongs on channel 3 only if it
+  is true of THAT MACHINE ONLY. Anything true of polyforge generally is mis-filed there,
+  because channel 3's reach is one.
+  That is not hypothetical either. The two hand-written sections on this workspace are
+  general agent discipline with measured backing — how to route read-only subtasks, and
+  that waiting costs tool CALLS not minutes. Neither is machine-specific; both currently
+  reach one machine. They belong on channel 1. What stops them is exactly what stopped
+  everything else: the resident tier has 22 characters free, and the tier rule (an
+  unenforced rule may not leave the resident tier) blocks parking them on-demand without
+  a BASELINE entry. So channel 3 is functioning as an overflow valve for a full budget —
+  which makes aihub#296's slimming the prerequisite, not a nice-to-have. Until then,
+  treat channel 3 as a LOCAL OVERRIDE LAYER and know that nothing on it propagates.
+
+  Nothing in this change regenerates usage.md or rewrites the workspace CLAUDE.md's
+  hand-written region. writeUsageMd keeps its existence guard; `doctor --fix` touches
+  only .polyforge/usage.md and leaves a .bak; ensureClaudeMdRef is additive — it prepends
+  the missing `@import` line and deletes nothing. The guard's original reason (do not
+  overwrite user edits) is still intact; the fix was to stop putting rules behind it.
+
   Enforced by internal/cli/usage_channel_test.go — a Go test, so `go test ./...` in CI
   runs it, unlike the suites in this directory (aihub#293). It asserts that no rule
   section is delivered twice, that a section dropped from usage.md still has a home in a
   fragment (moved, not deleted), and that no delivered surface spells the legacy worktree
   path. Existing workspaces keep their frozen copy — a template edit cannot reach them —
   so `polyforge doctor` reports it and `polyforge doctor --fix` removes it.
+
+  ONE OF THE THREE WAS DEMOTED, NOT JUST MOVED. Iron Rules and NL Routing were already
+  resident here, so dropping the usage.md copy loses no reach. The memory-type table was
+  not: it now lives in memory-conventions.md, which is `@ondemand:` and never injected, so
+  it went from "in every session" (usage.md rode the CLAUDE.md @import unconditionally) to
+  "read it if you think to". That is the right trade at 22 chars of free budget — a type
+  vocabulary is consulted when writing a memory, which is exactly an on-demand trigger —
+  but it is a real reduction in reach and is recorded as one. What makes it survivable is
+  on-demand-index.md naming the file, and TestOnDemandRuleSectionsAreIndexed now requires
+  that: without it, "moved" and "moved somewhere nothing points at" would pass the same
+  test.
 
   WHAT WAS NOT CARRIED OVER. Every removed SECTION has a home here, and a Go test asserts
   it. Two row-level phrasings were deliberately not carried, because on each the surviving

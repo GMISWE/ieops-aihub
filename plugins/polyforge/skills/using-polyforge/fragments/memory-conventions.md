@@ -44,12 +44,23 @@ prefer `rule.*` / `fact.*`.
 | plan output | `methodology.plan` | pf-execute, pf-retro |
 | release record | `methodology.release` | pf-release |
 
-🔴 **Six of those rows name a type `pf_remember` does not accept.** Its schema enum is
-`experience.approach|code|debug|pitfall`, `fact.architecture|constraint|note|reference`,
-`rule.coding|convention|process|scheduling|work` — so `experience.init`, `rule.init` and
-the `fact.<subtopic>` placeholder are rejected, and `methodology.*` is not a memory type at
-all (the tool's own description says it rejects them: spec/plan/review/retro go through
-`pf_save_artifact`). **The tool schema is authoritative; check it before writing a type.**
+🔴 **Six of those rows are off the curated list, and they fail in three different ways.**
+Be precise about which, because the modes are not interchangeable:
+
+- `methodology.spec` / `methodology.plan` — **`pf_remember` refuses all `methodology.*`**
+  outright (`PfRememberTypeEnum` is the curated list minus `methodology.*`, and
+  `handleRemember` has a hard gate, aihub#210). Write these with `pf_save_artifact`.
+- `methodology.release` — refused by `pf_remember` *and* absent from
+  `MethodologyTypeEnum` (`spec|plan|review|execute|retro|wrap_summary`), so
+  `pf_save_artifact` rejects it too. **This row is valid nowhere.**
+- `experience.init` / `rule.init` / the `fact.<subtopic>` placeholder — **accepted by the
+  server**, whose validation is a lenient four-prefix check (`experience.` / `fact.` /
+  `rule.` / `methodology.`), but off the curated enum, so the tool schema does not offer
+  them and contract-lint flags them. Usable, not blessed.
+
+The curated list is `experience.approach|code|debug|pitfall`,
+`fact.architecture|constraint|note|reference`,
+`rule.coding|convention|process|scheduling|work`. **The tool schema is authoritative.**
 
 That mismatch is exactly the point. This table was duplicated into `.polyforge/usage.md` by
 `polyforge init`, and that file is never regenerated once it exists — so the copy there has

@@ -290,10 +290,16 @@ func checkUsageMd(wsRoot string, fix bool) checkResult {
 	path := filepath.Join(wsRoot, ".polyforge", "usage.md")
 
 	b, err := os.ReadFile(path)
-	if err != nil {
+	if os.IsNotExist(err) {
 		// Absent is not a finding here: usage.md is written by init, and a workspace
 		// that never ran init has a louder problem that checkWorkspace already reports.
 		return checkResult{Name: name, Status: "ok", Message: "no .polyforge/usage.md to check"}
+	}
+	if err != nil {
+		// Anything else — a permission or IO fault on a file that IS there — must not
+		// report green. "Could not look" and "looked and found nothing" are different.
+		return checkResult{Name: name, Status: "warning",
+			Message: fmt.Sprintf(".polyforge/usage.md not readable: %v", err)}
 	}
 
 	found := usageSectionsOwnedBySkill(string(b))
@@ -303,14 +309,31 @@ func checkUsageMd(wsRoot string, fix bool) checkResult {
 	}
 	if fix {
 		stripped, n := stripUsageSections(string(b))
-		if werr := os.WriteFile(path, []byte(stripped), 0644); werr != nil {
+		// Back the original up first. This rewrite deletes from a file the user owns,
+		// and the section boundary is inferred from markdown structure, not from a
+		// record of what the generator actually wrote — so it can be wrong on a file
+		// edited in a way we did not anticipate. `--fix` is also reached by agents told
+		// to run it for unrelated reasons (pf-stop runs it to clean worktrees), so the
+		// operator asking for it has not necessarily read this file. Recoverable beats
+		// clever.
+		mode := os.FileMode(0644)
+		if fi, serr := os.Stat(path); serr == nil {
+			mode = fi.Mode().Perm()
+		}
+		backup := path + ".bak"
+		if werr := os.WriteFile(backup, b, mode); werr != nil {
+			return checkResult{Name: name, Status: "error",
+				Message: fmt.Sprintf("refusing to rewrite .polyforge/usage.md — could not write %s first: %v",
+					filepath.Base(backup), werr)}
+		}
+		if werr := os.WriteFile(path, []byte(stripped), mode); werr != nil {
 			return checkResult{Name: name, Status: "error",
 				Message: fmt.Sprintf("could not rewrite .polyforge/usage.md: %v", werr)}
 		}
 		return checkResult{Name: name, Status: "ok",
 			Message: fmt.Sprintf("removed %d duplicated rule section(s) from .polyforge/usage.md: %s "+
-				"(the maintained copy ships with the using-polyforge skill)",
-				n, strings.Join(found, ", "))}
+				"(the maintained copy ships with the using-polyforge skill; original saved as %s)",
+				n, strings.Join(found, ", "), filepath.Base(backup))}
 	}
 	return checkResult{Name: name, Status: "warning",
 		Message: fmt.Sprintf(".polyforge/usage.md still carries %d rule section(s) that using-polyforge "+
@@ -320,13 +343,38 @@ func checkUsageMd(wsRoot string, fix bool) checkResult {
 		FixCmd: "polyforge doctor --fix"}
 }
 
+// isMarkdownFence reports whether a line opens or closes a fenced code block.
+func isMarkdownFence(line string) bool {
+	t := strings.TrimSpace(line)
+	return strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~")
+}
+
+// isATXHeading reports whether a line is a markdown ATX heading of any level.
+// Any level, not just `## `: a user following this file's own closing invitation to
+// "add workspace-specific notes" is as likely to write `# Notes` or `### Notes`, and a
+// terminator that only recognises `## ` would swallow all of it.
+func isATXHeading(line string) bool {
+	t := strings.TrimSpace(line)
+	n := 0
+	for n < len(t) && t[n] == '#' {
+		n++
+	}
+	return n >= 1 && n <= 6 && n < len(t) && (t[n] == ' ' || t[n] == '\t')
+}
+
 // usageSectionsOwnedBySkill lists, in template order, the skillOwnedUsageSections
 // headings present in a usage.md body (reported without the leading "## ").
+// Fence-aware, so a heading quoted inside a ``` block is not mistaken for a real one.
 func usageSectionsOwnedBySkill(body string) []string {
 	var found []string
 	for _, h := range skillOwnedUsageSections {
+		fence := false
 		for _, line := range strings.Split(body, "\n") {
-			if strings.TrimSpace(line) == h {
+			if isMarkdownFence(line) {
+				fence = !fence
+				continue
+			}
+			if !fence && strings.TrimSpace(line) == h {
 				found = append(found, strings.TrimPrefix(h, "## "))
 				break
 			}
@@ -336,13 +384,24 @@ func usageSectionsOwnedBySkill(body string) []string {
 }
 
 // stripUsageSections removes every skillOwnedUsageSections section from a usage.md body
-// and reports how many it removed. A section runs from its `## ` heading to the next
-// `## ` heading or EOF, so the `---` rule the template puts *between* sections is carried
-// off with the section above it; the run of blank/`---` lines left dangling before the
-// removed heading is collapsed to a single blank line.
+// and reports how many it removed. The `---` rule the template puts *between* sections is
+// carried off with the section above it, and the run of blank/`---` lines left dangling
+// before a removed heading collapses to a single blank line.
 //
-// Only whole generated sections go. Everything the user added elsewhere in the file is
-// untouched, which is what makes this safe enough to run under `--fix`.
+// A section runs from its heading to the next ATX heading OF ANY LEVEL, or EOF. Both
+// halves of that matter and neither is cosmetic:
+//
+//   - Any level, because `## Memory Type Reference` is the LAST section the template
+//     emits and the line right above it invites the user to append notes. A terminator
+//     keyed on `## ` alone deleted every appended `# Appendix` / `### note` with it.
+//   - Fence-aware, because a `## ` inside a ``` block is an example, not a heading.
+//     Without this, quoting a heading either got the quote stripped as if it were real
+//     (leaving an unterminated fence, which swallows the rest of the document) or ended
+//     an owned section early, letting content escape that should have gone.
+//
+// Prose appended directly under an owned section with no heading of its own is still
+// indistinguishable from that section's body and goes with it — which is why the caller
+// writes a .bak before applying this.
 func stripUsageSections(body string) (string, int) {
 	owned := make(map[string]bool, len(skillOwnedUsageSections))
 	for _, h := range skillOwnedUsageSections {
@@ -352,8 +411,14 @@ func stripUsageSections(body string) (string, int) {
 	lines := strings.Split(body, "\n")
 	out := make([]string, 0, len(lines))
 	removed := 0
+	fence := false
 	for i := 0; i < len(lines); i++ {
-		if !owned[strings.TrimSpace(lines[i])] {
+		if isMarkdownFence(lines[i]) {
+			fence = !fence
+			out = append(out, lines[i])
+			continue
+		}
+		if fence || !owned[strings.TrimSpace(lines[i])] {
 			out = append(out, lines[i])
 			continue
 		}
@@ -365,8 +430,21 @@ func stripUsageSections(body string) (string, int) {
 			}
 			break
 		}
-		out = append(out, "")
-		for i+1 < len(lines) && !strings.HasPrefix(lines[i+1], "## ") {
+		if len(out) > 0 {
+			// Only if something precedes it — an owned heading on line 1 must not
+			// leave the file starting with a blank line.
+			out = append(out, "")
+		}
+		// Consume the section body, tracking fences opened inside it so that a heading
+		// quoted in an example cannot end the section early, and so the fence state is
+		// balanced again for the lines that follow.
+		inner := false
+		for i+1 < len(lines) {
+			if isMarkdownFence(lines[i+1]) {
+				inner = !inner
+			} else if !inner && isATXHeading(lines[i+1]) {
+				break // the next section starts here
+			}
 			i++
 		}
 	}

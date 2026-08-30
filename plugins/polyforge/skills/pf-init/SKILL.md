@@ -164,7 +164,7 @@ changes + generated line), not a single fallback line.
 polyforge doctor
 ```
 
-Expected: all 5 checks green.
+Expected: all 7 checks green.
 
 ---
 

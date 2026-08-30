@@ -60,17 +60,17 @@ EXPECTED SKILL BEHAVIOR (from pf-execute step loop):
     b. pf_recall(project="marketplace", query=wi.goal, type=["experience.*","rule.*"], top_k=5)
     c. pf_activate_memory(id) for each useful result
     d. Read codebase in WT_PATH (git log, read key files)
-    e. pf_get_step(work_item_id=WI_ID) — get current version
-    f. pf_update_step(work_item_id=WI_ID, step_id="prepare_context",
-                      status="in_progress", expected_version=<version>)
+    e. pf_update_step(work_item_id=WI_ID, step_id="prepare_context",
+                      status="in_progress")
        → returns step_attempt_id, new version
-    g. Build initial_context JSON: {goal_analysis, relevant_files, prior_experience,
+    f. Build initial_context JSON: {goal_analysis, relevant_files, prior_experience,
                                     known_pitfalls, suggested_approach, test_baseline}
-    h. [If step takes >5min] pf_update_step(work_item_id=WI_ID, step_id="prepare_context",
+    g. [If step takes >5min] pf_update_step(work_item_id=WI_ID, step_id="prepare_context",
                                              heartbeat=true)
-    i. pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="completed",
-                      step_attempt_id=<from f>,
-                      artifact_summary=<initial_context JSON [0:4096]>)
+    h. pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="completed",
+                      step_attempt_id=<from e>,
+                      artifact_summary=<initial_context JSON [0:4096]>,
+                      next_step="code_change", next_step_attempt_id=SA_CODE)
     NOTE: prepare_context does NOT call pf_save_artifact. Output goes in artifact_summary only.
 
   Wi Agent verifies completion:
@@ -80,7 +80,8 @@ EXPECTED SKILL BEHAVIOR (from pf-execute step loop):
 ASSERT MCP CALLS (prepare_context dispatch):
   - pf_update_step(step_id="prepare_context", status="in_progress") called by subagent
   - pf_update_step(step_id="prepare_context", status="completed") called with artifact_summary
-    containing initial_context JSON (not pf_save_artifact)
+    containing initial_context JSON (not pf_save_artifact), and next_step="code_change"
+    (the completion is what starts code_change)
   - pf_get_step called after subagent completes (Wi Agent verification)
   - pf_save_artifact NOT called
 
@@ -110,17 +111,14 @@ EXPECTED SKILL BEHAVIOR (main step loop iteration 1):
     previous_context: prepare_context.artifact_summary (initial_context JSON)
 
   Subagent executes (per code_change skill):
-    a. pf_get_step(work_item_id=WI_ID) — get current version
-    b. pf_update_step(work_item_id=WI_ID, step_id="code_change",
-                      status="in_progress", expected_version=<version>)
-       → returns step_attempt_id
-    c. Read initial_context from previous_steps.prepare_context.artifact_summary
-    d. Edit file(s) in WT_PATH (apply fix: remove stale cache entry on logout)
-    e. [If >5min] pf_update_step(work_item_id=WI_ID, step_id="code_change",
+    a. Read initial_context from previous_steps.prepare_context.artifact_summary
+    b. Edit file(s) in WT_PATH (apply fix: remove stale cache entry on logout)
+    c. [If >5min] pf_update_step(work_item_id=WI_ID, step_id="code_change",
                                   heartbeat=true)
-    f. pf_update_step(work_item_id=WI_ID, step_id="code_change", status="completed",
-                      step_attempt_id=<from b>,
-                      artifact_summary=JSON({summary, files_changed, tests_status, notes}))
+    d. pf_update_step(work_item_id=WI_ID, step_id="code_change", status="completed",
+                      step_attempt_id=SA_CODE,
+                      artifact_summary=JSON({summary, files_changed, tests_status, notes}),
+                      next_step="commit_and_pr", next_step_attempt_id=SA_COMMIT)
     NOTE: code_change does NOT call pf_save_artifact.
 
   Knowledge distillation (if artifact contains interesting findings):
@@ -132,9 +130,11 @@ EXPECTED SKILL BEHAVIOR (main step loop iteration 1):
 
 ASSERT MCP CALLS (code_change dispatch):
   - pf_recall called before dispatch (Memory-First before each step)
-  - pf_update_step(step_id="code_change", status="in_progress") called by subagent
+  - pf_update_step(step_id="code_change", status="in_progress") NOT called separately
+    (code_change was started by prepare_context's next_step, with step_attempt_id=SA_CODE)
   - File edit in WT_PATH (verify via `git -C WT_PATH diff --stat`)
   - pf_update_step(step_id="code_change", status="completed") called with artifact_summary
+    and next_step="commit_and_pr"
   - pf_save_artifact NOT called
 
 ASSERT STATE after code_change:
@@ -159,21 +159,19 @@ EXPECTED SKILL BEHAVIOR (main step loop iteration 2):
     previous_context: code_change.artifact_summary
 
   Subagent executes (per commit_and_pr skill):
-    a. pf_get_step(work_item_id=WI_ID) — get current version
-    b. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr",
-                      status="in_progress", expected_version=<version>)
-    c. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
+    a. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
                repo="marketplace", vs_base=true)
-    d. pf_commit(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
+    b. pf_commit(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
                  repo="marketplace",
                  message="fix(cache): remove stale entry on user logout\n\n...\n\nwi: marketplace#<seq>")
-    e. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
+    c. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
                repo="marketplace", skip_base_check=false)
-    f. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
+    d. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
              repo="marketplace",
              title="fix(cache): remove stale entry on user logout", body="...")
-    g. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="completed",
-                      step_attempt_id=<from b>, artifact_summary="PR #N: <url>")
+    e. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="completed",
+                      step_attempt_id=SA_COMMIT, artifact_summary="PR #N: <url>")
+       — no next_step: commit_and_pr is the last step
 
 ASSERT MCP CALLS (commit_and_pr dispatch):
   - pf_recall called before dispatch (Memory-First)
@@ -272,5 +270,6 @@ After kicking off execution, pf-execute outputs:
 ## PASS criteria
 pf-execute reads phase.yaml step graph and dispatches all 3 Step Agents in sequence;
 pf_recall called before each step dispatch (Memory-First); pf_update_step called
-in_progress then completed for every step; pf_wrap called (not pf_complete_attempt);
+in_progress for the FIRST step only, then completed+next_step to advance through the rest
+(bare completed on the last one); pf_wrap called (not pf_complete_attempt);
 retro subagent dispatched automatically before wrap; state file deleted after wrap.

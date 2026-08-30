@@ -55,9 +55,9 @@ NOTE: User starts working but does not complete the step before pausing.
 The step is in_progress state when pause is requested.
 
 Partial prepare_context work:
-  a. pf_get_step(work_item_id=WI_ID) → current_step="prepare_context", version=V1
+  a. pf_get_step(work_item_id=WI_ID) → current_step="prepare_context"
   b. pf_update_step(work_item_id=WI_ID, step_id="prepare_context",
-                    status="in_progress", expected_version=V1)
+                    status="in_progress")
      → returns step_attempt_id=SA_ID
   (User's environment interrupted before completing the step)
 

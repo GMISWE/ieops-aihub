@@ -8,15 +8,45 @@
 
 ## Bracket every step with status reporting
 
+**Do not call `pf_get_step` before `pf_update_step`.** There is nothing to read: the step
+bracket needs no version number, and the server's concurrency guard is its own
+`current_step_status = 'idle'` predicate. (`pf_update_step` used to publish an
+`expected_version` the server never bound — it was dropped on arrival, so the `pf_get_step`
+that fetched it bought nothing. aihub#290.) Call `pf_get_step` only when you actually need
+its answer, e.g. to discover which step is current after a resume.
+
+Start the FIRST step, then complete-and-advance through the rest:
+
 ```
-version = pf_get_step(work_item_id=<current>).version
-sa_id   = new_ulid()
-pf_update_step(work_item_id=<current>, step_id=<step>, status="in_progress",
-               expected_version=version)        # returns step_attempt_id
+sa_id = new_ulid()
+pf_update_step(work_item_id=<current>, step_id=<first step>, status="in_progress")
 # ... engine runs, artifact saved ...
-pf_update_step(work_item_id=<current>, step_id=<step>, status="completed",
-               step_attempt_id=sa_id, artifact_summary="<one sentence, status only, <=4096 chars>")
+next_sa = new_ulid()
+pf_update_step(work_item_id=<current>, step_id=<this step>, status="completed",
+               step_attempt_id=sa_id,
+               artifact_summary="<one sentence, status only, <=4096 chars>",
+               next_step=<next step>, next_step_attempt_id=next_sa)   # starts the next one
+sa_id = next_sa
 ```
+
+`next_step` completes one step and starts its successor in a single call — the two
+transitions share one server transaction and emit both timeline events, so it is
+indistinguishable from the two calls it replaces. Omit `next_step` on the LAST step (there is
+no successor to start), and on a `failed` status (it is rejected there, not ignored).
+
+> **Compatibility — check the tool schema first.** `next_step` needs a server binary from
+> aihub#290 or later, and the CLI binary updates on its own channel independently of this
+> plugin, so a session can be running a NEWER plugin against an OLDER binary. Look at
+> `pf_update_step`'s published parameters:
+> - it lists `next_step` → use the fused form above;
+> - it does **not** → fall back to two calls: `status="completed"` for this step, then a
+>   separate `status="in_progress"` for the next one — and pass `step_attempt_id=next_sa` on
+>   that second call. Omitting it leaves `current_step_attempt` NULL, which is the one way
+>   the two-call form is *not* equivalent to the fused one. Never pass `next_step` to a tool
+>   that does not publish it: it would be silently dropped and the next step would never start.
+>
+> The same rule applies in reverse for `expected_version`: an older plugin still passing it to
+> a NEWER binary is harmless — the parameter is ignored, exactly as it always effectively was.
 
 - **Use the real step id**: `step_id` = the scenario `## Step:` name (spec / plan / code_change / …).
   The server's `current_step` is a free-form string with no validation.
@@ -84,10 +114,12 @@ or pass `pf_commit(paths=[...])` to stage only intended files. (team memory: mem
 ## Wrap & cleanup (end of execute loop)
 
 `pf_complete_attempt` returns the state file's `worktrees` map before deleting it, so
-there is no need to read the state file yourself first:
+there is no need to read the state file yourself first. Pass the closing note as `note=` in
+the same call rather than emitting it beforehand with `pf_emit_event`:
 
 ```
-result = pf_complete_attempt(work_item_id=<current>, status="wrapped")
+result = pf_complete_attempt(work_item_id=<current>, status="wrapped",
+                             note="wrapped: <1-sentence summary of what was accomplished>")
 worktrees = result.get("worktrees", {})
 for repo_name, wt in worktrees.items():
     git -C <workspace_root>/.repo/<repo_name> worktree remove --force <wt>
@@ -97,6 +129,21 @@ if worktrees:
     parent = os.path.dirname(next(iter(worktrees.values())))
     if os.path.isdir(parent): rm -rf <parent>
 ```
+
+The `note` is recorded before the attempt is completed, which is the only order that works —
+the terminal call deletes the state file, so a `pf_emit_event` after it has no credentials to
+authenticate with. Folding it in removes that ordering hazard along with the round-trip
+(aihub#290: 201 measured note→terminal pairs, 0.325% of billed input). The response's
+`note_emitted` says whether it landed; a failed note does **not** fail the wrap, so check the
+field rather than assuming.
+
+⚠️ Because the note precedes the completion, a terminal call that fails *at the completion*
+has already recorded it. **Drop `note=` when retrying**, unless the error says the note was
+not recorded either.
+
+> **Compatibility**: if `pf_complete_attempt` / `pf_wrap` do not publish a `note` parameter,
+> the binary predates aihub#290 — emit the note with a separate `pf_emit_event(event_type="note",
+> payload={text: ...})` **before** the terminal call, as `pf-stop` describes.
 
 ---
 

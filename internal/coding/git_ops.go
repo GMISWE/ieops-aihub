@@ -25,22 +25,56 @@ func GitDiff(ctx context.Context, worktreePath string, vsBase bool) (string, err
 	return string(out), nil
 }
 
-// GitCommit runs `git -C path commit -m message`. If paths is non-empty,
-// it stages only those paths first.
-func GitCommit(ctx context.Context, worktreePath, message string, paths []string) (string, error) {
-	// Stage files
+// GitStage writes the worktree changes into the index: only `paths` when it is
+// non-empty, everything (`git add -A`) otherwise.
+//
+// Split out of GitCommit for Ship (aihub#286), which has to stage, then look at
+// what actually landed in the index, and only then decide whether a commit is
+// needed. Ship's retry path depends on answering "is there anything to commit?"
+// WITHOUT having first attempted a commit and failed: a fused
+// commit+push+PR call that is retried after a push failure must not die at
+// `git commit` with "nothing to commit" before it ever reaches the stage that
+// actually failed.
+func GitStage(ctx context.Context, worktreePath string, paths []string) error {
 	if len(paths) > 0 {
 		addArgs := append([]string{"-C", worktreePath, "add", "--"}, paths...)
 		if out, err := exec.CommandContext(ctx, "git", addArgs...).CombinedOutput(); err != nil {
-			return "", fmt.Errorf("git add: %w\n%s", err, out)
+			return fmt.Errorf("git add: %w\n%s", err, out)
 		}
-	} else {
-		out, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "add", "-A").CombinedOutput()
-		if err != nil {
-			return "", fmt.Errorf("git add -A: %w\n%s", err, out)
-		}
+		return nil
 	}
+	out, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "add", "-A").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git add -A: %w\n%s", err, out)
+	}
+	return nil
+}
 
+// GitHasStagedChanges reports whether the index differs from HEAD.
+//
+// `git diff --cached --quiet` exits 0 when the index matches HEAD, 1 when it
+// does not, and something else on a real failure. The three outcomes are kept
+// distinct on purpose, the same way GitIsAncestor keeps them apart: folding
+// "cannot tell" into "nothing staged" would make Ship skip a commit the caller
+// asked for and then report success, which is the one direction of wrongness
+// that loses work silently.
+func GitHasStagedChanges(ctx context.Context, worktreePath string) (bool, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", worktreePath,
+		"diff", "--cached", "--quiet").CombinedOutput()
+	if err == nil {
+		return false, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, fmt.Errorf("git diff --cached --quiet: %w\n%s", err, out)
+}
+
+// gitCommitStaged commits whatever is already in the index and returns the new
+// commit SHA. It does no staging of its own — callers that need it run GitStage
+// first.
+func gitCommitStaged(ctx context.Context, worktreePath, message string) (string, error) {
 	out, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "commit", "-m", message).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git commit: %w\n%s", err, out)
@@ -53,6 +87,32 @@ func GitCommit(ctx context.Context, worktreePath, message string, paths []string
 	}
 	return strings.TrimSpace(string(shaOut)), nil
 }
+
+// GitCommit runs `git -C path commit -m message`. If paths is non-empty,
+// it stages only those paths first.
+//
+// Behaviour is unchanged by the aihub#286 split — including the error on an
+// empty commit, which pf_commit callers rely on to notice they staged nothing.
+// Ship deliberately does NOT go through here; it needs the "nothing staged" case
+// to be a fact it can branch on rather than an error.
+func GitCommit(ctx context.Context, worktreePath, message string, paths []string) (string, error) {
+	if err := GitStage(ctx, worktreePath, paths); err != nil {
+		return "", err
+	}
+	return gitCommitStaged(ctx, worktreePath, message)
+}
+
+// BaseMovedMarker is the token GitPush puts in its error when origin moved under
+// a lease-protected push, and the token pf_push and pf_ship both report back as
+// the machine-readable `error` value so a caller can tell "rebase and retry"
+// apart from a generic push failure.
+//
+// It is one exported constant rather than a literal at each end because the two
+// ends are in different packages: the producer here and the matcher in
+// internal/mcp. Two copies of a magic string that must agree, with nothing
+// forcing them to, is a silent-degradation shape — the marker would simply stop
+// being emitted and every test would stay green.
+const BaseMovedMarker = "base_moved"
 
 // protectedBranches lists branches GitPush refuses to push to directly.
 var protectedBranches = map[string]bool{
@@ -126,7 +186,7 @@ func GitPush(ctx context.Context, worktreePath string) (string, error) {
 		// lease is held against refs/remotes/origin/<branch>, so a rejection
 		// here means origin genuinely moved under us.
 		if strings.Contains(outStr, "rejected") && strings.Contains(outStr, "stale") {
-			return "", fmt.Errorf("base_moved: %s\nAdvice: fetch and rebase on the latest base branch, then retry", outStr)
+			return "", fmt.Errorf("%s: %s\nAdvice: fetch and rebase on the latest base branch, then retry", BaseMovedMarker, outStr)
 		}
 		return "", fmt.Errorf("git push: %w\n%s", err, outStr)
 	}

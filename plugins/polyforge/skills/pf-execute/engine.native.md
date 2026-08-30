@@ -85,15 +85,17 @@ Each step appends/updates its key on completion. The next step reads the whole t
 
 ```python
 default_model = "sonnet"   # S1: superpowers-off consistency; per-step `level: opus` still overrides
-for step_id, content in sections:
+
+# Start the FIRST step only; every later step is started by the completion of the one
+# before it (see _common/lifecycle.md ## Bracket every step). No pf_get_step: the bracket
+# needs no version, and asking for one was a whole round-trip for a value the server
+# discarded (aihub#290).
+sa_id = new_ulid()                             # client-generated, for the completion history row
+pf_update_step(work_item_id=<current>, step_id=sections[0].step_id, status="in_progress")
+
+for i, (step_id, content) in enumerate(sections):
     expanded = expand_includes(content, sha)
     model = "opus" if step_level(content) == "opus" else default_model
-
-    # report: entering this step (see _common/lifecycle.md ## Bracket every step)
-    version = pf_get_step(work_item_id=<current>).version
-    sa_id   = new_ulid()                       # client-generated, for the completion history row
-    pf_update_step(work_item_id=<current>, step_id=step_id,
-                   status="in_progress", expected_version=version)
 
     dispatch subagent(
         model=model,
@@ -116,56 +118,89 @@ If there are learnings worth keeping, call pf_remember to store them in aihub.
     if step_id.endswith("_review") or step_id in ("review", "code_review", "release_review"):
         result = parse_review_result(subagent_output)
         if result == "FAIL":
+            # next_step is NOT valid on a failure — the loop stops here anyway.
             pf_update_step(work_item_id=<current>, step_id=step_id, status="failed",
                            step_attempt_id=sa_id, error_type="review_fail")
-            pf_complete_attempt(work_item_id=<current>, status="failed")
+            pf_complete_attempt(work_item_id=<current>, status="failed",
+                                note="failed reason: review_fail at step " + step_id)
             break   # stop the whole loop, skip the completed report below; output the review issues
         elif result == "WARN":
             print the warning and continue
 
-    # report: this step completed (status only; reuse the summary from .pf_steps.json)
+    # report: this step completed AND the next one started — one call, not two.
+    # Omit next_step/next_step_attempt_id on the last step.
+    next_sa = new_ulid() if i + 1 < len(sections) else None
     pf_update_step(work_item_id=<current>, step_id=step_id, status="completed",
                    step_attempt_id=sa_id,
-                   artifact_summary=read_json(".pf_steps.json").get(step_id, ""))
+                   artifact_summary=read_json(".pf_steps.json").get(step_id, ""),
+                   next_step=sections[i+1].step_id if next_sa else None,
+                   next_step_attempt_id=next_sa)
+    sa_id = next_sa
 
 # all steps done -> wrap + worktree cleanup (see _common/lifecycle.md ## Wrap & cleanup)
 ```
+
+> **Compatibility (server binary older than aihub#290).** Check what the tools publish:
+> - no `next_step` on `pf_update_step` → drop the two `next_*` arguments and start each step
+>   with its own `pf_update_step(..., status="in_progress", step_attempt_id=...)` at the top
+>   of the loop, as before;
+> - no `note` on `pf_complete_attempt` → emit
+>   `pf_emit_event(event_type="note", payload={text: "failed reason: ..."})` **before** the
+>   terminal call instead. Do not pass `note` to a tool that does not publish it: it is
+>   accepted and ignored, and the state file is deleted immediately afterwards, so the
+>   failure reason is lost with no error.
+>
+> See the compatibility notes in `_common/lifecycle.md`.
 
 ---
 
 ## Execute (rhs=true, interactive mode)
 
 ```python
-for step_id, content in sections:
-    expanded = expand_includes(content, sha)
+# Same bracket as auto mode: start the first step, then complete-and-advance. No pf_get_step.
+sa_id = new_ulid()
+pf_update_step(work_item_id=<current>, step_id=sections[0].step_id, status="in_progress")
 
-    # report: entering this step
-    version = pf_get_step(work_item_id=<current>).version
-    sa_id   = new_ulid()
-    pf_update_step(work_item_id=<current>, step_id=step_id,
-                   status="in_progress", expected_version=version)
+for i, (step_id, content) in enumerate(sections):
+    expanded = expand_includes(content, sha)
 
     output: f"## Step {step_id}\n\n{expanded}"
 
     wait for user input:
       "continue" / "done" / "ok"  -> fall through to the completed report below, then move to the next step
-      "skip"                      -> record in .pf_steps.json; **do NOT report this step**; continue to the next step
+      "skip"                      -> record in .pf_steps.json; **do NOT report this step**; continue to the
+                                     next step WITHOUT calling pf_update_step at all. The skipped
+                                     step stays in_progress and stays the server's current_step;
+                                     the next step you actually complete reports itself and
+                                     advances from there.
       "fail"                      -> pf_update_step(step_id, status="failed", step_attempt_id=sa_id);
-                                     pf_complete_attempt(failed); break (stop the whole loop)
+                                     pf_complete_attempt(failed, note="failed reason: <user description>");
+                                     break (stop the whole loop)
 
     if step_id.endswith("_review") or step_id in ("review", "code_review", "release_review"):
         "PASS" / "continue"  -> fall through to the completed report below
         "WARN <desc>"        -> record the warning, ask whether to continue; if yes, report completed as usual
         "FAIL <desc>"        -> pf_update_step(step_id, status="failed", step_attempt_id=sa_id,
-                                error_type="review_fail"); pf_complete_attempt(failed); break
+                                error_type="review_fail");
+                                pf_complete_attempt(failed, note="failed reason: <desc>"); break
 
-    # only the "continue/done/ok" path (or review PASS / WARN-continue) reaches here: report this step completed (status only).
+    # only the "continue/done/ok" path (or review PASS / WARN-continue) reaches here:
+    # report this step completed AND start the next one, in one call.
+    next_sa = new_ulid() if i + 1 < len(sections) else None
     pf_update_step(work_item_id=<current>, step_id=step_id, status="completed",
                    step_attempt_id=sa_id,
-                   artifact_summary=read_json(".pf_steps.json").get(step_id, ""))
+                   artifact_summary=read_json(".pf_steps.json").get(step_id, ""),
+                   next_step=sections[i+1].step_id if next_sa else None,
+                   next_step_attempt_id=next_sa)
+    sa_id = next_sa
 
 # all steps done -> wrap + worktree cleanup (see _common/lifecycle.md ## Wrap & cleanup)
 ```
+
+> Same compatibility rule as auto mode, for BOTH new parameters: no `next_step` on
+> `pf_update_step` → drop the `next_*` arguments and start each step with its own
+> `status="in_progress"` call; no `note` on `pf_complete_attempt` → emit the note with a
+> separate `pf_emit_event` **before** the terminal call.
 
 ---
 

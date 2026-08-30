@@ -35,7 +35,13 @@ func RunGetStep(ctx context.Context, c *client.Client, args []string) {
 // Usage: polyforge update-step --step-id=<id> --status=<status>
 //
 //	[--wi-id=<wi_id>] [--step-attempt-id=<sa>] [--artifact-summary=<json>]
-//	[--escalated] [--error-type=<type>] [--expected-version=<n>]
+//	[--escalated] [--error-type=<type>]
+//
+// `--expected-version` was accepted here until aihub#290 and forwarded as
+// expected_version, which server.UpdateStepRequest has never bound — it was
+// dropped on arrival, so the flag advertised an optimistic lock that did not
+// exist. It is gone rather than implemented; unrecognised flags are ignored by
+// the loop below, so an older caller still passing it behaves exactly as before.
 func RunUpdateStep(ctx context.Context, c *client.Client, args []string) {
 	wiID := ""
 	stepID := ""
@@ -44,7 +50,6 @@ func RunUpdateStep(ctx context.Context, c *client.Client, args []string) {
 	artifactSummary := ""
 	escalated := false
 	errorType := ""
-	expectedVersion := ""
 
 	for _, a := range args {
 		switch {
@@ -62,8 +67,6 @@ func RunUpdateStep(ctx context.Context, c *client.Client, args []string) {
 			escalated = true
 		case strings.HasPrefix(a, "--error-type="):
 			errorType = a[len("--error-type="):]
-		case strings.HasPrefix(a, "--expected-version="):
-			expectedVersion = a[len("--expected-version="):]
 		}
 	}
 
@@ -95,9 +98,6 @@ func RunUpdateStep(ctx context.Context, c *client.Client, args []string) {
 	}
 	if errorType != "" {
 		body["error_type"] = errorType
-	}
-	if expectedVersion != "" {
-		body["expected_version"] = expectedVersion
 	}
 
 	result, err := c.UpdateStep(ctx, wiID, body)

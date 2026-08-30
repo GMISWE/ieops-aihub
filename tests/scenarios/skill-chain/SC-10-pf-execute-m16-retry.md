@@ -66,11 +66,10 @@ EXPECTED SKILL BEHAVIOR (main step loop iteration — code_change):
     previous_context: prepare_context.artifact_summary (initial_context JSON)
 
   Subagent begins execution:
-    a. pf_get_step(work_item_id=WI_ID) → version V1
-    b. pf_update_step(work_item_id=WI_ID, step_id="code_change",
-                      status="in_progress", expected_version=V1)
+    a. pf_update_step(work_item_id=WI_ID, step_id="code_change",
+                      status="in_progress")
        → returns step_attempt_id=SA_CODE_1, version V2
-    c. Subagent begins editing files but then STALLS — no further MCP calls.
+    b. Subagent begins editing files but then STALLS — no further MCP calls.
        (Simulated: step remains status="in_progress" past the 60s deadline.)
 
   Wi Agent waits (up to 60s):
@@ -135,35 +134,35 @@ EXPECTED SKILL BEHAVIOR:
     retry_context: "retry attempt 2 — previous subagent stalled; step was reset"
 
   Subagent executes successfully this time:
-    a. pf_get_step(work_item_id=WI_ID) → version V3 (bumped after reset)
-    b. pf_update_step(work_item_id=WI_ID, step_id="code_change",
-                      status="in_progress", expected_version=V3)
+    a. pf_update_step(work_item_id=WI_ID, step_id="code_change",
+                      status="in_progress")
        → returns step_attempt_id=SA_CODE_2, version V4
-    c. Read initial_context from previous_steps.prepare_context.artifact_summary
-    d. Implement fix: deduplicate webhook delivery on retry
+    b. Read initial_context from previous_steps.prepare_context.artifact_summary
+    c. Implement fix: deduplicate webhook delivery on retry
        (e.g., idempotency key check in WT_PATH/src/webhooks/dispatcher.py)
-    e. [If >5min] pf_update_step(work_item_id=WI_ID, step_id="code_change",
+    d. [If >5min] pf_update_step(work_item_id=WI_ID, step_id="code_change",
                                   heartbeat=true)
-    f. pf_update_step(work_item_id=WI_ID, step_id="code_change", status="completed",
+    e. pf_update_step(work_item_id=WI_ID, step_id="code_change", status="completed",
                       step_attempt_id=SA_CODE_2,
                       artifact_summary=JSON({
                         summary: "added idempotency key check to webhook dispatcher",
                         files_changed: ["src/webhooks/dispatcher.py"],
                         tests_status: "passing",
                         notes: "retry attempt 2 succeeded"
-                      }))
+                      }),
+                      next_step="commit_and_pr", next_step_attempt_id=SA_COMMIT)
 
   Wi Agent verifies completion:
     pf_get_step(work_item_id=WI_ID)
     assert current_step == "commit_and_pr"  // code_change advanced
 
 ASSERT MCP CALLS (retry attempt 2):
-  - pf_update_step(step_id="code_change", status="in_progress")
-    called with expected_version=V3 (the post-reset version)
+  - pf_update_step(step_id="code_change", status="in_progress") called by the retry subagent
   - step_attempt_id returned = SA_CODE_2 (distinct from SA_CODE_1)
   - File edit present in WT_PATH (verify via git -C WT_PATH diff --stat)
   - pf_update_step(step_id="code_change", status="completed") called with artifact_summary
-    containing files_changed
+    containing files_changed, and next_step="commit_and_pr" (which is what advances
+    current_step — the retry's own in_progress call is kept because the reset ended the walk)
   - pf_save_artifact NOT called (code_change puts output in artifact_summary only)
 
 ASSERT STATE after retry:
@@ -271,8 +270,8 @@ EXPECTED SKILL BEHAVIOR (three-segment format after escalation — Step 6 path):
 - pf_recall called before first dispatch (Memory-First enforced)
 - 60s wait executed; stall detected when step remains "in_progress"
 - pf_update_step(status="failed", escalated=false) called to reset stale step
-- Fresh subagent dispatched with retry_count=1; uses post-reset version (V3)
-- Retry subagent calls pf_update_step(in_progress) with expected_version=V3
+- Fresh subagent dispatched with retry_count=1 after the step is reset to idle
+- Retry subagent calls pf_update_step(in_progress)
 - Retry subagent calls pf_update_step(completed) with non-empty artifact_summary
 - pf_get_step after retry shows current_step="commit_and_pr"
 - pf_save_artifact NOT called at any point during code_change

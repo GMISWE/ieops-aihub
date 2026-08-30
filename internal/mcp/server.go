@@ -1,4 +1,9 @@
-// Package mcp implements the polyforge MCP server with all 32 pf_ tools.
+// Package mcp implements the polyforge MCP server and every pf_ tool it
+// publishes.
+//
+// The tool count is deliberately not written here. It used to be, and it was
+// wrong by eighteen: nothing makes a number in a comment go red when a tool is
+// added. `polyforge dump-mcp-schemas` emits the authoritative list.
 package mcp
 
 import (

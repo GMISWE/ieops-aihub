@@ -80,12 +80,10 @@ NOTE: pf_force_takeover already reset the stale code_change step to idle and cre
 Admin's attempt. Admin can proceed directly — no manual step reset needed.
 
 AS ADMIN: Take code_change step in_progress:
-  version_info = pf_get_step(work_item_id=WI_ID)
   pf_update_step(
     work_item_id=WI_ID,
     step_id="code_change",
-    status="in_progress",
-    expected_version=version_info.version
+    status="in_progress"
   )
   → returns ADMIN_STEP_ATTEMPT_ID (claim_epoch=2 on Admin's attempt)
 

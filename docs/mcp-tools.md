@@ -1,7 +1,7 @@
 # MCP tool reference
 
 The polyforge MCP server (the `polyforge` binary in MCP mode, see
-[`../README.md`](../README.md)) exposes **49 `pf_*` tools**. Every tool maps to
+[`../README.md`](../README.md)) exposes **50 `pf_*` tools**. Every tool maps to
 an HTTP endpoint through the Go SDK in one path:
 
 ```
@@ -23,17 +23,18 @@ polyforge dump-mcp-schemas        # full JSON schema for all tools (CI contract)
 The tools are registered in `internal/mcp/tools_*.go`; the grouping below
 follows those files.
 
-## Work item lifecycle (12) - `tools_lifecycle.go`
+## Work item lifecycle (13) - `tools_lifecycle.go`
 
 | tool | purpose |
 |---|---|
 | `pf_whoami` | Caller identity plus accessible projects and roles. |
 | `pf_create_work_item` | Create a work item. Runs F3 dedup; `force_create` bypasses on a soft-conflict. |
+| `pf_batch_create_work_items` | Create SEVERAL work items in one round-trip. Items are independent: the response splits `created` / `failed`, each failure carrying its `index` so a retry resends only those. Dedup still runs per item. |
 | `pf_list_work_items` | List work items with filters (status, kind, label, milestone, user, source, ...). `sort=created_at\|closed_at` + `order=desc\|asc` control the ordering; `sort=closed_at` returns only closed items. |
 | `pf_get_work_item` | Fetch one work item by id or slug. |
 | `pf_update_work_item` | Patch goal, wi_type, priority, labels, declared_resources, content (status must be queued or paused). |
 | `pf_claim_work_item` | Claim a queued/paused wi -> new run attempt + resource locks. `mode=fresh|resume`. |
-| `pf_complete_attempt` | End the current attempt: `wrapped` (success), `failed`, or `paused`. |
+| `pf_complete_attempt` | End the current attempt: `wrapped` (success), `failed`, or `paused`. `note` records the closing note in the same call, before the state file is deleted. |
 | `pf_force_takeover` | Take a wi from another agent (same-user, or maintainer/admin). |
 | `pf_get_ready_queue` | LCRS six-segment ready queue for a project. |
 | `pf_cancel_work_item` | Cancel a work item. |
@@ -69,7 +70,7 @@ follows those files.
 | tool | purpose |
 |---|---|
 | `pf_get_step` | Current step graph, status, progress, and previous steps. |
-| `pf_update_step` | Update the current step (`in_progress`/`completed`/`failed`, heartbeat, artifact summary). |
+| `pf_update_step` | Update the current step (`in_progress`/`completed`/`failed`, heartbeat, artifact summary). `next_step` completes one step and starts its successor in one call. No version/CAS argument - concurrency is guarded by the server's idle-step predicate, so no `pf_get_step` is needed first. |
 
 ## Dependencies (3) - `tools_dependency.go`
 
@@ -97,7 +98,7 @@ worktree.
 | `pf_push` | Push the branch, lease-protected when it already exists on origin (refuses main/master/dev/tot). |
 | `pf_pr` | Create a GitHub PR for the task branch. |
 | `pf_ship` | **Commit + push + PR in one call**, and the push is the same force-push as `pf_push`. Prefer it over the three separately: those cost three round-trips for three confirmations no decision depends on. On failure the response is JSON with `stage` (which of commit/push/pr failed) and `side_effects` (typically an unpushed local commit). Retrying never duplicates a commit. |
-| `pf_wrap` | Push + PR + `complete_attempt(wrapped)` + delete state file. Idempotent only when a PR already covers local HEAD; see `pr_action` in the response. |
+| `pf_wrap` | Push + PR + `complete_attempt(wrapped)` + delete state file. Idempotent only when a PR already covers local HEAD; see `pr_action` in the response. `note` records the closing note in the same call. |
 
 ## Projects (4) - `tools_projects.go`
 

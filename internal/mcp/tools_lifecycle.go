@@ -147,25 +147,8 @@ func (s *Server) registerLifecycleTools() {
 	// pf_create_work_item
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_create_work_item",
-		Description: "Create a work item in the specified project",
-		InputSchema: objectSchema(map[string]any{
-			"project":                prop("string", "Project name"),
-			"goal":                   prop("string", "Single-line goal ≤500 chars"),
-			"scenario":               prop("string", "Scenario (default: coding)"),
-			"priority":               prop("string", "low|normal|high|urgent"),
-			"wi_type":                prop("string", "Work item type (fix_bug, feature, chore, etc.)"),
-			"requires_human_session": prop("boolean", "Whether this wi requires a human session"),
-			"milestone":              prop("string", "Milestone name"),
-			"labels":                 prop("array", "Labels"),
-			"declared_resources":     declaredResourcesProp("Declared resource locks"),
-			"parent_work_item_id":    prop("string", "Parent work item ID"),
-			"source":                 prop("string", "Source reference"),
-			"attrs":                  prop("object", "Additional attributes"),
-			"blocked_by":             prop("array", "List of blocking work item IDs"),
-			"content":                prop("string", "Background context for this wi (markdown, max 20000 chars)"),
-			"force_create":           prop("boolean", "Force create bypassing duplicate check"),
-			"force_reason":           prop("string", "Reason for force create"),
-		}, []string{"project", "goal"}),
+		Description: "Create a work item in the specified project. To create more than one, use pf_batch_create_work_items — repeated calls here cost one round-trip each.",
+		InputSchema: createWorkItemSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -177,10 +160,7 @@ func (s *Server) registerLifecycleTools() {
 		if strArg(args, "goal") == "" {
 			return errResult(fmt.Errorf("goal is required"))
 		}
-		// Auto-supply force_reason when force_create=true (server requires >=10 chars)
-		if boolArg(args, "force_create") && strArg(args, "force_reason") == "" {
-			args["force_reason"] = "force_create=true via MCP (admin bypass dedup check)"
-		}
+		applyForceReasonDefault(args)
 		result, err := s.client.CreateWorkItem(ctx, args)
 		if err != nil {
 			// Surface PROJECT_NOT_FOUND with a clear message
@@ -190,6 +170,106 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(err)
 		}
 		return jsonResult(result)
+	})
+
+	// pf_batch_create_work_items — file several wis in ONE round-trip (aihub#290).
+	//
+	// 134 measured adjacent create -> create pairs, 0.171% of billed input, spent
+	// filing a batch of unrelated follow-ups one call at a time. (Only pairs whose
+	// goals were <0.5 similar were counted, so these are genuinely distinct items
+	// being filed together, not a client retrying the same one.)
+	//
+	// A separate tool rather than an `items` array bolted onto pf_create_work_item,
+	// for the reason aihub#286 gives for pf_ship: `project` and `goal` are in that
+	// tool's flat `required` list, and objectSchema() cannot express "required
+	// unless items is set". Overloading it would leave the published schema
+	// misdescribing its own contract — aihub#238 / #241 again.
+	s.mcp.AddTool(&sdkmcp.Tool{
+		Name: "pf_batch_create_work_items",
+		Description: "Create SEVERAL work items in one call. Use this when filing more than one wi at once " +
+			"(follow-ups discovered mid-execution, a backlog split into pieces) instead of calling " +
+			"pf_create_work_item repeatedly — each extra call costs a whole round-trip for a confirmation " +
+			"the next one does not read. " +
+			"Items are created INDEPENDENTLY and one failure does not stop the rest: the response reports " +
+			"`created` and `failed` separately, each failure carrying the item's `index` so a retry can " +
+			"resend exactly the ones that did not land. Duplicate detection still runs per item, so a 409 " +
+			"DUPLICATE/CANDIDATES on one item is a normal, per-item outcome. " +
+			"For a single wi use pf_create_work_item.",
+		InputSchema: objectSchema(map[string]any{
+			"project": prop("string", "Default project for every item. An item may override it with its own \"project\"."),
+			"items":   batchWorkItemsProp(),
+		}, []string{"project", "items"}),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		args, err := parseArgs(req.Params.Arguments)
+		if err != nil {
+			return errResult(err)
+		}
+		project := strArg(args, "project")
+		if project == "" {
+			return errResult(fmt.Errorf("project is required"))
+		}
+		raw, ok := args["items"].([]any)
+		if !ok || len(raw) == 0 {
+			return errResult(fmt.Errorf("items must be a non-empty array of work-item objects"))
+		}
+		// Cap the batch. Each item is a sequential HTTP call inside this one tool
+		// call, with no partial-result flush and nothing visible to the caller
+		// until it returns, so an unbounded array turns a single MCP call into an
+		// arbitrarily long silent stall. Refused rather than truncated: silently
+		// creating a prefix of what was asked for is worse than creating nothing.
+		if len(raw) > maxBatchWorkItems {
+			return errResult(fmt.Errorf("items has %d entries, more than the %d-item limit; split it into several calls (nothing was created)",
+				len(raw), maxBatchWorkItems))
+		}
+
+		created := make([]any, 0, len(raw))
+		failed := make([]map[string]any, 0)
+
+		for i, entry := range raw {
+			item, ok := entry.(map[string]any)
+			if !ok {
+				failed = append(failed, map[string]any{
+					"index": i,
+					"error": fmt.Sprintf("item is not an object (got %T)", entry),
+				})
+				continue
+			}
+			// Copy before mutating: the caller's array is decoded from their
+			// arguments and defaulting in place would edit what they sent.
+			item = cloneArgs(item)
+			if strArg(item, "project") == "" {
+				item["project"] = project
+			}
+			if strArg(item, "goal") == "" {
+				failed = append(failed, map[string]any{"index": i, "error": "goal is required"})
+				continue
+			}
+			applyForceReasonDefault(item)
+
+			res, createErr := s.client.CreateWorkItem(ctx, item)
+			if createErr != nil {
+				// Reported, not returned: aborting here would leave the caller
+				// knowing only that "the batch failed", with no way to tell which
+				// items already exist — and re-sending the whole batch would then
+				// trip dedup on the ones that did land.
+				failed = append(failed, map[string]any{
+					"index":   i,
+					"goal":    strArg(item, "goal"),
+					"project": strArg(item, "project"),
+					"error":   createErr.Error(),
+				})
+				continue
+			}
+			created = append(created, res)
+		}
+
+		return jsonResult(map[string]any{
+			"ok":            len(failed) == 0,
+			"created_count": len(created),
+			"failed_count":  len(failed),
+			"created":       created,
+			"failed":        failed,
+		})
 	})
 
 	// pf_list_work_items
@@ -527,13 +607,25 @@ func (s *Server) registerLifecycleTools() {
 	})
 
 	// pf_complete_attempt
+	//
+	// `note` (aihub#290) exists because the closing note and the terminal call
+	// were always two round-trips in a fixed order — 201 measured adjacent pairs,
+	// 0.325% of billed input — and the second one read nothing out of the first.
+	// The ordering was not incidental: the terminal call deletes the state file,
+	// so pf_emit_event AFTER it cannot authenticate, and every skill that emits a
+	// wrap note carries a warning saying so. Folding the note into this call
+	// removes both the round-trip and the ordering hazard.
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_complete_attempt",
-		Description: "Complete the current run attempt (wrapped|failed|paused). Deletes state file for terminal statuses.",
+		Name: "pf_complete_attempt",
+		Description: "Complete the current run attempt (wrapped|failed|paused). Deletes state file for terminal statuses. " +
+			"Pass `note` to record the closing note in the same call instead of emitting it with a separate " +
+			"pf_emit_event beforehand — which is the only order that works, since this call deletes the " +
+			"credentials pf_emit_event needs. The response's note_emitted says whether it landed.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id":         prop("string", "Work item ID (used to find state file)"),
 			"status":               prop("string", "wrapped|failed|paused"),
 			"force_terminate_step": prop("boolean", "Force terminate in-progress step"),
+			"note":                 prop("string", "Closing note recorded as a `note` event before the attempt is completed (e.g. \"wrapped: <one sentence>\" / \"failed reason: <why>\"). Replaces a separate pf_emit_event call."),
 		}, []string{"work_item_id", "status"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -554,6 +646,16 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
 
+		// Emit the note FIRST — the CompleteAttempt below deletes the state file
+		// for terminal statuses, and with it the credentials this needs. Hold the
+		// error and report it on the response rather than aborting: a note that
+		// failed to record must not cost the caller its wrap.
+		note := strArg(args, "note")
+		var noteErr error
+		if note != "" {
+			noteErr = s.emitNote(ctx, wiID, sf, note)
+		}
+
 		body := map[string]any{
 			"status":         status,
 			"attempt_id":     sf.AttemptID,
@@ -566,8 +668,11 @@ func (s *Server) registerLifecycleTools() {
 
 		result, err := s.client.CompleteAttempt(ctx, wiID, body)
 		if err != nil {
-			return errResult(err)
+			// Carry the note's fate into the error: the caller is about to decide
+			// whether to retry, and retrying re-sends the note.
+			return errResult(fmt.Errorf("%w%s", err, noteOutcomeSuffix(note != "", noteErr)))
 		}
+		applyNoteResult(result, note != "", noteErr)
 
 		// Surface the worktree paths from the state file we're about to delete,
 		// for all statuses, so the caller doesn't need to have read the state
@@ -883,6 +988,81 @@ func propEnum(typ, description string, enum []string) map[string]any {
 	p := prop(typ, description)
 	p["enum"] = enum
 	return p
+}
+
+// maxBatchWorkItems bounds pf_batch_create_work_items. Generous relative to the
+// measured behaviour it replaces — the adjacent-create runs this fuses were a
+// handful of follow-ups long, not dozens — while still keeping one MCP call from
+// becoming an unbounded sequence of HTTP calls.
+const maxBatchWorkItems = 50
+
+// workItemFieldProps returns the per-work-item create fields, minus `project`.
+//
+// Single definition shared by pf_create_work_item's schema and the `items` entry
+// schema of pf_batch_create_work_items (aihub#290). Two hand-maintained copies
+// would drift, and a field present on one tool but not the other is the same
+// silent-drop failure the batch tool exists downstream of.
+func workItemFieldProps() map[string]any {
+	return map[string]any{
+		"goal":                   prop("string", "Single-line goal ≤500 chars"),
+		"scenario":               prop("string", "Scenario (default: coding)"),
+		"priority":               prop("string", "low|normal|high|urgent"),
+		"wi_type":                prop("string", "Work item type (fix_bug, feature, chore, etc.)"),
+		"requires_human_session": prop("boolean", "Whether this wi requires a human session"),
+		"milestone":              prop("string", "Milestone name"),
+		"labels":                 prop("array", "Labels"),
+		"declared_resources":     declaredResourcesProp("Declared resource locks"),
+		"parent_work_item_id":    prop("string", "Parent work item ID"),
+		"source":                 prop("string", "Source reference"),
+		"attrs":                  prop("object", "Additional attributes"),
+		"blocked_by":             prop("array", "List of blocking work item IDs"),
+		"content":                prop("string", "Background context for this wi (markdown, max 20000 chars)"),
+		"force_create":           prop("boolean", "Force create bypassing duplicate check"),
+		"force_reason":           prop("string", "Reason for force create"),
+	}
+}
+
+// createWorkItemSchema is pf_create_work_item's InputSchema: the shared per-item
+// fields plus the project this one is filed under.
+func createWorkItemSchema() json.RawMessage {
+	props := workItemFieldProps()
+	props["project"] = prop("string", "Project name")
+	return objectSchema(props, []string{"project", "goal"})
+}
+
+// batchWorkItemsProp describes the `items` array *including its entry shape*,
+// following declaredResourcesProp (aihub#238): an array whose element shape is
+// undocumented is a contract the caller has to guess at.
+func batchWorkItemsProp() map[string]any {
+	props := workItemFieldProps()
+	props["project"] = prop("string", "Project for THIS item; defaults to the call's top-level project.")
+	p := prop("array", fmt.Sprintf("Work items to create (1-%d). Each entry takes the same fields as pf_create_work_item; `project` is optional per item and falls back to the top-level one.", maxBatchWorkItems))
+	p["items"] = map[string]any{
+		"type":       "object",
+		"properties": props,
+		"required":   []string{"goal"},
+	}
+	return p
+}
+
+// applyForceReasonDefault supplies a force_reason when force_create is set,
+// because the server requires >=10 chars and rejects the request without one.
+// Shared by the single and batch create paths so a batch item does not fail a
+// validation the single-item path quietly satisfies for you.
+func applyForceReasonDefault(args map[string]any) {
+	if boolArg(args, "force_create") && strArg(args, "force_reason") == "" {
+		args["force_reason"] = "force_create=true via MCP (admin bypass dedup check)"
+	}
+}
+
+// cloneArgs returns a shallow copy, so defaulting a batch item's fields does not
+// mutate the arguments map the caller handed us.
+func cloneArgs(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in)+2)
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // declaredResourcesProp describes the declared_resources array *including its

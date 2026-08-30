@@ -55,15 +55,17 @@ EXPECTED SKILL BEHAVIOR:
   2. pf_recall(project="marketplace", query=wi.goal, type=["experience.*","rule.*"], top_k=5)
   3. pf_activate_memory(id) for each useful result
   4. Read codebase in WT_PATH to understand the target area (git log, Read key files)
-  5. pf_get_step(work_item_id=WI_ID) — get current version
-  6. pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="in_progress", expected_version=<version>)
-  7. Build initial_context JSON: {goal_analysis, relevant_files, prior_experience, known_pitfalls, suggested_approach, test_baseline}
-  8. pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="completed", step_attempt_id=<from 6>, artifact_summary=<initial_context JSON [0:4096]>)
+  5. pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="in_progress")
+  6. Build initial_context JSON: {goal_analysis, relevant_files, prior_experience, known_pitfalls, suggested_approach, test_baseline}
+  7. pf_update_step(work_item_id=WI_ID, step_id="prepare_context", status="completed", step_attempt_id=<from 5>,
+       artifact_summary=<initial_context JSON [0:4096]>,
+       next_step="code_change", next_step_attempt_id=SA_CODE)
 
 ASSERT MCP CALLS:
   - pf_recall called
   - pf_update_step(prepare_context, in_progress) called
   - pf_update_step(prepare_context, completed) called with artifact_summary containing initial_context JSON
+    and next_step="code_change" (the completion starts code_change)
   - pf_save_artifact NOT called (prepare_context does not save artifacts)
 
 ASSERT STATE:
@@ -77,20 +79,19 @@ NOTE: code_change saves its output ONLY in the step's artifact_summary via
 pf_update_step(completed, artifact_summary=...). It does NOT call pf_save_artifact.
 
 EXPECTED SKILL BEHAVIOR:
-  1. pf_get_step(work_item_id=WI_ID) — get current version
-  2. pf_update_step(work_item_id=WI_ID, step_id="code_change", status="in_progress", expected_version=<version>)
-     → returns step_attempt_id
-  3. pf_get_step(work_item_id=WI_ID) — read initial_context from previous_steps.prepare_context.artifact_summary
-  4. Edit file in WT_PATH (the actual fix — add null check)
-  5. Periodic heartbeat if taking >5min: pf_update_step(heartbeat=true)
-  6. pf_update_step(work_item_id=WI_ID, step_id="code_change", status="completed",
-       step_attempt_id=<from 2>,
-       artifact_summary=JSON({summary, files_changed, tests_status, notes}))
+  1. pf_get_step(work_item_id=WI_ID) — read initial_context from previous_steps.prepare_context.artifact_summary
+  2. Edit file in WT_PATH (the actual fix — add null check)
+  3. Periodic heartbeat if taking >5min: pf_update_step(heartbeat=true)
+  4. pf_update_step(work_item_id=WI_ID, step_id="code_change", status="completed",
+       step_attempt_id=SA_CODE,
+       artifact_summary=JSON({summary, files_changed, tests_status, notes}),
+       next_step="commit_and_pr", next_step_attempt_id=SA_COMMIT)
 
 ASSERT MCP CALLS:
-  - pf_update_step(code_change, in_progress) called
+  - pf_update_step(code_change, in_progress) NOT called separately
+    (code_change was started by prepare_context's next_step, with step_attempt_id=SA_CODE)
   - File edit in WT_PATH (verify via `git -C WT_PATH diff --stat`)
-  - pf_update_step(code_change, completed) called with artifact_summary
+  - pf_update_step(code_change, completed) called with artifact_summary and next_step="commit_and_pr"
   - pf_save_artifact NOT called
 
 ASSERT STATE:
@@ -101,16 +102,15 @@ ASSERT STATE:
 SKILL_INVOKE: polyforge-coding:commit_and_pr
 
 EXPECTED SKILL BEHAVIOR:
-  1. pf_get_step(work_item_id=WI_ID) — get current version
-  2. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="in_progress", expected_version=<version>)
-  3. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace", vs_base=true) — review the diff
-  4. pf_commit(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
+  1. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace", vs_base=true) — review the diff
+  2. pf_commit(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
        message="fix(auth): add null check for empty user input\n\n...\n\nwi: marketplace#<seq>")
-  5. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace", skip_base_check=false)
-  6. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
+  3. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace", skip_base_check=false)
+  4. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
        title="fix(auth): add null check for empty user input", body="...")
-  7. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="completed",
-       step_attempt_id=<from 2>, artifact_summary="PR #N: <url>")
+  5. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="completed",
+       step_attempt_id=SA_COMMIT, artifact_summary="PR #N: <url>")
+       — no next_step: commit_and_pr is the last step
 
 ASSERT MCP CALLS:
   - pf_diff called with workspace_root, work_item_id, repo params
@@ -126,16 +126,15 @@ ASSERT STATE:
 SKILL_INVOKE: polyforge:pf-stop --wrap
 
 EXPECTED SKILL BEHAVIOR (coding scenario — use pf_wrap, not pf_complete_attempt):
-  1. pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace")
+  1. pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
+       note="wrapped: null check fix complete, PR opened")
      (pf_wrap = on_wrap hook + pf_complete_attempt(wrapped) + workspace cleanup;
       credentials injected from state file by MCP server)
-  2. pf_emit_event(work_item_id=WI_ID, event_type="note",
-       payload={text: "wrapped: null check fix complete, PR opened"})
-  3. State file deleted at WORKSPACE_ROOT/.polyforge/state/WI_ID.json
+  2. State file deleted at WORKSPACE_ROOT/.polyforge/state/WI_ID.json
 
 ASSERT MCP CALLS:
   - pf_wrap called (NOT pf_complete_attempt directly)
-  - pf_emit_event called
+  - pf_wrap called with note= carrying the closing note
 
 ASSERT FINAL STATE:
   - WI_ID status=="wrapped"

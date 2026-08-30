@@ -56,26 +56,27 @@ encounters a terminal failure that cannot be resolved in this session (fail).
 
 ### Mode: wrap (`/pf-stop --wrap`)
 
-> **IMPORTANT**: Emit the wrap note BEFORE calling the terminal tool. `pf_wrap` and
-> `pf_complete_attempt(wrapped)` delete the state file; any `pf_emit_event` after them
-> fails because the MCP server can no longer read credentials.
+> **Pass the wrap note as `note=` on the terminal call** — one call, not two. The note is
+> recorded server-side before the attempt completes, which is the only order that works:
+> `pf_wrap` and `pf_complete_attempt(wrapped)` delete the state file, so a `pf_emit_event`
+> after them fails for want of credentials. Fusing them removes both the ordering hazard and
+> the round-trip (aihub#290).
+>
+> **Compatibility**: if `pf_wrap` / `pf_complete_attempt` do not publish a `note` parameter,
+> the server binary predates aihub#290 — fall back to a separate
+> `pf_emit_event(event_type="note", payload={text: ...})` issued **before** the terminal call.
+> Do not pass `note` to a tool that does not publish it.
 
-1. Emit wrap note **first**:
-   ```
-   pf_emit_event(
-     work_item_id=<current>,
-     event_type="note",
-     payload={text: "wrapped: <1-sentence summary of what was accomplished>"}
-   )
-   ```
-
-2. Then call the terminal wrap — **coding scenario**:
+1. Call the terminal wrap with the note — **coding scenario**:
    ```
    pf_wrap(
      workspace_root=<ws>,
-     work_item_id=<current>
+     work_item_id=<current>,
+     note="wrapped: <1-sentence summary of what was accomplished>"
    )
    ```
+   Check `note_emitted` in the response: a note that failed to record does **not** fail the
+   wrap, so it is reported rather than raised.
    `pf_wrap` = push + PR + `pf_complete_attempt(wrapped)` + delete the state file. It does NOT
    remove the `pf.<slug>/` worktree dirs — clean those up manually or with
    `polyforge doctor --fix`.
@@ -91,22 +92,23 @@ encounters a terminal failure that cannot be resolved in this session (fail).
    ```
    pf_complete_attempt(
      work_item_id=<current>,
-     status="wrapped"
+     status="wrapped",
+     note="wrapped: <1-sentence summary of what was accomplished>"
    )
    ```
 
-3. State file is deleted by `pf_wrap` / `pf_complete_attempt`; no manual delete needed.
+2. State file is deleted by `pf_wrap` / `pf_complete_attempt`; no manual delete needed.
 
-4. Suggest: "Run `/pf-retro` to save learnings to team memory."
+3. Suggest: "Run `/pf-retro` to save learnings to team memory."
 
-5. Output: "Is this session's workflow worth crystallizing as a wi_type? (enter a name to crystallize, or press Enter to skip)"
+4. Output: "Is this session's workflow worth crystallizing as a wi_type? (enter a name to crystallize, or press Enter to skip)"
 
    - User enters a name → call pf-crystallize, passing:
      - source_wi_id=<wrapped_wi_id>
      - wi_type_name=<user input>
    - Skip / empty input → end
 
-6. Output three-segment format with wrap summary:
+5. Output three-segment format with wrap summary:
    - Goal achieved
    - Key decisions made
    - Follow-up items (if any)
@@ -115,29 +117,29 @@ encounters a terminal failure that cannot be resolved in this session (fail).
 
 ### Mode: fail (`/pf-stop --fail`)
 
-> **IMPORTANT**: Emit the failure note BEFORE calling `pf_complete_attempt(failed)`.
-> The terminal call deletes the state file; `pf_emit_event` after it will fail.
+> **Pass the failure reason as `note=` on the same call.** The terminal call deletes the state
+> file, so a separate `pf_emit_event` only works before it — folding the note in removes that
+> ordering hazard and the extra round-trip (aihub#290).
+>
+> **Compatibility**: if `pf_complete_attempt` does not publish a `note` parameter, the server
+> binary predates aihub#290 — emit
+> `pf_emit_event(event_type="note", payload={text: "failed reason: ..."})` **first**, then call
+> `pf_complete_attempt(status="failed")` without `note`.
 
-1. Emit failure note **first**:
-   ```
-   pf_emit_event(
-     work_item_id=<current>,
-     event_type="note",
-     payload={text: "failed reason: <user description of why it failed>"}
-   )
-   ```
-
-2. Then mark the attempt as failed:
+1. Mark the attempt as failed, carrying the reason:
    ```
    pf_complete_attempt(
      work_item_id=<current>,
-     status="failed"
+     status="failed",
+     note="failed reason: <user description of why it failed>"
    )
    ```
+   `note_emitted` in the response says whether the note landed; a failed note does not fail
+   the terminal call.
 
-3. State file is deleted by `pf_complete_attempt`; no manual delete needed.
+2. State file is deleted by `pf_complete_attempt`; no manual delete needed.
 
-4. Output three-segment format. Suggest: "Create a bug wi with `/pf-work --goal 'bug: ...'`
+3. Output three-segment format. Suggest: "Create a bug wi with `/pf-work --goal 'bug: ...'`
    to track the root cause."
 
 ## NL Triggers

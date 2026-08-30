@@ -18,8 +18,9 @@
 > | 3 | §1.1 文件树 | 迁移 `0001`-`0006`（`0002_ownership_only` / `0006_memory_v2` 等）、MCP SDK `mark3labs/mcp-go`、`mcp/tools_locks.go` / `tools_actors.go`、`scenario/registry.go` | 实际 **25 个迁移**（`0001`-`0025`，命名不同）、MCP SDK 为 `modelcontextprotocol/go-sdk v1.6.0`、tools 文件为 `tools_users/projects/dependency.go`、`scenario/` 仅 `protocol.go` |
 > | 4 | 表数量 | "12→10 表"（memory_embeddings 并入 memories） | 最终 schema **11 张逻辑表**：另加 `projects`、`memory_relations`（均在本文定稿后新增；`scenario_phase_configs` 见 #5）；`agent_events` 另含 6 个月度分区子表 |
 > | 5 | `scenario_phase_configs`（v1.23/v1.24） | scenario 级 SoT，驱动分类 | 已在迁移 `0017` **删除**（aihub#38）；`wi_type` / `requires_human_session` 分类改为**客户端职责**，server 直接读 wi 行，`phase_config_version` 恒 NULL |
-> | 6 | 工具数量 | "38→32 工具" | 实际 **46 个 `pf_*` MCP 工具**（见 `docs/mcp-tools.md`） |
+> | 6 | 工具数量 | "38→32 工具" | 数量持续增长，**不在此处记数**——权威列表见 `docs/mcp-tools.md`，机器可读的权威 schema 由 `polyforge dump-mcp-schemas` 输出 |
 > | 7 | §16 EmbeddingProvider / 向量召回 | provider 抽象 + 语义召回 | 仅铺底、**从未接通**：provider 从未实例化、`Remember` 不写 `emb_vector`（恒 NULL）、HNSW 索引被注释、`RecallWithVector` 仅是一句注释。当前 recall = 文本/标签 + 近因排序。向量召回作为 **aihub#192** 在飞 |
+> | 8 | `pf_update_step` 的 `expected_version` CAS（§ 步骤状态机、§ 附录 API） | 客户端先 `pf_get_step` 取 `version`，随 `update_step` 回传做 CAS，冲突返回 412 | **从未实现**：`server.UpdateStepRequest` 从来没有这个字段，Echo Bind 静默丢弃，没有任何 412 路径。真正的并发保护是 `in_progress` 转换上的 `WHERE current_step_status='idle'` 谓词。参数已于 **aihub#290** 从 MCP schema 和 CLI flag 中删除（而非补实现），连带去掉了只为取这个 version 而存在的 `pf_get_step` 往返；同时 `update_step` 新增 `next_step`（完成一步并启动下一步）、终态调用新增 `note` |
 
 ---
 

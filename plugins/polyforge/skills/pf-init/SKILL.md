@@ -164,7 +164,7 @@ changes + generated line), not a single fallback line.
 polyforge doctor
 ```
 
-Expected: all 5 checks green.
+Expected: every check green.
 
 ---
 
@@ -206,7 +206,7 @@ cur = sl.get("command", "")
 if "pf-statusline.cjs" in cur:
     # already taken over — idempotent, no double-wrap. Still back-fill refreshInterval
     # so pre-aihub#122 takeovers (command present, refreshInterval absent) get the timer
-    # without a full re-takeover. This is what /pf-doctor Check 6 relies on.
+    # without a full re-takeover. This is what /pf-doctor's statusLine check relies on.
     if "refreshInterval" not in sl:
         sl["refreshInterval"] = 3
         settings["statusLine"] = sl

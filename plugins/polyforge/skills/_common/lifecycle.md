@@ -42,6 +42,38 @@ verification) but **stop before `superpowers:finishing-a-development-branch`**. 
 push, PR, wrap, and CI gating are done by polyforge (the scenario `commit_and_pr` step +
 `pf_wrap`), never by the superpowers branch-finishing skill.
 
+## Commit + push + PR: one call, not three (aihub#286)
+
+Use **`pf_ship`**, not `pf_commit` → `pf_push` → `pf_pr`:
+
+```
+pf_ship(work_item_id=<current>, repo=<repo>, workspace_root=<ws>,
+        message="<conventional commit message>",
+        pr_title="<title>", pr_body="<body>")
+```
+
+The three separate tools cost three MCP round-trips to return three few-hundred-byte
+confirmations that **no decision depends on** — `pf_push` never reads the commit sha,
+`pf_pr` never reads the push output. A round-trip costs the whole request prefix, not the
+size of its response; 93-day measurement puts the three-call pattern at **1.018% of billed
+input**.
+
+Three things to know before using it:
+
+- ⚠️ **It pushes to origin, and the push is a FORCE-push** (`--force-with-lease`, exactly
+  what `pf_push` does). It refuses `main`/`master`/`dev`/`tot`. The name is short; the
+  effect is not local.
+- **Failure is reported as JSON, not as an error string.** Read `stage` (`commit` / `push` /
+  `pr`) for where it stopped and `side_effects` for what already happened — most often a
+  local commit that never left the machine. Do not assume a failed `pf_ship` did nothing.
+- **Retrying is safe.** It commits only when something is staged and skips the push when a
+  PR already covers HEAD, so a retry after a fixed push failure does not duplicate the
+  commit. If an open PR already exists on the branch it is pushed to and reused.
+
+Keep using `pf_commit` / `pf_push` / `pf_pr` separately only when you genuinely need to
+inspect state between the steps — e.g. committing now but deliberately not pushing yet, or
+debugging which stage is broken.
+
 ## Commit hygiene (.pf_*)
 
 The marketplace repo has historically tracked `.pf_meta.json` / `.pf_steps.json`. Before any

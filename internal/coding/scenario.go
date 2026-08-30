@@ -48,6 +48,28 @@ func WorktreePath(wiID, repo, workspaceRoot string) (string, error) {
 	return filepath.Join(workspaceRoot, fmt.Sprintf("pf.%s-%s", sf.Project, seq), repo), nil
 }
 
+// Stages of the commit -> push -> PR chain, reported by WrapResult.Stage and
+// ShipResult.Stage. A returned error leaves Stage naming the step that did NOT
+// complete; StageDone means the whole chain ran.
+//
+// This exists because of what fusing costs (aihub#286): three separate MCP
+// calls each returned an observable state, so a caller always knew exactly how
+// far it had got. One fused call destroys that, and a bare "it failed" leaves it
+// with strictly less information than it had before. Stage is how that
+// information is given back.
+const (
+	// StageCommit — the local commit had not completed.
+	StageCommit = "commit"
+	// StagePush — the commit is done (or was not needed) but the push had not
+	// completed, so anything committed is local only.
+	StagePush = "push"
+	// StagePR — the push succeeded, so the commits ARE on origin and are safe;
+	// only opening the PR failed.
+	StagePR = "pr"
+	// StageDone — every stage completed.
+	StageDone = "done"
+)
+
 // Wrap actions, reported back to the caller so that a successful response can
 // never be mistaken for "the local commits were delivered".
 const (
@@ -87,6 +109,11 @@ type WrapResult struct {
 	Pushed bool
 	// PushedSHA is the pushed commit, empty when Pushed is false.
 	PushedSHA string
+	// Stage is one of the Stage* constants: on a returned error it names the
+	// step that did not complete, so a caller that fused earlier steps into the
+	// same call can say which side effects already exist. On success it is
+	// StageDone.
+	Stage string
 }
 
 // Wrap executes the wrap sequence for a work item:
@@ -104,6 +131,11 @@ type WrapResult struct {
 // state file. Both are destructive and irreversible from the agent's side, which
 // is why "did this actually deliver?" is answered here and surfaced in
 // WrapResult rather than left implicit in an ok:true.
+//
+// Error contract, which is deliberately mixed: Wrap returns (nil, err) for its
+// own two setup failures (worktree, branch), where no side effect is possible,
+// and forwards pushAndOpenPR's partial non-nil result from there on. pf_wrap
+// ignores the result whenever err != nil, so it sees no difference either way.
 func Wrap(ctx context.Context, sf *config.StateFile, repo, workspaceRoot, prTitle, prBody string) (*WrapResult, error) {
 	worktreePath, err := WorktreePath(sf.WIID, repo, workspaceRoot)
 	if err != nil {
@@ -115,24 +147,63 @@ func Wrap(ctx context.Context, sf *config.StateFile, repo, workspaceRoot, prTitl
 		return nil, fmt.Errorf("current branch: %w", err)
 	}
 
+	if prTitle == "" {
+		prTitle = fmt.Sprintf("feat: %s", sf.WIID)
+	}
+
+	// Wrap has no caller-supplied base: whatever base an existing PR carries is
+	// the only one it ever uses.
+	return pushAndOpenPR(ctx, worktreePath, branch, prTitle, prBody, "")
+}
+
+// pushAndOpenPR is the push+PR half of the wrap sequence, shared verbatim by
+// Wrap and Ship (aihub#286) so the two cannot drift. Ship adds a commit stage in
+// front of it; Wrap adds complete_attempt behind it. Neither reimplements the
+// PR-coverage decision documented on Wrap.
+//
+// prBase is the base branch to use when a NEW PR has to be opened. An existing
+// PR's own base always wins — a PR that is already open cannot be retargeted by
+// passing a different base here.
+//
+// On error the returned *WrapResult is non-nil and partially filled, with Stage
+// naming the step that did not complete and Pushed/PushedSHA describing what
+// already reached origin. Callers that only need "did it work" (pf_wrap) ignore
+// it; callers that fused an earlier stage into the same round-trip (Ship) need
+// it to report the side effects the caller can no longer observe for itself.
+func pushAndOpenPR(ctx context.Context, worktreePath, branch, prTitle, prBody, prBase string) (*WrapResult, error) {
+	// Stage tracks the step that has NOT completed yet, so every early return
+	// below reports where the chain stopped without any extra bookkeeping.
+	res := &WrapResult{Branch: branch, Stage: StagePush}
+
 	// Check for an existing PR. A real gh error is not swallowed — every
 	// branch below needs to trust that existingPR == nil genuinely means
 	// "no PR" rather than "gh failed".
 	existingPR, err := GHGetPR(ctx, worktreePath, branch)
 	if err != nil {
-		return nil, fmt.Errorf("check existing PR: %w", err)
+		return res, fmt.Errorf("check existing PR: %w", err)
 	}
 
-	base := ""
+	base := prBase
 	if existingPR != nil {
-		base, _ = existingPR["baseRefName"].(string)
+		// An explicit caller base wins. The only PR whose base could be
+		// inherited here is one that is merged or closed (an OPEN one returns
+		// before the base is ever used), so the PR this base will be applied to
+		// is always a brand-new one — and retargeting a NEW PR is exactly what
+		// the caller asked for. Wrap passes prBase="" and therefore always
+		// inherits, unchanged.
+		if existingBase, _ := existingPR["baseRefName"].(string); existingBase != "" && prBase == "" {
+			base = existingBase
+		}
 
 		delivered, err := deliveredByPR(ctx, worktreePath, existingPR)
 		if err != nil {
-			return nil, fmt.Errorf("check whether PR covers HEAD: %w", err)
+			return res, fmt.Errorf("check whether PR covers HEAD: %w", err)
 		}
 		if delivered {
-			return &WrapResult{PR: existingPR, Action: WrapActionReusedPR, Branch: branch}, nil
+			res.PR = existingPR
+			res.Action = WrapActionReusedPR
+			res.Stage = StageDone
+			return res, nil
 		}
 
 		// HEAD is not covered by this PR. Something local is undelivered, so
@@ -142,12 +213,14 @@ func Wrap(ctx context.Context, sf *config.StateFile, repo, workspaceRoot, prTitl
 		if strings.EqualFold(state, "OPEN") {
 			sha, err := GitPush(ctx, worktreePath)
 			if err != nil {
-				return nil, fmt.Errorf("push new commits onto open PR #%v: %w", existingPR["number"], err)
+				return res, fmt.Errorf("push new commits onto open PR #%v: %w", existingPR["number"], err)
 			}
-			return &WrapResult{
-				PR: existingPR, Action: WrapActionPushedToPR, Branch: branch,
-				Pushed: true, PushedSHA: sha,
-			}, nil
+			res.PR = existingPR
+			res.Action = WrapActionPushedToPR
+			res.Pushed = true
+			res.PushedSHA = sha
+			res.Stage = StageDone
+			return res, nil
 		}
 		// MERGED or CLOSED: that PR can never carry these commits, so fall
 		// through to push + create a new PR for them. If the merge deleted the
@@ -166,19 +239,20 @@ func Wrap(ctx context.Context, sf *config.StateFile, repo, workspaceRoot, prTitl
 
 	sha, err := GitPush(ctx, worktreePath)
 	if err != nil {
-		return nil, fmt.Errorf("push: %w", err)
+		return res, fmt.Errorf("push: %w", err)
 	}
-	if prTitle == "" {
-		prTitle = fmt.Sprintf("feat: %s", sf.WIID)
-	}
+	res.Pushed = true
+	res.PushedSHA = sha
+	res.Stage = StagePR
+
 	newPR, err := GHCreatePR(ctx, worktreePath, prTitle, prBody, "", base)
 	if err != nil {
-		return nil, fmt.Errorf("create PR: %w", err)
+		return res, fmt.Errorf("create PR: %w", err)
 	}
-	return &WrapResult{
-		PR: newPR, Action: WrapActionPushedAndCreatedPR, Branch: branch,
-		Pushed: true, PushedSHA: sha,
-	}, nil
+	res.PR = newPR
+	res.Action = WrapActionPushedAndCreatedPR
+	res.Stage = StageDone
+	return res, nil
 }
 
 // deliveredByPR reports whether local HEAD needs no further delivery given the

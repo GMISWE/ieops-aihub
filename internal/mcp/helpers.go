@@ -41,6 +41,31 @@ func boolArg(args map[string]any, key string) bool {
 	return false
 }
 
+// strSliceArg extracts a []string argument, skipping any entry that is not a
+// string. Absent, null or non-array values yield nil, which every caller reads
+// as "not specified" rather than "empty selection".
+//
+// Extracted from pf_commit's inline loop so pf_ship (aihub#286) shares one
+// definition of how `paths` is decoded: two copies of this could drift, and the
+// two tools stage files for the same worktree.
+func strSliceArg(args map[string]any, key string) []string {
+	v, ok := args[key]
+	if !ok {
+		return nil
+	}
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, item := range raw {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // numArg extracts a float64 argument (returns 0 if absent or wrong type).
 func numArg(args map[string]any, key string) float64 {
 	if v, ok := args[key]; ok {

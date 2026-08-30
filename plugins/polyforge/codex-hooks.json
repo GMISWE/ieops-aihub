@@ -13,7 +13,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|mcp__polyforge__pf_(commit|pr|wrap)",
+        "matcher": "Bash|mcp__polyforge__pf_(commit|pr|wrap|ship)",
         "hooks": [
           {
             "type": "command",

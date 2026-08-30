@@ -1,7 +1,7 @@
 # MCP tool reference
 
 The polyforge MCP server (the `polyforge` binary in MCP mode, see
-[`../README.md`](../README.md)) exposes **48 `pf_*` tools**. Every tool maps to
+[`../README.md`](../README.md)) exposes **49 `pf_*` tools**. Every tool maps to
 an HTTP endpoint through the Go SDK in one path:
 
 ```
@@ -85,7 +85,7 @@ follows those files.
 |---|---|
 | `pf_predict_conflicts` | Predict resource-lock conflicts for a set of declared resources; also returns `will_unlock`. |
 
-## Coding / git (5) - `tools_coding.go`
+## Coding / git (6) - `tools_coding.go`
 
 Credentials are injected from the state file; these operate inside the wi
 worktree.
@@ -96,6 +96,7 @@ worktree.
 | `pf_commit` | Commit staged changes in the worktree. |
 | `pf_push` | Push the branch, lease-protected when it already exists on origin (refuses main/master/dev/tot). |
 | `pf_pr` | Create a GitHub PR for the task branch. |
+| `pf_ship` | **Commit + push + PR in one call**, and the push is the same force-push as `pf_push`. Prefer it over the three separately: those cost three round-trips for three confirmations no decision depends on. On failure the response is JSON with `stage` (which of commit/push/pr failed) and `side_effects` (typically an unpushed local commit). Retrying never duplicates a commit. |
 | `pf_wrap` | Push + PR + `complete_attempt(wrapped)` + delete state file. Idempotent only when a PR already covers local HEAD; see `pr_action` in the response. |
 
 ## Projects (4) - `tools_projects.go`

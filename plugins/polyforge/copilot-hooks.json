@@ -15,7 +15,7 @@
         "timeoutSec": 10
       },
       {
-        "matcher": "bash|Bash|polyforge-pf_(commit|pr|wrap)",
+        "matcher": "bash|Bash|polyforge-pf_(commit|pr|wrap|ship)",
         "bash": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-commit-guard\"",
         "timeoutSec": 10
       }

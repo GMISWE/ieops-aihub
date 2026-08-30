@@ -131,17 +131,19 @@ via a PR, not a direct push to `main` -- use the crystallize chore wi's own clai
 After the user confirms:
 
 1. Write `{wi_type}[.{project}].md` (and any new `common/` files) into the polyforge-coding worktree.
-2. Commit, push, and open a PR through the chore wi's own claim (pass `paths=` so only the
-   target files are staged -- the worktree parent may hold `.pf_*` scratch):
+2. Commit, push, and open a PR through the chore wi's own claim -- ONE call, not three
+   (pass `paths=` so only the target files are staged; the worktree parent may hold
+   `.pf_*` scratch). ⚠️ `pf_ship` pushes to origin, and that push is a force-push:
    ```
-   pf_commit(work_item_id=<crystallize chore wi_id>, repo="polyforge-coding",
-             workspace_root=<ws>, paths=[<the new/changed .md files only>],
-             message="feat(scenario): crystallize {wi_type}[.{project}] from {source_slug}")
-   pf_push(work_item_id=<crystallize chore wi_id>, repo="polyforge-coding", workspace_root=<ws>)
-   pf_pr(work_item_id=<crystallize chore wi_id>, repo="polyforge-coding", workspace_root=<ws>,
-         base="main", title="feat(scenario): crystallize {wi_type}[.{project}]",
-         body="<short summary of the crystallized workflow + link to source_wi_id>")
+   pf_ship(work_item_id=<crystallize chore wi_id>, repo="polyforge-coding",
+           workspace_root=<ws>, paths=[<the new/changed .md files only>],
+           message="feat(scenario): crystallize {wi_type}[.{project}] from {source_slug}",
+           pr_base="main", pr_title="feat(scenario): crystallize {wi_type}[.{project}]",
+           pr_body="<short summary of the crystallized workflow + link to source_wi_id>")
    ```
+   On failure the response is JSON, not an error string: read `stage` (`commit`/`push`/`pr`)
+   and `side_effects` before assuming nothing happened. Retrying with the same arguments is
+   safe and will not duplicate the commit.
 3. Output: "Crystallized `{filename}` and opened PR `<url>`; takes effect on other machines after the PR merges and they run `polyforge init`."
 4. Call `/pf-stop --wrap` to finish the crystallize chore wi
 

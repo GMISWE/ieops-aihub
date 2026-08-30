@@ -7,9 +7,10 @@ description: >
 
 <!--
   using-polyforge is ASSEMBLED at SessionStart by hooks/pf-session-start from the
-  fragments listed below, IN ORDER. Each `@include: <path>` pulls a fragment; an
-  optional immediately-following `when: <cond>` makes that fragment conditional
-  (no `when:` = always included).
+  fragments listed below, IN ORDER. Each `@include: <path>` pulls a fragment into the
+  RESIDENT tier; each `@ondemand: <path>` declares a fragment that ships as a file and
+  is NEVER injected. Directives may be followed by an attribute block (see MANIFEST
+  SCHEMA below); `when: <cond>` makes an `@include` conditional (no `when:` = always).
 
   Conditions:
     when: superpowers   — the superpowers plugin is ENABLED for this workspace
@@ -22,6 +23,96 @@ description: >
 
   When invoked directly via the Skill tool (rare — this skill is auto-injected), read
   the fragments below to see the full content.
+
+  ==========================================================================
+  MANIFEST SCHEMA — kind / gate / authority (aihub#295)
+  ==========================================================================
+  A bare `@include:` list can say WHICH fragments and IN WHAT ORDER. It cannot say
+  whether a fragment is information or a rule, nor which mechanism enforces a rule.
+  That gap is not cosmetic: it is the difference between two failure modes.
+
+    info  read on demand — the cost of not reading it is one extra tool call.
+                           BOUNDED and OBSERVABLE.
+    rule  read on demand — "should have read it and didn't" is externally
+                           IDENTICAL to "read it and ignored it". Both silent.
+
+  So every directive carries an attribute block. Keys, one per line, immediately
+  after the directive, no blank line inside the block:
+
+    kind:             REQUIRED. `info` or `rule`.
+    gate:             REQUIRED iff kind is rule; FORBIDDEN otherwise. Comma-separated
+                      mechanism names, or the literal `none`. FAIL-CLOSED: if even one
+                      rule inside the fragment is unenforced, the whole fragment is
+                      `none`. Names are checked against a CURATED list of mechanisms
+                      that genuinely make a violation observable (today: exactly one,
+                      hooks/pf-commit-guard) — not against what exists on disk. Merely
+                      existing is not enforcing: an assembler, an injector or a test
+                      that reads repo content cannot notice an agent ignoring a rule.
+    gate-partial:     OPTIONAL, only with `gate: none`. Records mechanisms that cover
+                      SOME of the fragment's rules, without weakening the tier rule.
+    authority:        REQUIRED. `self` if this file is the maintained copy; otherwise
+                      a pointer to where the maintained copy lives. (This is the
+                      question that found redundancies "is this needed every request?"
+                      could not — aihub#296.)
+    resident-because: REQUIRED iff an `@include:` entry has a non-`self` authority;
+                      FORBIDDEN otherwise. If the authoritative copy is elsewhere, say
+                      why this one still spends resident budget.
+    when:             OPTIONAL, `@include:` only. MUST be the FIRST attribute line —
+                      see BACKWARD COMPATIBILITY below.
+
+  THE TIER RULE:  kind: rule + gate: none  =>  must NOT leave the resident tier.
+  An unenforced rule that is not in context has no observable failure mode at all.
+  tests/using-polyforge-manifest.test.sh checks this, with a documented baseline of
+  pre-existing violations that may only shrink. ⚠️ That suite is NOT in CI yet
+  (aihub#293) — so today it is a check someone must run by hand, not an enforcement.
+  By this manifest's own argument a lint nobody runs is itself an ungated rule; do not
+  describe it as a guarantee until #293 lands.
+
+  WHERE THE CURRENT `kind` VALUES CAME FROM — so they can be challenged, not inherited
+  aihub#295 measured the rules this skill ships: SIX of them, of which exactly ONE has
+  an enforcing mechanism — IR1, via hooks/pf-commit-guard's worktree and attribution
+  gates. That is why iron-rules.md is `gate: none` with `gate-partial: pf-commit-guard`:
+  partial coverage is fail-closed, because IR2 and IR3 are in the same file and nothing
+  catches either. The other four ungated rules are the three-segment output format, NL
+  routing, and post-claim Next-steps routing.
+  Those six rules span four fragments. memory-conventions.md is a FIFTH: it did not
+  appear in that table, but three places in this tree call its content a rule —
+  on-demand-index.md (resident, injected every session) says "the hard rule that a
+  `mem_…` id never goes in a repo doc"; the on-demand rationale below concedes that the
+  link-discipline rule "live[s] only in the fragment"; and the fragment itself says
+  "Never put an aihub `mem_…` ref in a repo doc". Marking it `info` would have
+  contradicted all three, so it is `rule`, and it is the second BASELINE entry.
+  The remaining seven are `kind: info`. That line is still not settled: an independent
+  review of aihub#295 applied the wi's own discriminator — is the violation observable?
+  — and also made memory-first.md ("pf_recall before every substantive action"),
+  bootstrap.md (the session startup scan) and repo-routing.md rules, which would take
+  the lower bound below from 11,489 to 14,993. Reclassifying only ever ENLARGES that
+  bound, which is the honest direction; aihub#296 owns settling it with a measurement
+  rather than deciding it in passing while moving a fragment.
+
+  BACKWARD COMPATIBILITY (why `@ondemand:` and not `tier: on-demand`)
+  The plugin and the polyforge binary update through independent channels, so a
+  manifest can meet a parser older than itself. The pre-aihub#295 parser skips any
+  line that does not start with `@include:`, and looks for `when:` ONLY on the line
+  immediately after one. Therefore:
+    - attribute lines are invisible to it — new keys can be added freely;
+    - an on-demand entry MUST NOT be spelled as an `@include:` with a tier attribute,
+      or an old parser would inject it and silently blow the size budget. It gets its
+      own directive verb, which an old parser drops entirely — the safe direction.
+    - `when:` must stay adjacent to its directive, or an old parser loses the
+      condition and unconditionally injects a conditional fragment. Linted.
+  Never start a line inside this comment with a bare directive verb: the parser
+  strips each line before matching, so an indented example would be parsed for real.
+
+  WHY THE ATTRIBUTES LIVE HERE AND NOT IN EACH FRAGMENT'S OWN HEADER
+  Per-fragment headers were measured, not argued about: the assembler appends each
+  fragment WHOLE, so a four-line YAML header on the seven resident fragments added 322
+  characters and took the payload from 9,772 to 10,094 — past the 10,000 hard limit,
+  into exactly the silent truncation aihub#285 just removed. A header-stripping
+  assembler could avoid that, but only for readers that go through the assembler, and
+  fragments/on-demand-index.md tells the model to `Read` these files directly. The
+  attributes are also manifest-scoped by nature: whether a fragment is resident is a
+  property of THIS list, not of the file.
 
   ==========================================================================
   SIZE BUDGET — READ BEFORE ADDING AN @include (aihub#285)
@@ -53,7 +144,8 @@ description: >
        ever busted again, the rules survive the truncation instead of bootstrap
        boilerplate. The same test asserts this ordering property.
 
-  ON-DEMAND TIER (deliberately NOT @include'd — see fragments/on-demand-index.md):
+  ON-DEMAND TIER (declared with the on-demand verb, never injected — see also
+  fragments/on-demand-index.md). Rationale per fragment:
     fragments/post-claim-routing.md    4,813 B — only applies to a three-segment
                                        "Next steps" for requires_human_session=true;
                                        the rhs=false auto-dispatch path is explicitly
@@ -102,9 +194,56 @@ description: >
 -->
 
 @include: fragments/iron-rules.md
+kind: rule
+gate: none
+gate-partial: pf-commit-guard
+authority: self
+
 @include: fragments/output-format.md
+kind: rule
+gate: none
+authority: self
+
 @include: fragments/memory-first.md
+kind: info
+authority: self
+
 @include: fragments/bootstrap.md
+kind: info
+authority: self
+
 @include: fragments/nl-routing.md
+kind: rule
+gate: none
+authority: each /pf-* skill's own NL Triggers section
+resident-because: it is the cross-skill index — a single skill's NL Triggers cannot tell you WHICH skill to open, and that is the decision made before any skill is read.
+
 @include: fragments/repo-routing.md
+kind: info
+authority: self
+
 @include: fragments/on-demand-index.md
+kind: info
+authority: self
+
+@ondemand: fragments/post-claim-routing.md
+kind: rule
+gate: none
+authority: self
+
+@ondemand: fragments/memory-conventions.md
+kind: rule
+gate: none
+authority: self
+
+@ondemand: fragments/diagram-convention.md
+kind: info
+authority: self
+
+@ondemand: fragments/platform-adaptation.md
+kind: info
+authority: references/codex-tools.md + references/copilot-tools.md
+
+@ondemand: fragments/repo-detail.md
+kind: info
+authority: self

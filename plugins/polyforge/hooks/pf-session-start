@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SessionStart hook for polyforge v1.
-# ASSEMBLES the using-polyforge skill at session start from the @include manifest in
+# ASSEMBLES the using-polyforge skill at session start from the manifest in
 # skills/using-polyforge/SKILL.md: each `@include: <path>` pulls a fragment, an optional
-# immediately-following `when: <cond>` makes it conditional. Conditions are evaluated
+# `when: <cond>` in its attribute block makes it conditional. Conditions are evaluated
 # against enabledPlugins across the user (~/.claude) and project (<workspace>/.claude)
 # settings layers (low->high precedence), so a conditional fragment is only added when the
 # plugin it depends on is ENABLED for the workspace. No-op outside a polyforge workspace
@@ -95,24 +95,45 @@ if body.startswith("---"):
     if end is not None:
         body = "\n".join(rest[end + 1:])
 
-inc_re = re.compile(r'^@include:\s*(\S+)\s*$')
-when_re = re.compile(r'^when:\s*(\S+)\s*$')
+# Manifest grammar (aihub#295). A directive line, optionally followed by an attribute
+# block of `key: value` lines (no blank line inside the block):
+#
+#   @include:  <path>   -> RESIDENT tier: assembled into the SessionStart payload.
+#   @ondemand: <path>   -> declared so the manifest lint can see its kind/gate, but
+#                          NEVER injected. Spelled as its own verb rather than
+#                          `@include:` + a tier attribute precisely so that a parser
+#                          predating this change drops it instead of injecting it and
+#                          silently blowing the 10,000-character budget.
+#
+# UNKNOWN ATTRIBUTE KEYS ARE IGNORED BY DESIGN. `kind` / `gate` / `authority` and
+# friends are consumed by tests/using-polyforge-manifest.test.sh, not here; the
+# assembler only needs `when`. Keeping this loop tolerant means the manifest schema can
+# grow without a hook update — and a hook must never block session startup.
+directive_re = re.compile(r'^@(include|ondemand):\s*(\S+)\s*$')
+attr_re = re.compile(r'^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$')
 lines = body.split("\n")
 parts = []
 i = 0
 while i < len(lines):
-    m = inc_re.match(lines[i].strip())
+    m = directive_re.match(lines[i].strip())
     if not m:
         i += 1
         continue
-    path = m.group(1)
-    cond = None
-    if i + 1 < len(lines):
-        w = when_re.match(lines[i + 1].strip())
-        if w:
-            cond = w.group(1)
-            i += 1
+    verb, path = m.group(1), m.group(2)
     i += 1
+    attrs = {}
+    while i < len(lines):
+        s = lines[i].strip()
+        if not s or directive_re.match(s):
+            break
+        a = attr_re.match(s)
+        if not a:
+            break
+        attrs.setdefault(a.group(1).lower(), a.group(2).strip())
+        i += 1
+    if verb != "include":
+        continue  # on-demand: shipped as a file, read by the model when it needs it
+    cond = attrs.get("when")
     if cond is not None and not cond_met(cond):
         continue
     full = os.path.normpath(os.path.join(skill_dir, path))

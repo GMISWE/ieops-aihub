@@ -21,7 +21,7 @@ type checkResult struct {
 	FixCmd  string
 }
 
-// RunDoctor runs 6 diagnostic checks and reports their status.
+// RunDoctor runs 7 diagnostic checks and reports their status.
 // With --fix: attempts to auto-repair fixable issues.
 //
 // Checks (§12.1):
@@ -31,6 +31,7 @@ type checkResult struct {
 //  4. worktrees  – pf.<project>-<seq>/ list vs server wi list; flag orphans
 //  5. version    – GET /v1/version; compare min_client_version vs local binary
 //  6. claude_md  – CLAUDE.md managed block format + .polyforge/repo-map/ presence
+//  7. usage_md   – .polyforge/usage.md still carrying rules using-polyforge owns
 func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot string, args []string) {
 	fix := len(args) > 0 && args[0] == "--fix"
 
@@ -41,6 +42,7 @@ func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot
 		checkWorktrees(ctx, c, cfg, wsRoot, fix),
 		checkVersion(ctx, c),
 		checkClaudeMd(wsRoot),
+		checkUsageMd(wsRoot, fix),
 	}
 
 	allOk := true
@@ -268,6 +270,109 @@ func checkWorktrees(ctx context.Context, c *client.Client, cfg *config.Config, w
 	}
 }
 
+// checkUsageMd reports a .polyforge/usage.md that still carries a rule section the
+// plugin-versioned using-polyforge skill owns (aihub#294).
+//
+// This check has to exist because writeUsageMd cannot fix the problem by itself. That
+// function refuses to overwrite an existing usage.md — deliberately; the file is the
+// user's — so dropping the rule sections from its template only helps workspaces created
+// after this release. Every workspace that already ran init keeps its frozen copy, a
+// session then receives the rules twice, and the two copies are under no obligation to
+// agree. They already did not: IR1's worktree path was wrong in one of them for three
+// months and nothing anywhere reported it.
+//
+// The removal is NOT done during `polyforge init`. Silently deleting from a file whose
+// entire contract is "polyforge does not write here once it exists" would trade a silent
+// duplicate for a silent deletion, which is the same class of defect this check exists to
+// end. `--fix` is an explicit request from the operator, so it is allowed to rewrite.
+func checkUsageMd(wsRoot string, fix bool) checkResult {
+	const name = "usage_md"
+	path := filepath.Join(wsRoot, ".polyforge", "usage.md")
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		// Absent is not a finding here: usage.md is written by init, and a workspace
+		// that never ran init has a louder problem that checkWorkspace already reports.
+		return checkResult{Name: name, Status: "ok", Message: "no .polyforge/usage.md to check"}
+	}
+
+	found := usageSectionsOwnedBySkill(string(b))
+	if len(found) == 0 {
+		return checkResult{Name: name, Status: "ok",
+			Message: ".polyforge/usage.md carries no rule section owned by using-polyforge"}
+	}
+	if fix {
+		stripped, n := stripUsageSections(string(b))
+		if werr := os.WriteFile(path, []byte(stripped), 0644); werr != nil {
+			return checkResult{Name: name, Status: "error",
+				Message: fmt.Sprintf("could not rewrite .polyforge/usage.md: %v", werr)}
+		}
+		return checkResult{Name: name, Status: "ok",
+			Message: fmt.Sprintf("removed %d duplicated rule section(s) from .polyforge/usage.md: %s "+
+				"(the maintained copy ships with the using-polyforge skill)",
+				n, strings.Join(found, ", "))}
+	}
+	return checkResult{Name: name, Status: "warning",
+		Message: fmt.Sprintf(".polyforge/usage.md still carries %d rule section(s) that using-polyforge "+
+			"owns (%s) — that file is never regenerated, so this copy cannot be corrected and a "+
+			"session sees both",
+			len(found), strings.Join(found, ", ")),
+		FixCmd: "polyforge doctor --fix"}
+}
+
+// usageSectionsOwnedBySkill lists, in template order, the skillOwnedUsageSections
+// headings present in a usage.md body (reported without the leading "## ").
+func usageSectionsOwnedBySkill(body string) []string {
+	var found []string
+	for _, h := range skillOwnedUsageSections {
+		for _, line := range strings.Split(body, "\n") {
+			if strings.TrimSpace(line) == h {
+				found = append(found, strings.TrimPrefix(h, "## "))
+				break
+			}
+		}
+	}
+	return found
+}
+
+// stripUsageSections removes every skillOwnedUsageSections section from a usage.md body
+// and reports how many it removed. A section runs from its `## ` heading to the next
+// `## ` heading or EOF, so the `---` rule the template puts *between* sections is carried
+// off with the section above it; the run of blank/`---` lines left dangling before the
+// removed heading is collapsed to a single blank line.
+//
+// Only whole generated sections go. Everything the user added elsewhere in the file is
+// untouched, which is what makes this safe enough to run under `--fix`.
+func stripUsageSections(body string) (string, int) {
+	owned := make(map[string]bool, len(skillOwnedUsageSections))
+	for _, h := range skillOwnedUsageSections {
+		owned[h] = true
+	}
+
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	removed := 0
+	for i := 0; i < len(lines); i++ {
+		if !owned[strings.TrimSpace(lines[i])] {
+			out = append(out, lines[i])
+			continue
+		}
+		removed++
+		for len(out) > 0 {
+			if t := strings.TrimSpace(out[len(out)-1]); t == "" || t == "---" {
+				out = out[:len(out)-1]
+				continue
+			}
+			break
+		}
+		out = append(out, "")
+		for i+1 < len(lines) && !strings.HasPrefix(lines[i+1], "## ") {
+			i++
+		}
+	}
+	return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n", removed
+}
+
 // checkClaudeMd inspects the CLAUDE.md managed block that `polyforge init`
 // writes. Two failure modes, both reported as warnings — a stale block is not a
 // broken workspace, so this check must never fail the run:
@@ -354,4 +459,3 @@ func checkVersion(ctx context.Context, c *client.Client) checkResult {
 	return checkResult{Name: "version", Status: "ok",
 		Message: fmt.Sprintf("server min_client_version=%s (local=dev)", minVer)}
 }
-

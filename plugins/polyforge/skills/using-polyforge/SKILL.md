@@ -86,9 +86,67 @@ description: >
   review of aihub#295 applied the wi's own discriminator — is the violation observable?
   — and also made memory-first.md ("pf_recall before every substantive action"),
   bootstrap.md (the session startup scan) and repo-routing.md rules, which would take
-  the lower bound below from 11,489 to 14,993. Reclassifying only ever ENLARGES that
+  the lower bound below from 13,563 to 17,127. Reclassifying only ever ENLARGES that
   bound, which is the honest direction; aihub#296 owns settling it with a measurement
   rather than deciding it in passing while moving a fragment.
+  (Both figures were 11,489 / 14,993 when aihub#295 wrote them. aihub#294 moved the
+  11-row memory-type table into memory-conventions.md, +2,074 chars on a fragment that
+  is already `kind: rule`, so the bound moved with it. Recomputed, not adjusted: the
+  first number is what tests/using-polyforge-manifest.test.sh prints today. Neither
+  number is resident — both these fragments are on-demand — so the payload is unaffected.)
+
+  ==========================================================================
+  WHICH CHANNEL OWNS A RULE (aihub#294)
+  ==========================================================================
+  Two channels put text in front of a model, and their properties are exact inverses:
+
+    .polyforge/usage.md   workspace-scoped, user-owned, NO size cap, delivered through
+                          the workspace CLAUDE.md `@import` — and never regenerated
+                          (internal/cli/init.go's writeUsageMd returns early if the file
+                          exists). A wrong rule here cannot be corrected in the field.
+    fragments/*.md        plugin-versioned, injected on every session, hard 10,000-char
+                          budget. A wrong rule here is corrected by the next release.
+
+  Both carried Iron Rules, NL Routing and the memory-type table. So the copy that was
+  maintained was not the copy that could be fixed where it runs, and they drifted: IR1's
+  worktree path read `pf.<shortid>` in one and `pf.<project>-<seq>` in the other for
+  three months, silently, because nothing had ever compared the two channels.
+
+  RULES LIVE HERE. Not because this channel is versioned — that is the weaker half of
+  the argument — but because it is UNCONDITIONALLY PRESENT and NOT USER-OWNED. usage.md
+  needs a .polyforge workspace, a CLAUDE.md, an intact `@import` line and a user who has
+  not edited it; the guard's own comment ("don't overwrite user edits") is a promise that
+  the file belongs to someone else. A rule with four delivery preconditions, kept in a
+  document the product has promised not to touch, is a default, not a rule.
+
+  And the obvious counter — "usage.md has no size cap, put the rules where there is room"
+  — is backwards. The 10,000-char cap is not a property of this channel, it is a property
+  of the model's context, which both channels spend. usage.md is not uncapped, it is
+  UNMEASURED. Moving text there buys no budget; it discards the only instrument that
+  measures the spend, and that instrument is what found this bug. Choosing a channel
+  because it has no gauge is how the payload reached 18,286 characters unnoticed.
+
+  Enforced by internal/cli/usage_channel_test.go — a Go test, so `go test ./...` in CI
+  runs it, unlike the suites in this directory (aihub#293). It asserts that no rule
+  section is delivered twice, that a section dropped from usage.md still has a home in a
+  fragment (moved, not deleted), and that no delivered surface spells the legacy worktree
+  path. Existing workspaces keep their frozen copy — a template edit cannot reach them —
+  so `polyforge doctor` reports it and `polyforge doctor --fix` removes it.
+
+  WHAT WAS NOT CARRIED OVER. Every removed SECTION has a home here, and a Go test asserts
+  it. Two row-level phrasings were deliberately not carried, because on each the surviving
+  copy is the better one — recorded so this reads as a decision, not an oversight:
+    - usage.md's IR3 named `/reload-plugins` as the remedy; iron-rules.md names `pf doctor`.
+      The fragment is right: `/reload-plugins` exists only under Claude Code, and this skill
+      ships a platform-adaptation fragment precisely because Codex/Copilot are supported.
+    - usage.md's NL Routing appended "+ fan-out subagents" to the ready-queue row. That is
+      an orchestration pattern, not an intent → operation mapping, which is all that table
+      claims to index.
+
+  KNOWN RESIDUAL: usage.md still carries "Wi creation rules", which is a rule with no
+  fragment copy. It is not part of this defect (one copy cannot diverge from itself) and
+  moving it costs resident budget that does not exist — 22 chars free at 9,778/9,800.
+  aihub#296 owns the slimming that would make room.
 
   BACKWARD COMPATIBILITY (why `@ondemand:` and not `tier: on-demand`)
   The plugin and the polyforge binary update through independent channels, so a
@@ -150,21 +208,23 @@ description: >
                                        "Next steps" for requires_human_session=true;
                                        the rhs=false auto-dispatch path is explicitly
                                        unaffected by it.
-    fragments/memory-conventions.md    2,173 B — its load-bearing rule ("all memory
+    fragments/memory-conventions.md    4,258 B — its load-bearing rule ("all memory
                                        lives in aihub, local .md memory is deprecated
                                        here") is already stated — in fact stated more
                                        strictly — in memory-first.md, which stays in the
-                                       always-injected tier. Its memory-type vocabulary
-                                       is also carried by .polyforge/usage.md (11 rows
-                                       there vs 4 here) via CLAUDE.md's @import.
-                                       ⚠️ usage.md is a partial fallback ONLY: it carries
-                                       the type table and nothing else (no `related`
-                                       links, no work_item_id, no cross-system link
-                                       discipline), and internal/cli/init.go does not
-                                       regenerate it once it exists, so older workspaces
-                                       may not have even that. The link-discipline and
-                                       work_item_id rules therefore live only in the
-                                       fragment — on-demand-index.md names them in its
+                                       always-injected tier.
+                                       ⚠️ This fragment used to be justified partly by
+                                       .polyforge/usage.md carrying the memory-type table
+                                       (11 rows there vs 4 here) as a fallback. That
+                                       fallback is GONE as of aihub#294: leaning on it was
+                                       the bug, not the mitigation. usage.md is written
+                                       once by internal/cli/init.go and never regenerated,
+                                       so the "fallback" was a copy nobody could correct —
+                                       and it had already drifted. The full 11-row table
+                                       now lives HERE and only here, which costs nothing
+                                       resident because this fragment is on-demand.
+                                       on-demand-index.md names the type vocabulary, the
+                                       link-discipline and work_item_id rules in its
                                        trigger so an agent knows when to go read it.
     fragments/platform-adaptation.md   1,431 B — its most load-bearing fact, the
                                        per-runtime MCP tool names for Claude Code /

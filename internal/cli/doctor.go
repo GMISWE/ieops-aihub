@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
@@ -20,7 +21,7 @@ type checkResult struct {
 	FixCmd  string
 }
 
-// RunDoctor runs 5 diagnostic checks and reports their status.
+// RunDoctor runs 6 diagnostic checks and reports their status.
 // With --fix: attempts to auto-repair fixable issues.
 //
 // Checks (§12.1):
@@ -29,6 +30,7 @@ type checkResult struct {
 //  3. repos      – .repo/<name>/ exist and match .polyforge.yaml remotes
 //  4. worktrees  – pf.<project>-<seq>/ list vs server wi list; flag orphans
 //  5. version    – GET /v1/version; compare min_client_version vs local binary
+//  6. claude_md  – CLAUDE.md managed block format + .polyforge/repo-map/ presence
 func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot string, args []string) {
 	fix := len(args) > 0 && args[0] == "--fix"
 
@@ -38,6 +40,7 @@ func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot
 		checkRepos(wsRoot, cfg),
 		checkWorktrees(ctx, c, cfg, wsRoot, fix),
 		checkVersion(ctx, c),
+		checkClaudeMd(wsRoot),
 	}
 
 	allOk := true
@@ -263,6 +266,74 @@ func checkWorktrees(ctx context.Context, c *client.Client, cfg *config.Config, w
 		Message: fmt.Sprintf("%d orphan worktrees: %s", len(orphans), strings.Join(orphans, ", ")),
 		FixCmd:  "polyforge doctor --fix",
 	}
+}
+
+// checkClaudeMd inspects the CLAUDE.md managed block that `polyforge init`
+// writes. Two failure modes, both reported as warnings — a stale block is not a
+// broken workspace, so this check must never fail the run:
+//
+//   - The block still inlines the per-repo detail (the pre-aihub#291 format).
+//     That detail sits at context position 0, is re-read on every request, and
+//     compaction cannot drop it; re-running `polyforge init` moves it to
+//     .polyforge/repo-map/. This is the whole reason the check exists: the
+//     saving only lands once a workspace re-runs init, and workspaces go months
+//     without doing so.
+//   - The block is slim but the repo map it points at is missing, so routing
+//     has nothing but the one-line positioning. Say so, rather than leaving an
+//     agent to quietly guess which repo a task belongs to.
+//
+// The expected set of maps comes from the block's own `### <project>` headings,
+// not from .polyforge.yaml — see managedBlockProjects.
+func checkClaudeMd(wsRoot string) checkResult {
+	const name = "claude_md"
+	const fix = "polyforge init"
+
+	b, err := os.ReadFile(filepath.Join(wsRoot, "CLAUDE.md"))
+	if err != nil {
+		return checkResult{Name: name, Status: "warning",
+			Message: fmt.Sprintf("CLAUDE.md not readable: %v", err), FixCmd: fix}
+	}
+	block, ok := managedBlockOf(string(b))
+	if !ok {
+		return checkResult{Name: name, Status: "warning",
+			Message: "CLAUDE.md has no polyforge managed block", FixCmd: fix}
+	}
+	if blockIsLegacyFormat(block) {
+		return checkResult{Name: name, Status: "warning",
+			Message: fmt.Sprintf("managed block is the legacy inline format (%d B, re-read on every request) — "+
+				"re-running init moves per-repo detail to .polyforge/repo-map/", len(block)),
+			FixCmd: fix}
+	}
+
+	mapDir := filepath.Join(wsRoot, ".polyforge", repoMapDirName)
+	present := map[string]bool{}
+	entries, _ := os.ReadDir(mapDir) // absent dir → no entries, handled below
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			present[e.Name()] = true
+		}
+	}
+	if len(present) == 0 {
+		return checkResult{Name: name, Status: "warning",
+			Message: fmt.Sprintf("repo map missing: no %s/*.md — the block carries only one-line positioning, "+
+				"so routing has no main_modules / change_scenarios / tech_stack to read",
+				filepath.Join(".polyforge", repoMapDirName)),
+			FixCmd: fix}
+	}
+	var missing []string
+	for _, project := range managedBlockProjects(block) {
+		if fn := repoMapFileName(project); fn != "" && !present[fn] {
+			missing = append(missing, project)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return checkResult{Name: name, Status: "warning",
+			Message: fmt.Sprintf("repo map missing for project(s): %s", strings.Join(missing, ", ")),
+			FixCmd:  fix}
+	}
+	return checkResult{Name: name, Status: "ok",
+		Message: fmt.Sprintf("managed block slim (%d B), %d repo map(s) present", len(block), len(present))}
 }
 
 // checkVersion fetches GET /v1/version and compares min_client_version with

@@ -1056,8 +1056,16 @@ func TestWritePolyforgeYAML_CorruptExistingFile(t *testing.T) {
 
 // ─── renderRepoBlock ─────────────────────────────────────────────────────────
 
+// TestRenderRepoBlock pins the aihub#291 contract: the CLAUDE.md managed block
+// carries exactly ONE line per repo — the positioning headline — and nothing
+// else. stack / modules / changes / generated moved to
+// .polyforge/repo-map/<project>.md (see TestRenderRepoMap), because the block
+// sits at context position 0 and is re-read on every request while that detail
+// is only needed at routing time.
 func TestRenderRepoBlock(t *testing.T) {
 	desc := "Go HTTP server + PostgreSQL"
+	// Any repo entry, fully populated, must still render as a single line.
+	detailBullets := []string{"  - stack:", "  - modules:", "  - changes:", "  - generated:"}
 	cases := []struct {
 		name       string
 		repo       repoEntry
@@ -1065,7 +1073,7 @@ func TestRenderRepoBlock(t *testing.T) {
 		notWant    []string
 	}{
 		{
-			name: "structured block renders headline + bullets",
+			name: "structured block renders the headline only",
 			repo: repoEntry{
 				Name:            "aihub",
 				Positioning:     "polyforge core API",
@@ -1075,30 +1083,21 @@ func TestRenderRepoBlock(t *testing.T) {
 				GeneratedAt:     "2026-05-27T05:10:00Z",
 				GeneratedCommit: "cef95e2ca68312651e1e147177f80c0c854a87cb",
 			},
-			wantSubstr: []string{
-				"- **aihub**: polyforge core API",
-				"  - stack: Go, PostgreSQL",
-				"  - modules:\n",
-				"    - internal/api — HTTP handlers\n",
-				"    - internal/store — PG store\n",
-				"  - changes:\n",
-				"    - add MCP tool\n",
-				"    - schema migration\n",
-				"  - generated: 2026-05-27 @ cef95e2\n",
-			},
-			notWant: []string{"  - changes: add MCP tool; schema migration"},
+			wantSubstr: []string{"- **aihub**: polyforge core API\n"},
+			notWant: append(append([]string{}, detailBullets...),
+				"Go, PostgreSQL", "internal/api", "add MCP tool", "cef95e2"),
 		},
 		{
 			name:       "legacy description-only renders headline, no bullets",
 			repo:       repoEntry{Name: "marketplace", Description: &desc},
 			wantSubstr: []string{"- **marketplace**: Go HTTP server + PostgreSQL"},
-			notWant:    []string{"  - stack:", "  - modules:", "  - changes:"},
+			notWant:    detailBullets,
 		},
 		{
 			name:       "empty repo renders pending placeholder",
 			repo:       repoEntry{Name: "proxy-server"},
 			wantSubstr: []string{"- **proxy-server**: *(description pending"},
-			notWant:    []string{"  - stack:"},
+			notWant:    detailBullets,
 		},
 		{
 			name: "embedded newline is collapsed to a single line",
@@ -1110,7 +1109,7 @@ func TestRenderRepoBlock(t *testing.T) {
 				ChangeScenarios: []string{"c"},
 			},
 			wantSubstr: []string{"- **x**: line one line two"},
-			notWant:    []string{"line one\nline two"},
+			notWant:    append([]string{"line one\nline two"}, detailBullets...),
 		},
 	}
 	for _, tc := range cases {
@@ -1118,6 +1117,10 @@ func TestRenderRepoBlock(t *testing.T) {
 			var sb strings.Builder
 			renderRepoBlock(&sb, tc.repo)
 			got := sb.String()
+			// The whole point of aihub#291: one repo = one line in CLAUDE.md.
+			if n := strings.Count(got, "\n"); n != 1 {
+				t.Errorf("renderRepoBlock emitted %d lines, want exactly 1:\n%s", n, got)
+			}
 			for _, want := range tc.wantSubstr {
 				if !strings.Contains(got, want) {
 					t.Errorf("missing %q in:\n%s", want, got)
@@ -1129,6 +1132,453 @@ func TestRenderRepoBlock(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ─── repo maps (aihub#291) ───────────────────────────────────────────────────
+
+// fullRepo is a repo entry with every structured field populated — the fixture
+// the zero-information-loss assertions below are built from.
+func fullRepo() repoEntry {
+	return repoEntry{
+		Name:            "aihub",
+		Positioning:     "polyforge core API",
+		TechStack:       []string{"Go", "PostgreSQL"},
+		MainModules:     []repoModuleEntry{{Path: "internal/api", Role: "HTTP handlers"}, {Path: "internal/store", Role: "PG store"}},
+		ChangeScenarios: []string{"add MCP tool", "schema migration"},
+		GeneratedAt:     "2026-05-27T05:10:00Z",
+		GeneratedCommit: "cef95e2ca68312651e1e147177f80c0c854a87cb",
+	}
+}
+
+// TestRenderRepoMap is the other half of the aihub#291 contract: every field
+// renderRepoBlock stopped emitting must land here instead. Zero information
+// loss is the acceptance criterion, so this asserts on the *values*, not just
+// that the section exists.
+func TestRenderRepoMap(t *testing.T) {
+	desc := "polyforge backend platform"
+	legacy := "Go HTTP server + PostgreSQL"
+	blk := projectBlock{
+		Name:        "aihub",
+		Description: &desc,
+		Repos: []repoEntry{
+			fullRepo(),
+			{Name: "marketplace", Description: &legacy},
+			{Name: "proxy-server"},
+		},
+	}
+	got := renderRepoMap(blk)
+
+	for _, want := range []string{
+		"# Repo map — aihub\n",
+		"polyforge backend platform",
+		"## aihub\n",
+		"polyforge core API",
+		"- stack: Go, PostgreSQL\n",
+		"- modules:\n",
+		"  - internal/api — HTTP handlers\n",
+		"  - internal/store — PG store\n",
+		"- changes:\n",
+		"  - add MCP tool\n",
+		"  - schema migration\n",
+		"- generated: 2026-05-27 @ cef95e2\n",
+		// Repos without a structured description still appear, so the map is a
+		// complete list of the project's repos rather than a filtered one.
+		"## marketplace\n",
+		"Go HTTP server + PostgreSQL",
+		"## proxy-server\n",
+		"*(description pending",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("renderRepoMap missing %q in:\n%s", want, got)
+		}
+	}
+
+	// A repo with no structured block must not sprout empty bullets.
+	after := got[strings.Index(got, "## marketplace"):]
+	for _, no := range []string{"- stack:", "- modules:", "- changes:", "- generated:"} {
+		if strings.Contains(after, no) {
+			t.Errorf("unstructured repo emitted %q in:\n%s", no, after)
+		}
+	}
+}
+
+// TestRenderRepoMapEmbeddedNewline guards the same one-line invariant
+// renderRepoBlock has: a field carrying a newline must not break the bullet
+// layout of the generated map.
+func TestRenderRepoMapEmbeddedNewline(t *testing.T) {
+	blk := projectBlock{Name: "p", Repos: []repoEntry{{
+		Name:            "x",
+		Positioning:     "line one\nline two",
+		TechStack:       []string{"Go"},
+		MainModules:     []repoModuleEntry{{Path: "p\nq", Role: "r"}},
+		ChangeScenarios: []string{"c\nd"},
+	}}}
+	got := renderRepoMap(blk)
+	for _, want := range []string{"line one line two", "  - p q — r\n", "  - c d\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("renderRepoMap missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestRepoMapFileName(t *testing.T) {
+	cases := map[string]string{
+		"aihub":            "aihub.md",
+		"global-routing":   "global-routing.md",
+		"polyforge_scen.1": "polyforge_scen.1.md",
+		"a/b":              "a-b.md",
+		"../etc/passwd":    "etc-passwd.md",
+		"..":               "",
+		".":                "",
+		"":                 "",
+		"  ":               "",
+		"with space":       "with-space.md",
+		".hidden":          "hidden.md",
+	}
+	for in, want := range cases {
+		if got := repoMapFileName(in); got != want {
+			t.Errorf("repoMapFileName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestWriteRepoMaps(t *testing.T) {
+	phase := t.TempDir()
+	dir := filepath.Join(phase, "repo-map")
+
+	blocks := []projectBlock{
+		{Name: "aihub", Repos: []repoEntry{fullRepo()}},
+		{Name: "ieops", Repos: []repoEntry{{Name: "ieops-v2", Positioning: "scheduler"}}},
+	}
+	if err := writeRepoMaps(phase, blocks); err != nil {
+		t.Fatalf("writeRepoMaps: %v", err)
+	}
+	for _, name := range []string{"aihub.md", "ieops.md"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("expected %s: %v", name, err)
+		}
+	}
+
+	// A project that disappears server-side must not leave a stale map behind:
+	// routing would otherwise read a map for a repo set that no longer exists.
+	if err := writeRepoMaps(phase, blocks[:1]); err != nil {
+		t.Fatalf("writeRepoMaps (prune): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ieops.md")); !os.IsNotExist(err) {
+		t.Errorf("stale ieops.md was not pruned (err=%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "aihub.md")); err != nil {
+		t.Errorf("aihub.md must survive the prune: %v", err)
+	}
+
+	// Non-.md files are not ours to delete.
+	keep := filepath.Join(dir, "NOTES.txt")
+	if err := os.WriteFile(keep, []byte("hand-written"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// An empty render (e.g. the project fetch failed) must NOT prune: a
+	// transient server error would otherwise wipe every map on disk.
+	if err := writeRepoMaps(phase, nil); err != nil {
+		t.Fatalf("writeRepoMaps (empty): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "aihub.md")); err != nil {
+		t.Errorf("empty render must not prune existing maps: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("non-.md file must not be pruned: %v", err)
+	}
+}
+
+// TestWriteRepoMapsIsBestEffort covers the failure ordering: by the time
+// writeRepoMaps runs, CLAUDE.md has already been slimmed. One unwritable project
+// must therefore not cost every other project its map — that combination (slim
+// block, no maps at all) leaves the detail unavailable with nothing explaining
+// why. The bad project must also keep whatever map it already had.
+func TestWriteRepoMapsIsBestEffort(t *testing.T) {
+	phase := t.TempDir()
+	dir := filepath.Join(phase, repoMapDirName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// A pre-existing map for the project whose rewrite is about to fail.
+	if err := os.WriteFile(filepath.Join(dir, "broken.md"), []byte("# stale but better than nothing\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Make "broken.md" unwritable by turning it into a directory.
+	if err := os.Remove(filepath.Join(dir, "broken.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "broken.md"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	blocks := []projectBlock{
+		{Name: "broken", Repos: []repoEntry{{Name: "r", Positioning: "p"}}},
+		{Name: "aihub", Repos: []repoEntry{fullRepo()}},
+	}
+	err := writeRepoMaps(phase, blocks)
+	if err == nil {
+		t.Error("expected an error describing the failed project")
+	} else if !strings.Contains(err.Error(), "broken") {
+		t.Errorf("error should name the failing project, got: %v", err)
+	}
+	// The healthy project listed AFTER the failing one must still be written.
+	if _, serr := os.Stat(filepath.Join(dir, "aihub.md")); serr != nil {
+		t.Errorf("a later healthy project lost its map because an earlier one failed: %v", serr)
+	}
+	// And the failing project's existing entry must not have been pruned.
+	if _, serr := os.Stat(filepath.Join(dir, "broken.md")); serr != nil {
+		t.Errorf("the failing project's existing map was pruned, widening the outage: %v", serr)
+	}
+}
+
+// TestWriteRepoMapsNoPruneWhenEveryWriteFails: if nothing could be written we
+// cannot distinguish "project removed" from "render broken", so pruning on that
+// evidence would destroy a working map set.
+func TestWriteRepoMapsNoPruneWhenEveryWriteFails(t *testing.T) {
+	phase := t.TempDir()
+	dir := filepath.Join(phase, repoMapDirName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "survivor.md"), []byte("# keep me\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "broken.md"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = writeRepoMaps(phase, []projectBlock{{Name: "broken", Repos: []repoEntry{{Name: "r"}}}})
+	if _, err := os.Stat(filepath.Join(dir, "survivor.md")); err != nil {
+		t.Errorf("existing maps were pruned even though no write succeeded: %v", err)
+	}
+}
+
+// TestWriteRepoMapsRoundTrip is the acceptance criterion in test form: every
+// value renderRepoBlock used to print into CLAUDE.md is still recoverable from
+// the generated map file.
+func TestWriteRepoMapsRoundTrip(t *testing.T) {
+	phase := t.TempDir()
+	r := fullRepo()
+	if err := writeRepoMaps(phase, []projectBlock{{Name: "aihub", Repos: []repoEntry{r}}}); err != nil {
+		t.Fatalf("writeRepoMaps: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(phase, "repo-map", "aihub.md"))
+	if err != nil {
+		t.Fatalf("read map: %v", err)
+	}
+	got := string(b)
+	want := append([]string{r.Positioning, generatedLine(r)}, r.TechStack...)
+	want = append(want, r.ChangeScenarios...)
+	for _, m := range r.MainModules {
+		want = append(want, m.Path, m.Role)
+	}
+	for _, w := range want {
+		if !strings.Contains(got, w) {
+			t.Errorf("repo map lost %q; it is no longer anywhere in:\n%s", w, got)
+		}
+	}
+}
+
+// TestRepoEntryFieldsAreAllRendered is the guard the hand-written round-trip
+// above cannot be: it walks repoEntry by reflection, so adding a field without
+// teaching renderRepoMap about it fails here instead of silently vanishing from
+// the map. This repo has been bitten before by a renderer that rebuilt a fresh
+// value instead of copying, dropping newly added fields with every test green.
+//
+// Each field is given a unique sentinel value and must surface in the rendered
+// map. Deliberately no "skip unknown fields" escape hatch — a new field should
+// force a decision about whether routing needs it.
+func TestRepoEntryFieldsAreAllRendered(t *testing.T) {
+	rt := reflect.TypeOf(repoEntry{})
+	v := reflect.New(rt).Elem()
+	sentinels := map[string]string{}
+
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		sentinel := "SENTINEL" + f.Name
+		sentinels[f.Name] = sentinel
+		switch f.Type.Kind() {
+		case reflect.String:
+			v.Field(i).SetString(sentinel)
+		case reflect.Pointer: // *string (Description)
+			s := sentinel
+			v.Field(i).Set(reflect.ValueOf(&s))
+		case reflect.Slice:
+			switch f.Type.Elem().Kind() {
+			case reflect.String: // []string (TechStack, ChangeScenarios)
+				v.Field(i).Set(reflect.ValueOf([]string{sentinel}))
+			case reflect.Struct: // []repoModuleEntry (MainModules)
+				v.Field(i).Set(reflect.ValueOf([]repoModuleEntry{{Path: sentinel, Role: sentinel + "Role"}}))
+			default:
+				t.Fatalf("repoEntry.%s: unhandled slice element kind %s — teach this test about it", f.Name, f.Type.Elem().Kind())
+			}
+		default:
+			t.Fatalf("repoEntry.%s: unhandled kind %s — teach this test about it", f.Name, f.Type.Kind())
+		}
+	}
+	r := v.Interface().(repoEntry)
+
+	// GeneratedAt/GeneratedCommit are reformatted by generatedLine rather than
+	// echoed, so match on what that produces instead of the raw sentinel.
+	rendered := renderRepoMap(projectBlock{Name: "p", Repos: []repoEntry{r}})
+	for fieldName, sentinel := range sentinels {
+		switch fieldName {
+		case "GeneratedAt", "GeneratedCommit":
+			if line := generatedLine(r); line == "" || !strings.Contains(rendered, line) {
+				t.Errorf("repoEntry.%s is not reachable from the rendered map (generated line %q)", fieldName, line)
+			}
+		case "Name":
+			if !strings.Contains(rendered, "## "+sentinel) {
+				t.Errorf("repoEntry.Name is not rendered as a section heading")
+			}
+		case "Description":
+			// Only a fallback: Positioning wins when both are set, which is
+			// correct. Assert it is reachable when it IS the headline.
+			only := repoEntry{Name: "x", Description: &sentinel}
+			if !strings.Contains(renderRepoMap(projectBlock{Name: "p", Repos: []repoEntry{only}}), sentinel) {
+				t.Errorf("repoEntry.Description is not reachable from the rendered map even as the sole headline")
+			}
+		default:
+			if !strings.Contains(rendered, sentinel) {
+				t.Errorf("repoEntry.%s (%q) is NOT in the rendered repo map — a field was added to repoEntry "+
+					"without being rendered, so it is silently lost from CLAUDE.md and from the map:\n%s",
+					fieldName, sentinel, rendered)
+			}
+		}
+	}
+}
+
+// TestRunInitWiring guards the seam the unit tests cannot: writeRepoMaps must
+// actually be called from RunInit. Without this, deleting that one call leaves
+// every test green while CLAUDE.md gets slimmed and no map is ever written —
+// the worst possible end state, since the detail is then nowhere.
+//
+// RunInit needs a live server, so this asserts on the source of the wiring
+// rather than executing it: both the block write and the map write must be
+// present in the same function.
+func TestRunInitWiring(t *testing.T) {
+	src, err := os.ReadFile("init.go")
+	if err != nil {
+		t.Fatalf("read init.go: %v", err)
+	}
+	body := string(src)
+	start := strings.Index(body, "func RunInit(")
+	if start < 0 {
+		t.Fatal("RunInit not found in init.go")
+	}
+	// End of RunInit = the next top-level func declaration.
+	end := strings.Index(body[start+1:], "\nfunc ")
+	if end < 0 {
+		end = len(body) - start - 1
+	}
+	fn := body[start : start+1+end]
+
+	for _, want := range []string{"upsertManagedBlock(", "writeRepoMaps("} {
+		if !strings.Contains(fn, want) {
+			t.Errorf("RunInit does not call %s — CLAUDE.md and .polyforge/repo-map/ must be written "+
+				"in the same pass, or the block is slimmed with no map to fall back on", want)
+		}
+	}
+}
+
+func TestManagedBlockOf(t *testing.T) {
+	body := "intro\n" + managedBlockStart + "\n## Workspace\nx\n" + managedBlockEnd + "\ntail\n"
+	got, ok := managedBlockOf(body)
+	if !ok {
+		t.Fatal("managedBlockOf did not find the block")
+	}
+	if !strings.HasPrefix(got, managedBlockStart) || !strings.HasSuffix(got, managedBlockEnd) {
+		t.Errorf("block not delimited by the markers: %q", got)
+	}
+	if strings.Contains(got, "intro") || strings.Contains(got, "tail") {
+		t.Errorf("block leaked surrounding text: %q", got)
+	}
+	if _, ok := managedBlockOf("no markers here"); ok {
+		t.Error("managedBlockOf reported a block in text that has none")
+	}
+	if _, ok := managedBlockOf(managedBlockStart + "\nunterminated"); ok {
+		t.Error("managedBlockOf accepted an unterminated block")
+	}
+}
+
+// TestBlockIsLegacyFormatWithoutModules is a regression test: each of the four
+// detail bullets is independently optional upstream, so a legacy block whose
+// repos have tech_stack / change_scenarios / generated but NO main_modules never
+// emits "  - modules:". Keying detection on that bullet alone called such a
+// block slim and reported the wrong remedy.
+func TestBlockIsLegacyFormatWithoutModules(t *testing.T) {
+	for _, tc := range []struct{ name, bullets string }{
+		{"stack only", "  - stack: Go\n"},
+		{"changes only", "  - changes:\n    - add MCP tool\n"},
+		{"generated only", "  - generated: 2026-05-27 @ cef95e2\n"},
+		{"stack+changes, no modules", "  - stack: Go\n  - changes:\n    - c\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			block := managedBlockStart + "\n## Workspace\n\n### aihub\n\n- **aihub**: core\n" +
+				tc.bullets + managedBlockEnd
+			if !blockIsLegacyFormat(block) {
+				t.Errorf("block with inline detail was classified slim:\n%s", block)
+			}
+		})
+	}
+}
+
+// TestManagedBlockRejectsForgedStructureInDescription is a regression test for a
+// false positive that was self-perpetuating: the project description is written
+// into the block, so if it is not collapsed to one line a description containing
+// "\n  - modules:" makes a FRESHLY rendered slim block classify as legacy. Doctor
+// would then warn forever and the SessionStart hint would fire on every session
+// — the unconditional position-0 line the design explicitly rules out — and
+// re-running init would never clear it. A "### " line likewise forges a project.
+func TestManagedBlockRejectsForgedStructureInDescription(t *testing.T) {
+	for _, tc := range []struct{ name, desc string }{
+		{"forged modules bullet", "real description\n  - modules:\n    - fake — fake"},
+		{"forged project heading", "real description\n### phantom-project"},
+		{"forged stack bullet", "real description\n  - stack: Go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "CLAUDE.md")
+			desc := tc.desc
+			blocks := []projectBlock{{
+				Name:        "aihub",
+				Description: &desc,
+				Repos:       []repoEntry{{Name: "aihub", Positioning: "core"}},
+			}}
+			if err := upsertManagedBlock(path, blocks); err != nil {
+				t.Fatalf("upsertManagedBlock: %v", err)
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			block, ok := managedBlockOf(string(b))
+			if !ok {
+				t.Fatal("no managed block written")
+			}
+			if blockIsLegacyFormat(block) {
+				t.Errorf("a freshly rendered slim block was classified legacy — the description forged block structure:\n%s", block)
+			}
+			if got := managedBlockProjects(block); len(got) != 1 || got[0] != "aihub" {
+				t.Errorf("managedBlockProjects = %v, want exactly [aihub] — the description forged a project", got)
+			}
+		})
+	}
+}
+
+func TestBlockIsLegacyFormat(t *testing.T) {
+	legacy := managedBlockStart + "\n## Workspace\n\n### aihub\n\n- **aihub**: core\n" +
+		"  - stack: Go\n  - modules:\n    - internal/api — handlers\n" + managedBlockEnd
+	if !blockIsLegacyFormat(legacy) {
+		t.Error("a block with inline modules must be detected as legacy")
+	}
+	var sb strings.Builder
+	renderRepoBlock(&sb, fullRepo())
+	slim := managedBlockStart + "\n## Workspace\n\n### aihub\n\n" + sb.String() + managedBlockEnd
+	if blockIsLegacyFormat(slim) {
+		t.Errorf("a freshly rendered block must not look legacy:\n%s", slim)
 	}
 }
 

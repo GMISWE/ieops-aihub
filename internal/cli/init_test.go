@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -1447,6 +1448,62 @@ func TestRepoEntryFieldsAreAllRendered(t *testing.T) {
 					fieldName, sentinel, rendered)
 			}
 		}
+	}
+}
+
+// TestManagedBlockPointsAtTheMapItWrote is the aihub#291 pointer contract, and
+// the reason the session-start skill text does NOT describe the repo-map layout:
+// the pointer in the block and the file it names are produced by the same init
+// pass, so they cannot drift. This test asserts that literally — it resolves the
+// pointer emitted into the block against the filesystem writeRepoMaps just wrote.
+//
+// If this ever fails, the block is telling agents to read a file that is not
+// there, which is worse than saying nothing.
+func TestManagedBlockPointsAtTheMapItWrote(t *testing.T) {
+	ws := t.TempDir()
+	phase := filepath.Join(ws, ".polyforge")
+	blocks := []projectBlock{
+		{Name: "aihub", Repos: []repoEntry{fullRepo()}},
+		{Name: "global-routing", Repos: []repoEntry{{Name: "gr", Positioning: "routing"}}},
+	}
+	if err := writeRepoMaps(phase, blocks); err != nil {
+		t.Fatalf("writeRepoMaps: %v", err)
+	}
+	claudeMd := filepath.Join(ws, "CLAUDE.md")
+	if err := upsertManagedBlock(claudeMd, blocks); err != nil {
+		t.Fatalf("upsertManagedBlock: %v", err)
+	}
+	b, err := os.ReadFile(claudeMd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, ok := managedBlockOf(string(b))
+	if !ok {
+		t.Fatal("no managed block")
+	}
+
+	re := regexp.MustCompile("(?m)^> Repo detail \\(stack / modules / changes\\): `([^`]+)`$")
+	found := re.FindAllStringSubmatch(block, -1)
+	if len(found) != len(blocks) {
+		t.Fatalf("got %d pointer lines, want one per project (%d):\n%s", len(found), len(blocks), block)
+	}
+	for _, m := range found {
+		rel := m[1]
+		if filepath.IsAbs(rel) || strings.Contains(rel, "..") {
+			t.Errorf("pointer %q must be a workspace-relative path", rel)
+		}
+		if _, err := os.Stat(filepath.Join(ws, filepath.FromSlash(rel))); err != nil {
+			t.Errorf("block points at %q but that file does not exist: %v", rel, err)
+		}
+	}
+
+	// The pointer must not be mistaken for legacy inline detail, and must not
+	// forge a project heading.
+	if blockIsLegacyFormat(block) {
+		t.Errorf("the pointer line made a slim block look legacy:\n%s", block)
+	}
+	if got := managedBlockProjects(block); len(got) != len(blocks) {
+		t.Errorf("managedBlockProjects = %v, want %d entries", got, len(blocks))
 	}
 }
 

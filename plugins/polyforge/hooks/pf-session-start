@@ -127,35 +127,20 @@ if not parts:
 
 assembled = "\n\n".join(parts)
 
-# aihub#291 — nudge a workspace whose CLAUDE.md managed block is still the legacy
-# inline format. The saving only lands once someone re-runs `polyforge init`, and
-# workspaces go months without doing so, so `polyforge doctor` alone is not enough:
-# the hint has to reach the session. CONDITIONAL on purpose — an unconditional line
-# here would itself sit at context position 0 on every request and eat part of what
-# the slimming buys. Fail-open: any error means no hint, never a blocked session.
+# aihub#291 deliberately does NOT add a "your managed block is still the legacy
+# format" nudge here. It was tried and reverted, for two measured reasons:
 #
-# NOTE: this is a second implementation of blockIsLegacyFormat / managedBlockOf
-# from internal/cli/init.go. Keep the marker list below in sync with
-# legacyDetailMarkers there — all four are listed because each detail bullet is
-# independently optional upstream, so keying on "  - modules:" alone would call
-# a fat block slim.
-hint = ""
-try:
-    claude_md = (read(os.path.join(ws, "CLAUDE.md")) or "") if ws else ""
-    END = "<!-- /polyforge:managed -->"
-    s = claude_md.find('<!-- polyforge:managed:version="1.0" -->')
-    e = claude_md.find(END, s + 1) if s >= 0 else -1
-    block = claude_md[s:e + len(END)] if s >= 0 and e > s else ""
-    if any(m in block for m in ("\n  - modules:", "\n  - stack:", "\n  - changes:", "\n  - generated:")):
-        hint = (
-            "\n\n**Workspace upkeep (one line, then move on):** this workspace's CLAUDE.md "
-            "`## Workspace` block is still the legacy inline format — it repeats every repo's "
-            "modules / changes / stack at context position 0 on *every* request. Running "
-            "`polyforge init` moves that detail to `.polyforge/repo-map/<project>.md`, read on "
-            "demand. Mention it to the user once; do not run it yourself unattended."
-        )
-except Exception:
-    hint = ""
+#   1. The payload has a hard 10,000-character budget (aihub#285). On top of
+#      #253's 9,756-character baseline the nudge measured 386 characters, so it
+#      busted the budget on its own — and it only fired on legacy workspaces,
+#      i.e. exactly the ones it was meant to help.
+#   2. It was concatenated at the very END of ctx, so every time it fired it sat
+#      past the truncation point: it turned an intact payload into a truncated
+#      one and still delivered none of itself.
+#
+# `polyforge doctor` (check 6, claude_md) reports the same state with no budget
+# cost. If a session-start nudge is ever revived, it must be measured against
+# the budget AND placed in the preamble, not appended.
 
 ctx = (
     "<EXTREMELY_IMPORTANT>\n"
@@ -168,7 +153,6 @@ ctx = (
     "(claim / step / artifact / commit / PR / wrap), not about which engine authors the content.\n\n"
     "**Below is the assembled `using-polyforge` skill (fragments per the SKILL.md manifest):**\n\n"
     + assembled
-    + hint
     + "\n</EXTREMELY_IMPORTANT>"
 )
 

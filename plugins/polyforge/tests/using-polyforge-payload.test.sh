@@ -155,6 +155,7 @@ check_deferred "post-claim-routing.md"  "Mandatory output rules"
 check_deferred "memory-conventions.md"  "Cross-memory links"
 check_deferred "diagram-convention.md"  "degrades gracefully back to a code block"
 check_deferred "platform-adaptation.md" "Copilot CLI**: installs as a native plugin"
+check_deferred "repo-detail.md"         "The pointer is written by the same code that writes the map file"
 
 echo
 echo "4. negative control — the window check must be able to fail"

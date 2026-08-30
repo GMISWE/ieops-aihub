@@ -314,7 +314,7 @@ aihub/
 │   │
 │   ├── cli/
 │   │   ├── init.go                     # pf init / pf init --apply
-│   │   ├── doctor.go                   # pf doctor（5 项检查）
+│   │   ├── doctor.go                   # pf doctor（6 项检查）
 │   │   ├── ready.go                    # pf ready [--view=lcrs]
 │   │   └── stalled.go                  # pf stalled
 │   │

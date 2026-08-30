@@ -16,28 +16,11 @@ On session start, before responding to any user message:
 
 **Step 0 — Repo map first.** Your context already includes CLAUDE.md's `## Workspace`
 managed block (auto-loaded by the harness). Consult it *before* anything else as your
-**repo map**: it lists every repo with a one-line `positioning`, which is what you route
-on — see [Repo Routing](#repo-routing-task--repo) below. Do **not** re-read the file; it's
-already in context.
-
-The per-repo detail (`tech_stack` / `main_modules` / `change_scenarios`) is deliberately
-**not** in the block — it would sit at context position 0 on every request, while it is
-only needed at the moment you route. Three cases:
-
-- **`.polyforge/repo-map/<project>.md` exists** → read that file, on demand, for the one
-  project you routed to.
-- **It doesn't, and the block still shows `  - stack:` / `  - modules:` / `  - changes:`
-  bullets under each repo** → this workspace hasn't re-run `polyforge init` since the
-  split, so those fields may still be inline in the block (older format); use them
-  straight from context.
-- **Neither** → say "repo map missing for `<project>` — run `polyforge init`" and fall
-  back to live tools (`codegraph_*`, `Grep`, a directory listing in the worktree). Do
-  **not** guess a repo's internals from its one-line positioning. `polyforge doctor`
-  reports this same state as a `claude_md` warning.
-
-Only if the `## Workspace` block is absent entirely (a subagent without injection, or a
-member who hasn't run `polyforge init`) → `Read` the workspace `CLAUDE.md`, or run
-`/pf-init` to generate it.
+**repo map**: each repo's one-line `positioning` tells you at a glance what every repo is.
+Use it to route work — see [Repo Routing](#repo-routing-task--repo) below. Do **not** re-read the
+file; it's already in context. Only if the `## Workspace` block is absent (a subagent
+without injection, or a member who hasn't run `polyforge init`) → `Read` the workspace
+`CLAUDE.md`, or run `/pf-init` to generate it.
 
 Then run the state/wi scan:
 

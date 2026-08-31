@@ -190,6 +190,16 @@ func parseListWIBool(c echo.Context, name string) (value, ok bool) {
 	return b, true
 }
 
+// trimmedParam reads a query param with surrounding whitespace removed.
+//
+// Every scalar filter on GET /v1/work_items goes through this, because a
+// half-applied rule is worse than none: `?milestone=%20v2` matching nothing
+// while `?wi_type=%20fix_bug` works is a difference no caller can see or
+// predict (aihub#280).
+func trimmedParam(c echo.Context, name string) string {
+	return strings.TrimSpace(c.QueryParam(name))
+}
+
 // splitCSVParam splits a comma-separated query param, trimming each entry and
 // dropping empties.
 //
@@ -259,7 +269,16 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 				// longer revokes their reads. Admins legitimately have an empty
 				// ProjectRoles (the membership query is skipped for them), so
 				// they are the one exemption.
-				if u.Role != "admin" && u.ProjectRoles[*u.ProjectScope] == "" {
+				// Compared through roleLevel, not tested for non-emptiness:
+				// checkProjectAccess gates on roleLevel[role] >= roleLevel[min],
+				// and roleLevel maps an unrecognised string to 0. Testing for a
+				// non-empty role would therefore admit a legacy value that
+				// ?project= rejects. SetProjectMembers validates to the three
+				// known roles today, but migration 0013_backfill_projects.sql
+				// copied arbitrary users.project_roles values in, mapping only
+				// maintainer→writer — so such rows may exist. Going through the
+				// same lookup removes the class without needing to know.
+				if u.Role != "admin" && roleLevel[u.ProjectRoles[*u.ProjectScope]] < roleLevel["viewer"] {
 					return writeError(c, domain.NewErr(domain.ErrForbidden,
 						fmt.Sprintf("no access to project %q", *u.ProjectScope)))
 				}
@@ -271,7 +290,10 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 			default:
 				projects := make([]string, 0, len(u.ProjectRoles))
 				for p, role := range u.ProjectRoles {
-					if role != "" {
+					// Through roleLevel for the same reason as the scoped branch
+					// above: an unrecognised legacy role is level 0, and must not
+					// grant here what ?project= denies.
+					if roleLevel[role] >= roleLevel["viewer"] {
 						projects = append(projects, p)
 					}
 				}
@@ -299,40 +321,55 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		// (ui_handlers_wi.go) — so "kind means wi_type" is already this codebase's
 		// convention. An explicit wi_type wins; there is deliberately no third
 		// spelling and no separate `kind` column (aihub#280).
-		wiType := strings.TrimSpace(c.QueryParam("wi_type"))
+		wiType := trimmedParam(c, "wi_type")
 		if wiType == "" {
-			wiType = strings.TrimSpace(c.QueryParam("kind"))
+			wiType = trimmedParam(c, "kind")
 		}
 		if wiType != "" {
 			filter.WIType = &wiType
 		}
-		if priority := c.QueryParam("priority"); priority != "" {
-			filter.Priority = &priority
-		}
-		if milestone := c.QueryParam("milestone"); milestone != "" {
-			filter.Milestone = &milestone
-		}
-		if scenario := c.QueryParam("scenario"); scenario != "" {
-			filter.Scenario = &scenario
-		}
-		if label := c.QueryParam("label"); label != "" {
-			filter.Label = &label
-		}
-		if userID := c.QueryParam("user_id"); userID != "" {
-			filter.UserID = &userID
-		}
-		if src := c.QueryParam("source"); src != "" {
-			filter.Source = &src
+		// EVERY scalar filter goes through trimmedParam, not just some.
+		//
+		// An earlier revision trimmed wi_type/kind and left the other six raw,
+		// while carrying a comment arguing that trimming is load-bearing. It is:
+		// `?milestone=%20v2` returned HTTP 200 with items: [], indistinguishable
+		// from "no work items on that milestone" — the same silent miss this wi
+		// exists to close, reintroduced in the fix for it. Assigning through a
+		// table rather than eight hand-written ifs is what stops the next added
+		// param from being the one that gets forgotten (aihub#280).
+		for _, p := range []struct {
+			name string
+			dest **string
+		}{
+			{"priority", &filter.Priority},
+			{"milestone", &filter.Milestone},
+			{"scenario", &filter.Scenario},
+			{"label", &filter.Label},
+			{"user_id", &filter.UserID},
+			{"source", &filter.Source},
+		} {
+			if v := trimmedParam(c, p.name); v != "" {
+				value := v
+				*p.dest = &value
+			}
 		}
 		if len(ids) > 0 {
 			filter.IDs = ids
 		}
 		// since: parsed here rather than passed through, because filter.Since is
 		// a time.Time. An unparseable value is rejected loudly instead of being
-		// dropped — pf-release computes its whole release scope from this param,
-		// so silently ignoring it turns "wrapped since the last release" into
-		// "the most recent 50 wrapped" with no signal at all (aihub#280).
-		if since := c.QueryParam("since"); since != "" {
+		// dropped (aihub#280).
+		//
+		// 🔴 `since` filters wi.created_at, NOT closed_at. It answers "created at
+		// or after T", so `status=wrapped&since=T` is NOT "wrapped since T" — a
+		// work item created three months ago and wrapped yesterday is excluded.
+		// Do not describe this param as expressing "wrapped since the last
+		// release"; that set needs closed_at (stamped by trg_wi_closed_at, and
+		// already reachable via sort=closed_at) and no param exposes it yet.
+		// The distinction matters in the dangerous direction: a created_at filter
+		// is silently UNDER-inclusive, and a caller cannot tell a short list from
+		// a complete one.
+		if since := trimmedParam(c, "since"); since != "" {
 			ts, parseErr := time.Parse(time.RFC3339, since)
 			if parseErr != nil {
 				return writeError(c, domain.NewErr(domain.ErrBadRequest,

@@ -19,6 +19,7 @@ package domain
 // plain "Unit tests" step instead of SKIPping there.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -115,7 +116,7 @@ func TestBuildListWorkItemsWhere_EveryFilterFieldReachesSQL(t *testing.T) {
 		{
 			name:     "IDs",
 			filter:   ListWorkItemsFilter{IDs: []string{"wi_a", "wi_b"}},
-			wantSQL:  "wi.id = ANY($2)",
+			wantSQL:  "(wi.id = ANY($2) OR wi.slug = ANY($2))",
 			wantArg:  []string{"wi_a", "wi_b"},
 			argIndex: 1,
 		},
@@ -174,6 +175,57 @@ func TestBuildListWorkItemsWhere_ReadyOnlyReachesSQL(t *testing.T) {
 	// after it (the aihub#147 defect class).
 	if len(args) != 1 || args[0] != "proj" {
 		t.Errorf("ReadyOnly must bind no args; got %#v", args)
+	}
+}
+
+// B7 / aihub#147: ReadyOnly is the first arg-free predicate inserted into the
+// MIDDLE of the clause chain, so it is the first one that could desynchronise
+// argIdx from len(args). Every other test either omits ReadyOnly or combines it
+// only with filters that bind BEFORE it, so an erroneous argIdx++ inside the
+// ReadyOnly branch left all of them green while `?ready_only=true&user_id=u`
+// became HTTP 500 "could not determine data type of parameter $2".
+//
+// The assertion therefore has to use a filter that binds AFTER ReadyOnly.
+func TestBuildListWorkItemsWhere_ReadyOnlyDoesNotConsumeAPlaceholder(t *testing.T) {
+	_, where, args := buildListWorkItemsWhere("proj", ListWorkItemsFilter{
+		ReadyOnly: true,
+		UserID:    ptrStr("u_abc"),
+	})
+	// $1=project; ReadyOnly binds nothing, so user_id must land on $2, not $3.
+	if !strings.Contains(where, "wi.reporter_user_id = $2") {
+		t.Errorf("ReadyOnly must not consume a placeholder; the next bound filter must land on $2.\nWHERE: %s", where)
+	}
+	if len(args) != 2 || args[0] != "proj" || args[1] != "u_abc" {
+		t.Errorf("expected args [proj u_abc]; got %#v", args)
+	}
+	// The invariant that keeps the whole chain safe, asserted directly: the
+	// clause text must not reference a placeholder with no bound arg behind it.
+	for i := len(args) + 1; i <= len(args)+3; i++ {
+		if strings.Contains(where, fmt.Sprintf("$%d", i)) {
+			t.Errorf("WHERE references $%d but only %d args are bound — the query fails at runtime.\nWHERE: %s",
+				i, len(args), where)
+		}
+	}
+}
+
+// A slug is a legal `ids` value: the MCP schema publishes "IDs or slugs" and
+// GetWorkItem has always accepted either spelling. Before aihub#280 the list
+// predicate matched only wi.id, so ids=["aihub#280"] returned an empty 200 —
+// a published capability the SQL did not implement.
+func TestBuildListWorkItemsWhere_IDsMatchSlugsToo(t *testing.T) {
+	_, where, args := buildListWorkItemsWhere("proj", ListWorkItemsFilter{IDs: []string{"aihub#280"}})
+	for _, want := range []string{"wi.id = ANY($2)", "wi.slug = ANY($2)"} {
+		if !strings.Contains(where, want) {
+			t.Errorf("ids must match slugs as well as ids; missing %q.\nWHERE: %s", want, where)
+		}
+	}
+	// One bound arg referenced twice — not two args, which would desynchronise
+	// every placeholder after it.
+	if len(args) != 2 {
+		t.Fatalf("expected 2 bound args (project + the id list); got %#v", args)
+	}
+	if !argsEqual(args[1], []string{"aihub#280"}) {
+		t.Errorf("id list must be bound once as $2; got %#v", args[1])
 	}
 }
 

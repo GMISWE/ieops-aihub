@@ -2,7 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
-	"slices"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -64,57 +64,153 @@ func schemaPropTypes(t *testing.T, raw json.RawMessage) map[string]string {
 	return out
 }
 
-// The core guard: every property the schema publishes must be forwarded by one
-// of the three tables, and every forwarded key must be published. Either gap is
-// a silently-dropped param.
-func TestListWorkItemsToolForwardsEveryPublishedParam(t *testing.T) {
+// listWIWireProbes is the hop-2 contract stated as VALUES: for each published
+// param, the JSON shapes a caller may actually put on the wire and the query
+// param each must produce.
+//
+// It replaces a comparison of the *declared* type against the type each decoder
+// reads. That comparison was structurally incapable of catching this wi's own
+// bug class, and demonstrably so: `ready_only` was declared `boolean` and
+// boolArg read `boolean`, so it stayed green while `ready_only: "true"` was
+// being discarded — the identical shape of the failure that let
+// `status: ["wrapped"]` be discarded for months while the same style of
+// assertion passed. **Name agreement is not value agreement, and neither is
+// type agreement.** Nothing validates the published type at call time: the MCP
+// SDK's untyped AddTool (the form every aihub tool uses) checks the schema
+// shape at registration and then stores the handler with no per-call validator,
+// so a wrongly-typed argument arrives here unchanged.
+//
+// Each entry is a shape that a real client is known or likely to send. `want`
+// is the query value; "" means "correctly not forwarded"; wantErr means the
+// call must be rejected rather than silently defaulted.
+var listWIWireProbes = map[string][]struct {
+	shape   any
+	want    string
+	wantErr bool
+}{
+	"project":   {{shape: "aihub", want: "aihub"}},
+	"label":     {{shape: "alpha", want: "alpha"}},
+	"user_id":   {{shape: "u_abc", want: "u_abc"}},
+	"source":    {{shape: "human", want: "human"}},
+	"since":     {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
+	"cursor":    {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
+	"sort":      {{shape: "closed_at", want: "closed_at"}},
+	"order":     {{shape: "asc", want: "asc"}},
+	"query":     {{shape: "latency", want: "latency"}},
+	"wi_type":   {{shape: "fix_bug", want: "fix_bug"}},
+	"kind":      {{shape: "fix_bug", want: "fix_bug"}},
+	"priority":  {{shape: "urgent", want: "urgent"}},
+	"milestone": {{shape: "v2", want: "v2"}},
+	"scenario":  {{shape: "coding", want: "coding"}},
+	// Published as a string, but pf-retro and pf-crystallize both send a JSON
+	// number. Dropping that silently handed the caller the server default of 50
+	// — half the data it asked for, with nothing to notice (aihub#280 B6).
+	"limit": {
+		{shape: "50", want: "50"},
+		{shape: float64(100), want: "100"},
+		{shape: float64(10), want: "10"},
+	},
+	// Published as booleans. A string or 0/1 must work; anything that is not a
+	// boolean in any spelling must be REFUSED, never read as false.
+	"ready_only": {
+		{shape: true, want: "true"},
+		{shape: false, want: ""},
+		{shape: "true", want: "true"},
+		{shape: "True", want: "true"},
+		{shape: "false", want: ""},
+		{shape: float64(1), want: "true"},
+		{shape: float64(0), want: ""},
+		{shape: "yes", wantErr: true},
+		{shape: float64(2), wantErr: true},
+	},
+	"include_step_state": {
+		{shape: true, want: "true"},
+		{shape: "true", want: "true"},
+		{shape: "1", want: "true"},
+		{shape: "maybe", wantErr: true},
+	},
+	// The two shapes that started all of this.
+	"ids": {
+		{shape: []any{"wi_a", "wi_b"}, want: "wi_a,wi_b"},
+		{shape: "wi_a,wi_b", want: "wi_a,wi_b"},
+	},
+	"status": {
+		{shape: []any{"wrapped"}, want: "wrapped"},
+		{shape: "running,paused", want: "running,paused"},
+	},
+}
+
+// The completeness half: every published param must have at least one value
+// probe, and every probe must name a published param. Without this, adding a
+// param and forgetting its probe would leave the value assertions silently
+// narrower than the contract — which is the failure mode this file keeps
+// re-learning.
+func TestListWorkItemsEveryPublishedParamHasAWireProbe(t *testing.T) {
 	published := schemaPropTypes(t, listWorkItemsSchema())
-
-	// Each table declares which published JSON types its decoder can actually
-	// read. strArg reads only strings, boolArg only booleans, csvArg either a
-	// string or an array — so a CSV param may legitimately be published as
-	// either. Anything else is a decoder that cannot read what is advertised.
-	forwarded := map[string][]string{}
-	for _, k := range listWorkItemsStringParams {
-		forwarded[k] = []string{"string"}
-	}
-	for _, k := range listWorkItemsBoolParams {
-		forwarded[k] = []string{"boolean"}
-	}
-	for _, k := range listWorkItemsCSVParams {
-		forwarded[k] = []string{"string", "array"}
-	}
-
-	for name, typ := range published {
-		accepted, ok := forwarded[name]
-		if !ok {
-			t.Errorf("schema publishes %q but the handler never forwards it — callers' argument is silently dropped (mem_1SJ12mCz)", name)
-			continue
-		}
-		if !slices.Contains(accepted, typ) {
-			t.Errorf("param %q is published as %q but its decoder only reads %v — the argument would be dropped",
-				name, typ, accepted)
+	for name := range published {
+		if len(listWIWireProbes[name]) == 0 {
+			t.Errorf("schema publishes %q but listWIWireProbes has no value probe for it — "+
+				"a type-name check cannot tell whether its decoder can read what callers send", name)
 		}
 	}
-	for name := range forwarded {
+	for name := range listWIWireProbes {
 		if _, ok := published[name]; !ok {
-			t.Errorf("handler forwards %q but the schema does not publish it — callers cannot discover it", name)
+			t.Errorf("listWIWireProbes covers %q, which the schema does not publish", name)
 		}
 	}
 
-	// No param may sit in two tables: two decoders would race to Set() the same
-	// query key and which one wins would depend on loop order.
-	seen := map[string]string{}
-	for table, keys := range map[string][]string{
+	// Structural, and still worth keeping: a published param must be in exactly
+	// one forwarding table, and a forwarded key must be published.
+	table := map[string]string{}
+	for label, keys := range map[string][]string{
 		"string": listWorkItemsStringParams,
 		"bool":   listWorkItemsBoolParams,
 		"csv":    listWorkItemsCSVParams,
 	} {
 		for _, k := range keys {
-			if prev, dup := seen[k]; dup {
-				t.Errorf("param %q appears in both the %s and %s forwarding tables", k, prev, table)
+			if prev, dup := table[k]; dup {
+				t.Errorf("param %q appears in both the %s and %s forwarding tables", k, prev, label)
 			}
-			seen[k] = table
+			table[k] = label
+		}
+	}
+	for name := range published {
+		if _, ok := table[name]; !ok {
+			t.Errorf("schema publishes %q but no forwarding table carries it — the argument is silently dropped (mem_1SJ12mCz)", name)
+		}
+	}
+	for name := range table {
+		if _, ok := published[name]; !ok {
+			t.Errorf("handler forwards %q but the schema does not publish it — callers cannot discover it", name)
+		}
+	}
+}
+
+// The core guard, at value level: every shape in listWIWireProbes must produce
+// the query param it claims.
+func TestListWorkItemsForwardsEveryPublishedParamByValue(t *testing.T) {
+	for name, probes := range listWIWireProbes {
+		for _, probe := range probes {
+			t.Run(fmt.Sprintf("%s=%#v", name, probe.shape), func(t *testing.T) {
+				got, err := buildListWorkItemsParams(map[string]any{name: probe.shape})
+				if probe.wantErr {
+					if err == nil {
+						t.Fatalf("%s=%#v must be rejected, not silently defaulted; got query %v", name, probe.shape, got)
+					}
+					// The message has to name the param, or the caller cannot act.
+					if !strings.Contains(err.Error(), name) {
+						t.Errorf("rejection message should name %q; got %v", name, err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("%s=%#v was rejected: %v", name, probe.shape, err)
+				}
+				if v := got.Get(name); v != probe.want {
+					t.Errorf("%s=%#v forwarded as %q, want %q — this caller's argument is silently dropped",
+						name, probe.shape, v, probe.want)
+				}
+			})
 		}
 	}
 }
@@ -195,7 +291,8 @@ func TestListWorkItemsForwardsRealSkillCallShapes(t *testing.T) {
 				"project": "aihub",
 				"status":  []any{"wrapped"},
 				"since":   "2026-08-01T00:00:00Z",
-				"limit":   "50",
+				// A JSON number, as pf-release actually writes it — NOT "50".
+				"limit": float64(50),
 			},
 			want: map[string]string{
 				"project": "aihub", "status": "wrapped",
@@ -214,7 +311,7 @@ func TestListWorkItemsForwardsRealSkillCallShapes(t *testing.T) {
 			name: "pf-release promote: release wis only",
 			args: map[string]any{
 				"project": "aihub", "scenario": "release", "label": "alpha",
-				"status": []any{"wrapped"}, "limit": "10",
+				"status": []any{"wrapped"}, "limit": float64(10),
 			},
 			want: map[string]string{
 				"project": "aihub", "scenario": "release", "label": "alpha",
@@ -228,7 +325,10 @@ func TestListWorkItemsForwardsRealSkillCallShapes(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildListWorkItemsParams(tc.args)
+			got, err := buildListWorkItemsParams(tc.args)
+			if err != nil {
+				t.Fatalf("rejected: %v", err)
+			}
 			for k, want := range tc.want {
 				if got.Get(k) != want {
 					t.Errorf("query param %q = %q, want %q — this skill's filter is dropped on the way to the server",
@@ -249,9 +349,12 @@ func TestListWorkItemsForwardsRealSkillCallShapes(t *testing.T) {
 // forwarding it makes the two indistinguishable on the wire — the exact
 // zero-value-vs-absent confusion this contract keeps tripping over.
 func TestListWorkItemsOmitsFalseBooleans(t *testing.T) {
-	got := buildListWorkItemsParams(map[string]any{
+	got, err := buildListWorkItemsParams(map[string]any{
 		"project": "aihub", "ready_only": false, "include_step_state": false,
 	})
+	if err != nil {
+		t.Fatalf("rejected: %v", err)
+	}
 	for _, k := range listWorkItemsBoolParams {
 		if _, present := got[k]; present {
 			t.Errorf("%q=false must not be forwarded; got %v", k, got)

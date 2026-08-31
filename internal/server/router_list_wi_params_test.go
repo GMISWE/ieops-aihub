@@ -288,6 +288,44 @@ func TestListWorkItems_IdsWithoutProjectDeniedWhenScopedToANonMemberProject(t *t
 	}
 }
 
+// A role string outside the three known values is level 0 in roleLevel, so
+// checkProjectAccess denies it on the ?project= path. The ids= path must agree.
+//
+// Reachable in principle: SetProjectMembers validates to viewer/writer/maintainer
+// today, but migration 0013_backfill_projects.sql copied arbitrary
+// users.project_roles values into projects.members, mapping only
+// maintainer→writer. Testing the role for non-emptiness would let such a row
+// grant a read that ?project= refuses (aihub#280).
+func TestListWorkItems_IdsWithoutProjectRejectsUnknownRoleStrings(t *testing.T) {
+	uc := viewerUser()
+	uc.ProjectRoles = map[string]string{"legacyproject": "some_legacy_role"}
+
+	rec := listWIRequestAs(t, nil, "ids=wi_abc", uc)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("an unrecognised role must not grant access on the ids= path "+
+			"(?project= denies it); got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	// Same via the scoped branch.
+	scope := "legacyproject"
+	uc2 := viewerUser()
+	uc2.ProjectScope = &scope
+	uc2.ProjectRoles = map[string]string{scope: "some_legacy_role"}
+	if rec := listWIRequestAs(t, nil, "ids=wi_abc", uc2); rec.Code != http.StatusForbidden {
+		t.Fatalf("scoped caller with an unrecognised role must get 403; got %d", rec.Code)
+	}
+
+	// Control: a real role still works, so the check is not just refusing everyone.
+	uc3 := viewerUser()
+	uc3.ProjectRoles = map[string]string{"realproject": "viewer"}
+	withFakeListWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string, _ domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		return &domain.ListWorkItemsResult{Items: []*domain.WorkItem{}}, nil
+	})
+	if rec := listWIRequestAs(t, nil, "ids=wi_abc", uc3); rec.Code != http.StatusOK {
+		t.Fatalf("a viewer role must still be accepted; got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
 // A scoped ADMIN is the one legitimate exemption: BearerAuth skips the
 // membership query for admins, so their ProjectRoles is always empty and
 // requiring a role there would lock them out of their own scoped key.
@@ -397,9 +435,50 @@ func TestListWorkItems_CSVParamsAreTrimmed(t *testing.T) {
 	if len(f.Status) != 2 || f.Status[0] != "wrapped" || f.Status[1] != "queued" {
 		t.Errorf("filter.Status = %#v, want [wrapped queued]", f.Status)
 	}
-	// wi_type/kind are single values, trimmed the same way.
-	if f2, _, _ := captureListWIFilter(t, "project=testproject&wi_type=%20fix_bug%20"); f2.WIType == nil || *f2.WIType != "fix_bug" {
-		t.Errorf("wi_type must be trimmed; got %v", f2.WIType)
+}
+
+// Table-driven over EVERY scalar filter, not a spot check.
+//
+// The previous version probed `wi_type` only, and that is precisely why the gap
+// it was supposed to guard stayed open: wi_type/kind were trimmed and the other
+// six were not, so `?milestone=%20v2` returned HTTP 200 with an empty list —
+// indistinguishable from "no work items on that milestone". A per-param table
+// driven off the same list the handler uses is what stops the next added param
+// from being the one nobody probes (aihub#280 B5).
+func TestListWorkItems_EveryScalarParamIsTrimmed(t *testing.T) {
+	for _, tc := range []struct {
+		param string
+		get   func(domain.ListWorkItemsFilter) *string
+	}{
+		{"wi_type", func(f domain.ListWorkItemsFilter) *string { return f.WIType }},
+		{"kind", func(f domain.ListWorkItemsFilter) *string { return f.WIType }},
+		{"priority", func(f domain.ListWorkItemsFilter) *string { return f.Priority }},
+		{"milestone", func(f domain.ListWorkItemsFilter) *string { return f.Milestone }},
+		{"scenario", func(f domain.ListWorkItemsFilter) *string { return f.Scenario }},
+		{"label", func(f domain.ListWorkItemsFilter) *string { return f.Label }},
+		{"user_id", func(f domain.ListWorkItemsFilter) *string { return f.UserID }},
+		{"source", func(f domain.ListWorkItemsFilter) *string { return f.Source }},
+	} {
+		t.Run(tc.param, func(t *testing.T) {
+			f, _, rec := captureListWIFilter(t, "project=testproject&"+tc.param+"=%20padded%20")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d (body: %s)", rec.Code, rec.Body.String())
+			}
+			got := tc.get(f)
+			if got == nil {
+				t.Fatalf("%s never reached the filter", tc.param)
+			}
+			if *got != "padded" {
+				t.Errorf("%s = %q, want %q — an untrimmed value matches no row while "+
+					"looking like a working filter", tc.param, *got, "padded")
+			}
+		})
+	}
+	// A value that is only whitespace carries no filter at all, and must not
+	// bind an empty-string selection that matches nothing.
+	f, _, _ := captureListWIFilter(t, "project=testproject&milestone=%20%20")
+	if f.Milestone != nil {
+		t.Errorf("an all-whitespace value must leave the filter unset; got %q", *f.Milestone)
 	}
 }
 

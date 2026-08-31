@@ -59,10 +59,20 @@ type WorkItem struct {
 	// what makes "did the param take effect?" answerable by comparing the
 	// response key set — the row count cannot answer it.
 	//
-	// A wi that has never been claimed has no wi_step_state row, so this stays
-	// nil even when the caller did ask. Absent therefore means "no step state",
-	// not "you forgot the param" — callers that need to tell the two apart must
-	// look at whether they sent it.
+	// Absence has THREE causes and the response cannot distinguish them:
+	//  1. the caller did not ask (no include_step_state)
+	//  2. the caller asked, but the wi has never been claimed, so no
+	//     wi_step_state row exists
+	//  3. the caller asked, the row exists, and the lookup FAILED —
+	//     attachStepState is best-effort and reports only to the server's stderr
+	//
+	// (3) is the uncomfortable one: a transient pool exhaustion makes a claimed,
+	// in-progress work item read exactly like a never-claimed one, so a consumer
+	// like pf-retro would conclude "no steps ran". That is a deliberate trade —
+	// failing the whole list would let include_step_state break a call that works
+	// without it — but it is a real ambiguity, named here rather than left for
+	// someone to discover from behaviour. Callers that must be sure should read
+	// the step state through pf_get_step.
 	StepState *WorkItemStepState `json:"step_state,omitempty"`
 }
 
@@ -979,8 +989,14 @@ func buildListWorkItemsWhere(project string, f ListWorkItemsFilter) (joinClause,
 		args = append(args, *f.OwnerDisplay)
 		argIdx++
 	}
+	// Slugs as well as ids, because the MCP schema publishes "IDs or slugs" and a
+	// published capability the SQL does not implement is exactly this wi's defect
+	// class: `ids=["aihub#280"]` returned {"items":[]} with HTTP 200 and no error
+	// — indistinguishable from "no such work item". GetWorkItem has always
+	// accepted either spelling; the list path had not. One bound arg referenced
+	// twice, the same shape as the Query predicate below (aihub#280).
 	if len(f.IDs) > 0 {
-		conds = append(conds, fmt.Sprintf("wi.id = ANY($%d)", argIdx))
+		conds = append(conds, fmt.Sprintf("(wi.id = ANY($%d) OR wi.slug = ANY($%d))", argIdx, argIdx))
 		args = append(args, f.IDs)
 		argIdx++
 	}
@@ -1722,13 +1738,21 @@ func CancelWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug, callerUse
 // buildReadyQueueItemsQuery assembles the SQL for the ready queue's items[]
 // segment: $1 = project, $2 = max.
 //
-// A function rather than an inline literal purely so the sharing is *checkable*.
-// `GET /v1/work_items?ready_only=true` is only the same question as this segment
-// for as long as both are built from readyOnlyPredicate, and a comment asserting
-// that is worth nothing — the whole reason aihub#280 exists is that a comment
-// accurately described a gap and nothing enforced it. This lets
-// TestReadyQueueItemsQueryUsesTheSharedReadyPredicate fail if someone inlines a
-// divergent copy here (an *identical* copy is not a defect; divergence is).
+// A function rather than an inline literal so the sharing is at least visible in
+// one place. Note precisely what that does and does not buy, because an earlier
+// version of this comment overclaimed and was wrong:
+//
+// Inspecting this function's return value proves nothing about GetReadyQueue.
+// Nothing forces GetReadyQueue to call it — an unused function is legal Go — so
+// a divergent query inlined at the call site leaves a helper-inspecting test
+// green. That was verified, not assumed: replacing the call site with an inline
+// query that dropped both requires_human_session and the blocker NOT EXISTS left
+// every aihub#280 test passing.
+//
+// The real guard is therefore behavioural and lives in
+// TestGetReadyQueue_ItemsExcludesHumanSessionAndBlocked, which calls
+// GetReadyQueue against a live DB and asserts what it actually returns. This
+// helper's own test only pins the SQL's shape.
 func buildReadyQueueItemsQuery() string {
 	return `
 		SELECT wi.id, wi.slug, wi.wi_type, wi.priority, wi.goal

@@ -54,18 +54,32 @@ to a stable channel.
        )
    ```
 
-   > **aihub#280 changed two things here.** `since=` is now honoured (it used to
-   > be discarded, so "wrapped since the last release" silently meant "the most
-   > recent 50 wrapped"), and `status` must be a string — `status=["wrapped"]`
-   > was dropped by the MCP layer, so the status filter was not applying either.
-   > Both are fixed above.
+   > **aihub#280 fixed `status`, and did NOT fix the release scope.** Be precise
+   > about which is which:
    >
-   > The `if last_release_at` branch is still unreachable for a different reason:
+   > - **Fixed:** `status` must be a string. `status=["wrapped"]` was dropped by
+   >   the MCP layer, so the status filter was not applying at all. Corrected above.
+   > - **Fixed:** `since=` reaches the server now instead of being discarded.
+   >
+   > 🔴 **Still wrong, and now wrong in the more dangerous direction.** `since`
+   > filters `wi.created_at`, not `closed_at`. So `status=wrapped&since=T` means
+   > "created after T and currently wrapped" — **a wi created before the last
+   > release and wrapped since it is silently excluded from the release notes.**
+   >
+   > Before aihub#280 the discarded `since` made this over-inclusive (the most
+   > recent 50 wrapped), and a human confirming the list could see the extras.
+   > Now it is under-inclusive, and a short list looks exactly like a correct one.
+   > **Do not treat this call as "wrapped since the last release" — it is not.**
+   > Expressing that set needs `closed_at` (stamped by `trg_wi_closed_at`, already
+   > reachable via `sort=closed_at`) exposed as a `closed_since` filter, which no
+   > param provides yet. That belongs to **aihub#176** along with everything else
+   > on this page.
+   >
+   > Latent today: the `if last_release_at` branch is unreachable anyway, because
    > `methodology.release` is rejected by `pf_remember` *and* absent from
-   > `MethodologyTypeEnum`, so step 5 below can never write the record step 1
-   > reads. Until **aihub#176** gives releases a real home, this always takes the
-   > `else` branch. Out of aihub#280's scope — recorded here rather than left as
-   > another undocumented dead path.
+   > `MethodologyTypeEnum`, so step 5 can never write the record step 1 reads.
+   > This always takes the `else` branch. Recorded rather than left as another
+   > undocumented dead path.
 
 2. Confirm release scope with the user: "These N wi's will be included in <version>."
 

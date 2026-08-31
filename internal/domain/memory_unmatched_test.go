@@ -2,9 +2,9 @@ package domain
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"regexp"
-	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -125,42 +125,42 @@ func TestUnmatchedTypes(t *testing.T) {
 	}
 
 	t.Run("no type filter reports nothing", func(t *testing.T) {
-		require.Empty(t, UnmatchedTypes(ctx, pool, req()))
+		requireUnmatched(t, ctx, pool, req())
 	})
 
 	t.Run("all entries match -> nothing to report", func(t *testing.T) {
-		require.Empty(t, UnmatchedTypes(ctx, pool, req("rule.work", "experience.*")))
+		requireUnmatched(t, ctx, pool, req("rule.work", "experience.*"))
 	})
 
 	// The acceptance criterion this field exists for: a type guaranteed not to exist
 	// must be visible in the response, not merely absent from the results.
 	t.Run("a type that cannot exist is named", func(t *testing.T) {
-		got := UnmatchedTypes(ctx, pool, req("zzz.definitely.not.a.type"))
+		got := requireUnmatched(t, ctx, pool, req("zzz.definitely.not.a.type"))
 		require.Equal(t, []string{"zzz.definitely.not.a.type"}, got)
 	})
 
 	// The insidious case: the recall RETURNS ROWS, so nothing looks wrong, yet one
 	// requested type contributed none of them.
 	t.Run("partial match still names the entry that matched nothing", func(t *testing.T) {
-		got := UnmatchedTypes(ctx, pool, req("rule.work", "fact.nonexistent", "experience.*"))
+		got := requireUnmatched(t, ctx, pool, req("rule.work", "fact.nonexistent", "experience.*"))
 		require.Equal(t, []string{"fact.nonexistent"}, got)
 	})
 
 	// The bug itself, at the layer that can now describe it.
 	t.Run("the piped form is named as unmatched", func(t *testing.T) {
-		got := UnmatchedTypes(ctx, pool, req("rule.work|experience.pitfall"))
+		got := requireUnmatched(t, ctx, pool, req("rule.work|experience.pitfall"))
 		require.Equal(t, []string{"rule.work|experience.pitfall"}, got,
 			"the piped string is one type name and matches nothing; before aihub#289 that "+
 				"was an empty result set with no way to tell it from an empty project")
 	})
 
 	t.Run("a wildcard matching nothing is named", func(t *testing.T) {
-		got := UnmatchedTypes(ctx, pool, req("experience.*", "methodology.*"))
+		got := requireUnmatched(t, ctx, pool, req("experience.*", "methodology.*"))
 		require.Equal(t, []string{"methodology.*"}, got)
 	})
 
 	t.Run("order is preserved and duplicates collapse", func(t *testing.T) {
-		got := UnmatchedTypes(ctx, pool, req("b.missing", "rule.work", "a.missing", "b.missing"))
+		got := requireUnmatched(t, ctx, pool, req("b.missing", "rule.work", "a.missing", "b.missing"))
 		require.Equal(t, []string{"b.missing", "a.missing"}, got)
 	})
 
@@ -172,7 +172,7 @@ func TestUnmatchedTypes(t *testing.T) {
 		r := req("rule.work")
 		r.MinStrength = 999
 		r.WorkItemID = strPtr("wi_does_not_exist")
-		require.Empty(t, UnmatchedTypes(ctx, pool, r))
+		requireUnmatched(t, ctx, pool, r)
 	})
 
 	// Visibility is mirrored, not bypassed: a private memory belonging to someone else
@@ -183,12 +183,12 @@ func TestUnmatchedTypes(t *testing.T) {
 			Project: proj, Types: []string{"fact.secret"},
 			CallerUserID: "u_someone_else", CallerRole: "member",
 		}
-		require.Equal(t, []string{"fact.secret"}, UnmatchedTypes(ctx, pool, other),
+		require.Equal(t, []string{"fact.secret"}, requireUnmatched(t, ctx, pool, other),
 			"another user's private memory must not count as a match")
-		require.Empty(t, UnmatchedTypes(ctx, pool, &RecallRequest{
+		requireUnmatched(t, ctx, pool, &RecallRequest{
 			Project: proj, Types: []string{"fact.secret"},
 			CallerUserID: uid, CallerRole: "member",
-		}), "the author sees their own private memory, so the type IS matched for them")
+		}, "the author sees their own private memory, so the type IS matched for them")
 	})
 }
 
@@ -212,7 +212,7 @@ func TestUnmatchedTypes_AgreesWithRecall(t *testing.T) {
 	resp, err := Recall(ctx, pool, piped)
 	require.NoError(t, err)
 	require.Empty(t, resp.Items, "the piped form matches nothing — this is the reproduction")
-	require.Equal(t, []string{"rule.work|fact.test"}, UnmatchedTypes(ctx, pool, piped),
+	require.Equal(t, []string{"rule.work|fact.test"}, requireUnmatched(t, ctx, pool, piped),
 		"...and the caller is now told so instead of inferring 'no history'")
 
 	// Array form over the same two names: returns the row, and reports nothing unmatched
@@ -225,7 +225,7 @@ func TestUnmatchedTypes_AgreesWithRecall(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp2.Items, 1, "the array form is the working spelling")
 	require.Equal(t, "rule.work", resp2.Items[0].Type)
-	require.Equal(t, []string{"fact.test"}, UnmatchedTypes(ctx, pool, arrayForm),
+	require.Equal(t, []string{"fact.test"}, requireUnmatched(t, ctx, pool, arrayForm),
 		"fact.test is a legitimate name with no rows here — reported, and correctly NOT rule.work")
 }
 
@@ -241,38 +241,167 @@ func TestUnmatchedTypes_NeverBreaksRecall(t *testing.T) {
 	require.NoError(t, err)
 	pool.Close()
 
-	got := UnmatchedTypes(context.Background(), pool, &RecallRequest{
+	got, unavailable := UnmatchedTypes(context.Background(), pool, &RecallRequest{
 		Project: "p_anything", Types: []string{"rule.work"}, CallerRole: "member",
 	})
-	require.Nil(t, got, "a failed diagnostic must degrade to silence, never to an error")
+	require.Nil(t, got, "a failed diagnostic must never return a partial list — a half-computed "+
+		"answer read as complete would name types as matched that were never checked")
+	require.NotEmpty(t, unavailable, "...and it must SAY it failed. Returning nil with no reason "+
+		"is what made a broken diagnostic indistinguishable from a clean one, because the "+
+		"response field is omitempty — the exact silent-degradation shape this wi removes")
 }
 
-// TestUnmatchedTypes_SQLShape covers the placeholder threading without a database: the
-// query is assembled by hand, and $N drifting out of step with the args slice is a bind
-// error at runtime rather than a compile error.
-func TestUnmatchedTypes_SQLShape(t *testing.T) {
-	// Reconstruct what UnmatchedTypes builds for three entries by exercising the shared
-	// builder from the same starting index it uses for a non-admin caller ($1 project,
-	// $2 author_user_id => entries start at $3).
-	idx := 3
-	var sels []string
-	var args []any
-	for i, typ := range []string{"rule.work", "experience.*", "zzz.nope"} {
-		clause, cargs, next := typeFilterClause([]string{typ}, idx)
-		sels = append(sels, clause+" AS m"+string(rune('0'+i)))
-		args = append(args, cargs...)
-		idx = next
-	}
-	require.Equal(t, []string{"(type = $3) AS m0", "(type LIKE $4) AS m1", "(type = $5) AS m2"}, sels)
-	require.Equal(t, []any{"rule.work", "experience.%", "zzz.nope"}, args)
-	require.Equal(t, 6, idx, "each entry must consume exactly one placeholder")
+// TestUnmatchedTypes_ChunksPastThePostgresTargetListCap covers the failure the first
+// version of this diagnostic had: the query puts one EXISTS per type in the SELECT target
+// list, and Postgres caps that at 1664. Past it the statement errored, nil came back, and
+// omitempty dropped the field — so a caller asking about 2000 types got a response
+// identical to "all 2000 matched", while Recall itself handled the same request fine.
+// The diagnostic was strictly less robust than the thing it diagnoses, and it failed in
+// the silent direction.
+//
+// 2000 is chosen to sit past the cap; the chunk size is 256.
+func TestUnmatchedTypes_ChunksPastThePostgresTargetListCap(t *testing.T) {
+	pool := setupLatestTestDB(t)
+	uid := testUser(t, pool)
+	proj := testProject(t, pool, uid)
+	ctx := context.Background()
 
-	// Every placeholder from $3 up to the highest emitted must appear exactly once, and
-	// the arg count must line up with the top index.
-	joined := strings.Join(sels, ", ")
-	for n := 3; n < idx; n++ {
-		require.Equal(t, 1, strings.Count(joined, "$"+string(rune('0'+n))),
-			"placeholder $%d must appear exactly once", n)
+	seedTypedMemory(t, pool, proj, uid, "mem_chunk_hit", "rule.work", "project")
+
+	types := make([]string, 0, 2000)
+	for i := 0; i < 2000; i++ {
+		types = append(types, fmt.Sprintf("zzz.absent%04d", i))
 	}
-	require.Equal(t, idx-3, len(args))
+	// One real type in the middle: proves chunk boundaries do not lose or invent an
+	// answer, and that the "matched" branch still works past the cap.
+	types[1000] = "rule.work"
+
+	got, unavailable := UnmatchedTypes(ctx, pool, &RecallRequest{
+		Project: proj, Types: types, CallerUserID: uid, CallerRole: "member",
+	})
+	require.Empty(t, unavailable, "2000 types must not break the diagnostic")
+	require.Len(t, got, 1999, "every absent type must be reported, across all chunks")
+	require.NotContains(t, got, "rule.work", "the one type that exists must not be reported")
+	require.Equal(t, "zzz.absent0000", got[0], "caller order is preserved across chunks")
+	require.Equal(t, "zzz.absent1999", got[len(got)-1])
+}
+
+// TestUnmatchedTypes_AdminAndArchived covers the two request-shape branches every other
+// test in this file leaves untouched. Both were dead coverage: injecting `AND 1=0` into
+// the admin branch, or deleting the IncludeArchived branch entirely, left the whole suite
+// green against a live DB.
+//
+// The admin branch matters concretely — it is the one that skips the visibility
+// predicate. If it broke, an admin would get items back AND see every one of their types
+// listed as unmatched: a self-contradicting response.
+func TestUnmatchedTypes_AdminAndArchived(t *testing.T) {
+	pool := setupLatestTestDB(t)
+	uid := testUser(t, pool)
+	proj := testProject(t, pool, uid)
+	ctx := context.Background()
+
+	// A SECOND author: the private memory must belong to someone other than the caller,
+	// or the non-admin branch below would see it as its own and the two role branches
+	// would agree for the wrong reason.
+	other := "u_other_" + sanitizeTestName(t.Name())
+	mustExec(t, pool, `INSERT INTO users(id,email,display_name) VALUES('`+other+`','`+other+`@test.local','`+other+`') ON CONFLICT (id) DO NOTHING`)
+
+	seedTypedMemory(t, pool, proj, uid, "mem_adm_pub", "rule.work", "project")
+	seedTypedMemory(t, pool, proj, other, "mem_adm_priv", "fact.secret", "private")
+	seedTypedMemory(t, pool, proj, uid, "mem_adm_arch", "experience.pitfall", "project")
+	mustExec(t, pool, `UPDATE memories SET status='archived' WHERE id='mem_adm_arch'`)
+
+	t.Run("admin sees another user's private memory, so its type is matched", func(t *testing.T) {
+		got, unavailable := UnmatchedTypes(ctx, pool, &RecallRequest{
+			Project: proj, Types: []string{"fact.secret", "rule.work"},
+			CallerUserID: "u_admin", CallerRole: "admin",
+		})
+		require.Empty(t, unavailable)
+		require.Empty(t, got, "the admin branch skips the visibility predicate, so both types match")
+	})
+
+	t.Run("a non-admin does NOT see it, so the same type is unmatched", func(t *testing.T) {
+		got, unavailable := UnmatchedTypes(ctx, pool, &RecallRequest{
+			Project: proj, Types: []string{"fact.secret", "rule.work"},
+			CallerUserID: uid, CallerRole: "member",
+		})
+		require.Empty(t, unavailable)
+		require.Equal(t, []string{"fact.secret"}, got,
+			"the two role branches must disagree here — if they agree, one of them is not "+
+				"applying its predicate")
+	})
+
+	t.Run("an archived-only type is unmatched by default", func(t *testing.T) {
+		got, unavailable := UnmatchedTypes(ctx, pool, &RecallRequest{
+			Project: proj, Types: []string{"experience.pitfall"},
+			CallerUserID: uid, CallerRole: "member",
+		})
+		require.Empty(t, unavailable)
+		require.Equal(t, []string{"experience.pitfall"}, got)
+	})
+
+	t.Run("...and matched when IncludeArchived is set", func(t *testing.T) {
+		got, unavailable := UnmatchedTypes(ctx, pool, &RecallRequest{
+			Project: proj, Types: []string{"experience.pitfall"},
+			CallerUserID: uid, CallerRole: "member", IncludeArchived: true,
+		})
+		require.Empty(t, unavailable)
+		require.Empty(t, got, "IncludeArchived must widen the status set the diagnostic looks at, "+
+			"exactly as it widens recallText's")
+	})
+}
+
+// requireUnmatched calls the diagnostic and fails if it reported itself unavailable —
+// every caller below is asserting on the ANSWER, and an unavailable diagnostic returns an
+// empty list that would satisfy most of those assertions vacuously.
+func requireUnmatched(t *testing.T, ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, msgAndArgs ...any) []string {
+	t.Helper()
+	got, unavailable := UnmatchedTypes(ctx, pool, req)
+	require.Empty(t, unavailable, "diagnostic unavailable, so this assertion would be vacuous")
+	if len(msgAndArgs) > 0 {
+		require.Empty(t, got, msgAndArgs...)
+	}
+	return got
+}
+
+// TestRemember_RejectsPipedType covers the WRITE half of the contract (aihub#289 / B5).
+//
+// The prefix check accepts "experience.*|rule.*" — it does start with "experience." — so
+// before this guard a memory could be STORED under a type that the read path now rejects
+// with a 400. The row would be write-only: the only query that could match it by type is
+// the one that 400s. Guarding one side of a contract and not the other is how you get
+// data you can never read back.
+//
+// No database: the type validation runs before Remember touches the pool, and passing nil
+// asserts exactly that — a regression that moved the guard below the first query would
+// panic here instead of quietly passing.
+func TestRemember_RejectsPipedType(t *testing.T) {
+	ctx := context.Background()
+
+	for _, bad := range []string{
+		"experience.*|rule.*",
+		"experience.pitfall|fact.note",
+		"rule.work|",
+	} {
+		_, _, err := Remember(ctx, nil, &RememberRequest{
+			Project: "p", Type: bad, Content: "c", Visibility: "project",
+		})
+		require.Error(t, err, "type %q must be rejected on write", bad)
+		var ae *AihubError
+		require.ErrorAs(t, err, &ae)
+		require.Equal(t, ErrInvalidMemoryType, ae.Code)
+		require.Contains(t, ae.Message, "'|'", "the message must name the offending character")
+		require.Contains(t, ae.Message, "exactly ONE type",
+			"the message must say what a memory's type actually is")
+	}
+
+	// The control: a type that merely fails the prefix check must still report the
+	// PREFIX error, not the pipe error — otherwise the new guard has swallowed the old
+	// one and this test would pass for the wrong reason.
+	_, _, err := Remember(ctx, nil, &RememberRequest{
+		Project: "p", Type: "nonsense.thing", Content: "c", Visibility: "project",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must be one of experience.*")
+	require.NotContains(t, err.Error(), "'|'")
 }

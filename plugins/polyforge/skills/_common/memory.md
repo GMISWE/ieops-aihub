@@ -8,8 +8,12 @@
 
 ## Before the engine — Memory-First recall
 
+`@@RECALL_TYPE@@` is substituted by the router with a JSON **array** (`["experience.*","rule.*"]`).
+Do NOT wrap it in quotes: `type` is a list, and a single string containing `|` is one type name
+that matches nothing — the server rejects it with a 400 (aihub#289).
+
 ```
-pf_recall(project=<current>, query=<wi.goal>, type="@@RECALL_TYPE@@", top_k=5)
+pf_recall(project=<current>, query=<wi.goal>, type=@@RECALL_TYPE@@, top_k=5)
 ```
 
 Display results with `effective_strength >= 0.3` (💡 prefix). For any memory the model

@@ -254,10 +254,19 @@ type RecallResponse struct {
 	//
 	// `omitempty` is deliberate: absent means "nothing to report", so the healthy
 	// call shapes — the overwhelming majority — pay zero tokens for it, and a
-	// present field always means the caller has a problem to look at. The cost of
-	// that choice is that "no type filter supplied" and "every type matched" are
-	// both absent; neither is a fault, so nothing needs to tell them apart.
+	// present field always means the caller has a problem to look at. "No type
+	// filter supplied" and "every type matched" are both absent; neither is a
+	// fault, so nothing needs to tell them apart. A BROKEN diagnostic is a fault
+	// and is NOT folded in with them — it reports through the field below.
 	UnmatchedTypes []string `json:"unmatched_types,omitempty"`
+	// UnmatchedTypesError is set when the unmatched-type diagnostic could not be
+	// computed (see UnmatchedTypes in memory_unmatched.go). It exists because
+	// `omitempty` would otherwise make a failed check indistinguishable from a
+	// clean one, which is the same silent-degradation shape this work item was
+	// opened to remove — and the same omitempty trap as aihub#269's
+	// content_truncated. When this is set, UnmatchedTypes is nil and says nothing
+	// about the type filter either way; it is never a partial answer.
+	UnmatchedTypesError string `json:"unmatched_types_error,omitempty"`
 }
 
 // ─── Forgetting Curve (§7.2) ──────────────────────────────────────────────────
@@ -397,6 +406,19 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	if !typeValid {
 		return nil, false, NewErr(ErrInvalidMemoryType,
 			fmt.Sprintf("type %q must be one of experience.*, fact.*, rule.*, methodology.*", req.Type))
+	}
+	// aihub#289: reject '|' on the WRITE path too. The prefix check above accepts
+	// "experience.*|rule.*" — it starts with "experience." — so a memory could be stored
+	// under a type that the read path now rejects with a 400, making the row
+	// permanently unreadable by type: write-only data, created by the same piped-string
+	// mistake this work item is about. Guarding only the read side would have left the
+	// two halves of one contract disagreeing.
+	if strings.Contains(req.Type, "|") {
+		return nil, false, NewErr(ErrInvalidMemoryType,
+			fmt.Sprintf("type %q contains '|', which is not part of the memory type "+
+				"vocabulary. A memory has exactly ONE type; '|' is not a separator here, "+
+				"and a type stored with it could never be recalled by type. Pick one "+
+				"concrete type (e.g. experience.pitfall).", req.Type))
 	}
 
 	if req.DedupMode == "" {

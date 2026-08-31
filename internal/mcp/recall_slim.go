@@ -117,6 +117,12 @@ func slimRecallResult(result map[string]any) map[string]any {
 	if um, ok := result["unmatched_types"]; ok && um != nil {
 		res["unmatched_types"] = um
 	}
+	// ...and its failure half. Forwarding the list but not the error would put the
+	// silence straight back: the model would read "no unmatched_types" as "your type
+	// filter is fine" in exactly the case where nothing was actually checked.
+	if ue, ok := result["unmatched_types_error"]; ok && ue != nil {
+		res["unmatched_types_error"] = ue
+	}
 	return res
 }
 

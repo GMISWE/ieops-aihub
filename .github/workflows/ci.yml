@@ -440,7 +440,9 @@ jobs:
           go test ./internal/domain/ -run 'TestUnmatchedTypes' -count=1 -v 2>&1 | tee recall_unmatched.log
           for want in TestUnmatchedTypes \
                       TestUnmatchedTypes_AgreesWithRecall \
-                      TestUnmatchedTypes_NeverBreaksRecall; do
+                      TestUnmatchedTypes_NeverBreaksRecall \
+                      TestUnmatchedTypes_ChunksPastThePostgresTargetListCap \
+                      TestUnmatchedTypes_AdminAndArchived; do
             grep -q -- "--- PASS: $want (" recall_unmatched.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#289 unmatched-type coverage is not actually executing"; exit 1; }
           done

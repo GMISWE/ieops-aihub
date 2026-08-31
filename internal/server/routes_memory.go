@@ -207,18 +207,38 @@ const (
 //	A. teach the server to split on `|` as well as `,`
 //	B. reject it, and fix the templates
 //
-// A was rejected because it would make `|` an operator in the type grammar while the
-// SAME character is in use as prose "pick one of these" notation elsewhere in the
-// same documents — `pf_remember(type=<experience.*|fact.*|rule.*>)`, and
-// `pf_user`'s `user_type=<"human"|"machine">`. One character cannot be both an
-// alternation operator on a read path and a human choice marker on a write path
-// without the docs teaching a distinction no reader can see. The array already
-// expresses everything the pipe form could, so A would buy a second spelling of an
-// existing capability and pay for it in permanent ambiguity.
+// # THE OPERATIVE REASON IS ROLLOUT LAG, AND IT POINTS AT B
 //
-// A's one real advantage — "old skill text keeps working without a plugin release" —
-// does not exist here: the templates ship from plugins/ in THIS repository, so they
-// are fixed by the same commit as the server.
+// The two candidate mechanisms reach an affected caller on opposite schedules, and the
+// population that has this bug is precisely the lagging one.
+//
+//   - The `unmatched_types` diagnostic has to survive slimRecallResult's allowlist, and
+//     that allowlist is COMPILED INTO THE CLIENT BINARY. Measured on a box running
+//     plugin 1.1.8: `strings <polyforge binary> | grep -c unmatched_types` -> 0, while
+//     the same probe for the older same-family field content_truncated -> 3. So a
+//     diagnostic-only fix is invisible to every already-installed client; the piped call
+//     keeps returning a bare empty set there.
+//   - This 400 is transport-level. Nothing in an old client can strip it.
+//
+// And the callers still emitting piped types ARE the ones on old plugins. A fix that
+// only added a response field would therefore fix nothing for the affected population.
+//
+// NOTE the correction that forced this paragraph to be rewritten: "the templates ship
+// from plugins/ in this repository, so they are fixed by the same commit as the server"
+// is TRUE and IRRELEVANT. Same commit is not same rollout — the server ships by
+// redeploying this binary, the plugin ships by each person running `/plugin update` on
+// their own machine (aihub#301 exists for that skew). Do not restore that argument.
+//
+// A SECOND, INDEPENDENT REASON: `|` cannot become an operator here, because the same
+// character is already in use as prose "pick one of these" notation in the same
+// documents — `pf_remember(type=<experience.*|fact.*|rule.*>)`, `pf_user`'s
+// `user_type=<"human"|"machine">`, memory-conventions.md's
+// `experience.approach|code|debug|pitfall`. Those are resolved BY THE READER and never
+// reach the server; a `type=` argument reaches it verbatim. One character cannot be an
+// alternation operator in one position and a human choice marker in the other without
+// the docs teaching a distinction no reader can see. The array already expresses
+// everything the pipe form could, so A buys a second spelling and pays in permanent
+// ambiguity. (internal/cli/skill_recall_type_test.go encodes exactly this boundary.)
 //
 // The failure mode of being wrong about `|`'s legality is also the mild direction: a
 // caller with a genuinely pipe-bearing type gets a loud, self-explanatory 400 they
@@ -230,6 +250,36 @@ func firstPipedType(types []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// parseRecallTypes turns a raw `type` query parameter into RecallRequest.Types and
+// reports the first pipe-bearing entry, if any.
+//
+// EVERY reader of the `type` parameter must go through this. There are two — the JSON
+// API (handleRecall) and the web UI (handleMemoriesPage in ui_handlers_memory.go) — and
+// they used to parse it independently. Only the API got the aihub#289 guard, so
+// `/ui/memories?type=a|b` still reproduced the original bug verbatim: no error, no
+// diagnostic, an empty list that looks like an empty project, and the piped value
+// round-tripped back into the page's own links. Two readers of one parameter with
+// opposite behaviour is how the next variant of this bug gets in.
+func parseRecallTypes(raw string) (types []string, badPipe string) {
+	if raw == "" {
+		return nil, ""
+	}
+	types = strings.Split(raw, ",")
+	if bad, ok := firstPipedType(types); ok {
+		return nil, bad
+	}
+	return types, ""
+}
+
+// pipedTypeMessage is the one actionable explanation both surfaces show. Kept in one
+// place so the UI cannot drift into a vaguer version of it.
+func pipedTypeMessage(bad string) string {
+	return fmt.Sprintf("type value %q contains '|', which is not a separator: `|` is not "+
+		"part of the memory type vocabulary, so this arrives as a single type name and "+
+		"matches nothing. Pass multiple types as separate entries instead — "+
+		"pf_recall(type=[\"a.b\",\"c.*\"]), or ?type=a.b,c.* over HTTP.", bad)
 }
 
 func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
@@ -257,14 +307,11 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 
 		// Parse type filter (comma-separated or repeated params)
-		if typeParam := c.QueryParam("type"); typeParam != "" {
-			req.Types = strings.Split(typeParam, ",")
-			if bad, ok := firstPipedType(req.Types); ok {
-				return writeError(c, domain.NewErr(domain.ErrBadRequest, fmt.Sprintf(
-					"type value %q contains '|', which is not a separator: `|` is not part of the memory type vocabulary, so this arrives as a single type name and matches nothing. Pass multiple types as separate entries instead — pf_recall(type=[\"a.b\",\"c.*\"]), or ?type=a.b,c.* over HTTP.",
-					bad)))
-			}
+		types, badPipe := parseRecallTypes(c.QueryParam("type"))
+		if badPipe != "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, pipedTypeMessage(badPipe)))
 		}
+		req.Types = types
 		if vis := c.QueryParam("visibility"); vis != "" {
 			req.Visibility = vis
 		}
@@ -318,7 +365,7 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 		// the router has picked a path, so the one call covers the text, vector and
 		// hybrid paths alike — annotating inside domain.Recall would have needed the
 		// same statement at each of its four return points.
-		resp.UnmatchedTypes = domain.UnmatchedTypes(ctx, pool, req)
+		resp.UnmatchedTypes, resp.UnmatchedTypesError = domain.UnmatchedTypes(ctx, pool, req)
 		// opt3 P1: truncate each item content to a snippet; full via GET /v1/memories/:id
 		for i := range resp.Items {
 			rr := []rune(resp.Items[i].Content)

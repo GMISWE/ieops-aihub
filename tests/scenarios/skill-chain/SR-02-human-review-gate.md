@@ -72,7 +72,7 @@ SKILL_INVOKE (as BOB): polyforge:pf-spec
 USER_INTENT: "debug variant: analyze why auth bypass is possible"
 
 EXPECTED SKILL BEHAVIOR:
-  1. pf_recall(project="marketplace", query=wi.goal, type="methodology.spec|fact.*|rule.*", top_k=3)
+  1. pf_recall(project="marketplace", query=wi.goal, type=["methodology.spec","fact.*","rule.*"], top_k=3)
   2. pf_get_step(work_item_id=WI_CRITICAL) — get current step
   3. Heartbeat during analysis: pf_update_step(heartbeat=true) if taking >5min
   4. Root cause analysis format:

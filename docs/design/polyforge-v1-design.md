@@ -21,6 +21,7 @@
 > | 6 | 工具数量 | "38→32 工具" | 数量持续增长，**不在此处记数**——权威列表见 `docs/mcp-tools.md`，机器可读的权威 schema 由 `polyforge dump-mcp-schemas` 输出 |
 > | 7 | §16 EmbeddingProvider / 向量召回 | provider 抽象 + 语义召回 | 仅铺底、**从未接通**：provider 从未实例化、`Remember` 不写 `emb_vector`（恒 NULL）、HNSW 索引被注释、`RecallWithVector` 仅是一句注释。当前 recall = 文本/标签 + 近因排序。向量召回作为 **aihub#192** 在飞 |
 > | 8 | `pf_update_step` 的 `expected_version` CAS（§ 步骤状态机、§ 附录 API） | 客户端先 `pf_get_step` 取 `version`，随 `update_step` 回传做 CAS，冲突返回 412 | **从未实现**：`server.UpdateStepRequest` 从来没有这个字段，Echo Bind 静默丢弃，没有任何 412 路径。真正的并发保护是 `in_progress` 转换上的 `WHERE current_step_status='idle'` 谓词。参数已于 **aihub#290** 从 MCP schema 和 CLI flag 中删除（而非补实现），连带去掉了只为取这个 version 而存在的 `pf_get_step` 往返；同时 `update_step` 新增 `next_step`（完成一步并启动下一步）、终态调用新增 `note` |
+> | 9 | 全文各处的 `pf_recall(type="a|b|c")` 示例（§ Memory-First、§ 附录 API 等，含 L1613 / L1990 / L3481 / L3659 / L3690） | `type` 用 `|` 分隔多个类型 | **管道语法从未被解析**：`type` 是列表，整串被当成一个类型名，exact 与 LIKE 都匹配不到 ⇒ 静默返回空集。**aihub#289** 起服务端对含 `|` 的 `type` 值直接返回 400，并新增 `unmatched_types` 响应字段。正确写法是数组：`type=["a.b","c.*"]`。本文档正文未逐条回改（按本表开头的约定「以代码为准」），因此 `internal/cli/skill_recall_type_test.go` 的复发闸把本文件列为**有据豁免**；现行指导以 `plugins/polyforge/skills/` 与 `docs/mcp-tools.md` 为准 |
 
 ---
 

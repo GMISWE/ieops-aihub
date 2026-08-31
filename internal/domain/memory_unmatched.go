@@ -91,15 +91,37 @@ func typeFilterClause(types []string, startIdx int) (string, []any, int) {
 // different diagnosis with a different fix. A field that means two things means
 // neither.
 //
-// Returns entries in the caller's order, deduplicated. A nil/empty result means
-// every entry matched something (or no type filter was supplied).
+// Returns entries in the caller's order, deduplicated, plus a non-empty `unavailable`
+// reason when the diagnostic could not be computed.
 //
-// NEVER fails the recall: this is an add-on observation, so a broken diagnostic
-// query is logged to stderr and reported as "nothing to say", not surfaced as an
-// error on a request whose primary result is already in hand.
-func UnmatchedTypes(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) []string {
+// WHY THE SECOND RETURN VALUE EXISTS
+// ----------------------------------
+// The first version of this returned only []string and logged failures to stderr. That
+// made three states collapse into two on the wire, because the response field is
+// `omitempty`:
+//
+//	every type matched        -> nil  -> field absent
+//	no type filter supplied   -> nil  -> field absent
+//	THE DIAGNOSTIC BROKE      -> nil  -> field absent   <- a fault, reported as "fine"
+//
+// The third is a fault and must not look like the first two. This is the same omitempty
+// trap as content_truncated in aihub#269, and it is the exact bug class this whole work
+// item exists to remove — a diagnostic that goes quiet on failure is the thing it was
+// written to replace. Callers surface `unavailable` as its own response field.
+func UnmatchedTypes(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (unmatched []string, unavailable string) {
 	if req == nil || len(req.Types) == 0 {
-		return nil
+		return nil, ""
+	}
+
+	// Deduplicate FIRST, preserving caller order: it shrinks the query, and a repeated
+	// entry should be reported once.
+	types := make([]string, 0, len(req.Types))
+	seen := make(map[string]bool, len(req.Types))
+	for _, t := range req.Types {
+		if !seen[t] {
+			seen[t] = true
+			types = append(types, t)
+		}
 	}
 
 	statusSet := "'active'"
@@ -109,50 +131,63 @@ func UnmatchedTypes(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest)
 	// Mirrors recallText's visibility predicate exactly — a type whose only rows are
 	// invisible to this caller genuinely has nothing for them, and saying "unmatched"
 	// is the honest answer rather than a leak that such rows exist.
-	base := fmt.Sprintf(`project = $1
+	buildBase := func(startIdx int) (string, []any, int) {
+		base := fmt.Sprintf(`project = $1
 		AND status IN (%s)
 		AND (expires_at IS NULL OR expires_at > clock_timestamp())`, statusSet)
-	args := []any{req.Project}
-	idx := 2
-	if req.CallerRole != "admin" {
-		base += fmt.Sprintf(` AND (visibility != 'private' OR author_user_id = $%d)`, idx)
-		args = append(args, req.CallerUserID)
-		idx++
-		base += ` AND visibility != 'admin'`
-	}
-
-	// One EXISTS per filter entry, all in a single round trip. EXISTS stops at the
-	// first hit, and the entry count is the size of a caller's type list (a handful),
-	// so this costs one cheap query on type-filtered recalls and nothing at all on
-	// unfiltered ones.
-	sels := make([]string, 0, len(req.Types))
-	for i, t := range req.Types {
-		clause, cargs, next := typeFilterClause([]string{t}, idx)
-		sels = append(sels, fmt.Sprintf(
-			"EXISTS(SELECT 1 FROM memories WHERE %s AND %s) AS m%d", base, clause, i))
-		args = append(args, cargs...)
-		idx = next
-	}
-
-	found := make([]bool, len(req.Types))
-	dests := make([]any, len(found))
-	for i := range found {
-		dests[i] = &found[i]
-	}
-	q := "SELECT " + strings.Join(sels, ", ")
-	if err := pool.QueryRow(ctx, q, args...).Scan(dests...); err != nil {
-		fmt.Fprintf(os.Stderr, "recall: unmatched-type diagnostic failed (recall result unaffected): %v\n", err)
-		return nil
-	}
-
-	var out []string
-	seen := make(map[string]bool, len(req.Types))
-	for i, t := range req.Types {
-		if found[i] || seen[t] {
-			continue
+		args := []any{req.Project}
+		idx := startIdx
+		if req.CallerRole != "admin" {
+			base += fmt.Sprintf(` AND (visibility != 'private' OR author_user_id = $%d)`, idx)
+			args = append(args, req.CallerUserID)
+			idx++
+			base += ` AND visibility != 'admin'`
 		}
-		seen[t] = true
-		out = append(out, t)
+		return base, args, idx
 	}
-	return out
+
+	// CHUNKED because the query puts one EXISTS per type in the SELECT target list, and
+	// Postgres caps a target list at 1664 entries. Unchunked, a caller passing more than
+	// that got `target lists can have at most 1664 entries` — while Recall itself handled
+	// the same request fine, i.e. the diagnostic was less robust than the thing it
+	// diagnoses, and failed in the silent direction. 256 leaves an order of magnitude of
+	// headroom and keeps each statement small.
+	const chunk = 256
+
+	for start := 0; start < len(types); start += chunk {
+		end := start + chunk
+		if end > len(types) {
+			end = len(types)
+		}
+		batch := types[start:end]
+
+		base, args, idx := buildBase(2)
+		sels := make([]string, 0, len(batch))
+		for i, t := range batch {
+			clause, cargs, next := typeFilterClause([]string{t}, idx)
+			sels = append(sels, fmt.Sprintf(
+				"EXISTS(SELECT 1 FROM memories WHERE %s AND %s) AS m%d", base, clause, i))
+			args = append(args, cargs...)
+			idx = next
+		}
+
+		found := make([]bool, len(batch))
+		dests := make([]any, len(found))
+		for i := range found {
+			dests[i] = &found[i]
+		}
+		q := "SELECT " + strings.Join(sels, ", ")
+		if err := pool.QueryRow(ctx, q, args...).Scan(dests...); err != nil {
+			// Do NOT return a partial list: a half-computed answer read as complete would
+			// name types as matched that were never checked.
+			fmt.Fprintf(os.Stderr, "recall: unmatched-type diagnostic failed (recall result unaffected): %v\n", err)
+			return nil, fmt.Sprintf("type diagnostic unavailable: %v", err)
+		}
+		for i, t := range batch {
+			if !found[i] {
+				unmatched = append(unmatched, t)
+			}
+		}
+	}
+	return unmatched, ""
 }

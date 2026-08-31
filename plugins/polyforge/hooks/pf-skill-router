@@ -67,9 +67,19 @@ if not skill:
 base = skill.split(":")[-1]  # "polyforge:pf-execute" -> "pf-execute"
 
 # Per-skill parameters: (step_id, artifact_type, recall_type_filter, superpowers_engine_pointer)
+#
+# recall_type_filter is a LIST, not a string (aihub#289). pf_recall's `type` parameter is a
+# list of type names; a single string with '|' in it is ONE type name, matches no row, and
+# is now rejected by the server with a 400. This field used to be a single pipe-joined
+# string, which rendered into _common/memory.md as a quoted scalar and made every
+# pf-execute Memory-First recall fail. Keeping it a real list means the piped form is not
+# expressible here; `common()` below is the only place that turns it into text.
+# (Stated without reproducing the broken literal on purpose — the recurrence gate in
+# internal/cli/skill_recall_type_test.go sweeps this whole tree, comments included, and
+# that strictness is the point: the string should not be paste-able anywhere in here.)
 TARGETS = {
     "pf-execute": (
-        "execute", "", "experience.*|rule.*",
+        "execute", "", ["experience.*", "rule.*"],
         "Delegate each scenario step's implementation to `superpowers:subagent-driven-development` "
         "(with TDD / systematic-debugging / code-review / verification as sub-engines per step). "
         "**Stop before `superpowers:finishing-a-development-branch`** — commit/PR/wrap/CI go back to polyforge.\n\n"
@@ -140,7 +150,14 @@ superpowers_on = plugin_enabled("superpowers@") is True
 # --- assemble fragments ---
 def common(name):
     txt = read(os.path.join(skills_dir, "_common", name)) or ""
-    return txt.replace("@@RECALL_TYPE@@", recall_type).replace("@@ARTIFACT_TYPE@@", artifact_type)
+    # @@RECALL_TYPE@@ renders as a JSON ARRAY, and the template must NOT wrap it in
+    # quotes (see _common/memory.md). aihub#289: pf_recall's `type` is a list, so a
+    # scalar carrying '|' is one type name that matches nothing — and is now a 400.
+    # A bare string is normalised into a one-element list so a future edit to TARGETS
+    # cannot silently re-emit a scalar into an unquoted slot.
+    types = recall_type if isinstance(recall_type, list) else [recall_type]
+    rendered = json.dumps(types, ensure_ascii=False, separators=(",", ":"))
+    return txt.replace("@@RECALL_TYPE@@", rendered).replace("@@ARTIFACT_TYPE@@", artifact_type)
 
 memory_frag  = common("memory.md")
 storage_frag = common("storage.md")

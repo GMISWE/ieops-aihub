@@ -165,9 +165,17 @@
 <div class="empty">
   <div class="ei">+</div>
   <div class="et">No memories yet</div>
-  No memories match the current filters. Clear the filters or pick another project.
+  {{/* aihub#289: distinguish "your type filter names nothing that exists" from "this
+       project is empty". Conflating the two is what made the API's silent empty set
+       dangerous, and this page said the same misleading sentence for both. */}}
+  {{if .TypeNotice}}{{.TypeNotice}}{{else}}No memories match the current filters. Clear the filters or pick another project.{{end}}
 </div>
 {{else}}
+
+{{/* The partial case: rows came back, so nothing LOOKS wrong, yet one requested type
+     contributed none of them. Same reason the API reports unmatched_types even on a
+     non-empty result. */}}
+{{if .TypeNotice}}<div class="empty" style="max-width:none;margin-bottom:12px">{{.TypeNotice}}</div>{{end}}
 
 {{/* Card grid. Every card carries data-created / data-strength / data-author so
      memories.js can sort, Mine/All-filter, and paginate entirely client-side

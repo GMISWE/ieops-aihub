@@ -24,6 +24,13 @@ type recallMemoryFn func(ctx context.Context, pool *pgxpool.Pool, req *domain.Re
 // same pattern queue handlers use (getQueueFn).
 var recallMemoriesFn recallMemoryFn = domain.Recall
 
+// unmatchedTypesFn is the production-wired UnmatchedTypes (aihub#289), behind the same
+// seam as recallMemoriesFn. Calling domain.UnmatchedTypes directly here would reach past
+// the package's one swap point for "this handler talks to the database" and nil-deref the
+// pool in every test that overrides the recall — which is exactly what happened when this
+// diagnostic was first wired in.
+var unmatchedTypesFn = domain.UnmatchedTypes
+
 // loadMemoryFn is the production-wired GetMemoryByID — swappable in tests.
 var loadMemoryFn memLoaderFn = domain.GetMemoryByID
 
@@ -122,6 +129,11 @@ type memListPageData struct {
 	// For the link back / pagination preservation.
 	FilterQuery string
 	ErrMessage  string
+	// TypeNotice carries the aihub#289 unmatched-type diagnostic. Without it the page
+	// renders "No memories match the current filters" for a type name that does not
+	// exist in this project at all — the same conflation of "wrong filter" with "empty
+	// project" that the API's unmatched_types field was added to end.
+	TypeNotice string
 }
 
 // MemRelatedRef is the view-layer representation of a related memory, sourced
@@ -276,8 +288,11 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		}
 
 		// Build RecallRequest. domain.Recall natively supports the "prefix.*"
-		// wildcard form via strings.HasSuffix(t, ".*") at memory.go:442, so we
-		// pass the raw type query through unchanged.
+		// wildcard form via typeFilterClause, so the raw type query passes through
+		// essentially unchanged — but it goes through parseRecallTypes (routes_memory.go)
+		// rather than straight into req.Types, because this page is the SECOND reader of
+		// the `type` parameter and used to be the one without the aihub#289 guard:
+		// /ui/memories?type=a|b reproduced the original silent-empty-set bug in full.
 		req := &domain.RecallRequest{
 			Project:      project,
 			MinStrength:  data.StrengthMin,
@@ -287,7 +302,16 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			CallerRole:   u.Role,
 		}
 		if data.Type != "" {
-			req.Types = []string{data.Type}
+			types, badPipe := parseRecallTypes(data.Type)
+			if badPipe != "" {
+				// Same explanation the API's 400 carries, and no recall is run: an empty
+				// list plus no message is precisely the failure being fixed. The typed
+				// value stays in data.Type (and so in the filter form and self-link) so
+				// the reader can see and correct what they entered.
+				data.ErrMessage = pipedTypeMessage(badPipe)
+				return renderTemplate(c, tmpl, "layout", data)
+			}
+			req.Types = types
 		}
 		if data.WorkItemID != "" {
 			req.WorkItemID = &data.WorkItemID
@@ -297,6 +321,22 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		if err != nil {
 			data.ErrMessage = "failed to load memories: " + err.Error()
 			return renderTemplate(c, tmpl, "layout", data)
+		}
+
+		// aihub#289: same diagnostic the JSON API reports as unmatched_types. Both the
+		// answer and the "could not check" case are surfaced, for the same reason the
+		// API carries two fields — a diagnostic that goes quiet on failure is the bug
+		// it was written to replace.
+		if len(req.Types) > 0 {
+			unmatched, unavailable := unmatchedTypesFn(ctx, pool, req)
+			switch {
+			case unavailable != "":
+				data.TypeNotice = unavailable
+			case len(unmatched) > 0:
+				data.TypeNotice = "No memory of type " + strings.Join(unmatched, ", ") +
+					" exists in this project — the filter matched nothing, rather than the " +
+					"project being empty."
+			}
 		}
 
 		// Per-row visibility re-check — defense-in-depth over Recall's inline

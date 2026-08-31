@@ -365,16 +365,74 @@ is safe.
 
 ## Team deployment (reference)
 
-The team runs a single shared instance and does not repeat the from-scratch steps
-above each time — the host, compose file, and registry auth already exist. The
-`Makefile` wraps the routine update:
+Production has moved on from the single-Compose host this section originally
+described: it now runs against a **managed Cloud SQL** database with a
+co-located embedding service, and starts the server as a **bare `docker run`**
+(no Compose file). The current setup and the retired one are both recorded below.
+
+### Current production (Cloud SQL + bare `docker run`)
+
+| | |
+|---|---|
+| Host | `10.146.0.34` (GPU host; its public IP changes across stop/start — use the internal IP over the jump host) |
+| Database | **Cloud SQL** — managed Postgres 18 + pgvector at `10.20.80.3:5432`, `sslmode=require`. This is the "managed Postgres" path from [What you are deploying](#what-you-are-deploying); there is **no `postgres` container** |
+| Embedding | a TEI container named `tei` on the same host and Docker network `aihub-net`, published on `:8085` |
+| Server | one `docker run` container named `aihub` on `aihub-net`, `-p 8080:8080`, `--env-file /root/aihub.env` (holds `DATABASE_URL`, the `EMBEDDING_*` vars, `PORT`, `ADMIN_BOOTSTRAP_KEY`) — **no Compose file** |
+| Image | `us-west1-docker.pkg.dev/devv-404803/public/aihub`, pulled by **git-SHA tag** (not `:latest`) |
+
+The steps mirror the Compose flow above (pull → `migrate-up` → start → verify);
+only the mechanics differ (bare `docker run`, managed DB). Run from the host:
+
+```bash
+IMG=us-west1-docker.pkg.dev/devv-404803/public/aihub
+SHA=<target git sha on main>          # after CI's "Build & Push Docker image (main)" is green
+DBURL=$(docker inspect aihub --format '{{range .Config.Env}}{{println .}}{{end}}' | grep ^DATABASE_URL= | cut -d= -f2-)
+
+# 1. Back up Cloud SQL — run pg_dump on aihub-net so it can reach the DB.
+docker run --rm --network aihub-net -v /root/backups:/backups pgvector/pgvector:pg18 \
+  pg_dump -Fc -d "$DBURL" -f /backups/cloudsql_$(date +%Y%m%d_%H%M%S).dump
+
+# 2. Record the rollback anchor (current image + commit) BEFORE changing anything.
+docker inspect -f '{{.Config.Image}}' aihub; curl -s localhost:8080/v1/version
+
+# 3. Pull the target image by SHA (a SHA tag never lags the way :latest can).
+docker pull "$IMG:$SHA"
+
+# 4. Apply migrations — same migrate-up mechanism as Compose, via docker run.
+docker run --rm --network aihub-net --env-file /root/aihub.env "$IMG:$SHA" migrate-up
+
+# 5. Recreate the server container on the new image.
+docker rm -f aihub
+docker run -d --name aihub --network aihub-net -p 8080:8080 --restart unless-stopped \
+  --env-file /root/aihub.env "$IMG:$SHA"
+
+# 6. Verify.
+curl -s localhost:8080/v1/version   # git_commit == $SHA
+curl -s localhost:8080/v1/health    # {"db_ok":true,...}
+```
+
+**Rollback** is steps 3 + 5 with the previous SHA (kept from step 2). Additive
+migrations mean a server rollback alone is safe — see
+[Upgrades & rollback](#10-upgrades--rollback).
+
+**Embedding backfill** — only when a release adds or changes embeddings. Run
+`aihub-embed-backfill` *on the host* with `DATABASE_URL` and the `EMBEDDING_*`
+vars, but **override `EMBEDDING_BASE_URL=http://localhost:8085`**: the value in
+`/root/aihub.env` is the Docker-network name `http://tei:80`, which the host
+cannot resolve, so a host-run backfill otherwise silently embeds nothing. It is
+idempotent (only rows missing a vector for the current model are touched).
+
+### Legacy single-Compose host (`10.146.0.16`, retired)
+
+The earlier shared instance ran server + Postgres via Compose on `10.146.0.16`,
+wrapped by `make deploy`. That host has been retired in favour of the Cloud SQL
+setup above; the Makefile target and its variables are kept for reference only:
 
 | | |
 |---|---|
 | Host | `10.146.0.16` (`PROD_HOST`) |
 | Compose dir on host | `/root/manifests/aihub-v1` (`COMPOSE_DIR`) |
 | Image | `us-west1-docker.pkg.dev/devv-404803/public/aihub` (`GCR_IMAGE`) |
-| Port | `8080` |
 
 ```bash
 make deploy
@@ -382,11 +440,9 @@ make deploy
 #                cd COMPOSE_DIR && docker compose up -d --no-deps --force-recreate aihub
 ```
 
-Requirements: SSH access to `PROD_HOST`, registry auth on the host
-(`docker login us-west1-docker.pkg.dev`), and a compose file at `COMPOSE_DIR`.
-Typical release order: merge to `main` → wait for CI to push `:latest` (+ the SHA
-tag) → run `migrate-up` if the release changed migrations → `make deploy` →
-verify `/v1/health` and `/v1/version`.
+Typical release order (unchanged in spirit): merge to `main` → wait for CI to push
+the SHA tag → run `migrate-up` if the release changed migrations → recreate the
+server → verify `/v1/health` and `/v1/version`.
 
 ## Health & version endpoints
 

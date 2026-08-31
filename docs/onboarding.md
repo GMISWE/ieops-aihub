@@ -214,7 +214,8 @@ repos, ~250 MB, ~30 s on a good connection) and also drops in:
 
 - `.polyforge.yaml` — workspace config pulled from the server
 - `CLAUDE.md` — managed repo-map block Claude Code reads at session start
-- `.polyforge/usage.md` — Iron Rules + command cheatsheet
+- `.polyforge/usage.md` — command cheatsheet + machine config (the Iron Rules live in the
+  `using-polyforge` skill, not here — aihub#294)
 
 You may see a warning like `pf init: skipping scenario "coding" for project
 ieops` near the end — that is a harmless server-side config quirk, not an

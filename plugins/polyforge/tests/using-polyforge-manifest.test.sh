@@ -288,7 +288,7 @@ BASELINE = {
     "fragments/post-claim-routing.md":
         "moved on-demand by aihub#285 to stop the payload being truncated. It cannot "
         "come back until the resident tier is slimmed (aihub#296): making it resident "
-        "measures 14,544 chars, against a 10,000-char harness limit.",
+        "measures 14,549 chars, against a 10,000-char harness limit.",
     "fragments/memory-conventions.md":
         "moved on-demand by aihub#285 on the grounds that memory-first.md states the "
         "memory-lives-in-aihub half more strictly. True for that half — but the "

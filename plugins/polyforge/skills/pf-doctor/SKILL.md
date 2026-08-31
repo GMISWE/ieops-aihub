@@ -35,6 +35,8 @@ Run the CLI diagnostic tool and interpret results:
 polyforge doctor
 # With auto-fix for fixable issues:
 polyforge doctor --fix
+# Remove one worktree --fix refused (see Check 4 — read the reason first):
+polyforge doctor --fix --force-remove=<dir>
 ```
 
 The CLI runs 7 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per check:

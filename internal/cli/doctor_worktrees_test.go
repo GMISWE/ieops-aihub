@@ -311,7 +311,11 @@ func TestOrphanScanStillReportsTerminalWorkItems(t *testing.T) {
 // ─── --fix granularity ─────────────────────────────────────────────────────
 
 func TestFixRemovesTerminalWorktreesOnly(t *testing.T) {
-	items := ieopsFixture(260, nil)
+	// Every status is set BEFORE the fake is constructed. Setting items[111]
+	// afterwards worked only because fakeAihub shares the backing array; the day
+	// it copies, this test would silently degrade into "a wrapped item is kept"
+	// and stop testing the thing it is named after.
+	items := ieopsFixture(260, map[int]string{111: "running"})
 	items[240].Status = "wrapped"
 	f := &fakeAihub{
 		items: items,
@@ -320,7 +324,6 @@ func TestFixRemovesTerminalWorktreesOnly(t *testing.T) {
 		// rows lands here, and the per-item re-check has to catch it.
 		hideFromList: map[string]bool{"ieops#1111": true},
 	}
-	items[111].Status = "running"
 
 	root := workspaceWithWorktrees(t, "pf.ieops-1111", "pf.ieops-1240")
 	res, out := runWorktreeCheck(t, f, root, doctorOpts{fix: true})
@@ -375,21 +378,178 @@ func TestFailedListingNeverProducesOrphans(t *testing.T) {
 	// 260 items, but page 2 of the walk 500s. The pre-fix code's reaction to a
 	// failed listing was `continue`, i.e. compare against nothing, i.e. nominate
 	// every worktree of that project for deletion.
+	dirs := []string{"pf.ieops-1001", "pf.ieops-9999", "pf.deadbeef"}
 	f := &fakeAihub{items: ieopsFixture(260, nil), failListPage: 2}
-	root := workspaceWithWorktrees(t, "pf.ieops-1001", "pf.ieops-9999", "pf.deadbeef")
+	root := workspaceWithWorktrees(t, dirs...)
 
 	res, _ := runWorktreeCheck(t, f, root, doctorOpts{})
 
 	if strings.Contains(res.Message, "orphan worktrees:") {
 		t.Errorf("a failed listing must not nominate anything for deletion.\nmessage: %s", res.Message)
 	}
-	for _, d := range []string{"pf.ieops-1001", "pf.ieops-9999", "pf.deadbeef"} {
+	for _, d := range dirs {
 		if !strings.Contains(res.Message, d) {
 			t.Errorf("%s should be reported as unverifiable, not silently dropped.\nmessage: %s", d, res.Message)
 		}
 	}
 	if res.Status != "warning" {
 		t.Errorf("status = %q, want warning", res.Status)
+	}
+
+	// The message is not the point — nothing may actually be deleted. Asserting
+	// only on the absence of a substring would pin the wording and not the
+	// behaviour.
+	f2 := &fakeAihub{items: ieopsFixture(260, nil), failListPage: 2}
+	root2 := workspaceWithWorktrees(t, dirs...)
+	if _, out := runWorktreeCheck(t, f2, root2, doctorOpts{fix: true}); strings.Contains(out, ": removed") {
+		t.Errorf("--fix removed something despite a failed listing.\noutput:\n%s", out)
+	}
+	for _, d := range dirs {
+		if _, err := os.Stat(filepath.Join(root2, d)); err != nil {
+			t.Errorf("%s was deleted despite a failed listing: %v", d, err)
+		}
+	}
+}
+
+// TestForceRemoveReachesUnverifiableDirectories: a project the caller has lost
+// access to fails its listing on every run, so without a way through, its
+// directories are permanently uncleanable and the only remaining option is
+// `rm -rf` — the tool gets bypassed exactly where it is being careful.
+func TestForceRemoveReachesUnverifiableDirectories(t *testing.T) {
+	f := &fakeAihub{items: ieopsFixture(260, nil), failListPage: 2}
+	root := workspaceWithWorktrees(t, "pf.ieops-9998", "pf.ieops-9999")
+
+	res, out := runWorktreeCheck(t, f, root, doctorOpts{
+		fix:         true,
+		forceRemove: map[string]bool{"pf.ieops-9998": true},
+	})
+
+	if _, err := os.Stat(filepath.Join(root, "pf.ieops-9998")); !os.IsNotExist(err) {
+		t.Errorf("--force-remove named pf.ieops-9998; it must be removable even though unverifiable, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "pf.ieops-9999")); err != nil {
+		t.Errorf("pf.ieops-9999 was not named and must survive: %v", err)
+	}
+	if !strings.Contains(out, "unverifiable, but --force-remove named it explicitly") {
+		t.Errorf("a forced removal of an unverifiable directory must say so.\noutput:\n%s", out)
+	}
+	if strings.Contains(res.Message, "knows nothing about") {
+		t.Errorf("pf.ieops-9998 was a known directory; it must not be reported as unknown.\nmessage: %s", res.Message)
+	}
+}
+
+// TestFixWillNotDeleteNamesPolyforgeNeverProduced guards the widest deletion
+// path: a name with no slug used to be treated as "legacy format" and removed
+// with no per-item check at all. Measured before the fix: pf.ieops-1005.bak,
+// pf.scratch and pf.aihub-notes were all deleted, each reported as a legacy
+// worktree. "pf." is a prefix, not a licence.
+func TestFixWillNotDeleteNamesPolyforgeNeverProduced(t *testing.T) {
+	f := &fakeAihub{items: ieopsFixture(20, map[int]string{5: "running"})}
+	strangers := []string{"pf.ieops-1005.bak", "pf.scratch", "pf.aihub-notes", "pf.ieops-1005.old"}
+	root := workspaceWithWorktrees(t, append([]string{"pf.7.aBcD1234", "pf.aBcD1234"}, strangers...)...)
+
+	res, out := runWorktreeCheck(t, f, root, doctorOpts{fix: true})
+
+	for _, d := range strangers {
+		if _, err := os.Stat(filepath.Join(root, d)); err != nil {
+			t.Errorf("%s is not a name polyforge produces and must not be deleted: %v", d, err)
+		}
+	}
+	// The two real legacy shapes match no active work item here, so they ARE
+	// orphans and must still be removed — otherwise this guard is just "delete
+	// nothing".
+	for _, d := range []string{"pf.7.aBcD1234", "pf.aBcD1234"} {
+		if _, err := os.Stat(filepath.Join(root, d)); !os.IsNotExist(err) {
+			t.Errorf("%s is a real legacy worktree name with no active work item; it should still be removed, stat err = %v", d, err)
+		}
+	}
+	if !strings.Contains(out, "refusing to delete something it cannot identify") {
+		t.Errorf("output must say why the unrecognised names were kept.\noutput:\n%s", out)
+	}
+	if res.Status != "warning" {
+		t.Errorf("status = %q, want warning — four directories were kept", res.Status)
+	}
+}
+
+func TestIsLegacyWorktreeName(t *testing.T) {
+	cases := map[string]bool{
+		"pf.aBcD1234":      true, // pf.<ulid8>
+		"pf.7.aBcD1234":    true, // pf.<seq>.<ulid8>
+		"pf.1234.00000000": true,
+		"pf.aBcD123":       false, // 7 chars
+		"pf.aBcD12345":     false, // 9 chars
+		"pf.scratch":       false,
+		"pf.aihub-notes":   false,
+		"pf.ieops-274.bak": false,
+		"pf.ieops-274":     false, // slug format, handled by worktreeSlug
+		"pf.x.aBcD1234":    false, // seq must be digits
+		"pf.aBcD_234":      false, // base62 only
+		"pf.7.8.aBcD1234":  false,
+		"pf.":              false,
+		"notpf.aBcD1234":   false,
+	}
+	for name, want := range cases {
+		if got := isLegacyWorktreeName(name); got != want {
+			t.Errorf("isLegacyWorktreeName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestRemovalFailureIsNotReportedAsRemoved: os.RemoveAll's error used to be
+// discarded, so a directory that could not be deleted still produced
+// "removed N orphan worktrees" and an [ok].
+func TestRemovalFailureIsNotReportedAsRemoved(t *testing.T) {
+	items := ieopsFixture(20, nil)
+	items[9].Status = "wrapped"
+	f := &fakeAihub{items: items}
+	root := workspaceWithWorktrees(t, "pf.ieops-1009")
+
+	// A deletion that silently does nothing. This has to be injected rather than
+	// induced with a read-only parent: these tests run as root in CI, where
+	// neither mode bits nor a read-only parent stop an unlink, so the guard would
+	// only ever be exercised on someone's laptop.
+	orig := deleteWorktreeDir
+	deleteWorktreeDir = func(context.Context, string, string) {}
+	t.Cleanup(func() { deleteWorktreeDir = orig })
+
+	res, out := runWorktreeCheck(t, f, root, doctorOpts{fix: true})
+
+	if _, err := os.Stat(filepath.Join(root, "pf.ieops-1009")); err != nil {
+		t.Fatalf("fixture broken — the directory should still be there: %v", err)
+	}
+	if !strings.Contains(out, "REMOVAL FAILED") || !strings.Contains(res.Message, "REMOVAL FAILED") {
+		t.Errorf("the directory is still on disk but nothing said the removal failed.\nmessage: %s\noutput:\n%s", res.Message, out)
+	}
+	if strings.Contains(out, "pf.ieops-1009: removed") {
+		t.Errorf("output claims a removal that did not happen.\noutput:\n%s", out)
+	}
+	if res.Status == "ok" {
+		t.Errorf("status = ok while a directory it claims to have removed is still there: %s", res.Message)
+	}
+}
+
+// TestRemoveWorktreeDirReportsSuccessOnlyWhenGone pins the primitive itself, so
+// the injected-failure test above cannot be the only thing holding the contract.
+func TestRemoveWorktreeDirReportsSuccessOnlyWhenGone(t *testing.T) {
+	root := workspaceWithWorktrees(t, "pf.ieops-1", "pf.ieops-2")
+
+	if err := removeWorktreeDir(context.Background(), root, "pf.ieops-1"); err != nil {
+		t.Errorf("a real removal should report success: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "pf.ieops-1")); !os.IsNotExist(err) {
+		t.Errorf("pf.ieops-1 should be gone, stat err = %v", err)
+	}
+	// Removing something that was never there is success, not a failure: the
+	// contract is "it is not on disk", not "this call did the deleting".
+	if err := removeWorktreeDir(context.Background(), root, "pf.never-existed"); err != nil {
+		t.Errorf("an already-absent directory should not be an error: %v", err)
+	}
+
+	orig := deleteWorktreeDir
+	deleteWorktreeDir = func(context.Context, string, string) {}
+	t.Cleanup(func() { deleteWorktreeDir = orig })
+	if err := removeWorktreeDir(context.Background(), root, "pf.ieops-2"); err == nil {
+		t.Error("the directory is still on disk; removeWorktreeDir must not report success")
 	}
 }
 
@@ -498,10 +658,28 @@ func TestParseDoctorArgs(t *testing.T) {
 	// An unrecognised flag must not be silently ignored: the old parser only
 	// looked at args[0], so `doctor --dry-run --fix` ran the read-only path and
 	// `doctor --fixx` did nothing, both without a word.
-	for _, args := range [][]string{{"--fixx"}, {"--dry-run", "--fix"}, {"--force-remove=pf.a"}, {"--fix", "--force-remove"}} {
+	for _, args := range [][]string{
+		{"--fixx"},
+		{"--dry-run", "--fix"},
+		{"--force-remove=pf.a"},
+		{"--fix", "--force-remove"},
+		// A flag consumed as a value: this used to record a directory literally
+		// named "--fix" and swallow the real flag, silently.
+		{"--force-remove", "--fix"},
+		{"--fix", "--force-remove=--fix"},
+	} {
 		if _, err := parseDoctorArgs(args); err == nil {
 			t.Errorf("parseDoctorArgs(%v) accepted an argument it cannot honour", args)
 		}
+	}
+	// --help must not be an error: it used to run the read-only check, and after
+	// the parser got strict it would have exited 2 on a request for usage.
+	h, err := parseDoctorArgs([]string{"--help"})
+	if err != nil || !h.help {
+		t.Errorf("--help: got help=%v err=%v", h.help, err)
+	}
+	if h, err := parseDoctorArgs([]string{"-h"}); err != nil || !h.help {
+		t.Errorf("-h: got help=%v err=%v", h.help, err)
 	}
 }
 

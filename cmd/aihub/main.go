@@ -79,6 +79,14 @@ func main() {
 			case <-ticker.C:
 				results := domain.RunAll(context.Background(), pool)
 				for _, r := range results {
+					// aihub#268: a sweep that failed reports Affected == 0, so the
+					// Affected==0 filter below was silently discarding every sweep
+					// error for the life of the service. Errors are logged first and
+					// unconditionally; the filter only ever meant to mute *idle*
+					// sweeps.
+					if r.Error != "" {
+						fmt.Fprintf(os.Stderr, "gc: %s error=%s\n", r.SweepType, r.Error)
+					}
 					if r.Skipped || r.Affected == 0 {
 						continue
 					}

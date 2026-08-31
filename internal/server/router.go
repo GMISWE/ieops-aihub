@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
@@ -168,6 +171,43 @@ func handleCreateWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 	}
 }
 
+// parseListWIBool reads a boolean query param for GET /v1/work_items. It returns
+// (value, true) for an absent param or a recognised spelling, and (false, false)
+// for anything else so the caller can reject it.
+//
+// strconv.ParseBool's set is used rather than a hand-rolled `== "true"` so the
+// spellings a caller is likely to try (True, TRUE, T, 1, 0, f) are all either
+// honoured or refused — never silently read as false (aihub#280).
+func parseListWIBool(c echo.Context, name string) (value, ok bool) {
+	raw := strings.TrimSpace(c.QueryParam(name))
+	if raw == "" {
+		return false, true
+	}
+	b, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, false
+	}
+	return b, true
+}
+
+// splitCSVParam splits a comma-separated query param, trimming each entry and
+// dropping empties.
+//
+// Trimming is load-bearing, not tidiness: `ids=wi_a, wi_b` is the form a human
+// or an agent writes, and an untrimmed " wi_b" matches no row while looking like
+// a working filter — the same silent-miss this wi exists to close. /ui already
+// trims its equivalents (ui_handlers_wi.go); this endpoint did not (aihub#280).
+func splitCSVParam(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // handleListWorkItems handles GET /v1/work_items.
 func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
@@ -176,27 +216,104 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		defer cancel()
 
 		project := c.QueryParam("project")
-		if project == "" {
-			return writeError(c, domain.NewErr(domain.ErrBadRequest, "project query parameter is required"))
-		}
-
-		// C1: Require at least viewer access to the project
-		if err := checkProjectAccess(c, u, project, "viewer"); err != nil {
-			return err
-		}
+		ids := splitCSVParam(c.QueryParam("ids"))
 
 		filter := domain.ListWorkItemsFilter{
 			Limit: 50,
 		}
 
-		if status := c.QueryParam("status"); status != "" {
-			filter.Status = strings.Split(status, ",") // supports "running,paused,queued"
+		// aihub#280: an ids= lookup no longer requires project=.
+		//
+		// pf-status, pf-retro and pf-execute all open with
+		// pf_list_work_items(ids=[<current_wi_id>]) and pass no project — a wi id
+		// already names exactly one wi, so there is nothing for the caller to
+		// supply. That request used to 400, meaning those three skills' first
+		// call had almost certainly never once succeeded. Requiring the caller to
+		// restate a project the id already determines is the wrong end to fix.
+		//
+		// Access control does not weaken: with no project to check a role
+		// against, the query is bounded to the projects this caller can see via
+		// AccessibleProjects (the same mechanism the /ui view-all option uses),
+		// so an id outside that set simply returns no rows.
+		if project == "" {
+			// len(ids)==0 rather than the raw param being empty: `ids=,` and
+			// `ids=%20` are non-empty strings that carry no id, and treating
+			// those as "an ids lookup" would drop the project requirement and
+			// then list every accessible project in full.
+			if len(ids) == 0 {
+				return writeError(c, domain.NewErr(domain.ErrBadRequest,
+					"project query parameter is required (or pass ids= to look up work items by id)"))
+			}
+			if u == nil {
+				return writeError(c, domain.NewErr(domain.ErrUnauthorized, "not authenticated"))
+			}
+			switch {
+			case u.ProjectScope != nil:
+				// ProjectScope is a *confinement* on the API key, never a grant.
+				// BearerAuth already intersects memberships with it
+				// (middleware.go), so a non-admin whose key is scoped to a
+				// project they are not a member of arrives here with an EMPTY
+				// ProjectRoles. Scoping to *u.ProjectScope unconditionally would
+				// hand that caller read access that `?project=X` still answers
+				// 403 for — and would mean removing someone from a project no
+				// longer revokes their reads. Admins legitimately have an empty
+				// ProjectRoles (the membership query is skipped for them), so
+				// they are the one exemption.
+				if u.Role != "admin" && u.ProjectRoles[*u.ProjectScope] == "" {
+					return writeError(c, domain.NewErr(domain.ErrForbidden,
+						fmt.Sprintf("no access to project %q", *u.ProjectScope)))
+				}
+				filter.AccessibleProjects = []string{*u.ProjectScope}
+			case u.Role == "admin":
+				// Empty AccessibleProjects + empty project = no project clause,
+				// i.e. every project. Matches the admin "view all" contract
+				// documented on ListWorkItems.
+			default:
+				projects := make([]string, 0, len(u.ProjectRoles))
+				for p, role := range u.ProjectRoles {
+					if role != "" {
+						projects = append(projects, p)
+					}
+				}
+				if len(projects) == 0 {
+					return writeError(c, domain.NewErr(domain.ErrForbidden,
+						"no accessible projects; pass project= explicitly"))
+				}
+				// Sorted so the bound arg is deterministic (map order is not).
+				sort.Strings(projects)
+				filter.AccessibleProjects = projects
+			}
+		} else {
+			// C1: Require at least viewer access to the project
+			if err := checkProjectAccess(c, u, project, "viewer"); err != nil {
+				return err
+			}
 		}
-		if wiType := c.QueryParam("wi_type"); wiType != "" {
+
+		if status := c.QueryParam("status"); status != "" {
+			filter.Status = splitCSVParam(status) // supports "running,paused,queued"
+		}
+		// `kind` is a deprecated spelling of `wi_type`. It is kept rather than
+		// removed because the MCP schema published it first and /ui still reads
+		// `kind` (and only `kind`) for what it folds onto filter.WIType
+		// (ui_handlers_wi.go) — so "kind means wi_type" is already this codebase's
+		// convention. An explicit wi_type wins; there is deliberately no third
+		// spelling and no separate `kind` column (aihub#280).
+		wiType := strings.TrimSpace(c.QueryParam("wi_type"))
+		if wiType == "" {
+			wiType = strings.TrimSpace(c.QueryParam("kind"))
+		}
+		if wiType != "" {
 			filter.WIType = &wiType
 		}
 		if priority := c.QueryParam("priority"); priority != "" {
 			filter.Priority = &priority
+		}
+		if milestone := c.QueryParam("milestone"); milestone != "" {
+			filter.Milestone = &milestone
+		}
+		if scenario := c.QueryParam("scenario"); scenario != "" {
+			filter.Scenario = &scenario
 		}
 		if label := c.QueryParam("label"); label != "" {
 			filter.Label = &label
@@ -207,8 +324,37 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		if src := c.QueryParam("source"); src != "" {
 			filter.Source = &src
 		}
-		if ids := c.QueryParam("ids"); ids != "" {
-			filter.IDs = strings.Split(ids, ",")
+		if len(ids) > 0 {
+			filter.IDs = ids
+		}
+		// since: parsed here rather than passed through, because filter.Since is
+		// a time.Time. An unparseable value is rejected loudly instead of being
+		// dropped — pf-release computes its whole release scope from this param,
+		// so silently ignoring it turns "wrapped since the last release" into
+		// "the most recent 50 wrapped" with no signal at all (aihub#280).
+		if since := c.QueryParam("since"); since != "" {
+			ts, parseErr := time.Parse(time.RFC3339, since)
+			if parseErr != nil {
+				return writeError(c, domain.NewErr(domain.ErrBadRequest,
+					fmt.Sprintf("since must be an RFC3339 timestamp, got %q", since)))
+			}
+			filter.Since = &ts
+		}
+		// Booleans are rejected rather than coerced, for the same reason `since`
+		// is: `ready_only=True` or `ready_only=yes` silently meaning false is the
+		// defect class this whole wi is about, and it would be indistinguishable
+		// from not sending the param at all (aihub#280).
+		if b, ok := parseListWIBool(c, "ready_only"); !ok {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest,
+				fmt.Sprintf("ready_only must be true or false, got %q", c.QueryParam("ready_only"))))
+		} else {
+			filter.ReadyOnly = b
+		}
+		if b, ok := parseListWIBool(c, "include_step_state"); !ok {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest,
+				fmt.Sprintf("include_step_state must be true or false, got %q", c.QueryParam("include_step_state"))))
+		} else {
+			filter.IncludeStepState = b
 		}
 		if limit := c.QueryParam("limit"); limit != "" {
 			var n int

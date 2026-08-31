@@ -66,6 +66,39 @@ func strSliceArg(args map[string]any, key string) []string {
 	return out
 }
 
+// csvArg extracts an argument that may arrive as either a JSON string or a
+// JSON array of strings, and renders it as the comma-separated form the aihub
+// HTTP API parses with strings.Split.
+//
+// aihub#280: strArg returns "" for anything that is not a string, so a param
+// declared `string` but *called* with an array was silently dropped — the whole
+// argument vanished with no error at any hop. Three polyforge skills sent
+// `ids=[...]` and three sent `status=["wrapped"]`; every one of those filters
+// was being discarded. Accepting both shapes at the decoder is what makes the
+// drop impossible rather than merely fixed at today's call sites.
+//
+// Absent, null, a wrong type, or an array with no usable entries all yield "",
+// which setIfNonempty treats as "not specified" — never as an empty selection.
+func csvArg(args map[string]any, key string) string {
+	v, ok := args[key]
+	if !ok {
+		return ""
+	}
+	switch typed := v.(type) {
+	case string:
+		return typed
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if s, ok := item.(string); ok && s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, ",")
+	}
+	return ""
+}
+
 // numArg extracts a float64 argument (returns 0 if absent or wrong type).
 func numArg(args map[string]any, key string) float64 {
 	if v, ok := args[key]; ok {

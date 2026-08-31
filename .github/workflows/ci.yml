@@ -455,6 +455,60 @@ jobs:
           ! grep -q -- '--- SKIP' recall_unmatched_http.log \
             || { echo "::error::TestHandleRecall_ReportsUnmatchedTypes SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#280: the pf_list_work_items parameter contract has four hops
+      # (published MCP schema → MCP/HTTP forwarding → query param → filter field
+      # → SQL), and seven params were dying on one hop or another while every
+      # existing test stayed green. Hops 1-4 each got their own pure-unit guard
+      # (internal/mcp/tools_list_wi_schema_test.go,
+      # internal/server/router_list_wi_params_test.go,
+      # internal/domain/work_items_list_filters_test.go) — those run on the
+      # "Unit tests" step above and need nothing here.
+      #
+      # This step is for the end-to-end probe, which needs a real database
+      # because the acceptance criterion is a *row count*: send a value that
+      # cannot match anything and assert n == 0. That is the only formulation
+      # that discriminates. The original investigation used limit=50 and compared
+      # counts, but 50 was the limit, so "filtered, still >50 matches" and "param
+      # discarded" produced the same number — and raising the limit reproduces the
+      # illusion, since limit>200 is silently clamped back to 50 (aihub#267).
+      # The suite therefore seeds a 6-item project (well under the limit), and
+      # also asserts positive controls still discriminate, that an unknown param
+      # does NOT filter, and — for include_step_state, which widens rows instead
+      # of narrowing the set — the response key set rather than any count.
+      #
+      # Runs against internal/server (not internal/domain, so no widening-gate
+      # concern with that package's other AIHUB_TEST_DB suites) and reuses the
+      # already-migrated Postgres service.
+      #
+      # Same -v + grep guard as every DB step above, and for the same reason:
+      # `go test` prints "ok" and exits 0 when every selected test SKIPs, and
+      # these skip whenever AIHUB_TEST_DB is empty — so without the guard this
+      # coverage would silently not exist while CI stayed green. Verified during
+      # this wi: the unguarded form printed "ok ... 0.131s" with all three tests
+      # SKIPped.
+      - name: aihub#280 list work_items param contract DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run 'TestListWorkItemsParams' -count=1 -v 2>&1 | tee wi_list_params.log
+          for want in TestListWorkItemsParams_EndToEnd \
+                      TestListWorkItemsParams_IncludeStepStateChangesTheKeySet \
+                      TestListWorkItemsParams_IdsWithoutProjectEndToEnd; do
+            grep -q -- "--- PASS: $want" wi_list_params.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#280 DB-gated param-contract coverage is not actually executing"; exit 1; }
+          done
+          # The n==0 probes are only meaningful if the positive controls and the
+          # unknown-param negative control also ran; name them so deleting a
+          # subtest cannot quietly shrink the probe to its vacuous half.
+          for want in 'TestListWorkItemsParams_EndToEnd/positive_controls_discriminate' \
+                      'TestListWorkItemsParams_EndToEnd/negative_control:_unknown_param_must_not_filter'; do
+            grep -q -- "--- PASS: $want" wi_list_params.log \
+              || { echo "::error::$want did not run; without it the n==0 probes prove nothing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' wi_list_params.log \
+            || { echo "::error::an aihub#280 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: Launcher update-check regression suite
         run: bash plugins/polyforge/tests/launcher-update-check.test.sh
 

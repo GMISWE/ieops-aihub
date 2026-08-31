@@ -36,6 +36,15 @@ wi_info = pf_list_work_items(
 )
 ```
 
+> Since aihub#280 this call actually works. Before it, `ids` was in no MCP
+> forwarding table and this site sends no `project`, so the outgoing request was
+> a bare `GET /v1/work_items` — a hard **400 `project query parameter is
+> required`**. This step had essentially never succeeded. Three things changed:
+> `ids` is published and forwarded, `project` is now optional when `ids` is given
+> (an id already names one wi; the query is bounded to the projects you can see),
+> and `include_step_state=true` really attaches `step_state`. Do not "fix" this
+> by adding `project=` or by dropping either param.
+
 ### Step 2: Read full event stream
 
 ```

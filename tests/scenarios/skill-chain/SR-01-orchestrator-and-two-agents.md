@@ -65,8 +65,8 @@ SKILL_INVOKE (as ALICE): polyforge:pf-stop --wrap
   (Alice may skip code_change/commit for this test — just wrap immediately)
 
 EXPECTED SKILL BEHAVIOR (coding scenario — pf_wrap, not pf_complete_attempt):
-  - pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_FIX1, repo="marketplace")
-  - pf_emit_event(event_type="note", payload={text: "wrapped: ..."})
+  - pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_FIX1, repo="marketplace",
+      note="wrapped: ...")
 
 ASSERT:
   - pf_wrap called (NOT pf_complete_attempt directly)

@@ -71,11 +71,13 @@ judges actually useful, call `pf_activate_memory(id)`.
 ### Step 2: Mark the step in_progress
 
 ```
-version = pf_get_step(work_item_id=<current>).version
-sa_id    = new_ulid()
-pf_update_step(work_item_id=<current>, step_id="spec", status="in_progress",
-               expected_version=version)
+sa_id = new_ulid()
+pf_update_step(work_item_id=<current>, step_id="spec", status="in_progress")
 ```
+
+No `pf_get_step` first: the bracket needs no version number, and the `expected_version` it
+used to fetch was never bound server-side — the call bought a value that was discarded on
+arrival (aihub#290).
 
 ### Step 3: Write the spec
 

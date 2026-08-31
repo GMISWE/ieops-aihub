@@ -188,6 +188,32 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
    **silent mode** (state "use silent mode" or "silent create" when invoking):
    emit three-segment output directly, do not ask, do not claim, wi stays on the queue.
 
+   **Filing several at once (silent mode only)**: use `pf_batch_create_work_items` instead of
+   one `pf_create_work_item` per item — repeated single calls cost one MCP round-trip each,
+   and a round-trip costs the whole request prefix rather than the size of its response
+   (aihub#290: 134 measured adjacent create→create pairs, 0.171% of billed input).
+
+   ```
+   pf_batch_create_work_items(
+     project=<from .polyforge.yaml>,
+     items=[
+       {goal:..., wi_type:..., priority:..., labels:[...], content:...},
+       {goal:..., wi_type:...},
+     ]
+   )
+   ```
+
+   - Items are created independently; one failure does not stop the rest. Read `created` and
+     `failed` separately — **`ok:true` is not implied by the call returning**.
+   - Each `failed` entry carries its `index`, so retry by resending only those items. Do not
+     resend the whole array: the ones that already landed would then trip dedup.
+   - Duplicate detection still runs per item, so a `409 DUPLICATE` / `409 CANDIDATES` on one
+     item is a normal per-item outcome — surface it the same way Step 4 does for a single wi.
+   - This is silent mode only. Dialog mode confirms one draft at a time, so batching there
+     would skip the confirmation each wi is supposed to get.
+   - **Compatibility**: if `pf_batch_create_work_items` is not among the available tools, the
+     server binary predates aihub#290 — fall back to one `pf_create_work_item` per item.
+
 6. Output three-segment format.
 
 ---

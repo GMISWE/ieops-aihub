@@ -275,6 +275,44 @@ jobs:
           grep -q -- "--- PASS: TestHandleListWorkItems_Query" wi_query.log             || { echo "::error::TestHandleListWorkItems_Query did not run; the aihub#273 DB-gated coverage is not executing"; exit 1; }
           ! grep -q -- '--- SKIP' wi_query.log             || { echo "::error::an aihub#273 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#290: exercise the fused step transition (next_step completes one
+      # step and starts its successor in a single request) against the same
+      # Postgres service, already migrated by the "Apply migrations (aihub#242 DB
+      # tests)" step above.
+      #
+      # These need a real database because the guarantee is transactional, not
+      # structural: the successor's start relies on reading the completion's own
+      # uncommitted 'idle' inside the same transaction, and the mandatory-record
+      # gate (aihub#221) has to keep blocking the successor as well as the
+      # completion. Neither is visible without executing the statements.
+      #
+      # TestHandleUpdateStep_FusedEqualsTwoCalls is the one that matters most: it
+      # drives two work items through the same step walk, one fused and one split
+      # across the two calls it replaces, and asserts the resulting wi_step_state
+      # and step timeline are identical. Fusing is a transport change, so
+      # "indistinguishable from what it replaces" is the actual contract.
+      #
+      # Same -v + grep guard as every DB step above, and for the same reason: `go
+      # test` prints "ok" and exits 0 when every selected test SKIPs, and these
+      # skip whenever AIHUB_TEST_DB is empty — so without the guard, anything
+      # that stops the env var reaching this step restores zero coverage while CI
+      # stays green.
+      - name: aihub#290 fused step-transition DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run 'TestHandleUpdateStep_(NextStep|FusedEquals|FusedRespects)' -count=1 -v 2>&1 | tee step_fused.log
+          for want in TestHandleUpdateStep_NextStepFusesCompleteAndStart \
+                      TestHandleUpdateStep_FusedEqualsTwoCalls \
+                      TestHandleUpdateStep_NextStepRejectedUnlessCompleted \
+                      TestHandleUpdateStep_FusedRespectsMandatoryRecordGate; do
+            grep -q -- "--- PASS: $want" step_fused.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#290 DB-gated fusion coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' step_fused.log \
+            || { echo "::error::an aihub#290 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: aihub#239 recall cursor tie + supersede carry DB tests
         env:
           AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable

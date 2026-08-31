@@ -326,14 +326,16 @@ func (s *Server) registerCodingTools() {
 
 	// pf_wrap
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_wrap",
-		Description: "Wrap a work item: push + PR + complete_attempt(wrapped) + delete state file. Idempotent only when a PR on the branch already covers local HEAD; local commits no PR covers are pushed, and a new PR is opened if the existing one is merged/closed. The response's pr_action says which happened.",
+		Name: "pf_wrap",
+		Description: "Wrap a work item: push + PR + complete_attempt(wrapped) + delete state file. Idempotent only when a PR on the branch already covers local HEAD; local commits no PR covers are pushed, and a new PR is opened if the existing one is merged/closed. The response's pr_action says which happened. " +
+			"Pass `note` to record the closing note in the same call rather than emitting it with a separate pf_emit_event beforehand.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
 			"work_item_id":   prop("string", "Work item ID"),
 			"repo":           prop("string", "Repository name"),
 			"pr_title":       prop("string", "PR title (if PR doesn't exist yet)"),
 			"pr_body":        prop("string", "PR body (if PR doesn't exist yet)"),
+			"note":           prop("string", "Closing note recorded as a `note` event before the attempt is completed (e.g. \"wrapped: <one sentence>\"). Replaces a separate pf_emit_event call."),
 		}, []string{"work_item_id", "repo"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -380,6 +382,26 @@ func (s *Server) registerCodingTools() {
 				prPayload(repo, strArg(args, "pr_title"), wrap.PR))
 		}
 
+		// Closing note (aihub#290), emitted HERE — after the push/PR half has
+		// actually succeeded, before the completion that deletes the credentials.
+		// Emitting it earlier would leave a "wrapped: ..." note on the timeline of
+		// a wrap that then failed at the push; emitting it later is impossible,
+		// because by then the attempt is closed and the state file is gone.
+		//
+		// This is NOT exactly-once. A wrap retried after a failed PUSH records the
+		// note once, because the push precedes it. A wrap retried after a failed
+		// COMPLETE_ATTEMPT records it twice — and that is the failure that
+		// actually happens, since this call never sets force_terminate_step, so
+		// wrapping with a step still in_progress always fails there. The note is
+		// short and duplicate notes are noise rather than damage, which is why
+		// this is documented rather than solved; the alternative (an idempotency
+		// key on agent_events) is a bigger change than this work item.
+		note := strArg(args, "note")
+		var noteErr error
+		if note != "" {
+			noteErr = s.emitNote(ctx, wiID, sf, note)
+		}
+
 		// Complete attempt — server expects wi_id in URL path; attempt_id in body for credential check.
 		body := map[string]any{
 			"status":         "wrapped",
@@ -389,7 +411,7 @@ func (s *Server) registerCodingTools() {
 		}
 		completeResult, err := s.client.CompleteAttempt(ctx, sf.WIID, body)
 		if err != nil {
-			return errResult(fmt.Errorf("complete_attempt: %w", err))
+			return errResult(fmt.Errorf("complete_attempt: %w%s", err, noteOutcomeSuffix(note != "", noteErr)))
 		}
 
 		// Delete state file (terminal status)
@@ -405,6 +427,7 @@ func (s *Server) registerCodingTools() {
 		if wrap.PushedSHA != "" {
 			wrapResult["pushed_sha"] = wrap.PushedSHA
 		}
+		applyNoteResult(wrapResult, note != "", noteErr)
 		addWorktrees(wrapResult, sf.Worktrees)
 		return jsonResult(wrapResult)
 	})

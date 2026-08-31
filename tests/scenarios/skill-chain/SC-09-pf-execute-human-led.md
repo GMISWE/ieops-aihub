@@ -51,16 +51,15 @@ EXPECTED SKILL BEHAVIOR (from pf-execute SKILL.md):
   → INLINE execution (do NOT dispatch subagent; Alice is the Wi Agent here)
 
   Inline spec execution:
-    a. pf_get_step(work_item_id=WI_ID) → current version V1
-    b. pf_update_step(work_item_id=WI_ID, step_id="spec",
-                      status="in_progress", expected_version=V1)
+    a. pf_update_step(work_item_id=WI_ID, step_id="spec",
+                      status="in_progress")
        → returns step_attempt_id=SA_SPEC
-    c. Heartbeat during discussion:
+    b. Heartbeat during discussion:
        pf_update_step(work_item_id=WI_ID, step_id="spec", heartbeat=true)
        [Called every 5 minutes while human is writing the spec with Alice]
-    d. Guide human through spec: What/Why, Non-goals, Acceptance criteria,
+    c. Guide human through spec: What/Why, Non-goals, Acceptance criteria,
        Rate limiting strategy (token bucket vs fixed window), storage backend (Redis).
-    e. pf_save_artifact(type="methodology.spec", work_item_id=WI_ID,
+    d. pf_save_artifact(type="methodology.spec", work_item_id=WI_ID,
                          content=<markdown spec>,
                          structured_payload={
                            decisions: ["token bucket algo", "Redis backend", "per-key limits"],
@@ -72,11 +71,12 @@ EXPECTED SKILL BEHAVIOR (from pf-execute SKILL.md):
                          },
                          visibility="project")
        → returns mem_SPEC_ID
-    f. pf_emit_event(work_item_id=WI_ID, event_type="note",
+    e. pf_emit_event(work_item_id=WI_ID, event_type="note",
                       payload={text: "spec saved: mem_SPEC_ID"})
-    g. pf_update_step(work_item_id=WI_ID, step_id="spec", status="completed",
+    f. pf_update_step(work_item_id=WI_ID, step_id="spec", status="completed",
                       step_attempt_id=SA_SPEC,
-                      artifact_summary="spec saved: mem_SPEC_ID — rate limiting via token bucket + Redis")
+                      artifact_summary="spec saved: mem_SPEC_ID — rate limiting via token bucket + Redis",
+                      next_step="plan", next_step_attempt_id=SA_PLAN)
 
 ASSERT MCP CALLS (spec inline):
   - pf_update_step(step_id="spec", status="in_progress") called
@@ -100,12 +100,8 @@ EXPECTED SKILL BEHAVIOR:
     a. pf_recall(project="marketplace", query=wi.goal,
                   type=["methodology.plan","experience.*"], top_k=3)
     b. pf_recall(work_item_id=WI_ID, type="methodology.spec", top_k=1) — read spec
-    c. pf_get_step(work_item_id=WI_ID) → version V2
-    d. pf_update_step(work_item_id=WI_ID, step_id="plan",
-                      status="in_progress", expected_version=V2)
-       → returns step_attempt_id=SA_PLAN
-    e. Break into implementation steps with human input
-    f. pf_save_artifact(type="methodology.plan", work_item_id=WI_ID,
+    c. Break into implementation steps with human input
+    d. pf_save_artifact(type="methodology.plan", work_item_id=WI_ID,
                          content=<markdown plan>,
                          structured_payload={
                            steps: [
@@ -117,9 +113,10 @@ EXPECTED SKILL BEHAVIOR:
                          },
                          visibility="project")
        → returns mem_PLAN_ID
-    g. pf_update_step(work_item_id=WI_ID, step_id="plan", status="completed",
+    e. pf_update_step(work_item_id=WI_ID, step_id="plan", status="completed",
                       step_attempt_id=SA_PLAN,
-                      artifact_summary="plan: 4 impl steps, ~10h, spec mem_SPEC_ID")
+                      artifact_summary="plan: 4 impl steps, ~10h, spec mem_SPEC_ID",
+                      next_step="code_change", next_step_attempt_id=SA_CODE)
 
 ASSERT MCP CALLS (plan inline):
   - pf_recall called before pf_update_step (Memory-First)
@@ -147,20 +144,18 @@ EXPECTED SKILL BEHAVIOR:
                       spec.artifact_summary
 
   Subagent executes (per code_change skill):
-    a. pf_get_step(work_item_id=WI_ID) → version V3
-    b. pf_update_step(work_item_id=WI_ID, step_id="code_change",
-                      status="in_progress", expected_version=V3)
-       → returns step_attempt_id=SA_CODE
-    c. Read spec and plan from previous_steps and recall
-    d. Implement: token bucket in Redis, rate-limit middleware, 429 handler
-    e. pf_update_step(work_item_id=WI_ID, step_id="code_change",
+    a. Read spec and plan from previous_steps and recall
+    b. Implement: token bucket in Redis, rate-limit middleware, 429 handler
+    c. pf_update_step(work_item_id=WI_ID, step_id="code_change",
                       status="completed", step_attempt_id=SA_CODE,
-                      artifact_summary=JSON({summary, files_changed, tests_status}))
+                      artifact_summary=JSON({summary, files_changed, tests_status}),
+                      next_step="commit_and_pr", next_step_attempt_id=SA_COMMIT)
 
 ASSERT MCP CALLS (code_change subagent):
   - pf_recall called by Wi Agent before dispatching subagent (Memory-First)
   - Subagent dispatched (not inline execution)
-  - pf_update_step(step_id="code_change", in_progress then completed)
+  - pf_update_step(step_id="code_change", completed) — no separate in_progress call;
+    code_change was started by the plan step's next_step, with step_attempt_id=SA_CODE
   - File edits present in WT_PATH
 
 ASSERT STATE after code_change:
@@ -178,21 +173,22 @@ EXPECTED SKILL BEHAVIOR (dispatch — same as auto wi):
     skill: polyforge-coding:commit_and_pr
 
   Subagent executes:
-    a. pf_update_step(step_id="commit_and_pr", status="in_progress", ...)
-    b. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
+    a. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
                repo="marketplace", vs_base=true)
-    c. pf_commit(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
+    b. pf_commit(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
                  repo="marketplace",
                  message="feat(api): add per-key rate limiting via token bucket\n\n...\n\nwi: marketplace#<seq>")
-    d. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
+    c. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
                repo="marketplace")
-    e. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
+    d. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
              repo="marketplace",
              title="feat(api): add per-key rate limiting via token bucket",
              body="...")
        → returns PR_URL
-    f. pf_update_step(step_id="commit_and_pr", status="completed",
-                      artifact_summary="PR #N: PR_URL")
+    e. pf_update_step(step_id="commit_and_pr", status="completed",
+                      step_attempt_id=SA_COMMIT,
+                      artifact_summary="PR #N: PR_URL",
+                      next_step="review", next_step_attempt_id=SA_REVIEW)
 
 ASSERT MCP CALLS (commit_and_pr subagent):
   - pf_commit called with conventional commit message
@@ -209,20 +205,19 @@ EXPECTED SKILL BEHAVIOR:
   pf_get_step(work_item_id=WI_ID) → current_step="review"
 
   Inline review execution:
-    a. pf_update_step(work_item_id=WI_ID, step_id="review",
-                      status="in_progress", expected_version=<version>)
-       → step_attempt_id=SA_REVIEW
-    b. Present PR diff + acceptance criteria from spec to human:
+    a. Present PR diff + acceptance criteria from spec to human:
        - "429 returned when limit exceeded" — check
        - "Rate limit headers in response" — check
        - "Config per API key tier" — check
-    c. Human reviews PR_URL and confirms acceptance criteria met.
-    d. pf_update_step(work_item_id=WI_ID, step_id="review", status="completed",
+    b. Human reviews PR_URL and confirms acceptance criteria met.
+    c. pf_update_step(work_item_id=WI_ID, step_id="review", status="completed",
                       step_attempt_id=SA_REVIEW,
                       artifact_summary="review: all 3 acceptance criteria met; PR approved")
+       — no next_step: review is the last step
 
 ASSERT MCP CALLS (review inline):
-  - pf_update_step(step_id="review", in_progress then completed)
+  - pf_update_step(step_id="review", completed) — no separate in_progress call;
+    review was started by the commit_and_pr step's next_step, with step_attempt_id=SA_REVIEW
   - Review done interactively (not dispatched as subagent)
 
 ASSERT STATE after review:

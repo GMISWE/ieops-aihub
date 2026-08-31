@@ -44,8 +44,8 @@ USER_INTENT: "let's spec out the dark mode feature"
 
 EXPECTED SKILL BEHAVIOR:
   1. pf_recall(project="marketplace", query=wi.goal, type=["methodology.spec","fact.*","rule.*"], top_k=3)
-  2. pf_get_step(work_item_id=WI_ID) — get current step and version
-  3. pf_update_step(work_item_id=WI_ID, step_id="spec", status="in_progress", expected_version=<version>)
+  2. pf_get_step(work_item_id=WI_ID) — get current step
+  3. pf_update_step(work_item_id=WI_ID, step_id="spec", status="in_progress")
      → returns step_attempt_id
   4. Heartbeat protocol: pf_update_step(heartbeat=true) every 5 min during discussion
   5. Guide user through: What/Why, Non-goals, Decisions, Acceptance criteria
@@ -55,7 +55,8 @@ EXPECTED SKILL BEHAVIOR:
        visibility="project")
   7. pf_emit_event(work_item_id=WI_ID, event_type="note", payload={text: "spec saved: mem_XXX"})
   8. pf_update_step(work_item_id=WI_ID, step_id="spec", status="completed",
-       step_attempt_id=<from 3>, artifact_summary="spec saved: mem_XXX — dark mode via CSS vars")
+       step_attempt_id=<from 3>, artifact_summary="spec saved: mem_XXX — dark mode via CSS vars",
+       next_step="plan", next_step_attempt_id=SA_PLAN)
 
 ASSERT:
   - pf_recall called before pf_update_step (Memory-First)
@@ -69,15 +70,15 @@ SKILL_INVOKE: polyforge:pf-plan
 EXPECTED SKILL BEHAVIOR:
   1. pf_recall(project="marketplace", query=wi.goal, type=["methodology.plan","experience.*"], top_k=3)
   2. pf_recall(work_item_id=WI_ID, type="methodology.spec", top_k=1) — read spec
-  3. pf_get_step(work_item_id=WI_ID) — get current step and version
-  4. pf_update_step(work_item_id=WI_ID, step_id="plan", status="in_progress", expected_version=<version>)
-  5. Break into implementation steps
-  6. pf_save_artifact(type="methodology.plan", work_item_id=WI_ID,
+  3. pf_get_step(work_item_id=WI_ID) — get current step
+  4. Break into implementation steps
+  5. pf_save_artifact(type="methodology.plan", work_item_id=WI_ID,
        content=<markdown plan>,
        structured_payload={steps:[{id, title, depends_on, effort_hint}]},
        visibility="project")
-  7. pf_update_step(work_item_id=WI_ID, step_id="plan", status="completed",
-       step_attempt_id=<from 4>, artifact_summary="plan: 4 steps, ~1 day")
+  6. pf_update_step(work_item_id=WI_ID, step_id="plan", status="completed",
+       step_attempt_id=SA_PLAN, artifact_summary="plan: 4 steps, ~1 day",
+       next_step="code_change", next_step_attempt_id=SA_CODE)
 
 ASSERT:
   - methodology.plan artifact saved
@@ -90,13 +91,12 @@ SKILL_INVOKE: polyforge-coding:code_change
 NOTE: code_change does NOT call pf_save_artifact. Output goes in step artifact_summary only.
 
 EXPECTED SKILL BEHAVIOR:
-  1. pf_get_step(work_item_id=WI_ID) — get current version
-  2. pf_update_step(work_item_id=WI_ID, step_id="code_change", status="in_progress", expected_version=<version>)
-  3. Read context from previous steps (spec, plan, prepare_context if present)
-  4. Edit files in WT_PATH (add dark mode toggle: CSS vars, toggle component)
-  5. pf_update_step(work_item_id=WI_ID, step_id="code_change", status="completed",
-       step_attempt_id=<from 2>,
-       artifact_summary=JSON({summary, files_changed, tests_status}))
+  1. Read context from previous steps (spec, plan, prepare_context if present)
+  2. Edit files in WT_PATH (add dark mode toggle: CSS vars, toggle component)
+  3. pf_update_step(work_item_id=WI_ID, step_id="code_change", status="completed",
+       step_attempt_id=SA_CODE,
+       artifact_summary=JSON({summary, files_changed, tests_status}),
+       next_step="commit_and_pr", next_step_attempt_id=SA_COMMIT)
 
 ASSERT:
   - File edits present in WT_PATH (git diff --stat shows changes)
@@ -107,14 +107,14 @@ ASSERT:
 SKILL_INVOKE: polyforge-coding:commit_and_pr
 
 EXPECTED SKILL BEHAVIOR:
-  1. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="in_progress", ...)
-  2. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace", vs_base=true)
-  3. pf_commit(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
+  1. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace", vs_base=true)
+  2. pf_commit(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
        message="feat(ui): add dark mode toggle\n\n...\n\nwi: marketplace#<seq>")
-  4. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace")
-  5. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
+  3. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace")
+  4. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
        title="feat(ui): add dark mode toggle", body="...")
-  6. pf_update_step(step_id="commit_and_pr", status="completed", artifact_summary="PR #N: <url>")
+  5. pf_update_step(step_id="commit_and_pr", status="completed", step_attempt_id=SA_COMMIT,
+       artifact_summary="PR #N: <url>", next_step="review", next_step_attempt_id=SA_REVIEW)
 
 ASSERT:
   - pf_commit called with conventional commit message
@@ -132,10 +132,11 @@ requires_human_session=true.
 
 EXPECTED SKILL BEHAVIOR:
   1. pf_get_step(work_item_id=WI_ID) — confirm current_step="review"
-  2. pf_update_step(work_item_id=WI_ID, step_id="review", status="in_progress", ...)
-  3. Human reviews PR: check acceptance criteria from spec artifact
-  4. pf_update_step(work_item_id=WI_ID, step_id="review", status="completed",
+  2. Human reviews PR: check acceptance criteria from spec artifact
+  3. pf_update_step(work_item_id=WI_ID, step_id="review", status="completed",
+       step_attempt_id=SA_REVIEW,
        artifact_summary="review: all acceptance criteria met; PR approved")
+       — no next_step: review is the last step
 
 ASSERT:
   - pf_update_step(review, completed) called
@@ -145,10 +146,9 @@ ASSERT:
 SKILL_INVOKE: polyforge:pf-stop --wrap
 
 EXPECTED SKILL BEHAVIOR (coding scenario — use pf_wrap, not pf_complete_attempt):
-  1. pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace")
-  2. pf_emit_event(work_item_id=WI_ID, event_type="note",
-       payload={text: "wrapped: dark mode feature complete, PR opened"})
-  3. State file deleted
+  1. pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
+       note="wrapped: dark mode feature complete, PR opened")
+  2. State file deleted
 
 ASSERT:
   - pf_wrap called (NOT pf_complete_attempt directly)

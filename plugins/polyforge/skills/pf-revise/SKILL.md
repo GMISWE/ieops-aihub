@@ -52,12 +52,15 @@ current_step_id = wi_info.current_step or "revise"
 pf_update_step(
   work_item_id=<current>,
   step_id=current_step_id,
-  status="in_progress",
-  expected_version=wi_info.version
+  status="in_progress"
 )
 ```
 
-Returns `step_attempt_id`.
+The `pf_get_step` here stays — this skill genuinely consumes `current_step`. What is gone is
+`expected_version`: the server never bound it (aihub#290), so passing it did nothing. Where a
+step bracket needs only the version, drop the `pf_get_step` entirely.
+
+The `step_attempt_id` is client-generated — `pf_update_step` returns only the step status (plus `next_step` when the call was a fused advance), so generate the id yourself and pass it back on the completing call.
 
 ### Step 3: Load head artifact(s)
 

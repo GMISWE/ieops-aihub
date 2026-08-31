@@ -35,6 +35,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The bump gate below diffs this PR against its base commit. The default
+          # depth-1 checkout does not contain that commit, and the gate would then
+          # report a diff failure rather than silently passing (aihub#302).
+          fetch-depth: 0
 
       # Cheap and Go-independent, so it runs first: a version bump that updates
       # only some of the four stamps fails here in seconds rather than after the
@@ -43,6 +48,25 @@ jobs:
         run: |
           python3 scripts/pf_version_check.py --self-test
           python3 scripts/pf_version_check.py --root .
+
+      # aihub#302. The step above is a STATE predicate — do the five stamps agree
+      # with each other? — and it cannot answer "did this PR touch the plugin?".
+      # That gap shipped twice in half an hour: PR#264 and PR#265 each edited files
+      # under plugins/polyforge/skills/ and moved no stamp, and CI was fully green
+      # both times, because all five stamps did agree. The install cache is keyed on
+      # version, so those edits reach nobody who is already on that version and
+      # /plugin update is a no-op for them.
+      #
+      # Kept as its own step so the two failures are never confused: this one is
+      # [NO_VERSION_BUMP], the one above is [VERSION_DRIFT] and friends.
+      #
+      # base.sha is the PR's base commit as GitHub recorded it. Deliberately NOT a
+      # local origin/main ref, which can be stale in the runner's checkout.
+      - name: Plugin contents changed => version must be bumped
+        run: |
+          python3 scripts/pf_version_check.py \
+            --root . \
+            --require-bump-since "${{ github.event.pull_request.base.sha }}"
 
       - name: Set up Go
         uses: actions/setup-go@v5

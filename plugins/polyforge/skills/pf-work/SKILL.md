@@ -47,7 +47,8 @@ Invocation modes:
 
 🔴 **`Read` that file before emitting the list — do not answer from session context.** It is
 deliberately NOT part of the auto-injected session-start payload (that payload has a hard
-size budget; see `using-polyforge/SKILL.md`), so it is *not* already in your context.
+size budget; see `using-polyforge/references/manifest-notes.md`), so it is *not* already
+in your context.
 This SKILL.md previously claimed the backreference "resolves reliably" because
 `using-polyforge` is auto-loaded; that was false — the section sat at character 5,856 of an
 18,286-character payload that the harness truncated to a ~2,000-character preview, so it

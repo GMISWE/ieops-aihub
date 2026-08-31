@@ -111,14 +111,32 @@ polyforge ships in **two layers that update independently** — know which one y
 change lives in:
 
 - **Skills + hooks** (the `/pf-*` workflow instructions) live in the plugin
-  package, versioned by the marketplace `catalog_revision`. Pull the latest with:
+  package, versioned by the plugin `version`. Pull the latest with:
   ```
   /plugin marketplace update GMISWE/GMI-marketplace   # refresh the catalog
-  /plugin install polyforge@gmi-marketplace           # re-install to the new revision
+  /plugin install polyforge@gmi-marketplace           # re-install to the new version
   ```
   (or use the interactive `/plugin` menu). Publishing a skill change: edit
-  `plugins/polyforge/skills/*`, merge to `main`, then bump `version` +
-  `catalog_revision` in `.claude-plugin/marketplace.json`.
+  `plugins/polyforge/skills/*`, bump `version` in **all five stamps** (both
+  catalogs plus the three `plugin.json` variants — `scripts/pf_version_check.py`
+  enforces that they agree), and merge that together with the change.
+
+  > 🔴 **`version` is the update signal; `catalog_revision` is inert.**
+  > `claude plugin validate` says verbatim: *"Unknown field 'catalog_revision'.
+  > Claude Code ignores it at load time."* The install cache is keyed on
+  > `version` (`installPath` is `<cache>/<marketplace>/polyforge/<version>`), so
+  > a new build reaches a user only when `version` changes — restamping
+  > `catalog_revision` alone ships a release that reaches **nobody**, and
+  > `/plugin update` is a no-op for anyone already on that version. This page,
+  > `pf_version_check.py` and team memory `mem_7yldi6xb` all taught the opposite
+  > until aihub#302. The corrected memory is **`mem_zZ3xWv4g`** — `mem_7yldi6xb`
+  > is its archived predecessor and still returns the wrong text verbatim if you
+  > fetch it by id. The field is kept only so `pf_version_check.py` can hold its
+  > two carriers consistent, and is changed alongside `version` by convention.
+  > Since aihub#302, CI fails a PR that edits anything under `plugins/polyforge/`
+  > without moving `version` (`[NO_VERSION_BUMP]` in the Contract Lint job), so
+  > you do not have to remember this — but do not "fix" that failure by
+  > restamping `catalog_revision`.
 
 - **The `polyforge` binary** (the MCP server — ALL `pf_*` tool behavior, e.g.
   `pf_recall` result-slimming) is NOT in the plugin package. The launcher

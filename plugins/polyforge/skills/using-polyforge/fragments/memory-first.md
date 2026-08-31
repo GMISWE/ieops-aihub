@@ -11,14 +11,7 @@ Before every substantive action:
 pf_recall(project=<current>, query=<user_intent>, type="experience.*|rule.*", top_k=5)
 ```
 
-Display results where `effective_strength >= 0.3`:
-
-```
-💡 Relevant history (for reference — not binding):
-  · [experience.pitfall] OAuth token clock-skew bug
-    activated 3×, last 14 days ago, confidence ★★★★
-  · [rule.scheduling] v3.1 waits for v3.0 backlog
-    immortal, by alice
-```
+Display each result with `effective_strength >= 0.3` under `💡 Relevant history (not binding)`
+as `· [<type>] <title> — <age, strength>`.
 
 For any memory the LLM judges as actually useful: `pf_activate_memory(id)`.

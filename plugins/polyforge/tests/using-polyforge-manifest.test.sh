@@ -34,7 +34,10 @@
 #                 each curated entry is checked against disk so the list cannot rot.
 #   3. TIER RULE: kind: rule + gate: none  =>  must NOT leave the resident tier.
 #                 Pre-existing violations live in a BASELINE that may only shrink:
-#                 a new one fails, and a resolved one fails until it is removed.
+#                 a new one fails, a resolved one fails until it is removed, and a
+#                 baselined fragment that GROWS past its recorded character cap fails —
+#                 without that cap the exemption is per-path, so relocating new ungated
+#                 rule text into an already-exempt file costs nothing (aihub#296).
 #   4. Compat:    the pre-aihub#295 parser, embedded verbatim below, must derive the
 #                 SAME (path, condition) list from this manifest as the current one.
 #                 Plugin and binary update through independent channels, so a manifest
@@ -279,21 +282,36 @@ if not rotted:
        % ", ".join("%s -> %s" % (n, p) for n, p in sorted(ENFORCEMENT_MECHANISMS.items())))
 
 # --- 3. the tier rule -----------------------------------------------------
-# BASELINE: pre-existing violations, each with the work item that owns the fix.
-# THIS LIST MAY ONLY SHRINK. Adding to it is a deliberate, reviewable edit to a test
-# file — which is the point: the previous cost of moving an unenforced rule out of the
-# resident tier was zero, and that is what produced the aihub#285 regression.
+# BASELINE: pre-existing violations. Each entry is (CHARACTER CAP, why it is exempt and who
+# owns the fix). THIS LIST MAY ONLY SHRINK, in both of its dimensions. Adding to it is a
+# deliberate, reviewable edit to a test file — which is the point: the previous cost of
+# moving an unenforced rule out of the resident tier was zero, and that is what produced the
+# aihub#285 regression.
+#
+# The CAP is not decoration (aihub#296). Keyed by path alone, this baseline priced one
+# specific move at exactly zero: take new ungated rule text and put it inside a file that is
+# already exempt. aihub#294 did precisely that — memory-conventions.md went from 2,155 to
+# 4,841 characters and the lower bound printed in section 5 went from 11,489 to 14,175, with
+# no assertion firing anywhere. An exemption that does not bound the thing it exempts is not
+# an exception, it is an open channel.
+#
+# Direction, and why it is one-way: GROWTH FAILS, shrinking does not. Requiring the cap to be
+# lowered on every shrink would make editing this number a routine part of editing these
+# files — and a number that is routinely edited can no longer signal anything on the one edit
+# that matters, the growth. (Same defect as a `gate:` that validates shape but not substance:
+# cheapest to satisfy by weakening the claim.) The residue is that shrink-then-regrow is free
+# up to the recorded cap, which is bounded by the size on the day the cap was set.
 BASELINE = {
-    "fragments/post-claim-routing.md":
+    "fragments/post-claim-routing.md": (4771,
         "moved on-demand by aihub#285 to stop the payload being truncated. It cannot "
         "come back until the resident tier is slimmed (aihub#296): making it resident "
-        "measures 14,549 chars, against a 10,000-char harness limit.",
-    "fragments/memory-conventions.md":
+        "measures 14,549 chars, against a 10,000-char harness limit."),
+    "fragments/memory-conventions.md": (4841,
         "moved on-demand by aihub#285 on the grounds that memory-first.md states the "
         "memory-lives-in-aihub half more strictly. True for that half — but the "
         "link-discipline half (never put a `mem_...` id in a repo doc, nor a repo path "
         "in a memory) has NO resident copy, as SKILL.md's own on-demand rationale "
-        "admits, and on-demand-index.md calls it 'the hard rule'. Also aihub#296.",
+        "admits, and on-demand-index.md calls it 'the hard rule'. Also aihub#296."),
 }
 
 print()
@@ -321,11 +339,27 @@ for p in sorted(set(BASELINE) - violations):
     bad("%s is in the tier-rule BASELINE but no longer violates it. Delete its entry "
         "from BASELINE in this file — the baseline is a ratchet and must only shrink."
         % p)
+# The second dimension of the ratchet: an exempt fragment may not ABSORB new content.
+sizes = {}
+for p in sorted(set(BASELINE) & violations):
+    cap = BASELINE[p][0]
+    try:
+        sizes[p] = len(open(os.path.join(skill_dir, p), encoding="utf-8").read())
+    except OSError:
+        sizes[p] = 0
+    if sizes[p] > cap:
+        bad("%s is baselined out of the resident tier at %d chars but now measures %d "
+            "(+%d). The exemption is per-PATH, so moving new ungated rule text into an "
+            "already-exempt file is the one way to enlarge the unenforced-rule surface "
+            "with nothing firing — that is how aihub#294 took section 5's lower bound "
+            "from 11,489 to 14,175. Shrink it back, or raise the cap here deliberately "
+            "and name the rule text you are adding." % (p, cap, sizes[p], sizes[p] - cap))
 if not violations.symmetric_difference(BASELINE):
     if violations:
         ok("no new violation; %d baselined: %s" % (len(violations), ", ".join(sorted(violations))))
         for p in sorted(violations):
-            print("        ~ %s: %s" % (p, BASELINE[p]))
+            print("        ~ %s (%d/%d chars): %s" % (p, sizes.get(p, 0), BASELINE[p][0],
+                                                      BASELINE[p][1]))
     else:
         ok("no rule with `gate: none` sits outside the resident tier")
 # <<< TIER RULE <<<
@@ -479,30 +513,38 @@ for fake in pf-session-start pf-skill-router using-polyforge-manifest.test.sh; d
   expect fail "gate: $fake — exists on disk, enforces nothing" "$r"
 done
 
+# These three edit one attribute of one real entry. They locate the directive line and then
+# the attribute BY NAME rather than matching a literal block: anchoring on a whole block made
+# them silently stop mutating anything the moment aihub#296 changed three `kind:` values, and
+# a negative control that mutates nothing passes for free.
 r="$(fixture no_kind '
-import sys, os, re
-p = os.path.join(sys.argv[1], "SKILL.md"); s = open(p, encoding="utf-8").read()
-s = s.replace("@include: fragments/output-format.md\nkind: rule\n",
-              "@include: fragments/output-format.md\n", 1)
-open(p, "w", encoding="utf-8").write(s)
+import sys, os
+p = os.path.join(sys.argv[1], "SKILL.md")
+rows = open(p, encoding="utf-8").read().split("\n")
+i = rows.index("@include: fragments/output-format.md")
+del rows[next(k for k in range(i + 1, len(rows)) if rows[k].startswith("kind:"))]
+open(p, "w", encoding="utf-8").write("\n".join(rows))
 ')"
 expect fail "an @include with no kind:" "$r"
 
 r="$(fixture when_not_adjacent '
 import sys, os
-p = os.path.join(sys.argv[1], "SKILL.md"); s = open(p, encoding="utf-8").read()
-s = s.replace("@include: fragments/repo-routing.md\nkind: info\n",
-              "@include: fragments/repo-routing.md\nkind: info\nwhen: superpowers\n", 1)
-open(p, "w", encoding="utf-8").write(s)
+p = os.path.join(sys.argv[1], "SKILL.md")
+rows = open(p, encoding="utf-8").read().split("\n")
+i = rows.index("@include: fragments/repo-routing.md")
+rows.insert(i + 2, "when: superpowers")   # second attribute line, i.e. NOT adjacent
+open(p, "w", encoding="utf-8").write("\n".join(rows))
 ')"
 expect fail "a when: that is not adjacent to its directive (old parser would drop it)" "$r"
 
 r="$(fixture unjustified_authority '
 import sys, os
-p = os.path.join(sys.argv[1], "SKILL.md"); s = open(p, encoding="utf-8").read()
-s = s.replace("@include: fragments/memory-first.md\nkind: info\nauthority: self\n",
-              "@include: fragments/memory-first.md\nkind: info\nauthority: elsewhere\n", 1)
-open(p, "w", encoding="utf-8").write(s)
+p = os.path.join(sys.argv[1], "SKILL.md")
+rows = open(p, encoding="utf-8").read().split("\n")
+i = rows.index("@include: fragments/memory-first.md")
+rows[next(k for k in range(i + 1, len(rows)) if rows[k].startswith("authority:"))] = \
+    "authority: elsewhere"
+open(p, "w", encoding="utf-8").write("\n".join(rows))
 ')"
 expect fail "a resident fragment whose authority is elsewhere, with no justification" "$r"
 
@@ -517,6 +559,27 @@ import sys, os
 open(os.path.join(sys.argv[1], "fragments", "_orphan.md"), "w").write("nobody declared me\n")
 ')"
 expect fail "a fragment on disk that the manifest never declares" "$r"
+
+# The aihub#294 shape: not a new violation, not a new manifest entry — just new ungated rule
+# text poured into a file the BASELINE already exempts. Before aihub#296 this cost zero.
+GREW='
+import sys, os
+p = os.path.join(sys.argv[1], "fragments", "memory-conventions.md")
+s = open(p, encoding="utf-8").read()
+open(p, "w", encoding="utf-8").write(s.rstrip("\n") + "DELTA\n")
+'
+r="$(fixture baselined_fragment_grew "${GREW/DELTA/$(printf 'y%.0s' $(seq 200))}")"
+expect fail "a baselined fragment absorbing 200 chars of new content" "$r"
+
+# ...and the ratchet is deliberately ONE-WAY: shrinking such a fragment must stay green, or
+# the cap becomes a number that gets edited on every touch and stops signalling anything.
+r="$(fixture baselined_fragment_shrank '
+import sys, os
+p = os.path.join(sys.argv[1], "fragments", "memory-conventions.md")
+s = open(p, encoding="utf-8").read()
+open(p, "w", encoding="utf-8").write(s.rstrip("\n")[:-200] + "\n")
+')"
+expect pass "...the same fragment SHRINKING is accepted (the ratchet is one-way)" "$r"
 
 echo
 echo "7. mutation control — delete the tier rule, the tier fixture must go green"

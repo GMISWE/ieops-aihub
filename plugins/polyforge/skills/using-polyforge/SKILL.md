@@ -82,24 +82,36 @@ description: >
   link-discipline rule "live[s] only in the fragment"; and the fragment itself says
   "Never put an aihub `mem_…` ref in a repo doc". Marking it `info` would have
   contradicted all three, so it is `rule`, and it is the second BASELINE entry.
-  The remaining seven are `kind: info`. That line is still not settled: an independent
-  review of aihub#295 applied the wi's own discriminator — is the violation observable?
-  — and also made memory-first.md ("pf_recall before every substantive action"),
-  bootstrap.md (the session startup scan) and repo-routing.md rules, which would take
-  the lower bound below from 14,175 to 17,685. Reclassifying only ever ENLARGES that
-  bound, which is the honest direction; aihub#296 owns settling it with a measurement
-  rather than deciding it in passing while moving a fragment.
-  (Both figures were 11,489 / 14,993 when aihub#295 wrote them. aihub#294 grew
+
+  SETTLED BY aihub#296: memory-first.md, bootstrap.md and repo-routing.md are `rule`.
+  aihub#295 left them `info` and flagged that an independent review had reached the
+  opposite answer; the tie-breaker is this manifest's own discriminator — is a violation
+  observable? — and on all three it is not:
+    - memory-first.md    "Before every substantive action: pf_recall(...)" and "do not
+                         read or write local memory files". A recall that never happened
+                         leaves no trace, and nothing checks where memory was written.
+    - bootstrap.md       "On session start, before responding to any user message" plus
+                         seven mandatory scan steps. A skipped scan is invisible.
+    - repo-routing.md    "Never infer internals from positioning", "ask the user rather
+                         than guessing". A guess that happens to be right looks the same
+                         as a lookup.
+  All three are RESIDENT, so this changes no gate status and moves nothing between tiers
+  — only the lower bound below, which is the honest direction. The remaining four
+  entries are `kind: info`.
+  (The bound was 11,489 / 14,993 when aihub#295 wrote them, then 14,175. aihub#294 grew
   memory-conventions.md from 2,155 to 4,841 chars — the 11-row memory-type table, then a
   correction to it — and that fragment is already `kind: rule`, so the bound moved with
-  it. Neither number is resident: both fragments are on-demand, so the payload is
-  unaffected.
+  it. That move is now capped: the tier-rule BASELINE records a character cap per
+  baselined fragment, because keyed by path alone it priced "pour new ungated rule text
+  into an already-exempt file" at exactly zero (aihub#296). Neither baselined number is
+  resident: both fragments are on-demand, so the payload is unaffected.
   ⚠️ DO NOT hand-adjust these. Re-run the suite and copy what it prints:
       bash tests/using-polyforge-manifest.test.sh | grep 'SUM(kind:rule'
+  Today it prints 16,405.
   This block has now been wrong twice for two different reasons. First 17,127, from
   adding three BYTE sizes to a CHARACTER total — every figure here is characters, like
   the budget, and these fragments carry CJK and em-dashes, so `wc -c` reads high
-  (memory-first is 891 chars but 909 bytes). Then 13,563, because the commit that fixed
+  (memory-first is 741 chars but 749 bytes). Then 13,563, because the commit that fixed
   the units added 612 more characters to memory-conventions.md and did not recompute.
   A derived number copied by hand goes stale on the next edit to its inputs, including
   the edit that is fixing it.)
@@ -158,11 +170,14 @@ description: >
   That is not hypothetical either. The two hand-written sections on this workspace are
   general agent discipline with measured backing — how to route read-only subtasks, and
   that waiting costs tool CALLS not minutes. Neither is machine-specific; both currently
-  reach one machine. They belong on channel 1. What stops them is exactly what stopped
-  everything else: the resident tier has 22 characters free, and the tier rule (an
-  unenforced rule may not leave the resident tier) blocks parking them on-demand without
-  a BASELINE entry. So channel 3 is functioning as an overflow valve for a full budget —
-  which makes aihub#296's slimming the prerequisite, not a nice-to-have. Until then,
+  reach one machine. They belong on channel 1. What stopped them was the budget: the
+  resident tier had 22 characters free, and the tier rule (an unenforced rule may not
+  leave the resident tier) blocks parking them on-demand without a BASELINE entry, so
+  channel 3 was functioning as an overflow valve for a full budget. aihub#296 has since
+  slimmed the payload to 8,498, which is the room those two sections needed — but taking
+  it now means raising the payload gate, and that gate is a two-sided ratchet on purpose
+  (see SIZE BUDGET). Whoever moves them must lift the gate DELIBERATELY, with the reason
+  recorded, which is exactly the transaction the ratchet exists to force. Until then,
   treat channel 3 as a LOCAL OVERRIDE LAYER and know that nothing on it propagates.
 
   Nothing in this change rewrites ANY user-owned file. writeUsageMd keeps its existence
@@ -255,10 +270,17 @@ description: >
   This manifest was 10 unconditional fragments = 18,286 characters, so ~89% of it
   never reached any model. Two rules keep it fixed:
 
-    1. TOTAL STAYS UNDER BUDGET. tests/using-polyforge-payload.test.sh asserts the
-       assembled size against PF_PAYLOAD_MAX_CHARS. If you add content here and
-       that test goes red, do not raise the limit — move something to the
-       on-demand tier instead.
+    1. THE TOTAL STAYS INSIDE A TWO-SIDED BAND. tests/using-polyforge-payload.test.sh
+       asserts the assembled size against PF_PAYLOAD_MAX_CHARS, which is a RATCHET
+       THAT TRACKS THE PAYLOAD (last measured size + a declared slack), not a fixed
+       ceiling. If you add content here and the test goes red, do not raise the
+       limit — move something to the on-demand tier instead. If you REMOVE content
+       the test also goes red, and tells you the lower number to write: a slimming
+       that leaves the gate where it was donates its whole saving to the next silent
+       growth, which is what happened between aihub#285 and aihub#296 (the payload
+       fell to 9,778 and then 8,498 while the gate sat at 9,800). A +300-character
+       probe is a standing control there, so the gate can be shown to discriminate
+       rather than merely being a smaller constant.
 
        ⚠️ That suite is NOT wired into CI yet (.github/workflows/ci.yml runs only
        launcher-update-check.test.sh — see its aihub#254 note). Until it is, this
@@ -272,11 +294,11 @@ description: >
 
   ON-DEMAND TIER (declared with the on-demand verb, never injected — see also
   fragments/on-demand-index.md). Rationale per fragment:
-    fragments/post-claim-routing.md    4,813 B — only applies to a three-segment
+    fragments/post-claim-routing.md    4,771 chars — only applies to a three-segment
                                        "Next steps" for requires_human_session=true;
                                        the rhs=false auto-dispatch path is explicitly
                                        unaffected by it.
-    fragments/memory-conventions.md    4,258 B — its load-bearing rule ("all memory
+    fragments/memory-conventions.md    4,841 chars — its load-bearing rule ("all memory
                                        lives in aihub, local .md memory is deprecated
                                        here") is already stated — in fact stated more
                                        strictly — in memory-first.md, which stays in the
@@ -294,7 +316,7 @@ description: >
                                        on-demand-index.md names the type vocabulary, the
                                        link-discipline and work_item_id rules in its
                                        trigger so an agent knows when to go read it.
-    fragments/platform-adaptation.md   1,431 B — its most load-bearing fact, the
+    fragments/platform-adaptation.md   1,425 chars — its most load-bearing fact, the
                                        per-runtime MCP tool names for Claude Code /
                                        Codex / Copilot, is already spelled out in the
                                        hook's own preamble, which is always delivered.
@@ -305,9 +327,9 @@ description: >
                                        Skill tool. on-demand-index.md's trigger says so
                                        explicitly. If this keeps biting non-Claude
                                        runtimes, move that one clause into the preamble.
-    fragments/diagram-convention.md      702 B — only applies while authoring an artifact
+    fragments/diagram-convention.md      700 chars — only applies while authoring an artifact
                                        that contains a diagram (/pf-spec, /pf-plan).
-    fragments/repo-detail.md           ~2,2xx B — where a repo's main_modules /
+    fragments/repo-detail.md           2,157 chars — where a repo's main_modules /
                                        change_scenarios / tech_stack live now that the
                                        `## Workspace` block carries only a one-line
                                        positioning per repo plus a per-project pointer
@@ -333,11 +355,13 @@ gate: none
 authority: self
 
 @include: fragments/memory-first.md
-kind: info
+kind: rule
+gate: none
 authority: self
 
 @include: fragments/bootstrap.md
-kind: info
+kind: rule
+gate: none
 authority: self
 
 @include: fragments/nl-routing.md
@@ -347,7 +371,8 @@ authority: each /pf-* skill's own NL Triggers section
 resident-because: it is the cross-skill index — a single skill's NL Triggers cannot tell you WHICH skill to open, and that is the decision made before any skill is read.
 
 @include: fragments/repo-routing.md
-kind: info
+kind: rule
+gate: none
 authority: self
 
 @include: fragments/on-demand-index.md

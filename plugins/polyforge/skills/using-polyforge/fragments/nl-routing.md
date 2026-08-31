@@ -4,7 +4,8 @@ This table **indexes** non-obvious intent → operation mappings; it is **not** 
 keyword classifier. Infer the user's intent and route to the nearest match — if nothing fits
 or intent is ambiguous, **ask rather than guess**. Each `/pf-*` skill's own `NL Triggers`
 section is authoritative for its triggers (this index may lag). NL Routing decides *what
-operation*; **Repo Routing** (below) decides *which repo*.
+operation*; **Repo Routing** (below) decides *which repo*. A row that merely restates a skill's
+own name (`plan` → `/pf-plan`) is omitted on purpose — do not add one back.
 
 | intent | operation |
 |---|---|
@@ -14,20 +15,12 @@ operation*; **Repo Routing** (below) decides *which repo*.
 | claim + slug | `/pf-work <slug>` (Mode B) |
 | resume + slug | `/pf-work <slug> --resume` (Mode C) |
 | takeover + slug | `/pf-work <slug> --force` (Mode D) |
-| pause | `/pf-stop --pause` |
-| done / wrap / finished | `/pf-stop --wrap` |
-| fail / abandon | `/pf-stop --fail` |
-| status / progress | `/pf-status` |
+| pause / done / wrap / finished / fail / abandon | `/pf-stop --pause` \| `--wrap` \| `--fail` |
 | design / spec / brainstorm | `/pf-spec` |
-| plan | `/pf-plan` |
-| execute / run it | `/pf-execute` |
-| retro | `/pf-retro` |
 | this bug / debug | `/pf-spec` (debug variant) |
 | note / log | `pf_emit_event(event_type="note", ...)` |
-| init / setup workspace | `/pf-init` |
 | doctor / can't connect | `/pf-doctor` |
 | release / cut | `/pf-release` |
-| create / update / list project | `/pf-project` |
 | sync Jira/GitHub / push to external | `/pf-sync` |
 | user management / whoami / issue key / list users | `/pf-user` |
 | revise spec/plan per annotations / resolve review comments | `/pf-revise` |

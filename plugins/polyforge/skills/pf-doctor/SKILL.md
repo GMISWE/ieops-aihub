@@ -35,6 +35,10 @@ Run the CLI diagnostic tool and interpret results:
 polyforge doctor
 # With auto-fix for fixable issues:
 polyforge doctor --fix
+# Remove one worktree --fix refused (read the reason first — Check 4):
+polyforge doctor --fix --force-remove=<dir>
+# Its work item is still active? The status must be transcribed and must match:
+polyforge doctor --fix --force-remove=<dir>:<status>
 ```
 
 The CLI runs 7 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per check:
@@ -43,8 +47,8 @@ The CLI runs 7 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per chec
 |---|-------|---------------|----------|
 | 1 | workspace | `.polyforge.yaml` found via upward search from wsRoot | `polyforge init` |
 | 2 | config | `~/.polyforge/config.toml` valid; aihub URL reachable (GET /health) | manual |
-| 3 | repos | `.repo/<name>/` exists for each project repo; remote URL matches `.polyforge.yaml` | `polyforge init --apply` |
-| 4 | worktrees | `pf.*` dirs cross-checked vs server wi list; flags orphans | `polyforge doctor --fix` |
+| 3 | repos | `.repo/<name>/` exists for each project repo; remote URL matches `.polyforge.yaml` | `polyforge init` (**not** `--apply` — that is a no-op) |
+| 4 | worktrees | `pf.*` dirs cross-checked vs the server's **full** wi list (paginated); flags orphans | `polyforge doctor --fix` |
 | 5 | version | Server `min_client_version` vs local binary; prompts upgrade if behind | `pf-init` skill |
 | 6 | claude_md | CLAUDE.md `## Workspace` block format (slim vs legacy inline) + `.polyforge/repo-map/<project>.md` present for every project | `polyforge init` |
 | 7 | usage_md | `.polyforge/usage.md` still carrying rule sections the `using-polyforge` skill owns (Iron Rules / NL Routing / Memory Type Reference). That file is never regenerated, so the copy there cannot be corrected and a session sees two (aihub#294) | **manual** — `--fix` does not touch it |
@@ -70,13 +74,38 @@ aihub unreachable. Triage:
 
 ### Check 3 — repos warn
 Missing or mismatched `.repo/` dirs.
-- Missing: run `polyforge init --apply` to clone all repos
-- Remote mismatch: `git -C .repo/<name> remote set-url origin <correct-url>`
+- Missing: run **`polyforge init`** to clone all repos. Not `polyforge init --apply`:
+  `--apply` is deprecated and a hard no-op — it prints a deprecation line and returns
+  before the clone loop, before the repo map, before CLAUDE.md. Following it looks like
+  a fix and does nothing (aihub#307).
+- Remote mismatch: `git -C .repo/<name> remote set-url origin <correct-url>`.
+  `init` cannot do this for you — it only fetches and resets an existing checkout.
 
 ### Check 4 — worktrees warn
-Orphan `pf.*` directories found (no matching running/paused wi on server).
-- Safe auto-remove: `polyforge doctor --fix`
-- If wi is actually still running but server state is stale: use `pf_list_work_items` first to confirm
+Orphan `pf.*` directories found (no matching active wi on the server).
+
+Each reported directory carries its work item's status, e.g.
+`pf.aihub-307 [wrapped]`. `--fix` removes a directory **only** when that work
+item is provably terminal (`wrapped` / `failed` / `cancelled`); anything else —
+`running`, `paused`, `queued`, `blocked`, or a work item it could not read at
+all — is printed with the reason and **kept**.
+
+- Auto-remove the safe ones: `polyforge doctor --fix`
+- A directory nothing could be established about — unreadable work item, no such
+  work item, or a name polyforge does not produce (`pf.scratch`, `pf.aihub-307.bak`):
+  `polyforge doctor --fix --force-remove=<dir>`. Being wrong here costs a stale
+  directory, so naming it is enough.
+- 🔴 A directory whose work item is **active** (`running`/`paused`/`queued`/`blocked`)
+  needs the status transcribed as well: `--force-remove=<dir>:<status>`, and it must
+  equal what the server reports right then. Being wrong here costs somebody's
+  uncommitted work, so `--fix` refuses the bare name and does not print a
+  ready-made bypass — look the status up, or wrap the work item first. Any forced
+  removal reports `[warn]`, never `[ok]`.
+- 🔴 If `--fix` says it KEPT something because the work item is **not** terminal,
+  that is a bug report, not a nuisance. It means the active listing missed a live
+  work item — the aihub#307 shape, where an unpaginated query saw only the
+  server's first 50 rows and nominated 5 live worktrees (one of them `running`)
+  for deletion.
 
 ### Check 5 — version warn
 Local binary is behind `min_client_version`. Run `/pf-init` skill to reinstall the latest plugin.
@@ -199,7 +228,7 @@ name it references.
 | seamcheck | ok (verified against superpowers 6.1.1) |
 
 ## Next steps
-- `polyforge init --apply` — clone missing repos
+- `polyforge init` — clone missing repos (`--apply` is a deprecated no-op)
 - `/pf-work` — resume work once health is green
 ```
 

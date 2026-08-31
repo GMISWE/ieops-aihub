@@ -62,6 +62,11 @@ jobs:
       # tests reuse: proof that a name-regex stops at the edge of its
       # alternation even inside a file it is already selecting from.
       #
+      # Not a one-off count, either: this gate went red on its own pull request
+      # the moment aihub#281 landed two more DB-gated tests on main that no
+      # `-run` named. They are wired in by the "aihub#281 wi-content echo E2E DB
+      # tests" step below — found by the gate, not by anyone remembering.
+      #
       # This step recomputes the difference on every run instead of trusting a
       # checked-in list, because a checked-in list of "the DB tests" would rot
       # exactly as silently as the gap it describes.
@@ -95,7 +100,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 83
+            -min-gated 85
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
@@ -570,6 +575,38 @@ jobs:
           done
           ! grep -q -- '--- SKIP' ready_queue.log \
             || { echo "::error::an aihub#280 ready-queue test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#281: the wiring that change deferred. Its
+      # internal/mcp/wi_echo_e2e_db_test.go header explains why the edit is not
+      # in its own commit — ci.yml was locked by aihub#303 while it was written
+      # — and asks for exactly a step of this shape. Note how it surfaced: not
+      # from the note, but because aihub#303's coverage gate below computed
+      # these two as the only DB-gated tests no `-run` named once the two
+      # branches met. A deferral that depends on someone reading a comment is
+      # the shape this whole pair of steps exists to replace.
+      #
+      # Both cases need only a database: the suite stands the real echo router
+      # up in-process (httptest) and drives it through the real SDK client, so
+      # there is no external service to provide. What they are for is the
+      # reference side of the suppression tests in wi_echo_test.go — that a real
+      # create/update response still carries `content` at all, and that stored
+      # content comes back byte-identical. Both of those can only be answered by
+      # executing against a real server, and if either silently stopped being
+      # true, every "content is absent" assertion elsewhere would stay green
+      # while measuring nothing.
+      - name: aihub#281 wi-content echo E2E DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/mcp/ -run '^(TestE2EWorkItemContentEchoAgainstARealServer|TestE2ERealServerStoresContentByteIdentically)$' -count=1 -v 2>&1 | tee wi_echo_e2e.log
+          for want in TestE2EWorkItemContentEchoAgainstARealServer \
+                      TestE2ERealServerStoresContentByteIdentically; do
+            grep -q -- "--- PASS: $want (" wi_echo_e2e.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#281 end-to-end echo coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' wi_echo_e2e.log \
+            || { echo "::error::an aihub#281 E2E test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#303: the 26 DB-gated test functions that, until this step, no
       # `-run` in this file named — so they SKIPped on every CI run since the

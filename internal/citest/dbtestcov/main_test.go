@@ -840,8 +840,8 @@ func TestParseWorkflow_RealCIWorkflow(t *testing.T) {
 		t.Fatalf("ParseWorkflow: %v", err)
 	}
 	// Ratchet, not an exact count: raise it when you add DB steps.
-	if len(scan.Invocations) < 19 {
-		t.Errorf("found only %d DB `go test` invocations in ci.yml, floor is 19 — the parser has stopped seeing steps that are there", len(scan.Invocations))
+	if len(scan.Invocations) < 20 {
+		t.Errorf("found only %d DB `go test` invocations in ci.yml, floor is 20 — the parser has stopped seeing steps that are there", len(scan.Invocations))
 	}
 	if len(scan.Unguarded) != 0 {
 		t.Errorf("ci.yml has DB `go test` invocations with no %q guard: %v", skipGuardMarker, scan.Unguarded)

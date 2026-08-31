@@ -22,7 +22,8 @@ If the step surfaced anything worth remembering across sessions (a pitfall, a re
 approach, a constraint), capture it:
 
 ```
-pf_remember(type="experience.*|fact.*|rule.*", project=<current>, content=<finding>,
+pf_remember(type=<ONE concrete type — e.g. experience.pitfall / fact.architecture / rule.work>,
+            project=<current>, content=<finding>,
             work_item_id=<current>, visibility="project")
 ```
 

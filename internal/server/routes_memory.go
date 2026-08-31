@@ -194,6 +194,44 @@ const (
 	recallContentMax = 800
 )
 
+// firstPipedType returns the first `type` entry containing a `|`, and whether one
+// was found.
+//
+// WHY REJECT INSTEAD OF SPLITTING (aihub#289)
+// -------------------------------------------
+// Three SKILL.md templates taught `type="a|b|c"` for months. Nothing in the chain
+// ever split on `|`, so the whole string arrived as one type name and matched no
+// row — a silent empty result, indistinguishable from "this project has no such
+// memory". Two ways out; this is the second, chosen deliberately:
+//
+//	A. teach the server to split on `|` as well as `,`
+//	B. reject it, and fix the templates
+//
+// A was rejected because it would make `|` an operator in the type grammar while the
+// SAME character is in use as prose "pick one of these" notation elsewhere in the
+// same documents — `pf_remember(type=<experience.*|fact.*|rule.*>)`, and
+// `pf_user`'s `user_type=<"human"|"machine">`. One character cannot be both an
+// alternation operator on a read path and a human choice marker on a write path
+// without the docs teaching a distinction no reader can see. The array already
+// expresses everything the pipe form could, so A would buy a second spelling of an
+// existing capability and pay for it in permanent ambiguity.
+//
+// A's one real advantage — "old skill text keeps working without a plugin release" —
+// does not exist here: the templates ship from plugins/ in THIS repository, so they
+// are fixed by the same commit as the server.
+//
+// The failure mode of being wrong about `|`'s legality is also the mild direction: a
+// caller with a genuinely pipe-bearing type gets a loud, self-explanatory 400 they
+// can act on, where today every such caller gets silence.
+func firstPipedType(types []string) (string, bool) {
+	for _, t := range types {
+		if strings.Contains(t, "|") {
+			return t, true
+		}
+	}
+	return "", false
+}
+
 func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -221,6 +259,11 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 		// Parse type filter (comma-separated or repeated params)
 		if typeParam := c.QueryParam("type"); typeParam != "" {
 			req.Types = strings.Split(typeParam, ",")
+			if bad, ok := firstPipedType(req.Types); ok {
+				return writeError(c, domain.NewErr(domain.ErrBadRequest, fmt.Sprintf(
+					"type value %q contains '|', which is not a separator: `|` is not part of the memory type vocabulary, so this arrives as a single type name and matches nothing. Pass multiple types as separate entries instead — pf_recall(type=[\"a.b\",\"c.*\"]), or ?type=a.b,c.* over HTTP.",
+					bad)))
+			}
 		}
 		if vis := c.QueryParam("visibility"); vis != "" {
 			req.Visibility = vis
@@ -271,6 +314,11 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 		if aihubErr != nil {
 			return domainErr(c, aihubErr)
 		}
+		// aihub#289: say so when a `type` entry matched nothing. Placed HERE, after
+		// the router has picked a path, so the one call covers the text, vector and
+		// hybrid paths alike — annotating inside domain.Recall would have needed the
+		// same statement at each of its four return points.
+		resp.UnmatchedTypes = domain.UnmatchedTypes(ctx, pool, req)
 		// opt3 P1: truncate each item content to a snippet; full via GET /v1/memories/:id
 		for i := range resp.Items {
 			rr := []rune(resp.Items[i].Content)

@@ -62,7 +62,9 @@ Whichever you use, the output markdown must satisfy the Contract above before yo
 ```
 # opt3 P2: merged Memory-First recall — covers BOTH spec and plan phases; the plan phase
 # reuses these results (no second recall). See pf-plan Step 1.
-pf_recall(project=<current>, query=<wi.goal>, type="methodology.spec|methodology.plan|fact.*|rule.*|experience.*", top_k=8)
+# `type` is an ARRAY, one entry per type. A "a|b|c" string is NOT split — it arrives as
+# one type name, matches nothing, and returns an empty set that reads like "no history".
+pf_recall(project=<current>, query=<wi.goal>, type=["methodology.spec","methodology.plan","fact.*","rule.*","experience.*"], top_k=8)
 ```
 
 Display results with `effective_strength >= 0.3` (💡 prefix). For any memory the model
@@ -117,7 +119,8 @@ If the run surfaced a pitfall or reusable approach worth remembering across sess
 capture it (don't over-save):
 
 ```
-pf_remember(type="experience.*|fact.*|rule.*", project=<current>, content=<finding>,
+pf_remember(type=<ONE concrete type — e.g. experience.pitfall / fact.architecture / rule.work>,
+            project=<current>, content=<finding>,
             work_item_id=<current>, visibility="project")
 ```
 

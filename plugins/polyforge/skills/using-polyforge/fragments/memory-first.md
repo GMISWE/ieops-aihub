@@ -8,7 +8,7 @@ update-vs-reinforce rules, read `fragments/memory-conventions.md` in this skill 
 Before every substantive action:
 
 ```
-pf_recall(project=<current>, query=<user_intent>, type="experience.*|rule.*", top_k=5)
+pf_recall(project=<current>, query=<user_intent>, type=["experience.*","rule.*"], top_k=5)
 ```
 
 Display each result with `effective_strength >= 0.3` under `💡 Relevant history (not binding)`

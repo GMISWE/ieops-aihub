@@ -108,11 +108,11 @@ description: >
   resident: both fragments are on-demand, so the payload is unaffected.
   ⚠️ DO NOT hand-adjust these. Re-run the suite and copy what it prints:
       bash tests/using-polyforge-manifest.test.sh | grep 'SUM(kind:rule'
-  Today it prints 16,405.
+  Today it prints 16,409.
   This block has now been wrong twice for two different reasons. First 17,127, from
   adding three BYTE sizes to a CHARACTER total — every figure here is characters, like
   the budget, and these fragments carry CJK and em-dashes, so `wc -c` reads high
-  (memory-first is 741 chars but 749 bytes). Then 13,563, because the commit that fixed
+  (memory-first is 745 chars but 753 bytes). Then 13,563, because the commit that fixed
   the units added 612 more characters to memory-conventions.md and did not recompute.
   A derived number copied by hand goes stale on the next edit to its inputs, including
   the edit that is fixing it.)

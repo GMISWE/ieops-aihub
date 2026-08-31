@@ -50,11 +50,15 @@ func (s *Server) registerMemoryTools() {
 	// pf_recall
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_recall",
-		Description: "Recall memories from aihub with optional semantic search. type supports wildcards (experience.*). An item with content_truncated=true holds only the first 800 runes of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest.",
+		Description: "Recall memories from aihub with optional semantic search. type is an ARRAY of type names, e.g. [\"experience.*\",\"rule.work\"] — one filter per entry; a '|' inside an entry is NOT a separator and is rejected. An entry ending in .* is a prefix wildcard. Any entry matching no memory comes back in unmatched_types, which distinguishes a wrong type name from a project that genuinely holds no such memory. An item with content_truncated=true holds only the first 800 runes of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest.",
 		InputSchema: objectSchema(map[string]any{
-			"project":              prop("string", "Project name"),
-			"query":                prop("string", "Semantic search query"),
-			"type":                 prop("array", "Memory types to filter (supports wildcards)"),
+			"project": prop("string", "Project name"),
+			"query":   prop("string", "Semantic search query"),
+			// aihub#289: the shape is the whole point of this description. Three
+			// SKILL.md templates taught type="a|b|c", nothing split it, and the
+			// resulting empty set read as "no relevant memory". The model reads this
+			// string, so this string has to state the contract.
+			"type":                 prop("array", "Memory types to filter — an ARRAY of names, one per entry: [\"experience.*\",\"rule.work\"]. Entries ending in .* are prefix wildcards. Do NOT pack several types into one string with '|' — that is not a separator and is rejected with a 400."),
 			"visibility":           prop("string", "Filter by visibility"),
 			"work_item_id":         prop("string", "Filter by work item ID"),
 			"top_k":                prop("string", "Max results"),

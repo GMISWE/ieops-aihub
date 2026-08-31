@@ -244,6 +244,20 @@ type RecallResponse struct {
 	// Populated on both the text path (Recall) and the vector path
 	// (RecallWithVector) — see countMemories.
 	Total int `json:"total"`
+	// UnmatchedTypes names the entries of the request's `type` filter that no
+	// visible, live memory in the project matches — the difference between "this
+	// project has no such memory" and "your type value is wrong", which the
+	// response could not express before aihub#289 (both were an empty item list).
+	// Populated by handleRecall via UnmatchedTypes(), so it covers the text and
+	// vector paths alike; see memory_unmatched.go for the precise scope of the
+	// claim it makes.
+	//
+	// `omitempty` is deliberate: absent means "nothing to report", so the healthy
+	// call shapes — the overwhelming majority — pay zero tokens for it, and a
+	// present field always means the caller has a problem to look at. The cost of
+	// that choice is that "no type filter supplied" and "every type matched" are
+	// both absent; neither is a fault, so nothing needs to tell them apart.
+	UnmatchedTypes []string `json:"unmatched_types,omitempty"`
 }
 
 // ─── Forgetting Curve (§7.2) ──────────────────────────────────────────────────
@@ -1259,7 +1273,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		// topping such a request up would spend half its budget on whichever methodology.*
 		// rows happen to be newest, regardless of the query, and spec/plan bodies are large.
 		// Asking for methodology.spec by name is a different request, and gets the top-up.
-		// (The common "experience.*|rule.*" recall names no such type either, so it also
+		// (The common ["experience.*","rule.*"] recall names no such type either, so it also
 		// pays nothing extra here.)
 		needsTextComplement := len(nonEmbTypes) > 0
 
@@ -1277,9 +1291,10 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		// existed before non-embeddable types could be returned at all — behave exactly as
 		// they did before aihub#270.
 
-		// A filter naming *only* non-embeddable types (e.g. "methodology.spec|
-		// methodology.plan") has no vector candidates at all. Skip straight to the text
-		// path rather than paying for an embed call whose result can only be empty. Note
+		// A filter naming *only* non-embeddable types (e.g.
+		// ["methodology.spec","methodology.plan"]) has no vector candidates at all. Skip
+		// straight to the text path rather than paying for an embed call whose result can
+		// only be empty. Note
 		// this reaches the text path even when a threshold is set — same rule as above:
 		// nothing in this request could ever carry a similarity score.
 		if len(req.Types) == 0 || len(embTypes) > 0 {
@@ -1439,21 +1454,15 @@ func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, non
 		where += ` AND visibility != 'admin'`
 	}
 
-	// Type filter with prefix matching
-	if len(req.Types) > 0 {
-		typeClauses := make([]string, 0, len(req.Types))
-		for _, t := range req.Types {
-			if strings.HasSuffix(t, ".*") {
-				prefix := strings.TrimSuffix(t, "*")
-				typeClauses = append(typeClauses, fmt.Sprintf("type LIKE $%d", idx))
-				args = append(args, prefix+"%")
-			} else {
-				typeClauses = append(typeClauses, fmt.Sprintf("type = $%d", idx))
-				args = append(args, t)
-			}
-			idx++
-		}
-		where += " AND (" + strings.Join(typeClauses, " OR ") + ")"
+	// Type filter with prefix matching. aihub#289 moved the rule into
+	// typeFilterClause (memory_unmatched.go) so the unmatched-type diagnostic can
+	// ask "would this entry have matched?" against the same code, not a Go
+	// re-implementation of it. Rendering is byte-identical to the inline version
+	// this replaces, parentheses included.
+	if clause, clauseArgs, nextIdx := typeFilterClause(req.Types, idx); clause != "" {
+		where += " AND " + clause
+		args = append(args, clauseArgs...)
+		idx = nextIdx
 	}
 
 	// aihub#270: when this query is the complement half of a hybrid recall, restrict it to

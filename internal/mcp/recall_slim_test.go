@@ -217,3 +217,50 @@ func TestSlimRecallResult_RewritesAttrsAndCommits(t *testing.T) {
 		t.Errorf("reply bodies not flattened as expected: %#v", note["replies"])
 	}
 }
+
+// TestSlimRecallResult_CarriesUnmatchedTypes guards aihub#289, and is the THIRD
+// instance of the same trap the two tests above were written for: slimRecallResult
+// builds a brand-new map, so a field added to RecallResponse reaches the REST
+// response and dies here. `total` (aihub#249) and the truncation pair (aihub#269)
+// were the first two.
+//
+// This one matters more than either, because unmatched_types exists ONLY to be read
+// by the model, and this slimmer is the model's surface. Dropped here, the field
+// would be a fix that never reaches the party it was written for: pf_recall would
+// keep returning a bare empty set for a wrong type name, i.e. the exact silence
+// aihub#289 exists to end, while the REST endpoint looked fixed.
+func TestSlimRecallResult_CarriesUnmatchedTypes(t *testing.T) {
+	result := map[string]any{
+		"items":           []any{},
+		"total":           float64(0),
+		"unmatched_types": []any{"rule.work|fact.test"},
+	}
+
+	out := slimRecallResult(result)
+
+	um, ok := out["unmatched_types"]
+	if !ok {
+		t.Fatalf("slimRecallResult dropped `unmatched_types` — the model never learns its type value was wrong: %+v", out)
+	}
+	got, ok := um.([]any)
+	if !ok || len(got) != 1 || got[0] != "rule.work|fact.test" {
+		t.Errorf("unmatched_types mangled: %#v", um)
+	}
+}
+
+// ...and it must stay absent when the server said nothing, so the healthy call
+// shapes pay no tokens for it. A slimmer that materialised an empty list here would
+// spend budget on every recall to report "no problem".
+func TestSlimRecallResult_OmitsAbsentUnmatchedTypes(t *testing.T) {
+	for name, result := range map[string]map[string]any{
+		"key absent": {"items": []any{}, "total": float64(3)},
+		"key nil":    {"items": []any{}, "total": float64(3), "unmatched_types": nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := slimRecallResult(result)
+			if _, ok := out["unmatched_types"]; ok {
+				t.Errorf("unmatched_types materialised when the server reported none: %+v", out)
+			}
+		})
+	}
+}

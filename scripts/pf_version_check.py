@@ -9,12 +9,21 @@
 #   check_bump()  a CHANGE predicate: did this PR touch the plugin without moving the
 #                 version? Reports [NO_VERSION_BUMP].
 #
-# They are complementary and cannot substitute for each other, which is exactly how
-# aihub#301's defect recurred twice in half an hour. PR#264 and PR#265 each edited files
-# under plugins/polyforge/skills/ (PR#264 including fragments/memory-first.md, which is in
-# the resident session payload) and moved no stamp. check_root passed both times and was
-# right to: all five stamps read the same value. It reads a cross-section; the defect lives
-# on the timeline. Keep the two error tags distinct so a red build says which one fired.
+# They are complementary and cannot substitute for each other. The record, verified stamp
+# by stamp rather than recalled (an earlier draft of this comment claimed the defect shipped
+# TWICE; it did not, and the wrong number outlived its own correction in the commit message):
+#
+#   93bda4a  1.1.9    before PR#264
+#   789a0ef  1.1.10   PR#264 - as first pushed it had NO bump; review caught it and the
+#                     bump was added in round 2. Caught by a human, not by a gate.
+#   fc77479  1.1.10   PR#265 - unchanged from its base. Four files under
+#                     plugins/polyforge/skills/ shipped under a version that was already
+#                     released. THIS is the defect, and it went undetected.
+#
+# So: caught once by review, shipped once undetected. That is the case for a gate - review
+# caught the first one by luck, and luck does not scale. check_root passed on both, and was
+# right to: all five stamps did agree. It reads a cross-section; the defect is on the
+# timeline. Keep the two error tags distinct so a red build says which one fired.
 #
 # Why this exists (aihub#232)
 # ---------------------------
@@ -78,7 +87,7 @@
 # value and `git rev-parse HEAD:plugins/polyforge` disagree on main today, harmlessly).
 #
 # Scope: check_root asserts the stamps AGREE with each other. "Content changed but nobody
-# bumped" is check_bump, below - added by aihub#302 after that failure recurred twice.
+# bumped" is check_bump, below - added by aihub#302 after PR#265 shipped exactly that.
 #
 # Usage
 # -----
@@ -90,6 +99,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -245,8 +255,12 @@ def check_root(root):
                 % _as_posix(source, CANONICAL_MANIFEST)
             )
 
-        # catalog_revision is optional as a whole, but all-or-nothing across the
-        # two places that drive install detection. The root catalog is exempt.
+        # catalog_revision is optional as a whole, but all-or-nothing across the two
+        # places that CARRY it. (This used to read "the two places that drive install
+        # detection" - a restatement of the refuted belief, sitting six lines from the
+        # code and contradicting the header above. Nothing drives install detection but
+        # version; these two carriers are held consistent only so the field cannot half-
+        # change.) The root catalog is exempt: it has no such field by design.
         if record["catalog_revision"]:
             carriers = {where for where, _ in record["catalog_revision"]}
             required = []
@@ -260,6 +274,18 @@ def check_root(root):
                         "[NO_CATALOG_REVISION] %s: catalog_revision is in use for "
                         "plugin %r but missing here" % (required_where, name)
                     )
+
+        # Agreement is not enough on its own: five stamps all reading "" agree perfectly,
+        # and `"version" in entry` is true, so [NO_VERSION] never fires either. An
+        # unorderable version is a defect wherever it appears, not only on the PRs that
+        # happen to touch the plugin, so it is checked here as well as in check_bump.
+        for where, value in record["version"]:
+            if parse_version(value) is None:
+                problems.append(
+                    "[BAD_VERSION] %s: version %r is not a plain dotted-numeric version "
+                    "(e.g. '1.1.11'). Note whitespace counts: '1.1.10 ' is not '1.1.10'."
+                    % (where, value)
+                )
 
         for field in ("version", "catalog_revision"):
             values = {json.dumps(value, sort_keys=True) for _, value in record[field]}
@@ -327,13 +353,44 @@ def plugin_sources(root):
     return sources
 
 
+_VERSION_RE = re.compile(r"^[0-9]+(\.[0-9]+)*$")
+
+
+def parse_version(value):
+    """'1.1.11' -> (1, 1, 11). None if it is not a plain dotted-numeric version.
+
+    Deliberately STRICT, and deliberately not a general semver parser. The comparison
+    below has to be an ORDERING, and anything this cannot order must be refused loudly
+    rather than waved through - a permissive parser here would re-open exactly the hole
+    it exists to close. Whitespace is not stripped: '1.1.10 ' is a different string that
+    every one of the five stamps would have to carry identically, which is a stamping
+    accident, not a version. If a pre-release scheme is ever adopted, extend this
+    deliberately and add ordering cases to run_bump_self_test.
+    """
+    if not isinstance(value, str) or not _VERSION_RE.match(value):
+        return None
+    return tuple(int(p) for p in value.split("."))
+
+
 def check_bump(changed_paths, sources, version_at_base, version_now):
     """Pure core: no git, no filesystem. Returns a list of problems.
 
     version_at_base(name) -> version string, or None if the plugin did not exist at the
     base (a brand-new plugin has nothing to bump from, so it is never a violation).
+
+    The rule is that the version must INCREASE, not merely differ. "Differ" was the first
+    implementation and it was wrong in a way strictly worse than the defect it was written
+    to catch: rewriting all five stamps 1.1.11 -> 1.1.9 passed both this check and
+    check_root, and 1.1.9 is a real released version whose cache directory is already
+    populated on every machine that installed it. The new tree would reach those machines
+    never, and two different trees would exist under one version - which is verbatim what
+    the message below calls the failure this check exists to prevent.
     """
     problems = []
+
+    def fail(msg):
+        problems.append("[%s] %s" % (BUMP_PROBLEM, msg))
+
     for name in sorted(sources):
         prefix = sources[name] + "/"
         touched = sorted(p for p in changed_paths if p.startswith(prefix))
@@ -343,33 +400,50 @@ def check_bump(changed_paths, sources, version_at_base, version_now):
         base_v = version_at_base(name)
         now_v = version_now(name)
         if base_v is None:
-            continue  # new plugin in this PR
-        if base_v != now_v:
-            continue  # bumped (or otherwise moved) - that is all this check asks
+            # Brand-new plugin: there is no base version to increase from. Note this arm
+            # is load-bearing, not decorative - without it the parse below rejects None
+            # and reports a bogus violation, which is what pins it in the self-test.
+            continue
 
         listed = touched[:_MAX_LISTED_FILES]
         more = len(touched) - len(listed)
-        problems.append(
-            "[%s] plugin %r: %d file(s) under %s changed in this PR, but version is "
-            "still %r - the same value as at the base commit.\n%s%s\n"
+        where = ("%d file(s) under %s changed in this PR:\n%s%s\n"
+                 % (len(touched), prefix,
+                    "".join("      %s\n" % p for p in listed),
+                    "      ... and %d more" % more if more else ""))
+        remedy = (
             "    The install cache is keyed on version (installPath is "
-            "<cache>/<marketplace>/%s/<version>), so everyone already on %s will NEVER "
-            "receive these files, and `/plugin update` is a no-op for them. Restamping "
-            "catalog_revision does NOT help: Claude Code ignores that field at load time.\n"
-            "    Fix: bump version in every stamp (%s, and each plugin.json variant under "
-            "%s), then re-run this check.\n"
-            "    If a parallel PR bumped first and you now conflict on plugin.json: rebase "
-            "onto the new main and re-bump to the NEXT version. Do not resolve the conflict "
-            "by keeping your side - that would ship two different trees under one version, "
-            "which is the failure this check exists to prevent."
-            % (
-                BUMP_PROBLEM, name, len(touched), prefix, base_v,
-                "".join("      %s\n" % p for p in listed),
-                "      ... and %d more" % more if more else "",
-                name, base_v,
-                " and ".join(CATALOG_RELPATHS), sources[name],
-            )
+            "<cache>/<marketplace>/%s/<version>), so anyone already on that version will "
+            "NEVER receive these files and `/plugin update` is a no-op for them. "
+            "Restamping catalog_revision does NOT help: it is ignored at load time.\n"
+            "    Fix: raise version in every stamp (%s, and each plugin.json variant "
+            "under %s), then re-run this check.\n"
+            "    If a parallel PR bumped first and you now conflict on plugin.json: "
+            "rebase onto the new main and re-bump to the NEXT version. Do not resolve "
+            "the conflict by keeping your side - that would ship two different trees "
+            "under one version, which is the failure this check exists to prevent."
+            % (name, " and ".join(CATALOG_RELPATHS), sources[name])
         )
+
+        base_t, now_t = parse_version(base_v), parse_version(now_v)
+        if base_t is None or now_t is None:
+            bad = base_v if base_t is None else now_v
+            fail("plugin %r: %sbut the version cannot be ordered: %r is not a plain "
+                 "dotted-numeric version (e.g. '1.1.11'). An unorderable version cannot "
+                 "be shown to have increased, so it is refused rather than assumed "
+                 "good.\n%s" % (name, where, bad, remedy))
+            continue
+        if now_t == base_t:
+            fail("plugin %r: %sbut version is still %r - the same value as at the base "
+                 "commit.\n%s" % (name, where, base_v, remedy))
+            continue
+        if now_t < base_t:
+            fail("plugin %r: %sand version went DOWN, %r -> %r. A downgrade is worse "
+                 "than no bump: the older version is already installed somewhere, its "
+                 "cache directory is already populated, and this tree would reach those "
+                 "machines never while two different trees exist under one version.\n%s"
+                 % (name, where, base_v, now_v, remedy))
+            continue
     return problems
 
 
@@ -382,10 +456,30 @@ def _git(root, *args):
 
 
 def git_changed_paths(root, base):
-    """Repo-relative paths changed between base and HEAD, three-dot (i.e. from the merge
-    base), which is what a PR actually proposes to land."""
-    out = _git(root, "diff", "--name-only", "%s...HEAD" % base)
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    """Repo-relative paths changed between base and HEAD.
+
+    Three dots, i.e. from the merge base: that is what the PR actually proposes to land.
+    Two dots would additionally report everything the BASE gained since the branch point,
+    as if this PR had deleted it.
+
+    Two flags here are load-bearing, and both were holes found in review:
+
+    --no-renames  git's default rename detection emits ONLY the destination of a rename.
+                  So `git mv plugins/polyforge/skills/.../copilot-tools.md docs/` showed up
+                  as a single path under docs/, nothing matched the plugin prefix, and a
+                  file vanishing from every future install passed green. With --no-renames
+                  the same move is a delete plus an add and the delete lands under the
+                  prefix.
+
+    -z            core.quotePath defaults to true, so a non-ASCII path arrives C-quoted and
+                  octal-escaped - '"plugins/polyforge/.../\\350\\257\\264\\346\\230\\216.md"' -
+                  which does not start with 'plugins/polyforge/' and slipped through. -z
+                  emits raw NUL-terminated paths with no quoting at all. Latent in this repo
+                  today (no non-ASCII tracked paths) but this workspace is full of Chinese
+                  prose, so it is one filename away from live.
+    """
+    out = _git(root, "diff", "--no-renames", "-z", "--name-only", "%s...HEAD" % base)
+    return [p for p in out.split("\0") if p]
 
 
 def git_manifest_version(root, rev, source):
@@ -403,6 +497,17 @@ def git_manifest_version(root, rev, source):
 
 def check_bump_since(root, base):
     """Wire the git layer to the pure core. Returns a list of problems."""
+    # An unusable base must be LOUD. The one input that used to be silent was the empty
+    # string, because `if args.require_bump_since:` treated it as "flag absent" and fell
+    # through to check_root, which printed ITS success line and exited 0 - a different
+    # check's green, standing in for this one. github.event.pull_request.base.sha is
+    # exactly empty on any non-pull_request event, so adding `push:` or `merge_group:` to
+    # the workflow would have turned this step into a no-op that still looked fine.
+    if base is None or not str(base).strip():
+        return ["[%s] no base commit given (--require-bump-since was empty). Under a "
+                "pull_request workflow this is github.event.pull_request.base.sha, which "
+                "is EMPTY on push / merge_group / workflow_dispatch events. This check "
+                "cannot run without a base and must not pass by default." % BUMP_PROBLEM]
     sources = plugin_sources(root)
     if not sources:
         return ["[%s] no plugin source found in any catalog, so nothing could be checked "
@@ -612,9 +717,14 @@ def run_self_test():
 
 
 def run_bump_self_test():
-    """Cases for check_bump. The pure ones pin the rule; the last one drives the real git
-    layer, because a green pure core says nothing about whether the diff and the base
-    version are actually being read from the repository."""
+    """Cases for check_bump.
+
+    The pure cases pin the RULE; the end-to-end cases drive the real git layer, because a
+    green pure core says nothing about whether the diff and the base version are actually
+    being read from the repository. Several cases below exist specifically because a
+    mutation survived without them, and each says which one - a case that kills no mutant
+    is decoration.
+    """
     sources = {"polyforge": "plugins/polyforge"}
     failures = []
 
@@ -623,7 +733,7 @@ def run_bump_self_test():
 
     cases = [
         # (label, changed_paths, base_version, head_version, expect_problem)
-        ("a skill edit with no bump - the PR#264 / PR#265 shape",
+        ("a skill edit with no bump - the PR#265 shape",
          ["plugins/polyforge/skills/using-polyforge/SKILL.md"], "1.1.10", "1.1.10", True),
         ("the resident payload edited with no bump",
          ["plugins/polyforge/skills/using-polyforge/fragments/memory-first.md"],
@@ -637,7 +747,27 @@ def run_bump_self_test():
          ["plugins/polyforge/tests/using-polyforge-payload.test.sh"], "1.1.10", "1.1.10", True),
         ("the same edit WITH a bump",
          ["plugins/polyforge/skills/using-polyforge/SKILL.md"], "1.1.10", "1.1.11", False),
-        # The negative control that keeps this from being a check on every PR.
+        # --- the version must INCREASE, not merely differ -----------------------------
+        # A downgrade to a real released version is worse than no bump: that cache
+        # directory is already populated on every machine that installed it.
+        ("a DOWNGRADE to a previously released version",
+         ["plugins/polyforge/skills/using-polyforge/SKILL.md"], "1.1.11", "1.1.9", True),
+        ("a downgrade of only the last component",
+         ["plugins/polyforge/hooks/pf-session-start"], "1.1.11", "1.1.10", True),
+        ("a minor-version increase is accepted",
+         ["plugins/polyforge/hooks/pf-session-start"], "1.1.11", "1.2.0", False),
+        ("a shorter version that is still larger is accepted",
+         ["plugins/polyforge/hooks/pf-session-start"], "1.1.11", "2", False),
+        # An unorderable version cannot be shown to have increased, so it is refused.
+        ("an empty version string",
+         ["plugins/polyforge/hooks/pf-session-start"], "1.1.10", "", True),
+        ("a version with a trailing space",
+         ["plugins/polyforge/hooks/pf-session-start"], "1.1.10", "1.1.10 ", True),
+        ("a non-numeric version",
+         ["plugins/polyforge/hooks/pf-session-start"], "1.1.10", "1.1.11-rc1", True),
+        ("an unorderable BASE version is refused too",
+         ["plugins/polyforge/hooks/pf-session-start"], "", "1.1.11", True),
+        # --- negative controls that keep this from firing on every PR ------------------
         ("a server-only change never asks for a bump",
          ["internal/domain/memory.go", "internal/mcp/tools_memory.go"],
          "1.1.10", "1.1.10", False),
@@ -647,6 +777,10 @@ def run_bump_self_test():
          [], "1.1.10", "1.1.10", False),
         ("a path that merely starts with the same letters is not inside the plugin",
          ["plugins/polyforge-extras/skills/x.md"], "1.1.10", "1.1.10", False),
+        # KILLS the mutant `if base_v is None: continue` -> `if False:`. Under the old
+        # "differ" rule this case passed either way, because None != "0.1.0" also
+        # continued - so the carve-out was asserted by nothing. Now, without the carve-out
+        # the None base reaches parse_version and is refused, and this case goes red.
         ("a brand-new plugin has no base version to bump from",
          ["plugins/polyforge/skills/x.md"], None, "0.1.0", False),
     ]
@@ -657,79 +791,185 @@ def run_bump_self_test():
         if got != expect_problem:
             failures.append("%s: expected problem=%s, got %s" % (label, expect_problem, problems))
 
+    # KILLS the mutant `for name in sorted(sources)[:1]`. Every case above has exactly one
+    # plugin, so checking only the first was indistinguishable from checking all of them.
+    two = {"aaa-quiet": "plugins/aaa-quiet", "zzz-loud": "plugins/zzz-loud"}
+    problems = check_bump(["plugins/zzz-loud/skills/x.md"], two, at("1.0.0"), at("1.0.0"))
+    if not any("zzz-loud" in p for p in problems):
+        failures.append("a violation in the SECOND plugin of two was not reported: %s"
+                        % problems)
+
     # --- the wiring hop: a real repository, a real diff, a real base blob --------------
     # Everything above calls check_bump directly. That leaves git_changed_paths and
     # git_manifest_version - the two places this check can silently read nothing and pass -
-    # completely untested. Build a throwaway repo and drive check_bump_since end to end,
-    # in both directions.
+    # completely untested.
     def _run(root, *args):
         import subprocess
         subprocess.run(["git", "-C", root] + list(args),
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
+    def _fixture(repo):
+        """A repo with one plugin, one server file, one committed base. Returns base sha."""
+        _run(repo, "init", "-q", "-b", "main")
+        _run(repo, "config", "user.email", "selftest@example.invalid")
+        _run(repo, "config", "user.name", "selftest")
+        # quotePath ON: the default, and the setting that used to hide non-ASCII paths.
+        _run(repo, "config", "core.quotePath", "true")
+        _write_fixture(repo, _catalogs(), {
+            ".claude-plugin/plugin.json": {"version": "1.0.0",
+                                           "catalog_revision": "abc123abc123"},
+            "plugin.json": {"version": "1.0.0"},
+            ".codex-plugin/plugin.json": {"version": "1.0.0"},
+        })
+        skill = os.path.join(repo, "plugins", "demo", "skills")
+        os.makedirs(skill, exist_ok=True)
+        for fn in ("SKILL.md", "extra.md"):
+            with open(os.path.join(skill, fn), "w", encoding="utf-8") as fh:
+                fh.write("before\n")
+        os.makedirs(os.path.join(repo, "internal"), exist_ok=True)
+        with open(os.path.join(repo, "internal", "server.go"), "w", encoding="utf-8") as fh:
+            fh.write("package internal\n")
+        os.makedirs(os.path.join(repo, "docs"), exist_ok=True)
+        _run(repo, "add", "-A")
+        _run(repo, "commit", "-qm", "base")
+        return _git(repo, "rev-parse", "HEAD").strip()
+
+    def _bump(repo, value="1.0.1"):
+        for rel in (".claude-plugin/plugin.json", "plugin.json", ".codex-plugin/plugin.json"):
+            path = os.path.join(repo, "plugins", "demo", rel)
+            data = _load_json(path)
+            data["version"] = value
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+
+    def e2e(label, mutate, expect_problem, needle=None):
+        """Build a fresh repo, apply `mutate(repo, skill_dir)`, commit, assert."""
+        try:
+            with tempfile.TemporaryDirectory() as repo:
+                base = _fixture(repo)
+                skill = os.path.join(repo, "plugins", "demo", "skills")
+                mutate(repo, skill)
+                _run(repo, "add", "-A")
+                _run(repo, "commit", "-qm", label)
+                problems = check_bump_since(repo, base)
+                got = any(("[%s]" % BUMP_PROBLEM) in p for p in problems)
+                if got != expect_problem:
+                    failures.append("end-to-end %r: expected problem=%s, got %s"
+                                    % (label, expect_problem, problems))
+                elif needle and needle not in "".join(problems):
+                    failures.append("end-to-end %r: failure does not mention %r: %s"
+                                    % (label, needle, problems))
+        except Exception as exc:
+            failures.append("end-to-end %r could not run (%s) - the git layer is "
+                            "therefore UNTESTED; do not read this run as green"
+                            % (label, exc))
+
+    def _write(path, text):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    e2e("a real unbumped plugin edit",
+        lambda r, s: _write(os.path.join(s, "SKILL.md"), "after\n"),
+        True, needle="plugins/demo/skills/SKILL.md")
+
+    e2e("the same edit with a real bump",
+        lambda r, s: (_write(os.path.join(s, "SKILL.md"), "after\n"), _bump(r)),
+        False)
+
+    # KILLS `--diff-filter=d` (drop deletions). A deleted plugin file is a change every
+    # future install receives, so it must demand a bump like any other.
+    e2e("deleting a plugin file with no bump",
+        lambda r, s: os.remove(os.path.join(s, "extra.md")),
+        True, needle="plugins/demo/skills/extra.md")
+
+    # KILLS the loss of --no-renames. git's default rename detection reports ONLY the
+    # destination, so moving a file OUT of the plugin showed up under docs/ alone, matched
+    # no prefix, and passed green while every future install silently lost the file.
+    def _rename_out(r, s):
+        import shutil
+        shutil.move(os.path.join(s, "extra.md"), os.path.join(r, "docs", "extra.md"))
+    e2e("renaming a file OUT of the plugin dir with no bump",
+        _rename_out, True, needle="plugins/demo/skills/extra.md")
+
+    # KILLS the loss of -z (and any mutant that drops C-quoted lines). With
+    # core.quotePath=true a non-ASCII path arrives octal-escaped and inside double quotes,
+    # so it does not start with the plugin prefix.
+    e2e("adding a non-ASCII plugin path with no bump",
+        lambda r, s: _write(os.path.join(s, "说明.md"), "notes\n"),
+        True, needle="说明.md")
+
+    # KILLS any mutant that discards paths beginning with a double quote - the shape a
+    # C-quoted path used to have. Under -z nothing is ever quoted, so such a filter looks
+    # inert; it is not, because a double quote is a legal filename character and the filter
+    # would silently drop a real file. Anchoring the rule on a name that genuinely starts
+    # with one is what tells "this filter is dead code" apart from "this filter eats data".
+    e2e('adding a plugin path whose name starts with a double quote',
+        lambda r, s: _write(os.path.join(s, '"quoted.md'), "notes\n"),
+        True, needle='"quoted.md')
+
+    # KILLS three-dot -> two-dot. The base gains a plugin file after the branch point; the
+    # PR itself touches only internal/. Two-dot reports the base's new file as if this PR
+    # had deleted it and demands a bump for a change the PR did not make.
     try:
         with tempfile.TemporaryDirectory() as repo:
-            _run(repo, "init", "-q", "-b", "main")
-            _run(repo, "config", "user.email", "selftest@example.invalid")
-            _run(repo, "config", "user.name", "selftest")
-            _write_fixture(repo, _catalogs(), {
-                ".claude-plugin/plugin.json": {"version": "1.0.0",
-                                               "catalog_revision": "abc123abc123"},
-                "plugin.json": {"version": "1.0.0"},
-                ".codex-plugin/plugin.json": {"version": "1.0.0"},
-            })
-            skill = os.path.join(repo, "plugins", "demo", "skills")
-            os.makedirs(skill, exist_ok=True)
-            with open(os.path.join(skill, "SKILL.md"), "w", encoding="utf-8") as fh:
-                fh.write("before\n")
-            os.makedirs(os.path.join(repo, "internal"), exist_ok=True)
-            with open(os.path.join(repo, "internal", "server.go"), "w", encoding="utf-8") as fh:
-                fh.write("package internal\n")
+            _fixture(repo)
+            _run(repo, "checkout", "-q", "-b", "feature")
+            _write(os.path.join(repo, "internal", "server.go"), "package internal // edit\n")
+            _run(repo, "commit", "-qam", "server-only change on the branch")
+            _run(repo, "checkout", "-q", "main")
+            _write(os.path.join(repo, "plugins", "demo", "skills", "late.md"), "late\n")
+            _bump(repo, "1.0.2")
             _run(repo, "add", "-A")
-            _run(repo, "commit", "-qm", "base")
-            base = _git(repo, "rev-parse", "HEAD").strip()
-
-            # 1. positive: touch the plugin, do not bump.
-            with open(os.path.join(skill, "SKILL.md"), "w", encoding="utf-8") as fh:
-                fh.write("after\n")
-            _run(repo, "commit", "-qam", "edit the skill, no bump")
-            problems = check_bump_since(repo, base)
-            if not any(("[%s]" % BUMP_PROBLEM) in p for p in problems):
-                failures.append("end-to-end: a real unbumped plugin edit did not fail: %s"
-                                % problems)
-            elif "plugins/demo/skills/SKILL.md" not in "".join(problems):
-                failures.append("end-to-end: the failure does not name the file that "
-                                "triggered it: %s" % problems)
-
-            # 2. negative: same repo, server-only commit on top - must go quiet again
-            #    only once the bump lands, so bump and re-check.
-            for rel in (".claude-plugin/plugin.json", "plugin.json", ".codex-plugin/plugin.json"):
-                p = os.path.join(repo, "plugins", "demo", rel)
-                data = _load_json(p)
-                data["version"] = "1.0.1"
-                with open(p, "w", encoding="utf-8") as fh:
-                    json.dump(data, fh)
-            _run(repo, "commit", "-qam", "bump")
-            problems = check_bump_since(repo, base)
+            _run(repo, "commit", "-qm", "main moved on, with its own bump")
+            moved_base = _git(repo, "rev-parse", "HEAD").strip()
+            _run(repo, "checkout", "-q", "feature")
+            problems = check_bump_since(repo, moved_base)
             if problems:
-                failures.append("end-to-end: bumping did not clear the failure: %s" % problems)
+                failures.append(
+                    "end-to-end 'base moved on': a server-only PR was asked to bump "
+                    "because the BASE gained a plugin file after the branch point. The "
+                    "diff must be three-dot (from the merge base). Got: %s" % problems)
+    except Exception as exc:
+        failures.append("end-to-end 'base moved on' could not run (%s)" % exc)
 
-            # 3. negative control on the base itself: no diff at all, no demand.
-            head = _git(repo, "rev-parse", "HEAD").strip()
-            problems = check_bump_since(repo, head)
-            if problems:
-                failures.append("end-to-end: an empty diff still demanded a bump: %s"
-                                % problems)
-    except Exception as exc:  # git missing or unusable
-        failures.append("end-to-end git case could not run (%s) - the git layer is "
-                        "therefore UNTESTED; do not read this run as green" % exc)
+    # KILLS the anti-vacuity guard being replaced by `return []`: a tree with no catalog
+    # must be reported, not silently treated as "nothing to check".
+    try:
+        with tempfile.TemporaryDirectory() as empty:
+            _run(empty, "init", "-q", "-b", "main")
+            _run(empty, "config", "user.email", "selftest@example.invalid")
+            _run(empty, "config", "user.name", "selftest")
+            with open(os.path.join(empty, "README.md"), "w", encoding="utf-8") as fh:
+                fh.write("no catalog here\n")
+            _run(empty, "add", "-A")
+            _run(empty, "commit", "-qm", "base")
+            head = _git(empty, "rev-parse", "HEAD").strip()
+            if not check_bump_since(empty, head):
+                failures.append("a tree with no plugin catalog passed silently - this "
+                                "check must never pass vacuously")
+    except Exception as exc:
+        failures.append("end-to-end 'no catalog' could not run (%s)" % exc)
 
+    # An unusable base must be LOUD. The empty string is the one that matters: it is what
+    # github.event.pull_request.base.sha expands to on any non-pull_request event.
+    for bad_base, why in ((None, "None"), ("", "empty string"), ("   ", "whitespace")):
+        try:
+            with tempfile.TemporaryDirectory() as repo:
+                _fixture(repo)
+                if not check_bump_since(repo, bad_base):
+                    failures.append("a %s base passed silently - on a non-pull_request "
+                                    "event this check would become a no-op" % why)
+        except Exception as exc:
+            failures.append("end-to-end 'bad base %s' could not run (%s)" % (why, exc))
+
+    n_e2e = 12
     if failures:
         print("bump self-test FAILED:")
         for failure in failures:
             print("  - %s" % failure)
         return 1
-    print("bump self-test passed (%d pure cases + 3 end-to-end git cases)" % len(cases))
+    print("bump self-test passed (%d pure cases + 1 multi-plugin case + %d end-to-end "
+          "git cases)" % (len(cases), n_e2e))
     return 0
 
 
@@ -751,9 +991,17 @@ def main():
     args = parser.parse_args()
 
     if args.self_test:
-        sys.exit(run_self_test() or run_bump_self_test())
+        # Both, unconditionally. `a() or b()` short-circuits, so a failing stamp self-test
+        # left the bump self-test unrun and its status merely unknown - reported as one
+        # red exit either way, which hides that half the suite never executed.
+        rc_stamps = run_self_test()
+        rc_bump = run_bump_self_test()
+        sys.exit(1 if (rc_stamps or rc_bump) else 0)
 
-    if args.require_bump_since:
+    # `is not None`, NOT truthiness: an empty string means "the flag was passed with an
+    # empty value", which check_bump_since reports loudly. Truthiness routed it to
+    # check_root instead, whose success line then stood in for this check never running.
+    if args.require_bump_since is not None:
         problems = check_bump_since(args.root, args.require_bump_since)
         if problems:
             print("plugin contents changed without a version bump:")

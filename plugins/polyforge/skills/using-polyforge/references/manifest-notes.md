@@ -4,15 +4,42 @@
 SessionStart by `hooks/pf-session-start` into the resident payload, and everything below
 is the reasoning behind its rules, its schema and its size budget.
 
-These notes lived inside an HTML comment at the top of `SKILL.md` until aihub#302, when
-they had reached 24,987 of that file's 26,558 bytes. They were moved out because the
-harness was **measured** not to charge `SKILL.md` to the model at session start (a
-200,000-character probe appended to the installed 1.1.10 copy moved the session's input
-token count by exactly zero, against a same-run positive control on `CLAUDE.md` that moved
-by +62,348) — so keeping them there bought no reach, while making `claude plugin details`
-report the whole payload-slimming line as a regression. Nothing here was rewritten in the
-move; "this manifest", "this file" and "below" all still mean `../SKILL.md` and this
-document respectively.
+These notes lived inside an HTML comment at the top of `SKILL.md` until aihub#302, where
+they had grown to **25,193 of that file's 26,558 bytes (94.9%)** — measured on the comment
+*including* its `<!--` / `-->` markers. Say which reading you mean if you quote a figure:
+excluding the markers it is 25,186 bytes, and in characters rather than bytes 25,059 /
+26,422. (An earlier draft of this line said 24,987, which reproduces under no reading at
+all. The warning further down about hand-copied derived numbers going stale applies to
+this sentence too.)
+
+Nothing here was rewritten in the move; "this manifest", "this file" and "below" still
+mean `../SKILL.md` and this document respectively.
+
+## Why the block was moved, and what was actually measured
+
+Two arms, the same counter (a headless session's total input tokens), the same
+200,000-character filler:
+
+| arm | what changed | tokens |
+|---|---|---|
+| **session start** | filler appended to the installed `SKILL.md`, session started, skill *not* invoked | 48,772 → **48,772** (0) |
+| **skill invoked** | filler in a skill's body, then that skill invoked via the Skill tool | 53,363 → **137,975** (+84,612) |
+
+So a skill's body **is** charged — but only when the skill is invoked, and `using-polyforge`
+is designed never to be invoked (the hook injects the assembled fragments instead). The
+second arm is what makes the first one mean anything: it shows the counter does move when a
+skill body enters context *through the skill channel*, so the flat session-start reading is
+a real null and not a blind instrument. Both invoked arms returned the marker word from the
+skill body, confirming the invocation actually happened.
+
+⚠️ **What this does not establish.** The session-start arm alone cannot distinguish "never
+charged" from "charged later, on a path this measurement does not cover" — which is why the
+invoked arm exists, and why the honest claim is the narrow one: *at session start this file
+costs only its frontmatter `description`; its body costs `len(body)/4`-ish tokens on the
+requests where someone invokes it.* Keeping 25 KB here bought no reach at session start and
+made every direct invocation expensive, while causing `claude plugin details` — which sees
+on-invoke cost and explicitly labels hook payloads "no model context cost" — to report the
+whole payload-slimming line as a regression.
 
 ---
 using-polyforge is ASSEMBLED at SessionStart by hooks/pf-session-start from the

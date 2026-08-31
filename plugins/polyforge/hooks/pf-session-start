@@ -201,7 +201,8 @@ ctx = PREAMBLE + LEDE + "\n\n".join(t for _, t in parts) + TAIL
 #   - it writes the same finding to stderr, so the failure is visible outside the model.
 # Fragments are dropped from the END of the manifest, keeping the longest prefix that fits:
 # the manifest orders iron-rules.md first precisely so the Iron Rules survive truncation
-# (SKILL.md, SIZE BUDGET rule 2), and dropping a suffix is the only policy that preserves
+# (SIZE BUDGET rule 2 in skills/using-polyforge/references/manifest-notes.md), and dropping
+# a suffix is the only policy that preserves
 # that ordering guarantee.
 MAX_CHARS = 10000
 
@@ -216,7 +217,8 @@ if len(ctx) > MAX_CHARS:
             "this hook dropped the trailing fragment(s) and is telling you so: **%s**. "
             "Each still ships on disk under `skills/using-polyforge/` — `Read` any you need "
             "before relying on it. This is a bug in the manifest, not in your session: the "
-            "budget must be restored (see the SIZE BUDGET note in that skill's SKILL.md and "
+            "budget must be restored (see the SIZE BUDGET section of "
+            "`skills/using-polyforge/references/manifest-notes.md` and "
             "`plugins/polyforge/tests/using-polyforge-payload.test.sh`).\n\n"
             % (full_len, MAX_CHARS, ", ".join(dropped) or "all of them")
         )
@@ -244,8 +246,8 @@ if len(ctx) > MAX_CHARS:
         "pf-session-start: using-polyforge payload is %d chars, over the %d-char harness "
         "limit. Emitted a degraded %d-char payload; dropped %s. Run "
         "plugins/polyforge/tests/using-polyforge-payload.test.sh and move a fragment to the "
-        "on-demand tier — do not raise the gate (skills/using-polyforge/SKILL.md, SIZE "
-        "BUDGET).\n"
+        "on-demand tier — do not raise the gate (SIZE BUDGET in "
+        "skills/using-polyforge/references/manifest-notes.md).\n"
         % (full_len, MAX_CHARS, len(ctx), ", ".join(dropped) or "every fragment")
     )
 

@@ -9,9 +9,11 @@ description: >
   MAINTAINER NOTES: references/manifest-notes.md — READ IT BEFORE EDITING THIS FILE.
   It holds the SIZE BUDGET rule, the kind/gate/authority schema, the tier rule and its
   BASELINE ratchet, the argument for which channel owns a rule, and why the on-demand
-  verb is spelled the way it is. It sat in this comment until aihub#302, at 24,987 of
-  this file's 26,558 bytes; the harness was measured not to charge SKILL.md at session
-  start, so it was buying no reach here.
+  verb is spelled the way it is. It sat in this comment until aihub#302, at 25,193 of
+  this file's 26,558 bytes (94.9%, markers included). Measured before moving it: this
+  file's BODY is charged only on the requests where the skill is INVOKED, never at
+  session start - and this skill is designed not to be invoked, so 25 KB of it here
+  bought no reach and priced every direct invocation. Both arms are in the notes.
 
   Four things not to get wrong without going and reading it:
     1. This file is a MANIFEST, assembled at SessionStart by hooks/pf-session-start.

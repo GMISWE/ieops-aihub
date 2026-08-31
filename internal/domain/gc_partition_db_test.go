@@ -38,6 +38,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GMISWE/ieops-aihub/internal/citest/testname"
 )
 
 // agentEventsFixtureDDL mirrors migration 0006's agent_events closely enough for
@@ -83,7 +85,7 @@ func setupPartitionTestDB(t *testing.T) *pgxpool.Pool {
 		t.Skip("set AIHUB_TEST_DB to run this integration test")
 	}
 
-	schema := "pf268_" + sanitizeTestName(t.Name())
+	schema := "pf268_" + testname.Sanitize(t.Name())
 	ctx := context.Background()
 
 	cfg, err := pgxpool.ParseConfig(dbURL)

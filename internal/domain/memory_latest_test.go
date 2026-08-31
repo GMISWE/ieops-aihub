@@ -17,6 +17,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GMISWE/ieops-aihub/internal/citest/testname"
 )
 
 // setupLatestTestDB connects to AIHUB_TEST_DB, skipping the test if unset.
@@ -40,7 +42,7 @@ func setupLatestTestDB(t *testing.T) *pgxpool.Pool {
 // concurrent/sequential tests sharing one DB don't collide.
 func testUser(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
-	uid := "u_" + sanitizeTestName(t.Name())
+	uid := "u_" + testname.Sanitize(t.Name())
 	mustExec(t, pool, `INSERT INTO users(id,email,display_name) VALUES('`+uid+`','`+uid+`@test.local','`+uid+`') ON CONFLICT (id) DO NOTHING`)
 	return uid
 }
@@ -66,7 +68,7 @@ func testUser(t *testing.T, pool *pgxpool.Pool) string {
 // do not read "two" as a property of the code.
 func testProject(t *testing.T, pool *pgxpool.Pool, ownerUserID string) string {
 	t.Helper()
-	proj := "p_" + sanitizeTestName(t.Name())
+	proj := "p_" + testname.Sanitize(t.Name())
 	mustExec(t, pool, `INSERT INTO projects(name,owner_user_id) VALUES('`+proj+`','`+ownerUserID+`') ON CONFLICT (name) DO NOTHING`)
 	resetTestProject(t, pool, proj)
 	return proj
@@ -88,9 +90,17 @@ func testProject(t *testing.T, pool *pgxpool.Pool, ownerUserID string) string {
 // predicates for the same reason (memories.latest_id / supersedes_id are
 // unqualified self-FKs, and splitting the delete would checkpoint mid-lineage).
 //
-// proj comes from sanitizeTestName, which emits only [a-z0-9_], so splicing it
-// into the literals below (matching the style of the rest of this file) cannot
-// break out of the quotes.
+// proj comes from testname.Sanitize (internal/citest/testname), which emits
+// only [a-z0-9_], so splicing it into the literals below (matching the style of
+// the rest of this file) cannot break out of the quotes.
+//
+// These are six separate statements on a pool, NOT one transaction, and that is
+// deliberate (revisited in aihub#303). Everything the ordering above relies on
+// is checked at end of STATEMENT: no FK in internal/db/migrations is declared
+// DEFERRABLE, so a surrounding BEGIN would not let the deletes be reordered or
+// merged. And the state a transaction would prevent — a half-applied reset — is
+// indistinguishable to the next caller from a reset that never ran, which this
+// function is already idempotent against.
 func resetTestProject(t *testing.T, pool *pgxpool.Pool, proj string) {
 	t.Helper()
 	wis := `(SELECT id FROM work_items WHERE project='` + proj + `')`
@@ -108,28 +118,6 @@ func resetTestProject(t *testing.T, pool *pgxpool.Pool, proj string) {
 	} {
 		mustExec(t, pool, stmt)
 	}
-}
-
-// sanitizeTestName lowercases and strips characters that are unsafe to splice
-// directly into a SQL identifier/literal (test names can contain '/' from
-// subtests), and truncates to fit projects.name's 40-char limit alongside a
-// "p_" prefix.
-func sanitizeTestName(name string) string {
-	out := make([]byte, 0, len(name))
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			out = append(out, byte(r))
-		case r >= 'A' && r <= 'Z':
-			out = append(out, byte(r-'A'+'a'))
-		default:
-			out = append(out, '_')
-		}
-	}
-	if len(out) > 37 {
-		out = out[:37]
-	}
-	return string(out)
 }
 
 // seedMemory inserts a minimal memory row directly (bypassing Remember) for
@@ -233,10 +221,10 @@ func TestBackfillLatestID(t *testing.T) {
 	u := testUser(t, pool)
 	project := testProject(t, pool, u)
 
-	idA := "mem_bfA_" + sanitizeTestName(t.Name())
-	idB := "mem_bfB_" + sanitizeTestName(t.Name())
-	idC := "mem_bfC_" + sanitizeTestName(t.Name())
-	idS := "mem_bfS_" + sanitizeTestName(t.Name())
+	idA := "mem_bfA_" + testname.Sanitize(t.Name())
+	idB := "mem_bfB_" + testname.Sanitize(t.Name())
+	idC := "mem_bfC_" + testname.Sanitize(t.Name())
+	idS := "mem_bfS_" + testname.Sanitize(t.Name())
 
 	seedMemory(t, pool, project, u, idA, "", "archived")
 	seedMemory(t, pool, project, u, idB, idA, "archived")
@@ -263,9 +251,9 @@ func TestBackfillLatestID_RedactedHead(t *testing.T) {
 	u := testUser(t, pool)
 	project := testProject(t, pool, u)
 
-	idA := "mem_rhA_" + sanitizeTestName(t.Name())
-	idB := "mem_rhB_" + sanitizeTestName(t.Name())
-	idC := "mem_rhC_" + sanitizeTestName(t.Name())
+	idA := "mem_rhA_" + testname.Sanitize(t.Name())
+	idB := "mem_rhB_" + testname.Sanitize(t.Name())
+	idC := "mem_rhC_" + testname.Sanitize(t.Name())
 
 	seedMemory(t, pool, project, u, idA, "", "archived")
 	seedMemory(t, pool, project, u, idB, idA, "archived")
@@ -403,7 +391,7 @@ func TestGetLatestByID(t *testing.T) {
 	}
 
 	// Nonexistent id surfaces not-found.
-	_, gerr := GetLatestByID(context.Background(), pool, "mem_does_not_exist_"+sanitizeTestName(t.Name()))
+	_, gerr := GetLatestByID(context.Background(), pool, "mem_does_not_exist_"+testname.Sanitize(t.Name()))
 	require.NotNil(t, gerr)
 	assert.Equal(t, ErrNotFound, gerr.Code)
 }
@@ -457,7 +445,7 @@ func TestUpdateMemory(t *testing.T) {
 	assert.Equal(t, v3.ID, latestOf(t, pool, v2.ID))
 
 	// Unknown id surfaces not-found.
-	_, err = UpdateMemory(context.Background(), pool, "mem_does_not_exist_"+sanitizeTestName(t.Name()), &UpdateMemoryRequest{
+	_, err = UpdateMemory(context.Background(), pool, "mem_does_not_exist_"+testname.Sanitize(t.Name()), &UpdateMemoryRequest{
 		Content: strp("nope"), CallerUserID: u, CallerDisplay: u,
 	})
 	require.Error(t, err)

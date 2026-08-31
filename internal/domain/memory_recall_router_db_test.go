@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GMISWE/ieops-aihub/internal/citest/testname"
 	"github.com/GMISWE/ieops-aihub/internal/embedding"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -114,7 +115,7 @@ func recallRouterFixture(t *testing.T, nEmb, nMeth int) (*pgxpool.Pool, string, 
 		mustExec(t, pool, fmt.Sprintf(
 			`INSERT INTO memories(id,project,author_user_id,author_display,type,content,visibility)
 			 VALUES ('mem_%srt%d','%s','%s','%s','methodology.spec','spec doc %d about vector routing','project')`,
-			sanitizeTestName(t.Name()), i, proj, uid, uid, i))
+			testname.Sanitize(t.Name()), i, proj, uid, uid, i))
 	}
 
 	// Guard the fixture's own premise: exactly the embeddable rows carry a vector. If this
@@ -312,7 +313,7 @@ func TestRecallRouterWorkItemScopedBypassesVectorPath(t *testing.T) {
 	pool, proj, uid := recallRouterFixture(t, 8, 4)
 	ctx := context.Background()
 
-	wiID := "wi_" + sanitizeTestName(t.Name())
+	wiID := "wi_" + testname.Sanitize(t.Name())
 	mustExec(t, pool, fmt.Sprintf(
 		`INSERT INTO work_items(id,seq,project,goal,wi_type,reporter_user_id,reporter_display)
 		 VALUES ('%s',1,'%s','router test','fix_bug','%s','%s') ON CONFLICT (id) DO NOTHING`,

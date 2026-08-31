@@ -18,6 +18,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GMISWE/ieops-aihub/internal/citest/testname"
 	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
@@ -100,7 +101,7 @@ func TestHandleGetMemory_AuthzDenied_PrivateNotAuthor(t *testing.T) {
 	ownerUID, project := seedStepTestUserAndProject(t, pool)
 	memID := seedGetTestMemory(t, pool, project, ownerUID, "private", "shh secret")
 
-	otherUID := "u_other_" + sanitizeStepTestName(t.Name())
+	otherUID := "u_other_" + testname.Sanitize(t.Name())
 	_, err := pool.Exec(context.Background(),
 		`INSERT INTO users(id,email,display_name) VALUES($1,$1||'@test.local',$1) ON CONFLICT (id) DO NOTHING`, otherUID)
 	require.NoError(t, err)
@@ -126,7 +127,7 @@ func TestHandleGetMemory_AuthzDenied_NoProjectAccess(t *testing.T) {
 	memID := seedGetTestMemory(t, pool, project, ownerUID, "project", "visible to project members only")
 
 	uc := &UserContext{
-		UserID:       "u_outsider_" + sanitizeStepTestName(t.Name()),
+		UserID:       "u_outsider_" + testname.Sanitize(t.Name()),
 		DisplayName:  "outsider",
 		Role:         "writer",
 		ProjectRoles: map[string]string{}, // no role on `project`
@@ -146,7 +147,7 @@ func TestHandleGetMemory_AdminSeesPrivate(t *testing.T) {
 	memID := seedGetTestMemory(t, pool, project, ownerUID, "private", "admin-visible secret")
 
 	uc := &UserContext{
-		UserID:      "u_admin_" + sanitizeStepTestName(t.Name()),
+		UserID:      "u_admin_" + testname.Sanitize(t.Name()),
 		DisplayName: "admin",
 		Role:        "admin",
 	}

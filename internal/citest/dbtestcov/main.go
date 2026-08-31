@@ -8,8 +8,9 @@
 // of the `-run` regexes on the handful of steps that DO set it. A test whose
 // name falls outside that union never runs anywhere — and `go test` prints "ok"
 // and exits 0 when everything it selected SKIPped, so nothing goes red. That is
-// how 28 of 83 DB-gated test functions came to be invisible to CI while every
-// step stayed green.
+// how 28 of the 83 DB-gated test functions that need only a database (85 in
+// total, less the 2 that also need EMBEDDING_BASE_URL) came to be invisible to
+// CI while every step stayed green.
 //
 // # How it decides what is "DB-gated"
 //
@@ -19,15 +20,22 @@
 // AIHUB_TEST_DB.
 //
 // Be precise about what that does and does not buy. It means there is no list
-// of guard helpers to keep in sync and no AST shape to be defeated: a test is
-// classified by what it did, so a guard written in a form nobody anticipated is
-// still caught. It does NOT mean the classification is free of a convention.
-// The convention is the skip MESSAGE, and it is the cheapest way to make this
-// gate go quiet: a DB test that skips with `t.Skip("no test database")` never
-// enters the required set, and -min-gated cannot see it because it was never
-// counted. checkSkipMessages closes that door inside this file — every function
-// that reads AIHUB_TEST_DB must name the variable in the messages it skips
-// with, or this command fails.
+// of guard helpers to keep in sync: a test is classified by what it did. It
+// does NOT mean the classification is free of a convention. The convention is
+// the skip MESSAGE, and wording it wrongly is the cheapest way to make this
+// gate go quiet — cheaper than fixing the coverage: a DB test that skips with
+// `t.Skip("no test database")` never enters the required set, and -min-gated
+// cannot see it because it was never counted.
+//
+// checkSkipMessages closes that door by auditing the SOURCE, and it has to be
+// robust rather than merely present. Eight separate shapes silenced it while
+// leaving the gated count UNCHANGED at 85 — measured, with all eight written
+// into this repository at once: an env read hidden in a bool-returning helper,
+// os.LookupEnv instead of os.Getenv, a constant or concatenated variable name,
+// a bare `return` instead of a skip, a TestMain gate, a build tag, and any of
+// those living in a non-test file. Note the common property: none of them moves
+// the count, so raising -min-gated could never have caught any of them. See
+// checkSkipMessages for what closes each one.
 //
 // A test whose skip message names a second environment variable (e.g.
 // EMBEDDING_BASE_URL) needs more than a database, so CI cannot run it: it is
@@ -44,13 +52,33 @@
 // It parses ci.yml, finds every step that sets AIHUB_TEST_DB, and applies
 // `go test`'s own `-run` semantics (see SplitRunPattern) to the test names in
 // the packages that step names. A `go test` invocation with no `-run` covers
-// its whole package. Constructs that would make coverage conditional or
-// unmodellable (`-skip`, `if:`, `continue-on-error:`) are hard errors, not
-// silent approximations.
+// its whole package.
+//
+// The hazard on this side is crediting coverage for a `go test` that CI does
+// not actually execute, or whose failure does not actually fail the step. So
+// the parser models shell structure rather than searching lines, and every
+// construct it cannot model is a hard error rather than a silent
+// approximation:
+//
+//   - `-skip`, `if:` and `continue-on-error:` are rejected (unmodellable, or
+//     conditional on the triggering event);
+//   - `-count=0` is rejected: it selects zero tests, so the invocation exits 0
+//     with no SKIP line — it defeats the inventory and the guard at once;
+//   - a repeated `-run` is rejected, because `go test` obeys the LAST one while
+//     a reader sees the first;
+//   - a `go test` inside a quoted string, inside an `if`/`for`/`while`/`case`
+//     body, after `&&`/`||`, negated with `!`, or backgrounded with `&` is
+//     rejected. The quoted case is the sharpest: one `echo` can carry the
+//     invocation, the tee target AND the SKIP marker, so in prose it both
+//     credits coverage and satisfies the guard meant to prove it ran.
 //
 // Every DB `go test` invocation must also tee its output to a log AND be
 // followed by a guard grepping THAT log for "--- SKIP". Coverage that is merely
-// named by a `-run` is nominal; the guard is what makes it real.
+// named by a `-run` is nominal; the guard is what makes it real — so the guard
+// is matched against an allowlist of spellings (see skipGuardRE) rather than
+// searched for, because `grep -q ... || exit 1` (inverted: it REQUIRES a skip)
+// and `... || true` (can never fail) both mention the marker while asserting
+// the opposite of, or nothing about, what the guard is for.
 //
 // Usage:
 //
@@ -148,8 +176,8 @@ func main() {
 	inventory := flag.String("inventory", "", "path to a `go test ./... -json` run taken with "+dbEnvVar+" UNSET")
 	workflow := flag.String("workflow", ".github/workflows/ci.yml", "path to the CI workflow to audit")
 	gomod := flag.String("gomod", "go.mod", "path to go.mod, read for the module path")
-	sourceRoot := flag.String("source-root", ".", "repository root, walked for _test.go files to check the skip-message convention")
-	minGated := flag.Int("min-gated", 1, "ratchet floor: fail if the inventory holds fewer DB-gated tests than this. Raise it when you add DB tests; it is what catches an inventory that stopped enumerating (for example because "+dbEnvVar+" leaked into the run that produced it, making everything pass instead of skip).")
+	sourceRoot := flag.String("source-root", ".", "repository root, walked for .go files to audit the "+dbEnvVar+" skip-guard convention")
+	minGated := flag.Int("min-gated", 1, "ratchet floor: fail if the inventory holds fewer DB-gated tests than this. Raise it when you add DB tests; it is what catches an inventory that stopped enumerating (for example because "+dbEnvVar+" leaked into the run that produced it, making everything pass instead of skip). It canNOT substitute for the source audit in checkSkipMessages: every known way of silencing a DB guard leaves this count unchanged.")
 	flag.Parse()
 
 	if *inventory == "" {
@@ -469,67 +497,393 @@ func contains(xs []string, s string) bool {
 
 var skipFuncNames = map[string]bool{"Skip": true, "Skipf": true, "SkipNow": true}
 
-// checkSkipMessages enforces the one convention ParseInventory depends on:
-// a function that reads AIHUB_TEST_DB must name AIHUB_TEST_DB in every message
-// it skips with. Otherwise the test it guards skips for want of a database and
-// this command never learns that it did — the original defect, one level up,
-// and the cheapest possible way to make this gate go quiet.
+// envReadFuncs are the selector names through which Go code reads the process
+// environment. Matching on the selector alone — not on the package it came
+// from — is deliberate: an aliased import, a dot-import or a same-named local
+// wrapper all still read the environment, and this check's whole job is to be
+// hard to walk around. `Environ` names no single variable, so it only matters
+// together with the scope-text check in dbGuardsIn.
+var envReadFuncs = map[string]bool{
+	"Getenv":    true, // os.Getenv, syscall.Getenv
+	"LookupEnv": true, // os.LookupEnv
+	"Environ":   true, // os.Environ, syscall.Environ — reads all of it
+}
+
+// checkSkipMessages enforces the convention ParseInventory depends on: a
+// function whose behaviour depends on AIHUB_TEST_DB must SKIP, and must name
+// AIHUB_TEST_DB in every message it skips with. Otherwise the test it guards
+// stops running for want of a database and this command never learns that it
+// did — the original defect, one level up, and the cheapest possible way to
+// make this gate go quiet.
 //
-// It is deliberately narrow: same function, syntactic. A guard that reads the
-// variable in one function and skips in another would slip past. That residual
-// hole is much more expensive to walk through than writing a correct message,
-// which is the property that matters.
+// It has to be robust rather than merely present, because silencing the gate
+// must not be cheaper than complying with it. Every one of these shapes used to
+// be invisible, all of them leaving the gated count unchanged — so no
+// -min-gated floor could ever have caught them:
+//
+//	if !haveDB() { t.Skip("no db") }         // the env read is in a helper
+//	os.LookupEnv(dbEnvVar)                   // not os.Getenv
+//	os.Getenv(dbEnvConst)                    // argument is an identifier
+//	os.Getenv("AIHUB_TEST" + "_DB")          // argument is a concatenation
+//	if os.Getenv(...) == "" { return }       // returns instead of skipping
+//	func TestMain(m) { ...; os.Exit(0) }     // gates the whole package
+//	//go:build dbtest                        // excluded from the default build
+//	// ...and any of the above in helper.go rather than helper_test.go
+//
+// What closes them:
+//
+//   - ALL .go files in a package are scanned, not just _test.go, because a
+//     guard helper is just as effective from a non-test file;
+//   - the prefilter is per PACKAGE, not per file, so a constant declared in one
+//     file cannot hide a use of it in another;
+//   - the env reader's ARGUMENT is constant-folded (literals, package-level
+//     string constants and `+` concatenations of them) rather than
+//     pattern-matched, and an argument that cannot be folded is itself a
+//     violation — otherwise "make the name unfoldable" becomes the cheap way
+//     out;
+//   - a function whose scope reads the variable and never reaches a Skip call
+//     is a violation, which is what catches both the bool-returning helper and
+//     the bare `return`;
+//   - any build constraint on a _test.go file in such a package is a violation,
+//     because the inventory is a default-build `go test ./...` run.
+//
+// The residual hole is a guard that reads the variable through a name this
+// command cannot fold AND lives in a package that never mentions the variable
+// at all. Getting there costs more than writing a correct skip message, which
+// is the property that matters.
 func checkSkipMessages(root string) ([]string, error) {
+	pkgs, err := goPackages(root)
+	if err != nil {
+		return nil, err
+	}
 	var violations []string
 	fset := token.NewFileSet()
+	dirs := make([]string, 0, len(pkgs))
+	for dir := range pkgs {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+
+	for _, dir := range dirs {
+		files, err := readGoFiles(pkgs[dir])
+		if err != nil {
+			return nil, err
+		}
+		// Package-granularity prefilter. Per FILE (as this used to be) a
+		// `const dbEnv = "AIHUB_TEST_DB"` in one file hides every use of it in
+		// the others, and the argument check below never runs at all.
+		mentions := false
+		for _, f := range files {
+			if strings.Contains(string(f.src), dbEnvVar) {
+				mentions = true
+				break
+			}
+		}
+		if !mentions {
+			continue
+		}
+		for i := range files {
+			f := &files[i]
+			f.ast, err = parser.ParseFile(fset, f.path, f.src, parser.ParseComments)
+			if err != nil {
+				return nil, fmt.Errorf("parse %s: %w", f.path, err)
+			}
+		}
+		consts := packageStringConsts(files)
+		for i := range files {
+			violations = append(violations, checkFile(fset, &files[i], consts)...)
+		}
+	}
+	sort.Strings(violations)
+	return violations, nil
+}
+
+// goFile is one parsed source file plus the bytes it was parsed from, which the
+// function-scope text check needs.
+type goFile struct {
+	path string
+	src  []byte
+	ast  *ast.File
+}
+
+// goPackages returns the .go files under root, grouped by directory. It skips
+// what the go tool itself skips — `vendor`, `testdata`, and any directory whose
+// name begins with '.' or '_' — so the set of files scanned is the set that
+// actually gets compiled.
+func goPackages(root string) (map[string][]string, error) {
+	pkgs := map[string][]string{}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "vendor", "node_modules":
+			name := d.Name()
+			if path == root {
+				return nil
+			}
+			if name == "vendor" || name == "testdata" || name == "node_modules" ||
+				strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		src, err := os.ReadFile(path) // #nosec G304 -- walking a CI-controlled root
-		if err != nil {
-			return err
-		}
-		if !strings.Contains(string(src), dbEnvVar) {
-			return nil
-		}
-		file, err := parser.ParseFile(fset, path, src, 0)
-		if err != nil {
-			return fmt.Errorf("parse %s: %w", path, err)
-		}
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil || !readsDBEnv(fn.Body) {
-				continue
-			}
-			for _, call := range skipCalls(fn.Body) {
-				msg, hasMsg := firstStringArg(call)
-				if hasMsg && strings.Contains(msg, dbEnvVar) {
-					continue
-				}
-				pos := fset.Position(call.Pos())
-				violations = append(violations, fmt.Sprintf(
-					"%s:%d: %s reads %s but skips with %s",
-					pos.Filename, pos.Line, fn.Name.Name, dbEnvVar, describeSkipMsg(msg, hasMsg)))
-			}
+		if strings.HasSuffix(path, ".go") {
+			dir := filepath.Dir(path)
+			pkgs[dir] = append(pkgs[dir], path)
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(violations)
-	return violations, nil
+	return pkgs, nil
+}
+
+func readGoFiles(paths []string) ([]goFile, error) {
+	sort.Strings(paths)
+	files := make([]goFile, 0, len(paths))
+	for _, p := range paths {
+		src, err := os.ReadFile(p) // #nosec G304 -- walking a CI-controlled root
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, goFile{path: p, src: src})
+	}
+	return files, nil
+}
+
+// packageStringConsts collects every package-level string constant (and
+// string-literal var) in the package, so that `os.Getenv(dbEnvName)` folds to
+// the same thing as `os.Getenv("AIHUB_TEST_DB")`. A var is included because
+// naming the variable through one is exactly as invisible as naming it through
+// a constant.
+func packageStringConsts(files []goFile) map[string]string {
+	consts := map[string]string{}
+	// Two passes, so that a constant defined in terms of another resolves
+	// regardless of declaration order.
+	for pass := 0; pass < 2; pass++ {
+		for _, f := range files {
+			for _, decl := range f.ast.Decls {
+				gen, ok := decl.(*ast.GenDecl)
+				if !ok || (gen.Tok != token.CONST && gen.Tok != token.VAR) {
+					continue
+				}
+				for _, spec := range gen.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, name := range vs.Names {
+						if i >= len(vs.Values) {
+							continue
+						}
+						if v, ok := constString(vs.Values[i], consts); ok {
+							consts[name.Name] = v
+						}
+					}
+				}
+			}
+		}
+	}
+	return consts
+}
+
+// constString folds an expression to a string when it can, handling the shapes
+// an author reaches for when the argument is not a bare literal: an identifier
+// bound to a constant, a qualified constant, and `+` concatenation.
+func constString(e ast.Expr, consts map[string]string) (string, bool) {
+	switch v := e.(type) {
+	case *ast.BasicLit:
+		if v.Kind != token.STRING {
+			return "", false
+		}
+		s, err := strconv.Unquote(v.Value)
+		if err != nil {
+			return "", false
+		}
+		return s, true
+	case *ast.Ident:
+		s, ok := consts[v.Name]
+		return s, ok
+	case *ast.SelectorExpr:
+		// pkg.Const: the import alias says nothing useful, so resolve on the
+		// selector's own name.
+		s, ok := consts[v.Sel.Name]
+		return s, ok
+	case *ast.ParenExpr:
+		return constString(v.X, consts)
+	case *ast.BinaryExpr:
+		if v.Op != token.ADD {
+			return "", false
+		}
+		l, lok := constString(v.X, consts)
+		r, rok := constString(v.Y, consts)
+		if !lok || !rok {
+			return "", false
+		}
+		return l + r, true
+	}
+	return "", false
+}
+
+func checkFile(fset *token.FileSet, f *goFile, consts map[string]string) []string {
+	var violations []string
+
+	// A constrained _test.go file is absent from the default build, so its
+	// tests never appear in the inventory at all — the same invisibility as a
+	// mis-worded skip message, reached by a different door. Enumerating tags is
+	// not attempted; carrying one at all is the violation.
+	if strings.HasSuffix(f.path, "_test.go") {
+		if c := buildConstraintOf(f.src); c != "" {
+			violations = append(violations, fmt.Sprintf(
+				"%s:1: carries the build constraint %q, so it is absent from the default build that produces dbtestcov's "+
+					"inventory — every test in it is invisible to this gate. Drop the constraint, or teach dbtestcov the tag",
+				f.path, c))
+		}
+	}
+
+	for _, decl := range f.ast.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		reads := envReadsIn(fn.Body, consts)
+		if len(reads) == 0 {
+			continue
+		}
+		scope := funcSource(fset, f, fn)
+
+		readsDB := strings.Contains(scope, dbEnvVar)
+		for _, r := range reads {
+			if r.resolved && r.name == dbEnvVar {
+				readsDB = true
+			}
+			// An environment read whose variable name is decided somewhere this
+			// command cannot see is the escape hatch that makes every check
+			// below optional, so it is a violation on its own. It is free
+			// today: every env read in every package that mentions
+			// AIHUB_TEST_DB names its variable with a literal.
+			if !r.resolved && !r.wildcard {
+				pos := fset.Position(r.pos)
+				violations = append(violations, fmt.Sprintf(
+					"%s:%d: %s reads an environment variable whose name dbtestcov cannot determine statically, so it cannot "+
+						"tell whether this is a %s guard. Name it with a string literal or a package-level string constant",
+					pos.Filename, pos.Line, fn.Name.Name, dbEnvVar))
+			}
+		}
+		if !readsDB {
+			continue
+		}
+
+		pos := fset.Position(fn.Pos())
+		skips := skipCalls(fn.Body)
+
+		// TestMain cannot skip: it either runs the package's tests or it does
+		// not. Gating it on the database makes every test in the package vanish
+		// from the inventory while `go test` still exits 0.
+		if fn.Name.Name == "TestMain" {
+			violations = append(violations, fmt.Sprintf(
+				"%s:%d: TestMain reads %s; a TestMain cannot SKIP, so gating it on the database removes every test in this "+
+					"package from dbtestcov's inventory while the package still exits 0. Gate the individual tests instead",
+				pos.Filename, pos.Line, dbEnvVar))
+			continue
+		}
+
+		// A function that reads the variable and merely RETURNS is not skipped,
+		// so no SKIP line exists for the inventory to classify — invisible by
+		// construction. Same verdict for a bool-returning helper whose caller
+		// does the skipping: dbtestcov cannot see the caller's message from
+		// here, so the guard has to skip where it reads.
+		if len(skips) == 0 {
+			violations = append(violations, fmt.Sprintf(
+				"%s:%d: %s reads %s but never calls t.Skip; a test that returns (or a helper that reports the answer to its "+
+					"caller) produces no SKIP line, so dbtestcov cannot classify it as %s-gated at all. Skip here, naming %s",
+				pos.Filename, pos.Line, fn.Name.Name, dbEnvVar, dbEnvVar, dbEnvVar))
+			continue
+		}
+
+		for _, call := range skips {
+			msg, hasMsg := skipMessage(call, consts)
+			if hasMsg && strings.Contains(msg, dbEnvVar) {
+				continue
+			}
+			cpos := fset.Position(call.Pos())
+			violations = append(violations, fmt.Sprintf(
+				"%s:%d: %s reads %s but skips with %s",
+				cpos.Filename, cpos.Line, fn.Name.Name, dbEnvVar, describeSkipMsg(msg, hasMsg)))
+		}
+	}
+	return violations
+}
+
+// buildConstraintOf returns the file's first //go:build or // +build line, or
+// "" when it has none. Only the header — everything before the package clause —
+// is examined, which is the only place the go tool honours one.
+func buildConstraintOf(src []byte) string {
+	for _, line := range strings.Split(string(src), "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "package ") {
+			return ""
+		}
+		if strings.HasPrefix(t, "//go:build") || strings.HasPrefix(t, "// +build") {
+			return t
+		}
+	}
+	return ""
+}
+
+// funcSource returns the source text of a function declaration, from the `func`
+// keyword to the closing brace. The doc comment is deliberately outside that
+// range: prose about AIHUB_TEST_DB is not a guard on it.
+func funcSource(fset *token.FileSet, f *goFile, fn *ast.FuncDecl) string {
+	tf := fset.File(fn.Pos())
+	if tf == nil {
+		return ""
+	}
+	start, end := tf.Offset(fn.Pos()), tf.Offset(fn.End())
+	if start < 0 || end > len(f.src) || start >= end {
+		return ""
+	}
+	return string(f.src[start:end])
+}
+
+// envRead is one call into the process environment found inside a function.
+type envRead struct {
+	name     string
+	resolved bool
+	// wildcard marks os.Environ(), which reads everything and so names no
+	// single variable.
+	wildcard bool
+	pos      token.Pos
+}
+
+func envReadsIn(body *ast.BlockStmt, consts map[string]string) []envRead {
+	var reads []envRead
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name := ""
+		switch fun := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			name = fun.Sel.Name
+		case *ast.Ident:
+			name = fun.Name
+		}
+		if !envReadFuncs[name] {
+			return true
+		}
+		r := envRead{pos: call.Pos()}
+		if name == "Environ" || len(call.Args) == 0 {
+			r.wildcard = true
+		} else {
+			r.name, r.resolved = constString(call.Args[0], consts)
+		}
+		reads = append(reads, r)
+		return true
+	})
+	return reads
 }
 
 func describeSkipMsg(msg string, hasMsg bool) string {
@@ -537,26 +891,6 @@ func describeSkipMsg(msg string, hasMsg bool) string {
 		return "no constant message"
 	}
 	return strconv.Quote(msg)
-}
-
-func readsDBEnv(body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "Getenv" {
-			return true
-		}
-		if v, has := firstStringArg(call); has && v == dbEnvVar {
-			found = true
-			return false
-		}
-		return true
-	})
-	return found
 }
 
 func skipCalls(body *ast.BlockStmt) []*ast.CallExpr {
@@ -574,19 +908,14 @@ func skipCalls(body *ast.BlockStmt) []*ast.CallExpr {
 	return calls
 }
 
-func firstStringArg(call *ast.CallExpr) (string, bool) {
+// skipMessage folds a skip call's first argument to a string, using the same
+// constant folding as the env-read argument: a message assembled from constants
+// still names the variable.
+func skipMessage(call *ast.CallExpr, consts map[string]string) (string, bool) {
 	if len(call.Args) == 0 {
 		return "", false
 	}
-	lit, ok := call.Args[0].(*ast.BasicLit)
-	if !ok || lit.Kind != token.STRING {
-		return "", false
-	}
-	v, err := strconv.Unquote(lit.Value)
-	if err != nil {
-		return "", false
-	}
-	return v, true
+	return constString(call.Args[0], consts)
 }
 
 // ---------------------------------------------------------------- workflow
@@ -612,14 +941,240 @@ type wfFile struct {
 }
 
 var (
-	goTestRE     = regexp.MustCompile(`(?:^|[;&|(]|\s)go\s+test\s`)
+	goTestRE     = regexp.MustCompile(`(?:^|[;&|(]|\s)(go\s+test)\s`)
 	runFlagRE    = regexp.MustCompile(`-run(?:\s+|=)(?:'([^']*)'|"([^"]*)"|(\S+))`)
 	skipFlagRE   = regexp.MustCompile(`-skip(?:\s+|=)`)
+	countFlagRE  = regexp.MustCompile(`-count(?:\s+|=)(\S+)`)
 	pkgArgRE     = regexp.MustCompile(`(?:^|\s)(\.{1,2}/[^\s'"]*)`)
 	teeRE        = regexp.MustCompile(`\|\s*tee\s+(?:-a\s+)?(\S+)`)
 	inlineDBEnv  = regexp.MustCompile(`(?:^|\s)` + dbEnvVar + `=`)
 	continuation = regexp.MustCompile(`\\\n\s*`)
+
+	// skipGuardRE is the ONE accepted spelling of the anti-silent-SKIP guard:
+	//
+	//	! grep -q -- '--- SKIP' <log> || exit 1
+	//	! grep -q -- '--- SKIP' <log> || { echo "..."; exit 1; }
+	//
+	// An allowlist rather than a search, because "some line mentions the marker
+	// and the log" is satisfied by lines that assert the OPPOSITE of what the
+	// guard is for, and a text search cannot tell them apart:
+	//
+	//	grep -q -- '--- SKIP' a.log || exit 1     # passes only if a test DID skip
+	//	! grep -c -- '--- SKIP' a.log || true     # can never fail the step
+	//	echo "then run: ! grep -q -- '--- SKIP' a.log"
+	//
+	// All three used to count as a guard. An allowlist is the right shape here
+	// because these lines are CI-authored, not user-authored: the cost of the
+	// narrowness is that a new guard must be spelled the same way as the twenty
+	// already in ci.yml, and the benefit is that no clever spelling can be
+	// wrong in a direction nobody notices. The trailing `exit` must be a
+	// NON-ZERO status, so `|| exit 0` is rejected along with `|| true`.
+	//
+	// Inside the `{ ... }` tail the `exit` must be the LAST command of the
+	// block, which is why the alternative before it has to end in `;`. Without
+	// that the allowlist admits `|| { echo x || exit 1; }`, where the echo
+	// succeeds, the exit never runs, the block returns 0 and the step is green
+	// on a SKIP — a false green that matches the pattern for correct guards.
+	skipGuardRE = regexp.MustCompile(
+		`^!\s+grep\s+-q\s+--\s+(?:'` + regexp.QuoteMeta(skipGuardMarker) + `'|"` + regexp.QuoteMeta(skipGuardMarker) +
+			`")\s+(\S+)\s*\|\|\s*(?:exit\s+[1-9][0-9]*|\{\s*(?:[^{}]*;\s*)?exit\s+[1-9][0-9]*\s*;?\s*\})\s*$`)
 )
+
+// ------------------------------------------------------------ shell modelling
+
+// quoteMask returns, for each byte of s, the quote character it sits inside
+// ('\” or '"'), or 0 when it is unquoted. Backslash escapes are honoured
+// everywhere except inside single quotes, where the shell treats them
+// literally.
+//
+// Every structural decision below is taken over unquoted text only. Without
+// that, `echo "to reproduce: go test ./... | tee a.log"` reads as a real
+// invocation — and because one quoted line can carry the `go test`, the `tee`
+// target AND the SKIP marker, it would credit coverage and satisfy the guard
+// that is supposed to prove the coverage ran. One line, complete bypass.
+func quoteMask(s string) []byte {
+	mask := make([]byte, len(s))
+	var q byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if q != 0 {
+			mask[i] = q
+			if q == '"' && c == '\\' && i+1 < len(s) {
+				i++
+				mask[i] = q
+				continue
+			}
+			if c == q {
+				q = 0
+			}
+			continue
+		}
+		switch {
+		case c == '\'' || c == '"':
+			q = c
+			mask[i] = q
+		case c == '\\' && i+1 < len(s):
+			i++ // an escaped character is literal, never a quote or an operator
+		}
+	}
+	return mask
+}
+
+// shellCommand is one command from a step's script: the text between unquoted
+// `;`, `&&`, `||` and `&` separators, with enough context to say whether it
+// actually runs and whether its failure actually fails the step.
+type shellCommand struct {
+	// Line is the 1-based line of the step's script the command starts on.
+	Line int
+	Text string
+	// Ungated is empty when the command runs unconditionally and its exit
+	// status fails the step. Otherwise it says why not, for the error message.
+	Ungated string
+}
+
+// shellPart is one span of a line plus the operator that separated it from the
+// previous span.
+type shellPart struct {
+	text string
+	op   string
+}
+
+// splitUnquoted splits a line at unquoted `;`, `&&`, `||` and `&`.
+//
+// `&` is only a separator when it is neither half of `&&` nor part of a
+// redirection: `2>&1` ends every `go test` line in ci.yml, and splitting there
+// would cut each invocation in half.
+func splitUnquoted(line string) []shellPart {
+	mask := quoteMask(line)
+	var parts []shellPart
+	prevOp := ""
+	start := 0
+	for i := 0; i < len(line); i++ {
+		if mask[i] != 0 {
+			continue
+		}
+		var op string
+		switch {
+		case strings.HasPrefix(line[i:], "&&"):
+			op = "&&"
+		case strings.HasPrefix(line[i:], "||"):
+			op = "||"
+		case line[i] == ';':
+			op = ";"
+		case line[i] == '&' && isBackgroundAmp(line, i):
+			op = "&"
+		default:
+			continue
+		}
+		parts = append(parts, shellPart{text: line[start:i], op: prevOp})
+		prevOp = op
+		i += len(op) - 1
+		start = i + 1
+	}
+	return append(parts, shellPart{text: line[start:], op: prevOp})
+}
+
+// isBackgroundAmp reports whether the `&` at index i backgrounds a command,
+// rather than being part of a redirection such as `2>&1`, `>&2` or `&>log`.
+func isBackgroundAmp(line string, i int) bool {
+	if i > 0 && (line[i-1] == '>' || line[i-1] == '<') {
+		return false
+	}
+	if i+1 < len(line) {
+		switch c := line[i+1]; {
+		case c == '>' || c == '<':
+			return false
+		case c >= '0' && c <= '9':
+			return false
+		}
+	}
+	return true
+}
+
+// controlKeywords are the shell words that open or close a compound statement.
+var (
+	blockOpeners = map[string]bool{"if": true, "while": true, "until": true, "for": true, "case": true}
+	blockClosers = map[string]bool{"fi": true, "done": true, "esac": true}
+	// condPosition holds the keywords after which a command's exit status is
+	// consumed by the compound statement instead of failing the step.
+	condPosition = map[string]bool{"if": true, "elif": true, "while": true, "until": true}
+)
+
+// shellCommands models a step's script as an ordered list of commands, marking
+// each one that does not run unconditionally with its exit status gating the
+// step. `stripShellComments` already established that this parser has to model
+// shell structure rather than grep lines; a `go test` inside `if ... fi` is the
+// same class of mistake as a `go test` inside a `#` comment, and used to be
+// credited as unconditional coverage.
+func shellCommands(lines []string) []shellCommand {
+	var out []shellCommand
+	depth := 0
+	for i, line := range lines {
+		parts := splitUnquoted(line)
+		for j, part := range parts {
+			text := strings.TrimSpace(part.text)
+			if text == "" {
+				continue
+			}
+			cmd := shellCommand{Line: i + 1, Text: text}
+			word := firstWord(text)
+			switch {
+			case depth > 0:
+				cmd.Ungated = "inside a shell `" + word + "`-block body (depth " + strconv.Itoa(depth) + ")"
+			case part.op == "&&" || part.op == "||":
+				cmd.Ungated = "guarded by `" + part.op + "`"
+			}
+			if condPosition[word] {
+				cmd.Ungated = "in the condition of a shell `" + word + "`"
+			} else if strings.HasPrefix(text, "!") {
+				cmd.Ungated = "negated with `!`, so its failure passes the step"
+			} else if j+1 < len(parts) && parts[j+1].op == "&" {
+				cmd.Ungated = "backgrounded with `&`, so its exit status is discarded"
+			}
+			switch {
+			case blockOpeners[word]:
+				depth++
+			case blockClosers[word] && depth > 0:
+				depth--
+			}
+			out = append(out, cmd)
+		}
+	}
+	return out
+}
+
+// firstWord returns the first shell word of a command, skipping a leading `!`.
+func firstWord(text string) string {
+	text = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "!"))
+	if i := strings.IndexAny(text, " \t"); i >= 0 {
+		return text[:i]
+	}
+	return text
+}
+
+// goTestHit is one `go test` occurrence inside a command.
+type goTestHit struct {
+	// start is the offset of the `go`; end is the offset just past the `test `,
+	// where the argument list begins.
+	start, end int
+	quoted     bool
+}
+
+func goTestHits(s string) []goTestHit {
+	var hits []goTestHit
+	mask := quoteMask(s)
+	for _, m := range goTestRE.FindAllStringSubmatchIndex(s, -1) {
+		// The `(go\s+test)` group is mandatory, so m[2] is always a real
+		// offset. Guarded anyway: if a future edit made the group optional,
+		// m[2] would be -1 and the indexing below would panic — and a crash in
+		// a gate is indistinguishable from the gate being removed.
+		if m[2] < 0 || m[2] >= len(mask) {
+			continue
+		}
+		hits = append(hits, goTestHit{start: m[2], end: m[1], quoted: mask[m[2]] != 0})
+	}
+	return hits
+}
 
 // ParseWorkflow returns every `go test` invocation that runs with AIHUB_TEST_DB
 // set, plus the invocations whose SKIPs nothing guards and the lines it could
@@ -644,7 +1199,7 @@ func ParseWorkflow(data []byte, module string) (*WorkflowScan, error) {
 				continue
 			}
 			script := continuation.ReplaceAllString(st.Run, " ")
-			lines := stripShellComments(script)
+			lines := stripHeredocs(stripShellComments(script))
 
 			hasDB := hasKey(st.Env, dbEnvVar) || hasKey(job.Env, dbEnvVar) || hasKey(wf.Env, dbEnvVar) ||
 				anyLineMatches(lines, inlineDBEnv)
@@ -669,30 +1224,54 @@ func ParseWorkflow(data []byte, module string) (*WorkflowScan, error) {
 				continue
 			}
 
-			for _, line := range lines {
-				if !goTestRE.MatchString(line) {
-					continue
-				}
-				inv, err := parseGoTestLine(line, module, stepName)
-				if err != nil {
-					return nil, err
-				}
-				if inv == nil {
-					scan.Dropped = append(scan.Dropped,
-						fmt.Sprintf("%s: %s", stepName, strings.TrimSpace(line)))
-					continue
-				}
-				scan.Invocations = append(scan.Invocations, *inv)
-				if inv.Log == "" {
-					scan.Unguarded = append(scan.Unguarded, fmt.Sprintf(
-						"%s: `%s` captures no output (no `| tee <log>`), so no %q assertion is possible",
-						stepName, strings.TrimSpace(line), skipGuardMarker))
-					continue
-				}
-				if !hasSkipGuardFor(lines, inv.Log) {
-					scan.Unguarded = append(scan.Unguarded, fmt.Sprintf(
-						"%s: nothing greps %s for %q, so this invocation passes even if every test it selects SKIPs",
-						stepName, inv.Log, skipGuardMarker))
+			for _, cmd := range shellCommands(lines) {
+				for _, hit := range goTestHits(cmd.Text) {
+					// A `go test` nobody executes must not credit coverage.
+					// Quoted text is the sharpest form because the same line can
+					// also carry the tee target and the SKIP marker, satisfying
+					// in prose the guard that is supposed to prove the run.
+					if hit.quoted {
+						return nil, fmt.Errorf(
+							"step %q (job %q), line %d: `go test` appears inside a quoted string, where nothing executes it, "+
+								"yet its packages would be credited as covered — and one quoted line can carry the %q marker "+
+								"and a log name too, satisfying the guard that is supposed to prove the coverage ran. "+
+								"Move it to a `#` comment or delete it: %s",
+							stepName, jobName, cmd.Line, skipGuardMarker, cmd.Text)
+					}
+					if cmd.Ungated != "" {
+						return nil, fmt.Errorf(
+							"step %q (job %q), line %d: `go test` is %s, so dbtestcov cannot model whether it runs or whether "+
+								"its failure fails the step; crediting it as coverage would be a guess. Make it an "+
+								"unconditional, ungated command, or teach dbtestcov about it: %s",
+							stepName, jobName, cmd.Line, cmd.Ungated, cmd.Text)
+					}
+					inv, err := parseGoTestArgs(cmd.Text[hit.end:], module, stepName)
+					if err != nil {
+						return nil, err
+					}
+					if inv == nil {
+						scan.Dropped = append(scan.Dropped, fmt.Sprintf("%s: %s", stepName, cmd.Text))
+						continue
+					}
+					scan.Invocations = append(scan.Invocations, *inv)
+					if inv.Log == "" {
+						scan.Unguarded = append(scan.Unguarded, fmt.Sprintf(
+							"%s: `%s` captures no output (no `| tee <log>`), so no %q assertion is possible",
+							stepName, cmd.Text, skipGuardMarker))
+						continue
+					}
+					switch verdict, offender := skipGuardFor(lines, inv.Log); verdict {
+					case guardMissing:
+						scan.Unguarded = append(scan.Unguarded, fmt.Sprintf(
+							"%s: nothing greps %s for %q, so this invocation passes even if every test it selects SKIPs",
+							stepName, inv.Log, skipGuardMarker))
+					case guardMalformed:
+						scan.Unguarded = append(scan.Unguarded, fmt.Sprintf(
+							"%s: the line that mentions %s and %q is not a working guard, so it asserts nothing about this "+
+								"invocation (an inverted `grep ... || exit 1` REQUIRES a skip; a trailing `|| true` can never "+
+								"fail). Spell it `! grep -q -- '%s' %s || exit 1` (a `|| { echo ...; exit 1; }` tail is fine): %s",
+							stepName, inv.Log, skipGuardMarker, skipGuardMarker, inv.Log, offender))
+					}
 				}
 			}
 		}
@@ -700,18 +1279,43 @@ func ParseWorkflow(data []byte, module string) (*WorkflowScan, error) {
 	return scan, nil
 }
 
-// hasSkipGuardFor reports whether some line both greps for the SKIP marker and
-// names this invocation's own log file. Checking per invocation rather than per
-// step matters: a step with three `go test` lines and one guard would otherwise
-// credit coverage for all three while asserting on only one.
-func hasSkipGuardFor(lines []string, log string) bool {
+// guardVerdict is the outcome of looking for an invocation's SKIP guard.
+type guardVerdict int
+
+const (
+	// guardOK: a line matching skipGuardRE names exactly this invocation's log.
+	guardOK guardVerdict = iota
+	// guardMissing: no line even mentions both the marker and this log.
+	guardMissing
+	// guardMalformed: a line mentions both, but is not a guard that can fail
+	// the step. This is the dangerous one — it looks like coverage is asserted.
+	guardMalformed
+)
+
+// skipGuardFor decides whether this invocation's SKIPs are actually asserted
+// on. Checking per invocation rather than per step matters: a step with three
+// `go test` lines and one guard would otherwise credit coverage for all three
+// while asserting on only one.
+//
+// The log name must match as a whole shell word — ci.yml really does have
+// recall_unmatched.log next to recall_unmatched_http.log, and a substring match
+// would let one guard stand in for the other.
+func skipGuardFor(lines []string, log string) (guardVerdict, string) {
 	nameRE := regexp.MustCompile(`(^|\s)` + regexp.QuoteMeta(log) + `(\s|$)`)
+	offender := ""
 	for _, line := range lines {
-		if strings.Contains(line, skipGuardMarker) && nameRE.MatchString(line) {
-			return true
+		trimmed := strings.TrimSpace(line)
+		if m := skipGuardRE.FindStringSubmatch(trimmed); m != nil && m[1] == log {
+			return guardOK, ""
+		}
+		if offender == "" && strings.Contains(line, skipGuardMarker) && nameRE.MatchString(line) {
+			offender = trimmed
 		}
 	}
-	return false
+	if offender != "" {
+		return guardMalformed, offender
+	}
+	return guardMissing, ""
 }
 
 // stripShellComments splits a script into lines and blanks out full-line
@@ -725,9 +1329,89 @@ func stripShellComments(script string) []string {
 			out[i] = ""
 			continue
 		}
-		out[i] = l
+		out[i] = cutTrailingComment(l)
 	}
 	return out
+}
+
+// heredocRE matches a here-document redirection and captures its delimiter,
+// quoted or bare.
+var heredocRE = regexp.MustCompile(`<<-?\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))`)
+
+// stripHeredocs blanks the BODY of every here-document in a step's script.
+//
+// A heredoc body is data, not commands — `cat > repro.sh <<'SH'` followed by a
+// `go test` line writes a file and executes nothing. It is the third form of
+// the same hole as a `#` comment and a quoted string, and the most complete:
+// the body can hold the invocation, its `| tee` target AND the SKIP guard, so
+// without this a step that merely WRITES a reproduction script credits full
+// coverage and satisfies the guard meant to prove that coverage ran. Measured
+// against the real command before this existed: `dbtestcov: OK`, exit 0, with
+// an uncovered DB-gated test in the inventory.
+//
+// An unterminated heredoc blanks the rest of the step. That under-credits,
+// which is the safe direction and a loud one: real coverage in those lines
+// stops being found and the tests it covers are reported as executed by no CI
+// step.
+func stripHeredocs(lines []string) []string {
+	out := make([]string, len(lines))
+	copy(out, lines)
+	for i := 0; i < len(out); i++ {
+		delim := heredocDelim(out[i])
+		if delim == "" {
+			continue
+		}
+		for j := i + 1; j < len(out); j++ {
+			body := strings.TrimSpace(out[j])
+			out[j] = ""
+			if body == delim {
+				break
+			}
+		}
+	}
+	return out
+}
+
+func heredocDelim(line string) string {
+	mask := quoteMask(line)
+	for _, m := range heredocRE.FindAllStringSubmatchIndex(line, -1) {
+		if m[0] >= len(mask) || mask[m[0]] != 0 {
+			continue
+		}
+		// `<<<` is a here-STRING: one line, no body to skip.
+		if m[0]+2 < len(line) && line[m[0]+2] == '<' {
+			continue
+		}
+		for g := 1; g <= 3; g++ {
+			if m[2*g] >= 0 {
+				return line[m[2*g]:m[2*g+1]]
+			}
+		}
+	}
+	return ""
+}
+
+// cutTrailingComment truncates a line at an unquoted `#` that begins a word,
+// which is where the shell starts a comment. A `#` in mid-word (`aihub#303`) is
+// literal, and one inside quotes is data — ci.yml's `echo "::error::an
+// aihub#289 test SKIPped"` must survive intact.
+//
+// A whole-line comment was already dropped above; this closes the trailing
+// case, which is the same hole one column to the right. `echo hi # go test
+// ./... -v 2>&1 | tee a.log` executes no test, but a parser that reads the
+// whole line credits the package as covered and — because the comment can go on
+// to mention the SKIP marker and the log — satisfies the guard as well.
+func cutTrailingComment(line string) string {
+	mask := quoteMask(line)
+	for i := 0; i < len(line); i++ {
+		if line[i] != '#' || mask[i] != 0 {
+			continue
+		}
+		if i == 0 || line[i-1] == ' ' || line[i-1] == '\t' {
+			return line[:i]
+		}
+	}
+	return line
 }
 
 func anyLineMatches(lines []string, re *regexp.Regexp) bool {
@@ -769,19 +1453,34 @@ func isTruthy(v any) bool {
 	}
 }
 
-func parseGoTestLine(line, module, stepName string) (*Invocation, error) {
-	loc := goTestRE.FindStringIndex(line)
-	if loc == nil {
-		return nil, nil
-	}
+// parseGoTestArgs models one `go test` invocation from everything that follows
+// the `go test ` itself, up to the end of its pipeline. rest starts at the
+// argument list and may run on into `| tee <log>`.
+func parseGoTestArgs(rest, module, stepName string) (*Invocation, error) {
 	// Cut the command at the first pipe / redirection so that `tee foo.log`
 	// arguments cannot be mistaken for package or flag arguments. The cut has
 	// to be quote-aware: a `-run` alternation is full of '|' characters that
 	// are arguments, not pipes.
-	args := cutAtShellOperator(line[loc[1]:])
+	args := cutAtShellOperator(rest)
 	if skipFlagRE.MatchString(args) {
 		return nil, fmt.Errorf("step %q: `go test -skip` is not modelled by dbtestcov, so its coverage cannot be trusted; "+
 			"either drop -skip or teach dbtestcov about it", stepName)
+	}
+	// `-count=0` selects zero tests. That defeats BOTH halves of this gate at
+	// once and in the same direction: there are no SKIP lines for the guard to
+	// find, and `go test` exits 0, so the step is green while running nothing.
+	// It is `-skip`'s twin and gets `-skip`'s treatment.
+	for _, m := range countFlagRE.FindAllStringSubmatch(args, -1) {
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			return nil, fmt.Errorf("step %q: `go test -count %s` is not a literal number, so dbtestcov cannot tell whether "+
+				"the invocation runs any test at all; use a literal count", stepName, m[1])
+		}
+		if n <= 0 {
+			return nil, fmt.Errorf("step %q: `go test -count=%d` selects zero tests, so the invocation prints \"ok\", exits 0, "+
+				"and emits no %q line for the guard to find — the step is green having run nothing. Use -count=1",
+				stepName, n, skipGuardMarker)
+		}
 	}
 
 	var pkgs []PackageSel
@@ -795,9 +1494,18 @@ func parseGoTestLine(line, module, stepName string) (*Invocation, error) {
 		return nil, nil
 	}
 
+	// `go test` obeys the LAST -run; this command used to read the first, so
+	// `-run 'TestFoo' -run 'TestNothingMatches'` credited TestFoo while CI ran
+	// nothing. Reading the last would close the hole, but a repeated -run is
+	// never intentional, so say so instead of silently picking a winner.
 	runPat := ""
-	if m := runFlagRE.FindStringSubmatch(args); m != nil {
-		for _, g := range m[1:] {
+	if ms := runFlagRE.FindAllStringSubmatch(args, -1); len(ms) > 0 {
+		if len(ms) > 1 {
+			return nil, fmt.Errorf("step %q: `go test` is given -run %d times; only the LAST one has any effect, so the "+
+				"earlier pattern(s) describe coverage that does not happen. Merge them into one -run: %s",
+				stepName, len(ms), strings.TrimSpace(args))
+		}
+		for _, g := range ms[len(ms)-1][1:] {
 			if g != "" {
 				runPat = g
 				break
@@ -805,7 +1513,7 @@ func parseGoTestLine(line, module, stepName string) (*Invocation, error) {
 		}
 	}
 	log := ""
-	if m := teeRE.FindStringSubmatch(line); m != nil {
+	if m := teeRE.FindStringSubmatch(rest); m != nil {
 		log = m[1]
 	}
 	return &Invocation{Step: stepName, Packages: pkgs, Run: runPat, Log: log}, nil

@@ -30,29 +30,52 @@
 # RENAMING one of the markers that step greps for does.
 #
 # WHAT IS ASSERTED
-#   1. Size:     assembled payload <= PF_PAYLOAD_MAX_CHARS, measured in characters, and
-#                measured for the WORST CASE (all conditional `when:` fragments enabled).
+#   1. Size:     assembled payload inside [PF_PAYLOAD_MAX_CHARS - PF_PAYLOAD_SLACK,
+#                PF_PAYLOAD_MAX_CHARS], measured in characters, for the WORST CASE (all
+#                conditional `when:` fragments enabled). BOTH bounds — see the ratchet note.
 #                Measured for the FULL assembly even when the hook degrades it — see the
 #                note next to `degraded` below, or this check becomes a tautology.
 #   2. Order:    IR1-IR3 land inside the preview window, so that if the budget is ever
 #                busted again the Iron Rules survive truncation rather than boilerplate.
 #   3. Tiering:  the on-demand fragments are absent from the payload but each is still named
 #                by fragments/on-demand-index.md, so none of them becomes orphaned.
-#   4. Control:  a deliberately mis-ordered build (Iron Rules last) must FAIL assertion 2.
-#                Without this the window check could pass vacuously and prove nothing.
+#   4. Controls: (a) a build with 300 characters added to a resident fragment must FAIL
+#                assertion 1; (b) a deliberately mis-ordered build (Iron Rules last) must
+#                FAIL assertion 2. Without these, both checks could pass vacuously.
 #   5. Degrade:  an over-budget manifest makes the hook emit a fitting, banner-led payload
 #                and warn on stderr instead of failing silently (aihub#293), with the real
 #                tree as the negative control that the degrade path is normally dormant.
+#   6. `when:`:  a conditional fragment is assembled when its condition holds and is ABSENT
+#                when it does not — proven in BOTH directions against a sentinel fixture, so
+#                assertion 0's coverage claim is about a mechanism that demonstrably works.
 
 set -uo pipefail
 
-# Gate, in CHARACTERS. The harness's hard limit is 10000; we sit below it on purpose so the
-# band between PF_PAYLOAD_MAX_CHARS and 10000 is a "test red but users still fine" warning
-# zone. If this fails, do NOT raise this number — move a fragment to the on-demand tier
-# (see the SIZE BUDGET comment in skills/using-polyforge/SKILL.md).
-PF_PAYLOAD_MAX_CHARS=9800
+# Gate, in CHARACTERS. This is a RATCHET THAT TRACKS THE PAYLOAD, not a fixed ceiling:
+#
+#     PF_PAYLOAD_MAX_CHARS = <last measured payload> + PF_PAYLOAD_SLACK
+#
+# and BOTH bounds are asserted. The upper bound is the budget. The LOWER bound exists
+# because a one-sided gate silently rots downward in value: aihub#285 slimmed the payload
+# from 18,286 to 9,778 against a 9,800 gate, then aihub#296 slimmed it to 8,498 — and had
+# the gate stayed at 9,800, that second slimming would have donated 1,300 unguarded
+# characters to whoever grew the payload next. The headroom a slimming buys must not become
+# the cushion for the next silent growth. So: if you SHRINK the payload, this test goes red
+# and tells you the new number to write here. If you GROW it past the gate, do NOT raise
+# this number — move a fragment to the on-demand tier (see the SIZE BUDGET comment in
+# skills/using-polyforge/SKILL.md).
+#
+# The harness's hard limit is 10000; we sit below it on purpose, so the band between the
+# gate and 10000 is a "test red but users still fine" warning zone.
+PF_PAYLOAD_MAX_CHARS=8598
+PF_PAYLOAD_SLACK=100
 HARNESS_HARD_LIMIT=10000
 PREVIEW_CHARS=2000
+# Control 4a appends this many characters to a resident fragment; it must trip the gate.
+# Any value > PF_PAYLOAD_SLACK proves the gate has discriminating power at its current
+# setting, which a hard-coded threshold could not (at the old 9,800 gate this same probe
+# measured 8,798 and passed).
+PF_PAYLOAD_PROBE_CHARS=300
 
 # Every condition hooks/pf-session-start's cond_met() knows about. The size gate measures
 # with ALL of them enabled, because a CI runner's own $HOME has none of them and would
@@ -77,17 +100,20 @@ python3 - "$home_max/.claude/settings.json" $KNOWN_CONDITIONS <<'PY'
 import json,sys
 json.dump({"enabledPlugins":{c+"@fixture":True for c in sys.argv[2:]}}, open(sys.argv[1],"w"))
 PY
+# ...and its opposite: no plugin enabled at all, for the `when:` off-direction check.
+home_min="$tmp/home_min"; mkdir -p "$home_min/.claude"
+echo '{"enabledPlugins":{}}' > "$home_min/.claude/settings.json"
 
 fails=0
 ok()  { echo "  PASS: $1"; }
 bad() { echo "  FAIL: $1" >&2; fails=$((fails+1)); }
 
 # Assemble the additionalContext for a given plugin root, hermetically:
-#  - HOME pinned to the all-conditions-on fixture (worst case)
+#  - HOME pinned to a fixture (defaults to all-conditions-on, i.e. the worst case)
 #  - CURSOR_PLUGIN_ROOT/PLUGIN_ROOT scrubbed, or the hook emits a different JSON shape
-assemble() { # plugin_root -> stdout = raw additionalContext
+assemble() { # plugin_root [home] -> stdout = raw additionalContext
   env -u CURSOR_PLUGIN_ROOT -u PLUGIN_ROOT \
-      HOME="$home_max" CLAUDE_PROJECT_DIR="$ws" "$1/hooks/pf-session-start" 2>/dev/null \
+      HOME="${2:-$home_max}" CLAUDE_PROJECT_DIR="$ws" "$1/hooks/pf-session-start" 2>/dev/null \
   | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'
 }
 assemble_err() { # plugin_root, stderr_path -> stdout = raw additionalContext (may be empty)
@@ -150,11 +176,14 @@ else
 fi
 
 echo
-echo "1. size budget"
-if [ "$n" -le "$PF_PAYLOAD_MAX_CHARS" ]; then
-  ok "payload $n <= $PF_PAYLOAD_MAX_CHARS chars"
-else
+echo "1. size budget (two-sided: the gate must keep tracking the payload)"
+floor=$((PF_PAYLOAD_MAX_CHARS - PF_PAYLOAD_SLACK))
+if [ "$n" -gt "$PF_PAYLOAD_MAX_CHARS" ]; then
   bad "payload $n exceeds gate $PF_PAYLOAD_MAX_CHARS. Move a fragment to the on-demand tier; do not raise the gate. (Harness truncates silently above $HARNESS_HARD_LIMIT chars.)"
+elif [ "$n" -lt "$floor" ]; then
+  bad "payload $n is $((PF_PAYLOAD_MAX_CHARS - n)) chars below the gate $PF_PAYLOAD_MAX_CHARS, i.e. $((floor - n)) chars past the declared $PF_PAYLOAD_SLACK-char working margin. Nothing guards that band: whatever this slimming freed is now a cushion for the next silent growth. Set PF_PAYLOAD_MAX_CHARS=$((n + PF_PAYLOAD_SLACK)) in this file."
+else
+  ok "payload $n within [$floor, $PF_PAYLOAD_MAX_CHARS] (gate = measured + $PF_PAYLOAD_SLACK slack)"
 fi
 if [ "$degraded" -eq 0 ]; then
   ok "the hook did not have to degrade this payload"
@@ -192,7 +221,47 @@ check_deferred "platform-adaptation.md" "Copilot CLI**: installs as a native plu
 check_deferred "repo-detail.md"         "The pointer is written by the same code that writes the map file"
 
 echo
-echo "4. negative control — the window check must be able to fail"
+echo "4a. negative control — the size gate must be able to fail"
+# Add PF_PAYLOAD_PROBE_CHARS characters to a resident fragment. The gate must reject the
+# result. This is what makes the ratchet meaningful rather than a number nobody can trip:
+# under the pre-aihub#296 gate of 9,800 this same build measured 8,798 and passed clean.
+probe="$tmp/probe"; cp -r "$plugin_root" "$probe"
+PF_PAYLOAD_PROBE_CHARS="$PF_PAYLOAD_PROBE_CHARS" python3 - \
+  "$probe/skills/using-polyforge/fragments/iron-rules.md" <<'PY'
+import os, sys
+p = sys.argv[1]
+n = int(os.environ["PF_PAYLOAD_PROBE_CHARS"])
+s = open(p, encoding="utf-8").read()
+# rstrip first: the assembler strips each fragment, so appending AFTER the trailing
+# newline would leave that newline inside the stripped body and add n+1 characters.
+open(p, "w", encoding="utf-8").write(s.rstrip("\n") + "x" * n + "\n")
+PY
+# Measured the same way `n` is, via assemble_err: if this build ever grows past the harness
+# hard limit the hook DEGRADES it, and a delivered-size measurement would come back under the
+# limit by construction. Taking the pre-degradation figure off stderr keeps probe_n and n on
+# the same footing, so the equality below compares like with like in both regimes.
+probe_err="$tmp/probe.err"
+probe_ctx="$(assemble_err "$probe" "$probe_err")"
+probe_n="$(printf '%s' "$probe_ctx" | charlen)"
+probe_full="$(sed -n 's/.*payload is \([0-9][0-9]*\) chars.*/\1/p' "$probe_err" | head -1)"
+[ -n "$probe_full" ] && probe_n="$probe_full"
+# The equality below is not a tidiness check, it is what keeps this control honest. A probe
+# is only evidence if the characters it adds actually reach the measurement — and anything
+# that normalises, trims or DEGRADES the payload between the fragment and the number would
+# silently absorb them, leaving a green control that proves only that the absorbing step
+# works. (That failure mode is live: the hook drops trailing fragments once the assembly
+# passes the harness limit, so a probe large enough to cross it would come back "compliant"
+# by construction.) Asserting probe_n == n + PROBE_CHARS exactly is what detects that.
+if [ "$probe_n" -ne "$((n + PF_PAYLOAD_PROBE_CHARS))" ]; then
+  bad "probe build measured $probe_n, expected $((n + PF_PAYLOAD_PROBE_CHARS)) — the $PF_PAYLOAD_PROBE_CHARS probe characters did not survive into the measured payload, so this control proves nothing about the gate. Something between the fragment and the number is absorbing them (degradation, trimming, or a stale fixture)"
+elif [ "$probe_n" -gt "$PF_PAYLOAD_MAX_CHARS" ]; then
+  ok "+$PF_PAYLOAD_PROBE_CHARS chars -> $probe_n, over the gate $PF_PAYLOAD_MAX_CHARS (gate discriminates)"
+else
+  bad "+$PF_PAYLOAD_PROBE_CHARS chars -> $probe_n, still under the gate $PF_PAYLOAD_MAX_CHARS. The gate has drifted above the payload and no longer catches growth this size. Set PF_PAYLOAD_MAX_CHARS=$((n + PF_PAYLOAD_SLACK))."
+fi
+
+echo
+echo "4b. negative control — the window check must be able to fail"
 # Rebuild the plugin with iron-rules.md moved to the END of the manifest. IR3 must then fall
 # outside the preview window. If this build also "passes", assertion 2 proves nothing.
 ctl="$tmp/ctl"; cp -r "$plugin_root" "$ctl"
@@ -334,6 +403,36 @@ else
   [ "$named_ok" -eq 1 ] && ok "every fragment the banner names as dropped ($dropped_list) is really absent"
 fi
 fi  # pad_ok
+
+echo
+echo "6. \`when:\` gates a fragment in BOTH directions"
+# Assertion 0 claims the size gate measures the worst case, i.e. that every `when:` condition
+# in the manifest is one KNOWN_CONDITIONS forces ON. That claim is only worth anything if
+# `when:` actually decides whether a fragment is assembled. The manifest ships no conditional
+# entry today (aihub#296 deleted the only candidate as a duplicate of the hook preamble), so
+# proving the mechanism against a sentinel fixture is what keeps assertion 0 from being
+# vacuous — and it keeps working whether or not a real conditional entry is ever added.
+SENTINEL="conditional-fragment-sentinel-aihub296"
+cond="$tmp/cond"; cp -r "$plugin_root" "$cond"
+SENTINEL="$SENTINEL" python3 - "$cond/skills/using-polyforge" <<'PY'
+import os, sys
+d = sys.argv[1]
+open(os.path.join(d, "fragments", "_sentinel.md"), "w", encoding="utf-8").write(
+    "## " + os.environ["SENTINEL"] + "\n")
+p = os.path.join(d, "SKILL.md"); s = open(p, encoding="utf-8").read()
+open(p, "w", encoding="utf-8").write(
+    s.rstrip("\n") + "\n\n@include: fragments/_sentinel.md\nwhen: superpowers\n"
+                     "kind: info\nauthority: self\n")
+PY
+on_ctx="$(assemble "$cond" "$home_max")"
+off_ctx="$(assemble "$cond" "$home_min")"
+case "$on_ctx"  in *"$SENTINEL"*) ok "condition met -> fragment IS assembled";;
+                   *) bad "condition met but the sentinel fragment is missing — \`when:\` drops fragments it should keep";; esac
+case "$off_ctx" in *"$SENTINEL"*) bad "condition NOT met but the sentinel fragment is still in the payload — \`when:\` is inert, so the worst-case size measurement in assertion 0 means nothing";;
+                   *) ok "condition unmet -> fragment is NOT assembled";; esac
+# ...and the off-direction must not be "absent because nothing assembled at all".
+case "$off_ctx" in *"IR1 —"*) ok "the unmet build is otherwise intact (IR1 still present)";;
+                   *) bad "the unmet build lost IR1 too — the sentinel's absence proves nothing";; esac
 
 echo
 if [ "$fails" -eq 0 ]; then

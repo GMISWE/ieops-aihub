@@ -1,15 +1,5 @@
 # using-polyforge — Session Bootstrap & NL Router
 
-## Usage
-
-**Purpose**: Session bootstrap meta-skill — establishes Iron Rules (IR1-IR3), routes natural-language intent to the correct `/pf-*` skill, enforces Memory-First, and defines the mandatory three-segment output format.
-
-**Pattern**: (auto-loaded at session start; not invoked by the user)
-
-**Required**: none — runs automatically before the first user message
-
-**Flags**: none
-
 ## Session Startup Scan
 
 On session start, before responding to any user message:

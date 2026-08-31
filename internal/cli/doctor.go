@@ -21,7 +21,7 @@ type checkResult struct {
 	FixCmd  string
 }
 
-// RunDoctor runs 6 diagnostic checks and reports their status.
+// RunDoctor runs 7 diagnostic checks and reports their status.
 // With --fix: attempts to auto-repair fixable issues.
 //
 // Checks (§12.1):
@@ -31,6 +31,7 @@ type checkResult struct {
 //  4. worktrees  – pf.<project>-<seq>/ list vs server wi list; flag orphans
 //  5. version    – GET /v1/version; compare min_client_version vs local binary
 //  6. claude_md  – CLAUDE.md managed block format + .polyforge/repo-map/ presence
+//  7. usage_md   – .polyforge/usage.md still carrying rules using-polyforge owns
 func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot string, args []string) {
 	fix := len(args) > 0 && args[0] == "--fix"
 
@@ -41,6 +42,7 @@ func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot
 		checkWorktrees(ctx, c, cfg, wsRoot, fix),
 		checkVersion(ctx, c),
 		checkClaudeMd(wsRoot),
+		checkUsageMd(wsRoot),
 	}
 
 	allOk := true
@@ -268,6 +270,164 @@ func checkWorktrees(ctx context.Context, c *client.Client, cfg *config.Config, w
 	}
 }
 
+// checkUsageMd reports a .polyforge/usage.md that still carries a rule section the
+// plugin-versioned using-polyforge skill owns (aihub#294).
+//
+// This check has to exist because writeUsageMd cannot fix the problem by itself. That
+// function refuses to overwrite an existing usage.md — deliberately; the file is the
+// user's — so dropping the rule sections from its template only helps workspaces created
+// after this release. Every workspace that already ran init keeps its frozen copy, a
+// session then receives the rules twice, and the two copies are under no obligation to
+// agree. They already did not: IR1's worktree path was wrong in one of them for three
+// months and nothing anywhere reported it.
+//
+// REPORT-ONLY, ON PURPOSE — and this is the second time that conclusion was reached the
+// hard way. The first cut of this check also removed the sections under `--fix`, deciding
+// each section's extent from markdown structure. Review found six input classes where
+// that destroyed content the user owned, three of them leaving the file structurally
+// broken (an unterminated fence or HTML comment swallows the rest of the document). The
+// live check against a real frozen workspace missed all six, because a pristine generated
+// template is the one input that cannot exhibit any of them.
+//
+// Inferring the extent of a generated section from the shape of a file a user has since
+// edited is the wrong primitive. The right one is to delete a span only when it is
+// byte-identical to something a known template version emitted, and otherwise say so and
+// stop. That is a real piece of work — it needs the historical template bodies — and it
+// is NOT what this work item is about, which is that a rule was on a channel that could
+// never be corrected. Detection is what makes that stop being silent; removal was a
+// convenience that cost a data-loss path.
+//
+// `--fix` deliberately does not reach here. It is also not the operator's considered
+// choice as often as it looks: plugins/polyforge/skills/pf-stop/SKILL.md tells agents to
+// run `polyforge doctor --fix` to clean up worktrees, so the caller asking for it has
+// very likely never read this file.
+func checkUsageMd(wsRoot string) checkResult {
+	const name = "usage_md"
+	path := filepath.Join(wsRoot, ".polyforge", "usage.md")
+
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		// Absent is not a finding here: usage.md is written by init, and a workspace
+		// that never ran init has a louder problem that checkWorkspace already reports.
+		return checkResult{Name: name, Status: "ok", Message: "no .polyforge/usage.md to check"}
+	}
+	if err != nil {
+		// Anything else — a permission or IO fault on a file that IS there — must not
+		// report green. "Could not look" and "looked and found nothing" are different.
+		return checkResult{Name: name, Status: "warning",
+			Message: fmt.Sprintf(".polyforge/usage.md not readable: %v", err)}
+	}
+
+	found, wellFormed := scanUsageSections(string(b))
+	if !wellFormed {
+		// An unterminated fence or HTML comment means everything after it was skipped,
+		// so a clean result here would mean "stopped looking", not "looked and found
+		// nothing". In a check whose entire subject is silent failure, that green would
+		// be the very defect it exists to report.
+		return checkResult{Name: name, Status: "warning",
+			Message: ".polyforge/usage.md has an unterminated code fence or HTML comment — " +
+				"the scan could not read past it, so this is 'did not look', not 'found nothing'"}
+	}
+	if len(found) == 0 {
+		return checkResult{Name: name, Status: "ok",
+			Message: ".polyforge/usage.md carries no rule section owned by using-polyforge"}
+	}
+	return checkResult{Name: name, Status: "warning",
+		Message: fmt.Sprintf(".polyforge/usage.md still carries %d rule section(s) that using-polyforge "+
+			"owns (%s) — that file is never regenerated, so this copy cannot be corrected and a "+
+			"session sees both",
+			len(found), strings.Join(found, ", ")),
+		FixCmd: "edit .polyforge/usage.md and delete those sections by hand — the maintained " +
+			"copy ships with the using-polyforge skill (not automated: see checkUsageMd)"}
+}
+
+// fenceDelim reports the fence character and run length that opens or closes a fenced
+// code block, or (0, 0) for any other line. `line` must already have leading space
+// stripped. Character AND length both matter: per CommonMark a fence is closed only by a
+// run of the SAME character at least as long as the one that opened it, so a ``` inside a
+// ```` block, or a ~~~ inside a ``` block, is content rather than a terminator. Treating
+// every ```/~~~ prefix as a toggle got both of those backwards.
+func fenceDelim(line string) (byte, int) {
+	if line == "" {
+		return 0, 0
+	}
+	c := line[0]
+	if c != '`' && c != '~' {
+		return 0, 0
+	}
+	n := 0
+	for n < len(line) && line[n] == c {
+		n++
+	}
+	if n < 3 {
+		return 0, 0
+	}
+	return c, n
+}
+
+// scanUsageSections walks a usage.md body once and reports which skillOwnedUsageSections
+// headings it really carries, in template order, plus whether the document parsed cleanly.
+//
+// "Really" is doing work here. A line that merely looks like an owned heading does not
+// count when it is inside a fenced block, inside an indented code block (4+ spaces is a
+// code block, and CommonMark allows an ATX heading at most 3), or inside an HTML comment.
+// Each of those is an example or a note ABOUT the heading, not the heading.
+//
+// wellFormed is false when the walk ends inside a fence or a comment, i.e. when the tail
+// of the file was never examined. The caller must not report a clean bill in that case.
+func scanUsageSections(body string) (found []string, wellFormed bool) {
+	owned := make(map[string]bool, len(skillOwnedUsageSections))
+	for _, h := range skillOwnedUsageSections {
+		owned[h] = true
+	}
+	seen := make(map[string]bool, len(skillOwnedUsageSections))
+
+	var fenceChar byte
+	fenceLen := 0
+	inComment := false
+
+	for _, line := range strings.Split(body, "\n") {
+		stripped := strings.TrimLeft(line, " \t")
+		indent := len(line) - len(stripped)
+
+		if inComment {
+			if strings.Contains(line, "-->") {
+				inComment = false
+			}
+			continue
+		}
+		if fenceLen > 0 {
+			if c, n := fenceDelim(stripped); c == fenceChar && n >= fenceLen && indent <= 3 {
+				fenceLen = 0
+			}
+			continue
+		}
+		if c, n := fenceDelim(stripped); n > 0 && indent <= 3 {
+			fenceChar, fenceLen = c, n
+			continue
+		}
+		if i := strings.Index(line, "<!--"); i >= 0 {
+			if !strings.Contains(line[i:], "-->") {
+				inComment = true
+			}
+			continue
+		}
+		if indent >= 4 {
+			continue // indented code block, not a heading
+		}
+		if s := strings.TrimSpace(line); owned[s] {
+			seen[s] = true
+		}
+	}
+
+	for _, h := range skillOwnedUsageSections {
+		if seen[h] {
+			found = append(found, strings.TrimPrefix(h, "## "))
+		}
+	}
+	return found, fenceLen == 0 && !inComment
+}
+
 // checkClaudeMd inspects the CLAUDE.md managed block that `polyforge init`
 // writes. Two failure modes, both reported as warnings — a stale block is not a
 // broken workspace, so this check must never fail the run:
@@ -354,4 +514,3 @@ func checkVersion(ctx context.Context, c *client.Client) checkResult {
 	return checkResult{Name: "version", Status: "ok",
 		Message: fmt.Sprintf("server min_client_version=%s (local=dev)", minVer)}
 }
-

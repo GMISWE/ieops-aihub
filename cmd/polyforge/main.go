@@ -168,7 +168,7 @@ Usage:
 
 Workspace commands:
   init                        Set up/repair workspace (usage.md, session hook, clone repos, CLAUDE.md)
-  doctor [--fix]              5-item health check
+  doctor [--fix]              7-item health check
   version                     Print version
 
 Schema export:

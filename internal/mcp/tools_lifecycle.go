@@ -259,6 +259,13 @@ func (s *Server) registerLifecycleTools() {
 			}
 			return errResult(err)
 		}
+		// aihub#281: the caller sent this content one line ago; the record it
+		// gets back is otherwise complete. No `brief` counterpart is published
+		// for create because there is nothing for it to do — a work item's
+		// content at creation is whatever the caller supplied, so an unsent
+		// content is an absent one and the equality gate already covers 100% of
+		// the bytes. (482/482 successful creates in the sample sent content.)
+		suppressContentEcho(args, result)
 		return jsonResult(result)
 	})
 
@@ -350,6 +357,12 @@ func (s *Server) registerLifecycleTools() {
 				})
 				continue
 			}
+			// aihub#281, and this is the tool where it matters most: `created`
+			// carries one whole record per item, so a 10-item batch echoes back
+			// up to 10 bodies the caller sent in the very same call. Suppressed
+			// against THIS item's arguments, not the batch's — item i's content
+			// is only an echo of item i.
+			suppressContentEcho(item, res)
 			created = append(created, res)
 		}
 
@@ -432,7 +445,27 @@ func (s *Server) registerLifecycleTools() {
 			"attrs":                  prop("object", "REPLACES the whole attrs object: every key you do not resend is DELETED. Use it only when you intend to overwrite attrs wholesale (e.g. after reading the current value). To add or change keys without destroying the others, use attrs_patch. Cannot be combined with attrs_patch/attrs_unset."),
 			"attrs_patch":            prop("object", "Merge these keys into attrs, leaving every other key untouched (aihub#288). Shallow: a top-level key in the patch replaces that key's stored value outright, it is NOT merged into it recursively, and null STORES a JSON null rather than deleting. To delete keys use attrs_unset. Cannot be combined with attrs."),
 			"attrs_unset":            prop("array", "Top-level attrs keys to delete (array of strings). Applied AFTER attrs_patch, so a key in both ends up deleted. Cannot be combined with attrs."),
-			"content":                prop("string", "Background context for this wi (markdown, max 20000 chars)"),
+			"content":                prop("string", contentPropDescription),
+			// aihub#281. The echo suppression above needs no flag because it only
+			// removes bytes the caller sent. THIS case is different and genuinely
+			// lossy: an update that touches nothing but attrs or priority still
+			// gets the whole body back (~80% of that response), and for a caller
+			// that has not read the wi that body is new information rather than an
+			// echo. So it is opt-in, default false — the same mixed-version
+			// reasoning that gave pf_get_work_item its `brief` in aihub#212,
+			// reused rather than reversed.
+			// The wording is exact on both halves because both were wrong once. It
+			// does not "omit the content field": a work item with no body keeps
+			// its content: null. And it is NOT the same as pf_get_work_item's
+			// brief, which deletes content and reports no length — a caller told
+			// the two were equivalent would apply this tool's "no content_len
+			// means no body" rule to that one's reply and conclude a work item
+			// with a 4 KB body was empty.
+			"brief": prop("boolean", "Replace the content body with content_len (bytes stored); default false. "+
+				"A wi that HAS no body is unaffected — it comes back as content: null with no content_len, so a "+
+				"missing content_len here means \"this wi has no body\", never \"the body was withheld\". "+
+				"NOT the same as pf_get_work_item's brief, which deletes content outright and reports no length. "+
+				"Content you send in THIS call is never echoed back regardless of this flag."),
 		}, []string{"work_item_id"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -450,16 +483,28 @@ func (s *Server) registerLifecycleTools() {
 		if err := normalizeIntArg(args, "resources_version"); err != nil {
 			return errResult(err)
 		}
-		// Remove work_item_id from body
+		// Remove work_item_id from body. `brief` goes with it (aihub#281): it
+		// shapes THIS process's reply and means nothing to the server, and
+		// forwarding a field the peer does not bind is how aihub#290's
+		// expected_version became a parameter that travelled the whole way and
+		// was discarded in silence.
 		body := make(map[string]any)
 		for k, v := range args {
-			if k != "work_item_id" {
+			if k != "work_item_id" && k != "brief" {
 				body[k] = v
 			}
 		}
 		result, err := s.client.UpdateWorkItem(ctx, id, body)
 		if err != nil {
 			return errResult(err)
+		}
+		// aihub#281. Order matters only in that brief is the wider rule: it drops
+		// the content whether or not this call sent one, so checking it first
+		// keeps the two paths from having to agree about the overlap.
+		if boolArg(args, "brief") {
+			dropContentEcho(result)
+		} else {
+			suppressContentEcho(args, result)
 		}
 		return jsonResult(result)
 	})
@@ -1101,11 +1146,22 @@ func workItemFieldProps() map[string]any {
 		"source":                 prop("string", "Source reference"),
 		"attrs":                  prop("object", "Additional attributes"),
 		"blocked_by":             prop("array", "List of blocking work item IDs"),
-		"content":                prop("string", "Background context for this wi (markdown, max 20000 chars)"),
+		"content":                prop("string", contentPropDescription),
 		"force_create":           prop("boolean", "Force create bypassing duplicate check"),
 		"force_reason":           prop("string", "Reason for force create"),
 	}
 }
+
+// contentPropDescription is the published description of the `content`
+// parameter, written once and shared by pf_create_work_item,
+// pf_batch_create_work_items and pf_update_work_item so the three cannot drift.
+//
+// The second sentence is contract, not decoration. aihub#281 stops echoing this
+// field back, and a schema that kept quiet about it would be describing a
+// response the tool no longer returns — the same drift between published shape
+// and real behaviour that aihub#238 and aihub#241 are about.
+const contentPropDescription = "Background context for this wi (markdown, max 20000 chars). " +
+	"Not echoed back: the response reports content_len (bytes stored) in its place."
 
 // createWorkItemSchema is pf_create_work_item's InputSchema: the shared per-item
 // fields plus the project this one is filed under.

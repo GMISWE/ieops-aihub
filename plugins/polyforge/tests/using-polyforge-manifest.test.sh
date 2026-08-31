@@ -49,10 +49,12 @@
 #                 everything is indistinguishable from no validator.
 #
 # CI STATUS: WIRED (aihub#293). .github/workflows/ci.yml runs this as the step
-# "aihub#293 using-polyforge manifest gate". That step does not trust this script's exit code
-# — it asserts named PASS markers, that no SKIP fired, that ALL PASS appears at least twice
-# (lint AND controls), and a floor on the PASS count, because a suite that runs zero checks
-# also exits 0. IF YOU ADD OR RENAME A CHECK HERE, update that step.
+# "aihub#293 using-polyforge manifest gate". A non-zero exit fails that step directly; on top
+# of that it asserts named PASS markers, that no SKIP fired, that ALL PASS appears at least
+# twice (lint AND controls), and a floor on the PASS count, to cover the case the exit code
+# CANNOT report — a run that exits 0 having executed nothing.
+# ADDING a check needs no CI change: the floor is `-ge`, a one-way ratchet. Only DELETING or
+# RENAMING one of the markers that step greps for does.
 #
 # USAGE
 #   tests/using-polyforge-manifest.test.sh              # lint + all controls

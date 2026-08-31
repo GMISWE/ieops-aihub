@@ -22,11 +22,12 @@
 # model at all, for every session since 2026-08-05.
 #
 # CI STATUS: WIRED (aihub#293). .github/workflows/ci.yml runs this as the step
-# "aihub#293 using-polyforge payload budget gate". That step does not trust this script's exit
-# code — it asserts named PASS markers, that no SKIP fired, and a floor on the PASS count,
-# because a suite that runs zero checks also exits 0 (see the `command -v python3` line below
-# for one way that happens). IF YOU ADD OR RENAME A CHECK HERE, update that step: the marker
-# list and the floor both live there.
+# "aihub#293 using-polyforge payload budget gate". A non-zero exit fails that step directly;
+# on top of that it asserts named PASS markers, that no SKIP fired, and a floor on the PASS
+# count, to cover the case the exit code CANNOT report — a run that exits 0 having executed
+# nothing (see the `command -v python3` line below for one way that happens).
+# ADDING a check needs no CI change: the floor is `-ge`, a one-way ratchet. Only DELETING or
+# RENAMING one of the markers that step greps for does.
 #
 # WHAT IS ASSERTED
 #   1. Size:     assembled payload <= PF_PAYLOAD_MAX_CHARS, measured in characters, and
@@ -238,8 +239,43 @@ fi
 # Now a REAL violation: pad a resident fragment until the assembled payload passes 10,000.
 # Sized from the measured $n so it stays a violation as the manifest changes.
 over="$tmp/over"; cp -r "$plugin_root" "$over"
-padded_frag="$over/skills/using-polyforge/fragments/repo-routing.md"
+padded_rel="fragments/repo-routing.md"
+padded_frag="$over/skills/using-polyforge/$padded_rel"
 pad_n=$(( HARNESS_HARD_LIMIT - n + 200 ))
+
+# What this manifest WOULD have assembled to under the pre-aihub#293 hook, predicted
+# independently of the hook: the clean payload plus the pad and the "\n\n" that joins it on.
+# Cross-checked against the hook's own reported figure below — two numbers derived from
+# different sides, so a wrong one shows up as a disagreement rather than as a green test.
+undegraded_n=$(( n + pad_n + 2 ))
+
+# MEASURE that this fixture is really a violation; do not merely COMPUTE it. Padding that
+# file busts the budget only if the manifest actually @includes it. Move it to the on-demand
+# tier — which is exactly what the SIZE BUDGET note prescribes when this gate goes red — or
+# delete it, and the pad never reaches the payload: nothing goes over budget, the hook
+# correctly does not degrade, and every assertion below then fails POINTING AT THE HOOK when
+# the broken thing is this fixture. `undegraded_n` cannot see that; it is arithmetic and
+# would keep reporting a violation that is not happening. So anchor on the clean payload
+# assembled at the top of this file: the fragment's own first line has to be in it.
+pad_anchor="$(grep -m1 . "$padded_frag" 2>/dev/null || true)"
+pad_ok=0
+if [ -z "$pad_anchor" ]; then
+  bad "FIXTURE, NOT HOOK: $padded_rel is missing or empty, so check 5's over-budget tree cannot be built. Point padded_rel at a fragment the manifest @includes."
+elif [ "$undegraded_n" -le "$HARNESS_HARD_LIMIT" ]; then
+  bad "FIXTURE, NOT HOOK: padding to $undegraded_n chars does not reach $HARNESS_HARD_LIMIT, so nothing below is tested. Raise pad_n."
+else
+  case "$ctx" in
+    *"$pad_anchor"*)
+      ok "fixture target $padded_rel is resident and pads to $undegraded_n > $HARNESS_HARD_LIMIT chars — a real violation"
+      pad_ok=1;;
+    *)
+      bad "FIXTURE, NOT HOOK: $padded_rel is not in the resident payload (moved to the on-demand tier?), so padding it busts no budget. Point padded_rel at a fragment the manifest @includes.";;
+  esac
+fi
+
+# Everything below drives that fixture. Skipped when the fixture is invalid — running it
+# anyway would emit a run of hook-shaped failures for a hook that is behaving correctly.
+if [ "$pad_ok" -eq 1 ]; then
 python3 - "$padded_frag" "$pad_n" <<'PY'
 import sys
 p, k = sys.argv[1], int(sys.argv[2])
@@ -256,21 +292,10 @@ try: sys.stdout.write(json.load(sys.stdin)["hookSpecificOutput"]["additionalCont
 except Exception: pass' < "$tmp/over.json")"
 over_n="$(printf '%s' "$over_ctx" | charlen)"
 
-# What this manifest WOULD have assembled to under the pre-aihub#293 hook, predicted
-# independently of the hook: the clean payload plus the pad and the "\n\n" that joins it on.
-# Cross-checked against the hook's own reported figure below — two numbers derived from
-# different sides, so a wrong one shows up as a disagreement rather than as a green test.
-undegraded_n=$(( n + pad_n + 2 ))
-
 [ "$over_rc" -eq 0 ] && ok "over-budget tree: hook still exits 0 (never blocks startup)" \
                      || bad "over-budget tree: hook exited $over_rc — it must never block startup"
 [ -n "$over_ctx" ] && ok "over-budget tree: hook still emits an additionalContext" \
                    || bad "over-budget tree: hook emitted no additionalContext — degrading must not mean going silent"
-if [ "$undegraded_n" -gt "$HARNESS_HARD_LIMIT" ]; then
-  ok "the fixture really is a violation (undegraded assembly would be $undegraded_n > $HARNESS_HARD_LIMIT chars)"
-else
-  bad "fixture only reaches $undegraded_n chars — it does not bust the budget, so nothing below is tested. Raise pad_n."
-fi
 if grep -q "payload is $undegraded_n chars" "$over_err"; then
   ok "the hook measured the same $undegraded_n chars this test predicted independently"
 else
@@ -308,6 +333,7 @@ else
   done
   [ "$named_ok" -eq 1 ] && ok "every fragment the banner names as dropped ($dropped_list) is really absent"
 fi
+fi  # pad_ok
 
 echo
 if [ "$fails" -eq 0 ]; then

@@ -46,13 +46,68 @@ func testUser(t *testing.T, pool *pgxpool.Pool) string {
 }
 
 // testProject returns a project name unique to this test and seeds it
-// (idempotently), owned by the given user id.
+// (idempotently), owned by the given user id, after clearing out everything a
+// previous run of the same test left in that project.
+//
+// The project name is DERIVED FROM t.Name(), so it is the same string on every
+// run against the same database — the isolation it buys is between tests, never
+// between runs. That makes the reset below load-bearing rather than tidy:
+// without it, run N+1 of a test collides with run N's own residue.
+//
+// Measured during aihub#303 (whole suite run twice against one database, before
+// this change): exactly two failures, TestResumeOwnLocks_NoSelfConflict and
+// TestResumeOwnLocks_DifferentWIStillConflicts. They claim a work item whose
+// declared path maps to a file_scope lock keyed by this project name, and the
+// previous run's attempt was still holding it, so the first claim 409'd with
+// CONFLICT_LOCK_TAKEN. Everything else survived only because it either cleans
+// up itself (seedWI in step_pause_stall_test.go does its own child-to-parent
+// delete for the same reason) or touches nothing but `memories`, which is all
+// this reset used to clear. Re-run the suite twice if you want to re-measure;
+// do not read "two" as a property of the code.
 func testProject(t *testing.T, pool *pgxpool.Pool, ownerUserID string) string {
 	t.Helper()
 	proj := "p_" + sanitizeTestName(t.Name())
 	mustExec(t, pool, `INSERT INTO projects(name,owner_user_id) VALUES('`+proj+`','`+ownerUserID+`') ON CONFLICT (name) DO NOTHING`)
-	mustExec(t, pool, `DELETE FROM memories WHERE project='`+proj+`'`)
+	resetTestProject(t, pool, proj)
 	return proj
+}
+
+// resetTestProject deletes the rows that would block re-seeding this test
+// project, in an order that satisfies every foreign key pointing at work_items
+// and run_attempts. Tables that cascade from work_items (wi_step_state,
+// wi_dependencies) are left to the database.
+//
+// resource_locks must go first and explicitly: its FK to run_attempts is ON
+// DELETE RESTRICT, so a leftover lock does not just linger, it blocks the
+// cleanup of the attempt that owns it.
+//
+// The two self-referential FKs here (work_items.parent_work_item_id,
+// run_attempts.parent_attempt_id) are NO ACTION, which Postgres checks at end
+// of statement — so deleting a parent and its child in one statement is legal,
+// and the `memories` delete is deliberately ONE statement covering both
+// predicates for the same reason (memories.latest_id / supersedes_id are
+// unqualified self-FKs, and splitting the delete would checkpoint mid-lineage).
+//
+// proj comes from sanitizeTestName, which emits only [a-z0-9_], so splicing it
+// into the literals below (matching the style of the rest of this file) cannot
+// break out of the quotes.
+func resetTestProject(t *testing.T, pool *pgxpool.Pool, proj string) {
+	t.Helper()
+	wis := `(SELECT id FROM work_items WHERE project='` + proj + `')`
+	attempts := `(SELECT id FROM run_attempts WHERE work_item_id IN ` + wis + `)`
+	for _, stmt := range []string{
+		`DELETE FROM resource_locks WHERE owner_attempt_id IN ` + attempts,
+		// agent_events rows for memory/system events carry neither
+		// work_item_id nor run_attempt_id (chk_evt_work_item_id permits NULL
+		// for those types), so scope by project as well or they accumulate.
+		`DELETE FROM agent_events WHERE project='` + proj + `' OR run_attempt_id IN ` + attempts + ` OR work_item_id IN ` + wis,
+		`DELETE FROM wi_step_completions WHERE work_item_id IN ` + wis + ` OR run_attempt_id IN ` + attempts,
+		`DELETE FROM memories WHERE project='` + proj + `' OR work_item_id IN ` + wis,
+		`DELETE FROM run_attempts WHERE work_item_id IN ` + wis,
+		`DELETE FROM work_items WHERE project='` + proj + `'`,
+	} {
+		mustExec(t, pool, stmt)
+	}
 }
 
 // sanitizeTestName lowercases and strips characters that are unsafe to splice

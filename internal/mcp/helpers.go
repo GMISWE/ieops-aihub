@@ -31,14 +31,105 @@ func strArg(args map[string]any, key string) string {
 	return ""
 }
 
-// boolArg extracts a bool argument from MCP call arguments map.
-func boolArg(args map[string]any, key string) bool {
-	if v, ok := args[key]; ok {
-		if b, ok := v.(bool); ok {
-			return b
-		}
+// parseBoolArg decodes a boolean MCP argument, reporting whether it was present
+// and whether it was readable.
+//
+// aihub#280: the MCP SDK's untyped AddTool — the form every aihub tool uses —
+// type-checks the *schema shape* at registration and then stores the handler
+// with no per-call validation, so nothing between the wire and here enforces the
+// published type. A caller that sends `ready_only: "true"` against a param
+// declared `boolean` reaches this function with a string.
+//
+// The old body returned false for anything that was not a Go bool, which made
+// that request return the UNFILTERED list with no error at any hop — the exact
+// symptom this wi exists to remove, on a param this wi added. It is not
+// hypothetical either: csvArg exists because real callers sent `ids=[...]` and
+// `status=["wrapped"]` against params declared `string`. Whatever produces those
+// shapes does not coerce to the declared type, and booleans are no different.
+//
+// Returns:
+//
+//	present=false           → absent or JSON null; caller should treat as unset
+//	present=true, ok=false  → sent, but not a boolean in any spelling
+//	present=true, ok=true   → value is usable
+func parseBoolArg(args map[string]any, key string) (value, present, ok bool) {
+	v, exists := args[key]
+	if !exists || v == nil {
+		return false, false, true
 	}
-	return false
+	switch typed := v.(type) {
+	case bool:
+		return typed, true, true
+	case string:
+		// Same spellings strconv.ParseBool accepts, matching parseListWIBool on
+		// the server side so the two ends of the hop agree on what a bool is.
+		b, err := strconv.ParseBool(strings.TrimSpace(typed))
+		if err != nil {
+			return false, true, false
+		}
+		return b, true, true
+	case float64:
+		switch typed {
+		case 0:
+			return false, true, true
+		case 1:
+			return true, true, true
+		}
+		return false, true, false
+	case int:
+		switch typed {
+		case 0:
+			return false, true, true
+		case 1:
+			return true, true, true
+		}
+		return false, true, false
+	}
+	return false, true, false
+}
+
+// boolArg extracts a bool argument from MCP call arguments map.
+//
+// Signature deliberately unchanged so the ~50 other tools that call it are not
+// touched; they simply become tolerant of the string and 0/1 spellings instead
+// of silently reading them as false. Callers that need to REJECT an unreadable
+// value (rather than default it) use parseBoolArg directly — see
+// buildListWorkItemsParams.
+func boolArg(args map[string]any, key string) bool {
+	v, _, _ := parseBoolArg(args, key)
+	return v
+}
+
+// scalarArg renders a JSON scalar (string, number, or bool) as the string form
+// the aihub HTTP API parses.
+//
+// aihub#280 / B6: `limit` is published as a string, but pf-retro and
+// pf-crystallize both send `limit=100` as a JSON *number*. strArg returns "" for
+// a non-string, so setIfNonempty dropped it and the server fell back to its
+// default of 50 — the caller silently received half the data it asked for, with
+// no error to notice. Numbers are rendered without a trailing ".0" because they
+// arrive as float64 from encoding/json but mean integers here.
+func scalarArg(args map[string]any, key string) string {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return ""
+	}
+	switch typed := v.(type) {
+	case string:
+		return typed
+	case float64:
+		if typed == math.Trunc(typed) && !math.IsInf(typed, 0) {
+			return strconv.FormatInt(int64(typed), 10)
+		}
+		return strconv.FormatFloat(typed, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(typed)
+	case int64:
+		return strconv.FormatInt(typed, 10)
+	case bool:
+		return strconv.FormatBool(typed)
+	}
+	return ""
 }
 
 // strSliceArg extracts a []string argument, skipping any entry that is not a
@@ -64,6 +155,39 @@ func strSliceArg(args map[string]any, key string) []string {
 		}
 	}
 	return out
+}
+
+// csvArg extracts an argument that may arrive as either a JSON string or a
+// JSON array of strings, and renders it as the comma-separated form the aihub
+// HTTP API parses with strings.Split.
+//
+// aihub#280: strArg returns "" for anything that is not a string, so a param
+// declared `string` but *called* with an array was silently dropped — the whole
+// argument vanished with no error at any hop. Three polyforge skills sent
+// `ids=[...]` and three sent `status=["wrapped"]`; every one of those filters
+// was being discarded. Accepting both shapes at the decoder is what makes the
+// drop impossible rather than merely fixed at today's call sites.
+//
+// Absent, null, a wrong type, or an array with no usable entries all yield "",
+// which setIfNonempty treats as "not specified" — never as an empty selection.
+func csvArg(args map[string]any, key string) string {
+	v, ok := args[key]
+	if !ok {
+		return ""
+	}
+	switch typed := v.(type) {
+	case string:
+		return typed
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if s, ok := item.(string); ok && s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, ",")
+	}
+	return ""
 }
 
 // numArg extracts a float64 argument (returns 0 if absent or wrong type).

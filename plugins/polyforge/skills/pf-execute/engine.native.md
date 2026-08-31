@@ -20,6 +20,10 @@
    wi_info = pf_list_work_items(ids=[<current_wi_id>])
    ```
 
+   > Since aihub#280 `ids` is a real filter and `project` is correctly omitted —
+   > an id already names one wi. Before that, `ids` reached no forwarding table
+   > and no `project` was sent, so this call was a hard 400 and never ran.
+
 2. Resolve the scenario repo path (from .polyforge.yaml):
    ```
    scenario_path = <workspace_root>/.repo/<scenario_name>/

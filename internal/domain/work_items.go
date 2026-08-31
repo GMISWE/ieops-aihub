@@ -53,6 +53,46 @@ type WorkItem struct {
 	// query embedding and this wi's embedding. omitempty keeps every non-query
 	// response byte-identical to before.
 	Similarity *float64 `json:"similarity,omitempty"`
+	// StepState is populated only when the caller asks for it
+	// (GET /v1/work_items?include_step_state=true, aihub#280). omitempty keeps
+	// every response that did not ask byte-identical to before, which is also
+	// what makes "did the param take effect?" answerable by comparing the
+	// response key set — the row count cannot answer it.
+	//
+	// Absence has THREE causes and the response cannot distinguish them:
+	//  1. the caller did not ask (no include_step_state)
+	//  2. the caller asked, but the wi has never been claimed, so no
+	//     wi_step_state row exists
+	//  3. the caller asked, the row exists, and the lookup FAILED —
+	//     attachStepState is best-effort and reports only to the server's stderr
+	//
+	// (3) is the uncomfortable one: a transient pool exhaustion makes a claimed,
+	// in-progress work item read exactly like a never-claimed one, so a consumer
+	// like pf-retro would conclude "no steps ran". That is a deliberate trade —
+	// failing the whole list would let include_step_state break a call that works
+	// without it — but it is a real ambiguity, named here rather than left for
+	// someone to discover from behaviour. Callers that must be sure should read
+	// the step state through pf_get_step.
+	StepState *WorkItemStepState `json:"step_state,omitempty"`
+}
+
+// WorkItemStepState mirrors the wi_step_state row for one work item, as served
+// under GET /v1/work_items?include_step_state=true (aihub#280).
+//
+// Every field is a pointer or has a natural zero because the row's columns are
+// nullable: current_step is NULL before the first start_step and again after the
+// last step completes, and current_step_attempt is NULL whenever the step is
+// idle. Collapsing those to "" would make "between steps" indistinguishable from
+// "no such column", which is the failure class this wi exists to close.
+type WorkItemStepState struct {
+	WIType             *string    `json:"wi_type"`
+	GraphSource        string     `json:"graph_source"`
+	CurrentStep        *string    `json:"current_step"`
+	CurrentStepStatus  *string    `json:"current_step_status"`
+	CurrentStepAttempt *string    `json:"current_step_attempt"`
+	StepStartedAt      *time.Time `json:"step_started_at"`
+	Version            int64      `json:"version"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 // CreateWorkItemRequest is the parsed body for POST /v1/work_items.
@@ -693,9 +733,17 @@ type ListWorkItemsFilter struct {
 	OwnerDisplay       *string  // case-insensitive contains on run_attempts.actor_display (current attempt)
 	AccessibleProjects []string // project allow-list for "view all" when project arg is ""
 	Source             *string
-	ReadyOnly          bool
-	IDs                []string
-	Since              *time.Time
+	Scenario           *string
+	// ReadyOnly narrows the set to the ready-queue's items[] segment — see
+	// readyOnlyPredicate for the exact definition and why it is that one.
+	ReadyOnly bool
+	IDs       []string
+	Since     *time.Time
+	// IncludeStepState attaches each item's wi_step_state row as
+	// WorkItem.StepState. Not a filter: it widens each row rather than
+	// narrowing the set, so its guard asserts the response key set, never the
+	// row count (aihub#280).
+	IncludeStepState bool
 	// Query is a semantic search over goal+content (aihub#273): pgvector
 	// cosine when an embedding provider is active, ILIKE fallback otherwise.
 	// Not combinable with Sort/Order/Cursor — the handler rejects those.
@@ -825,6 +873,47 @@ type ListWorkItemsResult struct {
 //   - project == "" + AccessibleProjects empty → no project clause at all
 //     (admin "view all" across every project)
 //
+// readyOnlyPredicate is *the* SQL definition of "ready", shared by the ready
+// queue's items[] segment (GetReadyQueue) and by ListWorkItemsFilter.ReadyOnly.
+//
+// aihub#280: `ready_only` sat in the published MCP schema for a long time with
+// nothing on the server consuming it, which means the decision this constant
+// records had never actually been made. It is not a free choice, though — the
+// six-segment LCRS view already defines "ready" as the items[] segment: takeable
+// right now, by an agent, with nobody having to unblock anything first. That is
+// exactly three conditions:
+//
+//   - status = 'queued'              — not already running/paused/terminal
+//   - requires_human_session = false — an agent may take it unattended
+//   - no live 'blocks' dependency    — nothing has to land before it
+//
+// It is one constant rather than two copies specifically because a second copy
+// is how `ready_only` would drift into meaning something other than the queue
+// it is named after. Combining ready_only with an explicit status filter yields
+// the intersection, so `status=running&ready_only=true` correctly returns none.
+const readyOnlyPredicate = `(wi.status = 'queued'
+		  AND wi.requires_human_session = false
+		  AND ` + noLiveBlockerPredicate + `)`
+
+// noLiveBlockerPredicate is the SQL for "nothing has to land before this wi":
+// no 'blocks' dependency whose blocker is still open. It assumes the outer query
+// aliases work_items as `wi`.
+//
+// One definition rather than four. Before aihub#280 this subquery was copied
+// verbatim into three of GetReadyQueue's segments (items[],
+// needs_human_session[], unclassified[]), and adding ready_only to the list
+// endpoint would have made a fourth. Those segments differ only in their
+// requires_human_session test, so a change to what "blocked" means had to be
+// applied identically in every copy or the segments would start disagreeing
+// about the same work item — silently, since each query is individually valid.
+const noLiveBlockerPredicate = `NOT EXISTS (
+		    SELECT 1 FROM wi_dependencies dep
+		    JOIN work_items blocker ON dep.blocking_wi_id = blocker.id
+		    WHERE dep.blocked_wi_id = wi.id
+		      AND dep.kind = 'blocks'
+		      AND blocker.status NOT IN ('wrapped','cancelled','failed')
+		  )`
+
 // buildListWorkItemsWhere builds the WHERE clause, JOIN clause, and ordered
 // bound args for ListWorkItems from the given project scope and filter. It is
 // split out from ListWorkItems so the query construction (notably placeholder
@@ -858,10 +947,29 @@ func buildListWorkItemsWhere(project string, f ListWorkItemsFilter) (joinClause,
 		args = append(args, *f.Priority)
 		argIdx++
 	}
+	if f.Milestone != nil {
+		conds = append(conds, fmt.Sprintf("wi.milestone = $%d", argIdx))
+		args = append(args, *f.Milestone)
+		argIdx++
+	}
+	if f.Source != nil {
+		conds = append(conds, fmt.Sprintf("wi.source = $%d", argIdx))
+		args = append(args, *f.Source)
+		argIdx++
+	}
+	if f.Scenario != nil {
+		conds = append(conds, fmt.Sprintf("wi.scenario = $%d", argIdx))
+		args = append(args, *f.Scenario)
+		argIdx++
+	}
 	if f.Label != nil {
 		conds = append(conds, fmt.Sprintf("$%d = ANY(wi.labels)", argIdx))
 		args = append(args, *f.Label)
 		argIdx++
+	}
+	// ReadyOnly binds no args, so it deliberately does not bump argIdx.
+	if f.ReadyOnly {
+		conds = append(conds, readyOnlyPredicate)
 	}
 	if f.UserID != nil {
 		conds = append(conds, fmt.Sprintf("wi.reporter_user_id = $%d", argIdx))
@@ -881,8 +989,14 @@ func buildListWorkItemsWhere(project string, f ListWorkItemsFilter) (joinClause,
 		args = append(args, *f.OwnerDisplay)
 		argIdx++
 	}
+	// Slugs as well as ids, because the MCP schema publishes "IDs or slugs" and a
+	// published capability the SQL does not implement is exactly this wi's defect
+	// class: `ids=["aihub#280"]` returned {"items":[]} with HTTP 200 and no error
+	// — indistinguishable from "no such work item". GetWorkItem has always
+	// accepted either spelling; the list path had not. One bound arg referenced
+	// twice, the same shape as the Query predicate below (aihub#280).
 	if len(f.IDs) > 0 {
-		conds = append(conds, fmt.Sprintf("wi.id = ANY($%d)", argIdx))
+		conds = append(conds, fmt.Sprintf("(wi.id = ANY($%d) OR wi.slug = ANY($%d))", argIdx, argIdx))
 		args = append(args, f.IDs)
 		argIdx++
 	}
@@ -926,8 +1040,12 @@ func buildListWorkItemsWhere(project string, f ListWorkItemsFilter) (joinClause,
 		args = append(args, *f.Cursor)
 		argIdx++
 	}
-	// Every clause above bumps argIdx uniformly so they can be reordered or
-	// extended without re-introducing a placeholder-numbering bug (cf. aihub#147).
+	// Every clause above that BINDS AN ARG bumps argIdx uniformly, so clauses can
+	// be reordered or extended without re-introducing a placeholder-numbering bug
+	// (cf. aihub#147). The arg-free clauses — the ReadyOnly predicate and the
+	// sort=closed_at NOT NULL guard — deliberately do not bump it, which is what
+	// keeps argIdx == len(args)+1. listWorkItemsByVector relies on exactly that
+	// invariant to place its own placeholders after these (wi_vector.go).
 	// The final bump is otherwise unread; sink it so ineffassign stays happy.
 	_ = argIdx
 
@@ -988,6 +1106,12 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 		case len(res.Items) == 0:
 			// nothing embedded matched — fall through to ILIKE
 		default:
+			// The vector path returns before the text path's enrichment, so it
+			// needs its own call — otherwise include_step_state would work for
+			// every query except a semantically-matched one (aihub#280).
+			if f.IncludeStepState {
+				attachStepState(ctx, pool, res.Items)
+			}
 			return res, nil
 		}
 	}
@@ -1031,7 +1155,61 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 	if result.Items == nil {
 		result.Items = []*WorkItem{}
 	}
+	// After truncation to f.Limit, so the extra look-ahead row never costs a
+	// step-state lookup.
+	if f.IncludeStepState {
+		attachStepState(ctx, pool, result.Items)
+	}
 	return result, nil
+}
+
+// attachStepState fills in WorkItem.StepState for every item that has a
+// wi_step_state row, in one round trip for the whole page (aihub#280).
+//
+// Best-effort by design: a failure here leaves StepState nil, which is the same
+// shape as "this wi was never claimed". The alternative — failing the whole list
+// — would make `include_step_state=true` able to break a call that works without
+// it, and the caller (pf-status, pf-retro) needs the wi fields far more than the
+// step fields.
+func attachStepState(ctx context.Context, pool *pgxpool.Pool, items []*WorkItem) {
+	if len(items) == 0 {
+		return
+	}
+	byID := make(map[string]*WorkItem, len(items))
+	ids := make([]string, 0, len(items))
+	for _, wi := range items {
+		byID[wi.ID] = wi
+		ids = append(ids, wi.ID)
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT work_item_id, wi_type, graph_source, current_step, current_step_status,
+		       current_step_attempt, step_started_at, version, updated_at
+		FROM wi_step_state
+		WHERE work_item_id = ANY($1)`, ids)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "list work_items: include_step_state lookup failed: %v\n", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var wiID string
+		var st WorkItemStepState
+		if scanErr := rows.Scan(&wiID, &st.WIType, &st.GraphSource, &st.CurrentStep,
+			&st.CurrentStepStatus, &st.CurrentStepAttempt, &st.StepStartedAt,
+			&st.Version, &st.UpdatedAt); scanErr != nil {
+			fmt.Fprintf(os.Stderr, "list work_items: include_step_state scan failed: %v\n", scanErr)
+			continue
+		}
+		if wi, ok := byID[wiID]; ok {
+			state := st
+			wi.StepState = &state
+		}
+	}
+	// A mid-stream read failure would otherwise truncate the enrichment with no
+	// signal at all — the same silence the two paths above deliberately log.
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "list work_items: include_step_state rows failed: %v\n", err)
+	}
 }
 
 // workItemUpdate is the compiled UPDATE statement for UpdateWorkItem.
@@ -1557,6 +1735,37 @@ func CancelWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug, callerUse
 	return nil
 }
 
+// buildReadyQueueItemsQuery assembles the SQL for the ready queue's items[]
+// segment: $1 = project, $2 = max.
+//
+// A function rather than an inline literal so the sharing is at least visible in
+// one place. Note precisely what that does and does not buy, because an earlier
+// version of this comment overclaimed and was wrong:
+//
+// Inspecting this function's return value proves nothing about GetReadyQueue.
+// Nothing forces GetReadyQueue to call it — an unused function is legal Go — so
+// a divergent query inlined at the call site leaves a helper-inspecting test
+// green. That was verified, not assumed: replacing the call site with an inline
+// query that dropped both requires_human_session and the blocker NOT EXISTS left
+// every aihub#280 test passing.
+//
+// The real guard is therefore behavioural and lives in
+// TestGetReadyQueue_ItemsExcludesHumanSessionAndBlocked, which calls
+// GetReadyQueue against a live DB and asserts what it actually returns. This
+// helper's own test only pins the SQL's shape.
+func buildReadyQueueItemsQuery() string {
+	return `
+		SELECT wi.id, wi.slug, wi.wi_type, wi.priority, wi.goal
+		FROM work_items wi
+		WHERE wi.project = $1
+		  AND ` + readyOnlyPredicate + `
+		ORDER BY
+		  CASE wi.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3
+		                   WHEN 'normal' THEN 2 WHEN 'low' THEN 1 END DESC,
+		  wi.created_at ASC
+		LIMIT $2`
+}
+
 // GetReadyQueue returns the six-segment LCRS view for a project.
 func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max int) (*ReadyQueue, *AihubError) {
 	if max <= 0 {
@@ -1574,27 +1783,8 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		Unclassified:      []ReadyItem{},
 	}
 
-	// items[]: queued + no blocker + requires_human_session=false
-	itemRows, err := pool.Query(ctx, `
-		SELECT wi.id, wi.slug, wi.wi_type, wi.priority, wi.goal
-		FROM work_items wi
-		WHERE wi.project = $1
-		  AND wi.status = 'queued'
-		  AND wi.requires_human_session = false
-		  AND NOT EXISTS (
-		    SELECT 1 FROM wi_dependencies dep
-		    JOIN work_items blocker ON dep.blocking_wi_id = blocker.id
-		    WHERE dep.blocked_wi_id = wi.id
-		      AND dep.kind = 'blocks'
-		      AND blocker.status NOT IN ('wrapped','cancelled','failed')
-		  )
-		ORDER BY
-		  CASE wi.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3
-		                   WHEN 'normal' THEN 2 WHEN 'low' THEN 1 END DESC,
-		  wi.created_at ASC
-		LIMIT $2`,
-		project, max,
-	)
+	// items[]: queued + no blocker + requires_human_session=false.
+	itemRows, err := pool.Query(ctx, buildReadyQueueItemsQuery(), project, max)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, "failed to query ready items")
 	}
@@ -1710,13 +1900,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		WHERE wi.project = $1
 		  AND wi.status = 'queued'
 		  AND wi.requires_human_session = true
-		  AND NOT EXISTS (
-		    SELECT 1 FROM wi_dependencies dep
-		    JOIN work_items blocker ON dep.blocking_wi_id = blocker.id
-		    WHERE dep.blocked_wi_id = wi.id
-		      AND dep.kind = 'blocks'
-		      AND blocker.status NOT IN ('wrapped','cancelled','failed')
-		  )
+		  AND `+noLiveBlockerPredicate+`
 		ORDER BY
 		  CASE wi.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3
 		                   WHEN 'normal' THEN 2 WHEN 'low' THEN 1 END DESC,
@@ -1746,13 +1930,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		WHERE wi.project = $1
 		  AND wi.status = 'queued'
 		  AND wi.requires_human_session IS NULL
-		  AND NOT EXISTS (
-		    SELECT 1 FROM wi_dependencies dep
-		    JOIN work_items blocker ON dep.blocking_wi_id = blocker.id
-		    WHERE dep.blocked_wi_id = wi.id
-		      AND dep.kind = 'blocks'
-		      AND blocker.status NOT IN ('wrapped','cancelled','failed')
-		  )
+		  AND `+noLiveBlockerPredicate+`
 		ORDER BY wi.created_at ASC
 		LIMIT $2`,
 		project, max,

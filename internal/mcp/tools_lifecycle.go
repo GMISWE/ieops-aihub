@@ -24,37 +24,127 @@ import (
 // Publishing a param in the InputSchema while forgetting it in the forwarding
 // loop makes the schema state a contract the transport does not keep — the
 // caller sends the param, nothing rejects it, and it is silently dropped
-// (mem_1SJ12mCz). Keeping the two as named tables lets
-// TestListWorkItemsToolForwardsEveryPublishedParam assert they agree, so the
-// next param added cannot drift.
+// (mem_1SJ12mCz). Keeping them as named tables lets
+// TestListWorkItemsEveryPublishedParamHasAWireProbe assert they agree with the
+// schema, and TestListWorkItemsForwardsEveryPublishedParamByValue assert each
+// decoder can actually read the shapes callers send.
+//
+// aihub#280: agreement between these tables and the schema is hop 2 of a
+// four-hop contract, and is *not* sufficient. See the header of
+// tools_list_wi_schema_test.go for the other three and where each is asserted.
 var (
 	// listWorkItemsStringParams are forwarded verbatim when non-empty.
 	listWorkItemsStringParams = []string{
-		"project", "status", "kind", "milestone", "label", "user_id",
-		"source", "since", "limit", "cursor", "sort", "order", "query",
+		"project", "kind", "wi_type", "priority", "milestone", "scenario",
+		"label", "user_id", "source", "since", "limit", "cursor",
+		"sort", "order", "query",
 	}
 	// listWorkItemsBoolParams are forwarded as "true" when set.
 	listWorkItemsBoolParams = []string{"ready_only", "include_step_state"}
+	// listWorkItemsCSVParams accept EITHER a JSON string (already comma-
+	// separated) or a JSON array of strings, and are forwarded as CSV — the wire
+	// form handleListWorkItems' strings.Split expects.
+	//
+	// Both shapes are accepted because both occur. The schema publishes `ids` as
+	// an array and `status` as a CSV string, but every polyforge skill that
+	// filters by status wrote `status=["wrapped"]`, and strArg returns "" for a
+	// non-string — so setIfNonempty dropped it and /pf-release listed the
+	// project's entire backlog instead of one release's worth. Coercing here
+	// fixes those callers without a plugin redeploy; the skills were corrected
+	// too, so the published shape and the call sites now agree (aihub#280).
+	listWorkItemsCSVParams = []string{"ids", "status"}
 )
+
+// buildListWorkItemsParams renders MCP call arguments into the HTTP query
+// string for GET /v1/work_items. This is hop 2 of the four-hop parameter
+// contract (aihub#280).
+//
+// Split out of the tool handler so hop 2 can be asserted on the value that
+// actually reaches the wire, not merely on the three tables agreeing with the
+// schema by name. Name agreement was green throughout the period when
+// `status=["wrapped"]` was being discarded on every call: the name matched, the
+// decoder could not read the shape, and nothing anywhere said so.
+func buildListWorkItemsParams(args map[string]any) (url.Values, error) {
+	params := url.Values{}
+	// scalarArg, not strArg: `limit` is published as a string but real callers
+	// send it as a JSON number, and strArg drops non-strings (aihub#280 B6).
+	for _, k := range listWorkItemsStringParams {
+		setIfNonempty(params, k, scalarArg(args, k))
+	}
+	for _, k := range listWorkItemsBoolParams {
+		value, present, ok := parseBoolArg(args, k)
+		if !present {
+			continue
+		}
+		if !ok {
+			// Rejected rather than defaulted to false. Defaulting is what made
+			// `ready_only: "true"` return the unfiltered list, and it is
+			// indistinguishable from not sending the param at all.
+			return nil, fmt.Errorf("%s must be a boolean (true/false, \"true\"/\"false\", or 1/0), got %#v", k, args[k])
+		}
+		// Only a true is forwarded: the server reads an absent param as false,
+		// so sending "false" would be redundant, and forwarding it would make
+		// "explicitly false" and "unset" identical on the wire anyway.
+		if value {
+			params.Set(k, "true")
+		}
+	}
+	for _, k := range listWorkItemsCSVParams {
+		setIfNonempty(params, k, csvArg(args, k))
+	}
+	return params, nil
+}
 
 // listWorkItemsSchema is the published input schema for pf_list_work_items,
 // split out so the forwarding test can read the same value the tool registers.
 func listWorkItemsSchema() json.RawMessage {
+	idsProp := prop("array", "Filter to these work item IDs or slugs (array of strings; "+
+		"a comma-separated string is also accepted). Makes `project` optional — an id "+
+		"already names one work item, and the query is bounded to the projects you can see. "+
+		"Note the asymmetry with `project`: an inaccessible project= is a 403, whereas ids "+
+		"you cannot see are silently omitted, so a short result means \"not visible to you\" "+
+		"as well as \"does not exist\".")
+	idsProp["items"] = map[string]any{"type": "string"}
 	return objectSchema(map[string]any{
-		"project":            prop("string", "Project name"),
-		"status":             prop("string", "Filter by status"),
-		"kind":               prop("string", "Filter by kind"),
-		"milestone":          prop("string", "Filter by milestone"),
-		"label":              prop("string", "Filter by label"),
-		"user_id":            prop("string", "Filter by user ID"),
-		"source":             prop("string", "Filter by source"),
-		"ready_only":         prop("boolean", "Only return ready items"),
-		"include_step_state": prop("boolean", "Include step state"),
-		"since":              prop("string", "Since timestamp (RFC3339)"),
+		"project": prop("string", "Project name. Optional when `ids` is given, required otherwise."),
+		"ids":     idsProp,
+		"status": prop("string", "Filter by status; comma-separated for several "+
+			"(e.g. \"running,paused\"). An array of strings is also accepted."),
+		"wi_type":   prop("string", "Filter by work item type (e.g. fix_bug, feature)"),
+		"kind":      prop("string", "DEPRECATED alias for `wi_type`; an explicit wi_type wins. There is no separate `kind` field."),
+		"priority":  prop("string", "Filter by priority (urgent|high|normal|low)"),
+		"milestone": prop("string", "Filter by milestone"),
+		// Deliberately NOT an enum, and deliberately not advertising "release".
+		// work_items.scenario is CHECKed to ('coding','writing','data') and
+		// CreateWorkItem is stricter still (it rejects anything but 'coding'), so
+		// 'coding' is the only value any existing row can hold. pf-release
+		// filters on scenario="release", which now correctly matches nothing —
+		// see the note at that call site; making release wis real is aihub#176.
+		"scenario": prop("string", "Filter by scenario. In practice every work item is 'coding': "+
+			"the column is constrained to coding|writing|data and creation rejects all but coding."),
+		"label":   prop("string", "Filter by label"),
+		"user_id": prop("string", "Filter by user ID"),
+		"source":  prop("string", "Filter by source"),
+		"ready_only": prop("boolean", "Only return items that are ready to claim: queued, "+
+			"not requiring a human session, and with no unfinished blocking dependency. "+
+			"Same PREDICATE as pf_get_ready_queue's items[] (one shared SQL constant), but "+
+			"not the same page: this defaults to limit=50 ordered by created_at desc, while "+
+			"the ready queue defaults to 10 ordered by priority desc. With more ready items "+
+			"than either limit they return different subsets."),
+		"include_step_state": prop("boolean", "Attach each item's step state as `step_state` "+
+			"(current_step, current_step_status, step_started_at, ...). The key is ABSENT for a work "+
+			"item that has never been claimed — and also if the lookup itself failed, which is "+
+			"best-effort and reported only on the server's stderr. Absent therefore means \"no step "+
+			"state\", not \"definitely never claimed\"."),
+		"since": prop("string", "Only items whose CREATED_AT is at or after this RFC3339 timestamp. "+
+			"This is creation time, not close time: combining it with status=wrapped does NOT give "+
+			"\"wrapped since T\" — an item created before T and wrapped after it is excluded. "+
+			"An unparseable value is rejected rather than ignored."),
 		"query": prop("string", "Semantic search over goal+content (aihub#273): "+
 			"embedding cosine when the server has a provider, ILIKE fallback otherwise. "+
 			"Results are similarity-ordered; not combinable with sort/order/cursor."),
-		"limit": prop("string", "Max items to return"),
+		"limit": prop("string", "Max items to return. A JSON number is also accepted "+
+			"(and is what most callers send); values above 200 fall back to the default of 50."),
 		"cursor": prop("string", "Pagination cursor. Carries the value of the column named by `sort`, "+
 			"so pass it back unchanged and do not mix cursors between different sort orders."),
 		// The enums come from the server's enforced sets (aihub#224) rather than
@@ -282,14 +372,9 @@ func (s *Server) registerLifecycleTools() {
 		if err != nil {
 			return errResult(err)
 		}
-		params := url.Values{}
-		for _, k := range listWorkItemsStringParams {
-			setIfNonempty(params, k, strArg(args, k))
-		}
-		for _, k := range listWorkItemsBoolParams {
-			if boolArg(args, k) {
-				params.Set(k, "true")
-			}
+		params, err := buildListWorkItemsParams(args)
+		if err != nil {
+			return errResult(err)
 		}
 		result, err := s.client.ListWorkItems(ctx, params)
 		if err != nil {

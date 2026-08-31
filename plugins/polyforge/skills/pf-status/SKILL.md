@@ -34,6 +34,10 @@ ready queue, or which items are stalled/blocked.
    )
    ```
 
+   > Since aihub#280 `ids` is a real filter and `project` is correctly omitted —
+   > an id already names one wi. Before that, `ids` reached no forwarding table
+   > and no `project` was sent, so this call was a hard 400 and never ran.
+
 2. ```
    pf_read_events(
      work_item_id=<current>,

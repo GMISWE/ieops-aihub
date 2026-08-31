@@ -366,6 +366,48 @@ jobs:
           ! grep -q -- '--- SKIP' recall_router.log \
             || { echo "::error::an aihub#270 router test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#268: exercise the agent_events partition creator against the same
+      # Postgres service. This is the step that makes the fix trustworthy: the
+      # bug it closes was a partition-exhaustion outage, and the pure-unit tests
+      # in gc_test.go can only reach the month arithmetic and the DDL string —
+      # everything that decides whether the sweep actually WORKS is answered by
+      # Postgres and nothing else.
+      #
+      # Unlike every other DB step here, these tests do NOT use the migrated
+      # schema: setupPartitionTestDB builds a self-contained agent_events in its
+      # own schema and pins search_path to it, so they need only a live server
+      # and cannot touch the migrated tables. They still run after the migration
+      # step because they need the service, not its contents.
+      #
+      # Scoped with -run for the same reason as the steps above — the package's
+      # other gated suites were not verified by this change — and doubly so here:
+      # RunPartitionCreate takes advisory lock 2006, which is database-wide.
+      #
+      # This step is also what retires a real gap: the change was verified by
+      # hand against a local PostgreSQL 14, while production is 18. The service
+      # below is pg18, so from here on the drain, the catalog-verified
+      # attachment, the error accumulation, the audit event, the DEFAULT-backlog
+      # alarm and the lock_timeout guard are all checked on production's major
+      # version.
+      - name: aihub#268 agent_events partition creator DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestRunPartitionCreate|TestPartitionDDLTimeoutsAreApplied' -count=1 -v 2>&1 | tee gc_partition.log
+          for want in TestRunPartitionCreate_CreatesTheLookaheadWindow \
+                      TestRunPartitionCreate_WritesLandInRealPartitionsAfterwards \
+                      TestRunPartitionCreate_DrainsRowsStrandedInDefault \
+                      TestRunPartitionCreate_ReportsBacklogItCannotDrain \
+                      TestRunPartitionCreate_ReportsADetachedNamesakeInsteadOfCountingIt \
+                      TestRunPartitionCreate_AccumulatesEveryError \
+                      TestPartitionDDLTimeoutsAreApplied; do
+            grep -q -- "--- PASS: $want" gc_partition.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#268 partition-creator coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' gc_partition.log \
+            || { echo "::error::an aihub#268 partition-creator test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: Launcher update-check regression suite
         run: bash plugins/polyforge/tests/launcher-update-check.test.sh
 

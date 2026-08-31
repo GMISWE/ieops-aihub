@@ -19,8 +19,15 @@ package mcp
 // This file is deliberately built the other way round so it cannot become the
 // fourth instance: it names the ONE key it removes and copies nothing. A field
 // added to domain.WorkItem tomorrow reaches the caller with no edit here, and
-// TestSuppressContentEchoLeavesEveryOtherFieldAlone pins that with a key the
-// code has never heard of.
+// TestUpdateKeepsFieldsThisCodeHasNeverHeardOf pins that with a key the code has
+// never heard of.
+//
+// That framing covers what this file REMOVES. It does not cover what this file
+// WRITES: content_len goes into a map this package does not own, so a
+// domain.WorkItem that ever gained a field serialised as `content_len` would be
+// clobbered in silence — and the unknown-field test cannot see it, because it
+// probes a name nothing produces, which is the opposite of a collision.
+// TestDomainWorkItemHasNoContentLenField is the guard for that half.
 //
 // ─── Why the drop is gated on equality, not on "the caller sent something" ───
 //
@@ -50,14 +57,29 @@ package mcp
 // contentSentByCaller returns the content string the caller supplied in this
 // call, and whether it supplied one at all.
 //
-// The type assertion is load-bearing and a bare `_, ok := args["content"]`
-// presence check is WRONG. parseArgs is a plain json.Unmarshal into
-// map[string]any, so an explicit `content: null` puts the key in the map with a
-// nil value — while the server's `Content *string` treats null and absent
-// identically and leaves the stored body untouched. Keyed on presence alone we
-// would then delete the echo of the EXISTING content, which the caller never
-// sent and cannot reconstruct. (Zero occurrences in the 873-call sample; a
-// latent defect, not an observed one.)
+// The type assertion earns its place, but on a far narrower input than the
+// original rationale here claimed, and that claim is worth correcting rather
+// than deleting: it read confidently enough that nobody would re-derive it.
+//
+// The setup is real. parseArgs is a plain json.Unmarshal into map[string]any, so
+// an explicit `content: null` puts the key in the map with a nil value, while
+// the server's `Content *string` reads null and absent alike and leaves the
+// stored body untouched.
+//
+// What does NOT follow — and what the old comment asserted — is that a bare
+// presence check would delete the echo of an existing body. It would not. A
+// presence check yields sent == "", and suppressContentEcho drops only when
+// stored == sent, so any work item with a body is refused by the equality gate
+// regardless. The gate subsumes almost all of this guard, which is exactly why
+// swapping the assertion for a presence check survived the whole test suite
+// until the case below was written.
+//
+// The assertion buys precisely one input: a work item whose stored content is
+// the empty string, updated with `content: null`. There sent == "" == stored,
+// the gate is satisfied, and "leave the body alone" would be answered with the
+// field deleted and content_len: 0 — a caller told a suppression happened when
+// it sent nothing at all. Small, but it is the whole difference between the two
+// spellings, and TestUpdateWithNullContentAgainstAnEmptyStoredBody pins it.
 func contentSentByCaller(args map[string]any) (string, bool) {
 	s, ok := args["content"].(string)
 	return s, ok
@@ -86,6 +108,14 @@ func dropContentEcho(result map[string]any) bool {
 		// Absent, or JSON null for a work item that has no body. Nothing to
 		// suppress, and emitting content_len: 0 here would claim a stored empty
 		// string where the record actually holds NULL.
+		//
+		// This is also what brief=true does on a bodyless work item: `content:
+		// null` survives and no length is reported. Deliberate, and the published
+		// description says so. Under brief the reply then carries either
+		// "content_len: N" (there is a body, this big) or "content: null" (there
+		// is none) — always a positive signal. Deleting the null instead would
+		// leave ABSENCE carrying the meaning, which is the aihub#269 ambiguity
+		// the content_len handle exists to remove, not to relocate.
 		return false
 	}
 	delete(result, "content")
@@ -110,6 +140,13 @@ func suppressContentEcho(args, result map[string]any) bool {
 	if !ok || result == nil {
 		return false
 	}
+	// The !ok half is defence in depth, not a gate: dropContentEcho repeats the
+	// same type assertion and refuses on its own, so dropping !ok here is a
+	// provably equivalent mutation (it can only be reached with sent == "", and
+	// dropContentEcho then bails anyway). Kept because the alternative is code
+	// that reads as though a failed assertion compares "" against the caller's
+	// string, and because it stops being equivalent the moment dropContentEcho's
+	// guard is relaxed.
 	if stored, ok := result["content"].(string); !ok || stored != sent {
 		return false
 	}

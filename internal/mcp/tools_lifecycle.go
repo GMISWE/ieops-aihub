@@ -454,8 +454,17 @@ func (s *Server) registerLifecycleTools() {
 			// echo. So it is opt-in, default false — the same mixed-version
 			// reasoning that gave pf_get_work_item its `brief` in aihub#212,
 			// reused rather than reversed.
-			"brief": prop("boolean", "Omit the content field from the response (default false); "+
-				"content_len is reported instead. Same meaning as pf_get_work_item's brief. "+
+			// The wording is exact on both halves because both were wrong once. It
+			// does not "omit the content field": a work item with no body keeps
+			// its content: null. And it is NOT the same as pf_get_work_item's
+			// brief, which deletes content and reports no length — a caller told
+			// the two were equivalent would apply this tool's "no content_len
+			// means no body" rule to that one's reply and conclude a work item
+			// with a 4 KB body was empty.
+			"brief": prop("boolean", "Replace the content body with content_len (bytes stored); default false. "+
+				"A wi that HAS no body is unaffected — it comes back as content: null with no content_len, so a "+
+				"missing content_len here means \"this wi has no body\", never \"the body was withheld\". "+
+				"NOT the same as pf_get_work_item's brief, which deletes content outright and reports no length. "+
 				"Content you send in THIS call is never echoed back regardless of this flag."),
 		}, []string{"work_item_id"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {

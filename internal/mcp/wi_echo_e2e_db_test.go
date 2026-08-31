@@ -256,6 +256,34 @@ func TestE2EWorkItemContentEchoAgainstARealServer(t *testing.T) {
 		t.Errorf("resources_version must survive brief — pf-plan reads it back from here")
 	}
 
+	// ── brief on a wi that HAS no body ──────────────────────────────────────
+	//
+	// The published description promises `content: null` and no content_len
+	// here, which rests on the real server serialising a NULL content column as
+	// a JSON null rather than omitting the key (domain.WorkItem.Content is
+	// *string with no omitempty). If that ever changed, brief would answer a
+	// bodyless work item with nothing at all about its content and absence would
+	// silently become the signal.
+	_, bodyless := s.call(t, "pf_create_work_item", map[string]any{
+		"project": s.project,
+		"goal":    "a work item filed with no body at all, to probe the null branch",
+	})
+	bodylessID, _ := bodyless["id"].(string)
+	if bodylessID == "" {
+		t.Fatalf("create returned no id for the bodyless work item")
+	}
+	_, nullBrief := s.call(t, "pf_update_work_item", map[string]any{
+		"work_item_id": bodylessID, "priority": "low", "brief": true,
+	})
+	if v, present := nullBrief["content"]; !present || v != nil {
+		t.Errorf("brief on a bodyless wi: content = %#v (present=%v), want a surviving null — "+
+			"the published description promises exactly this", v, present)
+	}
+	if _, present := nullBrief["content_len"]; present {
+		t.Errorf("brief on a bodyless wi reported content_len = %v; there is no body to measure",
+			nullBrief["content_len"])
+	}
+
 	t.Logf("MEASURED against a real Postgres + router + client + MCP handler (content %d B):", len(e2eContent))
 	t.Logf("  pf_create_work_item  after=%d B   (with content it would be ~%d B)", len(createText), len(createText)+len(e2eContent))
 	t.Logf("  pf_update_work_item  before=%d B  after=%d B  saved=%d B (%.1f%%)",

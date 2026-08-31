@@ -34,11 +34,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 	"github.com/GMISWE/ieops-aihub/internal/mcp"
 	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
@@ -49,16 +52,24 @@ import (
 var echoTestContent = "## Background\n\n" + strings.Repeat(
 	"Long-form markdown of the sort a spec or plan artifact carries. ", 64)
 
-// workItemRecord builds a response with the same 27 keys the live server
-// returns for a work item (captured read-only from GET /v1/work_items/:id
-// against production, which serialises the identical *domain.WorkItem that
-// POST and PATCH answer with — router.go handleCreateWorkItem / handleUpdate-
-// WorkItem / handleGetWorkItem all end in c.JSON(..., wi)).
+// workItemRecordBase builds a response with the same keys the live server
+// returns for a work item, MINUS content (captured read-only from
+// GET /v1/work_items/:id against production, which serialises the identical
+// *domain.WorkItem that POST and PATCH answer with — router.go
+// handleCreateWorkItem / handleUpdateWorkItem / handleGetWorkItem all end in
+// c.JSON(..., wi)).
 //
 // Written out rather than trimmed to the fields under test so the byte
 // measurements below are of a realistic record, and so a case that asserts
 // "everything else survived" has something to survive.
-func workItemRecord(id, content string) map[string]any {
+//
+// Split from workItemRecord because dropContentEcho branches on a distinction a
+// single helper could not express: a content key holding a string, a content key
+// holding JSON null, and no content key at all. The old helper skipped the key
+// whenever the content was empty, so NO test in this file could construct
+// `content: null` — and a mutant that answered a null body by deleting it and
+// reporting content_len: 0 survived the entire suite because of it.
+func workItemRecordBase(id string) map[string]any {
 	rec := map[string]any{
 		"id": id, "slug": "aihub#281", "seq": 281, "project": "aihub",
 		"goal":                   "pf_create/update_work_item echoes back the content the caller just wrote",
@@ -84,9 +95,16 @@ func workItemRecord(id, content string) map[string]any {
 		"updated_at":             "2026-08-31T15:39:45.663074Z",
 		"closed_at":              nil,
 	}
-	if content != "" {
-		rec["content"] = content
-	}
+	return rec
+}
+
+// workItemRecord is workItemRecordBase plus a content key, set VERBATIM —
+// including an empty string, which is a stored body and not the absence of one.
+// Tests that need `content: null` or no content key at all build on
+// workItemRecordBase directly.
+func workItemRecord(id, content string) map[string]any {
+	rec := workItemRecordBase(id)
+	rec["content"] = content
 	return rec
 }
 
@@ -256,28 +274,87 @@ func TestUpdateWithoutContentStillReturnsTheFullBody(t *testing.T) {
 // concurrent writer inside that window makes the stored content differ from
 // what was sent — and that is precisely the call whose response the caller
 // needs. Here the answer must be the full stored content, not a length.
+// The cases are chosen so that each defeats a WEAKER comparison that would
+// otherwise pass the whole suite. A single "wholly different" fixture does not:
+// the original one here was 35 B against a 4.1 KB payload, so a length-only
+// comparison satisfied it, and mutating `stored != sent` to
+// `len(stored) != len(sent)` survived every test in this file.
 func TestUpdateKeepsContentWhenTheStoredValueDiffers(t *testing.T) {
-	f := newFakeAihub(t)
-	servePatch(f, "wi_echo", workItemRecord("wi_echo", "what a CONCURRENT writer left behind"))
+	const sent = "status: queued\nowner: nobody\n"
+	for name, stored := range map[string]string{
+		// Same BYTE LENGTH, different bytes. This is the case the test is named
+		// for, stated so it can actually be seen: a caller PATCHes the body, a
+		// concurrent writer flips queued->paused inside the embedding window, and
+		// a length-gated comparison answers content_len: 29 with the body
+		// dropped — the caller never learning it was clobbered.
+		"same length, different bytes": "status: paused\nowner: nobody\n",
+		// Differs ONLY in surrounding whitespace: what a server that started
+		// trimming would produce, and what a TrimSpace-based comparison would
+		// wave through. Byte lengths differ here, so this case is blind to a
+		// length gate and the one above is blind to a trim gate — together they
+		// cover both.
+		"differs only in trailing whitespace": "status: queued\nowner: nobody",
+		"wholly different":                    "what a concurrent writer left behind",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if stored == sent {
+				t.Fatalf("fixture does not differ from what is sent; it cannot discriminate")
+			}
+			f := newFakeAihub(t)
+			servePatch(f, "wi_echo", workItemRecord("wi_echo", stored))
 
+			_, got := callToolText(t, f, "pf_update_work_item", map[string]any{
+				"work_item_id": "wi_echo", "content": sent,
+			})
+
+			if got["content"] != stored {
+				t.Errorf("content = %#v, want %#v — when the stored value differs from what was sent, "+
+					"suppressing it hides a clobber from the one caller positioned to notice", got["content"], stored)
+			}
+			if _, present := got["content_len"]; present {
+				t.Errorf("content_len must not appear when the content was kept, got %v", got["content_len"])
+			}
+		})
+	}
+}
+
+// TestContentLenCountsBytesNotRunes. content_len is documented as bytes, to
+// match Go's len() and the new_content_length the wi_content_updated event
+// already carries for the same string. Every other fixture in this file is
+// ASCII, where bytes and runes are the same number and a rune-counting
+// content_len is invisible.
+func TestContentLenCountsBytesNotRunes(t *testing.T) {
+	content := "结论：先量再改 🎯 measure before you change anything"
+	if len(content) == utf8.RuneCountInString(content) {
+		t.Fatalf("fixture is pure ASCII (%d bytes, %d runes); it cannot tell the two units apart",
+			len(content), utf8.RuneCountInString(content))
+	}
+
+	f := newFakeAihub(t)
+	servePatch(f, "wi_echo", workItemRecord("wi_echo", content))
 	_, got := callToolText(t, f, "pf_update_work_item", map[string]any{
-		"work_item_id": "wi_echo", "content": echoTestContent,
+		"work_item_id": "wi_echo", "content": content,
 	})
 
-	if got["content"] != "what a CONCURRENT writer left behind" {
-		t.Errorf("content = %v; when the stored value differs from what was sent, suppressing it would hide a clobber", got["content"])
-	}
-	if _, present := got["content_len"]; present {
-		t.Errorf("content_len must not appear when the content was kept, got %v", got["content_len"])
+	if got["content_len"] != float64(len(content)) {
+		t.Errorf("content_len = %v, want %d bytes (rune count would be %d)",
+			got["content_len"], len(content), utf8.RuneCountInString(content))
 	}
 }
 
 // TestUpdateTreatsAJSONNullContentAsUnsent. parseArgs is a plain json.Unmarshal
 // into map[string]any, so `content: null` puts the key in the map with a nil
 // value — while the server's `Content *string` reads null and absent alike and
-// leaves the stored body untouched. A presence check would therefore delete the
-// echo of the EXISTING body, which the caller never sent. The fix is the type
-// assertion in contentSentByCaller; this is what would go red without it.
+// leaves the stored body untouched, so nothing was echoed and nothing may be
+// dropped.
+//
+// This case does NOT depend on the type assertion in contentSentByCaller, and an
+// earlier version of this comment wrongly claimed it did. Under a bare presence
+// check the caller's content reads as "", the equality gate compares "" against
+// a non-empty stored body, and the drop is refused anyway. The assertion earns
+// its place on one narrower input — see
+// TestUpdateWithNullContentAgainstAnEmptyStoredBody, which is the case that
+// actually goes red without it.
 func TestUpdateTreatsAJSONNullContentAsUnsent(t *testing.T) {
 	f := newFakeAihub(t)
 	servePatch(f, "wi_echo", workItemRecord("wi_echo", "the body that was already stored"))
@@ -288,6 +365,37 @@ func TestUpdateTreatsAJSONNullContentAsUnsent(t *testing.T) {
 
 	if got["content"] != "the body that was already stored" {
 		t.Errorf("content = %v; a null content changes nothing on the server, so nothing was echoed and nothing may be dropped", got["content"])
+	}
+}
+
+// TestUpdateWithNullContentAgainstAnEmptyStoredBody is the single input on which
+// contentSentByCaller's type assertion changes the answer, and therefore the
+// only thing standing between that assertion and being deleted as decoration.
+//
+// `content: null` means "leave the body alone". Under a bare presence check the
+// caller's content reads as the zero value "" — and here the STORED body is also
+// "", so the equality gate is satisfied, and "leave the body alone" is answered
+// with the field deleted and content_len: 0. A caller that sent no content would
+// be told one had been suppressed, and could no longer tell an empty stored body
+// from a withheld one.
+//
+// An empty stored body is reachable: content is CHECKed for a maximum length,
+// not a minimum, so `content: ""` is a legal write.
+func TestUpdateWithNullContentAgainstAnEmptyStoredBody(t *testing.T) {
+	f := newFakeAihub(t)
+	servePatch(f, "wi_echo", workItemRecord("wi_echo", ""))
+
+	_, got := callToolText(t, f, "pf_update_work_item", map[string]any{
+		"work_item_id": "wi_echo", "content": nil,
+	})
+
+	if v, present := got["content"]; !present || v != "" {
+		t.Errorf("content = %#v (present=%v), want the stored empty string — a null content sends nothing, "+
+			"so there is no echo to suppress even when the stored body happens to be empty too", v, present)
+	}
+	if _, present := got["content_len"]; present {
+		t.Errorf("content_len = %v; reporting a length here claims a suppression that never happened",
+			got["content_len"])
 	}
 }
 
@@ -341,6 +449,114 @@ func TestUpdateBriefIsNotForwardedToTheServer(t *testing.T) {
 	}
 	if got := calls[0].Body["priority"]; got != "urgent" {
 		t.Errorf("the rest of the body must be unaffected; priority = %v", got)
+	}
+}
+
+// TestUpdateSendingAnEmptyContentToABodylessWorkItem pins the ONE input at which
+// suppressContentEcho's `!ok` guard and dropContentEcho's type assertion could
+// conceivably disagree, and documents why no test can force them to.
+//
+// Dropping the `!ok` leaves `stored != sent` comparing the zero value "" against
+// what the caller sent, so the two spellings diverge only when the response
+// content is not a string AND the caller sent exactly "". That is this call. And
+// even here they agree: the mutant reaches dropContentEcho, which repeats the
+// assertion, refuses, and changes nothing. So removing `!ok` is an EQUIVALENT
+// mutation — unkillable by construction, not a hole in the suite. It is kept
+// because it stops being equivalent the moment dropContentEcho's guard is
+// relaxed, and this test is what pins the behaviour either way.
+func TestUpdateSendingAnEmptyContentToABodylessWorkItem(t *testing.T) {
+	rec := workItemRecordBase("wi_echo")
+	rec["content"] = nil
+	f := newFakeAihub(t)
+	servePatch(f, "wi_echo", rec)
+
+	_, got := callToolText(t, f, "pf_update_work_item", map[string]any{
+		"work_item_id": "wi_echo", "content": "",
+	})
+
+	if v, present := got["content"]; !present || v != nil {
+		t.Errorf("content = %#v (present=%v), want a surviving null", v, present)
+	}
+	if _, present := got["content_len"]; present {
+		t.Errorf("content_len = %v; the response held no string to suppress", got["content_len"])
+	}
+}
+
+// TestUpdateBriefLeavesABodylessWorkItemAlone pins what brief does when there is
+// no body to replace, which is the half the published description used to get
+// wrong.
+//
+// `content: null` stays, and no content_len is emitted. That is deliberate and
+// it is the better of the two options: it leaves a POSITIVE signal. Under
+// brief=true the response says either "content_len: N" (there is a body, this
+// big) or "content: null" (there is none) — never nothing at all, which would
+// make absence carry the meaning and reinstate the aihub#269 ambiguity the
+// content_len handle exists to remove.
+func TestUpdateBriefLeavesABodylessWorkItemAlone(t *testing.T) {
+	rec := workItemRecordBase("wi_echo")
+	rec["content"] = nil
+	f := newFakeAihub(t)
+	servePatch(f, "wi_echo", rec)
+
+	_, got := callToolText(t, f, "pf_update_work_item", map[string]any{
+		"work_item_id": "wi_echo", "priority": "urgent", "brief": true,
+	})
+
+	v, present := got["content"]
+	if !present || v != nil {
+		t.Errorf("content = %#v (present=%v), want a surviving null — a wi with no body has nothing to "+
+			"replace, and deleting the key would leave absence as the only signal", v, present)
+	}
+	if _, present := got["content_len"]; present {
+		t.Errorf("content_len = %v; a wi with no body has no length to report, and 0 would be "+
+			"indistinguishable from a stored empty string", got["content_len"])
+	}
+}
+
+// TestUpdateBriefAcceptsTheStringSpelling. The MCP SDK's untyped AddTool
+// type-checks the schema at registration and then never validates a call, so
+// nothing between the wire and the handler enforces the published `boolean` —
+// and real callers demonstrably send the quoted form (csvArg and parseBoolArg
+// both exist because of it, aihub#280). boolArg's tolerance is what makes
+// `brief: "true"` work; without a test the tolerance could be narrowed back and
+// brief would silently stop applying, which fails in the safe direction and so
+// would never be noticed.
+func TestUpdateBriefAcceptsTheStringSpelling(t *testing.T) {
+	for _, spelling := range []any{"true", true, float64(1)} {
+		f := newFakeAihub(t)
+		servePatch(f, "wi_echo", workItemRecord("wi_echo", echoTestContent))
+
+		_, got := callToolText(t, f, "pf_update_work_item", map[string]any{
+			"work_item_id": "wi_echo", "priority": "urgent", "brief": spelling,
+		})
+
+		if _, present := got["content"]; present {
+			t.Errorf("brief=%#v did not apply; the published type is not enforced anywhere on the wire, "+
+				"so every spelling boolArg accepts has to keep working", spelling)
+		}
+		if got["content_len"] != float64(len(echoTestContent)) {
+			t.Errorf("brief=%#v: content_len = %v, want %d", spelling, got["content_len"], len(echoTestContent))
+		}
+	}
+}
+
+// TestDomainWorkItemHasNoContentLenField is the other half of the delete-list
+// argument, and the half that framing does not cover.
+//
+// wi_echo_slim.go removes only `content`, so a field added to domain.WorkItem
+// reaches the caller untouched — but it also WRITES `content_len` into a map it
+// does not own. If domain.WorkItem ever gains a field with that JSON name, the
+// write clobbers the server's value in silence, and
+// TestUpdateKeepsFieldsThisCodeHasNeverHeardOf cannot see it: that probes a name
+// nothing produces, which is the opposite of a collision.
+func TestDomainWorkItemHasNoContentLenField(t *testing.T) {
+	typ := reflect.TypeOf(domain.WorkItem{})
+	for i := 0; i < typ.NumField(); i++ {
+		name, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
+		if name == "content_len" {
+			t.Fatalf("domain.WorkItem.%s is serialised as content_len, which wi_echo_slim.go overwrites "+
+				"whenever it suppresses a body — rename one of the two", typ.Field(i).Name)
+		}
 	}
 }
 

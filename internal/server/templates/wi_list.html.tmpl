@@ -117,9 +117,49 @@
       </div>
       {{end}}
       </div>
+      {{if eq .SelectedSeg "done"}}
+      {{/* Done pager (aihub#298) — SERVER-side, unlike every other segment.
+           The client pager below paginates rows already in the DOM, which is
+           only honest when the server shipped the segment whole. Done grows
+           without bound and ships one cursor page at a time, so reusing that
+           pager here would page 50 rows into 5 pages and print "1–10 of 50"
+           under a header reading the archive total — stating a completeness
+           that is not there. This footer reports the page against that total
+           and is the only control that can reach older rows. */}}
+      {{$dproj := "__all__"}}{{if not .AllMode}}{{$dproj = .Project}}{{end}}
+      <div class="pager" data-done-pager>
+        <span class="pinfo" data-done-pinfo>
+          {{.DoneShown}} / {{index .SegCounts "done"}}
+          {{- if .DoneNextCursor}} · 还有更早的{{else if .DoneCursor}} · 已到最早{{end}}
+        </span>
+        <span style="flex:1"></span>
+        {{if .DoneCursor}}
+        <a class="pg-btn" data-done-newest
+           href="/ui/wi?seg=done&project={{$dproj}}&owner={{.Owner}}&limit={{.Limit}}"
+           hx-get="/ui/wi?seg=done&project={{$dproj}}&limit={{.Limit}}"
+           hx-target="#wi-list-body" hx-swap="innerHTML" hx-push-url="true">↑ 最新</a>
+        {{end}}
+        {{if .DoneNextCursor}}
+        {{/* urlquery on BOTH attributes, deliberately. href is a URL context so
+             html/template would escape it anyway (and does not double-escape a
+             pipeline already ending in urlquery); hx-get is NOT a URL context —
+             there the automatic escaping is HTML-only, so a cursor carrying a
+             '+' (a non-UTC offset in the RFC3339Nano timestamp) renders as
+             &#43;, reaches the server as a bare '+', and decodes to a space.
+             Writing the two lines the same way keeps the asymmetry from looking
+             like an accident to whoever edits this next. */}}
+        <a class="pg-btn" data-done-older
+           href="/ui/wi?seg=done&project={{$dproj}}&owner={{.Owner}}&limit={{.Limit}}&done_cursor={{urlquery .DoneNextCursor}}"
+           hx-get="/ui/wi?seg=done&project={{$dproj}}&limit={{.Limit}}&done_cursor={{urlquery .DoneNextCursor}}"
+           hx-target="#wi-list-body" hx-swap="innerHTML" hx-push-url="true">更早 →</a>
+        {{end}}
+      </div>
+      {{else}}
       {{/* Pager footer (aihub#185): page-info + per-page picker (default 10) +
            numbered page buttons. dropdown.js fills it; the footer shows whenever
-           the segment has rows, the page buttons only when the rows span >1 page. */}}
+           the segment has rows, the page buttons only when the rows span >1 page.
+           Not rendered for Done (see above); dropdown.js's wirePager early-returns
+           when [data-grp-pager] is absent, so its absence is inert, not a break. */}}
       <div class="pager" data-wi-pager hidden>
         <span class="pinfo" data-grp-pinfo></span>
         <span class="pp-label">每页</span>
@@ -132,6 +172,7 @@
         <span style="flex:1"></span>
         <div class="grp-pager" data-grp-pager></div>
       </div>
+      {{end}}
       </div>
     </div>
   </div>

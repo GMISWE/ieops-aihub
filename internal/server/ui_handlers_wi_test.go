@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1022,3 +1023,270 @@ func TestUIWIDetail_HiddenChild_Masked(t *testing.T) {
 
 // Verify wiStrPtr is referenced to keep helper used in case test fixtures grow.
 var _ = wiStrPtr
+
+// --- aihub#298: Done segment server-side pagination ---------------------------
+//
+// The Done segment fetched a single page hardcoded to 200 rows and stopped,
+// while its header count came from fetchDoneCount (a real COUNT(*)). Past 200
+// terminal items the page therefore printed an exact total above a silently
+// truncated list and offered a purely client-side pager over the loaded rows —
+// so the archive looked complete, and older items were unreachable by any
+// control on the page. These tests pin the behaviours whose regression would
+// restore that: the cursor must reach the server, "there are older rows" must
+// survive to the markup, and the page must not re-acquire a control that
+// implies completeness it does not have.
+
+// doneArchiveFake serves `total` terminal items from an "idx-N" cursor and
+// appends every filter it is called with to *seen, so a test can assert on what
+// the handler actually asked the domain layer for (not merely on what came
+// back). Rows are numbered newest-first: index i holds seq total-i.
+func doneArchiveFake(total int, seen *[]domain.ListWorkItemsFilter) func(context.Context, *pgxpool.Pool, string, domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+	return func(_ context.Context, _ *pgxpool.Pool, _ string, f domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		if seen != nil {
+			*seen = append(*seen, f)
+		}
+		start := 0
+		if f.Cursor != nil {
+			// Cursors this fake mints are "idx-N"; anything else (e.g. a real
+			// RFC3339 timestamp used by the escaping test) starts at 0.
+			if n, err := strconvAtoiPrefix(*f.Cursor, "idx-"); err == nil {
+				start = n
+			}
+		}
+		wiType := "fix_bug"
+		base := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+		items := []*domain.WorkItem{}
+		for i := start; i < start+f.Limit && i < total; i++ {
+			seq := int64(total - i)
+			items = append(items, &domain.WorkItem{
+				ID:        "wi_" + strconv.FormatInt(seq, 10),
+				Seq:       seq,
+				Slug:      "arch#" + strconv.FormatInt(seq, 10),
+				Project:   "p1",
+				Goal:      "archived item",
+				Status:    "wrapped",
+				WIType:    &wiType,
+				Labels:    []string{},
+				CreatedAt: base.Add(-time.Duration(i) * time.Minute),
+			})
+		}
+		res := &domain.ListWorkItemsResult{Items: items}
+		if start+f.Limit < total {
+			c := "idx-" + strconv.Itoa(start+f.Limit)
+			res.NextCursor = &c
+		}
+		return res, nil
+	}
+}
+
+// strconvAtoiPrefix parses "<prefix><int>", returning an error if the prefix is
+// absent so non-"idx-" cursors fall back to the first page.
+func strconvAtoiPrefix(s, prefix string) (int, error) {
+	if !strings.HasPrefix(s, prefix) {
+		return 0, strconv.ErrSyntax
+	}
+	return strconv.Atoi(strings.TrimPrefix(s, prefix))
+}
+
+// renderWIList runs the real list handler against the real template and returns
+// the rendered HTML. pool is nil: every DB helper the handler reaches on this
+// path either nil-guards or is stubbed by the caller.
+func renderWIList(t *testing.T, url string) string {
+	t.Helper()
+	tmpl := pageTemplate("wi_list.html.tmpl")
+	h := handleUIWIList(nil, tmpl)
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set("user", wiTestUser())
+	if err := h(c); err != nil {
+		t.Fatalf("handler error for %s: %v", url, err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d for %s", rec.Code, url)
+	}
+	return rec.Body.String()
+}
+
+// withDoneCount stubs the archive aggregate count.
+func withDoneCount(t *testing.T, n int) {
+	t.Helper()
+	prev := fetchDoneCountFn
+	fetchDoneCountFn = func(_ context.Context, _ *pgxpool.Pool, _ []string) int { return n }
+	t.Cleanup(func() { fetchDoneCountFn = prev })
+}
+
+// TestDoneSegment_CursorReachesTheQuery is the core regression: ?done_cursor=
+// must be forwarded to the domain filter. If it is dropped, every "older" click
+// silently re-serves page 1 — the list still looks fine, which is why this
+// asserts on the filter rather than on the row count.
+func TestDoneSegment_CursorReachesTheQuery(t *testing.T) {
+	var seen []domain.ListWorkItemsFilter
+	withFakeListWI(t, doneArchiveFake(417, &seen))
+	withDoneCount(t, 417)
+
+	renderWIList(t, "/ui/wi?seg=done&project=p1&done_cursor=idx-50")
+
+	var doneFilter *domain.ListWorkItemsFilter
+	for i := range seen {
+		if len(seen[i].Status) > 0 && seen[i].Status[0] == "wrapped" {
+			doneFilter = &seen[i]
+		}
+	}
+	if doneFilter == nil {
+		t.Fatal("no terminal-status query was issued for the done segment")
+	}
+	if doneFilter.Cursor == nil {
+		t.Fatal("done query carried no cursor: ?done_cursor= was dropped, so paging can never advance")
+	}
+	if *doneFilter.Cursor != "idx-50" {
+		t.Errorf("done cursor = %q, want %q", *doneFilter.Cursor, "idx-50")
+	}
+}
+
+// TestDoneSegment_PageSizeFollowsLimit pins that the page size is the request's
+// own limit rather than a hardcoded constant. A reintroduced literal would also
+// have to stay under domain.ListWorkItems' 200 cap, above which that function
+// silently falls back to 50 (aihub#267) — so a too-large literal degrades
+// invisibly, which is exactly what this catches.
+func TestDoneSegment_PageSizeFollowsLimit(t *testing.T) {
+	for _, limit := range []int{25, 120} {
+		var seen []domain.ListWorkItemsFilter
+		withFakeListWI(t, doneArchiveFake(417, &seen))
+		withDoneCount(t, 417)
+
+		renderWIList(t, "/ui/wi?seg=done&project=p1&limit="+strconv.Itoa(limit))
+
+		found := false
+		for _, f := range seen {
+			if len(f.Status) > 0 && f.Status[0] == "wrapped" {
+				found = true
+				if f.Limit != limit {
+					t.Errorf("limit=%d: done query used Limit=%d, want %d", limit, f.Limit, limit)
+				}
+				if f.Limit > 200 {
+					t.Errorf("limit=%d: done query Limit=%d exceeds domain's 200 cap and would silently degrade to 50", limit, f.Limit)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("limit=%d: no terminal-status query issued", limit)
+		}
+	}
+}
+
+// TestDoneSegment_MoreRowsAreAdvertised: when older rows exist the markup must
+// carry a control that reaches them, and when they do not it must not. The
+// original defect was precisely that no such control could exist.
+func TestDoneSegment_MoreRowsAreAdvertised(t *testing.T) {
+	withFakeListWI(t, doneArchiveFake(417, nil))
+	withDoneCount(t, 417)
+
+	first := renderWIList(t, "/ui/wi?seg=done&project=p1")
+	if !strings.Contains(first, "data-done-older") {
+		t.Error("first page of a 417-item archive has no 'older' control: the rest of the archive is unreachable")
+	}
+	if strings.Contains(first, "data-done-newest") {
+		t.Error("first page offers a 'newest' control while already on the newest page")
+	}
+
+	// 400 of 417 consumed: the last page is a short one and terminates paging.
+	last := renderWIList(t, "/ui/wi?seg=done&project=p1&done_cursor=idx-400")
+	if strings.Contains(last, "data-done-older") {
+		t.Error("final page still offers an 'older' control; paging does not terminate")
+	}
+	if !strings.Contains(last, "data-done-newest") {
+		t.Error("final page offers no way back to the newest page")
+	}
+}
+
+// TestDoneSegment_HeaderCountIsArchiveTotal guards the pair that made the bug
+// legible: the header shows the true archive size while the body shows one
+// page. Collapsing them (e.g. counting rendered rows) would hide truncation
+// again; that is the state this wi fixed, not a tidier invariant.
+func TestDoneSegment_HeaderCountIsArchiveTotal(t *testing.T) {
+	withFakeListWI(t, doneArchiveFake(417, nil))
+	withDoneCount(t, 417)
+
+	html := renderWIList(t, "/ui/wi?seg=done&project=p1&limit=50")
+
+	if !strings.Contains(html, ">417<") {
+		t.Error("header does not show the archive total 417")
+	}
+	if strings.Count(html, "data-wi-row") != 50 {
+		t.Errorf("rendered %d rows, want the 50-row page", strings.Count(html, "data-wi-row"))
+	}
+}
+
+// TestDoneSegment_NoClientPager: dropdown.js's pager paginates rows already in
+// the DOM and prints "N–M of <loaded>". That is honest only when the server
+// shipped the segment whole. Rendering it for Done asserts a completeness the
+// server-paged list does not have, so it must stay absent there — and present
+// everywhere else.
+func TestDoneSegment_NoClientPager(t *testing.T) {
+	withFakeListWI(t, doneArchiveFake(417, nil))
+	withDoneCount(t, 417)
+
+	done := renderWIList(t, "/ui/wi?seg=done&project=p1")
+	if strings.Contains(done, "data-grp-pager") {
+		t.Error("done renders the client-side pager, which pages only loaded rows and implies the archive is complete")
+	}
+	if !strings.Contains(done, "data-done-pager") {
+		t.Error("done renders no server pager")
+	}
+
+	active := renderWIList(t, "/ui/wi?seg=unclaimed&project=p1")
+	if !strings.Contains(active, "data-grp-pager") {
+		t.Error("active segment lost the client-side pager; the done-only change leaked")
+	}
+	if strings.Contains(active, "data-done-pager") {
+		t.Error("active segment rendered the done server pager")
+	}
+}
+
+// TestDoneSegment_CursorURLEscapedInBothAttributes pins the escaping asymmetry
+// that is invisible in normal fixtures. html/template treats href as a URL
+// context and escapes it; hx-get is a custom attribute and gets HTML escaping
+// only, so a '+' (a non-UTC RFC3339Nano offset) renders as &#43;, reaches the
+// server as a bare '+', and decodes to a space — silently paging from the wrong
+// place. UTC cursors end in 'Z' and can never exhibit this, so only an explicit
+// '+' fixture can hold the line.
+func TestDoneSegment_CursorURLEscapedInBothAttributes(t *testing.T) {
+	const plusCursor = "2026-08-30T23:22:54.510849+08:00"
+
+	withFakeListWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string, f domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		wiType := "fix_bug"
+		items := []*domain.WorkItem{{
+			ID: "wi_1", Seq: 1, Slug: "arch#1", Project: "p1", Goal: "archived",
+			Status: "wrapped", WIType: &wiType, Labels: []string{},
+			CreatedAt: time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC),
+		}}
+		c := plusCursor
+		return &domain.ListWorkItemsResult{Items: items, NextCursor: &c}, nil
+	})
+	withDoneCount(t, 417)
+
+	html := renderWIList(t, "/ui/wi?seg=done&project=p1")
+
+	if strings.Contains(html, "done_cursor=2026-08-30T23:22:54.510849&#43;") {
+		t.Error("cursor '+' was HTML-escaped but not URL-escaped; it will decode to a space server-side")
+	}
+	if n := strings.Count(html, "done_cursor=2026-08-30T23%3A22%3A54.510849%2B08%3A00"); n != 2 {
+		t.Errorf("URL-escaped cursor appears %d times, want 2 (href and hx-get); raw=%q", n,
+			firstMatchAround(html, "done_cursor="))
+	}
+}
+
+// firstMatchAround returns a short window around needle for failure messages.
+func firstMatchAround(s, needle string) string {
+	i := strings.Index(s, needle)
+	if i < 0 {
+		return "<not found>"
+	}
+	end := i + 90
+	if end > len(s) {
+		end = len(s)
+	}
+	return s[i:end]
+}

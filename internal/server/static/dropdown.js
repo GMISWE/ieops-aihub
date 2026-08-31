@@ -324,10 +324,20 @@
     if (!el || !el.matches) return;
     var isForm = el.matches("form[data-wi-filters]");
     var isSeg = el.matches(".seg-nav .seg-item[data-seg-key]");
-    if ((!isForm && !isSeg) || !e.detail || !e.detail.parameters) return;
-    // owner: inject the live "me" toggle state for BOTH the form reload and the
-    // sidebar segment links, so switching segment / project keeps the personal
-    // filter. Empty = All (the default view).
+    // Done's server pager (aihub#298) lives in .wi-main, not .seg-nav, so it
+    // matches neither selector above. Without this it would be the only htmx
+    // trigger on the page that sends no owner at all — not an empty owner, the
+    // parameter absent — which the handler reads as All, silently dropping the
+    // Mine toggle / explicit ?owner= the moment you page the archive. Its href
+    // fallback carries owner already; this is the JS path catching up, so both
+    // paths agree and there stays exactly ONE place that injects owner.
+    var isDonePager = el.matches("[data-done-older], [data-done-newest]");
+    if ((!isForm && !isSeg && !isDonePager) || !e.detail || !e.detail.parameters) return;
+    // owner: inject the live "me" toggle state for the form reload, the sidebar
+    // segment links AND Done's server pager, so switching segment / project or
+    // paging the archive keeps the personal filter. Empty = All (the default
+    // view). Anything else that swaps #wi-list-body must be added here too — the
+    // page has exactly one owner-injection point on purpose.
     var me = document.querySelector("[data-me-toggle]");
     e.detail.parameters.owner = (me && me.classList.contains("on")) ? (me.getAttribute("data-me-owner") || "") : "";
     // seg: for the form reload, read the live active sidebar item (the form's

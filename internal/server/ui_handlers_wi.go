@@ -232,7 +232,18 @@ type wiListPageData struct {
 	SelectedSeg string
 	SegRows     []*wiListRow
 	Segments    []segNav // ordered sidebar nav (label + count + selected + divider)
-	Err         string
+	// Done-segment server pagination (aihub#298). Only meaningful when
+	// SelectedSeg == "done": that segment grows without bound, so its rows are
+	// fetched one cursor page at a time instead of being shipped whole and paged
+	// in the browser. DoneCursor is the cursor that produced the page on screen
+	// ("" = newest); DoneNextCursor is non-empty exactly when older rows exist,
+	// and is the ONLY signal the template has that the archive continues past
+	// what it rendered. DoneShown is len(SegRows), i.e. this page's row count —
+	// deliberately distinct from SegCounts["done"], which is the archive total.
+	DoneCursor     string
+	DoneNextCursor string
+	DoneShown      int
+	Err            string
 }
 
 // segNav is one entry in the LCRS sidebar (aihub#185): a segment's display label,
@@ -736,6 +747,12 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		}
 		data.SelectedSeg = selectedSeg
 
+		// Cursor for the Done segment's server-side pagination (aihub#298).
+		// Empty = newest page. Only Done reads it; the active segments are
+		// bounded and ship whole.
+		doneCursor := strings.TrimSpace(c.QueryParam("done_cursor"))
+		data.DoneCursor = doneCursor
+
 		stalled := stalledSet(ctx, pool, project, allMode, projects, u)
 		segCounts, segRows := segmentListRows(rows, viewer, data.Mine, stalled)
 
@@ -764,16 +781,35 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		}
 
 		if selectedSeg == "done" {
+			// Done is server-paginated (aihub#298). It is the one segment whose row
+			// set only ever grows, so it cannot be "loaded fully and paged in the
+			// browser" the way the active segments are.
+			//
+			// The previous code fetched a single page capped at df.Limit = 200 and
+			// stopped, on the reasoning that this made the header count match the
+			// rendered rows. Past 200 terminal items that reasoning inverts: the
+			// header count comes from fetchDoneCount (a real COUNT(*), so it stays
+			// exact) while the rows silently stop at 200, and dropdown.js then pages
+			// those 200 client-side — printing "1–10 of 200" underneath a header
+			// reading e.g. 417, with no control that could ever reach the rest. The
+			// archive looked truncated to the point of data loss (it was not; the
+			// rows were simply never requested).
+			//
+			// So the fetch now carries a cursor and reports whether older rows exist.
+			// data.Limit is the page's own limit (default 50, ?limit= up to 200),
+			// which keeps Done consistent with every other list on the page and
+			// stays inside domain.ListWorkItems' 200 cap — above it that function
+			// silently falls back to 50 (aihub#267).
 			df := filter
 			df.Status = doneStatuses
-			// Load the full terminal archive (up to the 200 cap) so the sidebar /
-			// header Done count matches the rendered + paginated rows. The active
-			// segments don't need this — their counts derive from the same loaded
-			// rows. A project with >200 terminal items would need server-side
-			// pagination (follow-up).
-			df.Limit = 200
-			if dr, _, derr := fetchListGroups(ctx, pool, queryProject, df, viewer, data.Mine, nil); derr == nil {
+			df.Limit = data.Limit
+			if doneCursor != "" {
+				df.Cursor = &doneCursor
+			}
+			if dr, next, derr := fetchListRowsPaged(ctx, pool, queryProject, df); derr == nil {
 				data.SegRows = dr
+				data.DoneNextCursor = next
+				data.DoneShown = len(dr)
 			}
 		} else {
 			data.SegRows = segRows[selectedSeg]
@@ -781,6 +817,59 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 
 		return renderTemplate(c, tmpl, renderName, data)
 	}
+}
+
+// fetchListRowsPaged is fetchListGroups' paginated sibling: it returns one
+// cursor page of rows plus the cursor for the NEXT page.
+//
+// It exists because fetchListGroups discards res.NextCursor — which is correct
+// for its callers (the count strip and the active-segment list both want a
+// bounded snapshot, not a walkable archive) but leaves no way to page. Rather
+// than widen that function's signature at three call sites, Done gets its own
+// entry point. It also skips the grouping pass: the caller renders these rows
+// directly as the selected segment, so wiListGroup would be built and dropped.
+//
+// The returned cursor is domain's opaque page token, empty when this is the
+// last page. Ordering is whatever filter.Sort/Order specify (default
+// created_at DESC), and the cursor is only valid for that same ordering —
+// callers must not hand it back with a different sort.
+//
+// There is deliberately no `mine` parameter, which is narrower than it sounds:
+// an EXPLICIT owner filter still applies to Done, because the caller's filter
+// already carries filter.OwnerDisplay (set at the ?owner= handling above when
+// the user typed an owner and is not in Mine view) and df inherits it. What is
+// dropped is only the in-memory MINE scoping that groupListRows/segmentListRows
+// apply to the active segments. The old call site passed data.Mine to
+// fetchListGroups but then used its raw rows and discarded the grouping, so
+// that scoping never reached Done's rows there either — this preserves the
+// behaviour rather than implying a scoping that does not happen.
+func fetchListRowsPaged(ctx context.Context, pool *pgxpool.Pool, queryProject string, filter domain.ListWorkItemsFilter) ([]*wiListRow, string, *domain.AihubError) {
+	res, aerr := listWorkItemsFn(ctx, pool, queryProject, filter)
+	if aerr != nil {
+		return nil, "", aerr
+	}
+
+	attemptIDs := make([]string, 0, len(res.Items))
+	for _, wi := range res.Items {
+		if wi.CurrentAttemptID != nil {
+			attemptIDs = append(attemptIDs, *wi.CurrentAttemptID)
+		}
+	}
+	owners := fetchAttemptOwners(ctx, pool, attemptIDs)
+
+	rows := make([]*wiListRow, 0, len(res.Items))
+	for _, wi := range res.Items {
+		rows = append(rows, toListRow(wi, owners))
+	}
+	// Same global re-sort fetchListGroups applies, so a page's rows read in the
+	// same order as every other list on the page.
+	sortListRows(rows)
+
+	next := ""
+	if res.NextCursor != nil {
+		next = *res.NextCursor
+	}
+	return rows, next, nil
 }
 
 // fetchListGroups runs the wi list query, batch-loads current-attempt owners,

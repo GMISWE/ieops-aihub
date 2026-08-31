@@ -134,10 +134,17 @@ description: >
        that test goes red, do not raise the limit — move something to the
        on-demand tier instead.
 
-       ⚠️ That suite is NOT wired into CI yet (.github/workflows/ci.yml runs only
-       launcher-update-check.test.sh — see its aihub#254 note). Until it is, this
-       is a check someone must run by hand, not an automatic guarantee. Run it
-       after editing anything under fragments/.
+       Since aihub#293 that suite IS wired into CI (.github/workflows/ci.yml, step
+       "aihub#293 using-polyforge payload budget gate"), so busting the budget now
+       fails the PR rather than shipping silently. Run it locally anyway after
+       editing anything under fragments/ — it is faster than a CI round trip.
+
+       Second line of defence: hooks/pf-session-start checks its own assembled
+       length at runtime. Over 10,000 characters it drops trailing fragments,
+       leads with a banner naming them and warns on stderr, instead of letting
+       the harness swap the payload for a ~2,000-character preview in silence.
+       That is a safety net for sessions on an older plugin copy, NOT a licence
+       to exceed the budget — the CI gate above treats degradation as a failure.
 
     2. IRON RULES STAY FIRST. fragments/iron-rules.md is @include'd first so that
        IR1-IR3 land inside the ~2,000-character preview window. If the budget is

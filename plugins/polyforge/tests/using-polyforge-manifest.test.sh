@@ -48,10 +48,11 @@
 #                 and the tier fixture must then go green. A validator that passes on
 #                 everything is indistinguishable from no validator.
 #
-# !! CI STATUS: THIS SUITE IS NOT WIRED INTO CI YET. !!
-# .github/workflows/ci.yml runs only launcher-update-check.test.sh. Wiring this in is
-# aihub#293 (ci.yml is owned by a concurrent work item). A gate that CI does not run is
-# a gate nobody runs — until #293 lands this is a manual check, NOT a guarantee.
+# CI STATUS: WIRED (aihub#293). .github/workflows/ci.yml runs this as the step
+# "aihub#293 using-polyforge manifest gate". That step does not trust this script's exit code
+# — it asserts named PASS markers, that no SKIP fired, that ALL PASS appears at least twice
+# (lint AND controls), and a floor on the PASS count, because a suite that runs zero checks
+# also exits 0. IF YOU ADD OR RENAME A CHECK HERE, update that step.
 #
 # USAGE
 #   tests/using-polyforge-manifest.test.sh              # lint + all controls

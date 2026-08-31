@@ -204,17 +204,18 @@ jobs:
       # hermetic (no docker, no network: it stubs gh/curl/binary and drives
       # check_for_update directly), so it is safe to gate on.
       #
-      # Deliberately narrow: the other suites under plugins/polyforge/tests/
-      # (launcher-bash32, pf-commit-guard, pf-repo-sync, pf-seam-check,
-      # pf-skill-router) are ALSO unwired here and are not enabled by this step.
-      # launcher-bash32 in particular needs docker and would newly gate PRs, so
-      # turning them all on at once belongs in its own change rather than riding
-      # along with a bugfix.
+      # Deliberately narrow: launcher-bash32, pf-commit-guard, pf-repo-sync,
+      # pf-seam-check and pf-skill-router under plugins/polyforge/tests/ are
+      # still unwired and are not enabled by this step. launcher-bash32 in
+      # particular needs docker and would newly gate PRs, so turning them all on
+      # at once belongs in its own change rather than riding along with a bugfix.
       # NOTE (aihub#254): this gap has a cost, now demonstrated — pf-repo-sync
       # regressed session-start latency and shipped with no baseline because no
       # gate covered it. pf-repo-sync.test.sh carries the static assertion that
       # the hook stays `async: true`, and while unwired that guard is advisory:
       # it only runs when someone invokes it by hand.
+      # UPDATE (aihub#293): the two using-polyforge suites are no longer in that
+      # list — they are wired below. The rest of the sentence still stands.
       # aihub#249: GET /v1/memories previously parsed only `top_k` (a `?limit=N`
       # caller was silently ignored) and RecallResponse carried no `total`; and
       # GET /v1/memories/:id did not exist at all. These run against the
@@ -367,6 +368,86 @@ jobs:
 
       - name: Launcher update-check regression suite
         run: bash plugins/polyforge/tests/launcher-update-check.test.sh
+
+      # aihub#293: wire the two using-polyforge gates in. Until now ci.yml ran
+      # exactly one suite out of plugins/polyforge/tests/ (the launcher one
+      # above), so both of these were advisory — they only ran when a human
+      # remembered to invoke them. That is the same shape as the aihub#254 gap
+      # noted further up, applied to a bug that already shipped: aihub#285 found
+      # that ~89% of the using-polyforge skill had reached no model at all since
+      # 2026-08-05, silently, because the assembled SessionStart payload passed a
+      # 10,000-character harness limit and was replaced by a ~2,000-character
+      # preview. The hook still exited 0. Nothing was red.
+      #
+      # Both suites are hermetic — no docker, no network, no database. They shell
+      # out to python3 (present on ubuntu-latest) and drive hooks/pf-session-start
+      # against fixture trees under mktemp, so they are as safe to gate on as
+      # launcher-update-check.
+      #
+      # The assertions below deliberately do NOT trust the exit code, for exactly
+      # the reason the DB steps above give: a suite that ran zero checks also
+      # exits 0. Both scripts additionally start with
+      # `command -v python3 || { echo "SKIP: ..."; exit 0; }`, so anything that
+      # removes python3 from the runner would turn them into a green no-op — the
+      # zero-coverage state these steps exist to prevent. So each step asserts
+      # that named checks reported PASS, that no SKIP escape hatch fired, and
+      # that the PASS count did not fall below a floor.
+      #
+      # The floors are ratchets, not exact counts: raise them when you add
+      # checks. A floor catches the case that matters (a suite that silently
+      # stopped running checks) without going red on a legitimate addition.
+      - name: aihub#293 using-polyforge payload budget gate
+        run: |
+          set -o pipefail
+          bash plugins/polyforge/tests/using-polyforge-payload.test.sh 2>&1 | tee payload_gate.log
+          for want in "PASS: payload " \
+                      "PASS: the hook did not have to degrade this payload" \
+                      "PASS: IR1 — inside preview window" \
+                      "PASS: IR2 — inside preview window" \
+                      "PASS: IR3 — inside preview window" \
+                      "PASS: IR3 falls out of the window when iron-rules.md is moved last" \
+                      "PASS: post-claim-routing.md not injected" \
+                      "PASS: real tree" \
+                      "PASS: degraded payload " \
+                      "PASS: hook wrote the over-budget finding to stderr" \
+                      "ALL PASS"; do
+            grep -qF -- "$want" payload_gate.log \
+              || { echo "::error::using-polyforge-payload.test.sh did not report '$want' — the payload budget gate is not actually executing"; exit 1; }
+          done
+          ! grep -q '^SKIP:' payload_gate.log \
+            || { echo "::error::using-polyforge-payload.test.sh SKIPped (python3 missing on the runner?) — it exits 0 in that case, so this step would otherwise be a green no-op"; exit 1; }
+          n=$(grep -c '^  PASS: ' payload_gate.log || true)
+          [ "${n:-0}" -ge 34 ] \
+            || { echo "::error::only $n PASS lines from using-polyforge-payload.test.sh, floor is 34 — checks have gone missing"; exit 1; }
+          echo "using-polyforge payload gate: $n checks passed"
+
+      - name: aihub#293 using-polyforge manifest gate
+        run: |
+          set -o pipefail
+          bash plugins/polyforge/tests/using-polyforge-manifest.test.sh 2>&1 | tee manifest_gate.log
+          for want in "PASS: no fragment declared twice" \
+                      "PASS: every declared path exists on disk" \
+                      "PASS: no undeclared fragment under fragments/" \
+                      "PASS: every curated enforcement mechanism still exists on disk" \
+                      "PASS: no new violation;" \
+                      "PASS: old parser derives the same" \
+                      "PASS: with the tier rule excised, the ungated-on-demand fixture no longer fails" \
+                      "PASS: ...and the un-mutated script still fails it"; do
+            grep -qF -- "$want" manifest_gate.log \
+              || { echo "::error::using-polyforge-manifest.test.sh did not report '$want' — the manifest gate is not actually executing"; exit 1; }
+          done
+          ! grep -q '^SKIP:' manifest_gate.log \
+            || { echo "::error::using-polyforge-manifest.test.sh SKIPped (python3 missing on the runner?) — it exits 0 in that case, so this step would otherwise be a green no-op"; exit 1; }
+          # Two, not one: the suite prints ALL PASS after the lint of the real
+          # tree AND again after the negative-control + mutation sections. One
+          # occurrence means a whole half stopped running.
+          a=$(grep -c '^ALL PASS$' manifest_gate.log || true)
+          [ "${a:-0}" -ge 2 ] \
+            || { echo "::error::using-polyforge-manifest.test.sh printed ALL PASS $a time(s), expected at least 2 (lint + controls) — a whole section did not run"; exit 1; }
+          n=$(grep -c '^  PASS: ' manifest_gate.log || true)
+          [ "${n:-0}" -ge 20 ] \
+            || { echo "::error::only $n PASS lines from using-polyforge-manifest.test.sh, floor is 20 — checks have gone missing"; exit 1; }
+          echo "using-polyforge manifest gate: $n checks passed"
 
   publish-schemas:
     name: Publish MCP Schemas

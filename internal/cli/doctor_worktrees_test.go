@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +53,17 @@ type fakeAihub struct {
 	hideFromList map[string]bool
 	// failListPage, when non-zero, makes the Nth list page (1-based) return 500.
 	failListPage int
+	// repeatCursor makes every page hand back the cursor it was given, so the
+	// walk can never advance. Without this the repeated-cursor guard was dead
+	// code to the suite: the fake's cursor is a monotonic offset.
+	repeatCursor bool
+	// neverEndCursor makes every page hand back a fresh cursor forever, so the
+	// page budget is the only thing that ends the walk.
+	neverEndCursor bool
+	// omitItems drops the items key from the response entirely.
+	omitItems bool
+	// badCursorType returns next_cursor as a number rather than a string or null.
+	badCursorType bool
 
 	mu        sync.Mutex
 	listQuery []url.Values
@@ -124,9 +137,22 @@ func (f *fakeAihub) serveList(w http.ResponseWriter, r *http.Request) {
 		end = len(matched)
 	}
 	body := map[string]any{"items": itemsJSON(matched[start:end])}
-	if end < len(matched) {
+	if f.omitItems {
+		delete(body, "items")
+	}
+	switch {
+	case f.repeatCursor:
+		body["next_cursor"] = q.Get("cursor") // never advances; "" on page 1
+		if body["next_cursor"] == "" {
+			body["next_cursor"] = "0"
+		}
+	case f.neverEndCursor:
+		body["next_cursor"] = strconv.Itoa(start + 1)
+	case f.badCursorType:
+		body["next_cursor"] = 12345 // neither string nor null
+	case end < len(matched):
 		body["next_cursor"] = strconv.Itoa(end)
-	} else {
+	default:
 		body["next_cursor"] = nil // the real server emits JSON null
 	}
 	_ = json.NewEncoder(w).Encode(body)
@@ -206,7 +232,7 @@ func ieopsCfg() *config.Config {
 func runWorktreeCheck(t *testing.T, f *fakeAihub, root string, opts doctorOpts) (checkResult, string) {
 	t.Helper()
 	if opts.forceRemove == nil {
-		opts.forceRemove = map[string]bool{}
+		opts.forceRemove = map[string]string{}
 	}
 	var buf bytes.Buffer
 	res := checkWorktrees(context.Background(), f.start(t), ieopsCfg(), root, opts, &buf)
@@ -341,15 +367,30 @@ func TestFixRemovesTerminalWorktreesOnly(t *testing.T) {
 	if !strings.Contains(out, "pf.ieops-1240") || !strings.Contains(out, "status=wrapped") {
 		t.Errorf("--fix output does not name pf.ieops-1240 with its status.\noutput:\n%s", out)
 	}
-	if !strings.Contains(out, "--force-remove") {
-		t.Errorf("--fix must tell the caller how to override a refusal.\noutput:\n%s", out)
+	// It must say what to do, but NOT by printing a command that removes a
+	// running work item's worktree — see TestRefusalDoesNotHandOutTheBypass.
+	if !strings.Contains(out, "Commit or wrap ieops#1111 first") {
+		t.Errorf("--fix must say what to do about the refusal.\noutput:\n%s", out)
+	}
+	if strings.Contains(out, "--force-remove=pf.ieops-1111") {
+		t.Errorf("--fix printed a runnable bypass for a running work item.\noutput:\n%s", out)
 	}
 	if res.Status != "warning" {
 		t.Errorf("status = %q, want warning — something was kept", res.Status)
 	}
 }
 
-func TestForceRemoveIsPerDirectory(t *testing.T) {
+// TestForceRemoveOnlyTouchesNamedDirectories: the acknowledgement is the name.
+// It is never a blanket --force over whatever the scan selected, and one
+// directory's acknowledgement never carries to its neighbour — even when the two
+// are indistinguishable to the scan (same project, same status, adjacent seq).
+//
+// It is NOT "one directory per invocation": the flag takes a comma-separated list
+// and may be repeated, and a previous version of this file claimed otherwise
+// three lines above a usage string advertising `<dir>[,<dir>]`. What escalates
+// with danger is the value, not the count — an active work item needs its status
+// transcribed as well.
+func TestForceRemoveOnlyTouchesNamedDirectories(t *testing.T) {
 	items := ieopsFixture(20, nil)
 	items[3].Status = "running"
 	items[4].Status = "running"
@@ -358,7 +399,7 @@ func TestForceRemoveIsPerDirectory(t *testing.T) {
 	root := workspaceWithWorktrees(t, "pf.ieops-1003", "pf.ieops-1004")
 	_, out := runWorktreeCheck(t, f, root, doctorOpts{
 		fix:         true,
-		forceRemove: map[string]bool{"pf.ieops-1003": true},
+		forceRemove: map[string]string{"pf.ieops-1003": "running"},
 	})
 
 	if _, err := os.Stat(filepath.Join(root, "pf.ieops-1003")); !os.IsNotExist(err) {
@@ -416,25 +457,175 @@ func TestFailedListingNeverProducesOrphans(t *testing.T) {
 // directories are permanently uncleanable and the only remaining option is
 // `rm -rf` — the tool gets bypassed exactly where it is being careful.
 func TestForceRemoveReachesUnverifiableDirectories(t *testing.T) {
-	f := &fakeAihub{items: ieopsFixture(260, nil), failListPage: 2}
-	root := workspaceWithWorktrees(t, "pf.ieops-9998", "pf.ieops-9999")
+	items := ieopsFixture(260, nil)
+	items[250].Status = "wrapped" // ieops#1250 -> pf.ieops-1250, resolvable, terminal
+	f := &fakeAihub{items: items, failListPage: 2}
+	root := workspaceWithWorktrees(t, "pf.ieops-1250", "pf.ieops-9999")
 
 	res, out := runWorktreeCheck(t, f, root, doctorOpts{
 		fix:         true,
-		forceRemove: map[string]bool{"pf.ieops-9998": true},
+		forceRemove: map[string]string{"pf.ieops-1250": ""},
 	})
 
-	if _, err := os.Stat(filepath.Join(root, "pf.ieops-9998")); !os.IsNotExist(err) {
-		t.Errorf("--force-remove named pf.ieops-9998; it must be removable even though unverifiable, stat err = %v", err)
+	if _, err := os.Stat(filepath.Join(root, "pf.ieops-1250")); !os.IsNotExist(err) {
+		t.Errorf("--force-remove named pf.ieops-1250 and its work item is wrapped; it must be removable even though the listing failed, stat err = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "pf.ieops-9999")); err != nil {
 		t.Errorf("pf.ieops-9999 was not named and must survive: %v", err)
 	}
-	if !strings.Contains(out, "unverifiable, but --force-remove named it explicitly") {
-		t.Errorf("a forced removal of an unverifiable directory must say so.\noutput:\n%s", out)
+	if !strings.Contains(out, "named by --force-remove; it was not selected because") {
+		t.Errorf("output must say the directory was not selected, only named.\noutput:\n%s", out)
 	}
 	if strings.Contains(res.Message, "knows nothing about") {
-		t.Errorf("pf.ieops-9998 was a known directory; it must not be reported as unknown.\nmessage: %s", res.Message)
+		t.Errorf("pf.ieops-1250 was a known directory; it must not be reported as unknown.\nmessage: %s", res.Message)
+	}
+}
+
+// TestForcedUnverifiableStillGetsTheSecondHop is the F1 regression: --force-remove
+// on a directory whose listing failed used to call the remover DIRECTLY, with no
+// verifyOrphan, no status read and no status printed. Measured on the shipped
+// build: one command destroyed four live worktrees — three running, one blocked —
+// with zero status queries and an [ok] report. A failed listing says nothing
+// about whether GET /v1/work_items/<key> works.
+func TestForcedUnverifiableStillGetsTheSecondHop(t *testing.T) {
+	items := ieopsFixture(260, map[int]string{
+		251: "running",
+		252: "running",
+		253: "blocked",
+	})
+	f := &fakeAihub{items: items, failListPage: 2} // every listing walk dies on page 2
+	live := []string{"pf.ieops-1251", "pf.ieops-1252", "pf.ieops-1253"}
+	root := workspaceWithWorktrees(t, live...)
+
+	force := map[string]string{}
+	for _, d := range live {
+		force[d] = "" // named, but with no status stated — the F1 command shape
+	}
+	res, out := runWorktreeCheck(t, f, root, doctorOpts{fix: true, forceRemove: force})
+
+	for _, d := range live {
+		if _, err := os.Stat(filepath.Join(root, d)); err != nil {
+			t.Errorf("%s backs an active work item; --force-remove alone must not delete it: %v", d, err)
+		}
+	}
+	// The status has to have been read and printed for each one.
+	for _, want := range []string{"status=running", "status=blocked"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output never shows %s, so no second hop happened.\noutput:\n%s", want, out)
+		}
+	}
+	if res.Status == "ok" {
+		t.Errorf("status = ok while three active worktrees were named for deletion: %s", res.Message)
+	}
+	if strings.Contains(out, ": removed") {
+		t.Errorf("nothing should have been removed.\noutput:\n%s", out)
+	}
+}
+
+// TestForcingAnActiveWorktreeNeedsTheStatusTranscribed: the graded escape hatch.
+// Naming is enough when nothing could be established; when the server says the
+// work item is alive, the flag has to carry that status, and it has to match.
+func TestForcingAnActiveWorktreeNeedsTheStatusTranscribed(t *testing.T) {
+	items := ieopsFixture(20, map[int]string{3: "running"})
+	f := &fakeAihub{items: items, hideFromList: map[string]bool{"ieops#1003": true}}
+
+	t.Run("bare name is refused", func(t *testing.T) {
+		root := workspaceWithWorktrees(t, "pf.ieops-1003")
+		res, out := runWorktreeCheck(t, f, root, doctorOpts{
+			fix: true, forceRemove: map[string]string{"pf.ieops-1003": ""}})
+		if _, err := os.Stat(filepath.Join(root, "pf.ieops-1003")); err != nil {
+			t.Errorf("a bare --force-remove must not delete a running work item's worktree: %v", err)
+		}
+		if !strings.Contains(out, "must also carry the status") {
+			t.Errorf("output must say what is missing.\noutput:\n%s", out)
+		}
+		if res.Status == "ok" {
+			t.Errorf("status = ok: %s", res.Message)
+		}
+	})
+
+	t.Run("wrong status is refused", func(t *testing.T) {
+		root := workspaceWithWorktrees(t, "pf.ieops-1003")
+		_, out := runWorktreeCheck(t, f, root, doctorOpts{
+			fix: true, forceRemove: map[string]string{"pf.ieops-1003": "paused"}})
+		if _, err := os.Stat(filepath.Join(root, "pf.ieops-1003")); err != nil {
+			t.Errorf("a mismatched status must not delete: %v", err)
+		}
+		if !strings.Contains(out, "does not match the current status") {
+			t.Errorf("output must say the status did not match.\noutput:\n%s", out)
+		}
+	})
+
+	t.Run("matching status removes, loudly, and never reports ok", func(t *testing.T) {
+		root := workspaceWithWorktrees(t, "pf.ieops-1003")
+		res, out := runWorktreeCheck(t, f, root, doctorOpts{
+			fix: true, forceRemove: map[string]string{"pf.ieops-1003": "running"}})
+		if _, err := os.Stat(filepath.Join(root, "pf.ieops-1003")); !os.IsNotExist(err) {
+			t.Errorf("a matching transcribed status should remove it, stat err = %v", err)
+		}
+		if !strings.Contains(out, "stated its current status") {
+			t.Errorf("output must record that it was forced.\noutput:\n%s", out)
+		}
+		// F2: this is the single most dangerous outcome. It must never be green,
+		// or nothing reading the exit code or the icon can see it happened.
+		if res.Status != "warning" {
+			t.Errorf("status = %q, want warning — a running work item's worktree was just deleted: %s", res.Status, res.Message)
+		}
+		if !strings.Contains(res.Message, "ONLY because --force-remove") {
+			t.Errorf("the summary must record the forced removal: %s", res.Message)
+		}
+	})
+}
+
+// TestRefusalDoesNotHandOutTheBypass: F5. The refusal for an active work item
+// used to print `--force-remove=<dir>` verbatim, so the cheapest way past the
+// guard was to copy the line the guard printed.
+func TestRefusalDoesNotHandOutTheBypass(t *testing.T) {
+	items := ieopsFixture(20, map[int]string{3: "running"})
+	f := &fakeAihub{items: items, hideFromList: map[string]bool{"ieops#1003": true}}
+
+	// Two refusals reach an active work item, and BOTH have to be checked: the
+	// one a plain --fix prints, and the one printed when --force-remove named the
+	// directory but stated no status. The second is the subtler hole — the code
+	// knows the status by then, so a "helpful" edit can complete the command for
+	// the caller and hand over a working bypass.
+	for _, tc := range []struct {
+		name  string
+		force map[string]string
+	}{
+		{"plain --fix", nil},
+		{"--force-remove with no status", map[string]string{"pf.ieops-1003": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := workspaceWithWorktrees(t, "pf.ieops-1003", "pf.stranger")
+			_, out := runWorktreeCheck(t, f, root, doctorOpts{fix: true, forceRemove: tc.force})
+
+			if _, err := os.Stat(filepath.Join(root, "pf.ieops-1003")); err != nil {
+				t.Fatalf("pf.ieops-1003 backs a running work item and must survive: %v", err)
+			}
+			// A runnable bypass is one that needs nothing filled in. Naming the
+			// flag shape with a `<status>` placeholder is fine; naming it with the
+			// real status already substituted is the defect.
+			runnable := []string{
+				"--force-remove=pf.ieops-1003 ",
+				"--force-remove=pf.ieops-1003\n",
+				"--force-remove=pf.ieops-1003:running",
+			}
+			for _, bad := range runnable {
+				if strings.Contains(out+"\n", bad) {
+					t.Errorf("the refusal for a running work item hands out a runnable bypass (%q).\noutput:\n%s", strings.TrimSpace(bad), out)
+				}
+			}
+			// It still has to say what to do instead.
+			if !strings.Contains(out, "Commit or wrap") && !strings.Contains(out, "must also carry the status") {
+				t.Errorf("the refusal says nothing actionable.\noutput:\n%s", out)
+			}
+			// For a name nothing is known about, printing the command IS the right
+			// help: the cost of being wrong there is a stale directory.
+			if !strings.Contains(out, "--force-remove=pf.stranger") {
+				t.Errorf("an unidentifiable directory should come with its cleanup command.\noutput:\n%s", out)
+			}
+		})
 	}
 }
 
@@ -445,7 +636,10 @@ func TestForceRemoveReachesUnverifiableDirectories(t *testing.T) {
 // worktree. "pf." is a prefix, not a licence.
 func TestFixWillNotDeleteNamesPolyforgeNeverProduced(t *testing.T) {
 	f := &fakeAihub{items: ieopsFixture(20, map[int]string{5: "running"})}
-	strangers := []string{"pf.ieops-1005.bak", "pf.scratch", "pf.aihub-notes", "pf.ieops-1005.old"}
+	strangers := []string{"pf.ieops-1005.bak", "pf.scratch", "pf.aihub-notes", "pf.ieops-1005.old",
+		// 8 base62 characters, so they match the legacy SHAPE but resolve to no
+		// work item. Shape alone used to be enough to delete them.
+		"pf.salvage1", "pf.BACKUP01", "pf.notes123"}
 	root := workspaceWithWorktrees(t, append([]string{"pf.7.aBcD1234", "pf.aBcD1234"}, strangers...)...)
 
 	res, out := runWorktreeCheck(t, f, root, doctorOpts{fix: true})
@@ -459,11 +653,11 @@ func TestFixWillNotDeleteNamesPolyforgeNeverProduced(t *testing.T) {
 	// orphans and must still be removed — otherwise this guard is just "delete
 	// nothing".
 	for _, d := range []string{"pf.7.aBcD1234", "pf.aBcD1234"} {
-		if _, err := os.Stat(filepath.Join(root, d)); !os.IsNotExist(err) {
-			t.Errorf("%s is a real legacy worktree name with no active work item; it should still be removed, stat err = %v", d, err)
+		if _, err := os.Stat(filepath.Join(root, d)); err != nil {
+			t.Errorf("%s is a real legacy shape but resolves to no work item, so nothing is established about it and it must be KEPT without --force-remove: %v", d, err)
 		}
 	}
-	if !strings.Contains(out, "refusing to delete something it cannot identify") {
+	if !strings.Contains(out, "nothing to look up, so no status could be checked") {
 		t.Errorf("output must say why the unrecognised names were kept.\noutput:\n%s", out)
 	}
 	if res.Status != "warning" {
@@ -471,7 +665,102 @@ func TestFixWillNotDeleteNamesPolyforgeNeverProduced(t *testing.T) {
 	}
 }
 
-func TestIsLegacyWorktreeName(t *testing.T) {
+// TestLegacyWorktreeBackedByAnActiveWorkItem is the direction no test in this
+// file covered, which is why mutating `activeIDs[u]` to `false` left the suite
+// green: every fixture used slug-format directories, so the legacy-id match was
+// never load-bearing in any assertion.
+//
+// Both halves are here. The active legacy work item must be kept whether or not
+// the listing saw it — via the id map when it did, and via verifyOrphan's
+// wi_<ulid8> lookup when it did not — and the finished one must still go.
+func TestLegacyWorktreeBackedByAnActiveWorkItem(t *testing.T) {
+	// ieopsFixture ids are wi_00001000..., so pf.00001003 is a legitimate
+	// pf.<ulid8> directory for wi_00001003.
+	items := ieopsFixture(20, map[int]string{3: "running", 4: "paused"})
+	items[9].Status = "wrapped"
+
+	t.Run("kept when the listing sees it", func(t *testing.T) {
+		f := &fakeAihub{items: items}
+		root := workspaceWithWorktrees(t, "pf.00001003", "pf.7.00001004", "pf.00001009")
+		runWorktreeCheck(t, f, root, doctorOpts{fix: true})
+		for _, d := range []string{"pf.00001003", "pf.7.00001004"} {
+			if _, err := os.Stat(filepath.Join(root, d)); err != nil {
+				t.Errorf("%s backs an active work item and must be kept: %v", d, err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(root, "pf.00001009")); !os.IsNotExist(err) {
+			t.Errorf("pf.00001009 is wrapped and must still be removed, stat err = %v", err)
+		}
+
+		// The MECHANISM, not just the outcome. Both layers keep these
+		// directories — the ulid8 match against the listing, and verifyOrphan's
+		// wi_<ulid8> lookup — so asserting only "it survived" leaves the first
+		// layer unasserted and deleting it looks free. The whole point of the
+		// id map is that a directory the listing already accounted for costs no
+		// extra request, so assert that no lookup happened for these two.
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, id := range []string{"wi_00001003", "wi_00001004"} {
+			if slices.Contains(f.getSlugs, id) {
+				t.Errorf("%s was looked up individually even though the active listing already carried it; "+
+					"the ulid8 match against the listing is not being used (queries: %v)", id, f.getSlugs)
+			}
+		}
+		if !slices.Contains(f.getSlugs, "wi_00001009") {
+			t.Errorf("wi_00001009 was NOT looked up before deletion; every removal needs its own hop (queries: %v)", f.getSlugs)
+		}
+	})
+
+	t.Run("kept by the per-item hop when the listing misses it", func(t *testing.T) {
+		// The listing does not mention them at all, so activeIDs cannot help and
+		// only the wi_<ulid8> lookup can.
+		f := &fakeAihub{items: items, hideFromList: map[string]bool{
+			"ieops#1003": true, "ieops#1004": true}}
+		root := workspaceWithWorktrees(t, "pf.00001003", "pf.7.00001004")
+		res, out := runWorktreeCheck(t, f, root, doctorOpts{fix: true})
+		for _, d := range []string{"pf.00001003", "pf.7.00001004"} {
+			if _, err := os.Stat(filepath.Join(root, d)); err != nil {
+				t.Errorf("%s: the listing missed it, but wi_ lookup resolves it as active — must be kept: %v", d, err)
+			}
+		}
+		if !strings.Contains(out, "wi=wi_00001003") {
+			t.Errorf("the legacy directory must be looked up as wi_00001003.\noutput:\n%s", out)
+		}
+		for _, want := range []string{"status=running", "status=paused"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output must carry %s.\noutput:\n%s", want, out)
+			}
+		}
+		if res.Status == "ok" {
+			t.Errorf("status = ok: %s", res.Message)
+		}
+	})
+}
+
+func TestWorktreeLookupKey(t *testing.T) {
+	cases := map[string]string{
+		"pf.aihub-307":        "aihub#307",
+		"pf.global-routing-4": "global-routing#4",
+		"pf.aBcD1234":         "wi_aBcD1234",
+		"pf.7.aBcD1234":       "wi_aBcD1234",
+		"pf.1234.00000000":    "wi_00000000",
+		"pf.salvage1":         "wi_salvage1", // 8 base62: a lookup, not a licence
+		"pf.scratch":          "",
+		"pf.aihub-notes":      "",
+		"pf.ieops-274.bak":    "",
+		"pf.aBcD123":          "",
+		"pf.aBcD12345":        "",
+		"pf.x.aBcD1234":       "",
+		"pf.":                 "",
+	}
+	for name, want := range cases {
+		if got := worktreeLookupKey(name); got != want {
+			t.Errorf("worktreeLookupKey(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestWorktreeULID8Shape(t *testing.T) {
 	cases := map[string]bool{
 		"pf.aBcD1234":      true, // pf.<ulid8>
 		"pf.7.aBcD1234":    true, // pf.<seq>.<ulid8>
@@ -489,8 +778,8 @@ func TestIsLegacyWorktreeName(t *testing.T) {
 		"notpf.aBcD1234":   false,
 	}
 	for name, want := range cases {
-		if got := isLegacyWorktreeName(name); got != want {
-			t.Errorf("isLegacyWorktreeName(%q) = %v, want %v", name, got, want)
+		if got := worktreeULID8(name) != ""; got != want {
+			t.Errorf("worktreeULID8(%q) != \"\" = %v, want %v", name, got, want)
 		}
 	}
 }
@@ -581,7 +870,7 @@ func TestForceRemoveNameThatMatchesNothingIsReported(t *testing.T) {
 
 	res, _ := runWorktreeCheck(t, f, root, doctorOpts{
 		fix:         true,
-		forceRemove: map[string]bool{"pf.ieops-1005": true, "pf.typo-1": true},
+		forceRemove: map[string]string{"pf.ieops-1005": "running", "pf.typo-1": ""},
 	})
 
 	if _, err := os.Stat(filepath.Join(root, "pf.ieops-1005")); err != nil {
@@ -600,7 +889,7 @@ func TestForceRemoveNameThatMatchesNothingIsReported(t *testing.T) {
 func TestNoClientIsReportedAsDidNotLook(t *testing.T) {
 	root := workspaceWithWorktrees(t, "pf.ieops-1001")
 	var buf bytes.Buffer
-	res := checkWorktrees(context.Background(), nil, ieopsCfg(), root, doctorOpts{forceRemove: map[string]bool{}}, &buf)
+	res := checkWorktrees(context.Background(), nil, ieopsCfg(), root, doctorOpts{forceRemove: map[string]string{}}, &buf)
 	if res.Status == "ok" {
 		t.Errorf("with no aihub client nothing was cross-referenced; reporting ok is 'did not look' dressed as 'found nothing'.\nmessage: %s", res.Message)
 	}
@@ -646,13 +935,15 @@ func TestParseDoctorArgs(t *testing.T) {
 	if o, err := parseDoctorArgs([]string{"--fix"}); err != nil || !o.fix {
 		t.Errorf("--fix: got fix=%v err=%v", o.fix, err)
 	}
-	o, err := parseDoctorArgs([]string{"--fix", "--force-remove=pf.a,pf.b", "--force-remove", "pf.c"})
+	o, err := parseDoctorArgs([]string{"--fix", "--force-remove=pf.a,pf.b:running", "--force-remove", "pf.c"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, d := range []string{"pf.a", "pf.b", "pf.c"} {
-		if !o.forceRemove[d] {
-			t.Errorf("--force-remove did not record %s (got %v)", d, o.forceRemove)
+	want := map[string]string{"pf.a": "", "pf.b": "running", "pf.c": ""}
+	for d, st := range want {
+		got, ok := o.forceRemove[d]
+		if !ok || got != st {
+			t.Errorf("--force-remove[%s] = %q,%v; want %q (got %v)", d, got, ok, st, o.forceRemove)
 		}
 	}
 	// An unrecognised flag must not be silently ignored: the old parser only
@@ -667,6 +958,15 @@ func TestParseDoctorArgs(t *testing.T) {
 		// named "--fix" and swallow the real flag, silently.
 		{"--force-remove", "--fix"},
 		{"--fix", "--force-remove=--fix"},
+		// An acknowledgement that names nothing: accepted silently before, which
+		// is the same "it went unused" silence unmatched names are reported for.
+		{"--fix", "--force-remove="},
+		{"--fix", "--force-remove=,,,"},
+		{"--fix", "--force-remove", "  "},
+		// A status that is not a status, and a value with no directory.
+		{"--fix", "--force-remove=pf.a:runnning"},
+		{"--fix", "--force-remove=pf.a:"},
+		{"--fix", "--force-remove=:running"},
 	} {
 		if _, err := parseDoctorArgs(args); err == nil {
 			t.Errorf("parseDoctorArgs(%v) accepted an argument it cannot honour", args)
@@ -703,5 +1003,123 @@ func TestReposFixCmdDoesNotRecommendApply(t *testing.T) {
 	}
 	if !strings.Contains(res.FixCmd, "polyforge init") {
 		t.Errorf("fix advice should name `polyforge init`: %q", res.FixCmd)
+	}
+}
+
+// ─── the cursor walk's own failure branches ────────────────────────────────
+//
+// These four branches all implement the same rule — "return an error, never the
+// short list" — and three of them were dead code to this suite. The fake's cursor
+// was a monotonic offset and 260 items fit inside two pages, so a repeated
+// cursor, an endless cursor and a missing items array were never produced. That
+// matters more than ordinary coverage: each unasserted branch is a way for
+// "truncated" to be read as "complete", which is how "not in the list" becomes
+// "delete this directory".
+
+func TestCursorWalkFailuresNeverTruncate(t *testing.T) {
+	// pf.ieops-1005 backs a running work item that lives on page 2+ of every
+	// walk, so a truncated result would nominate it for deletion.
+	items := ieopsFixture(260, map[int]string{111: "running"})
+	dirs := []string{"pf.ieops-1111", "pf.ieops-1240"}
+
+	for _, tc := range []struct {
+		name string
+		fake *fakeAihub
+		want string
+	}{
+		{"repeated cursor", &fakeAihub{items: items, repeatCursor: true}, "repeated cursor"},
+		{"cursor that never ends", &fakeAihub{items: items, neverEndCursor: true}, "did not terminate"},
+		{"response with no items array", &fakeAihub{items: items, omitItems: true}, "carries no items array"},
+		{"next_cursor of the wrong type", &fakeAihub{items: items, badCursorType: true}, "not a string or null"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The listing must fail, not come back short.
+			if _, err := fetchActiveWorkItems(context.Background(), tc.fake.start(t), "ieops"); err == nil {
+				t.Fatalf("fetchActiveWorkItems returned no error; a walk that cannot prove it finished must not return its partial result")
+			} else if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q", err, tc.want)
+			}
+
+			// And that failure must reach the check as "unverifiable", never as
+			// an orphan list.
+			root := workspaceWithWorktrees(t, dirs...)
+			res, out := runWorktreeCheck(t, tc.fake, root, doctorOpts{fix: true})
+			for _, d := range dirs {
+				if _, err := os.Stat(filepath.Join(root, d)); err != nil {
+					t.Errorf("%s was deleted after a listing that could not complete: %v", d, err)
+				}
+			}
+			if strings.Contains(out, ": removed") {
+				t.Errorf("something was removed after an incomplete listing.\noutput:\n%s", out)
+			}
+			if res.Status == "ok" {
+				t.Errorf("status = ok after an incomplete listing: %s", res.Message)
+			}
+		})
+	}
+}
+
+// ─── the git limb ──────────────────────────────────────────────────────────
+
+// TestDeleteWorktreeDirDeregistersRealWorktrees covers the branch that had zero
+// coverage anywhere in the suite, and was broken because of it.
+//
+// The old call was `git -C <wsRoot> worktree remove --force pf.<slug>` — wsRoot
+// is not a repository and pf.<slug>/ is not a worktree, so it exited 128 every
+// time and rm -rf was always the path that actually ran, leaving a prunable
+// registration behind. The previous test used t.TempDir(), which is not a git
+// repo, so it could not tell the difference.
+func TestDeleteWorktreeDirDeregistersRealWorktrees(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatalf("git is required for this test and must not be skipped away: %v", err)
+	}
+	root := t.TempDir()
+	repo := filepath.Join(root, ".repo", "demo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(repo, "init", "-q", "-b", "main", ".")
+	run(repo, "commit", "-q", "--allow-empty", "-m", "init")
+	wtPath := filepath.Join(root, "pf.demo-1", "demo")
+	run(repo, "worktree", "add", "-q", "-b", "task", wtPath)
+
+	listed := func() string {
+		cmd := exec.Command("git", "worktree", "list")
+		cmd.Dir = repo
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("worktree list: %v", err)
+		}
+		return string(out)
+	}
+	if !strings.Contains(listed(), wtPath) {
+		t.Fatalf("fixture broken: %s is not registered\n%s", wtPath, listed())
+	}
+
+	if err := removeWorktreeDir(context.Background(), root, "pf.demo-1"); err != nil {
+		t.Fatalf("removeWorktreeDir: %v", err)
+	}
+	if strings.Contains(listed(), wtPath) {
+		t.Errorf("the worktree is still registered, so only rm -rf ran:\n%s", listed())
+	}
+	if _, err := os.Stat(filepath.Join(root, "pf.demo-1")); !os.IsNotExist(err) {
+		t.Errorf("pf.demo-1 should be gone, stat err = %v", err)
+	}
+	// The branch holds the work and polyforge pushes it: removing a checkout is
+	// not a reason to destroy it.
+	cmd := exec.Command("git", "branch", "--list", "task")
+	cmd.Dir = repo
+	if out, _ := cmd.Output(); !strings.Contains(string(out), "task") {
+		t.Errorf("the task branch was destroyed along with the checkout: %q", out)
 	}
 }

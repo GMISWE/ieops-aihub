@@ -168,11 +168,13 @@ Usage:
 
 Workspace commands:
   init                        Set up/repair workspace (usage.md, session hook, clone repos, CLAUDE.md)
-  doctor [--fix] [--force-remove=<dir>[,<dir>]]
+  doctor [--fix] [--force-remove=<dir>[:<status>][,...]]
                               7-item health check. --fix removes orphan worktrees, but only
                               those whose work item is provably terminal (wrapped/failed/
                               cancelled); anything else is printed with its status and KEPT.
-                              --force-remove names a directory to remove regardless.
+                              --force-remove overrides that for a named directory; if its
+                              work item is still active the flag must also carry that
+                              status. See "polyforge doctor --help" for the detail.
   version                     Print version
 
 Schema export:

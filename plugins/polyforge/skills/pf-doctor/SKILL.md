@@ -35,8 +35,10 @@ Run the CLI diagnostic tool and interpret results:
 polyforge doctor
 # With auto-fix for fixable issues:
 polyforge doctor --fix
-# Remove one worktree --fix refused (see Check 4 — read the reason first):
+# Remove one worktree --fix refused (read the reason first — Check 4):
 polyforge doctor --fix --force-remove=<dir>
+# Its work item is still active? The status must be transcribed and must match:
+polyforge doctor --fix --force-remove=<dir>:<status>
 ```
 
 The CLI runs 7 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per check:
@@ -89,9 +91,16 @@ item is provably terminal (`wrapped` / `failed` / `cancelled`); anything else �
 all — is printed with the reason and **kept**.
 
 - Auto-remove the safe ones: `polyforge doctor --fix`
-- Remove one it refused: `polyforge doctor --fix --force-remove=<dir>`.
-  It takes directory names, one at a time, on purpose: acknowledging one worktree
-  must not silently acknowledge the next.
+- A directory nothing could be established about — unreadable work item, no such
+  work item, or a name polyforge does not produce (`pf.scratch`, `pf.aihub-307.bak`):
+  `polyforge doctor --fix --force-remove=<dir>`. Being wrong here costs a stale
+  directory, so naming it is enough.
+- 🔴 A directory whose work item is **active** (`running`/`paused`/`queued`/`blocked`)
+  needs the status transcribed as well: `--force-remove=<dir>:<status>`, and it must
+  equal what the server reports right then. Being wrong here costs somebody's
+  uncommitted work, so `--fix` refuses the bare name and does not print a
+  ready-made bypass — look the status up, or wrap the work item first. Any forced
+  removal reports `[warn]`, never `[ok]`.
 - 🔴 If `--fix` says it KEPT something because the work item is **not** terminal,
   that is a bug report, not a nuisance. It means the active listing missed a live
   work item — the aihub#307 shape, where an unpaginated query saw only the

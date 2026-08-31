@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,35 +32,76 @@ type checkResult struct {
 type doctorOpts struct {
 	fix  bool
 	help bool
-	// forceRemove names worktree directories the caller has explicitly
-	// acknowledged, one directory at a time. It is the ONLY way --fix will remove
-	// a worktree whose work item is not provably finished; see removeOrphans.
-	forceRemove map[string]bool
+	// forceRemove maps a worktree directory the caller has explicitly named to
+	// the work-item status they claim to have seen ("" when they stated none).
+	//
+	// The acknowledgement is the NAME, not the count: this is never a blanket
+	// --force over whatever the scan happened to select. An earlier version of
+	// this comment claimed the flag took one directory at a time, three lines
+	// under a usage string advertising `<dir>[,<dir>]` — the claim was false and
+	// a guard documented as something it is not is worse than no guard.
+	//
+	// What actually escalates with danger is the VALUE. A directory whose work
+	// item is still active can only be forced as `<dir>:<status>`, and the status
+	// has to match what the server reports at that moment. That cannot be typed
+	// from the refusal message alone; it has to be looked up, and if the work
+	// item moves on in the meantime the removal stops.
+	forceRemove map[string]string
 }
 
-const doctorUsage = `polyforge doctor [--fix] [--force-remove=<dir>[,<dir>]]
+const doctorUsage = `polyforge doctor [--fix] [--force-remove=<dir>[:<status>][,...]]
 
-  --fix                          Remove orphan worktrees whose work item is
-                                 provably terminal (wrapped/failed/cancelled).
-                                 Anything else is printed with its status and kept.
-  --force-remove=<dir>[,<dir>]   Remove these directories even if --fix refused
-                                 them. Requires --fix. Names one directory at a
-                                 time on purpose: acknowledging one worktree must
-                                 not silently acknowledge the next.`
+  --fix                    Remove orphan worktrees whose work item is provably
+                           terminal (wrapped/failed/cancelled). Every other
+                           directory is printed with its status and KEPT.
+
+  --force-remove=<dir>     Remove <dir> even though --fix would not: its work
+                           item could not be read, does not exist, or the name is
+                           not one polyforge produces. Requires --fix.
+
+  --force-remove=<dir>:<status>
+                           Required instead when <dir>'s work item is still
+                           active (running/paused/queued/blocked): <status> must
+                           equal the status the server reports for it right now,
+                           or the removal is refused. A running work item's
+                           worktree holds uncommitted work by definition, so this
+                           asks you to have looked it up rather than to have
+                           copied a command out of a warning.
+
+  --help, -h               Print this.`
 
 func parseDoctorArgs(args []string) (doctorOpts, error) {
-	opts := doctorOpts{forceRemove: map[string]bool{}}
+	opts := doctorOpts{forceRemove: map[string]string{}}
 	addDirs := func(v string) error {
-		for _, d := range strings.Split(v, ",") {
-			if d = strings.TrimSpace(d); d != "" {
-				// A value that looks like a flag is a missing argument, not a
-				// directory: `--force-remove --fix` used to record a directory
-				// literally named "--fix" and swallow the real flag.
-				if strings.HasPrefix(d, "-") {
-					return fmt.Errorf("--force-remove got %q, which looks like a flag rather than a worktree directory", d)
-				}
-				opts.forceRemove[d] = true
+		if strings.TrimSpace(v) == "" || strings.Trim(v, " ,") == "" {
+			// An acknowledgement that names nothing is the same "it went unused"
+			// silence unmatched names are reported for.
+			return fmt.Errorf("--force-remove was given no worktree directory name")
+		}
+		for _, item := range strings.Split(v, ",") {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
 			}
+			// A value that looks like a flag is a missing argument, not a
+			// directory: `--force-remove --fix` used to record a directory
+			// literally named "--fix" and swallow the real flag.
+			if strings.HasPrefix(item, "-") {
+				return fmt.Errorf("--force-remove got %q, which looks like a flag rather than a worktree directory", item)
+			}
+			dir, status, hadColon := strings.Cut(item, ":")
+			dir, status = strings.TrimSpace(dir), strings.TrimSpace(status)
+			if dir == "" {
+				return fmt.Errorf("--force-remove got %q, which has no directory name before the ':'", item)
+			}
+			if hadColon && status == "" {
+				return fmt.Errorf("--force-remove=%s has a ':' but no status after it", item)
+			}
+			if status != "" && !isKnownWIStatus(status) {
+				return fmt.Errorf("--force-remove=%s: %q is not a work item status (one of %s)",
+					item, status, strings.Join(allWIStatuses, ", "))
+			}
+			opts.forceRemove[dir] = status
 		}
 		return nil
 	}
@@ -276,12 +318,20 @@ const listPageBudget = 100
 // cancelled — and only those release a worktree.
 var activeWIStatuses = []string{"running", "paused", "queued", "blocked"}
 
+// terminalWIStatuses is the complement. Together with activeWIStatuses it
+// partitions the status set the DB CHECK constraint allows
+// (internal/db/migrations/0002_work_items.sql) — no gap, no overlap. A gap here
+// is a status whose worktree nothing can classify.
+var terminalWIStatuses = []string{"wrapped", "failed", "cancelled"}
+
+var allWIStatuses = append(append([]string{}, activeWIStatuses...), terminalWIStatuses...)
+
 func isTerminalWIStatus(s string) bool {
-	switch s {
-	case "wrapped", "failed", "cancelled":
-		return true
-	}
-	return false
+	return slices.Contains(terminalWIStatuses, s)
+}
+
+func isKnownWIStatus(s string) bool {
+	return slices.Contains(allWIStatuses, s)
 }
 
 // fetchActiveWorkItems returns every non-terminal work item of one project,
@@ -331,7 +381,19 @@ func fetchActiveWorkItems(ctx context.Context, c *client.Client, projectName str
 				out = append(out, m)
 			}
 		}
-		next, _ := result["next_cursor"].(string) // JSON null → "" → done
+		// "Done" and "unreadable" have to be different answers. A one-line
+		// `next, _ := result["next_cursor"].(string)` made every unexpected type
+		// end the walk as if it had completed — the one branch in this function
+		// where "error, never truncate" was not actually implemented.
+		var next string
+		switch v := result["next_cursor"].(type) {
+		case nil:
+			return out, nil // the server emits JSON null on the last page
+		case string:
+			next = v
+		default:
+			return nil, fmt.Errorf("page %d: next_cursor is %T, not a string or null", page, v)
+		}
 		if next == "" {
 			return out, nil
 		}
@@ -372,29 +434,57 @@ func worktreeSlug(name string) string {
 	return p + "#" + strings.TrimPrefix(name, "pf."+p+"-")
 }
 
-// isLegacyWorktreeName reports whether `name` is one of the two pre-slug
-// worktree formats: `pf.<ulid8>` or `pf.<seq>.<ulid8>`, where ulid8 is exactly
-// the 8 base62 characters domain.NewID appends after the `wi_` prefix.
+// worktreeULID8 returns the 8-character id tail of the two pre-slug worktree
+// formats — `pf.<ulid8>` and `pf.<seq>.<ulid8>` — or "" for anything else. ulid8
+// is exactly the 8 base62 characters domain.NewID appends after the `wi_`
+// prefix, which is what makes it a lookup key and not just a label.
 //
-// The precision matters because these are the ONLY names --fix removes without
-// a per-item status check — there is no slug to ask the server about, so the
-// active listing is the only evidence there is. Treating "anything that is not
-// pf.<project>-<seq>" as legacy made that blanket permission cover names that
-// are not worktrees at all: a hand-made `pf.ieops-274.bak` salvage copy, a
-// `pf.scratch` note directory. Measured: all three were deleted, and the output
-// called each of them a legacy worktree.
-func isLegacyWorktreeName(name string) bool {
+// The precision matters twice over. Treating "anything that is not
+// pf.<project>-<seq>" as a legacy name handed a blanket permission to names that
+// are not worktrees at all — measured: `pf.ieops-274.bak`, `pf.scratch` and
+// `pf.aihub-notes` were all deleted, each reported as a legacy worktree. And
+// requiring exactly 8 base62 characters is not enough by itself: `pf.salvage1`
+// and `pf.BACKUP01` fit that shape too, which is why matching the shape now buys
+// a lookup rather than a deletion.
+func worktreeULID8(name string) string {
 	rest, ok := strings.CutPrefix(name, "pf.")
 	if !ok {
-		return false
+		return ""
 	}
 	if seq, tail, found := strings.Cut(rest, "."); found {
-		if seq == "" || !allDigits(seq) {
-			return false
+		if !allDigits(seq) {
+			return ""
 		}
 		rest = tail
 	}
-	return len(rest) == 8 && allBase62(rest)
+	if len(rest) != 8 || !allBase62(rest) {
+		return ""
+	}
+	return rest
+}
+
+// worktreeLookupKey returns what to ask the server about for a directory, and
+// whether there is anything to ask at all.
+//
+// For `pf.<project>-<seq>` that is the slug. For the two legacy formats it is
+// `wi_<ulid8>` — and THAT is the correction. The previous code returned "no slug
+// to ask about, so the active listing is the only evidence there is", which was
+// simply false: the tail in the directory name IS the work item id minus its
+// `wi_` prefix (the same value this file already indexes as `activeIDs[id[3:]]`),
+// and GET /v1/work_items/:id resolves the `wi_` spelling through
+// domain.FormatIDOrSlug. Verified live: wi_VGg1VR2x -> aihub#307, running.
+//
+// So a running `wi_aBcD1234` with worktree `pf.aBcD1234` used to be deletable on
+// any listing gap — the exact class of failure the per-item re-check exists for —
+// under a message asserting the check "was not possible" when it was.
+func worktreeLookupKey(dir string) string {
+	if slug := worktreeSlug(dir); slug != "" {
+		return slug
+	}
+	if u := worktreeULID8(dir); u != "" {
+		return "wi_" + u
+	}
+	return ""
 }
 
 func allDigits(s string) bool {
@@ -417,14 +507,34 @@ func allBase62(s string) bool {
 	return s != ""
 }
 
+// verdictKind says what it would take to delete a directory, and it exists
+// because "removable / not removable" was too coarse. It collapsed two very
+// different refusals — "its work item is running" and "nobody can tell what this
+// directory is" — into one, and then a single --force-remove flag was enough to
+// override both. Deleting a directory nobody can identify costs a stale
+// directory; deleting a running work item's costs uncommitted work.
+type verdictKind int
+
+const (
+	// verdictTerminal — the work item exists and is finished. --fix removes it.
+	verdictTerminal verdictKind = iota
+	// verdictActive — the work item exists and is running/paused/queued/blocked.
+	// Its worktree holds uncommitted work by definition. Only forceable by
+	// transcribing the current status.
+	verdictActive
+	// verdictUnknown — unreadable, absent, or a name polyforge never produced.
+	// Forceable by name: the cost of being wrong is a stale directory.
+	verdictUnknown
+)
+
 // orphanVerdict is the per-worktree answer --fix acts on. Each field is here
 // because the caller must be able to print WHY before it deletes anything.
 type orphanVerdict struct {
-	Dir       string
-	Slug      string // "" when the directory name carries none
-	Status    string // work item status as the server reports it, "" if unknown
-	Removable bool
-	Note      string
+	Dir    string
+	Key    string // slug or wi_<ulid8> that was asked about; "" if unidentifiable
+	Status string // work item status as the server reports it, "" if unknown
+	Kind   verdictKind
+	Note   string
 }
 
 func (v orphanVerdict) statusText() string {
@@ -434,8 +544,7 @@ func (v orphanVerdict) statusText() string {
 	return v.Status
 }
 
-// verifyOrphan re-asks the server about ONE candidate, by slug, before it can be
-// deleted.
+// verifyOrphan re-asks the server about ONE directory before it can be deleted.
 //
 // This is deliberately a second, independent hop rather than a reuse of the list
 // result: the list is what was wrong in aihub#307, and a check that answers "is
@@ -444,45 +553,43 @@ func (v orphanVerdict) statusText() string {
 // each path together with its work item's status, which is what a human needs to
 // veto the batch.
 //
-// Every uncertain outcome resolves to "do not delete", including 404. A 404 is
-// not proof the work item never existed — the far more likely cause is that
-// ~/.polyforge/config.toml points at a different aihub than the one this
-// workspace was built against, in which case EVERY slug 404s and a delete-on-404
-// rule wipes the whole workspace in one command.
+// It must be reached from EVERY path that deletes, including the forced ones and
+// including a directory whose project listing failed. A failed listing says
+// nothing about whether GET /v1/work_items/<key> works; skipping this hop
+// because the listing was unusable reintroduces exactly the bug above, in one
+// flag.
+//
+// A 404 lands on verdictUnknown, not on "delete it". The far likelier cause than
+// a deleted work item is ~/.polyforge/config.toml pointing at a different aihub
+// than the workspace was built against — in which case EVERY key 404s, and a
+// delete-on-404 rule empties the workspace in one command. It stays forceable by
+// name so a genuinely dead directory does not become permanently uncleanable.
 func verifyOrphan(ctx context.Context, c *client.Client, dir string) orphanVerdict {
-	slug := worktreeSlug(dir)
-	if slug == "" {
-		if !isLegacyWorktreeName(dir) {
-			// Not a name polyforge ever produced. "pf." is a prefix, not a
-			// licence: a directory nobody can identify is the last thing that
-			// should be deleted without being asked about.
-			return orphanVerdict{Dir: dir,
-				Note: "not a name polyforge produces (expected pf.<project>-<seq>, pf.<ulid8> or " +
-					"pf.<seq>.<ulid8>) — refusing to delete something it cannot identify"}
-		}
-		// Legacy name: no slug to ask about, so the completed active listing is
-		// the only evidence there is. Say so rather than implying a status was
-		// checked.
-		return orphanVerdict{Dir: dir, Removable: true,
-			Note: "legacy directory name carries no slug — classified from the completed active listing alone, no per-item status check was possible"}
+	key := worktreeLookupKey(dir)
+	if key == "" {
+		// "pf." is a prefix, not a licence: a directory nobody can identify is
+		// the last thing that should be deleted without being asked about.
+		return orphanVerdict{Dir: dir, Kind: verdictUnknown,
+			Note: "not a name polyforge produces (expected pf.<project>-<seq>, pf.<ulid8> or " +
+				"pf.<seq>.<ulid8>) — nothing to look up, so no status could be checked"}
 	}
-	wi, err := c.GetWorkItem(ctx, slug)
+	wi, err := c.GetWorkItem(ctx, key)
 	if err != nil {
-		return orphanVerdict{Dir: dir, Slug: slug,
-			Note: fmt.Sprintf("could not read %s: %v — refusing to delete on an unread work item", slug, err)}
+		return orphanVerdict{Dir: dir, Key: key, Kind: verdictUnknown,
+			Note: fmt.Sprintf("could not read %s: %v — refusing to delete on an unread work item", key, err)}
 	}
 	status, _ := wi["status"].(string)
 	if status == "" {
-		return orphanVerdict{Dir: dir, Slug: slug,
-			Note: fmt.Sprintf("%s came back without a status field — refusing to delete", slug)}
+		return orphanVerdict{Dir: dir, Key: key, Kind: verdictUnknown,
+			Note: fmt.Sprintf("%s came back without a status field — refusing to delete", key)}
 	}
 	if !isTerminalWIStatus(status) {
-		return orphanVerdict{Dir: dir, Slug: slug, Status: status,
+		return orphanVerdict{Dir: dir, Key: key, Status: status, Kind: verdictActive,
 			Note: fmt.Sprintf("%s is %s, not a terminal state — its worktree may hold uncommitted work. "+
-				"That it reached this list at all means the active listing missed it; please report that", slug, status)}
+				"That it was selected at all means the active listing missed it; please report that", key, status)}
 	}
-	return orphanVerdict{Dir: dir, Slug: slug, Status: status, Removable: true,
-		Note: fmt.Sprintf("%s is %s (terminal)", slug, status)}
+	return orphanVerdict{Dir: dir, Key: key, Status: status, Kind: verdictTerminal,
+		Note: fmt.Sprintf("%s is %s (terminal)", key, status)}
 }
 
 // checkWorktrees cross-references pf.* directories with active work items
@@ -565,17 +672,13 @@ func checkWorktrees(ctx context.Context, c *client.Client, cfg *config.Config, w
 		if activeSlugs[name] {
 			continue
 		}
-		// Old formats only: extract ulid8 and match against activeIDs. Running
-		// this on an unrecognised name would compare an arbitrary tail ("bak")
-		// against the id set and could match by accident.
-		if isLegacyWorktreeName(name) {
-			ulid8 := strings.TrimPrefix(name, "pf.")
-			if _, tail, found := strings.Cut(ulid8, "."); found {
-				ulid8 = tail // pf.<seq>.<ulid8>
-			}
-			if activeIDs[ulid8] {
-				continue
-			}
+		// Legacy formats: the 8-char tail IS the work item id minus its `wi_`
+		// prefix, which is what activeIDs is keyed on, so this is an exact lookup
+		// and not a suffix scan. Running it on an unrecognised name would compare
+		// an arbitrary tail ("bak") against the id set and could match by
+		// accident, so worktreeULID8 has to have said yes first.
+		if u := worktreeULID8(name); u != "" && activeIDs[u] {
+			continue
 		}
 		if why, gap := listingGapFor(name, failed); gap {
 			unverifiable = append(unverifiable, unverifiableDir{Dir: name, Why: why})
@@ -597,7 +700,7 @@ func checkWorktrees(ctx context.Context, c *client.Client, cfg *config.Config, w
 	for _, dir := range candidates {
 		v := verifyOrphan(ctx, c, dir)
 		listed = append(listed, fmt.Sprintf("%s [%s]", v.Dir, v.statusText()))
-		if !v.Removable {
+		if v.Kind != verdictTerminal {
 			blockers++
 		}
 	}
@@ -665,41 +768,50 @@ func listingGapFor(name string, failed map[string]string) (string, bool) {
 	return "legacy directory name, and these projects could not be listed: " + strings.Join(names, ", "), true
 }
 
-// removeOrphans is the --fix path. It prints one line per candidate — path, work
-// item status, and reason — BEFORE touching that candidate, and removes only the
-// ones whose work item is provably finished.
+// removeOrphans is the --fix path. Every directory it can delete goes through
+// verifyOrphan first, and the verdict is printed before that directory is
+// touched.
 //
-// The previous implementation took the whole candidate list and deleted it in a
-// loop with no per-worktree step, so there was no point at which a non-orphan
-// mixed into the batch could be noticed, by a human or by the program.
-// `--force-remove <dir>` is the escape hatch, and it is per directory by
-// construction: it takes names, not a blanket --force, so acknowledging one
-// worktree cannot silently acknowledge the next one.
+// "Every" is load-bearing and was learned twice. The first version deleted the
+// whole candidate list in one loop with no per-worktree step. The second added
+// the per-item check on the candidate path but let --force-remove delete an
+// unverifiable directory by calling the remover directly — so one flag
+// reproduced the original data-loss bug (four live worktrees, three of them
+// running, destroyed with zero status queries and an [ok] report), and did it in
+// the branch whose whole premise was that the listing could not be trusted. A
+// failed listing says nothing about whether GET /v1/work_items/<key> works.
+//
+// The escape hatch is graded by what being wrong costs. verdictUnknown — nothing
+// could be read, or the name is not one polyforge produces — is forceable by
+// name; the cost is a stale directory. verdictActive needs the work item's
+// current status transcribed into the flag, because the cost there is somebody's
+// uncommitted work.
 func removeOrphans(ctx context.Context, c *client.Client, wsRoot string, total int, candidates []string, unverifiable []unverifiableDir, opts doctorOpts, out io.Writer) checkResult {
-	// An unverifiable directory is reachable by name, and only by name. Its
-	// listing failed, so nothing here can say whether it is an orphan — but a
-	// caller who names it has taken that on themselves, and the alternative is
-	// that a project they lost access to leaves permanently uncleanable
-	// directories behind.
-	var forcedUnverifiable []string
+	// An unverifiable directory is reachable only when named: its listing failed,
+	// so nothing selected it. But once named it is verified exactly like a
+	// candidate — the naming buys it a look, not a deletion. Without any way
+	// through, a project the caller has lost access to would leave permanently
+	// uncleanable directories and the tool would simply be bypassed with rm -rf.
+	var acting []string
+	acting = append(acting, candidates...)
+	unverifiableWhy := map[string]string{}
 	kept := unverifiable[:0:0]
 	for _, u := range unverifiable {
-		if opts.forceRemove[u.Dir] {
-			forcedUnverifiable = append(forcedUnverifiable, u.Dir)
+		if _, named := opts.forceRemove[u.Dir]; named {
+			acting = append(acting, u.Dir)
+			unverifiableWhy[u.Dir] = u.Why
 			continue
 		}
 		kept = append(kept, u)
 	}
 	unverifiable = kept
+	sort.Strings(acting)
 
 	// A --force-remove name that matches nothing at all must be said out loud.
 	// Left silent, a typo and a directory that was already gone look identical,
 	// and the caller walks away believing an acknowledgement was acted on.
-	known := make(map[string]bool, len(candidates)+len(forcedUnverifiable))
-	for _, d := range candidates {
-		known[d] = true
-	}
-	for _, d := range forcedUnverifiable {
+	known := make(map[string]bool, len(acting))
+	for _, d := range acting {
 		known[d] = true
 	}
 	var unmatched []string
@@ -709,46 +821,35 @@ func removeOrphans(ctx context.Context, c *client.Client, wsRoot string, total i
 		}
 	}
 	sort.Strings(unmatched)
-	sort.Strings(forcedUnverifiable)
 
-	if len(candidates) == 0 && len(unmatched) == 0 && len(unverifiable) == 0 && len(forcedUnverifiable) == 0 {
+	if len(acting) == 0 && len(unmatched) == 0 && len(unverifiable) == 0 {
 		return checkResult{Name: "worktrees", Status: "ok",
 			Message: fmt.Sprintf("%d worktrees, none orphaned", total)}
 	}
 
-	remove := func(dir string) error { return removeWorktreeDir(ctx, wsRoot, dir) }
-
 	var removed, refused, forced, failedRemoval []string
-	for _, dir := range forcedUnverifiable {
-		_, _ = fmt.Fprintf(out, "       worktree %s: unverifiable, but --force-remove named it explicitly\n", dir)
-		if err := remove(dir); err != nil {
-			_, _ = fmt.Fprintf(out, "       worktree %s: REMOVAL FAILED: %v\n", dir, err)
-			failedRemoval = append(failedRemoval, fmt.Sprintf("%s (%v)", dir, err))
-			continue
-		}
-		_, _ = fmt.Fprintf(out, "       worktree %s: removed\n", dir)
-		removed = append(removed, dir)
-		forced = append(forced, dir+" [unverifiable]")
-	}
-
-	for _, dir := range candidates {
+	for _, dir := range acting {
 		v := verifyOrphan(ctx, c, dir)
-		override := opts.forceRemove[dir]
+		stated, named := opts.forceRemove[dir]
 
+		if why, ok := unverifiableWhy[dir]; ok {
+			_, _ = fmt.Fprintf(out, "       worktree %s: named by --force-remove; it was not selected because %s\n", dir, why)
+		}
 		_, _ = fmt.Fprintf(out, "       worktree %s: wi=%s status=%s — %s\n",
-			v.Dir, slugText(v.Slug), v.statusText(), v.Note)
+			v.Dir, keyText(v.Key), v.statusText(), v.Note)
 
-		if !v.Removable && !override {
-			_, _ = fmt.Fprintf(out, "       worktree %s: KEPT. To remove it anyway: polyforge doctor --fix --force-remove=%s\n", v.Dir, v.Dir)
+		allowed, why := forceAllows(v, stated, named)
+		if !allowed {
+			_, _ = fmt.Fprintf(out, "       worktree %s: KEPT — %s\n", v.Dir, why)
 			refused = append(refused, fmt.Sprintf("%s [%s]", v.Dir, v.statusText()))
 			continue
 		}
-		if !v.Removable {
-			_, _ = fmt.Fprintf(out, "       worktree %s: removing anyway, --force-remove named it explicitly\n", v.Dir)
+		if v.Kind != verdictTerminal {
+			_, _ = fmt.Fprintf(out, "       worktree %s: removing anyway — %s\n", v.Dir, why)
 			forced = append(forced, fmt.Sprintf("%s [%s]", v.Dir, v.statusText()))
 		}
 
-		if err := remove(v.Dir); err != nil {
+		if err := removeWorktreeDir(ctx, wsRoot, dir); err != nil {
 			_, _ = fmt.Fprintf(out, "       worktree %s: REMOVAL FAILED: %v\n", v.Dir, err)
 			failedRemoval = append(failedRemoval, fmt.Sprintf("%s (%v)", v.Dir, err))
 			continue
@@ -758,13 +859,15 @@ func removeOrphans(ctx context.Context, c *client.Client, wsRoot string, total i
 	}
 
 	// Phrased so that "removed <n> orphan" stays a substring: tests/scenarios/e2e
-	// asserts on it.
-	msg := fmt.Sprintf("removed %d orphan worktree(s) of %d candidate(s)", len(removed), len(candidates))
+	// asserts on it. The denominator counts every directory this run acted on,
+	// forced ones included — it previously counted only the selected candidates,
+	// so forcing four unverifiable directories reported "removed 4 of 0".
+	msg := fmt.Sprintf("removed %d orphan worktree(s) of %d considered", len(removed), len(acting))
 	if len(removed) > 0 {
 		msg += ": " + strings.Join(removed, ", ")
 	}
 	if len(forced) > 0 {
-		msg += fmt.Sprintf("; %d removed only because --force-remove named them: %s", len(forced), strings.Join(forced, ", "))
+		msg += fmt.Sprintf("; %d removed ONLY because --force-remove named them: %s", len(forced), strings.Join(forced, ", "))
 	}
 	if len(refused) > 0 {
 		msg += fmt.Sprintf("; KEPT %d that are not safe to remove: %s", len(refused), strings.Join(refused, ", "))
@@ -780,16 +883,57 @@ func removeOrphans(ctx context.Context, c *client.Client, wsRoot string, total i
 		msg += fmt.Sprintf("; --force-remove named %d director(y/ies) that this run knows nothing about, "+
 			"so nothing was done with them: %s", len(unmatched), strings.Join(unmatched, ", "))
 	}
+	// `forced` belongs in this condition. Without it, the single most dangerous
+	// thing this command can do — deleting the worktree of a work item the server
+	// says is running — was the one outcome reported fully green, invisible to
+	// anything reading the exit code or the [ok]/[warn] icon.
 	status := "ok"
-	if len(refused) > 0 || len(unverifiable) > 0 || len(unmatched) > 0 || len(failedRemoval) > 0 {
+	if len(refused) > 0 || len(forced) > 0 || len(unverifiable) > 0 || len(unmatched) > 0 || len(failedRemoval) > 0 {
 		status = "warning"
 	}
 	return checkResult{Name: "worktrees", Status: status, Message: msg}
 }
 
-func slugText(s string) string {
+// forceAllows decides whether one directory may be deleted, and returns the
+// sentence explaining the decision either way.
+//
+// The refusal for an ACTIVE work item deliberately does not print a ready-made
+// bypass. It used to print `--force-remove=<dir>` verbatim, which made the
+// cheapest way past the guard to copy the line the guard printed — an agent that
+// hit the refusal was handed the command that defeats it. The status has to be
+// looked up instead, and it is checked against the server's current value, so a
+// work item that moves on between the lookup and the run stops the removal.
+func forceAllows(v orphanVerdict, stated string, named bool) (bool, string) {
+	switch v.Kind {
+	case verdictTerminal:
+		return true, "work item is terminal"
+	case verdictUnknown:
+		if !named {
+			return false, fmt.Sprintf("nothing could be established about it. If it is genuinely dead: "+
+				"polyforge doctor --fix --force-remove=%s", v.Dir)
+		}
+		return true, "--force-remove named it and nothing could be established about it"
+	default: // verdictActive
+		if !named {
+			return false, fmt.Sprintf("its work item is %s and its worktree may hold uncommitted work. "+
+				"Commit or wrap %s first; see `polyforge doctor --help` if it really has to go", v.Status, v.Key)
+		}
+		if stated == "" {
+			return false, fmt.Sprintf("--force-remove named it, but its work item is %s: naming an active "+
+				"work item's worktree is not enough, the flag must also carry the status "+
+				"(--force-remove=%s:<status>) so it is clear that was looked up", v.Status, v.Dir)
+		}
+		if stated != v.Status {
+			return false, fmt.Sprintf("--force-remove=%s:%s does not match the current status %q — "+
+				"the work item moved since that was read, so the removal stops", v.Dir, stated, v.Status)
+		}
+		return true, fmt.Sprintf("--force-remove named it AND stated its current status (%s)", v.Status)
+	}
+}
+
+func keyText(s string) string {
 	if s == "" {
-		return "(none)"
+		return "(unidentifiable)"
 	}
 	return s
 }
@@ -800,13 +944,66 @@ func slugText(s string) string {
 // deletion failed" cannot otherwise be induced, and a guard that can only be
 // exercised by not being root is a guard that never runs.
 var deleteWorktreeDir = func(ctx context.Context, wsRoot, dir string) {
-	// git worktree remove --force is safest; fall back to rm -rf. Both errors are
-	// deliberately unhandled here — git legitimately refuses a directory it never
-	// registered, and whether the directory actually went away is settled by
-	// removeWorktreeDir looking, not by either call's exit status.
-	if err := exec.CommandContext(ctx, "git", "-C", wsRoot, "worktree", "remove", "--force", dir).Run(); err != nil {
-		_ = os.RemoveAll(filepath.Join(wsRoot, dir))
+	// Deregister every linked worktree under pf.<slug>/ before deleting the
+	// directory, so git does not keep a prunable registration pointing at a path
+	// that is gone.
+	//
+	// This used to be `git -C <wsRoot> worktree remove --force <dir>`, which can
+	// never succeed: wsRoot is not a repository and pf.<slug>/ is not a worktree.
+	// The registered worktrees are the pf.<slug>/<repo>/ subdirectories, and each
+	// belongs to .repo/<repo>. Measured before the fix — `fatal: 'pf.demo-1' is
+	// not a working tree`, exit 128 — so the fallback was in fact the only path
+	// that ever ran, under a comment calling the git call "safest".
+	//
+	// Branches are deliberately left alone: the branch is where the work is, and
+	// polyforge pushes it. Removing the checkout is not a reason to destroy it.
+	for _, sub := range gitWorktreesUnder(ctx, filepath.Join(wsRoot, dir)) {
+		mainRoot, err := gitMainWorktreeOf(ctx, sub)
+		if err != nil {
+			continue // not a linked worktree, or git unavailable: rm handles it
+		}
+		_ = exec.CommandContext(ctx, "git", "-C", mainRoot, "worktree", "remove", "--force", sub).Run()
 	}
+	// rm -rf finishes the job: it clears anything git refused or never knew
+	// about, plus the pf.<slug>/ parent itself. Its error is deliberately
+	// unhandled here — whether the directory actually went away is settled by
+	// removeWorktreeDir looking, not by any exit status.
+	_ = os.RemoveAll(filepath.Join(wsRoot, dir))
+}
+
+// gitWorktreesUnder returns the immediate subdirectories of a pf.<slug>/
+// directory, which is where the per-repo checkouts live.
+func gitWorktreesUnder(ctx context.Context, parent string) []string {
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		sub := filepath.Join(parent, e.Name())
+		if _, statErr := os.Stat(filepath.Join(sub, ".git")); statErr == nil {
+			out = append(out, sub)
+		}
+	}
+	return out
+}
+
+// gitMainWorktreeOf returns the main worktree root that owns a linked worktree,
+// derived from its --git-common-dir (".../.repo/<repo>/.git" → ".../.repo/<repo>").
+func gitMainWorktreeOf(ctx context.Context, worktree string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", worktree,
+		"rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	if err != nil {
+		return "", err
+	}
+	commonDir := strings.TrimSpace(string(out))
+	if commonDir == "" {
+		return "", fmt.Errorf("git reported no common dir for %s", worktree)
+	}
+	return filepath.Dir(commonDir), nil
 }
 
 // removeWorktreeDir deletes one worktree directory and confirms it is gone.

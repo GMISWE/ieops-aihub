@@ -168,7 +168,11 @@ Usage:
 
 Workspace commands:
   init                        Set up/repair workspace (usage.md, session hook, clone repos, CLAUDE.md)
-  doctor [--fix]              7-item health check
+  doctor [--fix] [--force-remove=<dir>[,<dir>]]
+                              7-item health check. --fix removes orphan worktrees, but only
+                              those whose work item is provably terminal (wrapped/failed/
+                              cancelled); anything else is printed with its status and KEPT.
+                              --force-remove names a directory to remove regardless.
   version                     Print version
 
 Schema export:

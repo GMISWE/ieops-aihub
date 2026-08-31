@@ -1363,8 +1363,20 @@ jobs:
           echo "to reproduce locally: go test ./... -count=1 -v 2>&1 | tee a.log ; ! grep -q -- '--- SKIP' a.log || exit 1"
 `)
 	var out bytes.Buffer
-	if err := run(inv, wf, gomod, dir, 1, &out); err == nil {
+	err := run(inv, wf, gomod, dir, 1, &out)
+	if err == nil {
 		t.Fatal("a quoted `go test` must not credit coverage (nor satisfy the SKIP guard), got a passing gate")
+	}
+	// Assert the CAUSE, not just that something failed. Review caught this
+	// being vacuous: with the quoted check disabled the test still passed,
+	// because skipGuardRE's `^!` anchor rejects the prose guard line and run()
+	// failed for the GUARD reason instead. "It went red" is not the claim.
+	// The phrase has to be one ONLY this error can produce. An earlier attempt
+	// asserted "inside a quoted string", which the malformed-GUARD message also
+	// contains as part of its own explanation — so the mutant survived a second
+	// time, now for a third reason. Same failure as the test this replaces.
+	if !strings.Contains(err.Error(), "`go test` appears inside a quoted string") {
+		t.Errorf("gate failed, but not because the `go test` was quoted: %v", err)
 	}
 }
 
@@ -1451,6 +1463,9 @@ func TestParseWorkflow_RejectsAGuardThatCannotFail(t *testing.T) {
 		// the twenty correct guards in ci.yml, and it is why the `{ ... }` tail
 		// has to require `exit` to be the block's LAST command.
 		`! grep -q -- '--- SKIP' a.log || { echo "a test SKIPped" || exit 1; }`,
+		// The earlier exit wins, so the block returns 0 while still ending in
+		// `exit 1`. "The exit is the block's LAST command" was not enough.
+		`! grep -q -- '--- SKIP' a.log || { echo "a test SKIPped" && exit 0; exit 1; }`,
 		`echo "remember: ! grep -q -- '--- SKIP' a.log || exit 1"`, // prose
 	} {
 		wf := []byte(`
@@ -1464,10 +1479,14 @@ jobs:
           go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
           ` + guard + `
 `)
+		// No `continue` on error: an escape hatch here would silently vacate
+		// any future fixture that failed for an unrelated reason, and the one
+		// this replaces justified itself with a claim that was not even true
+		// (the prose fixture contains no quoted `go test`). Every case below
+		// must reach the assertion.
 		scan, err := ParseWorkflow(wf, testModule)
 		if err != nil {
-			// A quoted `go test` in the prose case is itself rejected earlier,
-			// which is also a pass for this test's purpose.
+			t.Errorf("guard %q: want it reported as unguarded, got a hard parse error: %v", guard, err)
 			continue
 		}
 		if len(scan.Unguarded) != 1 {
@@ -1504,6 +1523,264 @@ jobs:
 	}
 }
 
+// ------------------------------- review round 2: five measured bypasses
+//
+// Every fixture below was measured as `dbtestcov: OK`, exit 0, with an
+// uncovered DB-gated test in the inventory — a green CI on a test that never
+// ran. All five cost LESS to write than a correct guard, which is the property
+// the design claims to have.
+
+// The quote mask used to be rebuilt per line, so adding a newline to a quoted
+// string turned it back into commands. This is the same complete bypass the
+// single-line form was, one '\n' later: the string carries the invocation, its
+// tee target AND the guard.
+func TestParseWorkflow_MultiLineQuotedStringIsNotCoverage(t *testing.T) {
+	wf := []byte(`
+jobs:
+  test:
+    steps:
+      - name: db suite
+        env:
+          AIHUB_TEST_DB: postgres://x
+        run: |
+          echo "Reproduce locally:
+          go test ./internal/domain/ -run '^(TestGhost)$' -count=1 -v 2>&1 | tee ghost.log
+          ! grep -q -- '--- SKIP' ghost.log || exit 1
+          "
+          echo "nothing above ran"
+`)
+	scan, err := ParseWorkflow(wf, testModule)
+	if err == nil && len(scan.Invocations) != 0 {
+		t.Errorf("a `go test` inside a multi-line quoted string must credit no coverage, got %+v", scan.Invocations)
+	}
+	if err != nil && !strings.Contains(err.Error(), "quoted string") {
+		t.Errorf("rejected, but not as quoted text: %v", err)
+	}
+
+	// A real invocation after the string closes must still be found, or this
+	// would trade one hole for a quieter one.
+	wf = []byte(`
+jobs:
+  test:
+    steps:
+      - name: db suite
+        env:
+          AIHUB_TEST_DB: postgres://x
+        run: |
+          echo "a
+          b"
+          go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
+          ! grep -q -- '--- SKIP' a.log || exit 1
+`)
+	scan, err = ParseWorkflow(wf, testModule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scan.Invocations) != 1 || len(scan.Unguarded) != 0 {
+		t.Errorf("the invocation after the multi-line string must still be found and guarded; scan = %+v", scan)
+	}
+}
+
+// The `go test` side rejected `if`/`&&`/quotes as unmodellable; the GUARD side
+// was matched against raw lines, so a guard that only sometimes runs — or is
+// itself only prose — counted. A guard worth less than the invocation it
+// certifies is the whole failure mode this gate exists to prevent.
+func TestParseWorkflow_GuardMustRunUnconditionally(t *testing.T) {
+	for name, guard := range map[string]string{
+		"inside an if-block": `if [ "${STRICT:-0}" = "1" ]; then
+          ! grep -q -- '--- SKIP' a.log || exit 1
+          fi`,
+		"behind a line-continuing &&": `[ -f a.log ] &&
+          ! grep -q -- '--- SKIP' a.log || exit 1`,
+		"behind a same-line &&": `[ -f a.log ] && ! grep -q -- '--- SKIP' a.log || exit 1`,
+		"inside a for-loop": `for f in a.log; do
+          ! grep -q -- '--- SKIP' a.log || exit 1
+          done`,
+	} {
+		wf := []byte(`
+jobs:
+  test:
+    steps:
+      - name: db suite
+        env:
+          AIHUB_TEST_DB: postgres://x
+        run: |
+          go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
+          ` + guard + `
+`)
+		scan, err := ParseWorkflow(wf, testModule)
+		if err != nil {
+			t.Errorf("%s: want it reported as unguarded, got a hard parse error: %v", name, err)
+			continue
+		}
+		if len(scan.Unguarded) != 1 {
+			t.Errorf("a guard %s asserts nothing; want it reported, got Unguarded = %v", name, scan.Unguarded)
+		}
+	}
+}
+
+// ORDER is part of correctness, not style. Before its invocation the log does
+// not exist, so `grep` exits 2, the leading `!` inverts that to 0, and
+// `|| exit 1` never fires: a guard that CANNOT fail, produced by an ordinary
+// reordering edit rather than by anyone trying to defeat anything.
+func TestParseWorkflow_GuardBeforeItsInvocationIsNotAGuard(t *testing.T) {
+	wf := []byte(`
+jobs:
+  test:
+    steps:
+      - name: db suite
+        env:
+          AIHUB_TEST_DB: postgres://x
+        run: |
+          ! grep -q -- '--- SKIP' a.log || exit 1
+          go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
+`)
+	scan, err := ParseWorkflow(wf, testModule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scan.Unguarded) != 1 {
+		t.Errorf("a guard placed BEFORE its invocation greps a file that does not exist yet; want it reported, got %v",
+			scan.Unguarded)
+	}
+
+	// The same two lines in the right order are fine — so the assertion above
+	// is about order and nothing else.
+	wf = []byte(`
+jobs:
+  test:
+    steps:
+      - name: db suite
+        env:
+          AIHUB_TEST_DB: postgres://x
+        run: |
+          go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
+          ! grep -q -- '--- SKIP' a.log || exit 1
+`)
+	scan, err = ParseWorkflow(wf, testModule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scan.Unguarded) != 0 {
+		t.Errorf("the correctly ordered pair must be accepted, got %v", scan.Unguarded)
+	}
+}
+
+// Ungated looked BACKWARD at the separator but never forward, so `x && go test`
+// was rejected while `go test || true` was credited as an unconditional,
+// failure-propagating command — the asymmetry contradicted Ungated's own
+// contract. Here what silently goes green is a test FAILURE rather than a skip.
+func TestParseWorkflow_RejectsGoTestWhoseFailureIsSwallowed(t *testing.T) {
+	for _, tail := range []string{"|| true", "|| echo ignored", "&& echo ok"} {
+		wf := []byte(`
+jobs:
+  test:
+    steps:
+      - name: db suite
+        env:
+          AIHUB_TEST_DB: postgres://x
+        run: |
+          go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log ` + tail + `
+          ! grep -q -- '--- SKIP' a.log || exit 1
+`)
+		if _, err := ParseWorkflow(wf, testModule); err == nil {
+			t.Errorf("`go test ... %s` does not fail the step; want an error, got nil", tail)
+		}
+	}
+}
+
+// A log of /dev/null is always empty, so the guard can never fail however
+// correctly it is spelled.
+func TestParseWorkflow_DevNullLogIsUnguarded(t *testing.T) {
+	wf := []byte(`
+jobs:
+  test:
+    steps:
+      - name: db suite
+        env:
+          AIHUB_TEST_DB: postgres://x
+        run: |
+          go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee /dev/null
+          ! grep -q -- '--- SKIP' /dev/null || exit 1
+`)
+	scan, err := ParseWorkflow(wf, testModule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scan.Unguarded) != 1 || !strings.Contains(scan.Unguarded[0], "/dev/null") {
+		t.Errorf("a /dev/null log can never carry a SKIP; want it reported, got %v", scan.Unguarded)
+	}
+}
+
+// Shape 1 reopened: neither a func literal bound to a var nor a var initialised
+// from the environment is an *ast.FuncDecl, so walking only function bodies
+// missed both. The gated count is unmoved in each case, so -min-gated cannot
+// stand in for this.
+func TestCheckSkipMessages_PackageLevelEnvReadIsAViolation(t *testing.T) {
+	for name, decl := range map[string]string{
+		"func literal bound to a var": `var haveDB = func() bool { return os.Getenv("AIHUB_TEST_DB") != "" }`,
+		"var initialised from the env": `var haveDBv = os.Getenv("AIHUB_TEST_DB")
+
+func haveDB() bool { return haveDBv != "" }`,
+	} {
+		dir := pkgDir(t, map[string]string{"helper_test.go": `package p
+
+import (
+	"os"
+	"testing"
+)
+
+` + decl + `
+
+func TestNeedsDB(t *testing.T) {
+	if !haveDB() {
+		t.Skip("no test database")
+	}
+}
+`})
+		got, err := checkSkipMessages(dir)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(got) == 0 {
+			t.Errorf("%s: a package-level read of %s cannot SKIP, so it must be reported; got no violation",
+				name, dbEnvVar)
+		}
+	}
+}
+
+// Two packages legally share one directory, and may declare the same bare
+// constant name with different values. Folding across the directory let the
+// external test package's value win by sorted filename — a fold that is not
+// absent but WRONG, and wrong in the unsafe direction: the guard reads as a
+// guard on some other variable and is dropped without a word.
+func TestCheckSkipMessages_ConstsDoNotFoldAcrossPackagesInOneDirectory(t *testing.T) {
+	dir := pkgDir(t, map[string]string{
+		"a_env.go": `package p
+
+const envName = "AIHUB_TEST_DB"
+`,
+		"a_guard_test.go": `package p
+
+import (
+	"os"
+	"testing"
+)
+
+func setupP(t *testing.T) {
+	if os.Getenv(envName) == "" {
+		t.Skip("no test database")
+	}
+}
+`,
+		"zz_ext_test.go": `package p_test
+
+const envName = "SOMETHING_ELSE"
+`,
+	})
+	wantViolation(t, dir, "setupP")
+}
+
 // A here-document body is DATA, not commands: `cat > repro.sh <<'SH'` followed
 // by a `go test` line writes a file and executes nothing. It is the most
 // complete form of the credited-but-not-run hole, because the body can hold the
@@ -1531,6 +1808,36 @@ jobs:
 	}
 	if len(scan.Invocations) != 0 {
 		t.Errorf("a `go test` inside a heredoc body executes nothing; it must credit no coverage, got %+v", scan.Invocations)
+	}
+
+	// The delimiter is a WORD, not an identifier. `<<\EOF` (backslash-quoted,
+	// the third POSIX way to stop expansion) and `<<1EOF` (digit-leading) are
+	// both valid and both were measured slipping past an
+	// `[A-Za-z_][A-Za-z0-9_]*` spelling as full bypasses.
+	for _, delim := range []string{`\EOF`, `1EOF`, `"EOF"`, `'EOF'`} {
+		term := strings.Trim(delim, `\'"`)
+		wf = []byte(`
+jobs:
+  test:
+    steps:
+      - name: db suite
+        env:
+          AIHUB_TEST_DB: postgres://x
+        run: |
+          cat > /tmp/repro.sh <<` + delim + `
+          go test ./... -count=1 -v 2>&1 | tee a.log
+          ! grep -q -- '--- SKIP' a.log || exit 1
+          ` + term + `
+          echo wrote it
+`)
+		scan, err = ParseWorkflow(wf, testModule)
+		if err != nil {
+			t.Errorf("<<%s: %v", delim, err)
+			continue
+		}
+		if len(scan.Invocations) != 0 {
+			t.Errorf("<<%s is a valid heredoc delimiter; its body must credit no coverage, got %+v", delim, scan.Invocations)
+		}
 	}
 
 	// A REAL invocation after the heredoc closes must still be seen, or this

@@ -99,8 +99,12 @@ jobs:
       # the SOURCE for every way that guard can be written to leave the count
       # unmoved: an env read in a bool-returning helper, os.LookupEnv, a
       # constant or concatenated variable name, a bare `return` instead of a
-      # skip, a TestMain gate, a build tag, and a guard living in a non-test
-      # file. See internal/citest/dbtestcov/main.go's checkSkipMessages. Note
+      # skip, a TestMain gate, a build tag, a guard living in a non-test file,
+      # and the read sitting in a package-level var or a func literal bound to
+      # one. It audits ci.yml the same way, because a `go test` line that is
+      # quoted, commented, inside a heredoc, inside an `if`, or trailed by
+      # `|| true` is credited as coverage by anything that reads lines instead
+      # of modelling the shell. See internal/citest/dbtestcov/main.go. Note
       # what all of those have in common: none of them changes the gated count,
       # so -min-gated below cannot substitute for any of them.
       #

@@ -28,13 +28,18 @@
 // cannot see it because it was never counted.
 //
 // checkSkipMessages closes that door by auditing the SOURCE, and it has to be
-// robust rather than merely present. Eight separate shapes silenced it while
-// leaving the gated count UNCHANGED at 85 — measured, with all eight written
-// into this repository at once: an env read hidden in a bool-returning helper,
-// os.LookupEnv instead of os.Getenv, a constant or concatenated variable name,
-// a bare `return` instead of a skip, a TestMain gate, a build tag, and any of
-// those living in a non-test file. Note the common property: none of them moves
-// the count, so raising -min-gated could never have caught any of them. See
+// robust rather than merely present. Ten separate shapes silenced it while
+// leaving the gated count UNCHANGED at 85 — measured, with the first eight
+// written into this repository at once: an env read hidden in a bool-returning
+// helper, os.LookupEnv instead of os.Getenv, a constant or concatenated
+// variable name, a bare `return` instead of a skip, a TestMain gate, a build
+// tag, and any of those living in a non-test file. A second review added two
+// more, both one edit from the first: the same read in a func literal bound to
+// a package-level var, and in a plain `var dsn = os.Getenv(...)` — neither is
+// an *ast.FuncDecl, so walking only function bodies missed both.
+//
+// Note the common property of all ten: none of them moves the gated count, so
+// raising -min-gated could never have caught any of them. See
 // checkSkipMessages for what closes each one.
 //
 // A test whose skip message names a second environment variable (e.g.
@@ -544,6 +549,12 @@ var envReadFuncs = map[string]bool{
 //   - a function whose scope reads the variable and never reaches a Skip call
 //     is a violation, which is what catches both the bool-returning helper and
 //     the bare `return`;
+//   - a read that is not inside ANY function body — a package-level var, with
+//     or without a func literal around it — is a violation unconditionally,
+//     because a declaration has no way to skip;
+//   - constants are folded per PACKAGE, not per directory: one directory holds
+//     both `package p` and `package p_test`, and folding across it let one
+//     package's constant silently supply the other's value;
 //   - any build constraint on a _test.go file in such a package is a violation,
 //     because the inventory is a default-build `go test ./...` run.
 //
@@ -589,9 +600,22 @@ func checkSkipMessages(root string) ([]string, error) {
 				return nil, fmt.Errorf("parse %s: %w", f.path, err)
 			}
 		}
-		consts := packageStringConsts(files)
-		for i := range files {
-			violations = append(violations, checkFile(fset, &files[i], consts)...)
+		// Group by PACKAGE NAME, not just directory: one directory legally
+		// holds `package p` and `package p_test`, and both may declare the
+		// same bare constant name with different values. Folding across the
+		// whole directory let the external test package's value win by sorted
+		// filename — a fold that is not merely absent but WRONG, and wrong in
+		// the unsafe direction (a real guard reads as a guard on some other
+		// variable and is skipped silently).
+		byPkg := map[string][]goFile{}
+		for _, f := range files {
+			byPkg[f.ast.Name.Name] = append(byPkg[f.ast.Name.Name], f)
+		}
+		for _, pkgFiles := range byPkg {
+			consts := packageStringConsts(pkgFiles)
+			for i := range pkgFiles {
+				violations = append(violations, checkFile(fset, &pkgFiles[i], consts)...)
+			}
 		}
 	}
 	sort.Strings(violations)
@@ -742,6 +766,25 @@ func checkFile(fset *token.FileSet, f *goFile, consts map[string]string) []strin
 		}
 	}
 
+	// A package-level declaration can read the environment too, and it cannot
+	// possibly skip:
+	//
+	//	var haveDB = func() bool { return os.Getenv(dbEnvVar) != "" }
+	//	var dsn     = os.Getenv(dbEnvVar)
+	//
+	// Both are one edit away from the bool-returning helper this check is built
+	// to catch, and neither is an *ast.FuncDecl, so walking only FuncDecls
+	// reopened the whole shape for four characters. Scanning what is left after
+	// the function bodies is what closes it for any declaration form, including
+	// ones nobody has thought of.
+	for _, r := range envReadsOutsideFuncs(f, consts) {
+		pos := fset.Position(r.pos)
+		violations = append(violations, fmt.Sprintf(
+			"%s:%d: a package-level declaration reads %s; a declaration cannot SKIP, so the tests that consult it are never "+
+				"classified as %s-gated. Move the read into the test helper that skips, naming %s in the message",
+			pos.Filename, pos.Line, dbEnvVar, dbEnvVar, dbEnvVar))
+	}
+
 	for _, decl := range f.ast.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -847,6 +890,44 @@ func funcSource(fset *token.FileSet, f *goFile, fn *ast.FuncDecl) string {
 	return string(f.src[start:end])
 }
 
+// envReadsOutsideFuncs returns the environment reads that resolve to dbEnvVar
+// and do NOT sit inside any function declaration's body — i.e. the ones in
+// package-level var/const initialisers, including inside a func literal bound
+// to a var. Those are reported unconditionally, because a declaration has no
+// way to skip.
+func envReadsOutsideFuncs(f *goFile, consts map[string]string) []envRead {
+	type span struct{ lo, hi token.Pos }
+	var bodies []span
+	for _, decl := range f.ast.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+			bodies = append(bodies, span{fn.Body.Pos(), fn.Body.End()})
+		}
+	}
+	inABody := func(p token.Pos) bool {
+		for _, b := range bodies {
+			if p >= b.lo && p < b.hi {
+				return true
+			}
+		}
+		return false
+	}
+
+	var out []envRead
+	for _, r := range envReadsInNode(f.ast, consts) {
+		if inABody(r.pos) {
+			continue
+		}
+		// Only a read this command can pin to dbEnvVar is reported here. An
+		// unresolvable one at package level is already covered by the
+		// per-function rule wherever it is consumed, and reporting it twice
+		// would make the message confusing.
+		if r.resolved && r.name == dbEnvVar {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // envRead is one call into the process environment found inside a function.
 type envRead struct {
 	name     string
@@ -858,8 +939,12 @@ type envRead struct {
 }
 
 func envReadsIn(body *ast.BlockStmt, consts map[string]string) []envRead {
+	return envReadsInNode(body, consts)
+}
+
+func envReadsInNode(root ast.Node, consts map[string]string) []envRead {
 	var reads []envRead
-	ast.Inspect(body, func(n ast.Node) bool {
+	ast.Inspect(root, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -993,8 +1078,25 @@ var (
 // target AND the SKIP marker, it would credit coverage and satisfy the guard
 // that is supposed to prove the coverage ran. One line, complete bypass.
 func quoteMask(s string) []byte {
+	mask, _ := quoteMaskFrom(s, 0)
+	return mask
+}
+
+// quoteMaskFrom is quoteMask with an INCOMING quote state, and it returns the
+// outgoing one. The carry is what makes a multi-line quoted string data rather
+// than commands:
+//
+//	echo "Reproduce locally:
+//	go test ./internal/domain/ -run '^(TestGhost)$' -v 2>&1 | tee ghost.log
+//	! grep -q -- '--- SKIP' ghost.log || exit 1
+//	"
+//
+// Nothing there runs. Computed per line, from a fresh state each time, lines 2
+// and 3 read as a real invocation AND its guard — the same complete bypass a
+// single-line quoted string used to be, reached by adding a newline. So quote
+// state is threaded through the whole script, not restarted at every '\n'.
+func quoteMaskFrom(s string, q byte) ([]byte, byte) {
 	mask := make([]byte, len(s))
-	var q byte
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if q != 0 {
@@ -1017,38 +1119,78 @@ func quoteMask(s string) []byte {
 			i++ // an escaped character is literal, never a quote or an operator
 		}
 	}
-	return mask
+	return mask, q
+}
+
+// scriptLine is one line of a step's `run:` block after comments and
+// here-document bodies have been blanked, together with the shell context in
+// force at its START. The context is what makes the SKIP guard checkable: a
+// guard inside `if ... fi`, or reached only via `&&`, or sitting inside a
+// multi-line quoted string, asserts nothing — and the `go test` side of this
+// parser rejects all three while the guard side used to accept them.
+type scriptLine struct {
+	Text string
+	// Depth is the enclosing if/while/until/for/case depth.
+	Depth int
+	// Quote is the quote character still open from an earlier line, or 0.
+	Quote byte
+	// PendingOp is the `&&` or `||` a PREVIOUS line ended with, which makes
+	// this line's first command conditional on that line's result. A shell
+	// line ending in `&&` continues onto the next line, so a guard placed
+	// there runs only sometimes.
+	PendingOp string
 }
 
 // shellCommand is one command from a step's script: the text between unquoted
 // `;`, `&&`, `||` and `&` separators, with enough context to say whether it
 // actually runs and whether its failure actually fails the step.
 type shellCommand struct {
-	// Line is the 1-based line of the step's script the command starts on.
+	// Line is the 0-based index into shellScript.Lines the command starts on.
 	Line int
 	Text string
+	// Quote is the quote character in force at the start of the command, or 0.
+	// Non-zero means the text is data inside a multi-line string.
+	Quote byte
 	// Ungated is empty when the command runs unconditionally and its exit
 	// status fails the step. Otherwise it says why not, for the error message.
 	Ungated string
 }
 
-// shellPart is one span of a line plus the operator that separated it from the
-// previous span.
-type shellPart struct {
-	text string
-	op   string
+// shellScript is a step's `run:` block, modelled.
+type shellScript struct {
+	Lines    []scriptLine
+	Commands []shellCommand
 }
 
-// splitUnquoted splits a line at unquoted `;`, `&&`, `||` and `&`.
+// Texts returns the blanked line texts, for the whole-script regexp probes.
+func (s *shellScript) Texts() []string {
+	out := make([]string, len(s.Lines))
+	for i, l := range s.Lines {
+		out[i] = l.Text
+	}
+	return out
+}
+
+// shellPart is one span of a line plus the operator that separated it from the
+// previous span and the quote state at its start.
+type shellPart struct {
+	text  string
+	op    string
+	quote byte
+}
+
+// splitUnquoted splits a line at unquoted `;`, `&&`, `||` and `&`, starting
+// from the given open-quote state and returning the state left at the end.
 //
 // `&` is only a separator when it is neither half of `&&` nor part of a
 // redirection: `2>&1` ends every `go test` line in ci.yml, and splitting there
 // would cut each invocation in half.
-func splitUnquoted(line string) []shellPart {
-	mask := quoteMask(line)
+func splitUnquoted(line string, inQuote byte) ([]shellPart, byte) {
+	mask, outQuote := quoteMaskFrom(line, inQuote)
 	var parts []shellPart
 	prevOp := ""
 	start := 0
+	startQuote := inQuote
 	for i := 0; i < len(line); i++ {
 		if mask[i] != 0 {
 			continue
@@ -1066,12 +1208,15 @@ func splitUnquoted(line string) []shellPart {
 		default:
 			continue
 		}
-		parts = append(parts, shellPart{text: line[start:i], op: prevOp})
+		parts = append(parts, shellPart{text: line[start:i], op: prevOp, quote: startQuote})
+		// A separator is only recognised outside quotes, so whatever follows it
+		// starts unquoted.
+		startQuote = 0
 		prevOp = op
 		i += len(op) - 1
 		start = i + 1
 	}
-	return append(parts, shellPart{text: line[start:], op: prevOp})
+	return append(parts, shellPart{text: line[start:], op: prevOp, quote: startQuote}), outQuote
 }
 
 // isBackgroundAmp reports whether the `&` at index i backgrounds a command,
@@ -1091,7 +1236,6 @@ func isBackgroundAmp(line string, i int) bool {
 	return true
 }
 
-// controlKeywords are the shell words that open or close a compound statement.
 var (
 	blockOpeners = map[string]bool{"if": true, "while": true, "until": true, "for": true, "case": true}
 	blockClosers = map[string]bool{"fi": true, "done": true, "esac": true}
@@ -1100,47 +1244,107 @@ var (
 	condPosition = map[string]bool{"if": true, "elif": true, "while": true, "until": true}
 )
 
-// shellCommands models a step's script as an ordered list of commands, marking
-// each one that does not run unconditionally with its exit status gating the
-// step. `stripShellComments` already established that this parser has to model
-// shell structure rather than grep lines; a `go test` inside `if ... fi` is the
-// same class of mistake as a `go test` inside a `#` comment, and used to be
-// credited as unconditional coverage.
-func shellCommands(lines []string) []shellCommand {
-	var out []shellCommand
+// parseShellScript models a step's `run:` block: it blanks `#` comments and
+// here-document bodies, threads open-quote state and block depth across lines,
+// and splits every line into commands.
+//
+// One pass, one carried state, because the three ways a `go test` line can look
+// executable without being executed — a comment, a quoted string, a heredoc
+// body — interact. A `#` inside a multi-line quoted string is data, not a
+// comment; a heredoc delimiter inside quotes is data too. Deciding them
+// independently, per line, is what let each one become a bypass in turn.
+func parseShellScript(script string) *shellScript {
+	raw := strings.Split(script, "\n")
+	sc := &shellScript{Lines: make([]scriptLine, len(raw))}
+	var quote byte
 	depth := 0
-	for i, line := range lines {
-		parts := splitUnquoted(line)
+	heredoc := ""
+	pendingOp := ""
+
+	for i, line := range raw {
+		ctx := scriptLine{Depth: depth, Quote: quote, PendingOp: pendingOp}
+
+		// Inside a here-document the lines are data. Blank them, and do not let
+		// them move quote state or block depth.
+		if heredoc != "" {
+			if strings.TrimSpace(line) == heredoc {
+				heredoc = ""
+			}
+			sc.Lines[i] = ctx
+			continue
+		}
+		// A whole-line comment, but only when we are not inside a string.
+		if quote == 0 && strings.HasPrefix(strings.TrimSpace(line), "#") {
+			sc.Lines[i] = ctx
+			continue
+		}
+
+		text := line
+		if quote == 0 {
+			text = cutTrailingComment(text)
+			heredoc = heredocDelim(text)
+		}
+		ctx.Text = text
+		sc.Lines[i] = ctx
+
+		parts, outQuote := splitUnquoted(text, quote)
 		for j, part := range parts {
-			text := strings.TrimSpace(part.text)
-			if text == "" {
+			t := strings.TrimSpace(part.text)
+			if t == "" {
 				continue
 			}
-			cmd := shellCommand{Line: i + 1, Text: text}
-			word := firstWord(text)
+			// The operator that makes this command conditional is the one
+			// inside the line, or — for the line's first command — the one a
+			// previous line ended with.
+			op := part.op
+			if j == 0 && op == "" {
+				op = pendingOp
+			}
+			cmd := shellCommand{Line: i, Text: t, Quote: part.quote}
 			switch {
 			case depth > 0:
-				cmd.Ungated = "inside a shell `" + word + "`-block body (depth " + strconv.Itoa(depth) + ")"
-			case part.op == "&&" || part.op == "||":
-				cmd.Ungated = "guarded by `" + part.op + "`"
+				cmd.Ungated = "inside a shell block body (depth " + strconv.Itoa(depth) + ")"
+			case op == "&&" || op == "||":
+				cmd.Ungated = "reached only via `" + op + "`"
 			}
-			if condPosition[word] {
-				cmd.Ungated = "in the condition of a shell `" + word + "`"
-			} else if strings.HasPrefix(text, "!") {
-				cmd.Ungated = "negated with `!`, so its failure passes the step"
-			} else if j+1 < len(parts) && parts[j+1].op == "&" {
-				cmd.Ungated = "backgrounded with `&`, so its exit status is discarded"
+			// Classification by keyword, and depth accounting, are only valid
+			// on text the shell would actually parse as a command.
+			if part.quote == 0 {
+				word := firstWord(t)
+				switch {
+				case condPosition[word]:
+					cmd.Ungated = "in the condition of a shell `" + word + "`"
+				case strings.HasPrefix(t, "!"):
+					cmd.Ungated = "negated with `!`, so its failure passes the step"
+				case j+1 < len(parts) && parts[j+1].op == "&":
+					cmd.Ungated = "backgrounded with `&`, so its exit status is discarded"
+				case j+1 < len(parts) && (parts[j+1].op == "&&" || parts[j+1].op == "||"):
+					// Looking FORWARD matters as much as looking back:
+					// `go test ... || true` is as ungated as `x && go test ...`,
+					// and only the second used to be rejected.
+					cmd.Ungated = "followed by `" + parts[j+1].op +
+						"`, so its exit status is consumed instead of failing the step"
+				}
+				switch {
+				case blockOpeners[word]:
+					depth++
+				case blockClosers[word] && depth > 0:
+					depth--
+				}
 			}
-			switch {
-			case blockOpeners[word]:
-				depth++
-			case blockClosers[word] && depth > 0:
-				depth--
-			}
-			out = append(out, cmd)
+			sc.Commands = append(sc.Commands, cmd)
 		}
+
+		// A line whose last span is empty after an `&&`/`||` continues onto the
+		// next line.
+		pendingOp = ""
+		if last := parts[len(parts)-1]; strings.TrimSpace(last.text) == "" &&
+			(last.op == "&&" || last.op == "||") {
+			pendingOp = last.op
+		}
+		quote = outQuote
 	}
-	return out
+	return sc
 }
 
 // firstWord returns the first shell word of a command, skipping a leading `!`.
@@ -1160,9 +1364,9 @@ type goTestHit struct {
 	quoted     bool
 }
 
-func goTestHits(s string) []goTestHit {
+func goTestHits(s string, inQuote byte) []goTestHit {
 	var hits []goTestHit
-	mask := quoteMask(s)
+	mask, _ := quoteMaskFrom(s, inQuote)
 	for _, m := range goTestRE.FindAllStringSubmatchIndex(s, -1) {
 		// The `(go\s+test)` group is mandatory, so m[2] is always a real
 		// offset. Guarded anyway: if a future edit made the group optional,
@@ -1199,7 +1403,8 @@ func ParseWorkflow(data []byte, module string) (*WorkflowScan, error) {
 				continue
 			}
 			script := continuation.ReplaceAllString(st.Run, " ")
-			lines := stripHeredocs(stripShellComments(script))
+			sc := parseShellScript(script)
+			lines := sc.Texts()
 
 			hasDB := hasKey(st.Env, dbEnvVar) || hasKey(job.Env, dbEnvVar) || hasKey(wf.Env, dbEnvVar) ||
 				anyLineMatches(lines, inlineDBEnv)
@@ -1224,8 +1429,8 @@ func ParseWorkflow(data []byte, module string) (*WorkflowScan, error) {
 				continue
 			}
 
-			for _, cmd := range shellCommands(lines) {
-				for _, hit := range goTestHits(cmd.Text) {
+			for _, cmd := range sc.Commands {
+				for _, hit := range goTestHits(cmd.Text, cmd.Quote) {
 					// A `go test` nobody executes must not credit coverage.
 					// Quoted text is the sharpest form because the same line can
 					// also carry the tee target and the SKIP marker, satisfying
@@ -1254,13 +1459,17 @@ func ParseWorkflow(data []byte, module string) (*WorkflowScan, error) {
 						continue
 					}
 					scan.Invocations = append(scan.Invocations, *inv)
-					if inv.Log == "" {
+					if inv.Log == "" || inv.Log == "/dev/null" {
+						why := "captures no output (no `| tee <log>`)"
+						if inv.Log == "/dev/null" {
+							why = "tees to /dev/null, which is always empty"
+						}
 						scan.Unguarded = append(scan.Unguarded, fmt.Sprintf(
-							"%s: `%s` captures no output (no `| tee <log>`), so no %q assertion is possible",
-							stepName, cmd.Text, skipGuardMarker))
+							"%s: `%s` %s, so no %q assertion is possible",
+							stepName, cmd.Text, why, skipGuardMarker))
 						continue
 					}
-					switch verdict, offender := skipGuardFor(lines, inv.Log); verdict {
+					switch verdict, offender := skipGuardFor(sc, inv.Log, cmd.Line); verdict {
 					case guardMissing:
 						scan.Unguarded = append(scan.Unguarded, fmt.Sprintf(
 							"%s: nothing greps %s for %q, so this invocation passes even if every test it selects SKIPs",
@@ -1268,8 +1477,11 @@ func ParseWorkflow(data []byte, module string) (*WorkflowScan, error) {
 					case guardMalformed:
 						scan.Unguarded = append(scan.Unguarded, fmt.Sprintf(
 							"%s: the line that mentions %s and %q is not a working guard, so it asserts nothing about this "+
-								"invocation (an inverted `grep ... || exit 1` REQUIRES a skip; a trailing `|| true` can never "+
-								"fail). Spell it `! grep -q -- '%s' %s || exit 1` (a `|| { echo ...; exit 1; }` tail is fine): %s",
+								"invocation. It must be spelled `! grep -q -- '%s' %s || exit 1` (a `|| { echo ...; exit 1; }` "+
+								"tail is fine), must come AFTER the invocation, and must not sit in an `if`/`for`/`while` body, "+
+								"behind `&&`/`||`, within quotes, or contain `exit 0` — an inverted "+
+								"`grep ... || exit 1` REQUIRES a skip, a trailing `|| true` can never fail, and a guard placed "+
+								"before its invocation greps a file that does not exist yet (exit 2, inverted to 0): %s",
 							stepName, inv.Log, skipGuardMarker, skipGuardMarker, inv.Log, offender))
 					}
 				}
@@ -1292,23 +1504,50 @@ const (
 	guardMalformed
 )
 
+// exitZeroRE finds a successful exit inside a guard. `{ echo "..." && exit 0;
+// exit 1; }` satisfies "the exit is the block's last command" while the earlier
+// one wins, so the block returns 0 on a SKIP. A correct guard never contains
+// `exit 0`.
+var exitZeroRE = regexp.MustCompile(`\bexit\s+0\b`)
+
 // skipGuardFor decides whether this invocation's SKIPs are actually asserted
 // on. Checking per invocation rather than per step matters: a step with three
 // `go test` lines and one guard would otherwise credit coverage for all three
 // while asserting on only one.
 //
-// The log name must match as a whole shell word — ci.yml really does have
-// recall_unmatched.log next to recall_unmatched_http.log, and a substring match
-// would let one guard stand in for the other.
-func skipGuardFor(lines []string, log string) (guardVerdict, string) {
+// A guard has to satisfy four things, not just one, and only the first used to
+// be checked:
+//
+//   - SHAPE: it matches skipGuardRE, and names this invocation's own log as a
+//     whole shell word (ci.yml really has recall_unmatched.log next to
+//     recall_unmatched_http.log, and a substring match would let one stand in
+//     for the other);
+//   - ORDER: it comes AFTER the invocation. Before it, the log does not exist
+//     yet, so `grep` exits 2, the leading `!` inverts that to 0 and `|| exit 1`
+//     never fires — a guard that CANNOT fail, produced by an ordinary
+//     reordering edit;
+//   - CONTEXT: it is not inside an `if`/`for`/`while`/`case` body, not reached
+//     only via `&&`/`||` (including one a previous line ended with), and not
+//     inside a multi-line quoted string. The `go test` side rejects all of
+//     those as unmodellable; a guard that only sometimes runs is worth no more;
+//   - EFFECT: no `exit 0` anywhere in it.
+//
+// A log of /dev/null is rejected too: it is always empty, so the guard can
+// never fail however it is spelled.
+func skipGuardFor(sc *shellScript, log string, afterLine int) (guardVerdict, string) {
 	nameRE := regexp.MustCompile(`(^|\s)` + regexp.QuoteMeta(log) + `(\s|$)`)
 	offender := ""
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if m := skipGuardRE.FindStringSubmatch(trimmed); m != nil && m[1] == log {
+	for i, ln := range sc.Lines {
+		if ln.Text == "" {
+			continue
+		}
+		trimmed := strings.TrimSpace(ln.Text)
+		if m := skipGuardRE.FindStringSubmatch(trimmed); m != nil && m[1] == log &&
+			i > afterLine && ln.Depth == 0 && ln.Quote == 0 && ln.PendingOp == "" &&
+			!exitZeroRE.MatchString(trimmed) {
 			return guardOK, ""
 		}
-		if offender == "" && strings.Contains(line, skipGuardMarker) && nameRE.MatchString(line) {
+		if offender == "" && strings.Contains(ln.Text, skipGuardMarker) && nameRE.MatchString(ln.Text) {
 			offender = trimmed
 		}
 	}
@@ -1318,59 +1557,13 @@ func skipGuardFor(lines []string, log string) (guardVerdict, string) {
 	return guardMissing, ""
 }
 
-// stripShellComments splits a script into lines and blanks out full-line
-// comments, so that a commented-out invocation is not credited as coverage and
-// a marker mentioned in prose is not mistaken for a guard.
-func stripShellComments(script string) []string {
-	lines := strings.Split(script, "\n")
-	out := make([]string, len(lines))
-	for i, l := range lines {
-		if strings.HasPrefix(strings.TrimSpace(l), "#") {
-			out[i] = ""
-			continue
-		}
-		out[i] = cutTrailingComment(l)
-	}
-	return out
-}
-
 // heredocRE matches a here-document redirection and captures its delimiter,
 // quoted or bare.
-var heredocRE = regexp.MustCompile(`<<-?\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))`)
-
-// stripHeredocs blanks the BODY of every here-document in a step's script.
-//
-// A heredoc body is data, not commands — `cat > repro.sh <<'SH'` followed by a
-// `go test` line writes a file and executes nothing. It is the third form of
-// the same hole as a `#` comment and a quoted string, and the most complete:
-// the body can hold the invocation, its `| tee` target AND the SKIP guard, so
-// without this a step that merely WRITES a reproduction script credits full
-// coverage and satisfies the guard meant to prove that coverage ran. Measured
-// against the real command before this existed: `dbtestcov: OK`, exit 0, with
-// an uncovered DB-gated test in the inventory.
-//
-// An unterminated heredoc blanks the rest of the step. That under-credits,
-// which is the safe direction and a loud one: real coverage in those lines
-// stops being found and the tests it covers are reported as executed by no CI
-// step.
-func stripHeredocs(lines []string) []string {
-	out := make([]string, len(lines))
-	copy(out, lines)
-	for i := 0; i < len(out); i++ {
-		delim := heredocDelim(out[i])
-		if delim == "" {
-			continue
-		}
-		for j := i + 1; j < len(out); j++ {
-			body := strings.TrimSpace(out[j])
-			out[j] = ""
-			if body == delim {
-				break
-			}
-		}
-	}
-	return out
-}
+// The bare alternative deliberately accepts ANY word, not just an identifier:
+// `<<\EOF` (backslash-quoted, the third POSIX way to stop expansion) and
+// `<<1EOF` (digit-leading) are both valid delimiters, and both were measured
+// slipping through an `[A-Za-z_][A-Za-z0-9_]*` spelling as full bypasses.
+var heredocRE = regexp.MustCompile(`<<-?\s*(?:'([^']+)'|"([^"]+)"|\\?([^\s;&|<>()'"]+))`)
 
 func heredocDelim(line string) string {
 	mask := quoteMask(line)

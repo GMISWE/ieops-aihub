@@ -8,8 +8,12 @@
 
 ## Before the engine — Memory-First recall
 
+`@@RECALL_TYPE@@` is substituted by the router with a JSON **array** (`["experience.*","rule.*"]`).
+Do NOT wrap it in quotes: `type` is a list, and a single string containing `|` is one type name
+that matches nothing — the server rejects it with a 400 (aihub#289).
+
 ```
-pf_recall(project=<current>, query=<wi.goal>, type="@@RECALL_TYPE@@", top_k=5)
+pf_recall(project=<current>, query=<wi.goal>, type=@@RECALL_TYPE@@, top_k=5)
 ```
 
 Display results with `effective_strength >= 0.3` (💡 prefix). For any memory the model
@@ -22,7 +26,8 @@ If the step surfaced anything worth remembering across sessions (a pitfall, a re
 approach, a constraint), capture it:
 
 ```
-pf_remember(type="experience.*|fact.*|rule.*", project=<current>, content=<finding>,
+pf_remember(type=<ONE concrete type — e.g. experience.pitfall / fact.architecture / rule.work>,
+            project=<current>, content=<finding>,
             work_item_id=<current>, visibility="project")
 ```
 

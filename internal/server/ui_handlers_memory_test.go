@@ -53,7 +53,30 @@ func withRecallOverride(items []domain.MemoryWithStrength) (capture *domain.Reca
 		got = *req
 		return &domain.RecallResponse{Items: items}, nil
 	}
-	return &got, func() { recallMemoriesFn = prev }
+	// aihub#289 added a SECOND database call to handleUIMemories — the unmatched-type
+	// diagnostic. This helper's contract is "this handler does not reach the database",
+	// so it has to cover both, or every existing caller that passes a nil pool and a
+	// type filter starts nil-dereferencing. A test that wants to assert ON the
+	// diagnostic layers withUnmatchedOverride over this one (see ui_memory_types_test).
+	prevUnmatched := unmatchedTypesFn
+	unmatchedTypesFn = func(_ context.Context, _ *pgxpool.Pool, _ *domain.RecallRequest) ([]string, string) {
+		return nil, ""
+	}
+	return &got, func() {
+		recallMemoriesFn = prev
+		unmatchedTypesFn = prevUnmatched
+	}
+}
+
+// withUnmatchedStub silences the aihub#289 unmatched-type diagnostic, for tests that
+// swap recallMemoriesFn by hand instead of going through withRecallOverride. Returns the
+// restore func, so the idiom is `defer withUnmatchedStub()()`.
+func withUnmatchedStub() func() {
+	prev := unmatchedTypesFn
+	unmatchedTypesFn = func(_ context.Context, _ *pgxpool.Pool, _ *domain.RecallRequest) ([]string, string) {
+		return nil, ""
+	}
+	return func() { unmatchedTypesFn = prev }
 }
 
 // withLoadMemoryOverride swaps loadMemoryFn for the duration of a test.
@@ -147,6 +170,10 @@ func TestUIMemories_FilterByType(t *testing.T) {
 	// returning the matching row when req.Types matches.
 	prev := recallMemoriesFn
 	defer func() { recallMemoriesFn = prev }()
+	// aihub#289: this test swaps the recall directly rather than via
+	// withRecallOverride, so it must stub the second DB seam itself — the handler now
+	// also consults the unmatched-type diagnostic whenever a type filter is present.
+	defer withUnmatchedStub()()
 	recallMemoriesFn = func(_ context.Context, _ *pgxpool.Pool, req *domain.RecallRequest) (*domain.RecallResponse, error) {
 		items := []domain.MemoryWithStrength{}
 		for _, m := range []domain.Memory{m1, m2} {

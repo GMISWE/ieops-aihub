@@ -1,6 +1,12 @@
 package mcp
 
-import "testing"
+import (
+	"encoding/json"
+	"reflect"
+	"testing"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+)
 
 // TestSlimRecallResult_CarriesTotal guards aihub#249: slimRecallResult builds a
 // brand-new result map (`res := map[string]any{"items": slim}`) rather than
@@ -215,5 +221,130 @@ func TestSlimRecallResult_RewritesAttrsAndCommits(t *testing.T) {
 	reps, ok := note["replies"].([]any)
 	if !ok || len(reps) != 1 || reps[0] != "agreed, fixed" {
 		t.Errorf("reply bodies not flattened as expected: %#v", note["replies"])
+	}
+}
+
+// TestSlimRecallResult_CarriesUnmatchedTypes guards aihub#289, and is the THIRD
+// instance of the same trap the two tests above were written for: slimRecallResult
+// builds a brand-new map, so a field added to RecallResponse reaches the REST
+// response and dies here. `total` (aihub#249) and the truncation pair (aihub#269)
+// were the first two.
+//
+// This one matters more than either, because unmatched_types exists ONLY to be read
+// by the model, and this slimmer is the model's surface. Dropped here, the field
+// would be a fix that never reaches the party it was written for: pf_recall would
+// keep returning a bare empty set for a wrong type name, i.e. the exact silence
+// aihub#289 exists to end, while the REST endpoint looked fixed.
+func TestSlimRecallResult_CarriesUnmatchedTypes(t *testing.T) {
+	result := map[string]any{
+		"items":           []any{},
+		"total":           float64(0),
+		"unmatched_types": []any{"rule.work|fact.test"},
+	}
+
+	out := slimRecallResult(result)
+
+	um, ok := out["unmatched_types"]
+	if !ok {
+		t.Fatalf("slimRecallResult dropped `unmatched_types` — the model never learns its type value was wrong: %+v", out)
+	}
+	got, ok := um.([]any)
+	if !ok || len(got) != 1 || got[0] != "rule.work|fact.test" {
+		t.Errorf("unmatched_types mangled: %#v", um)
+	}
+}
+
+// ...and it must stay absent when the server said nothing, so the healthy call
+// shapes pay no tokens for it. A slimmer that materialised an empty list here would
+// spend budget on every recall to report "no problem".
+func TestSlimRecallResult_OmitsAbsentUnmatchedTypes(t *testing.T) {
+	for name, result := range map[string]map[string]any{
+		"key absent": {"items": []any{}, "total": float64(3)},
+		"key nil":    {"items": []any{}, "total": float64(3), "unmatched_types": nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := slimRecallResult(result)
+			if _, ok := out["unmatched_types"]; ok {
+				t.Errorf("unmatched_types materialised when the server reported none: %+v", out)
+			}
+		})
+	}
+}
+
+// TestRecallResult_SurvivesIntoCallToolResult closes hop 4 of the aihub#289 contract.
+//
+// The chain from a wrong type name to a model that knows about it is four hops:
+// domain.UnmatchedTypes computes it, handleRecall assigns it, RecallResponse serialises
+// it, and the MCP surface forwards it. Hops 1-3 are gated elsewhere (memory_unmatched_test
+// and routes_memory_types_test). Hop 4 was NOT: slimRecallResult was tested, but nothing
+// asserted the slimmed map actually reaches a CallToolResult intact — and that is the
+// hop where the model finally reads it. Both the slimmer and jsonResultCompact are
+// exercised here in the order pf_recall calls them, so a marshalling change that dropped
+// or renamed the field cannot pass.
+func TestRecallResult_SurvivesIntoCallToolResult(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		in    map[string]any
+		want  map[string]any
+		unset []string
+	}{
+		{
+			name: "unmatched types reach the model",
+			in: map[string]any{
+				"items": []any{}, "total": float64(0),
+				"unmatched_types": []any{"rule.work|fact.test"},
+			},
+			want:  map[string]any{"unmatched_types": []any{"rule.work|fact.test"}},
+			unset: []string{"unmatched_types_error"},
+		},
+		{
+			name: "a broken diagnostic reaches the model as an error, not as silence",
+			in: map[string]any{
+				"items": []any{}, "total": float64(0),
+				"unmatched_types_error": "type diagnostic unavailable: boom",
+			},
+			want:  map[string]any{"unmatched_types_error": "type diagnostic unavailable: boom"},
+			unset: []string{"unmatched_types"},
+		},
+		{
+			name:  "a healthy recall carries neither",
+			in:    map[string]any{"items": []any{}, "total": float64(2)},
+			want:  map[string]any{"total": float64(2)},
+			unset: []string{"unmatched_types", "unmatched_types_error"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := jsonResultCompact(slimRecallResult(tc.in))
+			if err != nil {
+				t.Fatalf("jsonResultCompact: %v", err)
+			}
+			if len(res.Content) != 1 {
+				t.Fatalf("expected exactly one content block, got %d", len(res.Content))
+			}
+			text, ok := res.Content[0].(*sdkmcp.TextContent)
+			if !ok {
+				t.Fatalf("content is not TextContent: %T", res.Content[0])
+			}
+
+			var got map[string]any
+			if err := json.Unmarshal([]byte(text.Text), &got); err != nil {
+				t.Fatalf("tool result text is not JSON: %v\n%s", err, text.Text)
+			}
+			for k, want := range tc.want {
+				g, present := got[k]
+				if !present {
+					t.Errorf("%q never reached the model: %s", k, text.Text)
+					continue
+				}
+				if !reflect.DeepEqual(g, want) {
+					t.Errorf("%q = %#v, want %#v", k, g, want)
+				}
+			}
+			for _, k := range tc.unset {
+				if _, present := got[k]; present {
+					t.Errorf("%q materialised when the server reported none: %s", k, text.Text)
+				}
+			}
+		})
 	}
 }

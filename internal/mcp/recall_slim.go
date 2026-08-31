@@ -108,6 +108,21 @@ func slimRecallResult(result map[string]any) map[string]any {
 	if total, ok := result["total"]; ok && total != nil {
 		res["total"] = total
 	}
+	// aihub#289: unmatched_types names the `type` entries that matched no row. It
+	// exists solely to be READ BY THE MODEL — dropping it here would reinstate the
+	// silence the field was added to end, on the one caller that matters most. The
+	// server omits it when there is nothing to report, so healthy recalls pay
+	// nothing. Third instance of this whitelist swallowing a new field (total,
+	// aihub#249; the truncation pair, aihub#269); see the INVARIANT note above.
+	if um, ok := result["unmatched_types"]; ok && um != nil {
+		res["unmatched_types"] = um
+	}
+	// ...and its failure half. Forwarding the list but not the error would put the
+	// silence straight back: the model would read "no unmatched_types" as "your type
+	// filter is fine" in exactly the case where nothing was actually checked.
+	if ue, ok := result["unmatched_types_error"]; ok && ue != nil {
+		res["unmatched_types_error"] = ue
+	}
 	return res
 }
 

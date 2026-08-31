@@ -408,6 +408,53 @@ jobs:
           ! grep -q -- '--- SKIP' gc_partition.log \
             || { echo "::error::an aihub#268 partition-creator test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#289: pf_recall's `type` filter is a LIST, but three SKILL.md templates
+      # taught `type="a|b|c"` for months. Nothing in the chain ever split on '|', so the
+      # whole string arrived as one type name, matched no row on either the exact or the
+      # LIKE branch, and returned {"items":null,"total":0} — an empty set that is
+      # indistinguishable from "this project holds no such memory". An agent following
+      # the Memory-First rule read it as "no prior experience exists" and went on to
+      # redo work already recorded, with nothing in any log to show it happened.
+      #
+      # The fix is a 400 on '|' plus a new `unmatched_types` response field naming any
+      # type entry that matched nothing. The guard tests need no DB and run under "Unit
+      # tests" above; the two suites below DO need one, and both are the halves that
+      # prove the field survives to a caller rather than merely being computed:
+      #
+      #   internal/domain  — UnmatchedTypes against the real SQL (the shared
+      #                      typeFilterClause means the diagnostic and the recall filter
+      #                      cannot disagree), plus the differential check that the piped
+      #                      form is empty AND explained while the array form works
+      #   internal/server  — handleRecall assigning it and it surviving into the JSON
+      #                      body, including staying OFF the wire when there is nothing
+      #                      to report
+      #
+      # Same -v + grep guard as the steps above, for the same reason: `go test` prints
+      # "ok" and exits 0 when every selected test SKIPs, and these skip on an empty
+      # AIHUB_TEST_DB — so without the greps this step would be a green no-op.
+      - name: aihub#289 recall unmatched-type DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestUnmatchedTypes' -count=1 -v 2>&1 | tee recall_unmatched.log
+          for want in TestUnmatchedTypes \
+                      TestUnmatchedTypes_AgreesWithRecall \
+                      TestUnmatchedTypes_NeverBreaksRecall \
+                      TestUnmatchedTypes_ChunksPastThePostgresTargetListCap \
+                      TestUnmatchedTypes_AdminAndArchived; do
+            grep -q -- "--- PASS: $want (" recall_unmatched.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#289 unmatched-type coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' recall_unmatched.log \
+            || { echo "::error::an aihub#289 unmatched-type test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+          go test ./internal/server/ -run 'TestHandleRecall_ReportsUnmatchedTypes' -count=1 -v 2>&1 | tee recall_unmatched_http.log
+          grep -q -- "--- PASS: TestHandleRecall_ReportsUnmatchedTypes (" recall_unmatched_http.log \
+            || { echo "::error::TestHandleRecall_ReportsUnmatchedTypes did not run; the aihub#289 handler-to-JSON hop is not covered"; exit 1; }
+          ! grep -q -- '--- SKIP' recall_unmatched_http.log \
+            || { echo "::error::TestHandleRecall_ReportsUnmatchedTypes SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: Launcher update-check regression suite
         run: bash plugins/polyforge/tests/launcher-update-check.test.sh
 

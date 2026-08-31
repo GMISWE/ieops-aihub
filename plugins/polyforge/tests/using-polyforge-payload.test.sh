@@ -21,25 +21,31 @@
 # including all of Iron Rules, the three-segment output format and NL Routing — reached no
 # model at all, for every session since 2026-08-05.
 #
-# !! CI STATUS: THIS SUITE IS NOT WIRED INTO CI YET. !!
-# .github/workflows/ci.yml runs only launcher-update-check.test.sh; every other suite in this
-# directory (including this one) is advisory and runs only when invoked by hand — see the
-# aihub#254 note at ci.yml:171-183 for the documented cost of that gap. Wiring this in is
-# tracked separately (ci.yml is owned by a concurrent work item). Until then this file is a
-# manual check, NOT an automatic guarantee. Do not describe it as one.
+# CI STATUS: WIRED (aihub#293). .github/workflows/ci.yml runs this as the step
+# "aihub#293 using-polyforge payload budget gate". A non-zero exit fails that step directly;
+# on top of that it asserts named PASS markers, that no SKIP fired, and a floor on the PASS
+# count, to cover the case the exit code CANNOT report — a run that exits 0 having executed
+# nothing (see the `command -v python3` line below for one way that happens).
+# ADDING a check needs no CI change: the floor is `-ge`, a one-way ratchet. Only DELETING or
+# RENAMING one of the markers that step greps for does.
 #
 # WHAT IS ASSERTED
 #   1. Size:     assembled payload inside [PF_PAYLOAD_MAX_CHARS - PF_PAYLOAD_SLACK,
 #                PF_PAYLOAD_MAX_CHARS], measured in characters, for the WORST CASE (all
 #                conditional `when:` fragments enabled). BOTH bounds — see the ratchet note.
+#                Measured for the FULL assembly even when the hook degrades it — see the
+#                note next to `degraded` below, or this check becomes a tautology.
 #   2. Order:    IR1-IR3 land inside the preview window, so that if the budget is ever
 #                busted again the Iron Rules survive truncation rather than boilerplate.
 #   3. Tiering:  the on-demand fragments are absent from the payload but each is still named
 #                by fragments/on-demand-index.md, so none of them becomes orphaned.
-#   4. Controls: (a) a deliberately mis-ordered build (Iron Rules last) must FAIL assertion 2;
-#                (b) a build with 300 characters added to a resident fragment must FAIL
-#                assertion 1. Without these, both checks could pass vacuously.
-#   5. `when:`:  a conditional fragment is assembled when its condition holds and is ABSENT
+#   4. Controls: (a) a build with 300 characters added to a resident fragment must FAIL
+#                assertion 1; (b) a deliberately mis-ordered build (Iron Rules last) must
+#                FAIL assertion 2. Without these, both checks could pass vacuously.
+#   5. Degrade:  an over-budget manifest makes the hook emit a fitting, banner-led payload
+#                and warn on stderr instead of failing silently (aihub#293), with the real
+#                tree as the negative control that the degrade path is normally dormant.
+#   6. `when:`:  a conditional fragment is assembled when its condition holds and is ABSENT
 #                when it does not — proven in BOTH directions against a sentinel fixture, so
 #                assertion 0's coverage claim is about a mechanism that demonstrably works.
 
@@ -65,7 +71,7 @@ PF_PAYLOAD_MAX_CHARS=8598
 PF_PAYLOAD_SLACK=100
 HARNESS_HARD_LIMIT=10000
 PREVIEW_CHARS=2000
-# Control 4b appends this many characters to a resident fragment; it must trip the gate.
+# Control 4a appends this many characters to a resident fragment; it must trip the gate.
 # Any value > PF_PAYLOAD_SLACK proves the gate has discriminating power at its current
 # setting, which a hard-coded threshold could not (at the old 9,800 gate this same probe
 # measured 8,798 and passed).
@@ -110,6 +116,13 @@ assemble() { # plugin_root [home] -> stdout = raw additionalContext
       HOME="${2:-$home_max}" CLAUDE_PROJECT_DIR="$ws" "$1/hooks/pf-session-start" 2>/dev/null \
   | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'
 }
+assemble_err() { # plugin_root, stderr_path -> stdout = raw additionalContext (may be empty)
+  env -u CURSOR_PLUGIN_ROOT -u PLUGIN_ROOT \
+      HOME="$home_max" CLAUDE_PROJECT_DIR="$ws" "$1/hooks/pf-session-start" 2>"$2" \
+  | python3 -c 'import json,sys
+try: sys.stdout.write(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])
+except Exception: pass'
+}
 
 # Faithful port of the harness function that builds the preview.
 tle() { # stdin = payload -> stdout = visible window
@@ -124,14 +137,30 @@ else:
 }
 charlen() { python3 -c 'import sys; sys.stdout.write(str(len(sys.stdin.read())))'; }
 
-ctx="$(assemble "$plugin_root")"
+main_err="$tmp/main.err"
+ctx="$(assemble_err "$plugin_root" "$main_err")"
 [ -n "$ctx" ] || { echo "FAIL: hook produced no additionalContext" >&2; exit 1; }
-n="$(printf '%s' "$ctx" | charlen)"     # characters, not bytes (bash ${#} is bytes under LC_ALL=C)
+delivered_n="$(printf '%s' "$ctx" | charlen)"  # characters, not bytes (bash ${#} is bytes under LC_ALL=C)
 vis="$(printf '%s' "$ctx" | tle)"
 visn="$(printf '%s' "$vis" | charlen)"
 
+# aihub#293: the hook now DEGRADES an over-budget payload (drops trailing fragments and
+# prepends a banner) instead of letting the harness truncate it silently. That is right for
+# a session, and poison for this test: what comes back is then the post-degradation size,
+# which is under the limit BY CONSTRUCTION. Measuring it would turn the size gate below into
+# a tautology — the exact defect this suite exists to prevent, reintroduced through the fix.
+# So take the hook's own pre-degradation figure off stderr when it degraded, and treat the
+# degradation itself as a failure. `n` is therefore always the size of the FULL assembly.
+degraded=0
+n="$delivered_n"
+full_n="$(sed -n 's/.*payload is \([0-9][0-9]*\) chars.*/\1/p' "$main_err" | head -1)"
+if [ -n "$full_n" ]; then degraded=1; n="$full_n"; fi
+
 echo "using-polyforge SessionStart payload (worst case: $KNOWN_CONDITIONS enabled)"
 echo "  assembled : $n chars (gate $PF_PAYLOAD_MAX_CHARS, harness hard limit $HARNESS_HARD_LIMIT)"
+if [ "$degraded" -eq 1 ]; then
+echo "  delivered : $delivered_n chars  <-- DEGRADED by the hook; see check 1"
+fi
 echo "  preview   : $visn chars"
 echo
 
@@ -155,6 +184,11 @@ elif [ "$n" -lt "$floor" ]; then
   bad "payload $n is $((PF_PAYLOAD_MAX_CHARS - n)) chars below the gate $PF_PAYLOAD_MAX_CHARS, i.e. $((floor - n)) chars past the declared $PF_PAYLOAD_SLACK-char working margin. Nothing guards that band: whatever this slimming freed is now a cushion for the next silent growth. Set PF_PAYLOAD_MAX_CHARS=$((n + PF_PAYLOAD_SLACK)) in this file."
 else
   ok "payload $n within [$floor, $PF_PAYLOAD_MAX_CHARS] (gate = measured + $PF_PAYLOAD_SLACK slack)"
+fi
+if [ "$degraded" -eq 0 ]; then
+  ok "the hook did not have to degrade this payload"
+else
+  bad "the hook DEGRADED this payload ($n chars assembled -> $delivered_n delivered): the manifest is over the $HARNESS_HARD_LIMIT-char hard limit and fragments were dropped from the session. The degrade path is a safety net for sessions running an older plugin copy, NOT an acceptable steady state — fix the budget."
 fi
 
 echo
@@ -202,8 +236,15 @@ s = open(p, encoding="utf-8").read()
 # newline would leave that newline inside the stripped body and add n+1 characters.
 open(p, "w", encoding="utf-8").write(s.rstrip("\n") + "x" * n + "\n")
 PY
-probe_ctx="$(assemble "$probe")"
+# Measured the same way `n` is, via assemble_err: if this build ever grows past the harness
+# hard limit the hook DEGRADES it, and a delivered-size measurement would come back under the
+# limit by construction. Taking the pre-degradation figure off stderr keeps probe_n and n on
+# the same footing, so the equality below compares like with like in both regimes.
+probe_err="$tmp/probe.err"
+probe_ctx="$(assemble_err "$probe" "$probe_err")"
 probe_n="$(printf '%s' "$probe_ctx" | charlen)"
+probe_full="$(sed -n 's/.*payload is \([0-9][0-9]*\) chars.*/\1/p' "$probe_err" | head -1)"
+[ -n "$probe_full" ] && probe_n="$probe_full"
 # The equality below is not a tidiness check, it is what keeps this control honest. A probe
 # is only evidence if the characters it adds actually reach the measurement — and anything
 # that normalises, trims or DEGRADES the payload between the fragment and the number would
@@ -244,7 +285,127 @@ case "$ctl_vis" in
 esac
 
 echo
-echo "5. \`when:\` gates a fragment in BOTH directions"
+echo "5. runtime self-check — an over-budget manifest degrades LOUDLY, not silently (aihub#293)"
+# Assertions 1-4 above all measure THIS tree. They cannot see what the hook does when a
+# manifest is over budget anyway — an older plugin copy, a hand-edited fragment, a branch
+# that never ran this suite. That case is the aihub#285 bug itself, so the hook now checks
+# its own assembled length at runtime. Build a tree that really busts the budget and drive it.
+BANNER_MARK="POLYFORGE SESSION-START PAYLOAD OVER BUDGET"
+
+# Negative control FIRST, reusing the real tree's own run from the top of this file: the
+# degrade path must be DORMANT here. Without this, "the banner is present" below would pass
+# just as well for a hook that degrades unconditionally.
+case "$ctx" in
+  *"$BANNER_MARK"*) bad "the over-budget banner appears on the real tree ($n chars) — either the manifest is over budget (see check 1) or the check fires unconditionally and proves nothing";;
+  *)                ok "real tree ($n chars): no over-budget banner";;
+esac
+if [ -s "$main_err" ]; then
+  bad "real tree wrote to stderr: $(head -c 200 "$main_err") — the warning must fire only when over budget"
+else
+  ok "real tree ($n chars): hook stderr is silent"
+fi
+
+# Now a REAL violation: pad a resident fragment until the assembled payload passes 10,000.
+# Sized from the measured $n so it stays a violation as the manifest changes.
+over="$tmp/over"; cp -r "$plugin_root" "$over"
+padded_rel="fragments/repo-routing.md"
+padded_frag="$over/skills/using-polyforge/$padded_rel"
+pad_n=$(( HARNESS_HARD_LIMIT - n + 200 ))
+
+# What this manifest WOULD have assembled to under the pre-aihub#293 hook, predicted
+# independently of the hook: the clean payload plus the pad and the "\n\n" that joins it on.
+# Cross-checked against the hook's own reported figure below — two numbers derived from
+# different sides, so a wrong one shows up as a disagreement rather than as a green test.
+undegraded_n=$(( n + pad_n + 2 ))
+
+# MEASURE that this fixture is really a violation; do not merely COMPUTE it. Padding that
+# file busts the budget only if the manifest actually @includes it. Move it to the on-demand
+# tier — which is exactly what the SIZE BUDGET note prescribes when this gate goes red — or
+# delete it, and the pad never reaches the payload: nothing goes over budget, the hook
+# correctly does not degrade, and every assertion below then fails POINTING AT THE HOOK when
+# the broken thing is this fixture. `undegraded_n` cannot see that; it is arithmetic and
+# would keep reporting a violation that is not happening. So anchor on the clean payload
+# assembled at the top of this file: the fragment's own first line has to be in it.
+pad_anchor="$(grep -m1 . "$padded_frag" 2>/dev/null || true)"
+pad_ok=0
+if [ -z "$pad_anchor" ]; then
+  bad "FIXTURE, NOT HOOK: $padded_rel is missing or empty, so check 5's over-budget tree cannot be built. Point padded_rel at a fragment the manifest @includes."
+elif [ "$undegraded_n" -le "$HARNESS_HARD_LIMIT" ]; then
+  bad "FIXTURE, NOT HOOK: padding to $undegraded_n chars does not reach $HARNESS_HARD_LIMIT, so nothing below is tested. Raise pad_n."
+else
+  case "$ctx" in
+    *"$pad_anchor"*)
+      ok "fixture target $padded_rel is resident and pads to $undegraded_n > $HARNESS_HARD_LIMIT chars — a real violation"
+      pad_ok=1;;
+    *)
+      bad "FIXTURE, NOT HOOK: $padded_rel is not in the resident payload (moved to the on-demand tier?), so padding it busts no budget. Point padded_rel at a fragment the manifest @includes.";;
+  esac
+fi
+
+# Everything below drives that fixture. Skipped when the fixture is invalid — running it
+# anyway would emit a run of hook-shaped failures for a hook that is behaving correctly.
+if [ "$pad_ok" -eq 1 ]; then
+python3 - "$padded_frag" "$pad_n" <<'PY'
+import sys
+p, k = sys.argv[1], int(sys.argv[2])
+s = open(p, encoding="utf-8").read()
+open(p, "w", encoding="utf-8").write(s.rstrip("\n") + "\n\n" + ("PAD" * k)[:k] + "\n")
+PY
+over_err="$tmp/over.err"
+env -u CURSOR_PLUGIN_ROOT -u PLUGIN_ROOT \
+    HOME="$home_max" CLAUDE_PROJECT_DIR="$ws" "$over/hooks/pf-session-start" \
+    >"$tmp/over.json" 2>"$over_err"
+over_rc=$?
+over_ctx="$(python3 -c 'import json,sys
+try: sys.stdout.write(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])
+except Exception: pass' < "$tmp/over.json")"
+over_n="$(printf '%s' "$over_ctx" | charlen)"
+
+[ "$over_rc" -eq 0 ] && ok "over-budget tree: hook still exits 0 (never blocks startup)" \
+                     || bad "over-budget tree: hook exited $over_rc — it must never block startup"
+[ -n "$over_ctx" ] && ok "over-budget tree: hook still emits an additionalContext" \
+                   || bad "over-budget tree: hook emitted no additionalContext — degrading must not mean going silent"
+if grep -q "payload is $undegraded_n chars" "$over_err"; then
+  ok "the hook measured the same $undegraded_n chars this test predicted independently"
+else
+  bad "the hook reports a different pre-degradation size than the $undegraded_n predicted here: [$(head -c 200 "$over_err")]"
+fi
+if [ "$over_n" -le "$HARNESS_HARD_LIMIT" ] && [ "$over_n" -gt 0 ]; then
+  ok "degraded payload $over_n <= $HARNESS_HARD_LIMIT chars (delivered whole, not replaced by a preview)"
+else
+  bad "degraded payload is $over_n chars, still over the $HARNESS_HARD_LIMIT hard limit — it would be silently truncated exactly as before"
+fi
+case "$over_ctx" in
+  *"$BANNER_MARK"*) ok "degraded payload carries the over-budget banner";;
+  *)                bad "degraded payload has no banner — the omission is silent, which is the aihub#285 failure mode";;
+esac
+for ir in "IR1 —" "IR2 —" "IR3 —"; do
+  case "$over_ctx" in *"$ir"*) ok "$ir survives degradation";; *) bad "$ir dropped by degradation — Iron Rules must be the last thing to go";; esac
+done
+if grep -q "over the $HARNESS_HARD_LIMIT-char harness limit" "$over_err"; then
+  ok "hook wrote the over-budget finding to stderr (visible outside the model)"
+else
+  bad "nothing on stderr for an over-budget payload: [$(head -c 200 "$over_err")]"
+fi
+
+# The banner must not lie: everything it names as dropped has to be genuinely absent.
+dropped_list="$(sed -n 's/.*; dropped \(.*\)\. Run .*/\1/p' "$over_err" | tr -d ' ' | tr ',' ' ')"
+if [ -z "$dropped_list" ]; then
+  bad "stderr names no dropped fragment, so the claim 'dropped X' cannot be checked: [$(head -c 200 "$over_err")]"
+else
+  named_ok=1
+  for f in $dropped_list; do
+    # first non-empty line of the fragment: present in the full assembly, absent once dropped
+    marker="$(grep -m1 . "$over/skills/using-polyforge/$f" 2>/dev/null)"
+    [ -n "$marker" ] || { bad "cannot read dropped fragment $f to verify it"; named_ok=0; continue; }
+    case "$over_ctx" in *"$marker"*) bad "banner claims $f was dropped, but its content is still in the payload"; named_ok=0;; esac
+  done
+  [ "$named_ok" -eq 1 ] && ok "every fragment the banner names as dropped ($dropped_list) is really absent"
+fi
+fi  # pad_ok
+
+echo
+echo "6. \`when:\` gates a fragment in BOTH directions"
 # Assertion 0 claims the size gate measures the worst case, i.e. that every `when:` condition
 # in the manifest is one KNOWN_CONDITIONS forces ON. That claim is only worth anything if
 # `when:` actually decides whether a fragment is assembled. The manifest ships no conditional
@@ -266,8 +427,8 @@ PY
 on_ctx="$(assemble "$cond" "$home_max")"
 off_ctx="$(assemble "$cond" "$home_min")"
 case "$on_ctx"  in *"$SENTINEL"*) ok "condition met -> fragment IS assembled";;
-                   *) bad "condition met but the sentinel fragment is missing — `when:` drops fragments it should keep";; esac
-case "$off_ctx" in *"$SENTINEL"*) bad "condition NOT met but the sentinel fragment is still in the payload — `when:` is inert, so the worst-case size measurement in assertion 0 means nothing";;
+                   *) bad "condition met but the sentinel fragment is missing — \`when:\` drops fragments it should keep";; esac
+case "$off_ctx" in *"$SENTINEL"*) bad "condition NOT met but the sentinel fragment is still in the payload — \`when:\` is inert, so the worst-case size measurement in assertion 0 means nothing";;
                    *) ok "condition unmet -> fragment is NOT assembled";; esac
 # ...and the off-direction must not be "absent because nothing assembled at all".
 case "$off_ctx" in *"IR1 —"*) ok "the unmet build is otherwise intact (IR1 still present)";;

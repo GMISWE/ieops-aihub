@@ -63,10 +63,11 @@ description: >
   THE TIER RULE:  kind: rule + gate: none  =>  must NOT leave the resident tier.
   An unenforced rule that is not in context has no observable failure mode at all.
   tests/using-polyforge-manifest.test.sh checks this, with a documented baseline of
-  pre-existing violations that may only shrink. ⚠️ That suite is NOT in CI yet
-  (aihub#293) — so today it is a check someone must run by hand, not an enforcement.
-  By this manifest's own argument a lint nobody runs is itself an ungated rule; do not
-  describe it as a guarantee until #293 lands.
+  pre-existing violations that may only shrink. Since aihub#293 that suite RUNS IN CI
+  (.github/workflows/ci.yml, step "aihub#293 using-polyforge manifest gate"), so the
+  tier rule is enforced on every PR rather than only when someone runs it by hand —
+  which, by this manifest's own argument, is what a lint nobody runs would have been:
+  an ungated rule about ungated rules.
 
   WHERE THE CURRENT `kind` VALUES CAME FROM — so they can be challenged, not inherited
   aihub#295 measured the rules this skill ships: SIX of them, of which exactly ONE has
@@ -171,7 +172,8 @@ description: >
   overwrite user edits) is still intact; the fix was to stop putting rules behind it.
 
   Enforced by internal/cli/usage_channel_test.go — a Go test, so `go test ./...` in CI
-  runs it, unlike the suites in this directory (aihub#293). It asserts that no rule
+  runs it. (The two using-polyforge suites in this directory are in CI too as of
+  aihub#293; the rest of that directory is still unwired.) It asserts that no rule
   section is delivered twice, that a section dropped from usage.md still has a home in a
   fragment (moved, not deleted), and that no delivered surface spells the legacy worktree
   path. Existing workspaces keep their frozen copy — a template edit cannot reach them —

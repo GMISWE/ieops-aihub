@@ -204,8 +204,15 @@ open(p, "w", encoding="utf-8").write(s.rstrip("\n") + "x" * n + "\n")
 PY
 probe_ctx="$(assemble "$probe")"
 probe_n="$(printf '%s' "$probe_ctx" | charlen)"
+# The equality below is not a tidiness check, it is what keeps this control honest. A probe
+# is only evidence if the characters it adds actually reach the measurement — and anything
+# that normalises, trims or DEGRADES the payload between the fragment and the number would
+# silently absorb them, leaving a green control that proves only that the absorbing step
+# works. (That failure mode is live: the hook drops trailing fragments once the assembly
+# passes the harness limit, so a probe large enough to cross it would come back "compliant"
+# by construction.) Asserting probe_n == n + PROBE_CHARS exactly is what detects that.
 if [ "$probe_n" -ne "$((n + PF_PAYLOAD_PROBE_CHARS))" ]; then
-  bad "probe build measured $probe_n, expected $((n + PF_PAYLOAD_PROBE_CHARS)) — the probe did not land in the payload, so this control proves nothing"
+  bad "probe build measured $probe_n, expected $((n + PF_PAYLOAD_PROBE_CHARS)) — the $PF_PAYLOAD_PROBE_CHARS probe characters did not survive into the measured payload, so this control proves nothing about the gate. Something between the fragment and the number is absorbing them (degradation, trimming, or a stale fixture)"
 elif [ "$probe_n" -gt "$PF_PAYLOAD_MAX_CHARS" ]; then
   ok "+$PF_PAYLOAD_PROBE_CHARS chars -> $probe_n, over the gate $PF_PAYLOAD_MAX_CHARS (gate discriminates)"
 else

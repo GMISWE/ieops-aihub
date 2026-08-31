@@ -217,7 +217,7 @@ name it references.
 | seamcheck | ok (verified against superpowers 6.1.1) |
 
 ## Next steps
-- `polyforge init --apply` — clone missing repos
+- `polyforge init` — clone missing repos (`--apply` is a deprecated no-op)
 - `/pf-work` — resume work once health is green
 ```
 

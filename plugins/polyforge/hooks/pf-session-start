@@ -141,12 +141,11 @@ while i < len(lines):
         continue  # @include path must stay under the skill dir
     frag = read(full)
     if frag:
-        parts.append(frag.rstrip("\n"))
+        parts.append((path, frag.rstrip("\n")))  # (manifest path, text) — the path is needed
+                                                 # to NAME a fragment in the over-budget banner
 
 if not parts:
     sys.exit(0)  # nothing assembled -> no-op, never block startup
-
-assembled = "\n\n".join(parts)
 
 # aihub#291 deliberately does NOT add a "your managed block is still the legacy
 # format" nudge here. It was tried and reverted, for two measured reasons:
@@ -163,7 +162,7 @@ assembled = "\n\n".join(parts)
 # cost. If a session-start nudge is ever revived, it must be measured against
 # the budget AND placed in the preamble, not appended.
 
-ctx = (
+PREAMBLE = (
     "<EXTREMELY_IMPORTANT>\n"
     "You are in a polyforge workspace (.polyforge.yaml detected). "
     "Lifecycle skills /pf-* and the polyforge MCP tools (`mcp__plugin_polyforge_polyforge__*` "
@@ -172,10 +171,83 @@ ctx = (
     "Using superpowers skills as the content *engine* inside a /pf-* step (when superpowers "
     "is enabled) is NOT a bypass — the prohibition is about skipping the wi lifecycle "
     "(claim / step / artifact / commit / PR / wrap), not about which engine authors the content.\n\n"
-    "**Below is the assembled `using-polyforge` skill (fragments per the SKILL.md manifest):**\n\n"
-    + assembled
-    + "\n</EXTREMELY_IMPORTANT>"
 )
+LEDE = "**Below is the assembled `using-polyforge` skill (fragments per the SKILL.md manifest):**\n\n"
+TAIL = "\n</EXTREMELY_IMPORTANT>"
+
+ctx = PREAMBLE + LEDE + "\n\n".join(t for _, t in parts) + TAIL
+
+# ---------------------------------------------------------------------------
+# RUNTIME LENGTH SELF-CHECK (aihub#293, deferred from aihub#285's 4th criterion)
+# ---------------------------------------------------------------------------
+# Claude Code replaces any single hook output longer than 10,000 CHARACTERS with a
+# `<persisted-output>` wrapper: the full text is written to a file and only a ~2,000-char
+# preview reaches the model. The hook still exits 0 and the skill still "looks" injected,
+# so an over-budget manifest fails COMPLETELY SILENTLY — that is the aihub#285 bug, and
+# nothing here noticed it for every session between 2026-08-05 and the fix.
+#
+# 10,000 and the character (not byte) unit are MEASURED, not inferred: a 10,000-char
+# additionalContext arrives intact, 10,001 is truncated, and a 10,000-char / 29,658-byte
+# CJK payload also arrives intact. See tests/using-polyforge-payload.test.sh, which gates
+# the ASSEMBLED size at 9,800 so this runtime check is the second line of defence, not the
+# first: the test catches an over-budget manifest in CI, this catches one that reaches a
+# real session anyway (older plugin copy, hand-edited fragment, unmerged branch).
+#
+# This must NEVER block startup, so it does not exit non-zero and does not raise. Instead
+# it emits a DEGRADED payload that is strictly better than what the harness would do:
+#   - it FITS, so it is delivered whole instead of being replaced by a preview,
+#   - it leads with a banner naming exactly which fragments were dropped and where to read
+#     them, so the omission is stated rather than inferred,
+#   - it writes the same finding to stderr, so the failure is visible outside the model.
+# Fragments are dropped from the END of the manifest, keeping the longest prefix that fits:
+# the manifest orders iron-rules.md first precisely so the Iron Rules survive truncation
+# (SKILL.md, SIZE BUDGET rule 2), and dropping a suffix is the only policy that preserves
+# that ordering guarantee.
+MAX_CHARS = 10000
+
+if len(ctx) > MAX_CHARS:
+    full_len = len(ctx)
+
+    def banner(dropped):
+        return (
+            "⚠️ **POLYFORGE SESSION-START PAYLOAD OVER BUDGET — THIS SKILL IS INCOMPLETE.**\n"
+            "The assembled manifest is %d characters against a %d-character harness limit. "
+            "Rather than let the harness silently replace it with a ~2,000-character preview, "
+            "this hook dropped the trailing fragment(s) and is telling you so: **%s**. "
+            "Each still ships on disk under `skills/using-polyforge/` — `Read` any you need "
+            "before relying on it. This is a bug in the manifest, not in your session: the "
+            "budget must be restored (see the SIZE BUDGET note in that skill's SKILL.md and "
+            "`plugins/polyforge/tests/using-polyforge-payload.test.sh`).\n\n"
+            % (full_len, MAX_CHARS, ", ".join(dropped) or "all of them")
+        )
+
+    degraded_lede = (
+        "**Below is the PARTIAL `using-polyforge` skill — the fragments that fit, "
+        "in manifest order:**\n\n"
+    )
+
+    kept, dropped = list(parts), []
+    while True:
+        ctx = (PREAMBLE + banner(dropped) + degraded_lede
+               + "\n\n".join(t for _, t in kept) + TAIL)
+        if len(ctx) <= MAX_CHARS or not kept:
+            break
+        dropped.insert(0, kept.pop()[0])  # drop from the END; insert at the front so the
+                                          # banner lists them in manifest order
+    # Belt and braces: with every fragment dropped the envelope alone is ~1.5k chars, so
+    # this cannot fire today — but a future preamble must not be able to reintroduce the
+    # silent-truncation failure this whole block exists to remove.
+    if len(ctx) > MAX_CHARS:
+        ctx = ctx[:MAX_CHARS - len(TAIL)] + TAIL
+
+    sys.stderr.write(
+        "pf-session-start: using-polyforge payload is %d chars, over the %d-char harness "
+        "limit. Emitted a degraded %d-char payload; dropped %s. Run "
+        "plugins/polyforge/tests/using-polyforge-payload.test.sh and move a fragment to the "
+        "on-demand tier — do not raise the gate (skills/using-polyforge/SKILL.md, SIZE "
+        "BUDGET).\n"
+        % (full_len, MAX_CHARS, len(ctx), ", ".join(dropped) or "every fragment")
+    )
 
 if os.environ.get("CURSOR_PLUGIN_ROOT"):
     out = {"additional_context": ctx}

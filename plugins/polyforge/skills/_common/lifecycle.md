@@ -189,6 +189,10 @@ branch, because `_common/lifecycle.md` is injected by the router for both.
 ## Three-segment output
 
 Every pf-* response follows the mandatory three-segment format — its literal section labels are
-`Result` / `Status` / `Next steps` (see the session-start `output-format` and `post-claim-routing`
-fragments). The next-step ("Next steps") section is mechanically populated from the routing table
-for `requires_human_session=true` wi's.
+`Result` / `Status` / `Next steps`. The labels and the format come from the `output-format`
+fragment, which IS injected at session start, so it is already in your context.
+
+The next-step ("Next steps") section is mechanically populated from the Post-claim routing table
+for `requires_human_session=true` wi's. That table lives in `fragments/post-claim-routing.md`
+under `using-polyforge`, and since aihub#285 it is **on-demand, not session-start** — it is NOT in
+your context. `Read` it before filling in that segment.

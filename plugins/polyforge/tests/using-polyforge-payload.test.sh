@@ -62,8 +62,9 @@ set -uo pipefail
 # characters to whoever grew the payload next. The headroom a slimming buys must not become
 # the cushion for the next silent growth. So: if you SHRINK the payload, this test goes red
 # and tells you the new number to write here. If you GROW it past the gate, do NOT raise
-# this number — move a fragment to the on-demand tier (see the SIZE BUDGET comment in
-# skills/using-polyforge/SKILL.md).
+# this number — move a fragment to the on-demand tier (see the SIZE BUDGET section of
+# skills/using-polyforge/references/manifest-notes.md; it was a comment inside SKILL.md
+# until aihub#302 moved it out).
 #
 # The harness's hard limit is 10000; we sit below it on purpose, so the band between the
 # gate and 10000 is a "test red but users still fine" warning zone.

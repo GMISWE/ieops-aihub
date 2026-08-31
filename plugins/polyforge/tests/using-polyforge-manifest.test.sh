@@ -46,7 +46,10 @@
 #   5. Metric:    prints the resident-tier lower bound = the total size of every
 #                 fragment that is a rule with no gate. Nobody could compute this
 #                 before, because the classification was never written down.
-#   6. Controls:  five negative fixtures that MUST fail, one that must pass, and a
+#   6. Notes:     references/manifest-notes.md (aihub#302: the maintainer block that
+#                 used to live in SKILL.md's HTML comment) exists, is not gutted, still
+#                 carries its load-bearing sections, and is pointed at from SKILL.md.
+#   7. Controls:  nine negative fixtures that MUST fail, two that must pass, and a
 #                 MUTATION run — the tier rule is deleted from a copy of this script
 #                 and the tier fixture must then go green. A validator that passes on
 #                 everything is indistinguishable from no validator.
@@ -424,6 +427,56 @@ for p, n, v in sorted(ungated, key=lambda x: -x[1]):
 print("     %6d  = SUM(kind:rule AND gate:none)  <- the resident tier cannot be "
       "smaller than this" % total)
 
+# --- 6. the maintainer notes -----------------------------------------------
+# aihub#302 moved ~25,000 characters of maintainer reasoning out of an HTML comment at the
+# top of SKILL.md into references/manifest-notes.md. That trade is only sound while the
+# notes are still REACHABLE: the old arrangement could not lose them, because the rules sat
+# in the file you had to open to edit the manifest. Moving them out created a single point
+# of failure that no existing check covered — section 0 only validates declared @include /
+# @ondemand paths, and this is neither. So assert the three things that make the move
+# survivable: the file exists, it still carries its load-bearing sections, and SKILL.md
+# points at it. Deleting any one of them must be red, not quietly green.
+print()
+print("6. maintainer notes — the block moved out of SKILL.md is still reachable")
+NOTES_REL = "references/manifest-notes.md"
+# A floor, deliberately not a ratchet: it exists to catch the notes being emptied or
+# gutted, not to make every edit to them a test edit. Currently ~25,000 chars.
+NOTES_MIN_CHARS = 15000
+NOTES_ANCHORS = [
+    "SIZE BUDGET",             # the two-sided payload ratchet and why not to raise it
+    "MANIFEST SCHEMA",         # kind / gate / authority
+    "THE TIER RULE",           # unenforced rule may not leave the resident tier
+    "BACKWARD COMPATIBILITY",  # why @ondemand is a verb and not an attribute
+]
+notes_path = os.path.join(skill_dir, NOTES_REL)
+notes = None
+try:
+    notes = open(notes_path, encoding="utf-8").read()
+except OSError:
+    bad("%s is missing. SKILL.md's pointer comment sends every future maintainer here for "
+        "the SIZE BUDGET rule, the kind/gate/authority schema and the tier-rule rationale; "
+        "with the file gone that pointer is a dead end and the rules are nowhere "
+        "(aihub#302 moved them out of SKILL.md)." % NOTES_REL)
+if notes is not None:
+    if len(notes) < NOTES_MIN_CHARS:
+        bad("%s is %d chars, below the %d-char floor. It held ~25,000 chars of maintainer "
+            "reasoning when it was split out of SKILL.md; this floor exists so it cannot be "
+            "emptied or stubbed out without saying so." % (NOTES_REL, len(notes), NOTES_MIN_CHARS))
+    else:
+        ok("%s present, %d chars (floor %d)" % (NOTES_REL, len(notes), NOTES_MIN_CHARS))
+    absent = [a for a in NOTES_ANCHORS if a not in notes]
+    if absent:
+        bad("%s no longer contains: %s. These name the sections the manifest's own pointer "
+            "promises are there." % (NOTES_REL, ", ".join(absent)))
+    else:
+        ok("%s still carries all %d load-bearing sections" % (NOTES_REL, len(NOTES_ANCHORS)))
+    if NOTES_REL in manifest:
+        ok("SKILL.md points at %s" % NOTES_REL)
+    else:
+        bad("SKILL.md does not mention %s anywhere. The notes then ship as a file nothing "
+            "routes to, which is the 'moved somewhere nothing points at' failure this suite "
+            "already guards against for on-demand fragments." % NOTES_REL)
+
 print()
 if fails:
     print("%d CHECK(S) FAILED" % len(fails), file=sys.stderr)
@@ -497,7 +550,7 @@ open(p, "w", encoding="utf-8").write(s)
 '
 
 echo
-echo "6. negative controls — each of these MUST turn the lint red"
+echo "7. negative controls — each of these MUST turn the lint red"
 r="$(fixture ungated_ondemand "${PROBE_WRITE/GATE/none}")"
 expect fail "an ungated rule declared on-demand (the aihub#285 shape)" "$r"
 tier_fixture="$r"
@@ -584,8 +637,41 @@ open(p, "w", encoding="utf-8").write(s.rstrip("\n")[:-200] + "\n")
 ')"
 expect pass "...the same fragment SHRINKING is accepted (the ratchet is one-way)" "$r"
 
+# aihub#302: the maintainer notes are a new single point of failure — the rules used to
+# live in the file you had to open to edit the manifest, and now they do not. Each of the
+# three ways to lose them must be red.
+r="$(fixture notes_deleted '
+import sys, os
+os.remove(os.path.join(sys.argv[1], "references", "manifest-notes.md"))
+')"
+expect fail "references/manifest-notes.md deleted outright" "$r"
+
+r="$(fixture notes_gutted '
+import sys, os
+p = os.path.join(sys.argv[1], "references", "manifest-notes.md")
+open(p, "w", encoding="utf-8").write("# maintainer notes\n\nTODO\n")
+')"
+expect fail "...or replaced by a stub that keeps the filename" "$r"
+
+r="$(fixture notes_section_dropped '
+import sys, os
+p = os.path.join(sys.argv[1], "references", "manifest-notes.md")
+s = open(p, encoding="utf-8").read()
+# keep it well over the size floor, remove only the SIZE BUDGET heading text
+open(p, "w", encoding="utf-8").write(s.replace("SIZE BUDGET", "size budget"))
+')"
+expect fail "...or still large but missing a load-bearing section" "$r"
+
+r="$(fixture notes_pointer_removed '
+import sys, os
+p = os.path.join(sys.argv[1], "SKILL.md")
+s = open(p, encoding="utf-8").read()
+open(p, "w", encoding="utf-8").write(s.replace("references/manifest-notes.md", "somewhere"))
+')"
+expect fail "...or the file survives but SKILL.md stops pointing at it" "$r"
+
 echo
-echo "7. mutation control — delete the tier rule, the tier fixture must go green"
+echo "8. mutation control — delete the tier rule, the tier fixture must go green"
 mut="$tmp/mutant.sh"
 python3 - "$self" "$mut" <<'PY'
 import sys

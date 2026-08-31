@@ -35,14 +35,58 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The bump gate below diffs this PR against its base commit. The default
+          # depth-1 checkout does not contain that commit, and the gate would then
+          # report a diff failure rather than silently passing (aihub#302).
+          fetch-depth: 0
 
       # Cheap and Go-independent, so it runs first: a version bump that updates
       # only some of the four stamps fails here in seconds rather than after the
       # build (aihub#232).
       - name: Plugin version-stamp consistency
         run: |
-          python3 scripts/pf_version_check.py --self-test
+          set -euo pipefail
+          python3 scripts/pf_version_check.py --self-test | tee /tmp/pf_selftest.log
+          # --self-test runs TWO suites, and its exit code cannot report the one failure
+          # that matters most here: a suite that never ran. Replacing the bump suite's
+          # result with a literal 0 leaves the script green while skipping it entirely —
+          # no assertion inside the script can see that, because the mutation removes the
+          # call. So assert on the OUTPUT: each suite must announce itself by name.
+          # (Anchored at line start: "self-test passed" is a substring of the bump line.)
+          for want in '^self-test passed' '^bump self-test passed'; do
+            grep -qE -- "$want" /tmp/pf_selftest.log \
+              || { echo "::error::pf_version_check --self-test never reported \"$want\" — a suite did not run"; exit 1; }
+          done
           python3 scripts/pf_version_check.py --root .
+
+      # aihub#302. The step above is a STATE predicate — do the five stamps agree
+      # with each other? — and it cannot answer "did this PR touch the plugin?".
+      # PR#264 was pushed without a bump and a human caught it in review; PR#265 then
+      # shipped four files under plugins/polyforge/skills/ under a version that was
+      # already released, and nothing caught that one. Caught once by luck, shipped
+      # once undetected. CI was green throughout, correctly — all five stamps agreed.
+      # The install cache is keyed on version, so those edits reach nobody already on
+      # that version and /plugin update is a no-op for them.
+      #
+      # Kept as its own step so the two failures are never confused: this one is
+      # [NO_VERSION_BUMP], the one above is [VERSION_DRIFT] and friends. `!cancelled()`
+      # so a PR carrying BOTH defects sees both in one run rather than needing two
+      # round-trips — which is the whole point of separating them.
+      #
+      # base.sha is the PR's base commit as GitHub recorded it. Deliberately NOT a
+      # local origin/main ref, which can be stale in the runner's checkout.
+      #
+      # ⚠️ This value is EMPTY on any event other than pull_request. The check refuses an
+      # empty base loudly rather than passing, so adding `push:` / `merge_group:` above
+      # turns this step red, not silent — but if you do add such a trigger, give this
+      # step a base appropriate to that event instead of leaving it failing.
+      - name: Plugin contents changed => version must be bumped
+        if: ${{ !cancelled() }}
+        run: |
+          python3 scripts/pf_version_check.py \
+            --root . \
+            --require-bump-since "${{ github.event.pull_request.base.sha }}"
 
       - name: Set up Go
         uses: actions/setup-go@v5

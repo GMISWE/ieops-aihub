@@ -1,36 +1,63 @@
 package mcp_test
 
 // aihub#278, driven through the registered tool rather than the projection
-// function, for one reason: these two tests COMPILE against the build before
-// this change, so "fails before, passes after" is a real observation and not a
-// build error read as one.
+// function, for one reason: these tests COMPILE against the build before this
+// change, so "fails before, passes after" is a real observation and not a build
+// error read as one.
 //
 //	go test ./internal/mcp/ -run TestListWorkItemsResponse -count=1 -v
 //
 // Measured against the pre-change build (jsonResult(result), no projection):
 //   - TestListWorkItemsResponseDropsReconstructibleFields  FAIL, naming all 9 fields
+//   - TestListWorkItemsResponseKeepsPopulatedOptionalFields FAIL, on its
+//     anti-vacuity tail only: the seven fields it protects all survive there (of
+//     course — nothing is projected), but `seq` survives too, and that check is
+//     what stops the test from passing against a projection that does nothing.
 //   - TestListWorkItemsResponseKeepsEveryConsumedField     PASS
 //
 // The second one is the reverse half and is SUPPOSED to pass there. Its job is
 // to go red in the other direction. Measured, one mutation at a time, over both
-// files' tests — each row lists only the tests that went red:
+// files' tests — each row lists ONLY the tests that went red. Re-measure by
+// re-applying them; do not extend this table by reasoning about it.
 //
-//	M1  slimListWorkItem returns immediately     Reconstructible, KeepsSeq…,
-//	                                             KeepsUnknownTopLevelKeys,
-//	                                             Tolerates…, DropsReconstructible
-//	M2  + delete(m, "goal")                      Reconstructible, KeepsEveryConsumedField
-//	M3  delete every key in the item             Reconstructible, KeepsNullRequires…,
-//	                                             KeepsConditionallyPresent…, KeepsSeq…,
-//	                                             KeepsNonCodingScenario,
-//	                                             KeepsEveryConsumedField
-//	M4  + requires_human_session to the          KeepsNullRequiresHumanSession ONLY
-//	    null-drop allowlist
-//	M5  return a rebuilt top-level map           KeepsUnknownTopLevelKeys ONLY
+//	M1  slimListWorkItem returns immediately   Reconstructible · KeepsSeq… ·
+//	                                           KeepsUnknownTopLevelKeys · Tolerates… ·
+//	                                           KeepsPopulatedOptionalFields ·
+//	                                           DropsReconstructibleFields
+//	M2  + delete(m, "goal")                    Reconstructible · KeepsEveryConsumedField
+//	M3  delete every key in the item           Reconstructible · KeepsNonNullValues… ·
+//	                                           KeepsNullRequires… · KeepsConditionallyPresent… ·
+//	                                           KeepsSeq… · KeepsNonCodingScenario ·
+//	                                           KeepsPopulatedOptionalFields ·
+//	                                           KeepsEveryConsumedField
+//	M4  + requires_human_session to the        KeepsNullRequiresHumanSession ONLY
+//	    null-drop set
+//	M5  return a rebuilt top-level map         KeepsUnknownTopLevelKeys ONLY
+//	M6  content deleted unconditionally        KeepsNonNullValues… ·
+//	                                           KeepsPopulatedOptionalFields
+//	M7  null loop deletes by NAME              KeepsNonNullValues… ·
+//	    (drop the `v == nil` guard)            KeepsPopulatedOptionalFields
+//	M8  drop seq's float64 range guard         NOTHING — see below
 //
-// M2 and M3 are why the reverse half exists: both keep DropsReconstructibleFields
-// green — M3 satisfies it perfectly — and both are caught only by tests that
-// assert something SURVIVED. M4 is the one the losslessness proof cannot see;
-// its dedicated test is the whole coverage for that field.
+// Three things this table is here to say:
+//
+// M2 and M3 are why the reverse half exists. Both leave DropsReconstructibleFields
+// green — M3 satisfies it perfectly, by deleting everything — and both are caught
+// only by tests that assert something SURVIVED.
+//
+// M6 and M7 are why the two "…Populated…"/"…NonNullValues…" tests exist. They
+// relax a rule's GUARD rather than adding a delete, so the projection of a
+// null-valued fixture is unchanged and every other test stays green. Both were
+// found in review, not by this suite; the suite had eight tests and no negative
+// control on the rule the file calls its largest by bytes.
+//
+// M8 fails nothing, and that is reported rather than fixed. `int64(seq)` outside
+// int64's range is implementation-defined; on amd64 it yields the indefinite
+// value, the slug comparison then fails, and `seq` survives — the same outcome
+// the guard produces, so no test can distinguish the two. The guard is kept
+// precisely because a property that holds by platform accident cannot be pinned
+// by a test; "safe because checked" is the only version of it a reader can rely
+// on. Do not read the blank cell as "add a test here".
 
 import (
 	"net/http"
@@ -73,6 +100,55 @@ func oneFullWorkItem() map[string]any {
 			"step_state":             map[string]any{"current_step": "execute", "graph_source": "scenario"},
 		}},
 		"next_cursor": "2026-08-29T02:31:43.746959Z",
+	}
+}
+
+// TestListWorkItemsResponseKeepsPopulatedOptionalFields is the negative control
+// at the transport level: the same item, but with a value in every field the
+// projection is allowed to drop only when it is null.
+//
+// oneFullWorkItem() has all six as null — deliberately, because that is the
+// pre-change response shape the forward probe is measured against — which means
+// a projection that deleted those six by NAME rather than by VALUE would pass
+// every other test in both files. Review found that, the suite did not.
+func TestListWorkItemsResponseKeepsPopulatedOptionalFields(t *testing.T) {
+	populated := map[string]any{
+		"milestone":           "v1.2-alpha",
+		"parent_work_item_id": "wi_epicParent",
+		"closed_at":           "2026-08-31T09:00:00Z",
+		"current_attempt_id":  "ra_Ku2oXS0y",
+		"external_share_type": "public_link",
+		"external_share_key":  "shk_9f2a1c",
+		"content":             "a body a future server decided to serve on the list endpoint",
+	}
+	f := newFakeAihub(t)
+	f.on("/v1/work_items", func(map[string]any) (int, any) {
+		body := oneFullWorkItem()
+		item := body["items"].([]any)[0].(map[string]any)
+		for k, v := range populated {
+			item[k] = v
+		}
+		return http.StatusOK, body
+	})
+	result, isErr := callTool(t, f, "pf_list_work_items", map[string]any{"project": "aihub"})
+	if isErr {
+		t.Fatalf("pf_list_work_items failed: %v", result)
+	}
+	item := result["items"].([]any)[0].(map[string]any)
+	for k, want := range populated {
+		got, present := item[k]
+		if !present {
+			t.Errorf("%s was dropped although it held %q — the rule is deleting by name, not by value", k, want)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %v, want %v", k, got, want)
+		}
+	}
+	// seq must still go: this item's slug does reconstruct it, and the point of
+	// the control is that the OTHER rules stopped firing, not that all of them did.
+	if _, present := item["seq"]; present {
+		t.Error("seq survived an agreeing slug — the projection is not running at all")
 	}
 }
 
@@ -142,21 +218,29 @@ func TestListWorkItemsResponseDropsReconstructibleFields(t *testing.T) {
 // count is exactly as easy to satisfy by deleting the wrong field and lowering
 // the number.
 //
-// ⚠️ The citations are load-bearing in one direction only. The skill
-// documentation this repo ships is measurably out of sync with this response —
-// using-polyforge/fragments/output-format.md:29 has the model rendering
-// `owner.display` off this call, a field that has never existed on it — so a
-// field NAMED in the docs may well be dead. It cannot be used the other way
-// round: absence from the docs is not evidence that nothing reads a field,
-// because the reader is a language model and no compiler, test or error report
-// stands between a removed field and a wrong answer. Hence the rule this
-// projection actually obeys, which is losslessness, not usage.
+// ⚠️ Read the citations as "why it is plausible this is read", NOT as proof.
+// The skill documentation this repo ships is measurably out of sync with this
+// response: using-polyforge/fragments/output-format.md:27 has the model render a
+// multi-wi list with an `owner_display` column, and no item this endpoint serves
+// has ever had that field (domain.WorkItem has reporter_display; owner_display
+// is the ready queue's ReadyItem/RunningItem). So a field NAMED in the docs may
+// be dead — and a field the docs do not name may still be read, because the
+// reader is a language model and no compiler, test or error report stands
+// between a removed field and a wrong answer. Neither direction is evidence,
+// which is exactly why the projection obeys losslessness and not usage, and why
+// the rows below justify KEEPING things and can never justify dropping one.
+//
+// That cuts against the reporter_display row in particular, so it says so at the
+// row rather than borrowing authority from a line this same comment has just
+// called wrong.
 func TestListWorkItemsResponseKeepsEveryConsumedField(t *testing.T) {
 	result, item := listOneWorkItem(t)
 
 	kept := map[string]string{
-		"id":       "pf-release/SKILL.md builds included_wi_ids from it; pf-retro and pf-execute pass it as work_item_id",
-		"slug":     "using-polyforge/fragments/output-format.md renders the wi as <project#seq>, which is the slug verbatim",
+		"id": "pf-release/SKILL.md builds included_wi_ids from it; pf-retro and pf-execute pass it as work_item_id",
+		"slug": "output-format.md renders the wi as <project#seq>, which is the slug verbatim; " +
+			"it is also the only remaining source of seq, which skills need to build the " +
+			"pf.<project>-<seq>/<repo>/ worktree path (iron-rules.md, repo-routing.md, pf-init, pf-crystallize)",
 		"project":  "pf-execute/engine.native.md resolves the step graph as {wi_type}.{project}.md",
 		"goal":     "rendered in the Status table of every skill's three-segment output",
 		"status":   "same table; also the only field left saying whether the item is closed",
@@ -164,11 +248,13 @@ func TestListWorkItemsResponseKeepsEveryConsumedField(t *testing.T) {
 		"priority": "output-format.md's multi-wi column list",
 		"requires_human_session": "pf-execute/engine.native.md selects the execution mode from it; " +
 			"its null is a third state (unclassified), which is why it is not null-dropped",
-		"labels":                "no response-side consumer found, and kept anyway: a request-side filter proves nothing about the response, and no evidence says the model does not read it",
-		"attrs":                 "carries real payload, not bookkeeping; 42% of this project's list bytes and the single biggest thing this projection does NOT take",
-		"declared_resources":    "the conflict/lock surface; resources_version below is its CAS token",
-		"resources_version":     "compare-and-set guard for a declared_resources write read from this same response",
-		"reporter_display":      "output-format.md renders an owner column",
+		"labels":             "no response-side consumer found, and kept anyway: a request-side filter proves nothing about the response, and no evidence says the model does not read it",
+		"attrs":              "carries real payload, not bookkeeping; 42% of this project's list bytes and the single biggest thing this projection does NOT take",
+		"declared_resources": "the conflict/lock surface; resources_version below is its CAS token",
+		"resources_version":  "compare-and-set guard for a declared_resources write read from this same response",
+		"reporter_display": "no exact consumer. output-format.md asks for an owner column but names " +
+			"`owner_display`, which is not a field of this response — this is the nearest real one, " +
+			"and it is kept under the same rule as reporter_user_id, not on the strength of that line",
 		"current_attempt_epoch": "survives to distinguish never-claimed from claimed-and-released once current_attempt_id is gone",
 		"reporter_user_id":      "opaque, no consumer found — kept because 'no consumer found' is not evidence on this API",
 		"source":                "ditto",

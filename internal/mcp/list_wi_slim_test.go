@@ -3,6 +3,8 @@ package mcp
 import (
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -82,15 +84,16 @@ func restoreProjectedFields(slim map[string]any) map[string]any {
 	if _, ok := out["content"]; !ok {
 		out["content"] = nil
 	}
-	// Rule 2: seq is the integer half of slug.
+	// Rule 2: seq is the integer half of slug. Parsed rather than accumulated
+	// digit by digit so the reconstructor is correct on its own terms, not merely
+	// on inputs the implementation can produce.
 	if _, ok := out["seq"]; !ok {
 		slug, _ := out["slug"].(string)
-		project, _ := out["project"].(string)
-		var n float64
-		for i := len(project) + 1; i < len(slug); i++ {
-			n = n*10 + float64(slug[i]-'0')
+		if i := strings.LastIndex(slug, "#"); i >= 0 {
+			if n, err := strconv.ParseFloat(slug[i+1:], 64); err == nil {
+				out["seq"] = n
+			}
 		}
-		out["seq"] = n
 	}
 	// Rule 3: the only scenario a row can hold.
 	if _, ok := out["scenario"]; !ok {
@@ -113,12 +116,17 @@ func restoreProjectedFields(slim map[string]any) map[string]any {
 // when the response still states the same thing without it — by rebuilding the
 // full item from the projected one and demanding byte equality.
 //
-// Widening slimListWorkItem with a field that is NOT reconstructible turns this
-// red with no judgement call about who reads what, which matters because on an
-// LLM-facing API there is no consumer that can report the breakage. Verified
-// against three mutations of slimListWorkItem: `return` (no projection) passes,
-// as it must; deleting the whole item map, and adding `delete(m, "goal")`, both
-// fail here and nowhere else in this file.
+// Adding an UNCONDITIONAL delete of a non-reconstructible field turns this red
+// with no judgement call about who reads what, which matters because on an
+// LLM-facing API there is no consumer that can report the breakage.
+//
+// ⚠️ Its blind spot, stated because review found it the expensive way: this test
+// sees what a rule DELETES, not whether the rule's guard still fires. Every
+// conditional field in fullListItem() carries the value that makes its guard
+// true, so removing a guard — `delete(m, "content")` unconditionally, or the
+// null loop deleting by name — changes nothing about this fixture's projection
+// and this test stays green. TestSlimListWorkItems_KeepsNonNullValuesOfNullDroppedFields
+// is the other half; neither is redundant.
 func TestSlimListWorkItems_ProjectionIsReconstructible(t *testing.T) {
 	original := fullListItem()
 	item := fullListItem()
@@ -146,6 +154,67 @@ func missingKeys(a, b map[string]any) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestSlimListWorkItems_KeepsNonNullValuesOfNullDroppedFields is the negative
+// control for the null-drop loop, and it is the only test in either file that
+// has one.
+//
+// Every other test here runs against fullListItem(), where all six of these
+// fields are null — so the guarded loop (`if v == nil`) and an unguarded one
+// (`delete(m, k)` outright) produce byte-identical output, and reconstruction,
+// the keep-tests and the e2e probes all stay green under the mutation that
+// destroys a real milestone, a real closed_at and a live current_attempt_id.
+// That gap was found in review, not by the suite: the rule the file calls "the
+// largest by bytes" was the one rule with no test asserting its guard fires.
+//
+// So this test does the opposite of the fixture: every one of the six carries a
+// real value, and none may be touched.
+func TestSlimListWorkItems_KeepsNonNullValuesOfNullDroppedFields(t *testing.T) {
+	populated := map[string]any{
+		"milestone":           "v1.2-alpha",
+		"parent_work_item_id": "wi_epicParent",
+		"closed_at":           "2026-08-31T09:00:00Z",
+		"current_attempt_id":  "ra_Ku2oXS0y",
+		"external_share_type": "public_link",
+		"external_share_key":  "shk_9f2a1c",
+	}
+	item := fullListItem()
+	for k, v := range populated {
+		item[k] = v
+	}
+
+	slimListWorkItem(item)
+
+	for k, want := range populated {
+		got, present := item[k]
+		if !present {
+			t.Errorf("%s was dropped although its value was %q, not null — "+
+				"the null-drop loop is deleting by NAME, not by value", k, want)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %v, want %v", k, got, want)
+		}
+	}
+
+	// The same hole, one rule over. `content` is null on every row this endpoint
+	// serves TODAY, but this package ships in the polyforge binary and talks to
+	// aihub over HTTP, so an unconditional delete would be a claim about a SELECT
+	// list in another process at another version. A server that starts serving
+	// content must not have it stripped in silence.
+	withBody := fullListItem()
+	withBody["content"] = "## Spec\n\nthe body a newer server decided to serve"
+	slimListWorkItem(withBody)
+	if got := withBody["content"]; got != "## Spec\n\nthe body a newer server decided to serve" {
+		t.Errorf("a non-null content was dropped or altered (got %v) — "+
+			"the guard exists for version skew, not for today's SELECT list", got)
+	}
+
+	// And the third guarded rule, for completeness: a seq the slug does not
+	// reconstruct is covered by TestSlimListWorkItems_KeepsSeqWhenSlugDisagrees,
+	// a non-"coding" scenario by TestSlimListWorkItems_KeepsNonCodingScenario.
+	// Those two have controls; these two did not.
 }
 
 // TestSlimListWorkItems_KeepsNullRequiresHumanSession pins the field this work

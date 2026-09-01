@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"math"
 	"strconv"
 )
 
@@ -12,12 +13,12 @@ import (
 // ─── Why this is a delete-list, and why that is not a stylistic choice ───────
 //
 // The obvious shape is slimRecallResult's: a keep-list. It is the wrong shape
-// HERE, and the reason is written down next door. recall_slim.go's INVARIANT
-// note records that its keep-list has silently swallowed a newly-added field
-// three times — `total` (aihub#249), the truncation pair (aihub#269),
-// `unmatched_types` (aihub#289) — and wi_echo_slim.go (aihub#281) was
-// deliberately built the other way round "so it cannot become the fourth
-// instance".
+// HERE, and the reason is written down next door. recall_slim.go's keep-list has
+// silently swallowed a newly-added field three times — `total` (aihub#249) and
+// the truncation pair (aihub#269), which its INVARIANT note names, plus
+// `unmatched_types` (aihub#289), recorded ninety lines lower at the conditional
+// copy that fixed it. wi_echo_slim.go (aihub#281) was then deliberately built
+// the other way round "so it cannot become the fourth instance".
 //
 // A keep-list here would be instances four and five ON ARRIVAL, not someday:
 // domain.WorkItem already carries two conditionally-populated fields that no
@@ -25,9 +26,10 @@ import (
 // response does not have them.
 //
 //	similarity   aihub#273, present only on the ?query= semantic path
-//	step_state   aihub#280, present only under include_step_state=true —
-//	             and pf-status and pf-retro BOTH send that flag, on their
-//	             first call, every session
+//	step_state   aihub#280, present only under include_step_state=true — which
+//	             pf-retro sends on its first call, and pf-status sends on the
+//	             first call of its single-wi branch (its global branch makes no
+//	             pf_list_work_items call at all)
 //
 // aihub#280 landed `include_step_state` weeks ago; a keep-list would have taken
 // it straight back out, and — this is the whole hazard of this work item —
@@ -43,24 +45,39 @@ import (
 // byte-reconstructible from a field that survives. No field is removed for
 // "looks unused". "Looks unused" is precisely the judgement that has no
 // error-detection path on an LLM-facing API, and the evidence that would have to
-// back it does not exist: the skill documentation is measurably out of sync with
-// this response (using-polyforge/fragments/output-format.md:29 tells the model
-// to render `owner.display` off this very call — a field that has never existed
-// on it), so "no skill mentions field X" is not evidence that nothing reads X.
+// back it does not exist. The skill documentation is measurably out of sync with
+// this response: using-polyforge/fragments/output-format.md:27 tells the model to
+// render a multi-wi list with an `owner_display` column, and no work item served
+// by this endpoint has ever had such a field (domain.WorkItem has
+// reporter_display; owner_display belongs to the ready queue's ReadyItem and
+// RunningItem). So "no skill mentions field X" is not evidence that nothing
+// reads X.
 //
-// Note the asymmetry that makes those stale docs usable in ONE direction: they
-// over-claim. A field they name may be dead, so naming proves nothing about
-// consumption — but a field they DON'T name may equally well be read, so silence
-// proves nothing about non-consumption either. Only the losslessness rule above
-// is decidable without a consumer that can report breakage.
+// Note the asymmetry, and note that it closes BOTH directions rather than
+// leaving one open: the docs over-claim, so a field they name may be dead and
+// naming proves nothing about consumption — and a field they do not name may
+// still be read, so silence proves nothing about non-consumption. Neither
+// direction is usable. That is why the rule below is losslessness and not usage:
+// it is the only property here that is decidable without a consumer that can
+// report its own breakage.
 //
 // This is the same gate suppressContentEcho uses (wi_echo_slim.go): drop bytes
 // only when a check ON THE VALUES ITSELF says the drop is lossless, so
 // "lossless" is verified per call rather than asserted about the server's usual
-// behaviour. TestSlimListWorkItems_ProjectionIsReconstructible mechanises it:
-// it rebuilds the full item from the projected one and demands byte equality, so
-// widening the delete-list below with a field that is NOT reconstructible turns
-// red without anyone having to notice.
+// behaviour. Every rule below is written that way, including the `content` one,
+// which reads as unconditional but is not — see the note at that line for the
+// version-skew reason it must not be.
+//
+// Two tests carry that between them, and neither covers the other's half:
+//
+//	TestSlimListWorkItems_ProjectionIsReconstructible rebuilds the full item
+//	from the projected one and demands byte equality, so adding an
+//	UNCONDITIONAL delete of a non-reconstructible field turns red.
+//
+//	TestSlimListWorkItems_KeepsNonNullValuesOfNullDroppedFields feeds real
+//	values to every conditional rule, so relaxing a rule's GUARD turns red.
+//	Reconstruction is blind to that: with the fixture's nulls the guarded and
+//	unguarded projections are byte-identical.
 //
 // ─── What this deliberately does NOT do ─────────────────────────────────────
 //
@@ -114,22 +131,61 @@ func slimListWorkItem(m map[string]any) {
 	// and listWorkItemsByVector, which the comment there calls the "same
 	// 26-column SELECT (lockstep Scan sites)" — read 26 columns and content is
 	// not among them, so domain.WorkItem.Content is a nil *string on every item
-	// this endpoint has ever returned. `"content":null` is therefore not "this
-	// work item has no body"; it is "this endpoint does not serve bodies", which
-	// is a fact about the endpoint and not about the row.
+	// this endpoint returns today. `"content":null` is therefore not "this work
+	// item has no body"; it is "this endpoint does not serve bodies", which is a
+	// fact about the endpoint and not about the row.
 	//
-	// That distinction is why this is a delete and not an aihub#269-style
-	// handle: there is no per-item fact to leave behind. A `content_len` here
-	// would have to be invented, and pf_get_work_item is where a body is read.
-	delete(m, "content")
+	// 🔴 Gated on the value being null anyway, and the guard is the whole point.
+	// This package is compiled into the `polyforge` BINARY and reaches aihub over
+	// HTTP (pkg/client), so the client and the server version independently —
+	// that asymmetry is why /pf-doctor exists. An unconditional delete here would
+	// be a claim about a SELECT list in a different process, one this code can
+	// neither see nor be recompiled against: the day the server adds content (or
+	// a snippet) to that SELECT, every deployed polyforge would strip it in
+	// silence and the model would conclude the work item has no body. The read of
+	// the SELECT above is what makes the deletion WORTH doing; the guard is what
+	// makes it SAFE, and only one of those two survives a version skew.
+	//
+	// Value-gating also keeps this rule the same shape as suppressContentEcho and
+	// as the two below, rather than the one exception the file's header would
+	// then have to disown.
+	//
+	// A null content is a delete and not an aihub#269-style handle because there
+	// is no per-item fact to leave behind: a `content_len` here would have to be
+	// invented. pf_get_work_item is where a body is read.
+	if v, present := m["content"]; present && v == nil {
+		delete(m, "content")
+	}
 
-	// `seq` is the integer half of `slug`, which is exactly "<project>#<seq>".
-	// Gated on the reconstruction actually holding for THIS item rather than on
-	// the invariant being believed, so a row whose slug ever disagrees keeps its
-	// seq and the disagreement stays visible.
+	// `seq` is the integer half of `slug`. That is not a convention: slug is a
+	// generated column, `TEXT GENERATED ALWAYS AS (project || '#' || seq) STORED`
+	// (0002_work_items.sql), so the reconstruction is enforced by the schema.
+	//
+	// Gated on the reconstruction actually holding for THIS item all the same,
+	// so a row whose slug ever disagrees keeps its seq and the disagreement stays
+	// visible rather than being explained away by this comment.
+	//
+	// The consumer that has to do the reconstruction is worth naming, since
+	// naming consumers is the method this file claims: polyforge worktrees are
+	// `pf.<project>-<seq>/<repo>/` (using-polyforge/fragments/iron-rules.md,
+	// fragments/repo-routing.md, pf-init/SKILL.md, pf-crystallize/SKILL.md), so a
+	// skill building that path now splits the slug on '#' instead of reading seq.
+	// Trivial for the reader this API has, which is why the rule is kept — but it
+	// is a real consumer and it should be written down next to the rule that
+	// moves work onto it.
+	//
+	// The int64 conversion is range-guarded rather than left to luck: float64 ->
+	// int64 is implementation-defined outside int64's range, and while a seq
+	// beyond 2^53 cannot come out of a BIGINT sequence starting at 1, "safe
+	// because unreachable" is a worse guarantee than "safe because checked".
+	//
+	// No test covers this guard, and none can: without it, amd64 yields the
+	// indefinite value, the slug comparison fails, and seq survives anyway — the
+	// same observable behaviour. That equivalence is exactly the reason to write
+	// the guard rather than rely on it (mutation M8 in list_wi_slim_e2e_test.go).
 	if slug, ok := m["slug"].(string); ok {
 		if project, ok := m["project"].(string); ok {
-			if seq, ok := m["seq"].(float64); ok && seq == float64(int64(seq)) {
+			if seq, ok := m["seq"].(float64); ok && seq >= 0 && seq < 1<<53 && seq == math.Trunc(seq) {
 				if slug == project+"#"+strconv.FormatInt(int64(seq), 10) {
 					delete(m, "seq")
 				}
@@ -162,6 +218,11 @@ func slimListWorkItem(m map[string]any) {
 	}
 }
 
+// listWorkItemNullMeansNone is a SET. It is spelled map[string]struct{} rather
+// than map[string]bool because the loop above ranges the keys and never reads a
+// value, so a `"milestone": false` entry would read as "excluded" and behave as
+// "included" — an unforgeable set costs nothing and removes the discrepancy.
+
 // listWorkItemNullMeansNone names the fields of a work-item list response whose
 // JSON null carries no information the key's absence does not carry.
 //
@@ -190,17 +251,25 @@ func slimListWorkItem(m map[string]any) {
 // The failure mode of forgetting to add a nullable field here is bytes, not
 // correctness — which is why the list is opt-in in this direction, the opposite
 // of slimRecallResult's item whitelist, where forgetting costs a field.
-var listWorkItemNullMeansNone = map[string]bool{
+//
+// ⚠️ Every entry below is a licence to delete the key ONLY when its value is
+// null. Nothing about the name makes that true; it is the `v == nil` guard at
+// the call site, and that guard is the one this projection's live data depends
+// on — a real milestone, a real closed_at or a live current_attempt_id are all
+// information. TestSlimListWorkItems_KeepsNonNullValuesOfNullDroppedFields is
+// its negative control, because with a null-only fixture the guarded and
+// unguarded loops produce identical output and every other test stays green.
+var listWorkItemNullMeansNone = map[string]struct{}{
 	// Sharing is off for every row that exists (null on 1,049/1,049 sampled);
 	// when a share is created these become a type and a key, and say so.
-	"external_share_type": true,
-	"external_share_key":  true,
+	"external_share_type": {},
+	"external_share_key":  {},
 	// "no milestone" / "no parent" / "not closed" / "no live attempt". Each is
 	// also stated positively elsewhere in the same item — `status` says whether
 	// the item is closed, and current_attempt_epoch survives to say whether it
 	// has ever been claimed.
-	"milestone":           true,
-	"parent_work_item_id": true,
-	"closed_at":           true,
-	"current_attempt_id":  true,
+	"milestone":           {},
+	"parent_work_item_id": {},
+	"closed_at":           {},
+	"current_attempt_id":  {},
 }

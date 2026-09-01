@@ -214,17 +214,69 @@ func (s *Server) registerLifecycleTools() {
 								// JSONB holds a double-encoded JSON string instead
 								// of a JSON array. They are legacy-data cases, not
 								// caller-shape cases.
+								//
+								// ⚠️ SECOND DERIVATION, STILL UNFIXED.
+								// internal/server/middleware.go:116-131
+								// derives the same "caller's role out of
+								// projects.members" fact independently, to
+								// fill /v1/users/me's project_roles, and it
+								// still carries BOTH defects fixed here:
+								//
+								//   - Wholesale discard. It decodes into a
+								//     TYPED slice and `continue`s on error
+								//     (lines 120-122), so ONE junk element
+								//     drops that project's membership
+								//     entirely — even though encoding/json
+								//     had already filled the good entries in
+								//     (see the []any case below). Same shape
+								//     as the guard aihub#312 removed here.
+								//   - Bare identity compare. Line 124 is
+								//     `m.UserID == uc.UserID` with no
+								//     `!= ""` guard. That is safe today only
+								//     by accident of its inputs — uc.UserID
+								//     comes from an authenticated API key and
+								//     the SQL pre-filters with `members @>`
+								//     — not by anything at that line.
+								//
+								// Deliberately NOT fixed in aihub#312: out of
+								// scope here, and as of 2026-09-01 no work
+								// item covers it, so this note has no landing
+								// point yet. If you edit either derivation,
+								// edit the other or file one. The per-fixture
+								// divergence is measured in
+								// tools_whoami_members_test.go, on
+								// middlewareProjectRoles.
 								var members []map[string]any
 								switch m := membersRaw.(type) {
 								case []any:
 									// Walked element by element rather than
-									// re-marshalled and re-parsed in one go. A
-									// single json.Unmarshal over the whole list
-									// fails wholesale on one non-object entry, and
-									// this loop is guarded on that error, so one
-									// junk entry would discard every other member
-									// and silently degrade to public/viewer — the
-									// exact failure mode aihub#312 was.
+									// re-marshalled and re-parsed in one go.
+									//
+									// NOT because a whole-list json.Unmarshal
+									// would fail wholesale on one non-object
+									// entry — it does not. encoding/json records
+									// the FIRST *json.UnmarshalTypeError it hits
+									// inside a slice and KEEPS DECODING the rest.
+									// Measured: `[{u_a,writer}, 5, {u_b,viewer}]`
+									// into []map[string]any yields a length-3
+									// slice holding u_a, a nil map, and u_b —
+									// entries on BOTH sides of the bad one are
+									// filled — together with a non-nil error.
+									//
+									// The wholesale discard was the GUARD, not the
+									// decoder. The pre-change code read
+									// `if json.Unmarshal(...) == nil { ...use... }`,
+									// so one junk entry made the error non-nil and
+									// threw away a result that was in fact almost
+									// entirely populated, degrading every other
+									// member to public/viewer — the exact failure
+									// mode aihub#312 was.
+									//
+									// Walking []any is still the right shape: it
+									// has no error return at all, so there is
+									// nothing here for a later edit to re-guard on
+									// and a junk entry can only ever cost its own
+									// element.
 									members = make([]map[string]any, 0, len(m))
 									for _, entry := range m {
 										if mem, ok := entry.(map[string]any); ok {
@@ -234,12 +286,14 @@ func (s *Server) registerLifecycleTools() {
 								// The dropped errors below are deliberate and are
 								// NOT the swallow that caused aihub#312: a failed
 								// json.Unmarshal still fills in every element it
-								// parsed before the bad one, so keeping the
-								// partial result degrades per entry exactly like
-								// the []any case above, whereas discarding it on
-								// error would throw away a membership that parsed
-								// cleanly. The uid != "" check below is what stops
-								// a half-parsed entry from matching.
+								// could decode, on BOTH sides of the bad one —
+								// only the bad element itself is left at its zero
+								// value. Keeping that partial result therefore
+								// degrades per entry exactly like the []any case
+								// above, whereas discarding it on error would
+								// throw away memberships that parsed cleanly. The
+								// uid != "" check below is what stops the
+								// zero-valued entry from matching.
 								case string:
 									_ = json.Unmarshal([]byte(m), &members)
 								case []byte:

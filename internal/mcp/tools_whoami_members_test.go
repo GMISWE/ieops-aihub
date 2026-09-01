@@ -38,9 +38,37 @@ import (
 	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
-// middlewareProjectRoles mirrors what internal/server/middleware.go:102-134
-// puts in /v1/users/me's project_roles for this caller, so a fixture can only
-// describe a state the real server can actually produce.
+// middlewareProjectRoles fills /v1/users/me's project_roles so the fixtures
+// below carry a complete payload. It APPROXIMATES what internal/server
+// /middleware.go:102-134 would put there; it is not a fidelity oracle, and on
+// one fixture it and the real server disagree. Read the exception before
+// writing any assertion on project_roles.
+//
+// EXCEPTION — "caller listed alongside a non-object junk entry". Measured by
+// transcribing middleware.go:110-131 verbatim and running it and this helper
+// over each fixture's members JSON: seven of the eight call sites agree (the
+// six cases in the table below plus the two byte-identity goldens); that one
+// diverges. The real server emits `project_roles: {}` there, this helper emits
+// {"aihub":"writer"}. Two independent reasons, both costing the real server a
+// membership it should have kept:
+//
+//   - middleware.go:116-120 decodes members into a TYPED
+//     []struct{UserID, Role string} and `continue`s to the next project row on
+//     any error. A JSON number element makes that unmarshal return
+//     *json.UnmarshalTypeError, so the whole row is dropped. It is the
+//     `continue` that loses the membership, NOT the decoder — encoding/json
+//     fills the good entries in regardless (see the []any case in
+//     tools_lifecycle.go). That is the same wholesale-discard shape aihub#312
+//     removed on the pf_whoami side, still live over there.
+//   - middleware.go:124 matches on a bare `m.UserID == uc.UserID`, with no
+//     `uid != ""` guard. The body below has one. (Named by what it is rather
+//     than by line number: editing this comment moves that line.)
+//
+// Nothing is falsely green: no assertion in this file reads project_roles for
+// the diverging fixture. The only two goldens that quote project_roles at all
+// are the admin case and the non-admin-owner case, and the helper agrees with
+// the real server on both. The divergence is written down because an assertion
+// added later would silently inherit it.
 //
 // Worth knowing while reading these tests: that middleware already parses the
 // same projects.members JSONB and hands pf_whoami the caller's role for free,

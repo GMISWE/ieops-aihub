@@ -3,8 +3,6 @@ package mcp
 import (
 	"reflect"
 	"sort"
-	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -83,17 +81,6 @@ func restoreProjectedFields(slim map[string]any) map[string]any {
 	// Rule 1: content is never selected by either list query.
 	if _, ok := out["content"]; !ok {
 		out["content"] = nil
-	}
-	// Rule 2: seq is the integer half of slug. Parsed rather than accumulated
-	// digit by digit so the reconstructor is correct on its own terms, not merely
-	// on inputs the implementation can produce.
-	if _, ok := out["seq"]; !ok {
-		slug, _ := out["slug"].(string)
-		if i := strings.LastIndex(slug, "#"); i >= 0 {
-			if n, err := strconv.ParseFloat(slug[i+1:], 64); err == nil {
-				out["seq"] = n
-			}
-		}
 	}
 	// Rule 3: the only scenario a row can hold.
 	if _, ok := out["scenario"]; !ok {
@@ -211,10 +198,9 @@ func TestSlimListWorkItems_KeepsNonNullValuesOfNullDroppedFields(t *testing.T) {
 			"the guard exists for version skew, not for today's SELECT list", got)
 	}
 
-	// And the third guarded rule, for completeness: a seq the slug does not
-	// reconstruct is covered by TestSlimListWorkItems_KeepsSeqWhenSlugDisagrees,
-	// a non-"coding" scenario by TestSlimListWorkItems_KeepsNonCodingScenario.
-	// Those two have controls; these two did not.
+	// The remaining conditional rule, scenario, has its control in
+	// TestSlimListWorkItems_KeepsNonCodingScenario. content and the null six had
+	// none until this test.
 }
 
 // TestSlimListWorkItems_KeepsNullRequiresHumanSession pins the field this work
@@ -267,41 +253,33 @@ func TestSlimListWorkItems_KeepsConditionallyPresentFields(t *testing.T) {
 	}
 }
 
-// TestSlimListWorkItems_KeepsSeqWhenSlugDisagrees pins the gate rather than the
-// invariant: seq goes only when THIS item's slug really does reconstruct it, so
-// a row where the two ever diverge keeps both and the divergence stays visible.
-func TestSlimListWorkItems_KeepsSeqWhenSlugDisagrees(t *testing.T) {
-	cases := []struct {
-		name string
-		slug any
-		seq  any
-	}{
-		{"slug names a different seq", "aihub#999", float64(278)},
-		{"slug names a different project", "ieops#278", float64(278)},
-		{"slug is not the derived shape", "aihub-278", float64(278)},
-		{"slug is absent", nil, float64(278)},
-		{"seq is not an integer", "aihub#278", float64(278.5)},
+// TestSlimListWorkItems_KeepsSeq pins a NON-removal, which is unusual enough to
+// say why. seq passes this file's losslessness rule outright — slug is
+// `GENERATED ALWAYS AS (project || '#' || seq)`, so it is reconstructible by the
+// schema — and an earlier revision did drop it.
+//
+// It is kept because of the one piece of hard evidence available about what the
+// reader does with this response: across 315 real calls in this machine's
+// transcripts, the model hand-wrote 148 `jq` projections to recover from
+// oversized payloads, and `.seq` appears in 95 of them, more than any other
+// field. jq renders a missing key and a null key identically, so every one of
+// those filters is unaffected by the fields this projection DOES drop —
+// `"\(.closed_at)"` prints `null` either way. `.seq` is the sole exception: it
+// would print `278` before and `null` after.
+//
+// So this test guards against a future reader re-deriving the deletion from the
+// rule alone. The rule permits it; the evidence does not.
+func TestSlimListWorkItems_KeepsSeq(t *testing.T) {
+	item := fullListItem()
+	slimListWorkItem(item)
+	got, present := item["seq"]
+	if !present {
+		t.Fatal("seq was dropped: reconstructible from slug, but named in 95 of the 148 " +
+			"jq projections the model wrote against real responses, and the only dropped " +
+			"field whose absence those filters would render as `null`")
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			item := fullListItem()
-			if c.slug == nil {
-				delete(item, "slug")
-			} else {
-				item["slug"] = c.slug
-			}
-			item["seq"] = c.seq
-			slimListWorkItem(item)
-			if _, present := item["seq"]; !present {
-				t.Errorf("seq dropped although slug %v does not reconstruct it", c.slug)
-			}
-		})
-	}
-
-	agreeing := fullListItem()
-	slimListWorkItem(agreeing)
-	if _, present := agreeing["seq"]; present {
-		t.Error("seq survived an agreeing slug — the rule never fires")
+	if got != float64(278) {
+		t.Errorf("seq = %v, want 278", got)
 	}
 }
 

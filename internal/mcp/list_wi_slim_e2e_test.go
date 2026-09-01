@@ -11,7 +11,7 @@ package mcp_test
 //   - TestListWorkItemsResponseDropsReconstructibleFields  FAIL, naming all 9 fields
 //   - TestListWorkItemsResponseKeepsPopulatedOptionalFields FAIL, on its
 //     anti-vacuity tail only: the seven fields it protects all survive there (of
-//     course — nothing is projected), but `seq` survives too, and that check is
+//     course — nothing is projected), but so does `scenario`, and that check is
 //     what stops the test from passing against a projection that does nothing.
 //   - TestListWorkItemsResponseKeepsEveryConsumedField     PASS
 //
@@ -20,14 +20,14 @@ package mcp_test
 // files' tests — each row lists ONLY the tests that went red. Re-measure by
 // re-applying them; do not extend this table by reasoning about it.
 //
-//	M1  slimListWorkItem returns immediately   Reconstructible · KeepsSeq… ·
+//	M1  slimListWorkItem returns immediately   Reconstructible ·
 //	                                           KeepsUnknownTopLevelKeys · Tolerates… ·
 //	                                           KeepsPopulatedOptionalFields ·
 //	                                           DropsReconstructibleFields
 //	M2  + delete(m, "goal")                    Reconstructible · KeepsEveryConsumedField
 //	M3  delete every key in the item           Reconstructible · KeepsNonNullValues… ·
 //	                                           KeepsNullRequires… · KeepsConditionallyPresent… ·
-//	                                           KeepsSeq… · KeepsNonCodingScenario ·
+//	                                           KeepsSeq · KeepsNonCodingScenario ·
 //	                                           KeepsPopulatedOptionalFields ·
 //	                                           KeepsEveryConsumedField
 //	M4  + requires_human_session to the        KeepsNullRequiresHumanSession ONLY
@@ -37,9 +37,10 @@ package mcp_test
 //	                                           KeepsPopulatedOptionalFields
 //	M7  null loop deletes by NAME              KeepsNonNullValues… ·
 //	    (drop the `v == nil` guard)            KeepsPopulatedOptionalFields
-//	M8  drop seq's float64 range guard         NOTHING — see below
+//	M8  re-add the seq deletion an earlier     Reconstructible · KeepsSeq ·
+//	    revision had                           KeepsEveryConsumedField
 //
-// Three things this table is here to say:
+// Four things this table is here to say:
 //
 // M2 and M3 are why the reverse half exists. Both leave DropsReconstructibleFields
 // green — M3 satisfies it perfectly, by deleting everything — and both are caught
@@ -51,13 +52,22 @@ package mcp_test
 // found in review, not by this suite; the suite had eight tests and no negative
 // control on the rule the file calls its largest by bytes.
 //
-// M8 fails nothing, and that is reported rather than fixed. `int64(seq)` outside
-// int64's range is implementation-defined; on amd64 it yields the indefinite
-// value, the slug comparison then fails, and `seq` survives — the same outcome
-// the guard produces, so no test can distinguish the two. The guard is kept
-// precisely because a property that holds by platform accident cannot be pinned
-// by a test; "safe because checked" is the only version of it a reader can rely
-// on. Do not read the blank cell as "add a test here".
+// M8 is the mutation the design rule ALLOWS and the evidence forbids: seq really
+// is reconstructible from slug, and an earlier revision of this change did drop
+// it. Reconstructible catches it here only because restoreProjectedFields has no
+// seq rule to restore it with — i.e. because the reconstructor was edited to
+// match the decision. The load-bearing catches are KeepsSeq and
+// KeepsEveryConsumedField, which encode the measured consumer behaviour (95 of
+// 148 hand-written jq projections name `.seq`) rather than the rule.
+//
+// That is the honest limit of a losslessness rule, and worth stating plainly: it
+// tells you what can be removed without loss of INFORMATION, not what can be
+// removed without loss of a READER. Only measurement answers the second.
+//
+// ⚠️ This table was wrong once already. M8's row initially read "Reconstructible
+// would NOT catch it" and omitted KeepsEveryConsumedField — both derived by
+// reasoning after the seq decision, and both false, because the `seq` row had
+// silently failed to apply to the kept table at the time. Re-run the mutations.
 
 import (
 	"net/http"
@@ -145,10 +155,10 @@ func TestListWorkItemsResponseKeepsPopulatedOptionalFields(t *testing.T) {
 			t.Errorf("%s = %v, want %v", k, got, want)
 		}
 	}
-	// seq must still go: this item's slug does reconstruct it, and the point of
-	// the control is that the OTHER rules stopped firing, not that all of them did.
-	if _, present := item["seq"]; present {
-		t.Error("seq survived an agreeing slug — the projection is not running at all")
+	// scenario must still go: the point of the control is that the OTHER rules
+	// stopped firing, not that every rule did.
+	if _, present := item["scenario"]; present {
+		t.Error("scenario survived its \"coding\" value — the projection is not running at all")
 	}
 }
 
@@ -188,7 +198,6 @@ func TestListWorkItemsResponseDropsReconstructibleFields(t *testing.T) {
 
 	gone := map[string]string{
 		"content":  "neither list query SELECTs wi.content, so this is null on every row this endpoint has ever returned",
-		"seq":      "the integer half of slug, which is exactly \"aihub#278\"",
 		"scenario": "every row that can exist holds \"coding\"; CreateWorkItem rejects the other two",
 
 		"milestone":           "null means none, and absence says the same",
@@ -237,10 +246,15 @@ func TestListWorkItemsResponseKeepsEveryConsumedField(t *testing.T) {
 	result, item := listOneWorkItem(t)
 
 	kept := map[string]string{
-		"id": "pf-release/SKILL.md builds included_wi_ids from it; pf-retro and pf-execute pass it as work_item_id",
+		"id": "pf-release/SKILL.md builds included_wi_ids from it; measured: 311 later tool calls " +
+			"passed an id read out of one of these responses and seen nowhere earlier in the session",
+		"seq": "reconstructible from slug, and kept anyway — named in 95 of 148 measured jq recovery " +
+			"projections, more than any other field, and the ONLY droppable field those filters would " +
+			"render as `null` instead of a value (jq treats a missing key and a null key alike, which " +
+			"is why every other rule here is invisible to them)",
 		"slug": "output-format.md renders the wi as <project#seq>, which is the slug verbatim; " +
-			"it is also the only remaining source of seq, which skills need to build the " +
-			"pf.<project>-<seq>/<repo>/ worktree path (iron-rules.md, repo-routing.md, pf-init, pf-crystallize)",
+			"52 of the 148 measured jq recovery projections name it, and 319 later tool calls " +
+			"passed a slug read out of one of these responses and seen nowhere earlier",
 		"project":  "pf-execute/engine.native.md resolves the step graph as {wi_type}.{project}.md",
 		"goal":     "rendered in the Status table of every skill's three-segment output",
 		"status":   "same table; also the only field left saying whether the item is closed",

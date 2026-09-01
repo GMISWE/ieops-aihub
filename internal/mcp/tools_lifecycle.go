@@ -394,10 +394,11 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(err)
 		}
 		// aihub#278: drop the per-item fields the response can restate without
-		// (always-null content, slug-derivable seq, the constant scenario, and
-		// JSON nulls). Unconditional and lossless by construction — see the
-		// header of list_wi_slim.go for why it is a delete-list and not a
-		// keep-list like slimRecallResult.
+		// (always-null content, the constant scenario, and six nulls that mean
+		// "none"). Unconditional, and lossless by a per-value check rather than
+		// by assertion — see the header of list_wi_slim.go for why it is a
+		// delete-list and not a keep-list like slimRecallResult, and why `seq`
+		// is NOT among them despite passing the same rule.
 		return jsonResult(slimListWorkItemsResult(result))
 	})
 

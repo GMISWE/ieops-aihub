@@ -1,9 +1,8 @@
 package mcp
 
-import (
-	"math"
-	"strconv"
-)
+// This file has no imports: every rule is a map lookup and a comparison. That is
+// a deliberate ceiling, not a coincidence — anything needing a parser or a
+// numeric conversion to decide a drop is doing more than restating the response.
 
 // Work-item LIST projection (aihub#278).
 //
@@ -42,8 +41,16 @@ import (
 //
 // A field is removed only when the response still STATES the same thing without
 // it — either because the value carries no information at all, or because it is
-// byte-reconstructible from a field that survives. No field is removed for
-// "looks unused". "Looks unused" is precisely the judgement that has no
+// byte-reconstructible from a field that survives.
+//
+// 🔴 That rule is NECESSARY, not sufficient, and the difference cost this change
+// a revision. `seq` satisfies it outright (slug is `GENERATED ALWAYS AS (project
+// || '#' || seq)`) and is kept anyway, because measured consumer behaviour says
+// removing it would be noticed — see the seq note below. Losslessness tells you
+// what can go without loss of INFORMATION; it says nothing about loss of a
+// READER, and on this API the reader cannot report either one.
+//
+// No field is removed for "looks unused". "Looks unused" is precisely the judgement that has no
 // error-detection path on an LLM-facing API, and the evidence that would have to
 // back it does not exist. The skill documentation is measurably out of sync with
 // this response: using-polyforge/fragments/output-format.md:27 tells the model to
@@ -157,41 +164,33 @@ func slimListWorkItem(m map[string]any) {
 		delete(m, "content")
 	}
 
-	// `seq` is the integer half of `slug`. That is not a convention: slug is a
-	// generated column, `TEXT GENERATED ALWAYS AS (project || '#' || seq) STORED`
-	// (0002_work_items.sql), so the reconstruction is enforced by the schema.
+	// ─── `seq` is NOT dropped, and the reason is the only hard evidence in this
+	// file about what the reader actually does ─────────────────────────────────
 	//
-	// Gated on the reconstruction actually holding for THIS item all the same,
-	// so a row whose slug ever disagrees keeps its seq and the disagreement stays
-	// visible rather than being explained away by this comment.
+	// It is the obvious candidate. `slug` is a generated column, `TEXT GENERATED
+	// ALWAYS AS (project || '#' || seq) STORED` (0002_work_items.sql), so seq is
+	// reconstructible by the schema itself — it passes this file's rule outright,
+	// and an earlier revision of this code did delete it.
 	//
-	// The consumer that has to do the reconstruction is worth naming, since
-	// naming consumers is the method this file claims: polyforge worktrees are
-	// `pf.<project>-<seq>/<repo>/` (using-polyforge/fragments/iron-rules.md,
-	// fragments/repo-routing.md, pf-init/SKILL.md, pf-crystallize/SKILL.md), so a
-	// skill building that path now splits the slug on '#' instead of reading seq.
-	// Trivial for the reader this API has, which is why the rule is kept — but it
-	// is a real consumer and it should be written down next to the rule that
-	// moves work onto it.
+	// Measured behaviour says don't. 315 real pf_list_work_items calls were read
+	// out of the Claude Code transcripts on this machine; 104 of them returned a
+	// payload too large for the model's context, and in 79 of those the model
+	// recovered by writing a `jq` filter over the spilled sidecar — projecting the
+	// response down BY HAND, naming the fields it wanted. That is the closest
+	// thing this API has to a consumer declaring its own keep-set, 148 times over,
+	// and `.seq` is named in 95 of them — more than any other field, ahead of
+	// `.goal` (76), `.status` (53) and `.slug` (52).
 	//
-	// The int64 conversion is range-guarded rather than left to luck: float64 ->
-	// int64 is implementation-defined outside int64's range, and while a seq
-	// beyond 2^53 cannot come out of a BIGINT sequence starting at 1, "safe
-	// because unreachable" is a worse guarantee than "safe because checked".
+	// What makes that decisive rather than merely interesting is jq's semantics
+	// for a missing key. For every field this file DOES drop, absent and null are
+	// indistinguishable — `"\(.closed_at)"` prints `null` either way — so all 148
+	// of those filters keep producing byte-identical output after this change.
+	// `.seq` is the single exception: it prints `278` before and `null` after. The
+	// most frequently named field in the only self-authored consumer contract we
+	// can observe is also the one field whose removal that contract would notice,
+	// silently, in the direction of a wrong answer.
 	//
-	// No test covers this guard, and none can: without it, amd64 yields the
-	// indefinite value, the slug comparison fails, and seq survives anyway — the
-	// same observable behaviour. That equivalence is exactly the reason to write
-	// the guard rather than rely on it (mutation M8 in list_wi_slim_e2e_test.go).
-	if slug, ok := m["slug"].(string); ok {
-		if project, ok := m["project"].(string); ok {
-			if seq, ok := m["seq"].(float64); ok && seq >= 0 && seq < 1<<53 && seq == math.Trunc(seq) {
-				if slug == project+"#"+strconv.FormatInt(int64(seq), 10) {
-					delete(m, "seq")
-				}
-			}
-		}
-	}
+	// Twelve bytes an item, against the one rule here with evidence against it.
 
 	// `scenario` is CHECKed to (coding|writing|data) and CreateWorkItem rejects
 	// everything but coding, so every row that exists holds "coding" — the

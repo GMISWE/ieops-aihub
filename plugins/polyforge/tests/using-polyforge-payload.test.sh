@@ -57,18 +57,19 @@ set -uo pipefail
 #
 # and BOTH bounds are asserted. The upper bound is the budget. The LOWER bound exists
 # because a one-sided gate silently rots downward in value: aihub#285 slimmed the payload
-# from 18,286 to 9,778 against a 9,800 gate, then aihub#296 slimmed it to 8,498 — and had
-# the gate stayed at 9,800, that second slimming would have donated 1,300 unguarded
-# characters to whoever grew the payload next. The headroom a slimming buys must not become
-# the cushion for the next silent growth. So: if you SHRINK the payload, this test goes red
-# and tells you the new number to write here. If you GROW it past the gate, do NOT raise
-# this number — move a fragment to the on-demand tier (see the SIZE BUDGET section of
+# from 18,286 to 9,778 against a 9,800 gate, then aihub#296 slimmed it to 8,498, then
+# aihub#287 removed bootstrap.md's redundant wi-scoped pf_recall and took it to 8,397 — and
+# had the gate stayed at 9,800, the aihub#296 slimming alone would have donated 1,300
+# unguarded characters to whoever grew the payload next. The headroom a slimming buys must
+# not become the cushion for the next silent growth. So: if you SHRINK the payload, this
+# test goes red and tells you the new number to write here. If you GROW it past the gate,
+# do NOT raise this number — move a fragment to the on-demand tier (see the SIZE BUDGET section of
 # skills/using-polyforge/references/manifest-notes.md; it was a comment inside SKILL.md
 # until aihub#302 moved it out).
 #
 # The harness's hard limit is 10000; we sit below it on purpose, so the band between the
 # gate and 10000 is a "test red but users still fine" warning zone.
-PF_PAYLOAD_MAX_CHARS=8598
+PF_PAYLOAD_MAX_CHARS=8497
 PF_PAYLOAD_SLACK=100
 HARNESS_HARD_LIMIT=10000
 PREVIEW_CHARS=2000

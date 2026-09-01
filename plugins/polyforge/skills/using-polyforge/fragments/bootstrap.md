@@ -24,5 +24,4 @@ Then run the state/wi scan:
    Background: [content[:200]]...   ← only if content is non-null
    ```
 5. If attempt is `superseded` or `lost_lease` → prompt: "Stale state file found for [wi_id]. Delete it?"
-6. Call `pf_recall(work_item_id=<wi_id>, project=<wi.project>, top_k=10)` to surface wi-linked memories.
-7. Call `pf_get_ready_queue(project)` to show the current ready queue summary.
+6. Call `pf_get_ready_queue(project)` to show the current ready queue summary.

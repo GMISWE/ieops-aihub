@@ -141,12 +141,20 @@ change lives in:
 - **The `polyforge` binary** (the MCP server — ALL `pf_*` tool behavior, e.g.
   `pf_recall` result-slimming) is NOT in the plugin package. The launcher
   auto-downloads it once per day from the `bins-<channel>` branch, where
-  `<channel>` is the `[binary] channel` in `~/.polyforge/config.toml`
-  (`stable` by default; `dev` = latest `main`).
-  - **Channels**: a push to `main` publishes the binary to `bins-dev`; cutting a
-    `v*` tag (via `/pf-release`) publishes to `bins-stable`. So `main` changes
-    reach **dev** users automatically, but reach **stable** users only after a
-    tagged release.
+  `<channel>` is the `[binary] channel` in `~/.polyforge/config.toml`.
+  - **There is one channel: `dev`**, and it is the default — leave `[binary]`
+    out of your `config.toml` entirely. Every push to `main` publishes the
+    binary to `bins-dev`, so binary changes reach you within a day.
+  - 🔴 **`stable` is not a channel.** It was the default here and in the
+    launcher until aihub#305, but `bins-stable` was never published:
+    `publish-bins.yml` creates it only on a `v*` tag push, the repo's single tag
+    (`v1.0.0`, 2026-05-25) predates that workflow by a day, and no tag has been
+    pushed since. So the default configuration fetched a 404 — and a machine
+    that already had a binary just failed its daily update check on the MCP
+    launcher's stderr, which the client UI does not surface, and stayed frozen
+    on its old binary indefinitely. The launcher now maps a leftover
+    `channel = "stable"` onto `dev` and says so, so no config edit is required;
+    restoring a genuinely tag-gated channel is tracked separately.
   - **Force an update now** (skip the daily wait):
     ```
     rm -f ~/.polyforge/.last_binary_check    # forces the version check on next MCP start
@@ -183,21 +191,18 @@ the file is readable by your user (`ls -l ~/.polyforge/config.toml`). If
 the binary failed to download, re-run `gh auth status` and check the MCP
 server logs.
 
-## 6. (Optional) Switch to the dev channel or build from source
+## 6. (Optional) Build from source
 
-To run pre-release builds, **you do not need to compile anything** — set the
-channel in `~/.polyforge/config.toml` and restart Claude Code:
+You do **not** need to configure a channel: the launcher defaults to `dev`,
+which is the only channel that is published, and tracks every push to `main`.
+Setting `[binary] channel` is only useful once more than one channel exists.
 
-```toml
-[binary]
-channel = "dev"
-```
-
-The launcher reads `[binary] channel` and auto-downloads from `bins-stable`
-(default) or `bins-dev`.
+> If your `config.toml` still carries `channel = "stable"` from before
+> aihub#305, you can delete the `[binary]` section — but you do not have to.
+> The launcher maps it onto `dev` and prints a one-line notice.
 
 You only need a local build when you want a `polyforge` with **your own
-unpublished changes** (a branch not yet on either channel):
+unpublished changes** (a branch not yet published to `bins-dev`):
 
 ```bash
 git clone git@github.com:GMISWE/ieops-aihub.git

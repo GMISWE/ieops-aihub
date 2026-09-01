@@ -722,21 +722,36 @@ func RunPartitionCreate(ctx context.Context, pool *pgxpool.Pool) GCResult {
 // ignores the schedule. The schedule cuts runs per day from 1,440 to 24. It
 // cannot cut rows.
 //
-// What it does NOT do is serialise two aihub instances against each other, and
-// an earlier draft of this comment claimed it did. INSERT ... SELECT ... WHERE
-// NOT EXISTS is a snapshot read: under READ COMMITTED two concurrent
-// transactions both see no row and both write. Measured on two pgx connections
-// against this exact statement and DDL shape — 1 row inserted by each, 2 rows
-// for one wi inside one window. What actually keeps the two instances apart is
-// tryAdvisoryLock: pg_try_advisory_lock is session-level and held on a dedicated
-// pooled connection for the whole sweep, so the loser returns Skipped without
-// running a statement at all.
+// What it does NOT do is make the write atomic. INSERT ... SELECT ... WHERE NOT
+// EXISTS is a snapshot read: under READ COMMITTED two concurrent transactions
+// both see no row and both write. Measured on two pgx connections against this
+// exact statement and DDL shape — 1 row inserted by each, 2 rows for one wi
+// inside one window. What serialises concurrent sweeps is tryAdvisoryLock:
+// pg_try_advisory_lock is session-level and held on a dedicated pooled
+// connection for the whole sweep, so the loser returns Skipped without running a
+// statement at all.
 //
-// That distinction is worth keeping straight, because it says what may not
-// change silently. Narrowing the advisory lock — per project, say, for
-// throughput — would remove the only mutual exclusion these two sweeps have and
-// reintroduce duplicates, and no test here would notice, because every test in
-// this package runs one sweep at a time.
+// That lock earns its keep in a SINGLE-process deployment, which is the part
+// worth not losing: cmd/aihub/main.go runs the GC ticker on its own goroutine
+// while the HTTP server answers POST /v1/admin/gc on another, and those two call
+// RunDue and RunAll concurrently against one database. The advisory lock is the
+// only thing between an admin-forced run and a tick that overlaps it. Narrowing
+// it — per project, say, for throughput — would remove that, and no test here
+// would notice, because every test in this package runs one sweep at a time.
+//
+// An earlier version of this comment justified the lock differently: it asserted
+// that two aihub instances ran tickers against one database. That was false, and
+// how it got here is worth recording, because the same bait is still lying in
+// the work item. It was inherited from aihub#266's own 2026-08-27 narrative,
+// which audited「两个实例」10.146.0.16 and 10.146.0.34 — but those were two
+// deployments with DIVERGED databases (the divergence was the thing being
+// audited), not two tickers writing one table. Measured on 2026-09-01 against
+// production: pg_stat_activity on the aihub database showed exactly one
+// client_addr, the other aihub containers on that host had been Exited for four
+// days, and the flood arrived as ONE burst per minute — 60 rows in 59.0 minutes
+// for a single wi, 1.003 bursts/min, with sweep 7's rows strictly before sweep
+// 8's inside each 151-182ms burst. One emitter. The narrative said "two"; the
+// rows carry no emitter identity at all, so only the timing could answer it.
 //
 // The guard is a repeat WINDOW rather than a unique constraint because
 // agent_events is RANGE partitioned on created_at: a unique index on
@@ -1171,19 +1186,24 @@ func gcSweepTable() []gcSweep {
 
 // gcSchedule is RunDue's memory of when each sweep last ran in THIS process.
 //
-// In-process on purpose. Its two failure modes are both benign, because it is
-// not what prevents duplicate alerts — alertNotRepeatedSQL is:
+// In-process on purpose. Its ways of being bypassed are all benign, because it
+// is not what prevents duplicate alerts — alertNotRepeatedSQL is:
 //
 //   - a restart forgets everything, so every sweep is due on the first tick
 //     after start. Deliberate: a daily sweep that waited a full day after each
 //     deploy would be dark most of the time on a frequently deployed service.
 //     It is safe only because the SQL guard, not this map, stops re-emission.
-//   - two aihub instances keep separate schedules, so a daily sweep is attempted
-//     twice a day cluster-wide. The second attempt finds the first's row inside
-//     the window and writes nothing.
+//   - RunAll does not consult this map at all, so POST /v1/admin/gc runs the
+//     sweep whenever an operator asks, however recently it last ran. That is the
+//     point of that endpoint, and it is safe for the same reason.
+//   - a multi-replica deployment would give each replica its own map, so a sweep
+//     would be attempted once per replica per period. Listed because it costs
+//     nothing if it ever happens, NOT because it is the case: measured
+//     2026-09-01, production is one container against Cloud SQL, one
+//     client_addr in pg_stat_activity, one sweep burst per minute.
 //
-// Both would be defects if this map were the guard. It is not; it decides only
-// how often the database is asked.
+// Every one of those would be a defect if this map were the guard. It is not; it
+// decides only how often the database is asked.
 type gcSchedule struct {
 	mu      sync.Mutex
 	lastRun map[string]time.Time

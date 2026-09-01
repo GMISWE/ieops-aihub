@@ -85,6 +85,14 @@ type ClaimResponse struct {
 	Slug                  string   `json:"slug,omitempty"`
 	Project               string   `json:"project,omitempty"`
 	ID                    string   `json:"id,omitempty"`
+	// Goal is the work item's goal text, echoed back so the claiming client can
+	// name the task branch after it — polyforge/<project>-<seq>-<kebab goal>
+	// instead of the unreadable polyforge/<ulid8> (aihub#322). Without it the MCP
+	// layer would need a second round-trip to read the goal it just claimed, and
+	// the branch name has to be derived on the resume path too, where no such
+	// fetch happens today. Not forwarded to the LLM by the MCP claim tool; it is
+	// only consumed locally to build the branch name.
+	Goal string `json:"goal,omitempty"`
 }
 
 // FnClaimWorkItem implements the atomic claim transaction per §7 / §8.4 of the design doc.
@@ -195,6 +203,10 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			Slug:                  wi.Slug,
 			Project:               wi.Project,
 			ID:                    wi.ID,
+			// aihub#322: an idempotent replay must carry the goal too — the replay is
+			// what a retried claim sees, and it is the same call that has to build the
+			// worktree and its branch.
+			Goal: wi.Goal,
 		}, nil
 	}
 
@@ -559,6 +571,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		Slug:                  wi.Slug,
 		Project:               wi.Project,
 		ID:                    wi.ID,
+		Goal:                  wi.Goal,
 	}, nil
 }
 

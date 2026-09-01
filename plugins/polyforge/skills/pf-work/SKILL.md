@@ -309,18 +309,66 @@ Steps:
 
 ### State file management
 
-After a successful claim, `<workspace>/.polyforge/state/<wi_id>.json` contains:
+After a successful claim, `<workspace>/.polyforge/state/<wi_id>.json` holds the
+`config.StateFile` struct — these keys and no others:
 ```json
 {
   "wi_id": "wi_xxx",
+  "slug": "aihub#322",
+  "project": "aihub",
   "attempt_id": "ra_xxx",
   "claim_epoch": 1,
-  "workspace_root": "/path/to/workspace",
-  "repo": "repo-name",
-  "task_branch": "polyforge/<slug>"
+  "session_secret": "<64 hex, mode 0600>",
+  "claimed_at": "2026-09-01T00:00:00Z",
+  "claimed": true,
+  "idem_key": "<uuid>",
+  "worktrees": {"repo-name": "/abs/path/to/pf.<project>-<seq>/repo-name"}
 }
 ```
-`session_secret` is stored in this file by the MCP server and is never shown in output.
+`session_secret` is written here by the MCP server and is never shown in output.
+Every key except `wi_id`, `attempt_id`, `claim_epoch`, `session_secret` and
+`claimed` is `omitempty`, so it is absent rather than empty when unset.
+
+⚠️ This block used to list `workspace_root`, `repo` and `task_branch`. **None of
+the three has ever been a key of `StateFile`** — the workspace root is resolved
+at use time from `POLYFORGE_WORKSPACE_ROOT` or by walking up for
+`.polyforge.yaml`; a claim covers every repo in the project, so the per-repo
+paths live in `worktrees`; and `task_branch` is a field of a `declared_resources`
+entry, not of this file. The names do occur elsewhere — `workspace_root` is a
+parameter on the `pf_*` coding tools — so do not go looking for them here.
+
+### Task branch naming
+
+The claim creates one worktree per project repo at
+`<workspace>/pf.<project>-<seq>/<repo>/`, on a branch named
+
+```
+polyforge/<project>-<seq>-<short-kebab-goal>     e.g. polyforge/aihub-322-readable-task-branch-names
+```
+
+It is **computed at claim time and stored nowhere** — not in the state file, not
+on the work item. Nothing downstream re-derives it either: `pf_ship`, `pf_pr`,
+`pf_push` and `pf_wrap` all read the current branch out of the worktree with
+`git rev-parse --abbrev-ref HEAD`.
+
+Degradations, in order — the goal is free text and frequently Chinese, and the
+result must always be a legal git ref:
+
+| Situation | Branch |
+|---|---|
+| normal | `polyforge/<project>-<seq>-<kebab goal>` |
+| goal has no `[a-z0-9]` (Chinese-only, punctuation-only, empty) | `polyforge/<project>-<seq>` |
+| project has no `[a-z0-9]` | `polyforge/<seq>[-<kebab goal>]` |
+| neither project nor seq has any `[a-z0-9]` | `polyforge/<ulid8>` (the pre-1.1.18 name) |
+
+`<project>` is included because `<seq>` is unique per project, not per repo, and
+one repo may be listed under two projects in `.polyforge.yaml`.
+
+Branches created before plugin 1.1.18 are named `polyforge/<ulid8>` — the last 8
+characters of the wi id. **They keep those names.** A resume looks for the
+current name first, then that legacy name, then any single branch under
+`polyforge/<project>-<seq>-*` (which is what covers a goal edited after the
+claim), and only creates a branch when none of them exists.
 
 ## NL Triggers
 

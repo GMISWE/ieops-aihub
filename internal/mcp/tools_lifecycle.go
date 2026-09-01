@@ -747,6 +747,11 @@ func (s *Server) registerLifecycleTools() {
 		if v, ok := result["project"].(string); ok {
 			sf.Project = v
 		}
+		// aihub#322: the goal only feeds the task branch name below. It is a local
+		// variable rather than a StateFile field on purpose — the state file is a
+		// credential file read by middleware, and the goal is mutable wi content
+		// that would go stale there the moment someone edits it.
+		wiGoal, _ := result["goal"].(string)
 
 		// Persist the canonical-keyed state file and remove any orphan slug stub
 		// the C6-2 pre-claim write left behind (see config.WriteClaimState). (aihub#141)
@@ -756,7 +761,7 @@ func (s *Server) registerLifecycleTools() {
 
 		// Create git worktrees for each repo in the project (non-fatal).
 		// Worktree path format: pf.<project>-<seq>/<repo>/
-		// Branch name: polyforge/<ulid8>
+		// Branch name: polyforge/<project>-<seq>-<kebab goal> (newClaimBranchNames).
 		if sf.Project != "" {
 			wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
 			if wsRoot == "" {
@@ -774,14 +779,16 @@ func (s *Server) registerLifecycleTools() {
 				}
 
 				// Derive ulid8: last 8 chars of wi_id after stripping "wi_" prefix.
-				// Used only for the branch name; directory name uses the readable slug.
+				// No longer the branch name (aihub#322) — kept as the LEGACY name, which
+				// resume still has to recognise for every work item claimed before this
+				// change, and as the last-resort name when the slug yields no seq.
 				ulid8 := claimBranchULID8(canonicalWIID)
 
 				if effectiveCfg != nil && seq != "" && ulid8 != "" {
 					// Directory name uses readable format: pf.<project>-<seq>
 					// (e.g. "pf.aihub-26") so developers can identify the wi at a glance.
 					wtDir := fmt.Sprintf("pf.%s-%s", sf.Project, seq)
-					branchName := "polyforge/" + ulid8
+					branchNames := newClaimBranchNames(sf.Project, seq, wiGoal, ulid8)
 					mode := strArg(args, "mode")
 
 					if proj, ok := effectiveCfg.Projects[sf.Project]; ok {
@@ -797,41 +804,12 @@ func (s *Server) registerLifecycleTools() {
 								continue
 							}
 
-							var cmd *exec.Cmd
-							if mode == "resume" {
-								// Branch already exists; just attach.
-								cmd = exec.Command("git", "-C", srcPath, "worktree", "add", wtPath, branchName)
-							} else {
-								// Fresh claim: sync local clone from origin so the new branch
-								// starts from the latest remote state, not a stale local HEAD.
-								if out, err := exec.Command("git", "-C", srcPath, "fetch", "origin").CombinedOutput(); err != nil {
-									fmt.Fprintf(os.Stderr, "polyforge: fetch origin for %s: %s\n", repo.Name, string(out))
-								}
-								// Create branch from origin/main (always fresh after fetch above).
-								cmd = exec.Command("git", "-C", srcPath, "worktree", "add", "-b", branchName, wtPath, "origin/main")
-								if out, err := cmd.CombinedOutput(); err != nil {
-									// Branch may already exist (idempotent retry) — fall back to attach.
-									if strings.Contains(string(out), "already exists") || strings.Contains(string(out), "already checked out") {
-										cmd = exec.Command("git", "-C", srcPath, "worktree", "add", wtPath, branchName)
-									} else {
-										// Unexpected error; skip this repo.
-										fmt.Fprintf(os.Stderr, "polyforge: worktree add for %s: %s\n", repo.Name, string(out))
-										continue
-									}
-								} else {
-									// Success on first try; record and continue.
-									worktrees[repo.Name] = wtPath
-									writeWorktreeExcludes(wtPath)
-									continue
-								}
+							if err := addClaimWorktree(srcPath, wtPath, branchNames, mode); err != nil {
+								fmt.Fprintf(os.Stderr, "polyforge: worktree add for %s: %v\n", repo.Name, err)
+								continue
 							}
-
-							if out, err := cmd.CombinedOutput(); err != nil {
-								fmt.Fprintf(os.Stderr, "polyforge: worktree add for %s: %s\n", repo.Name, string(out))
-							} else {
-								worktrees[repo.Name] = wtPath
-								writeWorktreeExcludes(wtPath)
-							}
+							worktrees[repo.Name] = wtPath
+							writeWorktreeExcludes(wtPath)
 						}
 
 						if len(worktrees) > 0 {
@@ -1435,4 +1413,252 @@ func claimBranchULID8(canonicalWIID string) string {
 		return ""
 	}
 	return bare[len(bare)-8:]
+}
+
+// ---------------------------------------------------------------------------
+// Readable task branch names (aihub#322)
+// ---------------------------------------------------------------------------
+//
+// Until aihub#322 the claim branch was polyforge/<ulid8> — eight random chars
+// carrying no information at all. `git branch -r` on ieops-ctlchain showed 58 of
+// them, 44 unmerged, and nothing in the name says which work item any of them
+// belongs to or whether it is abandoned. The name is COMPUTED at claim time and
+// stored nowhere, so it can be changed without a migration; existing branches
+// keep the names they were created with, which is why resume must still know the
+// old shape (see resolveClaimBranch).
+//
+// Shape: polyforge/<project>-<seq>-<kebab goal>, e.g.
+// polyforge/aihub-322-readable-task-branch-names.
+//
+// WHY <project> IS IN THERE, given the hand-made precedents in ieops-datachain
+// are seq-only (polyforge/528-stagesconfig-wiring): <seq> is unique per PROJECT,
+// not per repo. config.Config is map[project]Project and each Project carries its
+// own []Repo with no cross-project uniqueness constraint anywhere in Load(), so
+// one repo may legally be listed under two projects — at which point two work
+// items, aihub#42 and ieops#42, resolve to the same branch in the same clone.
+// The fresh-claim path treats "branch already exists" as "attach to it", so the
+// collision would not error; it would silently put two work items on one branch.
+// (The live workspace has 28 repos across 7 projects and currently no such
+// sharing — this guards the structure, not an observed instance.) A seq-only
+// scheme would also collide most easily in its DEGRADED form, where the goal
+// contributes nothing and the whole name is just polyforge/<seq>. The worktree
+// DIRECTORY already spells pf.<project>-<seq> for exactly this reason, so a
+// branch that matches it is the consistent choice as well as the safe one.
+const (
+	claimBranchPrefix = "polyforge/"
+	// Total ref length cap, prefix included. Git imposes no limit of its own; the
+	// filesystem does (loose refs are files), and a name nobody can read on a
+	// `git branch` line has defeated the point of the change.
+	claimBranchMaxTotal = 72
+	claimBranchProjMax  = 24
+	claimBranchSeqMax   = 16
+	claimBranchDescMax  = 40
+	// Below this a truncated description is noise rather than a hint, so drop it
+	// and keep the bare polyforge/<project>-<seq>.
+	claimBranchMinDesc = 4
+)
+
+// kebabToken reduces free-form text to lowercase [a-z0-9-], collapsing every run
+// of rejected characters to a single "-" and trimming the ends. maxLen <= 0 means
+// no cap; otherwise the result is cut back to maxLen and, when that lands
+// mid-word, back again to the last "-" so the tail is a whole word.
+//
+// Everything outside [a-z0-9] is rejected, not transliterated — goals in this
+// repo are routinely Chinese and routinely contain "#", "/", ":", backticks,
+// quotes and emoji. That is deliberately lossy: the result is a hint, and a hint
+// that is always a legal git ref beats a faithful one that sometimes is not. The
+// two ref rules that bite here — a path component may not contain ".." and may
+// not end in ".lock" — are unreachable by construction, because "." is not in the
+// accepted set at all.
+func kebabToken(s string, maxLen int) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	pendingDash := false
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			if pendingDash && b.Len() > 0 {
+				b.WriteByte('-')
+			}
+			pendingDash = false
+			b.WriteRune(r)
+			continue
+		}
+		pendingDash = true
+	}
+	out := b.String()
+	if maxLen > 0 && len(out) > maxLen {
+		out = out[:maxLen]
+		if i := strings.LastIndex(out, "-"); i > 0 {
+			out = out[:i]
+		}
+		out = strings.TrimRight(out, "-")
+	}
+	return out
+}
+
+// claimBranchNames are the three names the worktree code needs for one claim.
+// Only Branch is used to CREATE; the other two exist so a resume can recognise a
+// branch an earlier claim created under a different name.
+type claimBranchNames struct {
+	// Branch is what a claim made today uses:
+	// polyforge/<project>-<seq>-<desc>, degrading to polyforge/<project>-<seq>
+	// when the goal reduces to nothing, then to polyforge/<ulid8> when project
+	// and seq both do, then to "" when there is no ulid8 either — which the
+	// caller already treats as "skip worktree creation".
+	Branch string
+	// Legacy is the pre-aihub#322 name, polyforge/<ulid8>. Empty when no ulid8.
+	Legacy string
+	// Stem is polyforge/<project>-<seq>: the part that identifies the work item
+	// regardless of what its goal says today. Empty when project and seq both
+	// reduce to nothing.
+	Stem string
+}
+
+// newClaimBranchNames derives all three names. It never returns a Branch that is
+// not a legal git ref: everything outside [a-z0-9-] is dropped by kebabToken, so
+// the two ref rules that would otherwise bite ("..", a ".lock" suffix) are
+// unreachable, and each degradation step is itself a legal ref.
+func newClaimBranchNames(project, seq, goal, ulid8 string) claimBranchNames {
+	n := claimBranchNames{}
+	if ulid8 != "" {
+		n.Legacy = claimBranchPrefix + ulid8
+	}
+	if s := strings.Trim(kebabToken(project, claimBranchProjMax)+"-"+kebabToken(seq, claimBranchSeqMax), "-"); s != "" {
+		n.Stem = claimBranchPrefix + s
+	}
+	if n.Stem == "" {
+		n.Branch = n.Legacy
+		return n
+	}
+
+	budget := claimBranchMaxTotal - len(n.Stem) - 1 // -1 for the joining "-"
+	if budget > claimBranchDescMax {
+		budget = claimBranchDescMax
+	}
+	n.Branch = n.Stem
+	if budget >= claimBranchMinDesc {
+		if desc := kebabToken(goal, budget); desc != "" {
+			n.Branch = n.Stem + "-" + desc
+		}
+	}
+	return n
+}
+
+// gitRefExists reports whether ref (a full ref path such as
+// "refs/heads/polyforge/x") resolves in the repo at srcPath.
+func gitRefExists(srcPath, ref string) bool {
+	return exec.Command("git", "-C", srcPath, "show-ref", "--verify", "--quiet", ref).Run() == nil
+}
+
+// gitUniqueBranchMatch returns the single branch under refPrefix whose name
+// matches pattern, or "". Anything but exactly one match returns "": zero means
+// nothing to attach to, and two or more mean picking one would be a guess.
+func gitUniqueBranchMatch(srcPath, refPrefix, pattern string) string {
+	out, err := exec.Command("git", "-C", srcPath, "for-each-ref",
+		"--format=%(refname)", refPrefix+pattern).Output()
+	if err != nil {
+		return ""
+	}
+	matches := strings.Fields(strings.TrimSpace(string(out)))
+	if len(matches) != 1 {
+		return ""
+	}
+	return strings.TrimPrefix(matches[0], refPrefix)
+}
+
+// resolveClaimBranch finds the branch a RESUME should attach to, and reports
+// whether it has to be materialised from origin first. It returns ("", false)
+// when no candidate exists, which the caller turns into "create it".
+//
+// The candidates, in order:
+//
+//  1. n.Branch — the name this claim would compute today.
+//  2. n.Legacy — polyforge/<ulid8>. THE COMPATIBILITY SHIM. Every work item
+//     claimed before aihub#322 has a branch under that name; without this tier a
+//     resume of one of them (with its worktree directory gone, so the os.Stat
+//     reuse in the claim handler does not fire) asks git to attach to a branch
+//     that does not exist, and the repo silently gets no worktree.
+//  3. a unique <Stem>-* match. The new name embeds the GOAL, which is mutable:
+//     edit the goal between claim and resume and tier 1 misses a branch that is
+//     unambiguously this work item's, because <project>-<seq> identifies the
+//     work item on its own. This tier is the reason the goal change introduced
+//     by aihub#322 cannot orphan a branch.
+//
+// Each candidate is looked for locally first and then as origin/<name>: a local
+// head deleted while the remote branch survives (a cleanup pass, a fresh clone)
+// must not be re-created from origin/main, which would orphan the pushed work.
+func resolveClaimBranch(srcPath string, n claimBranchNames) (string, bool) {
+	const localRefs, remoteRefs = "refs/heads/", "refs/remotes/origin/"
+	for _, cand := range []string{n.Branch, n.Legacy} {
+		if cand == "" {
+			continue
+		}
+		if gitRefExists(srcPath, localRefs+cand) {
+			return cand, false
+		}
+		if gitRefExists(srcPath, remoteRefs+cand) {
+			return cand, true
+		}
+	}
+
+	// Tier 3: the goal changed since the claim that created the branch.
+	if n.Stem == "" {
+		return "", false
+	}
+	if m := gitUniqueBranchMatch(srcPath, localRefs, n.Stem+"-*"); m != "" {
+		return m, false
+	}
+	if m := gitUniqueBranchMatch(srcPath, remoteRefs, n.Stem+"-*"); m != "" {
+		return m, true
+	}
+	return "", false
+}
+
+// addClaimWorktree materialises wtPath as a git worktree of srcPath.
+//
+// On resume it attaches to whatever branch resolveClaimBranch finds and only
+// creates a new one when there is nothing to attach to. On a fresh claim it
+// fetches and branches from origin/main, falling back to attaching when the
+// branch already exists (an idempotent retry of the same claim).
+func addClaimWorktree(srcPath, wtPath string, n claimBranchNames, mode string) error {
+	if n.Branch == "" {
+		return fmt.Errorf("empty branch name")
+	}
+	if mode == "resume" {
+		if existing, fromRemote := resolveClaimBranch(srcPath, n); existing != "" {
+			if fromRemote {
+				return runGit(srcPath, "worktree", "add", "-b", existing, wtPath, "origin/"+existing)
+			}
+			return runGit(srcPath, "worktree", "add", wtPath, existing)
+		}
+		// Nothing to attach to (branch deleted, or never created because an older
+		// claim failed here). Fall through and create it, rather than failing and
+		// leaving the repo with no worktree at all.
+	}
+
+	// Sync the local clone from origin so the new branch starts from the latest
+	// remote state, not a stale local HEAD.
+	if out, err := exec.Command("git", "-C", srcPath, "fetch", "origin").CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "polyforge: fetch origin in %s: %s\n", srcPath, string(out))
+	}
+	err := runGit(srcPath, "worktree", "add", "-b", n.Branch, wtPath, "origin/main")
+	if err == nil {
+		return nil
+	}
+	// Branch may already exist (idempotent retry) — fall back to attach.
+	if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "already checked out") {
+		return runGit(srcPath, "worktree", "add", wtPath, n.Branch)
+	}
+	return err
+}
+
+// runGit runs a git command in srcPath, folding its combined output into the
+// error so callers can both report it and match on it.
+func runGit(srcPath string, args ...string) error {
+	full := append([]string{"-C", srcPath}, args...)
+	out, err := exec.Command("git", full...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

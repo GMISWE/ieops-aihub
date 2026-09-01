@@ -126,7 +126,8 @@ observable? — and on all three it is not:
                        read or write local memory files". A recall that never happened
                        leaves no trace, and nothing checks where memory was written.
   - bootstrap.md       "On session start, before responding to any user message" plus
-                       seven mandatory scan steps. A skipped scan is invisible.
+                       six mandatory scan steps (seven until aihub#287 removed the
+                       wi-scoped pf_recall). A skipped scan is invisible.
   - repo-routing.md    "Never infer internals from positioning", "ask the user rather
                        than guessing". A guess that happens to be right looks the same
                        as a lookup.

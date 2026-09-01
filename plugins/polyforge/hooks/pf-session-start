@@ -175,7 +175,61 @@ PREAMBLE = (
 LEDE = "**Below is the assembled `using-polyforge` skill (fragments per the SKILL.md manifest):**\n\n"
 TAIL = "\n</EXTREMELY_IMPORTANT>"
 
-ctx = PREAMBLE + LEDE + "\n\n".join(t for _, t in parts) + TAIL
+# ---------------------------------------------------------------------------
+# BINARY-STATUS RELAY (aihub#305)
+# ---------------------------------------------------------------------------
+# bin/polyforge-mcp.sh writes ~/.polyforge/binary-status.txt when it could not
+# download the binary this plugin release expects and carried on with an older
+# one (or could not start at all). It cannot tell anyone itself: an MCP server's
+# stderr goes to a debug log, never to the transcript. This hook is the relay,
+# because it is the one plugin-shipped thing that runs every session AND has a
+# path to the model.
+#
+# It has to be plugin-shipped. The obvious alternative — a `polyforge doctor`
+# check — is compiled into the binary, and the population being warned is
+# precisely the one whose binary did not update, so their doctor would not carry
+# the check. Same for anything the MCP server itself would emit. Plugin files
+# travel with the marketplace install, so they reach the affected machines; the
+# binary, by construction, does not.
+#
+# BUDGET (aihub#285/#291/#293/#296). The resident payload is gated two-sided at
+# 8,497 +/- 100 chars against a measured 10,000-char harness limit, and #291's
+# legacy-format nudge was reverted for busting it. So:
+#   * the FULL text goes in the top-level `systemMessage`, which is a separate
+#     JSON field and costs the additionalContext budget nothing;
+#   * `ctx` gets a FIXED, capped pointer instead of the file's contents, so the
+#     worst case is a constant this file can state and a test can assert, not
+#     something that grows with whatever the launcher decided to write;
+#   * it is placed in the PREAMBLE, not appended — #291's second failure was a
+#     banner that only ever landed past the truncation point;
+#   * and it is emitted ONLY when the marker exists. A healthy session's payload
+#     and JSON shape are byte-for-byte what they were before this change, which
+#     is also what keeps the extra key off Codex/Copilot in normal operation.
+STATUS_PATH = os.path.join(os.path.expanduser("~"), ".polyforge", "binary-status.txt")
+STATUS_CTX_MAX = 420   # hard ceiling on what this can add to ctx; asserted in tests
+
+binary_status = ""
+try:
+    with open(STATUS_PATH, encoding="utf-8", errors="replace") as fh:
+        binary_status = fh.read().strip()
+except OSError:
+    binary_status = ""
+
+STATUS_BANNER = ""
+if binary_status:
+    STATUS_BANNER = (
+        "⚠️ **POLYFORGE IS RUNNING A BINARY IT DID NOT DOWNLOAD.** "
+        "`~/.polyforge/binary-status.txt` exists; the launcher writes it only when a "
+        "binary download failed, and deletes it when one succeeds. The MCP tools you "
+        "have may be older than this plugin's skills expect. `Read` that file, TELL "
+        "THE USER what it says including the cause, and do not work around it "
+        "silently.\n\n"
+    )
+    # A ceiling that cannot be exceeded by accident, so the budget arithmetic
+    # above stays true no matter what is edited into the string.
+    STATUS_BANNER = STATUS_BANNER[:STATUS_CTX_MAX]
+
+ctx = PREAMBLE + STATUS_BANNER + LEDE + "\n\n".join(t for _, t in parts) + TAIL
 
 # ---------------------------------------------------------------------------
 # RUNTIME LENGTH SELF-CHECK (aihub#293, deferred from aihub#285's 4th criterion)
@@ -228,9 +282,15 @@ if len(ctx) > MAX_CHARS:
         "in manifest order:**\n\n"
     )
 
+    # STATUS_BANNER is carried through the rebuild deliberately (aihub#305). It
+    # is normally empty and costs nothing; when it is not, dropping it here
+    # would delete the stale-binary warning in precisely the sessions that are
+    # already degraded — the same "the fix does not reach the people who have
+    # the bug" shape the warning exists to close. It is bounded at 420 chars, so
+    # it cannot meaningfully compete with the fragments for room.
     kept, dropped = list(parts), []
     while True:
-        ctx = (PREAMBLE + banner(dropped) + degraded_lede
+        ctx = (PREAMBLE + STATUS_BANNER + banner(dropped) + degraded_lede
                + "\n\n".join(t for _, t in kept) + TAIL)
         if len(ctx) <= MAX_CHARS or not kept:
             break
@@ -267,6 +327,21 @@ else:
         "additionalContext": ctx,
         "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx},
     }
+    # aihub#305. Documented as the way to "surface a message to the user on any
+    # platform", and it is not part of additionalContext, so it costs the
+    # payload budget nothing and can carry the launcher's full prose. Added on
+    # the Claude Code / Copilot branch only, and only when there is something to
+    # say: Codex validates SessionStart output with deny_unknown_fields, and an
+    # unconditional new key would be a shape change on every session on every
+    # host for the sake of a message that is almost never present.
+    #
+    # Belt to the ctx banner's braces, not a replacement for it: the docs say
+    # "some events discard it or deliver it elsewhere" and do not settle what
+    # SessionStart does, so this is the channel that MIGHT reach the human
+    # directly, while the banner in ctx is the one that provably reaches the
+    # model that will tell them.
+    if binary_status:
+        out["systemMessage"] = binary_status
 
 print(json.dumps(out))
 PY

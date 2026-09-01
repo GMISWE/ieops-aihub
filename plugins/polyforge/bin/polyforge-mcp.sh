@@ -11,6 +11,9 @@ PLUGIN_DIR="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 INSTALL_PATH="$PLUGIN_DIR/bin/polyforge"
 LAST_CHECK_FILE="$HOME/.polyforge/.last_binary_check"
 CONFIG="$HOME/.polyforge/config.toml"
+# Deliberately NOT dotted: this file is the whole user-visible half of aihub#305,
+# and `ls ~/.polyforge` is one of the few places a human looks by hand.
+STATUS_FILE="$HOME/.polyforge/binary-status.txt"
 
 # Read [binary] channel from config.toml; fall back to "dev".
 # Pure awk: no python3 dependency and no heredoc-in-$() (both break macOS bash 3.2).
@@ -52,6 +55,55 @@ case "$CHANNEL" in
     CHANNEL="dev"
     ;;
 esac
+
+# ── the visible half of aihub#305 ────────────────────────────────────────────
+# Every "we did not get the binary" path in this file used to end at a single
+# line on stderr. That is not a user-visible place: Claude Code writes a hook's
+# and an MCP server's stderr to a debug log and never to the transcript, so the
+# machine kept running whatever binary it already had and said nothing anyone
+# would read. Since every fix under internal/mcp/** and internal/cli/** ships as
+# THIS binary, "kept its old one" means the fix reached nobody, and the person
+# affected believed they had updated.
+#
+# So the launcher now leaves a durable record instead of a log line. The record
+# is a plain-text file because the two readers are a human running `cat` and
+# hooks/pf-session-start, which pastes it verbatim; neither needs a schema, and
+# a schema is one more thing that can drift between a new launcher and an old
+# reader. The launcher writes the prose because the launcher is the only party
+# that knows WHY — pf-session-start is deliberately a dumb pipe.
+#
+# It is written on failure and DELETED on success, so it reports the current
+# state rather than the worst state ever reached: a stale marker would train
+# people to ignore it, which is the same defect wearing a different hat.
+pf_bin_sha() { # $1 = a polyforge binary -> short commit sha, or "unknown"
+  local s
+  s=$("$1" version 2>/dev/null | grep -oE '[a-f0-9]{7,40}' | head -1 || true)
+  if [ -n "$s" ]; then printf '%.8s' "$s"; else printf 'unknown'; fi
+}
+
+pf_status_clear() {
+  rm -f "$STATUS_FILE" 2>/dev/null || true
+}
+
+pf_status_record() { # $1 = cause, $2 = what is running instead, $3 = what was wanted
+  mkdir -p "$(dirname "$STATUS_FILE")" 2>/dev/null || return 0
+  {
+    echo "polyforge: THIS MACHINE IS NOT RUNNING THE BINARY IT SHOULD BE."
+    echo
+    echo "  when     $(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || echo unknown)"
+    echo "  channel  bins-${CHANNEL}"
+    echo "  cause    $1"
+    echo "  running  $2"
+    echo "  wanted   $3"
+    echo "  launcher $0"
+    echo
+    echo "Every server-side fix that ships in the polyforge binary (the MCP tools and"
+    echo "the CLI) reaches you through that download, so until the cause above is"
+    echo "fixed you are missing an unknown number of them. Fix the cause, then start a"
+    echo "new session: this file is deleted the moment a download succeeds, and"
+    echo "rewritten on every launch that still fails."
+  } > "$STATUS_FILE" 2>/dev/null || true
+}
 
 download_binary() {
   echo "polyforge: downloading binary ($CHANNEL channel)..." >&2
@@ -141,14 +193,28 @@ check_for_update() {
   # previously one silent skip; the dev box that surfaced aihub#237 hit the
   # third (gh 2.4.0 predates `gh auth token`, so the guard failed with
   # "unknown command" rather than any auth problem, and printed nothing).
+  #
+  # aihub#305: each of these branches already SAID why it gave up, and that was
+  # not enough — every one of them said it on stderr, which nobody reads, and
+  # then returned 0 so the launcher exec'd the old binary as if nothing had
+  # happened. This is the second, independent failure recorded on that wi (a
+  # machine with no gh, or an unauthenticated one, is unaffected by the channel
+  # fix), so every branch that leaves the binary un-updated now also records it
+  # where a human and pf-session-start can find it.
   local gh_token
   if ! command -v gh >/dev/null 2>&1; then
     echo "polyforge: skipping update check — gh CLI not found (https://cli.github.com). Retrying in 24h." >&2
+    pf_status_record "gh CLI not found — install it from https://cli.github.com" \
+      "$INSTALL_PATH, version $(pf_bin_sha "$INSTALL_PATH") (never checked against the published build)" \
+      "whatever bins-${CHANNEL} publishes — could not look, gh gates access to it"
     echo "$now" > "$LAST_CHECK_FILE"
     return 0
   fi
   if ! gh_token=$(gh auth token 2>/dev/null) || [ -z "$gh_token" ]; then
     echo "polyforge: skipping update check — 'gh auth token' failed. Run 'gh auth login'; if that subcommand is unknown, upgrade gh (it needs >= 2.7). Retrying in 24h." >&2
+    pf_status_record "'gh auth token' failed — run 'gh auth login' (gh must be >= 2.7; older builds have no 'auth token' subcommand)" \
+      "$INSTALL_PATH, version $(pf_bin_sha "$INSTALL_PATH") (never checked against the published build)" \
+      "whatever bins-${CHANNEL} publishes — could not look, gh gates access to it"
     echo "$now" > "$LAST_CHECK_FILE"
     return 0
   fi
@@ -162,8 +228,18 @@ check_for_update() {
     2>/dev/null | grep -oE '[a-f0-9]{40}' | head -1 || echo "")
   current=$("$INSTALL_PATH" version 2>/dev/null | grep -oE '[a-f0-9]{40}' | head -1 || echo "")
 
+  local cur_disp="${current:0:8}"
+  [ -n "$cur_disp" ] || cur_disp=$(pf_bin_sha "$INSTALL_PATH")
+
   if [ -z "$latest" ]; then
     echo "polyforge: skipping update check — could not read the published version from bins-${CHANNEL}. Retrying in 24h." >&2
+    # The exact shape aihub#305 was: bins-stable did not exist, so this branch
+    # fired on every launch, forever, and the machine froze on its old binary
+    # while reporting nothing. A branch that cannot ever succeed must not look
+    # like a branch that will succeed tomorrow.
+    pf_status_record "could not read bins-${CHANNEL}/bin/version.txt — the branch may not exist, or the token cannot read it (raw.githubusercontent.com answers 404, not 401, for a private repo)" \
+      "$INSTALL_PATH, version $cur_disp" \
+      "unknown — the published version could not be read at all"
     echo "$now" > "$LAST_CHECK_FILE"
     return 0
   fi
@@ -176,19 +252,33 @@ check_for_update() {
     # next run compares normally and this self-heals.
     echo "polyforge: installed binary reports no commit SHA (likely a local build); updating to ${latest:0:8} to recover update capability." >&2
     if download_binary; then
+      pf_status_clear
       echo "$now" > "$LAST_CHECK_FILE"
+    else
+      pf_status_record "the update download from bins-${CHANNEL} failed (see the MCP server log for curl's reason)" \
+        "$INSTALL_PATH, a local build that reports no commit SHA" \
+        "bins-${CHANNEL} version ${latest:0:8}"
     fi
     return 0
   fi
 
   if [ "$current" = "$latest" ]; then
-    echo "$now" > "$LAST_CHECK_FILE"   # genuinely up to date
+    pf_status_clear                    # genuinely up to date — retract any earlier report
+    echo "$now" > "$LAST_CHECK_FILE"
     return 0
   fi
 
   echo "polyforge: updating ${current:0:8} → ${latest:0:8}..." >&2
   if download_binary; then
+    pf_status_clear
     echo "$now" > "$LAST_CHECK_FILE"   # only stamp after a successful download
+  else
+    # Known to be behind, by SHA, and unable to catch up. This is the one case
+    # where the launcher can name both numbers, which is exactly the message
+    # aihub#305 asked for: "you are running X, you should be running Y".
+    pf_status_record "the update download from bins-${CHANNEL} failed (see the MCP server log for curl's reason)" \
+      "$INSTALL_PATH, version ${current:0:8}" \
+      "bins-${CHANNEL} version ${latest:0:8}"
   fi
   return 0
 }
@@ -220,14 +310,37 @@ if [ ! -x "$INSTALL_PATH" ] || [ -L "$INSTALL_PATH" ]; then
   # Always attempt a real download first so we get the version that matches
   # this plugin release. The symlink case retries on every invocation by
   # design: we keep trying until a proper download succeeds.
-  if download_binary 2>/dev/null; then
-    : # download succeeded
+  #
+  # aihub#305: this used to read `download_binary 2>/dev/null`, which discarded
+  # EVERY reason the download could fail — including "gh CLI not authenticated"
+  # and "download failed from bins-<channel>" — and then fell through to the
+  # symlink branch below. The redirect is gone. It cost nothing to keep, either:
+  # the `else` branch below then had to re-run the whole download a second time
+  # purely to make the errors appear, so suppressing them here bought a
+  # duplicated network round trip in exchange for hiding the diagnosis.
+  if download_binary; then
+    pf_status_clear
   elif _path_bin=$(command -v polyforge 2>/dev/null) && [ "$_path_bin" != "$INSTALL_PATH" ]; then
+    # THE SILENT PATH. Everything still works, with the wrong binary — which is
+    # why this one, not the hard failure below, is the case aihub#305 is about.
     echo "polyforge: download failed, using system binary at $_path_bin" >&2
+    pf_status_record "the download from bins-${CHANNEL} failed (see the MCP server log for the reason curl or gh gave)" \
+      "$_path_bin, version $(pf_bin_sha "$_path_bin") — a fallback found on PATH, NOT the build this plugin release expects" \
+      "the build published on bins-${CHANNEL}, whose version could not be read"
     mkdir -p "$PLUGIN_DIR/bin"
     ln -sf "$_path_bin" "$INSTALL_PATH"
   else
-    download_binary  # retry with visible errors (will fail loudly)
+    # Nothing to degrade to: exiting non-zero here is the loudest channel this
+    # script has, because Claude Code reports a server that fails to start as
+    # `✘ Failed to connect` in /mcp, `claude mcp list` and `claude mcp get`.
+    # Record it anyway — the report has to survive for `polyforge doctor` and
+    # for the next session, and this branch is also the one where the user has
+    # no working `polyforge` on PATH to run doctor with.
+    pf_status_record "the download from bins-${CHANNEL} failed, and there is no polyforge on PATH to fall back to (see the MCP server log for the reason above)" \
+      "nothing — the polyforge MCP server could not start at all" \
+      "the build published on bins-${CHANNEL}"
+    echo "polyforge: no binary at $INSTALL_PATH and no fallback on PATH — the MCP server cannot start. Reason is above; a copy is in $STATUS_FILE." >&2
+    exit 1
   fi
 else
   # Binary exists and is a real file — daily update check
@@ -239,8 +352,27 @@ unset _path_bin 2>/dev/null || true
 # Keep /usr/local/bin/polyforge in sync with the managed binary so that bash
 # invocations of `polyforge` (e.g. `polyforge init`) always use the same version
 # as the MCP server. Silent no-op when /usr/local/bin is not writable.
-if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-  ln -sf "$INSTALL_PATH" /usr/local/bin/polyforge 2>/dev/null || true
+#
+# NOT when INSTALL_PATH is a symlink. Found while making the fallback branch
+# above visible, and reproduced: the fallback does
+# `ln -s <PATH binary> $INSTALL_PATH`, and the PATH binary it finds is normally
+# /usr/local/bin/polyforge, because a previous successful run of this very line
+# created it. Re-pointing /usr/local/bin/polyforge at INSTALL_PATH then closes
+# the cycle INSTALL_PATH -> /usr/local/bin/polyforge -> INSTALL_PATH, and the
+# exec below dies with ELOOP ("too many levels of symbolic links") — which
+# reports the launcher's own symlink bookkeeping as the problem instead of the
+# failed download that actually caused it. When INSTALL_PATH is a symlink it
+# already resolves to the binary we would be advertising, so there is nothing
+# to sync and skipping is also the correct answer on its own terms.
+#
+# POLYFORGE_SYSTEM_BIN_DIR exists so tests can drive the real launcher end to
+# end without writing to the developer's actual /usr/local/bin — which is not
+# hypothetical: /usr/local/bin/polyforge is a live symlink into the installed
+# plugin, so a test that ran the launcher for real would repoint the machine's
+# polyforge at a fixture. Default is unchanged.
+SYSTEM_BIN_DIR="${POLYFORGE_SYSTEM_BIN_DIR:-/usr/local/bin}"
+if [ -d "$SYSTEM_BIN_DIR" ] && [ -w "$SYSTEM_BIN_DIR" ] && [ ! -L "$INSTALL_PATH" ]; then
+  ln -sf "$INSTALL_PATH" "$SYSTEM_BIN_DIR/polyforge" 2>/dev/null || true
 fi
 
 exec "$INSTALL_PATH" "$@"

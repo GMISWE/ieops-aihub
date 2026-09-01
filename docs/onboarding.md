@@ -187,9 +187,45 @@ pf_whoami
 You should see your user id, display name, and the server URL from your
 `config.toml`. If you see a 401, double-check that the `api_key` in
 `~/.polyforge/config.toml` matches the one the owner handed you and that
-the file is readable by your user (`ls -l ~/.polyforge/config.toml`). If
-the binary failed to download, re-run `gh auth status` and check the MCP
-server logs.
+the file is readable by your user (`ls -l ~/.polyforge/config.toml`).
+
+### Did the binary actually download? (`~/.polyforge/binary-status.txt`)
+
+**One file answers this, and it is the only place you have to look:**
+
+```bash
+cat ~/.polyforge/binary-status.txt   # "No such file" = you are up to date
+```
+
+The launcher writes that file whenever it could **not** fetch the binary this
+plugin release expects, and deletes it as soon as a download succeeds. It names
+the cause, the version you are running, and the version you should be running.
+
+Before aihub#305 there was no such file and no way to tell. The launcher fell
+back to any `polyforge` it found on `PATH`, said so once on the MCP server's
+stderr — which Claude Code writes to a debug log, never to the transcript — and
+started normally. Every tool worked; the binary behind them was older than the
+plugin around it; nobody could see the difference. Every `pf_*` behaviour change
+ships in that binary, so "older" meant those changes reached nobody.
+
+You should not normally need to run that `cat` yourself: when the file exists,
+polyforge's SessionStart hook puts the warning in front of the agent at the top
+of every session, so it will tell you. `cat` is the check for when you want to
+confirm it is gone, or when you are outside a polyforge workspace (the hook is a
+no-op there).
+
+The two causes, in the order they actually happen:
+
+1. **`gh` missing or not logged in.** The binary lives on a branch of a private
+   repo, so `download_binary` needs `gh auth token`. Run `gh auth status`, then
+   `gh auth login` (gh must be **>= 2.7** — older builds have no `auth token`
+   subcommand and fail with "unknown command").
+2. **The channel is not fetchable.** `raw.githubusercontent.com` answers **404,
+   not 401**, for a private repo, so a bad token and a missing branch look
+   identical from the outside. This is what aihub#305 was: `bins-stable` had
+   never been published.
+
+Fix the cause, then start a new session — the launcher retries on every start.
 
 ## 6. (Optional) Build from source
 

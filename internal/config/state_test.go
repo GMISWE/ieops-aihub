@@ -304,13 +304,29 @@ func TestResolveStateFile_BySlug_ShadowedByStub(t *testing.T) {
 	}
 }
 
-// TestForceTakeover_BySlug_WritesSlugResolvableState is the aihub#149 regression
-// at the state-file layer: it drives the exact write sequence the pf_force_takeover
-// handler now uses when a work item is force-taken BY SLUG. The pre-fix handler
-// wrote {WIID: slug} with an empty Slug, which ResolveStateFile's slug-scan could
-// never match. The fixed handler keys by the canonical id (from the takeover
-// result's `id`) and populates Slug/Project via WriteClaimState — so a later
-// by-slug credential op resolves to the canonical, non-empty-attempt state.
+// TestForceTakeover_BySlug_WritesSlugResolvableState covers the WriteClaimState
+// -> ReadStateFile/ResolveStateFile round trip for the record shape that
+// pf_force_takeover writes when a work item is force-taken BY SLUG: keyed by the
+// canonical id, with Slug and Project populated. Given that input it pins two
+// outputs — no orphan slug-keyed file survives, and a later by-slug lookup
+// resolves to the canonical, non-empty-attempt record.
+//
+// ⚠️ Read what this does NOT do before relying on it. It does not call the
+// pf_force_takeover handler; it hand-writes the post-fix StateFile and exercises
+// only WriteClaimState / ReadStateFile / ResolveStateFile, none of which aihub#149
+// changed. It therefore CANNOT go red on the pre-#149 build — verified by
+// reverting the six source files that commit touched and re-running it, which
+// passes. Its earlier comment claimed to drive "the exact write sequence the
+// handler now uses", which is the false-green shape this repo keeps getting
+// bitten by: a marker that reads like a regression test for a fix it cannot
+// observe.
+//
+// The assertion that actually discriminates on the handler is
+// TestForceTakeoverBySlugWritesASlugResolvableStateFile in
+// internal/mcp/state_resolve_wiring_test.go — it drives the registered MCP tool
+// against a fake aihub and reads the resulting state directory off disk, and it
+// dies on the pre-#149 build with "no state file under the canonical key".
+// (aihub#319)
 func TestForceTakeover_BySlug_WritesSlugResolvableState(t *testing.T) {
 	withTempHome(t)
 	slug := "aihub#149"

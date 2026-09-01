@@ -34,9 +34,17 @@ package mcp_test
 // stubCleaned is the shape that discriminates even for a tool whose credentials
 // never reach the wire at all (pf_remove_dependency — see its row).
 //
-// Run: GOWORK=off go test ./internal/mcp/ -run 'TestSlugAddressed|TestForceTakeover' -v
+// ⚠️ The credential sites are only half of it. `git grep -c config.ReadStateFile
+// -- internal/mcp` reaching 0 is TRUE AND MEANINGLESS on its own: the same defect
+// escaped the package through coding.WorktreePath, which four more tools
+// (pf_diff, pf_commit, pf_push, pf_pr) reach with an unresolved work_item_id.
+// That is why the acceptance criterion here is
+// TestReadStateFileCallSitesAreAccountedFor — a repo-wide, executable inventory —
+// and not a grep scoped to the package the fix happened to start in.
+//
+// Run: GOWORK=off go test ./internal/mcp/ -run 'TestSlugAddressed|TestForceTakeover|TestReadStateFile|TestPreClaimStub' -v
 // No database and no environment variables are needed; git and gh are needed
-// only by the two coding-tool tests, which skip explicitly without them.
+// only by the worktree-tool tests, which skip explicitly without them.
 
 import (
 	"context"
@@ -458,6 +466,19 @@ esac
 // canonical file supplies worktrees["aihub"] and the commit/push/PR chain runs —
 // so the assertion is that the wi timeline gets its events, carrying the
 // canonical attempt_id.
+//
+// ⚠️ Measured, not assumed: since coding.WorktreePath itself resolves (aihub#319
+// finding 1), this test NO LONGER discriminates the tools_coding.go pf_ship line
+// on its own. Reverting only that line leaves this green, because sf is used for
+// exactly two things — WorktreePath(sf.WIID), which now compensates, and the
+// default PR title at ship.go:112, which pf_ship can never reach (it rejects an
+// empty pr_title before calling Ship). pf_ship consumes NO credential from sf,
+// so with the worktree hop fixed there is nothing observable left.
+//
+// The line is kept anyway and held by TestReadStateFileCallSitesAreAccountedFor:
+// coding.Ship's contract is that sf.WIID is canonical, and the moment anything
+// in that chain reads a credential — which fusing keeps pushing toward — the
+// stub would be back. Do not read this test as covering that line.
 func TestSlugAddressedShipResolvesTheCanonicalWorktree(t *testing.T) {
 	root := newResolveWorkspace(t)
 	r := newResolveRepo(t, root)
@@ -670,5 +691,515 @@ func TestForceTakeoverResponseCarriesTheIdentityKeysTheHandlerReads(t *testing.T
 				"internal/mcp/tools_lifecycle.go reads result[%q] and would silently get nothing",
 				key, key)
 		}
+	}
+}
+
+// ─── the four tools that resolve only a WORKTREE, via coding.WorktreePath ─────
+
+// worktreeSite is one MCP tool that hands its raw work_item_id argument to
+// coding.WorktreePath and never reads credentials from the state file itself.
+//
+// These four are why the original acceptance criterion was worthless. They
+// contain no `config.ReadStateFile` at all — the filename read was one layer
+// down, in internal/coding — so a grep scoped to internal/mcp reported the
+// defect fixed while all four were still broken for a slug-addressed caller.
+type worktreeSite struct {
+	site      string
+	tool      string
+	extraArgs map[string]any
+	// prep dirties the worktree so the tool has something real to do; nil when
+	// the fixture repo is already in the right state.
+	prep func(t *testing.T, r *resolveRepo)
+	// wantEvent is the timeline event the tool emits, "" when it emits none.
+	wantEvent string
+	// assertResult checks the tool actually did its job, so that "did not error"
+	// is not the whole assertion.
+	assertResult func(t *testing.T, r *resolveRepo, result map[string]any)
+}
+
+// diffMarker is written into the worktree so pf_diff's output can be identified
+// as a real diff of the RESOLVED worktree rather than any old text.
+const diffMarker = "slug-resolved-worktree-marker"
+
+func worktreeSites() []worktreeSite {
+	return []worktreeSite{
+		{
+			site: "internal/mcp/tools_coding.go pf_diff -> coding.WorktreePath",
+			tool: "pf_diff",
+			prep: func(t *testing.T, r *resolveRepo) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(r.wt, "seed.txt"), []byte(diffMarker+"\n"), 0644); err != nil {
+					t.Fatalf("dirty the worktree: %v", err)
+				}
+			},
+			wantEvent: "", // pf_diff is read-only and emits nothing
+			assertResult: func(t *testing.T, _ *resolveRepo, result map[string]any) {
+				t.Helper()
+				// pf_diff answers with raw diff text, not JSON, so it arrives as _raw.
+				raw, _ := result["_raw"].(string)
+				if !strings.Contains(raw, diffMarker) {
+					t.Errorf("pf_diff output does not contain the worktree's own change %q; got %q",
+						diffMarker, raw)
+				}
+			},
+		},
+		{
+			site:      "internal/mcp/tools_coding.go pf_commit -> coding.WorktreePath",
+			tool:      "pf_commit",
+			extraArgs: map[string]any{"message": "feat: committed into the resolved worktree"},
+			prep: func(t *testing.T, r *resolveRepo) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(r.wt, "committed.txt"), []byte(diffMarker+"\n"), 0644); err != nil {
+					t.Fatalf("add a file to commit: %v", err)
+				}
+			},
+			wantEvent: "commit",
+			assertResult: func(t *testing.T, r *resolveRepo, result map[string]any) {
+				t.Helper()
+				sha, _ := result["sha"].(string)
+				if sha == "" {
+					t.Fatalf("pf_commit returned no sha: %v", result)
+				}
+				if head := runGit(t, r.wt, "rev-parse", "HEAD"); head != sha {
+					t.Errorf("pf_commit reported %s but the resolved worktree's HEAD is %s — "+
+						"it committed somewhere else", sha, head)
+				}
+			},
+		},
+		{
+			site:      "internal/mcp/tools_coding.go pf_push -> coding.WorktreePath",
+			tool:      "pf_push",
+			wantEvent: "push",
+			assertResult: func(t *testing.T, r *resolveRepo, result map[string]any) {
+				t.Helper()
+				if result["ok"] != true {
+					t.Errorf("pf_push ok=%v, want true: %v", result["ok"], result)
+				}
+				if got := result["branch"]; got != r.branch {
+					t.Errorf("pf_push branch = %v, want %q", got, r.branch)
+				}
+				// The push is real: the local bare origin must now carry the branch.
+				if out := runGit(t, r.wt, "ls-remote", "--heads", "origin", "refs/heads/"+r.branch); out == "" {
+					t.Errorf("origin has no %s after pf_push reported success", r.branch)
+				}
+			},
+		},
+		{
+			site:      "internal/mcp/tools_coding.go pf_pr -> coding.WorktreePath",
+			tool:      "pf_pr",
+			extraArgs: map[string]any{"title": "resolved by slug", "body": "body"},
+			wantEvent: "pr_opened",
+			assertResult: func(t *testing.T, _ *resolveRepo, result map[string]any) {
+				t.Helper()
+				if got := result["number"]; got != float64(9) {
+					t.Errorf("pf_pr number = %v, want 9 (the fake gh's PR)", got)
+				}
+			},
+		},
+	}
+}
+
+// runWorktreeSite builds the fixture and drives one worktree tool by SLUG.
+func runWorktreeSite(t *testing.T, s worktreeSite, withStub bool) (*resolveRepo, *fakeAihub, map[string]any, bool) {
+	t.Helper()
+	root := newResolveWorkspace(t)
+	r := newResolveRepo(t, root)
+	fakeGHForResolve(t, `[]`)
+	if withStub {
+		writeResolveStub(t)
+	}
+	writeResolveCanonical(t, map[string]string{"aihub": r.wt})
+	if s.prep != nil {
+		s.prep(t, r)
+	}
+
+	args := map[string]any{"work_item_id": resolveSlug, "repo": "aihub"}
+	for k, v := range s.extraArgs {
+		args[k] = v
+	}
+	// workspace_root is deliberately NOT passed. It is WorktreePath's fallback
+	// input, and supplying it would let the fallback reconstruct a path from
+	// Project+Slug and mask whether the state file was resolved at all.
+
+	f := newFakeAihub(t)
+	result, isErr := callToolBounded(t, f, s.tool, args, 60*time.Second)
+	return r, f, result, isErr
+}
+
+func assertWorktreeSite(t *testing.T, s worktreeSite, r *resolveRepo, f *fakeAihub, result map[string]any, isErr bool) {
+	t.Helper()
+	if isErr {
+		t.Fatalf("%s (%s) refused a slug it can resolve: %v\n"+
+			"coding.WorktreePath reads the state file for the id it is handed; a filename lookup on "+
+			"%q finds either the pre-claim stub (no worktrees map, no project/slug) or nothing at all.",
+			s.tool, s.site, result, resolveSlug)
+	}
+	s.assertResult(t, r, result)
+
+	var events []recordedCall
+	for _, c := range f.recorded() {
+		if c.Path == "/v1/events" {
+			events = append(events, c)
+		}
+	}
+	if s.wantEvent == "" {
+		if len(f.recorded()) != 0 {
+			t.Errorf("%s is read-only and must make no upstream call, got %v", s.tool, f.paths())
+		}
+		return
+	}
+	if len(events) != 1 {
+		t.Fatalf("%s emitted %d timeline events, want 1 (%s); paths=%v",
+			s.tool, len(events), s.wantEvent, f.paths())
+	}
+	if got := events[0].Body["event_type"]; got != s.wantEvent {
+		t.Errorf("%s emitted event_type=%v, want %q", s.tool, got, s.wantEvent)
+	}
+	assertCanonicalCredentials(t, s.site+" event", events[0].Body)
+}
+
+// TestSlugAddressedWorktreeToolsResolveTheCanonicalWorktree is the stubShadowed
+// shape for the four tools that reach coding.WorktreePath with an unresolved id.
+//
+// Pre-change these do not merely send bad credentials — they cannot run at all:
+// the pre-claim stub has no worktrees map and no project/slug to rebuild one
+// from, so every one of them dies with "worktree path for repo ... not found"
+// for a work item whose worktree is sitting right there on disk.
+func TestSlugAddressedWorktreeToolsResolveTheCanonicalWorktree(t *testing.T) {
+	for _, s := range worktreeSites() {
+		t.Run(s.tool, func(t *testing.T) {
+			r, f, result, isErr := runWorktreeSite(t, s, true)
+			assertWorktreeSite(t, s, r, f, result, isErr)
+		})
+	}
+}
+
+// TestSlugAddressedWorktreeToolsResolveWhenOnlyTheCanonicalFileExists is the
+// stubCleaned shape for the same four — the state dir a normal claim leaves
+// behind. Pre-change the filename lookup misses entirely and the tools die with
+// "read state file for wi ...: state file not found".
+func TestSlugAddressedWorktreeToolsResolveWhenOnlyTheCanonicalFileExists(t *testing.T) {
+	for _, s := range worktreeSites() {
+		t.Run(s.tool, func(t *testing.T) {
+			r, f, result, isErr := runWorktreeSite(t, s, false)
+			assertWorktreeSite(t, s, r, f, result, isErr)
+		})
+	}
+}
+
+// TestSlugAddressedWorktreeToolsStillWorkByCanonicalID is the control. Every
+// assertion above would also be satisfied by a WorktreePath that ignored its
+// argument entirely and scanned for any claimed state file; this pins that the
+// ordinary canonical-id path — the one every existing caller uses, including
+// coding.Ship and coding.Wrap via sf.WIID — is untouched.
+//
+// PASSES ON THE PRE-CHANGE BUILD (359a435), and that is the point: it is the
+// control, not the regression. A control that went red pre-change would mean the
+// canonical path was broken before, which it was not.
+func TestSlugAddressedWorktreeToolsStillWorkByCanonicalID(t *testing.T) {
+	s := worktreeSites()[0] // pf_diff: read-only, so the control costs nothing
+	root := newResolveWorkspace(t)
+	r := newResolveRepo(t, root)
+	writeResolveCanonical(t, map[string]string{"aihub": r.wt})
+	s.prep(t, r)
+
+	f := newFakeAihub(t)
+	result, isErr := callToolBounded(t, f, s.tool, map[string]any{
+		"work_item_id": resolveCanonical, "repo": "aihub",
+	}, 60*time.Second)
+	if isErr {
+		t.Fatalf("pf_diff addressed by CANONICAL id failed: %v", result)
+	}
+	s.assertResult(t, r, result)
+}
+
+// ─── Finding 3: force_takeover must not destroy the worktree map ──────────────
+
+// TestForceTakeoverBySlugKeepsTheWorktreeMap covers a regression the aihub#149
+// canonicalisation introduced rather than fixed.
+//
+// Before it, a slug-addressed takeover wrote <slug>.json and left <canonical>.json
+// — worktrees map and all — untouched beside it. Now the write is keyed by the
+// canonical id, so it REPLACES that file; and the new StateFile is built from
+// scratch out of the takeover response, which carries no worktrees. The map is
+// therefore destroyed unless it is explicitly carried over.
+//
+// No git needed: the map is opaque to the handler, so a plain path pins it.
+func TestForceTakeoverBySlugKeepsTheWorktreeMap(t *testing.T) {
+	root := newResolveWorkspace(t)
+	priorWorktree := filepath.Join(root, "pf.aihub-319", "aihub")
+	writeResolveStub(t)
+	writeResolveCanonical(t, map[string]string{"aihub": priorWorktree})
+
+	f := newFakeAihub(t)
+	f.on("/v1/work_items/"+resolveSlug+"/force_takeover", func(map[string]any) (int, any) {
+		return 200, map[string]any{
+			"id": resolveCanonical, "slug": resolveSlug, "project": "aihub",
+			"new_attempt_id": "ra_forced", "new_claim_epoch": 9, "ok": true,
+		}
+	})
+	result, isErr := callToolBounded(t, f, "pf_force_takeover", map[string]any{
+		"work_item_id": resolveSlug, "reason": "the holder went stale",
+	}, 20*time.Second)
+	if isErr {
+		t.Fatalf("pf_force_takeover failed: %v", result)
+	}
+
+	sf, err := config.ReadStateFile(resolveCanonical)
+	if err != nil {
+		t.Fatalf("read state file after takeover: %v", err)
+	}
+	if got := sf.Worktrees["aihub"]; got != priorWorktree {
+		t.Errorf("worktrees[\"aihub\"] = %q after a slug-addressed takeover, want %q.\n"+
+			"The takeover response carries no worktree map, and this write replaces the "+
+			"canonical-keyed file rather than sitting beside it, so the map a prior claim "+
+			"recorded is gone unless it is carried over.", got, priorWorktree)
+	}
+	// The credentials must still be the NEW ones — carrying the map over must not
+	// drag the superseded attempt along with it.
+	if sf.AttemptID != "ra_forced" {
+		t.Errorf("AttemptID = %q after takeover, want ra_forced — the carry-over "+
+			"overwrote the new credentials with the prior attempt's", sf.AttemptID)
+	}
+}
+
+// TestForceTakeoverThenSlugAddressedDiffFindsTheWorktree is the same finding at
+// the layer that actually hurts: the reported failure was force_takeover followed
+// by a worktree tool with no workspace_root, which then has no path to fall back
+// to and fails outright.
+func TestForceTakeoverThenSlugAddressedDiffFindsTheWorktree(t *testing.T) {
+	root := newResolveWorkspace(t)
+	r := newResolveRepo(t, root)
+	writeResolveStub(t)
+	writeResolveCanonical(t, map[string]string{"aihub": r.wt})
+	if err := os.WriteFile(filepath.Join(r.wt, "seed.txt"), []byte(diffMarker+"\n"), 0644); err != nil {
+		t.Fatalf("dirty the worktree: %v", err)
+	}
+
+	f := newFakeAihub(t)
+	f.on("/v1/work_items/"+resolveSlug+"/force_takeover", func(map[string]any) (int, any) {
+		return 200, map[string]any{
+			"id": resolveCanonical, "slug": resolveSlug, "project": "aihub",
+			"new_attempt_id": "ra_forced", "new_claim_epoch": 9, "ok": true,
+		}
+	})
+	if _, isErr := callToolBounded(t, f, "pf_force_takeover", map[string]any{
+		"work_item_id": resolveSlug, "reason": "the holder went stale",
+	}, 20*time.Second); isErr {
+		t.Fatalf("pf_force_takeover failed")
+	}
+
+	f2 := newFakeAihub(t)
+	result, isErr := callToolBounded(t, f2, "pf_diff", map[string]any{
+		"work_item_id": resolveSlug, "repo": "aihub",
+	}, 60*time.Second)
+	if isErr {
+		t.Fatalf("pf_diff after a slug-addressed force_takeover failed: %v\n"+
+			"This is the reported scenario: the takeover replaced the canonical state file "+
+			"with one that has no worktrees map, and with no workspace_root argument there "+
+			"is nothing left to reconstruct a path from.", result)
+	}
+	if raw, _ := result["_raw"].(string); !strings.Contains(raw, diffMarker) {
+		t.Errorf("pf_diff after the takeover did not diff the wi's own worktree; got %q", raw)
+	}
+}
+
+// ─── the acceptance criterion, as an executable inventory ─────────────────────
+
+// readStateFileAllowlist is every NON-TEST source file permitted to call
+// config.ReadStateFile, with the count it may contain and why it is exempt.
+//
+// This replaces `git grep -c config.ReadStateFile -- internal/mcp`, which
+// reported 0 while pf_diff / pf_commit / pf_push / pf_pr were still broken —
+// the call had simply moved to internal/coding. A criterion scoped to the
+// package a fix started in measures the fix, not the defect.
+var readStateFileAllowlist = map[string]struct {
+	count  int
+	reason string
+}{
+	// ResolveStateFile's own two direct-lookup calls (the fast path and the
+	// error-preserving fallback) plus FindStateFiles' per-filename read — which
+	// is reading back a filename it just listed, so there is no alias to
+	// resolve. The `func ReadStateFile(` declaration is not counted as a call.
+	"internal/config/state.go": {3, "the resolver's own implementation"},
+
+	// worktreePath() in the `polyforge` CLI. `--wi-id` is free text, so a slug
+	// CAN arrive here. It is exempt because it is fail-closed rather than
+	// wrong: it reads only sf.Worktrees, never a credential, and returns "" on
+	// both slug shapes (error -> "", stub -> nil map -> ""). All three callers
+	// (RunCommit / RunPush / RunPR) then print "could not determine worktree
+	// path" and os.Exit(1). No git command runs against a wrong path and no
+	// state is written. The premise that makes that true — that the pre-claim
+	// stub carries no worktrees — is asserted by
+	// TestPreClaimStubCarriesNoWorktreesOrCredentials below, not merely
+	// asserted here in prose.
+	//
+	// It is still slug-INTOLERANT as a user experience, and that is worth its
+	// own work item; this file is not locked for aihub#319 and was deliberately
+	// not edited.
+	"internal/cli/machine_user.go": {1, "fail-closed: reads only Worktrees, returns \"\", callers exit 1"},
+}
+
+// TestReadStateFileCallSitesAreAccountedFor walks the whole module and fails on
+// any non-test call to config.ReadStateFile outside the allowlist above.
+//
+// It lives in internal/mcp because that is where this work item's test files
+// belong; what it measures is repo-wide by construction.
+func TestReadStateFileCallSitesAreAccountedFor(t *testing.T) {
+	root := moduleRoot(t)
+	found := map[string]int{}
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "vendor":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		b, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		n := 0
+		for _, line := range strings.Split(string(b), "\n") {
+			// The declaration is not a call site.
+			if strings.Contains(line, "func ReadStateFile(") {
+				continue
+			}
+			// Comments mentioning the name are not call sites either; the
+			// trailing "(" already excludes most prose, and this excludes the rest.
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") {
+				continue
+			}
+			n += strings.Count(line, "ReadStateFile(")
+		}
+		// Only files that actually call it enter the inventory — a zero entry
+		// would report every file in the repo as an unlisted call site.
+		if n > 0 {
+			found[rel] = n
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+
+	for file, n := range found {
+		allowed, ok := readStateFileAllowlist[file]
+		if !ok {
+			t.Errorf("%s calls config.ReadStateFile %d time(s) and is not on the allowlist.\n"+
+				"ReadStateFile is a filename lookup: it cannot resolve a slug, and it succeeds "+
+				"on the pre-claim stub instead of failing. Use config.ResolveStateFile, or add "+
+				"the file here with the reason a slug can never reach it. (aihub#319)", file, n)
+			continue
+		}
+		if n != allowed.count {
+			t.Errorf("%s calls config.ReadStateFile %d time(s), allowlisted for %d (%s). "+
+				"A new call site needs its own justification.", file, n, allowed.count, allowed.reason)
+		}
+	}
+	for file, allowed := range readStateFileAllowlist {
+		if _, ok := found[file]; !ok {
+			t.Errorf("allowlist entry %s (%s) no longer calls ReadStateFile — remove the entry "+
+				"so the list keeps meaning something", file, allowed.reason)
+		}
+	}
+
+	// The two packages the aihub#319 defect actually travelled through must stay
+	// at zero, named explicitly so a regression says WHERE rather than only that
+	// a count moved.
+	for file := range found {
+		if strings.HasPrefix(file, "internal/mcp/") || strings.HasPrefix(file, "internal/coding/") {
+			t.Errorf("%s calls config.ReadStateFile; every id reaching internal/mcp or "+
+				"internal/coding may be a slug", file)
+		}
+	}
+}
+
+// moduleRoot walks up from the test's working directory to the directory holding
+// go.mod.
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("no go.mod above %s", dir)
+		}
+		dir = parent
+	}
+}
+
+// TestPreClaimStubCarriesNoWorktreesOrCredentials is the premise the
+// internal/cli/machine_user.go allowlist entry rests on, asserted rather than
+// asserted-in-prose.
+//
+// worktreePath() there reads sf.Worktrees off whatever ReadStateFile hands back.
+// Handed a slug in the stubShadowed shape that is the PRE-CLAIM STUB, and the
+// only reason it fails closed instead of returning a path is that the stub has
+// no worktrees map. If the C6-2 pre-claim write ever gained one, that CLI helper
+// would start handing back a path derived from an unclaimed record and this
+// assertion is what would notice.
+//
+// The stub is produced by the real pf_claim_work_item handler, not hand-written:
+// the write happens before the server call, and a failed claim deliberately
+// leaves it on disk for the retry — so a 500 from the fake is enough to capture
+// exactly what that code path writes.
+//
+// PASSES ON THE PRE-CHANGE BUILD (359a435) — stated so nobody mistakes it for a
+// regression test for this diff. aihub#319 changed nothing about the pre-claim
+// write. Its job is forward-looking: it turns the allowlist's exemption argument
+// into something that can be falsified by a LATER change to that write, instead
+// of a sentence in a comment that would go quietly out of date.
+func TestPreClaimStubCarriesNoWorktreesOrCredentials(t *testing.T) {
+	newResolveWorkspace(t)
+
+	f := newFakeAihub(t)
+	f.on("/v1/work_items/"+resolveSlug+"/claim", func(map[string]any) (int, any) {
+		return 500, map[string]any{"code": "INTERNAL", "message": "claim exploded"}
+	})
+	result, isErr := callToolBounded(t, f, "pf_claim_work_item", map[string]any{
+		"work_item_id": resolveSlug, "idempotency_key": "idem_res319",
+	}, 20*time.Second)
+	if !isErr {
+		t.Fatalf("expected the claim to fail so the stub is left behind, got %v", result)
+	}
+
+	stub, err := config.ReadStateFile(resolveSlug)
+	if err != nil {
+		t.Fatalf("a failed claim must leave the pre-claim stub on disk for the retry: %v", err)
+	}
+	if len(stub.Worktrees) != 0 {
+		t.Errorf("the pre-claim stub carries a worktrees map (%v). "+
+			"internal/cli/machine_user.go's worktreePath() reads that map off a slug-addressed "+
+			"ReadStateFile and is only fail-closed because it is empty; with entries in it, that "+
+			"helper would hand back a worktree path belonging to an unclaimed record.", stub.Worktrees)
+	}
+	if stub.AttemptID != "" {
+		t.Errorf("the pre-claim stub carries AttemptID %q; it must be empty, or "+
+			"ResolveStateFile's slug-scan would accept the stub as a claimed record", stub.AttemptID)
+	}
+	if stub.Claimed {
+		t.Error("the pre-claim stub is marked claimed")
 	}
 }

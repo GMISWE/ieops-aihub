@@ -69,6 +69,10 @@ pf_recall(
 
 Find prior experience relevant to this wi for comparison.
 
+⚠️ No `fields="brief"` here (aihub#313). Step 4 has to write "This confirms…" /
+"This contradicts…" against these entries, and you cannot tell confirmation from
+contradiction by reading a title.
+
 ### Step 4: LLM retrospective analysis
 
 Produce a structured analysis:
@@ -82,6 +86,11 @@ Produce a structured analysis:
 - **Recommendations for next time**: Concrete suggestions
 
 ### Step 5: Batch save learnings (recall-before-remember protocol)
+
+⚠️ The dedup recall below must NOT pass `fields="brief"` (aihub#313), for two reasons.
+"if finding has new details" is a comparison against the candidate's TEXT, so briefing it
+would make that branch guess. And `similarity` is what the 0.85 / 0.65 thresholds read:
+brief rounds it to 4 decimals — harmless at that precision, but do not lower the rounding.
 
 For each finding:
 ```python

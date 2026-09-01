@@ -8,10 +8,10 @@ update-vs-reinforce rules, read `fragments/memory-conventions.md` in this skill 
 Before every substantive action:
 
 ```
-pf_recall(project=<current>, query=<user_intent>, type=["experience.*","rule.*"], top_k=5)
+pf_recall(project=<current>, query=<user_intent>, type=["experience.*","rule.*"], top_k=5, fields="brief")
 ```
 
 Display each result with `effective_strength >= 0.3` under `💡 Relevant history (not binding)`
-as `· [<type>] <title> — <age, strength>`.
+as `· [<type>] <title> — <age, strength>` (`brief` returns that line, no bodies).
 
 For any memory the LLM judges as actually useful: `pf_activate_memory(id)`.

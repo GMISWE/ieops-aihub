@@ -73,11 +73,15 @@ Whichever you use, the output markdown must satisfy the Contract above before yo
 # (no spec-phase recall in this session) run it once.
 # `type` is an ARRAY, one entry per type. A "a|b|c" string is NOT split — it arrives as
 # one type name, matches nothing, and returns an empty set that reads like "no history".
-pf_recall(project=<current>, query=<wi.goal>, type=["methodology.spec","methodology.plan","fact.*","rule.*","experience.*"], top_k=8)
+pf_recall(project=<current>, query=<wi.goal>, type=["methodology.spec","methodology.plan","fact.*","rule.*","experience.*"], top_k=8, fields="brief")
 ```
 
 Display results with `effective_strength >= 0.3` (💡 prefix). For any memory the model
 judges actually useful, call `pf_activate_memory(id)`.
+
+`fields="brief"` (aihub#313): display-and-activate only. Note this is deliberately NOT the
+same as the Step 3 spec read below, which passes no `fields` because it exists precisely to
+consume the spec's text.
 
 ### Step 2: Mark the step in_progress
 
@@ -94,7 +98,8 @@ arrival (aihub#290).
 
 Produce the markdown per the Contract above (read the head `methodology.spec` artifact first
 via `pf_recall(project=<current>, work_item_id=<current>, type="methodology.spec", top_k=1)` to ground the
-requirements), using the engine you picked in the previous section.
+requirements — **no `fields="brief"` here**, aihub#313: this call exists to consume the spec's
+text, and a first line cannot ground a plan), using the engine you picked in the previous section.
 
 ### Step 4: Record the artifact
 

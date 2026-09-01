@@ -5,8 +5,10 @@ Recall and remember are polyforge lifecycle, independent of which engine writes 
 ## Before the engine — Memory-First recall
 
 ```
-pf_recall(project=<current>, query=<wi.goal>, type=@@RECALL_TYPE@@, top_k=5)
+pf_recall(project=<current>, query=<wi.goal>, type=@@RECALL_TYPE@@, top_k=5, fields="brief")
 ```
+
+`brief`: display-only, no bodies (aihub#313; see `memory-conventions.md`).
 
 The router substitutes that slot with a JSON **array**; do NOT wrap it in quotes. `type` is a
 list, so a single string containing `|` is one type name matching nothing — a 400 (aihub#289).

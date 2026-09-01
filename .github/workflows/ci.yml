@@ -136,6 +136,18 @@ jobs:
       #             It is the reporter's acceptance assertion for aihub#311 and
       #             is expected to be RED against a real endpoint; CI has
       #             pgvector but no embedding service, so CI never runs it.
+      #
+      #   103 -> 104 aihub#316 added 1 DB-gated function in internal/domain
+      #             (TestEmbeddingBudget_HangingProviderLeavesRoomForFallback in
+      #             embedding_budget_integration_test.go). Unlike aihub#311's, it
+      #             needs only a database — its hanging provider is a fake, not a
+      #             live endpoint — so it joins the REQUIRED set: 100 -> 101, and
+      #             it does need a new step ("aihub#316 embedding budget DB
+      #             tests"). Measured, not predicted: the gate was run locally
+      #             exactly as it runs here and printed
+      #             `104 (require only a DB: 101, need extra env: 3)` with that
+      #             one function listed as executed by no step, before the step
+      #             existed.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -151,7 +163,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 103
+            -min-gated 104
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
@@ -395,6 +407,58 @@ jobs:
             || { echo "::error::TestHandleRecall_BiggerPageIsNotASmallerPage did not run; the aihub#309 handler-to-domain page-size hop is not covered"; exit 1; }
           ! grep -q -- '--- SKIP' recall_topk_inversion.log \
             || { echo "::error::TestHandleRecall_BiggerPageIsNotASmallerPage SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#316: a hung embedding backend must not consume the whole request
+      # budget. On 2026-09-01 it did, and three unrelated endpoints returned 500
+      # after exactly 30.00s while Postgres answered in 9ms.
+      #
+      # 🔴 The subtests are asserted INDIVIDUALLY, not just the parent, and the
+      # negative control is asserted by name alongside the positive arms. That is
+      # the whole point of this step. The graceful fallbacks this wi protects
+      # already existed and were already green — a provider that ERRORS proves
+      # nothing here, because the error dimension was never the defect. Only a
+      # provider that HANGS discriminates, and only against a request deadline
+      # sitting between the embedding budget and the hang. If the negative
+      # control ever stops running, the positive arms lose their meaning and the
+      # parent would still report PASS, which is exactly the shape this gate
+      # exists to refuse.
+      - name: aihub#316 embedding budget DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^(TestEmbeddingBudget_HangingProviderLeavesRoomForFallback)$' -count=1 -v 2>&1 | tee embedding_budget.log
+          # Every pattern ends in " (" — the open paren of Go's duration suffix.
+          # Without it these are PREFIXES, and Go prints each descendant under
+          # its ancestor's full path, so a child's PASS line silently satisfies
+          # its parent's pattern. Measured: with the fix removed, the
+          # negative_control subtest FAILED while a prefix grep for it still
+          # matched (via .../negative_control:.../Recall_fails). Each name below
+          # is the LEAF segment, which is unique within this test and keeps the
+          # em-dashes in the group names out of this file.
+          for want in "_all_three_fall_back (" \
+                      "/Recall_reaches_the_text_path (" \
+                      "/ListWorkItems_reaches_the_ILIKE_path (" \
+                      "/CreateWorkItem_commits_with_a_NULL_emb_vector (" \
+                      "_all_three_fail (" \
+                      "/Recall_fails (" \
+                      "/ListWorkItems_fails (" \
+                      "/CreateWorkItem_fails,_and_blames_the_right_hop (" \
+                      "/a_cancelled_request_is_not_reported_as_an_exhausted_deadline (" \
+                      "/pool_exhaustion_is_not_blamed_on_the_embedding_provider ("; do
+            grep -q -- "--- PASS: TestEmbeddingBudget_HangingProviderLeavesRoomForFallback$want" embedding_budget.log \
+              || grep -q -- "--- PASS: .*$want" embedding_budget.log \
+              || { echo "::error::'$want' did not report PASS; the aihub#316 budget coverage is not actually executing"; exit 1; }
+          done
+          # 🔴 And the COUNT, against a literal. Naming the arms individually
+          # catches a renamed arm; only a count catches an arm that was deleted
+          # outright together with its name here. 11 = 1 parent + 2 groups + 8
+          # leaves. Raise it deliberately when adding an arm.
+          passes=$(grep -c -- '--- PASS: TestEmbeddingBudget_HangingProviderLeavesRoomForFallback' embedding_budget.log)
+          [ "$passes" -eq 11 ] \
+            || { echo "::error::expected 11 PASS lines under TestEmbeddingBudget_HangingProviderLeavesRoomForFallback, saw $passes — an arm was added or removed without updating this gate"; exit 1; }
+          ! grep -q -- '--- SKIP' embedding_budget.log \
+            || { echo "::error::an aihub#316 budget case SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#239: two consistency gaps deferred from aihub#236's review. (1) The
       # supersede path through Remember (pf_save_artifact, or any POST

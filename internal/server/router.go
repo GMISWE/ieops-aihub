@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -94,16 +95,73 @@ func NewRouter(pool *pgxpool.Pool, uiCookieSecret []byte) *echo.Echo {
 	return e
 }
 
+// healthDBPingTimeout bounds the database half of /v1/health. Deliberately far
+// below contextWithTimeout's 30s: this endpoint is polled by liveness probes,
+// and one that blocks for 30s on a wedged pool reads as "dead" to every one of
+// them (aihub#316).
+const healthDBPingTimeout = 2 * time.Second
+
+// healthDBPingFn is the seam through which handleHealth reaches the database,
+// so the status-composition logic is testable without a live pool (same pattern
+// as listWorkItemsFn). A nil pool is a failed ping, not a panic.
+var healthDBPingFn = func(ctx context.Context, pool *pgxpool.Pool) error {
+	if pool == nil {
+		return errors.New("no database pool configured")
+	}
+	return pool.Ping(ctx)
+}
+
 // handleHealth returns server health status.
+//
+// aihub#316: "status" used to be the literal "ok" — it did not even reflect
+// db_ok, which the same response was already reporting. It now aggregates the
+// database and the embedding backend, the latter via a cached Ping
+// (domain.EmbeddingStatusSnapshot). Before this, a dead embedding provider was
+// invisible here and only showed up as unrelated endpoints 500ing at exactly
+// the 30s request timeout.
+//
+// 🔴 The HTTP status stays 200 even when the body says "degraded". Do not
+// "fix" this to 503. Two consumers read this endpoint's REACHABILITY as
+// liveness and never look at the body: container/orchestrator health checks,
+// and cli/doctor.go's checkConfig, which reports "aihub unreachable" for any
+// non-2xx. Returning 503 because an OPTIONAL dependency is down would restart
+// a server that is still serving every request it can, and would tell every
+// operator the wrong thing — a degraded service turned into a restart loop.
+// The degradation signal belongs in the body, where a reader can tell which
+// dependency it is.
 func handleHealth(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		ctx := c.Request().Context()
-		dbOK := pool.Ping(ctx) == nil
-		return c.JSON(http.StatusOK, map[string]any{
-			"status":  "ok",
-			"version": version.Version,
-			"db_ok":   dbOK,
-		})
+		// Bounded, unlike every other use of the raw request context in this
+		// file: /v1/health is the endpoint an operator hits to find out WHY
+		// things are slow, so it is the one that must not itself hang on a
+		// wedged dependency. It is also the only handler here that does not go
+		// through contextWithTimeout. A health check that never answers is
+		// strictly worse than one that answers "degraded" (aihub#316).
+		ctx, cancel := context.WithTimeout(c.Request().Context(), healthDBPingTimeout)
+		defer cancel()
+
+		dbOK := healthDBPingFn(ctx, pool) == nil
+		emb := domain.EmbeddingStatusSnapshot(ctx)
+
+		status := "ok"
+		if !dbOK || (emb.Enabled && !emb.OK) {
+			status = "degraded"
+		}
+
+		body := map[string]any{
+			"status":            status,
+			"version":           version.Version,
+			"db_ok":             dbOK,
+			"embedding_enabled": emb.Enabled,
+			"embedding_ok":      emb.OK,
+		}
+		// Omitted when empty, and never the underlying error text: this route
+		// is registered before the BearerAuth group above, so anyone can read
+		// it and the raw error names the embedding backend's base URL.
+		if emb.ErrorKind != "" {
+			body["embedding_error_kind"] = emb.ErrorKind
+		}
+		return c.JSON(http.StatusOK, body)
 	}
 }
 

@@ -15,6 +15,17 @@
 # The _common/* fragments are injected in BOTH branches — lifecycle never depends on which
 # engine writes the content. Only the engine fragment branches on whether superpowers is enabled.
 #
+# 🔴 SIZE BUDGET (aihub#304). The assembled payload has a hard 10,000-CHARACTER limit: past it
+# the harness writes the whole thing to a file and delivers only a ~2,000-character preview, and
+# this hook still exits 0. That is measured on PreToolUse, not assumed from SessionStart — see
+# internal/cli/skill_router_payload_test.go, which gates every skill in TARGETS in BOTH engine
+# branches. The fragments are therefore TIERED: what every step needs is resident here, and what
+# is needed once per wi (startup detail, ship, wrap, the interactive loop, older-binary
+# fallbacks) lives under skills/**/references/ and is reached by a `📄 Read <abs path>` pointer.
+# @@PLUGIN_ROOT@@ is what makes those pointers absolute, and therefore usable — the model's cwd
+# is the wi worktree, not the plugin directory.
+# If a fragment needs to grow, move something to the on-demand tier; do not raise the gate.
+#
 # Inert (exit 0, no output) for any non-target skill (including pf-spec/pf-plan), and
 # FAIL-SILENT on any error: if this hook emits nothing for pf-execute, the stub's
 # load-bearing pointer line routes the model to engine.native.md + _common/*.md (the
@@ -148,8 +159,7 @@ def plugin_enabled(prefix):
 superpowers_on = plugin_enabled("superpowers@") is True
 
 # --- assemble fragments ---
-def common(name):
-    txt = read(os.path.join(skills_dir, "_common", name)) or ""
+def subst(txt):
     # @@RECALL_TYPE@@ renders as a JSON ARRAY, and the template must NOT wrap it in
     # quotes (see _common/memory.md). aihub#289: pf_recall's `type` is a list, so a
     # scalar carrying '|' is one type name that matches nothing — and is now a 400.
@@ -157,7 +167,15 @@ def common(name):
     # cannot silently re-emit a scalar into an unquoted slot.
     types = recall_type if isinstance(recall_type, list) else [recall_type]
     rendered = json.dumps(types, ensure_ascii=False, separators=(",", ":"))
-    return txt.replace("@@RECALL_TYPE@@", rendered).replace("@@ARTIFACT_TYPE@@", artifact_type)
+    # @@PLUGIN_ROOT@@ becomes the ABSOLUTE plugin path, so the on-demand pointers the
+    # resident fragments carry are Read-able exactly as written (aihub#304). A relative
+    # path would send the model hunting: its cwd is the wi worktree, not the plugin cache.
+    return (txt.replace("@@RECALL_TYPE@@", rendered)
+               .replace("@@ARTIFACT_TYPE@@", artifact_type)
+               .replace("@@PLUGIN_ROOT@@", plugin_root))
+
+def common(name):
+    return subst(read(os.path.join(skills_dir, "_common", name)) or "")
 
 memory_frag  = common("memory.md")
 storage_frag = common("storage.md")
@@ -170,31 +188,96 @@ if superpowers_on:
         "commit / PR / wrap."
     )
     engine_label = f"superpowers ({base})"
+    engine_path = "hooks/pf-skill-router (TARGETS[%r] pointer)" % base
 else:
     native = read(os.path.join(skills_dir, base, "engine.native.md"))
     if not native:
         sys.exit(0)  # no native engine fragment to inject -> inert (stub fallback takes over)
-    engine_frag = native
+    engine_frag = subst(native)
     engine_label = "native (engine.native.md)"
+    engine_path = "skills/%s/engine.native.md" % base
 
 # Any missing common fragment -> fail silent (let the stub fallback route to repo files).
 if not (memory_frag and storage_frag and lifecycle_frag):
     sys.exit(0)
 
 header = (
-    f"[polyforge router] `/{base}` step `{step_id}` — engine: {engine_label}. "
-    "The SKILL.md is a stub; the text below is the step body the router assembled and injected at the "
-    "call site (it takes precedence). The common fragments (memory / storage / lifecycle) are injected "
-    "in BOTH branches; only the engine fragment depends on whether superpowers is enabled."
+    f"[polyforge router] `/{base}` step `{step_id}` — engine: {engine_label}. The SKILL.md is a "
+    "stub; the text below is the step body, assembled and injected at the call site, and it takes "
+    "precedence. Fragments marked 📄 are NOT injected — this payload has a hard 10,000-character "
+    "limit and `Read` is how you get the rest (aihub#304)."
 )
 
-ctx = "\n\n---\n\n".join([
-    header,
-    memory_frag.rstrip("\n"),
-    engine_frag.rstrip("\n"),
-    storage_frag.rstrip("\n"),
-    lifecycle_frag.rstrip("\n"),
-])
+SEP = "\n\n---\n\n"
+
+# (name, on-disk path under the plugin root, drop_rank, text).
+# List order is EMISSION order. drop_rank orders DEGRADATION only, lowest dropped first:
+# storage is a four-line note, memory costs only recall context, lifecycle costs correct wi
+# state, and the engine is the loop itself — without it there is nothing to run at all.
+parts = [
+    ("_common/memory.md",    "skills/_common/memory.md",    1, memory_frag.rstrip("\n")),
+    ("engine",               engine_path,                   3, engine_frag.rstrip("\n")),
+    ("_common/storage.md",   "skills/_common/storage.md",   0, storage_frag.rstrip("\n")),
+    ("_common/lifecycle.md", "skills/_common/lifecycle.md", 2, lifecycle_frag.rstrip("\n")),
+]
+
+ctx = SEP.join([header] + [t for _, _, _, t in parts])
+
+# --- budget self-check (aihub#304) ------------------------------------------------------
+# MEASURED, not inferred. Claude Code replaces any single hook output longer than 10,000
+# CHARACTERS with a `<persisted-output>` wrapper: the full text is written to a file and only
+# a ~2,000-character preview reaches the model. aihub#285 measured that on SessionStart;
+# aihub#304 confirmed the SAME constant and the SAME preview function apply to PreToolUse, by
+# invoking Skill(polyforge:pf-execute) in a real session — a 14,482-char payload was cut at
+# exactly the 1,976 chars the ported preview rule predicts, i.e. 13.6% of it reached the model.
+#
+# The hook still exits 0 either way, so unchecked this fails silently. `tests/` and
+# internal/cli/skill_router_payload_test.go gate the shipped tree; this block catches a tree
+# that reaches a real session anyway (older plugin copy, hand-edited fragment, unmerged branch).
+# It must NEVER block a Skill call, so it neither raises nor exits non-zero — it emits a
+# DEGRADED payload that FITS, names what it dropped and where to Read it, and says the same on
+# stderr so the failure is visible outside the model.
+MAX_CHARS = 10000
+
+if len(ctx) > MAX_CHARS:
+    full_len = len(ctx)
+
+    def banner(dropped):
+        return (
+            "⚠️ **POLYFORGE SKILL-ROUTER PAYLOAD OVER BUDGET — THIS STEP BODY IS INCOMPLETE.**\n"
+            "The assembled body for `/%s` is %d characters against a %d-character harness "
+            "limit. Rather than let the harness replace it with a ~2,000-character preview, "
+            "this hook dropped fragment(s) and is telling you so: **%s**. Each still ships on "
+            "disk under the plugin root `%s` — `Read` any you need before relying on it. This "
+            "is a bug in the fragments, not in your session: the budget must be restored (see "
+            "`internal/cli/skill_router_payload_test.go`).\n"
+            % (base, full_len, MAX_CHARS, ", ".join(dropped) or "all of them", plugin_root)
+        )
+
+    kept, dropped = list(parts), []
+    while True:
+        ctx = SEP.join([header, banner(dropped).rstrip("\n")]
+                       + [t for _, _, _, t in kept])
+        if len(ctx) <= MAX_CHARS or not kept:
+            break
+        # Drop the lowest-ranked fragment still present, not simply the last one: emission
+        # order is a reading order, not a priority order, so a suffix drop would throw away
+        # lifecycle while keeping storage.
+        victim = min(range(len(kept)), key=lambda i: kept[i][2])
+        name, path, _, _ = kept.pop(victim)
+        dropped.append("%s (%s)" % (name, path))
+    # Belt and braces: the envelope alone is ~1.5k chars, so this cannot fire today — but a
+    # future header must not be able to reintroduce the silent truncation this block removes.
+    if len(ctx) > MAX_CHARS:
+        ctx = ctx[:MAX_CHARS]
+
+    sys.stderr.write(
+        "pf-skill-router: %s payload is %d chars, over the %d-char harness limit. Emitted a "
+        "degraded %d-char payload; dropped %s. Run "
+        "`go test ./internal/cli/ -run TestRoutedSkillHook` and move text to the on-demand "
+        "tier (skills/**/references/) — do not raise the gate.\n"
+        % (base, full_len, MAX_CHARS, len(ctx), ", ".join(dropped) or "every fragment")
+    )
 
 # Default ALLOW + inject: additionalContext with no permissionDecision lets the Skill call
 # proceed and adds the assembled body to context. Dual-shape so one script serves both

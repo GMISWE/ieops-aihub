@@ -104,7 +104,7 @@ worktree.
 
 | tool | purpose |
 |---|---|
-| `pf_list_projects` | List projects visible to the caller. |
+| `pf_list_projects` | List projects visible to the caller. `include_repos` defaults to **true**, i.e. the full repo metadata this returned before the parameter existed — `polyforge init` reads it to decide what to clone. Pass `false` for a `repo_count` integer instead, which drops ~85% of the response's tokens. |
 | `pf_create_project` | Create a project (repos + scenario). |
 | `pf_update_project` | Update repos, members, description, scenario, visibility. |
 | `pf_rotate_identifier` | Rotate the project access identifier (returned once). |

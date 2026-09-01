@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GMISWE/ieops-aihub/internal/citest/testname"
 	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
@@ -45,34 +46,13 @@ func setupStepTestDB(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-// sanitizeStepTestName mirrors sanitizeTestName in the domain package
-// (unexported there, so duplicated here rather than exported cross-package
-// for a two-file need).
-func sanitizeStepTestName(name string) string {
-	out := make([]byte, 0, len(name))
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			out = append(out, byte(r))
-		case r >= 'A' && r <= 'Z':
-			out = append(out, byte(r-'A'+'a'))
-		default:
-			out = append(out, '_')
-		}
-	}
-	if len(out) > 37 {
-		out = out[:37]
-	}
-	return string(out)
-}
-
 // seedStepTestUserAndProject creates a real users row + projects row (both
 // required by FK constraints on work_items.reporter_user_id and
 // agent_events.actor_user_id) and returns (userID, project).
 func seedStepTestUserAndProject(t *testing.T, pool *pgxpool.Pool) (string, string) {
 	t.Helper()
-	uid := "u_" + sanitizeStepTestName(t.Name())
-	proj := "p_" + sanitizeStepTestName(t.Name())
+	uid := "u_" + testname.Sanitize(t.Name())
+	proj := "p_" + testname.Sanitize(t.Name())
 	_, err := pool.Exec(context.Background(),
 		`INSERT INTO users(id,email,display_name) VALUES($1,$1||'@test.local',$1) ON CONFLICT (id) DO NOTHING`, uid)
 	require.NoError(t, err)

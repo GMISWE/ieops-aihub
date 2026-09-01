@@ -28,9 +28,17 @@ func TestResumeOwnLocks_NoSelfConflict(t *testing.T) {
 	uid := testUser(t, pool)
 	proj := testProject(t, pool, uid)
 
-	// Scope the locked path to this test's unique project name so a stale lock
-	// left behind by a prior failed/killed run of this same test (which would
-	// use the same file path otherwise) can never collide with this run.
+	// Scope the locked path to this test's project name so that OTHER tests
+	// sharing the database cannot contend for the same file_scope lock.
+	//
+	// It buys nothing against this test's own previous runs, and an earlier
+	// version of this comment claimed the opposite ("a stale lock left behind by
+	// a prior failed/killed run of this same test can never collide"). That was
+	// backwards: proj is derived from t.Name(), so a prior run produced the
+	// SAME key — the determinism is precisely what let residue collide, and
+	// this was one of only two non-idempotent tests in the suite (aihub#303).
+	// What actually makes a re-run safe is testProject's reset, which clears
+	// this project's work_items / run_attempts / resource_locks first.
 	lockPath := "file:internal/domain/" + proj + "_run_attempts.go"
 	declared, err := json.Marshal([]DeclaredResourceItem{
 		{Type: "path", URI: lockPath, Intent: "write"},
@@ -114,9 +122,9 @@ func TestResumeOwnLocks_DifferentWIStillConflicts(t *testing.T) {
 	uid := testUser(t, pool)
 	proj := testProject(t, pool, uid)
 
-	// Scope the locked path to this test's unique project name (see the
-	// NoSelfConflict test above for why: avoids collisions with stale locks
-	// left behind by a prior failed/killed run of this same test).
+	// Scope the locked path to this test's project name (see the NoSelfConflict
+	// test above: this isolates the lock from OTHER tests, not from this test's
+	// own previous runs — testProject's reset is what handles those).
 	lockPath := "file:internal/domain/" + proj + "_shared_conflict_target.go"
 	declared, err := json.Marshal([]DeclaredResourceItem{
 		{Type: "path", URI: lockPath, Intent: "write"},

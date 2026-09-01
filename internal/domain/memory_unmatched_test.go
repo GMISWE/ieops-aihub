@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GMISWE/ieops-aihub/internal/citest/testname"
 )
 
 // aihub#289 — the `type` filter rule has ONE implementation, and a type that matches
@@ -303,7 +305,7 @@ func TestUnmatchedTypes_AdminAndArchived(t *testing.T) {
 	// A SECOND author: the private memory must belong to someone other than the caller,
 	// or the non-admin branch below would see it as its own and the two role branches
 	// would agree for the wrong reason.
-	other := "u_other_" + sanitizeTestName(t.Name())
+	other := "u_other_" + testname.Sanitize(t.Name())
 	mustExec(t, pool, `INSERT INTO users(id,email,display_name) VALUES('`+other+`','`+other+`@test.local','`+other+`') ON CONFLICT (id) DO NOTHING`)
 
 	seedTypedMemory(t, pool, proj, uid, "mem_adm_pub", "rule.work", "project")

@@ -31,6 +31,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GMISWE/ieops-aihub/internal/citest/testname"
 )
 
 // readyQueueTestPool opens the AIHUB_TEST_DB pool, skipping when unset — the
@@ -60,10 +62,10 @@ func readyQueueTestPool(t *testing.T) *pgxpool.Pool {
 func seedReadyQueueFixture(t *testing.T, pool *pgxpool.Pool) (project string, ids map[string]string) {
 	t.Helper()
 	ctx := context.Background()
-	// sanitizeTestName (memory_latest_test.go) lowercases, strips subtest
-	// slashes, and truncates to fit projects.name's CHECK
-	// (^[a-z][a-z0-9_-]{0,39}$) — a raw t.Name() violates it.
-	project = "p_" + sanitizeTestName(t.Name())
+	// testname.Sanitize (internal/citest/testname) lowercases, strips subtest
+	// slashes, and shortens (truncate + hash suffix) to fit projects.name's
+	// CHECK (^[a-z][a-z0-9_-]{0,39}$) — a raw t.Name() violates it.
+	project = "p_" + testname.Sanitize(t.Name())
 	uid := "u_readyq_test"
 
 	for _, q := range []string{

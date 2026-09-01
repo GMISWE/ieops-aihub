@@ -17,6 +17,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GMISWE/ieops-aihub/internal/citest/testname"
 )
 
 // setupLatestTestDB connects to AIHUB_TEST_DB, skipping the test if unset.
@@ -40,41 +42,95 @@ func setupLatestTestDB(t *testing.T) *pgxpool.Pool {
 // concurrent/sequential tests sharing one DB don't collide.
 func testUser(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
-	uid := "u_" + sanitizeTestName(t.Name())
+	uid := "u_" + testname.Sanitize(t.Name())
 	mustExec(t, pool, `INSERT INTO users(id,email,display_name) VALUES('`+uid+`','`+uid+`@test.local','`+uid+`') ON CONFLICT (id) DO NOTHING`)
 	return uid
 }
 
 // testProject returns a project name unique to this test and seeds it
-// (idempotently), owned by the given user id.
+// (idempotently), owned by the given user id, after clearing out everything a
+// previous run of the same test left in that project.
+//
+// The project name is DERIVED FROM t.Name(), so it is the same string on every
+// run against the same database — the isolation it buys is between tests, never
+// between runs. That makes the reset below load-bearing rather than tidy:
+// without it, run N+1 of a test collides with run N's own residue.
+//
+// Measured during aihub#303 (whole suite run twice against one database, before
+// this change): exactly two failures, TestResumeOwnLocks_NoSelfConflict and
+// TestResumeOwnLocks_DifferentWIStillConflicts. They claim a work item whose
+// declared path maps to a file_scope lock keyed by this project name, and the
+// previous run's attempt was still holding it, so the first claim 409'd with
+// CONFLICT_LOCK_TAKEN. Everything else survived only because it either cleans
+// up itself (seedWI in step_pause_stall_test.go does its own child-to-parent
+// delete for the same reason) or touches nothing but `memories`, which is all
+// this reset used to clear. Re-run the suite twice if you want to re-measure;
+// do not read "two" as a property of the code.
 func testProject(t *testing.T, pool *pgxpool.Pool, ownerUserID string) string {
 	t.Helper()
-	proj := "p_" + sanitizeTestName(t.Name())
+	proj := "p_" + testname.Sanitize(t.Name())
 	mustExec(t, pool, `INSERT INTO projects(name,owner_user_id) VALUES('`+proj+`','`+ownerUserID+`') ON CONFLICT (name) DO NOTHING`)
-	mustExec(t, pool, `DELETE FROM memories WHERE project='`+proj+`'`)
+	resetTestProject(t, pool, proj)
 	return proj
 }
 
-// sanitizeTestName lowercases and strips characters that are unsafe to splice
-// directly into a SQL identifier/literal (test names can contain '/' from
-// subtests), and truncates to fit projects.name's 40-char limit alongside a
-// "p_" prefix.
-func sanitizeTestName(name string) string {
-	out := make([]byte, 0, len(name))
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			out = append(out, byte(r))
-		case r >= 'A' && r <= 'Z':
-			out = append(out, byte(r-'A'+'a'))
-		default:
-			out = append(out, '_')
-		}
+// resetTestProject deletes the rows that would block re-seeding this test
+// project, in an order that satisfies every foreign key pointing at work_items
+// and run_attempts. Tables that cascade from work_items (wi_step_state,
+// wi_dependencies) are left to the database.
+//
+// resource_locks must go first and explicitly: its FK to run_attempts is ON
+// DELETE RESTRICT, so a leftover lock does not just linger, it blocks the
+// cleanup of the attempt that owns it.
+//
+// The two self-referential FKs here (work_items.parent_work_item_id,
+// run_attempts.parent_attempt_id) are NO ACTION, which Postgres checks at end
+// of statement — so deleting a parent and its child in one statement is legal,
+// and the `memories` delete is deliberately ONE statement covering both
+// predicates for the same reason (memories.latest_id / supersedes_id are
+// unqualified self-FKs, and splitting the delete would checkpoint mid-lineage).
+//
+// proj comes from testname.Sanitize (internal/citest/testname), which emits
+// only [a-z0-9_], so splicing it into the literals below (matching the style of
+// the rest of this file) cannot break out of the quotes.
+//
+// These are six separate statements on a pool, NOT one transaction, and that is
+// deliberate (revisited in aihub#303). What makes that safe, in the order the
+// argument actually depends on:
+//
+//  1. The function is idempotent, and the only state a transaction would
+//     prevent — a half-applied reset — is indistinguishable to the next caller
+//     from a reset that never ran. The next call simply redoes it.
+//  2. Every statement is scoped to `proj`, which is derived from t.Name(), so
+//     no other test names these rows.
+//  3. Nothing in this package calls t.Parallel(), so no second test is inside
+//     this window. Verify with:
+//     `grep -rn 't.Parallel()' internal/domain/ internal/server/ internal/mcp/`
+//     (empty as of aihub#303). If that ever stops being empty, revisit this.
+//
+// An earlier revision of this comment justified it by "no FK in
+// internal/db/migrations is declared DEFERRABLE". That is true, and it does
+// mean a surrounding BEGIN would not let the deletes be reordered — but it is
+// not what makes the current form safe, and stating it as the reason would have
+// left the real load-bearing conditions (2) and (3) unrecorded and free to
+// change without anything noticing.
+func resetTestProject(t *testing.T, pool *pgxpool.Pool, proj string) {
+	t.Helper()
+	wis := `(SELECT id FROM work_items WHERE project='` + proj + `')`
+	attempts := `(SELECT id FROM run_attempts WHERE work_item_id IN ` + wis + `)`
+	for _, stmt := range []string{
+		`DELETE FROM resource_locks WHERE owner_attempt_id IN ` + attempts,
+		// agent_events rows for memory/system events carry neither
+		// work_item_id nor run_attempt_id (chk_evt_work_item_id permits NULL
+		// for those types), so scope by project as well or they accumulate.
+		`DELETE FROM agent_events WHERE project='` + proj + `' OR run_attempt_id IN ` + attempts + ` OR work_item_id IN ` + wis,
+		`DELETE FROM wi_step_completions WHERE work_item_id IN ` + wis + ` OR run_attempt_id IN ` + attempts,
+		`DELETE FROM memories WHERE project='` + proj + `' OR work_item_id IN ` + wis,
+		`DELETE FROM run_attempts WHERE work_item_id IN ` + wis,
+		`DELETE FROM work_items WHERE project='` + proj + `'`,
+	} {
+		mustExec(t, pool, stmt)
 	}
-	if len(out) > 37 {
-		out = out[:37]
-	}
-	return string(out)
 }
 
 // seedMemory inserts a minimal memory row directly (bypassing Remember) for
@@ -178,10 +234,10 @@ func TestBackfillLatestID(t *testing.T) {
 	u := testUser(t, pool)
 	project := testProject(t, pool, u)
 
-	idA := "mem_bfA_" + sanitizeTestName(t.Name())
-	idB := "mem_bfB_" + sanitizeTestName(t.Name())
-	idC := "mem_bfC_" + sanitizeTestName(t.Name())
-	idS := "mem_bfS_" + sanitizeTestName(t.Name())
+	idA := "mem_bfA_" + testname.Sanitize(t.Name())
+	idB := "mem_bfB_" + testname.Sanitize(t.Name())
+	idC := "mem_bfC_" + testname.Sanitize(t.Name())
+	idS := "mem_bfS_" + testname.Sanitize(t.Name())
 
 	seedMemory(t, pool, project, u, idA, "", "archived")
 	seedMemory(t, pool, project, u, idB, idA, "archived")
@@ -208,9 +264,9 @@ func TestBackfillLatestID_RedactedHead(t *testing.T) {
 	u := testUser(t, pool)
 	project := testProject(t, pool, u)
 
-	idA := "mem_rhA_" + sanitizeTestName(t.Name())
-	idB := "mem_rhB_" + sanitizeTestName(t.Name())
-	idC := "mem_rhC_" + sanitizeTestName(t.Name())
+	idA := "mem_rhA_" + testname.Sanitize(t.Name())
+	idB := "mem_rhB_" + testname.Sanitize(t.Name())
+	idC := "mem_rhC_" + testname.Sanitize(t.Name())
 
 	seedMemory(t, pool, project, u, idA, "", "archived")
 	seedMemory(t, pool, project, u, idB, idA, "archived")
@@ -348,7 +404,7 @@ func TestGetLatestByID(t *testing.T) {
 	}
 
 	// Nonexistent id surfaces not-found.
-	_, gerr := GetLatestByID(context.Background(), pool, "mem_does_not_exist_"+sanitizeTestName(t.Name()))
+	_, gerr := GetLatestByID(context.Background(), pool, "mem_does_not_exist_"+testname.Sanitize(t.Name()))
 	require.NotNil(t, gerr)
 	assert.Equal(t, ErrNotFound, gerr.Code)
 }
@@ -402,7 +458,7 @@ func TestUpdateMemory(t *testing.T) {
 	assert.Equal(t, v3.ID, latestOf(t, pool, v2.ID))
 
 	// Unknown id surfaces not-found.
-	_, err = UpdateMemory(context.Background(), pool, "mem_does_not_exist_"+sanitizeTestName(t.Name()), &UpdateMemoryRequest{
+	_, err = UpdateMemory(context.Background(), pool, "mem_does_not_exist_"+testname.Sanitize(t.Name()), &UpdateMemoryRequest{
 		Content: strp("nope"), CallerUserID: u, CallerDisplay: u,
 	})
 	require.Error(t, err)

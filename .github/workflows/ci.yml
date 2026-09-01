@@ -50,6 +50,87 @@ jobs:
         # AIHUB_TEST_DB is deliberately NOT set here — see the "aihub#242
         # dependency-requeue DB tests" step below for why.
 
+      # aihub#303: the step above leaves every AIHUB_TEST_DB-gated test SKIPped,
+      # by design. The real DB coverage is therefore exactly the union of the
+      # `-run` regexes on the steps below that DO set the variable — and a test
+      # whose name falls outside that union runs NOWHERE, forever, while `go
+      # test` prints "ok" and exits 0.
+      #
+      # That is not hypothetical. Each number below is over a stated set, and
+      # each one is derived from the line before it — an earlier draft of this
+      # comment added the EMBEDDING pair to a total that already excluded it and
+      # still landed on the right answer by coincidence, which is exactly the
+      # kind of arithmetic that rots without anything going red:
+      #
+      #   85  AIHUB_TEST_DB-gated test functions in the repo (the whole set:
+      #       every function that SKIPped naming the variable)
+      #   -2  also need EMBEDDING_BASE_URL, which CI has no service for, so
+      #       dbtestcov excludes them and requires that no step name them
+      #   =83  require only a database — the set every step below is judged over
+      #   -55  were already named by some step's `-run` before this branch
+      #   =28  ran NOWHERE, on every CI run since the day they were written
+      #
+      # Those 28 split into the two steps that now execute them: 26 (23 in
+      # internal/domain, 3 in internal/server) in "aihub#303 previously
+      # CI-invisible DB tests" at the bottom of this job, plus the 2 in
+      # internal/mcp in "aihub#281 wi-content echo E2E DB tests". Re-measure by
+      # deleting those two steps and re-running this gate; do not read 28 as a
+      # property of the code.
+      #
+      # The 3 in internal/server sit in routes_step_test.go — the file that
+      # defines the seed helpers the COVERED tests reuse: proof that a name
+      # regex stops at the edge of its alternation even inside a file it is
+      # already selecting from.
+      #
+      # Not a one-off count, either: this gate went red on its own pull request
+      # the moment aihub#281 landed the internal/mcp pair on main with no `-run`
+      # naming them — found by the gate, not by anyone remembering.
+      #
+      # This step recomputes the difference on every run instead of trusting a
+      # checked-in list, because a checked-in list of "the DB tests" would rot
+      # exactly as silently as the gap it describes.
+      #
+      # What counts as DB-gated is measured, not inferred: the inventory is a
+      # `go test ./...` run with AIHUB_TEST_DB explicitly unset, and a test is
+      # DB-gated iff it SKIPped and its own skip message names that variable. So
+      # there is no list of guard helpers to keep in sync. The message IS a
+      # convention, and wording it wrongly is the cheapest way to make this gate
+      # go quiet — cheaper than fixing the coverage — so dbtestcov also audits
+      # the SOURCE for every way that guard can be written to leave the count
+      # unmoved: an env read in a bool-returning helper, os.LookupEnv, a
+      # constant or concatenated variable name, a bare `return` instead of a
+      # skip, a TestMain gate, a build tag, a guard living in a non-test file,
+      # and the read sitting in a package-level var or a func literal bound to
+      # one. It audits ci.yml the same way, because a `go test` line that is
+      # quoted, commented, inside a heredoc, inside an `if`, or trailed by
+      # `|| true` is credited as coverage by anything that reads lines instead
+      # of modelling the shell. See internal/citest/dbtestcov/main.go. Note
+      # what all of those have in common: none of them changes the gated count,
+      # so -min-gated below cannot substitute for any of them.
+      #
+      # `env -u` rather than merely omitting an env: block, so that adding a
+      # job-level AIHUB_TEST_DB later cannot silently turn this into a green
+      # no-op (with the variable set, nothing SKIPs, the inventory is empty and
+      # every check below passes vacuously). -min-gated is the second guard on
+      # the same failure, pinned to the measured count: raise it when you add DB
+      # tests, lower it only when you deliberately remove one.
+      - name: aihub#303 DB-test coverage gate
+        run: |
+          set -o pipefail
+          inventory=$(mktemp)
+          if ! env -u AIHUB_TEST_DB go test ./... -count=1 -json > "$inventory"; then
+            echo "::error::the DB-free inventory run failed, so DB-test coverage cannot be audited; fix the failing tests first (the 'Unit tests' step above runs the same set)"
+            # `|| true`: a build failure produces no "fail" action at all, and a
+            # no-match grep under `set -e -o pipefail` would abort here and
+            # swallow the explicit exit below.
+            grep -F -e '"Action":"fail"' -e '"Action":"build-fail"' "$inventory" | head -20 || true
+            exit 1
+          fi
+          go run ./internal/citest/dbtestcov \
+            -inventory "$inventory" \
+            -workflow .github/workflows/ci.yml \
+            -min-gated 85
+
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
       # the "Unit tests" step above leaves unused (AIHUB_TEST_DB unset there).
@@ -523,6 +604,152 @@ jobs:
           done
           ! grep -q -- '--- SKIP' ready_queue.log \
             || { echo "::error::an aihub#280 ready-queue test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#281: the wiring that change deferred. Its
+      # internal/mcp/wi_echo_e2e_db_test.go header explains why the edit is not
+      # in its own commit — ci.yml was locked by aihub#303 while it was written
+      # — and asks for exactly a step of this shape. Note how it surfaced: not
+      # from the note, but because aihub#303's coverage gate below computed
+      # these two as the only DB-gated tests no `-run` named once the two
+      # branches met. A deferral that depends on someone reading a comment is
+      # the shape this whole pair of steps exists to replace.
+      #
+      # Both cases need only a database: the suite stands the real echo router
+      # up in-process (httptest) and drives it through the real SDK client, so
+      # there is no external service to provide. What they are for is the
+      # reference side of the suppression tests in wi_echo_test.go — that a real
+      # create/update response still carries `content` at all, and that stored
+      # content comes back byte-identical. Both of those can only be answered by
+      # executing against a real server, and if either silently stopped being
+      # true, every "content is absent" assertion elsewhere would stay green
+      # while measuring nothing.
+      - name: aihub#281 wi-content echo E2E DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/mcp/ -run '^(TestE2EWorkItemContentEchoAgainstARealServer|TestE2ERealServerStoresContentByteIdentically)$' -count=1 -v 2>&1 | tee wi_echo_e2e.log
+          for want in TestE2EWorkItemContentEchoAgainstARealServer \
+                      TestE2ERealServerStoresContentByteIdentically; do
+            grep -q -- "--- PASS: $want (" wi_echo_e2e.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#281 end-to-end echo coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' wi_echo_e2e.log \
+            || { echo "::error::an aihub#281 E2E test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#303: the 26 DB-gated test functions that, until this step, no
+      # `-run` in this file named — so they SKIPped on every CI run since the
+      # day they were written, and `go test` printed "ok" and exited 0 each
+      # time. Nothing was ever red. This step is ADDITIVE: it does not replace
+      # any narrow step above, it only picks up what those steps' regexes never
+      # selected.
+      #
+      # The sharpest case is the internal/server trio below. They live in
+      # routes_step_test.go — the file that defines setupStepTestDB /
+      # seedStepTestWI, which the aihub#290 step's tests reuse — yet their own
+      # names fall outside
+      # `TestHandleUpdateStep_(NextStep|FusedEquals|FusedRespects)`. A regex
+      # cannot know what else is in the file it is selecting from, so coverage
+      # scoped by test name silently stops at the edge of the alternation; the
+      # "aihub#303 DB-test coverage gate" step near the top of this job is what
+      # makes that edge visible from now on.
+      #
+      # Two of these groups end with a database-WIDE sweep
+      # (RunMemoryExpiredSweep in the ranking group, RunUnblockDependentWI in
+      # the pause group): neither is project-scoped, so keep this step LAST
+      # among the DB steps.
+      #
+      # Grouped by the concern each cluster belongs to, one `go test` per group,
+      # so a failure names the area rather than "the leftovers". Same -v + grep
+      # discipline as every DB step above: assert each case reported PASS, and
+      # reject any SKIP, because a suite in which everything SKIPped still exits
+      # 0 — which is the exact state this step exists to leave behind.
+      - name: aihub#303 previously CI-invisible DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+
+          # memories.latest_id cursor (aihub#201): backfill, round-trip, redaction
+          # repointing, supersede advancing the head, and the concurrent
+          # single-head invariant. All of it is SQL behaviour under contention.
+          go test ./internal/domain/ -run '^(TestBackfillLatestID|TestBackfillLatestID_RedactedHead|TestGetLatestByID|TestLatestIDRoundTrip|TestRedactHeadRepointsCursor|TestSupersedeAdvancesCursor|TestConcurrentUpdateSingleHead)$' -count=1 -v 2>&1 | tee invisible_latest.log
+          for want in TestBackfillLatestID \
+                      TestBackfillLatestID_RedactedHead \
+                      TestGetLatestByID \
+                      TestLatestIDRoundTrip \
+                      TestRedactHeadRepointsCursor \
+                      TestSupersedeAdvancesCursor \
+                      TestConcurrentUpdateSingleHead; do
+            grep -q -- "--- PASS: $want (" invisible_latest.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#201 latest_id coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' invisible_latest.log \
+            || { echo "::error::a latest_id test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+          # Recall ranking + memory update/expiry (aihub#236). The ranking order
+          # is decided by GREATEST(last_activated_at, created_at) in SQL, and the
+          # sweep's whole subtlety is which rows it declines to archive — neither
+          # is observable without executing the statements.
+          go test ./internal/domain/ -run '^(TestRecallRanking_CursorSkipsNoRows|TestRecallRanking_FreshNeverActivatedBeatsOlderActivated|TestRecallRanking_GreatestIgnoresNullArgument|TestUpdateMemory|TestUpdateMemory_CarriesActivationState|TestUpdateMemory_FreshEditWithStaleActivationSurvivesMinStrength|TestMemoryExpiredSweep_DoesNotArchiveFreshEditWithStaleActivation|TestMemoryExpiredSweep_StillArchivesGenuinelyDecayedMemory)$' -count=1 -v 2>&1 | tee invisible_ranking.log
+          for want in TestRecallRanking_CursorSkipsNoRows \
+                      TestRecallRanking_FreshNeverActivatedBeatsOlderActivated \
+                      TestRecallRanking_GreatestIgnoresNullArgument \
+                      TestUpdateMemory \
+                      TestUpdateMemory_CarriesActivationState \
+                      TestUpdateMemory_FreshEditWithStaleActivationSurvivesMinStrength \
+                      TestMemoryExpiredSweep_DoesNotArchiveFreshEditWithStaleActivation \
+                      TestMemoryExpiredSweep_StillArchivesGenuinelyDecayedMemory; do
+            grep -q -- "--- PASS: $want (" invisible_ranking.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#236 ranking/update coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' invisible_ranking.log \
+            || { echo "::error::a ranking/update test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+          # Step pause / stall (aihub#207) + the 0027 migration's own up/down.
+          # TestMigration0027_UpDown drops and restores run_attempts.pause_reason
+          # against the migrated schema, so it is meaningless without one.
+          go test ./internal/domain/ -run '^(TestPauseReasonOmittedWhenNil|TestPauseReasonSurfacedInReadyQueue|TestMigration0027_UpDown|TestRunUnblockDependentWI_StalledStaysBlocked)$' -count=1 -v 2>&1 | tee invisible_pause.log
+          for want in TestPauseReasonOmittedWhenNil \
+                      TestPauseReasonSurfacedInReadyQueue \
+                      TestMigration0027_UpDown \
+                      TestRunUnblockDependentWI_StalledStaysBlocked; do
+            grep -q -- "--- PASS: $want (" invisible_pause.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the pause/stall coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' invisible_pause.log \
+            || { echo "::error::a pause/stall test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+          # Lock conflict scan: resume-against-own-locks (aihub#207 Change 3),
+          # the cross-wi guard that stops a broken fix from letting real
+          # collisions through, and the project-scoped file_scope key (aihub#222).
+          # These were also the only two non-idempotent tests in the suite until
+          # aihub#303 widened testProject's reset — worth knowing if this group
+          # ever goes red on a re-used database.
+          go test ./internal/domain/ -run '^(TestResumeOwnLocks_NoSelfConflict|TestResumeOwnLocks_DifferentWIStillConflicts|TestCrossProjectSamePath_NoConflict|TestPredictConflicts_FileScopeProjectScoped)$' -count=1 -v 2>&1 | tee invisible_locks.log
+          for want in TestResumeOwnLocks_NoSelfConflict \
+                      TestResumeOwnLocks_DifferentWIStillConflicts \
+                      TestCrossProjectSamePath_NoConflict \
+                      TestPredictConflicts_FileScopeProjectScoped; do
+            grep -q -- "--- PASS: $want (" invisible_locks.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the lock-conflict coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' invisible_locks.log \
+            || { echo "::error::a lock-conflict test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+          # internal/server: the three routes_step_test.go cases outside the
+          # aihub#290 step's alternation — including the mandatory-record gate,
+          # whose entire point is that a step transition is REFUSED, which only a
+          # real transaction can show.
+          go test ./internal/server/ -run '^(TestHandleUpdateStep_ArtifactSummary|TestHandleUpdateStep_EscalatedStall|TestHandleUpdateStep_MandatoryRecordGate)$' -count=1 -v 2>&1 | tee invisible_step.log
+          for want in TestHandleUpdateStep_ArtifactSummary \
+                      TestHandleUpdateStep_EscalatedStall \
+                      TestHandleUpdateStep_MandatoryRecordGate; do
+            grep -q -- "--- PASS: $want (" invisible_step.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the routes_step coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' invisible_step.log \
+            || { echo "::error::a routes_step test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       - name: Launcher update-check regression suite
         run: bash plugins/polyforge/tests/launcher-update-check.test.sh

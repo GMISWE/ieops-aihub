@@ -31,15 +31,14 @@ package mcp_test
 // The DB must already be migrated (goose -dir internal/db/migrations ... up);
 // like setupLatestTestDB this test connects, it does not migrate.
 //
-// NOT YET WIRED INTO CI. .github/workflows/ci.yml already runs a Postgres
-// service and two DB-gated steps built exactly for this ("aihub#242
-// dependency-requeue DB tests", "aihub#241 CAS"), and this suite wants a third
-// of the same shape — `-run TestE2EWorkItemContentEcho -v`, then grep the log
-// for `--- PASS` per case and fail on any `--- SKIP`, because `go test` prints
-// ok and exits 0 when everything skips. That edit is not in this change because
-// ci.yml was held by another running work item (aihub#303) for the duration of
-// this one; it is called out in this work item's report rather than left as a
-// deferral pointing at nothing (the mistake aihub#280's header records).
+// WIRED INTO CI by aihub#303, which held ci.yml while this change was written:
+// the "aihub#281 wi-content echo E2E DB tests" step runs both cases with -v
+// against the job's Postgres service and asserts a `--- PASS` line per case
+// plus no `--- SKIP`, because `go test` prints ok and exits 0 when everything
+// skips. aihub#303 did not find this suite by reading the deferral note — its
+// new coverage gate computed the difference between the DB-gated tests in the
+// repo and the ones any `-run` in ci.yml names, and these two came out as the
+// only gap on the merge of the two branches.
 
 import (
 	"context"

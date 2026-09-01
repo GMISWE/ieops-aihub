@@ -1,241 +1,70 @@
 # pf-execute — native engine (Wi Agent main loop)
 
-> **Injected by the `PreToolUse(Skill)` router** (`hooks/pf-skill-router`) when the
-> `superpowers` plugin is **absent**. When superpowers IS enabled, the router instead
-> instructs you to delegate the **per-step implementation** to
-> `superpowers:subagent-driven-development` (TDD,
-> systematic-debugging, code-review, verification), while **this loop's scenario-step
-> iteration, step-status reporting, and wrap still run** — and you **stop before
-> `superpowers:finishing-a-development-branch`** (commit/PR/wrap/CI belong to polyforge —
-> see `_common/lifecycle.md`).
->
-> In BOTH branches the lifecycle scaffolding (step-status reporting protocol, ownership,
-> `.pf_*` hygiene, wrap) comes from the injected `_common/lifecycle.md`. This file is the
-> native execution engine: read the scenario step graph and drive each step.
+> Injected when `superpowers` is absent; bracket / ownership / ship / wrap come from the injected
+> `_common/lifecycle.md`. 📄 **`Read @@PLUGIN_ROOT@@/skills/pf-execute/references/engine-native-details.md`
+> before step 1** — startup commands, the `@include` rule, the rhs=true loop, older-binary
+> fallbacks. Hard 10,000-char budget (aihub#304).
 
-## Startup
+## Startup — 🔴 run the on-demand file §0 first
 
-1. Read the wi info:
-   ```
-   wi_info = pf_list_work_items(ids=[<current_wi_id>])
-   ```
+Six steps: read the wi, resolve `<workspace_root>/.repo/<scenario_name>/`, **pin the scenario
+SHA** into `.pf_meta.json`, resolve `{wi_type}.{project}.md` (falling back to `{wi_type}.md`),
+scan `^## Step: (\w+)\s*$` in document order, and expand each section's `@include`s at the pinned
+sha. **§0 has the exact commands and the `@include`/`level:` pair-parsing rule — `Read` it; the
+fallback chain and the pinning are easy to get subtly wrong.** `level: opus` on an include means
+dispatch that step with `model: opus`.
 
-   > Since aihub#280 `ids` is a real filter and `project` is correctly omitted —
-   > an id already names one wi. Before that, `ids` reached no forwarding table
-   > and no `project` was sent, so this call was a hard 400 and never ran.
-
-2. Resolve the scenario repo path (from .polyforge.yaml):
-   ```
-   scenario_path = <workspace_root>/.repo/<scenario_name>/
-   ```
-
-3. **SHA pinning**: read the scenario repo's current HEAD SHA and write it to `.pf_meta.json`
-   in the worktree root:
-   ```bash
-   sha = git -C <scenario_path> rev-parse HEAD
-   # write <worktree_root>/.pf_meta.json: {"scenario_sha": "<sha>", "started_at": "<ISO8601>"}
-   ```
-
-4. **Resolve the .md file** (using the pinned SHA, with a fallback chain):
-   ```
-   1. git show <sha>:{wi_type}.{project}.md   <- project-specific
-   2. git show <sha>:{wi_type}.md             <- generic fallback (warn and continue)
-   3. neither exists -> call pf_complete_attempt(failed), report and list the available .md files, stop
-   ```
-
-5. **Scan `## Step:` sections** (document order):
-   ```
-   scan by the regex ^## Step: (\w+)\s*$ (strict line start, ignore inside code fences)
-   produce an ordered step list: [(step_id, content), ...]
-   ```
-
-6. **Expand `@include` directives** (pair-parsing rule):
-
-   `@include:` and `level:` are a bound pair: `level:` must be the line immediately after
-   `@include:`, and its scope is only that include. Multiple includes each have their own
-   level (or no level).
-
-   ```
-   scan the section content line by line:
-   - on @include: <path>
-       -> read the next line; if it is "level: <value>" record the level, else level=null
-       -> expand via git show <sha>:<path> (if missing, call pf_complete_attempt(failed) and stop)
-       -> if there is a level, insert a line before the expanded content: "Review level: <value>"
-   - any other line: keep as-is
-   concatenate the expanded content with the remaining prose
-   ```
-
-   **level=opus special case**: pf-execute dispatches that step with `model: opus` (via the
-   Agent tool's model parameter).
-
----
-
-## `.pf_steps.json` convention
-
-Stored in the worktree root, a flat dict, last-write-wins per key:
-```json
-{"prepare_context": "analyzed 3 files", "code_change": "edited publish.go"}
-```
-Each step appends/updates its key on completion. The next step reads the whole thing as context.
-
-> Step-status reporting (the `pf_update_step` calls bracketing each step, heartbeat,
-> `step_attempt_id`) is the **lifecycle** concern documented in `_common/lifecycle.md` —
-> the loops below reference it. The mode is selected from the wi's `requires_human_session`
-> (`false` -> auto dispatch, `true` -> interactive).
-
----
+`.pf_steps.json` (worktree root): flat dict, last-write-wins per key; each step updates its key
+and the next reads the file.
 
 ## Execute (rhs=false, auto mode)
 
 ```python
-default_model = "sonnet"   # S1: superpowers-off consistency; per-step `level: opus` still overrides
+default_model = "sonnet"   # superpowers-off consistency; per-step `level: opus` overrides
 
-# Start the FIRST step only; every later step is started by the completion of the one
-# before it (see _common/lifecycle.md ## Bracket every step). No pf_get_step: the bracket
-# needs no version, and asking for one was a whole round-trip for a value the server
-# discarded (aihub#290).
-sa_id = new_ulid()                             # client-generated, for the completion history row
+sa_id = new_ulid()
 pf_update_step(work_item_id=<current>, step_id=sections[0].step_id, status="in_progress")
 
 for i, (step_id, content) in enumerate(sections):
     expanded = expand_includes(content, sha)
     model = "opus" if step_level(content) == "opus" else default_model
 
-    dispatch subagent(
-        model=model,
-        prompt=f"""
-You are executing step {step_id} of wi {wi_id}.
+    # subagent prompt: the step id + wi id, "read .pf_steps.json for prior context",
+    # the expanded instructions, and "append your one-line summary to .pf_steps.json,
+    # and pf_remember anything worth keeping".
+    dispatch subagent(model=model, prompt=...)
 
-Read .pf_steps.json in the worktree root for prior-step context (if any).
+    # long steps: pf_update_step(..., status="in_progress", heartbeat=true) every ~5 min
 
---- step instructions ---
-{expanded}
---- END ---
-
-When done, append this step's summary to .pf_steps.json: {{"step_id": "one-line summary"}}.
-If there are learnings worth keeping, call pf_remember to store them in aihub.
-""")
-
-    # during long steps: pf_update_step(..., status="in_progress", heartbeat=true) every ~5 min
-
-    # review step: check the REVIEW_RESULT marker
     if step_id.endswith("_review") or step_id in ("review", "code_review", "release_review"):
         result = parse_review_result(subagent_output)
         if result == "FAIL":
-            # next_step is NOT valid on a failure — the loop stops here anyway.
-            pf_update_step(work_item_id=<current>, step_id=step_id, status="failed",
-                           step_attempt_id=sa_id, error_type="review_fail")
-            pf_complete_attempt(work_item_id=<current>, status="failed",
-                                note="failed reason: review_fail at step " + step_id)
-            break   # stop the whole loop, skip the completed report below; output the review issues
+            # §0c, verbatim: pf_update_step(status="failed", step_attempt_id=sa_id,
+            # error_type="review_fail") AND THEN pf_complete_attempt(status="failed", note=...)
+            break     # both calls, in that order; then output the review issues
         elif result == "WARN":
             print the warning and continue
 
-    # report: this step completed AND the next one started — one call, not two.
-    # Omit next_step/next_step_attempt_id on the last step.
+    # complete THIS step and start the next in one call — exact signature in
+    # _common/lifecycle.md ## Bracket every step. Omit both next_* args on the last step.
     next_sa = new_ulid() if i + 1 < len(sections) else None
-    pf_update_step(work_item_id=<current>, step_id=step_id, status="completed",
-                   step_attempt_id=sa_id,
+    pf_update_step(..., step_id=step_id, status="completed", step_attempt_id=sa_id,
                    artifact_summary=read_json(".pf_steps.json").get(step_id, ""),
                    next_step=sections[i+1].step_id if next_sa else None,
                    next_step_attempt_id=next_sa)
     sa_id = next_sa
 
-# all steps done -> wrap + worktree cleanup (see _common/lifecycle.md ## Wrap & cleanup)
+# all steps done -> wrap + cleanup (_common/lifecycle.md ## Once per wi)
 ```
 
-> **Compatibility (server binary older than aihub#290).** Check what the tools publish:
-> - no `next_step` on `pf_update_step` → drop the two `next_*` arguments and start each step
->   with its own `pf_update_step(..., status="in_progress", step_attempt_id=...)` at the top
->   of the loop, as before;
-> - no `note` on `pf_complete_attempt` → emit
->   `pf_emit_event(event_type="note", payload={text: "failed reason: ..."})` **before** the
->   terminal call instead. Do not pass `note` to a tool that does not publish it: it is
->   accepted and ignored, and the state file is deleted immediately afterwards, so the
->   failure reason is lost with no error.
->
-> See the compatibility notes in `_common/lifecycle.md`.
-
----
+**`parse_review_result(output)`** = the LAST match of `<!-- REVIEW_RESULT: (PASS|WARN|FAIL) -->`;
+no marker → warn that the marker is missing and return `WARN`, never an auto-fail.
 
 ## Execute (rhs=true, interactive mode)
 
-```python
-# Same bracket as auto mode: start the first step, then complete-and-advance. No pf_get_step.
-sa_id = new_ulid()
-pf_update_step(work_item_id=<current>, step_id=sections[0].step_id, status="in_progress")
+Same bracket and completion call; you present each step to the user instead of dispatching.
+📄 **`Read` the on-demand file §1 before running interactively** — `skip` in particular must call
+**no** `pf_update_step` at all, and getting that wrong desyncs the server's `current_step`.
 
-for i, (step_id, content) in enumerate(sections):
-    expanded = expand_includes(content, sha)
-
-    output: f"## Step {step_id}\n\n{expanded}"
-
-    wait for user input:
-      "continue" / "done" / "ok"  -> fall through to the completed report below, then move to the next step
-      "skip"                      -> record in .pf_steps.json; **do NOT report this step**; continue to the
-                                     next step WITHOUT calling pf_update_step at all. The skipped
-                                     step stays in_progress and stays the server's current_step;
-                                     the next step you actually complete reports itself and
-                                     advances from there.
-      "fail"                      -> pf_update_step(step_id, status="failed", step_attempt_id=sa_id);
-                                     pf_complete_attempt(failed, note="failed reason: <user description>");
-                                     break (stop the whole loop)
-
-    if step_id.endswith("_review") or step_id in ("review", "code_review", "release_review"):
-        "PASS" / "continue"  -> fall through to the completed report below
-        "WARN <desc>"        -> record the warning, ask whether to continue; if yes, report completed as usual
-        "FAIL <desc>"        -> pf_update_step(step_id, status="failed", step_attempt_id=sa_id,
-                                error_type="review_fail");
-                                pf_complete_attempt(failed, note="failed reason: <desc>"); break
-
-    # only the "continue/done/ok" path (or review PASS / WARN-continue) reaches here:
-    # report this step completed AND start the next one, in one call.
-    next_sa = new_ulid() if i + 1 < len(sections) else None
-    pf_update_step(work_item_id=<current>, step_id=step_id, status="completed",
-                   step_attempt_id=sa_id,
-                   artifact_summary=read_json(".pf_steps.json").get(step_id, ""),
-                   next_step=sections[i+1].step_id if next_sa else None,
-                   next_step_attempt_id=next_sa)
-    sa_id = next_sa
-
-# all steps done -> wrap + worktree cleanup (see _common/lifecycle.md ## Wrap & cleanup)
-```
-
-> Same compatibility rule as auto mode, for BOTH new parameters: no `next_step` on
-> `pf_update_step` → drop the `next_*` arguments and start each step with its own
-> `status="in_progress"` call; no `note` on `pf_complete_attempt` → emit the note with a
-> separate `pf_emit_event` **before** the terminal call.
-
----
-
-## parse_review_result
-
-```python
-def parse_review_result(output):
-    import re
-    matches = re.findall(r'<!-- REVIEW_RESULT: (PASS|WARN|FAIL) -->', output)
-    if not matches:
-        # no marker = the subagent did not output the required format; treat as WARN (visible issue, not auto-fail)
-        print("⚠️ review step did not output a REVIEW_RESULT marker; treating as WARN")
-        return "WARN"
-    return matches[-1]
-```
-
----
-
-## Output three-segment format (at startup)
-
-```
-## Result
-Started executing <slug>, N steps total.
-
-## Status
-| wi     | <slug>     |
-| steps  | N steps    |
-| mode   | auto/human |
-| status | running    |
-
-## Next steps
-- Running; monitor with /pf-status
-- Pause with /pf-stop --pause
-```
+At startup report three-segment: Result = `Started executing <slug>, N steps total.`; Status =
+wi / steps / mode / status; Next steps = `/pf-status` to monitor, `/pf-stop --pause` to pause.

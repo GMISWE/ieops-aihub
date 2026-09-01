@@ -288,7 +288,7 @@ func (s *Server) registerMemoryTools() {
 		if wiID == "" {
 			return errResult(fmt.Errorf("work_item_id is required for credential injection"))
 		}
-		sf, err := config.ReadStateFile(wiID)
+		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}

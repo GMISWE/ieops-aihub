@@ -284,7 +284,7 @@ func (s *Server) registerCodingTools() {
 			return errResult(fmt.Errorf("pr_body is required"))
 		}
 
-		sf, err := config.ReadStateFile(wiID)
+		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}

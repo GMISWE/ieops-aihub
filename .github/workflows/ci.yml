@@ -129,7 +129,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 85
+            -min-gated 86
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
@@ -302,6 +302,14 @@ jobs:
       # drives the real hook per routed skill in both engine branches and runs
       # under the "Unit tests" step above, with no -run filter to fall out of.
       # It is Go rather than shell precisely so it cannot become advisory.
+      # UPDATE (aihub#305): launcher-channel-url.test.sh is wired below too, and
+      # it is the first gate here that touches the network. That was a
+      # deliberate trade: the defect it guards (the default download channel
+      # pointing at a branch that was never published) is invisible to every
+      # hermetic check, because stubbing curl makes any URL succeed. The suite
+      # keeps its own positive control so a token or network problem reports as
+      # a SKIP rather than masquerading as a missing branch, and the step below
+      # then fails on that SKIP rather than passing quietly.
       # aihub#249: GET /v1/memories previously parsed only `top_k` (a `?limit=N`
       # caller was silently ignored) and RecallResponse carried no `total`; and
       # GET /v1/memories/:id did not exist at all. These run against the
@@ -330,6 +338,36 @@ jobs:
           done
           ! grep -q -- '--- SKIP' recall_getbyid.log \
             || { echo "::error::an aihub#249 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#309: handleRecall carried a page-size cap of its own (top_k > 10 ->
+      # 10) three lines above its only call to domain.Recall, whose default page
+      # size is 20. So asking for a bigger page returned FEWER items than asking
+      # for nothing — measured against production 2026-09-01, one filter,
+      # total=220 throughout: top_k=30 -> 10 items, top_k unset -> 20, top_k=20 ->
+      # 10, top_k=300 -> 10, with no field in the response saying a clamp had
+      # happened. The cap also made Recall's 200 ceiling unreachable.
+      #
+      # This is its own step rather than another name in the aihub#249 -run above
+      # for a reason worth keeping: the aihub#249 test seeds 7 rows, so every page
+      # size >= 7 returns 7 and its `limit=50` case stayed GREEN for the whole life
+      # of the inversion (measured — the cap was restored and that test still
+      # passed). Coverage of a topic is not coverage of a contract.
+      #
+      # The page-size resolution itself, including the negative control that shows
+      # the measurement goes red on the pre-change build, is pure and runs on the
+      # "Unit tests" step above: internal/domain/memory_topk_test.go
+      # (TestNormalizeRecallTopK*). What needs a database is the COMPOSITION — a
+      # cap in the handler is invisible to a domain test — so only that hop is here.
+      - name: aihub#309 recall top_k inversion DB test
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^(TestHandleRecall_BiggerPageIsNotASmallerPage)$' -count=1 -v 2>&1 | tee recall_topk_inversion.log
+          grep -q -- "--- PASS: TestHandleRecall_BiggerPageIsNotASmallerPage (" recall_topk_inversion.log \
+            || { echo "::error::TestHandleRecall_BiggerPageIsNotASmallerPage did not run; the aihub#309 handler-to-domain page-size hop is not covered"; exit 1; }
+          ! grep -q -- '--- SKIP' recall_topk_inversion.log \
+            || { echo "::error::TestHandleRecall_BiggerPageIsNotASmallerPage SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#239: two consistency gaps deferred from aihub#236's review. (1) The
       # supersede path through Remember (pf_save_artifact, or any POST
@@ -758,6 +796,54 @@ jobs:
 
       - name: Launcher update-check regression suite
         run: bash plugins/polyforge/tests/launcher-update-check.test.sh
+
+      # aihub#305: the launcher's default channel pointed at `bins-stable`, a
+      # branch publish-bins.yml has never created. Every gate that existed
+      # asserted on the resolved channel STRING — launcher-bash32 even encoded
+      # `stable` as the expected answer — and launcher-update-check stubs curl,
+      # so no URL is ever real there. Nothing anywhere asked whether the branch
+      # the launcher downloads from exists, which is why a 404 default shipped
+      # and then sat silently freezing machines on their old binaries.
+      #
+      # This suite closes that specific gap, so it is wired on purpose rather
+      # than left advisory like launcher-bash32 (see the note further up):
+      #   part 1 is hermetic and reads the URL out of the argv the launcher
+      #          hands to curl, so changing the URL template turns it red;
+      #   part 2 actually fetches those URLs. GH_TOKEN is needed because the
+      #          repo is private and raw.githubusercontent.com answers 404 —
+      #          not 401 — for an unauthenticated read, so without a working
+      #          token "missing branch" and "bad token" are indistinguishable.
+      #          The suite carries its own positive control for exactly that,
+      #          and downgrades to a loud SKIP if the control does not pass.
+      #
+      # The assertions deliberately do not trust the exit code, and they name
+      # the part-2 lines specifically: a suite that skipped its only networked
+      # check also exits 0, and that is the state this gate exists to prevent.
+      - name: aihub#305 launcher channel/url gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          bash plugins/polyforge/tests/launcher-channel-url.test.sh 2>&1 | tee channel_gate.log
+          for want in "PASS: no-config -> channel 'dev'" \
+                      "PASS: no-binary-section -> channel 'dev'" \
+                      "PASS: channel-stable -> channel 'dev'" \
+                      "PASS: channel-garbage -> channel 'dev'" \
+                      "PASS: channel-stable -> binary url on bins-dev" \
+                      "PASS: channel-stable -> warns and names the channel it used" \
+                      "PASS: channel-dev -> silent, as a valid config must be" \
+                      "PASS: negative control" \
+                      "PASS: every url the launcher resolves is published and fetchable"; do
+            grep -qF -- "$want" channel_gate.log \
+              || { echo "::error::launcher channel/url gate never reported \"$want\" — that check did not run"; exit 1; }
+          done
+          ! grep -q '^SKIP:' channel_gate.log \
+            || { echo "::error::the networked half of the launcher channel/url gate SKIPped — GH_TOKEN is not reaching raw.githubusercontent.com, so the one assertion that can tell a published channel from a 404 did not run"; exit 1; }
+          ! grep -q '^FAIL:' channel_gate.log \
+            || { echo "::error::launcher channel/url gate reported a FAIL"; exit 1; }
+          n=$(grep -c '^PASS: ' channel_gate.log)
+          [ "$n" -ge 22 ] \
+            || { echo "::error::launcher channel/url gate reported only $n PASSes (floor 22) — checks have gone missing"; exit 1; }
 
       # aihub#293: wire the two using-polyforge gates in. Until now ci.yml ran
       # exactly one suite out of plugins/polyforge/tests/ (the launcher one

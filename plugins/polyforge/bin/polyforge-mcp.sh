@@ -2,7 +2,9 @@
 # polyforge-mcp.sh — MCP server entrypoint
 # Auto-downloads the polyforge binary on first use.
 # Checks for updates once per day and auto-updates if a newer version exists.
-# ~/.polyforge/config.toml [binary] channel controls stable/dev.
+# ~/.polyforge/config.toml [binary] channel selects the bins-<channel> branch to
+# download from. `dev` is the only channel that is published, and the default —
+# see the case statement below for why there is no longer a `stable`.
 set -euo pipefail
 
 PLUGIN_DIR="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -10,9 +12,9 @@ INSTALL_PATH="$PLUGIN_DIR/bin/polyforge"
 LAST_CHECK_FILE="$HOME/.polyforge/.last_binary_check"
 CONFIG="$HOME/.polyforge/config.toml"
 
-# Read [binary] channel from config.toml; fall back to "stable".
+# Read [binary] channel from config.toml; fall back to "dev".
 # Pure awk: no python3 dependency and no heredoc-in-$() (both break macOS bash 3.2).
-CHANNEL="stable"
+CHANNEL="dev"
 if [ -f "$CONFIG" ]; then
   _ch=$(awk -F= '
     /^[[:space:]]*\[/ { in_sec = ($0 ~ /\[binary\]/) }
@@ -23,9 +25,32 @@ if [ -f "$CONFIG" ]; then
   [ -n "$_ch" ] && CHANNEL="$_ch"
 fi
 
+# `dev` is the ONLY channel, and `stable` is not a channel name any more
+# (aihub#305). It used to be the default here and the path docs taught, but
+# bins-stable was never published: publish-bins.yml creates it only on a `v*`
+# tag push, the repo's single tag predates that workflow by a day, and no tag
+# has been pushed since. A default-configured machine therefore fetched a 404 —
+# and if it already had a binary, check_for_update just got an empty `latest`,
+# printed one line on the MCP launcher's stderr (which the client UI does not
+# surface) and returned 0, leaving that machine frozen on its old binary,
+# retrying and failing every 24h, invisibly. Since every fix to internal/mcp/**
+# and internal/cli/** ships as this binary, "frozen" meant reaching nobody.
+#
+# There is no tagged release process today, so a channel named "stable" was a
+# name for something that does not exist; naming it back into existence is
+# tracked separately. `stable` is kept ONLY as a legacy config value, mapped
+# onto dev with a loud message, so that every already-broken machine recovers by
+# updating the plugin and does not have to be told to edit its config.toml.
 case "$CHANNEL" in
-  stable|dev) ;;
-  *) echo "polyforge: unknown channel '${CHANNEL}' in config.toml; defaulting to 'stable'" >&2; CHANNEL="stable" ;;
+  dev) ;;
+  stable)
+    echo "polyforge: channel 'stable' no longer exists — bins-stable was never published (aihub#305). Using 'dev' instead. Delete the [binary] section from ~/.polyforge/config.toml, or set channel = \"dev\", to silence this." >&2
+    CHANNEL="dev"
+    ;;
+  *)
+    echo "polyforge: unknown channel '${CHANNEL}' in config.toml; defaulting to 'dev'" >&2
+    CHANNEL="dev"
+    ;;
 esac
 
 download_binary() {

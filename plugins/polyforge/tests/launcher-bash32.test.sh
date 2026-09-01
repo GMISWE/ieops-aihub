@@ -59,10 +59,18 @@ check() { # label  config-body(printf %b)  expected
   rm -rf "$home"
 }
 
-check 'channel="dev"'    '[binary]\nchannel = "dev"\n'   dev
-check "channel='dev'"    "[binary]\nchannel = 'dev'\n"   dev
-check 'channel=stable'   '[binary]\nchannel = stable\n'   stable
-check 'unknown->stable'  '[binary]\nchannel = "wat"\n'    stable
+# aihub#305: `dev` is the only published channel, so every input resolves to it —
+# a bare default, the legacy `stable` value, and an unrecognised value alike.
+# These cases exist to prove the awk/case parsing still behaves under bash 3.2;
+# they say nothing about whether the resolved URL exists. That is
+# launcher-channel-url.test.sh's job, and the distinction is what let the
+# original defect hide: this file was green with `stable` as the expected answer
+# while bins-stable had never been published.
+check 'channel="dev"'      '[binary]\nchannel = "dev"\n'                    dev
+check "channel='dev'"      "[binary]\nchannel = 'dev'\n"                    dev
+check 'legacy stable->dev' '[binary]\nchannel = stable\n'                   dev
+check 'unknown->dev'       '[binary]\nchannel = "wat"\n'                    dev
+check 'no [binary]->dev'   'machine_id = "x"\n[auth]\napi_key = "k"\n'      dev
 rm -f "$probe"
 
 if [ "$fails" = 0 ]; then

@@ -1597,9 +1597,17 @@ func gitUniqueBranchMatch(srcPath, refPrefix, pattern string) string {
 	return strings.TrimPrefix(matches[0], refPrefix)
 }
 
-// resolveClaimBranch finds the branch this claim should attach to, and reports
-// whether it has to be materialised from origin first. It returns ("", false)
-// when no candidate exists, which the caller turns into "create it".
+// resolveClaimBranch finds the branch this claim should attach to, or "" when
+// there is none — which the caller turns into "create it".
+//
+// It deliberately does NOT report where the branch was found. An earlier version
+// returned a fromRemote bool alongside the name, and that flag could be stale by
+// the time it was used: with the local glob ambiguous (two matches, correctly
+// declined) but the remote glob unique, tier 3 returned fromRemote=true for a
+// branch that also existed locally, `worktree add -b` failed with "already
+// exists", and the repo got NO worktree at all. Whether a local head exists is
+// now decided inside attachWorktree, immediately before the command that cares,
+// from the only authority on the question.
 //
 // ⚠️ It runs on EVERY claim, fresh and resume alike, and the mode is
 // deliberately not an input. The pre-aihub#322 code was NAME-STABLE — every
@@ -1615,51 +1623,86 @@ func gitUniqueBranchMatch(srcPath, refPrefix, pattern string) string {
 // the real work sat on the legacy branch. Deciding from what EXISTS rather than
 // from what the caller called the claim removes the whole class.
 //
-// The candidates, in order:
+// EXACT names are tried first and exhaustively, then the one glob. An exact
+// name cannot over-match, so there is no reason to reach the heuristic while an
+// exact candidate is still untried.
 //
 //  1. n.Branch — the name this claim would compute today.
-//  2. n.Legacy — polyforge/<ulid8>. THE COMPATIBILITY SHIM. Every work item
-//     claimed before aihub#322 has a branch under that name (.repo/aihub alone
-//     carries 87 local and 125 remote); without this tier a claim of one of
-//     them, with its worktree directory gone so the os.Stat reuse in the claim
-//     handler does not fire, either fails outright (resume) or silently starts
-//     over on a new branch (fresh).
-//  3. a unique <Stem>-* match. The new name embeds the GOAL, which is mutable:
-//     edit the goal between claim and resume and tier 1 misses a branch that is
-//     unambiguously this work item's, because <project>-<seq> identifies the
-//     work item on its own. This tier is the reason the goal change introduced
-//     by aihub#322 cannot orphan a branch. It runs only when Stem carries both
-//     components — see the field comment for why a half stem is a set, not an
-//     identity.
+//  2. n.Stem   — the bare polyforge/<project>-<seq>.
+//  3. n.Legacy — polyforge/<ulid8>, the pre-aihub#322 name.
+//  4. a unique n.Stem+"-*" match.
+//
+// Why n.Stem is an EXACT candidate and not only a glob prefix (review finding
+// 1): the bare stem is a name this scheme really produces — it is degradation
+// row 1, "the goal reduces to nothing", and goals here are routinely Chinese, so
+// it is common rather than exotic. Branches of exactly that shape already exist
+// in the live workspace (polyforge/aihub-21, -29, -47, -55, -58,
+// polyforge/ieops-210, -390, -549, -577). The glob "<Stem>-*" cannot match the
+// bare "<Stem>": add any latin word to such a work item's goal and tier 1 misses
+// the new name, tier 4 misses the old one, and the claim silently starts over on
+// origin/main with the previous commits abandoned. The mirror direction
+// (desc → bare stem) always worked, which is why only this one direction was
+// broken and nothing noticed.
+//
+// Ordering, and why: Branch first because it is the most specific name and the
+// one a healthy claim wants. Stem before Legacy because both can only be this
+// work item's, and the stem belongs to the CURRENT naming scheme while the
+// legacy name belongs to the one we left — the same reason Branch outranks
+// Legacy. When Branch == Stem (a goal that reduced to nothing) the duplicate is
+// skipped rather than probed twice. The glob stays last, after every exact
+// candidate, and runs only when Stem carries both components — see the field
+// comment for why a half stem is a set, not an identity.
 //
 // Each candidate is looked for locally first and then as origin/<name>: a local
 // head deleted while the remote branch survives (a cleanup pass, a fresh clone)
 // must not be re-created from origin/main, which would orphan the pushed work.
-func resolveClaimBranch(srcPath string, n claimBranchNames) (string, bool) {
+//
+// KNOWN, NOT FIXED HERE: the name embeds two mutable fields, so a project rename
+// orphans a branch the same way a goal edit would if tier 4 did not exist, and
+// two repos of one project can end up on differently-named branches for the same
+// claim. Both are inherent to deriving a name from mutable data; neither loses
+// commits, because the branch that holds them still exists under its old name.
+func resolveClaimBranch(srcPath string, n claimBranchNames) string {
 	const localRefs, remoteRefs = "refs/heads/", "refs/remotes/origin/"
-	for _, cand := range []string{n.Branch, n.Legacy} {
-		if cand == "" {
+
+	tried := map[string]bool{"": true}
+	for _, cand := range []string{n.Branch, n.Stem, n.Legacy} {
+		if tried[cand] {
 			continue
 		}
-		if gitRefExists(srcPath, localRefs+cand) {
-			return cand, false
-		}
-		if gitRefExists(srcPath, remoteRefs+cand) {
-			return cand, true
+		tried[cand] = true
+		if gitRefExists(srcPath, localRefs+cand) || gitRefExists(srcPath, remoteRefs+cand) {
+			return cand
 		}
 	}
 
-	// Tier 3: the goal changed since the claim that created the branch.
+	// Last tier: the goal changed since the claim that created the branch.
 	if n.Stem == "" {
-		return "", false
+		return ""
 	}
 	if m := gitUniqueBranchMatch(srcPath, localRefs, n.Stem+"-*"); m != "" {
-		return m, false
+		return m
 	}
-	if m := gitUniqueBranchMatch(srcPath, remoteRefs, n.Stem+"-*"); m != "" {
-		return m, true
+	return gitUniqueBranchMatch(srcPath, remoteRefs, n.Stem+"-*")
+}
+
+// attachWorktree puts an EXISTING branch into wtPath.
+//
+// Where the branch lives is decided here rather than carried in from the
+// resolver, because this is the last moment before the command runs and
+// refs/heads is the only authority on the question. A local head is checked out
+// directly; otherwise the branch is materialised from origin. The "already
+// exists" retry closes the remaining race — a concurrent claim, or a ref the
+// resolver could not see — for which the alternative is no worktree at all.
+func attachWorktree(srcPath, wtPath, branch string) error {
+	if gitRefExists(srcPath, "refs/heads/"+branch) {
+		return runGit(srcPath, "worktree", "add", wtPath, branch)
 	}
-	return "", false
+	err := runGit(srcPath, "worktree", "add", "-b", branch, wtPath, "origin/"+branch)
+	if err != nil && strings.Contains(err.Error(), "already exists") {
+		return runGit(srcPath, "worktree", "add", wtPath, branch)
+	}
+	return err
 }
 
 // claimFetchTimeout bounds the ONE network call on this path.
@@ -1672,7 +1715,10 @@ func resolveClaimBranch(srcPath string, n claimBranchNames) (string, bool) {
 // bounded an unbounded upstream call for the same reason.
 //
 // A var, not a const, solely so TestAddClaimWorktree_FetchIsBounded can shorten
-// it; nothing outside tests assigns to it.
+// it; nothing outside tests assigns to it. ⚠️ That makes it a mutated package
+// global, which is safe today only because no test in internal/mcp calls
+// t.Parallel() — verified, not assumed. Whoever adds the first t.Parallel() here
+// owns turning this into an explicit parameter or a per-call option.
 var claimFetchTimeout = 90 * time.Second
 
 // addClaimWorktree materialises wtPath as a git worktree of srcPath.
@@ -1692,11 +1738,8 @@ func addClaimWorktree(ctx context.Context, srcPath, wtPath string, n claimBranch
 	if n.Branch == "" {
 		return fmt.Errorf("empty branch name")
 	}
-	if existing, fromRemote := resolveClaimBranch(srcPath, n); existing != "" {
-		if fromRemote {
-			return runGit(srcPath, "worktree", "add", "-b", existing, wtPath, "origin/"+existing)
-		}
-		return runGit(srcPath, "worktree", "add", wtPath, existing)
+	if existing := resolveClaimBranch(srcPath, n); existing != "" {
+		return attachWorktree(srcPath, wtPath, existing)
 	}
 	// Nothing to attach to: a genuinely new work item, or one whose branch was
 	// deleted. Create it rather than failing and leaving the repo with no

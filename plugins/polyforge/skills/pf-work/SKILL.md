@@ -368,21 +368,42 @@ one repo may be listed under two projects in `.polyforge.yaml`.
 ### Which branch a claim attaches to
 
 Branches created before plugin 1.1.18 are named `polyforge/<ulid8>` — the last 8
-characters of the wi id. **They keep those names.** So every claim first looks
-for a branch to attach to, and creates one only when nothing matches:
+characters of the wi id. **They keep those names.** And because the name above is
+derived from the goal, which is editable, the name a claim computes today need
+not be the name the branch was created under. So every claim first looks for a
+branch to attach to, and creates one only when nothing matches.
+
+**The lookup must be able to find every name in the table above**, because those
+are the names this scheme creates. Exact names are tried first and exhaustively;
+one glob comes last:
 
 1. the current name, `polyforge/<project>-<seq>-<kebab goal>`;
-2. the legacy `polyforge/<ulid8>`;
-3. any **single** branch matching `polyforge/<project>-<seq>-*` — this is what
-   covers a goal edited after the claim, since the name embeds the goal. Two
-   matches means the goal was edited twice, and the lookup declines rather than
-   guess. Skipped entirely unless *both* `<project>` and `<seq>` survived: half a
-   stem is not an identity, it is a glob over other people's branches.
+2. the bare `polyforge/<project>-<seq>` — table row 2, which a Chinese-only goal
+   produces, and which is common rather than exotic;
+3. the legacy `polyforge/<ulid8>`;
+4. any **single** branch matching `polyforge/<project>-<seq>-*`. This covers a
+   goal edited after the claim. Note it does **not** match the bare
+   `polyforge/<project>-<seq>` — a glob with a trailing `-*` never can — which is
+   exactly why step 2 exists as its own exact lookup. Two matches means the goal
+   was edited twice, and the lookup declines rather than guess. Skipped entirely
+   unless *both* `<project>` and `<seq>` survived: half a stem is not an identity,
+   it is a glob over other people's branches.
 
-Each of the three is looked for as a local branch **and then as
-`origin/<name>`**, so a local head deleted by a cleanup pass or missing from a
-fresh clone does not cause pushed work to be orphaned by a new branch off
-`origin/main`.
+Each of the four is looked for as a local branch **and then as `origin/<name>`**,
+so a local head deleted by a cleanup pass or missing from a fresh clone does not
+cause pushed work to be orphaned by a new branch off `origin/main`. Whether the
+local branch exists is re-checked immediately before the worktree is created, so
+a branch found via `origin/` that also exists locally is checked out rather than
+re-created.
+
+Mapping the table onto the steps, so the two sections cannot drift apart: row 1
+→ step 1, row 2 → step 2, row 5 (`polyforge/<ulid8>`) → step 3. Rows 3 and 4
+(`polyforge/<project>` and `polyforge/<seq>`) are reached by step 1 only, since
+with one component missing that degraded form *is* the name computed today —
+and step 4 is skipped for them, so for those two rows alone a goal edited after
+the claim is **not** recoverable and the claim starts a new branch. That is the
+accepted cost of a work item whose project or seq contains no `[a-z0-9]` at all;
+the earlier branch still exists under its own name and nothing is lost from it.
 
 ⚠️ This applies on **every** claim — fresh, resume and force takeover alike. It
 is decided from what exists in the clone, never from the `mode` argument. Modes

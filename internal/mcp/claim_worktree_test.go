@@ -262,6 +262,95 @@ func TestAddClaimWorktree_MatchesStemWhenGoalChanged(t *testing.T) {
 	assertFileInWorktree(t, r.wtPath(), "original-work.txt")
 }
 
+// TestAddClaimWorktree_AttachesToABareStemBranch is review finding 3.1: the
+// glob cannot match the name the scheme itself produces.
+//
+// Degradation row 1 is "the goal has no [a-z0-9] → polyforge/<project>-<seq>",
+// and goals in this workspace are routinely Chinese, so the bare stem is a
+// common name, not an exotic one — polyforge/aihub-21, -29, -47, -55, -58 and
+// polyforge/ieops-210, -390, -549, -577 all exist in the live workspace today.
+// Add any latin word to such a work item's goal and:
+//
+//	tier 1 polyforge/aihub-322-gateway-timeout-fix  → miss (new name)
+//	tier 3 polyforge/<ulid8>                        → miss (never had one)
+//	tier 4 polyforge/aihub-322-*                    → DOES NOT MATCH polyforge/aihub-322
+//
+// so the claim created a virgin branch and abandoned the commits. The mirror
+// direction, desc → bare stem, always worked, which is exactly why
+// MatchesStemWhenGoalChanged stayed green over this: it only exercises
+// desc → desc.
+//
+// MUTANT: drop n.Stem from the exact-candidate loop in resolveClaimBranch. The
+// branch assertion and the marker assertion both go red.
+func TestAddClaimWorktree_AttachesToABareStemBranch(t *testing.T) {
+	r := newClaimRepo(t)
+
+	// What the first claim produced, under a Chinese-only goal.
+	atClaim := newClaimBranchNames("aihub", "322", "修复网关超时", "SosL0kmU")
+	if atClaim.Branch != "polyforge/aihub-322" {
+		t.Fatalf("fixture: a Chinese-only goal derived %q, want the bare stem polyforge/aihub-322", atClaim.Branch)
+	}
+	r.branchWithMarker(t, atClaim.Branch, "original-work.txt")
+
+	// The goal is edited to add latin text; the name moves off the bare stem.
+	later := newClaimBranchNames("aihub", "322", "gateway timeout fix", "SosL0kmU")
+	if later.Branch == atClaim.Branch {
+		t.Fatalf("fixture is not exercising anything: both goals derive %q", atClaim.Branch)
+	}
+	// State the glob's blind spot as an assertion rather than as a claim in a
+	// comment: if git ever made "<stem>-*" match the bare stem, this test would
+	// pass for a reason that has nothing to do with the fix.
+	if m := gitUniqueBranchMatch(r.src, "refs/heads/", later.Stem+"-*"); m != "" {
+		t.Fatalf("the glob %q matched %q — this test no longer isolates the exact-candidate tier", later.Stem+"-*", m)
+	}
+
+	if err := r.add(t, later); err != nil {
+		t.Fatalf("addClaimWorktree: %v", err)
+	}
+	if got := checkedOutBranch(t, r.wtPath()); got != atClaim.Branch {
+		t.Errorf("worktree is on %q, want the bare-stem branch %q the first claim created", got, atClaim.Branch)
+	}
+	assertFileInWorktree(t, r.wtPath(), "original-work.txt")
+}
+
+// TestAddClaimWorktree_RemoteUniqueStemMatchAttachesLocally is review finding
+// 3.2, which was a data-availability bug rather than a data-loss one: the repo
+// ended up with NO worktree.
+//
+// Two local branches under the stem make the local glob decline, correctly. The
+// remote glob then finds one — the pushed one, which is evidence about which of
+// the two holds the work, not a guess — and the old code returned it flagged
+// "from remote". `worktree add -b` on a branch that also exists locally fails
+// with "already exists", that early return had no fallback (unlike the create
+// path twenty lines below), and the handler logged one stderr line and moved on.
+//
+// The fix drops the flag entirely: attachWorktree asks refs/heads at the moment
+// it matters. MUTANT: reinstate the flag, i.e. have this path run
+// `worktree add -b <m> <wt> origin/<m>` unconditionally — addClaimWorktree then
+// returns an "already exists" error and no worktree is created, so both the
+// error check and the branch assertion go red.
+func TestAddClaimWorktree_RemoteUniqueStemMatchAttachesLocally(t *testing.T) {
+	r := newClaimRepo(t)
+	const pushed = "polyforge/aihub-322-first-goal"
+	r.branchWithMarker(t, pushed, "first.txt")
+	r.branchWithMarker(t, "polyforge/aihub-322-second-goal", "second.txt")
+	mustGit(t, r.src, "push", "-q", "origin", pushed)
+
+	// A ulid8 with no branch anywhere, so the legacy tier cannot rescue this.
+	names := newClaimBranchNames("aihub", "322", "a third goal entirely", "ZZZZZZZZ")
+	if r.hasLocalBranch(t, names.Legacy) || r.hasLocalBranch(t, names.Stem) {
+		t.Fatal("fixture: an exact candidate exists, so the glob tier is not what is under test")
+	}
+
+	if err := r.add(t, names); err != nil {
+		t.Fatalf("addClaimWorktree: %v — a remote-unique match must attach to the local head, not fail the repo out of a worktree", err)
+	}
+	if got := checkedOutBranch(t, r.wtPath()); got != pushed {
+		t.Errorf("worktree is on %q, want the one branch of the two that was pushed, %q", got, pushed)
+	}
+	assertFileInWorktree(t, r.wtPath(), "first.txt")
+}
+
 // TestAddClaimWorktree_IgnoresAmbiguousStemMatches: two branches under the same
 // stem mean the goal was edited twice, and picking either would be a guess. The
 // stem tier must decline; the legacy tier still applies.
@@ -486,16 +575,35 @@ func TestAddClaimWorktree_FetchIsBounded(t *testing.T) {
 	// is the one taken.
 	names := newClaimBranchNames("aihub", "322", "readable task branch names", "SosL0kmU")
 
+	// Run it off the test goroutine and race it against a timer. Calling it
+	// inline would make the failure mode of this test a HANG: the package would
+	// sit until go test's own 10-minute panic, and in this repo a hang gets
+	// attributed to a broken harness rather than to the bug it just caught. A
+	// mutant has to produce a FAIL, promptly, with a sentence saying what broke.
+	const hangBudget = 20 * time.Second
+	type outcome struct {
+		err     error
+		elapsed time.Duration
+	}
+	done := make(chan outcome, 1) // buffered: the goroutine must not block if we gave up
 	start := time.Now()
-	addErr := addClaimWorktree(context.Background(), r.src, r.wtPath(), names)
-	elapsed := time.Since(start)
+	go func() {
+		e := addClaimWorktree(context.Background(), r.src, r.wtPath(), names)
+		done <- outcome{e, time.Since(start)}
+	}()
 
+	var got outcome
+	select {
+	case got = <-done:
+	case <-time.After(hangBudget):
+		t.Fatalf("addClaimWorktree had not returned after %v against a %v fetch timeout — the fetch is not bounded",
+			hangBudget, claimFetchTimeout)
+	}
+
+	addErr, elapsed := got.err, got.elapsed
 	if elapsed < claimFetchTimeout {
 		t.Errorf("returned in %v, before the %v timeout could have fired — the fetch failed for some other reason and this test proves nothing about the bound",
 			elapsed, claimFetchTimeout)
-	}
-	if elapsed > 20*time.Second {
-		t.Errorf("took %v against a %v timeout — the fetch is not bounded", elapsed, claimFetchTimeout)
 	}
 	// The fetch failing is non-fatal: the worktree must still be created, off the
 	// stale local origin/main, rather than the claim losing its worktree because

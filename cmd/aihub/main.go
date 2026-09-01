@@ -68,7 +68,18 @@ func main() {
 		domain.InitEmbeddingProvider(p)
 	}
 
-	// GC background scheduler: runs all sweeps every 60s.
+	// GC background scheduler: ticks every 60s and runs the sweeps that are DUE.
+	//
+	// RunDue, not RunAll. This ticker used to call RunAll, which runs all eight
+	// sweeps unconditionally, so the two sweeps documented as "(daily)" ran 1,440
+	// times a day — and since both of them EMIT an agent_events row rather than
+	// mutating one, every one of those runs left a duplicate. That is aihub#266:
+	// ~105,000 rows/day for one project, 111,221 on a single work item.
+	//
+	// The per-sweep periods live in domain.gcSweepTable so that the six sweeps
+	// this tick genuinely drives keep their cadence; the tick interval stays here
+	// because it is this loop's property, and the table says "every tick" rather
+	// than naming 60 seconds a second time.
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
@@ -77,7 +88,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				results := domain.RunAll(context.Background(), pool)
+				results := domain.RunDue(context.Background(), pool)
 				for _, r := range results {
 					// aihub#268: a sweep that failed reports Affected == 0, so the
 					// Affected==0 filter below was silently discarding every sweep

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -22,6 +23,21 @@ const (
 	gcLockPartitionCreate   = int64(2006)
 	gcLockNeedsHumanAging   = int64(2007)
 	gcLockUnclassifiedAlert = int64(2008)
+)
+
+// Sweep type names. Each sweep reports its own name in GCResult.SweepType and
+// gcSweepTable keys the run schedule on the same constant, so the name an
+// operator reads in a `gc: <name> affected=N` line and the name the schedule
+// throttles cannot drift apart.
+const (
+	sweepOrphanLockCleanup      = "orphan_lock_cleanup"
+	sweepMemoryExpiredArchive   = "memory_expired_archive"
+	sweepMethodologyExpiry      = "methodology_expiry_archive"
+	sweepEventPayloadTruncation = "event_payload_truncation"
+	sweepUnblockDependentWI     = "unblock_dependent_wi"
+	sweepPartitionCreate        = "partition_create"
+	sweepNeedsHumanSessionAging = "needs_human_session_aging"
+	sweepUnclassifiedWIAlert    = "unclassified_wi_alert"
 )
 
 // GCResult summarizes what a single GC sweep did.
@@ -75,7 +91,7 @@ const orphanLockSweepSQL = `
 // RunOrphanLockSweep removes resource_locks whose owner_attempt_id points to an
 // attempt that is neither running nor paused (i.e. genuinely orphaned).
 func RunOrphanLockSweep(ctx context.Context, pool *pgxpool.Pool) GCResult {
-	result := GCResult{SweepType: "orphan_lock_cleanup"}
+	result := GCResult{SweepType: sweepOrphanLockCleanup}
 	acquired, release, err := tryAdvisoryLock(ctx, pool, gcLockOrphanLocks)
 	if err != nil {
 		result.Error = err.Error()
@@ -101,7 +117,7 @@ func RunOrphanLockSweep(ctx context.Context, pool *pgxpool.Pool) GCResult {
 // RunMemoryExpiredSweep archives memories where effective_strength < 0.1 (raw) per §7.4.
 // Uses the Ebbinghaus formula inline in SQL.
 func RunMemoryExpiredSweep(ctx context.Context, pool *pgxpool.Pool) GCResult {
-	result := GCResult{SweepType: "memory_expired_archive"}
+	result := GCResult{SweepType: sweepMemoryExpiredArchive}
 	acquired, release, err := tryAdvisoryLock(ctx, pool, gcLockMemoryExpired)
 	if err != nil {
 		result.Error = err.Error()
@@ -143,7 +159,7 @@ func RunMemoryExpiredSweep(ctx context.Context, pool *pgxpool.Pool) GCResult {
 
 // RunMethodologyExpiryArchive archives methodology.* memories whose expires_at has passed.
 func RunMethodologyExpiryArchive(ctx context.Context, pool *pgxpool.Pool) GCResult {
-	result := GCResult{SweepType: "methodology_expiry_archive"}
+	result := GCResult{SweepType: sweepMethodologyExpiry}
 	acquired, release, err := tryAdvisoryLock(ctx, pool, gcLockMethodologyExpiry)
 	if err != nil {
 		result.Error = err.Error()
@@ -175,7 +191,7 @@ func RunMethodologyExpiryArchive(ctx context.Context, pool *pgxpool.Pool) GCResu
 
 // RunEventPayloadTruncation truncates agent_events payloads that exceed 64KB.
 func RunEventPayloadTruncation(ctx context.Context, pool *pgxpool.Pool) GCResult {
-	result := GCResult{SweepType: "event_payload_truncation"}
+	result := GCResult{SweepType: sweepEventPayloadTruncation}
 	acquired, release, err := tryAdvisoryLock(ctx, pool, gcLockEventPayloadTrunc)
 	if err != nil {
 		result.Error = err.Error()
@@ -208,7 +224,7 @@ func RunEventPayloadTruncation(ctx context.Context, pool *pgxpool.Pool) GCResult
 // RunUnblockDependentWI unblocks work_items whose blocking wi are all terminal.
 // This is the GC fallback (60s tick); the primary path is inside fn_complete_attempt.
 func RunUnblockDependentWI(ctx context.Context, pool *pgxpool.Pool) GCResult {
-	result := GCResult{SweepType: "unblock_dependent_wi"}
+	result := GCResult{SweepType: sweepUnblockDependentWI}
 	acquired, release, err := tryAdvisoryLock(ctx, pool, gcLockUnblockDependent)
 	if err != nil {
 		result.Error = err.Error()
@@ -490,6 +506,21 @@ func createPartitionDrainingDefault(ctx context.Context, pool *pgxpool.Pool, spe
 	return tx.Commit(ctx)
 }
 
+// defaultBacklogWarnSQL emits the DEFAULT-partition backlog warning at most once
+// an hour. Named rather than inline so that
+// TestGCSQL_PartitionKeyBoundsReadFromNowNotClockTimestamp can hold it to the
+// same rule as the alert guards.
+const defaultBacklogWarnSQL = `
+	INSERT INTO agent_events (id, event_type, payload, created_at)
+	SELECT $1, 'system_gc', $2, clock_timestamp()
+	WHERE NOT EXISTS (
+	  SELECT 1 FROM agent_events
+	  WHERE event_type = 'system_gc'
+	    AND payload->>'sweep' = 'partition_create'
+	    AND payload ? 'default_partition_rows'
+	    AND created_at > now() - interval '1 hour'
+	)`
+
 // reportDefaultBacklog is the signal the DEFAULT partition would otherwise
 // remove. Rows in agent_events_default mean the range partitions are NOT
 // covering live writes — the safety net is load-bearing right now — and without
@@ -529,16 +560,16 @@ func reportDefaultBacklog(ctx context.Context, pool *pgxpool.Pool) (int64, error
 	})
 	// WHERE NOT EXISTS is the rate limit: no extra state, and the lookup rides
 	// idx_evt_type_time.
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO agent_events (id, event_type, payload, created_at)
-		SELECT $1, 'system_gc', $2, clock_timestamp()
-		WHERE NOT EXISTS (
-		  SELECT 1 FROM agent_events
-		  WHERE event_type = 'system_gc'
-		    AND payload->>'sweep' = 'partition_create'
-		    AND payload ? 'default_partition_rows'
-		    AND created_at > clock_timestamp() - interval '1 hour'
-		)`, NewID("evt"), payload); err != nil {
+	//
+	// The window reads from now(), not clock_timestamp(), for the reason set out
+	// at length in alertNotRepeatedSQL: agent_events is RANGE partitioned on
+	// created_at, now() is STABLE and prunes, clock_timestamp() is VOLATILE and
+	// does not. This predicate runs on every 60s tick for as long as the DEFAULT
+	// partition is non-empty — that is, precisely when the table is at its worst —
+	// so it is where the difference is paid most often. The INSERTED created_at
+	// stays clock_timestamp(): that is a value being written, not a bound being
+	// scanned.
+	if _, err := pool.Exec(ctx, defaultBacklogWarnSQL, NewID("evt"), payload); err != nil {
 		return n, fmt.Errorf("emit default-backlog warning: %w", err)
 	}
 	return n, nil
@@ -563,7 +594,7 @@ func reportDefaultBacklog(ctx context.Context, pool *pgxpool.Pool) (int64, error
 // every error instead of keeping only the last, and leave an audit event per
 // created partition.
 func RunPartitionCreate(ctx context.Context, pool *pgxpool.Pool) GCResult {
-	result := GCResult{SweepType: "partition_create"}
+	result := GCResult{SweepType: sweepPartitionCreate}
 	acquired, release, err := tryAdvisoryLock(ctx, pool, gcLockPartitionCreate)
 	if err != nil {
 		result.Error = err.Error()
@@ -655,12 +686,207 @@ func RunPartitionCreate(ctx context.Context, pool *pgxpool.Pool) GCResult {
 	return result
 }
 
+// ─── Alert sweeps 7 & 8: cadence and idempotency ─────────────────────────────
+
+// Sweeps 7 and 8 are the only two of the eight that EMIT a row rather than
+// mutate one, and that is exactly why they were the two defective ones.
+//
+// Every other sweep's write falsifies its own WHERE predicate — a deleted
+// resource_lock cannot be deleted twice, an archived memory is no longer
+// 'active', a truncated payload is no longer over 64KB, an unblocked wi is no
+// longer 'blocked', an attached partition is skipped by isAttachedPartition — so
+// re-running it is a no-op by construction and its cadence costs only query
+// time. An INSERT has no such property: re-running it inserts again. For these
+// two, idempotency had to be written down, and it never was — both looped over
+// their candidate wis calling NewID("evt") and INSERTing unconditionally.
+//
+// Driven from the 60s ticker in cmd/aihub/main.go, that is 1,440 rows per
+// matching wi per day, each carrying an identical
+// (work_item_id, event_type, payload) triple. Measured in production before this
+// change (aihub#266): ieops#84 alone held 111,221 of these rows, aihub#118 over
+// 50,000, and agent_events grew ~105,000 rows/day for the ieops project alone —
+// enough that "the most recent N events" stopped working as a diagnostic window,
+// which is how the flood was found in the first place.
+//
+// Both defects are fixed, in different places on purpose:
+//
+//   - the DUPLICATE (this section) is fixed in SQL, by a repeat window inside
+//     the sweeps' own statements;
+//   - the CADENCE (gcSweepTable below) is fixed in the run schedule, by giving
+//     these two the daily period their headers always claimed.
+//
+// The SQL guard, not the schedule, is what makes the no-duplicates property
+// true, because there are ways to reach these sweeps that no in-process schedule
+// can see: a restart resets the schedule, so a crash-looping instance would
+// re-emit on every start; and POST /v1/admin/gc calls RunAll, which deliberately
+// ignores the schedule. The schedule cuts runs per day from 1,440 to 24. It
+// cannot cut rows.
+//
+// What it does NOT do is serialise two aihub instances against each other, and
+// an earlier draft of this comment claimed it did. INSERT ... SELECT ... WHERE
+// NOT EXISTS is a snapshot read: under READ COMMITTED two concurrent
+// transactions both see no row and both write. Measured on two pgx connections
+// against this exact statement and DDL shape — 1 row inserted by each, 2 rows
+// for one wi inside one window. What actually keeps the two instances apart is
+// tryAdvisoryLock: pg_try_advisory_lock is session-level and held on a dedicated
+// pooled connection for the whole sweep, so the loser returns Skipped without
+// running a statement at all.
+//
+// That distinction is worth keeping straight, because it says what may not
+// change silently. Narrowing the advisory lock — per project, say, for
+// throughput — would remove the only mutual exclusion these two sweeps have and
+// reintroduce duplicates, and no test here would notice, because every test in
+// this package runs one sweep at a time.
+//
+// The guard is a repeat WINDOW rather than a unique constraint because
+// agent_events is RANGE partitioned on created_at: a unique index on
+// (work_item_id, event_type) would have to include the partition key, and
+// created_at is precisely the column that differs between two duplicates.
+// reportDefaultBacklog above already uses this shape, for the same reason.
+
+// The two sweeps have TWO cadences, and keeping them apart is the whole design:
+//
+//	gcAlertRepeatWindow  how often a wi may be ALERTED ABOUT. Enforced in SQL.
+//	gcAlertPollPeriod    how often the sweep ASKS the database. Enforced by the
+//	                     in-process schedule.
+//
+// The window is the user-visible cadence; the poll period is only a load knob.
+// Making one constant do both jobs is the trap, and an earlier draft of this
+// change fell into it by giving the schedule a 24h period and the window 23h.
+//
+// The failure is not the obvious one. Window >= period deadlocks — the row
+// written at T+ε is still inside the window at T+24h, so the sweep emits every
+// 48h instead of 24h — and 23h < 24h avoids that. But window ≈ period makes the
+// SCHEDULE'S PHASE decide the delivered cadence, and a restart randomises that
+// phase. Measured on the 24h/23h pair: an instance restarting 22h after the last
+// alert runs the sweep, the 23h window correctly suppresses it, the schedule
+// records the run anyway, and the next run is 24h later — an alert gap of ~46h,
+// which is the very 2x-period outcome the slack existed to prevent, reached
+// through a different door.
+//
+// Polling far more often than the window closes it: the window is then always
+// the binding constraint, and the schedule's phase can only add up to one poll
+// period of delay. Alert-to-alert lands in [23h, 24h] — under a day, as
+// specified — for any phase, any restart, any number of instances.
+const (
+	// gcAlertPollPeriod is how often RunDue lets an alert sweep ask. One hour
+	// turns 1,440 runs a day into 24, which is the whole of the load problem;
+	// going further would buy nothing and start to matter for phase.
+	gcAlertPollPeriod = time.Hour
+
+	// gcAlertRepeatWindow is how recently an alert of the same type for the same
+	// wi must have landed to suppress a new one. One poll period short of a day,
+	// so that window + worst-case poll delay is exactly a day rather than a day
+	// and a bit.
+	gcAlertRepeatWindow = 24*time.Hour - gcAlertPollPeriod
+)
+
+// gcSpecifiedAlertCadence is what docs/design/polyforge-v1-design.md §15 items 7
+// and 8 call these sweeps ("daily tick"), and what their section headers have
+// claimed since they were written. Nothing schedules on it — it is the number
+// gcAlertRepeatWindow is derived to stay under, and the tests compare against.
+//
+// aihub#266 asked which side of the comment/code mismatch was the intent and
+// which the drift, and told the fixer not to assume it was the comment. The
+// answer is in gcSweepTable's doc comment: §15 declares the whole sweep list a
+// "60s tick" job and then marks exactly three of its eight items as daily
+// exceptions. The code kept the header and lost the exceptions.
+const gcSpecifiedAlertCadence = 24 * time.Hour
+
+// gcAlertRepeatWindowArg is gcAlertRepeatWindow as the interval argument bound
+// into both alert statements.
+//
+// A whole count of seconds rather than gcAlertRepeatWindow.String(): Go renders
+// a Duration as e.g. "23h0m0s", and Postgres' interval parser happening to
+// accept that spelling is a coincidence between two independent grammars, not a
+// contract. "82800 seconds" is unambiguous in both.
+var gcAlertRepeatWindowArg = fmt.Sprintf("%d seconds", int64(gcAlertRepeatWindow/time.Second))
+
+// alertNotRepeatedSQL renders "this wi has had no alert of this type inside the
+// repeat window", for one event type.
+//
+// eventType is interpolated and is always a literal defined in this file, never
+// request input. wiExpr is either a correlated column reference ("wi.id", in a
+// candidate query) or a bind placeholder ("$2", in an INSERT).
+//
+// It is a shared fragment because each sweep applies the SAME guard at two
+// moments: once when choosing candidates, so that the steady state costs one
+// query and zero INSERT round trips, and once inside the INSERT, so that a row
+// which landed between the two — from an admin-forced RunAll, or from this
+// process before a restart — is still respected. Two hand-maintained copies of
+// one predicate is how they would quietly diverge, and divergence in the
+// direction where the candidate query is looser than the INSERT produces an
+// alert that never arrives, with Affected honestly reporting 0 and nothing else
+// to see.
+//
+// The INSERT's copy is NOT a concurrency guard, whatever its shape suggests:
+// INSERT ... SELECT ... WHERE NOT EXISTS is a snapshot read, so under READ
+// COMMITTED two simultaneous transactions both see nothing and both write
+// (measured: 2 rows for one wi inside one window). Two aihub instances are kept
+// apart by tryAdvisoryLock, not by this. See the section comment above.
+//
+// The window is measured from now(), NOT from clock_timestamp(), and that is the
+// one thing in this function that is not free to change. Everything else in this
+// file timestamps with clock_timestamp(), so "make it consistent" is a tempting
+// edit; it costs two orders of magnitude.
+//
+// agent_events is RANGE partitioned on created_at, and pruning a partition needs
+// a bound the planner can evaluate. now() is STABLE, so it can; clock_timestamp()
+// is VOLATILE, so it cannot, and the guard then has to visit every partition for
+// every candidate. Measured against a fixture rebuilt to the shape production is
+// in — 199,221 events over seven monthly partitions, 111,221 of them on one work
+// item, 78 unclassified wis:
+//
+//	clock_timestamp()  181-197 ms, no pruning, 78 correlated subplan executions
+//	now()              1.1-1.3 ms, "Subplans Removed: 4", hash right anti join
+//
+// A 165x difference on a predicate whose semantics are identical either way: the
+// window is 23 hours, and transaction start versus statement start differ by
+// microseconds. The candidate queries already age their wis with now() for the
+// same reason.
+func alertNotRepeatedSQL(wiExpr, eventType, intervalArg string) string {
+	return `NOT EXISTS (
+			SELECT 1 FROM agent_events e
+			WHERE e.work_item_id = ` + wiExpr + `
+			  AND e.event_type = '` + eventType + `'
+			  AND e.created_at > now() - ` + intervalArg + `::interval
+		)`
+}
+
 // ─── Sweep 7: Needs Human Session Aging (daily) ──────────────────────────────
 
-// RunNeedsHumanSessionAging emits wi_needs_attention for queued requires_human_session=true
-// work_items that have been waiting too long (§15 sweep 7).
+// needsHumanSessionCandidateSQL selects queued requires_human_session=true wis
+// past their aging threshold that have NOT already been alerted inside the
+// repeat window. Carrying the window predicate here as well as in the INSERT is
+// what makes the steady state — every matching wi already alerted today — cost
+// exactly this one query and no INSERT round trips at all.
+var needsHumanSessionCandidateSQL = `
+	SELECT wi.id, wi.slug, wi.wi_type, wi.priority, wi.project, wi.created_at
+	FROM work_items wi
+	WHERE wi.requires_human_session = true
+	  AND wi.status = 'queued'
+	  AND wi.created_at < now() - CASE wi.priority
+	      WHEN 'urgent' THEN interval '1 day'
+	      ELSE interval '7 days'
+	    END
+	  AND ` + alertNotRepeatedSQL("wi.id", "wi_needs_attention", "$1")
+
+// needsHumanSessionInsertSQL emits one wi_needs_attention unless an alert for
+// this wi landed inside the window since the candidate query ran — an
+// admin-forced RunAll, or this process before a restart. INSERT ... SELECT ...
+// WHERE NOT EXISTS rather than VALUES so the re-check rides the write itself
+// instead of being a second round trip that can be skipped. It does NOT make the
+// write atomic against a concurrent inserter; see alertNotRepeatedSQL.
+var needsHumanSessionInsertSQL = `
+	INSERT INTO agent_events (id, work_item_id, event_type, payload, project, created_at)
+	SELECT $1, $2, 'wi_needs_attention', $3, $4, clock_timestamp()
+	WHERE ` + alertNotRepeatedSQL("$2", "wi_needs_attention", "$5")
+
+// RunNeedsHumanSessionAging emits wi_needs_attention for queued
+// requires_human_session=true work_items that have been waiting too long
+// (§15 sweep 7) — at most one per wi per gcAlertRepeatWindow.
 func RunNeedsHumanSessionAging(ctx context.Context, pool *pgxpool.Pool) GCResult {
-	result := GCResult{SweepType: "needs_human_session_aging"}
+	result := GCResult{SweepType: sweepNeedsHumanSessionAging}
 	acquired, release, err := tryAdvisoryLock(ctx, pool, gcLockNeedsHumanAging)
 	if err != nil {
 		result.Error = err.Error()
@@ -672,31 +898,37 @@ func RunNeedsHumanSessionAging(ctx context.Context, pool *pgxpool.Pool) GCResult
 	}
 	defer release()
 
-	rows, err := pool.Query(ctx, `
-		SELECT id, slug, wi_type, priority, project, created_at
-		FROM work_items
-		WHERE requires_human_session = true
-		  AND status = 'queued'
-		  AND created_at < now() - CASE priority
-		      WHEN 'urgent' THEN interval '1 day'
-		      ELSE interval '7 days'
-		    END`)
+	rows, err := pool.Query(ctx, needsHumanSessionCandidateSQL, gcAlertRepeatWindowArg)
 	if err != nil {
 		result.Error = fmt.Sprintf("needs_human_session query: %v", err)
 		return result
 	}
 	defer rows.Close()
 
+	// WIType is a POINTER because work_items.wi_type is nullable — migration 0002
+	// declares `wi_type TEXT` with no NOT NULL and no default — and nothing ties it
+	// to requires_human_session: a wi can be queued, flagged as needing a human,
+	// and still have no wi_type, which is exactly the population worth nagging
+	// about. Scanning that into a string fails with "cannot scan NULL into
+	// *string", and after this change the failure is no longer swallowed by
+	// `if err == nil`: it reaches GCResult.Error, so runDueAt never records the
+	// run and the sweep retries and re-logs on every tick forever, while the wi
+	// that caused it is never alerted about. A nil marshals to JSON null, which is
+	// what the column actually holds.
 	type wiRow struct {
-		ID, Slug, WIType, Priority, Project string
-		CreatedAt                           time.Time
+		ID, Slug, Priority, Project string
+		WIType                      *string
+		CreatedAt                   time.Time
 	}
 	var wis []wiRow
+	var errs []string
 	for rows.Next() {
 		var w wiRow
-		if err := rows.Scan(&w.ID, &w.Slug, &w.WIType, &w.Priority, &w.Project, &w.CreatedAt); err == nil {
-			wis = append(wis, w)
+		if err := rows.Scan(&w.ID, &w.Slug, &w.WIType, &w.Priority, &w.Project, &w.CreatedAt); err != nil {
+			errs = append(errs, fmt.Sprintf("scan candidate: %v", err))
+			continue
 		}
+		wis = append(wis, w)
 	}
 	rows.Close()
 
@@ -710,23 +942,59 @@ func RunNeedsHumanSessionAging(ctx context.Context, pool *pgxpool.Pool) GCResult
 			"waiting_since": w.CreatedAt,
 			"reason":        "requires_human_session=true, no claim after aging threshold",
 		})
-		_, err := pool.Exec(ctx, `
-			INSERT INTO agent_events (id, work_item_id, event_type, payload, project, created_at)
-			VALUES ($1, $2, 'wi_needs_attention', $3, $4, clock_timestamp())`,
-			NewID("evt"), w.ID, payload, w.Project)
-		if err == nil {
-			affected++
+		// Count rows actually written, not "Exec returned no error". The guard
+		// makes a 0-row INSERT a legitimate outcome, and the old
+		// `if err == nil { affected++ }` would have reported one as an emitted
+		// alert. Errors accumulate rather than being dropped (the aihub#268
+		// shape): a permanently failing INSERT would otherwise be
+		// indistinguishable from having nothing to alert about, which is the same
+		// "success looks exactly like silence" defect this change is about.
+		tag, err := pool.Exec(ctx, needsHumanSessionInsertSQL,
+			NewID("evt"), w.ID, payload, w.Project, gcAlertRepeatWindowArg)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("emit wi_needs_attention for %s: %v", w.Slug, err))
+			continue
 		}
+		affected += tag.RowsAffected()
 	}
+
 	result.Affected = affected
+	if len(errs) > 0 {
+		result.Error = strings.Join(errs, "; ")
+	}
 	return result
 }
 
 // ─── Sweep 8: Unclassified WI Alert (daily) ──────────────────────────────────
 
-// RunUnclassifiedWIAlert emits wi_classification_missing for old unclassified work_items.
+// unclassifiedWIAlertCandidateSQL selects day-old queued wis with
+// requires_human_session IS NULL that have not already been alerted inside the
+// repeat window. See needsHumanSessionCandidateSQL for why the window predicate
+// appears here as well as in the INSERT.
+var unclassifiedWIAlertCandidateSQL = `
+	SELECT wi.id, wi.slug, wi.project, wi.reporter_user_id
+	FROM work_items wi
+	WHERE wi.requires_human_session IS NULL
+	  AND wi.status = 'queued'
+	  AND wi.created_at < now() - interval '1 day'
+	  AND ` + alertNotRepeatedSQL("wi.id", "wi_classification_missing", "$1")
+
+// unclassifiedWIAlertInsertSQL emits one wi_classification_missing, guarded the
+// same way as needsHumanSessionInsertSQL.
+var unclassifiedWIAlertInsertSQL = `
+	INSERT INTO agent_events (id, work_item_id, event_type, payload, project, created_at)
+	SELECT $1, $2, 'wi_classification_missing', $3, $4, clock_timestamp()
+	WHERE ` + alertNotRepeatedSQL("$2", "wi_classification_missing", "$5")
+
+// RunUnclassifiedWIAlert emits wi_classification_missing for old unclassified
+// work_items — at most one per wi per gcAlertRepeatWindow.
+//
+// requires_human_session IS NULL is the unclassified THIRD state, not false:
+// migration 0002 routes a NULL wi to the ready queue's unclassified[] rather
+// than items[], so nothing can be dispatched to it. That is what this alert is
+// for, and why it must keep firing (once) rather than being silenced.
 func RunUnclassifiedWIAlert(ctx context.Context, pool *pgxpool.Pool) GCResult {
-	result := GCResult{SweepType: "unclassified_wi_alert"}
+	result := GCResult{SweepType: sweepUnclassifiedWIAlert}
 	acquired, release, err := tryAdvisoryLock(ctx, pool, gcLockUnclassifiedAlert)
 	if err != nil {
 		result.Error = err.Error()
@@ -738,12 +1006,7 @@ func RunUnclassifiedWIAlert(ctx context.Context, pool *pgxpool.Pool) GCResult {
 	}
 	defer release()
 
-	rows, err := pool.Query(ctx, `
-		SELECT id, slug, project, reporter_user_id
-		FROM work_items
-		WHERE requires_human_session IS NULL
-		  AND status = 'queued'
-		  AND created_at < now() - interval '1 day'`)
+	rows, err := pool.Query(ctx, unclassifiedWIAlertCandidateSQL, gcAlertRepeatWindowArg)
 	if err != nil {
 		result.Error = fmt.Sprintf("unclassified wi query: %v", err)
 		return result
@@ -752,11 +1015,14 @@ func RunUnclassifiedWIAlert(ctx context.Context, pool *pgxpool.Pool) GCResult {
 
 	type wiRow struct{ ID, Slug, Project, ReporterID string }
 	var wis []wiRow
+	var errs []string
 	for rows.Next() {
 		var w wiRow
-		if err := rows.Scan(&w.ID, &w.Slug, &w.Project, &w.ReporterID); err == nil {
-			wis = append(wis, w)
+		if err := rows.Scan(&w.ID, &w.Slug, &w.Project, &w.ReporterID); err != nil {
+			errs = append(errs, fmt.Sprintf("scan candidate: %v", err))
+			continue
 		}
+		wis = append(wis, w)
 	}
 	rows.Close()
 
@@ -768,36 +1034,272 @@ func RunUnclassifiedWIAlert(ctx context.Context, pool *pgxpool.Pool) GCResult {
 			"reporter_id": w.ReporterID,
 			"reason":      "requires_human_session is NULL — please set wi_type to classify",
 		})
-		_, err := pool.Exec(ctx, `
-			INSERT INTO agent_events (id, work_item_id, event_type, payload, project, created_at)
-			VALUES ($1, $2, 'wi_classification_missing', $3, $4, clock_timestamp())`,
-			NewID("evt"), w.ID, payload, w.Project)
-		if err == nil {
-			affected++
+		// See RunNeedsHumanSessionAging for why this counts RowsAffected and
+		// accumulates errors instead of counting successful Execs.
+		tag, err := pool.Exec(ctx, unclassifiedWIAlertInsertSQL,
+			NewID("evt"), w.ID, payload, w.Project, gcAlertRepeatWindowArg)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("emit wi_classification_missing for %s: %v", w.Slug, err))
+			continue
 		}
+		affected += tag.RowsAffected()
 	}
+
 	result.Affected = affected
+	if len(errs) > 0 {
+		result.Error = strings.Join(errs, "; ")
+	}
 	return result
 }
 
-// ─── RunAll ───────────────────────────────────────────────────────────────────
+// ─── Sweep cadence: RunDue and RunAll ────────────────────────────────────────
 
-// RunAll executes all 8 GC sweeps (the 60s-tick set) in sequence.
-func RunAll(ctx context.Context, pool *pgxpool.Pool) []GCResult {
-	sweeps := []func(context.Context, *pgxpool.Pool) GCResult{
-		RunOrphanLockSweep,
-		RunMemoryExpiredSweep,
-		RunMethodologyExpiryArchive,
-		RunEventPayloadTruncation,
-		RunUnblockDependentWI,
-		RunPartitionCreate,
-		RunNeedsHumanSessionAging,
-		RunUnclassifiedWIAlert,
+// gcEveryTick marks a sweep that runs on every RunDue call, i.e. at whatever
+// cadence its caller's ticker fires (60s, in cmd/aihub/main.go).
+//
+// Zero rather than a literal 60s, deliberately. Comparing "elapsed since last
+// run" against 60s would let ordinary scheduling jitter push one tick's
+// now.Sub(last) a millisecond under the threshold and drop that tick, silently
+// halving the cadence of six sweeps that are documented to run on every one of
+// them. "Every tick" is not a duration, so it is not stored as one — and the
+// ticker's period stays the business of the file that owns the ticker.
+const gcEveryTick = time.Duration(0)
+
+// gcSweep is one row of the sweep table: the sweep function, the name it reports
+// in GCResult.SweepType, and how often RunDue may run it.
+type gcSweep struct {
+	Name   string
+	Period time.Duration
+	Fn     func(context.Context, *pgxpool.Pool) GCResult
+}
+
+// gcSweepTable is the eight sweeps and their cadences.
+//
+// Six run on every tick and aihub#266 does NOT change their period. A blanket
+// period change to the shared RunAll — the obvious way to make two sweeps daily
+// — would have moved all six with them, so each one is accounted for here.
+//
+// aihub#266 asked which side of the comment/code mismatch was the intent and
+// which the drift, and warned against assuming it was the comment. The design
+// doc answers it directly, and not by saying "daily" somewhere: §15 introduces
+// this exact list as
+//
+//	GC job（60s tick，pg_try_advisory_lock 单实例保证只有一个实例跑）：
+//
+// and then marks THREE of its eight items, and only three, as exceptions —
+// item 6 partition creator「daily tick 独立」(independent daily tick), item 7
+// needs_human_session aging「daily tick」, item 8 unclassified wi 告警
+// 「daily tick」. Item 5 goes the other way and pins itself to the header
+// ("GC 60s tick 仅作兜底").
+//
+// So the spec is not ambiguous and it is not silent: it states a default cadence
+// for the list and names the departures from it. The code applied the header to
+// all eight and dropped the three exceptions. The comments in this file are the
+// surviving trace of them.
+//
+// (§7.4 separately calls the memory chapter's GC a「daily job」. It is not a
+// second opinion about item 2: §15 is the operational sweep list, it places
+// memory archival in the 60s set, and aihub#236's much later comment in
+// RunMemoryExpiredSweep reasons about what gets archived "on the next 60s tick".
+// Following §7.4 instead would slow a sweep two subsequent changes have relied
+// on being fast.)
+//
+// Of the three real exceptions, one is deliberately NOT restored: aihub#268
+// rebuilt partition_create around the 60s cadence after the spec was written.
+// The other two are restored here, and the reason to treat them differently from
+// the five 60s sweeps survives even without the spec: they are the only two that
+// EMIT. Every other sweep's write falsifies its own WHERE predicate — an
+// archived memory is no longer 'active', a truncated payload no longer exceeds
+// 64KB, an attached partition is skipped by isAttachedPartition — so running it
+// 1,440x a day produces exactly the same rows as running it once, and costs only
+// query time. An INSERT has no such property. Same mismatch, different cost.
+//
+// Per sweep:
+//
+//	orphan_lock_cleanup        every tick — §15 item 1, unmarked. A lock still
+//	                           held by a dead attempt blocks the next claim of
+//	                           that resource until this runs, and the aihub#145
+//	                           retention contract is stated in terms of the 60s
+//	                           tick. Idempotent: a deleted row cannot re-match.
+//	memory_expired_archive     every tick — §15 item 2, inside the "60s tick"
+//	                           header with no exception marker, and aihub#236's
+//	                           comment reasons explicitly about what would be
+//	                           archived "on the next 60s tick". Idempotent
+//	                           (UPDATE off 'active'), so the cadence costs only
+//	                           query time.
+//	methodology_expiry_archive every tick — §15 item 3, likewise unmarked. Same
+//	                           idempotent UPDATE shape as the sweep above.
+//	event_payload_truncation   every tick — §15 item 4, unmarked. It bounds the
+//	                           size of a row that is ALREADY written, so delay
+//	                           leaves oversized payloads being served to readers.
+//	                           Idempotent: a truncated payload no longer exceeds
+//	                           64KB.
+//	unblock_dependent_wi       every tick — §15 calls it exactly the 60s fallback
+//	                           ("GC 60s tick 仅作兜底") behind
+//	                           fn_complete_attempt's primary path, so here the
+//	                           spec and the code already agree. Idempotent: an
+//	                           unblocked wi is no longer 'blocked'.
+//	partition_create           every tick — §15 item 6 says "daily tick 独立", but
+//	                           aihub#268 later and deliberately built this sweep
+//	                           around the 60s cadence: its lock_timeout exists so
+//	                           that a contended run degrades to "a logged error
+//	                           and a retry 60 seconds later". Retrying a
+//	                           write-path outage tomorrow is a different
+//	                           guarantee. Idempotent twice over —
+//	                           isAttachedPartition skips existing months, and
+//	                           reportDefaultBacklog's durable warning is already
+//	                           rate-limited to one per hour by the same
+//	                           WHERE NOT EXISTS shape this change adopts.
+//
+// The two alert sweeps carry gcAlertPollPeriod, NOT the daily cadence §15 asks
+// for. That is deliberate and is explained where those constants are defined:
+// the daily cadence is enforced by the SQL repeat window, and this period only
+// decides how often the sweep asks. A period equal to the cadence would put the
+// schedule's restart-randomised phase in charge of it instead.
+func gcSweepTable() []gcSweep {
+	return []gcSweep{
+		{sweepOrphanLockCleanup, gcEveryTick, RunOrphanLockSweep},
+		{sweepMemoryExpiredArchive, gcEveryTick, RunMemoryExpiredSweep},
+		{sweepMethodologyExpiry, gcEveryTick, RunMethodologyExpiryArchive},
+		{sweepEventPayloadTruncation, gcEveryTick, RunEventPayloadTruncation},
+		{sweepUnblockDependentWI, gcEveryTick, RunUnblockDependentWI},
+		{sweepPartitionCreate, gcEveryTick, RunPartitionCreate},
+		{sweepNeedsHumanSessionAging, gcAlertPollPeriod, RunNeedsHumanSessionAging},
+		{sweepUnclassifiedWIAlert, gcAlertPollPeriod, RunUnclassifiedWIAlert},
 	}
+}
 
-	results := make([]GCResult, 0, len(sweeps))
-	for _, sweep := range sweeps {
-		results = append(results, sweep(ctx, pool))
+// gcSchedule is RunDue's memory of when each sweep last ran in THIS process.
+//
+// In-process on purpose. Its two failure modes are both benign, because it is
+// not what prevents duplicate alerts — alertNotRepeatedSQL is:
+//
+//   - a restart forgets everything, so every sweep is due on the first tick
+//     after start. Deliberate: a daily sweep that waited a full day after each
+//     deploy would be dark most of the time on a frequently deployed service.
+//     It is safe only because the SQL guard, not this map, stops re-emission.
+//   - two aihub instances keep separate schedules, so a daily sweep is attempted
+//     twice a day cluster-wide. The second attempt finds the first's row inside
+//     the window and writes nothing.
+//
+// Both would be defects if this map were the guard. It is not; it decides only
+// how often the database is asked.
+type gcSchedule struct {
+	mu      sync.Mutex
+	lastRun map[string]time.Time
+}
+
+func newGCSchedule() *gcSchedule {
+	return &gcSchedule{lastRun: make(map[string]time.Time)}
+}
+
+// due reports whether `name` is due at `now`, recording nothing. A gcEveryTick
+// period is always due, and so is a sweep this process has never run.
+//
+// due+record is deliberately NOT atomic, unlike the single claim() it replaced,
+// and the mutex below should not be read as making it so — it protects the map,
+// not the check-then-act across the two calls. Two callers can therefore both
+// find the same sweep due and both run it. Nothing does that today (one GC
+// goroutine per process; RunAll does not touch the schedule at all), and if
+// something ever did, the consequence is bounded twice over: tryAdvisoryLock
+// makes the loser return Skipped, and the SQL repeat window makes a duplicate
+// alert impossible even if it did not. Atomicity here would buy nothing and
+// would cost the property that matters more — that the clock starts on a
+// COMPLETED run.
+func (s *gcSchedule) due(name string, period time.Duration, now time.Time) bool {
+	if period <= 0 {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	last, ran := s.lastRun[name]
+	return !ran || now.Sub(last) >= period
+}
+
+// record marks `name` as having COMPLETED a run at `now`. Separate from due()
+// rather than folded into one claim() call, because what starts the clock is a
+// sweep that did its job — see runDueAt.
+//
+// A no-op for gcEveryTick sweeps: they are never throttled, so there is nothing
+// for a recorded timestamp to be compared against, and writing one would put the
+// "period 0 means unscheduled" rule in two places.
+func (s *gcSchedule) record(name string, period time.Duration, now time.Time) {
+	if period <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastRun[name] = now
+}
+
+// gcTickSchedule is the schedule RunDue throttles against: one per process,
+// matching the single GC goroutine in cmd/aihub/main.go.
+var gcTickSchedule = newGCSchedule()
+
+// RunDue executes the sweeps whose period has elapsed since this process last
+// ran them. It is the entry point for the background ticker.
+//
+// A sweep that is not due is omitted from the results rather than reported as a
+// skip: main.go already mutes any sweep with Affected == 0, so "not due" and
+// "nothing to do" print identically anyway, and inventing a third GCResult state
+// for it would only give the admin endpoint's JSON a field that is always false.
+func RunDue(ctx context.Context, pool *pgxpool.Pool) []GCResult {
+	return runDueAt(ctx, pool, gcTickSchedule, time.Now())
+}
+
+// runDueAt is RunDue with the schedule and the clock injected, so that a test
+// can drive a day of ticks without waiting a day.
+func runDueAt(ctx context.Context, pool *pgxpool.Pool, sched *gcSchedule, now time.Time) []GCResult {
+	table := gcSweepTable()
+	results := make([]GCResult, 0, len(table))
+	for _, s := range table {
+		if !sched.due(s.Name, s.Period, now) {
+			continue
+		}
+		r := s.Fn(ctx, pool)
+		results = append(results, r)
+
+		// The period starts from a run that actually DID something, not from one
+		// that was attempted. A sweep that errored did not do its job, and one
+		// that reported Skipped had its advisory lock held by the other
+		// instance — neither should buy 24 hours of silence. Recording
+		// unconditionally would turn a single transient database error into a
+		// full day with no alert, and would make the instance that lost the lock
+		// race stop trying even if the winner never finished.
+		//
+		// A partial failure is the case that makes this safe rather than merely
+		// nicer: if the sweep emitted for three wis and then errored on a
+		// fourth, it retries on the next tick and the repeat window suppresses
+		// the three it already did, so the retry emits exactly the one it
+		// missed. The guard being in the SQL is what lets the schedule be
+		// pessimistic here for free.
+		//
+		// The price is that a PERSISTENTLY failing daily sweep retries every
+		// tick and therefore logs every tick. That is already what all six
+		// every-tick sweeps do on failure, stderr lines are the signal an
+		// operator wants, and it is not the agent_events growth this change is
+		// about.
+		if r.Error == "" && !r.Skipped {
+			sched.record(s.Name, s.Period, now)
+		}
+	}
+	return results
+}
+
+// RunAll executes all 8 GC sweeps in sequence, ignoring the per-sweep periods.
+//
+// This is the admin path (POST /v1/admin/gc): an operator who asks for a sweep
+// run must get one, not a silent no-op because the daily sweeps happened to run
+// four hours ago. It remains safe to call at any frequency because the alert
+// sweeps' idempotency lives in their SQL rather than in the schedule — a forced
+// run cannot re-emit an alert that is already inside its repeat window.
+//
+// The background ticker uses RunDue instead.
+func RunAll(ctx context.Context, pool *pgxpool.Pool) []GCResult {
+	table := gcSweepTable()
+	results := make([]GCResult, 0, len(table))
+	for _, s := range table {
+		results = append(results, s.Fn(ctx, pool))
 	}
 	return results
 }

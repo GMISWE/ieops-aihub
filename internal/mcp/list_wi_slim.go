@@ -1,0 +1,206 @@
+package mcp
+
+import (
+	"strconv"
+)
+
+// Work-item LIST projection (aihub#278).
+//
+// pf_list_work_items answered with `jsonResult(result)` — the REST body
+// verbatim, 27 fields per item, no projection. This file removes bytes from it.
+//
+// ─── Why this is a delete-list, and why that is not a stylistic choice ───────
+//
+// The obvious shape is slimRecallResult's: a keep-list. It is the wrong shape
+// HERE, and the reason is written down next door. recall_slim.go's INVARIANT
+// note records that its keep-list has silently swallowed a newly-added field
+// three times — `total` (aihub#249), the truncation pair (aihub#269),
+// `unmatched_types` (aihub#289) — and wi_echo_slim.go (aihub#281) was
+// deliberately built the other way round "so it cannot become the fourth
+// instance".
+//
+// A keep-list here would be instances four and five ON ARRIVAL, not someday:
+// domain.WorkItem already carries two conditionally-populated fields that no
+// keep-list drafted from a sample response would contain, because a sample
+// response does not have them.
+//
+//	similarity   aihub#273, present only on the ?query= semantic path
+//	step_state   aihub#280, present only under include_step_state=true —
+//	             and pf-status and pf-retro BOTH send that flag, on their
+//	             first call, every session
+//
+// aihub#280 landed `include_step_state` weeks ago; a keep-list would have taken
+// it straight back out, and — this is the whole hazard of this work item —
+// nothing would have said so. The consumer is a language model. Project an API
+// used by code and the compiler names who broke. Project an API used by a model
+// and the model reads a smaller object, concludes "this wi has no step state",
+// and reports that confidently.
+//
+// ─── The rule every deletion below obeys ────────────────────────────────────
+//
+// A field is removed only when the response still STATES the same thing without
+// it — either because the value carries no information at all, or because it is
+// byte-reconstructible from a field that survives. No field is removed for
+// "looks unused". "Looks unused" is precisely the judgement that has no
+// error-detection path on an LLM-facing API, and the evidence that would have to
+// back it does not exist: the skill documentation is measurably out of sync with
+// this response (using-polyforge/fragments/output-format.md:29 tells the model
+// to render `owner.display` off this very call — a field that has never existed
+// on it), so "no skill mentions field X" is not evidence that nothing reads X.
+//
+// Note the asymmetry that makes those stale docs usable in ONE direction: they
+// over-claim. A field they name may be dead, so naming proves nothing about
+// consumption — but a field they DON'T name may equally well be read, so silence
+// proves nothing about non-consumption either. Only the losslessness rule above
+// is decidable without a consumer that can report breakage.
+//
+// This is the same gate suppressContentEcho uses (wi_echo_slim.go): drop bytes
+// only when a check ON THE VALUES ITSELF says the drop is lossless, so
+// "lossless" is verified per call rather than asserted about the server's usual
+// behaviour. TestSlimListWorkItems_ProjectionIsReconstructible mechanises it:
+// it rebuilds the full item from the projected one and demands byte equality, so
+// widening the delete-list below with a field that is NOT reconstructible turns
+// red without anyone having to notice.
+//
+// ─── What this deliberately does NOT do ─────────────────────────────────────
+//
+// The measured field census (four projects, 24 windows, 334 KB) puts `attrs` at
+// 42% of the aihub project's list bytes — far more than everything removed here
+// — and dropping it, or reducing it to its key names, is where the work item's
+// headline 57-78% actually lives. It is not done here because it is not
+// lossless, and no available evidence says the model does not read it. That
+// share is also not a property of the endpoint: in the three control projects
+// attrs is 14%, ~1% and ~0%. The aihub figure is the observer effect this work
+// item warned about in its own acceptance criteria — the fattest attrs in the
+// sample belong to the token-accounting work items that produced the estimate.
+//
+// ─── Unconditional, no flag ─────────────────────────────────────────────────
+//
+// Same reasoning as suppressContentEcho, and the same measurement behind it:
+// pf_get_work_item has carried `brief` since aihub#212 and was still called 489
+// times for 1,537,444 B in the sample window because nobody passes it. A
+// default-off flag here would save nothing until every skill call site changed,
+// and would put the saving behind a plugin release. What makes flagless safe is
+// not nerve, it is that every removal below is reconstructible.
+
+// slimListWorkItemsResult projects the items of a pf_list_work_items response in
+// place and returns the SAME top-level map.
+//
+// Returning the same map, rather than building `res := map[string]any{"items":
+// ...}`, is deliberate and is the aihub#249 lesson applied structurally: a
+// rebuilt top-level map drops every key nobody remembered to copy, which is how
+// `total` vanished from pf_recall. Here `next_cursor` — and any top-level key
+// added to ListWorkItemsResult later — survives because it is never touched.
+// Pinned by TestSlimListWorkItems_KeepsUnknownTopLevelKeys.
+func slimListWorkItemsResult(result map[string]any) map[string]any {
+	if result == nil {
+		return nil
+	}
+	items, ok := result["items"].([]any)
+	if !ok {
+		return result
+	}
+	for _, it := range items {
+		if m, ok := it.(map[string]any); ok {
+			slimListWorkItem(m)
+		}
+	}
+	return result
+}
+
+// slimListWorkItem removes the reconstructible fields from one list item.
+func slimListWorkItem(m map[string]any) {
+	// `content` is not in the SELECT. Both list paths — buildListWorkItemsQuery
+	// and listWorkItemsByVector, which the comment there calls the "same
+	// 26-column SELECT (lockstep Scan sites)" — read 26 columns and content is
+	// not among them, so domain.WorkItem.Content is a nil *string on every item
+	// this endpoint has ever returned. `"content":null` is therefore not "this
+	// work item has no body"; it is "this endpoint does not serve bodies", which
+	// is a fact about the endpoint and not about the row.
+	//
+	// That distinction is why this is a delete and not an aihub#269-style
+	// handle: there is no per-item fact to leave behind. A `content_len` here
+	// would have to be invented, and pf_get_work_item is where a body is read.
+	delete(m, "content")
+
+	// `seq` is the integer half of `slug`, which is exactly "<project>#<seq>".
+	// Gated on the reconstruction actually holding for THIS item rather than on
+	// the invariant being believed, so a row whose slug ever disagrees keeps its
+	// seq and the disagreement stays visible.
+	if slug, ok := m["slug"].(string); ok {
+		if project, ok := m["project"].(string); ok {
+			if seq, ok := m["seq"].(float64); ok && seq == float64(int64(seq)) {
+				if slug == project+"#"+strconv.FormatInt(int64(seq), 10) {
+					delete(m, "seq")
+				}
+			}
+		}
+	}
+
+	// `scenario` is CHECKed to (coding|writing|data) and CreateWorkItem rejects
+	// everything but coding, so every row that exists holds "coding" — the
+	// published pf_list_work_items schema says so in as many words. Dropped only
+	// when it IS "coding", so if a migration ever makes another value real, that
+	// item carries its scenario and this rule quietly stops applying to it
+	// instead of hiding the change.
+	if s, ok := m["scenario"].(string); ok && s == "coding" {
+		delete(m, "scenario")
+	}
+
+	// For the fields named in listWorkItemNullMeansNone, a JSON null and the
+	// key's absence state the same thing. That is already this response's
+	// contract for `similarity` and `step_state` (both `omitempty`), so
+	// absence-means-none is what a reader of this endpoint has always had to
+	// understand — not a convention introduced here.
+	//
+	// This is the largest rule by bytes: `"external_share_type":null` spends 27
+	// bytes to say nothing, and does so on 100% of rows.
+	for k := range listWorkItemNullMeansNone {
+		if v, present := m[k]; present && v == nil {
+			delete(m, k)
+		}
+	}
+}
+
+// listWorkItemNullMeansNone names the fields of a work-item list response whose
+// JSON null carries no information the key's absence does not carry.
+//
+// ─── Why this is an allowlist and not `for k, v := range m { if v == nil }` ──
+//
+// The blanket rule is what this started as, and it was wrong on a field this
+// work item was explicitly warned about. `requires_human_session` is a
+// *bool, and its NULL is not "no value" — it is a THIRD classification,
+// "unclassified", with its own ready-queue segment (domain.ReadyQueue.
+// Unclassified) and its own GC alert sweep (RunUnclassifiedWIAlert). Measured
+// against the live server, 37 of 1,049 work items across seven projects are in
+// it — 3.5%, not a corner case.
+//
+// Drop that null and a model reading the smaller object sees no
+// requires_human_session at all. pf-execute/engine.native.md selects its
+// execution mode from that field, and absence reads as false, so an
+// unclassified work item would silently be executed unattended. Same for a null
+// `wi_type`: pf-execute resolves its step graph as `{wi_type}.{project}.md`, and
+// "untyped" is a state the graph resolution must see rather than infer.
+//
+// Note what the reconstruction test CANNOT do for those two, because it is the
+// reason they need naming here rather than a guard. Rebuilding "absent -> null"
+// round-trips them perfectly; the loss is not in the bytes, it is in what a
+// reader concludes from absence. A byte-level losslessness proof is blind to it.
+//
+// The failure mode of forgetting to add a nullable field here is bytes, not
+// correctness — which is why the list is opt-in in this direction, the opposite
+// of slimRecallResult's item whitelist, where forgetting costs a field.
+var listWorkItemNullMeansNone = map[string]bool{
+	// Sharing is off for every row that exists (null on 1,049/1,049 sampled);
+	// when a share is created these become a type and a key, and say so.
+	"external_share_type": true,
+	"external_share_key":  true,
+	// "no milestone" / "no parent" / "not closed" / "no live attempt". Each is
+	// also stated positively elsewhere in the same item — `status` says whether
+	// the item is closed, and current_attempt_epoch survives to say whether it
+	// has ever been claimed.
+	"milestone":           true,
+	"parent_work_item_id": true,
+	"closed_at":           true,
+	"current_attempt_id":  true,
+}

@@ -393,7 +393,12 @@ func (s *Server) registerLifecycleTools() {
 		if err != nil {
 			return errResult(err)
 		}
-		return jsonResult(result)
+		// aihub#278: drop the per-item fields the response can restate without
+		// (always-null content, slug-derivable seq, the constant scenario, and
+		// JSON nulls). Unconditional and lossless by construction — see the
+		// header of list_wi_slim.go for why it is a delete-list and not a
+		// keep-list like slimRecallResult.
+		return jsonResult(slimListWorkItemsResult(result))
 	})
 
 	// pf_get_work_item

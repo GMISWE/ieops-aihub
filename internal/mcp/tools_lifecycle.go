@@ -193,48 +193,74 @@ func (s *Server) registerLifecycleTools() {
 								relation = "owner"
 								memberRole = "owner"
 							} else if membersRaw != nil {
-								// Parse members to find caller's role
-								var membersBytes []byte
+								// Parse members to find caller's role.
+								//
+								// aihub#312: []any is the shape that actually
+								// arrives, and it used to be the one shape this
+								// switch did NOT handle. The server sends members
+								// as a JSON array (domain.Project.Members is a
+								// json.RawMessage) and client.ListProjects decodes
+								// the whole response into map[string]any
+								// (pkg/client/client.go), so proj["members"] is
+								// []any. With only the string and []byte cases
+								// below, nothing matched, no members were ever
+								// parsed, and EVERY non-admin non-owner member
+								// fell through to the public/viewer defaults set
+								// just above.
+								//
+								// string and []byte are kept, but note that
+								// s.client is always the HTTP client, so the only
+								// way to reach them is a project row whose members
+								// JSONB holds a double-encoded JSON string instead
+								// of a JSON array. They are legacy-data cases, not
+								// caller-shape cases.
+								var members []map[string]any
 								switch m := membersRaw.(type) {
 								case []any:
-									// aihub#312: this is the shape that actually
-									// arrives. The server sends members as a JSON
-									// array (domain.Project.Members is a
-									// json.RawMessage) and client.ListProjects
-									// decodes the whole response into
-									// map[string]any (pkg/client/client.go), so
-									// proj["members"] is []any — never the string
-									// or []byte an in-process caller holding the
-									// raw message would have. Without this case
-									// the switch matched nothing, membersBytes
-									// stayed empty, and EVERY non-admin non-owner
-									// member fell through to public/viewer.
-									//
-									// Re-marshalling rather than walking the []any
-									// keeps one members parser instead of two;
-									// internal/cli/init.go does the same thing in
-									// parseServerProjects for the same reason.
-									if b, err := json.Marshal(m); err == nil {
-										membersBytes = b
-									}
-								case string:
-									membersBytes = []byte(m)
-								case []byte:
-									membersBytes = m
-								}
-								if len(membersBytes) > 0 {
-									var members []map[string]any
-									if json.Unmarshal(membersBytes, &members) == nil {
-										for _, mem := range members {
-											uid, _ := mem["user_id"].(string)
-											if uid == callerID {
-												relation = "member"
-												if r, ok := mem["role"].(string); ok {
-													memberRole = r
-												}
-												break
-											}
+									// Walked element by element rather than
+									// re-marshalled and re-parsed in one go. A
+									// single json.Unmarshal over the whole list
+									// fails wholesale on one non-object entry, and
+									// this loop is guarded on that error, so one
+									// junk entry would discard every other member
+									// and silently degrade to public/viewer — the
+									// exact failure mode aihub#312 was.
+									members = make([]map[string]any, 0, len(m))
+									for _, entry := range m {
+										if mem, ok := entry.(map[string]any); ok {
+											members = append(members, mem)
 										}
+									}
+								// The dropped errors below are deliberate and are
+								// NOT the swallow that caused aihub#312: a failed
+								// json.Unmarshal still fills in every element it
+								// parsed before the bad one, so keeping the
+								// partial result degrades per entry exactly like
+								// the []any case above, whereas discarding it on
+								// error would throw away a membership that parsed
+								// cleanly. The uid != "" check below is what stops
+								// a half-parsed entry from matching.
+								case string:
+									_ = json.Unmarshal([]byte(m), &members)
+								case []byte:
+									_ = json.Unmarshal(m, &members)
+								}
+								for _, mem := range members {
+									uid, _ := mem["user_id"].(string)
+									// uid != "" matters now that this loop is
+									// reachable at all. Both sides fall back to ""
+									// when the field is absent or not a string, so
+									// an entry with no user_id would match a caller
+									// whose own user_id failed to decode and report
+									// them as a member with that entry's role.
+									// aihub#312 under-reported privilege; matching
+									// on "" would over-report it, which is worse.
+									if uid != "" && uid == callerID {
+										relation = "member"
+										if r, ok := mem["role"].(string); ok {
+											memberRole = r
+										}
+										break
 									}
 								}
 							}

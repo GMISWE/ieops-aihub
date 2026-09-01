@@ -250,9 +250,43 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	}
 	embVecLit, embModel, embDims := embedWorkItemBestEffort(ctx, req.Goal, wiContent)
 
+	// aihub#316: sampled BEFORE pool.Begin, and that ordering is the whole
+	// point. Reading ctx.Err() AFTER Begin returns cannot tell "the context was
+	// already dead when we called Begin" (embedding ate the budget — the
+	// aihub#316 shape) from "the context died WHILE Begin was blocked waiting
+	// for a free connection" (pool exhaustion — a database-side problem).
+	// Blaming the embedding provider for the second case would be the same
+	// mis-attribution this whole branch exists to remove, just pointing the
+	// other way: measured with embedding switched off entirely and MaxConns=1
+	// held busy, the after-the-fact read produced "an upstream dependency (most
+	// likely the embedding provider) consumed the request budget" for a request
+	// that had no upstream dependency at all.
+	ctxDeadBeforeDB := ctx.Err()
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to begin transaction")
+		// The three cases get three different sentences, because each sends the
+		// reader somewhere different. The original single "failed to begin
+		// transaction" is how the 2026-09-01 investigation spent two passes on a
+		// database that was answering in 9ms.
+		switch {
+		case errors.Is(ctxDeadBeforeDB, context.DeadlineExceeded):
+			return nil, NewErr(ErrInternalError,
+				"request deadline exhausted before reaching the database — an upstream dependency (most likely the embedding provider) consumed the request budget")
+		case ctxDeadBeforeDB != nil:
+			// Canceled: the caller hung up. Saying "deadline exhausted" here
+			// would send the next reader hunting a slow dependency that was
+			// never slow.
+			return nil, NewErr(ErrInternalError,
+				"request was cancelled before reaching the database — the caller disconnected upstream of any database work")
+		case ctx.Err() != nil:
+			// Alive on entry, dead now: the time went INSIDE Begin, i.e.
+			// waiting for a pool connection. Name the pool, not the upstream.
+			return nil, NewErr(ErrInternalError,
+				"request deadline expired while waiting for a database connection — the connection pool is saturated, not an upstream dependency")
+		default:
+			return nil, NewErr(ErrInternalError, "failed to begin transaction")
+		}
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 

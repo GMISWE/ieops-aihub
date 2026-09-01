@@ -226,8 +226,12 @@ process starts):
 ```bash
 until curl -fs http://localhost:8080/v1/health >/dev/null; do sleep 1; done
 curl -s http://localhost:8080/v1/health
-# {"db_ok":true,"status":"ok","version":"..."}
+# {"db_ok":true,"embedding_enabled":true,"embedding_ok":true,"status":"ok","version":"..."}
 ```
+
+`status` is `ok` or `degraded`, and the endpoint answers **200 either way** —
+the verdict is in the body, never in the status code. See
+[Health & version endpoints](#health--version-endpoints).
 
 ## 6. Bootstrap the first admin
 
@@ -265,7 +269,7 @@ The endpoint disables itself once any user exists (a second call returns
 
 | check | command | expected |
 |---|---|---|
-| DB + server | `curl -s localhost:8080/v1/health` | `{"db_ok":true,"status":"ok",...}` |
+| DB + server + embedding | `curl -s localhost:8080/v1/health` | `{"db_ok":true,"embedding_ok":true,...,"status":"ok"}` — `status` is `degraded` (still HTTP 200) if a dependency is down; see [Health & version endpoints](#health--version-endpoints) |
 | build info | `curl -s localhost:8080/v1/version` | JSON with `version`, `git_commit`, `build_time`, `min_client_version` |
 | web console | `curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' localhost:8080/ui/` | `302 .../ui/wi` |
 
@@ -363,6 +367,19 @@ is safe.
   If it never becomes `200`, check `docker compose logs aihub` — most often
   `DATABASE_URL` is wrong or the DB is not reachable/healthy.
 
+- **`/v1/health` returns `200` with `"status":"degraded"`.**
+  Not a bug, and not something to escalate to a restart: the code stays 200 on
+  purpose (see [Health & version endpoints](#health--version-endpoints)). Read
+  `db_ok` and `embedding_ok` to see which dependency it is; `embedding_error_kind`
+  (`timeout` / `unreachable`) narrows the embedding case, and the full error —
+  including the backend URL, which is why it is not in the body — is on the
+  server's stderr (`docker compose logs aihub | grep 'embedding health'`).
+
+- **The embedding backend is clearly dead but `/v1/health` still says `ok`.**
+  Wait 15 s and ask again. The embedding probe result is cached with a 15 s TTL,
+  so the endpoint reports the old verdict for up to that long after the backend
+  dies. Two polls 15 s apart is the shortest reliable check.
+
 ## Team deployment (reference)
 
 Production has moved on from the single-Compose host this section originally
@@ -408,7 +425,7 @@ docker run -d --name aihub --network aihub-net -p 8080:8080 --restart unless-sto
 
 # 6. Verify.
 curl -s localhost:8080/v1/version   # git_commit == $SHA
-curl -s localhost:8080/v1/health    # {"db_ok":true,...}
+curl -s localhost:8080/v1/health    # {"db_ok":true,"embedding_ok":true,...,"status":"ok"}
 ```
 
 **Rollback** is steps 3 + 5 with the previous SHA (kept from step 2). Additive
@@ -448,6 +465,57 @@ server → verify `/v1/health` and `/v1/version`.
 
 | endpoint | use |
 |---|---|
-| `GET /v1/health` | server + DB connectivity (`{"db_ok":true,"status":"ok",...}`) |
+| `GET /v1/health` | server + DB + embedding-backend status (body below) |
 | `GET /v1/version` | running version, git commit, build time, min client version |
 | `GET /ui/` | web console (redirects to `/ui/wi`) |
+
+`GET /v1/health` needs no authentication and answers:
+
+```json
+{
+  "status": "ok",
+  "version": "1.x.x",
+  "db_ok": true,
+  "embedding_enabled": true,
+  "embedding_ok": true
+}
+```
+
+When a dependency is down, `status` becomes `degraded` and — for the embedding
+case — one extra key appears: `"embedding_error_kind": "timeout"` (or
+`"unreachable"`). It is absent whenever there is no error to report.
+
+| field | meaning |
+|---|---|
+| `status` | `ok`, or `degraded` when `db_ok` is false **or** embedding is enabled and its probe failed |
+| `db_ok` | the pool answered a `Ping` **within 2 s**. The handler bounds its own context, so a wedged pool reports `false` rather than making the health check hang |
+| `embedding_enabled` | `false` when the configured provider is the no-op one, i.e. embedding was never asked for. A dependency nobody asked for is not a degradation |
+| `embedding_ok` | the last probe of the embedding backend succeeded; always `true` when embedding is disabled |
+| `embedding_error_kind` | `timeout` or `unreachable` — **omitted entirely when empty**. A closed set on purpose: this endpoint is unauthenticated and the raw error names the embedding backend's base URL, so the detail goes to the server's stderr only |
+
+**The HTTP status code is 200 in every branch, `degraded` included. Do not
+"fix" this to 503.** Container liveness probes and `polyforge doctor` read this
+endpoint's *reachability* as liveness and never look at the body; a 503 because
+an **optional** dependency is down would restart a server that is still serving
+every request it can — a degraded service turned into a restart loop. Read
+`status` from the body, not the status code.
+
+Two limits to know before you act on a green answer:
+
+- **It can be up to 15 s stale.** The embedding probe result is cached with a
+  15 s TTL, because this endpoint is polled by container runtimes and by
+  `polyforge doctor`, and an uncached probe would put steady load on the very
+  backend the check exists to protect. So for up to 15 s after the embedding
+  backend dies, `/v1/health` still says `"status":"ok"`. Poll twice, 15 s apart,
+  before concluding it is fine.
+- **`embedding_ok:true` means "the backend answers", not "vectors are being
+  written".** The probe is `Ping`, which embeds the 4-character string `ping`,
+  bounded at 2 s. A backend that is up but slow answers that in milliseconds
+  while a real 6000-rune embed times out against the 5 s per-call budget. To
+  confirm embeddings are actually being written, create a memory and check that
+  its row has a vector — not this field.
+
+`polyforge doctor` reads all of the above: its `config` check reports `warn`,
+naming the failing dependency and the `embedding_error_kind`, instead of the
+bare `[ok] config: aihub reachable` it printed when it only looked at the
+status code.

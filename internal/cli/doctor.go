@@ -212,7 +212,21 @@ func checkWorkspace(wsRoot string, cfg *config.Config) checkResult {
 	}
 }
 
-// checkConfig verifies aihub reachability via GET /health.
+// checkConfig verifies aihub reachability via GET /v1/health — and, since
+// aihub#316, reads what that endpoint's BODY says about the server's
+// dependencies.
+//
+// It used to decode the response into a map and then read nothing out of it,
+// so the one first-party diagnostic printed "[ok] config: aihub reachable"
+// against a server whose database ping was failing and whose embedding backend
+// had been dead for hours. That silence is what aihub#316 exists to end, and
+// the server-side half of it — a "degraded" status plus per-dependency fields —
+// is only worth emitting if something reads it.
+//
+// There is deliberately no non-2xx to notice: /v1/health answers 200 in every
+// branch (see handleHealth in internal/server/router.go), because container
+// liveness probes and this very check treat its reachability as liveness. The
+// verdict is in the body or nowhere.
 func checkConfig(ctx context.Context, c *client.Client) checkResult {
 	if c == nil {
 		return checkResult{
@@ -229,7 +243,115 @@ func checkConfig(ctx context.Context, c *client.Client) checkResult {
 			Message: fmt.Sprintf("aihub unreachable: %v", err),
 		}
 	}
-	return checkResult{Name: "config", Status: "ok", Message: "aihub reachable"}
+	return healthVerdict(health)
+}
+
+// healthBoolField reads a /v1/health boolean that MAY NOT BE THERE, and that
+// distinction is the whole backward-compatibility problem in one function.
+//
+// A server older than aihub#316 answers with only {status, version, db_ok} — no
+// embedding fields at all — and in Go an absent JSON key and an explicit false
+// both land on the same zero value, so decoding into a plain bool would read
+// every older server as "embedding backend down" and warn on all of them.
+//
+// nil therefore means "this server does not report it", which is not a finding.
+// A key that is present but not a JSON boolean is also nil, and is reported
+// separately as unreadable rather than as false: "could not tell" and "fine"
+// have to stay different answers here, same as everywhere else in this file.
+func healthBoolField(m map[string]any, key string) (val *bool, malformed bool) {
+	v, present := m[key]
+	if !present || v == nil {
+		return nil, false
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return nil, true
+	}
+	return &b, false
+}
+
+// healthVerdict turns a decoded /v1/health body into the config check result.
+//
+// Split out of checkConfig as a pure function on purpose: every interesting
+// input is a shape of JSON — new/degraded, new/ok, old server with no embedding
+// fields, old server whose hardcoded status="ok" contradicts its own
+// db_ok=false — and none of them need a socket or a database to construct.
+//
+// `status` alone is NOT sufficient evidence, in either direction. Before
+// aihub#316 it was the literal "ok" regardless of db_ok, so an old server with a
+// failing database says "ok"; hence db_ok is checked on its own. And a future
+// server may degrade on a dependency this client has no field for, so a
+// "degraded" that names nothing recognised is still reported rather than
+// swallowed.
+//
+// No FixCmd: nothing `doctor --fix` can run repairs a dead database or a dead
+// embedding backend, and printing a command that cannot fix what it is offered
+// for is the defect checkRepos already had to unlearn (aihub#307).
+func healthVerdict(health map[string]any) checkResult {
+	const name = "config"
+
+	status, _ := health["status"].(string)
+	dbOK, dbBad := healthBoolField(health, "db_ok")
+	embEnabled, embEnabledBad := healthBoolField(health, "embedding_enabled")
+	embOK, embOKBad := healthBoolField(health, "embedding_ok")
+	errKind, _ := health["embedding_error_kind"].(string)
+
+	var problems []string
+	if dbOK != nil && !*dbOK {
+		problems = append(problems, "database: ping failed (db_ok=false)")
+	}
+	if embEnabled != nil && *embEnabled && embOK != nil && !*embOK {
+		p := "embedding backend: probe failed"
+		if errKind != "" {
+			p += " (" + errKind + ")"
+		}
+		problems = append(problems, p)
+	}
+	if len(problems) == 0 && status == "degraded" {
+		problems = append(problems, "server reports status=degraded but names no dependency "+
+			"this client knows how to read — check the server log")
+	}
+
+	var unreadable []string
+	for _, f := range []struct {
+		key string
+		bad bool
+	}{{"db_ok", dbBad}, {"embedding_enabled", embEnabledBad}, {"embedding_ok", embOKBad}} {
+		if f.bad {
+			unreadable = append(unreadable, f.key)
+		}
+	}
+
+	// Context that is not a finding but is worth printing, because "the server
+	// never told me" and "the server told me it is fine" look identical in a
+	// one-line green report otherwise.
+	var notes []string
+	switch {
+	case embEnabled == nil:
+		notes = append(notes, "server does not report embedding health (predates aihub#316)")
+	case !*embEnabled:
+		notes = append(notes, "embedding disabled")
+	}
+
+	suffix := ""
+	if len(notes) > 0 {
+		suffix = " (" + strings.Join(notes, "; ") + ")"
+	}
+
+	switch {
+	case len(problems) > 0:
+		msg := "aihub reachable but degraded — " + strings.Join(problems, "; ") + suffix
+		if len(unreadable) > 0 {
+			msg += fmt.Sprintf("; also could not read %s from the health body", strings.Join(unreadable, ", "))
+		}
+		return checkResult{Name: name, Status: "warning", Message: msg}
+	case len(unreadable) > 0:
+		return checkResult{Name: name, Status: "warning",
+			Message: fmt.Sprintf("aihub reachable, but %s came back as a non-boolean, so its health "+
+				"could not be read — this is 'did not look', not 'looked and found nothing'%s",
+				strings.Join(unreadable, ", "), suffix)}
+	}
+	return checkResult{Name: name, Status: "ok", Message: "aihub reachable" + suffix}
 }
 
 // checkRepos verifies that .repo/<name>/ directories exist and their remote

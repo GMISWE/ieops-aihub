@@ -157,11 +157,24 @@ func (c *Client) WhoAmI(ctx context.Context) (map[string]any, error) {
 }
 
 // Health calls GET /v1/health and decodes the response into out (may be nil).
+//
+// A nil error means the request completed with a 2xx — it says nothing about
+// whether the server is healthy. /v1/health answers 200 in every branch by
+// design (aihub#316): liveness probes read its reachability and ignore the
+// body, so a 503 for an optional dependency would restart a server that is
+// still serving. The verdict lives in the decoded body's "status" field
+// ("ok" | "degraded"), alongside "db_ok", "embedding_enabled", "embedding_ok"
+// and — only when non-empty — "embedding_error_kind". A caller that wants the
+// verdict must read those; see healthVerdict in internal/cli/doctor.go.
 func (c *Client) Health(ctx context.Context, out any) error {
 	return c.do(ctx, "GET", "/v1/health", nil, out)
 }
 
-// Ping calls GET /v1/health and returns nil if the server is reachable and healthy.
+// Ping calls GET /v1/health, discards the body, and returns nil if the server
+// answered with a 2xx. That is reachability only, NOT health: it used to claim
+// "reachable and healthy", which was never true of the code and became actively
+// misleading once the body started carrying a real verdict (aihub#316). Use
+// Health and read "status" if you need to know whether the server is degraded.
 func (c *Client) Ping(ctx context.Context) error {
 	return c.do(ctx, "GET", "/v1/health", nil, nil)
 }

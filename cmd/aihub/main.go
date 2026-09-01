@@ -52,18 +52,35 @@ func main() {
 	// aihub#192: initialise embedding provider from env.
 	// EMBEDDING_ENABLED=true/1 activates; on error or unreachable backend we
 	// degrade to NoopProvider so the server still starts.
+	//
+	// aihub#316: both fallbacks below are permanent — there is no retry, so a
+	// backend that is merely late to start leaves this process with embedding
+	// off until someone restarts it. That was already true; what is new is that
+	// /v1/health now has an opinion about it, and "configured but we gave up"
+	// must not be reported as the same thing as "never configured". Hence
+	// NoteEmbeddingUnavailableAtBoot on exactly the paths that give up after
+	// embedding WAS asked for.
 	{
 		p, embErr := embedding.FromEnv()
-		if embErr != nil {
+		switch {
+		case embErr != nil:
 			fmt.Fprintf(os.Stderr, "warn: embedding.FromEnv: %v — falling back to NoopProvider\n", embErr)
 			p = &embedding.NoopProvider{}
-		} else if p != nil {
+			domain.NoteEmbeddingUnavailableAtBoot()
+		case p != nil:
+			// 10s, and it really is 10s: budgetProvider deliberately does not
+			// re-bound Ping, because clamping it to the 5s per-call embed
+			// budget would fail a cold backend that needs to load a model on
+			// its first embed — and the penalty for failing here is the
+			// permanent downgrade below.
 			pingCtx, pingCancel := context.WithTimeout(ctx, 10*time.Second)
-			if pingErr := p.Ping(pingCtx); pingErr != nil {
+			pingErr := p.Ping(pingCtx)
+			pingCancel()
+			if pingErr != nil {
 				fmt.Fprintf(os.Stderr, "warn: embedding backend unreachable: %v — falling back to NoopProvider\n", pingErr)
 				p = &embedding.NoopProvider{}
+				domain.NoteEmbeddingUnavailableAtBoot()
 			}
-			pingCancel()
 		}
 		domain.InitEmbeddingProvider(p)
 	}

@@ -1460,7 +1460,9 @@ PUT    /v1/scenarios/{scenario}/phase_config
 #### System
 
 ```
-GET    /v1/health   → {status,version,db_ok}
+GET    /v1/health   → {status,version,db_ok,embedding_enabled,embedding_ok,embedding_error_kind?}
+                      status = "ok" | "degraded"；embedding_error_kind 为空时省略
+                      HTTP code 恒 200（含 degraded），详见 §30.1 健康检查
 GET    /v1/version  → {version,git_commit,build_time,min_client_version}
 ```
 
@@ -4269,12 +4271,37 @@ aihub 是 Go HTTP server；PostgreSQL 独立进程。所有状态持久化在 PG
 - 3 次均失败 → tool 返回 `{code:"AIHUB_UNAVAILABLE",retry_after_seconds:30}` 给 LLM
 - skill SKILL.md 约束 LLM：收到 AIHUB_UNAVAILABLE → 暂停操作，告知用户 aihub 不可用
 
-**健康检查**：
+**健康检查**（aihub#316 起聚合 DB + embedding 后端）：
 ```
 GET /v1/health
-→ {"status":"ok","version":"1.x.x","db_ok":true}
+→ {"status":"ok","version":"1.x.x","db_ok":true,
+   "embedding_enabled":true,"embedding_ok":true,
+   "embedding_error_kind":"timeout"}      ← 仅在非空时出现
 ```
-MCP server 启动时调一次；LLM 可通过 `pf_whoami` 间接感知（server_version 字段）。
+
+| 字段 | 含义 |
+|---|---|
+| `status` | `ok`；`db_ok=false` **或**（embedding 启用且探测失败）时为 `degraded` |
+| `db_ok` | `pool.Ping` 在 **2s 内**返回 nil。handler 自己限时（不用裸 request context），wedged pool 得到 `false` 而不是把健康检查一起挂死 |
+| `embedding_enabled` | provider 为 NoopProvider 时 false——没人要的可选依赖不算降级 |
+| `embedding_ok` | 最近一次探测成功；embedding 关闭时恒 true |
+| `embedding_error_kind` | `timeout` \| `unreachable`，**闭集**。本端点在 BearerAuth 之前注册（未认证可读），而原始错误里带 embedding 后端 base URL，因此详情只写 stderr |
+
+**⚠️ HTTP status code 恒为 200，`degraded` 也是 200，不要"修"成 503。**
+容器 liveness 探针和 `polyforge doctor` 都把本端点的**可达性**当存活信号、不看 body；
+为一个**可选**依赖返 503 会把"还在正常服务的降级实例"变成重启循环。降级信号只在 body 里。
+
+**两条读这个端点前必须知道的限制**：
+- **最长 15s 陈旧**：embedding 探测结果按 15s TTL 缓存（本端点被容器运行时和 doctor 高频轮询，
+  不缓存等于给它要保护的那个后端持续加压）。所以 embedding 后端死后的 15s 内，
+  `/v1/health` 仍然说 `"status":"ok"`。判定"确实恢复/确实挂了"要间隔 15s poll 两次。
+- **`embedding_ok:true` 只表示"后端会应答"，不表示"向量在写"**：探测走 `Ping`，
+  即 embed 4 个字符的 `"ping"`（限时 2s）。一个"活着但很慢"的后端可以毫秒级答完它，
+  同时让真实的 6000 字符 embed 撞上 5s 的 per-call budget 超时。要确认真在写向量，
+  应新建一条 memory 看它那行有没有 vector，而不是读这个字段。
+
+MCP server 启动时调一次；`polyforge doctor` 的 config 检查读 body 并在 degraded 时报 warn；
+LLM 可通过 `pf_whoami` 间接感知（server_version 字段）。
 
 **in-progress step 不受影响**：step_state 存 DB，aihub 重启后 Wi Agent 继续调 tool，正常返回。
 
@@ -4402,7 +4429,8 @@ systemctl restart aihub           # 或 k8s rolling update
 # 新 aihub 启动时自动做 migration 检查（防止跳步）
 
 # 3. 验证
-curl http://aihub/v1/health       # {"status":"ok","db_ok":true}
+curl http://aihub/v1/health       # {"status":"ok","db_ok":true,"embedding_enabled":true,"embedding_ok":true}
+                                  # status=degraded 时 HTTP code 仍是 200 —— 看 body 不看 code（§30.1）
 ```
 
 **migration 工具**：Go binary 内嵌 `golang-migrate/migrate`，migration 文件在 `internal/db/migrations/`。

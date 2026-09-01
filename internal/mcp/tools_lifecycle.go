@@ -196,6 +196,27 @@ func (s *Server) registerLifecycleTools() {
 								// Parse members to find caller's role
 								var membersBytes []byte
 								switch m := membersRaw.(type) {
+								case []any:
+									// aihub#312: this is the shape that actually
+									// arrives. The server sends members as a JSON
+									// array (domain.Project.Members is a
+									// json.RawMessage) and client.ListProjects
+									// decodes the whole response into
+									// map[string]any (pkg/client/client.go), so
+									// proj["members"] is []any — never the string
+									// or []byte an in-process caller holding the
+									// raw message would have. Without this case
+									// the switch matched nothing, membersBytes
+									// stayed empty, and EVERY non-admin non-owner
+									// member fell through to public/viewer.
+									//
+									// Re-marshalling rather than walking the []any
+									// keeps one members parser instead of two;
+									// internal/cli/init.go does the same thing in
+									// parseServerProjects for the same reason.
+									if b, err := json.Marshal(m); err == nil {
+										membersBytes = b
+									}
 								case string:
 									membersBytes = []byte(m)
 								case []byte:

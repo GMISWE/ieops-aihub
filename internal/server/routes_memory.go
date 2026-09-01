@@ -189,10 +189,11 @@ func enforceMethodologyAttemptGate(
 }
 
 // handleRecall handles GET /v1/memories.
-const (
-	recallTopKMax    = 10
-	recallContentMax = 800
-)
+//
+// There is deliberately no page-size constant here. Page size is bounded in
+// exactly one place, domain.normalizeRecallTopK — see aihub#309 at the call to
+// domain.Recall below for what a second one did.
+const recallContentMax = 800
 
 // firstPipedType returns the first `type` entry containing a `|`, and whether one
 // was found.
@@ -349,14 +350,32 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 			req.RecallAlgo = algo
 		}
 
-		// opt3 P1: cap top_k (max 10). No forced default here: when the caller
-		// supplies neither param (or only malformed values), TopK stays 0 and
-		// domain.Recall applies its own default page size (20) — preserving the
-		// aihub#249 contract that bad input falls back to the default, not to a
-		// smaller page.
-		if req.TopK > recallTopKMax {
-			req.TopK = recallTopKMax
-		}
+		// NO page-size cap on this path. domain.Recall bounds TopK itself — unset,
+		// zero or negative becomes 20, and 200 is the ceiling — and that is the only
+		// place it may be bounded. A second cap here is what aihub#309 was:
+		//
+		//	if req.TopK > recallTopKMax /* 10 */ { req.TopK = recallTopKMax }
+		//
+		// sat on these lines, three above the call below. 10 is BELOW Recall's
+		// default of 20, so asking for a bigger page returned FEWER items than
+		// asking for nothing. Measured against production on 2026-09-01, same
+		// filter, total=220 throughout: top_k=30 -> 10 items, top_k unset -> 20,
+		// top_k=20 -> 10, top_k=300 -> 10. Nothing in the response said a clamp had
+		// happened, and the direction was backwards, so a caller reacting to a short
+		// page by asking for more got less.
+		//
+		// It also made Recall's 200 ceiling unreachable, and an unreachable ceiling
+		// is a false one that the next reader believes: the aihub#249 comment ~30
+		// lines above still asserts "Recall()'s TopK still defaults to 20 / clamps to
+		// 200 regardless of which name supplied it", which `top_k=300 -> 10 items`
+		// disproved. Both halves of that sentence are true again now.
+		//
+		// The aihub#249 contract the deleted cap named is real but narrower than it
+		// claimed: case 5 of TestHandleRecall_TotalAndLimitAlias pins BAD input (both
+		// top_k and limit malformed) to Recall's default page size. Removing the
+		// forced `TopK<=0 -> 5` default in 12934c5f was the right call and still
+		// holds — TopK still reaches Recall untouched at 0. What that contract never
+		// licensed was shrinking a page a caller asked for and spelled correctly.
 		resp, aihubErr := domain.Recall(ctx, pool, req)
 		if aihubErr != nil {
 			return domainErr(c, aihubErr)

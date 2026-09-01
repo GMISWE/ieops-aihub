@@ -129,7 +129,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 85
+            -min-gated 86
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
@@ -330,6 +330,36 @@ jobs:
           done
           ! grep -q -- '--- SKIP' recall_getbyid.log \
             || { echo "::error::an aihub#249 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#309: handleRecall carried a page-size cap of its own (top_k > 10 ->
+      # 10) three lines above its only call to domain.Recall, whose default page
+      # size is 20. So asking for a bigger page returned FEWER items than asking
+      # for nothing — measured against production 2026-09-01, one filter,
+      # total=220 throughout: top_k=30 -> 10 items, top_k unset -> 20, top_k=20 ->
+      # 10, top_k=300 -> 10, with no field in the response saying a clamp had
+      # happened. The cap also made Recall's 200 ceiling unreachable.
+      #
+      # This is its own step rather than another name in the aihub#249 -run above
+      # for a reason worth keeping: the aihub#249 test seeds 7 rows, so every page
+      # size >= 7 returns 7 and its `limit=50` case stayed GREEN for the whole life
+      # of the inversion (measured — the cap was restored and that test still
+      # passed). Coverage of a topic is not coverage of a contract.
+      #
+      # The page-size resolution itself, including the negative control that shows
+      # the measurement goes red on the pre-change build, is pure and runs on the
+      # "Unit tests" step above: internal/domain/memory_topk_test.go
+      # (TestNormalizeRecallTopK*). What needs a database is the COMPOSITION — a
+      # cap in the handler is invisible to a domain test — so only that hop is here.
+      - name: aihub#309 recall top_k inversion DB test
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^(TestHandleRecall_BiggerPageIsNotASmallerPage)$' -count=1 -v 2>&1 | tee recall_topk_inversion.log
+          grep -q -- "--- PASS: TestHandleRecall_BiggerPageIsNotASmallerPage (" recall_topk_inversion.log \
+            || { echo "::error::TestHandleRecall_BiggerPageIsNotASmallerPage did not run; the aihub#309 handler-to-domain page-size hop is not covered"; exit 1; }
+          ! grep -q -- '--- SKIP' recall_topk_inversion.log \
+            || { echo "::error::TestHandleRecall_BiggerPageIsNotASmallerPage SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#239: two consistency gaps deferred from aihub#236's review. (1) The
       # supersede path through Remember (pf_save_artifact, or any POST

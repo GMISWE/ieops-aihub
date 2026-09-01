@@ -1265,16 +1265,63 @@ func ReplyCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, autho
 
 // ─── Recall ───────────────────────────────────────────────────────────────────
 
+// Page-size bounds for Recall. recallTopKDefault is what a caller who names no
+// page size gets; recallTopKCeiling is the largest page any caller can obtain.
+//
+// INVARIANT: recallTopKCeiling >= recallTopKDefault. A ceiling BELOW the default
+// inverts the endpoint — asking for a bigger page then returns FEWER items than
+// asking for nothing — and that inversion shipped (aihub#309): handleRecall
+// carried a second cap of its own, `if req.TopK > 10 { req.TopK = 10 }`, three
+// lines above the only call to Recall. Measured against production on 2026-09-01,
+// same filter and total=220 throughout: top_k=30 -> 10 items, top_k unset -> 20
+// items, top_k=300 -> 10 items.
+//
+// Deliberately unexported, and no test may derive an expectation from either: a
+// fixture that reads the constant under test moves with the defect instead of
+// catching it. The tests in memory_topk_test.go spell 20 and 200 out.
+const (
+	recallTopKDefault = 20
+	recallTopKCeiling = 200
+)
+
+// normalizeRecallTopK resolves a requested page size into the one Recall uses.
+//
+// A non-positive request — the caller sent nothing, sent 0, or sent a negative —
+// means "no page size named" and yields the default. That is the aihub#249
+// contract: bad input falls back to the DEFAULT, never to a smaller page (case 5
+// of TestHandleRecall_TotalAndLimitAlias pins it at the HTTP layer). Any positive
+// request is honoured up to the ceiling.
+//
+// This is the ONLY place a recall page size is bounded, and callers must not add a
+// cap of their own. A cap applied upstream of this function is invisible from
+// here, so nothing can hold it to the invariant above — which is precisely how
+// aihub#309 happened, and why the ceiling on the next line was unreachable, and
+// therefore false, for as long as it did.
+//
+// Landing above the ceiling is still visible to the caller without a new response
+// field: Total reports the full matching count independently of pagination on
+// both the text and vector paths, so Total > len(Items) says a page was not the
+// whole answer (NextCursor says it too, but only on the text path — see the note
+// on paging in RecallWithVector). Total already survives the pf_recall slimming
+// whitelist in internal/mcp/recall_slim.go. A dedicated `top_k_clamped` field
+// would not — that whitelist is opt-in and drops anything unlisted — so
+// disclosure by new field would have reached REST callers while silently missing
+// the pf_recall callers who are the population that has the problem.
+func normalizeRecallTopK(requested int) int {
+	if requested <= 0 {
+		return recallTopKDefault
+	}
+	if requested > recallTopKCeiling {
+		return recallTopKCeiling
+	}
+	return requested
+}
+
 // Recall retrieves memories per §7.5. It is the router: it decides between the pgvector
 // path (RecallWithVector) and the text/tag path (recallText), and — because those two
 // paths own disjoint halves of the corpus — merges them when a request spans both.
 func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*RecallResponse, error) {
-	if req.TopK <= 0 {
-		req.TopK = 20
-	}
-	if req.TopK > 200 {
-		req.TopK = 200
-	}
+	req.TopK = normalizeRecallTopK(req.TopK)
 	if req.MinStrength <= 0 {
 		req.MinStrength = 0.3
 	}

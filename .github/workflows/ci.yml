@@ -114,6 +114,18 @@ jobs:
       # every check below passes vacuously). -min-gated is the second guard on
       # the same failure, pinned to the measured count: raise it when you add DB
       # tests, lower it only when you deliberately remove one.
+      #
+      # Since then, -min-gated has moved once, and the delta is recorded rather
+      # than folded into the derivation above — that block is the record of
+      # aihub#303's own measurement and rewriting it would destroy the audit it
+      # exists to be:
+      #
+      #   85 -> 101 aihub#266 added 16 DB-gated functions in internal/domain
+      #             (gc_alert_idempotency_db_test.go, all named
+      #             TestAlertSweep_*), executed by the "aihub#266 GC alert-sweep
+      #             idempotency DB tests" step below. The gate found them itself:
+      #             it went red on this branch, listing every one of them as
+      #             executed by no step, before that step existed.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -129,7 +141,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 85
+            -min-gated 101
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
@@ -493,6 +505,103 @@ jobs:
           done
           ! grep -q -- '--- SKIP' gc_partition.log \
             || { echo "::error::an aihub#268 partition-creator test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#266: the two GC sweeps documented "(daily)" ran on the 60s ticker
+      # with no idempotency, so each matching work item accumulated 1,440
+      # identical agent_events rows per day (measured: 111,221 on ieops#84 alone,
+      # ~105,000 rows/day for one project). The fix is in two places — a repeat
+      # window in the sweeps' SQL, and a daily period in the RunAll/RunDue sweep
+      # table — and only Postgres can say whether the first one works.
+      #
+      # This step is where the claim "one event per day, not 1,440" is actually
+      # measured. The suite drives the sweep 1,440 times per arm against a
+      # self-contained work_items + agent_events fixture (the gc_partition_db_test
+      # pattern: own schema, pinned search_path, no migrated tables touched, no
+      # pgvector needed), and it carries its own negative control — the verbatim
+      # pre-change statements, required to come back 1,440 — so the measurement
+      # is shown to discriminate rather than assumed to.
+      #
+      # The assertion list below names every case individually, and two of them
+      # are the reason this step exists at all rather than just checking for
+      # duplicates:
+      #   FiresAgainOnceTheRepeatWindowHasPassed  — a guard that never emits
+      #     again satisfies "no duplicates" perfectly. This is the only test that
+      #     can tell a window from a latch.
+      #   GuardIsPerWorkItemNotGlobal             — one alert anywhere must not
+      #     suppress alerts everywhere.
+      #   GuardIsScopedPerEventTypeNotPerWorkItem — nor must one alert TYPE
+      #     suppress the other for the same wi.
+      #   RunDueStillDrivesEverySweep             — the period change must not
+      #     have taken the other six sweeps with it.
+      #   RunDueSharesOneProcessWideSchedule      — the production entry point
+      #     must be wired to the shared schedule, not a fresh one per call.
+      #   RunDueRetriesADailySweepThatFailed      — the daily clock must start on
+      #     a run that COMPLETED, or one transient DB error silences the alert
+      #     for 24h.
+      #   RecognisesFloodRowsWrittenByTheOldBuild — the deploy transition: on the
+      #     day this ships, agent_events already holds the flood, and the guard
+      #     has to recognise rows it did not write.
+      #   AlertsAWorkItemWhoseWITypeIsNull        — work_items.wi_type is
+      #     nullable and sweep 7 reads it; the only test that seeds the NULL.
+      #   RestartAtAnUnluckyPhaseStillAlertsWithinADay — a restart must not be
+      #     able to stretch the alert gap past a day. Walks both clocks (the
+      #     schedule's and the database's) rather than restating arithmetic.
+      #
+      # Those six are not a wish list. A mutation run over eleven edits that each
+      # restore a distinct defect — guard removed, period reverted, both (i.e. the
+      # pre-change build), window's time bound dropped, wi match dropped,
+      # event_type match dropped, window set equal to the period, RunDue given a
+      # per-call schedule, the schedule recording attempts instead of completions,
+      # record() storing timestamps for every-tick sweeps, and >= turned into > in
+      # the due() comparison — is red on all eleven, and EIGHT of the eleven are
+      # caught by exactly ONE probe each. Six of those eight live in this step
+      # (the other two are pure-unit tests in gc_test.go). Deleting any one makes
+      # a real defect shippable with the suite green, which is why they are named
+      # here individually instead of trusting `-run 'TestAlertSweep'` to keep
+      # selecting them.
+      #
+      # Scoped with -run like the steps above, and for the same extra reason as
+      # aihub#268: these sweeps take advisory locks 2007/2008, which are
+      # database-wide.
+      - name: aihub#266 GC alert-sweep idempotency DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestAlertSweep' -count=1 -v 2>&1 | tee gc_alert_idempotency.log
+          for want in TestAlertSweep_UnclassifiedWIEmitsOnePerDayNotOnePerTick \
+                      TestAlertSweep_NeedsHumanSessionEmitsOnePerDayNotOnePerTick \
+                      TestAlertSweep_MeasurementFailsOnPreChangeBuild \
+                      TestAlertSweep_StillFiresOnceForAGenuinelyUnclassifiedWI \
+                      TestAlertSweep_FiresAgainOnceTheRepeatWindowHasPassed \
+                      TestAlertSweep_GuardIsPerWorkItemNotGlobal \
+                      TestAlertSweep_DoesNotAlertWorkItemsOutsideItsPredicate \
+                      TestAlertSweep_RunDueStillDrivesEverySweep \
+                      TestAlertSweep_RunAllIgnoresTheScheduleButStillCannotDuplicate \
+                      TestAlertSweep_GuardIsScopedPerEventTypeNotPerWorkItem \
+                      TestAlertSweep_RunDueSharesOneProcessWideSchedule \
+                      TestAlertSweep_RunDueRetriesADailySweepThatFailed \
+                      TestAlertSweep_RecognisesFloodRowsWrittenByTheOldBuild \
+                      TestAlertSweep_AlertsAWorkItemWhoseWITypeIsNull \
+                      TestAlertSweep_RestartAtAnUnluckyPhaseStillAlertsWithinADay \
+                      TestAlertSweep_WindowArgIsAnIntervalPostgresAgrees; do
+            grep -q -- "--- PASS: $want" gc_alert_idempotency.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#266 alert-sweep coverage is not actually executing"; exit 1; }
+          done
+          # The four arms of the events-per-day measurement, named individually:
+          # the two "old_driver_*" arms are the negative control, and a green run
+          # with them absent would mean the control never executed.
+          for want in TestAlertSweep_UnclassifiedWIEmitsOnePerDayNotOnePerTick/old_driver_old_emitter \
+                      TestAlertSweep_UnclassifiedWIEmitsOnePerDayNotOnePerTick/old_driver_new_emitter \
+                      TestAlertSweep_UnclassifiedWIEmitsOnePerDayNotOnePerTick/new_driver_old_emitter \
+                      TestAlertSweep_UnclassifiedWIEmitsOnePerDayNotOnePerTick/new_driver_new_emitter \
+                      TestAlertSweep_NeedsHumanSessionEmitsOnePerDayNotOnePerTick/shipped_behaviour \
+                      TestAlertSweep_NeedsHumanSessionEmitsOnePerDayNotOnePerTick/after_the_fix; do
+            grep -q -- "--- PASS: $want" gc_alert_idempotency.log \
+              || { echo "::error::$want did not run; the aihub#266 events-per-day measurement is incomplete, so its number is not the measured one"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' gc_alert_idempotency.log \
+            || { echo "::error::an aihub#266 alert-sweep test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#289: pf_recall's `type` filter is a LIST, but three SKILL.md templates
       # taught `type="a|b|c"` for months. Nothing in the chain ever split on '|', so the

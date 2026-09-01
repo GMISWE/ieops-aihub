@@ -101,6 +101,14 @@ Started executing <slug>, N steps total.
 
 ## 1. Execute (rhs=true, interactive mode) — the loop in full
 
+> ⚠️ **Why this one is deferred, when the auto loop is not.** Interactive mode is a *per-step*
+> mechanic, so the resident/on-demand criterion ("resident = every step, on-demand = once per
+> wi") does not by itself put it here — the **budget** did. The two loops are near-identical and
+> only one can be resident; the auto loop stays because `requires_human_session=false` is the
+> common case. `engine.native.md` therefore carries a summary of this loop plus an explicit
+> instruction to read this section before running interactively. If the budget ever frees up,
+> this is the first thing that should come back.
+
 ```python
 # Same bracket as auto mode: start the first step, then complete-and-advance. No pf_get_step.
 sa_id = new_ulid()
@@ -141,7 +149,8 @@ for i, (step_id, content) in enumerate(sections):
                    next_step_attempt_id=next_sa)
     sa_id = next_sa
 
-# all steps done -> wrap + worktree cleanup (see _common/lifecycle.md ## Wrap & cleanup)
+# all steps done -> wrap + worktree cleanup (_common/lifecycle.md ## Once per wi, whose full
+# sequence is §0 "Wrap & cleanup" of _common/references/lifecycle-details.md)
 ```
 
 ## 2. Compatibility — server binary older than aihub#290

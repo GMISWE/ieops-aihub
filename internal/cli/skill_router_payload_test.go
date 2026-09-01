@@ -36,10 +36,10 @@ import (
 //     TARGETS without adding its entry here fails — it cannot escape the gate by being new.
 //
 //  2. THE PAYLOAD DEPENDS ON THE ENGINE BRANCH. With superpowers enabled the router injects a
-//     short pointer; without it, engine.native.md. The native branch is ~2,400 characters
-//     larger and is the binding constraint, so BOTH branches are measured. A gate that only
-//     saw the developer's own machine would measure whichever branch that machine happens to
-//     select and call the other one covered.
+//     short pointer; without it, engine.native.md. The native branch is the binding constraint
+//     — before this change it was 23,873 characters against the superpowers branch's 14,482 —
+//     so BOTH branches are measured. A gate that only saw the developer's own machine would
+//     measure whichever branch that machine happens to select and call the other one covered.
 //
 // WHAT IS ASSERTED, per (skill, branch)
 //   1. Size inside [gate-slack, gate] — BOTH bounds, and gate < the harness limit.
@@ -52,9 +52,13 @@ import (
 //      dropped, and everything it names is really gone.
 
 const (
-	// MEASURED on Claude Code 2.1.246, not inferred. See the header comment: a 14,482-char
-	// PreToolUse additionalContext was replaced by a preview in a real session, and the
-	// cutoff matched tle() exactly.
+	// IMPORTED from aihub#285, which bisected 10,000/10,001 on the SessionStart hook, and
+	// CORROBORATED on PreToolUse rather than re-bisected there. What was measured on THIS
+	// event: a 14,482-char additionalContext was diverted to a file in a real session and the
+	// cut landed where tle() predicts; and across the session transcripts the largest payload
+	// delivered inline is 9,116 while the smallest diverted one is 11,571. So the true
+	// threshold is known to sit in (9,116, 11,571] and 10,000 is inside that interval — not
+	// established to be exactly 10,000 on this event. The gate is conservative either way.
 	routerHarnessHardLimit = 10000
 	routerPreviewChars     = 2000
 
@@ -83,7 +87,7 @@ const (
 //
 // This is a RATCHET THAT TRACKS THE PAYLOAD, not a fixed ceiling, and BOTH bounds are
 // asserted. The lower bound exists because a one-sided gate rots downward in value: aihub#304
-// slimmed the native branch from 16,840 to 9,261, and if the gate stayed near 10,000 that
+// slimmed the native branch from 23,873 to 9,256, and if the gate stayed near 10,000 that
 // slimming would simply have donated ~700 unguarded characters to whoever grew the payload
 // next. The headroom a slimming buys must not become the cushion for the next silent growth.
 //
@@ -95,10 +99,11 @@ const (
 // If you GROW one past its gate, do NOT raise the number — move text to the on-demand tier
 // (skills/**/references/, reached by a `📄 Read …` pointer in the resident fragment).
 //
-// ⚠️ `native` is the binding branch and its worst-case headroom is ~500 characters, not the
-// ~3,000 the superpowers branch enjoys. Adding a third `📄` pointer costs 125 of that up front
-// (see routerAssumedRootLen). If native needs to grow, the growth has to come out of
-// engine.native.md or lifecycle.md, not out of this number.
+// ⚠️ `native` is the binding branch and it is nearly full: ~150 characters of resident headroom
+// under its own gate, and ~500 of worst-case headroom under the harness limit — against the
+// ~3,000 the superpowers branch enjoys. A third `📄` pointer alone costs 125 of the worst case
+// (see routerAssumedRootLen). So the next contributor who needs to add a paragraph to a
+// native-branch fragment must RE-TIER something out to skills/**/references/, not re-budget.
 var routerBudget = map[string]int{
 	"pf-execute/superpowers": 6803 + routerGateSlack,
 	"pf-execute/native":      9256 + routerGateSlack,
@@ -489,10 +494,18 @@ func TestRoutedSkillHook_SizeGateDiscriminates(t *testing.T) {
 				// differ by the path difference alone and the arithmetic below would be
 				// measuring the temp directory's name.
 				if probe.degraded {
-					t.Fatalf("%s: the probe build went over the harness limit and DEGRADED, so "+
-						"its size is capped by construction and this control cannot measure the "+
-						"gate. Lower routerProbeChars (currently %d) or restore the budget.",
-						key, routerProbeChars)
+					// Most likely cause is the environment, not the tree: the probe renders
+					// from a copy under TMPDIR, whose absolute path is substituted into the
+					// payload once per 📄 pointer. A TMPDIR of roughly 127+ characters pushes
+					// base+400 past the harness limit and the hook then degrades by design.
+					// (Bisected: an 87-char root passes, 127 fails. GitHub runners land ~105.)
+					// Check that before touching routerProbeChars or the budget — this is
+					// never a false green, only a confusing red.
+					t.Fatalf("%s: the probe build degraded, so its size is capped by "+
+						"construction and this control cannot measure the gate. TMPDIR is %q "+
+						"(%d chars) — if that is long, shorten it and re-run before concluding "+
+						"anything about routerProbeChars (%d) or the budget.",
+						key, os.TempDir(), len(os.TempDir()), routerProbeChars)
 				}
 				// The equality is not tidiness: a probe is only evidence if the characters it
 				// adds actually reach the measurement. Anything that normalises, trims or

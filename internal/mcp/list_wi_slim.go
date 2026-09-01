@@ -44,13 +44,16 @@ package mcp
 // byte-reconstructible from a field that survives.
 //
 // 🔴 That rule is NECESSARY, not sufficient, and the difference cost this change
-// a revision. `seq` satisfies it outright (slug is `GENERATED ALWAYS AS (project
-// || '#' || seq)`) and is kept anyway, because measured consumer behaviour says
-// removing it would be noticed — see the seq note below. Losslessness tells you
-// what can go without loss of INFORMATION; it says nothing about loss of a
-// READER, and on this API the reader cannot report either one.
+// two revisions. `seq` satisfies it outright (slug is `GENERATED ALWAYS AS
+// (project || '#' || seq)`) and so does `scenario` (a CHECKed constant). BOTH are
+// kept, because measured consumer behaviour says removing either would be
+// noticed — silently. Losslessness tells you what can go without loss of
+// INFORMATION; it says nothing about loss of a READER, and on this API the reader
+// cannot report either one. The line that survived is the gate, not the field:
+// **a key may be dropped only when its value is null.** See the long note at the
+// end of slimListWorkItem for why, and for the measurement that got there.
 //
-// No field is removed for "looks unused". "Looks unused" is precisely the judgement that has no
+// No field is removed for "looks unused" either. That judgement has no
 // error-detection path on an LLM-facing API, and the evidence that would have to
 // back it does not exist. The skill documentation is measurably out of sync with
 // this response: using-polyforge/fragments/output-format.md:27 tells the model to
@@ -64,9 +67,13 @@ package mcp
 // leaving one open: the docs over-claim, so a field they name may be dead and
 // naming proves nothing about consumption — and a field they do not name may
 // still be read, so silence proves nothing about non-consumption. Neither
-// direction is usable. That is why the rule below is losslessness and not usage:
-// it is the only property here that is decidable without a consumer that can
-// report its own breakage.
+// direction is usable, which is why the rules below start from losslessness
+// rather than from usage: losslessness is the only property here that is
+// decidable without a consumer that can report its own breakage.
+//
+// Usage still gets the last word, though — it just has to come from measured
+// behaviour rather than from documentation. That is what the null-gate gives:
+// see the closing note.
 //
 // This is the same gate suppressContentEcho uses (wi_echo_slim.go): drop bytes
 // only when a check ON THE VALUES ITSELF says the drop is lossless, so
@@ -105,7 +112,15 @@ package mcp
 // times for 1,537,444 B in the sample window because nobody passes it. A
 // default-off flag here would save nothing until every skill call site changed,
 // and would put the saving behind a plugin release. What makes flagless safe is
-// not nerve, it is that every removal below is reconstructible.
+// not nerve, it is that every removal below is a null.
+//
+// One thing the flag would have bought is discoverability, and that is paid for
+// separately: the tool description now carries a one-sentence note that an
+// absent key means null, because nothing else reaches the caller at call time.
+// Measured at +70 B / ~27 tokens per request against ~7 KB off every full page.
+// The arithmetic that killed a `fields` PARAMETER clears for a sentence — and it
+// is the same arithmetic that kept it to a sentence: an enumerating draft cost
+// +220 B / ~86 tokens, the same order as the parameter itself.
 
 // slimListWorkItemsResult projects the items of a pf_list_work_items response in
 // place and returns the SAME top-level map.
@@ -132,7 +147,8 @@ func slimListWorkItemsResult(result map[string]any) map[string]any {
 	return result
 }
 
-// slimListWorkItem removes the reconstructible fields from one list item.
+// slimListWorkItem removes, from one list item, the keys whose value is null and
+// which say nothing the key's absence does not.
 func slimListWorkItem(m map[string]any) {
 	// `content` is not in the SELECT. Both list paths — buildListWorkItemsQuery
 	// and listWorkItemsByVector, which the comment there calls the "same
@@ -153,53 +169,16 @@ func slimListWorkItem(m map[string]any) {
 	// the SELECT above is what makes the deletion WORTH doing; the guard is what
 	// makes it SAFE, and only one of those two survives a version skew.
 	//
-	// Value-gating also keeps this rule the same shape as suppressContentEcho and
-	// as the two below, rather than the one exception the file's header would
-	// then have to disown.
+	// Value-gating also makes this rule the same shape as suppressContentEcho and
+	// as the null loop below — after two revisions, every rule in this file is
+	// gated on a null, and the note at the end explains why that is the whole
+	// design rather than a coincidence.
 	//
 	// A null content is a delete and not an aihub#269-style handle because there
 	// is no per-item fact to leave behind: a `content_len` here would have to be
 	// invented. pf_get_work_item is where a body is read.
 	if v, present := m["content"]; present && v == nil {
 		delete(m, "content")
-	}
-
-	// ─── `seq` is NOT dropped, and the reason is the only hard evidence in this
-	// file about what the reader actually does ─────────────────────────────────
-	//
-	// It is the obvious candidate. `slug` is a generated column, `TEXT GENERATED
-	// ALWAYS AS (project || '#' || seq) STORED` (0002_work_items.sql), so seq is
-	// reconstructible by the schema itself — it passes this file's rule outright,
-	// and an earlier revision of this code did delete it.
-	//
-	// Measured behaviour says don't. 315 real pf_list_work_items calls were read
-	// out of the Claude Code transcripts on this machine; 104 of them returned a
-	// payload too large for the model's context, and in 79 of those the model
-	// recovered by writing a `jq` filter over the spilled sidecar — projecting the
-	// response down BY HAND, naming the fields it wanted. That is the closest
-	// thing this API has to a consumer declaring its own keep-set, 148 times over,
-	// and `.seq` is named in 95 of them — more than any other field, ahead of
-	// `.goal` (76), `.status` (53) and `.slug` (52).
-	//
-	// What makes that decisive rather than merely interesting is jq's semantics
-	// for a missing key. For every field this file DOES drop, absent and null are
-	// indistinguishable — `"\(.closed_at)"` prints `null` either way — so all 148
-	// of those filters keep producing byte-identical output after this change.
-	// `.seq` is the single exception: it prints `278` before and `null` after. The
-	// most frequently named field in the only self-authored consumer contract we
-	// can observe is also the one field whose removal that contract would notice,
-	// silently, in the direction of a wrong answer.
-	//
-	// Twelve bytes an item, against the one rule here with evidence against it.
-
-	// `scenario` is CHECKed to (coding|writing|data) and CreateWorkItem rejects
-	// everything but coding, so every row that exists holds "coding" — the
-	// published pf_list_work_items schema says so in as many words. Dropped only
-	// when it IS "coding", so if a migration ever makes another value real, that
-	// item carries its scenario and this rule quietly stops applying to it
-	// instead of hiding the change.
-	if s, ok := m["scenario"].(string); ok && s == "coding" {
-		delete(m, "scenario")
 	}
 
 	// For the fields named in listWorkItemNullMeansNone, a JSON null and the
@@ -217,6 +196,64 @@ func slimListWorkItem(m map[string]any) {
 	}
 }
 
+// ─── Why every rule above is gated on the value being NULL ───────────────────
+//
+// Not a coincidence and not conservatism: it is the line the measured consumer
+// behaviour actually draws, and finding it cost this change two reversals.
+//
+// Two fields qualified for removal under the losslessness rule and are kept
+// anyway. `seq` is reconstructible by the schema — slug is `TEXT GENERATED
+// ALWAYS AS (project || '#' || seq) STORED` (0002_work_items.sql). `scenario` is
+// CHECKed to (coding|writing|data) with CreateWorkItem rejecting all but coding,
+// so it is a constant. Earlier revisions deleted both.
+//
+// What the observed readers do with a removed key splits cleanly, and it splits
+// on the GATE, not on the field:
+//
+//	null-gated drop   the key only ever goes when its value was null, so a
+//	                  reader that renders it by path sees no change at all in jq
+//	                  ("\(.closed_at)" prints `null` either way), and a reader
+//	                  that subscripts it in Python raises KeyError — LOUD, and
+//	                  self-correcting on the next turn.
+//
+//	value-gated drop  the key goes while holding a REAL value, so the same
+//	                  renderer silently prints `null` where it used to print
+//	                  `coding`. Verified: "\(.scenario)" gives `coding` before
+//	                  and `null` after, and (.scenario|type) flips string->null.
+//	                  Nothing raises. Nothing reports. That is the exact failure
+//	                  mode this whole work item exists to avoid.
+//
+// So the rule is one line: a key may be dropped only when its value is null. A
+// loud failure is an acceptable price for the bytes; a silent wrong value is
+// not, at any price. `seq` and `scenario` are both value-gated drops, so both
+// are out — and the earlier revision that kept seq but dropped scenario was
+// applying the rule to whichever field the evidence had been counted for, which
+// is not a rule.
+//
+// ⚠️ The evidence that produced this, described accurately, because an earlier
+// revision of this comment described it wrongly and the mistake is instructive.
+// 315 real pf_list_work_items calls were read out of this machine's session
+// transcripts. 104 returned a payload too large for the caller's context, and it
+// recovered by shell-processing the spilled sidecar: **145 such commands, of
+// which 125 are Python and only 21 are jq.** That population is the closest
+// thing this API has to a consumer declaring its own keep-set.
+//
+// The first version of this comment called all 145 "jq filters" and ranked
+// fields by a BARE SUBSTRING count over the command text, then presented the
+// result as structured `.field` references. Over the 39 jq programs actually
+// extracted, the real path counts are `.items` 35, `.status` 24, `.slug` 14,
+// `.seq` 13, `.goal` 11 — so the claim that `.seq` led the field is false;
+// `.status` and `.slug` outrank it. The substring count put seq at 92-95, close
+// enough to the true 13-of-39 ordering's top group that nothing looked wrong.
+// The conclusion (keep seq) survived; its stated reason did not.
+//
+// The half that IS robust — it holds under every counting rule tried, in both
+// languages — is the zero set: `project`, `source`, `reporter_user_id`,
+// `current_attempt_id`, `external_share_type` and `external_share_key` are named
+// zero times. Four of those six are dropped here anyway, but only when null, and
+// none is dropped BECAUSE of that count. "Named zero times" is not evidence on
+// this API; it is the absence of evidence, which is why it decides nothing.
+
 // listWorkItemNullMeansNone is a SET. It is spelled map[string]struct{} rather
 // than map[string]bool because the loop above ranges the keys and never reads a
 // value, so a `"milestone": false` entry would read as "excluded" and behave as
@@ -231,9 +268,15 @@ func slimListWorkItem(m map[string]any) {
 // work item was explicitly warned about. `requires_human_session` is a
 // *bool, and its NULL is not "no value" — it is a THIRD classification,
 // "unclassified", with its own ready-queue segment (domain.ReadyQueue.
-// Unclassified) and its own GC alert sweep (RunUnclassifiedWIAlert). Measured
-// against the live server, 37 of 1,049 work items across seven projects are in
-// it — 3.5%, not a corner case.
+// Unclassified, populated in work_items.go) and its own GC alert sweep
+// (RunUnclassifiedWIAlert, gc.go). Migration 0002 says it outright: "NULL wi goes
+// to unclassified[] queue, NOT items[] (prevents auto-execution)".
+//
+// Measured against the live server 2026-09-01: 77 of 1,935 work items are in it
+// — 3.98% — and the number that matters is narrower and much larger: **45 of the
+// 174 `queued` items, 26%**. Queued is exactly the population the ready queue
+// segments and the population pf-execute is pointed at, so this is not a tail
+// case, it is a quarter of the work waiting to be picked up.
 //
 // Drop that null and a model reading the smaller object sees no
 // requires_human_session at all. pf-execute/engine.native.md selects its
@@ -258,9 +301,13 @@ func slimListWorkItem(m map[string]any) {
 // information. TestSlimListWorkItems_KeepsNonNullValuesOfNullDroppedFields is
 // its negative control, because with a null-only fixture the guarded and
 // unguarded loops produce identical output and every other test stays green.
+// Live null rates 2026-09-01, over 1,935 items: external_share_type and
+// external_share_key 100%, milestone 96.9%, parent_work_item_id 94.8%,
+// current_attempt_id 19.2%, closed_at 12.2%.
 var listWorkItemNullMeansNone = map[string]struct{}{
-	// Sharing is off for every row that exists (null on 1,049/1,049 sampled);
-	// when a share is created these become a type and a key, and say so.
+	// Sharing is off for every row that exists (null on 1,935/1,935 sampled
+	// 2026-09-01); when a share is created these become a type and a key, and
+	// say so.
 	"external_share_type": {},
 	"external_share_key":  {},
 	// "no milestone" / "no parent" / "not closed" / "no live attempt". Each is

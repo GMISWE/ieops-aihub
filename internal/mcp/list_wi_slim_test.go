@@ -82,11 +82,7 @@ func restoreProjectedFields(slim map[string]any) map[string]any {
 	if _, ok := out["content"]; !ok {
 		out["content"] = nil
 	}
-	// Rule 3: the only scenario a row can hold.
-	if _, ok := out["scenario"]; !ok {
-		out["scenario"] = "coding"
-	}
-	// Rule 4: nulls that mean "none".
+	// Rule 2: nulls that mean "none".
 	for _, k := range []string{
 		"external_share_type", "external_share_key",
 		"milestone", "parent_work_item_id", "closed_at", "current_attempt_id",
@@ -198,15 +194,18 @@ func TestSlimListWorkItems_KeepsNonNullValuesOfNullDroppedFields(t *testing.T) {
 			"the guard exists for version skew, not for today's SELECT list", got)
 	}
 
-	// The remaining conditional rule, scenario, has its control in
-	// TestSlimListWorkItems_KeepsNonCodingScenario. content and the null six had
-	// none until this test.
+	// After the scenario rule was removed, content and the null six ARE every
+	// rule this file has — so this test is the negative control for all of them,
+	// and it is the only one. TestSlimListWorkItems_KeepsValueGatedCandidates
+	// covers the two fields deliberately not dropped.
 }
 
 // TestSlimListWorkItems_KeepsNullRequiresHumanSession pins the field this work
 // item was warned about by name. Its NULL is a third classification —
-// "unclassified", 3.5% of live rows — not "no value", and a model reading its
-// absence would take an unclassified work item for an unattended one.
+// "unclassified" — not "no value" — and a reader of its absence takes an
+// unclassified work item for an unattended one. Live 2026-09-01: 77 of 1,935
+// items, and 45 of the 174 `queued` ones, which is 26% of exactly the population
+// the ready queue segments and pf-execute is pointed at.
 //
 // This is the case a losslessness proof cannot make: reconstructing "absent ->
 // null" round-trips perfectly, so TestSlimListWorkItems_ProjectionIsReconstructible
@@ -253,47 +252,49 @@ func TestSlimListWorkItems_KeepsConditionallyPresentFields(t *testing.T) {
 	}
 }
 
-// TestSlimListWorkItems_KeepsSeq pins a NON-removal, which is unusual enough to
-// say why. seq passes this file's losslessness rule outright — slug is
-// `GENERATED ALWAYS AS (project || '#' || seq)`, so it is reconstructible by the
-// schema — and an earlier revision did drop it.
+// TestSlimListWorkItems_KeepsValueGatedCandidates pins two NON-removals, which is
+// unusual enough to say why. Both fields satisfy this file's losslessness rule
+// outright and earlier revisions of this change deleted them:
 //
-// It is kept because of the one piece of hard evidence available about what the
-// reader does with this response: across 315 real calls in this machine's
-// transcripts, the model hand-wrote 148 `jq` projections to recover from
-// oversized payloads, and `.seq` appears in 95 of them, more than any other
-// field. jq renders a missing key and a null key identically, so every one of
-// those filters is unaffected by the fields this projection DOES drop —
-// `"\(.closed_at)"` prints `null` either way. `.seq` is the sole exception: it
-// would print `278` before and `null` after.
+//	seq       slug is `GENERATED ALWAYS AS (project || '#' || seq)`
+//	scenario  CHECKed to (coding|writing|data), CreateWorkItem rejects all but
+//	          coding, so it is a constant
 //
-// So this test guards against a future reader re-deriving the deletion from the
-// rule alone. The rule permits it; the evidence does not.
-func TestSlimListWorkItems_KeepsSeq(t *testing.T) {
+// They are kept because dropping either is a VALUE-gated drop: the key goes while
+// holding a real value, so a reader that renders it by path silently prints
+// `null` where it used to print `278` or `coding`. Verified with real jq —
+// `"\(.scenario)"` gives `coding` before and `null` after, and `(.scenario|type)`
+// flips `string` to `null`. Nothing raises; nothing reports.
+//
+// Every rule this file DOES apply is null-gated, so the key only ever goes when
+// its value was already null: jq output is then byte-identical, and Python
+// subscript style raises KeyError, which is loud and self-corrects. That gate —
+// not the field, and not how often the field is named — is the line.
+//
+// ⚠️ An earlier revision kept seq and dropped scenario, on the strength of a
+// field-frequency count that had only been run for seq. Two rules for two fields
+// in the same category is not a rule. Do not re-derive either deletion from the
+// losslessness rule alone; it permits both.
+func TestSlimListWorkItems_KeepsValueGatedCandidates(t *testing.T) {
 	item := fullListItem()
 	slimListWorkItem(item)
-	got, present := item["seq"]
-	if !present {
-		t.Fatal("seq was dropped: reconstructible from slug, but named in 95 of the 148 " +
-			"jq projections the model wrote against real responses, and the only dropped " +
-			"field whose absence those filters would render as `null`")
-	}
-	if got != float64(278) {
-		t.Errorf("seq = %v, want 278", got)
-	}
-}
 
-// TestSlimListWorkItems_KeepsNonCodingScenario: `scenario` is dropped because
-// every row that can exist holds "coding", so the drop has to be conditional on
-// the value. If a migration ever makes writing/data real, those items keep their
-// scenario and the rule stops applying to them instead of hiding the change.
-func TestSlimListWorkItems_KeepsNonCodingScenario(t *testing.T) {
-	for _, s := range []string{"writing", "data", "release"} {
-		item := fullListItem()
-		item["scenario"] = s
-		slimListWorkItem(item)
-		if got := item["scenario"]; got != s {
-			t.Errorf("scenario %q was dropped or altered (got %v)", s, got)
+	if got, present := item["seq"]; !present || got != float64(278) {
+		t.Errorf("seq = %v (present=%v), want 278: dropping it is a value-gated drop, "+
+			"and a reader rendering .seq would silently print null", got, present)
+	}
+	if got, present := item["scenario"]; !present || got != "coding" {
+		t.Errorf("scenario = %v (present=%v), want \"coding\": same category as seq — "+
+			"`\\(.scenario)` prints `coding` before and `null` after", got, present)
+	}
+	// A non-coding scenario must obviously survive too; it is the same assertion
+	// with the constant-value excuse removed.
+	for _, sc := range []string{"writing", "data", "release"} {
+		other := fullListItem()
+		other["scenario"] = sc
+		slimListWorkItem(other)
+		if got := other["scenario"]; got != sc {
+			t.Errorf("scenario %q was dropped or altered (got %v)", sc, got)
 		}
 	}
 }

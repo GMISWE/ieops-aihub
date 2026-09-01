@@ -8,7 +8,8 @@ package mcp_test
 //	go test ./internal/mcp/ -run TestListWorkItemsResponse -count=1 -v
 //
 // Measured against the pre-change build (jsonResult(result), no projection):
-//   - TestListWorkItemsResponseDropsReconstructibleFields  FAIL, naming all 9 fields
+//   - TestListWorkItemsResponseDropsReconstructibleFields  FAIL, naming all 7 fields
+//     in its `gone` table (count it there; do not trust this line if they diverge)
 //   - TestListWorkItemsResponseKeepsPopulatedOptionalFields FAIL, on its
 //     anti-vacuity tail only: the seven fields it protects all survive there (of
 //     course — nothing is projected), but so does `scenario`, and that check is
@@ -20,25 +21,34 @@ package mcp_test
 // files' tests — each row lists ONLY the tests that went red. Re-measure by
 // re-applying them; do not extend this table by reasoning about it.
 //
-//	M1  slimListWorkItem returns immediately   Reconstructible ·
+//	M1   slimListWorkItem returns immediately  Reconstructible ·
 //	                                           KeepsUnknownTopLevelKeys · Tolerates… ·
 //	                                           KeepsPopulatedOptionalFields ·
 //	                                           DropsReconstructibleFields
-//	M2  + delete(m, "goal")                    Reconstructible · KeepsEveryConsumedField
-//	M3  delete every key in the item           Reconstructible · KeepsNonNullValues… ·
-//	                                           KeepsNullRequires… · KeepsConditionallyPresent… ·
-//	                                           KeepsSeq · KeepsNonCodingScenario ·
+//	M2   + delete(m, "goal")                   Reconstructible · KeepsEveryConsumedField
+//	M3   delete every key in the item          Reconstructible · KeepsNonNullValues… ·
+//	                                           KeepsNullRequires… ·
+//	                                           KeepsConditionallyPresent… ·
+//	                                           KeepsValueGatedCandidates ·
 //	                                           KeepsPopulatedOptionalFields ·
 //	                                           KeepsEveryConsumedField
-//	M4  + requires_human_session to the        KeepsNullRequiresHumanSession ONLY
-//	    null-drop set
-//	M5  return a rebuilt top-level map         KeepsUnknownTopLevelKeys ONLY
-//	M6  content deleted unconditionally        KeepsNonNullValues… ·
+//	M4   + requires_human_session to the       KeepsNullRequiresHumanSession ONLY
+//	     null-drop set
+//	M5   return a rebuilt top-level map,       KeepsUnknownTopLevelKeys ONLY
+//	     conditional-copy variant
+//	     {"items": items, "next_cursor": …}
+//	M5b  same, plain {"items": items} with     KeepsUnknownTopLevelKeys ·
+//	     no cursor copy at all                 KeepsEveryConsumedField
+//	M6   content deleted unconditionally       KeepsNonNullValues… ·
 //	                                           KeepsPopulatedOptionalFields
-//	M7  null loop deletes by NAME              KeepsNonNullValues… ·
-//	    (drop the `v == nil` guard)            KeepsPopulatedOptionalFields
-//	M8  re-add the seq deletion an earlier     Reconstructible · KeepsSeq ·
-//	    revision had                           KeepsEveryConsumedField
+//	M7   null loop deletes by NAME             KeepsNonNullValues… ·
+//	     (drop the `v == nil` guard)           KeepsPopulatedOptionalFields
+//	M8   re-add the seq deletion an earlier    Reconstructible ·
+//	     revision had                          KeepsValueGatedCandidates ·
+//	                                           KeepsEveryConsumedField
+//	M9   re-add the scenario deletion an       Reconstructible ·
+//	     earlier revision had                  KeepsValueGatedCandidates ·
+//	                                           KeepsEveryConsumedField
 //
 // Four things this table is here to say:
 //
@@ -52,22 +62,27 @@ package mcp_test
 // found in review, not by this suite; the suite had eight tests and no negative
 // control on the rule the file calls its largest by bytes.
 //
-// M8 is the mutation the design rule ALLOWS and the evidence forbids: seq really
-// is reconstructible from slug, and an earlier revision of this change did drop
-// it. Reconstructible catches it here only because restoreProjectedFields has no
-// seq rule to restore it with — i.e. because the reconstructor was edited to
-// match the decision. The load-bearing catches are KeepsSeq and
-// KeepsEveryConsumedField, which encode the measured consumer behaviour (95 of
-// 148 hand-written jq projections name `.seq`) rather than the rule.
+// M8 and M9 are the two mutations the design rule ALLOWS and the evidence
+// forbids. Both fields are genuinely reconstructible — seq from slug, scenario
+// from being a CHECKed constant — and earlier revisions of this change deleted
+// them. Reconstructible catches them here only because restoreProjectedFields
+// has no rule to restore them with, i.e. because the reconstructor was edited to
+// match the decision. The load-bearing catches are KeepsValueGatedCandidates and
+// KeepsEveryConsumedField.
 //
 // That is the honest limit of a losslessness rule, and worth stating plainly: it
 // tells you what can be removed without loss of INFORMATION, not what can be
-// removed without loss of a READER. Only measurement answers the second.
+// removed without loss of a READER. Only measurement answers the second, and the
+// line it drew is the GATE rather than the field — a null-gated drop is invisible
+// to jq and loud in Python, a value-gated drop is silent and wrong in both.
 //
-// ⚠️ This table was wrong once already. M8's row initially read "Reconstructible
-// would NOT catch it" and omitted KeepsEveryConsumedField — both derived by
-// reasoning after the seq decision, and both false, because the `seq` row had
-// silently failed to apply to the kept table at the time. Re-run the mutations.
+// ⚠️ This table has been wrong twice, both times from the same cause: a row was
+// filled in by reasoning about a mutation instead of running it. First M8's row
+// read "Reconstructible would NOT catch it" and omitted KeepsEveryConsumedField
+// (the `seq` row had silently failed to apply to the kept table at the time).
+// Then M5's row was written without noticing that its red set depends on WHICH
+// rebuild you write — hence M5 and M5b. Re-run the mutations; do not extend this
+// table from the code.
 
 import (
 	"net/http"
@@ -123,7 +138,6 @@ func oneFullWorkItem() map[string]any {
 // every other test in both files. Review found that, the suite did not.
 func TestListWorkItemsResponseKeepsPopulatedOptionalFields(t *testing.T) {
 	populated := map[string]any{
-		"milestone":           "v1.2-alpha",
 		"parent_work_item_id": "wi_epicParent",
 		"closed_at":           "2026-08-31T09:00:00Z",
 		"current_attempt_id":  "ra_Ku2oXS0y",
@@ -155,10 +169,12 @@ func TestListWorkItemsResponseKeepsPopulatedOptionalFields(t *testing.T) {
 			t.Errorf("%s = %v, want %v", k, got, want)
 		}
 	}
-	// scenario must still go: the point of the control is that the OTHER rules
-	// stopped firing, not that every rule did.
-	if _, present := item["scenario"]; present {
-		t.Error("scenario survived its \"coding\" value — the projection is not running at all")
+	// milestone is left null by this fixture on purpose, so it must still go: the
+	// point of the control is that the guards stopped firing for the POPULATED
+	// fields, not that the projection stopped running. Without this the test
+	// passes against a projection that does nothing at all.
+	if _, present := item["milestone"]; present {
+		t.Error("the null milestone survived — the projection is not running at all")
 	}
 }
 
@@ -197,9 +213,7 @@ func TestListWorkItemsResponseDropsReconstructibleFields(t *testing.T) {
 	_, item := listOneWorkItem(t)
 
 	gone := map[string]string{
-		"content":  "neither list query SELECTs wi.content, so this is null on every row this endpoint has ever returned",
-		"scenario": "every row that can exist holds \"coding\"; CreateWorkItem rejects the other two",
-
+		"content":             "neither list query SELECTs wi.content, so this is null on every row this endpoint has ever returned",
 		"milestone":           "null means none, and absence says the same",
 		"parent_work_item_id": "null means none",
 		"closed_at":           "null means not closed, which status already says",
@@ -248,10 +262,12 @@ func TestListWorkItemsResponseKeepsEveryConsumedField(t *testing.T) {
 	kept := map[string]string{
 		"id": "pf-release/SKILL.md builds included_wi_ids from it; measured: 311 later tool calls " +
 			"passed an id read out of one of these responses and seen nowhere earlier in the session",
-		"seq": "reconstructible from slug, and kept anyway — named in 95 of 148 measured jq recovery " +
-			"projections, more than any other field, and the ONLY droppable field those filters would " +
-			"render as `null` instead of a value (jq treats a missing key and a null key alike, which " +
-			"is why every other rule here is invisible to them)",
+		"seq": "reconstructible from slug (a generated column), and kept anyway: dropping it is a " +
+			"VALUE-gated drop, so a reader rendering `.seq` silently prints null instead of 278. " +
+			"13 of the 39 measured jq programs name it, and 72 Python subscripts read [\"seq\"]",
+		"scenario": "a CHECKed constant, so reconstructible, and kept for exactly the same reason as " +
+			"seq — verified: `\\(.scenario)` prints `coding` before and `null` after, and " +
+			"(.scenario|type) flips string->null. 2 of the 39 jq programs name it",
 		"slug": "output-format.md renders the wi as <project#seq>, which is the slug verbatim; " +
 			"52 of the 148 measured jq recovery projections name it, and 319 later tool calls " +
 			"passed a slug read out of one of these responses and seen nowhere earlier",
@@ -282,12 +298,19 @@ func TestListWorkItemsResponseKeepsEveryConsumedField(t *testing.T) {
 		}
 	}
 
-	// next_cursor is the top-level half. No skill reads it today (they all cap
-	// with `limit`), so losing it would not surface until the day someone
-	// paginates — the failure mode recall_slim.go's INVARIANT note records for
-	// `total`. Asserted here rather than trusted to the projection returning the
-	// same map, because that is an implementation detail this test should
-	// outlive.
+	// next_cursor is the top-level half, and the reason to assert it is the
+	// opposite of what this comment used to say. It claimed no skill reads it
+	// "(they all cap with `limit`)". The first clause is true of the skill FILES —
+	// none mentions next_cursor — and the parenthetical is false: measured over
+	// 315 real calls, next_cursor came back non-null in 104 of them, and ALL 30
+	// cursor-passing calls passed back a value that had been returned by an
+	// earlier response. Pagination is live; it is just not written down anywhere.
+	//
+	// Which makes this exactly the aihub#249 shape rather than a hypothetical one:
+	// a top-level field that no document names, that the caller nonetheless
+	// depends on, and whose loss would surface as a silently truncated result set.
+	// Asserted here rather than trusted to the projection returning the same map,
+	// because that is an implementation detail this test should outlive.
 	if got := result["next_cursor"]; got != "2026-08-29T02:31:43.746959Z" {
 		t.Errorf("next_cursor = %v, want it preserved", got)
 	}

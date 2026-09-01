@@ -126,6 +126,16 @@ jobs:
       #             idempotency DB tests" step below. The gate found them itself:
       #             it went red on this branch, listing every one of them as
       #             executed by no step, before that step existed.
+      #
+      #   102 -> 103 aihub#311 added 1 DB-gated function in internal/domain
+      #             (TestRecallPositiveControl_Live in
+      #             memory_vector_integration_test.go). It also needs
+      #             EMBEDDING_BASE_URL, so it joins the excluded pair rather
+      #             than the required set: excluded goes 2 -> 3 and the required
+      #             count stays 100, which is why no new CI step accompanies it.
+      #             It is the reporter's acceptance assertion for aihub#311 and
+      #             is expected to be RED against a real endpoint; CI has
+      #             pgvector but no embedding service, so CI never runs it.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -141,7 +151,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 102
+            -min-gated 103
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which

@@ -2,19 +2,23 @@ package mcp
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // aihub#313 — pf_recall brief mode.
 //
-// Measured premise (live against prod aihub, 2026-09-01, real tokenizer via
-// /v1/messages/count_tokens): a no-top_k pf_recall returns 20 items = 6,967 tok,
-// of which content is 60.4% and `related` 15.9%. With fields="brief" the same 20
-// items cost 1,728 tok = 24.8%. The point of these tests is that the 75.2% cut is
-// a PROJECTION and not a LOSS: the item count is unchanged, every id survives, and
-// every shortened body is flagged with the true full length so pf_get_memory can
-// complete it.
+// Measured premise: see the CANONICAL MEASUREMENT block on slimRecallResultMode in
+// recall_slim.go — 20 items, 6,966 tok full -> 1,766 tok brief = 25.4%, still 20
+// items. Deliberately NOT restated here with its own numbers: an earlier draft of
+// this file quoted 6,967/1,728/24.8% from a different call of the same query, and
+// two comments disagreeing about one statistic is how a measured table rots.
+//
+// What these tests exist to prove is that the 74.6% cut is a PROJECTION and not a
+// LOSS: the item count is unchanged, every id survives, and every shortened body is
+// flagged with its true full length so pf_get_memory can complete it.
 
 // briefFixture is one item as it reaches briefRecallItem: already through
 // slimRecallResult's whitelist, content already cut to 800 runes by handleRecall,
@@ -96,24 +100,30 @@ func TestBriefRecallItem_ProjectsBodyAndKeepsRetrievalPath(t *testing.T) {
 }
 
 // TestBriefRecallItem_CapsBodylessOfNewline covers the case that makes an uncapped
-// "first line" rule a no-op: 37.5% of memories in the measured corpus contain no
-// newline at all, and 44.2% of first lines exceed 200 chars. For those the first
-// line IS the whole body, so without briefContentMax brief mode would have returned
-// the full 800 runes while reporting itself as brief.
+// "first line" rule a no-op: 37.5% of items across 659 recalls contain no newline at
+// all (45% in the smaller live 20-item sample). For those the first line IS the
+// whole body, so without briefContentMax brief mode would return the full 800 runes
+// while reporting itself as brief.
 func TestBriefRecallItem_CapsBodylessOfNewline(t *testing.T) {
 	long := strings.Repeat("单", 800) // no newline anywhere, 800 runes
 	got := briefRecallItem(map[string]any{"id": "mem_nl", "content": long})
 
-	gotRunes := len([]rune(got["content"].(string)))
+	gotContent := got["content"].(string)
+	gotRunes := len([]rune(gotContent))
 	if gotRunes != briefContentMax {
 		t.Fatalf("newline-free content must be cut to briefContentMax (%d runes), got %d — "+
 			"this is the 37.5%% of the corpus where 'first line' alone saves nothing",
 			briefContentMax, gotRunes)
 	}
 	// Cut on a rune boundary, not a byte boundary: these are 3-byte runes, so a
-	// byte-slice would have produced invalid UTF-8.
-	if !json.Valid(mustJSON(t, got)) {
-		t.Error("brief content is not valid JSON — the cap sliced a multi-byte rune")
+	// byte-slice would produce invalid UTF-8.
+	//
+	// utf8.ValidString, NOT json.Valid(json.Marshal(...)). The first draft used the
+	// latter and review proved it tautological: encoding/json silently replaces
+	// invalid UTF-8 with U+FFFD, so json.Valid(json.Marshal(x)) is true for EVERY x.
+	// It read like a guard and could not fail.
+	if !utf8.ValidString(gotContent) {
+		t.Errorf("brief content is not valid UTF-8 — the cap sliced a multi-byte rune: %q", gotContent)
 	}
 	if got["content_full_len"] != 800 {
 		t.Errorf("content_full_len should be the length we actually held (800), got %v",
@@ -138,16 +148,19 @@ func TestBriefRecallItem_UntruncatedStaysUnflagged(t *testing.T) {
 }
 
 // TestBriefRecallItem_TrimsNoiseWithoutLosingMeaning locks the two noise trims that
-// carry brief mode from 28.4% to 24.8% of the full response. Rounding is to 3
-// decimals (the consumers are an ordering and a ">= 0.3" threshold) and timestamps
-// keep their DATE and time-of-day — only sub-second exhaust goes.
+// are worth ~3.5 points of the 25.4% result. Rounding is to 4 decimals, not 3,
+// because pf-retro gates on similarity > 0.85; timestamps keep their DATE and
+// time-of-day, and only sub-second exhaust goes.
 func TestBriefRecallItem_TrimsNoiseWithoutLosingMeaning(t *testing.T) {
 	got := briefRecallItem(briefFixture())
-	if got["similarity"] != 0.289 {
-		t.Errorf("similarity should round to 3dp, got %v", got["similarity"])
+	// 0.2891933706162386 -> 0.2892, not 0.289: see briefRoundDigits for why the cut
+	// is at 4 decimals (pf-retro branches on similarity > 0.85 / > 0.65, so a 5e-4
+	// shift from 3dp rounding can flip a reinforce into a duplicate).
+	if got["similarity"] != 0.2892 {
+		t.Errorf("similarity should round to 4dp, got %v", got["similarity"])
 	}
-	if got["effective_strength"] != 2.992 {
-		t.Errorf("effective_strength should round to 3dp, got %v", got["effective_strength"])
+	if got["effective_strength"] != 2.9916 {
+		t.Errorf("effective_strength should round to 4dp, got %v", got["effective_strength"])
 	}
 	if got["created_at"] != "2026-05-21T20:48:26Z" {
 		t.Errorf("created_at should keep date and time-of-day at second precision, got %v",
@@ -162,11 +175,23 @@ func TestTrimSubsecond_LeavesUnparseableStringsAlone(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"2026-05-21T20:48:26.806541Z", "2026-05-21T20:48:26Z"},
 		{"2026-05-21T20:48:26.5+08:00", "2026-05-21T20:48:26+08:00"},
-		{"2026-05-21T20:48:26Z", "2026-05-21T20:48:26Z"}, // nothing to trim
+		{"2026-05-21T20:48:26.000000123-05:00", "2026-05-21T20:48:26-05:00"},
+		{"2026-05-21T20:48:26.5z", "2026-05-21T20:48:26z"}, // lowercase zone
+		{"2026-05-21T20:48:26Z", "2026-05-21T20:48:26Z"},   // nothing to trim
 		{"", ""},
 		{"not a timestamp", "not a timestamp"},
 		{"1.x", "1.x"}, // a dot with no digit group is not a fractional second
 		{"trailing.", "trailing."},
+		// The counterexamples a review found against the first draft, which only
+		// looked for "a dot followed by digits" while its doc claimed non-timestamps
+		// were safe. It turned "v1.2.3" into "v1.3".
+		{"v1.2.3", "v1.2.3"},
+		{"0.5.1", "0.5.1"},
+		{"3.14 is pi", "3.14 is pi"},
+		{"12.5", "12.5"},     // digits either side, but no zone and no seconds field
+		{"a12.5Z", "a12.5Z"}, // looks close, but "a12" is not a time
+		{".5Z", ".5Z"},       // dot at index 0 — no seconds field to trim from
+		{"2026-05-21", "2026-05-21"},
 	} {
 		if got := trimSubsecond(tc.in); got != tc.want {
 			t.Errorf("trimSubsecond(%q) = %q, want %q", tc.in, got, tc.want)
@@ -216,12 +241,14 @@ func TestSlimRecallResultMode_BriefPreservesItemCountAndShrinks(t *testing.T) {
 		t.Fatalf("brief mode did not shrink the response: full=%d bytes, brief=%d bytes",
 			len(fullB), len(briefB))
 	}
-	// Measured live at 24.8% of full tokens; 40% of BYTES is a loose ceiling that
-	// still fails loudly if the projection stops being applied, without pinning the
-	// test to one corpus's exact ratio.
+	// Measured live at 25.4% of full TOKENS and 31.1% of full BYTES. The 40% byte
+	// ceiling is deliberately loose — it fails loudly if the projection stops being
+	// applied at all, without pinning this test to one corpus's exact ratio (which
+	// would make it a fixture check rather than a behaviour check). Partial
+	// regressions are caught by the field-level assertions, not by this number.
 	if ratio := float64(len(briefB)) / float64(len(fullB)); ratio > 0.40 {
 		t.Errorf("brief response is %.1f%% of full by bytes, want <=40%% "+
-			"(measured 24.8%% of TOKENS on a real 20-item recall)", ratio*100)
+			"(measured 25.4%% of TOKENS on a real 20-item recall)", ratio*100)
 	}
 
 	// Every id survives, in order — the reverse probe at response scale.
@@ -257,6 +284,259 @@ func TestSlimRecallResultMode_FullModeIsUnchanged(t *testing.T) {
 	if _, ok := item["related"]; !ok {
 		t.Error("full mode dropped `related`, which only brief mode may do")
 	}
+}
+
+// TestBriefRecallItem_BodylessItemGainsNoContentKey: an item that arrived with no
+// `content` key at all must not leave with `content: ""`. Synthesising an empty
+// string would ADD bytes to the response this projection exists to shrink, and it
+// would let a stray content_full_len flag an empty body as truncated. The id
+// invariant still has to hold on that path — the fix is a guarded assignment
+// rather than an early return precisely so the id block below it still runs.
+func TestBriefRecallItem_BodylessItemGainsNoContentKey(t *testing.T) {
+	got := briefRecallItem(map[string]any{"id": "mem_nobody", "type": "rule.work"})
+
+	if _, ok := got["content"]; ok {
+		t.Errorf("brief synthesised a content key for a bodyless item: %+v", got)
+	}
+	for _, k := range []string{"content_truncated", "content_full_len"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("bodyless item must not be flagged %q: %v", k, got[k])
+		}
+	}
+	if got["id"] != "mem_nobody" {
+		t.Errorf("the id invariant must hold on the bodyless path too, got %v", got["id"])
+	}
+}
+
+// TestBriefRecallItem_NonFiniteNumbersStayMarshalable is about what ROUNDING can
+// introduce, not about implausible data. math.Round(f*1000)/1000 sends a finite but
+// enormous f to +Inf, and encoding/json FAILS on +Inf — so without the guard brief
+// mode could error on an item full mode serialises fine. Real values are bounded to
+// roughly 0..3, so this can never fire in production; the invariant being locked is
+// that brief mode is never able to fail where full mode succeeds.
+func TestBriefRecallItem_NonFiniteNumbersStayMarshalable(t *testing.T) {
+	for _, v := range []float64{math.MaxFloat64, 1e306, -1e306, math.Inf(1), math.Inf(-1), math.NaN()} {
+		item := map[string]any{"id": "mem_big", "content": "x", "similarity": v}
+		got := briefRecallItem(item)
+		// Left untouched, so brief mode is exactly as (un)marshalable as full mode.
+		if got["similarity"] != v && !(math.IsNaN(v) && math.IsNaN(got["similarity"].(float64))) {
+			t.Errorf("similarity %v was rewritten to %v; the guard should have left it alone",
+				v, got["similarity"])
+		}
+		if _, err := json.Marshal(got); err != nil {
+			// Full mode would fail identically on this input; what must NOT happen is
+			// brief failing where full succeeds.
+			if _, fullErr := json.Marshal(item); fullErr == nil {
+				t.Errorf("brief mode failed to marshal (%v) an item full mode handles fine: %v", err, v)
+			}
+		}
+	}
+	// And the ordinary case still rounds.
+	got := briefRecallItem(map[string]any{"id": "m", "content": "x", "similarity": 0.4556157860526919})
+	if got["similarity"] != 0.4556 {
+		t.Errorf("finite values must still round to 4dp, got %v", got["similarity"])
+	}
+}
+
+// TestBriefFields_KeepsIDAsTheRetrievalMechanism locks the mechanism, not just the
+// outcome. briefFields is the ONLY path that carries `id` into a brief item, and
+// criterion 2 of aihub#313 rests on it. An earlier draft had a redundant fallback
+// block after the copy loop; review showed it was unreachable AND that it made
+// TestBriefRecallItem_AlwaysCarriesID pass even with "id" removed from briefFields —
+// the outcome test could not see the mechanism disappear. The fallback is gone, so
+// that test bites again; this one names the requirement directly so a future
+// refactor of briefFields cannot quietly drop it.
+func TestBriefFields_KeepsIDAsTheRetrievalMechanism(t *testing.T) {
+	var found bool
+	for _, f := range briefFields {
+		if f == "id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("briefFields must contain \"id\" — it is the only thing that carries the id "+
+			"into a brief item, and without it pf_get_memory is unreachable: %v", briefFields)
+	}
+}
+
+// TestBriefLine_NeverReturnsAZeroInformationLine is the WARN-1 regression. Taking
+// content[:IndexByte('\n')] literally returns "" for a body opening with a blank
+// line and "---" for one opening with YAML frontmatter — both plausible in a
+// markdown memory corpus, and both yield a brief item carrying nothing while still
+// reporting itself as a projection. The model's only recovery is the full read this
+// projection exists to avoid, so the degenerate case converts a saving into an
+// induced round-trip (~192k tok here). Every case below must yield a line the model
+// can actually judge the memory by.
+func TestBriefLine_NeverReturnsAZeroInformationLine(t *testing.T) {
+	for _, tc := range []struct {
+		name, content, want string
+	}{
+		{"leading blank line", "\nsecond line here", "second line here"},
+		{"leading blank lines and indent", "\n\n   # Real Title", "# Real Title"},
+		{"yaml frontmatter", "---\ntitle: x\n---\n# T", "title: x"},
+		{"horizontal rule first", "-----\n# After the rule", "# After the rule"},
+		{"whitespace-only line first", "   \n# Real Title", "# Real Title"},
+		{"crlf body", "line1\r\nline2", "line1"},
+		{"plain first line", "# Title\nbody", "# Title"},
+		{"single line", "just this", "just this"},
+		{"trailing newline only", "hello\n", "hello"},
+		// No informative line anywhere: fall back to the collapsed head. Returning ""
+		// here would be LESS informative than the truth — "--- ---" is literally what
+		// the memory contains — so the fallback reports it rather than hiding it. ""
+		// comes back only when the body really carries no non-whitespace rune.
+		{"only fences and blanks", "---\n\n---\n", "--- ---"},
+		{"only whitespace", "   \n\t\n", ""},
+		{"genuinely empty", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := briefLine(tc.content); got != tc.want {
+				t.Errorf("briefLine(%q) = %q, want %q", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBriefRecallItem_DoesNotAdvertiseWhitespaceAsMissingBody: "hello\n" holds one
+// rune more than the line shown, but that rune is a newline. Flagging it truncated
+// with content_full_len 6 invites a pf_get_memory round-trip that buys nothing, and
+// a round-trip costs ~192k tok here — far more than the whole response.
+func TestBriefRecallItem_DoesNotAdvertiseWhitespaceAsMissingBody(t *testing.T) {
+	for _, content := range []string{"hello\n", "hello\n\n", "hello   ", "hello\r\n"} {
+		got := briefRecallItem(map[string]any{"id": "m", "content": content})
+		if _, ok := got["content_truncated"]; ok {
+			t.Errorf("content %q flagged truncated (full_len=%v) when only whitespace was dropped",
+				content, got["content_full_len"])
+		}
+	}
+	// ...but a genuinely shortened body must still be flagged.
+	got := briefRecallItem(map[string]any{"id": "m", "content": "head\nreal tail content"})
+	if got["content_truncated"] != true {
+		t.Errorf("a body with a real second line must still be flagged truncated: %+v", got)
+	}
+}
+
+// TestSlimRecallResultMode_MatchesPreChangeFullMode is the missing pre-change
+// reference (WARN 7). TestSlimRecallResultMode_FullModeIsUnchanged compares the new
+// entry point against its own one-line delegate, so it is structurally incapable of
+// noticing a change to the SHARED body — which is exactly what "byte-identical to
+// what slimRecallResult produced before this wi" means. preChangeSlimRecallResult
+// below is the function as it stood at 3abc042, vendored verbatim, so any drift in
+// the shared path now shows up as a byte diff.
+func TestSlimRecallResultMode_MatchesPreChangeFullMode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   map[string]any
+	}{
+		{"rich item", map[string]any{"items": []any{briefFixture()}, "total": float64(1)}},
+		{"empty items", map[string]any{"items": []any{}, "total": float64(0)}},
+		{"non-map item", map[string]any{"items": []any{"not a map"}}},
+		{"empty item map", map[string]any{"items": []any{map[string]any{}}}},
+		{"unknown top-level field", map[string]any{"items": []any{}, "surprise": "kept?"}},
+		{"no items key", map[string]any{"total": float64(3)}},
+		{"cursor and diagnostics", map[string]any{
+			"items": []any{briefFixture()}, "total": float64(9), "next_cursor": "c1",
+			"unmatched_types": []any{"nope.type"}, "unmatched_types_error": "boom",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := mustJSON(t, preChangeSlimRecallResult(deepCopy(t, tc.in)))
+			got := mustJSON(t, slimRecallResultMode(deepCopy(t, tc.in), false))
+			if string(want) != string(got) {
+				t.Errorf("full mode drifted from the pre-change (3abc042) output:\n pre  = %s\n post = %s",
+					want, got)
+			}
+		})
+	}
+}
+
+// preChangeSlimRecallResult is slimRecallResult exactly as it stood at 3abc042, the
+// commit this wi branched from. Vendored so the suite carries its own reference for
+// "full mode is unchanged" instead of asserting it against code that changed in the
+// same commit. Do NOT refactor this to share helpers with the production function —
+// sharing is precisely what would let both drift together.
+func preChangeSlimRecallResult(result map[string]any) map[string]any {
+	if result == nil {
+		return result
+	}
+	items, ok := result["items"].([]any)
+	if !ok {
+		return result
+	}
+	keep := map[string]bool{
+		"id": true, "type": true, "content": true, "effective_strength": true,
+		"similarity": true, "work_item_id": true, "tags": true, "related": true,
+		"created_at":        true,
+		"content_truncated": true, "content_full_len": true,
+	}
+	slim := make([]any, 0, len(items))
+	for _, it := range items {
+		m, ok := it.(map[string]any)
+		if !ok {
+			slim = append(slim, it)
+			continue
+		}
+		out := make(map[string]any, len(keep)+1)
+		for k, v := range m {
+			if keep[k] {
+				out[k] = v
+			}
+		}
+		if attrs, ok := m["attrs"].(map[string]any); ok {
+			if sp, ok := attrs["structured_payload"]; ok {
+				out["attrs"] = map[string]any{"structured_payload": sp}
+			}
+		}
+		if commits, ok := m["commits"].([]any); ok && len(commits) > 0 {
+			notes := make([]any, 0, len(commits))
+			for _, c := range commits {
+				cm, ok := c.(map[string]any)
+				if !ok {
+					continue
+				}
+				note := map[string]any{}
+				if b, ok := cm["body"]; ok {
+					note["body"] = b
+				}
+				if a, ok := cm["author_display"]; ok {
+					note["by"] = a
+				}
+				if reps, ok := cm["replies"].([]any); ok && len(reps) > 0 {
+					rb := make([]any, 0, len(reps))
+					for _, r := range reps {
+						if rm, ok := r.(map[string]any); ok {
+							if b, ok := rm["body"]; ok {
+								rb = append(rb, b)
+							}
+						}
+					}
+					if len(rb) > 0 {
+						note["replies"] = rb
+					}
+				}
+				if len(note) > 0 {
+					notes = append(notes, note)
+				}
+			}
+			if len(notes) > 0 {
+				out["commits"] = notes
+			}
+		}
+		slim = append(slim, out)
+	}
+	res := map[string]any{"items": slim}
+	if nc, ok := result["next_cursor"]; ok && nc != nil {
+		res["next_cursor"] = nc
+	}
+	if total, ok := result["total"]; ok && total != nil {
+		res["total"] = total
+	}
+	if um, ok := result["unmatched_types"]; ok && um != nil {
+		res["unmatched_types"] = um
+	}
+	if ue, ok := result["unmatched_types_error"]; ok && ue != nil {
+		res["unmatched_types_error"] = ue
+	}
+	return res
 }
 
 func mustJSON(t *testing.T, v any) []byte {

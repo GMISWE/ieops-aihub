@@ -66,18 +66,33 @@ func (s *Server) registerMemoryTools() {
 			"min_strength":         prop("number", "Min memory strength (default 0.3)"),
 			"include_archived":     prop("boolean", "Include archived memories (default false)"),
 			"recency_weight":       prop("number", "Recency weight (default 0.3)"),
-			// aihub#313. Wire text stays terse on purpose: this string is charged on
-			// EVERY request of EVERY session, whether or not pf_recall is called,
-			// which is the standing cost that closed aihub#279 as net negative.
-			// Measured on the REAL tools/list payload (+50 for this property, -5 from
-			// the Description reword above = +45 net), against a pf_recall tool object
-			// of 415 tok and a 50-tool block of 11,634. Do NOT re-measure this with
-			// `dump-mcp-schemas`: the contract JSON omits per-property descriptions
-			// and reports only +18, understating the real cost 2.5x. One briefed
-			// no-top_k call saves 5,239 tok x 47.3 re-billings = 247,800 tok, which
-			// pays for 5,507 requests of this. The reasoning lives in Go comments,
-			// which are charged to nobody.
-			"fields": prop("string", "\"brief\" drops item bodies, keeping id + a 120-rune first line; pf_get_memory(id) for full text. Use for wide exploratory recalls."),
+			// aihub#313. This string is charged on EVERY request of EVERY session,
+			// whether or not pf_recall is called — the standing cost that closed
+			// aihub#279 as net negative — so it is priced, not written to taste.
+			// Measured on the REAL tools/list payload: +59 net (this property +64, the
+			// Description reword above -5), against a pf_recall tool object of 415 tok
+			// and a 50-tool block of 11,634. Three wordings were measured; the one
+			// below is 36 tok cheaper than a version that also enumerated the kept
+			// fields (redundant — the model can see them in the response) and 22 tok
+			// dearer than one that dropped the rune cap and the dropped-field list
+			// (NOT redundant — a caller that needs `related` has to learn brief drops
+			// it before spending a call). Do NOT re-price this with
+			// `dump-mcp-schemas`: its contract JSON omits per-property descriptions
+			// and reports +18, understating the real cost 3x.
+			//
+			// Break-even: one briefed no-top_k call saves 5,200 tok x 47.3 re-billings
+			// = ~246,000 tok, paying for ~4,150 requests of this standing cost, against
+			// a measured density of 16 briefed calls per 63 requests.
+			//
+			// propEnum, not prop: `fields` conventionally names a field LIST, so
+			// fields="id,type" is a natural guess that would silently return the full
+			// 6,966-token response — the exact cost this exists to remove, with no
+			// signal that the request was misunderstood. The enum makes the single
+			// legal value discoverable. It stays advisory (the SDK does not reject
+			// other values — verified, the wiring tests still pass while sending
+			// "Brief"/"BRIEF"/""), so the safe "anything but brief == full" default
+			// still holds for a client that ignores the enum.
+			"fields": propEnum("string", "\"brief\" replaces each item body with its first line (<=120 runes) and drops related/tags; content_truncated marks the cut, pf_get_memory(id) returns the full text.", []string{"brief"}),
 		}, []string{"project"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)

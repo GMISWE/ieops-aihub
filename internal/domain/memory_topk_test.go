@@ -164,8 +164,27 @@ func TestNormalizeRecallTopK_CeilingIsReachable(t *testing.T) {
 	}
 
 	// Reachability as a measurement over the sweep, not as a claim about one
-	// value — this is the half that goes red if a new cap is ever reintroduced
-	// upstream of the ceiling, whatever value it takes.
+	// value — this is the half that goes red if a new cap is reintroduced
+	// upstream of the ceiling check WITHIN normalizeRecallTopK, whatever value
+	// it takes.
+	//
+	// That scope is the whole limit, and it does NOT reach the defect aihub#309
+	// actually was. Measured 2026-09-01: restoring the deleted clamp at its real
+	// site — `if req.TopK > 10 { req.TopK = 10 }` in handleRecall,
+	// internal/server/routes_memory.go, three lines above its only call to
+	// domain.Recall — leaves ALL FOUR tests in this file GREEN. They live in
+	// internal/domain and call normalizeRecallTopK directly, so a bound in
+	// internal/server is structurally invisible to them; only a cap placed
+	// inside normalizeRecallTopK itself reds them.
+	//
+	// The guard against that regression class — a second bound reintroduced in
+	// the handler — is TestHandleRecall_BiggerPageIsNotASmallerPage
+	// (internal/server/routes_memory_recall_pagination_test.go), which drives a
+	// real GET /v1/memories over seeded rows, plus the DB-gated ci.yml step
+	// "aihub#309 recall top_k inversion DB test" that proves it actually RAN
+	// rather than SKIPped. Under the same mutation that test fails on its first
+	// assertion: "10 is not greater than or equal to 20". These pure tests pin
+	// the resolution; that one pins the hop.
 	reached := false
 	for _, r := range topKSweep() {
 		if normalizeRecallTopK(r) == 200 {

@@ -297,6 +297,11 @@ jobs:
       # it only runs when someone invokes it by hand.
       # UPDATE (aihub#293): the two using-polyforge suites are no longer in that
       # list — they are wired below. The rest of the sentence still stands.
+      # UPDATE (aihub#304): pf-skill-router.test.sh is still unwired, but the
+      # router is no longer ungated — internal/cli/skill_router_payload_test.go
+      # drives the real hook per routed skill in both engine branches and runs
+      # under the "Unit tests" step above, with no -run filter to fall out of.
+      # It is Go rather than shell precisely so it cannot become advisory.
       # aihub#249: GET /v1/memories previously parsed only `top_k` (a `?limit=N`
       # caller was silently ignored) and RecallResponse carried no `total`; and
       # GET /v1/memories/:id did not exist at all. These run against the

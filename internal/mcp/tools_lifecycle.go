@@ -377,8 +377,31 @@ func (s *Server) registerLifecycleTools() {
 
 	// pf_list_work_items
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_list_work_items",
-		Description: "List work items with optional filters",
+		Name: "pf_list_work_items",
+		// The second sentence is the only thing that tells the caller the response
+		// is projected (aihub#278), and it is nine words for two reasons.
+		//
+		// Cost: a tool description sits in the prefix of EVERY request, so it is
+		// a standing charge against a per-call saving — the same arithmetic that
+		// made a `fields` PARAMETER not worth adding. An earlier draft here
+		// enumerated the seven droppable fields and measured +220 B / ~86 tokens
+		// per request, which is the same order as the ~100 that killed the
+		// parameter. This one measures +70 B / ~27 tokens per request — about
+		// 23k tokens a day at cache-read pricing, against ~462k saved on the
+		// limit=200 calls alone, so it clears by ~20x where the enumeration
+		// cleared by ~5x and the parameter did not clear at all.
+		//
+		// Correctness: the enumeration was also the more fragile of the two. It
+		// restates listWorkItemNullMeansNone in prose, in a different file, with
+		// nothing to keep them in step — a checked-in list of the droppable
+		// fields would rot exactly as quietly as the response shape it describes.
+		// Stating the INVARIANT cannot go stale, and it is what a caller needs:
+		// not which keys may vanish, but what a vanished key means.
+		//
+		// The field list lives in docs/mcp-tools.md and the reasoning in
+		// list_wi_slim.go, neither of which is charged to anybody.
+		Description: "List work items with optional filters. " +
+			"Item keys whose value is null are omitted: an absent key means null.",
 		InputSchema: listWorkItemsSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -393,7 +416,14 @@ func (s *Server) registerLifecycleTools() {
 		if err != nil {
 			return errResult(err)
 		}
-		return jsonResult(result)
+		// aihub#278: drop the keys whose value is null and which say nothing the
+		// key's absence does not (content, plus six that mean "none").
+		// Unconditional, and lossless by a per-value check rather than by
+		// assertion — see the header of list_wi_slim.go for why it is a
+		// delete-list and not a keep-list like slimRecallResult, and the closing
+		// note there for why `seq` and `scenario` are NOT among them despite
+		// passing the same rule.
+		return jsonResult(slimListWorkItemsResult(result))
 	})
 
 	// pf_get_work_item

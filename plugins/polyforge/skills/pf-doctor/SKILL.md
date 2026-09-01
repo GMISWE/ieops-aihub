@@ -56,8 +56,12 @@ The CLI runs 7 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per chec
 Then read the launcher's binary-status marker (Check 10 below) — one `cat`, no binary needed:
 
 ```bash
-cat ~/.polyforge/binary-status.txt 2>/dev/null || echo "ok: no binary-status marker"
+cat ~/.polyforge/binary-status.txt   # "No such file or directory" IS the ok result
 ```
+
+No `2>/dev/null`, no `|| echo`: this whole check exists because the launcher used to
+suppress exactly that kind of error, and `cat`'s own message already says which of the two
+outcomes happened.
 
 Then run the seam-check probe (read-only, pinned to the cached `superpowers` plugin version):
 

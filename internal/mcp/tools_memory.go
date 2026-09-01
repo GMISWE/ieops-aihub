@@ -50,7 +50,7 @@ func (s *Server) registerMemoryTools() {
 	// pf_recall
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_recall",
-		Description: "Recall memories from aihub with optional semantic search. type is an ARRAY of type names, e.g. [\"experience.*\",\"rule.work\"] — one filter per entry; a '|' inside an entry is NOT a separator and is rejected. An entry ending in .* is a prefix wildcard. Any entry matching no memory comes back in unmatched_types, which distinguishes a wrong type name from a project that genuinely holds no such memory. An item with content_truncated=true holds only the first 800 runes of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest.",
+		Description: "Recall memories from aihub with optional semantic search. type is an ARRAY of type names, e.g. [\"experience.*\",\"rule.work\"] — one filter per entry; a '|' inside an entry is NOT a separator and is rejected. An entry ending in .* is a prefix wildcard. Any entry matching no memory comes back in unmatched_types, which distinguishes a wrong type name from a project that genuinely holds no such memory. An item with content_truncated=true holds only a prefix of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest.",
 		InputSchema: objectSchema(map[string]any{
 			"project": prop("string", "Project name"),
 			"query":   prop("string", "Semantic search query"),
@@ -66,6 +66,18 @@ func (s *Server) registerMemoryTools() {
 			"min_strength":         prop("number", "Min memory strength (default 0.3)"),
 			"include_archived":     prop("boolean", "Include archived memories (default false)"),
 			"recency_weight":       prop("number", "Recency weight (default 0.3)"),
+			// aihub#313. Wire text stays terse on purpose: this string is charged on
+			// EVERY request of EVERY session, whether or not pf_recall is called,
+			// which is the standing cost that closed aihub#279 as net negative.
+			// Measured on the REAL tools/list payload (+50 for this property, -5 from
+			// the Description reword above = +45 net), against a pf_recall tool object
+			// of 415 tok and a 50-tool block of 11,634. Do NOT re-measure this with
+			// `dump-mcp-schemas`: the contract JSON omits per-property descriptions
+			// and reports only +18, understating the real cost 2.5x. One briefed
+			// no-top_k call saves 5,239 tok x 47.3 re-billings = 247,800 tok, which
+			// pays for 5,507 requests of this. The reasoning lives in Go comments,
+			// which are charged to nobody.
+			"fields": prop("string", "\"brief\" drops item bodies, keeping id + a 120-rune first line; pf_get_memory(id) for full text. Use for wide exploratory recalls."),
 		}, []string{"project"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -118,7 +130,28 @@ func (s *Server) registerMemoryTools() {
 		if err != nil {
 			return errResult(err)
 		}
-		return jsonResultCompact(slimRecallResult(result))
+		// aihub#313: `fields` is deliberately NOT added to the params loop above.
+		//
+		// That loop is the hop aihub#282 is about. `similarity_threshold` is
+		// published in this very InputSchema, is never forwarded here, and is never
+		// parsed by handleRecall either, while being fully implemented in domain —
+		// so nothing reaches it. Re-confirmed live while writing this: passing 0.99
+		// and passing nothing return the same 20 items in the same order, min
+		// similarity 0.154, differing only in effective_strength's 10th decimal
+		// (decay between the two calls).
+		//
+		// `fields` cannot repeat that because it has no server hop to be dropped on.
+		// The projection is a property of what the MCP process HANDS THE MODEL, and
+		// this process is the last hop before the model, so the parameter is consumed
+		// exactly where it is read: one hop, no wire contract, no REST parse, no
+		// domain change. Adding it to the loop would be strictly worse — handleRecall
+		// would ignore the query param (a third instance of aihub#282), and
+		// routes_memory.go is aihub#309's declared file besides.
+		//
+		// This is the OPPOSITE error from aihub#287's 4_wrong_landing_point ("only
+		// building the 4th hop"): there domain was complete and the MCP hop missing;
+		// here the MCP hop is the only one that can implement the feature at all.
+		return jsonResultCompact(slimRecallResultMode(result, strArg(args, "fields") == "brief"))
 	})
 
 	// pf_get_memory — aihub#269. pf_recall truncates content to 800 runes and

@@ -322,6 +322,11 @@ jobs:
       # keeps its own positive control so a token or network problem reports as
       # a SKIP rather than masquerading as a missing branch, and the step below
       # then fails on that SKIP rather than passing quietly.
+      # UPDATE (aihub#305, second half): launcher-visibility.test.sh is wired
+      # below as well. It is hermetic — the thing it gates is what the launcher
+      # SAYS when a download fails, which needs no real network, only a failing
+      # one. So the unwired list above is now: launcher-bash32, pf-commit-guard,
+      # pf-repo-sync, pf-seam-check, pf-skill-router.
       # aihub#249: GET /v1/memories previously parsed only `top_k` (a `?limit=N`
       # caller was silently ignored) and RecallResponse carried no `total`; and
       # GET /v1/memories/:id did not exist at all. These run against the
@@ -953,6 +958,64 @@ jobs:
           n=$(grep -c '^PASS: ' channel_gate.log)
           [ "$n" -ge 22 ] \
             || { echo "::error::launcher channel/url gate reported only $n PASSes (floor 22) — checks have gone missing"; exit 1; }
+
+      # aihub#305 second half. The channel fix above made the DEFAULT path
+      # resolve to a branch that exists; it did nothing about what happens when
+      # the download fails anyway, which is still the common case for anyone
+      # without gh or not logged in (`download_binary` needs `gh auth token` for
+      # private-repo raw access — an independent cause the channel fix cannot
+      # touch). That path used to swallow its own diagnosis with
+      # `download_binary 2>/dev/null`, symlink whatever `polyforge` was on PATH,
+      # and start normally: a session where every tool works and the binary
+      # behind them is older than the plugin's skills, with nothing saying so.
+      #
+      # This suite drives the REAL launcher end to end under stubs and then the
+      # REAL SessionStart hook against the HOME it left behind, because the
+      # defect was two components agreeing to say nothing to each other —
+      # neither one's source proves anything on its own.
+      #
+      # Hermetic (no network, no docker, no token), unlike the gate above: gh
+      # and curl are stubbed and POLYFORGE_SYSTEM_BIN_DIR is pinned so the
+      # launcher cannot repoint the runner's /usr/local/bin.
+      #
+      # Sections 5-7 are mutation controls that reproduce main's pre-fix
+      # behaviour and pass only when the arms above go dark. They each assert
+      # the mutated file really differs first — a replacement that matches
+      # nothing yields a green run that means nothing, which is why
+      # "MUTATION DID NOT APPLY" is a FAIL and not a skip.
+      - name: aihub#305 launcher failure-visibility gate
+        run: |
+          set -o pipefail
+          bash plugins/polyforge/tests/launcher-visibility.test.sh 2>&1 | tee visibility_gate.log
+          for want in "PASS: mutant/degraded -> launcher recorded ~/.polyforge/binary-status.txt" \
+                      "PASS: mutant/degraded -> SessionStart puts the warning in front of the model" \
+                      "PASS: mutant/degraded -> SessionStart systemMessage carries the launcher's full text" \
+                      "PASS: mutant/degraded -> system bin dir not repointed" \
+                      "PASS: mutant/no-fallback -> launcher exits non-zero instead of pretending to start" \
+                      "PASS: reverse -> SessionStart says nothing, as a healthy machine must" \
+                      "PASS: reverse -> the pre-seeded marker was DELETED by the successful download" \
+                      "PASS: budget -> the warning costs" \
+                      "PASS: gh-missing/download -> the reason survives to the log" \
+                      "PASS: gh-unauth/update-check -> marker names the actual cause" \
+                      "PASS: unreadable-channel -> marker names the actual cause" \
+                      "PASS: nc/launcher-download -> mutation applied" \
+                      "PASS: nc/launcher-download -> with the mechanism removed the arm goes dark" \
+                      "PASS: nc/hook-banner -> mutation applied" \
+                      "PASS: nc/hook-banner -> with the banner removed the model is told nothing" \
+                      "PASS: nc/update-check -> mutation applied" \
+                      "PASS: nc/update-check -> the gh-unauth arm goes dark" \
+                      "PASS: degrade-path -> the forced-degrade fixture really took the degrade path" \
+                      "PASS: degrade-path -> the stale-binary warning survives being rebuilt"; do
+            grep -qF -- "$want" visibility_gate.log \
+              || { echo "::error::launcher visibility gate never reported \"$want\" — that check did not run"; exit 1; }
+          done
+          ! grep -q '^SKIP:' visibility_gate.log \
+            || { echo "::error::launcher visibility gate SKIPped — it has no skip path, so this means the suite was replaced or python3 vanished from the runner"; exit 1; }
+          ! grep -q '^FAIL:' visibility_gate.log \
+            || { echo "::error::launcher visibility gate reported a FAIL"; exit 1; }
+          n=$(grep -c '^PASS: ' visibility_gate.log)
+          [ "$n" -ge 50 ] \
+            || { echo "::error::launcher visibility gate reported only $n PASSes (floor 50) — checks have gone missing"; exit 1; }
 
       # aihub#293: wire the two using-polyforge gates in. Until now ci.yml ran
       # exactly one suite out of plugins/polyforge/tests/ (the launcher one

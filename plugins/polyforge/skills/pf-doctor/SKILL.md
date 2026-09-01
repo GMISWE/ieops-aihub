@@ -53,6 +53,16 @@ The CLI runs 7 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per chec
 | 6 | claude_md | CLAUDE.md `## Workspace` block format (slim vs legacy inline) + `.polyforge/repo-map/<project>.md` present for every project | `polyforge init` |
 | 7 | usage_md | `.polyforge/usage.md` still carrying rule sections the `using-polyforge` skill owns (Iron Rules / NL Routing / Memory Type Reference). That file is never regenerated, so the copy there cannot be corrected and a session sees two (aihub#294) | **manual** — `--fix` does not touch it |
 
+Then read the launcher's binary-status marker (Check 10 below) — one `cat`, no binary needed:
+
+```bash
+cat ~/.polyforge/binary-status.txt   # "No such file or directory" IS the ok result
+```
+
+No `2>/dev/null`, no `|| echo`: this whole check exists because the launcher used to
+suppress exactly that kind of error, and `cat`'s own message already says which of the two
+outcomes happened.
+
 Then run the seam-check probe (read-only, pinned to the cached `superpowers` plugin version):
 
 ```bash
@@ -208,6 +218,33 @@ engine without telling you). Treat a WARN as: re-verify the seam by hand against
 superpowers version, then update the pin (`PIN_VERSION` in `bin/pf-seam-check`) and any
 name it references.
 
+### Check 10 — binary freshness (`~/.polyforge/binary-status.txt`)
+
+`cat ~/.polyforge/binary-status.txt`. **File absent → `ok`.** File present → `warn`, and
+relay its contents verbatim: it names the cause, the version running, and the version
+expected. `bin/polyforge-mcp.sh` writes it on every path that fails to fetch the binary
+this plugin release expects, and deletes it the moment a download succeeds, so it is a
+statement about right now, not a log.
+
+Two causes, independent of each other — fixing one does not fix the other:
+
+- **`gh` missing / not authenticated / older than 2.7.** The binary lives on a branch of a
+  private repo, so `download_binary` needs `gh auth token`. `gh auth status`, then
+  `gh auth login`.
+- **The `bins-<channel>` branch is not fetchable.** `raw.githubusercontent.com` answers
+  **404, not 401**, for a private repo, so a bad token and a missing branch are
+  indistinguishable from the response alone. Check the token first, since it is the cause
+  you can rule out.
+
+🔴 **This check is deliberately here in the skill and not a `polyforge doctor` check in
+Go, and that is not an oversight.** Every other numbered check above 7 runs out of the
+binary. The population this one is for is exactly the population whose binary did not
+update — their `polyforge doctor` predates the check and would report nothing, and in the
+worst case (no binary at all, `✘ Failed to connect` in `/mcp`) there is no `polyforge` to
+run. A diagnostic that ships in the artifact whose absence it diagnoses cannot fire. The
+skill and the SessionStart hook travel with the plugin install, so they reach those
+machines; the binary, by construction, does not. See aihub#305.
+
 ## Output (three-segment format)
 
 ```markdown
@@ -226,6 +263,7 @@ name it references.
 | usage_md  | warn (3 duplicated rule sections) |
 | statusLine| ok (chain installed, refreshInterval 3) |
 | seamcheck | ok (verified against superpowers 6.1.1) |
+| binary    | warn (binary-status.txt: gh not authenticated; running cccccccc) |
 
 ## Next steps
 - `polyforge init` — clone missing repos (`--apply` is a deprecated no-op)

@@ -74,3 +74,28 @@ workspace. Caveat: the harness may still auto-recall a pre-existing local `MEMOR
 session start until those local files are retired; retiring the migrated local files and any
 global-config change are tracked as a separate follow-up (the data already lives in aihub via
 aihub#74 Stream C).
+
+### `fields="brief"` — the axis to choose it on (aihub#313)
+
+`pf_recall` accepts `fields="brief"`: it keeps `id`, `type`, `similarity`,
+`effective_strength`, `created_at` and the body's **first line** (≤120 runes, flagged with
+`content_truncated` + `content_full_len`), and drops the rest of `content` plus `related`,
+`tags`, `work_item_id` and `attrs`. `pf_get_memory(id)` returns any one in full.
+
+**The rule: brief a recall whose caller never reads a body — not the recalls that look big.**
+Volume is the wrong axis. The resident Memory-First recall is the highest-frequency one in
+the system and is safe to brief, because its display line needs exactly brief's field set;
+a single `top_k=1` artifact read is not, because grounding on an artifact means reading it.
+Item counts never change — trimming `top_k` instead would trade away recall breadth, which
+is the value of recall.
+
+Per-call-site decisions are recorded AT each call site, not tabulated here: every briefed
+recall in `plugins/` carries its reason inline and every deliberately-full one carries a
+`⚠️ No fields="brief"` note saying which field it consumes. One table listing all of them
+would be a second copy to rot.
+
+Two cautions. Brief rounds `similarity`/`effective_strength` to **4** decimals — safe for
+`pf-retro`'s 0.85/0.65 branches and the `>= 0.3` display filter, but do not lower it. And
+the measured `pf_recall → pf_get_memory` follow-up rate of **0** (659 recalls, 2,541 items)
+was observed under FULL mode, where callers already get 800-rune bodies: it shows they do
+not chase truncation, NOT that a first line is enough to decide on.

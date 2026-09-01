@@ -64,11 +64,16 @@ Whichever you use, the output markdown must satisfy the Contract above before yo
 # reuses these results (no second recall). See pf-plan Step 1.
 # `type` is an ARRAY, one entry per type. A "a|b|c" string is NOT split — it arrives as
 # one type name, matches nothing, and returns an empty set that reads like "no history".
-pf_recall(project=<current>, query=<wi.goal>, type=["methodology.spec","methodology.plan","fact.*","rule.*","experience.*"], top_k=8)
+pf_recall(project=<current>, query=<wi.goal>, type=["methodology.spec","methodology.plan","fact.*","rule.*","experience.*"], top_k=8, fields="brief")
 ```
 
 Display results with `effective_strength >= 0.3` (💡 prefix). For any memory the model
 judges actually useful, call `pf_activate_memory(id)`.
+
+`fields="brief"` (aihub#313): this step is display-and-activate only, both of which need
+`type` / first line / age / strength / `id` and none of which read a body. When the spec
+actually has to be GROUNDED on a prior artifact's text, that is a separate by-id read —
+`pf_get_memory(id)` — not a reason to un-brief all 8 items here.
 
 ### Step 2: Mark the step in_progress
 

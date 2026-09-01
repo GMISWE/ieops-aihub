@@ -358,17 +358,41 @@ result must always be a legal git ref:
 |---|---|
 | normal | `polyforge/<project>-<seq>-<kebab goal>` |
 | goal has no `[a-z0-9]` (Chinese-only, punctuation-only, empty) | `polyforge/<project>-<seq>` |
-| project has no `[a-z0-9]` | `polyforge/<seq>[-<kebab goal>]` |
+| **seq** has no `[a-z0-9]` | `polyforge/<project>[-<kebab goal>]` |
+| **project** has no `[a-z0-9]` | `polyforge/<seq>[-<kebab goal>]` |
 | neither project nor seq has any `[a-z0-9]` | `polyforge/<ulid8>` (the pre-1.1.18 name) |
 
 `<project>` is included because `<seq>` is unique per project, not per repo, and
 one repo may be listed under two projects in `.polyforge.yaml`.
 
+### Which branch a claim attaches to
+
 Branches created before plugin 1.1.18 are named `polyforge/<ulid8>` — the last 8
-characters of the wi id. **They keep those names.** A resume looks for the
-current name first, then that legacy name, then any single branch under
-`polyforge/<project>-<seq>-*` (which is what covers a goal edited after the
-claim), and only creates a branch when none of them exists.
+characters of the wi id. **They keep those names.** So every claim first looks
+for a branch to attach to, and creates one only when nothing matches:
+
+1. the current name, `polyforge/<project>-<seq>-<kebab goal>`;
+2. the legacy `polyforge/<ulid8>`;
+3. any **single** branch matching `polyforge/<project>-<seq>-*` — this is what
+   covers a goal edited after the claim, since the name embeds the goal. Two
+   matches means the goal was edited twice, and the lookup declines rather than
+   guess. Skipped entirely unless *both* `<project>` and `<seq>` survived: half a
+   stem is not an identity, it is a glob over other people's branches.
+
+Each of the three is looked for as a local branch **and then as
+`origin/<name>`**, so a local head deleted by a cleanup pass or missing from a
+fresh clone does not cause pushed work to be orphaned by a new branch off
+`origin/main`.
+
+⚠️ This applies on **every** claim — fresh, resume and force takeover alike. It
+is decided from what exists in the clone, never from the `mode` argument. Modes
+D (`takeover`) and B (`/pf-work <slug>` without `--resume`) both send
+`mode="fresh"` at a work item that already has a branch and commits, and `mode`
+is optional so it can be absent entirely.
+
+None of this is reached while the worktree directory
+`<workspace>/pf.<project>-<seq>/<repo>/` still exists — that is reused as-is,
+whatever branch it happens to be on.
 
 ## NL Triggers
 

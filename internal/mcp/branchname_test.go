@@ -209,6 +209,78 @@ func TestNewClaimBranchNames_LegacyAndStem(t *testing.T) {
 	}
 }
 
+// TestNewClaimBranchNames_StemRequiresBothComponents locks review findings 2
+// and 3, which are one defect reached through either component.
+//
+// Stem is used ONLY as the glob <Stem>-*, and a glob is a claim that the string
+// identifies one work item. The first version built it with
+// strings.Trim(project+"-"+seq, "-"), so losing either component silently turned
+// the identity into a SET:
+//
+//	seq unusable     -> "polyforge/aihub" -> matches every branch in the project
+//	                    (reproduced: landed on polyforge/aihub-999-someone-elses-work-item)
+//	project unusable -> "polyforge/528"   -> matches the hand-made
+//	                    polyforge/528-stagesconfig-wiring that exists in ieops-datachain
+//
+// The assertion is on Stem itself, at the point it is built, rather than only on
+// the attach behaviour: a use site can forget to check, and the two use sites
+// today are not the last two there will ever be. Branch is asserted alongside
+// because the surviving component must still be used — as an exact NAME, which
+// cannot over-match.
+//
+// MUTANT: restore the Trim-join. The Stem assertions in the first two cases go
+// red, and so do the two behavioural tests in claim_worktree_test.go.
+func TestNewClaimBranchNames_StemRequiresBothComponents(t *testing.T) {
+	cases := []struct {
+		name       string
+		project    string
+		seq        string
+		goal       string
+		wantStem   string
+		wantBranch string
+	}{
+		{
+			name:    "seq reduces to nothing: no stem, project still names the branch",
+			project: "aihub", seq: "###", goal: "some goal",
+			wantStem: "", wantBranch: "polyforge/aihub-some-goal",
+		},
+		{
+			name:    "project reduces to nothing: no stem, seq still names the branch",
+			project: "映坊", seq: "528", goal: "把配置接起来",
+			wantStem: "", wantBranch: "polyforge/528",
+		},
+		{
+			name:    "both survive: stem is the full identity",
+			project: "aihub", seq: "322", goal: "readable task branch names",
+			wantStem: "polyforge/aihub-322", wantBranch: "polyforge/aihub-322-readable-task-branch-names",
+		},
+		{
+			name:    "both reduce to nothing: no stem, and the name falls back to legacy",
+			project: "映坊", seq: "###", goal: "做点什么",
+			wantStem: "", wantBranch: "polyforge/ABCDEFGH",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := newClaimBranchNames(tc.project, tc.seq, tc.goal, "ABCDEFGH")
+			if got.Stem != tc.wantStem {
+				t.Errorf("Stem = %q, want %q — a stem missing a component globs other work items",
+					got.Stem, tc.wantStem)
+			}
+			if got.Branch != tc.wantBranch {
+				t.Errorf("Branch = %q, want %q", got.Branch, tc.wantBranch)
+			}
+			assertLegalGitRef(t, got.Branch)
+			assertLegalGitRef(t, got.Stem)
+			// The invariant restated as a property: a non-empty stem always
+			// carries a separator INSIDE it, past the "polyforge/" prefix.
+			if got.Stem != "" && !strings.Contains(strings.TrimPrefix(got.Stem, "polyforge/"), "-") {
+				t.Errorf("Stem %q has no separator past the prefix, so it is one component, not two", got.Stem)
+			}
+		})
+	}
+}
+
 // TestNewClaimBranchNames_ProjectDisambiguates is the collision guard.
 //
 // config.Config is map[project]Project and each Project has its own []Repo, with

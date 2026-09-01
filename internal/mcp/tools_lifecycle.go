@@ -788,8 +788,10 @@ func (s *Server) registerLifecycleTools() {
 					// Directory name uses readable format: pf.<project>-<seq>
 					// (e.g. "pf.aihub-26") so developers can identify the wi at a glance.
 					wtDir := fmt.Sprintf("pf.%s-%s", sf.Project, seq)
+					// Deliberately NOT keyed on args["mode"] (aihub#322): which branch
+					// to attach to is decided by what exists in the clone, not by what
+					// the caller called the claim. See resolveClaimBranch.
 					branchNames := newClaimBranchNames(sf.Project, seq, wiGoal, ulid8)
-					mode := strArg(args, "mode")
 
 					if proj, ok := effectiveCfg.Projects[sf.Project]; ok {
 						worktrees := make(map[string]string)
@@ -804,7 +806,7 @@ func (s *Server) registerLifecycleTools() {
 								continue
 							}
 
-							if err := addClaimWorktree(srcPath, wtPath, branchNames, mode); err != nil {
+							if err := addClaimWorktree(ctx, srcPath, wtPath, branchNames); err != nil {
 								fmt.Fprintf(os.Stderr, "polyforge: worktree add for %s: %v\n", repo.Name, err)
 								continue
 							}
@@ -1508,9 +1510,20 @@ type claimBranchNames struct {
 	Branch string
 	// Legacy is the pre-aihub#322 name, polyforge/<ulid8>. Empty when no ulid8.
 	Legacy string
-	// Stem is polyforge/<project>-<seq>: the part that identifies the work item
-	// regardless of what its goal says today. Empty when project and seq both
-	// reduce to nothing.
+	// Stem is polyforge/<project>-<seq> and is used ONLY as the glob <Stem>-*.
+	//
+	// ⚠️ It is populated only when BOTH components survived kebabToken, and that
+	// is a correctness requirement, not tidiness. A stem is a claim that the
+	// string identifies ONE work item; drop either component and it identifies a
+	// SET. With no seq, "polyforge/aihub-*" matches every branch in the project
+	// and a resume silently attaches to somebody else's work item (reproduced:
+	// it landed on polyforge/aihub-999-someone-elses-work-item). With no project,
+	// "polyforge/528-*" matches the hand-made polyforge/528-stagesconfig-wiring
+	// that really exists in ieops-datachain. So the invariant is enforced HERE,
+	// where the stem is built, rather than left to every use site to remember:
+	// when either component is gone the stem is empty and the glob tier does not
+	// run at all. Branch still degrades to whichever component survived — that is
+	// a NAME, matched exactly, and an exact match cannot over-match.
 	Stem string
 }
 
@@ -1523,22 +1536,28 @@ func newClaimBranchNames(project, seq, goal, ulid8 string) claimBranchNames {
 	if ulid8 != "" {
 		n.Legacy = claimBranchPrefix + ulid8
 	}
-	if s := strings.Trim(kebabToken(project, claimBranchProjMax)+"-"+kebabToken(seq, claimBranchSeqMax), "-"); s != "" {
-		n.Stem = claimBranchPrefix + s
+
+	proj := kebabToken(project, claimBranchProjMax)
+	sq := kebabToken(seq, claimBranchSeqMax)
+	if proj != "" && sq != "" {
+		n.Stem = claimBranchPrefix + proj + "-" + sq
 	}
-	if n.Stem == "" {
+
+	base := strings.Trim(proj+"-"+sq, "-")
+	if base == "" {
 		n.Branch = n.Legacy
 		return n
 	}
+	base = claimBranchPrefix + base
 
-	budget := claimBranchMaxTotal - len(n.Stem) - 1 // -1 for the joining "-"
+	budget := claimBranchMaxTotal - len(base) - 1 // -1 for the joining "-"
 	if budget > claimBranchDescMax {
 		budget = claimBranchDescMax
 	}
-	n.Branch = n.Stem
+	n.Branch = base
 	if budget >= claimBranchMinDesc {
 		if desc := kebabToken(goal, budget); desc != "" {
-			n.Branch = n.Stem + "-" + desc
+			n.Branch = base + "-" + desc
 		}
 	}
 	return n
@@ -1553,36 +1572,65 @@ func gitRefExists(srcPath, ref string) bool {
 // gitUniqueBranchMatch returns the single branch under refPrefix whose name
 // matches pattern, or "". Anything but exactly one match returns "": zero means
 // nothing to attach to, and two or more mean picking one would be a guess.
+//
+// Split on "\n" and not strings.Fields: Fields splits on unicode.IsSpace, which
+// includes U+00A0, and git permits a UTF-8 NBSP inside a refname while
+// forbidding every ASCII control character and the ASCII space. One such ref
+// would be miscounted as two matches. Line-splitting is exact for
+// --format=%(refname), which emits one ref per line and cannot emit a refname
+// containing one.
 func gitUniqueBranchMatch(srcPath, refPrefix, pattern string) string {
 	out, err := exec.Command("git", "-C", srcPath, "for-each-ref",
 		"--format=%(refname)", refPrefix+pattern).Output()
 	if err != nil {
 		return ""
 	}
-	matches := strings.Fields(strings.TrimSpace(string(out)))
+	matches := []string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimRight(line, "\r"); line != "" {
+			matches = append(matches, line)
+		}
+	}
 	if len(matches) != 1 {
 		return ""
 	}
 	return strings.TrimPrefix(matches[0], refPrefix)
 }
 
-// resolveClaimBranch finds the branch a RESUME should attach to, and reports
+// resolveClaimBranch finds the branch this claim should attach to, and reports
 // whether it has to be materialised from origin first. It returns ("", false)
 // when no candidate exists, which the caller turns into "create it".
+//
+// ⚠️ It runs on EVERY claim, fresh and resume alike, and the mode is
+// deliberately not an input. The pre-aihub#322 code was NAME-STABLE — every
+// claim of a work item computed the same polyforge/<ulid8> — so on a fresh
+// claim `worktree add -b` failed with "already exists" and the fallback
+// attached to the existing work. That attach-if-exists behaviour was load
+// bearing on both paths, and the claims that most need it declare "fresh":
+// force_takeover (Mode D) is by definition applied to a work item another agent
+// already has a branch for, `/pf-work <slug>` without --resume sends "fresh",
+// and `mode` is optional, so an omitted one arrives as "". Gating the lookup on
+// mode=="resume" therefore let those claims compute a name no pre-1.1.18 work
+// item has, succeed at `-b`, and land on a virgin branch off origin/main while
+// the real work sat on the legacy branch. Deciding from what EXISTS rather than
+// from what the caller called the claim removes the whole class.
 //
 // The candidates, in order:
 //
 //  1. n.Branch — the name this claim would compute today.
 //  2. n.Legacy — polyforge/<ulid8>. THE COMPATIBILITY SHIM. Every work item
-//     claimed before aihub#322 has a branch under that name; without this tier a
-//     resume of one of them (with its worktree directory gone, so the os.Stat
-//     reuse in the claim handler does not fire) asks git to attach to a branch
-//     that does not exist, and the repo silently gets no worktree.
+//     claimed before aihub#322 has a branch under that name (.repo/aihub alone
+//     carries 87 local and 125 remote); without this tier a claim of one of
+//     them, with its worktree directory gone so the os.Stat reuse in the claim
+//     handler does not fire, either fails outright (resume) or silently starts
+//     over on a new branch (fresh).
 //  3. a unique <Stem>-* match. The new name embeds the GOAL, which is mutable:
 //     edit the goal between claim and resume and tier 1 misses a branch that is
 //     unambiguously this work item's, because <project>-<seq> identifies the
 //     work item on its own. This tier is the reason the goal change introduced
-//     by aihub#322 cannot orphan a branch.
+//     by aihub#322 cannot orphan a branch. It runs only when Stem carries both
+//     components — see the field comment for why a half stem is a set, not an
+//     identity.
 //
 // Each candidate is looked for locally first and then as origin/<name>: a local
 // head deleted while the remote branch survives (a cleanup pass, a fresh clone)
@@ -1614,46 +1662,74 @@ func resolveClaimBranch(srcPath string, n claimBranchNames) (string, bool) {
 	return "", false
 }
 
+// claimFetchTimeout bounds the ONE network call on this path.
+//
+// `git fetch origin` reaches a remote and has no timeout of its own: an SSH or
+// git-daemon peer that accepts the connection and then never answers leaves it
+// blocked on a read forever. This runs inside an MCP request, so an unbounded
+// hang spends the caller's whole request budget on a step whose failure is
+// already treated as non-fatal ten lines below. Same shape as aihub#316, which
+// bounded an unbounded upstream call for the same reason.
+//
+// A var, not a const, solely so TestAddClaimWorktree_FetchIsBounded can shorten
+// it; nothing outside tests assigns to it.
+var claimFetchTimeout = 90 * time.Second
+
 // addClaimWorktree materialises wtPath as a git worktree of srcPath.
 //
-// On resume it attaches to whatever branch resolveClaimBranch finds and only
-// creates a new one when there is nothing to attach to. On a fresh claim it
-// fetches and branches from origin/main, falling back to attaching when the
-// branch already exists (an idempotent retry of the same claim).
-func addClaimWorktree(srcPath, wtPath string, n claimBranchNames, mode string) error {
+// It attaches to whatever branch resolveClaimBranch finds — on a fresh claim
+// just as much as on a resume, see that function for why the mode must not gate
+// it — and creates a branch off origin/main only when nothing matches.
+//
+// ctx is the MCP request context and bounds the fetch, and ONLY the fetch. The
+// local git invocations are deliberately left uncancellable: the claim handler
+// short-circuits on os.Stat(wtPath), so a `worktree add` killed part-way through
+// its checkout leaves a half-populated directory that every later claim then
+// adopts and never repairs. A local command that outlives a cancelled request
+// costs a few seconds of CPU; a silently half-checked-out worktree costs a
+// debugging session.
+func addClaimWorktree(ctx context.Context, srcPath, wtPath string, n claimBranchNames) error {
 	if n.Branch == "" {
 		return fmt.Errorf("empty branch name")
 	}
-	if mode == "resume" {
-		if existing, fromRemote := resolveClaimBranch(srcPath, n); existing != "" {
-			if fromRemote {
-				return runGit(srcPath, "worktree", "add", "-b", existing, wtPath, "origin/"+existing)
-			}
-			return runGit(srcPath, "worktree", "add", wtPath, existing)
+	if existing, fromRemote := resolveClaimBranch(srcPath, n); existing != "" {
+		if fromRemote {
+			return runGit(srcPath, "worktree", "add", "-b", existing, wtPath, "origin/"+existing)
 		}
-		// Nothing to attach to (branch deleted, or never created because an older
-		// claim failed here). Fall through and create it, rather than failing and
-		// leaving the repo with no worktree at all.
+		return runGit(srcPath, "worktree", "add", wtPath, existing)
 	}
+	// Nothing to attach to: a genuinely new work item, or one whose branch was
+	// deleted. Create it rather than failing and leaving the repo with no
+	// worktree at all.
 
 	// Sync the local clone from origin so the new branch starts from the latest
-	// remote state, not a stale local HEAD.
-	if out, err := exec.Command("git", "-C", srcPath, "fetch", "origin").CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "polyforge: fetch origin in %s: %s\n", srcPath, string(out))
+	// remote state, not a stale local HEAD. Non-fatal: a stale base is worse than
+	// a fresh one but far better than no worktree, which is why bounding this is
+	// safe as well as necessary.
+	fetchCtx, cancel := context.WithTimeout(ctx, claimFetchTimeout)
+	out, fetchErr := exec.CommandContext(fetchCtx, "git", "-C", srcPath, "fetch", "origin").CombinedOutput()
+	cancel()
+	if fetchErr != nil {
+		fmt.Fprintf(os.Stderr, "polyforge: fetch origin in %s: %v: %s\n", srcPath, fetchErr, string(out))
 	}
+
 	err := runGit(srcPath, "worktree", "add", "-b", n.Branch, wtPath, "origin/main")
 	if err == nil {
 		return nil
 	}
-	// Branch may already exist (idempotent retry) — fall back to attach.
+	// Branch may already exist (a racing retry of the same claim, or a ref
+	// resolveClaimBranch could not see) — fall back to attach.
 	if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "already checked out") {
 		return runGit(srcPath, "worktree", "add", wtPath, n.Branch)
 	}
 	return err
 }
 
-// runGit runs a git command in srcPath, folding its combined output into the
-// error so callers can both report it and match on it.
+// runGit runs a local git command in srcPath, folding its combined output into
+// the error so callers can both report it and match on it. Every invocation is
+// local — `worktree add` resolves origin/<x> from a remote-tracking ref and does
+// not reach the network — so there is nothing here for a timeout to protect; see
+// addClaimWorktree for why these are deliberately not cancellable.
 func runGit(srcPath string, args ...string) error {
 	full := append([]string{"-C", srcPath}, args...)
 	out, err := exec.Command("git", full...).CombinedOutput()

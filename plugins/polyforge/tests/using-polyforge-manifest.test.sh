@@ -312,12 +312,25 @@ BASELINE = {
         "moved on-demand by aihub#285 to stop the payload being truncated. It cannot "
         "come back until the resident tier is slimmed (aihub#296): making it resident "
         "measures 14,549 chars, against a 10,000-char harness limit."),
-    "fragments/memory-conventions.md": (4841,
+    "fragments/memory-conventions.md": (6457,
         "moved on-demand by aihub#285 on the grounds that memory-first.md states the "
         "memory-lives-in-aihub half more strictly. True for that half — but the "
         "link-discipline half (never put a `mem_...` id in a repo doc, nor a repo path "
         "in a memory) has NO resident copy, as SKILL.md's own on-demand rationale "
-        "admits, and on-demand-index.md calls it 'the hard rule'. Also aihub#296."),
+        "admits, and on-demand-index.md calls it 'the hard rule'. Also aihub#296. "
+        "RAISED 4841 -> 6457 by aihub#313, naming the rule text as this cap requires: "
+        "ONE new rule, '`fields=\"brief\"` — the axis to choose it on', whose normative "
+        "sentence is 'brief a recall whose caller never reads a body — not the recalls "
+        "that look big'. It is deliberately NOT resident: the resident payload measures "
+        "8,452 of a 8,497 gate, and the rule is unenforceable in the abstract anyway "
+        "because it is decided per call site. Its enforcement is therefore AT the call "
+        "sites, not here — each briefed pf_recall in plugins/ states its reason inline "
+        "and each deliberately-full one carries a `⚠️ No fields=\"brief\"` note naming "
+        "the field it consumes, so the section here is rationale plus two numeric "
+        "cautions (4-decimal rounding; the 0 follow-up rate was measured under FULL "
+        "mode) rather than a rule that has to be obeyed unseen. The per-site table was "
+        "cut from this section on purpose — it would have been a second copy of the "
+        "inline notes, and a duplicated table rots."),
 }
 
 print()

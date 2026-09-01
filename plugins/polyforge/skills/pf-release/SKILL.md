@@ -37,6 +37,8 @@ to a stable channel.
      limit=1
    )
    last_release_at = last_release_records[0].attrs.released_at if last_release_records else null
+   // No fields="brief" here (aihub#313): brief drops `attrs`, and `attrs.released_at` is
+   // the entire reason for this call. It would return successfully and yield null.
 
    // List all wi's wrapped since the last release (or all wrapped if first release)
    if last_release_at:

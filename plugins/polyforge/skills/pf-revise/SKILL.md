@@ -37,11 +37,15 @@ pf_recall(
   project=<current>,
   query=<wi.goal + " annotation revision">,
   type=["experience.*", "rule.*"],
-  top_k=3
+  top_k=3,
+  fields="brief"
 )
 ```
 
 Display relevant memories; activate those the LLM judges as useful.
+
+`fields="brief"` (aihub#313): display-and-activate only. The spec/plan reads in Step 3 pass
+no `fields` on purpose — those DO consume `content` + `commits`.
 
 ### Step 2: Mark step in_progress
 
@@ -85,6 +89,11 @@ plan_results = pf_recall(
 The first (and only) entry returned for each type is the current head (pf_recall returns
 the most-recent non-superseded version). Record: `head_spec_id`, `head_plan_id`, and
 their `content` + `commits` arrays.
+
+⚠️ These two calls must NOT pass `fields="brief"` (aihub#313): brief replaces the body with
+its first line and drops `commits`, and this step revises the artifact from exactly those
+two. Note the body you get here is still capped at 800 runes by the server, so for a long
+spec the honest read is `pf_get_memory(head_spec_id)` — check `content_truncated`.
 
 ### Step 4: Identify open annotations
 

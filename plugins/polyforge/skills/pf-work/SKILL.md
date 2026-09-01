@@ -378,13 +378,18 @@ are the names this scheme creates. Exact names are tried first and exhaustively;
 one glob comes last:
 
 1. the current name, `polyforge/<project>-<seq>-<kebab goal>`;
-2. the bare `polyforge/<project>-<seq>` — table row 2, which a Chinese-only goal
-   produces, and which is common rather than exotic;
-3. the legacy `polyforge/<ulid8>`;
+2. the legacy `polyforge/<ulid8>`;
+3. the bare `polyforge/<project>-<seq>` — table row 2, which a Chinese-only goal
+   produces, and which is common rather than exotic. It comes *after* the legacy
+   name because a stem-shaped branch has a second producer: the
+   `declared_resources[].task_branch` field is set by hand, and work items do
+   carry values like `polyforge/ieops-549` in it. So a stem-shaped branch may
+   belong to someone else, while `polyforge/<ulid8>` can only ever have been
+   created by this system for this work item;
 4. any **single** branch matching `polyforge/<project>-<seq>-*`. This covers a
    goal edited after the claim. Note it does **not** match the bare
    `polyforge/<project>-<seq>` — a glob with a trailing `-*` never can — which is
-   exactly why step 2 exists as its own exact lookup. Two matches means the goal
+   exactly why step 3 exists as its own exact lookup. Two matches means the goal
    was edited twice, and the lookup declines rather than guess. Skipped entirely
    unless *both* `<project>` and `<seq>` survived: half a stem is not an identity,
    it is a glob over other people's branches.
@@ -397,13 +402,16 @@ a branch found via `origin/` that also exists locally is checked out rather than
 re-created.
 
 Mapping the table onto the steps, so the two sections cannot drift apart: row 1
-→ step 1, row 2 → step 2, row 5 (`polyforge/<ulid8>`) → step 3. Rows 3 and 4
-(`polyforge/<project>` and `polyforge/<seq>`) are reached by step 1 only, since
-with one component missing that degraded form *is* the name computed today —
-and step 4 is skipped for them, so for those two rows alone a goal edited after
-the claim is **not** recoverable and the claim starts a new branch. That is the
-accepted cost of a work item whose project or seq contains no `[a-z0-9]` at all;
-the earlier branch still exists under its own name and nothing is lost from it.
+→ step 1, row 2 → step 3, row 5 (`polyforge/<ulid8>`) → step 2. Rows 3 and 4 —
+`polyforge/<project>[-<kebab goal>]` and `polyforge/<seq>[-<kebab goal>]`, one
+component unusable — are reached by step 1 only, since that degraded form *is*
+the name computed today. Step 4 is skipped for them, so for those two rows alone
+a goal edited after the claim is **not** recoverable and the claim starts a new
+branch. That bites specifically on the **goal-bearing** variant: with no goal
+text the name does not move when the goal is edited, so there is nothing to
+lose. It is the accepted cost of a work item whose project or seq contains no
+`[a-z0-9]` at all; the earlier branch still exists under its own name and
+nothing is lost from it.
 
 ⚠️ This applies on **every** claim — fresh, resume and force takeover alike. It
 is decided from what exists in the clone, never from the `mode` argument. Modes

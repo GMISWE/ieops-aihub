@@ -165,16 +165,25 @@ func TestClaimHandlerCreatesTheWorktreeOnANonResumeClaim(t *testing.T) {
 }
 
 // TestClaimHandlerNamesTheBranchAfterTheGoal is the other half of the same hop:
-// the goal has to travel all the way from the claim response into the branch
-// name. domain.ClaimResponse.Goal, the JSON field, the handler's
-// result["goal"] read and newClaimBranchNames are four separate places where it
-// can be dropped, and dropping it is silent — the claim still succeeds, on
-// polyforge/<project>-<seq>, which is a perfectly legal name.
+// the goal has to travel from the claim response into the branch name, and
+// dropping it is silent — the claim still succeeds, on polyforge/<project>-<seq>,
+// which is a perfectly legal name.
 //
-// MUTANT: delete the `wiGoal, _ := result["goal"].(string)` line and pass "".
-// The branch becomes polyforge/aihub-322 and this goes red, while every
-// derivation test in branchname_test.go stays green because they call
-// newClaimBranchNames directly.
+// ⚠️ IT PINS THREE HOPS, NOT FOUR. The fake aihub below hardcodes "goal" into
+// its response, so what is covered is the wire key as CONSUMED (result["goal"]),
+// the handler's read of it, and newClaimBranchNames. The fourth hop — the SERVER
+// populating domain.ClaimResponse.Goal at internal/domain/run_attempts.go — is
+// NOT covered: blanking `Goal: wi.Goal` at both exits there leaves
+// `go test ./...` at exit 0. And because the field is `json:"goal,omitempty"`,
+// a server that stopped echoing it would emit no key at all and silently degrade
+// every claim to the bare stem with nothing going red. Closing that hop needs a
+// DB-backed test, which would move ci.yml's -min-gated ratchet; it is filed
+// separately rather than smuggled in here.
+//
+// MUTANT (for the three hops it does pin): delete the
+// `wiGoal, _ := result["goal"].(string)` line and pass "". The branch becomes
+// polyforge/aihub-322 and this goes red, while every derivation test in
+// branchname_test.go stays green because they call newClaimBranchNames directly.
 func TestClaimHandlerNamesTheBranchAfterTheGoal(t *testing.T) {
 	const wiID = "wi_01JGOALWIREDXYZ99"
 

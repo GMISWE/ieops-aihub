@@ -1510,20 +1510,24 @@ type claimBranchNames struct {
 	Branch string
 	// Legacy is the pre-aihub#322 name, polyforge/<ulid8>. Empty when no ulid8.
 	Legacy string
-	// Stem is polyforge/<project>-<seq> and is used ONLY as the glob <Stem>-*.
+	// Stem is polyforge/<project>-<seq>. It has TWO uses in resolveClaimBranch:
+	// as an exact candidate in its own right (it is a name this scheme really
+	// produces — degradation row 2, "the goal reduced to nothing"), and as the
+	// prefix of the glob <Stem>-*. Those are different lookups with different
+	// hazards, and only the second one is a set.
 	//
 	// ⚠️ It is populated only when BOTH components survived kebabToken, and that
 	// is a correctness requirement, not tidiness. A stem is a claim that the
-	// string identifies ONE work item; drop either component and it identifies a
-	// SET. With no seq, "polyforge/aihub-*" matches every branch in the project
-	// and a resume silently attaches to somebody else's work item (reproduced:
-	// it landed on polyforge/aihub-999-someone-elses-work-item). With no project,
-	// "polyforge/528-*" matches the hand-made polyforge/528-stagesconfig-wiring
-	// that really exists in ieops-datachain. So the invariant is enforced HERE,
-	// where the stem is built, rather than left to every use site to remember:
-	// when either component is gone the stem is empty and the glob tier does not
-	// run at all. Branch still degrades to whichever component survived — that is
-	// a NAME, matched exactly, and an exact match cannot over-match.
+	// string identifies ONE work item; drop either component and the GLOB
+	// identifies a SET. With no seq, "polyforge/aihub-*" matches every branch in
+	// the project and a claim silently attaches to somebody else's work item
+	// (reproduced: it landed on polyforge/aihub-999-someone-elses-work-item).
+	// With no project, "polyforge/528-*" matches the hand-made
+	// polyforge/528-stagesconfig-wiring that really exists in ieops-datachain.
+	// The invariant is enforced HERE, where the stem is built, rather than left
+	// to every use site to remember. Branch still degrades to whichever component
+	// survived — that is a NAME, matched exactly, and an exact match cannot
+	// over-match.
 	Stem string
 }
 
@@ -1603,7 +1607,7 @@ func gitUniqueBranchMatch(srcPath, refPrefix, pattern string) string {
 // It deliberately does NOT report where the branch was found. An earlier version
 // returned a fromRemote bool alongside the name, and that flag could be stale by
 // the time it was used: with the local glob ambiguous (two matches, correctly
-// declined) but the remote glob unique, tier 3 returned fromRemote=true for a
+// declined) but the remote glob unique, the glob tier returned fromRemote=true for a
 // branch that also existed locally, `worktree add -b` failed with "already
 // exists", and the repo got NO worktree at all. Whether a local head exists is
 // now decided inside attachWorktree, immediately before the command that cares,
@@ -1628,30 +1632,46 @@ func gitUniqueBranchMatch(srcPath, refPrefix, pattern string) string {
 // exact candidate is still untried.
 //
 //  1. n.Branch — the name this claim would compute today.
-//  2. n.Stem   — the bare polyforge/<project>-<seq>.
-//  3. n.Legacy — polyforge/<ulid8>, the pre-aihub#322 name.
+//  2. n.Legacy — polyforge/<ulid8>, the pre-aihub#322 name.
+//  3. n.Stem   — the bare polyforge/<project>-<seq>.
 //  4. a unique n.Stem+"-*" match.
 //
-// Why n.Stem is an EXACT candidate and not only a glob prefix (review finding
-// 1): the bare stem is a name this scheme really produces — it is degradation
-// row 1, "the goal reduces to nothing", and goals here are routinely Chinese, so
-// it is common rather than exotic. Branches of exactly that shape already exist
-// in the live workspace (polyforge/aihub-21, -29, -47, -55, -58,
-// polyforge/ieops-210, -390, -549, -577). The glob "<Stem>-*" cannot match the
-// bare "<Stem>": add any latin word to such a work item's goal and tier 1 misses
-// the new name, tier 4 misses the old one, and the claim silently starts over on
-// origin/main with the previous commits abandoned. The mirror direction
-// (desc → bare stem) always worked, which is why only this one direction was
-// broken and nothing noticed.
+// Why n.Stem is an EXACT candidate and not only a glob prefix: the bare stem is
+// a name this scheme really produces — degradation row 2, "the goal reduces to
+// nothing", and goals here are routinely Chinese, so it is common rather than
+// exotic. The glob "<Stem>-*" cannot match the bare "<Stem>": add any latin word
+// to such a work item's goal and tier 1 misses the new name, tier 4 misses the
+// old one, and the claim silently starts over on origin/main with the previous
+// commits abandoned. The mirror direction (desc → bare stem) always worked,
+// which is why only this one direction was broken and nothing noticed.
 //
-// Ordering, and why: Branch first because it is the most specific name and the
-// one a healthy claim wants. Stem before Legacy because both can only be this
-// work item's, and the stem belongs to the CURRENT naming scheme while the
-// legacy name belongs to the one we left — the same reason Branch outranks
-// Legacy. When Branch == Stem (a goal that reduced to nothing) the duplicate is
-// skipped rather than probed twice. The glob stays last, after every exact
+// ⚠️ WHY LEGACY OUTRANKS STEM. An earlier version had these the other way round,
+// on the reasoning that "a bare stem can only have been created by a post-322
+// claim, so it is the more recent". THAT REASONING IS FALSE, and was measured to
+// be false across all 45 repos in .repo/: eleven bare-stem-shaped branches
+// exist, and every one PREDATES this scheme — polyforge/aihub-21 (2026-05-23),
+// -47 (05-25), -58 (05-26), -29, -55, polyforge/ieops-210, -390, -549, -577 —
+// while the commit that introduced this naming is dated 2026-09-01 and plugin
+// 1.1.18 is unreleased. The May-era code named branches polyforge/<ulid8>.
+//
+// There is also a second, still-live producer that has nothing to do with this
+// function: declared_resources[].task_branch is human-settable, and ieops#549
+// and ieops#577 carry exactly "polyforge/ieops-549" / "polyforge/ieops-577" in
+// it. So a stem-shaped branch may be FOREIGN to the claim that finds it, whereas
+// polyforge/<ulid8> can only ever have been produced by this system for this
+// work item. The safer candidate goes first.
+//
+// Inverting costs nothing, which is what makes it free to be careful: when a
+// bare stem IS legitimately this claim's, the goal reduced to nothing, so
+// Branch == Stem and tier 1 already returns it. Tier 3 is reached DISTINCTLY
+// only when the goal has since gained latin text — exactly the case where a
+// stem-shaped branch is more likely to be the old or foreign one.
+//
+// The rest of the order: Branch first because it is the most specific name and
+// the one a healthy claim wants. Duplicates are skipped rather than probed twice
+// (the Branch == Stem case above). The glob stays last, after every exact
 // candidate, and runs only when Stem carries both components — see the field
-// comment for why a half stem is a set, not an identity.
+// comment for why a half stem globs a set rather than an identity.
 //
 // Each candidate is looked for locally first and then as origin/<name>: a local
 // head deleted while the remote branch survives (a cleanup pass, a fresh clone)
@@ -1666,7 +1686,7 @@ func resolveClaimBranch(srcPath string, n claimBranchNames) string {
 	const localRefs, remoteRefs = "refs/heads/", "refs/remotes/origin/"
 
 	tried := map[string]bool{"": true}
-	for _, cand := range []string{n.Branch, n.Stem, n.Legacy} {
+	for _, cand := range []string{n.Branch, n.Legacy, n.Stem} {
 		if tried[cand] {
 			continue
 		}
@@ -1694,6 +1714,12 @@ func resolveClaimBranch(srcPath string, n claimBranchNames) string {
 // directly; otherwise the branch is materialised from origin. The "already
 // exists" retry closes the remaining race — a concurrent claim, or a ref the
 // resolver could not see — for which the alternative is no worktree at all.
+//
+// NOT HANDLED, deliberately: `fatal: '<b>' is already used by worktree at '<p>'`,
+// which is what git 2.43 says when the branch is checked out in ANOTHER
+// worktree. There is no recovery — a branch cannot be in two worktrees — so the
+// error is returned and the claim handler logs it and skips that repo, which is
+// the correct outcome rather than a gap.
 func attachWorktree(srcPath, wtPath, branch string) error {
 	if gitRefExists(srcPath, "refs/heads/"+branch) {
 		return runGit(srcPath, "worktree", "add", wtPath, branch)
@@ -1762,6 +1788,14 @@ func addClaimWorktree(ctx context.Context, srcPath, wtPath string, n claimBranch
 	}
 	// Branch may already exist (a racing retry of the same claim, or a ref
 	// resolveClaimBranch could not see) — fall back to attach.
+	//
+	// ⚠️ "already checked out" is DEAD TEXT and predates aihub#322. Verified
+	// against git 2.43.0: `worktree add -b <b>` on an existing branch says
+	// `fatal: a branch named '<b>' already exists`, and the checked-out-elsewhere
+	// case says `is already used by worktree at '<path>'` — neither contains the
+	// string. Left in place rather than removed: it is harmless, it may match an
+	// older or newer git, and deleting it is a behaviour change on a path this
+	// work item is not about. The live matcher is "already exists".
 	if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "already checked out") {
 		return runGit(srcPath, "worktree", "add", wtPath, n.Branch)
 	}

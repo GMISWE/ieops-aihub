@@ -265,15 +265,18 @@ func TestAddClaimWorktree_MatchesStemWhenGoalChanged(t *testing.T) {
 // TestAddClaimWorktree_AttachesToABareStemBranch is review finding 3.1: the
 // glob cannot match the name the scheme itself produces.
 //
-// Degradation row 1 is "the goal has no [a-z0-9] → polyforge/<project>-<seq>",
+// Degradation row 2 is "the goal has no [a-z0-9] → polyforge/<project>-<seq>",
 // and goals in this workspace are routinely Chinese, so the bare stem is a
 // common name, not an exotic one — polyforge/aihub-21, -29, -47, -55, -58 and
 // polyforge/ieops-210, -390, -549, -577 all exist in the live workspace today.
 // Add any latin word to such a work item's goal and:
 //
 //	tier 1 polyforge/aihub-322-gateway-timeout-fix  → miss (new name)
-//	tier 3 polyforge/<ulid8>                        → miss (never had one)
+//	tier 2 polyforge/<ulid8>                        → miss (never had one)
 //	tier 4 polyforge/aihub-322-*                    → DOES NOT MATCH polyforge/aihub-322
+//
+// leaving tier 3, the bare stem as an exact candidate, as the only thing that
+// finds it — which is what this test pins.
 //
 // so the claim created a virgin branch and abandoned the commits. The mirror
 // direction, desc → bare stem, always worked, which is exactly why
@@ -313,6 +316,55 @@ func TestAddClaimWorktree_AttachesToABareStemBranch(t *testing.T) {
 	assertFileInWorktree(t, r.wtPath(), "original-work.txt")
 }
 
+// TestAddClaimWorktree_PrefersLegacyOverABareStemBranch pins the candidate
+// ORDER, which is a decision no other test here can see: with both a legacy
+// branch and a bare-stem branch present, either order produces a worktree on a
+// branch that looks plausible, and only one of them is this work item's work.
+//
+// The order is Branch, Legacy, Stem. An earlier version had Legacy last, on the
+// stated reasoning that a bare stem "can only have been created by a post-322
+// claim, so it is the more recent". That reasoning was measured across all 45
+// repos in .repo/ and is FALSE: eleven bare-stem-shaped branches exist and every
+// one predates this scheme (polyforge/aihub-21 dates to 2026-05-23; the commit
+// that invented this naming is 2026-09-01 and the plugin version carrying it is
+// unreleased). There is a second producer too, unrelated to this code:
+// declared_resources[].task_branch is human-settable and ieops#549 / ieops#577
+// hold literally "polyforge/ieops-549" / "polyforge/ieops-577". A stem-shaped
+// branch can therefore be FOREIGN; polyforge/<ulid8> can only ever have been
+// produced by this system for this work item.
+//
+// The fixture is the failure shape: the work is on the legacy branch, a
+// stem-shaped branch exists that is not this work item's, and the goal contains
+// latin so Branch != Stem and tier 3 is reached distinctly.
+//
+// MUTANT: swap the loop back to {n.Branch, n.Stem, n.Legacy}. The worktree lands
+// on the foreign bare-stem branch and both assertions go red.
+func TestAddClaimWorktree_PrefersLegacyOverABareStemBranch(t *testing.T) {
+	r := newClaimRepo(t)
+	const legacy = "polyforge/SosL0kmU"
+	r.branchWithMarker(t, legacy, "the-real-work.txt")
+	// Not created by this scheme: a hand-set declared_resources[].task_branch, or
+	// a branch left over from the May-era naming.
+	r.branchWithMarker(t, "polyforge/aihub-322", "not-this-wi.txt")
+
+	names := newClaimBranchNames("aihub", "322", "gateway timeout fix", "SosL0kmU")
+	if names.Branch == names.Stem {
+		t.Fatalf("fixture: Branch == Stem (%q), so tier 1 would answer and the order is not under test", names.Branch)
+	}
+	if r.hasLocalBranch(t, names.Branch) {
+		t.Fatalf("fixture: %q exists, so tier 1 would answer", names.Branch)
+	}
+
+	if err := r.add(t, names); err != nil {
+		t.Fatalf("addClaimWorktree: %v", err)
+	}
+	if got := checkedOutBranch(t, r.wtPath()); got != legacy {
+		t.Errorf("worktree is on %q, want the legacy branch %q — the bare stem has producers other than this scheme and must not outrank it", got, legacy)
+	}
+	assertFileInWorktree(t, r.wtPath(), "the-real-work.txt")
+	assertFileNotInWorktree(t, r.wtPath(), "not-this-wi.txt")
+}
+
 // TestAddClaimWorktree_RemoteUniqueStemMatchAttachesLocally is review finding
 // 3.2, which was a data-availability bug rather than a data-loss one: the repo
 // ended up with NO worktree.
@@ -325,10 +377,23 @@ func TestAddClaimWorktree_AttachesToABareStemBranch(t *testing.T) {
 // path twenty lines below), and the handler logged one stderr line and moved on.
 //
 // The fix drops the flag entirely: attachWorktree asks refs/heads at the moment
-// it matters. MUTANT: reinstate the flag, i.e. have this path run
-// `worktree add -b <m> <wt> origin/<m>` unconditionally — addClaimWorktree then
-// returns an "already exists" error and no worktree is created, so both the
-// error check and the branch assertion go red.
+// it matters, and keeps an "already exists" retry for the residual race.
+//
+// MUTANT: reinstate the flag, i.e. have attachWorktree run
+// `worktree add -b <m> <wt> origin/<m>` unconditionally with no retry —
+// addClaimWorktree then returns an "already exists" error and no worktree is
+// created, so both the error check and the branch assertion go red.
+//
+// ⚠️ MEASURED LIMITATION OF THIS TEST, recorded because the obvious reading of
+// it is wrong: it does NOT isolate the local-head check. Removing only that
+// check leaves this test GREEN — the retry rescues it, since both paths end with
+// the same plain attach — while turning seven OTHER tests red, plus the handler
+// test, because their fixtures have no remote branch for the `-b` to resolve.
+// So the regression test written for this finding is not what catches the
+// finding's own fix; that is done incidentally by tests written for other
+// things. Removing only the retry is green everywhere. Both halves are kept
+// deliberately: the check makes the common case correct without a wasted failed
+// git invocation, the retry closes a race no check can eliminate.
 func TestAddClaimWorktree_RemoteUniqueStemMatchAttachesLocally(t *testing.T) {
 	r := newClaimRepo(t)
 	const pushed = "polyforge/aihub-322-first-goal"
@@ -567,6 +632,12 @@ func TestAddClaimWorktree_FetchIsBounded(t *testing.T) {
 	mustGit(t, r.src, "remote", "set-url", "origin",
 		fmt.Sprintf("git://127.0.0.1:%d/hangs", ln.Addr().(*net.TCPAddr).Port))
 
+	// ⚠️ On the t.Fatalf path below, this cleanup writes claimFetchTimeout while
+	// the orphaned goroutine may still be inside addClaimWorktree reading it — a
+	// -race report reachable only when the test is ALREADY failing, and only
+	// under the mutant. Left as is deliberately: restructuring to close it (a
+	// per-call timeout parameter, or refusing to give up on the goroutine) costs
+	// more than a warning that can only appear alongside a real failure.
 	prev := claimFetchTimeout
 	claimFetchTimeout = 750 * time.Millisecond
 	t.Cleanup(func() { claimFetchTimeout = prev })

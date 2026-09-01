@@ -223,3 +223,30 @@ __marimo__/
 # polyforge step state files (written by pf-execute, must not enter git)
 .pf_meta.json
 .pf_steps.json
+
+# Go binaries dropped at the repo root by a single-package `go build`.
+# `go build ./...` discards its output when it builds several packages, but
+# `go build ./internal/citest/dbtestcov/` writes ./dbtestcov — which is how a
+# 4.7 MB binary reached a commit in aihub#303. One entry per main package, each
+# anchored with a leading '/' so the tracked bin/aihub and bin/polyforge are
+# unaffected. Derive the list with:
+#   GOWORK=off go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...
+/aihub
+/aihub-embed-backfill
+/polyforge
+/dbtestcov
+
+# `make build` output (Makefile: `go build -o bin/aihub`, `-o bin/polyforge`).
+# Both were committed once by mistake in 299ed37 (2026-05-27) — 27 MB and 13 MB
+# of binary — and untracked again in aihub#308. Nothing consumes them: the
+# Dockerfile builds its own /usr/local/bin/aihub, and polyforge-mcp.sh downloads
+# from the bins-* branches, not from main.
+#
+# 🔴 Anchored, and exact filenames only — never a bare `polyforge` or a blanket
+# `bin/`. publish-bins.yml puts bin/polyforge-{linux,darwin}-{amd64,arm64} on the
+# bins-* branches, and a loose pattern here would match those distribution
+# artifacts. Verify both directions after editing this block:
+#   git check-ignore -v bin/aihub bin/polyforge                 # must MATCH
+#   git check-ignore -v bin/polyforge-linux-amd64 ...           # must NOT match
+/bin/aihub
+/bin/polyforge

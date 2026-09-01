@@ -30,6 +30,9 @@ var annotatorJS []byte
 //go:embed annot.js
 var annotJS []byte
 
+//go:embed share.js
+var shareJS []byte
+
 //go:embed viewer.css
 var viewerCSS []byte
 
@@ -42,6 +45,12 @@ func AnnotatorJS() []byte { return annotatorJS }
 // /ui/static/annot.js).
 func AnnotJS() []byte { return annotJS }
 
+// ShareJS returns the embedded share.js bytes (served at /ui/static/share.js).
+// This is the /ui-only artifact share-toggle glue (aihub#154). Never embedded
+// into /v1 or /share output — the share control + script are injected only on
+// the /ui path.
+func ShareJS() []byte { return shareJS }
+
 // ViewerCSS returns the embedded viewer.css bytes (served at
 // /ui/static/viewer.css). This is the /ui-only design-system override layer
 // that reskins the artifact viewer using #129 tokens. Never embedded into
@@ -53,7 +62,7 @@ func ViewerCSS() []byte { return viewerCSS }
 // changed JS invalidates browser caches immediately despite Cache-Control
 // max-age (aihub#125).
 var assetVersion = func() string {
-	all := append(append(append([]byte{}, annotatorJS...), annotJS...), viewerCSS...)
+	all := append(append(append(append([]byte{}, annotatorJS...), annotJS...), viewerCSS...), shareJS...)
 	sum := sha256.Sum256(all)
 	return hex.EncodeToString(sum[:4])
 }()
@@ -97,7 +106,7 @@ func DocumentWithMeta(body, title, backHref, ownerWIHref, ownerWILabel string, r
 	// and auto-placement scatters the document across both columns.
 	annotated := len(annotationsHTML) > 0 && annotationsHTML[0] != ""
 	if annotated {
-		b.WriteString("<div id=\"pf-doc-col\">\n")
+		b.WriteString("<div id=\"pf-doc-col\" data-pf-chrome>\n")
 	}
 	// Metadata header: owning wi + related memories.
 	if ownerWIHref != "" || len(related) > 0 {

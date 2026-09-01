@@ -141,8 +141,9 @@ func (r *repoEntry) hasDescriptionBlock() bool {
 
 // UserRecord holds caller info passed to domain project functions.
 type UserRecord struct {
-	ID   string
-	Role string // "admin" | "writer"
+	ID           string
+	Role         string  // "admin" | "writer"
+	ProjectScope *string // nil = unscoped; else confined to this project name
 }
 
 // scanProject scans a row into a Project struct.
@@ -258,6 +259,12 @@ func validateDescriptionBlock(r *repoEntry) *AihubError {
 //
 // minRole: "viewer" or "writer" or "owner"
 func checkProjectAccess(ctx context.Context, conn *pgxpool.Pool, name string, caller *UserRecord, identifier string, minRole string) (*Project, *AihubError) {
+	// project_scope on the api key confines the caller; an out-of-scope project
+	// is reported as not-found so its existence is not revealed (applies to admin too).
+	if caller.ProjectScope != nil && *caller.ProjectScope != name {
+		return nil, NewErr(ErrProjectNotFound, fmt.Sprintf("project %q not found", name))
+	}
+
 	// Level 1: admin bypasses all checks
 	if caller.Role == "admin" {
 		p, err := getProjectByName(ctx, conn, name)
@@ -388,6 +395,9 @@ func CreateProject(ctx context.Context, conn *pgxpool.Pool, owner *UserRecord, r
 		return nil, NewErr(ErrProjectNameInvalid,
 			fmt.Sprintf("project name %q is invalid: must match ^[a-z][a-z0-9_-]{0,39}$", req.Name))
 	}
+	if owner.ProjectScope != nil && *owner.ProjectScope != req.Name {
+		return nil, NewErr(ErrProjectAccessDenied, fmt.Sprintf("api key is scoped to project %q", *owner.ProjectScope))
+	}
 
 	// Default visible to true
 	visible := true
@@ -438,6 +448,21 @@ func GetProject(ctx context.Context, conn *pgxpool.Pool, name string, caller *Us
 	return checkProjectAccess(ctx, conn, name, caller, identifier, "viewer")
 }
 
+// applyProjectScope drops projects outside the caller's api-key project_scope.
+// nil scope = unscoped (all pass). Applies to admins too.
+func applyProjectScope(projects []Project, scope *string) []Project {
+	if scope == nil {
+		return projects
+	}
+	kept := make([]Project, 0, 1)
+	for _, p := range projects {
+		if p.Name == *scope {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
 // ListProjects returns all projects visible to the caller.
 func ListProjects(ctx context.Context, conn *pgxpool.Pool, caller *UserRecord) ([]Project, *AihubError) {
 	var rows pgx.Rows
@@ -485,6 +510,7 @@ func ListProjects(ctx context.Context, conn *pgxpool.Pool, caller *UserRecord) (
 		}
 		projects = append(projects, p)
 	}
+	projects = applyProjectScope(projects, caller.ProjectScope)
 	if projects == nil {
 		projects = []Project{}
 	}

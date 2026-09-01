@@ -1,0 +1,14 @@
+[
+  {"file": "plugins/polyforge/skills/pf-release/SKILL.md", "rule": "UNKNOWN_PARAM", "match": "limit", "wi": "aihub#176", "note": "pf-release tool redesign pending aihub#176"},
+  {"file": "plugins/polyforge/skills/pf-release/SKILL.md", "rule": "UNKNOWN_PARAM", "match": "version", "wi": "aihub#176", "note": "pf-release tool redesign pending aihub#176"},
+  {"file": "plugins/polyforge/skills/pf-release/SKILL.md", "rule": "UNKNOWN_PARAM", "match": "tag_message", "wi": "aihub#176", "note": "pf-release tool redesign pending aihub#176"},
+  {"file": "plugins/polyforge/skills/pf-release/SKILL.md", "rule": "UNKNOWN_PARAM", "match": "included_wi_ids", "wi": "aihub#176", "note": "pf-release tool redesign pending aihub#176"},
+  {"file": "plugins/polyforge/skills/pf-release/SKILL.md", "rule": "ENUM_VIOLATION", "match": "methodology.release", "wi": "aihub#176", "note": "methodology.release not yet in MemoryTypeEnum; pending aihub#176"},
+  {"file": "plugins/polyforge/skills/pf-release/SKILL.md", "rule": "UNKNOWN_PARAM", "match": "body", "wi": "aihub#176", "note": "pf-release tool redesign pending aihub#176"},
+  {"file": "plugins/polyforge/skills/pf-release/SKILL.md", "rule": "UNKNOWN_PARAM", "match": "source_release_wi_id", "wi": "aihub#176", "note": "pf-release tool redesign pending aihub#176"},
+  {"file": "plugins/polyforge/skills/pf-release/SKILL.md", "rule": "UNKNOWN_PARAM", "match": "from_channel", "wi": "aihub#176", "note": "pf-release tool redesign pending aihub#176"},
+  {"file": "plugins/polyforge/skills/pf-release/SKILL.md", "rule": "UNKNOWN_PARAM", "match": "to_channel", "wi": "aihub#176", "note": "pf-release tool redesign pending aihub#176"},
+  {"file": "plugins/polyforge/skills/pf-release/SKILL.md", "rule": "UNKNOWN_PARAM", "match": "new_version", "wi": "aihub#176", "note": "pf-release tool redesign pending aihub#176"},
+  {"file": "plugins/polyforge/skills/pf-sync/SKILL.md", "rule": "UNKNOWN_TOOL", "match": "pf_sync_pull", "wi": "aihub#176", "note": "pf_sync_pull tool not yet implemented; pending aihub#176"},
+  {"file": "plugins/polyforge/skills/pf-sync/SKILL.md", "rule": "UNKNOWN_TOOL", "match": "pf_sync_push", "wi": "aihub#176", "note": "pf_sync_push tool not yet implemented; pending aihub#176"}
+]

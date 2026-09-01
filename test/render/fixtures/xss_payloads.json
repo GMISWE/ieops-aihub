@@ -1,0 +1,468 @@
+{
+  "_comment": [
+    "Stored-XSS regression corpus for render.SanitizeArtifactHTML (aihub#240, resolves #144).",
+    "Categories track the five classes enumerated in the render-refactor research doc",
+    "01-static-html-render-engine-research.md 2.6 'SVG 专属安全清单', plus style_block, which",
+    "was added after two consecutive review rounds found the sanitizer bypassable there and",
+    "nowhere else -- the corpus had zero cases in the one place the code actually failed.",
+    "external_resource carries protocol-relative (//host) forms as well as scheme forms:",
+    "the three scheme cases all passed while //host slipped through the same regex branch,",
+    "so the category guard reported coverage the class did not have.",
+    "",
+    "Each case asserts on the SANITIZER output only. The sandboxed iframe and the CSP header",
+    "are separate, independent layers -- a payload that survives sanitization is still expected",
+    "to be inert in a browser, but defence in depth means we do not rely on that here.",
+    "",
+    "forbidden: substrings that must NOT appear in the sanitized output (case-insensitive).",
+    "required:  substrings that MUST survive -- these guard against over-sanitizing, which is",
+    "           its own failure mode: a policy that eats legitimate SVG silently breaks every",
+    "           complex diagram (see acceptance criterion 4)."
+  ],
+  "cases": [
+    {
+      "name": "script_tag_plain",
+      "category": "script_tag",
+      "input": "<p>before</p><script>alert(1)</script><p>after</p>",
+      "forbidden": [
+        "<script",
+        "alert(1)"
+      ],
+      "required": [
+        "before",
+        "after"
+      ]
+    },
+    {
+      "name": "script_tag_inside_svg",
+      "category": "script_tag",
+      "input": "<svg viewBox=\"0 0 10 10\"><script>alert(1)</script><circle cx=\"5\" cy=\"5\" r=\"4\"/></svg>",
+      "forbidden": [
+        "<script",
+        "alert(1)"
+      ],
+      "required": [
+        "<svg",
+        "<circle"
+      ]
+    },
+    {
+      "name": "script_tag_uppercase_and_split",
+      "category": "script_tag",
+      "input": "<SCRIPT>alert(1)</SCRIPT><ScRiPt>alert(2)</ScRiPt>",
+      "forbidden": [
+        "<script",
+        "alert(1)",
+        "alert(2)"
+      ],
+      "required": []
+    },
+    {
+      "name": "event_attr_onload_on_svg",
+      "category": "event_attr",
+      "input": "<svg onload=\"alert(1)\" viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\"/></svg>",
+      "forbidden": [
+        "onload",
+        "alert(1)"
+      ],
+      "required": [
+        "<svg",
+        "<rect"
+      ]
+    },
+    {
+      "name": "event_attr_onerror_on_image",
+      "category": "event_attr",
+      "input": "<img src=\"x\" onerror=\"alert(1)\">",
+      "forbidden": [
+        "onerror",
+        "alert(1)"
+      ],
+      "required": []
+    },
+    {
+      "name": "event_attr_parser_mutation_unclosed_g",
+      "category": "event_attr",
+      "input": "<svg><g/onload=alert(2)//<p></svg>",
+      "forbidden": [
+        "onload",
+        "alert(2)"
+      ],
+      "required": []
+    },
+    {
+      "name": "event_attr_onmouseover_mixed_case",
+      "category": "event_attr",
+      "input": "<svg viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"4\" OnMouseOver=\"alert(1)\"/></svg>",
+      "forbidden": [
+        "onmouseover",
+        "alert(1)"
+      ],
+      "required": [
+        "<circle"
+      ]
+    },
+    {
+      "name": "javascript_uri_in_anchor_href",
+      "category": "javascript_uri",
+      "input": "<a href=\"javascript:alert(1)\">click</a>",
+      "forbidden": [
+        "javascript:",
+        "alert(1)"
+      ],
+      "required": [
+        "click"
+      ]
+    },
+    {
+      "name": "javascript_uri_in_svg_xlink_href",
+      "category": "javascript_uri",
+      "input": "<svg viewBox=\"0 0 10 10\"><a xlink:href=\"javascript:alert(1)\"><text x=\"1\" y=\"5\">go</text></a></svg>",
+      "forbidden": [
+        "javascript:",
+        "alert(1)"
+      ],
+      "required": [
+        "<svg",
+        "go"
+      ]
+    },
+    {
+      "name": "javascript_uri_obfuscated_whitespace",
+      "category": "javascript_uri",
+      "input": "<a href=\"java\tscript:alert(1)\">x</a>",
+      "forbidden": [
+        "alert(1)"
+      ],
+      "required": []
+    },
+    {
+      "name": "data_uri_html_in_href",
+      "category": "javascript_uri",
+      "input": "<a href=\"data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==\">x</a>",
+      "forbidden": [
+        "data:text/html"
+      ],
+      "required": []
+    },
+    {
+      "name": "external_resource_svg_image_href",
+      "category": "external_resource",
+      "input": "<svg viewBox=\"0 0 10 10\"><image href=\"http://evil.example/pixel.png\" width=\"10\" height=\"10\"/></svg>",
+      "forbidden": [
+        "evil.example"
+      ],
+      "required": [
+        "<svg"
+      ]
+    },
+    {
+      "name": "external_resource_img_tracking_pixel",
+      "category": "external_resource",
+      "input": "<img src=\"http://evil.example/track?u=1\" width=\"1\" height=\"1\">",
+      "forbidden": [
+        "evil.example"
+      ],
+      "required": []
+    },
+    {
+      "name": "external_resource_css_url_import",
+      "category": "external_resource",
+      "input": "<svg viewBox=\"0 0 10 10\"><style>@import url(\"http://evil.example/x.css\");</style><rect width=\"10\" height=\"10\"/></svg>",
+      "forbidden": [
+        "evil.example"
+      ],
+      "required": [
+        "<rect"
+      ]
+    },
+    {
+      "name": "xml_dtd_doctype_entity",
+      "category": "xml_dtd",
+      "input": "<!DOCTYPE svg [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><svg viewBox=\"0 0 10 10\"><text x=\"1\" y=\"5\">&xxe;</text></svg>",
+      "forbidden": [
+        "<!DOCTYPE",
+        "<!ENTITY",
+        "file:///etc/passwd"
+      ],
+      "required": []
+    },
+    {
+      "name": "xml_dtd_billion_laughs",
+      "category": "xml_dtd",
+      "input": "<!DOCTYPE lolz [<!ENTITY lol \"lol\"><!ENTITY lol2 \"&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;\">]><svg viewBox=\"0 0 10 10\"><text x=\"1\" y=\"5\">&lol2;</text></svg>",
+      "forbidden": [
+        "<!DOCTYPE",
+        "<!ENTITY"
+      ],
+      "required": []
+    },
+    {
+      "name": "xml_dtd_external_subset",
+      "category": "xml_dtd",
+      "input": "<!DOCTYPE svg SYSTEM \"http://evil.example/evil.dtd\"><svg viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\"/></svg>",
+      "forbidden": [
+        "<!DOCTYPE",
+        "evil.example"
+      ],
+      "required": [
+        "<rect"
+      ]
+    },
+    {
+      "name": "benign_complex_svg_survives",
+      "category": "over_sanitization_guard",
+      "input": "<svg viewBox=\"0 0 200 100\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"g1\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#4f46e5\"/><stop offset=\"100%\" stop-color=\"#0ea5e9\"/></linearGradient><filter id=\"f1\"><feGaussianBlur stdDeviation=\"2\"/></filter><clipPath id=\"c1\"><rect x=\"0\" y=\"0\" width=\"100\" height=\"50\"/></clipPath></defs><g clip-path=\"url(#c1)\" filter=\"url(#f1)\"><path d=\"M10 10 C 20 20, 40 20, 50 10 S 80 0, 90 10 Z\" fill=\"url(#g1)\" stroke=\"#111\" stroke-width=\"1.5\"/></g><text x=\"10\" y=\"80\" font-size=\"12\">node label</text></svg>",
+      "forbidden": [],
+      "required": [
+        "<svg",
+        "linearGradient",
+        "stop-color",
+        "feGaussianBlur",
+        "clipPath",
+        "clip-path",
+        "filter",
+        "<path",
+        "M10 10 C 20 20",
+        "url(#g1)",
+        "node label"
+      ]
+    },
+    {
+      "name": "style_in_svg_lifts_live_img",
+      "category": "style_block",
+      "input": "<svg viewBox=\"0 0 10 10\"><style><img src=x onerror=alert(1)></style><rect width=\"10\" height=\"10\"/></svg>",
+      "forbidden": [
+        "onerror",
+        "<img",
+        "alert(1)"
+      ],
+      "required": [
+        "<svg",
+        "<rect"
+      ]
+    },
+    {
+      "name": "style_in_svg_lifts_script_element",
+      "category": "style_block",
+      "input": "<svg viewBox=\"0 0 10 10\"><style><script>alert(2)</script></style><rect width=\"10\" height=\"10\"/></svg>",
+      "forbidden": [
+        "<script",
+        "alert(2)"
+      ],
+      "required": [
+        "<svg",
+        "<rect"
+      ]
+    },
+    {
+      "name": "style_in_svg_lifts_javascript_iframe",
+      "category": "style_block",
+      "input": "<svg viewBox=\"0 0 10 10\"><style><iframe src=javascript:alert(3)></iframe></style></svg>",
+      "forbidden": [
+        "<iframe",
+        "javascript:",
+        "alert(3)"
+      ],
+      "required": [
+        "<svg"
+      ]
+    },
+    {
+      "name": "style_in_div_wrapper_lifts_live_img",
+      "category": "style_block",
+      "input": "<div><style><img src=x onerror=alert(4)></style></div><p>ok</p>",
+      "forbidden": [
+        "onerror",
+        "<img",
+        "alert(4)"
+      ],
+      "required": [
+        "ok"
+      ]
+    },
+    {
+      "name": "style_benign_block_precedes_malicious",
+      "category": "style_block",
+      "input": "<svg><style>.a{fill:#111}</style><style><img src=x onerror=alert(5)></style></svg>",
+      "forbidden": [
+        "onerror",
+        "<img",
+        "alert(5)"
+      ],
+      "required": [
+        "<svg"
+      ]
+    },
+    {
+      "name": "style_unbalanced_block_is_ui_redress",
+      "category": "style_block",
+      "input": "<p>ok</p><style>.x{position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483647;background:red</style>",
+      "forbidden": [
+        "position:fixed",
+        "z-index",
+        "2147483647"
+      ],
+      "required": [
+        "ok"
+      ]
+    },
+    {
+      "name": "style_unterminated_element_is_ui_redress",
+      "category": "style_block",
+      "input": "<p>ok</p><style>.x{position:fixed;top:0;z-index:2147483647",
+      "forbidden": [
+        "position:fixed",
+        "z-index",
+        "2147483647"
+      ],
+      "required": [
+        "ok"
+      ]
+    },
+    {
+      "name": "style_media_nesting_is_ui_redress",
+      "category": "style_block",
+      "input": "<p>ok</p><style>@media all{.x{position:fixed;top:0;width:100vw;height:100vh;z-index:99999;background:#fff}}</style>",
+      "forbidden": [
+        "position:fixed",
+        "z-index",
+        "@media"
+      ],
+      "required": [
+        "ok"
+      ]
+    },
+    {
+      "name": "style_supports_nesting_is_ui_redress",
+      "category": "style_block",
+      "input": "<p>ok</p><style>@supports (display:grid){.y{position:absolute;z-index:9}}</style>",
+      "forbidden": [
+        "position:absolute",
+        "z-index",
+        "@supports"
+      ],
+      "required": [
+        "ok"
+      ]
+    },
+    {
+      "name": "style_comment_fakes_nested_block",
+      "category": "style_block",
+      "input": "<p>ok</p><style>a{/*{*/position:fixed}</style>",
+      "forbidden": [
+        "position:fixed"
+      ],
+      "required": [
+        "ok"
+      ]
+    },
+    {
+      "name": "style_string_terminates_block_early",
+      "category": "style_block",
+      "input": "<p>ok</p><style>a { font-family: \"}\n; position: fixed; z-index:9999 }</style>",
+      "forbidden": [
+        "position: fixed",
+        "z-index"
+      ],
+      "required": [
+        "ok"
+      ]
+    },
+    {
+      "name": "style_at_font_face_reaches_network",
+      "category": "style_block",
+      "input": "<p>ok</p><style>@media all{@font-face{src:url(https://evil.example/f.woff)}}</style>",
+      "forbidden": [
+        "evil.example",
+        "@font-face"
+      ],
+      "required": [
+        "ok"
+      ]
+    },
+    {
+      "name": "style_expression_in_nested_at_rule",
+      "category": "style_block",
+      "input": "<p>ok</p><style>@media all{a{width:expression(alert(6))}}</style>",
+      "forbidden": [
+        "expression(",
+        "alert(6)"
+      ],
+      "required": [
+        "ok"
+      ]
+    },
+    {
+      "name": "style_css_escaped_at_import",
+      "category": "style_block",
+      "input": "<p>ok</p><style>@\\69 mport url(https://evil.example/x.css);a{color:red}</style>",
+      "forbidden": [
+        "evil.example",
+        "mport url"
+      ],
+      "required": [
+        "ok"
+      ]
+    },
+    {
+      "name": "style_agent_authored_d2_stylesheet_is_dropped",
+      "category": "style_block",
+      "input": "<svg viewBox=\"0 0 100 50\"><style>.d2-1 .fill-N1{fill:#1c1c20;}</style><rect class=\"fill-N1\" width=\"100\" height=\"50\"/></svg>",
+      "forbidden": [
+        "<style",
+        "{fill:#1c1c20"
+      ],
+      "required": [
+        "<svg",
+        "<rect",
+        "class=\"fill-N1\""
+      ]
+    },
+    {
+      "name": "external_resource_img_protocol_relative",
+      "category": "external_resource",
+      "input": "<p>ok</p><img src=\"//evil.example/px.gif?leak=1\" width=\"1\" height=\"1\">",
+      "forbidden": [
+        "evil.example"
+      ],
+      "required": [
+        "ok"
+      ]
+    },
+    {
+      "name": "external_resource_svg_image_protocol_relative",
+      "category": "external_resource",
+      "input": "<svg viewBox=\"0 0 10 10\"><image href=\"//evil.example/x.svg\" width=\"10\" height=\"10\"/><rect width=\"10\" height=\"10\"/></svg>",
+      "forbidden": [
+        "evil.example"
+      ],
+      "required": [
+        "<svg",
+        "<rect"
+      ]
+    },
+    {
+      "name": "external_resource_svg_image_xlink_protocol_relative",
+      "category": "external_resource",
+      "input": "<svg viewBox=\"0 0 10 10\"><image xlink:href=\"//evil.example/x.svg\" width=\"10\" height=\"10\"/><rect width=\"10\" height=\"10\"/></svg>",
+      "forbidden": [
+        "evil.example"
+      ],
+      "required": [
+        "<svg",
+        "<rect"
+      ]
+    },
+    {
+      "name": "external_resource_img_root_relative_also_dropped",
+      "category": "external_resource",
+      "input": "<p>ok</p><img src=\"/ui/static/first-party.png\" alt=\"a\">",
+      "forbidden": [
+        "/ui/static/first-party.png"
+      ],
+      "required": [
+        "ok"
+      ]
+    }
+  ]
+}

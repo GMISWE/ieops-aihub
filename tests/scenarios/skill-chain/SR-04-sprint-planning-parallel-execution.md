@@ -5,11 +5,11 @@ dependencies; two agents (Alice, Bob) execute in parallel respecting dep order.
 
 ## Users
 - ADMIN (PM/Orchestrator)
-  API key: baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
+  API key: $ADMIN_KEY
 - ALICE (Agent 1, takes high-priority tasks)
-  API key: pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V
+  API key: $ALICE_KEY
 - BOB (Agent 2, takes normal-priority tasks)
-  API key: pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR
+  API key: $BOB_KEY
 
 ## Scenario
 

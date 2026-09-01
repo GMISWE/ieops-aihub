@@ -186,6 +186,261 @@ func TestArtifactHTML_401_NoUser(t *testing.T) {
 	}
 }
 
+// ─── aihub#248: /ui lineage-head redirect for handleArtifactHTML ───────────
+
+// supersededArtifactMem returns an archived-but-still-loadable memory whose
+// LatestID points to headID — the shape produced once a later
+// pf_update_memory/pf_save_artifact call has superseded it. headID == "" is
+// used by callers that then blank out LatestID themselves (the nil case).
+func supersededArtifactMem(id, headID, memType string) *domain.Memory {
+	m := &domain.Memory{
+		ID:           id,
+		Project:      "testproj",
+		Type:         memType,
+		Status:       "archived",
+		Visibility:   "project",
+		AuthorUserID: "u_author",
+		Content:      "old body",
+		RenderedHTML: htmlPtr("<p>OLD-BODY-MARKER</p>"),
+	}
+	if headID != "" {
+		head := headID
+		m.LatestID = &head
+	}
+	return m
+}
+
+// headArtifactMem returns an active lineage-head memory, self-headed unless
+// overridden by the caller.
+func headArtifactMem(id, memType string) *domain.Memory {
+	self := id
+	return &domain.Memory{
+		ID:           id,
+		Project:      "testproj",
+		Type:         memType,
+		Status:       "active",
+		Visibility:   "project",
+		AuthorUserID: "u_author",
+		Content:      "new body",
+		RenderedHTML: htmlPtr("<p>HEAD-BODY-MARKER</p>"),
+		LatestID:     &self,
+	}
+}
+
+func TestArtifactHTML_UI_LatestIDNil_NoRedirect(t *testing.T) {
+	defer withVersionChainOverride()()
+	mem := supersededArtifactMem("mem_old1", "", "experience.debug")
+	defer withLoadMemoryOverride(mem, nil)()
+	calls := 0
+	defer withResolveLatestCounter(t, "mem_old1", nil, nil, &calls)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_old1/html", "mem_old1")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("unexpected Location: %q", loc)
+	}
+	if calls != 0 {
+		t.Errorf("resolveLatestFn calls: got %d, want 0 (LatestID nil must skip resolution)", calls)
+	}
+}
+
+func TestArtifactHTML_UI_LatestIDSelf_NoRedirect(t *testing.T) {
+	defer withVersionChainOverride()()
+	mem := headArtifactMem("mem_head_self", "experience.debug")
+	defer withLoadMemoryOverride(mem, nil)()
+	calls := 0
+	defer withResolveLatestCounter(t, "mem_head_self", nil, nil, &calls)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_head_self/html", "mem_head_self")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	if calls != 0 {
+		t.Errorf("resolveLatestFn calls: got %d, want 0 (LatestID==ID must skip resolution)", calls)
+	}
+}
+
+func TestArtifactHTML_UI_SupersededVisibleHead_Redirects(t *testing.T) {
+	old := supersededArtifactMem("mem_old2", "mem_head2", "experience.debug")
+	defer withLoadMemoryOverride(old, nil)()
+	defer withResolveLatestOverride(t, "mem_old2", headArtifactMem("mem_head2", "experience.debug"), nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_old2/html?back=/ui/queue", "mem_old2")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status: got %d, want 302 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	want := "/ui/artifacts/mem_head2/html?back=/ui/queue"
+	if loc := rec.Header().Get("Location"); loc != want {
+		t.Errorf("Location: got %q, want %q", loc, want)
+	}
+}
+
+func TestArtifactHTML_UI_SupersededHead_VisibilityDenied_Fallback(t *testing.T) {
+	defer withVersionChainOverride()()
+	old := supersededArtifactMem("mem_old3", "mem_head3", "experience.debug")
+	defer withLoadMemoryOverride(old, nil)()
+	head := headArtifactMem("mem_head3", "experience.debug")
+	head.Visibility = "private"
+	head.AuthorUserID = "u_someone_else"
+	defer withResolveLatestOverride(t, "mem_old3", head, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_old3/html", "mem_old3")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (silent fallback, no 403/404); body=%s",
+			rec.Code, excerptStr(rec.Body.String()))
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("unexpected Location on fallback: %q", loc)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "OLD-BODY-MARKER") {
+		t.Errorf("fallback should render the original record; body=%s", excerptStr(body))
+	}
+	if strings.Contains(body, "HEAD-BODY-MARKER") {
+		t.Errorf("fallback must NOT leak the inaccessible head's content; body=%s", excerptStr(body))
+	}
+}
+
+func TestArtifactHTML_UI_SupersededHead_ProjectDenied_Fallback(t *testing.T) {
+	defer withVersionChainOverride()()
+	old := supersededArtifactMem("mem_old4", "mem_head4", "experience.debug")
+	defer withLoadMemoryOverride(old, nil)()
+	head := headArtifactMem("mem_head4", "experience.debug")
+	head.Project = "otherproj" // caller has no role on this project
+	defer withResolveLatestOverride(t, "mem_old4", head, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_old4/html", "mem_old4")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (silent fallback)", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("unexpected Location on fallback: %q", loc)
+	}
+}
+
+func TestArtifactHTML_UI_HeadResolutionError_Fallback(t *testing.T) {
+	defer withVersionChainOverride()()
+	old := supersededArtifactMem("mem_old5", "mem_head5", "experience.debug")
+	defer withLoadMemoryOverride(old, nil)()
+	defer withResolveLatestOverride(t, "mem_old5", nil, domain.NewErr(domain.ErrNotFound, "memory not found"))()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_old5/html", "mem_old5")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 — never 404 on an unreachable head", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "OLD-BODY-MARKER") {
+		t.Errorf("should render the original record on head-resolution error")
+	}
+}
+
+// TestArtifactHTML_V1_SupersededID_NoRedirect proves the /v1 surface never
+// follows latest_id: same superseded fixture as the /ui tests above, but no
+// c.SetPath("/ui/...") — mirrors the real /v1 route, whose registered pattern
+// does not start with "/ui". Byte-identical to today: 200, original content,
+// no Location, and resolveLatestFn must not even be called.
+func TestArtifactHTML_V1_SupersededID_NoRedirect(t *testing.T) {
+	old := supersededArtifactMem("mem_old6", "mem_head6", "experience.debug")
+	defer withLoadMemoryOverride(old, nil)()
+	calls := 0
+	defer withResolveLatestCounter(t, "mem_old6", headArtifactMem("mem_head6", "experience.debug"), nil, &calls)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/v1/artifacts/mem_old6/html", "mem_old6")
+	c.SetPath("/v1/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("/v1 must never redirect; got Location %q", loc)
+	}
+	if !strings.Contains(rec.Body.String(), "OLD-BODY-MARKER") {
+		t.Errorf("/v1 must serve the exact requested record")
+	}
+	if calls != 0 {
+		t.Errorf("resolveLatestFn calls: got %d, want 0 on /v1 (gated on /ui prefix)", calls)
+	}
+}
+
+// TestSharedArtifact_SupersededID_NoRedirect proves /share stays exact-ID even
+// when the shared row's lineage has since moved on — handleSharedArtifact
+// never calls resolveLatestFn at all (aihub#248 non-goal 2 / mem_A6540SyP).
+func TestSharedArtifact_SupersededID_NoRedirect(t *testing.T) {
+	old := supersededArtifactMem("mem_old7", "mem_head7", "methodology.spec")
+	old.Visibility = "public"
+	defer withLoadMemoryOverride(old, nil)()
+	calls := 0
+	defer withResolveLatestCounter(t, "mem_old7", headArtifactMem("mem_head7", "methodology.spec"), nil, &calls)()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/share/mem_old7", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_old7")
+
+	if err := handleSharedArtifact(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("/share must never redirect; got Location %q", loc)
+	}
+	if calls != 0 {
+		t.Errorf("resolveLatestFn calls: got %d, want 0 (/share never resolves lineage)", calls)
+	}
+}
+
 // TestRenderArtifactBody_FullDocVerbatim verifies aihub#104: a stored value that is
 // already a complete HTML document is served verbatim (no double-wrapping), case-
 // and leading-whitespace-insensitive.
@@ -308,6 +563,89 @@ func publicSharedMem() *domain.Memory {
 		Visibility:   "public",
 		AuthorUserID: "u_author",
 		RenderedHTML: htmlPtr("<h1>SPEC-BODY-MARKER</h1>"),
+	}
+}
+
+// TestArtifactViewer_UIvsV1Share_BytePurity locks the aihub#159 invariant: every
+// new viewer affordance (side rail, section folding, annotation data island,
+// viewer.css/ui.css links, app chrome, share control) is /ui-only — the /v1 API
+// and the public /share output must contain NONE of those bytes (spec mem_5kxhPqA2).
+func TestArtifactViewer_UIvsV1Share_BytePurity(t *testing.T) {
+	defer withVersionChainOverride()()
+
+	mem := publicSharedMem()
+	mem.WorkItemID = strptr("aihub#159")
+	mem.Content = "# Title\n\nintro paragraph\n\n## Section A\n\nbody A\n\n## Section B\n\nbody B"
+	mem.RenderedHTML = htmlPtr(`<h1 id="title">Title</h1><p>intro paragraph</p>` +
+		`<h2 id="section-a">Section A</h2><p>body A</p>` +
+		`<pre><code class="language-d2">a -&gt; b</code></pre>` +
+		`<h2 id="section-b">Section B</h2><p>body B</p>`)
+	mem.Commits = []byte(`[{"id":"c1","author_display":"monte","body":"q","status":"open","anchor":{"quote":"body A"}}]`)
+	defer withLoadMemoryOverride(mem, nil)()
+
+	// Bytes that exist ONLY on the /ui artifact viewer.
+	uiOnly := []string{
+		`id="pf-side-rail"`,
+		`class="pf-side-card"`,
+		`<details open class="pf-sec"`, // section folding
+		`id="pf-annot-data"`,
+		`/ui/static/viewer.css`,
+		`/ui/static/ui.css`,
+		`class="pf-appnav"`,
+		`id="pf-share"`,
+		`/ui/static/annot.js`,
+		`<figure class="pf-diagram"`, // aihub#160: d2 → inline SVG; /v1+/share keep the code block
+		`/ui/static/diagram.js`,      // aihub#234: click-to-zoom for those figures
+	}
+
+	renderPath := func(path string) string {
+		e := echo.New()
+		c, rec := newUIContext(e, http.MethodGet, path, "mem_share1")
+		c.SetPath(path) // drives the HasPrefix(c.Path(), "/ui") gate
+		setUser(c, authorUser())
+		if err := handleArtifactHTML(nil)(c); err != nil {
+			e.HTTPErrorHandler(err, c)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d (body=%s)", path, rec.Code, excerptStr(rec.Body.String()))
+		}
+		return rec.Body.String()
+	}
+
+	// /ui: the affordances MUST be present (proves the gate adds them).
+	uiBody := renderPath("/ui/artifacts/:id/html")
+	for _, s := range uiOnly {
+		if !strings.Contains(uiBody, s) {
+			t.Errorf("/ui output should contain %q (affordance missing)", s)
+		}
+	}
+
+	// /v1: NONE of them — byte-identical to the pre-#159 pure document.
+	v1Body := renderPath("/v1/artifacts/:id/html")
+	for _, s := range uiOnly {
+		if strings.Contains(v1Body, s) {
+			t.Errorf("/v1 output must NOT contain /ui-only bytes; found %q", s)
+		}
+	}
+
+	// /share (public, no auth): NONE of them + the strict CSP stays.
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/share/mem_share1", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_share1")
+	if err := handleSharedArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	shareBody := rec.Body.String()
+	for _, s := range uiOnly {
+		if strings.Contains(shareBody, s) {
+			t.Errorf("/share output must NOT contain /ui-only bytes; found %q", s)
+		}
+	}
+	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'none'") {
+		t.Errorf("/share must keep its strict CSP")
 	}
 }
 
@@ -733,6 +1071,318 @@ func TestShareArtifact_Writer_200(t *testing.T) {
 	}
 }
 
+// ─── aihub#154: /ui artifact share button ────────────────────────────────────
+//
+// The share/unshare handlers are auth-agnostic and already covered for /v1 by
+// scenarios 1-7 above; these focus on the new /ui surface: that the same
+// handlers behave identically under cookie auth (happy + 403 + 412), and that
+// the /ui viewer injects the share control while /v1 + /share stay
+// byte-identical (no pf-share, no share.js).
+
+// withVersionChainOverride swaps versionChainFn so /ui handler tests don't hit
+// the DB (nil pool would panic in MemoryVersionChain). Returns an empty chain
+// so buildVersionHistoryHTML is a no-op.
+func withVersionChainOverride() func() {
+	prev := versionChainFn
+	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+		return nil, nil
+	}
+	return func() { versionChainFn = prev }
+}
+
+// uiShareContext builds an echo context whose registered path is the /ui share
+// route, so handlers that branch on c.Path() (none here, but kept symmetric
+// with the /ui html path) and the share handlers run as they would under /ui.
+func newUIContext(e *echo.Echo, method, target, id string) (echo.Context, *httptest.ResponseRecorder) {
+	req := httptest.NewRequest(method, target, nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(id)
+	return c, rec
+}
+
+// TestUIShareArtifact_Writer_200 covers acceptance 1: a writer sharing a
+// spec/plan with rendered_html over the /ui route → 200, body has share_url +
+// visibility:"public", and the visibility setter is invoked with "public".
+func TestUIShareArtifact_Writer_200(t *testing.T) {
+	mem := publicSharedMem()
+	mem.Visibility = "project" // not yet shared
+	defer withLoadMemoryOverride(mem, nil)()
+	gotID, gotVis, cleanup := withSetVisibilityOverride(nil)
+	defer cleanup()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodPost, "/ui/artifacts/mem_share1/share", "mem_share1")
+	c.SetPath("/ui/artifacts/:id/share")
+	setUser(c, authorUser()) // writer on testproj
+
+	if err := handleShareArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if *gotID != "mem_share1" || *gotVis != "public" {
+		t.Fatalf("share mutation: got (%q,%q), want (mem_share1,public)", *gotID, *gotVis)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "share_url") || !strings.Contains(body, "/share/mem_share1") {
+		t.Fatalf("response missing share_url: %s", body)
+	}
+	if !strings.Contains(body, "\"visibility\":\"public\"") {
+		t.Fatalf("response missing visibility:public: %s", body)
+	}
+}
+
+// TestUIUnshareArtifact_Writer_200 covers acceptance 2: DELETE over /ui → 200,
+// {ok:true}, visibility setter invoked with "project".
+func TestUIUnshareArtifact_Writer_200(t *testing.T) {
+	mem := publicSharedMem() // currently public
+	defer withLoadMemoryOverride(mem, nil)()
+	gotID, gotVis, cleanup := withSetVisibilityOverride(nil)
+	defer cleanup()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodDelete, "/ui/artifacts/mem_share1/share", "mem_share1")
+	c.SetPath("/ui/artifacts/:id/share")
+	setUser(c, authorUser())
+
+	if err := handleUnshareArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if *gotID != "mem_share1" || *gotVis != "project" {
+		t.Fatalf("unshare mutation: got (%q,%q), want (mem_share1,project)", *gotID, *gotVis)
+	}
+	if !strings.Contains(rec.Body.String(), "\"ok\":true") {
+		t.Fatalf("response missing ok:true: %s", rec.Body.String())
+	}
+}
+
+// TestUIShareArtifact_Viewer_403 covers acceptance 3a: non-writer over /ui → 403.
+func TestUIShareArtifact_Viewer_403(t *testing.T) {
+	mem := publicSharedMem()
+	mem.Visibility = "project"
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodPost, "/ui/artifacts/mem_share1/share", "mem_share1")
+	c.SetPath("/ui/artifacts/:id/share")
+	setUser(c, otherViewerUser()) // viewer only
+
+	if err := handleShareArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status: got %d, want 403 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUIShareArtifact_NoRenderedHTML_412 covers acceptance 3b: rendered_html=NULL
+// over /ui → 412.
+func TestUIShareArtifact_NoRenderedHTML_412(t *testing.T) {
+	mem := publicSharedMem()
+	mem.Visibility = "project"
+	mem.RenderedHTML = nil
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodPost, "/ui/artifacts/mem_share1/share", "mem_share1")
+	c.SetPath("/ui/artifacts/:id/share")
+	setUser(c, authorUser())
+
+	if err := handleShareArtifact(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("status: got %d, want 412 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUIArtifactHTML_ShareControlInjected covers acceptance 4: the /ui viewer
+// injects the share control when rendered_html != nil, with data-shared
+// reflecting visibility and a share.js script tag.
+func TestUIArtifactHTML_ShareControlInjected(t *testing.T) {
+	defer withVersionChainOverride()()
+
+	cases := []struct {
+		name       string
+		visibility string
+		wantShared string
+	}{
+		{"public_shared_true", "public", `data-shared="true"`},
+		{"project_shared_false", "project", `data-shared="false"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := publicSharedMem()
+			mem.Visibility = tc.visibility
+			mem.WorkItemID = strptr("aihub#154")
+			defer withLoadMemoryOverride(mem, nil)()
+
+			e := echo.New()
+			c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_share1/html", "mem_share1")
+			c.SetPath("/ui/artifacts/:id/html")
+			setUser(c, authorUser())
+
+			if err := handleArtifactHTML(nil)(c); err != nil {
+				e.HTTPErrorHandler(err, c)
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, `id="pf-share"`) {
+				t.Errorf("missing pf-share control; excerpt: %s", excerptStr(body))
+			}
+			if !strings.Contains(body, tc.wantShared) {
+				t.Errorf("missing %s; excerpt: %s", tc.wantShared, excerptStr(body))
+			}
+			if !strings.Contains(body, "/ui/static/share.js") {
+				t.Errorf("missing share.js script; excerpt: %s", excerptStr(body))
+			}
+			// aihub#154: the share control must sit BELOW the document title
+			// (the first </h1>), not above it.
+			h1End := strings.Index(body, "</h1>")
+			shareAt := strings.Index(body, `id="pf-share"`)
+			if h1End < 0 {
+				t.Fatalf("rendered body has no </h1>; excerpt: %s", excerptStr(body))
+			}
+			if shareAt < h1End {
+				t.Errorf("share control must follow the first </h1> (h1End=%d shareAt=%d); excerpt: %s",
+					h1End, shareAt, excerptStr(body))
+			}
+		})
+	}
+}
+
+// TestUIArtifactHTML_ShareAboveVersionHistory covers the multi-version layout
+// requirement (aihub#154 #3): when a spec has a >1-version chain, the share
+// control renders ABOVE the version-history dropdown, and both sit below the
+// title (title → share → version-history).
+func TestUIArtifactHTML_ShareAboveVersionHistory(t *testing.T) {
+	prev := versionChainFn
+	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+		return []domain.MemoryVersionRef{
+			{ID: "mem_share1", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
+			{ID: "mem_v2", CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+		}, nil
+	}
+	defer func() { versionChainFn = prev }()
+
+	mem := publicSharedMem()
+	mem.WorkItemID = strptr("aihub#154")
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_share1/html", "mem_share1")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	body := rec.Body.String()
+
+	h1End := strings.Index(body, "</h1>")
+	shareAt := strings.Index(body, `id="pf-share"`)
+	railAt := strings.Index(body, `id="pf-side-rail"`)
+	vhRailAt := strings.Index(body, `class="pf-side-vh"`)
+	if h1End < 0 || shareAt < 0 || railAt < 0 || vhRailAt < 0 {
+		t.Fatalf("expected in-card share + side-rail version history; h1End=%d shareAt=%d railAt=%d vhRailAt=%d; excerpt: %s",
+			h1End, shareAt, railAt, vhRailAt, excerptStr(body))
+	}
+	// aihub#159: share stays in the doc card below the title; version history moved
+	// out of the card into the consolidated side rail (#pf-side-rail).
+	if h1End >= shareAt {
+		t.Errorf("share must render below the title (h1End=%d shareAt=%d)", h1End, shareAt)
+	}
+	if strings.Contains(body, `<section class="pf-version-history"`) {
+		t.Errorf("version history should live in the side rail, not an in-card <section>")
+	}
+	if vhRailAt < railAt {
+		t.Errorf("version-history timeline must live inside #pf-side-rail (railAt=%d vhRailAt=%d)", railAt, vhRailAt)
+	}
+}
+
+// TestUIArtifactHTML_NoRenderedHTML_NoShareControl covers acceptance 5: when
+// rendered_html == nil the /ui viewer must NOT inject the share control.
+func TestUIArtifactHTML_NoRenderedHTML_NoShareControl(t *testing.T) {
+	defer withVersionChainOverride()()
+
+	mem := retroMemNullHTML() // rendered_html = nil, lazy-rendered body
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_retro1/html", "mem_retro1")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `id="pf-share"`) {
+		t.Errorf("share control must be absent when rendered_html is nil; excerpt: %s", excerptStr(body))
+	}
+	if strings.Contains(body, "/ui/static/share.js") {
+		t.Errorf("share.js must be absent when rendered_html is nil; excerpt: %s", excerptStr(body))
+	}
+}
+
+// TestArtifactHTML_V1AndShare_NoShareControl covers acceptance 6 (byte-identical
+// conservation): the /v1 html output and the /share output must NOT contain the
+// share control nor the share.js script.
+func TestArtifactHTML_V1AndShare_NoShareControl(t *testing.T) {
+	// /v1 path.
+	mem := publicSharedMem() // rendered_html != nil
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/v1/artifacts/mem_share1/html", "mem_share1")
+	c.SetPath("/v1/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/v1 status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	v1Body := rec.Body.String()
+	if strings.Contains(v1Body, "pf-share") {
+		t.Errorf("/v1 output must not contain pf-share; excerpt: %s", excerptStr(v1Body))
+	}
+	if strings.Contains(v1Body, "share.js") {
+		t.Errorf("/v1 output must not contain share.js; excerpt: %s", excerptStr(v1Body))
+	}
+
+	// /share path (handleSharedArtifact). publicSharedMem is already public.
+	sc, srec := newUIContext(e, http.MethodGet, "/share/mem_share1", "mem_share1")
+	if err := handleSharedArtifact(nil)(sc); err != nil {
+		e.HTTPErrorHandler(err, sc)
+	}
+	if srec.Code != http.StatusOK {
+		t.Fatalf("/share status: got %d, want 200 (body=%s)", srec.Code, excerptStr(srec.Body.String()))
+	}
+	shareBody := srec.Body.String()
+	if strings.Contains(shareBody, "pf-share") {
+		t.Errorf("/share output must not contain pf-share; excerpt: %s", excerptStr(shareBody))
+	}
+	if strings.Contains(shareBody, "share.js") {
+		t.Errorf("/share output must not contain share.js; excerpt: %s", excerptStr(shareBody))
+	}
+}
+
 // ─── aihub#124: annotation UI tests ──────────────────────────────────────────
 
 // TestBuildAnnotationHTML_RouteAware is the core route-aware test:
@@ -772,7 +1422,7 @@ func TestBuildAnnotationHTML_RouteAware(t *testing.T) {
 	commitsRaw := json.RawMessage(commitsJSON)
 
 	// --- /ui path: buildAnnotationHTML should return non-empty HTML ---
-	annotHTML := buildAnnotationHTML("mem_spec_42", specBody, commitsRaw)
+	annotHTML := buildAnnotationHTML("mem_spec_42", specBody, commitsRaw, "TESTNONCE")
 
 	if annotHTML == "" {
 		t.Fatal("buildAnnotationHTML returned empty string for non-empty commits")
@@ -825,7 +1475,7 @@ func TestBuildAnnotationHTML_RouteAware(t *testing.T) {
 // TestBuildAnnotationHTML_NoCommitsNoHeadings verifies that an artifact with
 // neither commits nor headings returns an empty annotation fragment.
 func TestBuildAnnotationHTML_NoCommitsNoHeadings(t *testing.T) {
-	got := buildAnnotationHTML("mem_x", "<p>no headings here</p>", nil)
+	got := buildAnnotationHTML("mem_x", "<p>no headings here</p>", nil, "TESTNONCE")
 	if got != "" {
 		t.Errorf("expected empty annotation fragment, got: %s", excerptStr(got))
 	}
@@ -843,7 +1493,7 @@ func TestBuildAnnotationHTML_UnanchoredGroup(t *testing.T) {
 		// No Anchor set — unanchored.
 	}
 	commitsJSON, _ := jsonMarshal([]CommitEntry{entry})
-	got := buildAnnotationHTML("mem_y", "<h1 id=\"intro\">Intro</h1>", json.RawMessage(commitsJSON))
+	got := buildAnnotationHTML("mem_y", "<h1 id=\"intro\">Intro</h1>", json.RawMessage(commitsJSON), "TESTNONCE")
 	if !strings.Contains(got, "general") {
 		t.Errorf("unanchored commit should appear in general group; got: %s", excerptStr(got))
 	}
@@ -924,7 +1574,7 @@ func TestBuildVersionHistoryHTML_SingleVersion(t *testing.T) {
 	versions := []domain.MemoryVersionRef{
 		{ID: "mem_v1", CreatedAt: "2024-01-01T00:00:00Z", Status: "active", IsCurrent: true},
 	}
-	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions)
+	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions, "TESTNONCE")
 	if got != "" {
 		t.Errorf("single-version chain must produce empty HTML, got: %s", excerptStr(got))
 	}
@@ -941,7 +1591,7 @@ func TestBuildVersionHistoryHTML_MultiVersion(t *testing.T) {
 		{ID: "mem_v2", CreatedAt: "2024-06-01T12:00:00Z", Status: "active", IsCurrent: true},
 	}
 	// Viewing mem_v1 (the older version).
-	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions)
+	got := buildVersionHistoryHTML(context.TODO(), nil, "mem_v1", versions, "TESTNONCE")
 
 	if !strings.Contains(got, "pf-version-history") {
 		t.Errorf("missing pf-version-history class; got: %s", excerptStr(got))
@@ -977,7 +1627,7 @@ func TestVersionHistoryHTML_RouteAware(t *testing.T) {
 		{ID: "mem_v1", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
 		{ID: "mem_v2", CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
 	}
-	vhHTML := buildVersionHistoryHTML(context.TODO(), nil, "mem_v2", versions)
+	vhHTML := buildVersionHistoryHTML(context.TODO(), nil, "mem_v2", versions, "TESTNONCE")
 	if vhHTML == "" {
 		t.Fatal("buildVersionHistoryHTML returned empty for 2-version chain")
 	}
@@ -997,10 +1647,494 @@ func TestVersionHistoryHTML_RouteAware(t *testing.T) {
 
 // TestVersionHistoryHTML_NilVersions verifies that a nil/empty slice returns "".
 func TestVersionHistoryHTML_NilVersions(t *testing.T) {
-	if got := buildVersionHistoryHTML(context.TODO(), nil, "mem_x", nil); got != "" {
+	if got := buildVersionHistoryHTML(context.TODO(), nil, "mem_x", nil, "TESTNONCE"); got != "" {
 		t.Errorf("nil versions must produce empty HTML, got: %s", excerptStr(got))
 	}
-	if got := buildVersionHistoryHTML(context.TODO(), nil, "mem_x", []domain.MemoryVersionRef{}); got != "" {
+	if got := buildVersionHistoryHTML(context.TODO(), nil, "mem_x", []domain.MemoryVersionRef{}, "TESTNONCE"); got != "" {
 		t.Errorf("empty versions must produce empty HTML, got: %s", excerptStr(got))
+	}
+}
+
+// ─── aihub#248 review_fix: exact-version marker (pf_exact) + W1/W2 ─────────
+//
+// Spec amendment (mem_Vcc8Jf6M superseded following deep review mem_eCIctvsx):
+// non-goal 6 now permits a narrow exact-version marker so the two deliberate
+// past-version link sites (the side rail below, and wi_detail.html.tmpl's
+// per-version "View" link) can still reach a specific superseded revision.
+
+// withLoadMemoryDispatch swaps loadMemoryFn with an id-keyed fake. Needed by
+// the W1 side-rail leak test below, where the primary record and OTHER
+// lineage-chain members must resolve to DIFFERENT full domain.Memory records
+// so the test can express "the caller can see A but not B" — the shared,
+// id-blind withLoadMemoryOverride returns one fixed record for any id and
+// cannot express that.
+func withLoadMemoryDispatch(byID map[string]*domain.Memory) func() {
+	prev := loadMemoryFn
+	loadMemoryFn = func(_ context.Context, _ *pgxpool.Pool, id string) (*domain.Memory, *domain.AihubError) {
+		if m, ok := byID[id]; ok {
+			return m, nil
+		}
+		return nil, domain.NewErr(domain.ErrNotFound, "test fake: unknown id "+id)
+	}
+	return func() { loadMemoryFn = prev }
+}
+
+// TestArtifactHTML_UI_ExactVersionMarker_SkipsRedirect covers the blocking
+// finding's fix: a caller that followed a deliberate past-version link
+// (?pf_exact=1) must see the exact requested revision, not the head —
+// resolveLatestFn must not even be called.
+func TestArtifactHTML_UI_ExactVersionMarker_SkipsRedirect(t *testing.T) {
+	defer withVersionChainOverride()()
+	old := supersededArtifactMem("mem_old_exact1", "mem_head_exact1", "experience.debug")
+	defer withLoadMemoryOverride(old, nil)()
+	calls := 0
+	defer withResolveLatestCounter(t, "mem_old_exact1", nil, nil, &calls)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_old_exact1/html?pf_exact=1", "mem_old_exact1")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("pf_exact=1 must skip the redirect entirely; got Location %q", loc)
+	}
+	if !strings.Contains(rec.Body.String(), "OLD-BODY-MARKER") {
+		t.Errorf("pf_exact=1 must serve the exact requested version")
+	}
+	if calls != 0 {
+		t.Errorf("resolveLatestFn calls: got %d, want 0 (pf_exact=1 must skip head resolution entirely)", calls)
+	}
+}
+
+// TestArtifactHTML_UI_HeadLatestID_PointsElsewhere_NoRedirect covers W2: a
+// head whose OWN cursor points somewhere else (multi-hop / stale data) must
+// not trigger a second redirect — the handler falls back to the originally
+// requested record instead of chaining.
+func TestArtifactHTML_UI_HeadLatestID_PointsElsewhere_NoRedirect(t *testing.T) {
+	defer withVersionChainOverride()()
+	old := supersededArtifactMem("mem_old_w2", "mem_head_w2", "experience.debug")
+	defer withLoadMemoryOverride(old, nil)()
+
+	head := headArtifactMem("mem_head_w2", "experience.debug")
+	elsewhere := "mem_somewhere_else"
+	head.LatestID = &elsewhere // head's own cursor points away from itself
+	defer withResolveLatestOverride(t, "mem_old_w2", head, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_old_w2/html", "mem_old_w2")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (fallback; body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("a head whose own LatestID points elsewhere must not redirect again; got Location %q", loc)
+	}
+	if !strings.Contains(rec.Body.String(), "OLD-BODY-MARKER") {
+		t.Errorf("fallback should render the original record")
+	}
+}
+
+// TestArtifactHTML_UI_SideRail_EmitsExactVersionMarker asserts the side
+// rail's "Version history" rows for non-current versions carry ?pf_exact=1
+// so they opt out of the head redirect.
+func TestArtifactHTML_UI_SideRail_EmitsExactVersionMarker(t *testing.T) {
+	mem := headArtifactMem("mem_cur_marker", "experience.debug")
+	defer withLoadMemoryOverride(mem, nil)()
+
+	prevVCF := versionChainFn
+	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+		return []domain.MemoryVersionRef{
+			{ID: "mem_old_marker", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
+			{ID: mem.ID, CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+		}, nil
+	}
+	defer func() { versionChainFn = prevVCF }()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/"+mem.ID+"/html", mem.ID)
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	body := rec.Body.String()
+	wantHref := `href="/ui/artifacts/mem_old_marker/html?pf_exact=1"`
+	if !strings.Contains(body, wantHref) {
+		t.Errorf("side rail must emit the exact-version marker on a past-version link; want %q; body=%s", wantHref, excerptStr(body))
+	}
+}
+
+// TestArtifactHTML_UI_SideRail_DeniedVersion_Omitted covers W1: the side
+// rail must not reveal a lineage member the caller cannot access (id, date,
+// or link) — domain.MemoryVersionChain applies no project/visibility
+// predicate, so the server layer must filter srVersions itself.
+func TestArtifactHTML_UI_SideRail_DeniedVersion_Omitted(t *testing.T) {
+	cur := headArtifactMem("mem_side_cur", "experience.debug")
+	visibleOther := headArtifactMem("mem_side_visible", "experience.debug")
+	visibleOther.Status = "archived"
+	denied := headArtifactMem("mem_side_denied", "experience.debug")
+	denied.Visibility = "private"
+	denied.AuthorUserID = "u_someone_else"
+
+	defer withLoadMemoryDispatch(map[string]*domain.Memory{
+		cur.ID:          cur,
+		visibleOther.ID: visibleOther,
+		denied.ID:       denied,
+	})()
+
+	prevVCF := versionChainFn
+	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+		return []domain.MemoryVersionRef{
+			{ID: denied.ID, CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
+			{ID: visibleOther.ID, CreatedAt: "2024-03-01T00:00:00Z", Status: "archived", IsCurrent: false},
+			{ID: cur.ID, CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+		}, nil
+	}
+	defer func() { versionChainFn = prevVCF }()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/"+cur.ID+"/html", cur.ID)
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, denied.ID) {
+		t.Errorf("side rail must not reveal a lineage member the caller cannot access (W1); body=%s", excerptStr(body))
+	}
+	if !strings.Contains(body, visibleOther.ID) {
+		t.Errorf("side rail must still show a lineage member the caller CAN access; body=%s", excerptStr(body))
+	}
+	// aihub#248 review (minor 7 / test-strength gap): the id-absence check
+	// above cannot distinguish "row omitted entirely" from "row kept but
+	// unlinked" — a mutation that keeps the denied row and only blanks its
+	// Href renders a labeled, dated <span> with no id text and would still
+	// pass the two assertions above. Pin the full-omission property W1 is
+	// actually about: the denied row's date must also be absent, and exactly
+	// two <li class="pf-side-vrow...> rows may render (denied + visibleOther +
+	// cur in the fake chain, minus the one filtered out).
+	if strings.Contains(body, "2024-01-01") {
+		t.Errorf("side rail must not reveal the denied row's date either (row must be fully omitted, not merely unlinked); body=%s", excerptStr(body))
+	}
+	if n := strings.Count(body, "pf-side-vrow"); n != 2 {
+		t.Errorf("side rail must render exactly 2 version rows (denied row fully omitted, not blanked-href); got %d; body=%s", n, excerptStr(body))
+	}
+}
+
+// TestUIWIDetail_VersionLink_CarriesExactMarker_OpenLinkDoesNot renders
+// wi_detail.html.tmpl directly (no DB, no handler fan-out) to verify the
+// per-version "View" link (wi_detail.html.tmpl:143) carries the exact-version
+// marker while the per-artifact "Open" link (wi_detail.html.tmpl:120) does
+// NOT — it is an ordinary cross-link and must keep self-healing to the head.
+func TestUIWIDetail_VersionLink_CarriesExactMarker_OpenLinkDoesNot(t *testing.T) {
+	tmpl := pageTemplate("wi_detail.html.tmpl", "events_timeline.html.tmpl")
+
+	data := &wiDetailPageData{
+		Title:  "wi test",
+		Active: "wi",
+		Theme:  "auto",
+		Origin: "http://example.com",
+		Nonce:  "testnonce",
+		User:   authorUser(),
+		WI: &domain.WorkItem{
+			ID: "wi_marker_1", Slug: "testproj#1", Project: "testproj", Goal: "goal", Status: "running",
+		},
+		Artifacts: []artifactLink{
+			{
+				MemID: "mem_wi_head",
+				Type:  "methodology.spec",
+				Versions: []domain.MemoryVersionRef{
+					{ID: "mem_wi_head", CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+					{ID: "mem_wi_old", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
+				},
+			},
+		},
+	}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/ui/wi/testproj%231", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if err := renderTemplate(c, tmpl, "layout", data); err != nil {
+		t.Fatalf("renderTemplate error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", rec.Code, excerptStr(rec.Body.String()))
+	}
+	body := rec.Body.String()
+
+	// The "Open" link (wi_detail.html.tmpl:120) is an ordinary cross-link to
+	// the artifact's row id and must NOT carry the marker — checked as the
+	// exact anchor tag (href + Open text together) so this cannot pass by
+	// accidentally matching a *different* anchor that happens to share the
+	// same href prefix (the per-version "View" row for this same id, below,
+	// legitimately does carry the marker — see decision in the code review).
+	wantOpen := `href="/ui/artifacts/mem_wi_head/html" target="_blank" rel="noopener">Open</a>`
+	if !strings.Contains(body, wantOpen) {
+		t.Errorf("Open link for the current artifact row must render without the marker; want %q; body=%s", wantOpen, excerptStr(body))
+	}
+	// The per-version "View" link (wi_detail.html.tmpl:143) always carries the
+	// marker, including for the row that happens to be the current version —
+	// it is still a deliberate link to that exact version id, just like the
+	// older row below.
+	if !strings.Contains(body, `href="/ui/artifacts/mem_wi_old/html?pf_exact=1"`) {
+		t.Errorf("past-version View link must carry the exact-version marker; body=%s", excerptStr(body))
+	}
+	if !strings.Contains(body, `href="/ui/artifacts/mem_wi_head/html?pf_exact=1" target="_blank" rel="noopener" style="font-size:11px">View</a>`) {
+		t.Errorf("current-version View row must also carry the marker (every View link targets an exact revision); body=%s", excerptStr(body))
+	}
+}
+
+// ─── aihub#248 review round 2 fixes ────────────────────────────────────────
+
+// TestArtifactHTML_UI_AnnotationCommit_PreservesExactMarker_RoundTrip is the
+// regression test for review warning 1: a POST/commit round-trip that starts
+// on a marked past-version URL must land back on that same past version, not
+// the lineage head. Concrete scenario from the review: open v1?pf_exact=1 →
+// add an annotation → POST /ui/artifacts/mem_v1_rt/commit?pf_exact=1 (the
+// add-annotation form now carries the marker via
+// buildAnnotationHTMLWithExact) → 303 must preserve ?pf_exact=1 in Location
+// (artifactRedirectURL) → following that redirect must render v1 itself, not
+// bounce again to head. Before the fix, step 3's Location dropped the
+// marker, so step 4 fell into the lineage-head redirect and silently served
+// head content instead of the version the comment was just written on.
+func TestArtifactHTML_UI_AnnotationCommit_PreservesExactMarker_RoundTrip(t *testing.T) {
+	old := supersededArtifactMem("mem_v1_rt", "mem_head_rt", "experience.debug")
+
+	// Phase 1: POST the annotation commit as if submitted from a page that
+	// was rendered with ?pf_exact=1 (the form action itself carries the
+	// marker in its query string — see buildAnnotationHTMLWithExact).
+	restoreProject := withCommitMemoryProjectOverride(old.Project, old.Status, nil)
+	defer restoreProject()
+	prevCommit := doArtifactCommitFn
+	doArtifactCommitFn = func(_ context.Context, _ *pgxpool.Pool, _, _, _, _ string, _ domain.CommitAnchorArgs) error {
+		return nil
+	}
+	defer func() { doArtifactCommitFn = prevCommit }()
+
+	e := echo.New()
+	form := strings.NewReader("body=nice+catch&heading_id=&heading_text=")
+	req := httptest.NewRequest(http.MethodPost, "/ui/artifacts/mem_v1_rt/commit?pf_exact=1", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_v1_rt")
+	setUser(c, authorUser())
+
+	if err := handleUIArtifactCommit(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status: got %d, want 303 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	wantLoc := "/ui/artifacts/mem_v1_rt/html?pf_exact=1"
+	loc := rec.Header().Get("Location")
+	if loc != wantLoc {
+		t.Fatalf("Location after commit: got %q, want %q (pf_exact must round-trip through the write)", loc, wantLoc)
+	}
+
+	// Phase 2: follow the redirect. mem_v1_rt is superseded by mem_head_rt,
+	// so WITHOUT the marker this GET would 302 to head — proving the round
+	// trip actually lands back on the exact version requires exercising the
+	// same superseded fixture here, not just checking the Location string.
+	defer withLoadMemoryOverride(old, nil)()
+	defer withVersionChainOverride()()
+	calls := 0
+	defer withResolveLatestCounter(t, "mem_v1_rt", nil, nil, &calls)()
+
+	e2 := echo.New()
+	c2, rec2 := newUIContext(e2, http.MethodGet, loc, "mem_v1_rt")
+	c2.SetPath("/ui/artifacts/:id/html")
+	setUser(c2, authorUser())
+
+	if err := handleArtifactHTML(nil)(c2); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec2.Code, excerptStr(rec2.Body.String()))
+	}
+	if loc2 := rec2.Header().Get("Location"); loc2 != "" {
+		t.Errorf("landing GET must not bounce again to head; got Location %q", loc2)
+	}
+	if !strings.Contains(rec2.Body.String(), "OLD-BODY-MARKER") {
+		t.Errorf("must render the exact past version the comment was written on, not head; body=%s", excerptStr(rec2.Body.String()))
+	}
+	if calls != 0 {
+		t.Errorf("resolveLatestFn calls: got %d, want 0 (marker must skip head resolution on the landing GET)", calls)
+	}
+}
+
+// TestArtifactHTML_UI_ExactVersionMarker_DoesNotBypassAuthorization pins AC12
+// of the amended spec: pf_exact must not widen what is authorized. A caller
+// denied the REQUESTED record (private, not the author) must still get 403
+// even when the request carries ?pf_exact=1 — checkProjectAccess and
+// checkMemoryVisibility run unconditionally before the marker is ever read.
+func TestArtifactHTML_UI_ExactVersionMarker_DoesNotBypassAuthorization(t *testing.T) {
+	mem := &domain.Memory{
+		ID:           "mem_denied_exact",
+		Project:      "testproj",
+		Type:         "experience.debug",
+		Status:       "active",
+		Visibility:   "private",
+		AuthorUserID: "u_someone_else",
+		Content:      "secret",
+	}
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_denied_exact/html?pf_exact=1", "mem_denied_exact")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, otherViewerUser()) // not the author; private visibility
+
+	if err := handleArtifactHTML(nil)(c); err == nil {
+		t.Fatalf("expected an error for a denied record even with pf_exact=1")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status: got %d, want 403 — pf_exact must not bypass authorization on the requested record (AC12); body=%s",
+			rec.Code, excerptStr(rec.Body.String()))
+	}
+	if strings.Contains(rec.Body.String(), "secret") {
+		t.Errorf("denied content must not leak; body=%s", excerptStr(rec.Body.String()))
+	}
+}
+
+// TestArtifactHTML_V1_SupersededID_MarkerIgnored_NoRedirect pins AC13: /v1
+// ignores pf_exact entirely (it is /ui-only). Sibling of
+// TestArtifactHTML_V1_SupersededID_NoRedirect with the marker appended to the
+// request target — behavior must be byte-identical to the marker-less case.
+func TestArtifactHTML_V1_SupersededID_MarkerIgnored_NoRedirect(t *testing.T) {
+	old := supersededArtifactMem("mem_old6b", "mem_head6b", "experience.debug")
+	defer withLoadMemoryOverride(old, nil)()
+	calls := 0
+	defer withResolveLatestCounter(t, "mem_old6b", headArtifactMem("mem_head6b", "experience.debug"), nil, &calls)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/v1/artifacts/mem_old6b/html?pf_exact=1", "mem_old6b")
+	c.SetPath("/v1/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("/v1 must never redirect even with pf_exact present; got Location %q", loc)
+	}
+	if !strings.Contains(rec.Body.String(), "OLD-BODY-MARKER") {
+		t.Errorf("/v1 must serve the exact requested record")
+	}
+	if calls != 0 {
+		t.Errorf("resolveLatestFn calls: got %d, want 0 on /v1 regardless of pf_exact (AC13)", calls)
+	}
+}
+
+// TestSharedArtifact_SupersededID_MarkerIgnored_NoRedirect pins AC13 for
+// /share: sibling of TestSharedArtifact_SupersededID_NoRedirect with the
+// marker appended — handleSharedArtifact never references
+// isExactVersionRequest, so appending the query param must change nothing.
+func TestSharedArtifact_SupersededID_MarkerIgnored_NoRedirect(t *testing.T) {
+	old := supersededArtifactMem("mem_old7b", "mem_head7b", "methodology.spec")
+	old.Visibility = "public"
+	defer withLoadMemoryOverride(old, nil)()
+	calls := 0
+	defer withResolveLatestCounter(t, "mem_old7b", headArtifactMem("mem_head7b", "methodology.spec"), nil, &calls)()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/share/mem_old7b?pf_exact=1", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("mem_old7b")
+
+	if err := handleSharedArtifact(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("/share must never redirect even with pf_exact present; got Location %q", loc)
+	}
+	if calls != 0 {
+		t.Errorf("resolveLatestFn calls: got %d, want 0 (/share never resolves lineage, marker or not — AC13)", calls)
+	}
+}
+
+// TestArtifactHTML_UI_SideRail_Labels_ContiguousAfterFilter covers review
+// minor 4: after the W1 permission filter drops a row, the remaining labels
+// must renumber contiguously (v1, v2, ...) from the FILTERED slice, not the
+// unfiltered chain index — otherwise a gap like v1, v3 discloses that a
+// hidden version exists, the same class of leak W1 already fixed for
+// id/date/href.
+func TestArtifactHTML_UI_SideRail_Labels_ContiguousAfterFilter(t *testing.T) {
+	cur := headArtifactMem("mem_label_cur", "experience.debug")
+	visibleOther := headArtifactMem("mem_label_visible", "experience.debug")
+	visibleOther.Status = "archived"
+	denied := headArtifactMem("mem_label_denied", "experience.debug")
+	denied.Visibility = "private"
+	denied.AuthorUserID = "u_someone_else"
+
+	defer withLoadMemoryDispatch(map[string]*domain.Memory{
+		cur.ID:          cur,
+		visibleOther.ID: visibleOther,
+		denied.ID:       denied,
+	})()
+
+	prevVCF := versionChainFn
+	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+		return []domain.MemoryVersionRef{
+			{ID: denied.ID, CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
+			{ID: visibleOther.ID, CreatedAt: "2024-03-01T00:00:00Z", Status: "archived", IsCurrent: false},
+			{ID: cur.ID, CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+		}, nil
+	}
+	defer func() { versionChainFn = prevVCF }()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/"+cur.ID+"/html", cur.ID)
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	body := rec.Body.String()
+	wantVisible := `href="/ui/artifacts/` + visibleOther.ID + `/html?pf_exact=1">v1</a>`
+	if !strings.Contains(body, wantVisible) {
+		t.Errorf("first surviving row must be labeled v1 (contiguous after filtering the denied row); want %q; body=%s", wantVisible, excerptStr(body))
+	}
+	if strings.Contains(body, ">v3<") {
+		t.Errorf("labels must not skip to v3 after one row is filtered out (would disclose a hidden version); body=%s", excerptStr(body))
+	}
+	wantCur := `<span class="mono pf-side-vlabel">v2</span>`
+	if !strings.Contains(body, wantCur) {
+		t.Errorf("current row must be labeled v2 (contiguous, not v3); body=%s", excerptStr(body))
 	}
 }

@@ -31,7 +31,8 @@ ENDPOINTS: list[EndpointShape] = [
                   frozenset({400, 401})),
     EndpointShape("GET", "/v1/work_items", "list_work_items",
                   frozenset(), frozenset({"items", "next_cursor"}),
-                  frozenset({401})),
+                  # 400: unrecognised sort/order (aihub#224).
+                  frozenset({400, 401})),
     EndpointShape("GET", "/v1/work_items/{work_item_id}", "get_work_item",
                   frozenset(),
                   frozenset({"work_item", "current_attempt",

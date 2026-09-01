@@ -9,11 +9,11 @@
 </div>
 {{else}}
 
-<div class="crumb">
-  <a class="link" href="/ui/wi">Work Items</a>
+<nav class="pf-crumb">
+  <a href="/ui/wi">Work Items</a>
   <span>/</span>
-  <span class="mono">{{or .WI.Slug .WI.ID}}</span>
-</div>
+  <span class="pf-crumb-mono">{{or .WI.Slug .WI.ID}}</span>
+</nav>
 
 {{if .NeedsYou}}
 {{/* needs-you bar — this item is awaiting the current user (they own the
@@ -26,7 +26,7 @@
 
 <div class="detail">
   {{/* ---------- main column ---------- */}}
-  <div>
+  <div class="pf-doc-card">
     <div class="metaline">
       {{if .WIType}}<span class="badge b-{{.WIType}}">{{.WIType}}</span>{{end}}
       <span class="badge b-{{or .WI.Priority "normal"}}">{{or .WI.Priority "normal"}}</span>
@@ -36,32 +36,33 @@
     <h1 class="h-title">{{.WI.Goal}}</h1>
 
     {{if .Content}}
-    <div class="card">
-      <div class="hd"><h3>Background</h3></div>
-      <div class="bd prose">{{md .Content}}</div>
+    <div class="pf-doc-section">
+      <div class="pf-doc-section-hd"><h3>Background</h3></div>
+      <div class="pf-embed-wrap">{{md .Content .Origin .Theme .Nonce}}</div>
     </div>
     {{end}}
 
-    <div class="card">
-      <div class="hd"><h3>Activity</h3><span class="role mono" style="font-size:11px">live</span></div>
-      <div class="bd">
-        {{/* HTMX poll: refresh the activity feed in place every 5s. The target
-             swaps only the feed fragment so the card chrome stays put. */}}
-        <div id="pf-events"
-             hx-get="{{wiref (or .WI.Slug .WI.ID)}}/events/partial"
-             hx-trigger="every 5s"
-             hx-target="#pf-events"
-             hx-swap="innerHTML">
-          {{template "events_timeline.html.tmpl" .}}
-        </div>
+    <div class="pf-doc-section">
+      <div class="pf-doc-section-hd">
+        <h3>Activity</h3>
+        <span class="role mono" style="font-size:11px">live</span>
+      </div>
+      {{/* HTMX poll: refresh the activity feed in place every 5s. The target
+           swaps only the feed fragment so the section body stays put. */}}
+      <div id="pf-events"
+           hx-get="{{wiref (or .WI.Slug .WI.ID)}}/events/partial"
+           hx-trigger="every 5s"
+           hx-target="#pf-events"
+           hx-swap="innerHTML">
+        {{template "events_timeline.html.tmpl" .}}
       </div>
     </div>
   </div>
 
   {{/* ---------- sidebar ---------- */}}
   <aside>
-    <div class="card">
-      <div class="hd"><h3>Details</h3></div>
+    <details class="card" open>
+      <summary class="hd"><h3>Details</h3><span class="chev"></span></summary>
       <div class="bd">
         <div class="meta-row">
           <span class="k">Reporter</span>
@@ -100,12 +101,12 @@
         </div>
         {{end}}
       </div>
-    </div>
+    </details>
 
     {{/* Artifacts sit directly under the meta card, above the dependency
          blocks (review feedback). */}}
-    <div class="card">
-      <div class="hd"><h3>Artifacts</h3><span class="grp-n">{{len .Artifacts}}</span></div>
+    <details class="card">
+      <summary class="hd"><h3>Artifacts</h3><span class="grp-n">{{len .Artifacts}}</span><span class="chev"></span></summary>
       <div class="bd">
         {{if .Artifacts}}
           {{range $i, $a := .Artifacts}}
@@ -113,7 +114,7 @@
             <div class="art">
               <span class="ico">{{artifactInitial $a.Type}}</span>
               <div class="art-meta">
-                <div class="nm">{{$a.Type}}{{if $a.Versions}}<span class="vtag">v{{len $a.Versions}}</span>{{end}}</div>
+                <div class="nm">{{$a.Type}}</div>
                 <div class="sub mono">{{$a.MemID}}</div>
               </div>
               <a class="link" href="/ui/artifacts/{{$a.MemID}}/html" target="_blank" rel="noopener">Open</a>
@@ -131,6 +132,13 @@
                    number is total - displayIndex so labels stay chronological
                    (v{N} current on top ... v1 oldest at the bottom). */}}
               {{$n := len $a.Versions}}
+              {{/* aihub#248: this "View" link deliberately targets a specific
+                   past revision, not the lineage head, so it carries the
+                   pf_exact=1 marker to opt out of the /ui head redirect
+                   (spec amendment to non-goal 6). The "Open" link above (for
+                   the current artifact row) is an ordinary cross-link and
+                   must keep self-healing to the head — it does NOT carry the
+                   marker. */}}
               <div class="vlist">
                 {{range $vi, $v := $a.Versions}}
                 <div class="vrow{{if $v.IsCurrent}} cur{{end}}">
@@ -139,7 +147,7 @@
                     <b>v{{sub $n $vi}}</b>{{if $v.IsCurrent}}<span class="vcur">current</span>{{end}}
                     <div class="vmeta">{{shortDate $v.CreatedAt}}{{if $v.Status}} · {{$v.Status}}{{end}}</div>
                   </div>
-                  <a class="link" href="/ui/artifacts/{{$v.ID}}/html" target="_blank" rel="noopener" style="font-size:11px">View</a>
+                  <a class="link" href="/ui/artifacts/{{$v.ID}}/html?pf_exact=1" target="_blank" rel="noopener" style="font-size:11px">View</a>
                 </div>
                 {{end}}
               </div>
@@ -151,12 +159,11 @@
           <div class="empty" style="max-width:none;padding:14px;border:0"><div class="et">Nothing here</div>No artifacts yet.</div>
         {{end}}
       </div>
-    </div>
+    </details>
 
-    {{/* Blocked by — the wis that block THIS one (see toDepView for the
-         direction note). */}}
-    <div class="card">
-      <div class="hd"><h3>Blocked by</h3><span class="grp-n">{{if .Dependencies}}{{len .Dependencies.BlockedBy}}{{else}}0{{end}}</span></div>
+    {{/* Blocked by — the wis that block THIS one. */}}
+    <details class="card">
+      <summary class="hd"><h3>Blocked by</h3><span class="grp-n">{{if .Dependencies}}{{len .Dependencies.BlockedBy}}{{else}}0{{end}}</span><span class="chev"></span></summary>
       <div class="bd">
         {{if and .Dependencies .Dependencies.BlockedBy}}
           {{range .Dependencies.BlockedBy}}{{template "dep_row" .}}{{end}}
@@ -164,11 +171,11 @@
           <div class="empty" style="max-width:none;padding:14px;border:0"><div class="et">Nothing here</div>No blocking dependencies.</div>
         {{end}}
       </div>
-    </div>
+    </details>
 
     {{/* Blocking — the wis THIS one blocks. */}}
-    <div class="card">
-      <div class="hd"><h3>Blocking</h3><span class="grp-n">{{if .Dependencies}}{{len .Dependencies.Blocking}}{{else}}0{{end}}</span></div>
+    <details class="card">
+      <summary class="hd"><h3>Blocking</h3><span class="grp-n">{{if .Dependencies}}{{len .Dependencies.Blocking}}{{else}}0{{end}}</span><span class="chev"></span></summary>
       <div class="bd">
         {{if and .Dependencies .Dependencies.Blocking}}
           {{range .Dependencies.Blocking}}{{template "dep_row" .}}{{end}}
@@ -176,7 +183,7 @@
           <div class="empty" style="max-width:none;padding:14px;border:0"><div class="et">Nothing here</div>Not blocking anything.</div>
         {{end}}
       </div>
-    </div>
+    </details>
 
     {{/* Children — sub-items whose parent_work_item_id points at THIS wi
          (aihub#142). Ordered by seq ASC. The pill is a plain count, not a
@@ -185,12 +192,12 @@
          partial (slug link + status badge + owner avatar; hidden placeholder
          for cross-project children). */}}
     {{if .Children}}
-    <div class="card">
-      <div class="hd"><h3>Children</h3><span class="grp-n">{{len .Children}}</span></div>
+    <details class="card">
+      <summary class="hd"><h3>Children</h3><span class="grp-n">{{len .Children}}</span><span class="chev"></span></summary>
       <div class="bd">
         {{range .Children}}{{template "dep_row" .}}{{end}}
       </div>
-    </div>
+    </details>
     {{end}}
   </aside>
 </div>

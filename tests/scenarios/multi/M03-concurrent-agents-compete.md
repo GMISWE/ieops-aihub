@@ -5,9 +5,9 @@ One wins the lock, the other gets 409 and must wait.
 Tests the real multi-agent coordination flow.
 
 ## Users
-- ALICE_KEY=pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V  (Test Agent Alice, writer)
-- BOB_KEY=pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR  (Test Writer Bob, writer)
-- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig  (admin, for setup/verification)
+- ALICE_KEY=$ALICE_KEY  (Test Agent Alice, writer)
+- BOB_KEY=$BOB_KEY  (Test Writer Bob, writer)
+- ADMIN_KEY=$ADMIN_KEY  (admin, for setup/verification)
 
 ## Steps
 

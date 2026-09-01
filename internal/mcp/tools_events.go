@@ -10,6 +10,67 @@ import (
 	"github.com/GMISWE/ieops-aihub/internal/config"
 )
 
+// notePayload builds the payload for a `note` event. One definition, because
+// pf_emit_event's callers have always written `{text: "..."}` by hand and the
+// fused note on the terminal calls (aihub#290) has to land in the same shape or
+// the UI's event rendering and every existing timeline diverge for no reason.
+func notePayload(text string) map[string]any {
+	return map[string]any{"text": text}
+}
+
+// emitNote posts a `note` event using an already-resolved state file.
+//
+// Unlike emitCodingEvent this RETURNS its error rather than swallowing it. The
+// note fused onto pf_wrap / pf_complete_attempt (aihub#290) is the wi's closing
+// statement, and it is emitted at the one moment it can never be re-sent: the
+// terminal call that follows deletes the state file, so a silently-lost note is
+// lost permanently. Callers report the failure in the response instead of
+// failing the wrap over it — the wrap itself is the more important half.
+func (s *Server) emitNote(ctx context.Context, wiID string, sf *config.StateFile, text string) error {
+	_, err := s.client.EmitEvent(ctx, map[string]any{
+		"work_item_id":   wiID,
+		"attempt_id":     sf.AttemptID,
+		"claim_epoch":    sf.ClaimEpoch,
+		"session_secret": sf.SessionSecret,
+		"event_type":     "note",
+		"payload":        notePayload(text),
+	})
+	return err
+}
+
+// applyNoteResult records on a tool response whether a fused note reached the
+// timeline. Always sets note_emitted when a note was requested: "the field is
+// absent" and "the note failed" must not look alike to the caller.
+func applyNoteResult(result map[string]any, requested bool, err error) {
+	if !requested {
+		return
+	}
+	result["note_emitted"] = err == nil
+	if err != nil {
+		result["note_error"] = err.Error()
+	}
+}
+
+// noteOutcomeSuffix renders the fused note's fate as a clause to append to an
+// error message.
+//
+// The success path reports the note through applyNoteResult, but the terminal
+// call can fail AFTER the note was already emitted — and that is exactly the
+// case where the caller most needs to know, because it is about to retry. A bare
+// "complete_attempt: ..." leaves it unable to tell whether retrying will
+// duplicate the note or supply one that never landed. Returns "" when no note
+// was requested, so ordinary errors are unchanged.
+func noteOutcomeSuffix(requested bool, err error) string {
+	switch {
+	case !requested:
+		return ""
+	case err != nil:
+		return " (the closing note was NOT recorded either: " + err.Error() + ")"
+	default:
+		return " (the closing note WAS already recorded; retrying this call will record it a second time)"
+	}
+}
+
 func (s *Server) registerEventTools() {
 	// pf_emit_event
 	s.mcp.AddTool(&sdkmcp.Tool{

@@ -60,7 +60,7 @@ func TestMemoryVersionChainDB(t *testing.T) {
 	mk := func(content string, supersedes *string) string {
 		t.Helper()
 		mem, _, err := domain.Remember(ctx, pool, &domain.RememberRequest{
-			Project: project, Type: "methodology.spec", Content: content,
+			Project: project, Type: "fact.note", Content: content,
 			Visibility: "project", DedupMode: "off",
 			CallerUserID: userID, CallerDisplay: "version-chain-test",
 			SupersedesMemID: supersedes,
@@ -131,8 +131,8 @@ func TestResolveCommitDB(t *testing.T) {
 
 	mem, _, err := domain.Remember(ctx, pool, &domain.RememberRequest{
 		Project: project, Type: "methodology.spec",
-		Content:      fmt.Sprintf("# resolve-test %d\n\n## Overview\nbody", time.Now().UnixNano()),
-		Visibility:   "project", DedupMode: "off",
+		Content:    fmt.Sprintf("# resolve-test %d\n\n## Overview\nbody", time.Now().UnixNano()),
+		Visibility: "project", DedupMode: "off",
 		CallerUserID: userID, CallerDisplay: "resolve-test",
 	})
 	if err != nil {
@@ -142,7 +142,7 @@ func TestResolveCommitDB(t *testing.T) {
 	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM memories WHERE id=$1`, memID) })
 
 	// Add a section-anchored annotation (open).
-	if err := domain.CommitMemory(ctx, pool, memID, "this section is too vague", userID, "reviewer", "overview", "Overview"); err != nil {
+	if err := domain.CommitMemory(ctx, pool, memID, "this section is too vague", userID, "reviewer", domain.CommitAnchorArgs{HeadingID: "overview", HeadingText: "Overview"}); err != nil {
 		t.Fatalf("CommitMemory: %v", err)
 	}
 

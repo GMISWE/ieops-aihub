@@ -17,25 +17,24 @@ import (
 	"github.com/GMISWE/ieops-aihub/internal/auth"
 )
 
-
 // RunAttempt mirrors the run_attempts table.
 type RunAttempt struct {
-	ID                  string     `json:"id"`
-	WorkItemID          string     `json:"work_item_id"`
-	Status              string     `json:"status"`
-	ClaimEpoch          int64      `json:"claim_epoch"`
-	IdempotencyKey      string     `json:"idempotency_key"`
-	LastActiveAt        time.Time  `json:"last_active_at"`
-	ActorUserID         string     `json:"actor_user_id"`
-	APIKeyID            string     `json:"api_key_id"`
-	ActorDisplay        string     `json:"actor_display"`
-	MachineID           string     `json:"machine_id"`
-	SessionSecretHash   string     `json:"session_secret_hash"`
-	ParentAttemptID     *string    `json:"parent_attempt_id"`
-	PhaseConfigVersion  *int       `json:"phase_config_version"` // kept as audit field; always NULL since scenario_phase_configs was removed (aihub#38)
-	PreparedWorkspace   *json.RawMessage `json:"prepared_workspace"`
-	StartedAt           time.Time  `json:"started_at"`
-	EndedAt             *time.Time `json:"ended_at"`
+	ID                 string           `json:"id"`
+	WorkItemID         string           `json:"work_item_id"`
+	Status             string           `json:"status"`
+	ClaimEpoch         int64            `json:"claim_epoch"`
+	IdempotencyKey     string           `json:"idempotency_key"`
+	LastActiveAt       time.Time        `json:"last_active_at"`
+	ActorUserID        string           `json:"actor_user_id"`
+	APIKeyID           string           `json:"api_key_id"`
+	ActorDisplay       string           `json:"actor_display"`
+	MachineID          string           `json:"machine_id"`
+	SessionSecretHash  string           `json:"session_secret_hash"`
+	ParentAttemptID    *string          `json:"parent_attempt_id"`
+	PhaseConfigVersion *int             `json:"phase_config_version"` // kept as audit field; always NULL since scenario_phase_configs was removed (aihub#38)
+	PreparedWorkspace  *json.RawMessage `json:"prepared_workspace"`
+	StartedAt          time.Time        `json:"started_at"`
+	EndedAt            *time.Time       `json:"ended_at"`
 }
 
 // ResourceLock mirrors a resource_locks row.
@@ -48,12 +47,12 @@ type ResourceLock struct {
 
 // ClaimRequest is the parsed body for POST /v1/work_items/:id/claim.
 type ClaimRequest struct {
-	IdempotencyKey string        `json:"idempotency_key"`
-	SessionInfo    SessionInfo   `json:"session_info"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	SessionInfo    SessionInfo       `json:"session_info"`
 	RequestedLocks []ResourceLockReq `json:"requested_locks"`
-	Mode           string        `json:"mode"` // "fresh" | "resume"
-	ForceOver      bool          `json:"force_takeover"`
-	ScenarioRef    *string       `json:"scenario_ref,omitempty"` // git SHA of local scenario clone at claim time
+	Mode           string            `json:"mode"` // "fresh" | "resume"
+	ForceOver      bool              `json:"force_takeover"`
+	ScenarioRef    *string           `json:"scenario_ref,omitempty"` // git SHA of local scenario clone at claim time
 }
 
 // SessionInfo carries machine_id and session_secret.
@@ -70,16 +69,22 @@ type ResourceLockReq struct {
 
 // ClaimResponse is returned by POST /v1/work_items/:id/claim.
 type ClaimResponse struct {
-	AttemptID             string         `json:"attempt_id"`
-	ClaimEpoch            int64          `json:"claim_epoch"`
-	AcquiredLocks         []ResourceLock `json:"acquired_locks"`
-	CurrentAttemptEpoch   int64          `json:"current_attempt_epoch"`
-	StepRecoveryHint      string         `json:"step_recovery_hint,omitempty"`
-	RequiresHumanSession  *bool          `json:"requires_human_session"`
-	WIType                *string        `json:"wi_type"`
-	Slug                  string         `json:"slug,omitempty"`
-	Project               string         `json:"project,omitempty"`
-	ID                    string         `json:"id,omitempty"`
+	AttemptID           string         `json:"attempt_id"`
+	ClaimEpoch          int64          `json:"claim_epoch"`
+	AcquiredLocks       []ResourceLock `json:"acquired_locks"`
+	CurrentAttemptEpoch int64          `json:"current_attempt_epoch"`
+	StepRecoveryHint    string         `json:"step_recovery_hint,omitempty"`
+	// UnrecognizedResources lists declared_resources entries whose type the lock
+	// mapper could not understand and which are therefore holding NO lock
+	// (aihub#238). Stored data cannot be rejected at claim time without making
+	// historical work items unclaimable, so the claim succeeds and says so here
+	// rather than staying silent. Empty on a healthy work item.
+	UnrecognizedResources []string `json:"unrecognized_resources,omitempty"`
+	RequiresHumanSession  *bool    `json:"requires_human_session"`
+	WIType                *string  `json:"wi_type"`
+	Slug                  string   `json:"slug,omitempty"`
+	Project               string   `json:"project,omitempty"`
+	ID                    string   `json:"id,omitempty"`
 }
 
 // FnClaimWorkItem implements the atomic claim transaction per §7 / §8.4 of the design doc.
@@ -177,16 +182,19 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			return nil, NewErr(ErrInternalError, "failed to commit idempotent claim")
 		}
 		return &ClaimResponse{
-			AttemptID:            existingAttemptID,
-			ClaimEpoch:           existingEpoch,
-			AcquiredLocks:        existingLocks,
-			CurrentAttemptEpoch:  existingEpoch,
-			StepRecoveryHint:     idemHint,
-			RequiresHumanSession: wi.RequiresHumanSession,
-			WIType:               wi.WIType,
-			Slug:                 wi.Slug,
-			Project:              wi.Project,
-			ID:                   wi.ID,
+			AttemptID:           existingAttemptID,
+			ClaimEpoch:          existingEpoch,
+			AcquiredLocks:       existingLocks,
+			CurrentAttemptEpoch: existingEpoch,
+			StepRecoveryHint:    idemHint,
+			// aihub#238: an idempotent replay must repeat the warning too, or the
+			// signal disappears on retry — exactly when a confused caller looks again.
+			UnrecognizedResources: UnrecognizedDeclaredResources(wi.DeclaredResources),
+			RequiresHumanSession:  wi.RequiresHumanSession,
+			WIType:                wi.WIType,
+			Slug:                  wi.Slug,
+			Project:               wi.Project,
+			ID:                    wi.ID,
 		}, nil
 	}
 
@@ -235,9 +243,9 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 					fmt.Sprintf("work item is already claimed by %s", currentActorDisplay),
 					map[string]any{
 						"current_attempt": map[string]any{
-							"id":            *wi.CurrentAttemptID,
-							"actor_display": currentActorDisplay,
-							"claim_epoch":   currentEpoch,
+							"id":             *wi.CurrentAttemptID,
+							"actor_display":  currentActorDisplay,
+							"claim_epoch":    currentEpoch,
 							"last_active_at": currentLastActive.Format(time.RFC3339),
 						},
 					},
@@ -245,6 +253,19 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			}
 		}
 	} else if wi.Status == "blocked" {
+		// aihub#242: removing a blocked wi's last active dependency now
+		// auto-requeues it (DeleteDependency / requeueIfUnblocked in
+		// dependencies.go), so this rejection is no longer a dead end — the
+		// caller (or its blockers' owners) has a real path out via
+		// pf_remove_dependency, or the reporter can cancel it (CancelWorkItem /
+		// cancelGate now allows cancelling from status=blocked).
+		//
+		// force_takeover deliberately does NOT bypass this gate: router.go's
+		// force_takeover permission check only applies when wi.CurrentAttemptID
+		// is set, and a blocked wi has none, so any writer could otherwise
+		// bypass the block by claiming with force_takeover=true. Do not "fix"
+		// this by moving the blocked check after the force_takeover check
+		// without first adding a role gate here too.
 		return nil, NewErr(ErrConflictTerminalState, "work item is blocked by dependencies; resolve blockers first")
 	} else if wi.Status == "paused" || wi.Status == "queued" {
 		// Normal claim — no extra checks required.
@@ -252,9 +273,27 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		return nil, NewErr(ErrConflictTerminalState, fmt.Sprintf("work item is in terminal state: %s", wi.Status))
 	}
 
+	// aihub#238: validate the CLIENT-SUPPLIED locks, before the derivation block
+	// below can append server-derived entries to the same slice.
+	//
+	// Ordering is load-bearing. Validating the merged slice instead would apply
+	// input rules to server-derived entries, and derivation can legitimately
+	// produce a well-typed lock with an empty key from bad stored data — e.g. a
+	// stored {"type":"service"} with no uri maps to ("deploy_env", ""). That would
+	// 400 the claim and make an existing work item unclaimable, which is exactly
+	// the outcome this change exists to avoid.
+	if aihubErr := ValidateRequestedLocks(req.RequestedLocks); aihubErr != nil {
+		return nil, aihubErr
+	}
+
 	// §4.3 + §15: locks are derived from wi.declared_resources at claim time.
 	// If the client did not pass RequestedLocks explicitly, derive them from the
 	// work_item's declared_resources via resourceToLock mapping (§25 C-R3-8).
+	// Server-derived file_scope keys are project-namespaced (aihub#222). NOTE: a
+	// client that passes RequestedLocks explicitly is trusted verbatim and its
+	// file_scope keys are NOT re-namespaced here; the standard polyforge flow always
+	// leaves RequestedLocks empty and derives server-side, so this raw-API path is
+	// a known, low-exposure limitation rather than a normal code path.
 	if len(req.RequestedLocks) == 0 && len(wi.DeclaredResources) > 0 {
 		var declared []struct {
 			Type       string `json:"type"`
@@ -266,8 +305,13 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			for _, d := range declared {
 				lockType, lockKey := resourceToLock(DeclaredResourceItem{
 					Type: d.Type, URI: d.URI, Intent: d.Intent, TaskBranch: d.TaskBranch,
-				})
-				if lockType == "" {
+				}, wi.Project)
+				// aihub#238: an empty key is possible from bad stored data (a
+				// `service`/`path` entry with no uri). Never insert it — the row is
+				// meaningless as a lock and would collide with every other empty-key
+				// row of the same type. Skipping keeps the wi claimable; the entry is
+				// reported via unrecognizedResources below rather than dropped silently.
+				if lockType == "" || lockKey == "" {
 					continue
 				}
 				req.RequestedLocks = append(req.RequestedLocks, ResourceLockReq{
@@ -276,6 +320,14 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			}
 		}
 	}
+
+	// aihub#238: this path reads ALREADY-STORED declared_resources, so it cannot
+	// reject a mistyped entry without making historical work items unclaimable
+	// (~14% of entries in aihub's own recent wis are mistyped). Report instead of
+	// failing, so the claimer at least learns that something they declared is
+	// holding no lock. New bad data is prevented upstream, by the create/update
+	// validation in work_items.go.
+	unrecognizedResources := UnrecognizedDeclaredResources(wi.DeclaredResources)
 
 	// Check lock conflicts (advisory — actual conflict resolution in claim)
 	if len(req.RequestedLocks) > 0 && !isTakeover {
@@ -293,8 +345,9 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 				JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
 				JOIN work_items wi2 ON wi2.id = ra.work_item_id
 				WHERE rl.resource_type = $1 AND rl.resource_key = $2
-				  AND ra.status IN ('running', 'paused')`,
-				resourceTypes[i], resourceKeys[i],
+				  AND ra.status IN ('running', 'paused')
+				  AND ra.work_item_id != $3`,
+				resourceTypes[i], resourceKeys[i], wi.ID,
 			).Scan(&conflictAttemptID, &conflictActorDisplay, &conflictWISlug)
 			if err == nil {
 				return nil, NewErrDetails(ErrConflictLockTaken,
@@ -355,8 +408,8 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		supEvtID := NewID("evt")
 		supPayload, _ := json.Marshal(map[string]any{
 			"superseded_by_attempt_id": newAttemptID,
-			"reason":                  "claim by same user or explicit takeover",
-			"actor_user_id":           callerUserID,
+			"reason":                   "claim by same user or explicit takeover",
+			"actor_user_id":            callerUserID,
 		})
 		_, _ = tx.Exec(ctx, `
 			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
@@ -451,9 +504,9 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			fmt.Sprintf("wi.requires_human_session=%v but phase config says %v for wi_type %q",
 				*wi.RequiresHumanSession, resolvedRHS, *wi.WIType),
 			map[string]any{
-				"db_value":        *wi.RequiresHumanSession,
+				"db_value":         *wi.RequiresHumanSession,
 				"phase_yaml_value": resolvedRHS,
-				"wi_type":         *wi.WIType,
+				"wi_type":          *wi.WIType,
 			},
 		)
 	}
@@ -495,16 +548,17 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	}
 
 	return &ClaimResponse{
-		AttemptID:            newAttemptID,
-		ClaimEpoch:           newEpoch,
-		AcquiredLocks:        acquiredLocks,
-		CurrentAttemptEpoch:  newEpoch,
-		StepRecoveryHint:     stepRecoveryHint,
-		RequiresHumanSession: wi.RequiresHumanSession,
-		WIType:               wi.WIType,
-		Slug:                 wi.Slug,
-		Project:              wi.Project,
-		ID:                   wi.ID,
+		AttemptID:             newAttemptID,
+		ClaimEpoch:            newEpoch,
+		AcquiredLocks:         acquiredLocks,
+		CurrentAttemptEpoch:   newEpoch,
+		StepRecoveryHint:      stepRecoveryHint,
+		UnrecognizedResources: unrecognizedResources,
+		RequiresHumanSession:  wi.RequiresHumanSession,
+		WIType:                wi.WIType,
+		Slug:                  wi.Slug,
+		Project:               wi.Project,
+		ID:                    wi.ID,
 	}, nil
 }
 
@@ -523,11 +577,12 @@ func HashSecret(secret string) string {
 
 // CompleteAttemptRequest is the parsed body for POST /v1/work_items/:id/complete.
 type CompleteAttemptRequest struct {
-	AttemptID          string `json:"attempt_id"`
-	ClaimEpoch         int64  `json:"claim_epoch"`
-	SessionSecret      string `json:"session_secret"`
-	Status             string `json:"status"` // "wrapped" | "failed" | "paused"
-	ForceTerminateStep bool   `json:"force_terminate_step"`
+	AttemptID          string  `json:"attempt_id"`
+	ClaimEpoch         int64   `json:"claim_epoch"`
+	SessionSecret      string  `json:"session_secret"`
+	Status             string  `json:"status"` // "wrapped" | "failed" | "paused"
+	ForceTerminateStep bool    `json:"force_terminate_step"`
+	PauseReason        *string `json:"pause_reason,omitempty"`
 }
 
 // FnCompleteAttempt implements the complete_attempt transaction.
@@ -582,21 +637,34 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 		}
 	}
 
-	// Set run_attempt status
+	// Set run_attempt status. pause_reason is only meaningful for status=paused
+	// but is written unconditionally from req (nil for wrapped/failed), matching
+	// the column's nullable, informational-only nature.
 	_, err = tx.Exec(ctx, `
-		UPDATE run_attempts SET status=$1, ended_at=clock_timestamp() WHERE id=$2`,
-		req.Status, req.AttemptID,
+		UPDATE run_attempts SET status=$1, ended_at=clock_timestamp(), pause_reason=$2 WHERE id=$3`,
+		req.Status, req.PauseReason, req.AttemptID,
 	)
 	if err != nil {
 		return NewErr(ErrInternalError, "failed to update run_attempt status")
 	}
 
-	// N4: on paused, keep resource_locks so resume can reclaim them (C5-3 design invariant)
-	// on wrapped/failed: release locks
+	// N4 (revised): on paused, release only file_scope locks (acquired mid-attempt via
+	// FnAcquireLocks); git_branch/deploy_env locks are retained so resume can continue
+	// holding the branch/env. On terminal (wrapped/failed), release all locks.
+	// NOTE: resume re-acquires released file_scope locks via the claim path. Claim's
+	// INSERT uses DO UPDATE, but the advisory conflict check (status IN running,paused)
+	// runs first in the same tx and hard-fails if another attempt took the file while
+	// paused — so resume surfaces a conflict rather than stealing. This ordering is
+	// load-bearing: do not move the DO UPDATE ahead of the conflict check.
 	if req.Status != "paused" {
 		_, err = tx.Exec(ctx, `DELETE FROM resource_locks WHERE owner_attempt_id=$1`, req.AttemptID)
 		if err != nil {
 			return NewErr(ErrInternalError, "failed to release resource locks")
+		}
+	} else {
+		_, err = tx.Exec(ctx, acquireLocksReleasePausedSQL, req.AttemptID)
+		if err != nil {
+			return NewErr(ErrInternalError, "failed to release file_scope locks on pause")
 		}
 	}
 
@@ -616,9 +684,13 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 
 	// Emit attempt_completed event
 	evtID := NewID("evt")
-	evtPayload, _ := json.Marshal(map[string]any{
+	evtPayloadMap := map[string]any{
 		"status": req.Status,
-	})
+	}
+	if req.PauseReason != nil {
+		evtPayloadMap["pause_reason"] = *req.PauseReason
+	}
+	evtPayload, _ := json.Marshal(evtPayloadMap)
 	_, _ = tx.Exec(ctx, `
 		INSERT INTO agent_events (id, work_item_id, run_attempt_id, event_type, payload, project)
 		VALUES ($1, $2, $3, 'attempt_completed', $4, $5)`,
@@ -725,30 +797,27 @@ func unblockDependentWI(ctx context.Context, tx pgx.Tx, wiID, project string) *A
 	rows.Close()
 
 	for _, blockedID := range candidateIDs {
-		// Check if all other blockers are terminal
-		var stillBlocked int
-		tx.QueryRow(ctx, `
-			SELECT COUNT(*) FROM wi_dependencies dep
-			JOIN work_items blocker ON dep.blocking_wi_id = blocker.id
-			WHERE dep.blocked_wi_id = $1
-			  AND dep.kind = 'blocks'
-			  AND dep.blocking_wi_id != $2
-			  AND blocker.status NOT IN ('wrapped','cancelled','failed')`,
-			blockedID, wiID,
-		).Scan(&stillBlocked) //nolint:errcheck
-
-		if stillBlocked == 0 {
-			// All blockers done — move to queued
-			tx.Exec(ctx, `UPDATE work_items SET status='queued' WHERE id=$1`, blockedID) //nolint:errcheck
-
-			// Emit wi_unblocked event
-			evtID := NewID("evt")
+		// aihub#242: status recompute now lives in the shared requeueIfUnblocked
+		// helper (also used by DeleteDependency). Pass wiID as the excluded
+		// blocker, matching this function's pre-refactor SQL exactly.
+		unblocked, err := requeueIfUnblocked(ctx, tx, blockedID, wiID)
+		if err != nil {
+			// Fail closed: skip this blockedID and leave it blocked. This is a
+			// deliberate behaviour change from the pre-refactor code, not a
+			// continuation of it — the old inline query did
+			// `.Scan(&stillBlocked)` with the error ignored, so a Scan failure
+			// silently left stillBlocked at its zero value (0) and the old code
+			// went ahead and requeued the wi anyway (fail-open). Here, a
+			// requeueIfUnblocked error means we couldn't verify no active
+			// blocker remains, so leaving the wi blocked is the safer choice.
+			continue
+		}
+		if unblocked {
+			// Emit wi_unblocked event, SAVEPOINT-isolated (see
+			// emitWIUnblockedEvent in dependencies.go) so a failed insert
+			// cannot roll back the requeue above.
 			evtPayload, _ := json.Marshal(map[string]any{"unblocked_by_wi": wiID})
-			_, _ = tx.Exec(ctx, `
-				INSERT INTO agent_events (id, work_item_id, event_type, payload, project)
-				VALUES ($1, $2, 'wi_unblocked', $3, $4)`,
-				evtID, blockedID, evtPayload, project,
-			)
+			emitWIUnblockedEvent(ctx, tx, blockedID, project, evtPayload)
 		}
 	}
 	return nil
@@ -777,12 +846,12 @@ type ForceTakeoverResponse struct {
 	PriorAttemptID    string `json:"prior_attempt_id"`
 	PriorActorDisplay string `json:"prior_actor_display"`
 	// H3: new attempt credentials — written to state file by MCP layer (never returned to LLM)
-	NewAttemptID    string `json:"new_attempt_id"`
-	NewClaimEpoch   int64  `json:"new_claim_epoch"`
+	NewAttemptID  string `json:"new_attempt_id"`
+	NewClaimEpoch int64  `json:"new_claim_epoch"`
 	// NewSessionSecret is intentionally NOT in JSON (Decision A): the client supplied it
 	// in the request body and already knows the plaintext.
 	NewSessionSecret string `json:"-"`
-	OK              bool   `json:"ok"`
+	OK               bool   `json:"ok"`
 }
 
 // FnForceTakeover implements the force_takeover operation (H-R7-4).
@@ -913,8 +982,11 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	if len(wi.DeclaredResources) > 0 {
 		json.Unmarshal(wi.DeclaredResources, &declaredRes) //nolint:errcheck
 	}
+	// aihub#238: entries the mapper cannot understand yield no lock here either.
+	// Stored data, so this must not fail the takeover; the subsequent fresh claim
+	// reports them via ClaimResponse.unrecognized_resources.
 	for _, res := range declaredRes {
-		lockType, lockKey := resourceToLock(DeclaredResourceItem{Type: res.Type, URI: res.URI, TaskBranch: res.TaskBranch})
+		lockType, lockKey := resourceToLock(DeclaredResourceItem{Type: res.Type, URI: res.URI, TaskBranch: res.TaskBranch}, wi.Project)
 		if lockType == "" {
 			continue
 		}
@@ -951,7 +1023,6 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	}, nil
 }
 
-
 // generateSessionSecret returns (plaintext, nil) for a new 32-byte session secret.
 func generateSessionSecret() (string, error) {
 	b := make([]byte, 32)
@@ -964,9 +1035,13 @@ func generateSessionSecret() (string, error) {
 // verifyAttemptCredential validates attempt_id, claim_epoch, and session_secret
 // against the DB. Matches §21 of the design doc.
 func verifyAttemptCredential(ctx context.Context, tx pgx.Tx, wi WorkItem, attemptID string, claimEpoch int64, sessionSecret string) *AihubError {
-	// 1. Verify attempt is the current attempt for the wi
+	// 1. Verify attempt is the current attempt for the wi. When the caller's own
+	// attempt was superseded (e.g. by a force-takeover), enrich the 409 with who
+	// took over and when, so the losing session can explain itself (aihub#209).
 	if wi.CurrentAttemptID == nil || *wi.CurrentAttemptID != attemptID {
-		return NewErr(ErrConflictEpochMismatch, "attempt_id does not match current attempt for this work item")
+		return NewErrDetails(ErrConflictEpochMismatch,
+			"attempt_id does not match current attempt for this work item",
+			supersededByDetails(ctx, tx, attemptID, wi.CurrentAttemptID))
 	}
 
 	// 2. Load the attempt
@@ -1001,8 +1076,13 @@ func verifyAttemptCredential(ctx context.Context, tx pgx.Tx, wi WorkItem, attemp
 		return NewErr(ErrUnauthorized, "invalid session_secret")
 	}
 
-	// 5. Attempt must be running
+	// 5. Attempt must be running. A paused attempt gets a distinct code so the
+	// client keeps its state file and points the user at resume, instead of
+	// treating it as a stale-credential mismatch and deleting it (aihub#209).
 	if storedStatus != "running" {
+		if storedStatus == "paused" {
+			return NewErr(ErrAttemptPaused, "attempt is paused; resume it before continuing")
+		}
 		return NewErr(ErrAttemptMismatch, fmt.Sprintf("attempt status is %q; only running attempts can be used", storedStatus))
 	}
 
@@ -1010,6 +1090,33 @@ func verifyAttemptCredential(ctx context.Context, tx pgx.Tx, wi WorkItem, attemp
 	tx.Exec(ctx, `UPDATE run_attempts SET last_active_at=clock_timestamp() WHERE id=$1`, attemptID) //nolint:errcheck
 
 	return nil
+}
+
+// supersededByDetails returns {"superseded_by": {"actor_display", "at"}} when the
+// caller's attempt has been superseded (its row exists with status 'superseded'),
+// otherwise nil so unrelated epoch mismatches carry no details. Best-effort: any
+// query error yields nil rather than masking the original credential error.
+func supersededByDetails(ctx context.Context, tx pgx.Tx, callerAttemptID string, currentAttemptID *string) any {
+	var callerStatus string
+	var endedAt *time.Time
+	if err := tx.QueryRow(ctx,
+		`SELECT status, ended_at FROM run_attempts WHERE id=$1`, callerAttemptID,
+	).Scan(&callerStatus, &endedAt); err != nil || callerStatus != "superseded" {
+		return nil
+	}
+	sb := map[string]any{}
+	if currentAttemptID != nil {
+		var actor string
+		if err := tx.QueryRow(ctx,
+			`SELECT actor_display FROM run_attempts WHERE id=$1`, *currentAttemptID,
+		).Scan(&actor); err == nil {
+			sb["actor_display"] = actor
+		}
+	}
+	if endedAt != nil {
+		sb["at"] = endedAt.UTC().Format(time.RFC3339)
+	}
+	return map[string]any{"superseded_by": sb}
 }
 
 // VerifyAttemptCredentialPool is the exported pool-based variant used by HTTP handlers
@@ -1029,4 +1136,220 @@ func VerifyAttemptCredentialPool(ctx context.Context, pool *pgxpool.Pool, wiID, 
 	}
 	tx.Commit(ctx) //nolint:errcheck
 	return nil
+}
+
+// ─── Acquire-locks SQL constants ─────────────────────────────────────────────
+//
+// These are package-level consts so the domain tests can inspect them without
+// a live DB (same pattern as orphanLockSweepSQL in gc.go).
+
+// acquireLocksCollisionSQL is the SELECT used to detect lock conflicts during
+// FnAcquireLocks. It mirrors the claim-time conflict check (:290-298) exactly
+// so collision semantics are identical.
+const acquireLocksCollisionSQL = `
+	SELECT rl.owner_attempt_id, ra.actor_display, wi2.slug
+	FROM resource_locks rl
+	JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
+	JOIN work_items wi2 ON wi2.id = ra.work_item_id
+	WHERE rl.resource_type = $1 AND rl.resource_key = $2
+	  AND ra.status IN ('running', 'paused')`
+
+// acquireLocksInsertSQL inserts a lock without stealing (DO NOTHING on conflict).
+// A non-zero RowsAffected means we took a free key; 0 means a row already exists
+// (held by us, by another live attempt, or an un-GC'd orphan) and the caller must
+// re-check the owner to decide no-op / conflict / reclaim.
+const acquireLocksInsertSQL = `
+	INSERT INTO resource_locks (resource_type, resource_key, owner_attempt_id, claim_epoch)
+	VALUES ($1, $2, $3, $4)
+	ON CONFLICT (resource_type, resource_key) DO NOTHING`
+
+// acquireLocksReleasePausedSQL releases only file_scope locks when an attempt
+// transitions to paused (git_branch / deploy_env locks are kept for resume).
+const acquireLocksReleasePausedSQL = `DELETE FROM resource_locks WHERE owner_attempt_id=$1 AND resource_type='file_scope'`
+
+// ─── AcquireLocks request / response ────────────────────────────────────────
+
+// AcquireLocksRequest is the body for POST /v1/work_items/:id/acquire_locks.
+type AcquireLocksRequest struct {
+	AttemptID     string `json:"attempt_id"`
+	ClaimEpoch    int64  `json:"claim_epoch"`
+	SessionSecret string `json:"session_secret"`
+}
+
+// AcquireLocksResponse is returned by FnAcquireLocks.
+type AcquireLocksResponse struct {
+	Acquired    []ResourceLock `json:"acquired"`
+	AlreadyHeld []ResourceLock `json:"already_held"`
+}
+
+// FnAcquireLocks acquires file_scope write-intent locks for a running attempt
+// from the work item's current declared_resources. It never steals locks from
+// other attempts (DO NOTHING on conflict; hard-fail on collision).
+func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *AcquireLocksRequest) (*AcquireLocksResponse, *AihubError) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return nil, NewErr(ErrInternalError, "failed to begin transaction")
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Load and lock the work item row.
+	var wi WorkItem
+	err = tx.QueryRow(ctx, `
+		SELECT id, project, status, declared_resources,
+		       current_attempt_id, current_attempt_epoch
+		FROM work_items WHERE (id = $1 OR slug = $1) FOR UPDATE`, wiID,
+	).Scan(
+		&wi.ID, &wi.Project, &wi.Status, &wi.DeclaredResources,
+		&wi.CurrentAttemptID, &wi.CurrentAttemptEpoch,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, NewErr(ErrNotFound, fmt.Sprintf("work item %q not found", wiID))
+		}
+		return nil, NewErr(ErrInternalError, "failed to lock work_item")
+	}
+
+	// Only running work items can acquire additional locks.
+	if wi.Status != "running" {
+		return nil, NewErr(ErrAttemptMismatch, fmt.Sprintf("work item status is %q; only running work items can acquire locks", wi.Status))
+	}
+
+	// Verify credentials; also confirms attempt is running and matches current.
+	if aihubErr := verifyAttemptCredential(ctx, tx, wi, req.AttemptID, req.ClaimEpoch, req.SessionSecret); aihubErr != nil {
+		return nil, aihubErr
+	}
+
+	// Derive target locks: file_scope + write-intent only.
+	var declared []DeclaredResourceItem
+	if len(wi.DeclaredResources) > 0 {
+		if jsonErr := json.Unmarshal(wi.DeclaredResources, &declared); jsonErr != nil {
+			return nil, NewErr(ErrInternalError, "failed to parse declared_resources")
+		}
+	}
+
+	type targetLock struct {
+		lockType string
+		lockKey  string
+	}
+	var targets []targetLock
+	for _, d := range declared {
+		if d.Intent == "read" {
+			continue // read-only resources never need a write lock
+		}
+		lType, lKey := resourceToLock(d, wi.Project)
+		if lType != "file_scope" {
+			continue // this endpoint handles file_scope only
+		}
+		if lKey == "" {
+			continue
+		}
+		targets = append(targets, targetLock{lType, lKey})
+	}
+
+	acquired := make([]ResourceLock, 0)
+	alreadyHeld := make([]ResourceLock, 0)
+
+	for _, t := range targets {
+		var ownerAttemptID, ownerActorDisplay, ownerWISlug string
+		scanErr := tx.QueryRow(ctx, acquireLocksCollisionSQL, t.lockType, t.lockKey).
+			Scan(&ownerAttemptID, &ownerActorDisplay, &ownerWISlug)
+
+		if scanErr == nil {
+			// A live attempt holds this lock.
+			if ownerAttemptID == req.AttemptID {
+				// Already held by this very attempt — no-op.
+				alreadyHeld = append(alreadyHeld, ResourceLock{
+					ResourceType:   t.lockType,
+					ResourceKey:    t.lockKey,
+					OwnerAttemptID: req.AttemptID,
+					ClaimEpoch:     req.ClaimEpoch,
+				})
+			} else {
+				// Held by a different live attempt — conflict; rollback and error.
+				return nil, NewErrDetails(ErrConflictLockTaken,
+					fmt.Sprintf("resource %s:%s is already locked", t.lockType, t.lockKey),
+					map[string]any{
+						"conflict_with": map[string]any{
+							"attempt_id":     ownerAttemptID,
+							"actor_display":  ownerActorDisplay,
+							"work_item_slug": ownerWISlug,
+						},
+					},
+				)
+			}
+			continue
+		}
+		if !errors.Is(scanErr, pgx.ErrNoRows) {
+			return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to check lock collision for %s:%s", t.lockType, t.lockKey))
+		}
+
+		// No existing lock — attempt to insert (DO NOTHING on conflict to avoid stealing).
+		tag, execErr := tx.Exec(ctx, acquireLocksInsertSQL, t.lockType, t.lockKey, req.AttemptID, req.ClaimEpoch)
+		if execErr != nil {
+			return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to acquire lock %s:%s: %v", t.lockType, t.lockKey, execErr))
+		}
+		if tag.RowsAffected() == 0 {
+			// DO NOTHING hit an existing row. Re-check who owns it (live attempts only).
+			var raceOwnerID, raceActorDisplay, raceWISlug string
+			reScanErr := tx.QueryRow(ctx, acquireLocksCollisionSQL, t.lockType, t.lockKey).
+				Scan(&raceOwnerID, &raceActorDisplay, &raceWISlug)
+			switch {
+			case reScanErr == nil && raceOwnerID == req.AttemptID:
+				// We already own it — no-op.
+				alreadyHeld = append(alreadyHeld, ResourceLock{
+					ResourceType:   t.lockType,
+					ResourceKey:    t.lockKey,
+					OwnerAttemptID: req.AttemptID,
+					ClaimEpoch:     req.ClaimEpoch,
+				})
+				continue
+			case reScanErr == nil:
+				// A different live attempt owns it — conflict.
+				return nil, NewErrDetails(ErrConflictLockTaken,
+					fmt.Sprintf("resource %s:%s is already locked", t.lockType, t.lockKey),
+					map[string]any{
+						"conflict_with": map[string]any{
+							"attempt_id":     raceOwnerID,
+							"actor_display":  raceActorDisplay,
+							"work_item_slug": raceWISlug,
+						},
+					},
+				)
+			case errors.Is(reScanErr, pgx.ErrNoRows):
+				// Row exists but its owner is NOT a live attempt: an orphan lock from a
+				// crashed/expired attempt the orphan-sweep (gc.go) has not yet reclaimed.
+				// Reclaim it: delete the dead row and insert for this attempt. Matches the
+				// orphan-sweep contract (a lock owned by a non-live attempt is free).
+				if _, delErr := tx.Exec(ctx,
+					`DELETE FROM resource_locks WHERE resource_type=$1 AND resource_key=$2`,
+					t.lockType, t.lockKey); delErr != nil {
+					return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to reclaim orphan lock %s:%s", t.lockType, t.lockKey))
+				}
+				if _, insErr := tx.Exec(ctx, acquireLocksInsertSQL,
+					t.lockType, t.lockKey, req.AttemptID, req.ClaimEpoch); insErr != nil {
+					return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to acquire reclaimed lock %s:%s", t.lockType, t.lockKey))
+				}
+				acquired = append(acquired, ResourceLock{
+					ResourceType:   t.lockType,
+					ResourceKey:    t.lockKey,
+					OwnerAttemptID: req.AttemptID,
+					ClaimEpoch:     req.ClaimEpoch,
+				})
+				continue
+			default:
+				return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to re-check lock owner for %s:%s", t.lockType, t.lockKey))
+			}
+		}
+		acquired = append(acquired, ResourceLock{
+			ResourceType:   t.lockType,
+			ResourceKey:    t.lockKey,
+			OwnerAttemptID: req.AttemptID,
+			ClaimEpoch:     req.ClaimEpoch,
+		})
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, NewErr(ErrInternalError, "failed to commit acquire_locks")
+	}
+	return &AcquireLocksResponse{Acquired: acquired, AlreadyHeld: alreadyHeld}, nil
 }

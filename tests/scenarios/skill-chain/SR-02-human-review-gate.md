@@ -6,11 +6,11 @@ An auto-agent (Alice) cannot pick it up.
 
 ## Users
 - ADMIN: creates critical_bug wi
-  API key: baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
+  API key: $ADMIN_KEY
 - ALICE (auto-agent, Session 1): should NOT pick up the critical wi
-  API key: pf_k1_H36gVOed7wzTH4cPA1FpsG37qsia117V
+  API key: $ALICE_KEY
 - BOB (human developer, Session 2): claims and resolves it
-  API key: pf_k1_NekUaAWXMdZf5WVfrpdmd7V8d1NVn1VR
+  API key: $BOB_KEY
 
 ## Scenario
 
@@ -56,12 +56,12 @@ prepare_context must be completed before pf-spec is invoked.
 EXPECTED SKILL BEHAVIOR:
   1. pf_list_work_items(ids=[WI_CRITICAL], include_step_state=true)
   2. pf_recall(project="marketplace", query=wi.goal, type=["experience.*","rule.*"])
-  3. pf_get_step(work_item_id=WI_CRITICAL) — get version
-  4. pf_update_step(work_item_id=WI_CRITICAL, step_id="prepare_context", status="in_progress", expected_version=<version>)
-  5. Analyze codebase in WT_PATH — find the admin middleware vulnerability
-  6. pf_update_step(work_item_id=WI_CRITICAL, step_id="prepare_context", status="completed",
-       step_attempt_id=<from 4>,
-       artifact_summary=<initial_context JSON: {goal_analysis, relevant_files, suggested_approach}>)
+  3. pf_update_step(work_item_id=WI_CRITICAL, step_id="prepare_context", status="in_progress")
+  4. Analyze codebase in WT_PATH — find the admin middleware vulnerability
+  5. pf_update_step(work_item_id=WI_CRITICAL, step_id="prepare_context", status="completed",
+       step_attempt_id=<from 3>,
+       artifact_summary=<initial_context JSON: {goal_analysis, relevant_files, suggested_approach}>,
+       next_step="spec", next_step_attempt_id=SA_SPEC)
 
 ASSERT:
   - pf_update_step(prepare_context, completed) called
@@ -72,21 +72,20 @@ SKILL_INVOKE (as BOB): polyforge:pf-spec
 USER_INTENT: "debug variant: analyze why auth bypass is possible"
 
 EXPECTED SKILL BEHAVIOR:
-  1. pf_recall(project="marketplace", query=wi.goal, type="methodology.spec|fact.*|rule.*", top_k=3)
-  2. pf_get_step(work_item_id=WI_CRITICAL) — get current step and version
-  3. pf_update_step(work_item_id=WI_CRITICAL, step_id="spec", status="in_progress", expected_version=<version>)
-     → returns step_attempt_id
-  4. Heartbeat during analysis: pf_update_step(heartbeat=true) if taking >5min
-  5. Root cause analysis format:
+  1. pf_recall(project="marketplace", query=wi.goal, type=["methodology.spec","fact.*","rule.*"], top_k=3)
+  2. pf_get_step(work_item_id=WI_CRITICAL) — get current step
+  3. Heartbeat during analysis: pf_update_step(heartbeat=true) if taking >5min
+  4. Root cause analysis format:
      - Symptoms, reproduction steps, impact, proposed fix
-  6. pf_save_artifact(type="methodology.spec", work_item_id=WI_CRITICAL,
+  5. pf_save_artifact(type="methodology.spec", work_item_id=WI_CRITICAL,
        content="## Root Cause Analysis\n...\n## Proposed Fix\nAdd jwt.Verify() before /admin/* route handler\n...",
        structured_payload={acceptance_criteria:[...], non_goals:[...]},
        visibility="project")
-  7. pf_emit_event(work_item_id=WI_CRITICAL, event_type="note", payload={text: "spec saved: mem_XXX"})
-  8. pf_update_step(work_item_id=WI_CRITICAL, step_id="spec", status="completed",
-       step_attempt_id=<from 3>,
-       artifact_summary="root cause: missing JWT validation in admin middleware")
+  6. pf_emit_event(work_item_id=WI_CRITICAL, event_type="note", payload={text: "spec saved: mem_XXX"})
+  7. pf_update_step(work_item_id=WI_CRITICAL, step_id="spec", status="completed",
+       step_attempt_id=SA_SPEC,
+       artifact_summary="root cause: missing JWT validation in admin middleware",
+       next_step="code_change", next_step_attempt_id=SA_CODE)
 
 ASSERT:
   - pf_save_artifact called with type="methodology.spec"
@@ -99,7 +98,9 @@ SKILL_INVOKE (as BOB): polyforge-coding:code_change
 EXPECTED:
   - Reads initial_context from prepare_context step + spec artifact
   - Edits WT_PATH file (adds JWT validation to /admin/* middleware)
-  - pf_update_step(code_change, completed, artifact_summary=JSON({files_changed, tests_status}))
+  - pf_update_step(code_change, completed, step_attempt_id=SA_CODE,
+      artifact_summary=JSON({files_changed, tests_status}),
+      next_step="commit_and_pr", next_step_attempt_id=SA_COMMIT)
   - pf_save_artifact NOT called (code_change writes to step artifact_summary only)
 
 SKILL_INVOKE (as BOB): polyforge-coding:commit_and_pr
@@ -110,13 +111,14 @@ EXPECTED:
   - pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_CRITICAL, repo="marketplace")
   - pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_CRITICAL, repo="marketplace",
       title="fix(auth): add JWT validation to admin middleware", body="...")
-  - pf_update_step(commit_and_pr, completed, artifact_summary="PR #N: <url>")
+  - pf_update_step(commit_and_pr, completed, step_attempt_id=SA_COMMIT,
+      artifact_summary="PR #N: <url>")   — no next_step: commit_and_pr is the last step
 
 SKILL_INVOKE (as BOB): polyforge:pf-stop --wrap
 
 EXPECTED SKILL BEHAVIOR (coding scenario — pf_wrap, not pf_complete_attempt):
-  - pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_CRITICAL, repo="marketplace")
-  - pf_emit_event(event_type="note", payload={text: "wrapped: auth bypass fixed, PR opened"})
+  - pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_CRITICAL, repo="marketplace",
+      note="wrapped: auth bypass fixed, PR opened")
 
 ASSERT:
   - pf_wrap called (NOT pf_complete_attempt directly)

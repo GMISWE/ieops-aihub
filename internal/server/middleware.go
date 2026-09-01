@@ -31,6 +31,7 @@ type UserContext struct {
 	Role         string            // "writer" | "admin"
 	ProjectRoles map[string]string // project → "viewer" | "writer" | "maintainer"
 	APIKeyID     string
+	ProjectScope *string // nil = unscoped; else caller is confined to this project
 }
 
 // GetUser retrieves the authenticated user from echo context.
@@ -93,6 +94,7 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 				return c.JSON(http.StatusUnauthorized, errorResponse(domain.NewErr(domain.ErrUnauthorized, "API key has been revoked")))
 			}
 
+			uc.ProjectScope = projectScope
 			uc.ProjectRoles = make(map[string]string)
 
 			// Non-admin users: load project memberships from projects.members JSONB.
@@ -187,6 +189,12 @@ func checkProjectAccess(c echo.Context, u *UserContext, project, minRole string)
 	if u == nil {
 		ae := domain.NewErr(domain.ErrUnauthorized, "not authenticated")
 		writeError(c, ae) //nolint:errcheck // response committed; return ae below
+		return ae
+	}
+	if u.ProjectScope != nil && *u.ProjectScope != project {
+		ae := domain.NewErr(domain.ErrForbidden,
+			fmt.Sprintf("no access to project %q", project))
+		writeError(c, ae) //nolint:errcheck
 		return ae
 	}
 	if u.Role == "admin" {

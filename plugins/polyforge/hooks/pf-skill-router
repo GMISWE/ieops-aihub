@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+# PreToolUse(Skill) router hook for polyforge v1.
+# Fires right before a Skill tool call (there is no dedicated SkillStart event). When the
+# skill being invoked is polyforge:pf-execute, this hook ASSEMBLES that step's body at the
+# call site and injects it via hookSpecificOutput.additionalContext — the SKILL.md file
+# itself is a stub, so this injection IS the step body. pf-spec and pf-plan are
+# self-sufficient SKILL.md files (no stub, no injection) and are not routed by this hook.
+#
+# Composition (see skills/_common/*.md and skills/pf-execute/engine.native.md):
+#   additionalContext = header
+#                     + _common/memory.md      (Memory-First recall + team-memory sync)
+#                     + <engine fragment>       (superpowers pointer  |  engine.native.md)
+#                     + _common/storage.md      (save_artifact)
+#                     + _common/lifecycle.md    (step reporting / ownership / wrap)
+# The _common/* fragments are injected in BOTH branches — lifecycle never depends on which
+# engine writes the content. Only the engine fragment branches on whether superpowers is enabled.
+#
+# 🔴 SIZE BUDGET (aihub#304). The assembled payload has a hard 10,000-CHARACTER limit: past it
+# the harness writes the whole thing to a file and delivers only a ~2,000-character preview, and
+# this hook still exits 0. That is measured on PreToolUse, not assumed from SessionStart — see
+# internal/cli/skill_router_payload_test.go, which gates every skill in TARGETS in BOTH engine
+# branches. The fragments are therefore TIERED: what every step needs is resident here, and what
+# is needed once per wi (startup detail, ship, wrap, the interactive loop, older-binary
+# fallbacks) lives under skills/**/references/ and is reached by a `📄 Read <abs path>` pointer.
+# @@PLUGIN_ROOT@@ is what makes those pointers absolute, and therefore usable — the model's cwd
+# is the wi worktree, not the plugin directory.
+# If a fragment needs to grow, move something to the on-demand tier; do not raise the gate.
+#
+# Inert (exit 0, no output) for any non-target skill (including pf-spec/pf-plan), and
+# FAIL-SILENT on any error: if this hook emits nothing for pf-execute, the stub's
+# load-bearing pointer line routes the model to engine.native.md + _common/*.md (the
+# fallback). It never blocks or denies a skill call.
+#
+# NOTE: the PreToolUse payload arrives on this script's stdin. We capture it into an env var
+# FIRST, because the python program is delivered to python3 via a heredoc on python3's stdin —
+# so python's sys.stdin is the heredoc, NOT the hook payload.
+
+set -euo pipefail
+command -v python3 >/dev/null 2>&1 || exit 0  # no python3 -> inert, never block
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+
+PF_PAYLOAD="$(cat)" PF_PLUGIN_ROOT="$PLUGIN_ROOT" python3 <<'PY'
+import json, os, re, sys
+
+def read(p):
+    try:
+        return open(p, encoding="utf-8").read()
+    except OSError:
+        return None
+
+raw = os.environ.get("PF_PAYLOAD", "")
+try:
+    payload = json.loads(raw) if raw.strip() else {}
+except ValueError:
+    sys.exit(0)  # unparseable payload -> inert
+if not isinstance(payload, dict):
+    sys.exit(0)
+
+ti = payload.get("tool_input")
+if ti is None:
+    # Copilot CLI fires this on toolName "skill" and carries the skill name in a
+    # JSON-encoded `toolArgs` string (e.g. '{"skill":"pf-execute"}'), not tool_input.
+    ta = payload.get("toolArgs")
+    if isinstance(ta, str):
+        try:
+            ti = json.loads(ta) if ta.strip() else {}
+        except ValueError:
+            ti = {}
+    else:
+        ti = ta
+if not isinstance(ti, dict):
+    ti = {}
+skill = (ti.get("skill") or "").strip()
+if not skill:
+    sys.exit(0)
+base = skill.split(":")[-1]  # "polyforge:pf-execute" -> "pf-execute"
+
+# Per-skill parameters: (step_id, artifact_type, recall_type_filter, superpowers_engine_pointer)
+#
+# recall_type_filter is a LIST, not a string (aihub#289). pf_recall's `type` parameter is a
+# list of type names; a single string with '|' in it is ONE type name, matches no row, and
+# is now rejected by the server with a 400. This field used to be a single pipe-joined
+# string, which rendered into _common/memory.md as a quoted scalar and made every
+# pf-execute Memory-First recall fail. Keeping it a real list means the piped form is not
+# expressible here; `common()` below is the only place that turns it into text.
+# (Stated without reproducing the broken literal on purpose — the recurrence gate in
+# internal/cli/skill_recall_type_test.go sweeps this whole tree, comments included, and
+# that strictness is the point: the string should not be paste-able anywhere in here.)
+TARGETS = {
+    "pf-execute": (
+        "execute", "", ["experience.*", "rule.*"],
+        "Delegate each scenario step's implementation to `superpowers:subagent-driven-development` "
+        "(with TDD / systematic-debugging / code-review / verification as sub-engines per step). "
+        "**Stop before `superpowers:finishing-a-development-branch`** — commit/PR/wrap/CI go back to polyforge.\n\n"
+        "**Model policy for dispatched subagents.** subagent-driven-development selects a model per role by "
+        "relative tier (cheap / standard / most-capable); resolve those tiers to concrete models and pass "
+        "`model` explicitly on every Task dispatch:\n"
+        "- explore/search code, mechanical or trivial edits, coding/implementation, multi-file integration, debugging -> model: sonnet\n"
+        "- spec-compliance review, code-quality review, architecture/design judgement -> model: opus\n"
+        "In short: sonnet for everything except review/architecture, which use opus. Steering, not a hard "
+        "guarantee: a coding task that genuinely needs architectural reasoning may use opus; a BLOCKED re-dispatch may escalate.\n\n"
+        "Parallel dispatch is only for independent investigation; parallel implementation must be split into child work items.",
+    ),
+}
+if base not in TARGETS:
+    sys.exit(0)  # not a target skill -> inert (let the call through untouched)
+step_id, artifact_type, recall_type, sp_pointer = TARGETS[base]
+
+plugin_root = os.environ.get("PF_PLUGIN_ROOT", "")
+skills_dir = os.path.join(plugin_root, "skills")
+
+# --- detect superpowers: walk payload.cwd up to .polyforge.yaml, scan 4 settings layers ---
+def find_ws(start):
+    d = start or ""
+    seen = set()
+    while d and d != "/" and d not in seen:
+        seen.add(d)
+        if os.path.isfile(os.path.join(d, ".polyforge.yaml")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return ""
+
+ws = find_ws(payload.get("cwd") or os.getcwd())
+home = os.path.expanduser("~")
+settings_layers = [
+    os.path.join(home, ".claude", "settings.json"),
+    os.path.join(home, ".claude", "settings.local.json"),
+    os.path.join(home, ".copilot", "settings.json"),  # Copilot CLI enabledPlugins
+]
+if ws:
+    settings_layers += [
+        os.path.join(ws, ".claude", "settings.json"),
+        os.path.join(ws, ".claude", "settings.local.json"),
+        os.path.join(ws, ".github", "copilot", "settings.json"),  # Copilot project layer
+    ]
+
+def plugin_enabled(prefix):
+    val = None
+    for f in settings_layers:
+        if not os.path.isfile(f):
+            continue
+        try:
+            data = json.load(open(f, encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        ep = data.get("enabledPlugins")
+        if not isinstance(ep, dict):
+            continue
+        for k, v in ep.items():
+            if k.startswith(prefix):
+                val = bool(v)  # highest-precedence layer wins
+    return val
+
+superpowers_on = plugin_enabled("superpowers@") is True
+
+# --- assemble fragments ---
+def subst(txt):
+    # @@RECALL_TYPE@@ renders as a JSON ARRAY, and the template must NOT wrap it in
+    # quotes (see _common/memory.md). aihub#289: pf_recall's `type` is a list, so a
+    # scalar carrying '|' is one type name that matches nothing — and is now a 400.
+    # A bare string is normalised into a one-element list so a future edit to TARGETS
+    # cannot silently re-emit a scalar into an unquoted slot.
+    types = recall_type if isinstance(recall_type, list) else [recall_type]
+    rendered = json.dumps(types, ensure_ascii=False, separators=(",", ":"))
+    # @@PLUGIN_ROOT@@ becomes the ABSOLUTE plugin path, so the on-demand pointers the
+    # resident fragments carry are Read-able exactly as written (aihub#304). A relative
+    # path would send the model hunting: its cwd is the wi worktree, not the plugin cache.
+    return (txt.replace("@@RECALL_TYPE@@", rendered)
+               .replace("@@ARTIFACT_TYPE@@", artifact_type)
+               .replace("@@PLUGIN_ROOT@@", plugin_root))
+
+def common(name):
+    return subst(read(os.path.join(skills_dir, "_common", name)) or "")
+
+memory_frag  = common("memory.md")
+storage_frag = common("storage.md")
+lifecycle_frag = common("lifecycle.md")
+
+if superpowers_on:
+    engine_frag = (
+        f"## Engine fragment (superpowers enabled)\n\n{sp_pointer}\n\n"
+        "This is not a lifecycle bypass: polyforge still owns claim / step reporting / save_artifact / "
+        "commit / PR / wrap."
+    )
+    engine_label = f"superpowers ({base})"
+    engine_path = "hooks/pf-skill-router (TARGETS[%r] pointer)" % base
+else:
+    native = read(os.path.join(skills_dir, base, "engine.native.md"))
+    if not native:
+        sys.exit(0)  # no native engine fragment to inject -> inert (stub fallback takes over)
+    engine_frag = subst(native)
+    engine_label = "native (engine.native.md)"
+    engine_path = "skills/%s/engine.native.md" % base
+
+# Any missing common fragment -> fail silent (let the stub fallback route to repo files).
+if not (memory_frag and storage_frag and lifecycle_frag):
+    sys.exit(0)
+
+header = (
+    f"[polyforge router] `/{base}` step `{step_id}` — engine: {engine_label}. The SKILL.md is a "
+    "stub; the text below is the step body, assembled and injected at the call site, and it takes "
+    "precedence. Fragments marked 📄 are NOT injected — this payload has a hard 10,000-character "
+    "limit and `Read` is how you get the rest (aihub#304)."
+)
+
+SEP = "\n\n---\n\n"
+
+# (name, on-disk path under the plugin root, drop_rank, text).
+# List order is EMISSION order. drop_rank orders DEGRADATION only, lowest dropped first:
+# storage is a four-line note, memory costs only recall context, lifecycle costs correct wi
+# state, and the engine is the loop itself — without it there is nothing to run at all.
+parts = [
+    ("_common/memory.md",    "skills/_common/memory.md",    1, memory_frag.rstrip("\n")),
+    ("engine",               engine_path,                   3, engine_frag.rstrip("\n")),
+    ("_common/storage.md",   "skills/_common/storage.md",   0, storage_frag.rstrip("\n")),
+    ("_common/lifecycle.md", "skills/_common/lifecycle.md", 2, lifecycle_frag.rstrip("\n")),
+]
+
+ctx = SEP.join([header] + [t for _, _, _, t in parts])
+
+# --- budget self-check (aihub#304) ------------------------------------------------------
+# MEASURED, not inferred. Claude Code replaces any single hook output longer than 10,000
+# CHARACTERS with a `<persisted-output>` wrapper: the full text is written to a file and only
+# a ~2,000-character preview reaches the model. aihub#285 measured that on SessionStart;
+# aihub#304 confirmed the SAME constant and the SAME preview function apply to PreToolUse, by
+# invoking Skill(polyforge:pf-execute) in a real session — a 14,482-char payload was cut at
+# exactly the 1,976 chars the ported preview rule predicts, i.e. 13.6% of it reached the model.
+#
+# The hook still exits 0 either way, so unchecked this fails silently. `tests/` and
+# internal/cli/skill_router_payload_test.go gate the shipped tree; this block catches a tree
+# that reaches a real session anyway (older plugin copy, hand-edited fragment, unmerged branch).
+# It must NEVER block a Skill call, so it neither raises nor exits non-zero — it emits a
+# DEGRADED payload that FITS, names what it dropped and where to Read it, and says the same on
+# stderr so the failure is visible outside the model.
+MAX_CHARS = 10000
+
+if len(ctx) > MAX_CHARS:
+    full_len = len(ctx)
+
+    def banner(dropped):
+        return (
+            "⚠️ **POLYFORGE SKILL-ROUTER PAYLOAD OVER BUDGET — THIS STEP BODY IS INCOMPLETE.**\n"
+            "The assembled body for `/%s` is %d characters against a %d-character harness "
+            "limit. Rather than let the harness replace it with a ~2,000-character preview, "
+            "this hook dropped fragment(s) and is telling you so: **%s**. Each still ships on "
+            "disk under the plugin root `%s` — `Read` any you need before relying on it. This "
+            "is a bug in the fragments, not in your session: the budget must be restored (see "
+            "`internal/cli/skill_router_payload_test.go`).\n"
+            % (base, full_len, MAX_CHARS, ", ".join(dropped) or "all of them", plugin_root)
+        )
+
+    kept, dropped = list(parts), []
+    while True:
+        ctx = SEP.join([header, banner(dropped).rstrip("\n")]
+                       + [t for _, _, _, t in kept])
+        if len(ctx) <= MAX_CHARS or not kept:
+            break
+        # Drop the lowest-ranked fragment still present, not simply the last one: emission
+        # order is a reading order, not a priority order, so a suffix drop would throw away
+        # lifecycle while keeping storage.
+        victim = min(range(len(kept)), key=lambda i: kept[i][2])
+        name, path, _, _ = kept.pop(victim)
+        dropped.append("%s (%s)" % (name, path))
+    # Belt and braces: the envelope alone is ~1.5k chars, so this cannot fire today — but a
+    # future header must not be able to reintroduce the silent truncation this block removes.
+    if len(ctx) > MAX_CHARS:
+        ctx = ctx[:MAX_CHARS]
+
+    sys.stderr.write(
+        "pf-skill-router: %s payload is %d chars, over the %d-char harness limit. Emitted a "
+        "degraded %d-char payload; dropped %s. Run "
+        "`go test ./internal/cli/ -run TestRoutedSkillHook` and move text to the on-demand "
+        "tier (skills/**/references/) — do not raise the gate.\n"
+        % (base, full_len, MAX_CHARS, len(ctx), ", ".join(dropped) or "every fragment")
+    )
+
+# Default ALLOW + inject: additionalContext with no permissionDecision lets the Skill call
+# proceed and adds the assembled body to context. Dual-shape so one script serves both
+# harnesses: Claude Code reads hookSpecificOutput.additionalContext; Copilot CLI reads the
+# top-level additionalContext (both verified). Each runtime ignores the key it does not use.
+out = {
+    "additionalContext": ctx,
+    "hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": ctx},
+}
+print(json.dumps(out))
+PY
+exit 0

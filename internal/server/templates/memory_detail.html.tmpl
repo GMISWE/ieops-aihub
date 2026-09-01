@@ -1,14 +1,14 @@
 {{define "content"}}
 {{with .Memory}}
-<div class="crumb">
-  <a class="link" href="/ui/memories{{if $.BackQuery}}?{{$.BackQuery}}{{end}}">Memories</a>
+<nav class="pf-crumb">
+  <a href="/ui/memories{{if $.BackQuery}}?{{$.BackQuery}}{{end}}">Memories</a>
   <span>/</span>
-  <span class="mono">{{.ID}}</span>
-</div>
+  <span class="pf-crumb-mono">{{.ID}}</span>
+</nav>
 
 <div class="detail">
   {{/* ---------- main column ---------- */}}
-  <div>
+  <div class="pf-doc-card">
     <div class="metaline">
       <span class="pf-mem-type">{{.Type}}</span>
       {{/* 5-pip strength bar, mirrors the list card (BaseStrength on a 1-5 scale). */}}
@@ -17,11 +17,40 @@
       </span>
     </div>
 
-    <div class="card">
-      <div class="hd"><h3>Content</h3></div>
+    <div class="pf-doc-section">
+      <div class="pf-doc-section-hd">
+        <h3>Content</h3>
+        {{/* aihub#240: source/rendered toggle. Only offered when the content would
+             actually render as markdown — for anything else the two views are identical
+             and a toggle that does nothing is worse than no toggle. */}}
+        <span class="pf-hd-actions">
+          {{/* aihub#240: the twin pair's two halves, switched in place. Only offered when
+               rendered_html was written by the agent rather than auto-rendered from this
+               markdown — see agentAuthoredHTML. HTML is the default, so ?view=md is the only
+               half that needs naming in a URL. */}}
+          {{if $.AgentHTML}}
+            <span class="pf-seg-toggle" role="group" aria-label="Document view">
+              <a class="pf-seg-item{{if $.ShowAgentHTML}} on{{end}}"
+                 href="?view=html"{{if $.ShowAgentHTML}} aria-current="true"{{end}}>HTML</a>
+              <a class="pf-seg-item{{if not $.ShowAgentHTML}} on{{end}}"
+                 href="?view=md"{{if not $.ShowAgentHTML}} aria-current="true"{{end}}>Markdown</a>
+            </span>
+          {{end}}
+          {{if or $.RenderAsMD $.ViewingSource}}
+            {{if $.ViewingSource}}
+              <a class="pf-src-toggle" href="?view=md">View rendered</a>
+            {{else}}
+              <a class="pf-src-toggle" href="?view=md&amp;source=1">View source</a>
+            {{end}}
+          {{end}}
+        </span>
+      </div>
       <div class="bd">
-        {{if $.RenderAsMD}}
-          <div class="prose">{{.Content | md}}</div>
+        {{if $.ShowAgentHTML}}
+          {{/* The agent's finished page, in the same sandboxed frame the markdown half uses. */}}
+          <div class="pf-embed-wrap">{{agentdoc $.AgentHTML $.Origin $.Theme $.Nonce}}</div>
+        {{else if $.RenderAsMD}}
+          <div class="pf-embed-wrap">{{md .Content $.Origin $.Theme $.Nonce}}</div>
         {{else}}
           <pre class="pf-content-raw">{{.Content}}</pre>
         {{end}}
@@ -36,8 +65,8 @@
          swaps it (outerHTML). No HX fragment branch on the server is needed, and
          the same plain <form action=...> still works without JS (native POST ->
          303 -> full reload). */}}
-    <div class="card">
-      <div class="hd">
+    <div class="pf-doc-section">
+      <div class="pf-doc-section-hd">
         <h3>Comments</h3>
         {{$open := 0}}{{range $.Commits}}{{if .IsOpen}}{{$open = inc $open}}{{end}}{{end}}
         {{if $.Commits}}<span class="badge {{if gt $open 0}}b-high{{else}}b-running{{end}}" style="margin-left:auto">{{if gt $open 0}}{{$open}} open{{else}}all resolved{{end}}</span>{{end}}
@@ -52,8 +81,8 @@
 
   {{/* ---------- sidebar ---------- */}}
   <aside>
-    <div class="card">
-      <div class="hd"><h3>Details</h3></div>
+    <details class="card" open>
+      <summary class="hd"><h3>Details</h3><span class="chev"></span></summary>
       <div class="bd">
         <div class="meta-row">
           <span class="k">Author</span>
@@ -77,11 +106,11 @@
         <div class="meta-row"><span class="k">Created</span><span class="v mono">{{.CreatedAt.Format "2006-01-02 15:04 MST"}}</span></div>
         <div class="meta-row"><span class="k">Updated</span><span class="v mono">{{.UpdatedAt.Format "2006-01-02 15:04 MST"}}</span></div>
       </div>
-    </div>
+    </details>
 
     {{if $.Related}}
-    <div class="card">
-      <div class="hd"><h3>Related</h3><span class="grp-n">{{len $.Related}}</span></div>
+    <details class="card">
+      <summary class="hd"><h3>Related</h3><span class="grp-n">{{len $.Related}}</span><span class="chev"></span></summary>
       <div class="bd">
         {{range $.Related}}
         <div class="dep">
@@ -90,7 +119,7 @@
         </div>
         {{end}}
       </div>
-    </div>
+    </details>
     {{end}}
   </aside>
 </div>

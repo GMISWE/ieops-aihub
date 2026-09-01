@@ -35,11 +35,17 @@ body {
    the blocks auto-place across both columns and the headings scatter right. */
 body.pf-annot-active {
   display: grid;
-  grid-template-columns: minmax(0, 720px) 300px;
+  grid-template-columns: minmax(0, 940px) 256px;
   justify-content: center;
   align-items: start;
-  gap: var(--s8);
-  padding: 74px var(--s6) var(--s8);
+  /* Override style.css's `margin: 2em auto` on body.pf-annot-active — that 2em top
+     margin pushed the breadcrumb ~32px lower than the app-shell (.pf-main has no top
+     margin), making the viewer's breadcrumb band taller. /ui-only class; /v1+/share
+     are never .pf-annot-active, so this does not affect their frozen output. */
+  margin: 0 auto;
+  row-gap: var(--s4);
+  column-gap: var(--s8);
+  padding: 68px var(--s6) var(--s8);
 }
 /* Pin every direct body child to col 1 (stacked); the rail alone is col 2. */
 body.pf-annot-active > * { grid-column: 1; }
@@ -49,7 +55,7 @@ body.pf-annot-active > #pf-margin-rail { grid-column: 2; grid-row: 1; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
-  padding: var(--s8);
+  padding: var(--s8) 28px;
   box-shadow: var(--shadow);
   min-width: 0;
   font-size: 13.5px;
@@ -76,7 +82,14 @@ body:not(.pf-annot-active) #pf-doc-col {
   font-size: 12px;
   color: var(--text-subtle);
   margin-bottom: var(--s4);
+  /* aihub#159: match the top-right Share button's height + vertically center the
+     meta text so "Work item: …" and Share read as one aligned header row. */
+  min-height: 28px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
+.pf-doc-meta p { margin: 0; }
 .pf-doc-meta a { color: var(--text-muted); text-decoration: underline; }
 
 /* ── Doc card ──────────────────────────────────────────────────────── */
@@ -101,6 +114,42 @@ p, li { font-size: 13.5px; color: var(--text); line-height: 1.65; }
 ul { padding-left: 18px; }
 a { color: var(--text-muted); }
 a:hover { color: var(--text); }
+
+/* aihub#171: hide the markdown `---` rule on /ui. The viewer already separates
+   sections via the h2 / .pf-sec border-top above, so an authored <hr> renders a
+   redundant second divider. Overrides the frozen style.css hr (border-top + 2em
+   margin) — equal specificity, loaded later so display:none wins. /v1 + /share
+   never load viewer.css, so their byte output keeps the <hr> unchanged. */
+hr { display: none; }
+
+/* aihub#172: wide content tables scroll horizontally inside the doc column
+   instead of overflowing the page (which pushed under the TOC rail). GitHub's
+   responsive-table pattern: width:max-content keeps the table at its natural
+   column widths, max-width:100% caps it at the doc column, overflow-x:auto adds
+   a scrollbar only when it exceeds. Scoped to #pf-doc-col so it never touches
+   the list-page .pf-table tables; the #id beats the frozen `table{width:100%}`.
+   /v1 + /share don't load viewer.css, so their tables are unchanged. */
+#pf-doc-col table { display: block; width: max-content; max-width: 100%; overflow-x: auto; }
+
+/* aihub#229: theme the rendered-content tables with design tokens so dark
+   mode is readable. style.css (frozen, inlined in <head>) hardcodes light
+   colors (#f6f8fa header + even-row / #d0d7de borders); in dark mode the
+   near-white row bg under light text is nearly invisible. viewer.css loads
+   only on the /ui artifact page (never /v1 + /share), so those stay
+   byte-identical. */
+#pf-doc-col th, #pf-doc-col td { border-color: var(--border); }
+#pf-doc-col th { background: var(--surface); color: var(--text); }
+#pf-doc-col tbody tr:nth-child(odd) { background: var(--bg); }
+#pf-doc-col tbody tr:nth-child(even) { background: var(--surface-2); }
+
+/* aihub#159: collapsible H2 sections (/ui readability; default-open) */
+.pf-sec { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 4px; }
+.pf-sec > .pf-sec-sum { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
+.pf-sec > .pf-sec-sum::-webkit-details-marker { display: none; }
+.pf-sec > .pf-sec-sum > h2 { margin: 0; border-top: none; padding-top: 0; flex: 1; }
+.pf-sec-chev { width: 7px; height: 7px; border-right: 1.5px solid var(--text-subtle); border-bottom: 1.5px solid var(--text-subtle); transform: rotate(-45deg); transition: transform .15s; flex: none; }
+.pf-sec[open] > .pf-sec-sum .pf-sec-chev { transform: rotate(45deg); }
+.pf-sec-body { padding-top: 2px; }
 
 /* ── Annotation highlights ─────────────────────────────────────────── */
 mark.pf-annot-highlight {
@@ -441,6 +490,234 @@ mark.pf-annot-highlight.pf-flash {
 }
 .pf-annot-form button[type="submit"]:hover { background: var(--accent-hover); }
 
+/* ── Share control (aihub#154) ─────────────────────────────────────── */
+/* Sits directly below the doc title; visually aligned with the version-history
+   toggle (same height / border / radius / font) so the two controls read as a
+   single toolbar row. Lives inside #pf-doc-col, above .pf-version-history. */
+.pf-share {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  margin: var(--s4) 0;
+}
+.pf-share-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 14px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: var(--sans);
+}
+/* aihub#159: default Share = solid accent (prominent CTA). */
+.pf-share-btn:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+/* Shared state: outline button so "Stop sharing" reads as the subtler undo toggle. */
+.pf-share[data-shared="true"] .pf-share-btn {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.pf-share[data-shared="true"] .pf-share-btn:hover { background: var(--surface-2); }
+.pf-share-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.pf-share-link[hidden] { display: none; }
+.pf-share-link input {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+  padding: 0 10px;
+  height: 28px;
+  min-width: 260px;
+  max-width: 380px;
+  font-family: var(--mono, monospace);
+}
+.pf-share-copy {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  font-family: var(--sans);
+}
+.pf-share-copy:hover { border-color: var(--border-strong); }
+.pf-share-toast {
+  font-size: 12px;
+  color: var(--text-muted);
+  visibility: hidden;
+}
+.pf-share-toast.pf-share-toast--show { visibility: visible; }
+
+/* aihub#159: float the Share control to the top-right of the doc card (CSS-only;
+   #154 owns the control markup + share.js). Collapsed = a small corner button;
+   when shared, the link row stacks below it (right-aligned) so it never overlaps
+   the title. The title gets right padding (only when a Share control is present)
+   so a long H1 wraps before reaching the button. */
+#pf-doc-col { position: relative; }
+#pf-doc-col > #pf-share {
+  position: absolute;
+  top: var(--s8);
+  right: 28px;
+  margin: 0;
+  flex-direction: column;
+  align-items: flex-end;
+  z-index: 5;
+}
+#pf-doc-col:has(> #pf-share) > h1 { padding-right: 92px; }
+
+/* aihub#159 step4a: inline annotation markers + popover (replaces the margin rail).
+   The right column is freed for the consolidated side rail (step 4b). */
+body.pf-annot-active > #pf-margin-rail { display: none; }
+.pf-annot-marker {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; padding: 0 4px; margin: 0 1px 0 2px;
+  vertical-align: super; font: 700 10px/1 var(--mono);
+  border: none; border-radius: var(--pill);
+  background: var(--warning); color: #1c1c20; cursor: pointer;
+}
+.pf-annot-marker[data-status="resolved"] { background: var(--success); color: #fff; }
+.pf-annot-popover {
+  position: absolute; z-index: 80; width: 320px; max-width: calc(100vw - 16px);
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--r); box-shadow: var(--shadow-pop); padding: 12px;
+}
+.pf-annot-popover[hidden] { display: none; }
+.pf-annot-popover .pf-margin-bubble { position: static; width: auto; margin: 0; }
+/* Drop the rail-tuned card chrome inside the popover (the popover IS the card),
+   and restyle the reply/resolve forms to the signed-off prototype's clean look. */
+.pf-annot-popover .pf-margin-bubble,
+.pf-annot-popover .pf-margin-bubble--active {
+  border: none; border-left: none; border-radius: 0;
+  background: transparent; box-shadow: none; padding: 0; cursor: default;
+}
+.pf-annot-popover .pf-margin-bubble-header { margin-bottom: 8px; }
+.pf-annot-popover .pf-annot-status {
+  margin-left: auto; padding: 1px 7px; border-radius: var(--pill);
+  font-size: 10.5px; font-weight: 600;
+}
+.pf-annot-popover .pf-st-open { background: var(--warning-soft); color: var(--warning); }
+.pf-annot-popover .pf-st-resolved { background: var(--success-soft); color: var(--success); }
+.pf-annot-popover .pf-annot-body { font-size: 13px; line-height: 1.5; }
+.pf-annot-popover .pf-annot-inline-forms {
+  display: block; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+}
+.pf-annot-popover .pf-annot-inline-form {
+  display: flex; flex-direction: column; gap: 6px; margin-top: 8px;
+}
+.pf-annot-popover .pf-annot-inline-form textarea {
+  width: 100%; flex: none; min-height: 44px; resize: vertical; box-sizing: border-box;
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--surface-2); color: var(--text);
+  font: 12.5px/1.45 var(--sans); padding: 7px;
+}
+.pf-annot-popover .pf-annot-inline-form textarea:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.pf-annot-popover .pf-annot-inline-form button {
+  align-self: flex-end; height: 28px; padding: 0 14px; border-radius: var(--r-sm);
+  font: 600 12px var(--sans); cursor: pointer;
+}
+/* Reply form (first) = primary accent; Resolve form (second) = ghost outline. */
+.pf-annot-popover .pf-annot-inline-form:nth-of-type(1) button {
+  background: var(--accent); color: var(--accent-contrast); border: 1px solid var(--accent);
+}
+.pf-annot-popover .pf-annot-inline-form:nth-of-type(1) button:hover { background: var(--accent-hover); }
+.pf-annot-popover .pf-annot-inline-form:nth-of-type(2) button {
+  background: var(--surface); color: var(--text-muted); border: 1px solid var(--border);
+}
+.pf-annot-popover .pf-annot-inline-form:nth-of-type(2) button:hover { border-color: var(--border-strong); color: var(--text); }
+
+/* aihub#159 step4b: consolidated right rail (TOC + Details) in the freed column.
+   The breadcrumb spans both columns as a full-width header row (it floats to the
+   top via order); the doc + rail then auto-place on the row below it with aligned
+   tops. (The old margin rail used grid-row:1, which here would pin the rail to the
+   breadcrumb row and sit it above the doc card — the misalignment we hit.) */
+body.pf-annot-active > .pf-crumb { grid-column: 1 / -1; order: -1; }
+body.pf-annot-active > #pf-side-rail { grid-column: 2; }
+#pf-side-rail {
+  position: sticky; top: 74px; align-self: start; min-width: 0;
+  display: flex; flex-direction: column; gap: var(--s4); font-size: 13px;
+}
+@media (max-width: 1040px) { body.pf-annot-active > #pf-side-rail { display: none; } }
+.pf-side-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); box-shadow: var(--shadow);
+}
+.pf-side-hd {
+  padding: 10px var(--s4); border-bottom: 1px solid var(--border);
+  font-size: 11.5px; font-weight: 650; text-transform: uppercase;
+  letter-spacing: .03em; color: var(--text-muted);
+}
+.pf-side-toc { display: flex; flex-direction: column; padding: var(--s2) 0; }
+.pf-side-toc a {
+  padding: 4px var(--s4); border-left: 2px solid transparent;
+  color: var(--text-muted); font-size: 12.5px; line-height: 1.4; text-decoration: none;
+}
+.pf-side-toc a:hover { color: var(--text); border-left-color: var(--border-strong); }
+.pf-side-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px var(--s4); font-size: 12.5px; }
+.pf-side-row + .pf-side-row { border-top: 1px solid var(--surface-3); }
+.pf-side-row .k { color: var(--text-subtle); flex: none; }
+.pf-side-row .v { color: var(--text); text-align: right; min-width: 0; word-break: break-word; }
+.pf-side-hd .pf-side-n { margin-left: auto; font: 600 11px var(--mono); color: var(--text-subtle); text-transform: none; }
+/* version-history timeline */
+.pf-side-vh { list-style: none; margin: 0; padding: var(--s2) var(--s4); }
+.pf-side-vrow { position: relative; display: flex; align-items: center; gap: 7px; padding: 4px 0 4px 14px; font-size: 12px; }
+.pf-side-vrow::before { content: ""; position: absolute; left: 4px; top: 13px; bottom: -2px; width: 1px; background: var(--border); }
+.pf-side-vrow:last-child::before { display: none; }
+.pf-side-vdot { position: absolute; left: 0; top: 5px; width: 8px; height: 8px; border-radius: 50%; background: var(--surface); border: 2px solid var(--border-strong); }
+.pf-side-vrow.cur .pf-side-vdot { background: var(--text); border-color: var(--text); }
+.pf-side-vlabel { font-weight: 600; font-size: 12px; }
+.pf-side-vcur { font-size: 9.5px; background: var(--success-soft); color: var(--success); padding: 0 5px; border-radius: var(--pill); }
+.pf-side-vdate { margin-left: auto; color: var(--text-subtle); font-size: 11px; }
+/* comments list */
+.pf-side-cmt { padding: 0 var(--s4) var(--s2); font-size: 12.5px; color: var(--text-muted); }
+.pf-side-cmt-sum { font-size: 11.5px; color: var(--text-subtle); padding: 8px 0; }
+.pf-side-cmt-item { display: block; width: 100%; text-align: left; cursor: pointer; background: none;
+  border: none; border-top: 1px solid var(--surface-3); padding: 8px 0; font: inherit; }
+.pf-side-cmt-item:hover { background: var(--surface-2); }
+.pf-side-cmt-top { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.pf-side-cmt-top .who { font-size: 12px; color: var(--text); }
+.pf-side-cmt-st { margin-left: auto; font-size: 9.5px; padding: 0 6px; border-radius: var(--pill); }
+.pf-side-cmt-st.open { background: var(--warning-soft); color: var(--warning); }
+.pf-side-cmt-st.resolved { background: var(--success-soft); color: var(--success); }
+.pf-side-cmt-body { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+/* aihub#160 / #161: d2 diagram figures used to be styled here. aihub#234 moved the
+   whole `.pf-diagram` block (figure chrome, size caps, light/dark hex map and the
+   zoom overlay) to static/ui.css. Reason: viewer.css is linked ONLY by the artifact
+   viewer, but d2 figures also appear on the memory / wi detail pages, which link
+   ui.css alone — leaving them unstyled and, worse, wrong in dark mode. ui.css is
+   loaded by the artifact viewer too (routes_artifacts.go injects both links), so
+   nothing is lost here. Do not re-add diagram rules to this file. */
+/* collapsible side-rail cards (aihub#159 step4c) — TOC default-open, rest closed */
+.pf-side-hd { display: flex; align-items: center; gap: 6px; }
+.pf-side-card > summary.pf-side-hd { cursor: pointer; list-style: none; }
+.pf-side-card > summary.pf-side-hd::-webkit-details-marker { display: none; }
+.pf-side-card > summary.pf-side-hd:hover { color: var(--text); }
+.pf-side-card:not([open]) > summary.pf-side-hd { border-bottom: none; }
+.pf-side-chev { width: 6px; height: 6px; flex: none; margin-left: auto;
+  border-right: 1.5px solid var(--text-subtle); border-bottom: 1.5px solid var(--text-subtle);
+  transform: rotate(-45deg); transition: transform .15s; }
+.pf-side-hd .pf-side-n + .pf-side-chev { margin-left: 6px; }
+.pf-side-card[open] > summary.pf-side-hd .pf-side-chev { transform: rotate(45deg); }
+.pf-side-toc a.active { color: var(--text); border-left-color: var(--text); font-weight: 550; }
+
 /* ── Version history (collapsible) ────────────────────────────────── */
 .pf-version-history {
   margin: var(--s5) 0 var(--s4);
@@ -629,24 +906,11 @@ mark.pf-annot-highlight.pf-flash {
 .pf-review-meta { color: var(--text-subtle); font-size: 12px; margin-bottom: var(--s4); }
 .pf-review-meta a { color: var(--text-muted); }
 
-/* ── App-shell nav (prototype .nav) ───────────────────────────────── */
-/* Fixed full-viewport-width top bar (the centered body grid can't span the
-   whole viewport, so the nav is taken out of flow; body gets top padding to
-   clear it). */
-.pf-appnav{position:fixed;top:0;left:0;right:0;width:100%;box-sizing:border-box;z-index:50;height:54px;display:flex;align-items:center;gap:var(--s5);padding:0 var(--s6);background:var(--surface);border-bottom:1px solid var(--border)}
-.pf-appnav-brand{display:flex;align-items:center;gap:var(--s2);font-weight:650;letter-spacing:-.01em;color:var(--text)}
-.pf-appnav-mark{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--accent),var(--accent-hover));display:grid;place-items:center;color:var(--accent-contrast);font-size:13px;font-weight:700}
-.pf-appnav-links{display:flex;gap:2px;margin-left:var(--s3)}
-.pf-appnav-links a{padding:6px 10px;border-radius:var(--r-sm);color:var(--text-muted);font-weight:500;text-decoration:none}
-.pf-appnav-links a:hover{background:var(--surface-2);color:var(--text)}
-.pf-appnav-spacer{flex:1}
-.pf-appnav-themebtn{height:32px;padding:0 10px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--surface);color:var(--text-muted);cursor:pointer;font-size:13px;font-family:var(--sans)}
-.pf-appnav-themebtn:hover{color:var(--text);border-color:var(--border-strong)}
-/* Breadcrumb (prototype .crumb) */
-.pf-crumb{display:flex;align-items:center;gap:8px;color:var(--text-subtle);font-size:12.5px;padding:var(--s5) var(--s6) 0}
-.pf-crumb a{color:var(--text-subtle);text-decoration:none}
-.pf-crumb a:hover{color:var(--text-muted)}
-.pf-crumb-mono{font-family:var(--mono)}
+/* ── Breadcrumb (prototype .crumb) ────────────────────────────────── */
+/* .pf-crumb* rules moved to ui.css (aihub#167 follow-up) so both the app-shell
+   and the artifact viewer share the same CSS from one source. The padding override
+   below applies only inside the viewer's body context (the app-shell uses margin). */
+.pf-crumb { padding: 0; margin-bottom: 0; }
 /* Float nav+crumb to the top, full width, in the doc grid */
 body.pf-annot-active > .pf-appnav, body.pf-review-page > .pf-appnav{order:-2;grid-column:1/-1}
 body.pf-annot-active > .pf-crumb, body.pf-review-page > .pf-crumb{order:-1;grid-column:1/-1}
@@ -662,5 +926,11 @@ body.pf-review-page #pf-doc-col{margin:0 auto}
 /* Note header: avatar + name + status pushed right (prototype .note .nh) */
 .pf-annot-status{margin-left:auto;font-size:10.5px;font-weight:650;text-transform:uppercase;letter-spacing:.04em}
 .pf-st-open{color:var(--warning)} .pf-st-resolved{color:var(--success)}
-/* version history at top inside card: tighten top margin */
-#pf-doc-col > .pf-version-history:first-child{margin-bottom:var(--s5)}
+/* aihub#154: title → share → version-history stack inside the doc card.
+   The share control follows the <h1> directly; the version-history dropdown
+   (multi-version only) follows the share control. Keep the three vertically
+   even: tighten the share top margin under the title, and drop the version
+   block's own top margin so it tucks just under share. */
+#pf-doc-col > .pf-share { margin-top: var(--s3); }
+#pf-doc-col > .pf-share + .pf-version-history { margin-top: 0; }
+#pf-doc-col > .pf-version-history { margin-bottom: var(--s5); }

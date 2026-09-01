@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+# SessionStart hook for polyforge v1.
+# ASSEMBLES the using-polyforge skill at session start from the manifest in
+# skills/using-polyforge/SKILL.md: each `@include: <path>` pulls a fragment, an optional
+# `when: <cond>` in its attribute block makes it conditional. Conditions are evaluated
+# against enabledPlugins across the user (~/.claude) and project (<workspace>/.claude)
+# settings layers (low->high precedence), so a conditional fragment is only added when the
+# plugin it depends on is ENABLED for the workspace. No-op outside a polyforge workspace
+# (.polyforge.yaml walk-up). Skill tree is the plugin's own, so injection travels with it.
+#
+# JSON is emitted via python3 json.dumps so every control character escapes correctly.
+
+set -euo pipefail
+
+# Detect a polyforge workspace: walk up looking for .polyforge.yaml.
+dir="${CLAUDE_PROJECT_DIR:-$PWD}"
+ws=""
+while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+  if [ -f "$dir/.polyforge.yaml" ]; then
+    ws="$dir"
+    break
+  fi
+  parent="$(dirname "$dir")"
+  [ "$parent" = "$dir" ] && break
+  dir="$parent"
+done
+[ -z "$ws" ] && exit 0
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SKILL_DIR="${PLUGIN_ROOT}/skills/using-polyforge"
+[ -f "${SKILL_DIR}/SKILL.md" ] || exit 0
+command -v python3 >/dev/null 2>&1 || exit 0  # python3 unavailable -> no-op, never block startup
+
+SKILL_DIR="$SKILL_DIR" PF_WS="$ws" python3 <<'PY'
+import json, os, re, sys
+
+def read(p):
+    try:
+        return open(p, encoding="utf-8").read()
+    except OSError:
+        return None
+
+skill_dir = os.environ["SKILL_DIR"]
+manifest = read(os.path.join(skill_dir, "SKILL.md"))
+if manifest is None:
+    sys.exit(0)  # unreadable manifest -> no-op, never block the session
+
+ws = os.environ.get("PF_WS", "")
+home = os.path.expanduser("~")
+settings_layers = [
+    os.path.join(home, ".claude", "settings.json"),
+    os.path.join(home, ".claude", "settings.local.json"),
+    os.path.join(home, ".copilot", "settings.json"),  # Copilot CLI enabledPlugins
+]
+if ws:
+    settings_layers += [
+        os.path.join(ws, ".claude", "settings.json"),
+        os.path.join(ws, ".claude", "settings.local.json"),
+        os.path.join(ws, ".github", "copilot", "settings.json"),  # Copilot project layer
+    ]
+
+def plugin_enabled(prefix):
+    val = None
+    for f in settings_layers:
+        if not os.path.isfile(f):
+            continue
+        try:
+            data = json.load(open(f, encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        ep = data.get("enabledPlugins")
+        if not isinstance(ep, dict):
+            continue
+        for k, v in ep.items():
+            if k.startswith(prefix):
+                val = bool(v)  # highest-precedence layer wins
+    return val
+
+def cond_met(cond):
+    cond = cond.strip()
+    if cond == "superpowers":
+        return plugin_enabled("superpowers@") is True
+    return False  # unknown condition -> not met (fail-closed; only known conds ship)
+
+# Strip YAML frontmatter from the manifest.
+body = manifest
+if body.startswith("---"):
+    rest = body.split("\n")
+    end = None
+    for i in range(1, len(rest)):
+        if rest[i].strip() == "---":
+            end = i
+            break
+    if end is not None:
+        body = "\n".join(rest[end + 1:])
+
+# Manifest grammar (aihub#295). A directive line, optionally followed by an attribute
+# block of `key: value` lines (no blank line inside the block):
+#
+#   @include:  <path>   -> RESIDENT tier: assembled into the SessionStart payload.
+#   @ondemand: <path>   -> declared so the manifest lint can see its kind/gate, but
+#                          NEVER injected. Spelled as its own verb rather than
+#                          `@include:` + a tier attribute precisely so that a parser
+#                          predating this change drops it instead of injecting it and
+#                          silently blowing the 10,000-character budget.
+#
+# UNKNOWN ATTRIBUTE KEYS ARE IGNORED BY DESIGN. `kind` / `gate` / `authority` and
+# friends are consumed by tests/using-polyforge-manifest.test.sh, not here; the
+# assembler only needs `when`. Keeping this loop tolerant means the manifest schema can
+# grow without a hook update — and a hook must never block session startup.
+directive_re = re.compile(r'^@(include|ondemand):\s*(\S+)\s*$')
+attr_re = re.compile(r'^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$')
+lines = body.split("\n")
+parts = []
+i = 0
+while i < len(lines):
+    m = directive_re.match(lines[i].strip())
+    if not m:
+        i += 1
+        continue
+    verb, path = m.group(1), m.group(2)
+    i += 1
+    attrs = {}
+    while i < len(lines):
+        s = lines[i].strip()
+        if not s or directive_re.match(s):
+            break
+        a = attr_re.match(s)
+        if not a:
+            break
+        attrs.setdefault(a.group(1).lower(), a.group(2).strip())
+        i += 1
+    if verb != "include":
+        continue  # on-demand: shipped as a file, read by the model when it needs it
+    cond = attrs.get("when")
+    if cond is not None and not cond_met(cond):
+        continue
+    full = os.path.normpath(os.path.join(skill_dir, path))
+    if full != skill_dir and not full.startswith(skill_dir + os.sep):
+        continue  # @include path must stay under the skill dir
+    frag = read(full)
+    if frag:
+        parts.append((path, frag.rstrip("\n")))  # (manifest path, text) — the path is needed
+                                                 # to NAME a fragment in the over-budget banner
+
+if not parts:
+    sys.exit(0)  # nothing assembled -> no-op, never block startup
+
+# aihub#291 deliberately does NOT add a "your managed block is still the legacy
+# format" nudge here. It was tried and reverted, for two measured reasons:
+#
+#   1. The payload has a hard 10,000-character budget (aihub#285). On top of
+#      #253's 9,756-character baseline the nudge measured 386 characters, so it
+#      busted the budget on its own — and it only fired on legacy workspaces,
+#      i.e. exactly the ones it was meant to help.
+#   2. It was concatenated at the very END of ctx, so every time it fired it sat
+#      past the truncation point: it turned an intact payload into a truncated
+#      one and still delivered none of itself.
+#
+# `polyforge doctor` (check 6, claude_md) reports the same state with no budget
+# cost. If a session-start nudge is ever revived, it must be measured against
+# the budget AND placed in the preamble, not appended.
+
+PREAMBLE = (
+    "<EXTREMELY_IMPORTANT>\n"
+    "You are in a polyforge workspace (.polyforge.yaml detected). "
+    "Lifecycle skills /pf-* and the polyforge MCP tools (`mcp__plugin_polyforge_polyforge__*` "
+    "in Claude Code, `mcp__polyforge__*` in Codex, `polyforge(pf_*)` in Copilot CLI) are "
+    "authoritative; do not bypass them with raw git / Edit / Bash on work_items. "
+    "Using superpowers skills as the content *engine* inside a /pf-* step (when superpowers "
+    "is enabled) is NOT a bypass — the prohibition is about skipping the wi lifecycle "
+    "(claim / step / artifact / commit / PR / wrap), not about which engine authors the content.\n\n"
+)
+LEDE = "**Below is the assembled `using-polyforge` skill (fragments per the SKILL.md manifest):**\n\n"
+TAIL = "\n</EXTREMELY_IMPORTANT>"
+
+# ---------------------------------------------------------------------------
+# BINARY-STATUS RELAY (aihub#305)
+# ---------------------------------------------------------------------------
+# bin/polyforge-mcp.sh writes ~/.polyforge/binary-status.txt when it could not
+# download the binary this plugin release expects and carried on with an older
+# one (or could not start at all). It cannot tell anyone itself: an MCP server's
+# stderr goes to a debug log, never to the transcript. This hook is the relay,
+# because it is the one plugin-shipped thing that runs every session AND has a
+# path to the model.
+#
+# It has to be plugin-shipped. The obvious alternative — a `polyforge doctor`
+# check — is compiled into the binary, and the population being warned is
+# precisely the one whose binary did not update, so their doctor would not carry
+# the check. Same for anything the MCP server itself would emit. Plugin files
+# travel with the marketplace install, so they reach the affected machines; the
+# binary, by construction, does not.
+#
+# BUDGET (aihub#285/#291/#293/#296). The resident payload is gated two-sided at
+# 8,497 +/- 100 chars against a measured 10,000-char harness limit, and #291's
+# legacy-format nudge was reverted for busting it. So:
+#   * the FULL text goes in the top-level `systemMessage`, which is a separate
+#     JSON field and costs the additionalContext budget nothing;
+#   * `ctx` gets a FIXED, capped pointer instead of the file's contents, so the
+#     worst case is a constant this file can state and a test can assert, not
+#     something that grows with whatever the launcher decided to write;
+#   * it is placed in the PREAMBLE, not appended — #291's second failure was a
+#     banner that only ever landed past the truncation point;
+#   * and it is emitted ONLY when the marker exists. A healthy session's payload
+#     and JSON shape are byte-for-byte what they were before this change, which
+#     is also what keeps the extra key off Codex/Copilot in normal operation.
+STATUS_PATH = os.path.join(os.path.expanduser("~"), ".polyforge", "binary-status.txt")
+STATUS_CTX_MAX = 420   # hard ceiling on what this can add to ctx; asserted in tests
+
+binary_status = ""
+try:
+    with open(STATUS_PATH, encoding="utf-8", errors="replace") as fh:
+        binary_status = fh.read().strip()
+except OSError:
+    binary_status = ""
+
+STATUS_BANNER = ""
+if binary_status:
+    STATUS_BANNER = (
+        "⚠️ **POLYFORGE IS RUNNING A BINARY IT DID NOT DOWNLOAD.** "
+        "`~/.polyforge/binary-status.txt` exists; the launcher writes it only when a "
+        "binary download failed, and deletes it when one succeeds. The MCP tools you "
+        "have may be older than this plugin's skills expect. `Read` that file, TELL "
+        "THE USER what it says including the cause, and do not work around it "
+        "silently.\n\n"
+    )
+    # A ceiling that cannot be exceeded by accident, so the budget arithmetic
+    # above stays true no matter what is edited into the string.
+    STATUS_BANNER = STATUS_BANNER[:STATUS_CTX_MAX]
+
+ctx = PREAMBLE + STATUS_BANNER + LEDE + "\n\n".join(t for _, t in parts) + TAIL
+
+# ---------------------------------------------------------------------------
+# RUNTIME LENGTH SELF-CHECK (aihub#293, deferred from aihub#285's 4th criterion)
+# ---------------------------------------------------------------------------
+# Claude Code replaces any single hook output longer than 10,000 CHARACTERS with a
+# `<persisted-output>` wrapper: the full text is written to a file and only a ~2,000-char
+# preview reaches the model. The hook still exits 0 and the skill still "looks" injected,
+# so an over-budget manifest fails COMPLETELY SILENTLY — that is the aihub#285 bug, and
+# nothing here noticed it for every session between 2026-08-05 and the fix.
+#
+# 10,000 and the character (not byte) unit are MEASURED, not inferred: a 10,000-char
+# additionalContext arrives intact, 10,001 is truncated, and a 10,000-char / 29,658-byte
+# CJK payload also arrives intact. See tests/using-polyforge-payload.test.sh, which gates
+# the ASSEMBLED size at 9,800 so this runtime check is the second line of defence, not the
+# first: the test catches an over-budget manifest in CI, this catches one that reaches a
+# real session anyway (older plugin copy, hand-edited fragment, unmerged branch).
+#
+# This must NEVER block startup, so it does not exit non-zero and does not raise. Instead
+# it emits a DEGRADED payload that is strictly better than what the harness would do:
+#   - it FITS, so it is delivered whole instead of being replaced by a preview,
+#   - it leads with a banner naming exactly which fragments were dropped and where to read
+#     them, so the omission is stated rather than inferred,
+#   - it writes the same finding to stderr, so the failure is visible outside the model.
+# Fragments are dropped from the END of the manifest, keeping the longest prefix that fits:
+# the manifest orders iron-rules.md first precisely so the Iron Rules survive truncation
+# (SIZE BUDGET rule 2 in skills/using-polyforge/references/manifest-notes.md), and dropping
+# a suffix is the only policy that preserves
+# that ordering guarantee.
+MAX_CHARS = 10000
+
+if len(ctx) > MAX_CHARS:
+    full_len = len(ctx)
+
+    def banner(dropped):
+        return (
+            "⚠️ **POLYFORGE SESSION-START PAYLOAD OVER BUDGET — THIS SKILL IS INCOMPLETE.**\n"
+            "The assembled manifest is %d characters against a %d-character harness limit. "
+            "Rather than let the harness silently replace it with a ~2,000-character preview, "
+            "this hook dropped the trailing fragment(s) and is telling you so: **%s**. "
+            "Each still ships on disk under `skills/using-polyforge/` — `Read` any you need "
+            "before relying on it. This is a bug in the manifest, not in your session: the "
+            "budget must be restored (see the SIZE BUDGET section of "
+            "`skills/using-polyforge/references/manifest-notes.md` and "
+            "`plugins/polyforge/tests/using-polyforge-payload.test.sh`).\n\n"
+            % (full_len, MAX_CHARS, ", ".join(dropped) or "all of them")
+        )
+
+    degraded_lede = (
+        "**Below is the PARTIAL `using-polyforge` skill — the fragments that fit, "
+        "in manifest order:**\n\n"
+    )
+
+    # STATUS_BANNER is carried through the rebuild deliberately (aihub#305). It
+    # is normally empty and costs nothing; when it is not, dropping it here
+    # would delete the stale-binary warning in precisely the sessions that are
+    # already degraded — the same "the fix does not reach the people who have
+    # the bug" shape the warning exists to close. It is bounded at 420 chars, so
+    # it cannot meaningfully compete with the fragments for room.
+    kept, dropped = list(parts), []
+    while True:
+        ctx = (PREAMBLE + STATUS_BANNER + banner(dropped) + degraded_lede
+               + "\n\n".join(t for _, t in kept) + TAIL)
+        if len(ctx) <= MAX_CHARS or not kept:
+            break
+        dropped.insert(0, kept.pop()[0])  # drop from the END; insert at the front so the
+                                          # banner lists them in manifest order
+    # Belt and braces: with every fragment dropped the envelope alone is ~1.5k chars, so
+    # this cannot fire today — but a future preamble must not be able to reintroduce the
+    # silent-truncation failure this whole block exists to remove.
+    if len(ctx) > MAX_CHARS:
+        ctx = ctx[:MAX_CHARS - len(TAIL)] + TAIL
+
+    sys.stderr.write(
+        "pf-session-start: using-polyforge payload is %d chars, over the %d-char harness "
+        "limit. Emitted a degraded %d-char payload; dropped %s. Run "
+        "plugins/polyforge/tests/using-polyforge-payload.test.sh and move a fragment to the "
+        "on-demand tier — do not raise the gate (SIZE BUDGET in "
+        "skills/using-polyforge/references/manifest-notes.md).\n"
+        % (full_len, MAX_CHARS, len(ctx), ", ".join(dropped) or "every fragment")
+    )
+
+if os.environ.get("CURSOR_PLUGIN_ROOT"):
+    out = {"additional_context": ctx}
+elif os.environ.get("PLUGIN_ROOT"):
+    # Codex (codex-cli) sets the bare PLUGIN_ROOT env var for plugin hooks and validates
+    # SessionStart output with deny_unknown_fields: a top-level additionalContext is
+    # rejected ("invalid session start JSON output"). Codex reads the nested
+    # hookSpecificOutput.additionalContext, so emit only that shape.
+    out = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}}
+else:
+    # Claude Code + Copilot CLI. Emit BOTH shapes: Claude Code reads
+    # hookSpecificOutput.additionalContext; Copilot CLI reads the top-level additionalContext
+    # (and silently drops the nested key). Both tolerate the extra key.
+    out = {
+        "additionalContext": ctx,
+        "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx},
+    }
+    # aihub#305. Documented as the way to "surface a message to the user on any
+    # platform", and it is not part of additionalContext, so it costs the
+    # payload budget nothing and can carry the launcher's full prose. Added on
+    # the Claude Code / Copilot branch only, and only when there is something to
+    # say: Codex validates SessionStart output with deny_unknown_fields, and an
+    # unconditional new key would be a shape change on every session on every
+    # host for the sake of a message that is almost never present.
+    #
+    # Belt to the ctx banner's braces, not a replacement for it: the docs say
+    # "some events discard it or deliver it elsewhere" and do not settle what
+    # SessionStart does, so this is the channel that MIGHT reach the human
+    # directly, while the banner in ctx is the one that provably reaches the
+    # model that will tell them.
+    if binary_status:
+        out["systemMessage"] = binary_status
+
+print(json.dumps(out))
+PY
+exit 0

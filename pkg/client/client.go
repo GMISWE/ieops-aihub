@@ -21,6 +21,28 @@ import (
 // mem_xxx, u_xxx) unchanged, so id-based callers see no behavior change.
 func seg(s string) string { return url.PathEscape(s) }
 
+// formatDetails renders the server error `details` object as a compact
+// " details=<json>" suffix for the error string, so the conflict metadata the
+// server already computes (lock holder, dedup candidates, superseded_by, …)
+// reaches the caller instead of being silently dropped. Empty/null details
+// yield "". The rendered JSON is capped at ~500 bytes; the server contract keeps
+// secrets out of `details`, so passing it through verbatim is safe (aihub#209).
+func formatDetails(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return ""
+	}
+	s := buf.String()
+	const max = 500
+	if len(s) > max {
+		s = s[:max] + "...(truncated)"
+	}
+	return " details=" + s
+}
+
 // Client is the aihub HTTP API client.
 type Client struct {
 	baseURL    string
@@ -67,12 +89,13 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 
 	if resp.StatusCode >= 400 {
 		var errResp struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
+			Code    string          `json:"code"`
+			Message string          `json:"message"`
+			Details json.RawMessage `json:"details"`
 		}
 		json.NewDecoder(resp.Body).Decode(&errResp) //nolint:errcheck
 		if errResp.Code != "" {
-			return fmt.Errorf("aihub %d %s: %s", resp.StatusCode, errResp.Code, errResp.Message)
+			return fmt.Errorf("aihub %d %s: %s%s", resp.StatusCode, errResp.Code, errResp.Message, formatDetails(errResp.Details))
 		}
 		return fmt.Errorf("aihub %d: unexpected error", resp.StatusCode)
 	}
@@ -111,12 +134,13 @@ func (c *Client) doRaw(ctx context.Context, method, path string) ([]byte, string
 
 	if resp.StatusCode >= 400 {
 		var errResp struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
+			Code    string          `json:"code"`
+			Message string          `json:"message"`
+			Details json.RawMessage `json:"details"`
 		}
 		_ = json.Unmarshal(body, &errResp)
 		if errResp.Code != "" {
-			return nil, "", fmt.Errorf("aihub %d %s: %s", resp.StatusCode, errResp.Code, errResp.Message)
+			return nil, "", fmt.Errorf("aihub %d %s: %s%s", resp.StatusCode, errResp.Code, errResp.Message, formatDetails(errResp.Details))
 		}
 		return nil, "", fmt.Errorf("aihub %d: unexpected error", resp.StatusCode)
 	}
@@ -213,6 +237,12 @@ func (c *Client) PauseAttempt(ctx context.Context, wiID string, body any) (map[s
 	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/pause", body, &out)
 }
 
+// AcquireLocks calls POST /v1/work_items/:wiID/acquire_locks.
+func (c *Client) AcquireLocks(ctx context.Context, wiID string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/acquire_locks", body, &out)
+}
+
 // ─── Events ────────────────────────────────────────────────────────────────
 
 // EmitEvent calls POST /v1/events.
@@ -249,6 +279,16 @@ func (c *Client) Recall(ctx context.Context, params url.Values) (map[string]any,
 	return out, c.do(ctx, "GET", path, nil, &out)
 }
 
+// GetMemory calls GET /v1/memories/:id. Unlike the list endpoint, this returns
+// the memory's FULL content — the list endpoint truncates content to 800 runes
+// and flags the cut with content_truncated / content_full_len (aihub#244), and
+// this is the escape hatch that PR #245 declared for reading the rest
+// (aihub#269).
+func (c *Client) GetMemory(ctx context.Context, memoryID string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "GET", "/v1/memories/"+seg(memoryID), nil, &out)
+}
+
 // ActivateMemory calls POST /v1/memories/:id/activate.
 func (c *Client) ActivateMemory(ctx context.Context, memoryID string) (map[string]any, error) {
 	var out map[string]any
@@ -265,6 +305,14 @@ func (c *Client) ReinforceMemory(ctx context.Context, memoryID string, body any)
 func (c *Client) RedactMemory(ctx context.Context, memoryID string, body any) (map[string]any, error) {
 	var out map[string]any
 	return out, c.do(ctx, "PATCH", "/v1/memories/"+seg(memoryID)+"/redact", body, &out)
+}
+
+// UpdateMemory calls PATCH /v1/memories/:id/update — creates a new version
+// superseding the current lineage head and advances the latest_id cursor
+// (aihub#201).
+func (c *Client) UpdateMemory(ctx context.Context, memoryID string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "PATCH", "/v1/memories/"+seg(memoryID)+"/update", body, &out)
 }
 
 // ResolveCommit calls POST /v1/memories/:id/commit/:commit_id/resolve.

@@ -85,6 +85,87 @@ The plugin itself ships only an MCP launcher
 binary is downloaded by that launcher on the first MCP start (next step),
 using the `gh` token from step 3.
 
+### Codex (codex-cli)
+
+The same plugin runs under Codex. Codex does not use Claude Code's
+`/plugin install`; once the plugin is available on disk (so
+`$CLAUDE_PLUGIN_ROOT` is set), register the MCP server once — Codex does not
+register it from the manifest:
+
+```
+codex mcp add polyforge -- "$CLAUDE_PLUGIN_ROOT/bin/polyforge-mcp.sh"
+```
+
+(If `$CLAUDE_PLUGIN_ROOT` is unset, pass the absolute path to
+`<plugin-root>/bin/polyforge-mcp.sh`.) The launcher downloads the `polyforge`
+binary on first start, the same as Claude Code. Skills load natively — type
+`$pf-work` or run `/skills` (there is no `Skill` tool). MCP tools surface as
+`mcp__polyforge__pf_*`. Verify with `codex mcp list` (or `/mcp` in session),
+then ask Codex to run `pf_whoami`. See
+`plugins/polyforge/skills/using-polyforge/references/codex-tools.md` for the
+full Claude Code -> Codex tool mapping.
+
+### Updating the plugin, skills, and binary
+
+polyforge ships in **two layers that update independently** — know which one your
+change lives in:
+
+- **Skills + hooks** (the `/pf-*` workflow instructions) live in the plugin
+  package, versioned by the plugin `version`. Pull the latest with:
+  ```
+  /plugin marketplace update GMISWE/GMI-marketplace   # refresh the catalog
+  /plugin install polyforge@gmi-marketplace           # re-install to the new version
+  ```
+  (or use the interactive `/plugin` menu). Publishing a skill change: edit
+  `plugins/polyforge/skills/*`, bump `version` in **all five stamps** (both
+  catalogs plus the three `plugin.json` variants — `scripts/pf_version_check.py`
+  enforces that they agree), and merge that together with the change.
+
+  > 🔴 **`version` is the update signal; `catalog_revision` is inert.**
+  > `claude plugin validate` says verbatim: *"Unknown field 'catalog_revision'.
+  > Claude Code ignores it at load time."* The install cache is keyed on
+  > `version` (`installPath` is `<cache>/<marketplace>/polyforge/<version>`), so
+  > a new build reaches a user only when `version` changes — restamping
+  > `catalog_revision` alone ships a release that reaches **nobody**, and
+  > `/plugin update` is a no-op for anyone already on that version. This page,
+  > `pf_version_check.py` and team memory `mem_7yldi6xb` all taught the opposite
+  > until aihub#302. The corrected memory is **`mem_zZ3xWv4g`** — `mem_7yldi6xb`
+  > is its archived predecessor and still returns the wrong text verbatim if you
+  > fetch it by id. The field is kept only so `pf_version_check.py` can hold its
+  > two carriers consistent, and is changed alongside `version` by convention.
+  > Since aihub#302, CI fails a PR that edits anything under `plugins/polyforge/`
+  > without moving `version` (`[NO_VERSION_BUMP]` in the Contract Lint job), so
+  > you do not have to remember this — but do not "fix" that failure by
+  > restamping `catalog_revision`.
+
+- **The `polyforge` binary** (the MCP server — ALL `pf_*` tool behavior, e.g.
+  `pf_recall` result-slimming) is NOT in the plugin package. The launcher
+  auto-downloads it once per day from the `bins-<channel>` branch, where
+  `<channel>` is the `[binary] channel` in `~/.polyforge/config.toml`.
+  - **There is one channel: `dev`**, and it is the default — leave `[binary]`
+    out of your `config.toml` entirely. Every push to `main` publishes the
+    binary to `bins-dev`, so binary changes reach you within a day.
+  - 🔴 **`stable` is not a channel.** It was the default here and in the
+    launcher until aihub#305, but `bins-stable` was never published:
+    `publish-bins.yml` creates it only on a `v*` tag push, the repo's single tag
+    (`v1.0.0`, 2026-05-25) predates that workflow by a day, and no tag has been
+    pushed since. So the default configuration fetched a 404 — and a machine
+    that already had a binary just failed its daily update check on the MCP
+    launcher's stderr, which the client UI does not surface, and stayed frozen
+    on its old binary indefinitely. The launcher now maps a leftover
+    `channel = "stable"` onto `dev` and says so, so no config edit is required;
+    restoring a genuinely tag-gated channel is tracked separately.
+  - **Force an update now** (skip the daily wait):
+    ```
+    rm -f ~/.polyforge/.last_binary_check    # forces the version check on next MCP start
+    ```
+    then restart Claude Code. Confirm with `polyforge version` (prints the
+    published commit SHA).
+
+> Rule of thumb: **skill / workflow change → update the plugin (marketplace);
+> tool behavior / token or recall changes → update the binary (channel +
+> force-refresh).**
+
 ## 5. Restart Claude Code and verify
 
 Restart Claude Code so the plugin's `mcpServers.polyforge` entry is picked up.
@@ -95,8 +176,9 @@ so the shell sees the same version as the MCP server. Subsequent starts skip
 the download and do a daily update check.
 
 Once the MCP server reconnects, every `mcp__plugin_polyforge_polyforge__*`
-tool is available. `pf_whoami` is an MCP tool (not a shell command) — just
-ask Claude for it in chat:
+tool is available. (Codex users: tools surface as `mcp__polyforge__pf_*`;
+verify with `codex mcp list` or `/mcp` in session.) `pf_whoami` is an MCP
+tool (not a shell command) — just ask the agent for it in chat:
 
 ```
 pf_whoami
@@ -105,25 +187,58 @@ pf_whoami
 You should see your user id, display name, and the server URL from your
 `config.toml`. If you see a 401, double-check that the `api_key` in
 `~/.polyforge/config.toml` matches the one the owner handed you and that
-the file is readable by your user (`ls -l ~/.polyforge/config.toml`). If
-the binary failed to download, re-run `gh auth status` and check the MCP
-server logs.
+the file is readable by your user (`ls -l ~/.polyforge/config.toml`).
 
-## 6. (Optional) Switch to the dev channel or build from source
+### Did the binary actually download? (`~/.polyforge/binary-status.txt`)
 
-To run pre-release builds, **you do not need to compile anything** — set the
-channel in `~/.polyforge/config.toml` and restart Claude Code:
+**One file answers this, and it is the only place you have to look:**
 
-```toml
-[binary]
-channel = "dev"
+```bash
+cat ~/.polyforge/binary-status.txt   # "No such file" = you are up to date
 ```
 
-The launcher reads `[binary] channel` and auto-downloads from `bins-stable`
-(default) or `bins-dev`.
+The launcher writes that file whenever it could **not** fetch the binary this
+plugin release expects, and deletes it as soon as a download succeeds. It names
+the cause, the version you are running, and the version you should be running.
+
+Before aihub#305 there was no such file and no way to tell. The launcher fell
+back to any `polyforge` it found on `PATH`, said so once on the MCP server's
+stderr — which Claude Code writes to a debug log, never to the transcript — and
+started normally. Every tool worked; the binary behind them was older than the
+plugin around it; nobody could see the difference. Every `pf_*` behaviour change
+ships in that binary, so "older" meant those changes reached nobody.
+
+You should not normally need to run that `cat` yourself: when the file exists,
+polyforge's SessionStart hook puts the warning in front of the agent at the top
+of every session, so it will tell you. `cat` is the check for when you want to
+confirm it is gone, or when you are outside a polyforge workspace (the hook is a
+no-op there).
+
+The two causes, in the order they actually happen:
+
+1. **`gh` missing or not logged in.** The binary lives on a branch of a private
+   repo, so `download_binary` needs `gh auth token`. Run `gh auth status`, then
+   `gh auth login` (gh must be **>= 2.7** — older builds have no `auth token`
+   subcommand and fail with "unknown command").
+2. **The channel is not fetchable.** `raw.githubusercontent.com` answers **404,
+   not 401**, for a private repo, so a bad token and a missing branch look
+   identical from the outside. This is what aihub#305 was: `bins-stable` had
+   never been published.
+
+Fix the cause, then start a new session — the launcher retries on every start.
+
+## 6. (Optional) Build from source
+
+You do **not** need to configure a channel: the launcher defaults to `dev`,
+which is the only channel that is published, and tracks every push to `main`.
+Setting `[binary] channel` is only useful once more than one channel exists.
+
+> If your `config.toml` still carries `channel = "stable"` from before
+> aihub#305, you can delete the `[binary]` section — but you do not have to.
+> The launcher maps it onto `dev` and prints a one-line notice.
 
 You only need a local build when you want a `polyforge` with **your own
-unpublished changes** (a branch not yet on either channel):
+unpublished changes** (a branch not yet published to `bins-dev`):
 
 ```bash
 git clone git@github.com:GMISWE/ieops-aihub.git
@@ -158,10 +273,8 @@ repos, ~250 MB, ~30 s on a good connection) and also drops in:
 
 - `.polyforge.yaml` — workspace config pulled from the server
 - `CLAUDE.md` — managed repo-map block Claude Code reads at session start
-- `.polyforge/usage.md` — Iron Rules + command cheatsheet
-- `~/.claude/hooks/pf-session-start.sh` — a per-user Claude Code hook that
-  auto-loads the polyforge skill in every Claude session (installed once
-  per machine, idempotent — `polyforge init` re-registers it each time)
+- `.polyforge/usage.md` — command cheatsheet + machine config (the Iron Rules live in the
+  `using-polyforge` skill, not here — aihub#294)
 
 You may see a warning like `pf init: skipping scenario "coding" for project
 ieops` near the end — that is a harmless server-side config quirk, not an
@@ -177,13 +290,13 @@ example:
 ```
 
 That triggers the `polyforge:pf-work` skill, which talks to the shared
-`aihub` at `http://34.180.90.199:8080` to claim or create a work item for you.
+`aihub` at `http://10.146.0.16:8080` to claim or create a work item for you.
 
 To see the work item land server-side, open the Web UI:
 
-1. Visit `http://34.180.90.199:8080/ui/login` and paste your API key. The
+1. Visit `http://10.146.0.16:8080/ui/login` and paste your API key. The
    server mints a 7-day signed session cookie.
-2. Browse to `http://34.180.90.199:8080/ui/wi` — the list polls every 5 s, so
+2. Browse to `http://10.146.0.16:8080/ui/wi` — the list polls every 5 s, so
    your new wi shows up without a manual refresh.
 3. Click through to `/ui/wi/<id>` for the full timeline, declared resources,
    and step state.

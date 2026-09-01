@@ -14,6 +14,8 @@ import (
 
 	"github.com/GMISWE/ieops-aihub/internal/db"
 	"github.com/GMISWE/ieops-aihub/internal/domain"
+	"github.com/GMISWE/ieops-aihub/internal/embedding"
+	"github.com/GMISWE/ieops-aihub/internal/render"
 	"github.com/GMISWE/ieops-aihub/internal/server"
 	"github.com/GMISWE/ieops-aihub/internal/version"
 )
@@ -42,7 +44,42 @@ func main() {
 	// When unset, defaults to "methodology.spec,methodology.plan" (backward-compatible).
 	domain.InitRenderTypes(os.Getenv("RENDER_MEMORY_TYPES"))
 
-	// GC background scheduler: runs all sweeps every 60s.
+	// aihub#250: bound a single d2 compile. DIAGRAM_COMPILE_TIMEOUT is a
+	// time.Duration string (e.g. "5s", "800ms"); unset or unparseable keeps the
+	// 5s default.
+	fmt.Printf("d2 compile timeout: %s\n", render.InitDiagramCompileTimeout(os.Getenv("DIAGRAM_COMPILE_TIMEOUT")))
+
+	// aihub#192: initialise embedding provider from env.
+	// EMBEDDING_ENABLED=true/1 activates; on error or unreachable backend we
+	// degrade to NoopProvider so the server still starts.
+	{
+		p, embErr := embedding.FromEnv()
+		if embErr != nil {
+			fmt.Fprintf(os.Stderr, "warn: embedding.FromEnv: %v — falling back to NoopProvider\n", embErr)
+			p = &embedding.NoopProvider{}
+		} else if p != nil {
+			pingCtx, pingCancel := context.WithTimeout(ctx, 10*time.Second)
+			if pingErr := p.Ping(pingCtx); pingErr != nil {
+				fmt.Fprintf(os.Stderr, "warn: embedding backend unreachable: %v — falling back to NoopProvider\n", pingErr)
+				p = &embedding.NoopProvider{}
+			}
+			pingCancel()
+		}
+		domain.InitEmbeddingProvider(p)
+	}
+
+	// GC background scheduler: ticks every 60s and runs the sweeps that are DUE.
+	//
+	// RunDue, not RunAll. This ticker used to call RunAll, which runs all eight
+	// sweeps unconditionally, so the two sweeps documented as "(daily)" ran 1,440
+	// times a day — and since both of them EMIT an agent_events row rather than
+	// mutating one, every one of those runs left a duplicate. That is aihub#266:
+	// ~105,000 rows/day for one project, 111,221 on a single work item.
+	//
+	// The per-sweep periods live in domain.gcSweepTable so that the six sweeps
+	// this tick genuinely drives keep their cadence; the tick interval stays here
+	// because it is this loop's property, and the table says "every tick" rather
+	// than naming 60 seconds a second time.
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
@@ -51,8 +88,16 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				results := domain.RunAll(context.Background(), pool)
+				results := domain.RunDue(context.Background(), pool)
 				for _, r := range results {
+					// aihub#268: a sweep that failed reports Affected == 0, so the
+					// Affected==0 filter below was silently discarding every sweep
+					// error for the life of the service. Errors are logged first and
+					// unconditionally; the filter only ever meant to mute *idle*
+					// sweeps.
+					if r.Error != "" {
+						fmt.Fprintf(os.Stderr, "gc: %s error=%s\n", r.SweepType, r.Error)
+					}
 					if r.Skipped || r.Affected == 0 {
 						continue
 					}
@@ -70,6 +115,8 @@ func main() {
 		port = "8080"
 	}
 
+	applyServerTimeouts(e.Server)
+
 	go func() {
 		if err := e.Start(":" + port); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
@@ -85,6 +132,41 @@ func main() {
 		fmt.Fprintf(os.Stderr, "shutdown error: %v\n", err)
 	}
 	fmt.Println("aihub stopped")
+}
+
+// Server timeouts (aihub#250). Before this the server ran with every http.Server
+// timeout at its zero value, i.e. none: a request that wedged in a handler held
+// its connection until the client gave up, and a slow or idle peer could hold one
+// indefinitely for free.
+//
+// What these do and do not buy, stated exactly — WriteTimeout is the one that
+// gets over-trusted: net/http enforces these on the CONNECTION, not on the
+// handler goroutine. A passed WriteTimeout fails the write and frees the socket
+// and the client; it does not unwind a goroutine stuck inside d2's goja runtime.
+// Only the compile deadline in internal/render reclaims the request, and even
+// that abandons rather than kills the wedged goroutine (aihub#244 is the root
+// cause). These are the other half: they stop a wedge from also consuming
+// connections indefinitely and from looking like a silent hang to the client.
+const (
+	serverReadHeaderTimeout = 10 * time.Second
+	serverReadTimeout       = 30 * time.Second
+	serverWriteTimeout      = 60 * time.Second
+	serverIdleTimeout       = 120 * time.Second
+)
+
+// applyServerTimeouts installs the bounds above.
+//
+// Split out of main so it can be tested: the invariant that matters is not that
+// the fields are set but that WriteTimeout stays comfortably clear of the d2
+// compile budget. A document compiles each of its figures in turn and
+// diagram_gate's narrowerLayout can compile a wide one twice, so a WriteTimeout
+// at or below the budget would cut legitimate renders — the exact failure this
+// change is supposed to prevent, arriving through the fix instead.
+func applyServerTimeouts(s *http.Server) {
+	s.ReadHeaderTimeout = serverReadHeaderTimeout
+	s.ReadTimeout = serverReadTimeout
+	s.WriteTimeout = serverWriteTimeout
+	s.IdleTimeout = serverIdleTimeout
 }
 
 // loadUICookieSecret resolves the secret used to sign /ui/* session cookies.

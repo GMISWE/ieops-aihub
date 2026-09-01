@@ -14,7 +14,8 @@ func (s *Server) registerConflictTools() {
 		Description: "Predict resource lock conflicts for a set of declared_resources. Also returns will_unlock (which blocked wi would be unblocked).",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id":       prop("string", "Work item ID (optional, for context)"),
-			"declared_resources": prop("array", "Resources to check for conflicts"),
+			"project":            prop("string", "Project the declared resources belong to; namespaces file_scope conflict checks (aihub#222). Optional when work_item_id is set (the wi own project takes precedence)."),
+			"declared_resources": declaredResourcesProp("Resources to check for conflicts"),
 			"dry_run":            prop("boolean", "Dry run — do not mutate state"),
 		}, []string{"declared_resources"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {

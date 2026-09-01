@@ -5,7 +5,7 @@ per design (CLAUDE.md: "goal is immutable — pf_update_work_item rejects it").
 Reference: domain/work_items.go FnUpdateWorkItem — goal not in patchable fields.
 
 ## Users
-- ADMIN_KEY=baOHJg3Gh7JMpV5kW2Q1BHPqweg3y5Ig
+- ADMIN_KEY=$ADMIN_KEY
 
 ## Steps
 

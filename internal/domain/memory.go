@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GMISWE/ieops-aihub/internal/render"
@@ -120,11 +121,22 @@ type Memory struct {
 	Attrs            json.RawMessage `json:"attrs,omitempty"`
 	RenderedHTML     *string         `json:"rendered_html,omitempty"`
 	Commits          json.RawMessage `json:"commits"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
+	// LatestID is the authoritative version-lineage pointer: nil while this
+	// row is the current head of its supersede chain, otherwise the id of the
+	// row that currently is. It is transactionally maintained by UpdateMemory
+	// and propagated across the whole lineage on every supersede/redact (see
+	// GetLatestByID). Do NOT confuse this with attrs["similar_to"] — that is
+	// an unrelated, one-shot write-time content-similarity dedup hint set by
+	// Remember (see the dedup block above); it carries no lineage meaning.
+	LatestID  *string   `json:"latest_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 	// populated post-scan from memory_relations (aihub#74); NOT part of any SELECT/Scan — do not add to the 6 lockstep sites.
 	Related   []RelatedRef `json:"related,omitempty"`
 	Backlinks []RelatedRef `json:"backlinks,omitempty"`
+	// opt3 P1: recall returns content truncated to a snippet; full via GET /v1/memories/:id.
+	ContentTruncated bool `json:"content_truncated,omitempty"`
+	ContentFullLen   int  `json:"content_full_len,omitempty"`
 }
 
 // RelatedRef is a lightweight reference to a related memory, used in
@@ -168,9 +180,29 @@ type RememberRequest struct {
 	// standalone HTML document (or fragment) for any artifact type — e.g.
 	// pf_save_artifact html=. Empty/whitespace falls back to auto-render.
 	RenderedHTML *string `json:"rendered_html,omitempty"`
+	// aihub#210: attempt credentials for methodology.* artifact writes. Bound to
+	// WorkItemID and verified in handleRemember. Previously absent, so echo's
+	// c.Bind silently dropped the credentials pf_save_artifact sends, leaving
+	// project-writer as the only gate on spec/plan writes. Empty for
+	// non-methodology memories, which stay project-writer gated.
+	AttemptID     string `json:"attempt_id,omitempty"`
+	ClaimEpoch    int64  `json:"claim_epoch,omitempty"`
+	SessionSecret string `json:"session_secret,omitempty"`
 	// Set by handler from Bearer token — not from JSON body.
 	CallerUserID  string `json:"-"`
 	CallerDisplay string `json:"-"`
+	// aihub#236: activation state carried forward by UpdateMemory so that
+	// editing a memory does not reset its lineage's activation history (which
+	// previously dropped every new version into the NULLS-LAST ranking tier).
+	//
+	// json:"-" is REQUIRED, not stylistic. handleRemember binds the request body
+	// directly into this struct (internal/server/routes_memory.go:60) with no
+	// intermediate DTO, so a JSON-named field here would let any project writer
+	// POST /v1/memories with activation_count=9999 and pin their memory to the
+	// top of every recall in the project. Only UpdateMemory sets these.
+	LastActivatedAt *time.Time `json:"-"`
+	LastActivatedBy *string    `json:"-"`
+	ActivationCount int        `json:"-"`
 }
 
 // RecallRequest is the query for GET /v1/memories.
@@ -185,6 +217,7 @@ type RecallRequest struct {
 	MinStrength         float64  `json:"min_strength"`
 	IncludeArchived     bool     `json:"include_archived,omitempty"`
 	RecencyWeight       float64  `json:"recency_weight"`
+	RecallAlgo          string   `json:"recall_algo,omitempty"`
 	Cursor              string   `json:"cursor,omitempty"`
 	CallerUserID        string   `json:"-"`
 	CallerRole          string   `json:"-"`
@@ -201,6 +234,39 @@ type ActivateResponse struct {
 type RecallResponse struct {
 	Items      []MemoryWithStrength `json:"items"`
 	NextCursor *string              `json:"next_cursor,omitempty"`
+	// Total is the count of memories matching every filter in the request
+	// (project/status/visibility/type/work_item/min_strength, and, on the
+	// vector path, similarity_threshold) — computed independently of
+	// pagination (top_k/limit/cursor). aihub#249: without this a caller
+	// cannot tell "that's everything" from "you haven't paged far enough";
+	// NextCursor being nil already answers that for the text path, but Total
+	// lets a caller size a UI/progress bar without walking every page.
+	// Populated on both the text path (Recall) and the vector path
+	// (RecallWithVector) — see countMemories.
+	Total int `json:"total"`
+	// UnmatchedTypes names the entries of the request's `type` filter that no
+	// visible, live memory in the project matches — the difference between "this
+	// project has no such memory" and "your type value is wrong", which the
+	// response could not express before aihub#289 (both were an empty item list).
+	// Populated by handleRecall via UnmatchedTypes(), so it covers the text and
+	// vector paths alike; see memory_unmatched.go for the precise scope of the
+	// claim it makes.
+	//
+	// `omitempty` is deliberate: absent means "nothing to report", so the healthy
+	// call shapes — the overwhelming majority — pay zero tokens for it, and a
+	// present field always means the caller has a problem to look at. "No type
+	// filter supplied" and "every type matched" are both absent; neither is a
+	// fault, so nothing needs to tell them apart. A BROKEN diagnostic is a fault
+	// and is NOT folded in with them — it reports through the field below.
+	UnmatchedTypes []string `json:"unmatched_types,omitempty"`
+	// UnmatchedTypesError is set when the unmatched-type diagnostic could not be
+	// computed (see UnmatchedTypes in memory_unmatched.go). It exists because
+	// `omitempty` would otherwise make a failed check indistinguishable from a
+	// clean one, which is the same silent-degradation shape this work item was
+	// opened to remove — and the same omitempty trap as aihub#269's
+	// content_truncated. When this is set, UnmatchedTypes is nil and says nothing
+	// about the type filter either way; it is never a partial answer.
+	UnmatchedTypesError string `json:"unmatched_types_error,omitempty"`
 }
 
 // ─── Forgetting Curve (§7.2) ──────────────────────────────────────────────────
@@ -226,18 +292,70 @@ func isImmortalType(memType string) bool {
 	return strings.HasPrefix(memType, "rule.")
 }
 
+// memoryRefTime returns the reference timestamp used for BOTH decay and
+// ranking: the most recent of last_activated_at and created_at. It is the Go
+// mirror of memRefTimeSQL and the two MUST stay in agreement — recall filters
+// rows in SQL and reports effective_strength from Go, so a divergence makes the
+// score shown to clients disagree with the order rows come back in (aihub#236).
+//
+// Deliberately NOT "activation if set, else created": UpdateMemory carries a
+// lineage's last_activated_at onto each new version, so a freshly created head
+// can hold an old activation timestamp. Taking the later of the two keeps that
+// head as fresh as it actually is.
+func memoryRefTime(lastActivatedAt *time.Time, createdAt time.Time) time.Time {
+	if lastActivatedAt != nil && lastActivatedAt.After(createdAt) {
+		return *lastActivatedAt
+	}
+	return createdAt
+}
+
+// memRefTimeSQL is the SQL mirror of memoryRefTime. PostgreSQL's GREATEST
+// IGNORES NULL arguments (returning NULL only when every argument is NULL) and
+// memories.created_at is NOT NULL, so this expression is total: it can never
+// yield NULL, and therefore can never produce a NULLS-ordering tier.
+//
+// Do NOT rewrite this as COALESCE(last_activated_at, created_at). COALESCE
+// prefers a stale activation timestamp over a fresher created_at, which
+// reintroduces aihub#236 in the min_strength filter — a freshly edited fact.*
+// memory would be decayed against its old activation and filtered out.
+const memRefTimeSQL = `GREATEST(last_activated_at, created_at)`
+
+// recallCursorSep separates the two halves of a Recall cursor. Neither half can
+// contain it: the left half is RFC3339Nano (digits, '-', ':', '.', 'T', and a
+// 'Z'/'+'/'-' offset) and the right half is a NewID (base62 plus one '_').
+const recallCursorSep = "|"
+
+// formatRecallCursor encodes Recall's full sort position. Recall orders by
+// `memRefTimeSQL DESC, id DESC` — TWO keys — so a cursor that carried only the
+// timestamp could not express "the row after this one" among rows sharing a
+// reference time. With a strict `<` on the timestamp alone, every row tied with
+// the last row of a page was skipped on all subsequent pages (aihub#236 finding
+// 7, deferred to aihub#239). Ties are rare because created_at defaults to
+// clock_timestamp() at microsecond resolution, but a bulk import or a backfill
+// that stamps many rows identically reaches them.
+func formatRecallCursor(refTime time.Time, id string) string {
+	return refTime.Format(time.RFC3339Nano) + recallCursorSep + id
+}
+
+// parseRecallCursor splits a cursor into its timestamp and id halves. Cursors
+// issued before aihub#239 carry the timestamp alone; those return id == "" and
+// the caller must fall back to the single-key comparison so an in-flight cursor
+// keeps paginating instead of erroring or silently restarting.
+func parseRecallCursor(cursor string) (ts, id string) {
+	if i := strings.LastIndex(cursor, recallCursorSep); i >= 0 {
+		return cursor[:i], cursor[i+len(recallCursorSep):]
+	}
+	return cursor, ""
+}
+
 // MemoryStrength calculates effective_strength (raw) per §7.2.
 // Formula: base_strength × exp(-days_since / stability_days)
-// days_since uses last_activated_at if set, else created_at (M8).
+// days_since is measured from memoryRefTime (M8, revised by aihub#236).
 func MemoryStrength(baseStrength, stabilityDays float64, lastActivatedAt *time.Time, createdAt time.Time) float64 {
 	if stabilityDays <= 0 {
 		return 0
 	}
-	ref := createdAt
-	if lastActivatedAt != nil {
-		ref = *lastActivatedAt
-	}
-	daysSince := time.Since(ref).Hours() / 24
+	daysSince := time.Since(memoryRefTime(lastActivatedAt, createdAt)).Hours() / 24
 	return baseStrength * math.Exp(-daysSince/stabilityDays)
 }
 
@@ -248,6 +366,29 @@ func computeStabilityDays(memType string, activationCount int) float64 {
 }
 
 // ─── Remember ─────────────────────────────────────────────────────────────────
+
+// Querier is satisfied by both *pgxpool.Pool and pgx.Tx, letting the shared
+// INSERT (and other supersede-path statements) run against either a bare
+// pool connection or an in-flight transaction without duplicating the SQL.
+type Querier interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// validateSupersedeScope enforces aihub#210: a supersede may only target a memory
+// in the SAME project, and methodology.* artifacts may only supersede within the
+// SAME work item — otherwise any project writer could re-home or clobber another
+// wi's (or project's) spec/plan lineage. reqWI/tgtWI are canonical work_item ids
+// ("" when unset). Pure so it is unit-testable without a DB.
+func validateSupersedeScope(memType, reqProject, reqWI, tgtProject, tgtWI string) *AihubError {
+	if tgtProject != reqProject {
+		return NewErr(ErrForbidden, "supersedes_memory_id belongs to a different project")
+	}
+	if strings.HasPrefix(memType, "methodology.") && (tgtWI == "" || tgtWI != reqWI) {
+		return NewErr(ErrForbidden, "methodology.* artifacts may only supersede a memory bound to the same work item")
+	}
+	return nil
+}
 
 // Remember creates a new memory per §7 / §4.3.
 // Returns (memory, isNew, error). isNew=false if dedup hit in suggest mode.
@@ -265,6 +406,19 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	if !typeValid {
 		return nil, false, NewErr(ErrInvalidMemoryType,
 			fmt.Sprintf("type %q must be one of experience.*, fact.*, rule.*, methodology.*", req.Type))
+	}
+	// aihub#289: reject '|' on the WRITE path too. The prefix check above accepts
+	// "experience.*|rule.*" — it starts with "experience." — so a memory could be stored
+	// under a type that the read path now rejects with a 400, making the row
+	// permanently unreadable by type: write-only data, created by the same piped-string
+	// mistake this work item is about. Guarding only the read side would have left the
+	// two halves of one contract disagreeing.
+	if strings.Contains(req.Type, "|") {
+		return nil, false, NewErr(ErrInvalidMemoryType,
+			fmt.Sprintf("type %q contains '|', which is not part of the memory type "+
+				"vocabulary. A memory has exactly ONE type; '|' is not a separator here, "+
+				"and a type stored with it could never be recalled by type. Pick one "+
+				"concrete type (e.g. experience.pitfall).", req.Type))
 	}
 
 	if req.DedupMode == "" {
@@ -286,9 +440,45 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		req.WorkItemID = &canonical
 	}
 
+	// C5 (aihub#210): validate supersede scope before any lineage work — the
+	// target must be in the same project, and methodology.* must stay within the
+	// same wi. Guards against a project-writer re-homing or clobbering another
+	// wi's (or project's) spec/plan lineage.
+	if req.SupersedesMemID != nil && *req.SupersedesMemID != "" {
+		var tgtProject string
+		var tgtWorkItemID *string
+		if err := pool.QueryRow(ctx,
+			`SELECT project, work_item_id FROM memories WHERE id=$1`, *req.SupersedesMemID,
+		).Scan(&tgtProject, &tgtWorkItemID); err != nil {
+			return nil, false, NewErr(ErrNotFound, "supersedes_memory_id not found")
+		}
+		reqWI := ""
+		if req.WorkItemID != nil {
+			reqWI = *req.WorkItemID
+		}
+		tgtWI := ""
+		if tgtWorkItemID != nil {
+			tgtWI = *tgtWorkItemID
+		}
+		if scopeErr := validateSupersedeScope(req.Type, req.Project, reqWI, tgtProject, tgtWI); scopeErr != nil {
+			return nil, false, scopeErr
+		}
+	}
+
 	// Dedup check (skip for "off" mode).
 	// Design §7.7 / §11: strict mode rejects only at HIGH similarity (≥ 0.85);
 	// suggest mode annotates attrs.similar_to between LOW (0.65) and HIGH.
+	//
+	// aihub#249: attrs.similar_to is NOT a version/lineage pointer. It is a
+	// write-time content-similarity annotation (Jaccard, computed by
+	// textDedupCheck below) recording that THIS new memory looked similar to
+	// an existing one at the moment it was created — a one-shot dedup hint,
+	// never updated again after this write, and it can point to any memory
+	// with similar content regardless of type or lineage. The actual,
+	// transactionally-maintained "what supersedes what" chain pointer is
+	// Memory.LatestID (see its doc comment and UpdateMemory) — that field is
+	// authoritative for lineage; attrs.similar_to is not and must not be
+	// treated as one.
 	if req.DedupMode != "off" {
 		existing, err := textDedupCheck(ctx, pool, req.Project, req.Type, req.Content)
 		if err != nil {
@@ -322,7 +512,7 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		baseStrength = *req.BaseStrength
 	}
 	immortal := isImmortalType(req.Type)
-	stabilityDays := computeStabilityDays(req.Type, 0)
+	stabilityDays := computeStabilityDays(req.Type, req.ActivationCount)
 	if req.Tags == nil {
 		req.Tags = []string{}
 	}
@@ -351,49 +541,253 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		req.Attrs = merged
 	}
 
-	// N1: if SupersedesMemID is set, archive the superseded memory first
-	if req.SupersedesMemID != nil && *req.SupersedesMemID != "" {
-		_, _ = pool.Exec(ctx, `
-			UPDATE memories SET status='archived', updated_at=clock_timestamp()
-			WHERE id=$1 AND status='active'`, *req.SupersedesMemID)
-	}
-
 	// aihub#27 / IEBE-1694: render markdown to HTML for configured types only.
 	// Render is best-effort — a render failure must NOT block the insert (spec
 	// decision 3). Other memory types leave rendered_html NULL.
 	renderedHTML := resolveRenderedHTML(req.RenderedHTML, req.Type, req.Content)
 
+	// aihub#192: compute embedding vector for embeddable types. This is a
+	// network call to the embedding provider, so it MUST run before any
+	// transaction below begins — never hold a DB tx open across it.
+	// Best-effort: a provider error logs a warning and leaves emb_vector NULL.
+	var embVecLit *string // nil → SQL NULL
+	var embModel *string
+	var embDims *int
+	if embeddableType(req.Type) {
+		if vec, embErr := embProvider.Embed(ctx, req.Content); embErr != nil {
+			fmt.Fprintf(os.Stderr, "remember: embed failed for type=%s: %v\n", req.Type, embErr)
+		} else if len(vec) > 0 {
+			lit := vecToPGLiteral(vec)
+			embVecLit = &lit
+			m := embProvider.ModelID()
+			embModel = &m
+			d := embProvider.Dims()
+			embDims = &d
+		}
+	}
+
+	// aihub#201: hoisted so the new row's id can double as its own latest_id
+	// (self-head trick — a freshly inserted row is always the head of its
+	// lineage) and be reused below to propagate the cursor across the old
+	// lineage when this insert supersedes a prior version.
+	newID := NewID("mem")
+
+	// N1 / aihub#201 / S2 / BUG1: when SupersedesMemID is set, the head
+	// resolve + archive + insert + latest_id propagation must be one atomic,
+	// serialized unit — otherwise concurrent supersedes can branch the
+	// lineage (see the historical bug note below). Everything from here to
+	// tx.Commit runs on `q` (the tx when superseding, the bare pool
+	// otherwise) so the big INSERT below is never duplicated.
+	//
+	// Historical bug (fixed here): the OLD code ran the head-resolve/archive
+	// retry loop and the latest_id propagation UPDATE as separate,
+	// non-transactional statements against the pool. A concurrent loser could
+	// resolve the same stale head, lose the archive race, retry, and still
+	// see the old (pre-propagation) cursor because the winner hadn't
+	// committed/propagated yet — exhausting all retries and falling through
+	// with oldHead="", inserting a branch off a stale supersedes_id with no
+	// archive and no propagation. Wrapping the whole sequence in one tx makes
+	// the loser's archive UPDATE block on the winner's row lock instead of
+	// racing it: by the time the loser's statement unblocks, the winner has
+	// either committed (loser sees 0 rows, re-resolves the now-current head)
+	// or rolled back (loser retries the same head cleanly).
+	var q Querier = pool
+	var tx pgx.Tx
+	if req.SupersedesMemID != nil && *req.SupersedesMemID != "" {
+		var txErr error
+		tx, txErr = pool.Begin(ctx)
+		if txErr != nil {
+			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to begin tx: %v", txErr))
+		}
+		defer func() {
+			if tx != nil {
+				_ = tx.Rollback(ctx)
+			}
+		}()
+		q = tx
+
+		// Deadlock fix: row-level locks alone cannot give N-way concurrent
+		// supersedes a total order. With N transactions each racing to
+		// archive-then-relink one link in the SAME chain, each ends up
+		// holding a lock on a different row while waiting on a different
+		// transaction's row — a genuine multi-party wait-for cycle (Postgres
+		// 40P01, reproduced deterministically with N=8 concurrent supersedes
+		// in TestConcurrentUpdateSingleHead even after making the individual
+		// SELECT/UPDATE steps blocking rather than racy). The standard fix
+		// for "chain of dependent row locks with no global order" is to
+		// serialize the whole resolve→archive→insert→propagate sequence
+		// with a single mutex per lineage, so only one transaction is ever
+		// inside the critical section for a given lineage. A Postgres
+		// session-independent transaction-scoped advisory lock does exactly
+		// that (auto-released on commit/rollback, no cleanup needed) — keyed
+		// on the lineage's ROOT id (walked up supersedes_id to the row with
+		// supersedes_id IS NULL), which is the only identifier that is
+		// invariant across every step of every concurrent call, unlike
+		// latest_id/head which is exactly what's racing.
+		var rootID string
+		if err := q.QueryRow(ctx, `
+			WITH RECURSIVE up(id, supersedes_id, depth) AS (
+				SELECT id, supersedes_id, 0 FROM memories WHERE id = $1
+				UNION ALL
+				SELECT m.id, m.supersedes_id, up.depth + 1
+				FROM memories m
+				JOIN up ON m.id = up.supersedes_id
+				WHERE up.depth < 10000
+			)
+			SELECT id FROM up WHERE supersedes_id IS NULL
+			ORDER BY depth DESC LIMIT 1`, *req.SupersedesMemID,
+		).Scan(&rootID); err != nil {
+			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to resolve lineage root: %v", err))
+		}
+		if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, rootID); err != nil {
+			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to acquire lineage lock: %v", err))
+		}
+	}
+
+	var oldHead string
+	if req.SupersedesMemID != nil && *req.SupersedesMemID != "" {
+		startID := *req.SupersedesMemID
+		const maxAttempts = 8
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			// With the per-lineage advisory lock held above, at most one
+			// transaction is ever inside this loop for a given lineage, so a
+			// plain (non-locking) read is sufficient and safe here.
+			var head string
+			if err := q.QueryRow(ctx, `
+				SELECT COALESCE(latest_id, id) FROM memories WHERE id=$1`, startID,
+			).Scan(&head); err != nil || head == "" {
+				break
+			}
+			tag, err := q.Exec(ctx, `
+				UPDATE memories SET status='archived', updated_at=clock_timestamp()
+				WHERE id=$1 AND status='active'`, head)
+			if err != nil {
+				return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to archive head: %v", err))
+			}
+			if tag.RowsAffected() == 1 {
+				oldHead = head
+				req.SupersedesMemID = &head
+				break
+			}
+			// Lost the race (or head was already non-active for another reason,
+			// e.g. redacted): re-resolve from the same starting id and retry. In
+			// a tx, this UPDATE only reaches here after any concurrent winner's
+			// row lock has been released (commit or rollback), so latest_id is
+			// guaranteed to reflect the winner's outcome on the next iteration.
+		}
+		if oldHead == "" {
+			return nil, false, NewErr(ErrInternalError, "failed to resolve and archive supersede head after retries")
+		}
+
+		// aihub#239: inherit the lineage's activation history on EVERY supersede
+		// path, not just UpdateMemory's. aihub#236 made UpdateMemory carry the
+		// trio, but pf_save_artifact and any POST /v1/memories with
+		// supersedes_memory_id reach here through Remember instead
+		// (internal/mcp/tools_memory.go), so they used to mint a head with
+		// activation_count=0 / last_activated_at=NULL and strand the history on
+		// the row we just archived. That made #236's guarantee path-dependent.
+		//
+		// handleRemember zeroes the trio right after c.Bind (the #236 finding-3
+		// fix, routes_memory.go), so an external caller can never supply it —
+		// which is exactly why the inheritance has to happen down here in the
+		// domain layer rather than being left to the caller.
+		//
+		// Read from oldHead, the row this call actually archived, rather than
+		// from a head the caller resolved earlier: under concurrent supersedes
+		// the archive loop above may have landed on a different row than the
+		// caller saw. An explicitly supplied trio still wins (UpdateMemory
+		// passes one), so this only fills the gap.
+		if req.LastActivatedAt == nil && req.LastActivatedBy == nil && req.ActivationCount == 0 {
+			var inhAt *time.Time
+			var inhBy *string
+			var inhCount int
+			if err := q.QueryRow(ctx, `
+				SELECT last_activated_at, last_activated_by, activation_count
+				FROM memories WHERE id=$1`, oldHead,
+			).Scan(&inhAt, &inhBy, &inhCount); err != nil {
+				return nil, false, NewErr(ErrInternalError,
+					fmt.Sprintf("failed to inherit activation state from supersede head: %v", err))
+			}
+			req.LastActivatedAt, req.LastActivatedBy, req.ActivationCount = inhAt, inhBy, inhCount
+			// stabilityDays was computed above from a zero ActivationCount, so it
+			// must be recomputed now that the count is inherited — otherwise the
+			// new head stores a non-zero activation_count alongside a
+			// stability_days derived from zero. Only bites experience.* and the
+			// default bucket: fn_mem_immortal (migration 0006) overwrites
+			// stability_days for rule.* / fact.* / methodology.* on INSERT.
+			stabilityDays = computeStabilityDays(req.Type, req.ActivationCount)
+		}
+	}
+
 	mem := &Memory{}
-	err := pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		INSERT INTO memories (
 			id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
-			activation_count, expires_at, tags, source_artifact_id,
-			status, attrs, rendered_html, supersedes_id, created_at, updated_at
+			activation_count, last_activated_at, last_activated_by, expires_at, tags, source_artifact_id,
+			emb_model, emb_dims, emb_vector,
+			status, attrs, rendered_html, supersedes_id, latest_id, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11,
-			0, $12, $13, $14,
-			'active', $15, $16, $17, clock_timestamp(), clock_timestamp()
+			$12, $13, $14, $15, $16, $17,
+			$18, $19, $20::vector,
+			'active', $21, $22, $23, $1, clock_timestamp(), clock_timestamp()
 		)
 		RETURNING id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
 			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
-			rendered_html, commits, created_at, updated_at`,
-		NewID("mem"), req.Project, req.Type, req.Content, req.CallerUserID, req.CallerDisplay,
+			rendered_html, commits, latest_id, created_at, updated_at`,
+		newID, req.Project, req.Type, req.Content, req.CallerUserID, req.CallerDisplay,
 		req.WorkItemID, req.Visibility, immortal, baseStrength, stabilityDays,
-		req.ExpiresAt, req.Tags, nil, // source_artifact_id = nil
-		req.Attrs, renderedHTML, req.SupersedesMemID,
+		req.ActivationCount, req.LastActivatedAt, req.LastActivatedBy, // $12, $13, $14
+		req.ExpiresAt, req.Tags, nil, // $15, $16, $17 — source_artifact_id = nil
+		embModel, embDims, embVecLit, // $18, $19, $20 — emb_model/dims/vector
+		req.Attrs, renderedHTML, req.SupersedesMemID, // $21, $22, $23
 	).Scan(
 		&mem.ID, &mem.Project, &mem.Type, &mem.Content, &mem.AuthorUserID, &mem.AuthorDisplay,
 		&mem.WorkItemID, &mem.Visibility, &mem.IsImmortal, &mem.BaseStrength, &mem.StabilityDays,
 		&mem.LastActivatedAt, &mem.LastActivatedBy, &mem.ActivationCount, &mem.ExpiresAt,
 		&mem.Tags, &mem.SourceArtifactID, &mem.EmbModel, &mem.EmbDims, &mem.Status,
-		&mem.Attrs, &mem.RenderedHTML, &mem.Commits, &mem.CreatedAt, &mem.UpdatedAt,
+		&mem.Attrs, &mem.RenderedHTML, &mem.Commits, &mem.LatestID, &mem.CreatedAt, &mem.UpdatedAt,
 	)
 	if err != nil {
 		return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to insert memory: %v", err))
+	}
+
+	// aihub#201: advance the old lineage's cursor to the new head. Every row
+	// that used to point latest_id at oldHead (the whole prior chain) now
+	// points at newID instead. Runs on the same tx as the archive+insert above
+	// so the whole supersede sequence commits or rolls back together.
+	//
+	// BUG1 deadlock fix: this UPDATE's WHERE clause matches an unindexed
+	// column (latest_id) and can therefore touch multiple rows (the whole
+	// prior chain shares one cursor). Plain `UPDATE ... WHERE latest_id=$2`
+	// lets Postgres acquire those row locks in scan order, which is not
+	// guaranteed consistent across concurrent transactions — under N-way
+	// concurrency two txs can each hold a lock the other needs, in opposite
+	// order, and deadlock (40P01; reproduced with N=8 concurrent supersedes
+	// in TestConcurrentUpdateSingleHead before this fix). Driving the update
+	// off an explicit `SELECT ... ORDER BY id FOR UPDATE` forces every
+	// transaction to acquire the same rows in the same (id-sorted) order, so
+	// the wait graph can only ever be a chain, never a cycle.
+	if oldHead != "" {
+		if _, err := q.Exec(ctx, `
+			WITH targets AS (
+				SELECT id FROM memories WHERE latest_id=$2 ORDER BY id FOR UPDATE
+			)
+			UPDATE memories SET latest_id=$1
+			WHERE id IN (SELECT id FROM targets)`, newID, oldHead); err != nil {
+			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to propagate latest_id: %v", err))
+		}
+	}
+
+	if tx != nil {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to commit supersede tx: %v", err))
+		}
+		tx = nil // the deferred Rollback becomes a no-op after a successful Commit
 	}
 
 	// aihub#74 Stream A: dual-write related links into memory_relations.
@@ -529,6 +923,35 @@ var MemoryTypeEnum = []string{
 	"methodology.spec", "methodology.plan", "methodology.review",
 	"methodology.execute", "methodology.retro", "methodology.wrap_summary",
 }
+
+// PfRememberTypeEnum is MemoryTypeEnum minus methodology.* — pf_remember refuses
+// methodology artifacts (they must be written via pf_save_artifact: wi-bound and
+// credentialed, see handleRemember's methodology gate, aihub#210). Derived from
+// MemoryTypeEnum so the two lists never drift.
+var PfRememberTypeEnum = func() []string {
+	out := make([]string, 0, len(MemoryTypeEnum))
+	for _, t := range MemoryTypeEnum {
+		if !strings.HasPrefix(t, "methodology.") {
+			out = append(out, t)
+		}
+	}
+	return out
+}()
+
+// MethodologyTypeEnum is the methodology.* subset of MemoryTypeEnum — the only
+// types pf_save_artifact accepts. Exposing it as the tool's `type` enum lets
+// contract-lint catch server-400 calls like pf_save_artifact(type="spec") /
+// type="retro" (aihub#211). Derived from MemoryTypeEnum so the two never drift;
+// mirror of PfRememberTypeEnum.
+var MethodologyTypeEnum = func() []string {
+	out := make([]string, 0, 6)
+	for _, t := range MemoryTypeEnum {
+		if strings.HasPrefix(t, "methodology.") {
+			out = append(out, t)
+		}
+	}
+	return out
+}()
 
 // ─── Commit (human annotation) ────────────────────────────────────────────────
 
@@ -842,23 +1265,241 @@ func ReplyCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, autho
 
 // ─── Recall ───────────────────────────────────────────────────────────────────
 
-// Recall retrieves memories per §7.5 (text/tag search path).
-// pgvector cosine search is handled in RecallWithVector when embedding is available.
+// Page-size bounds for Recall. recallTopKDefault is what a caller who names no
+// page size gets; recallTopKCeiling is the largest page any caller can obtain.
+//
+// INVARIANT: recallTopKCeiling >= recallTopKDefault. A ceiling BELOW the default
+// inverts the endpoint — asking for a bigger page then returns FEWER items than
+// asking for nothing — and that inversion shipped (aihub#309): handleRecall
+// carried a second cap of its own, `if req.TopK > 10 { req.TopK = 10 }`, three
+// lines above the only call to Recall. Measured against production on 2026-09-01,
+// same filter and total=220 throughout: top_k=30 -> 10 items, top_k unset -> 20
+// items, top_k=300 -> 10 items.
+//
+// Deliberately unexported, and no test may derive an expectation from either: a
+// fixture that reads the constant under test moves with the defect instead of
+// catching it. The tests in memory_topk_test.go spell 20 and 200 out.
+const (
+	recallTopKDefault = 20
+	recallTopKCeiling = 200
+)
+
+// normalizeRecallTopK resolves a requested page size into the one Recall uses.
+//
+// A non-positive request — the caller sent nothing, sent 0, or sent a negative —
+// means "no page size named" and yields the default. That is the aihub#249
+// contract: bad input falls back to the DEFAULT, never to a smaller page (case 5
+// of TestHandleRecall_TotalAndLimitAlias pins it at the HTTP layer). Any positive
+// request is honoured up to the ceiling.
+//
+// This is the ONLY place a recall page size is bounded, and callers must not add a
+// cap of their own. A cap applied upstream of this function is invisible from
+// here, so nothing can hold it to the invariant above — which is precisely how
+// aihub#309 happened, and why the ceiling on the next line was unreachable, and
+// therefore false, for as long as it did.
+//
+// Landing above the ceiling is still visible to the caller without a new response
+// field: Total reports the full matching count independently of pagination on
+// both the text and vector paths, so Total > len(Items) says a page was not the
+// whole answer (NextCursor says it too, but only on the text path — see the note
+// on paging in RecallWithVector). Total already survives the pf_recall slimming
+// whitelist in internal/mcp/recall_slim.go. A dedicated `top_k_clamped` field
+// would not — that whitelist is opt-in and drops anything unlisted — so
+// disclosure by new field would have reached REST callers while silently missing
+// the pf_recall callers who are the population that has the problem.
+func normalizeRecallTopK(requested int) int {
+	if requested <= 0 {
+		return recallTopKDefault
+	}
+	if requested > recallTopKCeiling {
+		return recallTopKCeiling
+	}
+	return requested
+}
+
+// Recall retrieves memories per §7.5. It is the router: it decides between the pgvector
+// path (RecallWithVector) and the text/tag path (recallText), and — because those two
+// paths own disjoint halves of the corpus — merges them when a request spans both.
 func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*RecallResponse, error) {
-	if req.TopK <= 0 {
-		req.TopK = 20
-	}
-	if req.TopK > 200 {
-		req.TopK = 200
-	}
+	req.TopK = normalizeRecallTopK(req.TopK)
 	if req.MinStrength <= 0 {
 		req.MinStrength = 0.3
 	}
+
+	// aihub#192: route to vector path when embedding is active, a query is present,
+	// and there is no work_item_id filter (wi-scoped recalls are deterministic, not
+	// semantic — skip the vector path to avoid pulling unrelated memories).
+	if !isNoopProvider(embProvider) && req.Query != "" && req.WorkItemID == nil {
+		// aihub#270: the vector path's WHERE carries `emb_vector IS NOT NULL`, so it can
+		// only ever return rows whose type is embeddable. Splitting the caller's filter
+		// tells us which half of the request each path is actually able to answer.
+		embTypes, nonEmbTypes := partitionTypesByEmbeddable(req.Types)
+
+		// The complement runs only when the caller NAMED a type the vector path cannot
+		// serve. An empty type filter deliberately does not qualify: a semantic recall with
+		// no filter is asking "what is relevant to this query", and the text path has no
+		// answer to that — it cannot score relevance, it only orders by reference time. So
+		// topping such a request up would spend half its budget on whichever methodology.*
+		// rows happen to be newest, regardless of the query, and spec/plan bodies are large.
+		// Asking for methodology.spec by name is a different request, and gets the top-up.
+		// (The common ["experience.*","rule.*"] recall names no such type either, so it also
+		// pays nothing extra here.)
+		needsTextComplement := len(nonEmbTypes) > 0
+
+		// How SimilarityThreshold interacts with all of this, stated once:
+		//
+		//   A caller-set threshold gates the EMBEDDABLE half only.
+		//
+		// That half is the only one a cosine score can be computed for, so it is the only
+		// one the threshold can mean anything about. Concretely: a threshold still
+		// suppresses the "vector came back empty, retry over everything as text" fallback
+		// (the case below) — that fallback is what the "empty is intended" rule was written
+		// to prevent. It does not suppress rows of a non-embeddable type the caller named
+		// explicitly, because those rows were never candidates for similarity filtering in
+		// the first place. Requests with a purely embeddable filter — the only shape that
+		// existed before non-embeddable types could be returned at all — behave exactly as
+		// they did before aihub#270.
+
+		// A filter naming *only* non-embeddable types (e.g.
+		// ["methodology.spec","methodology.plan"]) has no vector candidates at all. Skip
+		// straight to the text path rather than paying for an embed call whose result can
+		// only be empty. Note
+		// this reaches the text path even when a threshold is set — same rule as above:
+		// nothing in this request could ever carry a similarity score.
+		if len(req.Types) == 0 || len(embTypes) > 0 {
+			vreq := *req
+			// When req.Types is empty this stays empty, i.e. "no type filter" — correct,
+			// because `emb_vector IS NOT NULL` already restricts that query to the
+			// embeddable half on its own.
+			vreq.Types = embTypes
+
+			r, vecErr := RecallWithVector(ctx, pool, &vreq)
+			switch {
+			case vecErr != nil:
+				fmt.Fprintf(os.Stderr, "recall: vector path failed, falling through to text path: %v\n", vecErr)
+			case len(r.Items) == 0 && req.SimilarityThreshold <= 0:
+				// No embedded candidates matched — e.g. the corpus is not yet backfilled,
+				// or every stored emb_model differs from the current provider. Fall through
+				// to the text/tag path so recall is never silently empty during the embedding
+				// rollout window. (A caller-set SimilarityThreshold means empty is intended.)
+				fmt.Fprintln(os.Stderr, "recall: vector path returned 0 items, falling through to text path")
+			case needsTextComplement:
+				// aihub#270: the vector half came back non-empty, which used to short-circuit
+				// the whole call — and that is exactly how the non-embeddable types the caller
+				// also asked for got dropped, silently, with a plausible-looking result set.
+				// Top up from the text path instead.
+				//
+				// This branch also catches "empty vector half, but SimilarityThreshold > 0",
+				// and that is deliberate: the threshold's "empty is intended" rule is about
+				// suppressing the *semantic* fallback, and the non-embeddable half was never
+				// subject to a similarity score in the first place (it has no vector to score).
+				// So we still return its rows, and we still never run a full text query for
+				// the embeddable types the threshold was meant to gate.
+				return recallHybrid(ctx, pool, req, r, nonEmbTypes)
+			default:
+				return r, nil
+			}
+		}
+	}
+
+	return recallText(ctx, pool, req, false)
+}
+
+// recallHybrid completes a recall whose vector half (vec) is already in hand but whose
+// type filter also names rows the vector path can never return. It runs the text path
+// over exactly the non-embeddable complement and interleaves the two result lists.
+//
+// nonEmbTypes is the caller's filter narrowed to its non-embeddable entries, and is always
+// non-empty here — Recall only reaches this path when the caller named such a type.
+func recallHybrid(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, vec *RecallResponse, nonEmbTypes []string) (*RecallResponse, error) {
+	creq := *req
+	creq.Types = nonEmbTypes
+	// A merged page has no coherent cursor position (the two halves are ordered by
+	// different keys), so neither consume an incoming cursor nor emit one — same reasoning
+	// the vector path already documents for its fusion ordering.
+	creq.Cursor = ""
+
+	txt, err := recallText(ctx, pool, &creq, true)
+	if err != nil {
+		// Degrade to vector-only rather than failing a recall that already has results.
+		// This is the pre-aihub#270 behaviour, so the worst case is the old bug, not an error.
+		fmt.Fprintf(os.Stderr, "recall: text complement failed, returning vector results only: %v\n", err)
+		return vec, nil
+	}
+
+	return mergeRecallHalves(vec, txt, req.TopK), nil
+}
+
+// mergeRecallHalves interleaves two disjoint recall result lists round-robin and truncates
+// to topK.
+//
+// Interleaving rather than concatenating is the point: the two halves are ranked by
+// incomparable keys (the vector half by 0.7*cosine + 0.3*tanh(strength), the text half by
+// reference time), so there is no honest way to sort them into one list — and any scheme
+// that appends one after the other reintroduces the aihub#270 starvation as soon as the
+// first half alone fills topK. Round-robin guarantees each half gets its share of the
+// budget while preserving the internal order of both.
+func mergeRecallHalves(vec, txt *RecallResponse, topK int) *RecallResponse {
+	merged := make([]MemoryWithStrength, 0, topK)
+	seen := make(map[string]bool, topK)
+
+	// The halves are disjoint by construction (embeddable vs non-embeddable types), but
+	// dedupe anyway so a future change to the partition can't produce duplicate rows.
+	push := func(m MemoryWithStrength) {
+		if len(merged) >= topK || seen[m.ID] {
+			return
+		}
+		seen[m.ID] = true
+		merged = append(merged, m)
+	}
+
+	for i := 0; i < len(vec.Items) || i < len(txt.Items); i++ {
+		if len(merged) >= topK {
+			break
+		}
+		if i < len(vec.Items) {
+			push(vec.Items[i])
+		}
+		if i < len(txt.Items) {
+			push(txt.Items[i])
+		}
+	}
+
+	if len(merged) == 0 {
+		// Match the text path, which leaves Items nil rather than empty, so the JSON is
+		// `null` on both paths instead of varying with which one served the request.
+		merged = nil
+	}
+
+	return &RecallResponse{
+		Items: merged,
+		// The halves count disjoint sets, so summing double-counts nothing. It is still
+		// the size of what these two queries can see, not of the whole corpus: the vector
+		// half's own filter excludes rows with a NULL or stale emb_model, so during a
+		// backfill window an embeddable row that neither half matched is counted by
+		// neither. That is the vector path's pre-existing blind spot, inherited here.
+		Total: vec.Total + txt.Total,
+		// NextCursor stays nil: see the cursor note in recallHybrid.
+	}
+}
+
+// recallText is the text/tag search path (§7.5).
+//
+// nonEmbeddableOnly restricts the query to rows embeddableType reports false for. Recall
+// sets it when this query is the complement half of a hybrid recall, so the text half
+// cannot re-return rows the vector half already covers.
+//
+// The narrowed type filter recallHybrid passes already implies that restriction today (a
+// non-embeddable filter entry cannot match an embeddable row). This flag enforces it at
+// the SQL level anyway, so the disjointness that mergeRecallHalves' deduping and the
+// summed Total both rely on is a property of the query rather than of a subtle argument
+// about the partition — and stays true if that partition is ever reworked.
+func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, nonEmbeddableOnly bool) (*RecallResponse, error) {
 	// NOTE: RecencyWeight is currently a reserved-but-unused knob. The text/tag
-	// recall path orders strictly by last_activated_at DESC NULLS LAST, created_at
-	// DESC (see ORDER BY below) and does not blend a recency score. The default is
-	// intentionally not set here so the field stays an explicit no-op rather than a
-	// misleading "applied" value; implementing recency blending is tracked separately.
+	// recall path orders by memRefTimeSQL (see ORDER BY below) and does not blend
+	// a separate recency score. The default is intentionally not set here so the
+	// field stays an explicit no-op rather than a misleading "applied" value;
+	// implementing recency blending is tracked separately.
 
 	args := []any{req.Project}
 	idx := 2
@@ -882,21 +1523,26 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		where += ` AND visibility != 'admin'`
 	}
 
-	// Type filter with prefix matching
-	if len(req.Types) > 0 {
-		typeClauses := make([]string, 0, len(req.Types))
-		for _, t := range req.Types {
-			if strings.HasSuffix(t, ".*") {
-				prefix := strings.TrimSuffix(t, "*")
-				typeClauses = append(typeClauses, fmt.Sprintf("type LIKE $%d", idx))
-				args = append(args, prefix+"%")
-			} else {
-				typeClauses = append(typeClauses, fmt.Sprintf("type = $%d", idx))
-				args = append(args, t)
-			}
-			idx++
-		}
-		where += " AND (" + strings.Join(typeClauses, " OR ") + ")"
+	// Type filter with prefix matching. aihub#289 moved the rule into
+	// typeFilterClause (memory_unmatched.go) so the unmatched-type diagnostic can
+	// ask "would this entry have matched?" against the same code, not a Go
+	// re-implementation of it. Rendering is byte-identical to the inline version
+	// this replaces, parentheses included.
+	if clause, clauseArgs, nextIdx := typeFilterClause(req.Types, idx); clause != "" {
+		where += " AND " + clause
+		args = append(args, clauseArgs...)
+		idx = nextIdx
+	}
+
+	// aihub#270: when this query is the complement half of a hybrid recall, restrict it to
+	// the rows the vector half structurally cannot return. This is what makes the two
+	// halves disjoint — and it is placed here, above the count, so Total counts the same
+	// set the SELECT returns.
+	if nonEmbeddableOnly {
+		clause, clauseArgs, nextIdx := nonEmbeddableTypeClause(idx)
+		where += " AND " + clause
+		args = append(args, clauseArgs...)
+		idx = nextIdx
 	}
 
 	if req.WorkItemID != nil {
@@ -910,36 +1556,91 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	// Formula: base_strength * exp(-days_since / stability_days) >= min_strength
 	where += fmt.Sprintf(` AND (is_immortal = true OR (stability_days > 0 AND
 		base_strength * exp(
-			-extract(epoch from (clock_timestamp() - COALESCE(last_activated_at, created_at)))/86400.0
+			-extract(epoch from (clock_timestamp() - `+memRefTimeSQL+`))/86400.0
 			/ stability_days
 		) >= $%d))`, idx)
 	args = append(args, req.MinStrength)
 	idx++
 
-	// C5 fix: cursor-based pagination using timestamp, not id.
-	// ORDER BY last_activated_at DESC NULLS LAST, created_at DESC means we need
-	// AND (last_activated_at < cursor_ts OR (last_activated_at IS NULL AND created_at < cursor_ts))
-	// Cursor value is an RFC3339Nano timestamp string of the last item's sort key.
-	if req.Cursor != "" {
-		where += fmt.Sprintf(` AND (
-			last_activated_at < $%d::timestamptz
-			OR (last_activated_at IS NULL AND created_at < $%d::timestamptz)
-		)`, idx, idx)
-		args = append(args, req.Cursor)
-		idx++
+	// aihub#249: total is COUNT(*) over every filter above, taken BEFORE the
+	// cursor predicate is appended below — it must report the size of the whole
+	// matching set, not "rows remaining from this cursor onward". `where`/`args`
+	// are safe to reuse here even though both are extended further down: `where`
+	// is a Go string (immutable — later `+=` rebinds the variable, it doesn't
+	// mutate this value) and `args` is only ever appended to, never rewritten at
+	// an existing index, so this snapshot's contents can't be altered by later
+	// appends. This total applies to both the plain and lexical branches below,
+	// since the lexical branch's own comment notes it doesn't use the cursor.
+	total, terr := countMemories(ctx, pool, where, args)
+	if terr != nil {
+		return nil, NewErr(ErrInternalError, fmt.Sprintf("recall count query: %v", terr))
 	}
 
-	args = append(args, req.TopK+1)
+	// Cursor-based pagination. memRefTimeSQL is a single total expression (no
+	// NULL branch — the previous two-branch form could not express "the next row
+	// after this one" once ordering crossed the activated/never-activated
+	// boundary, and silently skipped rows, aihub#236), but it is not by itself
+	// unique, so the cursor must carry the `id DESC` tiebreaker from the ORDER BY
+	// too. A row-value comparison is the exact inverse of that two-key ordering:
+	// it admits rows strictly older by reference time, plus rows at the SAME
+	// reference time with a smaller id — the ones a timestamp-only `<` dropped
+	// from every page after the tie (aihub#239). `id` is already the ORDER BY
+	// tiebreaker, so this needs no index or ordering change, and both halves are
+	// NOT NULL (created_at is NOT NULL, so GREATEST is total) which keeps the
+	// comparison from going NULL.
+	if req.Cursor != "" {
+		curTS, curID := parseRecallCursor(req.Cursor)
+		if curID != "" {
+			where += fmt.Sprintf(` AND (`+memRefTimeSQL+`, id) < ($%d::timestamptz, $%d)`, idx, idx+1)
+			args = append(args, curTS, curID)
+			idx += 2
+		} else {
+			// Pre-aihub#239 cursor: timestamp only. Keep the old single-key
+			// semantics rather than inventing an id bound — `(ts, id) < (ts0, '')`
+			// would drop every row at ts0, which is worse than the tie bug.
+			where += fmt.Sprintf(` AND `+memRefTimeSQL+` < $%d::timestamptz`, idx)
+			args = append(args, curTS)
+			idx++
+		}
+	}
 
-	query := fmt.Sprintf(`
+	// opt③ L1 recall precision (RecallAlgo=="lexical"): fuse lexical relevance
+	// (ts_rank over content_tsv vs the query) with the strength/recency prior via
+	// Reciprocal Rank Fusion, so req.Query actually drives ranking. Default
+	// (""/"recency") keeps the query-blind recency order verbatim — a zero-behavior-
+	// change opt-in. Lexical path skips cursor paging (fusion score is incompatible
+	// with the timestamp cursor); query terms that match nothing tie rlex, so ranking
+	// falls back to the strength prior and recall is preserved.
+	var query string
+	if req.RecallAlgo == "lexical" && req.Query != "" {
+		limitIdx := idx
+		args = append(args, req.TopK)
+		qIdx := idx + 1
+		args = append(args, req.Query)
+		query = fmt.Sprintf(`
 		SELECT id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
-			tags, source_artifact_id, status, attrs, commits, created_at, updated_at
+			tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at
 		FROM memories
 		WHERE %s
-		ORDER BY last_activated_at DESC NULLS LAST, created_at DESC
+		ORDER BY ts_rank(content_tsv, replace(plainto_tsquery('english', $%d)::text, ' & ', ' | ')::tsquery) DESC,
+			tanh(base_strength * exp(
+				-extract(epoch from (clock_timestamp() - `+memRefTimeSQL+`))/86400.0
+				/ NULLIF(stability_days, 0))) DESC
+		LIMIT $%d`, where, qIdx, limitIdx)
+	} else {
+		args = append(args, req.TopK+1)
+		query = fmt.Sprintf(`
+		SELECT id, project, type, content, author_user_id, author_display,
+			work_item_id, visibility, is_immortal, base_strength, stability_days,
+			last_activated_at, last_activated_by, activation_count, expires_at,
+			tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at
+		FROM memories
+		WHERE %s
+		ORDER BY `+memRefTimeSQL+` DESC, id DESC
 		LIMIT $%d`, where, idx)
+	}
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
@@ -967,14 +1668,11 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	if len(items) > req.TopK {
 		items = items[:req.TopK]
 		last := items[len(items)-1]
-		// C5 fix: cursor is the sort-key timestamp, not the id.
-		// Use last_activated_at when set, else created_at (mirrors ORDER BY logic).
-		var cursorVal string
-		if last.LastActivatedAt != nil {
-			cursorVal = last.LastActivatedAt.Format(time.RFC3339Nano)
-		} else {
-			cursorVal = last.CreatedAt.Format(time.RFC3339Nano)
-		}
+		// Cursor is the last row's full sort position — reference time (computed
+		// by the same rule as memRefTimeSQL) AND the id tiebreaker — so the next
+		// page resumes exactly where this one ended even when several rows share
+		// that reference time (aihub#239).
+		cursorVal := formatRecallCursor(memoryRefTime(last.LastActivatedAt, last.CreatedAt), last.ID)
 		nextCursor = &cursorVal
 	}
 
@@ -997,7 +1695,17 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		}
 	}
 
-	return &RecallResponse{Items: items, NextCursor: nextCursor}, nil
+	return &RecallResponse{Items: items, NextCursor: nextCursor, Total: total}, nil
+}
+
+// countMemories runs a COUNT(*) over the memories table with the given WHERE
+// clause/args, shared by Recall (text path) and RecallWithVector (vector path)
+// so the reported `total` always reflects exactly the predicate that produced
+// the page of items, and the two paths cannot silently drift apart (aihub#249).
+func countMemories(ctx context.Context, pool *pgxpool.Pool, where string, args []any) (int, error) {
+	var n int
+	err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM memories WHERE `+where, args...).Scan(&n)
+	return n, err
 }
 
 // scanMemoryLite scans a lightweight memory row for LLM recall (aihub#102).
@@ -1009,7 +1717,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 //	id, project, type, content, author_user_id, author_display,
 //	work_item_id, visibility, is_immortal, base_strength, stability_days,
 //	last_activated_at, last_activated_by, activation_count, expires_at,
-//	tags, source_artifact_id, status, attrs, commits, created_at, updated_at
+//	tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at
 func scanMemoryLite(rows pgx.Rows) (*Memory, error) {
 	m := &Memory{}
 	err := rows.Scan(
@@ -1017,7 +1725,7 @@ func scanMemoryLite(rows pgx.Rows) (*Memory, error) {
 		&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
 		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
 		&m.Tags, &m.SourceArtifactID, &m.Status,
-		&m.Attrs, &m.Commits, &m.CreatedAt, &m.UpdatedAt,
+		&m.Attrs, &m.Commits, &m.LatestID, &m.CreatedAt, &m.UpdatedAt,
 	)
 	return m, err
 }
@@ -1078,7 +1786,7 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
 			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
-			rendered_html, commits, created_at, updated_at
+			rendered_html, commits, latest_id, created_at, updated_at
 		FROM memories
 		WHERE id = $1 AND status != 'redacted'`, id,
 	).Scan(
@@ -1086,7 +1794,7 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 		&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
 		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
 		&m.Tags, &m.SourceArtifactID, &m.EmbModel, &m.EmbDims, &m.Status,
-		&m.Attrs, &m.RenderedHTML, &m.Commits, &m.CreatedAt, &m.UpdatedAt,
+		&m.Attrs, &m.RenderedHTML, &m.Commits, &m.LatestID, &m.CreatedAt, &m.UpdatedAt,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -1101,6 +1809,99 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 	// predicate would leak private/admin/cross-project memories. Recall enriches forward
 	// links with full scoping (see loadForwardRelations).
 	return m, nil
+}
+
+// GetLatestByID resolves id to the current head of its supersede lineage via
+// the latest_id cursor, then loads that head through GetMemoryByID (so it
+// never duplicates GetMemoryByID's column list — avoiding a 7th lockstep
+// drift site). If id does not exist at all, the initial COALESCE(latest_id,
+// id) lookup itself returns pgx.ErrNoRows and this returns ErrNotFound
+// directly — it never reaches GetMemoryByID. The "fall back to id itself"
+// behavior (COALESCE) only applies to an EXISTING row whose latest_id is
+// NULL (pre-migration data written before latest_id was backfilled/self-set).
+func GetLatestByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory, *AihubError) {
+	var head string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(latest_id, id) FROM memories WHERE id = $1`, id,
+	).Scan(&head)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, NewErr(ErrNotFound, "memory not found")
+		}
+		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to resolve latest memory: %v", err))
+	}
+	return GetMemoryByID(ctx, pool, head)
+}
+
+// UpdateMemoryRequest is the body for PATCH /v1/memories/:id/update. Any nil
+// (or empty-slice, for Tags) field inherits the current lineage head's value.
+type UpdateMemoryRequest struct {
+	Content      *string
+	Visibility   *string
+	Tags         []string
+	BaseStrength *float64
+	Attrs        json.RawMessage
+	// Set by handler from Bearer token — not from JSON body.
+	CallerUserID  string
+	CallerDisplay string
+}
+
+// UpdateMemory creates a NEW version superseding the lineage head resolved
+// from id (any id in the lineage), inheriting unchanged fields from that
+// head, and advances the latest_id cursor across the whole lineage (via
+// Remember's supersede-propagation logic). Returns the new head.
+func UpdateMemory(ctx context.Context, pool *pgxpool.Pool, id string, req *UpdateMemoryRequest) (*Memory, error) {
+	head, aerr := GetLatestByID(ctx, pool, id)
+	if aerr != nil {
+		return nil, aerr
+	}
+	rr := &RememberRequest{
+		Project:         head.Project,
+		Type:            head.Type,
+		WorkItemID:      head.WorkItemID,
+		Visibility:      head.Visibility,
+		Tags:            head.Tags,
+		Content:         head.Content,
+		DedupMode:       "off", // updating a memory is an explicit edit, not a fresh dedup-checked remember
+		CallerUserID:    req.CallerUserID,
+		CallerDisplay:   req.CallerDisplay,
+		SupersedesMemID: &head.ID,
+		// aihub#236: a new version inherits the lineage's activation history —
+		// without it each edit reset the head to activation_count=0 /
+		// last_activated_at=NULL, stranding the history on the archived row.
+		//
+		// aihub#239 moved that carry INTO Remember, which now inherits the trio
+		// from the head it actually archives, so this request deliberately leaves
+		// the three fields unset. Passing head's values from here would be worse,
+		// not merely redundant: the `head` above comes from an unlocked
+		// GetLatestByID taken before Remember opens its transaction and acquires
+		// the per-lineage advisory lock, so a pf_activate_memory bump landing in
+		// that window would be silently overwritten by the pre-bump values.
+		// Remember reads under the lock, after the archive, and is the single
+		// source of truth for the trio.
+	}
+	if req.Content != nil {
+		rr.Content = *req.Content
+	}
+	if req.Visibility != nil {
+		rr.Visibility = *req.Visibility
+	}
+	if req.Tags != nil {
+		rr.Tags = req.Tags
+	}
+	if req.BaseStrength != nil {
+		rr.BaseStrength = req.BaseStrength
+	} else {
+		bs := head.BaseStrength
+		rr.BaseStrength = &bs
+	}
+	if len(req.Attrs) > 0 {
+		rr.Attrs = req.Attrs
+	} else {
+		rr.Attrs = head.Attrs
+	}
+	m, _, err := Remember(ctx, pool, rr)
+	return m, err
 }
 
 // SetMemoryVisibility updates a single memory's visibility tier. Used by the artifact
@@ -1121,8 +1922,21 @@ func SetMemoryVisibility(ctx context.Context, pool *pgxpool.Pool, id, visibility
 
 // ─── Activate (§7.3) ──────────────────────────────────────────────────────────
 
+// activationTargetStatus returns the status an activated memory should take.
+// Activation normally revives a memory to "active" (it was just used). The one
+// exception (aihub#214): a superseded (archived) methodology.* artifact stays
+// archived — activate is an unauthenticated read-side recall signal and must not
+// resurrect a stale spec/plan head over its successor.
+func activationTargetStatus(curStatus, memType string) string {
+	if curStatus == "archived" && strings.HasPrefix(memType, "methodology.") {
+		return "archived"
+	}
+	return "active"
+}
+
 // Activate reinforces a memory: increments activation_count, recomputes stability_days,
-// resets last_activated_at, and revives archived memories.
+// resets last_activated_at, and revives archived memories (except a superseded
+// methodology.* artifact, which stays archived — see activationTargetStatus).
 func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, callerDisplay string) (*ActivateResponse, error) {
 	var memType string
 	var baseStrength, stabilityDays float64
@@ -1147,6 +1961,13 @@ func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, call
 	newCount := activationCount + 1
 	newStability := computeStabilityDays(memType, newCount)
 
+	// aihub#214: activation revives an archived memory to active — correct for
+	// experience/fact/rule (used again -> live again), but WRONG for a superseded
+	// (archived) methodology.* artifact: activate is an unauthenticated read-side
+	// recall signal, so it must not resurrect a stale spec/plan head. Keep an
+	// archived methodology.* archived; every other case still revives to active.
+	newStatus := activationTargetStatus(status, memType)
+
 	var newLastActivatedAt time.Time
 	err = pool.QueryRow(ctx, `
 		UPDATE memories
@@ -1154,11 +1975,11 @@ func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, call
 		    stability_days     = $2,
 		    last_activated_at  = clock_timestamp(),
 		    last_activated_by  = $3,
-		    status             = 'active',
+		    status             = $4,
 		    updated_at         = clock_timestamp()
-		WHERE id = $4
+		WHERE id = $5
 		RETURNING last_activated_at`,
-		newCount, newStability, callerUserID, memID,
+		newCount, newStability, callerUserID, newStatus, memID,
 	).Scan(&newLastActivatedAt)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to activate memory: %v", err))
@@ -1211,6 +2032,77 @@ func Redact(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, caller
 		WHERE id = $1`, memID)
 	if err != nil {
 		return NewErr(ErrInternalError, fmt.Sprintf("failed to redact memory: %v", err))
+	}
+
+	// aihub#201 BUG2: if the row we just redacted was a lineage head (some row
+	// — possibly itself — has latest_id = memID), that cursor now points at a
+	// redacted row. GetMemoryByID filters out status='redacted', so the whole
+	// lineage would 404 via GetLatestByID until repointed. Reuse migration
+	// 0026's component/head-selection logic (root_walk up, down_walk down,
+	// newest-non-redacted-first) scoped to just this row's component.
+	if err := repointHeadIfRedacted(ctx, pool, memID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// repointHeadIfRedacted checks whether redactedID was a lineage head (i.e.
+// some row's latest_id still points at it) and, if so, repoints every such
+// row's latest_id at the newest non-redacted row in the connected component.
+// If the whole component is now redacted, latest_id is left pointing at
+// redactedID — the lineage is fully deleted, so a 404 is correct.
+func repointHeadIfRedacted(ctx context.Context, pool *pgxpool.Pool, redactedID string) error {
+	var wasHead bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM memories WHERE latest_id = $1)`, redactedID,
+	).Scan(&wasHead); err != nil {
+		return NewErr(ErrInternalError, fmt.Sprintf("failed to check lineage head: %v", err))
+	}
+	if !wasHead {
+		return nil
+	}
+
+	var newHead string
+	err := pool.QueryRow(ctx, `
+		WITH RECURSIVE root_walk(cur_id) AS (
+			SELECT id FROM memories WHERE id = $1
+			UNION ALL
+			SELECT m.supersedes_id
+			FROM root_walk rw
+			JOIN memories m ON m.id = rw.cur_id
+			WHERE m.supersedes_id IS NOT NULL
+		),
+		root AS (
+			SELECT rw.cur_id AS root_id
+			FROM root_walk rw
+			JOIN memories m ON m.id = rw.cur_id
+			WHERE m.supersedes_id IS NULL
+		),
+		down_walk(member_id) AS (
+			SELECT root_id FROM root
+			UNION ALL
+			SELECT m.id
+			FROM down_walk dw
+			JOIN memories m ON m.supersedes_id = dw.member_id
+		)
+		SELECT m.id
+		FROM down_walk dw
+		JOIN memories m ON m.id = dw.member_id
+		ORDER BY (m.status = 'redacted') ASC, m.created_at DESC
+		LIMIT 1`, redactedID,
+	).Scan(&newHead)
+	if err != nil {
+		return NewErr(ErrInternalError, fmt.Sprintf("failed to resolve component head: %v", err))
+	}
+	if newHead == redactedID {
+		// Every member is redacted (or this row has no component) — nothing to repoint.
+		return nil
+	}
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE memories SET latest_id = $1 WHERE latest_id = $2`, newHead, redactedID,
+	); err != nil {
+		return NewErr(ErrInternalError, fmt.Sprintf("failed to repoint lineage head: %v", err))
 	}
 	return nil
 }

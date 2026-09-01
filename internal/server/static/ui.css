@@ -49,7 +49,15 @@
 html[data-theme="light"], :root {
   --bg: #fbfbfa; --surface: #fff; --surface-2: #f6f6f4; --surface-3: #efeeec;
   --border: #e6e5e1; --border-strong: #d6d5d0;
-  --text: #1c1c20; --text-muted: #646469; --text-subtle: #94949b;
+  /* --text-subtle was #94949b, which is 3.01:1 on --surface and 2.79:1 on
+     --surface-2 — below AA for the 11.5-12.5px labels that are its main
+     consumers (breadcrumbs, DETAILS keys, timestamps, row ids, pagination).
+     44 usages, and grep finds no text painted on --surface-3, so --surface-2
+     is the worst real background: #6e6e77 clears 4.5:1 on all three.
+     The cost is that subtle (4.67:1 on --surface-2) now sits close to muted
+     (5.44:1) in light mode; that third tier was barely visible here anyway.
+     Dark keeps a wide gap — see html[data-theme="dark"]. */
+  --text: #1c1c20; --text-muted: #646469; --text-subtle: #6e6e77;
   --success: #16a34a; --success-soft: #d8f3e2;
   --warning: #e08c0a; --warning-soft: #fcecc6;
   --danger: #e23b30; --danger-soft: #fbdfdb;
@@ -61,10 +69,15 @@ html[data-theme="light"], :root {
   --shadow-pop: 0 10px 34px rgba(20, 20, 30, .16);
 }
 
+/* --text-subtle was #6e6e77 here too, measured at 3.61:1 on --surface (DETAILS
+   keys) and 3.92:1 on --bg (breadcrumbs) against a dark page. #8a8a94 clears
+   4.5:1 on all three surfaces and still reads a full tier below --text-muted
+   (5.79 vs 7.62 on --bg), so the hierarchy survives here in a way it does not
+   in light mode. Both dark blocks below carry the same value. */
 html[data-theme="dark"] {
   --bg: #0a0a0b; --surface: #151517; --surface-2: #1c1c20; --surface-3: #232328;
   --border: #2a2a2f; --border-strong: #383840;
-  --text: #ededf0; --text-muted: #a0a0a8; --text-subtle: #6e6e77;
+  --text: #ededf0; --text-muted: #a0a0a8; --text-subtle: #8a8a94;
   --success: #3fcf78; --success-soft: rgba(63, 207, 120, .14);
   --warning: #e3b341; --warning-soft: rgba(227, 179, 65, .14);
   --danger: #f2655a; --danger-soft: rgba(242, 101, 90, .15);
@@ -85,7 +98,7 @@ html[data-theme="dark"] {
   html[data-theme="auto"] {
     --bg: #0a0a0b; --surface: #151517; --surface-2: #1c1c20; --surface-3: #232328;
     --border: #2a2a2f; --border-strong: #383840;
-    --text: #ededf0; --text-muted: #a0a0a8; --text-subtle: #6e6e77;
+    --text: #ededf0; --text-muted: #a0a0a8; --text-subtle: #8a8a94;
     --success: #3fcf78; --success-soft: rgba(63, 207, 120, .14);
     --warning: #e3b341; --warning-soft: rgba(227, 179, 65, .14);
     --danger: #f2655a; --danger-soft: rgba(242, 101, 90, .15);
@@ -136,45 +149,24 @@ a:hover { text-decoration: underline; }
 .mono { font-family: var(--mono); }
 [hidden] { display: none !important; }
 
-/* ---------- top nav ---------- */
-.pf-nav {
-  border-bottom: 1px solid var(--pf-border);
-  background: var(--pf-bg-soft);
-  padding: 0;
-}
-.pf-nav-inner {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 0.6em 1.5em;
-  display: flex;
-  align-items: center;
-  gap: 1.5em;
-}
-.pf-nav-brand {
-  font-weight: 700;
-  font-size: 1.1em;
-  color: var(--pf-fg);
-}
-.pf-nav-links {
-  display: flex;
-  gap: 1em;
-  flex: 1;
-}
-.pf-nav-links a {
-  color: var(--pf-fg);
-  padding: 4px 6px;
-  border-radius: 4px;
-}
-.pf-nav-links a { color: var(--text-muted); }
-.pf-nav-links a:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
-.pf-nav-links a.pf-active {
-  background: var(--selected);
-  color: var(--text);
-  font-weight: 500;
-}
-.pf-nav-user { display: flex; align-items: center; gap: 0.75em; }
+/* ---------- top nav (unified .pf-appnav — aihub#167) ----------
+   Fixed full-viewport-width top bar shared by both the app-shell
+   (layout.html.tmpl → {{appnav}}) and the artifact viewer
+   (buildUIChrome → buildAppNav). Moved from viewer.css so the app-
+   shell and viewer both get the identical rules from one source. */
+.pf-appnav{position:fixed;top:0;left:0;right:0;width:100%;box-sizing:border-box;z-index:50;height:54px;display:flex;align-items:center;gap:var(--s5);padding:0 var(--s6);background:var(--surface);border-bottom:1px solid var(--border)}
+.pf-appnav-brand{display:flex;align-items:center;gap:var(--s2);font-weight:650;letter-spacing:-.01em;color:var(--text);text-decoration:none}
+.pf-appnav-brand:hover{text-decoration:none}
+.pf-appnav-mark{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--accent),var(--accent-hover));display:grid;place-items:center;color:var(--accent-contrast);font-size:13px;font-weight:700}
+.pf-appnav-links{display:flex;gap:2px;margin-left:var(--s3)}
+.pf-appnav-links a{padding:6px 10px;border-radius:var(--r-sm);color:var(--text-muted);font-weight:500;text-decoration:none}
+.pf-appnav-links a:hover{background:var(--surface-2);color:var(--text)}
+.pf-appnav-links a.pf-active{background:var(--selected);color:var(--text);font-weight:600}
+.pf-appnav-spacer{flex:1}
+/* user name + logout reuse pf-nav-who / pf-nav-logout so the shared buildAppNav
+   output styles correctly in both the app-shell and the artifact viewer. */
 .pf-nav-who {
-  color: var(--pf-fg-muted);
+  color: var(--text-muted);
   font-size: 0.88em;
 }
 .pf-nav-logout button {
@@ -191,7 +183,8 @@ a:hover { text-decoration: underline; }
 /* Theme mode control in the nav: a compact 3-segment rectangle
    (Auto | Light | Dark), styled like the prototype .seg control. Vanilla-JS
    sets the `theme` cookie + data-theme on click; the active segment is rendered
-   server-side from .Theme so it is correct on first paint. */
+   server-side from .Theme so it is correct on first paint.
+   Shared between app-shell and artifact viewer (aihub#167). */
 .pf-theme-seg {
   display: inline-flex;
   height: 30px;
@@ -217,9 +210,17 @@ a:hover { text-decoration: underline; }
 /* ---------- main + footer ---------- */
 .pf-main {
   max-width: 1100px;
-  margin: 1.5em auto 3em;
-  padding: 0 1.5em;
+  /* padding-top reserves space for the fixed .pf-appnav (height 54px + 6px gap). */
+  margin: 0 auto 3em;
+  padding: 60px 1.5em 0;
 }
+/* Scoped override: the .detail grid only appears on the WI detail page. Size the
+   container so its inner width equals the 940+256+gap grid (~1228px) PLUS the
+   .pf-main 1.5em side padding — so the doc column is the full 940px (matching the
+   artifact viewer) AND the breadcrumb/notices above the grid align with the doc
+   card's left edge (everything sits in one centered container, not the viewport).
+   Does not affect other pages using .pf-main. */
+.pf-main:has(.detail) { max-width: 1276px; padding-top: 68px; }
 .pf-footer {
   border-top: 1px solid var(--pf-border);
   color: var(--pf-fg-muted);
@@ -384,12 +385,21 @@ a:hover { text-decoration: underline; }
   border-radius: 4px;
   font-family: var(--pf-mono);
   font-size: 0.9em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .pf-content-md pre code { background: transparent; padding: 0; }
 .pf-content-md table {
   border-collapse: collapse;
   width: 100%;
   margin: 1em 0;
+  /* Wide tables scroll within their own box instead of stretching the page
+     (mirrors .pf-content-raw's wrap intent, prevents horizontal page overflow).
+     display:block makes the <table> its own x-scroll container; narrow tables
+     still fill the container via width:100%. */
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
 }
 .pf-content-md th, .pf-content-md td {
   border: 1px solid var(--pf-border);
@@ -885,6 +895,13 @@ a:hover { text-decoration: underline; }
   letter-spacing: .03em; text-transform: uppercase;
 }
 .card .bd { padding: var(--s4); }
+
+/* collapsible right-rail cards (native <details>/<summary>) */
+details.card > summary.hd { cursor: pointer; list-style: none; justify-content: flex-start; gap: 6px; }
+details.card > summary.hd::-webkit-details-marker { display: none; }
+details.card:not([open]) > summary.hd { border-bottom: none; }
+.card .hd .chev { width: 6px; height: 6px; flex: none; margin-left: auto; border-right: 1.5px solid var(--text-subtle); border-bottom: 1.5px solid var(--text-subtle); transform: rotate(-45deg); transition: transform .15s; }
+details.card[open] > summary.hd .chev { transform: rotate(45deg); }
 .list { border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; background: var(--surface); box-shadow: var(--shadow); }
 .list .grp {
   padding: 8px var(--s4); background: var(--surface-2); font-size: 11px;
@@ -1075,6 +1092,58 @@ a:hover { text-decoration: underline; }
   .qcell:nth-child(n+3) { border-top: 1px solid var(--border); }
 }
 
+/* ============================================================
+   aihub#185 — wi list two-column layout + LCRS segment sidebar.
+   Scoped to the wi list ([data-wi-filters] / .wi-layout / .seg-nav) so the
+   shared .filters / .seg rules above stay intact for the memories page.
+   The .qstrip count strip is no longer rendered by the wi list (counts moved
+   into the sidebar); its rules above are kept for any other consumer.
+   ============================================================ */
+
+/* filter row aligned to the body grid: search fills the left (list) column,
+   Mine/All/Watching fills the right (sidebar) column. */
+.filters[data-wi-filters] { display: grid; grid-template-columns: minmax(0, 1fr) 232px; gap: var(--s6); align-items: center; }
+@media (max-width: 920px) { .filters[data-wi-filters] { grid-template-columns: 1fr; } }
+.filters[data-wi-filters] > .seg { width: 100%; }
+.filters[data-wi-filters] > .seg button { flex: 1; }
+
+/* two-column body: list (left) + segment sidebar (right). */
+.wi-layout { display: grid; grid-template-columns: minmax(0, 1fr) 232px; gap: var(--s6); align-items: start; }
+@media (max-width: 920px) { .wi-layout { grid-template-columns: 1fr; } }
+
+/* right sidebar — vertical single-select segment nav (items are HTMX <a> links). */
+.seg-nav { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); padding: 6px; position: sticky; top: 18px; box-shadow: var(--shadow); }
+.seg-title { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-subtle); padding: 6px 10px 4px; }
+.seg-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; border: 0; background: none; cursor: pointer; padding: 8px 10px; border-radius: var(--r); color: var(--text-muted); font-size: 13px; font-weight: 550; font-family: inherit; text-decoration: none; }
+.seg-item:hover { background: var(--surface-2); }
+.seg-item.on { background: var(--selected); color: var(--text); }
+.seg-item .cnt { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--text-subtle); }
+.seg-item.on .cnt { color: var(--text); }
+.seg-div { height: 1px; background: var(--border); margin: 6px 6px; }
+/* Align the status sidebar's top with the search box. The filter row's right
+   column is empty (the Mine/All seg was removed → aihub#185 follow-up), so pull
+   the sidebar up into it by the search row's height: search box (32px) + the
+   .filters bottom margin (--s4). Desktop only — the two-column layout collapses
+   to one column below 921px, where there is nothing to align to. */
+@media (min-width: 921px) { .wi-layout .seg-nav { margin-top: calc(-32px - var(--s4)); } }
+
+/* sort toggle in the list group header (next to the count). */
+.grp-sort { border: 0; background: none; cursor: pointer; color: var(--text-subtle); font-family: var(--mono); font-size: 13px; line-height: 1; padding: 2px 5px; margin-right: 4px; border-radius: var(--r-sm); }
+.grp-sort:hover { background: var(--surface-2); color: var(--text); }
+
+/* "me" owner toggle in the group header (aihub#185 follow-up): on = only my
+   items, off = all. A small pill before the sort arrow. */
+.grp-me { border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); font-family: inherit; font-size: 11.5px; font-weight: 600; line-height: 1; height: 22px; padding: 0 9px; border-radius: var(--pill); cursor: pointer; margin-right: 6px; }
+.grp-me:hover { background: var(--surface-2); color: var(--text); }
+.grp-me.on { background: var(--selected); color: var(--text); border-color: var(--border-strong); }
+
+/* in-list pager footer (aihub#185): one clean footer row inside the .list card
+   — page-info + per-page picker + numbered page buttons. */
+.list .pager { margin: 0; padding: 8px var(--s3); border-top: 1px solid var(--border); background: var(--surface); }
+.list .pager .grp-pager { border-top: 0; padding: 0; background: none; }
+.list .pager .pp-label { color: var(--text-subtle); font-size: 12px; margin-left: 6px; }
+.list .pager .seg button { height: 26px; padding: 0 9px; font-size: 12px; }
+
 /* needs-you list-row highlight (prototype .row.hot) */
 .row.hot { box-shadow: inset 3px 0 0 var(--accent); }
 
@@ -1109,9 +1178,13 @@ a:hover { text-decoration: underline; }
    All classes mirror the prototype; tokens are reused from above.
    ============================================================ */
 
-/* breadcrumb */
-.crumb { display: flex; align-items: center; gap: 8px; color: var(--text-subtle); font-size: 12.5px; margin-bottom: var(--s4); }
-.crumb a:hover { color: var(--text-muted); }
+/* breadcrumb — unified across app-shell and artifact viewer (aihub#167 follow-up).
+   Moved from viewer.css so the single rule set covers both surfaces.
+   App-shell templates use <nav class="pf-crumb">; viewer uses the same via buildUIChrome. */
+.pf-crumb { display: flex; align-items: center; gap: 8px; color: var(--text-subtle); font-size: 12.5px; margin-bottom: var(--s4); }
+.pf-crumb a { color: var(--text-subtle); text-decoration: none; }
+.pf-crumb a:hover { color: var(--text-muted); }
+.pf-crumb-mono { font-family: var(--mono); }
 
 /* needs-you bar — subtle grey, mirrors the list's needs-you treatment */
 .needs {
@@ -1124,23 +1197,87 @@ a:hover { text-decoration: underline; }
 .needs .dot { width: 6px; height: 6px; border-radius: var(--pill); background: var(--text-subtle); flex: none; }
 
 /* two-column detail grid */
-.detail { display: grid; grid-template-columns: 1fr 300px; gap: var(--s6); align-items: start; }
-@media (max-width: 860px) { .detail { grid-template-columns: 1fr; } }
+.detail { display: grid; grid-template-columns: minmax(0, 940px) 256px; gap: var(--s8); align-items: start; justify-content: center; }
+@media (max-width: 1040px) { .detail { grid-template-columns: 1fr; } }
 .detail aside { display: flex; flex-direction: column; gap: var(--s4); }
 
 /* header: badge metaline + goal title */
 .metaline { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; margin-bottom: var(--s4); }
 .h-title { font-size: 21px; line-height: 1.3; font-weight: 650; letter-spacing: -.012em; margin: 0 0 var(--s5); }
 
+/* doc card — shared surface used by the wi detail main column and the artifact
+   viewer's #pf-doc-col. A clean reusable class; does NOT carry the viewer's grid
+   placement (that stays on #pf-doc-col in viewer.css). aihub#167 follow-up. */
+.pf-doc-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow);
+  padding: var(--s8) 28px;
+}
+
+/* doc section — borderless section used inside a .pf-doc-card. Replaces nested
+   .card chrome (Background / Activity) so there is no card-inside-card visual.
+   The first section has no divider; subsequent sections get a top divider. */
+.pf-doc-section { }
+.pf-doc-section + .pf-doc-section { border-top: 1px solid var(--border); margin-top: var(--s6); padding-top: var(--s6); }
+.pf-doc-section-hd {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: var(--s4);
+}
+.pf-doc-section-hd h3 {
+  margin: 0; font-size: 12px; font-weight: 650; color: var(--text-muted);
+  letter-spacing: .03em; text-transform: uppercase;
+}
+/* aihub#240: source/rendered toggle. Sized to the section heading rather than body text
+   so it reads as part of the section chrome, not as content. */
+.pf-src-toggle {
+  font-size: 11px; font-weight: 600; color: var(--text-muted);
+  text-decoration: none; letter-spacing: .02em;
+  border: 1px solid var(--pf-border); border-radius: 5px; padding: 2px 8px;
+  white-space: nowrap;
+}
+.pf-src-toggle:hover { color: var(--text); border-color: var(--text-subtle); }
+.pf-hd-actions { display: inline-flex; gap: 6px; align-items: center; }
+
+/* aihub#240: the twin pair's HTML/Markdown switch. A segmented control rather than two
+   .pf-src-toggle buttons because the two halves are one choice with a current value, and
+   a pair of plain links cannot show which half is on screen. Same 11px/600 as the toggle
+   beside it so the section chrome reads as one row. */
+.pf-seg-toggle {
+  display: inline-flex; border: 1px solid var(--pf-border); border-radius: 5px;
+  overflow: hidden; white-space: nowrap;
+}
+.pf-seg-item {
+  font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  color: var(--text-muted); text-decoration: none; padding: 2px 8px;
+}
+.pf-seg-item + .pf-seg-item { border-left: 1px solid var(--pf-border); }
+.pf-seg-item:hover { color: var(--text); }
+/* The selected half. --selected is the same token the nav and list rows use for "you are
+   here", so the control does not invent a third idiom for the same idea. */
+.pf-seg-item.on { background: var(--selected); color: var(--text); }
+
 /* prose (markdown background body) */
-.prose { font-size: 13.5px; }
+/* aihub#240: an embedded agent document. The frame is transparent and borderless so it
+   reads as part of the page, and it starts at a modest height that embedframe.js replaces
+   with the height the document reports for itself. The starting value matters: it is what
+   a reader sees if script is unavailable, so it is a readable box rather than 0. */
+iframe.pf-embed { display: block; width: 100%; height: 220px; border: 0; background: transparent; color-scheme: normal; }
+.pf-embed-wrap { min-width: 0; }
+
+.prose { font-size: 13.5px; min-width: 0; }
 .prose > :first-child { margin-top: 0; }
 .prose > :last-child { margin-bottom: 0; }
 .prose p { margin: 0 0 10px; }
 .prose h1, .prose h2, .prose h3, .prose h4 { margin: 14px 0 6px; font-size: 14px; font-weight: 650; }
 .prose h1 { font-size: 16px; }
-.prose code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); padding: 1px 5px; border-radius: 5px; }
-.prose pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r); padding: var(--s3); overflow: auto; }
+.prose code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); padding: 1px 5px; border-radius: 5px; overflow-wrap: anywhere; word-break: break-word; }
+.prose pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r); padding: var(--s3); overflow: auto; max-width: 100%; }
+.prose table { display: block; width: max-content; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 0 0 10px; font-size: 13px; }
+.prose th, .prose td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+.prose th { background: var(--surface-2); color: var(--text); font-weight: 600; }
+.prose tbody tr:nth-child(even) { background: var(--surface-2); }
 .prose pre code { background: none; border: 0; padding: 0; }
 .prose ul, .prose ol { margin: 0 0 10px; padding-left: 18px; }
 .prose li { margin: 3px 0; color: var(--text-muted); }
@@ -1168,7 +1305,7 @@ a:hover { text-decoration: underline; }
 .art { display: flex; align-items: center; gap: var(--s3); }
 .art .ico { width: 30px; height: 30px; border-radius: var(--r-sm); background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-size: 14px; flex: none; font-weight: 700; }
 .art .art-meta { min-width: 0; flex: 1; }
-.art .nm { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.art .nm { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .art .sub { color: var(--text-subtle); font-size: 11.5px; }
 .art .link { font-size: 12.5px; flex: none; }
 .vtag { font-family: var(--mono); font-size: 10px; font-weight: 600; background: var(--neutral-soft); color: var(--neutral-fg); border-radius: var(--pill); padding: 1px 7px; }
@@ -1289,3 +1426,137 @@ a:hover { text-decoration: underline; }
 .mcard-link { position: absolute; inset: 0; z-index: 0; border-radius: inherit; }
 .mcard .ft .wi { position: relative; z-index: 1; }
 .mcard .pf-strength-bar { position: relative; z-index: 1; }
+
+/* ---------- d2 diagram figures (aihub#160 / #161 / #234) ---------- */
+/* Moved here from render/viewer.css by aihub#234. viewer.css is linked only by the
+   artifact viewer, but since aihub#231 the memory and wi detail pages compile d2 too
+   — and they link ui.css alone, so they were emitting <figure class="pf-diagram"> with
+   no rules behind it at all: no frame, and (the part that fails quietly) no light/dark
+   map, leaving a light diagram on a dark page. The artifact viewer links ui.css as
+   well, so one copy here serves every surface. */
+
+.pf-diagram {
+  position: relative;
+  margin: var(--s5) 0; padding: var(--s4);
+  border: 1px solid var(--border); border-radius: var(--r-lg);
+  background: var(--surface-2); text-align: center;
+}
+
+/* aihub#234: this was `max-width: min(100%, 600px)` — a hard 600px cap unrelated to
+   the viewport, which squeezed wide diagrams to ~1/3 label size with no way to
+   enlarge them, so authors ended up reshaping the diagram to fit the renderer.
+   Paired with Scale=1 in render/diagram.go (which gives the SVG an intrinsic size),
+   this is now plain image sizing: a diagram wider than the document column scales
+   down to fit it, everything else renders 1:1 and is never blown up. Anything still
+   too small to read at column width is served by the zoom overlay below. */
+.pf-diagram svg { max-width: 100%; height: auto; }
+
+/* Zoom affordance. diagram.js adds .pf-diagram--zoomable (plus role/tabindex) at
+   runtime, so a page without JS never advertises a click target that does nothing. */
+.pf-diagram--zoomable { cursor: zoom-in; }
+.pf-diagram--zoomable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The hint MUST be generated content, not a DOM node. annot.js anchors reviewer
+   annotations by text-quote over the visible text of #pf-doc-col, so a real
+   "click to enlarge" text node inside a figure would join the quote haystack and
+   could break the anchoring of any annotation spanning a diagram — silently, since
+   a failed anchor just drops the annotation. ::after content is not part of
+   Range.toString(), and neither aria-hidden nor opacity:0 would have been. */
+.pf-diagram--zoomable::after {
+  content: "click to enlarge";
+  position: absolute; right: 10px; bottom: 8px; pointer-events: none;
+  font-size: 11px; color: var(--text-subtle); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--pill); padding: 1px 8px;
+  opacity: 0; transition: opacity .14s ease;
+}
+.pf-diagram--zoomable:hover::after,
+.pf-diagram--zoomable:focus-visible::after { opacity: 1; }
+
+/* Overlay. The zoomed figure keeps the .pf-diagram class so the theme map below
+   still matches inside the overlay — without it the diagram would fall back to d2's
+   baked-in light ramp on a dark page. */
+.pf-diagram-ovl {
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--s6); box-sizing: border-box;
+  background: rgba(0, 0, 0, .62); backdrop-filter: blur(2px);
+}
+.pf-diagram-ovl .pf-diagram {
+  margin: 0; max-width: 100%; max-height: 100%; overflow: auto;
+  background: var(--surface); box-shadow: var(--shadow-pop); cursor: default;
+}
+/* Sized in px by diagram.js: scaled up to fill the viewport when the diagram is
+   smaller than it, kept at natural size when it is larger — which is the case the
+   overlay exists for, and the only place a diagram is ever allowed to overflow its
+   box (hence the `overflow: auto` above; the inline figure can never overflow, since
+   there max-width is 100% of that same box). */
+.pf-diagram-ovl .pf-diagram svg { max-width: none; max-height: none; }
+.pf-diagram-ovl-close {
+  position: fixed; top: 14px; right: 16px;
+  width: 32px; height: 32px; line-height: 1; font-size: 20px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: var(--r);
+  background: var(--surface); color: var(--text); cursor: pointer; padding: 0;
+}
+.pf-diagram-ovl-close:hover { background: var(--surface-2); }
+body.pf-diagram-zoomed { overflow: hidden; }
+
+/* aihub#161: theme the d2 diagram for light/dark. d2 bakes the #129 LIGHT ramp (set
+   in render/diagram.go's ThemeOverrides) into the SVG, so each fixed hex is mapped
+   here to the page's theme token: light resolves to the same hex (diagram unchanged),
+   dark resolves to the dark token (diagram follows the page). Instant toggle, no
+   re-render, no Go change.
+
+   aihub#234 — these rules used to be written as `.pf-diagram [fill="#1c1c20"]`, and
+   they never actually fired. d2 colors every element BOTH ways: a presentation
+   attribute (fill="#1c1c20") and a class (fill-N1), and it emits its own stylesheet
+   INSIDE the <svg>: `.d2-<hash> .fill-N1{fill:#1c1c20}`. That is specificity (0,2,0),
+   identical to `.pf-diagram [fill=…]`, and it sits in the body — later in document
+   order than the head-linked ui.css — so d2 won every tie and dark pages rendered
+   light diagrams. Adding the `svg` type selector lifts these to (0,2,1), which beats
+   d2's rule on specificity regardless of order. Both the class and the attribute form
+   are mapped: the class form is what d2 actually emits today, the attribute form
+   covers any element it colors without one. Keep the `svg` in every selector — drop it
+   and the whole block silently stops applying again.
+
+   d2 emits FOUR property families per theme slot — fill-, stroke-, color- and
+   background-color-. Mapping only fill/stroke is worse than mapping none: a markdown
+   label (`a: |md **x** |`) renders as <div class="md color-N1"> inside a foreignObject
+   over a rect.fill-B6, so remapping the rect alone puts near-black text on a dark
+   surface. Every slot below therefore maps all four families to the same token. */
+.pf-diagram svg [fill="#1c1c20"], .pf-diagram svg .fill-N1 { fill: var(--text) }
+.pf-diagram svg [stroke="#1c1c20"], .pf-diagram svg .stroke-N1 { stroke: var(--text) }
+.pf-diagram svg .color-N1 { color: var(--text) }
+.pf-diagram svg .background-color-N1 { background-color: var(--text) }
+.pf-diagram svg [fill="#646469"], .pf-diagram svg .fill-N2, .pf-diagram svg .fill-B1, .pf-diagram svg .fill-B2,
+.pf-diagram svg .fill-AA2 { fill: var(--text-muted) }
+.pf-diagram svg [stroke="#646469"], .pf-diagram svg .stroke-N2, .pf-diagram svg .stroke-B1, .pf-diagram svg .stroke-B2,
+.pf-diagram svg .stroke-AA2 { stroke: var(--text-muted) }
+.pf-diagram svg .color-N2, .pf-diagram svg .color-B1, .pf-diagram svg .color-B2, .pf-diagram svg .color-AA2, { color: var(--text-muted) }
+.pf-diagram svg .background-color-N2, .pf-diagram svg .background-color-B1, .pf-diagram svg .background-color-B2,
+.pf-diagram svg .background-color-AA2 { background-color: var(--text-muted) }
+.pf-diagram svg [fill="#94949b"], .pf-diagram svg .fill-N3, .pf-diagram svg .fill-B3 { fill: var(--text-subtle) }
+.pf-diagram svg [stroke="#94949b"], .pf-diagram svg .stroke-N3, .pf-diagram svg .stroke-B3 { stroke: var(--text-subtle) }
+.pf-diagram svg .color-N3, .pf-diagram svg .color-B3 { color: var(--text-subtle) }
+.pf-diagram svg .background-color-N3, .pf-diagram svg .background-color-B3 { background-color: var(--text-subtle) }
+.pf-diagram svg [fill="#d6d5d0"], .pf-diagram svg .fill-N4, .pf-diagram svg .fill-B4, .pf-diagram svg .fill-AA4,
+.pf-diagram svg .fill-AB4 { fill: var(--border-strong) }
+.pf-diagram svg [stroke="#d6d5d0"], .pf-diagram svg .stroke-N4, .pf-diagram svg .stroke-B4, .pf-diagram svg .stroke-AA4,
+.pf-diagram svg .stroke-AB4 { stroke: var(--border-strong) }
+.pf-diagram svg .color-N4, .pf-diagram svg .color-B4, .pf-diagram svg .color-AA4, .pf-diagram svg .color-AB4, { color: var(--border-strong) }
+.pf-diagram svg .background-color-N4, .pf-diagram svg .background-color-B4, .pf-diagram svg .background-color-AA4,
+.pf-diagram svg .background-color-AB4 { background-color: var(--border-strong) }
+.pf-diagram svg [fill="#e6e5e1"], .pf-diagram svg .fill-N5, .pf-diagram svg .fill-B5, .pf-diagram svg .fill-AA5,
+.pf-diagram svg .fill-AB5 { fill: var(--border) }
+.pf-diagram svg [stroke="#e6e5e1"], .pf-diagram svg .stroke-N5, .pf-diagram svg .stroke-B5, .pf-diagram svg .stroke-AA5,
+.pf-diagram svg .stroke-AB5 { stroke: var(--border) }
+.pf-diagram svg .color-N5, .pf-diagram svg .color-B5, .pf-diagram svg .color-AA5, .pf-diagram svg .color-AB5, { color: var(--border) }
+.pf-diagram svg .background-color-N5, .pf-diagram svg .background-color-B5, .pf-diagram svg .background-color-AA5,
+.pf-diagram svg .background-color-AB5 { background-color: var(--border) }
+.pf-diagram svg [fill="#f6f6f4"], .pf-diagram svg .fill-N6 { fill: var(--surface-2) }
+.pf-diagram svg [stroke="#f6f6f4"], .pf-diagram svg .stroke-N6 { stroke: var(--surface-2) }
+.pf-diagram svg .color-N6 { color: var(--surface-2) }
+.pf-diagram svg .background-color-N6 { background-color: var(--surface-2) }
+.pf-diagram svg [fill="#ffffff"], .pf-diagram svg .fill-B6 { fill: var(--surface) }
+.pf-diagram svg [stroke="#ffffff"], .pf-diagram svg .stroke-B6 { stroke: var(--surface) }
+.pf-diagram svg .color-B6 { color: var(--surface) }
+.pf-diagram svg .background-color-B6 { background-color: var(--surface) }

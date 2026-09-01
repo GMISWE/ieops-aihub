@@ -46,25 +46,19 @@ EXPECTED SKILL BEHAVIOR (pf-stop fail mode):
        escalated=false
      )
 
-  2. Terminal failure:
+  2. Terminal failure, carrying the failure reason:
      pf_complete_attempt(
        work_item_id=WI_ID,
-       status="failed"
+       status="failed",
+       note="failed reason: legacy auth token system has undocumented
+             dependencies — migration is unsafe in current sprint scope.
+             Root cause needs investigation before retry."
      )
 
-  3. Emit failure reason:
-     pf_emit_event(
-       work_item_id=WI_ID,
-       event_type="note",
-       payload={text: "failed reason: legacy auth token system has undocumented
-                        dependencies — migration is unsafe in current sprint scope.
-                        Root cause needs investigation before retry."}
-     )
-
-  4. Delete state file:
+  3. Delete state file:
      Remove WORKSPACE_ROOT/.polyforge/state/WI_ID.json
 
-  5. Output three-segment format:
+  4. Output three-segment format:
      ## 结果
      wi WI_ID marked as failed. State file deleted.
 
@@ -80,8 +74,7 @@ EXPECTED SKILL BEHAVIOR (pf-stop fail mode):
 
 ASSERT MCP CALLS:
   - pf_complete_attempt(work_item_id=WI_ID, status="failed") called
-  - pf_emit_event(work_item_id=WI_ID, event_type="note") called
-    payload.text contains the failure description (not empty)
+  - pf_complete_attempt called with note= carrying the failure description (not empty)
   - pf_wrap NOT called (fail is not a success wrap)
   - pf_complete_attempt(status="wrapped") NOT called
 
@@ -132,7 +125,7 @@ the suggestion. Test passes if Step 2 PASS criteria are met, regardless of Step 
 
 ## PASS criteria
 pf-stop --fail calls pf_complete_attempt(status="failed") — NOT "wrapped" or "paused";
-pf_emit_event called with failure reason in payload.text;
+pf_complete_attempt called with the failure reason in note=;
 state file deleted after fail;
 WI_ID moves to terminal failed state (not retrievable via pf_get_ready_queue);
 output suggests creating a follow-up bug wi.

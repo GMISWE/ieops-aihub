@@ -402,6 +402,9 @@ func TestSaveArtifactAndRecall(t *testing.T) {
 		"content":            content,
 		"visibility":         "project",
 		"work_item_id":       wiID,
+		"attempt_id":         claim["attempt_id"],
+		"claim_epoch":        claim["claim_epoch"],
+		"session_secret":     claim["session_secret"],
 		"dedup_mode":         "off",
 		"structured_payload": map[string]any{"acceptance": []string{"AC1", "AC2"}, "goal": "concise"},
 	})
@@ -598,8 +601,8 @@ func TestStepRecoveryHintCrashedInProgress(t *testing.T) {
 	case "active_in_progress_conflict":
 		t.Logf("OK: step_recovery_hint=%s (active conflict path)", hint)
 	case "clean":
-		t.Logf("NOTE: step_recovery_hint=clean — server resets step_state to idle "+
-			"before computing the hint (FnClaimWorkItem L426 vs L492); "+
+		t.Logf("NOTE: step_recovery_hint=clean — server resets step_state to idle " +
+			"before computing the hint (FnClaimWorkItem L426 vs L492); " +
 			"crashed_in_progress is currently unreachable via re-claim.")
 	default:
 		t.Logf("NOTE: unexpected step_recovery_hint=%q", hint)
@@ -631,12 +634,15 @@ func TestMethodologyMemoryExpiryOnWrap(t *testing.T) {
 
 	content := fmt.Sprintf("methodology-expiry plan content %d", time.Now().UnixNano())
 	memResp, err := c.Remember(ctx, map[string]any{
-		"project":      testProject,
-		"type":         "methodology.plan",
-		"content":      content,
-		"visibility":   "project",
-		"work_item_id": wiID,
-		"dedup_mode":   "off",
+		"project":        testProject,
+		"type":           "methodology.plan",
+		"content":        content,
+		"visibility":     "project",
+		"work_item_id":   wiID,
+		"attempt_id":     claim["attempt_id"],
+		"claim_epoch":    claim["claim_epoch"],
+		"session_secret": claim["session_secret"],
+		"dedup_mode":     "off",
 	})
 	if err != nil {
 		t.Fatalf("Remember methodology.plan: %v", err)
@@ -700,23 +706,28 @@ func TestMultiLevelDependencyChain(t *testing.T) {
 	waitForHealth(t, c, 30*time.Second)
 
 	suffix := time.Now().UnixNano()
+	// requires_human_session=false so items appear in items[] (not unclassified[])
+	// now that scenario_phase_configs auto-classification was removed (migration 0017).
 	a := mustCreateWorkItem(t, c, ctx, map[string]any{
-		"goal":     fmt.Sprintf("multi-dep-A %d", suffix),
-		"project":  testProject,
-		"scenario": "coding",
-		"wi_type":  "fix_bug",
+		"goal":                   fmt.Sprintf("multi-dep-A %d", suffix),
+		"project":                testProject,
+		"scenario":               "coding",
+		"wi_type":                "fix_bug",
+		"requires_human_session": false,
 	})
 	b := mustCreateWorkItem(t, c, ctx, map[string]any{
-		"goal":     fmt.Sprintf("multi-dep-B %d", suffix),
-		"project":  testProject,
-		"scenario": "coding",
-		"wi_type":  "fix_bug",
+		"goal":                   fmt.Sprintf("multi-dep-B %d", suffix),
+		"project":                testProject,
+		"scenario":               "coding",
+		"wi_type":                "fix_bug",
+		"requires_human_session": false,
 	})
 	cWI := mustCreateWorkItem(t, c, ctx, map[string]any{
-		"goal":     fmt.Sprintf("multi-dep-C %d", suffix),
-		"project":  testProject,
-		"scenario": "coding",
-		"wi_type":  "fix_bug",
+		"goal":                   fmt.Sprintf("multi-dep-C %d", suffix),
+		"project":                testProject,
+		"scenario":               "coding",
+		"wi_type":                "fix_bug",
+		"requires_human_session": false,
 	})
 	defer cancelWorkItem(t, c, ctx, a)
 	defer cancelWorkItem(t, c, ctx, b)
@@ -920,18 +931,19 @@ func TestGetDependencies(t *testing.T) {
 		t.Fatalf("CreateDependency C<-A: %v", err)
 	}
 
-	// GET deps for A: A blocks B and C → A.blocked_by lists B and C
-	// (server-side: "blocked_by" stores rows where blocking_wi_id = A, i.e.
-	// wi-records that are downstream of A).
+	// GET deps for A (the blocker): A blocks B and C, so A.blocking lists B and
+	// C and A.blocked_by is empty. Direction matters here — aihub#230 fixed an
+	// inversion where these two lists were populated from swapped SQL, so this
+	// test asserts the projection direction explicitly, not just the counts.
 	depsA, err := c.ListDependencies(ctx, a)
 	if err != nil {
 		t.Fatalf("ListDependencies A: %v", err)
 	}
-	blockedByA, _ := depsA["blocked_by"].([]any)
-	if len(blockedByA) < 2 {
-		t.Errorf("expected A.blocked_by to contain B and C, got %d entries (%v)", len(blockedByA), blockedByA)
+	blockingA, _ := depsA["blocking"].([]any)
+	if len(blockingA) < 2 {
+		t.Errorf("expected A.blocking to contain B and C, got %d entries (%v)", len(blockingA), blockingA)
 	} else {
-		for _, e := range blockedByA {
+		for _, e := range blockingA {
 			m, ok := e.(map[string]any)
 			if !ok {
 				continue
@@ -940,30 +952,37 @@ func TestGetDependencies(t *testing.T) {
 				t.Errorf("expected kind=blocks, got %v", m["kind"])
 			}
 		}
-		t.Logf("OK: A.blocked_by has %d entries", len(blockedByA))
+		t.Logf("OK: A.blocking has %d entries", len(blockingA))
+	}
+	if blockedByA, _ := depsA["blocked_by"].([]any); len(blockedByA) != 0 {
+		t.Errorf("expected A.blocked_by to be empty (nothing blocks A), got %v", blockedByA)
 	}
 
-	// GET deps for B: B is blocked by A → B.blocking lists A
+	// GET deps for B (the blocked one): B is blocked by A → B.blocked_by lists A
+	// and B.blocking is empty.
 	depsB, err := c.ListDependencies(ctx, b)
 	if err != nil {
 		t.Fatalf("ListDependencies B: %v", err)
 	}
-	blockingB, _ := depsB["blocking"].([]any)
+	blockedByB, _ := depsB["blocked_by"].([]any)
 	foundA := false
-	for _, e := range blockingB {
+	for _, e := range blockedByB {
 		if m, ok := e.(map[string]any); ok {
 			if m["id"] == a {
 				foundA = true
 				if m["kind"] != "blocks" {
-					t.Errorf("expected B.blocking entry kind=blocks, got %v", m["kind"])
+					t.Errorf("expected B.blocked_by entry kind=blocks, got %v", m["kind"])
 				}
 			}
 		}
 	}
 	if !foundA {
-		t.Errorf("expected B.blocking to contain A (%s); got %v", a, blockingB)
+		t.Errorf("expected B.blocked_by to contain A (%s); got %v", a, blockedByB)
 	} else {
-		t.Logf("OK: B.blocking contains A with kind=blocks")
+		t.Logf("OK: B.blocked_by contains A with kind=blocks")
+	}
+	if blockingB, _ := depsB["blocking"].([]any); len(blockingB) != 0 {
+		t.Errorf("expected B.blocking to be empty (B blocks nothing), got %v", blockingB)
 	}
 }
 

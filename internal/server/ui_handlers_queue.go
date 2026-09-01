@@ -126,6 +126,12 @@ func handleUIQueuePartial(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 			return renderTemplate(c, tmpl, "queue_section.html.tmpl", data)
 		}
 
+		if !allMode && uiScopeBlocks(u, project) {
+			data.AccessDenied = true
+			data.Err = "no access to project " + project
+			return renderTemplate(c, tmpl, "queue_section.html.tmpl", data)
+		}
+
 		if !allMode && u != nil && u.Role != "admin" {
 			if _, ok := u.ProjectRoles[project]; !ok {
 				data.AccessDenied = true
@@ -148,7 +154,7 @@ func handleUIQueuePartial(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 		queryProject := project
 		if allMode {
 			queryProject = ""
-			if u != nil && u.Role != "admin" {
+			if u != nil && (u.Role != "admin" || u.ProjectScope != nil) {
 				filter.AccessibleProjects = available
 			}
 		}

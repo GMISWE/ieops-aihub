@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -238,7 +239,11 @@ func runClone(url, destPath string) error {
 //  3. Clones/syncs all repos.
 //  4. PATCHes server with merged repo list.
 //  5. GETs refreshed project for CLAUDE.md block.
-func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, repoDir string, sp serverProject) projectBlock {
+//
+// Returns the CLAUDE.md block plus the reconciled repo list (server ∪ local-only
+// appends) — the same list the clone loop walks, so .polyforge.yaml can be
+// refreshed from it instead of from the pre-PATCH server snapshot (aihub#228).
+func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, repoDir string, sp serverProject) (projectBlock, []serverRepoEntry) {
 	localRepos := []config.Repo{}
 	if cfg != nil {
 		if lp, ok := cfg.Projects[sp.Name]; ok {
@@ -352,26 +357,82 @@ func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, rep
 			block.Repos = repoEntriesFromServer(parseServerRepos(refreshed.Repos))
 		}
 	}
-	return block
+	// The yaml gets `merged`, not the refreshed GET: if the PATCH above failed,
+	// the refreshed response would be missing the local-only repos and writing
+	// from it would delete them from the workspace config.
+	return block, merged
 }
 
-// writeMemberPolyforgeYAML generates .polyforge.yaml for a member workspace
-// as a local cache of the server's project+repo list. The file is written
-// only when it does not already exist. It applies the same callerHasRole
-// filter as the clone loop so the cache declares only projects the caller has
-// a role in — listing a visible project in GET /v1/projects does not imply the
-// caller should treat its repos as part of their workspace.
-func writeMemberPolyforgeYAML(path string, projects []serverProject, currentUserID string) error {
-	mc, err := config.LoadMachineConfig()
-	if err != nil {
-		return err
+// writePolyforgeYAML generates .polyforge.yaml as a local cache of the server's
+// project+repo list. It applies the same callerHasRole filter as the clone loop
+// so the cache declares only projects the caller has a role in — listing a
+// visible project in GET /v1/projects does not imply the caller should treat its
+// repos as part of their workspace.
+//
+// It runs on EVERY init, rewriting an existing file, which is what the generated
+// header has always promised ("Re-run polyforge init to refresh"). Before
+// aihub#228 the call was gated on os.IsNotExist, so a repo added to a project
+// server-side never reached .polyforge.yaml and claim therefore never built a
+// worktree for it.
+//
+// Refreshing an existing file must not destroy local state that the server does
+// not carry, so three things are preserved from the file on disk:
+//
+//   - the aihub block — ResolveAihubURL() returns "" when there is no
+//     POLYFORGE_AIHUB_URL and no ~/.polyforge/config.toml server URL, so
+//     rebuilding it from scratch would blank a working workspace's endpoint;
+//   - project blocks the server did not return (caller lost visibility, or a
+//     hand-authored entry) — dropping them silently would break those repos;
+//   - a project description when the server has none.
+//
+// For projects the server DID return, the repos list is replaced wholesale
+// rather than merged, so a repo removed server-side does not linger.
+//
+// reconciledRepos optionally supplies a per-project repo list that overrides the
+// project's server snapshot. The owner path needs this: runOwnerInit merges
+// local-only repos into the server list and PATCHes them up, but the `projects`
+// slice the caller holds is still the pre-PATCH GET response, so writing from it
+// would drop the repo that was just appended.
+func writePolyforgeYAML(path string, projects []serverProject, currentUserID string, reconciledRepos map[string][]serverRepoEntry) error {
+	// Existing on-disk config, if any. A missing file is the normal first-init
+	// case and not an error. A file that exists but does not parse is different:
+	// everything this function preserves (the aihub block, unmanaged project
+	// blocks) is about to be overwritten, so say so rather than silently
+	// clobbering a file the user could otherwise have repaired by hand.
+	prev, loadErr := config.Load(filepath.Dir(path))
+	if loadErr != nil {
+		if _, statErr := os.Stat(path); statErr == nil {
+			fmt.Fprintf(os.Stderr, "pf init: warning: %s exists but could not be parsed (%v); "+
+				"rewriting it from the server — the previous aihub block and any project "+
+				"entries the server does not return will be lost\n", path, loadErr)
+		}
+		prev = nil
 	}
 
 	cfg := config.Config{
 		Version:  1,
-		AIHub:    config.AIHubConfig{URL: mc.ResolveAihubURL()},
 		Projects: make(map[string]config.Project),
 	}
+
+	// Carry the aihub block over verbatim when it is already populated.
+	if prev != nil {
+		cfg.AIHub = prev.AIHub
+	}
+	if cfg.AIHub.URL == "" {
+		mc, err := config.LoadMachineConfig()
+		if err != nil {
+			return err
+		}
+		cfg.AIHub.URL = mc.ResolveAihubURL()
+	}
+
+	// Preserve project blocks that the server did not return.
+	if prev != nil {
+		for name, p := range prev.Projects {
+			cfg.Projects[name] = p
+		}
+	}
+
 	for _, sp := range projects {
 		if !sp.Visible {
 			continue
@@ -383,7 +444,11 @@ func writeMemberPolyforgeYAML(path string, projects []serverProject, currentUser
 		if !callerHasRole(sp, currentUserID) {
 			continue
 		}
-		serverRepos := parseServerRepos(sp.Repos)
+
+		serverRepos, ok := reconciledRepos[sp.Name]
+		if !ok {
+			serverRepos = parseServerRepos(sp.Repos)
+		}
 		repos := make([]config.Repo, 0, len(serverRepos))
 		for _, r := range serverRepos {
 			var ghOwnerRepo, desc string
@@ -400,9 +465,16 @@ func writeMemberPolyforgeYAML(path string, projects []serverProject, currentUser
 				Description:     desc,
 			})
 		}
-		proj := config.Project{Repos: repos}
+
+		// Start from the existing block so fields the server does not own are
+		// kept, then overwrite what the server is authoritative for.
+		proj := cfg.Projects[sp.Name]
+		proj.Repos = repos
 		if sp.Scenario != nil {
 			proj.Scenario = *sp.Scenario
+		}
+		if sp.Description != nil && *sp.Description != "" {
+			proj.Description = *sp.Description
 		}
 		cfg.Projects[sp.Name] = proj
 	}
@@ -411,7 +483,7 @@ func writeMemberPolyforgeYAML(path string, projects []serverProject, currentUser
 	if err != nil {
 		return err
 	}
-	header := "# polyforge workspace config — auto-generated by pf init (member)\n" +
+	header := "# polyforge workspace config — auto-generated by pf init\n" +
 		"# Source of truth is the server. Re-run polyforge init to refresh.\n\n"
 	return os.WriteFile(path, append([]byte(header), b...), 0644)
 }
@@ -427,8 +499,9 @@ func projectFromRaw(raw map[string]any) (*serverProject, error) {
 }
 
 // runMemberInit performs the member-side init for a single project:
-// uses server repos directly, clones/syncs them.
-func runMemberInit(repoDir string, sp serverProject) projectBlock {
+// uses server repos directly, clones/syncs them. Returns the CLAUDE.md block plus
+// the repo list it cloned, so .polyforge.yaml can be refreshed from the same list.
+func runMemberInit(repoDir string, sp serverProject) (projectBlock, []serverRepoEntry) {
 	serverRepos := parseServerRepos(sp.Repos)
 	for _, r := range serverRepos {
 		if r.URL == "" {
@@ -440,7 +513,7 @@ func runMemberInit(repoDir string, sp serverProject) projectBlock {
 		Name:        sp.Name,
 		Description: sp.Description,
 		Repos:       repoEntriesFromServer(serverRepos),
-	}
+	}, serverRepos
 }
 
 // RunInit sets up (or repairs) the workspace: it ensures ~/.polyforge/config.toml,
@@ -482,11 +555,19 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 		fmt.Printf("ok .polyforge/usage.md written\n")
 	}
 
-	// Write pf-session-start.sh and register it in ~/.claude/settings.json.
-	if err := ensureSessionStartHook(); err != nil {
-		fmt.Fprintf(os.Stderr, "pf init: session start hook: %v\n", err)
-	} else {
-		fmt.Printf("ok ~/.claude/hooks/pf-session-start.sh registered\n")
+	// One-time cleanup of the legacy self-installed SessionStart hook. The
+	// polyforge plugin now ships its own ${CLAUDE_PLUGIN_ROOT}/hooks/
+	// pf-session-start, so the copy in ~/.claude/hooks/ is dead code that
+	// aborted with exit 2 on every session start. Silent when there is
+	// nothing to clean up.
+	if removed, err := removeLegacySessionStartHook(); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init: legacy session start hook cleanup: %v\n", err)
+	} else if removed {
+		// Deliberately does not claim the script itself was moved aside: this
+		// also fires when only a dangling registration was cleared and no
+		// script existed, and pointing users at a .bak that is not there is
+		// worse than saying less.
+		fmt.Printf("ok legacy pf-session-start hook cleaned up (superseded by the polyforge plugin hook)\n")
 	}
 
 	// Ensure .gitignore covers .polyforge.yaml and .polyforge/ secrets.
@@ -534,6 +615,10 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 	}
 
 	var blocks []projectBlock
+	// Per-project reconciled repo lists, keyed by project name — what each init
+	// path actually cloned. .polyforge.yaml is refreshed from these rather than
+	// from the pre-PATCH GET /v1/projects snapshot (aihub#228).
+	reconciledRepos := make(map[string][]serverRepoEntry)
 	for _, sp := range projects {
 		if !sp.Visible {
 			continue
@@ -545,26 +630,47 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 			continue
 		}
 		var blk projectBlock
+		var repos []serverRepoEntry
 		if currentUserID != "" && sp.OwnerUserID == currentUserID {
-			blk = runOwnerInit(ctx, c, cfg, repoDir, sp)
+			blk, repos = runOwnerInit(ctx, c, cfg, repoDir, sp)
 		} else {
-			blk = runMemberInit(repoDir, sp)
+			blk, repos = runMemberInit(repoDir, sp)
 		}
 		blocks = append(blocks, blk)
+		reconciledRepos[sp.Name] = repos
 	}
 
-	// For member workspaces: generate .polyforge.yaml as a local cache if it
-	// doesn't exist yet. Owners already have it as their source of truth.
+	// Refresh .polyforge.yaml from the server on every init — this is what the
+	// generated header promises. Previously gated on the file not existing, which
+	// meant repos added to a project server-side never reached the local config
+	// and claim never built worktrees for them (aihub#228). The writer preserves
+	// the aihub block, unmanaged project blocks, and local-only descriptions.
+	// Guard on the post-role-filter set, not the raw server list: if the caller
+	// holds no role in any returned project there is nothing authoritative to
+	// write, and rewriting the file from an empty set would be pure churn.
 	polyforgeYAMLPath := filepath.Join(wsRoot, ".polyforge.yaml")
-	if _, yerr := os.Stat(polyforgeYAMLPath); os.IsNotExist(yerr) && len(projects) > 0 {
-		if werr := writeMemberPolyforgeYAML(polyforgeYAMLPath, projects, currentUserID); werr != nil {
+	if len(reconciledRepos) > 0 {
+		if werr := writePolyforgeYAML(polyforgeYAMLPath, projects, currentUserID, reconciledRepos); werr != nil {
 			fmt.Fprintf(os.Stderr, "pf init: write .polyforge.yaml: %v\n", werr)
 		} else {
-			fmt.Printf("ok .polyforge.yaml generated (member workspace)\n")
+			fmt.Printf("ok .polyforge.yaml refreshed from server (%d project(s))\n", len(reconciledRepos))
 		}
 	}
 
 	// Write managed block to CLAUDE.md.
+	// Write the repo maps BEFORE slimming the managed block (aihub#291).
+	// Order matters for failure, not for success: the block is only useful
+	// alongside the maps it points at, so writing the maps first means a failure
+	// here leaves the workspace exactly as it was, instead of leaving it worse
+	// than before init ran — block already slimmed, detail nowhere on disk.
+	// Both are rendered from the same `blocks`, so the one-line positioning and
+	// the detail can never come from different snapshots of the server data.
+	if err := writeRepoMaps(phaseDir, blocks); err != nil {
+		fmt.Fprintf(os.Stderr, "pf init: write .polyforge/repo-map: %v\n", err)
+	} else if len(blocks) > 0 {
+		fmt.Printf("ok .polyforge/repo-map/ written (%d project(s))\n", len(blocks))
+	}
+
 	claudeMd := filepath.Join(wsRoot, "CLAUDE.md")
 	if err := upsertManagedBlock(claudeMd, blocks); err != nil {
 		fmt.Fprintf(os.Stderr, "pf init: update CLAUDE.md: %v\n", err)
@@ -618,27 +724,52 @@ func scenarioRepoName(url string) string {
 	return url
 }
 
+// skillOwnedUsageSections are the `## ` headings this template used to emit and that the
+// plugin-versioned using-polyforge skill now owns outright (aihub#294).
+//
+// Two channels carry polyforge's rules into a session, and their properties are exact
+// inverses:
+//
+//	.polyforge/usage.md     workspace-scoped, user-owned, no size cap — and NEVER
+//	                        regenerated (the os.Stat guard at the foot of writeUsageMd).
+//	                        A wrong rule here cannot be corrected in the field.
+//	fragments/*.md under    plugin-versioned, injected by hooks/pf-session-start on every
+//	the using-polyforge     session, hard 10,000-character budget. A wrong rule here is
+//	skill                   corrected by the next plugin release.
+//
+// So rules belong on the fragment channel and only workspace/machine specifics belong in
+// usage.md. A second copy in usage.md is not redundancy, it is a divergence generator: the
+// copy that gets maintained is not the copy that can be fixed where it runs. That is not
+// hypothetical — IR1's worktree path format was wrong in one copy for three months, and
+// this workspace's own usage.md is still the pre-translation template from 2026-05-25.
+//
+// This list is the SINGLE source for three consumers, so they cannot drift apart:
+// writeUsageMd must not emit these headings, checkUsageMd reports an existing file that
+// still carries them, and TestNoRuleSectionIsDeliveredTwice asserts the first.
+var skillOwnedUsageSections = []string{
+	"## Iron Rules",
+	"## NL Routing",
+	"## Memory Type Reference",
+}
+
 // writeUsageMd creates <wsRoot>/.polyforge/usage.md with the polyforge v1 workspace guide.
 // This replaces the old .claude/polyforge.md pattern from polyforge-v3.
+//
+// Deliberately carries no rule text — see skillOwnedUsageSections for why. The existence
+// guard below means this function can only ever fix workspaces created after it ships;
+// existing ones are handled by checkUsageMd in doctor.go.
 func writeUsageMd(path string) error {
 	const content = `# polyforge v1 workspace guide
 
 > **State authority = aihub PostgreSQL** at the URL in ~/.polyforge/config.toml.
 > Per-wi task worktrees materialize at pf.<project>-<seq>/<repo>/ on /pf-work.
 
-## Iron Rules
-
-**IR1 — Work-item-gated writes**
-Every git commit/push/PR and Edit/Write under .repo/ must happen inside a
-claimed wi worktree (pf.<project>-<seq>/<repo>/). No env-var bypass.
-
-**IR2 — Analyze obstacles; track blockers as wi's**
-When you hit an obstacle, find the root cause. If it's a bug or out of
-scope, create a wi to track it — don't route around it.
-
-**IR3 — MCP unavailable → stop**
-If the polyforge MCP can't reach aihub, stop and report. Do not fall back
-to direct HTTP calls. Use /reload-plugins or restart to reconnect.
+> **No rule lives in this file.** The Iron Rules (IR1-IR3), NL Routing and the
+> memory-type vocabulary ship with the ` + "`" + `using-polyforge` + "`" + ` skill and are injected at
+> session start, so a correction reaches every workspace on the next plugin update.
+> ` + "`" + `polyforge init` + "`" + ` never rewrites this file once it exists — it is yours to edit —
+> and that is exactly why no rule may be kept here: a copy parked on this channel
+> can never be fixed. Read ` + "`" + `fragments/` + "`" + ` under the skill dir for the full text.
 
 ---
 
@@ -666,14 +797,14 @@ to direct HTTP calls. Use /reload-plugins or restart to reconnect.
 
 ---
 
-## Wi 创建规则
+## Wi creation rules
 
-**所有 wi 创建必须通过 ` + "`" + `/pf-work` + "`" + ` skill**，不管是人还是 AI。
+**All wi creation MUST go through the ` + "`" + `/pf-work` + "`" + ` skill**, whether human or AI.
 
-- **对话模式**（默认）：人/AI 在 session 讨论中决定建 wi → 创建后询问是否认领
-- **静默模式**：AI 在 step 执行中途发现问题 → 调用 pf-work 时说明"静默模式" → 只创建放 queue，不询问
+- **dialog mode** (default): a human/AI decides to create a wi during a session discussion -> after creation, ask whether to claim it
+- **silent mode**: an AI finds an issue mid-step -> when calling pf-work, state "silent mode" -> create and queue only, no prompt
 
-不要直接调用 ` + "`" + `pf_create_work_item` + "`" + ` MCP tool 创建 wi，统一走 pf-work 以保持行为一致。
+Do not call the ` + "`" + `pf_create_work_item` + "`" + ` MCP tool directly; always go through pf-work for consistent behavior.
 
 ---
 
@@ -686,61 +817,15 @@ api_key = "your-key-here"
 [server]
 url = "http://your-aihub-host"
 
-# Binary update channel (optional; default: stable)
+# Binary update channel (optional; "dev" is the only published channel and the
+# default, so you normally leave this out entirely)
 # [binary]
-# channel = "stable"   # stable | dev
+# channel = "dev"
 ` + "```" + `
 
 ---
 
 > Generated by polyforge init. Edit this file to add workspace-specific notes.
-
----
-
-## NL Routing
-
-| 说什么 | 对应操作 |
-|--------|---------|
-| 今天有哪些活 / 派活 / ready queue | ` + "`" + `pf_get_ready_queue` + "`" + ` + fan-out subagents |
-| 哪些活需要我拍板 / needs attention | ` + "`" + `pf_get_ready_queue` + "`" + ` → ` + "`" + `needs_human_session[]` + "`" + ` |
-| 开始 / 新任务 / new / start | ` + "`" + `/pf-work` + "`" + ` (Mode A) |
-| 认领 / claim + slug | ` + "`" + `/pf-work <slug>` + "`" + ` (Mode B) |
-| 继续 / resume + slug | ` + "`" + `/pf-work <slug> --resume` + "`" + ` (Mode C) |
-| 接管 / takeover + slug | ` + "`" + `/pf-work <slug> --force` + "`" + ` (Mode D) |
-| 暂停 / pause | ` + "`" + `/pf-stop --pause` + "`" + ` |
-| 完成 / done / wrap / 搞定 | ` + "`" + `/pf-stop --wrap` + "`" + ` |
-| 失败 / abandon | ` + "`" + `/pf-stop --fail` + "`" + ` |
-| 状态 / status / 进度 | ` + "`" + `/pf-status` + "`" + ` |
-| 设计 / spec / brainstorm | ` + "`" + `/pf-spec` + "`" + ` |
-| 计划 / plan | ` + "`" + `/pf-plan` + "`" + ` |
-| 执行 / execute / run it | ` + "`" + `/pf-execute` + "`" + ` |
-| 回顾 / retro | ` + "`" + `/pf-retro` + "`" + ` |
-| 这个 bug / 调试 / debug | ` + "`" + `/pf-spec` + "`" + ` (debug variant) |
-| 记录 / note / log | ` + "`" + `pf_emit_event(event_type="note", ...)` + "`" + ` |
-| 初始化 / init / setup workspace | ` + "`" + `/pf-init` + "`" + ` |
-| 诊断 / doctor / 连不上 | ` + "`" + `/pf-doctor` + "`" + ` |
-| 发布 / release / cut | ` + "`" + `/pf-release` + "`" + ` |
-
----
-
-## Memory Type Reference
-
-手动调用 ` + "`" + `pf_remember` + "`" + ` 时，按**消费方**选 type，不按内容描述选。
-` + "`" + `experience.*` + "`" + ` 由 pf-retro 自动写入，手动存记忆优先用 ` + "`" + `rule.*` + "`" + ` / ` + "`" + `fact.*` + "`" + `。
-
-| 内容 | Type | 被哪些 skill 召回 |
-|------|------|-----------------|
-| init/setup 经验 | ` + "`" + `experience.init` + "`" + ` | pf-init |
-| 执行中发现的 bug 模式 | ` + "`" + `experience.debug` + "`" + ` | pf-plan, pf-execute, pf-retro |
-| 成功解决某类问题的方案 | ` + "`" + `experience.approach` + "`" + ` | pf-plan, pf-execute, pf-retro |
-| 需要避开的坑 | ` + "`" + `experience.pitfall` + "`" + ` | pf-plan, pf-execute, pf-retro |
-| wi 生命周期操作规则 | ` + "`" + `rule.work` + "`" + ` | using-polyforge, pf-spec |
-| init 阶段操作规则 | ` + "`" + `rule.init` + "`" + ` | pf-init |
-| 调度/排期规则 | ` + "`" + `rule.scheduling` + "`" + ` | pf-init (managed block) |
-| 领域事实 | ` + "`" + `fact.<subtopic>` + "`" + ` | pf-spec |
-| spec 产出 | ` + "`" + `methodology.spec` + "`" + ` | pf-plan, pf-execute, pf-retro |
-| plan 产出 | ` + "`" + `methodology.plan` + "`" + ` | pf-execute, pf-retro |
-| release 记录 | ` + "`" + `methodology.release` + "`" + ` | pf-release |
 `
 	if _, err := os.Stat(path); err == nil {
 		return nil // already exists — don't overwrite user edits
@@ -797,177 +882,202 @@ func ensureClaudeMdRef(claudeMd string) error {
 			return writeErr
 		}
 		fmt.Printf("ok CLAUDE.md updated: %s → %s\n", oldRef, newRef)
+		return nil
 	}
+
+	// Neither ref present. Returning nil here used to be the NORMAL outcome on a fresh
+	// workspace, not an edge case: RunInit calls upsertManagedBlock first, which creates
+	// CLAUDE.md when it is absent, so the os.IsNotExist branch above is unreachable on
+	// the main path and this one ran against a file holding only a managed block — and
+	// the import line was never written at all. Prepend it: the managed block is spliced
+	// by marker index, so anything above it survives the next init.
+	if s != "" && !strings.HasPrefix(s, "\n") {
+		s = "\n" + s
+	}
+	s = newRef + "\n" + s
+	if writeErr := os.WriteFile(claudeMd, []byte(s), 0644); writeErr != nil {
+		return writeErr
+	}
+	fmt.Printf("ok CLAUDE.md: added %s\n", newRef)
 	return nil
 }
 
-// pfSessionStartScript is written to ~/.claude/hooks/pf-session-start.sh.
-// It injects the using-polyforge SKILL.md into the Claude Code session context
-// whenever the session is opened inside a polyforge workspace.
-const pfSessionStartScript = `#!/usr/bin/env bash
-# SessionStart hook: inject polyforge v1 using-polyforge SKILL.md as
-# additionalContext when the session is opened inside a polyforge workspace.
+// legacySessionStartHookName is the hook file that `polyforge init` used to
+// self-install into ~/.claude/hooks/. It is fully superseded by the
+// plugin-bundled ${CLAUDE_PLUGIN_ROOT}/hooks/pf-session-start, which
+// self-locates instead of hardcoding a plugin cache path.
+const legacySessionStartHookName = "pf-session-start.sh"
 
-set -euo pipefail
+// legacySessionStartHookMarker is the giveaway string inside the dead script:
+// it pointed at the pre-rename `gmi-marketplace` plugin cache, so after the
+// marketplace was renamed to `ieops-aihub` the path never resolved — and under
+// `set -euo pipefail` the failed lookup aborted the hook with exit 2 and no
+// stderr on every session start. Only a file containing this marker is ours to
+// clean up; anything else at that path is the user's own hook, left untouched.
+const legacySessionStartHookMarker = "plugins/cache/gmi-marketplace/polyforge"
 
-# Walk up from $PWD looking for .polyforge.yaml.
-dir="${CLAUDE_PROJECT_DIR:-$PWD}"
-in_workspace=0
-while [ -n "$dir" ] && [ "$dir" != "/" ]; do
-  if [ -f "$dir/.polyforge.yaml" ]; then
-    in_workspace=1
-    break
-  fi
-  parent="$(dirname "$dir")"
-  [ "$parent" = "$dir" ] && break
-  dir="$parent"
-done
-[ "$in_workspace" = "0" ] && exit 0
+// legacySessionStartHookBackupSuffix is appended to the legacy hook when it is
+// moved aside. The cleanup renames rather than deletes so the removal stays
+// reversible by hand.
+const legacySessionStartHookBackupSuffix = ".removed-by-polyforge.bak"
 
-# Locate the most recently modified polyforge v1 plugin install.
-plugin_base="$HOME/.claude/plugins/cache/gmi-marketplace/polyforge"
-plugin_root="$(ls -td "$plugin_base"/*/ 2>/dev/null | head -1)"
-plugin_root="${plugin_root%/}"
-[ -z "$plugin_root" ] && exit 0
-
-skill="$plugin_root/skills/using-polyforge/SKILL.md"
-[ -f "$skill" ] || exit 0
-
-SKILL_PATH="$skill" python3 <<'PY'
-import json, os
-skill = open(os.environ["SKILL_PATH"]).read()
-ctx = (
-    "<EXTREMELY_IMPORTANT>\n"
-    "You are in a polyforge workspace (.polyforge.yaml detected). "
-    "Lifecycle skills /pf-* and ` + "`" + `mcp__plugin_polyforge_polyforge__*` + "`" + ` MCP tools are "
-    "authoritative; do not bypass them with raw git / Edit / Bash on work_items.\n\n"
-    "**Below is the full content of the ` + "`" + `using-polyforge` + "`" + ` skill:**\n\n"
-    + skill
-    + "\n</EXTREMELY_IMPORTANT>"
-)
-print(json.dumps({
-    "hookSpecificOutput": {
-        "hookEventName": "SessionStart",
-        "additionalContext": ctx,
-    }
-}))
-PY
-`
-
-// ensureSessionStartHook writes pf-session-start.sh to ~/.claude/hooks/ and
-// registers it in ~/.claude/settings.json. Idempotent.
-func ensureSessionStartHook() error {
+// removeLegacySessionStartHook runs the one-time reverse cleanup of the legacy
+// self-installed SessionStart hook against the current user's home directory.
+// It reports whether anything was actually removed. Silent and idempotent: on
+// an already-clean machine it returns (false, nil) without touching a byte.
+func removeLegacySessionStartHook() (removed bool, err error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		return false, err
 	}
-
-	hooksDir := filepath.Join(homeDir, ".claude", "hooks")
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
-		return err
-	}
-
-	hookPath := filepath.Join(hooksDir, "pf-session-start.sh")
-	if err := os.WriteFile(hookPath, []byte(pfSessionStartScript), 0755); err != nil {
-		return err
-	}
-
-	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
-	return ensureSettingsHook(settingsPath, hookPath)
+	return removeLegacySessionStartHookIn(homeDir)
 }
 
-// sessionStartHookTimeoutMs is the Claude Code SessionStart hook timeout in
-// milliseconds. The pf-session-start.sh script forks bash and python3, so it
-// needs enough headroom for cold start — anything below ~1s tends to get the
-// hook SIGKILL'd before it can write additionalContext.
-const sessionStartHookTimeoutMs = 5000
+// removeLegacySessionStartHookIn is removeLegacySessionStartHook with an
+// explicit home directory, so the cleanup can be exercised against a fake HOME.
+func removeLegacySessionStartHookIn(homeDir string) (removed bool, err error) {
+	hookPath := filepath.Join(homeDir, ".claude", "hooks", legacySessionStartHookName)
+	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
 
-// ensureSettingsHook adds hookCmd to the SessionStart hooks in settings.json,
-// or reconciles the timeout/type fields of an existing entry. Idempotent: a
-// no-op when the existing entry already matches the desired shape.
-func ensureSettingsHook(settingsPath, hookCmd string) error {
-	var settings map[string]any
-
-	b, err := os.ReadFile(settingsPath)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err == nil {
-		if err := json.Unmarshal(b, &settings); err != nil {
-			return err
+	body, err := os.ReadFile(hookPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// The script is already gone but its registration may not be —
+			// e.g. someone stopped the bleeding by hand with `rm` and left
+			// settings.json pointing at a path that no longer exists. That
+			// dangling entry is exactly the "residual registration" the
+			// cleanup is meant to clear, so drop it. Safe without the content
+			// gate below: there is no file to gate on, and an entry naming a
+			// missing script is broken no matter who wrote it.
+			return removeSettingsHook(settingsPath, hookPath)
 		}
-	} else {
-		settings = make(map[string]any)
+		return false, err
+	}
+	// Content gate: never touch a hook we did not write.
+	if !strings.Contains(string(body), legacySessionStartHookMarker) {
+		return false, nil
 	}
 
-	// Navigate to hooks.SessionStart[0].hooks, creating the path if needed.
+	// Unregister first, move the file aside second. If the second step fails
+	// the leftover is an orphan script nothing invokes; the reverse order would
+	// leave settings.json pointing at a missing file.
+	if _, err := removeSettingsHook(settingsPath, hookPath); err != nil {
+		return false, err
+	}
+	// Overwrites a pre-existing backup of the same name — it holds the same
+	// dead content, and keeping the rename unconditional keeps this idempotent.
+	if err := os.Rename(hookPath, hookPath+legacySessionStartHookBackupSuffix); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// removeSettingsHook deletes the SessionStart hook entries whose command is
+// exactly hookCmd from settings.json, leaving every sibling entry, the
+// enclosing group (even when it ends up empty), other hook events and all
+// unrelated top-level keys alone. It reports whether an entry was actually
+// removed. A no-op — including a missing settings.json — writes nothing at all,
+// so re-running init does not disturb the file's mtime.
+func removeSettingsHook(settingsPath, hookCmd string) (removed bool, err error) {
+	b, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	var settings map[string]any
+	if err := json.Unmarshal(b, &settings); err != nil {
+		return false, err
+	}
+
 	hooks, _ := settings["hooks"].(map[string]any)
-	if hooks == nil {
-		hooks = make(map[string]any)
-		settings["hooks"] = hooks
-	}
-
 	sessionStart, _ := hooks["SessionStart"].([]any)
-	if len(sessionStart) == 0 {
-		sessionStart = []any{map[string]any{"hooks": []any{}}}
-		hooks["SessionStart"] = sessionStart
-	}
 
-	group, _ := sessionStart[0].(map[string]any)
-	if group == nil {
-		group = map[string]any{"hooks": []any{}}
-		sessionStart[0] = group
-	}
-
-	entries, _ := group["hooks"].([]any)
-
-	const desiredType = "command"
-	desiredTimeout := sessionStartHookTimeoutMs
-
-	// Find existing entry by command; reconcile its fields if found, otherwise
-	// append a new entry. Reconcile (not early-return) so legacy installs that
-	// captured a wrong timeout get healed when the user re-runs init.
-	found := false
 	changed := false
-	for _, e := range entries {
-		m, ok := e.(map[string]any)
+	for _, grp := range sessionStart {
+		g, _ := grp.(map[string]any)
+		if g == nil {
+			continue
+		}
+		entries, ok := g["hooks"].([]any)
 		if !ok {
 			continue
 		}
-		if cmd, _ := m["command"].(string); cmd != hookCmd {
-			continue
+		kept := make([]any, 0, len(entries))
+		for _, e := range entries {
+			// Exact command match only — never substring or prefix.
+			if m, _ := e.(map[string]any); m != nil {
+				if cmd, _ := m["command"].(string); cmd == hookCmd {
+					continue
+				}
+			}
+			kept = append(kept, e)
 		}
-		found = true
-		if t, _ := m["type"].(string); t != desiredType {
-			m["type"] = desiredType
+		if len(kept) != len(entries) {
+			// Keep the group itself: pruning empty containers would edit more
+			// of the user's file than this cleanup is entitled to.
+			g["hooks"] = kept
 			changed = true
 		}
-		// JSON unmarshal turns numbers into float64; coerce before comparing.
-		if ms, ok := m["timeout"].(float64); !ok || int(ms) != desiredTimeout {
-			m["timeout"] = desiredTimeout
-			changed = true
-		}
-		break
-	}
-	if !found {
-		entries = append(entries, map[string]any{
-			"type":    desiredType,
-			"command": hookCmd,
-			"timeout": desiredTimeout,
-		})
-		group["hooks"] = entries
-		changed = true
 	}
 
 	if !changed {
-		return nil
+		return false, nil
 	}
 
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
+		return false, err
+	}
+	if err := writeFileAtomic(settingsPath, append(out, '\n'), 0644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// writeFileAtomic writes data to path via a temp file in the same directory
+// followed by a rename, so an interrupted write cannot leave settings.json
+// truncated or half-written.
+//
+// The replacement inherits the existing file's permissions. The rename swaps in
+// a new inode, so without this a user who ran `chmod 600 ~/.claude/settings.json`
+// — reasonable, since that file can carry an env block with API keys — would
+// silently get it widened back. fallbackPerm applies only when path does not
+// exist yet.
+func writeFileAtomic(path string, data []byte, fallbackPerm os.FileMode) error {
+	perm := fallbackPerm
+	if fi, err := os.Stat(path); err == nil {
+		perm = fi.Mode().Perm()
+	}
+
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.WriteFile(settingsPath, append(out, '\n'), 0644)
+	tmp := f.Name()
+	// No-op once the rename below has succeeded.
+	defer func() { _ = os.Remove(tmp) }()
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	// Flush before the rename so a crash cannot leave the new name pointing at
+	// an empty file on filesystems that would otherwise defer the data write.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 const managedBlockStart = `<!-- polyforge:managed:version="1.0" -->`
@@ -986,51 +1096,234 @@ func oneLine(s string) string {
 }
 
 // Remote URLs are NOT included in the managed block.
-// renderRepoBlock writes one repo's entry into the managed block. When the
-// structured description is present it renders a positioning line plus stack /
-// modules / typical-change bullets (for AI routing); otherwise it falls back to
-// the legacy single-line description or a pending placeholder.
+// renderRepoBlock writes one repo's entry into the managed block: exactly one
+// line, `- **<name>**: <positioning>`.
+//
+// It used to also emit stack / modules / changes / generated bullets. Those
+// moved to .polyforge/repo-map/<project>.md (renderRepoMap) in aihub#291: the
+// managed block is injected into CLAUDE.md at context position 0, so it is
+// re-read on every single request and compaction cannot drop it, while that
+// detail is only needed at the moment of routing a task to a repo. Measured on
+// this workspace, the detail was 29,650 of the block's 34,606 bytes.
+//
+// Keep this function emitting a single line. If you are tempted to add a
+// bullet here, add it to renderRepoMap instead.
 func renderRepoBlock(sb *strings.Builder, r repoEntry) {
-	headline := ""
+	fmt.Fprintf(sb, "- **%s**: %s\n", r.Name, repoHeadline(r))
+}
+
+// repoHeadline is the one-line positioning shown for a repo, with the legacy
+// description and the pending placeholder as fallbacks. Shared by the managed
+// block and the repo map so the two can never disagree about a repo's identity.
+func repoHeadline(r repoEntry) string {
 	switch {
 	case r.Positioning != "":
-		headline = oneLine(r.Positioning)
+		return oneLine(r.Positioning)
 	case r.Description != nil && *r.Description != "":
-		headline = oneLine(*r.Description)
+		return oneLine(*r.Description)
 	default:
-		headline = "*(description pending — run /pf-init to generate)*"
+		return "*(description pending — run /pf-init to generate)*"
 	}
-	fmt.Fprintf(sb, "- **%s**: %s\n", r.Name, headline)
+}
 
-	if !r.hasStructuredDesc() {
-		return
+// repoMapDirName is the .polyforge subdirectory holding the per-project repo
+// maps. One file per project (not per repo, and not one combined file) so a
+// routing read costs the relevant project's few KB instead of all of them.
+const repoMapDirName = "repo-map"
+
+// renderRepoMap renders one project's on-demand repo map: the detail that used
+// to live inline in CLAUDE.md's managed block. Every repo in the project gets a
+// section — including repos with no structured description — so the file is a
+// complete list and a reader can tell "this repo has no detail yet" apart from
+// "this repo is missing from the map".
+func renderRepoMap(blk projectBlock) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "# Repo map — %s\n\n", blk.Name)
+	sb.WriteString("> Generated by `polyforge init` — do not edit by hand. Every `*.md` in this\n")
+	sb.WriteString("> directory is rewritten on each init, and any `*.md` that no longer\n")
+	sb.WriteString("> corresponds to a project is DELETED. Keep nothing of your own here.\n")
+	sb.WriteString("> On-demand routing detail for this project's repos. CLAUDE.md's `## Workspace`\n")
+	sb.WriteString("> block carries only each repo's one-line positioning; read this file when you\n")
+	sb.WriteString("> need `tech_stack` / `main_modules` / `change_scenarios`.\n")
+	if blk.Description != nil && *blk.Description != "" {
+		fmt.Fprintf(&sb, "\n%s\n", oneLine(*blk.Description))
 	}
-	if len(r.TechStack) > 0 {
-		stack := make([]string, 0, len(r.TechStack))
-		for _, t := range r.TechStack {
-			stack = append(stack, oneLine(t))
+	for _, r := range blk.Repos {
+		fmt.Fprintf(&sb, "\n## %s\n\n%s\n", r.Name, repoHeadline(r))
+		if !r.hasStructuredDesc() {
+			continue
 		}
-		fmt.Fprintf(sb, "  - stack: %s\n", strings.Join(stack, ", "))
-	}
-	if len(r.MainModules) > 0 {
-		// Nested sub-list (one bullet per module) — far more scannable than a
-		// long semicolon-joined line when a repo has many modules.
-		sb.WriteString("  - modules:\n")
-		for _, m := range r.MainModules {
-			fmt.Fprintf(sb, "    - %s — %s\n", oneLine(m.Path), oneLine(m.Role))
+		sb.WriteString("\n")
+		if len(r.TechStack) > 0 {
+			stack := make([]string, 0, len(r.TechStack))
+			for _, t := range r.TechStack {
+				stack = append(stack, oneLine(t))
+			}
+			fmt.Fprintf(&sb, "- stack: %s\n", strings.Join(stack, ", "))
+		}
+		if len(r.MainModules) > 0 {
+			// Nested sub-list (one bullet per module) — far more scannable than
+			// a long semicolon-joined line when a repo has many modules.
+			sb.WriteString("- modules:\n")
+			for _, m := range r.MainModules {
+				fmt.Fprintf(&sb, "  - %s — %s\n", oneLine(m.Path), oneLine(m.Role))
+			}
+		}
+		if len(r.ChangeScenarios) > 0 {
+			sb.WriteString("- changes:\n")
+			for _, c := range r.ChangeScenarios {
+				fmt.Fprintf(&sb, "  - %s\n", oneLine(c))
+			}
+		}
+		if line := generatedLine(r); line != "" {
+			fmt.Fprintf(&sb, "- generated: %s\n", line)
 		}
 	}
-	if len(r.ChangeScenarios) > 0 {
-		// Nested sub-list, matching the modules style (a semicolon-joined line
-		// clashes with the surrounding bullet layout).
-		sb.WriteString("  - changes:\n")
-		for _, c := range r.ChangeScenarios {
-			fmt.Fprintf(sb, "    - %s\n", oneLine(c))
+	return sb.String()
+}
+
+// repoMapFileName maps a project name to its repo-map filename. Project names
+// come from the server, so the result is constrained to a flat, safe basename:
+// anything outside [A-Za-z0-9._-] becomes '-', and leading/trailing dots and
+// dashes are trimmed so "." / ".." / hidden files can never be produced.
+// Returns "" when nothing usable remains, in which case the project is skipped.
+func repoMapFileName(project string) string {
+	var b strings.Builder
+	for _, r := range project {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
 		}
 	}
-	if line := generatedLine(r); line != "" {
-		fmt.Fprintf(sb, "  - generated: %s\n", line)
+	name := strings.Trim(b.String(), ".-")
+	if name == "" {
+		return ""
 	}
+	return name + ".md"
+}
+
+// writeRepoMaps writes <phaseDir>/repo-map/<project>.md for every rendered
+// project and prunes maps for projects that are no longer present, so a project
+// removed server-side cannot leave a stale map that routing would still read.
+//
+// Deliberately best-effort per project rather than fail-stop. By the time this
+// runs, CLAUDE.md has already been slimmed, so one unwritable project must not
+// cost every *other* project its map — that combination (slim block, no maps)
+// leaves the detail unavailable locally with nothing pointing at the cause.
+// Errors are collected and returned together after every project has had a try.
+//
+// Pruning removes only *.md files, only ones we did not just write, and only
+// when at least one write succeeded: a transient failure of GET /v1/projects (or
+// of the writes themselves) must never delete the maps already on disk.
+func writeRepoMaps(phaseDir string, blocks []projectBlock) error {
+	dir := filepath.Join(phaseDir, repoMapDirName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	var errs []error
+	written := 0
+	// keep = every filename this render lays claim to, whether or not the write
+	// succeeded. A map whose rewrite just failed is stale, but deleting it too
+	// would only widen the outage, so it is kept out of the prune set.
+	keep := make(map[string]bool, len(blocks))
+	for _, blk := range blocks {
+		name := repoMapFileName(blk.Name)
+		if name == "" {
+			errs = append(errs, fmt.Errorf("project %q: no usable repo-map filename", blk.Name))
+			continue
+		}
+		keep[name] = true
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(renderRepoMap(blk)), 0644); err != nil {
+			errs = append(errs, fmt.Errorf("project %q: %w", blk.Name, err))
+			continue
+		}
+		written++
+	}
+
+	// Only prune once something was actually written: if every write failed we
+	// cannot tell a removed project from a broken render, and deleting on that
+	// evidence would destroy a working map set.
+	if written > 0 {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || keep[e.Name()] {
+					continue
+				}
+				if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// managedBlockOf returns the managed block of a CLAUDE.md body, markers
+// included, and whether a complete one was found. An unterminated block does
+// not count — callers use this to classify block *content*, and half a block
+// cannot be classified.
+func managedBlockOf(claudeMd string) (string, bool) {
+	start := strings.Index(claudeMd, managedBlockStart)
+	if start < 0 {
+		return "", false
+	}
+	end := strings.Index(claudeMd[start:], managedBlockEnd)
+	if end < 0 {
+		return "", false
+	}
+	return claudeMd[start : start+end+len(managedBlockEnd)], true
+}
+
+// managedBlockProjects lists the project names a managed block actually renders,
+// read from its `### <name>` headings.
+//
+// This is deliberately NOT taken from .polyforge.yaml: init only renders
+// projects the caller has a role in (callerHasRole), while .polyforge.yaml can
+// still carry others. Classifying by the config would report a missing repo map
+// for a project that was never supposed to have one.
+func managedBlockProjects(block string) []string {
+	var out []string
+	for _, line := range strings.Split(block, "\n") {
+		if name := strings.TrimPrefix(line, "### "); name != line {
+			if name = strings.TrimSpace(name); name != "" {
+				out = append(out, name)
+			}
+		}
+	}
+	return out
+}
+
+// legacyDetailMarkers are the indented bullets that only the pre-aihub#291
+// renderer emitted. Detection keys on these rather than on the block's size: a
+// workspace with many repos legitimately has a large *slim* block.
+//
+// All four are listed because each is independently optional upstream — a repo
+// with tech_stack and change_scenarios but no main_modules renders "  - stack:"
+// and "  - changes:" and never "  - modules:", and keying on modules alone would
+// call that fat block slim.
+var legacyDetailMarkers = []string{
+	"\n  - modules:",
+	"\n  - stack:",
+	"\n  - changes:",
+	"\n  - generated:",
+}
+
+// blockIsLegacyFormat reports whether a managed block still inlines the
+// per-repo detail that now belongs in .polyforge/repo-map/.
+func blockIsLegacyFormat(block string) bool {
+	for _, m := range legacyDetailMarkers {
+		if strings.Contains(block, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // generatedLine formats the freshness metadata as "<date> @ <short-sha>", using
@@ -1066,9 +1359,28 @@ func upsertManagedBlock(claudeMd string, blocks []projectBlock) error {
 		sb.WriteString("\n")
 		fmt.Fprintf(&sb, "### %s\n", blk.Name)
 		if blk.Description != nil && *blk.Description != "" {
-			fmt.Fprintf(&sb, "%s\n", *blk.Description)
+			// oneLine, like every other field rendered into this block: a
+			// description carrying a newline would otherwise be able to forge
+			// block structure — a literal "\n  - modules:" makes a freshly
+			// rendered slim block classify as legacy forever (so doctor keeps
+			// warning and re-running init never clears it), and a "### " line
+			// forges a whole project.
+			fmt.Fprintf(&sb, "%s\n", oneLine(*blk.Description))
 		} else {
 			sb.WriteString("*(description pending — ask project owner to run polyforge init)*\n")
+		}
+		// Point at the detail from inside the generated block itself, rather than
+		// describing the layout in the session-start skill text (aihub#291).
+		// Two reasons this is the better seam:
+		//   - the pointer and the file it names are written by the same function
+		//     in the same pass, so they cannot drift out of sync and there is no
+		//     version-skew case left for prose to describe;
+		//   - skill fragments are injected on EVERY session under a hard
+		//     10,000-character budget (aihub#285), while this line is paid once,
+		//     in a block that just shed ~29 KB.
+		if name := repoMapFileName(blk.Name); name != "" {
+			fmt.Fprintf(&sb, "> Repo detail (stack / modules / changes): `%s`\n",
+				filepath.ToSlash(filepath.Join(".polyforge", repoMapDirName, name)))
 		}
 		sb.WriteString("\n")
 		for _, r := range blk.Repos {

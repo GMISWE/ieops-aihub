@@ -298,25 +298,54 @@
     closeAllMenus(null);
   });
 
-  // ---- segmented control (All / Mine / Watching) --------------------------
+  // ---- "me" owner toggle (header) -----------------------------------------
 
-  document.querySelectorAll("[data-seg]").forEach(function (seg) {
-    var input = document.querySelector('[data-seg-input="owner"]');
-    var allInput = document.querySelector('[data-seg-input="all"]');
-    seg.querySelectorAll("button").forEach(function (b) {
-      if (b.disabled) return; // Watching is inert — no backend relationship.
-      b.addEventListener("click", function () {
-        if (!input) return;
-        seg.querySelectorAll("button").forEach(function (x) {
-          x.classList.toggle("on", x === b);
-        });
-        input.value = b.dataset.segOwner || "";
-        // The "All" segment carries data-seg-all="1" so the handler does not
-        // re-default the empty owner filter back to Mine.
-        if (allInput) allInput.value = b.dataset.segAll === "1" ? "1" : "";
-        fireFilter(0);
-      });
-    });
+  // Header pill ([data-me-toggle]): on = only my items, off = all (the list
+  // defaults to All). Delegated because the header is re-rendered on every swap.
+  // Fires the filter form; htmx:configRequest below injects the owner from this
+  // toggle's live state (there is no owner segment / hidden owner driver anymore).
+  document.body.addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("[data-me-toggle]") : null;
+    if (!b) return;
+    b.classList.toggle("on");
+    fireFilter(0);
+  });
+
+  // ---- keep the filter form's seg param fresh (aihub#185 fix) --------------
+  // The sidebar segment links swap only #wi-list-body, so the form's hidden
+  // `seg` input (which lives OUTSIDE the swap, in the page header) never updates
+  // when you switch segments — it stays at the initial value. So a Mine/All
+  // toggle or project switch (which reloads via this form) would send the STALE
+  // seg and reset you to it (e.g. Unclaimed). Fix: at request time, read the live
+  // selected segment from the sidebar's .on item (which IS re-rendered on every
+  // swap) and inject it, so the segment is always preserved.
+  document.body.addEventListener("htmx:configRequest", function (e) {
+    var el = e.target;
+    if (!el || !el.matches) return;
+    var isForm = el.matches("form[data-wi-filters]");
+    var isSeg = el.matches(".seg-nav .seg-item[data-seg-key]");
+    // Done's server pager (aihub#298) lives in .wi-main, not .seg-nav, so it
+    // matches neither selector above. Without this it would be the only htmx
+    // trigger on the page that sends no owner at all — not an empty owner, the
+    // parameter absent — which the handler reads as All, silently dropping the
+    // Mine toggle / explicit ?owner= the moment you page the archive. Its href
+    // fallback carries owner already; this is the JS path catching up, so both
+    // paths agree and there stays exactly ONE place that injects owner.
+    var isDonePager = el.matches("[data-done-older], [data-done-newest]");
+    if ((!isForm && !isSeg && !isDonePager) || !e.detail || !e.detail.parameters) return;
+    // owner: inject the live "me" toggle state for the form reload, the sidebar
+    // segment links AND Done's server pager, so switching segment / project or
+    // paging the archive keeps the personal filter. Empty = All (the default
+    // view). Anything else that swaps #wi-list-body must be added here too — the
+    // page has exactly one owner-injection point on purpose.
+    var me = document.querySelector("[data-me-toggle]");
+    e.detail.parameters.owner = (me && me.classList.contains("on")) ? (me.getAttribute("data-me-owner") || "") : "";
+    // seg: for the form reload, read the live active sidebar item (the form's
+    // hidden seg input lives outside the swap and would be stale).
+    if (isForm) {
+      var on = document.querySelector(".seg-nav .seg-item.on[data-seg-key]");
+      if (on) e.detail.parameters.seg = on.getAttribute("data-seg-key");
+    }
   });
 
   // ---- per-section pagination ---------------------------------------------
@@ -327,7 +356,7 @@
   // rows are already in the DOM (server renders the full block); this is pure
   // client-side show/hide. The header still prints the TOTAL count so paged-out
   // rows are never invisible. To change the page size, edit PAGE_SIZE.
-  var PAGE_SIZE = 5;
+  var PAGE_SIZE = 10; // default; overridden at runtime by the per-page picker (aihub#185)
 
   // Build the page-number sequence with ellipsis gaps, e.g. for 21 pages on
   // page 1: [1,2,3,"…",21]. Always shows first + last, the current page, and
@@ -369,13 +398,26 @@
     }
 
     wrap._page = 1;
+    var footer = wrap.querySelector("[data-wi-pager]");
+    var pinfo = wrap.querySelector("[data-grp-pinfo]");
+    // "N–M of T" page-info shown in the footer.
+    function setPinfo(rs) {
+      if (!pinfo) return;
+      if (!rs.length) { pinfo.textContent = ""; return; }
+      var start = (wrap._page - 1) * PAGE_SIZE;
+      var end = Math.min(start + PAGE_SIZE, rs.length);
+      pinfo.textContent = (start + 1) + "–" + end + " of " + rs.length;
+    }
 
     // Pool of empty filler rows used to pad a short page (e.g. the last page)
     // up to PAGE_SIZE slots, so the block height is constant across pages and
-    // the pager never jumps. At most PAGE_SIZE-1 fillers are ever needed.
+    // the pager never jumps. Topped up by ensureFillers() (called from
+    // _applyPager) so a larger per-page pick gets enough fillers; capped so a
+    // 100/page pick doesn't spawn 99 filler nodes.
     var fillers = [];
-    (function ensureFillers() {
-      while (fillers.length < PAGE_SIZE - 1) {
+    function ensureFillers() {
+      var want = Math.min(PAGE_SIZE - 1, 24);
+      while (fillers.length < want) {
         var f = document.createElement("div");
         f.className = "row-pad";
         f.setAttribute("aria-hidden", "true");
@@ -391,7 +433,7 @@
         rowsBox.appendChild(f);
         fillers.push(f);
       }
-    })();
+    }
 
     function hideFillers() {
       fillers.forEach(function (f) { f.hidden = true; });
@@ -423,6 +465,7 @@
       wrap._page = page;
       showPage(rs, page);
       render(rs, pages);
+      setPinfo(rs);
     }
 
     // Render the pager controls for the current matched set + current page.
@@ -475,19 +518,32 @@
     // the pager entirely when a single page covers every matched row. Re-run
     // after search so pages reflect only the matched subset.
     wrap._applyPager = function () {
+      ensureFillers();
       var rs = rows();
       var pages = Math.ceil(rs.length / PAGE_SIZE);
-      if (pages <= 1) {
-        // One page (or fewer): show every matched row, no pager, no padding.
-        rs.forEach(function (el) { el.hidden = false; });
+      // The footer (page-info + per-page picker + page buttons) is shown whenever
+      // the segment has rows, so the per-page control is always usable; the
+      // numbered page buttons only appear when there is more than one page.
+      if (footer) footer.hidden = rs.length === 0;
+      if (rs.length === 0) {
         hideFillers();
         pager.hidden = true;
         pager.textContent = "";
         wrap._page = 1;
         return;
       }
-      pager.hidden = false;
       if (wrap._page > pages) wrap._page = 1;
+      if (pages <= 1) {
+        // One page: show every matched row, no padding, no page buttons (but the
+        // footer with the per-page picker + count stays visible).
+        rs.forEach(function (el) { el.hidden = false; });
+        hideFillers();
+        pager.hidden = true;
+        pager.textContent = "";
+        setPinfo(rs);
+        return;
+      }
+      pager.hidden = false;
       go(wrap._page, rs, pages);
     };
 
@@ -588,6 +644,69 @@
     marker.remove();
   }
 
+  // ---- client-side sort (aihub#185) ---------------------------------------
+
+  // Newest(↓)/oldest(↑) toggle in the group header ([data-wi-sort]), reordering
+  // the rendered rows by data-created. Client-only — no server round-trip; the
+  // server renders newest-first, so the default (newest) needs no reorder. The
+  // mode is held in memory so it survives HTMX swaps (a full reload resets to
+  // newest, matching the server order). Re-applied by initListBody after a swap.
+  var wiSortMode = "newest";
+  function applySort() {
+    document.querySelectorAll("[data-wi-list] [data-grp-rows]").forEach(function (rowsBox) {
+      var rows = Array.prototype.filter.call(rowsBox.children, function (el) {
+        return el.hasAttribute("data-wi-row");
+      });
+      rows.sort(function (a, b) {
+        var ca = parseInt(a.getAttribute("data-created") || "0", 10);
+        var cb = parseInt(b.getAttribute("data-created") || "0", 10);
+        return wiSortMode === "newest" ? cb - ca : ca - cb;
+      });
+      rows.forEach(function (r) { rowsBox.appendChild(r); });
+      // Keep any pager filler/padding rows (non data-wi-row) after the real rows,
+      // so a reorder never floats fillers above content on an underfull page.
+      Array.prototype.filter.call(rowsBox.children, function (el) {
+        return !el.hasAttribute("data-wi-row");
+      }).forEach(function (el) { rowsBox.appendChild(el); });
+    });
+    document.querySelectorAll("[data-wi-sort]").forEach(function (btn) {
+      btn.textContent = wiSortMode === "newest" ? "↓" : "↑";
+    });
+  }
+
+  // Delegated — the sort button is re-rendered with the header on every swap.
+  document.body.addEventListener("click", function (e) {
+    var btn = e.target.closest ? e.target.closest("[data-wi-sort]") : null;
+    if (!btn) return;
+    wiSortMode = wiSortMode === "newest" ? "oldest" : "newest";
+    applySort();
+    applySearch(); // re-page from the reordered (still-filtered) set
+  });
+
+  // ---- per-page picker (aihub#185) ----------------------------------------
+
+  // Segmented control [data-wi-perpage] sets the page size; delegated so it
+  // survives HTMX swaps. PAGE_SIZE is module-level (shared by all pagers).
+  document.body.addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("[data-wi-perpage] button[data-perpage]") : null;
+    if (!b) return;
+    var n = parseInt(b.getAttribute("data-perpage"), 10);
+    if (!n) return;
+    PAGE_SIZE = n;
+    var seg = b.closest("[data-wi-perpage]");
+    seg.querySelectorAll("button").forEach(function (x) { x.classList.toggle("on", x === b); });
+    applySearch(); // re-runs each wrap._applyPager() with the new page size
+  });
+
+  // Reflect the current PAGE_SIZE on the per-page control after a re-render.
+  function applyPerPageState() {
+    document.querySelectorAll("[data-wi-perpage]").forEach(function (seg) {
+      seg.querySelectorAll("button[data-perpage]").forEach(function (b) {
+        b.classList.toggle("on", parseInt(b.getAttribute("data-perpage"), 10) === PAGE_SIZE);
+      });
+    });
+  }
+
   // ---- (re)initialise list-body widgets -----------------------------------
 
   // Re-run the per-render wiring against the current list body. Called once on
@@ -597,6 +716,8 @@
   function initListBody() {
     wirePagers();
     applyStatusGroupOrder();
+    applySort();
+    applyPerPageState();
     applySearch();
   }
 

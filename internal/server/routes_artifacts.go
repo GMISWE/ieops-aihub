@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	htmltemplate "html/template"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -51,6 +52,70 @@ var setMemoryVisibilityFn memVisibilitySetterFn = domain.SetMemoryVisibility
 //  2. If that fails or content is empty — fallback: serve content in a <pre>.
 //
 // No DB write is performed on a GET; render-on-view only.
+// Content-Security-Policy for authed artifact/document responses (aihub#240,
+// resolves #144). Until now only the anonymous /share path sent a CSP; /ui and /v1
+// sent none, which meant a project member — the reader with a session — was the least
+// protected of the three.
+//
+// Two policies, because the two surfaces load genuinely different things.
+const (
+	// artifactV1CSP locks down /v1/artifacts/:id/html AND /share/:id. Both responses are
+	// pure content documents: no first-party stylesheet, no script, no fetch. So both run
+	// the lockdown /share has used since the share feature shipped.
+	//
+	// handleSharedArtifact references this identifier rather than restating the policy. It
+	// used to hold its own copy of the same string, under a comment here claiming the two
+	// were kept identical so they could not drift — a claim nothing checked, since the
+	// equality test only compared substrings of this constant and never read /share's copy.
+	// One identifier makes it structural; TestArtifactV1CSP_MatchesSharePolicy now compares
+	// the headers both handlers actually emit.
+	artifactV1CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; " +
+		"form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+)
+
+// uiPageCSPWithNonce builds the policy for ONE /ui response: the artifact viewer and the
+// memory/wi detail pages that render agent markdown through the {{md}} / {{agentdoc}} helpers.
+//
+// It cannot be as strict as artifactV1CSP because /ui serves its own assets
+// (ui.css, viewer.css, annot.js, annotator.js, share.js, theme.js, diagram.js)
+// and emits inline <script> for the synchronous theme setter and the side-rail
+// IntersectionObserver.
+//
+// script-src carries a per-response nonce instead of 'unsafe-inline' (aihub#243). That
+// closes the weakening #240 shipped knowingly: with 'unsafe-inline', CSP alone would not
+// stop an inline script in agent content, so sanitization (SanitizeArtifactHTML) was the
+// only real control and CSP was decoration. Now an inline script must name this response's
+// nonce to run, and the nonce is 128 bits of crypto/rand minted per request — an agent
+// authoring content cannot know it, and it is never reused across responses.
+//
+// Note what a nonce does and does not neuter. Adding a nonce to script-src makes browsers
+// IGNORE 'unsafe-inline' (which is why it is now removed rather than left as a fallback for
+// older browsers — leaving it would be a lie in modern ones and a hole in ancient ones), but
+// it does NOT affect 'self'. Every <script src="/ui/static/..."> tag on these pages keeps
+// loading under 'self' untouched; only the three inline blocks this package emits need the
+// attribute.
+//
+// The nonce is ALSO handed to the sandboxed srcdoc frames, and that is load-bearing rather
+// than tidy — see EmbedOptions.Nonce in internal/render/safeembed.go. A srcdoc frame inherits
+// the embedding page's policy container, so a frame minting its own nonce would be refused by
+// this policy and its height-reporting bridge would die silently.
+//
+// What this policy buys beyond script-src: no external origin may be contacted or loaded
+// from, object/embed are dead, <base> cannot be rewritten, and the page cannot be framed
+// cross-origin.
+func uiPageCSPWithNonce(nonce string) string {
+	return "default-src 'none'; " +
+		"script-src 'self' 'nonce-" + nonce + "'; " +
+		"style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data:; " +
+		"font-src 'self' data:; " +
+		"connect-src 'self'; " +
+		"form-action 'self'; " +
+		"base-uri 'none'; " +
+		"object-src 'none'; " +
+		"frame-ancestors 'self'"
+}
+
 func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -75,6 +140,46 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
+		// aihub#248: /ui only — if this id has been superseded (mem.LatestID !=
+		// nil and != mem.ID), 302 to the lineage head's /ui URL instead of
+		// silently serving stale content. /v1 and /share stay exact-ID and
+		// byte-identical (mem_A6540SyP), hence the path-prefix gate — same
+		// pattern already used below for sanitization/CSP branching.
+		//
+		// The head is re-authorized here with the PURE predicates
+		// hasProjectAccess/memoryVisibleTo, never the side-effecting
+		// checkProjectAccess/checkMemoryVisibility above: those commit a
+		// 403/401 response to c on denial, which would leak "a newer version
+		// exists but you can't see it" on the very path meant to silently fall
+		// back to mem. UpdateMemory lets a new version's Visibility (and, in
+		// principle, Project) diverge from its predecessor's, so reusing the
+		// authorization decision already made for mem would be a privilege
+		// escalation onto the head. Any failure to resolve or authorize the
+		// head falls back to serving mem exactly as today — never a 404/403.
+		//
+		// aihub#248 review (W2): head.ID != mem.ID only rules out a self-redirect;
+		// also require head.LatestID == nil || *head.LatestID == head.ID so a head
+		// whose own cursor points elsewhere (multi-hop, or a 2-cycle) does not
+		// redirect again — defensive even though normal write-path invariants
+		// keep every real head self-headed.
+		//
+		// aihub#248 review (blocking, spec amendment to non-goal 6): a caller
+		// that followed a deliberate past-version link — the side rail's
+		// "Version history" rows below, or wi_detail.html.tmpl's per-version
+		// "View" link — arrives with ?pf_exact=1 and must see that exact
+		// revision, not the head. isExactVersionRequest skips head resolution
+		// only; it never bypasses the checkProjectAccess/checkMemoryVisibility
+		// gates on mem above.
+		if strings.HasPrefix(c.Path(), "/ui") && !isExactVersionRequest(c) &&
+			mem.LatestID != nil && *mem.LatestID != mem.ID {
+			if head, aerr := resolveLatestFn(ctx, pool, mem.ID); aerr == nil && head != nil &&
+				head.ID != mem.ID &&
+				(head.LatestID == nil || *head.LatestID == head.ID) &&
+				hasProjectAccess(u, head.Project, "viewer") && memoryVisibleTo(u, head) {
+				return c.Redirect(http.StatusFound, appendQueryString(c, "/ui/artifacts/"+url.PathEscape(head.ID)+"/html"))
+			}
+		}
+
 		// Resolve the HTML body fragment to serve. Prefer the stored rendered_html;
 		// if NULL, lazy-render on the fly so no renderable artifact ever 404s.
 		var bodyFragment string
@@ -94,6 +199,57 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				// Empty content: serve a minimal placeholder.
 				bodyFragment = "<pre></pre>"
 			}
+		}
+
+		// aihub#240 (resolves #144): agent-authored HTML reaches an authed reader here.
+		//
+		// Two different treatments, because the two routes have different contracts:
+		//
+		//   /ui — the body is sanitized in place, before any chrome is injected below.
+		//         Sanitizing here and not later matters: everything after this point
+		//         appends OUR OWN markup (share control, annotation scaffold, side rail,
+		//         first-party <script> tags), and running the sanitizer over that would
+		//         strip the viewer's own behaviour.
+		//
+		//   /v1 — the body is left exactly as-is. aihub#138 makes /v1 and /share
+		//         contractually byte-identical and TestArtifactViewer_UIvsV1Share_
+		//         BytePurity enforces it, so the payload is neutralised by the response
+		//         CSP instead (set below) rather than by rewriting bytes. This is the
+		//         same trade /share itself already makes.
+		// aihub#240 D7: an architecture-doc artifact carries agent-AUTHORED HTML — it is
+		// the Step 1 output of the three-step design (agent writes md + html; the viewer
+		// renders the html half). That half is the one case on this page where the body is
+		// untrusted rich content rather than our own markdown render, so it goes inside the
+		// sandboxed frame instead of being inlined. This is what makes Step 3 real here.
+		//
+		// Gated on type rather than a stored flag: resolveRenderedHTML (domain/memory.go:77)
+		// distinguishes agent-supplied HTML from auto-rendered markdown at WRITE time, but
+		// does not persist which one it took. fact.architecture is not in renderTypes, so a
+		// non-NULL rendered_html on this type can only have come from the author — the
+		// condition below is exactly "agent-authored html", with no schema change. Promoting
+		// it to an explicit contract flag is P1 (proposal §7 open question 3).
+		//
+		// The frame is NOT given the pre-processed body: SafeEmbedDocument sanitizes and
+		// THEN compiles d2 internally, and that order is load-bearing (compiling first costs
+		// d2 its entire stylesheet — see ui_embed.go). So the sanitize + compile + fold steps
+		// below are all skipped for this path and the raw body is handed over untouched.
+		//
+		// Annotation, viewer.css and diagram.js do not cross the frame boundary yet, so they
+		// are inert on this artifact type. That is aihub#245, tracked as P1 and explicitly
+		// accepted for the P0 demo (mem_YlnN3R8H).
+		sandboxBody := strings.HasPrefix(c.Path(), "/ui") &&
+			mem.Type == "fact.architecture" && mem.RenderedHTML != nil
+
+		if strings.HasPrefix(c.Path(), "/ui") {
+			if !sandboxBody {
+				bodyFragment = render.SanitizeArtifactHTML(bodyFragment)
+			}
+		} else {
+			// /ui gets its policy from the uiGroup middleware (ui_routes.go), which
+			// also covers the {{md}} memory/wi detail pages. /v1 has no such group.
+			h := c.Response().Header()
+			h.Set("Content-Security-Policy", artifactV1CSP)
+			h.Set("X-Content-Type-Options", "nosniff")
 		}
 
 		title := mem.ID + " (" + mem.Type + ")"
@@ -128,17 +284,20 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			// token vars declared by ui.css.
 			av := render.AssetVersion()
 			theme := themeFromCookie(c)
+			// This response's CSP nonce (aihub#243). Every inline <script> below must carry
+			// it or the policy refuses to run it; the value comes from uiSecurityHeaders,
+			// which put the same nonce in the header.
+			nonce := uiNonce(c)
 			var uiHead strings.Builder
 			// Set data-theme on <html> immediately (inline script runs synchronously).
 			// For review pages, also add pf-review-page class so CSS grid + order work.
 			if mem.Type == "methodology.review" {
-				uiHead.WriteString("<script>(function(){document.documentElement.setAttribute('data-theme','")
+				uiHead.WriteString("<script nonce=\"" + html.EscapeString(nonce) + "\">(function(){document.documentElement.setAttribute('data-theme','")
 				uiHead.WriteString(theme)
 				uiHead.WriteString("');document.addEventListener('DOMContentLoaded',function(){document.body.classList.add('pf-review-page');});")
-				uiHead.WriteString("document.addEventListener('click',function(e){ if(e.target && e.target.id==='pf-theme-toggle'){ var r=document.documentElement; var cur=r.getAttribute('data-theme')==='dark'?'light':'dark'; r.setAttribute('data-theme',cur); document.cookie='theme='+cur+';path=/;max-age=31536000'; }});")
 				uiHead.WriteString("})();</script>\n")
 			} else {
-				uiHead.WriteString("<script>(function(){document.documentElement.setAttribute('data-theme','")
+				uiHead.WriteString("<script nonce=\"" + html.EscapeString(nonce) + "\">(function(){document.documentElement.setAttribute('data-theme','")
 				uiHead.WriteString(theme)
 				uiHead.WriteString("');")
 				// aihub#138: stabilise the /ui layout for spec/plan regardless of
@@ -149,20 +308,73 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				// so every spec/plan version renders in the new UI; annot.js's later add
 				// is then a no-op (the class is a pure CSS hook it never reads).
 				uiHead.WriteString("if(document.body){document.body.classList.add('pf-annot-active');}")
-				uiHead.WriteString("document.addEventListener('click',function(e){ if(e.target && e.target.id==='pf-theme-toggle'){ var r=document.documentElement; var cur=r.getAttribute('data-theme')==='dark'?'light':'dark'; r.setAttribute('data-theme',cur); document.cookie='theme='+cur+';path=/;max-age=31536000'; }});")
 				uiHead.WriteString("})();</script>\n")
 			}
+			// aihub#234: assets served from the server package's embedded static/ FS
+			// (ui.css, theme.js, diagram.js) are versioned with THIS package's
+			// assetVersion, not render.AssetVersion(). The latter is a content hash
+			// over the render package's own bytes (annotator.js, annot.js, viewer.css,
+			// share.js) and cannot see static/ at all, so a ui.css-only edit shipped
+			// under an unchanged ?v= and the browser kept the cached copy for up to
+			// the hour of its max-age. This mattered little while ui.css and viewer.css
+			// changed together; it matters now that the diagram styling lives in ui.css.
 			uiHead.WriteString("<link rel=\"stylesheet\" href=\"/ui/static/ui.css?v=")
-			uiHead.WriteString(av)
+			uiHead.WriteString(assetVersion)
 			uiHead.WriteString("\">\n")
 			uiHead.WriteString("<link rel=\"stylesheet\" href=\"/ui/static/viewer.css?v=")
 			uiHead.WriteString(av)
 			uiHead.WriteString("\">\n")
+			// aihub#167: load theme.js so the 3-segment theme control (now unified
+			// with the app-shell nav) works on the viewer. The inline single-toggle
+			// handler was removed; theme.js is the canonical theme handler for all /ui.
+			uiHead.WriteString("<script src=\"/ui/static/theme.js?v=")
+			uiHead.WriteString(assetVersion)
+			uiHead.WriteString("\" defer></script>\n")
+			// aihub#240 D7: embedframe.js is the PARENT half of the frame's height protocol —
+			// the framed document measures itself and postMessages the height; this listener
+			// applies it. The app shell gets it from layout.html.tmpl, but the artifact viewer
+			// builds its own head and never included it, so a framed body here sat at the
+			// stylesheet's default 220px with an inner scrollbar while the bridge posted a
+			// correct 1589 into a page with nobody listening. Only needed when the body is
+			// actually framed.
+			if sandboxBody {
+				uiHead.WriteString("<script src=\"/ui/static/embedframe.js?v=")
+				uiHead.WriteString(assetVersion)
+				uiHead.WriteString("\" defer></script>\n")
+			}
+			// aihub#234: click-to-zoom for d2 figures. Inline, a diagram is capped at
+			// the column width (ui.css); this is the only way to read a wide one at
+			// full size without page-zooming the prose along with it. Inside the /ui
+			// gate like every other viewer affordance — /v1 and /share never compile
+			// d2 in the first place.
+			uiHead.WriteString("<script src=\"/ui/static/diagram.js?v=")
+			uiHead.WriteString(assetVersion)
+			uiHead.WriteString("\" defer></script>\n")
 
-			// aihub#138: build the app-shell nav + breadcrumb for /ui pages.
+			// aihub#138 / #167: build the unified app-shell nav + breadcrumb for /ui
+			// pages. Uses buildAppNav (same function as layout.html.tmpl) so the nav
+			// is byte-identical across the app-shell and the artifact viewer.
 			// The chrome is prepended to annotHTML so it is emitted after #pf-doc-col
 			// in the DOM; CSS grid `order` floats it to the top.
-			uiChrome := buildUIChrome(mem.WorkItemID, mem.Type, mem.ID)
+			uiChrome := buildUIChrome(mem.WorkItemID, mem.Type, mem.ID, "", theme, u)
+
+			// aihub#154: build the Share control + share.js — /ui path only, and
+			// only for artifacts that actually have stored rendered HTML (i.e.
+			// methodology.spec / plan / review). The handlers behind it 412 when
+			// rendered_html is NULL, so gating the control on the same condition
+			// keeps the UI honest. The fragment (control + script) is injected just
+			// after the first </h1> so it renders directly below the document title;
+			// it never reaches /v1 or /share, preserving their byte-identical output.
+			shareControlHTML := ""
+			// aihub#240 D7: the control is injected INTO the body, and the framed body is
+			// a separate document whose CSP admits no script but our nonced bridge — the
+			// control would render inert inside the frame. Suppressed rather than shipped
+			// broken; rehoming it to the parent chrome is part of aihub#245 (P1).
+			if mem.RenderedHTML != nil && !sandboxBody {
+				shareURL := c.Scheme() + "://" + c.Request().Host + "/share/" + mem.ID
+				shared := mem.Visibility == "public"
+				shareControlHTML = buildShareControlHTML(mem.ID, shareURL, shared, av)
+			}
 
 			// aihub#138: review viewer — methodology.review gets a dedicated layout
 			// instead of the annotation scaffold. /v1 + /share stay plain document.
@@ -174,6 +386,11 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				if chrome := buildReviewHTML(mem); chrome != "" {
 					bodyFragment = bodyFragment + "\n" + chrome
 				}
+				// review has no version-history chain — only the share control is
+				// injected, directly below the title.
+				if shareControlHTML != "" {
+					bodyFragment = insertAfterFirstH1(bodyFragment, shareControlHTML)
+				}
 				annotHTML = uiHead.String() + uiChrome
 			} else {
 				// aihub#124: build annotation UI (section threads + add-comment form).
@@ -184,14 +401,86 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				// Annotations are strictly per-version: a page shows only the commits
 				// made on the version being viewed (cross-version feedback flow is
 				// pf-revise's job, which reads the old head explicitly by id).
-				annotHTML = buildAnnotationHTML(mem.ID, bodyFragment, mem.Commits)
-				// aihub#138 version_history: prepend version history INSIDE the doc card
-				// (bodyFragment) so it appears at the top of #pf-doc-col per the #129 prototype.
-				// aihub#124: was previously prepended to annotHTML (outside the card).
-				if versions, verErr := versionChainFn(ctx, pool, mem.ID); verErr == nil {
-					if vhHTML := buildVersionHistoryHTML(ctx, pool, mem.ID, versions); vhHTML != "" {
-						bodyFragment = vhHTML + bodyFragment
+				// aihub#160: render ```d2 code blocks to inline SVG (/ui-only; /v1 + /share
+				// keep the raw code block). Done before folding so the figure lands inside
+				// its section.
+				// aihub#240 D7: skipped when the body is going into the frame —
+				// SafeEmbedDocument does sanitize-then-compile itself, in that order.
+				if !sandboxBody {
+					bodyFragment = render.RenderDiagramsGated(bodyFragment)
+				}
+				// aihub#159: fold H2 sections into <details> for /ui readability (spec/plan).
+				// /ui-only — /v1 + /share keep the flat body. Default-open so annot.js
+				// text-quote anchoring (searches visible text) is unaffected.
+				// aihub#240 D7: folding rewrites the body's section structure, which is a
+				// parent-page readability affordance. Inside the frame it would only mangle
+				// the agent's own layout, so the framed body is left exactly as authored.
+				if !sandboxBody {
+					bodyFragment = wrapH2SectionsForUI(bodyFragment)
+				}
+				annotHTML = buildAnnotationHTMLWithExact(mem.ID, bodyFragment, mem.Commits, nonce, isExactVersionRequest(c))
+				// aihub#138 version_history: render version history INSIDE the doc card.
+				// aihub#154: the share control + version history are injected together
+				// just after the first </h1> — share above, version history below — so
+				// the order is title → share → version history → body. Empty pieces
+				// (single-version chain, or NULL rendered_html) collapse out cleanly.
+				// aihub#159 step4b: version history relocates into the side rail (below);
+				// only the share control stays injected in-card under the title.
+				var srVersions []sideRailVersion
+				if versions, verErr := versionChainFn(ctx, pool, mem.ID); verErr == nil && len(versions) > 1 {
+					for _, v := range versions {
+						// aihub#248 review (W1): domain.MemoryVersionChain's SQL filters
+						// only status != 'redacted' — no project/visibility predicate — so
+						// its rows (domain.MemoryVersionRef: id/created_at/status/is_current
+						// only) are not enough on their own to answer "can THIS caller see
+						// this row". Without this check a caller denied a lineage member
+						// would still see that row's id, date, and link rendered in this
+						// side rail — exactly the leak spec decision 4 exists to prevent.
+						// v.ID == mem.ID is always safe to include as-is: mem was already
+						// authorized above via the side-effecting
+						// checkProjectAccess/checkMemoryVisibility. Every other row needs
+						// its own full record — MemoryVersionRef carries no Project or
+						// Visibility — loaded via the same loadMemoryFn seam used for the
+						// primary record, then checked with the same pure predicates
+						// (hasProjectAccess/memoryVisibleTo) used for the head redirect
+						// above, so a denied row is omitted entirely rather than merely
+						// stripped of its link.
+						if v.ID != mem.ID {
+							full, ferr := loadMemoryFn(ctx, pool, v.ID)
+							// aihub#248 review (minor 5): ferr != nil is deliberately treated
+							// the same as "denied" (fail-closed), not a bug to be "fixed" into
+							// fail-open. This loop is on a leak-prevention path (W1): a
+							// transient load failure that instead rendered the row would risk
+							// showing an id/date/link the caller may not be authorized for.
+							// Losing one row on a rare transient DB hiccup is an acceptable
+							// cost for never leaking on a permissions path.
+							if ferr != nil || full == nil ||
+								!hasProjectAccess(u, full.Project, "viewer") || !memoryVisibleTo(u, full) {
+								continue
+							}
+						}
+						// aihub#248 review (minor 4): label from the FILTERED slice
+						// (len(srVersions), the count of rows already kept), not the
+						// unfiltered chain index. Numbering from the unfiltered index
+						// would render e.g. v1, v3, v4 after a v2 is filtered out above —
+						// disclosing that a hidden version exists, the same class of leak
+						// W1 fixed for id/date/href.
+						sv := sideRailVersion{Label: "v" + strconv.Itoa(len(srVersions)+1), Current: v.IsCurrent}
+						if len(v.CreatedAt) >= 10 {
+							sv.Date = v.CreatedAt[:10]
+						}
+						if v.ID != mem.ID {
+							// aihub#248: this row deliberately targets a specific past
+							// revision, not the lineage head, so it carries the pf_exact
+							// marker to opt out of the /ui redirect above (spec amendment
+							// to non-goal 6).
+							sv.Href = "/ui/artifacts/" + url.PathEscape(v.ID) + "/html?" + exactVersionParam + "=1"
+						}
+						srVersions = append(srVersions, sv)
 					}
+				}
+				if shareControlHTML != "" {
+					bodyFragment = insertAfterFirstH1(bodyFragment, shareControlHTML)
 				}
 				// aihub#125: inject client-side annotation scripts — /ui path only.
 				// ?v= content hash busts browser caches on deploys (assets are served
@@ -199,10 +488,226 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 				annotHTML += "\n<script src=\"/ui/static/annotator.js?v=" + av + "\" defer></script>\n<script src=\"/ui/static/annot.js?v=" + av + "\" defer></script>\n"
 				// Prepend ui.css + viewer.css links + theme setter + chrome.
 				annotHTML = uiHead.String() + uiChrome + annotHTML
+				// aihub#159 step4b: consolidated right rail (TOC + Details) in the
+				// column freed by the inline-marker annotation rework.
+				srMeta := sideRailMeta{
+					Author:     mem.AuthorDisplay,
+					Type:       mem.Type,
+					Project:    mem.Project,
+					Visibility: mem.Visibility,
+					Strength:   fmt.Sprintf("%.2f", mem.BaseStrength),
+					Created:    mem.CreatedAt.Format("2006-01-02"),
+					Updated:    mem.UpdatedAt.Format("2006-01-02"),
+				}
+				if mem.WorkItemID != nil {
+					srMeta.WorkItemHref = wiHref(*mem.WorkItemID)
+					srMeta.WorkItemLabel = *mem.WorkItemID
+				}
+				var srComments []sideRailComment
+				if len(mem.Commits) > 0 {
+					var cl []CommitEntry
+					if json.Unmarshal(mem.Commits, &cl) == nil {
+						for _, c := range cl {
+							srComments = append(srComments, sideRailComment{ID: c.ID, Author: c.AuthorDisplay, Body: c.Body, Status: c.Status})
+						}
+					}
+				}
+				annotHTML += buildSideRail(render.ExtractHeadings(mem.Content), srMeta, srVersions, srComments, nonce)
 			}
+		}
+		// aihub#240 D7: hand the body to the sandbox last, so everything above operated on
+		// the authored bytes and nothing downstream can re-process the frame markup.
+		// SafeEmbedDocument sanitizes, compiles d2, and wraps the result in
+		// <iframe srcdoc sandbox="allow-scripts"> (no allow-same-origin) with its own inner
+		// CSP — the same call the {{md}} pages already use (ui_embed.go).
+		if sandboxBody {
+			bodyFragment = render.SafeEmbedDocument(bodyFragment, render.EmbedOptions{
+				Title:        "document",
+				BridgeScript: render.AnnotationBridgeFor(c.Scheme() + "://" + c.Request().Host),
+				FrameClass:   "pf-embed",
+				// Read again rather than reusing the /ui block's local: that one is scoped to
+				// the chrome builder above, and themeFromCookie is a pure cookie read.
+				Theme: themeFromCookie(c),
+				// The frame inherits THIS page's policy container, so its bridge has to run
+				// under THIS page's nonce. Letting SafeEmbedDocument mint its own would leave
+				// the conjunction admitting neither value and kill the height protocol
+				// silently (aihub#243).
+				Nonce: uiNonce(c),
+			})
 		}
 		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBodyWithMeta(bodyFragment, title, backHref, ownerHref, ownerLabel, related, annotHTML)))
 	}
+}
+
+// wrapH2SectionsForUI wraps each top-level H2 section of a rendered artifact body
+// in a <details open> block so the /ui viewer can fold long sections (aihub#159).
+// /ui-only: /v1 + /share keep the flat rendered body, so byte-identical output is
+// preserved. Default-open keeps every section's text in the visible DOM, so annot.js
+// text-quote anchoring (which searches rendered text) is unaffected. Content before
+// the first H2 (the H1 + intro + any injected share/version chrome) is left as-is.
+func wrapH2SectionsForUI(body string) string {
+	const open = "<h2"
+	first := strings.Index(body, open)
+	if first < 0 {
+		return body
+	}
+	var b strings.Builder
+	b.Grow(len(body) + 256)
+	b.WriteString(body[:first])
+	rest := body[first:]
+	for rest != "" {
+		// rest begins with "<h2"; find the next section boundary.
+		nextRel := strings.Index(rest[len(open):], open)
+		var section string
+		if nextRel < 0 {
+			section, rest = rest, ""
+		} else {
+			cut := len(open) + nextRel
+			section, rest = rest[:cut], rest[cut:]
+		}
+		hClose := strings.Index(section, "</h2>")
+		if hClose < 0 {
+			b.WriteString(section) // malformed; pass through untouched
+			continue
+		}
+		heading := section[:hClose+len("</h2>")]
+		secBody := section[hClose+len("</h2>"):]
+		b.WriteString(`<details open class="pf-sec"><summary class="pf-sec-sum">`)
+		b.WriteString(heading)
+		b.WriteString(`<span class="pf-sec-chev" aria-hidden="true"></span></summary><div class="pf-sec-body">`)
+		b.WriteString(secBody)
+		b.WriteString(`</div></details>`)
+	}
+	return b.String()
+}
+
+// sideRailMeta carries the pre-formatted Details fields for the /ui side rail so
+// buildSideRail stays decoupled from *domain.Memory (and trivially testable).
+type sideRailMeta struct {
+	Author, Type, Project, Visibility string
+	WorkItemHref, WorkItemLabel       string
+	Strength, Created, Updated        string
+}
+
+// buildSideRail builds the consolidated /ui artifact-viewer right rail (aihub#159
+// step4b): an "On this page" TOC (from the rendered heading anchors) + a Details
+// card. It occupies the right grid column freed by the inline-marker annotation
+// rework. /ui-only — never emitted on /v1 or /share.
+// sideRailVersion is one row of the side rail's version-history timeline.
+type sideRailVersion struct {
+	Label   string // e.g. "v3"
+	Date    string // YYYY-MM-DD
+	Current bool
+	Href    string // /ui/artifacts/<id>/html for other versions; "" for the viewed one
+}
+
+// sideRailComment is one entry in the side rail's Comments card.
+type sideRailComment struct {
+	ID, Author, Body, Status string
+}
+
+func buildSideRail(headings []render.HeadingRef, m sideRailMeta, versions []sideRailVersion, comments []sideRailComment, nonce string) string {
+	var b strings.Builder
+	b.WriteString("<aside id=\"pf-side-rail\">\n")
+	// chev is the collapse caret appended to each card's <summary>.
+	const chev = "<span class=\"pf-side-chev\" aria-hidden=\"true\"></span>"
+	if len(headings) >= 2 {
+		b.WriteString("<details class=\"pf-side-card\" open><summary class=\"pf-side-hd\">On this page" + chev + "</summary><nav class=\"pf-side-toc\">")
+		for _, h := range headings {
+			b.WriteString("<a href=\"#")
+			b.WriteString(html.EscapeString(h.ID))
+			b.WriteString("\">")
+			b.WriteString(html.EscapeString(h.Text))
+			b.WriteString("</a>")
+		}
+		b.WriteString("</nav></details>\n")
+	}
+	b.WriteString("<details class=\"pf-side-card\"><summary class=\"pf-side-hd\">Details" + chev + "</summary>")
+	row := func(k, vHTML string) {
+		if vHTML == "" {
+			return
+		}
+		b.WriteString("<div class=\"pf-side-row\"><span class=\"k\">")
+		b.WriteString(html.EscapeString(k))
+		b.WriteString("</span><span class=\"v\">")
+		b.WriteString(vHTML)
+		b.WriteString("</span></div>")
+	}
+	mono := func(s string) string {
+		if s == "" {
+			return ""
+		}
+		return "<span class=\"mono\">" + html.EscapeString(s) + "</span>"
+	}
+	row("Author", html.EscapeString(m.Author))
+	row("Type", mono(m.Type))
+	row("Project", html.EscapeString(m.Project))
+	row("Visibility", html.EscapeString(m.Visibility))
+	if m.WorkItemHref != "" {
+		row("Work item", "<a class=\"link mono\" href=\""+html.EscapeString(m.WorkItemHref)+"\">"+html.EscapeString(m.WorkItemLabel)+"</a>")
+	}
+	row("Strength", mono(m.Strength))
+	row("Created", mono(m.Created))
+	row("Updated", mono(m.Updated))
+	b.WriteString("</details>\n") // close Details card
+
+	if len(versions) > 1 {
+		b.WriteString("<details class=\"pf-side-card\"><summary class=\"pf-side-hd\">Version history <span class=\"pf-side-n\">")
+		b.WriteString(strconv.Itoa(len(versions)))
+		b.WriteString("</span>" + chev + "</summary><ol class=\"pf-side-vh\">")
+		for _, v := range versions {
+			b.WriteString("<li class=\"pf-side-vrow")
+			if v.Current {
+				b.WriteString(" cur")
+			}
+			b.WriteString("\"><span class=\"pf-side-vdot\"></span>")
+			if v.Href != "" {
+				b.WriteString("<a class=\"link mono pf-side-vlabel\" href=\"" + html.EscapeString(v.Href) + "\">" + html.EscapeString(v.Label) + "</a>")
+			} else {
+				b.WriteString("<span class=\"mono pf-side-vlabel\">" + html.EscapeString(v.Label) + "</span>")
+			}
+			if v.Current {
+				b.WriteString("<span class=\"pf-side-vcur\">current</span>")
+			}
+			b.WriteString("<span class=\"pf-side-vdate\">" + html.EscapeString(v.Date) + "</span></li>")
+		}
+		b.WriteString("</ol></details>\n")
+	}
+
+	if len(comments) > 0 {
+		open := 0
+		for _, c := range comments {
+			if c.Status == "" || c.Status == "open" {
+				open++
+			}
+		}
+		b.WriteString("<details class=\"pf-side-card\"><summary class=\"pf-side-hd\">Comments <span class=\"pf-side-n\">")
+		b.WriteString(strconv.Itoa(len(comments)))
+		b.WriteString("</span>" + chev + "</summary><div class=\"pf-side-cmt\"><div class=\"pf-side-cmt-sum\">")
+		b.WriteString(strconv.Itoa(open) + " open · " + strconv.Itoa(len(comments)-open) + " resolved")
+		b.WriteString("</div>")
+		for _, c := range comments {
+			st := c.Status
+			if st == "" {
+				st = "open"
+			}
+			body := c.Body
+			if r := []rune(body); len(r) > 84 {
+				body = string(r[:84]) + "…"
+			}
+			b.WriteString("<button type=\"button\" class=\"pf-side-cmt-item\" data-commit-id=\"" + html.EscapeString(c.ID) + "\">")
+			b.WriteString("<span class=\"pf-side-cmt-top\"><span class=\"who\"><span class=\"av sm\" data-av-name=\"" + html.EscapeString(c.Author) + "\"></span><b>" + html.EscapeString(c.Author) + "</b></span><span class=\"pf-side-cmt-st " + st + "\">" + st + "</span></span>")
+			b.WriteString("<span class=\"pf-side-cmt-body\">" + html.EscapeString(body) + "</span>")
+			b.WriteString("</button>")
+		}
+		b.WriteString("</div></details>\n")
+	}
+
+	b.WriteString("</aside>\n")
+	// aihub#159 step4c: TOC scroll-spy — highlight the side-rail link for the
+	// section currently in view (/ui-only; no-op without IntersectionObserver).
+	b.WriteString(`<script nonce="` + html.EscapeString(nonce) + `">(function(){var ls=document.querySelectorAll('#pf-side-rail .pf-side-toc a');if(!ls.length||!window.IntersectionObserver)return;var m={};ls.forEach(function(a){m[a.getAttribute('href').slice(1)]=a;});var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){for(var k in m){m[k].classList.remove('active');}var a=m[e.target.id];if(a){a.classList.add('active');}}});},{rootMargin:'-80px 0px -70% 0px'});Object.keys(m).forEach(function(id){var el=document.getElementById(id);if(el){io.observe(el);}});})();(function(){document.querySelectorAll('#pf-side-rail .pf-side-cmt-item').forEach(function(btn){btn.addEventListener('click',function(e){e.stopPropagation();var id=btn.getAttribute('data-commit-id');var mk=document.querySelector('.pf-annot-marker[data-commit-id="'+id+'"]')||document.querySelector('mark[data-commit-id="'+id+'"]');if(mk){mk.scrollIntoView({behavior:'smooth',block:'center'});mk.click();}});});})();</script>` + "\n")
+	return b.String()
 }
 
 // renderArtifactBody returns the HTML body to serve for a stored rendered_html
@@ -284,27 +789,83 @@ func artifactBackHref(routePath string, workItemID *string) string {
 	return ""
 }
 
-// buildUIChrome constructs the app-shell nav + breadcrumb HTML fragment for /ui
-// artifact pages (aihub#138). The fragment is emitted into annotHTML so it
-// lands AFTER #pf-doc-col in the DOM; CSS grid `order` rules float it to the
-// visual top without restructuring DocumentWithMeta's wrapper.
+// buildAppNav constructs the canonical <header class="pf-appnav"> HTML for the
+// /ui top navigation bar (aihub#167). It is the single source for the nav so
+// that both the app-shell (layout.html.tmpl via the {{appnav}} template func)
+// and the artifact viewer (buildUIChrome) render the same markup from one place.
 //
-// The breadcrumb format varies by type:
+//   - active: "wi" | "memories" | "" — drives the .pf-active class on nav links.
+//   - theme:  "auto" | "light" | "dark" — drives the .on class on the 3-segment
+//     theme control.
+//   - user:   when non-nil the display-name + logout form are emitted; pass nil
+//     to omit (anonymous / non-authenticated views).
+//
+// All user-supplied strings are HTML-escaped. Returns template.HTML so it is
+// safe to inject directly into a template with {{appnav .Active .Theme .User}}.
+func buildAppNav(active, theme string, user *UserContext) htmltemplate.HTML {
+	var b strings.Builder
+	b.WriteString("<header class=\"pf-appnav\">\n")
+	b.WriteString("  <a class=\"pf-appnav-brand\" href=\"/ui/\"><span class=\"pf-appnav-mark\">p</span> polyforge</a>\n")
+	b.WriteString("  <nav class=\"pf-appnav-links\">")
+	if active == "wi" {
+		b.WriteString("<a href=\"/ui/wi\" class=\"pf-active\">Work Items</a>")
+	} else {
+		b.WriteString("<a href=\"/ui/wi\">Work Items</a>")
+	}
+	if active == "memories" {
+		b.WriteString("<a href=\"/ui/memories\" class=\"pf-active\">Memories</a>")
+	} else {
+		b.WriteString("<a href=\"/ui/memories\">Memories</a>")
+	}
+	b.WriteString("</nav>\n")
+	b.WriteString("  <span class=\"pf-appnav-spacer\"></span>\n")
+	b.WriteString("  <div class=\"pf-theme-seg\" id=\"pf-theme-seg\" role=\"group\" aria-label=\"Color theme\">\n")
+	if theme == "auto" {
+		b.WriteString("    <button type=\"button\" data-theme-mode=\"auto\" class=\"on\">Auto</button>\n")
+	} else {
+		b.WriteString("    <button type=\"button\" data-theme-mode=\"auto\">Auto</button>\n")
+	}
+	if theme == "light" {
+		b.WriteString("    <button type=\"button\" data-theme-mode=\"light\" class=\"on\">Light</button>\n")
+	} else {
+		b.WriteString("    <button type=\"button\" data-theme-mode=\"light\">Light</button>\n")
+	}
+	if theme == "dark" {
+		b.WriteString("    <button type=\"button\" data-theme-mode=\"dark\" class=\"on\">Dark</button>\n")
+	} else {
+		b.WriteString("    <button type=\"button\" data-theme-mode=\"dark\">Dark</button>\n")
+	}
+	b.WriteString("  </div>\n")
+	if user != nil {
+		b.WriteString("  <span class=\"pf-nav-who\">")
+		b.WriteString(html.EscapeString(user.DisplayName))
+		b.WriteString("</span>\n")
+		b.WriteString("  <form method=\"POST\" action=\"/ui/logout\" class=\"pf-nav-logout\">\n")
+		b.WriteString("    <button type=\"submit\">Logout</button>\n")
+		b.WriteString("  </form>\n")
+	}
+	b.WriteString("</header>\n")
+	return htmltemplate.HTML(b.String()) //nolint:gosec // intentionally pre-escaped above
+}
+
+// buildUIChrome constructs the app-shell nav + breadcrumb HTML fragment for /ui
+// artifact pages (aihub#138, unified in aihub#167). The fragment is emitted
+// into annotHTML so it lands AFTER #pf-doc-col in the DOM; CSS grid `order`
+// rules float it to the visual top without restructuring DocumentWithMeta's wrapper.
+//
+// The nav is now produced by buildAppNav so it is byte-identical to the nav
+// rendered by the app-shell (layout.html.tmpl). The breadcrumb format varies:
 //   - methodology.spec → "<wi> / Spec <memID>"
 //   - methodology.plan → "<wi> / Plan <memID>"
 //   - methodology.review → "<wi> / Review <memID>"
 //   - other → "<wi> / <type> <memID>"
 //
 // When workItemID is nil the wi segment is rendered as plain text "artifact".
+// active is typically "" for artifact pages (no nav link is highlighted).
 // All interpolated values are HTML-escaped.
-func buildUIChrome(workItemID *string, memType, memID string) string {
+func buildUIChrome(workItemID *string, memType, memID, active, theme string, user *UserContext) string {
 	var b strings.Builder
-	b.WriteString("<header class=\"pf-appnav\">\n")
-	b.WriteString("  <div class=\"pf-appnav-brand\"><span class=\"pf-appnav-mark\">p</span> polyforge</div>\n")
-	b.WriteString("  <nav class=\"pf-appnav-links\"><a href=\"/ui/wi\">Work Items</a><a href=\"/ui/memories\">Memories</a></nav>\n")
-	b.WriteString("  <span class=\"pf-appnav-spacer\"></span>\n")
-	b.WriteString("  <button type=\"button\" class=\"pf-appnav-themebtn\" id=\"pf-theme-toggle\" title=\"toggle light / dark\">light / dark</button>\n")
-	b.WriteString("</header>\n")
+	b.WriteString(string(buildAppNav(active, theme, user)))
 
 	// Breadcrumb.
 	b.WriteString("<nav class=\"pf-crumb\">")
@@ -340,6 +901,74 @@ func buildUIChrome(workItemID *string, memType, memID string) string {
 	return b.String()
 }
 
+// insertAfterFirstH1 inserts inject right after the first closing </h1> tag in
+// body. If body has no <h1> (shouldn't happen for spec/plan/review, whose
+// rendered HTML always opens with the title heading), it falls back to
+// prepending so the injected control is never lost.
+func insertAfterFirstH1(body, inject string) string {
+	idx := strings.Index(strings.ToLower(body), "</h1>")
+	if idx < 0 {
+		return inject + body
+	}
+	cut := idx + len("</h1>")
+	return body[:cut] + inject + body[cut:]
+}
+
+// buildShareControlHTML builds the /ui-only Share control fragment for the
+// artifact viewer (aihub#154). It is injected just after the first </h1> so it
+// renders directly below the document title (above the version-history dropdown
+// when present); the share.js <script> is included in the fragment itself (with
+// a ?v= cache-buster) so it loads regardless of whether the annotation HTML is
+// present, without touching DocumentWithMeta.
+//
+// shared toggles the initial button label + whether the read-only link row is
+// shown pre-filled (so a refresh of an already-shared artifact still surfaces
+// the link). shareURL is the canonical /share/<id> link for the current host.
+// This fragment is NEVER emitted on /v1 or /share — only the /ui path calls it.
+func buildShareControlHTML(memID, shareURL string, shared bool, assetVersion string) string {
+	escID := html.EscapeString(memID)
+	var b strings.Builder
+	b.WriteString("<div id=\"pf-share\" data-mem-id=\"")
+	b.WriteString(escID)
+	b.WriteString("\" data-shared=\"")
+	if shared {
+		b.WriteString("true")
+	} else {
+		b.WriteString("false")
+	}
+	b.WriteString("\" class=\"pf-share\">\n")
+
+	b.WriteString("  <button type=\"button\" data-pf-share-btn class=\"pf-share-btn\">")
+	if shared {
+		b.WriteString("Stop sharing")
+	} else {
+		b.WriteString("Share")
+	}
+	b.WriteString("</button>\n")
+
+	b.WriteString("  <span data-pf-share-link class=\"pf-share-link\"")
+	if !shared {
+		b.WriteString(" hidden")
+	}
+	b.WriteString(">\n")
+	b.WriteString("    <input type=\"text\" readonly value=\"")
+	if shared {
+		b.WriteString(html.EscapeString(shareURL))
+	}
+	b.WriteString("\">\n")
+	b.WriteString("    <button type=\"button\" data-pf-share-copy class=\"pf-share-copy\">Copy</button>\n")
+	b.WriteString("  </span>\n")
+
+	b.WriteString("  <span data-pf-share-toast class=\"pf-share-toast\" role=\"status\" aria-live=\"polite\"></span>\n")
+	b.WriteString("</div>\n")
+
+	b.WriteString("<script src=\"/ui/static/share.js?v=")
+	b.WriteString(assetVersion)
+	b.WriteString("\" defer></script>\n")
+
+	return b.String()
+}
+
 // handleSharedArtifact serves a publicly-shared artifact's rendered HTML with NO auth.
 // The memory_id is itself the unguessable share link. Only memories with
 // visibility='public' and non-null rendered_html are reachable; anything else returns a
@@ -359,12 +988,19 @@ func handleSharedArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 		// goldmark's unsafe renderer) and we now serve it to anonymous viewers, so a
 		// malicious artifact author could embed <script>/onerror handlers. Lock the
 		// public response down: a strict CSP blocks script execution and any external
-		// fetch/form, and nosniff prevents content-type confusion. The authed /v1 path
-		// keeps the original (trusted, project-member-only) behavior.
+		// fetch/form, and nosniff prevents content-type confusion.
+		//
+		// artifactV1CSP is the same policy, referenced rather than restated. It used to be
+		// duplicated here as a literal, with a comment on the constant claiming the two were
+		// "kept deliberately identical so they cannot drift apart" — which nothing enforced:
+		// the equality test only compared substrings of the constant and never read this
+		// string at all. Sharing the identifier is what makes the claim true.
+		//
+		// /v1 now sends this too (aihub#240 / #144), so both authed and anonymous artifact
+		// responses carry it; the difference between the routes is that /ui sanitizes its
+		// body while /v1 and /share serve byte-identical stored bytes (aihub#138).
 		h := c.Response().Header()
-		h.Set("Content-Security-Policy",
-			"default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; "+
-				"form-action 'none'; base-uri 'none'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", artifactV1CSP)
 		h.Set("X-Content-Type-Options", "nosniff")
 		title := mem.ID + " (" + mem.Type + ")"
 		// renderArtifactBody (not render.Document) so a custom full-document artifact
@@ -496,7 +1132,33 @@ func escapeJSONForScriptTag(b []byte) []byte {
 //
 // Annotations are per-version: only the commits stored on this memory row are
 // rendered (no supersede-chain inheritance — decided 2026-06-03).
-func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage) string {
+//
+// buildAnnotationHTML is the stable 4-arg entry point kept for existing
+// callers/tests; it always renders write-form actions without the pf_exact
+// marker (equivalent to "viewing the head"). Production /ui rendering goes
+// through buildAnnotationHTMLWithExact so a POST made from a marked
+// past-version page round-trips back to that same version — see aihub#248
+// review warning 1 (annotation round-trip dropped pf_exact).
+func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage, nonce string) string {
+	return buildAnnotationHTMLWithExact(memID, renderedHTML, commitsRaw, nonce, false)
+}
+
+// buildAnnotationHTMLWithExact is buildAnnotationHTML plus the exact-version
+// marker: when exact is true, every write-form action this function emits
+// (add-annotation, hidden selection form, inline reply, inline resolve)
+// carries ?pf_exact=1 so the resulting POST's redirect (artifactRedirectURL)
+// lands back on the same past version instead of the lineage head (aihub#248
+// review warning 1). This is NOT a new marker emission site in the sense
+// non-goal 6 restricts (side rail + wi-detail "View" link only): those two
+// are the only places a link may be minted to a DIFFERENT memory id with the
+// marker attached. Here the marker is preserved on forms that submit back to
+// the SAME memID the page is already (rightfully) showing, carrying forward
+// intent the caller already established by following one of those two links.
+func buildAnnotationHTMLWithExact(memID, renderedHTML string, commitsRaw json.RawMessage, nonce string, exact bool) string {
+	exactSuffix := ""
+	if exact {
+		exactSuffix = "?" + exactVersionParam + "=1"
+	}
 	// Parse commits.
 	var commits []CommitEntry
 	if len(commitsRaw) > 0 {
@@ -709,8 +1371,8 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage)
 
 			// Inline reply + resolve forms for open commits (aihub#125).
 			if e.IsOpen() {
-				replyAction := "/ui/artifacts/" + html.EscapeString(memID) + "/commit/" + html.EscapeString(e.ID) + "/reply"
-				resolveAction := "/ui/artifacts/" + html.EscapeString(memID) + "/commit/" + html.EscapeString(e.ID) + "/resolve"
+				replyAction := "/ui/artifacts/" + html.EscapeString(memID) + "/commit/" + html.EscapeString(e.ID) + "/reply" + exactSuffix
+				resolveAction := "/ui/artifacts/" + html.EscapeString(memID) + "/commit/" + html.EscapeString(e.ID) + "/resolve" + exactSuffix
 				b.WriteString("<div class=\"pf-annot-inline-forms\">\n")
 				b.WriteString("<form method=\"POST\" action=\"")
 				b.WriteString(replyAction)
@@ -737,12 +1399,13 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage)
 	b.WriteString("<h3 class=\"pf-annot-form-title\">Add annotation</h3>\n")
 	b.WriteString("<form method=\"POST\" action=\"/ui/artifacts/")
 	b.WriteString(html.EscapeString(memID))
-	b.WriteString("/commit\">\n")
+	b.WriteString("/commit" + exactSuffix + "\">\n")
 
 	if len(headings) > 0 {
 		b.WriteString("<label for=\"pf-annot-heading\">Section:</label>\n")
-		b.WriteString("<select id=\"pf-annot-heading\" name=\"heading_id\"")
-		b.WriteString(" onchange=\"document.getElementById('pf-annot-htxt').value=this.options[this.selectedIndex].dataset.text\">\n")
+		// data-pf-chrome marks this as OUR element, not the artifact's — see the wiring
+		// script below and chromeEl() in annot.js for why the id alone is not trustworthy.
+		b.WriteString("<select id=\"pf-annot-heading\" data-pf-chrome name=\"heading_id\">\n")
 		b.WriteString("<option value=\"\" data-text=\"\">— general —</option>\n")
 		for _, h := range headings {
 			b.WriteString("<option value=\"")
@@ -754,7 +1417,33 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage)
 			b.WriteString("</option>\n")
 		}
 		b.WriteString("</select>\n")
-		b.WriteString("<input type=\"hidden\" id=\"pf-annot-htxt\" name=\"heading_text\" value=\"\">\n")
+		b.WriteString("<input type=\"hidden\" id=\"pf-annot-htxt\" data-pf-chrome name=\"heading_text\" value=\"\">\n")
+		// aihub#243: this mirror used to be an inline `onchange=` attribute on the <select>.
+		// A CSP nonce authorises <script> ELEMENTS; it cannot authorise event-handler
+		// ATTRIBUTES — script-src-attr falls back to script-src, and only 'unsafe-inline'
+		// (or 'unsafe-hashes') admits a handler attribute, neither of which this policy has.
+		// So dropping 'unsafe-inline' silently killed the handler: heading_text submitted
+		// empty and the empty value persisted into the stored anchor. Same behaviour, moved
+		// into a nonced element.
+		//
+		// NOT put in annot.js: that file's main() returns unless the viewport is ≥1100px,
+		// while viewer.css only SHOWS this form at ≤1040px. The two windows are disjoint, so
+		// a listener installed there would never run on the pages where this form is visible.
+		//
+		// Queried by [data-pf-chrome] rather than getElementById: the sanitizer allows `id`
+		// globally (d2 figures need it) and the agent body is emitted BEFORE this chrome, so
+		// an artifact carrying id="pf-annot-htxt" would otherwise be written into instead.
+		// data-* is not on the sanitizer's attribute allowlist, so this marker is unforgeable.
+		b.WriteString("<script nonce=\"" + html.EscapeString(nonce) + "\">")
+		b.WriteString("(function(){")
+		b.WriteString("var s=document.querySelector('select[data-pf-chrome][id=\"pf-annot-heading\"]');")
+		b.WriteString("var t=document.querySelector('input[data-pf-chrome][id=\"pf-annot-htxt\"]');")
+		b.WriteString("if(!s||!t)return;")
+		b.WriteString("s.addEventListener('change',function(){")
+		b.WriteString("var o=s.options[s.selectedIndex];t.value=o?(o.getAttribute('data-text')||''):'';")
+		b.WriteString("});")
+		b.WriteString("})();")
+		b.WriteString("</script>\n")
 	} else {
 		b.WriteString("<input type=\"hidden\" name=\"heading_id\" value=\"\">\n")
 		b.WriteString("<input type=\"hidden\" name=\"heading_text\" value=\"\">\n")
@@ -769,13 +1458,18 @@ func buildAnnotationHTML(memID, renderedHTML string, commitsRaw json.RawMessage)
 
 	// ─── Margin rail scaffold ─────────────────────────────────────────────────
 	// JS removes [hidden] and populates bubbles from the data island.
-	b.WriteString("<div id=\"pf-margin-rail\" hidden></div>\n")
+	// data-pf-chrome is an unforgeable marker: `data-*` is not on the sanitizer's attribute
+	// allowlist, so agent content cannot carry it (verified for the quoted, valueless and
+	// upper-case forms). annot.js requires it, which is what stops an artifact from supplying a
+	// <div id="pf-margin-rail"> that wins document order — the agent body is inlined BEFORE this
+	// chrome, and getElementById returns the first match regardless of tag.
+	b.WriteString("<div id=\"pf-margin-rail\" data-pf-chrome hidden></div>\n")
 
 	// ─── Hidden selection-comment form ────────────────────────────────────────
 	// JS reveals + positions this on text selection.
-	b.WriteString("<form id=\"pf-selform\" hidden method=\"POST\" action=\"/ui/artifacts/")
+	b.WriteString("<form id=\"pf-selform\" data-pf-chrome hidden method=\"POST\" action=\"/ui/artifacts/")
 	b.WriteString(html.EscapeString(memID))
-	b.WriteString("/commit\">\n")
+	b.WriteString("/commit" + exactSuffix + "\">\n")
 	b.WriteString("<input type=\"hidden\" name=\"quote\" value=\"\">\n")
 	b.WriteString("<input type=\"hidden\" name=\"prefix\" value=\"\">\n")
 	b.WriteString("<input type=\"hidden\" name=\"suffix\" value=\"\">\n")
@@ -903,9 +1597,23 @@ func RegisterUIArtifactReplyResolveRoutes(uiGroup *echo.Group, pool *pgxpool.Poo
 }
 
 // artifactRedirectURL builds the 303 redirect target for artifact-scoped write
-// operations: always back to the artifact HTML page.
-func artifactRedirectURL(memID string) string {
-	return "/ui/artifacts/" + url.PathEscape(memID) + "/html"
+// operations: back to the artifact HTML page.
+//
+// aihub#248 review warning 1: preserves the exact-version marker from the
+// incoming request. Without this, annotating (or replying/resolving on) a
+// past version reached via the side-rail's marked link 303s back to a
+// marker-less URL, which then falls into the lineage-head redirect above and
+// bounces the author to head — silently "hiding" the comment they just wrote
+// on that past version (annotations are strictly per-version, :385). The
+// marker only ever round-trips back to the SAME memID this request already
+// wrote to; it is not a new mint site under non-goal 6's "two link sites"
+// restriction (see buildAnnotationHTMLWithExact's doc comment).
+func artifactRedirectURL(c echo.Context, memID string) string {
+	path := "/ui/artifacts/" + url.PathEscape(memID) + "/html"
+	if isExactVersionRequest(c) {
+		path += "?" + exactVersionParam + "=1"
+	}
+	return path
 }
 
 // handleUIArtifactReplyCommit handles POST /ui/artifacts/:id/commit/:commit_id/reply.
@@ -942,7 +1650,7 @@ func handleUIArtifactReplyCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		if err := doReplyCommitFn(ctx, pool, memID, commitID, u.UserID, u.DisplayName, body); err != nil {
 			return domainErr(c, err)
 		}
-		return c.Redirect(http.StatusSeeOther, artifactRedirectURL(memID))
+		return c.Redirect(http.StatusSeeOther, artifactRedirectURL(c, memID))
 	}
 }
 
@@ -976,7 +1684,7 @@ func handleUIArtifactResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		if err := doResolveCommitFn(ctx, pool, memID, commitID, reply, u.UserID, u.DisplayName); err != nil {
 			return domainErr(c, err)
 		}
-		return c.Redirect(http.StatusSeeOther, artifactRedirectURL(memID))
+		return c.Redirect(http.StatusSeeOther, artifactRedirectURL(c, memID))
 	}
 }
 
@@ -1026,7 +1734,7 @@ func handleUIArtifactCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 			return domainErr(c, err)
 		}
 
-		return c.Redirect(http.StatusSeeOther, "/ui/artifacts/"+url.PathEscape(memID)+"/html")
+		return c.Redirect(http.StatusSeeOther, artifactRedirectURL(c, memID))
 	}
 }
 
@@ -1046,7 +1754,7 @@ var versionChainFn = func(ctx context.Context, pool *pgxpool.Pool, memID string)
 // For versions that have a linked review (keyed via attrs.structured_payload
 // .reviewed_memory_id), a "Review" link is emitted.
 // aihub#138: converted to collapsible <details> and added per-version review link.
-func buildVersionHistoryHTML(ctx context.Context, pool *pgxpool.Pool, memID string, versions []domain.MemoryVersionRef) string {
+func buildVersionHistoryHTML(ctx context.Context, pool *pgxpool.Pool, memID string, versions []domain.MemoryVersionRef, nonce string) string {
 	if len(versions) <= 1 {
 		return ""
 	}
@@ -1058,9 +1766,15 @@ func buildVersionHistoryHTML(ctx context.Context, pool *pgxpool.Pool, memID stri
 	var b strings.Builder
 	b.WriteString("<section class=\"pf-version-history\">\n")
 	nVers := len(versions)
-	b.WriteString("<button type=\"button\" class=\"pf-version-history-toggle\" onclick=\"")
-	b.WriteString("var p=this.nextElementSibling;var c=this.querySelector('.pf-vchev');")
-	b.WriteString("p.hidden=!p.hidden;if(c)c.classList.toggle('open',!p.hidden);\">")
+	// aihub#243: this was an inline `onclick=` attribute. A CSP nonce cannot authorise
+	// event-handler attributes (script-src-attr falls back to script-src, which admits only
+	// 'unsafe-inline'/'unsafe-hashes'), so it would be refused under the current policy.
+	//
+	// This function has no production caller today — aihub#159 moved version history into the
+	// side rail — so nothing was actually broken. It is fixed rather than annotated because a
+	// comment does not survive someone re-wiring it, and a dead inline handler is exactly the
+	// kind of thing that gets re-wired and then silently does nothing.
+	b.WriteString("<button type=\"button\" class=\"pf-version-history-toggle\" data-pf-chrome>")
 	b.WriteString("<span class=\"pf-vchev\"></span>History &mdash; ")
 	b.WriteString(strconv.Itoa(nVers))
 	b.WriteString(" version")
@@ -1068,6 +1782,17 @@ func buildVersionHistoryHTML(ctx context.Context, pool *pgxpool.Pool, memID stri
 		b.WriteString("s")
 	}
 	b.WriteString("</button>\n")
+	b.WriteString("<script nonce=\"" + html.EscapeString(nonce) + "\">")
+	b.WriteString("(function(){")
+	b.WriteString("var b=document.querySelector('button[data-pf-chrome].pf-version-history-toggle');")
+	b.WriteString("if(!b)return;")
+	b.WriteString("b.addEventListener('click',function(){")
+	b.WriteString("var p=b.nextElementSibling;while(p&&p.tagName==='SCRIPT'){p=p.nextElementSibling;}")
+	b.WriteString("if(!p)return;var c=b.querySelector('.pf-vchev');")
+	b.WriteString("p.hidden=!p.hidden;if(c)c.classList.toggle('open',!p.hidden);")
+	b.WriteString("});")
+	b.WriteString("})();")
+	b.WriteString("</script>\n")
 	b.WriteString("<div class=\"pf-version-history-panel\" hidden>\n")
 	b.WriteString("<ol class=\"pf-version-list\">\n")
 	for i, v := range versions {

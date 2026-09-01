@@ -1,0 +1,6 @@
+{
+  "polyforge": {
+    "command": "./bin/polyforge-mcp.sh",
+    "cwd": "."
+  }
+}

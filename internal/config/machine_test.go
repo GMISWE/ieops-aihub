@@ -122,3 +122,54 @@ func TestResolveAihubURL(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveBinaryChannel pins the aihub#305 contract: `dev` is the only
+// published bins-<channel> branch, so it is the default AND the answer for the
+// legacy `stable` value that is still sitting in existing config.toml files.
+//
+// This helper has no callers today — it is the Go-side twin of the case
+// statement in plugins/polyforge/bin/polyforge-mcp.sh, which is what actually
+// downloads the binary. That is precisely why it is worth pinning: an
+// uncalled twin drifts silently, and whoever wires it up later inherits
+// whatever it happens to say. The launcher's own behaviour is covered by
+// plugins/polyforge/tests/launcher-channel-url.test.sh, which additionally
+// fetches the resolved URL — a string check cannot tell a published branch
+// from a 404, which is how "stable" survived as the default for months.
+func TestResolveBinaryChannel(t *testing.T) {
+	tests := []struct {
+		name    string
+		binary  *MachineBinary
+		want    string
+		comment string
+	}{
+		{
+			name: "no [binary] section at all defaults to dev",
+			want: "dev",
+		},
+		{
+			name:   "empty channel defaults to dev",
+			binary: &MachineBinary{Channel: ""},
+			want:   "dev",
+		},
+		{
+			name:   "explicit dev is honoured",
+			binary: &MachineBinary{Channel: "dev"},
+			want:   "dev",
+		},
+		{
+			name:    "legacy stable maps onto dev rather than a 404",
+			binary:  &MachineBinary{Channel: "stable"},
+			want:    "dev",
+			comment: "bins-stable was never published; returning it verbatim resolves to a 404",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mc := &MachineConfig{Binary: tt.binary}
+			if got := mc.ResolveBinaryChannel(); got != tt.want {
+				t.Errorf("ResolveBinaryChannel() = %q, want %q (%s)", got, tt.want, tt.comment)
+			}
+		})
+	}
+}

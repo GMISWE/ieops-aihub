@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# Read-only drift probe: warns when the cached `superpowers` plugin no longer matches the
+# assumptions polyforge hardcodes against version 6.1.1 (skill names the pf-execute engine
+# pointer depends on, and the router's `superpowers@` settings prefix scan). Never blocks --
+# always exits 0; pf-doctor interprets the [WARN] lines.
+#
+# Usage: bash pf-seam-check
+# Env overrides (for tests): PF_SEAM_CACHE_DIR (plugin cache root), PF_SEAM_WS (workspace
+# root to also scan for workspace-level settings, mirrors pf-skill-router's ws layer).
+
+set -uo pipefail
+
+PIN_VERSION="6.1.1"
+CACHE_ROOT="${PF_SEAM_CACHE_DIR:-$HOME/.claude/plugins/cache}"
+warnings=0
+
+ok()   { echo "[ok] $1"; }
+warn() { echo "[WARN] $1: $2"; warnings=$((warnings + 1)); }
+
+# --- locate the superpowers skills dir(s): marketplace segment varies, so glob for it ---
+skills_dirs=()
+for d in "$CACHE_ROOT"/*/superpowers/*/skills; do
+    [ -d "$d" ] && skills_dirs+=("$d")
+done
+
+if [ "${#skills_dirs[@]}" -eq 0 ]; then
+    warn "superpowers cache" "superpowers plugin not found in cache"
+    echo "pf-seam-check: $warnings warning(s) against pinned superpowers $PIN_VERSION"
+    exit 0
+fi
+
+# Pick the highest version present (version dir is skills_dir's parent's basename).
+highest=""
+for d in "${skills_dirs[@]}"; do
+    v="$(basename "$(dirname "$d")")"
+    if [ -z "$highest" ] || [ "$(printf '%s\n%s\n' "$highest" "$v" | sort -V | tail -1)" = "$v" ]; then
+        highest="$v"
+    fi
+done
+# Use the skills dir matching the highest version found.
+target_dir=""
+for d in "${skills_dirs[@]}"; do
+    v="$(basename "$(dirname "$d")")"
+    [ "$v" = "$highest" ] && target_dir="$d"
+done
+
+if [ "$highest" != "$PIN_VERSION" ]; then
+    warn "superpowers version" "superpowers $highest present; seams pinned to 6.1.1 -- re-verify seams and update the pin"
+fi
+
+# --- Probe A: skill names + frontmatter ---
+names=(subagent-driven-development executing-plans finishing-a-development-branch)
+for name in "${names[@]}"; do
+    f="$target_dir/$name/SKILL.md"
+    if [ ! -f "$f" ]; then
+        case "$name" in
+            subagent-driven-development)
+                warn "skill name: $name" "SKILL.md missing; pf-skill-router's engine pointer for this skill will not resolve" ;;
+            finishing-a-development-branch)
+                warn "skill name: $name" "SKILL.md missing; _common/lifecycle.md's D6 execute boundary references this terminal skill" ;;
+            executing-plans)
+                warn "skill name: $name" "SKILL.md missing; pf-skill-router.test.sh's negative assertion (ck_not) for this name may go stale" ;;
+        esac
+        continue
+    fi
+    fm_name="$(sed -n '2p' "$f" | sed -n 's/^name: *//p')"
+    if [ "$fm_name" != "$name" ]; then
+        case "$name" in
+            subagent-driven-development)
+                warn "skill name: $name" "frontmatter name is '$fm_name'; pf-skill-router's engine pointer for this skill will not resolve" ;;
+            finishing-a-development-branch)
+                warn "skill name: $name" "frontmatter name is '$fm_name'; _common/lifecycle.md's D6 execute boundary references this terminal skill" ;;
+            executing-plans)
+                warn "skill name: $name" "frontmatter name is '$fm_name'; pf-skill-router.test.sh's negative assertion (ck_not) for this name may go stale" ;;
+        esac
+        continue
+    fi
+    ok "skill name: $name"
+done
+
+# --- Probe C: settings prefix scan ---
+# Mirror pf-skill-router's resolution exactly: scan $HOME/.claude AND the workspace's
+# .claude, where ws = the nearest ancestor of $PWD holding .polyforge.yaml. PF_SEAM_WS
+# overrides ws directly (test injection); otherwise walk up from $PWD (find_ws).
+ws="${PF_SEAM_WS:-}"
+if [ -z "$ws" ]; then
+    d="$PWD"
+    while [ -n "$d" ] && [ "$d" != "/" ]; do
+        if [ -f "$d/.polyforge.yaml" ]; then ws="$d"; break; fi
+        d="$(dirname "$d")"
+    done
+fi
+settings_layers=("$HOME/.claude/settings.json" "$HOME/.claude/settings.local.json")
+if [ -n "$ws" ]; then
+    settings_layers+=("$ws/.claude/settings.json" "$ws/.claude/settings.local.json")
+fi
+
+found_prefix=0
+if command -v python3 >/dev/null 2>&1; then
+    for f in "${settings_layers[@]}"; do
+        [ -f "$f" ] || continue
+        if PF_SETTINGS_FILE="$f" python3 <<'PY' 2>/dev/null
+import json, os, sys
+try:
+    data = json.load(open(os.environ["PF_SETTINGS_FILE"], encoding="utf-8"))
+except (OSError, ValueError):
+    sys.exit(1)
+ep = data.get("enabledPlugins")
+if not isinstance(ep, dict):
+    sys.exit(1)
+sys.exit(0 if any(k.startswith("superpowers@") for k in ep) else 1)
+PY
+        then
+            found_prefix=1
+        fi
+    done
+else
+    for f in "${settings_layers[@]}"; do
+        [ -f "$f" ] || continue
+        grep -q '"superpowers@' "$f" && found_prefix=1
+    done
+fi
+
+if [ "$found_prefix" -eq 1 ]; then
+    ok "settings prefix: superpowers@ found"
+else
+    warn "settings prefix" "pf-skill-router's superpowers@ prefix will not detect superpowers"
+fi
+
+if [ "$warnings" -eq 0 ]; then
+    echo "pf-seam-check: all seams verified against superpowers $PIN_VERSION"
+else
+    echo "pf-seam-check: $warnings warning(s) against pinned superpowers $PIN_VERSION"
+fi
+exit 0

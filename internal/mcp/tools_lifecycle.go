@@ -16,7 +16,148 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
+
+// pf_list_work_items forwarding tables.
+//
+// Publishing a param in the InputSchema while forgetting it in the forwarding
+// loop makes the schema state a contract the transport does not keep — the
+// caller sends the param, nothing rejects it, and it is silently dropped
+// (mem_1SJ12mCz). Keeping them as named tables lets
+// TestListWorkItemsEveryPublishedParamHasAWireProbe assert they agree with the
+// schema, and TestListWorkItemsForwardsEveryPublishedParamByValue assert each
+// decoder can actually read the shapes callers send.
+//
+// aihub#280: agreement between these tables and the schema is hop 2 of a
+// four-hop contract, and is *not* sufficient. See the header of
+// tools_list_wi_schema_test.go for the other three and where each is asserted.
+var (
+	// listWorkItemsStringParams are forwarded verbatim when non-empty.
+	listWorkItemsStringParams = []string{
+		"project", "kind", "wi_type", "priority", "milestone", "scenario",
+		"label", "user_id", "source", "since", "limit", "cursor",
+		"sort", "order", "query",
+	}
+	// listWorkItemsBoolParams are forwarded as "true" when set.
+	listWorkItemsBoolParams = []string{"ready_only", "include_step_state"}
+	// listWorkItemsCSVParams accept EITHER a JSON string (already comma-
+	// separated) or a JSON array of strings, and are forwarded as CSV — the wire
+	// form handleListWorkItems' strings.Split expects.
+	//
+	// Both shapes are accepted because both occur. The schema publishes `ids` as
+	// an array and `status` as a CSV string, but every polyforge skill that
+	// filters by status wrote `status=["wrapped"]`, and strArg returns "" for a
+	// non-string — so setIfNonempty dropped it and /pf-release listed the
+	// project's entire backlog instead of one release's worth. Coercing here
+	// fixes those callers without a plugin redeploy; the skills were corrected
+	// too, so the published shape and the call sites now agree (aihub#280).
+	listWorkItemsCSVParams = []string{"ids", "status"}
+)
+
+// buildListWorkItemsParams renders MCP call arguments into the HTTP query
+// string for GET /v1/work_items. This is hop 2 of the four-hop parameter
+// contract (aihub#280).
+//
+// Split out of the tool handler so hop 2 can be asserted on the value that
+// actually reaches the wire, not merely on the three tables agreeing with the
+// schema by name. Name agreement was green throughout the period when
+// `status=["wrapped"]` was being discarded on every call: the name matched, the
+// decoder could not read the shape, and nothing anywhere said so.
+func buildListWorkItemsParams(args map[string]any) (url.Values, error) {
+	params := url.Values{}
+	// scalarArg, not strArg: `limit` is published as a string but real callers
+	// send it as a JSON number, and strArg drops non-strings (aihub#280 B6).
+	for _, k := range listWorkItemsStringParams {
+		setIfNonempty(params, k, scalarArg(args, k))
+	}
+	for _, k := range listWorkItemsBoolParams {
+		value, present, ok := parseBoolArg(args, k)
+		if !present {
+			continue
+		}
+		if !ok {
+			// Rejected rather than defaulted to false. Defaulting is what made
+			// `ready_only: "true"` return the unfiltered list, and it is
+			// indistinguishable from not sending the param at all.
+			return nil, fmt.Errorf("%s must be a boolean (true/false, \"true\"/\"false\", or 1/0), got %#v", k, args[k])
+		}
+		// Only a true is forwarded: the server reads an absent param as false,
+		// so sending "false" would be redundant, and forwarding it would make
+		// "explicitly false" and "unset" identical on the wire anyway.
+		if value {
+			params.Set(k, "true")
+		}
+	}
+	for _, k := range listWorkItemsCSVParams {
+		setIfNonempty(params, k, csvArg(args, k))
+	}
+	return params, nil
+}
+
+// listWorkItemsSchema is the published input schema for pf_list_work_items,
+// split out so the forwarding test can read the same value the tool registers.
+func listWorkItemsSchema() json.RawMessage {
+	idsProp := prop("array", "Filter to these work item IDs or slugs (array of strings; "+
+		"a comma-separated string is also accepted). Makes `project` optional — an id "+
+		"already names one work item, and the query is bounded to the projects you can see. "+
+		"Note the asymmetry with `project`: an inaccessible project= is a 403, whereas ids "+
+		"you cannot see are silently omitted, so a short result means \"not visible to you\" "+
+		"as well as \"does not exist\".")
+	idsProp["items"] = map[string]any{"type": "string"}
+	return objectSchema(map[string]any{
+		"project": prop("string", "Project name. Optional when `ids` is given, required otherwise."),
+		"ids":     idsProp,
+		"status": prop("string", "Filter by status; comma-separated for several "+
+			"(e.g. \"running,paused\"). An array of strings is also accepted."),
+		"wi_type":   prop("string", "Filter by work item type (e.g. fix_bug, feature)"),
+		"kind":      prop("string", "DEPRECATED alias for `wi_type`; an explicit wi_type wins. There is no separate `kind` field."),
+		"priority":  prop("string", "Filter by priority (urgent|high|normal|low)"),
+		"milestone": prop("string", "Filter by milestone"),
+		// Deliberately NOT an enum, and deliberately not advertising "release".
+		// work_items.scenario is CHECKed to ('coding','writing','data') and
+		// CreateWorkItem is stricter still (it rejects anything but 'coding'), so
+		// 'coding' is the only value any existing row can hold. pf-release
+		// filters on scenario="release", which now correctly matches nothing —
+		// see the note at that call site; making release wis real is aihub#176.
+		"scenario": prop("string", "Filter by scenario. In practice every work item is 'coding': "+
+			"the column is constrained to coding|writing|data and creation rejects all but coding."),
+		"label":   prop("string", "Filter by label"),
+		"user_id": prop("string", "Filter by user ID"),
+		"source":  prop("string", "Filter by source"),
+		"ready_only": prop("boolean", "Only return items that are ready to claim: queued, "+
+			"not requiring a human session, and with no unfinished blocking dependency. "+
+			"Same PREDICATE as pf_get_ready_queue's items[] (one shared SQL constant), but "+
+			"not the same page: this defaults to limit=50 ordered by created_at desc, while "+
+			"the ready queue defaults to 10 ordered by priority desc. With more ready items "+
+			"than either limit they return different subsets."),
+		"include_step_state": prop("boolean", "Attach each item's step state as `step_state` "+
+			"(current_step, current_step_status, step_started_at, ...). The key is ABSENT for a work "+
+			"item that has never been claimed — and also if the lookup itself failed, which is "+
+			"best-effort and reported only on the server's stderr. Absent therefore means \"no step "+
+			"state\", not \"definitely never claimed\"."),
+		"since": prop("string", "Only items whose CREATED_AT is at or after this RFC3339 timestamp. "+
+			"This is creation time, not close time: combining it with status=wrapped does NOT give "+
+			"\"wrapped since T\" — an item created before T and wrapped after it is excluded. "+
+			"An unparseable value is rejected rather than ignored."),
+		"query": prop("string", "Semantic search over goal+content (aihub#273): "+
+			"embedding cosine when the server has a provider, ILIKE fallback otherwise. "+
+			"Results are similarity-ordered; not combinable with sort/order/cursor."),
+		"limit": prop("string", "Max items to return. A JSON number is also accepted "+
+			"(and is what most callers send); values above 200 fall back to the default of 50."),
+		"cursor": prop("string", "Pagination cursor. Carries the value of the column named by `sort`, "+
+			"so pass it back unchanged and do not mix cursors between different sort orders."),
+		// The enums come from the server's enforced sets (aihub#224) rather than
+		// being retyped here, so the published contract cannot drift from the
+		// validator that rejects everything outside them.
+		"sort": propEnum("string", fmt.Sprintf(
+			"Sort column (default %s). %s returns ONLY closed items — a NULL close time has no position in that ordering.",
+			domain.ListWorkItemsSortCreatedAt, domain.ListWorkItemsSortClosedAt),
+			domain.ListWorkItemsSortValues()),
+		"order": propEnum("string", fmt.Sprintf("Sort direction (default %s)", domain.ListWorkItemsOrderDesc),
+			domain.ListWorkItemsOrderValues()),
+	}, nil)
+}
 
 func (s *Server) registerLifecycleTools() {
 	// pf_whoami
@@ -52,27 +193,128 @@ func (s *Server) registerLifecycleTools() {
 								relation = "owner"
 								memberRole = "owner"
 							} else if membersRaw != nil {
-								// Parse members to find caller's role
-								var membersBytes []byte
+								// Parse members to find caller's role.
+								//
+								// aihub#312: []any is the shape that actually
+								// arrives, and it used to be the one shape this
+								// switch did NOT handle. The server sends members
+								// as a JSON array (domain.Project.Members is a
+								// json.RawMessage) and client.ListProjects decodes
+								// the whole response into map[string]any
+								// (pkg/client/client.go), so proj["members"] is
+								// []any. With only the string and []byte cases
+								// below, nothing matched, no members were ever
+								// parsed, and EVERY non-admin non-owner member
+								// fell through to the public/viewer defaults set
+								// just above.
+								//
+								// string and []byte are kept, but note that
+								// s.client is always the HTTP client, so the only
+								// way to reach them is a project row whose members
+								// JSONB holds a double-encoded JSON string instead
+								// of a JSON array. They are legacy-data cases, not
+								// caller-shape cases.
+								//
+								// ⚠️ SECOND DERIVATION, STILL UNFIXED.
+								// internal/server/middleware.go:116-131
+								// derives the same "caller's role out of
+								// projects.members" fact independently, to
+								// fill /v1/users/me's project_roles, and it
+								// still carries BOTH defects fixed here:
+								//
+								//   - Wholesale discard. It decodes into a
+								//     TYPED slice and `continue`s on error
+								//     (lines 120-122), so ONE junk element
+								//     drops that project's membership
+								//     entirely — even though encoding/json
+								//     had already filled the good entries in
+								//     (see the []any case below). Same shape
+								//     as the guard aihub#312 removed here.
+								//   - Bare identity compare. Line 124 is
+								//     `m.UserID == uc.UserID` with no
+								//     `!= ""` guard. That is safe today only
+								//     by accident of its inputs — uc.UserID
+								//     comes from an authenticated API key and
+								//     the SQL pre-filters with `members @>`
+								//     — not by anything at that line.
+								//
+								// Deliberately NOT fixed in aihub#312: out of
+								// scope here, and as of 2026-09-01 no work
+								// item covers it, so this note has no landing
+								// point yet. If you edit either derivation,
+								// edit the other or file one. The per-fixture
+								// divergence is measured in
+								// tools_whoami_members_test.go, on
+								// middlewareProjectRoles.
+								var members []map[string]any
 								switch m := membersRaw.(type) {
-								case string:
-									membersBytes = []byte(m)
-								case []byte:
-									membersBytes = m
-								}
-								if len(membersBytes) > 0 {
-									var members []map[string]any
-									if json.Unmarshal(membersBytes, &members) == nil {
-										for _, mem := range members {
-											uid, _ := mem["user_id"].(string)
-											if uid == callerID {
-												relation = "member"
-												if r, ok := mem["role"].(string); ok {
-													memberRole = r
-												}
-												break
-											}
+								case []any:
+									// Walked element by element rather than
+									// re-marshalled and re-parsed in one go.
+									//
+									// NOT because a whole-list json.Unmarshal
+									// would fail wholesale on one non-object
+									// entry — it does not. encoding/json records
+									// the FIRST *json.UnmarshalTypeError it hits
+									// inside a slice and KEEPS DECODING the rest.
+									// Measured: `[{u_a,writer}, 5, {u_b,viewer}]`
+									// into []map[string]any yields a length-3
+									// slice holding u_a, a nil map, and u_b —
+									// entries on BOTH sides of the bad one are
+									// filled — together with a non-nil error.
+									//
+									// The wholesale discard was the GUARD, not the
+									// decoder. The pre-change code read
+									// `if json.Unmarshal(...) == nil { ...use... }`,
+									// so one junk entry made the error non-nil and
+									// threw away a result that was in fact almost
+									// entirely populated, degrading every other
+									// member to public/viewer — the exact failure
+									// mode aihub#312 was.
+									//
+									// Walking []any is still the right shape: it
+									// has no error return at all, so there is
+									// nothing here for a later edit to re-guard on
+									// and a junk entry can only ever cost its own
+									// element.
+									members = make([]map[string]any, 0, len(m))
+									for _, entry := range m {
+										if mem, ok := entry.(map[string]any); ok {
+											members = append(members, mem)
 										}
+									}
+								// The dropped errors below are deliberate and are
+								// NOT the swallow that caused aihub#312: a failed
+								// json.Unmarshal still fills in every element it
+								// could decode, on BOTH sides of the bad one —
+								// only the bad element itself is left at its zero
+								// value. Keeping that partial result therefore
+								// degrades per entry exactly like the []any case
+								// above, whereas discarding it on error would
+								// throw away memberships that parsed cleanly. The
+								// uid != "" check below is what stops the
+								// zero-valued entry from matching.
+								case string:
+									_ = json.Unmarshal([]byte(m), &members)
+								case []byte:
+									_ = json.Unmarshal(m, &members)
+								}
+								for _, mem := range members {
+									uid, _ := mem["user_id"].(string)
+									// uid != "" matters now that this loop is
+									// reachable at all. Both sides fall back to ""
+									// when the field is absent or not a string, so
+									// an entry with no user_id would match a caller
+									// whose own user_id failed to decode and report
+									// them as a member with that entry's role.
+									// aihub#312 under-reported privilege; matching
+									// on "" would over-report it, which is worse.
+									if uid != "" && uid == callerID {
+										relation = "member"
+										if r, ok := mem["role"].(string); ok {
+											memberRole = r
+										}
+										break
 									}
 								}
 							}
@@ -96,25 +338,8 @@ func (s *Server) registerLifecycleTools() {
 	// pf_create_work_item
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_create_work_item",
-		Description: "Create a work item in the specified project",
-		InputSchema: objectSchema(map[string]any{
-			"project":                prop("string", "Project name"),
-			"goal":                   prop("string", "Single-line goal ≤500 chars"),
-			"scenario":               prop("string", "Scenario (default: coding)"),
-			"priority":               prop("string", "low|normal|high|urgent"),
-			"wi_type":                prop("string", "Work item type (fix_bug, feature, chore, etc.)"),
-			"requires_human_session": prop("boolean", "Whether this wi requires a human session"),
-			"milestone":              prop("string", "Milestone name"),
-			"labels":                 prop("array", "Labels"),
-			"declared_resources":     prop("array", "Declared resource locks"),
-			"parent_work_item_id":    prop("string", "Parent work item ID"),
-			"source":                 prop("string", "Source reference"),
-			"attrs":                  prop("object", "Additional attributes"),
-			"blocked_by":             prop("array", "List of blocking work item IDs"),
-			"content":                prop("string", "Background context for this wi (markdown, max 20000 chars)"),
-			"force_create":           prop("boolean", "Force create bypassing duplicate check"),
-			"force_reason":           prop("string", "Reason for force create"),
-		}, []string{"project", "goal"}),
+		Description: "Create a work item in the specified project. To create more than one, use pf_batch_create_work_items — repeated calls here cost one round-trip each.",
+		InputSchema: createWorkItemSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -126,10 +351,7 @@ func (s *Server) registerLifecycleTools() {
 		if strArg(args, "goal") == "" {
 			return errResult(fmt.Errorf("goal is required"))
 		}
-		// Auto-supply force_reason when force_create=true (server requires >=10 chars)
-		if boolArg(args, "force_create") && strArg(args, "force_reason") == "" {
-			args["force_reason"] = "force_create=true via MCP (admin bypass dedup check)"
-		}
+		applyForceReasonDefault(args)
 		result, err := s.client.CreateWorkItem(ctx, args)
 		if err != nil {
 			// Surface PROJECT_NOT_FOUND with a clear message
@@ -138,55 +360,180 @@ func (s *Server) registerLifecycleTools() {
 			}
 			return errResult(err)
 		}
+		// aihub#281: the caller sent this content one line ago; the record it
+		// gets back is otherwise complete. No `brief` counterpart is published
+		// for create because there is nothing for it to do — a work item's
+		// content at creation is whatever the caller supplied, so an unsent
+		// content is an absent one and the equality gate already covers 100% of
+		// the bytes. (482/482 successful creates in the sample sent content.)
+		suppressContentEcho(args, result)
 		return jsonResult(result)
 	})
 
-	// pf_list_work_items
+	// pf_batch_create_work_items — file several wis in ONE round-trip (aihub#290).
+	//
+	// 134 measured adjacent create -> create pairs, 0.171% of billed input, spent
+	// filing a batch of unrelated follow-ups one call at a time. (Only pairs whose
+	// goals were <0.5 similar were counted, so these are genuinely distinct items
+	// being filed together, not a client retrying the same one.)
+	//
+	// A separate tool rather than an `items` array bolted onto pf_create_work_item,
+	// for the reason aihub#286 gives for pf_ship: `project` and `goal` are in that
+	// tool's flat `required` list, and objectSchema() cannot express "required
+	// unless items is set". Overloading it would leave the published schema
+	// misdescribing its own contract — aihub#238 / #241 again.
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_list_work_items",
-		Description: "List work items with optional filters",
+		Name: "pf_batch_create_work_items",
+		Description: "Create SEVERAL work items in one call. Use this when filing more than one wi at once " +
+			"(follow-ups discovered mid-execution, a backlog split into pieces) instead of calling " +
+			"pf_create_work_item repeatedly — each extra call costs a whole round-trip for a confirmation " +
+			"the next one does not read. " +
+			"Items are created INDEPENDENTLY and one failure does not stop the rest: the response reports " +
+			"`created` and `failed` separately, each failure carrying the item's `index` so a retry can " +
+			"resend exactly the ones that did not land. Duplicate detection still runs per item, so a 409 " +
+			"DUPLICATE/CANDIDATES on one item is a normal, per-item outcome. " +
+			"For a single wi use pf_create_work_item.",
 		InputSchema: objectSchema(map[string]any{
-			"project":            prop("string", "Project name"),
-			"status":             prop("string", "Filter by status"),
-			"kind":               prop("string", "Filter by kind"),
-			"milestone":          prop("string", "Filter by milestone"),
-			"label":              prop("string", "Filter by label"),
-			"user_id":            prop("string", "Filter by user ID"),
-			"source":             prop("string", "Filter by source"),
-			"ready_only":         prop("boolean", "Only return ready items"),
-			"include_step_state": prop("boolean", "Include step state"),
-			"since":              prop("string", "Since timestamp (RFC3339)"),
-			"limit":              prop("string", "Max items to return"),
-			"cursor":             prop("string", "Pagination cursor"),
-		}, nil),
+			"project": prop("string", "Default project for every item. An item may override it with its own \"project\"."),
+			"items":   batchWorkItemsProp(),
+		}, []string{"project", "items"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
 			return errResult(err)
 		}
-		params := url.Values{}
-		for _, k := range []string{"project", "status", "kind", "milestone", "label", "user_id", "source", "since", "limit", "cursor"} {
-			setIfNonempty(params, k, strArg(args, k))
+		project := strArg(args, "project")
+		if project == "" {
+			return errResult(fmt.Errorf("project is required"))
 		}
-		if boolArg(args, "ready_only") {
-			params.Set("ready_only", "true")
+		raw, ok := args["items"].([]any)
+		if !ok || len(raw) == 0 {
+			return errResult(fmt.Errorf("items must be a non-empty array of work-item objects"))
 		}
-		if boolArg(args, "include_step_state") {
-			params.Set("include_step_state", "true")
+		// Cap the batch. Each item is a sequential HTTP call inside this one tool
+		// call, with no partial-result flush and nothing visible to the caller
+		// until it returns, so an unbounded array turns a single MCP call into an
+		// arbitrarily long silent stall. Refused rather than truncated: silently
+		// creating a prefix of what was asked for is worse than creating nothing.
+		if len(raw) > maxBatchWorkItems {
+			return errResult(fmt.Errorf("items has %d entries, more than the %d-item limit; split it into several calls (nothing was created)",
+				len(raw), maxBatchWorkItems))
+		}
+
+		created := make([]any, 0, len(raw))
+		failed := make([]map[string]any, 0)
+
+		for i, entry := range raw {
+			item, ok := entry.(map[string]any)
+			if !ok {
+				failed = append(failed, map[string]any{
+					"index": i,
+					"error": fmt.Sprintf("item is not an object (got %T)", entry),
+				})
+				continue
+			}
+			// Copy before mutating: the caller's array is decoded from their
+			// arguments and defaulting in place would edit what they sent.
+			item = cloneArgs(item)
+			if strArg(item, "project") == "" {
+				item["project"] = project
+			}
+			if strArg(item, "goal") == "" {
+				failed = append(failed, map[string]any{"index": i, "error": "goal is required"})
+				continue
+			}
+			applyForceReasonDefault(item)
+
+			res, createErr := s.client.CreateWorkItem(ctx, item)
+			if createErr != nil {
+				// Reported, not returned: aborting here would leave the caller
+				// knowing only that "the batch failed", with no way to tell which
+				// items already exist — and re-sending the whole batch would then
+				// trip dedup on the ones that did land.
+				failed = append(failed, map[string]any{
+					"index":   i,
+					"goal":    strArg(item, "goal"),
+					"project": strArg(item, "project"),
+					"error":   createErr.Error(),
+				})
+				continue
+			}
+			// aihub#281, and this is the tool where it matters most: `created`
+			// carries one whole record per item, so a 10-item batch echoes back
+			// up to 10 bodies the caller sent in the very same call. Suppressed
+			// against THIS item's arguments, not the batch's — item i's content
+			// is only an echo of item i.
+			suppressContentEcho(item, res)
+			created = append(created, res)
+		}
+
+		return jsonResult(map[string]any{
+			"ok":            len(failed) == 0,
+			"created_count": len(created),
+			"failed_count":  len(failed),
+			"created":       created,
+			"failed":        failed,
+		})
+	})
+
+	// pf_list_work_items
+	s.mcp.AddTool(&sdkmcp.Tool{
+		Name: "pf_list_work_items",
+		// The second sentence is the only thing that tells the caller the response
+		// is projected (aihub#278), and it is nine words for two reasons.
+		//
+		// Cost: a tool description sits in the prefix of EVERY request, so it is
+		// a standing charge against a per-call saving — the same arithmetic that
+		// made a `fields` PARAMETER not worth adding. An earlier draft here
+		// enumerated the seven droppable fields and measured +220 B / ~86 tokens
+		// per request, which is the same order as the ~100 that killed the
+		// parameter. This one measures +70 B / ~27 tokens per request — about
+		// 23k tokens a day at cache-read pricing, against ~462k saved on the
+		// limit=200 calls alone, so it clears by ~20x where the enumeration
+		// cleared by ~5x and the parameter did not clear at all.
+		//
+		// Correctness: the enumeration was also the more fragile of the two. It
+		// restates listWorkItemNullMeansNone in prose, in a different file, with
+		// nothing to keep them in step — a checked-in list of the droppable
+		// fields would rot exactly as quietly as the response shape it describes.
+		// Stating the INVARIANT cannot go stale, and it is what a caller needs:
+		// not which keys may vanish, but what a vanished key means.
+		//
+		// The field list lives in docs/mcp-tools.md and the reasoning in
+		// list_wi_slim.go, neither of which is charged to anybody.
+		Description: "List work items with optional filters. " +
+			"Item keys whose value is null are omitted: an absent key means null.",
+		InputSchema: listWorkItemsSchema(),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		args, err := parseArgs(req.Params.Arguments)
+		if err != nil {
+			return errResult(err)
+		}
+		params, err := buildListWorkItemsParams(args)
+		if err != nil {
+			return errResult(err)
 		}
 		result, err := s.client.ListWorkItems(ctx, params)
 		if err != nil {
 			return errResult(err)
 		}
-		return jsonResult(result)
+		// aihub#278: drop the keys whose value is null and which say nothing the
+		// key's absence does not (content, plus six that mean "none").
+		// Unconditional, and lossless by a per-value check rather than by
+		// assertion — see the header of list_wi_slim.go for why it is a
+		// delete-list and not a keep-list like slimRecallResult, and the closing
+		// note there for why `seq` and `scenario` are NOT among them despite
+		// passing the same rule.
+		return jsonResult(slimListWorkItemsResult(result))
 	})
 
 	// pf_get_work_item
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_get_work_item",
-		Description: "Get a work item by ID or slug",
+		Description: "Get a work item by ID or slug. Pass brief=true to omit the (potentially large) content field.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID or slug"),
+			"brief":        prop("boolean", "Omit the content field from the response (default false)"),
 		}, []string{"work_item_id"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -200,6 +547,11 @@ func (s *Server) registerLifecycleTools() {
 		result, err := s.client.GetWorkItem(ctx, id)
 		if err != nil {
 			return errResult(err)
+		}
+		// brief=true drops the (potentially ~20K-char) content field; default
+		// false preserves the current response shape for mixed-version safety (aihub#212).
+		if boolArg(args, "brief") {
+			delete(result, "content")
 		}
 		return jsonResult(result)
 	})
@@ -219,10 +571,32 @@ func (s *Server) registerLifecycleTools() {
 			"requires_human_session": prop("boolean", "Updated requires_human_session"),
 			"reclassify_reason":      prop("string", "Reason for wi_type change (min 10 chars)"),
 			"labels":                 prop("array", "Updated labels"),
-			"declared_resources":     prop("array", "Updated declared resources"),
-			"resources_version":      prop("string", "Current resources version for CAS"),
-			"attrs":                  prop("object", "Updated attributes"),
-			"content":                prop("string", "Background context for this wi (markdown, max 20000 chars)"),
+			"declared_resources":     declaredResourcesProp("Updated declared resources"),
+			"resources_version":      prop("integer", "Compare-and-set guard for declared_resources: the resources_version you last read from this work item. The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version. Omit to overwrite unconditionally. Every write of declared_resources increments this counter."),
+			"attrs":                  prop("object", "REPLACES the whole attrs object: every key you do not resend is DELETED. Use it only when you intend to overwrite attrs wholesale (e.g. after reading the current value). To add or change keys without destroying the others, use attrs_patch. Cannot be combined with attrs_patch/attrs_unset."),
+			"attrs_patch":            prop("object", "Merge these keys into attrs, leaving every other key untouched (aihub#288). Shallow: a top-level key in the patch replaces that key's stored value outright, it is NOT merged into it recursively, and null STORES a JSON null rather than deleting. To delete keys use attrs_unset. Cannot be combined with attrs."),
+			"attrs_unset":            prop("array", "Top-level attrs keys to delete (array of strings). Applied AFTER attrs_patch, so a key in both ends up deleted. Cannot be combined with attrs."),
+			"content":                prop("string", contentPropDescription),
+			// aihub#281. The echo suppression above needs no flag because it only
+			// removes bytes the caller sent. THIS case is different and genuinely
+			// lossy: an update that touches nothing but attrs or priority still
+			// gets the whole body back (~80% of that response), and for a caller
+			// that has not read the wi that body is new information rather than an
+			// echo. So it is opt-in, default false — the same mixed-version
+			// reasoning that gave pf_get_work_item its `brief` in aihub#212,
+			// reused rather than reversed.
+			// The wording is exact on both halves because both were wrong once. It
+			// does not "omit the content field": a work item with no body keeps
+			// its content: null. And it is NOT the same as pf_get_work_item's
+			// brief, which deletes content and reports no length — a caller told
+			// the two were equivalent would apply this tool's "no content_len
+			// means no body" rule to that one's reply and conclude a work item
+			// with a 4 KB body was empty.
+			"brief": prop("boolean", "Replace the content body with content_len (bytes stored); default false. "+
+				"A wi that HAS no body is unaffected — it comes back as content: null with no content_len, so a "+
+				"missing content_len here means \"this wi has no body\", never \"the body was withheld\". "+
+				"NOT the same as pf_get_work_item's brief, which deletes content outright and reports no length. "+
+				"Content you send in THIS call is never echoed back regardless of this flag."),
 		}, []string{"work_item_id"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -233,16 +607,35 @@ func (s *Server) registerLifecycleTools() {
 		if id == "" {
 			return errResult(fmt.Errorf("work_item_id is required"))
 		}
-		// Remove work_item_id from body
+		// aihub#241: resources_version is an INT column and *int on the wire.
+		// Coerce before building the body so a quoted "0" from a mixed-version
+		// client becomes a JSON number here, instead of failing c.Bind two
+		// layers away as an opaque 400 "invalid request body".
+		if err := normalizeIntArg(args, "resources_version"); err != nil {
+			return errResult(err)
+		}
+		// Remove work_item_id from body. `brief` goes with it (aihub#281): it
+		// shapes THIS process's reply and means nothing to the server, and
+		// forwarding a field the peer does not bind is how aihub#290's
+		// expected_version became a parameter that travelled the whole way and
+		// was discarded in silence.
 		body := make(map[string]any)
 		for k, v := range args {
-			if k != "work_item_id" {
+			if k != "work_item_id" && k != "brief" {
 				body[k] = v
 			}
 		}
 		result, err := s.client.UpdateWorkItem(ctx, id, body)
 		if err != nil {
 			return errResult(err)
+		}
+		// aihub#281. Order matters only in that brief is the wider rule: it drops
+		// the content whether or not this call sent one, so checking it first
+		// keeps the two paths from having to agree about the overlap.
+		if boolArg(args, "brief") {
+			dropContentEcho(result)
+		} else {
+			suppressContentEcho(args, result)
 		}
 		return jsonResult(result)
 	})
@@ -255,7 +648,7 @@ func (s *Server) registerLifecycleTools() {
 			"work_item_id":    prop("string", "Work item ID or slug"),
 			"idempotency_key": prop("string", "Idempotency key for DB dedup"),
 			"mode":            prop("string", "fresh|resume (default: fresh)"),
-			"requested_locks": prop("array", "Resource locks to acquire"),
+			"requested_locks": requestedLocksProp("Resource locks to acquire"),
 			"force_takeover":  prop("boolean", "Force takeover if already claimed"),
 			"scenario_ref":    prop("string", "Git SHA of local scenario clone at claim time (optional)"),
 		}, []string{"work_item_id", "idempotency_key"}),
@@ -370,15 +763,7 @@ func (s *Server) registerLifecycleTools() {
 				wsRoot = config.FindWorkspaceRoot()
 			}
 			if wsRoot != "" {
-				// Resolve workspace config: use server-level cfg if available, otherwise
-				// load fresh from wsRoot. This handles the case where the MCP server
-				// started without POLYFORGE_WORKSPACE_ROOT set (e.g. a background session
-				// whose cwd has no .polyforge.yaml ancestor), so s.cfg is nil even though
-				// wsRoot is now correctly resolved at claim time.
-				effectiveCfg := s.cfg
-				if effectiveCfg == nil {
-					effectiveCfg, _ = config.Load(wsRoot) // non-fatal; stays nil if not found
-				}
+				effectiveCfg := resolveWorkspaceConfig(wsRoot, s.cfg)
 
 				// Derive seq from slug (e.g. "marketplace#42" → "42").
 				seq := ""
@@ -390,11 +775,7 @@ func (s *Server) registerLifecycleTools() {
 
 				// Derive ulid8: last 8 chars of wi_id after stripping "wi_" prefix.
 				// Used only for the branch name; directory name uses the readable slug.
-				ulid8 := ""
-				bare := strings.TrimPrefix(wiID, "wi_")
-				if len(bare) >= 8 {
-					ulid8 = bare[len(bare)-8:]
-				}
+				ulid8 := claimBranchULID8(canonicalWIID)
 
 				if effectiveCfg != nil && seq != "" && ulid8 != "" {
 					// Directory name uses readable format: pf.<project>-<seq>
@@ -412,6 +793,7 @@ func (s *Server) registerLifecycleTools() {
 							// If the worktree directory already exists, reuse it directly.
 							if _, statErr := os.Stat(wtPath); statErr == nil {
 								worktrees[repo.Name] = wtPath
+								writeWorktreeExcludes(wtPath)
 								continue
 							}
 
@@ -439,6 +821,7 @@ func (s *Server) registerLifecycleTools() {
 								} else {
 									// Success on first try; record and continue.
 									worktrees[repo.Name] = wtPath
+									writeWorktreeExcludes(wtPath)
 									continue
 								}
 							}
@@ -447,6 +830,7 @@ func (s *Server) registerLifecycleTools() {
 								fmt.Fprintf(os.Stderr, "polyforge: worktree add for %s: %s\n", repo.Name, string(out))
 							} else {
 								worktrees[repo.Name] = wtPath
+								writeWorktreeExcludes(wtPath)
 							}
 						}
 
@@ -467,26 +851,42 @@ func (s *Server) registerLifecycleTools() {
 			"claim_epoch": sf.ClaimEpoch,
 			"ok":          true,
 		}
-		// Pass through other non-secret fields
-		for _, k := range []string{"expires_at", "acquired_locks", "current_attempt_epoch", "slug", "project"} {
+		// Pass through other non-secret fields.
+		//
+		// aihub#238: `unrecognized_resources` MUST stay in this list. It is the only
+		// signal that a declared resource is holding no lock, and reporting at claim
+		// is the only remedy available on the stored-data path (rejecting there would
+		// make historical mistyped work items unclaimable). Dropped here, the whole
+		// remedy is inert and the caller sees exactly the pre-fix output.
+		for _, k := range []string{"expires_at", "acquired_locks", "current_attempt_epoch", "slug", "project", "unrecognized_resources"} {
 			if v, ok := result[k]; ok {
 				safeResult[k] = v
 			}
 		}
-		if len(sf.Worktrees) > 0 {
-			safeResult["worktrees"] = sf.Worktrees
-		}
+		addWorktrees(safeResult, sf.Worktrees)
 		return jsonResult(safeResult)
 	})
 
 	// pf_complete_attempt
+	//
+	// `note` (aihub#290) exists because the closing note and the terminal call
+	// were always two round-trips in a fixed order — 201 measured adjacent pairs,
+	// 0.325% of billed input — and the second one read nothing out of the first.
+	// The ordering was not incidental: the terminal call deletes the state file,
+	// so pf_emit_event AFTER it cannot authenticate, and every skill that emits a
+	// wrap note carries a warning saying so. Folding the note into this call
+	// removes both the round-trip and the ordering hazard.
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_complete_attempt",
-		Description: "Complete the current run attempt (wrapped|failed|paused). Deletes state file for terminal statuses.",
+		Name: "pf_complete_attempt",
+		Description: "Complete the current run attempt (wrapped|failed|paused). Deletes state file for terminal statuses. " +
+			"Pass `note` to record the closing note in the same call instead of emitting it with a separate " +
+			"pf_emit_event beforehand — which is the only order that works, since this call deletes the " +
+			"credentials pf_emit_event needs. The response's note_emitted says whether it landed.",
 		InputSchema: objectSchema(map[string]any{
-			"work_item_id":           prop("string", "Work item ID (used to find state file)"),
-			"status":                 prop("string", "wrapped|failed|paused"),
-			"force_terminate_step":   prop("boolean", "Force terminate in-progress step"),
+			"work_item_id":         prop("string", "Work item ID (used to find state file)"),
+			"status":               prop("string", "wrapped|failed|paused"),
+			"force_terminate_step": prop("boolean", "Force terminate in-progress step"),
+			"note":                 prop("string", "Closing note recorded as a `note` event before the attempt is completed (e.g. \"wrapped: <one sentence>\" / \"failed reason: <why>\"). Replaces a separate pf_emit_event call."),
 		}, []string{"work_item_id", "status"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -507,6 +907,16 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
 
+		// Emit the note FIRST — the CompleteAttempt below deletes the state file
+		// for terminal statuses, and with it the credentials this needs. Hold the
+		// error and report it on the response rather than aborting: a note that
+		// failed to record must not cost the caller its wrap.
+		note := strArg(args, "note")
+		var noteErr error
+		if note != "" {
+			noteErr = s.emitNote(ctx, wiID, sf, note)
+		}
+
 		body := map[string]any{
 			"status":         status,
 			"attempt_id":     sf.AttemptID,
@@ -519,8 +929,16 @@ func (s *Server) registerLifecycleTools() {
 
 		result, err := s.client.CompleteAttempt(ctx, wiID, body)
 		if err != nil {
-			return errResult(err)
+			// Carry the note's fate into the error: the caller is about to decide
+			// whether to retry, and retrying re-sends the note.
+			return errResult(fmt.Errorf("%w%s", err, noteOutcomeSuffix(note != "", noteErr)))
 		}
+		applyNoteResult(result, note != "", noteErr)
+
+		// Surface the worktree paths from the state file we're about to delete,
+		// for all statuses, so the caller doesn't need to have read the state
+		// file itself before calling pf_complete_attempt (aihub#207).
+		addWorktrees(result, sf.Worktrees)
 
 		// Delete state file for terminal statuses; keep for paused. Delete by the
 		// resolved canonical key (sf.WIID), and best-effort the passed key too, so
@@ -689,7 +1107,7 @@ func (s *Server) registerLifecycleTools() {
 	// pf_pause_attempt
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_pause_attempt",
-		Description: "Pause the current attempt (releases lease + locks, status → paused). State file is preserved for resume.",
+		Description: "Pause the current attempt (releases file_scope locks acquired mid-attempt; git_branch/deploy_env locks are retained for resume; status → paused). State file is preserved for resume.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID (used to find state file)"),
 			"pause_reason": prop("string", "Optional reason for pausing"),
@@ -722,6 +1140,92 @@ func (s *Server) registerLifecycleTools() {
 		// State file is kept for paused status (C5-3: resume needs credentials)
 		return jsonResult(result)
 	})
+
+	// pf_acquire_locks
+	s.mcp.AddTool(&sdkmcp.Tool{
+		Name:        "pf_acquire_locks",
+		Description: "Acquire file_scope locks for the current running attempt from the work item's declared_resources (reconcile mid-attempt; blocks on conflict, never steals).",
+		InputSchema: objectSchema(map[string]any{
+			"work_item_id": prop("string", "Work item ID (used to find state file)"),
+		}, []string{"work_item_id"}),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		args, err := parseArgs(req.Params.Arguments)
+		if err != nil {
+			return errResult(err)
+		}
+		wiID := strArg(args, "work_item_id")
+		if wiID == "" {
+			return errResult(fmt.Errorf("work_item_id is required"))
+		}
+		sf, err := config.ResolveStateFile(wiID)
+		if err != nil {
+			return errResult(fmt.Errorf("read state file: %w", err))
+		}
+		body := map[string]any{
+			"attempt_id":     sf.AttemptID,
+			"claim_epoch":    sf.ClaimEpoch,
+			"session_secret": sf.SessionSecret,
+		}
+		result, err := s.client.AcquireLocks(ctx, sf.WIID, body)
+		if err != nil {
+			return errResult(err)
+		}
+		return jsonResult(result)
+	})
+}
+
+// writeWorktreeExcludes adds polyforge scratch-file patterns to a worktree's
+// per-worktree git exclude file, so they never get accidentally staged.
+// Best-effort and non-fatal: a worktree must still be usable if this fails.
+func writeWorktreeExcludes(wtPath string) {
+	out, err := exec.Command("git", "-C", wtPath, "rev-parse", "--git-path", "info/exclude").Output()
+	if err != nil {
+		return
+	}
+	excludePath := strings.TrimSpace(string(out))
+	if excludePath == "" {
+		return
+	}
+	if !filepath.IsAbs(excludePath) {
+		excludePath = filepath.Join(wtPath, excludePath)
+	}
+
+	patterns := []string{".superpowers/", ".pf_meta.json", ".pf_steps.json"}
+
+	existing := ""
+	if b, err := os.ReadFile(excludePath); err == nil {
+		existing = string(b)
+	}
+	existingLines := strings.Split(existing, "\n")
+	have := make(map[string]bool, len(existingLines))
+	for _, l := range existingLines {
+		have[strings.TrimSpace(l)] = true
+	}
+
+	var toAdd []string
+	for _, p := range patterns {
+		if !have[p] {
+			toAdd = append(toAdd, p)
+		}
+	}
+	if len(toAdd) == 0 {
+		return
+	}
+
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	if existing != "" && !strings.HasSuffix(existing, "\n") {
+		_, _ = f.WriteString("\n")
+	}
+	for _, p := range toAdd {
+		_, _ = f.WriteString(p + "\n")
+	}
 }
 
 // generateSessionSecret generates a 64-hex random session secret.
@@ -764,4 +1268,190 @@ func propEnum(typ, description string, enum []string) map[string]any {
 	p := prop(typ, description)
 	p["enum"] = enum
 	return p
+}
+
+// maxBatchWorkItems bounds pf_batch_create_work_items. Generous relative to the
+// measured behaviour it replaces — the adjacent-create runs this fuses were a
+// handful of follow-ups long, not dozens — while still keeping one MCP call from
+// becoming an unbounded sequence of HTTP calls.
+const maxBatchWorkItems = 50
+
+// workItemFieldProps returns the per-work-item create fields, minus `project`.
+//
+// Single definition shared by pf_create_work_item's schema and the `items` entry
+// schema of pf_batch_create_work_items (aihub#290). Two hand-maintained copies
+// would drift, and a field present on one tool but not the other is the same
+// silent-drop failure the batch tool exists downstream of.
+func workItemFieldProps() map[string]any {
+	return map[string]any{
+		"goal":                   prop("string", "Single-line goal ≤500 chars"),
+		"scenario":               prop("string", "Scenario (default: coding)"),
+		"priority":               prop("string", "low|normal|high|urgent"),
+		"wi_type":                prop("string", "Work item type (fix_bug, feature, chore, etc.)"),
+		"requires_human_session": prop("boolean", "Whether this wi requires a human session"),
+		"milestone":              prop("string", "Milestone name"),
+		"labels":                 prop("array", "Labels"),
+		"declared_resources":     declaredResourcesProp("Declared resource locks"),
+		"parent_work_item_id":    prop("string", "Parent work item ID"),
+		"source":                 prop("string", "Source reference"),
+		"attrs":                  prop("object", "Additional attributes"),
+		"blocked_by":             prop("array", "List of blocking work item IDs"),
+		"content":                prop("string", contentPropDescription),
+		"force_create":           prop("boolean", "Force create bypassing duplicate check"),
+		"force_reason":           prop("string", "Reason for force create"),
+	}
+}
+
+// contentPropDescription is the published description of the `content`
+// parameter, written once and shared by pf_create_work_item,
+// pf_batch_create_work_items and pf_update_work_item so the three cannot drift.
+//
+// The second sentence is contract, not decoration. aihub#281 stops echoing this
+// field back, and a schema that kept quiet about it would be describing a
+// response the tool no longer returns — the same drift between published shape
+// and real behaviour that aihub#238 and aihub#241 are about.
+const contentPropDescription = "Background context for this wi (markdown, max 20000 chars). " +
+	"Not echoed back: the response reports content_len (bytes stored) in its place."
+
+// createWorkItemSchema is pf_create_work_item's InputSchema: the shared per-item
+// fields plus the project this one is filed under.
+func createWorkItemSchema() json.RawMessage {
+	props := workItemFieldProps()
+	props["project"] = prop("string", "Project name")
+	return objectSchema(props, []string{"project", "goal"})
+}
+
+// batchWorkItemsProp describes the `items` array *including its entry shape*,
+// following declaredResourcesProp (aihub#238): an array whose element shape is
+// undocumented is a contract the caller has to guess at.
+func batchWorkItemsProp() map[string]any {
+	props := workItemFieldProps()
+	props["project"] = prop("string", "Project for THIS item; defaults to the call's top-level project.")
+	p := prop("array", fmt.Sprintf("Work items to create (1-%d). Each entry takes the same fields as pf_create_work_item; `project` is optional per item and falls back to the top-level one.", maxBatchWorkItems))
+	p["items"] = map[string]any{
+		"type":       "object",
+		"properties": props,
+		"required":   []string{"goal"},
+	}
+	return p
+}
+
+// applyForceReasonDefault supplies a force_reason when force_create is set,
+// because the server requires >=10 chars and rejects the request without one.
+// Shared by the single and batch create paths so a batch item does not fail a
+// validation the single-item path quietly satisfies for you.
+func applyForceReasonDefault(args map[string]any) {
+	if boolArg(args, "force_create") && strArg(args, "force_reason") == "" {
+		args["force_reason"] = "force_create=true via MCP (admin bypass dedup check)"
+	}
+}
+
+// cloneArgs returns a shallow copy, so defaulting a batch item's fields does not
+// mutate the arguments map the caller handed us.
+func cloneArgs(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in)+2)
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// declaredResourcesProp describes the declared_resources array *including its
+// entry shape* (aihub#238).
+//
+// Before this, all three declared_resources schemas were a bare
+// prop("array", ...) and the only written record of the real shape was
+// pf-plan/SKILL.md Step 5 — invisible to every caller that does not go through
+// pf-plan, even though the MCP schema is their sole contract. Combined with a
+// server that silently skipped unrecognized types, a wrong guess cost nothing at
+// the call and everything later.
+//
+// The enum is taken from domain.DeclaredResourceTypeList() rather than written
+// out here, so the published contract cannot drift from the validator that
+// enforces it.
+func declaredResourcesProp(description string) map[string]any {
+	p := prop("array", description+
+		` — entries are {"type","uri","intent"}. NOTE: type takes a DECLARED type (repo/path/document/section/service/external_ref), NOT a lock type: file_scope/git_branch/worktree/tcp_port/deploy_env are resource_locks.resource_type values the server derives. A file path is type="path", uri="file:<repo-relative-path>". The path field is `+"`uri`"+`, not value/path/scope.`)
+	p["items"] = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"type": propEnum("string", "Declared resource type (NOT a lock type)", domain.DeclaredResourceTypeList()),
+			"uri": prop("string",
+				`Resource URI. Scheme by type: "file:<repo-relative-path>" for path/document/section, "repo:<repo-name>" for repo, "service:<name>" for service, a plain URL for external_ref.`),
+			// Deliberately NOT an enum. The server does not validate `intent` at all;
+			// only two values change behaviour ("read" suppresses the write lock and
+			// downgrades path conflicts to info; "refactor" on a repo entry triggers
+			// conflict rule 4). Meanwhile this repo's own fixtures use "exclusive" more
+			// often than "write". Publishing a closed set would state a contract the
+			// server does not keep — the exact failure this wi is about — so describe
+			// the semantics instead and let unknown values through as inert. (aihub#238)
+			"intent": prop("string",
+				`Access intent. Not validated by the server; only two values carry behaviour: "read" (takes no write lock, and path overlaps report as info instead of soft_block) and "refactor" (on a repo entry, flags other refactors of the same repo). "write" is the conventional default; other values are accepted but inert.`),
+			"base_branch": prop("string", "Base branch (repo entries only)"),
+			"task_branch": prop("string", "Task branch (repo entries only); defaults to main for lock-key derivation"),
+		},
+		"required": []string{"type", "uri"},
+	}
+	return p
+}
+
+// requestedLocksProp describes the requested_locks array including its entry
+// shape (aihub#238).
+//
+// This array had no item schema and was passed through to the server verbatim, so
+// a caller had to guess domain.ResourceLockReq's {resource_type, resource_key}.
+// Guessing the neighbouring declared_resources {type, value} shape produced an
+// empty resource_type, tripped the resource_locks CHECK constraint, and returned
+// 500 INTERNAL_ERROR with a bare SQLSTATE.
+//
+// Normal polyforge flow leaves this unset and lets the server derive locks from
+// the work item's declared_resources.
+func requestedLocksProp(description string) map[string]any {
+	p := prop("array", description+
+		` — usually OMIT this and let the server derive locks from the wi's declared_resources. Entries are {"resource_type","resource_key"} (NOT declared_resources' type/uri).`)
+	p["items"] = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"resource_type": propEnum("string", "Lock type (NOT a declared_resources type)", domain.ResourceLockTypeList()),
+			"resource_key": prop("string",
+				`Lock key. file_scope is project-namespaced "<project>:<repo-relative-path>" (aihub#222); git_branch is "<repo>/<branch>"; deploy_env is the bare service name.`),
+		},
+		"required": []string{"resource_type", "resource_key"},
+	}
+	return p
+}
+
+// resolveWorkspaceConfig returns the workspace config to build claim worktrees
+// from, reading .polyforge.yaml fresh out of wsRoot rather than trusting the
+// snapshot the MCP process loaded at startup.
+//
+// startupCfg (the server's s.cfg) is read once when the process starts, so a repo
+// added to a project mid-session was silently missing from every subsequent claim
+// in that session — the worktree loop iterates this config, and users saw a claim
+// come back short without any error (aihub#228).
+//
+// startupCfg remains the fallback for two cases: the fresh read failing, and the
+// server having started without POLYFORGE_WORKSPACE_ROOT (cwd with no
+// .polyforge.yaml ancestor), where s.cfg is nil but the caller has since resolved
+// a usable wsRoot. Returns nil when neither source yields a config, which the
+// caller treats as "skip worktree creation".
+func resolveWorkspaceConfig(wsRoot string, startupCfg *config.Config) *config.Config {
+	if cfg, err := config.Load(wsRoot); err == nil && cfg != nil {
+		return cfg
+	}
+	return startupCfg
+}
+
+// claimBranchULID8 derives the 8-char branch suffix (polyforge/<ulid8>) from a
+// work item's canonical id. Callers must pass the canonical wi id (wi_<ulid>),
+// not a raw slug such as "aihub#225": for a slug the "wi_" prefix is absent, so
+// the last-8-chars slice would leak slug characters into the branch name (e.g.
+// "ihub#225"). Returns "" when the canonical id is shorter than 8 chars, which
+// the caller treats as "skip worktree creation". (aihub#225)
+func claimBranchULID8(canonicalWIID string) string {
+	bare := strings.TrimPrefix(canonicalWIID, "wi_")
+	if len(bare) < 8 {
+		return ""
+	}
+	return bare[len(bare)-8:]
 }

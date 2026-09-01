@@ -7,6 +7,24 @@
 
 ---
 
+> ⚠️ **勘误（最后核对 2026-06-25，基准 origin/main `39be871`）**
+>
+> 本文档是 v1 编码前的设计契约，部分内容已与实现漂移。下表列出已知偏差；正文未逐条回改，**以代码为准**。
+>
+> | # | 文档处 | 文档说法 | 实际 |
+> |---|---|---|---|
+> | 1 | 头部版本 | `版本: v1.15` | Changelog 已到 **v1.24**，头部版本号未同步更新 |
+> | 2 | §1 仓库结构 | 两个仓库（aihub + GMI-marketplace 插件） | 插件已 vendored 进本仓（aihub#193，2026-06-24）：`plugins/polyforge/` + 根 `.claude-plugin/marketplace.json`；本仓同时是该插件的 marketplace 宿主 |
+> | 3 | §1.1 文件树 | 迁移 `0001`-`0006`（`0002_ownership_only` / `0006_memory_v2` 等）、MCP SDK `mark3labs/mcp-go`、`mcp/tools_locks.go` / `tools_actors.go`、`scenario/registry.go` | 实际 **25 个迁移**（`0001`-`0025`，命名不同）、MCP SDK 为 `modelcontextprotocol/go-sdk v1.6.0`、tools 文件为 `tools_users/projects/dependency.go`、`scenario/` 仅 `protocol.go` |
+> | 4 | 表数量 | "12→10 表"（memory_embeddings 并入 memories） | 最终 schema **11 张逻辑表**：另加 `projects`、`memory_relations`（均在本文定稿后新增；`scenario_phase_configs` 见 #5）；`agent_events` 另含 6 个月度分区子表 |
+> | 5 | `scenario_phase_configs`（v1.23/v1.24） | scenario 级 SoT，驱动分类 | 已在迁移 `0017` **删除**（aihub#38）；`wi_type` / `requires_human_session` 分类改为**客户端职责**，server 直接读 wi 行，`phase_config_version` 恒 NULL |
+> | 6 | 工具数量 | "38→32 工具" | 数量持续增长，**不在此处记数**——权威列表见 `docs/mcp-tools.md`，机器可读的权威 schema 由 `polyforge dump-mcp-schemas` 输出 |
+> | 7 | §16 EmbeddingProvider / 向量召回 | provider 抽象 + 语义召回 | 仅铺底、**从未接通**：provider 从未实例化、`Remember` 不写 `emb_vector`（恒 NULL）、HNSW 索引被注释、`RecallWithVector` 仅是一句注释。当前 recall = 文本/标签 + 近因排序。向量召回作为 **aihub#192** 在飞 |
+> | 8 | `pf_update_step` 的 `expected_version` CAS（§ 步骤状态机、§ 附录 API） | 客户端先 `pf_get_step` 取 `version`，随 `update_step` 回传做 CAS，冲突返回 412 | **从未实现**：`server.UpdateStepRequest` 从来没有这个字段，Echo Bind 静默丢弃，没有任何 412 路径。真正的并发保护是 `in_progress` 转换上的 `WHERE current_step_status='idle'` 谓词。参数已于 **aihub#290** 从 MCP schema 和 CLI flag 中删除（而非补实现），连带去掉了只为取这个 version 而存在的 `pf_get_step` 往返；同时 `update_step` 新增 `next_step`（完成一步并启动下一步）、终态调用新增 `note` |
+> | 9 | 全文各处的 `pf_recall(type="a|b|c")` 示例（§ Memory-First、§ 附录 API 等，含 L1613 / L1990 / L3481 / L3659 / L3690） | `type` 用 `|` 分隔多个类型 | **管道语法从未被解析**：`type` 是列表，整串被当成一个类型名，exact 与 LIKE 都匹配不到 ⇒ 静默返回空集。**aihub#289** 起服务端对含 `|` 的 `type` 值直接返回 400，并新增 `unmatched_types` 响应字段。正确写法是数组：`type=["a.b","c.*"]`。本文档正文未逐条回改（按本表开头的约定「以代码为准」），因此 `internal/cli/skill_recall_type_test.go` 的复发闸把本文件列为**有据豁免**；现行指导以 `plugins/polyforge/skills/` 与 `docs/mcp-tools.md` 为准 |
+
+---
+
 ## Changelog
 
 - v1.24: 综合 Opus R9 Part A：C-R9-1 migration seed 默认数据；C-R9-2 CAS 冲突禁止自动 merge，强制手工确认；C-R9-3 scenario config 不存在→503；C-R9-4 classification_rules.set.wi_type 写入时校验；C-R9-5 zombie sweeper 改为 system force_takeover + lost 状态（释放 locks）；C-R9-6 wi.wi_type=NULL 时禁止 claim；C-R9-7 Wi Agent = 角色，两种载体明确区分；C-R9-10 fn_claim 时验证 wi_type 仍存在；H-R9-8 pf-add-type 先 server 后本地；H-R9-9 agent_events.work_item_id 改 NULLABLE；H-R9-11 paused 时 fn_complete_attempt 自动 force_terminate；H-R9-12 mode=resume 同 user 隐式 takeover；M-R9-20 GC sweep 7 SQL 语法修正；Part B 精简：memory_embeddings 合并进 memories（12→10 表）；wi_sequences 删除；pf_acquire_lock/pf_release_lock/pf_update_artifact/pf_reconcile_artifacts/pf_manage_actors 删除（38→32 工具）；execute-scenario 推 v2；pf-debug/pf-event/pf-review stub 内联（skill 18→12）；pf-add-type 合并到 NL 路由
@@ -298,7 +316,7 @@ aihub/
 │   │
 │   ├── cli/
 │   │   ├── init.go                     # pf init / pf init --apply
-│   │   ├── doctor.go                   # pf doctor（5 项检查）
+│   │   ├── doctor.go                   # pf doctor（6 项检查）
 │   │   ├── ready.go                    # pf ready [--view=lcrs]
 │   │   └── stalled.go                  # pf stalled
 │   │
@@ -1276,8 +1294,11 @@ PATCH  /v1/work_items/{id}/step
          artifact_summary?,   ← max 4096 chars
          error_type?,
          escalated?,          ← true → server emit step_failed + wi stalled
-         expected_version}    ← CAS，失败返回 412 + {current_version, current_state}
-  → {step_attempt_id?, next_step?, version}
+         next_step?,          ← 完成一步的同时启动下一步（aihub#290）
+         next_step_attempt_id?}
+  ⚠️ 勘误 #8：本文档原设计的 `expected_version` CAS（失败返回 412）**从未实现**，已于 aihub#290 从
+     schema 与 CLI 中删除。并发保护是服务端的 `WHERE current_step_status='idle'` 谓词。
+  → {status, next_step?, next_step_status?}
 ```
 
 #### Conflicts
@@ -1315,6 +1336,17 @@ POST   /v1/memories
   dedup_mode=suggest → 写入，attrs.similar_to 记录已有 memory ID
   dedup_mode=off     → 强制写入（methodology.* 使用）
   → {memory_id} 或 409 {code:SIMILAR_EXISTS, existing:{id,content,similarity}}
+  -- aihub#249: attrs.similar_to 不是版本链指针，只是写入时刻的一次性内容相似度
+  --   提示（Jaccard，dedup_mode=suggest），写入后不再更新，可能指向类型/lineage
+  --   都无关的另一条 memory。真正权威的"谁取代了谁"链指针是 Memory.latest_id
+  --   （由 PATCH .../update 维护，见下）——不要把 similar_to 当成 lineage 用。
+
+GET    /v1/memories/{id}
+  -- aihub#249: 返回完整 Memory 对象（含 status、latest_id，list 接口的精简
+  --   scan 不带这两个字段）。鉴权与可见性过滤与 GET /v1/memories 完全一致：
+  --   private 只有 author 可见，admin 档只有 admin 可见，无权限一律 404
+  --   （不是 403，避免探测某条 memory 是否存在）。
+  → 200 Memory（见 §19.6）或 404
 
 POST   /v1/memories/{id}/activate
   body: {}    -- M3: actor_user_id 从 Bearer token 推导，不由 client 传入
@@ -1333,6 +1365,8 @@ GET    /v1/memories
   -- M10: visibility 过滤语义：仅返回 visibility=X 的 memory
   --      server 另外强制 access control：private 只返回 author=caller 的条目
   work_item_id, query(语义/文本), top_k,
+  -- aihub#249: limit 是 top_k 的别名（历史上只解析 top_k，?limit=N 会被静默
+  --   忽略）；两者都传时 top_k 优先。上限/默认值不变（默认 20，clamp 200）。
   similarity_threshold,
   min_strength(default 0.3, M7),  ← 改为 0.3（原 1.0 几乎过滤所有 memory）
   include_archived(default false), recency_weight(default 0.3), cursor
@@ -1342,7 +1376,11 @@ GET    /v1/memories
       last_activated_by_display?,      -- 快照，如 "Alice (machine)"
       effective_strength, activation_count,
       last_activated_at, created_at
-    }], next_cursor}
+    }], next_cursor, total}
+    -- aihub#249: total = 满足本次请求全部过滤条件（project/status/visibility/
+    --   type/work_item_id/min_strength，向量路径下还包括 similarity_threshold）
+    --   的 memory 总数，与分页（top_k/limit/cursor）无关，两条 recall 路径
+    --   （文本/向量）都会填充。用于让调用方判断"还有多少页"而不必翻到底。
 
 PATCH  /v1/memories/{id}/redact
   body: {reason}
@@ -1645,7 +1683,7 @@ pf_get_step(work_item_id)
 pf_update_step(work_item_id, attempt_id, claim_epoch, session_secret,
                step_id, status:in_progress|completed|failed,
                step_attempt_id?, artifact_summary?, error_type?,
-               escalated?, expected_version)
+               escalated?, next_step?, next_step_attempt_id?)  ⚠️ 见勘误 #8：expected_version 从未实现，已于 aihub#290 删除
   -- M17: server 在状态转移时自动 emit step_started/step_completed/step_failed event
   --      client 无需显式调用 pf_emit_event 记录 step 事件
   → {step_attempt_id?, next_step?, version}
@@ -2763,7 +2801,7 @@ pf init --apply      # clone repos + 填充 CLAUDE.md managed 区块
                      # 失败处理：clone 失败的 repo 跳过+记录，不 abort 整次 init；
                      #           可重复运行（idempotent，已 clone 的 repo 跳过）
 
-pf doctor            # 5 项健康检查（见 §12.1）
+pf doctor            # 6 项健康检查（见 §12.1）
 pf doctor --fix      # 自动修复
 
 pf ready [--view=lcrs] [--max=N] [--non-conflicting]
@@ -2786,14 +2824,14 @@ pf claim <id_or_slug>                   # → pf_claim_work_item
 pf get-step [--wi-id=<id>]             # → pf_get_step
 pf update-step --status=<in_progress|completed|failed> --step-id=<id>
                [--step-attempt-id=<sa>] [--artifact-summary=<json>]
-               [--escalated] [--error-type=<type>] [--expected-version=<n>]
+               [--escalated] [--error-type=<type>]  ⚠️ 见勘误 #8：expected_version 从未实现，已于 aihub#290 删除
 pf commit [--message=<msg>]            # → pf_commit
 pf push                                # → pf_push
 pf pr --title=<t> --body=<b>           # → pf_pr
 pf wrap [--wi-id=<id>]                 # → pf_wrap（coding scenario）
 ```
 
-### 12.1 doctor 5 项检查
+### 12.1 doctor 7 项检查
 
 ```
 1. workspace  从任意子目录能找到 .polyforge.yaml（向上搜索）
@@ -2801,6 +2839,26 @@ pf wrap [--wi-id=<id>]                 # → pf_wrap（coding scenario）
 3. repos      所有 .repo/<name>/ 存在且 remote 匹配 .polyforge.yaml
 4. worktrees  pf.<xxx>/ 列表 vs server wi 列表，标红 orphan
 5. version    GET /v1/version，比对 min_client_version 与本地 binary
+6. claude_md  CLAUDE.md 托管块的格式 + .polyforge/repo-map/ 的完整性（aihub#291）
+              - 块里仍内联 `  - stack:` / `  - modules:` / `  - changes:` / `  - generated:`
+                ⇒ 旧格式，warn 并报字节数（这些明细在上下文位置 0，每个请求都被重读）
+              - 块已瘦身但缺 repo-map/<project>.md ⇒ warn「地图缺失」，因为此时路由
+                只剩一行定位，不足以定位仓内代码
+              - 期望的 map 集合取自块自身的 `### <project>` 标题，不取 .polyforge.yaml
+                （init 只渲染 caller 有角色的项目，按 config 判会误报）
+              - 永远不返回 error：块过期是成本问题，不是工作区坏了
+7. usage_md   .polyforge/usage.md 仍带着 using-polyforge 拥有的规则段落（aihub#294）
+              - Iron Rules / NL Routing / Memory Type Reference 三段现在归插件侧的
+                fragment 所有；writeUsageMd 不再生成它们
+              - 但 writeUsageMd 有存在性守卫（文件存在就不重写），所以存量工作区仍留着
+                一份冻结的副本 ⇒ 一个 session 收到两份，而只有 fragment 那份能被修好
+              - **只报告，不自动删除**：删除范围要从 markdown 结构反推，而用户可能已经
+                编辑过这个文件；评审在六类输入上验证过那样会毁掉用户内容（其中三类还会
+                留下未闭合的 fence / HTML 注释，吞掉全文后续）。正确的原语是「与某个已知
+                模板版本逐字节相同才删」，那需要历史模板正文，留作后续 wi
+              - 扫描器忽略 fence / 缩进代码块 / HTML 注释里的假标题；若走到文件尾时 fence
+                或注释仍未闭合 ⇒ warn「没看完」，不能报 ok
+              - 永远不返回 error：多一份副本是成本问题，不是工作区坏了
 ```
 
 ### 12.2 CLAUDE.md 两阶段生成
@@ -3022,8 +3080,9 @@ HTTP 409
   WI_RECLASSIFY_FORBIDDEN         PATCH wi_type 时权限不足或 wi.status 不允许（需 queued/paused）
 
 HTTP 412
-  PRECONDITION_FAILED      CAS version 前置条件失败（用于 step state）
-                           details: {current_version: N, current_state: "..."}
+  PRECONDITION_FAILED      ⚠️ 勘误 #8：从未实现。原计划用于 step state 的 CAS，但
+                           expected_version 从未被服务端绑定，代码里没有任何 412 路径。
+                           已于 aihub#290 连同该参数一并删除。
 
 HTTP 413
   PAYLOAD_TOO_LARGE        event payload 超 64KB / artifact_summary 超 4096 chars
@@ -3217,7 +3276,7 @@ interface StepStartRequest {
   session_secret: string
   step_id: string
   status: "in_progress"
-  expected_version: number
+  // expected_version: number  ← 勘误 #8：从未实现，aihub#290 已删
 }
 interface StepStartResponse {
   step_attempt_id: string    // server 生成，后续 completed/failed 时必须带回
@@ -3233,7 +3292,9 @@ interface StepCompleteRequest {
   status: "completed"
   step_attempt_id: string    // 必须与 in_progress 时拿到的一致
   artifact_summary?: string  // max 4096 chars
-  expected_version: number
+  next_step?: string         // aihub#290：完成本步的同时启动下一步
+  next_step_attempt_id?: string
+  // expected_version: number  ← 勘误 #8：从未实现，aihub#290 已删
 }
 interface StepCompleteResponse {
   next_step: string | null   // null = 所有步骤完成
@@ -3250,17 +3311,17 @@ interface StepFailRequest {
   step_attempt_id: string
   error_type: string         // "timeout"|"tool_error"|"external_dependency"|"agent_error" 等
   escalated: boolean         // true → server emit step_failed + wi→stalled
-  expected_version: number
+  // expected_version: number  ← 勘误 #8：从未实现，aihub#290 已删
 }
 interface StepFailResponse {
   version: number
 }
 
-// CAS 失败（412 PRECONDITION_FAILED）
-interface StepCASError {
-  code: "PRECONDITION_FAILED"
-  details: { current_version: number; current_state: string }
-}
+// ⚠️ 勘误 #8：CAS 失败（412 PRECONDITION_FAILED）从未实现——服务端从不返回此码。
+// interface StepCASError {
+//   code: "PRECONDITION_FAILED"
+//   details: { current_version: number; current_state: string }
+// }
 ```
 
 ### 19.6 Memory 对象
@@ -3282,7 +3343,9 @@ interface Memory {
       context: string
     }>
     context_snippet?: string       // max 500 chars
-    similar_to?: string[]          // memory id list（dedup_mode=suggest 时填）
+    similar_to?: string           // 写入时刻一次性 dedup 相似度提示（Jaccard，
+                                   // dedup_mode=suggest），写入后不再更新；
+                                   // 不是版本链，不要与 latest_id 混用（aihub#249）
   }
   base_strength: number            // 1-5
   stability_days: number
@@ -3294,6 +3357,9 @@ interface Memory {
   status: "active"|"archived"|"redacted"
   effective_strength: number
   supersedes_id: string | null
+  latest_id: string | null         // 权威的版本链指针：本行仍是链头时为 null，
+                                    // 否则是当前链头的 id（PATCH .../update 维护，
+                                    // supersede/redact 时在整条链上传播，aihub#249）
   expires_at: string | null
   created_at: string
   // 查询时额外嵌入
@@ -3800,10 +3866,9 @@ review/代码审查          → /pf-review
    }
 
 -- C5-1 + Alice-1 WALL-6.1: start_step 必须先 in_progress 再 completed
--- expected_version 必须从 pf_get_step 获取（不能从 pf_list_work_items 拿，那里没有 version 字段）
-4.5. version_info = pf_get_step(wi_id)  ← 先拿 version（list_work_items 不含此字段）
-5a. pf_update_step(step_id="start_step", status="in_progress",
-      expected_version=version_info.version)
+-- ⚠️ 勘误 #8：原设计要求先 pf_get_step 取 version 再作为 expected_version 回传。该 CAS **从未实现**，
+--    aihub#290 已删除该参数；step bracket 不需要 version，故这里也不再有 pf_get_step 这一跳。
+5a. pf_update_step(step_id="start_step", status="in_progress")
     → 得到 step_attempt_id + 新 version
 
 5b. pf_update_step(step_id="start_step",
@@ -4049,7 +4114,8 @@ pf_commit(workspace_root, work_item_id, repo, message, paths?)
 pf_push(workspace_root, work_item_id, repo, skip_base_check?)
 pf_pr(workspace_root, work_item_id, repo, title, body, head?, base?)
 pf_update_step(work_item_id, step_id, status, step_attempt_id?,
-               artifact_summary?, error_type?, escalated?, expected_version)
+               artifact_summary?, error_type?, escalated?,
+               next_step?, next_step_attempt_id?)  ⚠️ 见勘误 #8：expected_version 从未实现，已于 aihub#290 删除
 ```
 
 所有工具 `attempt_id / claim_epoch / session_secret` 参数从 client 传入改为 MCP server 自动注入。

@@ -62,8 +62,14 @@ var fetchWIFacetsFn = fetchWIFacets
 // project switcher. Swappable in tests (nil pool returns empty map).
 var fetchProjectWICountsFn = fetchProjectWICounts
 
+// fetchDoneCountFn is the package-level seam for the terminal (Done) count query
+// (aihub#185). Swappable in tests (nil pool returns 0).
+var fetchDoneCountFn = fetchDoneCount
+
 // validWIStatuses enumerates the values accepted in the ?status= filter.
 // The empty string maps to "active" = queued + running + paused + blocked.
+// "failed" is included (aihub#185) so the Done segment can surface failed wi's,
+// which were previously absent from the enum and therefore invisible in any view.
 var validWIStatuses = map[string]bool{
 	"queued":    true,
 	"running":   true,
@@ -71,6 +77,110 @@ var validWIStatuses = map[string]bool{
 	"blocked":   true,
 	"cancelled": true,
 	"wrapped":   true,
+	"failed":    true,
+}
+
+// doneStatuses are the terminal statuses folded into the "Done" sidebar segment
+// (aihub#185). failed is included here so previously-invisible failed wi's get a
+// home; the row still renders its own real status badge.
+var doneStatuses = []string{"wrapped", "cancelled", "failed"}
+
+// segmentOrder is the canonical top->bottom order of the LCRS sidebar segments
+// (aihub#185), replacing the old raw-status statusBlockOrder for the list view.
+// "done" is rendered below a divider in the sidebar.
+var segmentOrder = []string{"running", "needsyou", "unclaimed", "stalled", "paused", "done"}
+
+// segmentLabels maps each segment key to its sidebar display label.
+var segmentLabels = map[string]string{
+	"running":   "Running",
+	"needsyou":  "Needs you",
+	"unclaimed": "Unclaimed",
+	"stalled":   "Stalled",
+	"paused":    "Paused",
+	"done":      "Done",
+}
+
+// segmentFor returns the LCRS segment (aihub#185) a row belongs to, by precedence:
+//
+//	done      — terminal: status in {wrapped, cancelled, failed}
+//	stalled   — running but flagged stalled by the ready-queue path
+//	running   — running and alive
+//	unclaimed — no current-attempt owner AND status in {queued, blocked}
+//	needsyou  — owner == viewer AND status in {paused, blocked} (your work, waiting on you)
+//	paused    — paused (owned by someone else; yours went to needsyou above)
+//	(fallback) unclaimed — the only residual is "blocked owned by another", rare;
+//	            fold into the claimable pool so it is never silently dropped.
+//
+// viewer is the current user's display name; stalled is the set of stalled wi IDs.
+func segmentFor(r *wiListRow, viewer string, stalled map[string]bool) string {
+	switch {
+	case r.Status == "wrapped" || r.Status == "cancelled" || r.Status == "failed":
+		return "done"
+	case r.Status == "running" && stalled[r.ID]:
+		return "stalled"
+	case r.Status == "running":
+		return "running"
+	case r.OwnerDisplay == "" && (r.Status == "queued" || r.Status == "blocked"):
+		return "unclaimed"
+	case viewer != "" && r.OwnerDisplay == viewer && (r.Status == "paused" || r.Status == "blocked"):
+		return "needsyou"
+	case r.Status == "paused":
+		return "paused"
+	default:
+		return "unclaimed"
+	}
+}
+
+// segmentListRows buckets active-status rows into LCRS segments (aihub#185),
+// returning per-segment counts and the rows in each. In Mine view, rows owned by
+// another user are dropped from every segment EXCEPT unclaimed (the claimable pool
+// is always shown) — mirroring groupListRows' owner scoping. stalled is the set of
+// wi IDs flagged stalled by the ready-queue path. Terminal rows are not expected
+// here (the active query excludes them); Done is counted/loaded separately.
+func segmentListRows(rows []*wiListRow, viewer string, mine bool, stalled map[string]bool) (map[string]int, map[string][]*wiListRow) {
+	counts := map[string]int{}
+	bySeg := map[string][]*wiListRow{}
+	for _, r := range rows {
+		seg := segmentFor(r, viewer, stalled)
+		if mine && seg != "unclaimed" && r.OwnerDisplay != viewer {
+			continue
+		}
+		if seg == "needsyou" {
+			r.NeedsYou = true // drives the .row.hot left bar
+		}
+		counts[seg]++
+		bySeg[seg] = append(bySeg[seg], r)
+	}
+	return counts, bySeg
+}
+
+// stalledSet returns the set of wi IDs that are stalled (running-but-gone-quiet),
+// sourced from the ready-queue path. Single-project mode queries that project;
+// __all__ mode unions across accessible projects (admins: every visible project).
+// Best-effort: query errors contribute nothing. Mirrors stalledCount's scoping.
+func stalledSet(ctx context.Context, pool *pgxpool.Pool, project string, allMode bool, accessible []string, u *UserContext) map[string]bool {
+	out := map[string]bool{}
+	if pool == nil {
+		return out
+	}
+	scope := []string{project}
+	if allMode {
+		scope = accessible
+		if u != nil && u.Role == "admin" {
+			scope = availableProjectsForUI(ctx, pool, u)
+		}
+	}
+	for _, p := range scope {
+		if p == "" {
+			continue
+		}
+		if q, aerr := getQueueFn(ctx, pool, p, 100); aerr == nil && q != nil {
+			for _, it := range q.Stalled {
+				out[it.ID] = true
+			}
+		}
+	}
+	return out
 }
 
 // validWIKinds enumerates the values accepted in the ?kind= filter.
@@ -115,7 +225,37 @@ type wiListPageData struct {
 	Items             []*wiListRow  // flat list, kept for tests / fallback
 	Groups            []wiListGroup // grouped rows for display (Needs you / status blocks / Unclaimed)
 	Strip             stripCounts   // headline count strip — derived from Groups (single source of truth)
-	Err               string
+	// LCRS segment sidebar (aihub#185). SegCounts is the per-segment count for the
+	// right sidebar nav; SelectedSeg is the single-selected segment; SegRows is the
+	// rows the middle pane renders (only the selected segment).
+	SegCounts   map[string]int
+	SelectedSeg string
+	SegRows     []*wiListRow
+	Segments    []segNav // ordered sidebar nav (label + count + selected + divider)
+	// Done-segment server pagination (aihub#298). Only meaningful when
+	// SelectedSeg == "done": that segment grows without bound, so its rows are
+	// fetched one cursor page at a time instead of being shipped whole and paged
+	// in the browser. DoneCursor is the cursor that produced the page on screen
+	// ("" = newest); DoneNextCursor is non-empty exactly when older rows exist,
+	// and is the ONLY signal the template has that the archive continues past
+	// what it rendered. DoneShown is len(SegRows), i.e. this page's row count —
+	// deliberately distinct from SegCounts["done"], which is the archive total.
+	DoneCursor     string
+	DoneNextCursor string
+	DoneShown      int
+	Err            string
+}
+
+// segNav is one entry in the LCRS sidebar (aihub#185): a segment's display label,
+// its live count, whether it is the selected segment, and whether a divider is
+// drawn above it (the terminal "Done" segment sits below a divider). Built in the
+// handler because Go templates can't reach the package-level segmentOrder/labels.
+type segNav struct {
+	Key     string
+	Label   string
+	Count   int
+	On      bool
+	Divider bool
 }
 
 // StatusOn reports whether the given status value is currently selected in the
@@ -165,6 +305,8 @@ type wiDetailPageData struct {
 	Title          string
 	Active         string
 	Theme          string
+	Origin         string // scheme://host of this request; frames post their height to it
+	Nonce          string // this response's CSP nonce; the frame's bridge must run under it (aihub#243)
 	User           *UserContext
 	WI             *domain.WorkItem
 	WIType         string     // flattened *WI.WIType
@@ -370,14 +512,24 @@ func registerUIWIHandlers(g *echo.Group, pool *pgxpool.Pool, _ *template.Templat
 
 // handleUIWIList renders the work-item list page.
 //
-// Project selection mirrors the queue page: query ?project= wins; otherwise
-// the first project (alphabetical) the caller can see. For non-admins this
-// comes from their ProjectRoles map; for admins (empty map by design — see
-// middleware.go ~L104-106) availableProjectsForUI falls back to all visible
-// projects via domain.ListProjects.
+// Project selection: an explicit ?project= wins — a concrete name narrows to a
+// single project, __all__ selects the cross-project view. With no ?project= we
+// default to the "All projects" view so the top-nav Work Items link always lands
+// on every accessible project (not an arbitrary first one). The one exception is a
+// non-admin with zero accessible projects: it falls through to the no-access guard
+// below. availableProjectsForUI is the project set — non-admins get their
+// ProjectRoles map; for admins (empty map by design — see middleware.go ~L104-106)
+// it falls back to all visible projects via domain.ListProjects.
 func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
+		// u is populated by RequireUISession middleware, so it is never nil here in
+		// practice. Guard defensively anyway so the rest of the handler can deref it
+		// freely without a nil check on every access (and so staticcheck does not
+		// flag SA5011 possible-nil-dereference on the bare u.Role / u.DisplayName uses).
+		if u == nil {
+			return c.NoContent(http.StatusUnauthorized)
+		}
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
@@ -406,15 +558,17 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 
 		// project resolution:
 		//   "__all__"  → view across every project the caller can see
-		//   ""         → default to first available
+		//   ""         → default to the cross-project "All projects" view (the
+		//                top-nav Work Items link lands here); a non-admin with zero
+		//                accessible projects stays "" so the no-access guard fires
 		//   "<name>"   → single project
 		projectParam := strings.TrimSpace(c.QueryParam("project"))
-		allMode := projectParam == allProjectsSentinel
+		isAdmin := u.Role == "admin"
+		allMode := projectParam == allProjectsSentinel ||
+			(projectParam == "" && (isAdmin || len(projects) > 0))
 		project := projectParam
 		if allMode {
 			project = allProjectsSentinel // keep sentinel for the template's selected-option check
-		} else if project == "" && len(projects) > 0 {
-			project = projects[0]
 		}
 		data.Project = project
 		data.AllMode = allMode
@@ -427,7 +581,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		// Per-project active-wi counts for the switcher dropdown. Scope to the
 		// projects the user can see; nil for admins means "all projects".
 		var countScope []string
-		if u.Role != "admin" {
+		if u.Role != "admin" || u.ProjectScope != nil {
 			countScope = projects
 		}
 		data.ProjectCounts, data.TotalCount = fetchProjectWICountsFn(ctx, pool, countScope)
@@ -461,19 +615,14 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		data.Reporter = strings.TrimSpace(c.QueryParam("reporter"))
 		data.StatusLabel = statusFilterLabel(statusList)
 
-		// "Mine" segment is the owner filter pinned to the current user's
-		// display name. There is no separate domain concept — it reuses the
-		// existing ?owner= filter. This list is a PERSONAL dashboard, so when
-		// the caller has not explicitly chosen a segment (no ?owner= and no
-		// explicit ?all=1 opt-out) we DEFAULT to "Mine".
+		// Owner filter (aihub#185 follow-up): the list now DEFAULTS to All
+		// (everyone's items). The header "me" toggle opts into a personal view by
+		// setting ?owner=<my display name>; unset/empty = All. There is no separate
+		// domain concept — it reuses the existing ?owner= filter. data.Mine drives
+		// the in-memory owner scoping in segmentListRows + the toggle's on-state.
 		ownerParam := strings.TrimSpace(c.QueryParam("owner"))
-		_, ownerExplicit := c.QueryParams()["owner"]
-		allOptOut := c.QueryParam("all") == "1"
-		if ownerParam == "" && !ownerExplicit && !allOptOut && u != nil && u.DisplayName != "" {
-			ownerParam = u.DisplayName // default view = Mine
-		}
 		data.Owner = ownerParam
-		if u != nil && ownerParam != "" && ownerParam == u.DisplayName {
+		if ownerParam != "" && ownerParam == u.DisplayName {
 			data.Mine = true
 		}
 
@@ -531,12 +680,12 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		var facetScope []string
 		if allMode {
 			queryProject = ""
-			if u.Role != "admin" {
-				// non-admin view-all is bounded to their member projects
+			if u.Role != "admin" || u.ProjectScope != nil {
+				// non-admin (or scoped admin) view-all is bounded to their member/scoped projects
 				filter.AccessibleProjects = projects
 				facetScope = projects
 			}
-			// admin view-all: AccessibleProjects empty + facetScope nil = every project
+			// unscoped admin view-all: AccessibleProjects empty + facetScope nil = every project
 		} else {
 			// single project — access check (admin bypasses)
 			if err := checkProjectAccessSoft(u, project); err != nil {
@@ -551,10 +700,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		data.ReporterOptions = facets.Reporters
 		data.OwnerOptions = facets.Owners
 
-		viewer := ""
-		if u != nil {
-			viewer = u.DisplayName
-		}
+		viewer := u.DisplayName
 		// Headline strip counts come from the grouping (single source of truth —
 		// annotation #2). The strip is a STABLE overview and must NOT shift with
 		// the display status filter: when a status filter is active, compute it
@@ -589,8 +735,141 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		data.Strip = groupCountsFromGroups(stripGroups)
 		data.Strip.Stalled = stalledCount(ctx, pool, project, allMode, projects, u)
 
+		// --- LCRS segment sidebar (aihub#185) -------------------------------
+		// Single-select sidebar: ?seg= picks which segment the middle pane shows
+		// (default: the actionable Unclaimed pool). The five active segments +
+		// their counts come from the active rows already loaded; Done is terminal
+		// — counted via aggregate (never load 100s of rows to count) and its rows
+		// loaded only when it is the selected segment.
+		selectedSeg := strings.TrimSpace(c.QueryParam("seg"))
+		if _, ok := segmentLabels[selectedSeg]; !ok {
+			selectedSeg = "unclaimed"
+		}
+		data.SelectedSeg = selectedSeg
+
+		// Cursor for the Done segment's server-side pagination (aihub#298).
+		// Empty = newest page. Only Done reads it; the active segments are
+		// bounded and ship whole.
+		doneCursor := strings.TrimSpace(c.QueryParam("done_cursor"))
+		data.DoneCursor = doneCursor
+
+		stalled := stalledSet(ctx, pool, project, allMode, projects, u)
+		segCounts, segRows := segmentListRows(rows, viewer, data.Mine, stalled)
+
+		// Done count is project-scoped (the archive is shown project-wide, not
+		// owner-scoped like the active segments). Empty scope = all projects.
+		doneScope := []string{project}
+		if allMode {
+			doneScope = nil
+			if u.Role != "admin" || u.ProjectScope != nil {
+				doneScope = projects
+			}
+		}
+		segCounts["done"] = fetchDoneCountFn(ctx, pool, doneScope)
+		data.SegCounts = segCounts
+
+		// Ordered sidebar nav for the template (Done sits below a divider).
+		data.Segments = make([]segNav, 0, len(segmentOrder))
+		for _, k := range segmentOrder {
+			data.Segments = append(data.Segments, segNav{
+				Key:     k,
+				Label:   segmentLabels[k],
+				Count:   segCounts[k],
+				On:      k == selectedSeg,
+				Divider: k == "done",
+			})
+		}
+
+		if selectedSeg == "done" {
+			// Done is server-paginated (aihub#298). It is the one segment whose row
+			// set only ever grows, so it cannot be "loaded fully and paged in the
+			// browser" the way the active segments are.
+			//
+			// The previous code fetched a single page capped at df.Limit = 200 and
+			// stopped, on the reasoning that this made the header count match the
+			// rendered rows. Past 200 terminal items that reasoning inverts: the
+			// header count comes from fetchDoneCount (a real COUNT(*), so it stays
+			// exact) while the rows silently stop at 200, and dropdown.js then pages
+			// those 200 client-side — printing "1–10 of 200" underneath a header
+			// reading e.g. 417, with no control that could ever reach the rest. The
+			// archive looked truncated to the point of data loss (it was not; the
+			// rows were simply never requested).
+			//
+			// So the fetch now carries a cursor and reports whether older rows exist.
+			// data.Limit is the page's own limit (default 50, ?limit= up to 200),
+			// which keeps Done consistent with every other list on the page and
+			// stays inside domain.ListWorkItems' 200 cap — above it that function
+			// silently falls back to 50 (aihub#267).
+			df := filter
+			df.Status = doneStatuses
+			df.Limit = data.Limit
+			if doneCursor != "" {
+				df.Cursor = &doneCursor
+			}
+			if dr, next, derr := fetchListRowsPaged(ctx, pool, queryProject, df); derr == nil {
+				data.SegRows = dr
+				data.DoneNextCursor = next
+				data.DoneShown = len(dr)
+			}
+		} else {
+			data.SegRows = segRows[selectedSeg]
+		}
+
 		return renderTemplate(c, tmpl, renderName, data)
 	}
+}
+
+// fetchListRowsPaged is fetchListGroups' paginated sibling: it returns one
+// cursor page of rows plus the cursor for the NEXT page.
+//
+// It exists because fetchListGroups discards res.NextCursor — which is correct
+// for its callers (the count strip and the active-segment list both want a
+// bounded snapshot, not a walkable archive) but leaves no way to page. Rather
+// than widen that function's signature at three call sites, Done gets its own
+// entry point. It also skips the grouping pass: the caller renders these rows
+// directly as the selected segment, so wiListGroup would be built and dropped.
+//
+// The returned cursor is domain's opaque page token, empty when this is the
+// last page. Ordering is whatever filter.Sort/Order specify (default
+// created_at DESC), and the cursor is only valid for that same ordering —
+// callers must not hand it back with a different sort.
+//
+// There is deliberately no `mine` parameter, which is narrower than it sounds:
+// an EXPLICIT owner filter still applies to Done, because the caller's filter
+// already carries filter.OwnerDisplay (set at the ?owner= handling above when
+// the user typed an owner and is not in Mine view) and df inherits it. What is
+// dropped is only the in-memory MINE scoping that groupListRows/segmentListRows
+// apply to the active segments. The old call site passed data.Mine to
+// fetchListGroups but then used its raw rows and discarded the grouping, so
+// that scoping never reached Done's rows there either — this preserves the
+// behaviour rather than implying a scoping that does not happen.
+func fetchListRowsPaged(ctx context.Context, pool *pgxpool.Pool, queryProject string, filter domain.ListWorkItemsFilter) ([]*wiListRow, string, *domain.AihubError) {
+	res, aerr := listWorkItemsFn(ctx, pool, queryProject, filter)
+	if aerr != nil {
+		return nil, "", aerr
+	}
+
+	attemptIDs := make([]string, 0, len(res.Items))
+	for _, wi := range res.Items {
+		if wi.CurrentAttemptID != nil {
+			attemptIDs = append(attemptIDs, *wi.CurrentAttemptID)
+		}
+	}
+	owners := fetchAttemptOwners(ctx, pool, attemptIDs)
+
+	rows := make([]*wiListRow, 0, len(res.Items))
+	for _, wi := range res.Items {
+		rows = append(rows, toListRow(wi, owners))
+	}
+	// Same global re-sort fetchListGroups applies, so a page's rows read in the
+	// same order as every other list on the page.
+	sortListRows(rows)
+
+	next := ""
+	if res.NextCursor != nil {
+		next = *res.NextCursor
+	}
+	return rows, next, nil
 }
 
 // fetchListGroups runs the wi list query, batch-loads current-attempt owners,
@@ -691,6 +970,8 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			Title:  "Work item",
 			Active: "wi",
 			Theme:  themeFromCookie(c),
+			Origin: pageOrigin(c),
+			Nonce:  uiNonce(c),
 			User:   u,
 		}
 
@@ -767,21 +1048,21 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 
 		go func() {
 			defer wg.Done()
-			deps, depsErr = listDependenciesFn(ctx, pool, wi.ID, roles)
+			deps, depsErr = listDependenciesFn(ctx, pool, wi.ID, roles, u.Role)
 		}()
 
 		go func() {
 			defer wg.Done()
 			// Parent link — nil parentRef means "no parent" (not an error).
 			// Errors are best-effort: a failed lookup just drops the link.
-			parentRef, _ = getParentRefFn(ctx, pool, wi.ID, roles)
+			parentRef, _ = getParentRefFn(ctx, pool, wi.ID, roles, u.Role)
 		}()
 
 		go func() {
 			defer wg.Done()
 			// Children ordered by seq ASC. Best-effort: a failed lookup leaves
 			// the Children card empty.
-			childRefs, _ = listChildrenFn(ctx, pool, wi.ID, roles)
+			childRefs, _ = listChildrenFn(ctx, pool, wi.ID, roles, u.Role)
 		}()
 
 		go func() {
@@ -822,8 +1103,8 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		}
 
 		// Parent link (aihub#142): build the view entry straight from the domain
-		// ref — NOT via toDepView, which inverts blocking/blocked-by direction;
-		// parent/children are plain identity references with no direction to flip.
+		// ref — parent/children are plain identity references, not dependency
+		// edges, so they do not go through the blocking/blocked-by projection.
 		if parentRef != nil {
 			pe := wiRefToDepEntry(*parentRef)
 			data.Parent = &pe
@@ -1005,21 +1286,17 @@ func toDepView(d *domain.DependenciesResponse) *depView {
 	if d == nil {
 		return nil
 	}
-	// NOTE: domain.DependenciesResponse uses inverted field semantics —
-	// `Blocking` is populated from rows where this wi is the *blocked* side
-	// (so it actually lists the wi's that block us), and `BlockedBy` lists
-	// the wi's we are blocking. Swap them here so the template labels mean
-	// what a human reader expects:
-	//   depView.BlockedBy = "who blocks us" (domain.Blocking)
-	//   depView.Blocking  = "who we block"  (domain.BlockedBy)
+	// domain.DependenciesResponse field semantics match the template labels
+	// directly: `Blocking` lists the wi's our wi blocks, `BlockedBy` lists the
+	// wi's that block our wi. Copy straight across — no direction swap.
 	v := &depView{
-		Blocking:  make([]depEntry, 0, len(d.BlockedBy)),
-		BlockedBy: make([]depEntry, 0, len(d.Blocking)),
-	}
-	for _, e := range d.BlockedBy {
-		v.Blocking = append(v.Blocking, depEntryFrom(e))
+		Blocking:  make([]depEntry, 0, len(d.Blocking)),
+		BlockedBy: make([]depEntry, 0, len(d.BlockedBy)),
 	}
 	for _, e := range d.Blocking {
+		v.Blocking = append(v.Blocking, depEntryFrom(e))
+	}
+	for _, e := range d.BlockedBy {
 		v.BlockedBy = append(v.BlockedBy, depEntryFrom(e))
 	}
 	return v
@@ -1036,9 +1313,9 @@ func depEntryFrom(e domain.DependencyListEntry) depEntry {
 // template-friendly depEntry. It reuses the SAME cross-project sentinel as
 // depEntryFrom (Slug==nil || ID=="hidden" → Hidden) so hidden refs render the
 // shared placeholder. Status + Assignee are left zero here; the view layer fills
-// them via fetchDepMeta/enrichDepView, identical to the dependency rows. There
-// is no direction inversion to worry about (unlike toDepView): parent/children
-// are plain identity references, so we build the entry straight from the row.
+// them via fetchDepMeta/enrichDepView, identical to the dependency rows.
+// parent/children are plain identity references, so we build the entry straight
+// from the row.
 func wiRefToDepEntry(r domain.WIRef) depEntry {
 	if r.Slug == nil || r.ID == "hidden" {
 		return depEntry{Hidden: true}
@@ -1330,6 +1607,7 @@ func renderHTMLStatus(c echo.Context, tmpl *template.Template, name string, data
 	if err := tmpl.ExecuteTemplate(&buf, name, data); err != nil {
 		return c.String(http.StatusInternalServerError, "template error: "+err.Error())
 	}
+	setRenderHeaders(c)
 	return c.HTMLBlob(status, []byte(buf.String()))
 }
 
@@ -1340,6 +1618,9 @@ func renderHTMLStatus(c echo.Context, tmpl *template.Template, name string, data
 func checkProjectAccessSoft(u *UserContext, project string) error {
 	if u == nil {
 		return errSoft("not authenticated")
+	}
+	if u.ProjectScope != nil && *u.ProjectScope != project {
+		return errSoft("no access to project " + project)
 	}
 	if u.Role == "admin" {
 		return nil

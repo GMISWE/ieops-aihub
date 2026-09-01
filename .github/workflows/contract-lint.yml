@@ -1,0 +1,111 @@
+name: Contract Lint
+
+# Lints the in-tree polyforge plugin (plugins/polyforge/**) against the MCP tool
+# contract. Unlike the marketplace/polyforge-coding copies — which curl the schema
+# from the pf-schemas orphan branch and therefore lag one merge behind in-flight
+# PRs — this job builds the polyforge binary from THIS PR's source and dumps the
+# schema fresh, so the plugin is always checked against the server code it ships
+# with (aihub#211).
+
+on:
+  pull_request:
+    paths:
+      - 'plugins/polyforge/**'
+      # Server-side MCP contract surface: a tool/param change here can break the
+      # plugin's references, so re-lint against the freshly-built schema. (A pure
+      # internal/domain enum change without an internal/mcp edit is the one gap.)
+      - 'internal/mcp/**'
+      - 'cmd/polyforge/**'
+      - 'scripts/pf_contract_lint.py'
+      - 'scripts/pf_contract_lint_baseline.json'
+      - '.github/workflows/contract-lint.yml'
+      # Version-stamp consistency (aihub#232). Both catalogs live outside
+      # plugins/**, so a catalog-only version edit would otherwise not run this
+      # job at all — which is exactly the drift the check exists to catch. The
+      # repo-root marketplace.json is the Copilot CLI catalog and carries its own
+      # version stamp; it was one of the files left at 1.1.6 by the original
+      # incident, so it needs the trigger just as much as the Claude one.
+      - '.claude-plugin/marketplace.json'
+      - 'marketplace.json'
+      - 'scripts/pf_version_check.py'
+
+jobs:
+  contract-lint:
+    name: Contract Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The bump gate below diffs this PR against its base commit. The default
+          # depth-1 checkout does not contain that commit, and the gate would then
+          # report a diff failure rather than silently passing (aihub#302).
+          fetch-depth: 0
+
+      # Cheap and Go-independent, so it runs first: a version bump that updates
+      # only some of the four stamps fails here in seconds rather than after the
+      # build (aihub#232).
+      - name: Plugin version-stamp consistency
+        run: |
+          set -euo pipefail
+          python3 scripts/pf_version_check.py --self-test | tee /tmp/pf_selftest.log
+          # --self-test runs TWO suites, and its exit code cannot report the one failure
+          # that matters most here: a suite that never ran. Replacing the bump suite's
+          # result with a literal 0 leaves the script green while skipping it entirely —
+          # no assertion inside the script can see that, because the mutation removes the
+          # call. So assert on the OUTPUT: each suite must announce itself by name.
+          # (Anchored at line start: "self-test passed" is a substring of the bump line.)
+          for want in '^self-test passed' '^bump self-test passed'; do
+            grep -qE -- "$want" /tmp/pf_selftest.log \
+              || { echo "::error::pf_version_check --self-test never reported \"$want\" — a suite did not run"; exit 1; }
+          done
+          python3 scripts/pf_version_check.py --root .
+
+      # aihub#302. The step above is a STATE predicate — do the five stamps agree
+      # with each other? — and it cannot answer "did this PR touch the plugin?".
+      # PR#264 was pushed without a bump and a human caught it in review; PR#265 then
+      # shipped four files under plugins/polyforge/skills/ under a version that was
+      # already released, and nothing caught that one. Caught once by luck, shipped
+      # once undetected. CI was green throughout, correctly — all five stamps agreed.
+      # The install cache is keyed on version, so those edits reach nobody already on
+      # that version and /plugin update is a no-op for them.
+      #
+      # Kept as its own step so the two failures are never confused: this one is
+      # [NO_VERSION_BUMP], the one above is [VERSION_DRIFT] and friends. `!cancelled()`
+      # so a PR carrying BOTH defects sees both in one run rather than needing two
+      # round-trips — which is the whole point of separating them.
+      #
+      # base.sha is the PR's base commit as GitHub recorded it. Deliberately NOT a
+      # local origin/main ref, which can be stale in the runner's checkout.
+      #
+      # ⚠️ This value is EMPTY on any event other than pull_request. The check refuses an
+      # empty base loudly rather than passing, so adding `push:` / `merge_group:` above
+      # turns this step red, not silent — but if you do add such a trigger, give this
+      # step a base appropriate to that event instead of leaving it failing.
+      - name: Plugin contents changed => version must be bumped
+        if: ${{ !cancelled() }}
+        run: |
+          python3 scripts/pf_version_check.py \
+            --root . \
+            --require-bump-since "${{ github.event.pull_request.base.sha }}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+          cache: true
+
+      - name: Build polyforge and dump MCP schemas (fresh, in-repo)
+        run: |
+          go build -o /tmp/polyforge ./cmd/polyforge
+          /tmp/polyforge dump-mcp-schemas "$(git rev-parse HEAD)" > /tmp/pf-tool-schemas.json
+          python3 -c "import json; json.load(open('/tmp/pf-tool-schemas.json')); print('schema JSON valid')"
+
+      - name: Linter self-test
+        run: python3 scripts/pf_contract_lint.py --self-test
+
+      - name: Contract-lint the polyforge plugin
+        run: |
+          python3 scripts/pf_contract_lint.py \
+            --schemas /tmp/pf-tool-schemas.json \
+            --target plugins/ \
+            --baseline scripts/pf_contract_lint_baseline.json

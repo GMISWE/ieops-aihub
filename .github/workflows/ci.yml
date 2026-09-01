@@ -302,6 +302,14 @@ jobs:
       # drives the real hook per routed skill in both engine branches and runs
       # under the "Unit tests" step above, with no -run filter to fall out of.
       # It is Go rather than shell precisely so it cannot become advisory.
+      # UPDATE (aihub#305): launcher-channel-url.test.sh is wired below too, and
+      # it is the first gate here that touches the network. That was a
+      # deliberate trade: the defect it guards (the default download channel
+      # pointing at a branch that was never published) is invisible to every
+      # hermetic check, because stubbing curl makes any URL succeed. The suite
+      # keeps its own positive control so a token or network problem reports as
+      # a SKIP rather than masquerading as a missing branch, and the step below
+      # then fails on that SKIP rather than passing quietly.
       # aihub#249: GET /v1/memories previously parsed only `top_k` (a `?limit=N`
       # caller was silently ignored) and RecallResponse carried no `total`; and
       # GET /v1/memories/:id did not exist at all. These run against the
@@ -788,6 +796,54 @@ jobs:
 
       - name: Launcher update-check regression suite
         run: bash plugins/polyforge/tests/launcher-update-check.test.sh
+
+      # aihub#305: the launcher's default channel pointed at `bins-stable`, a
+      # branch publish-bins.yml has never created. Every gate that existed
+      # asserted on the resolved channel STRING — launcher-bash32 even encoded
+      # `stable` as the expected answer — and launcher-update-check stubs curl,
+      # so no URL is ever real there. Nothing anywhere asked whether the branch
+      # the launcher downloads from exists, which is why a 404 default shipped
+      # and then sat silently freezing machines on their old binaries.
+      #
+      # This suite closes that specific gap, so it is wired on purpose rather
+      # than left advisory like launcher-bash32 (see the note further up):
+      #   part 1 is hermetic and reads the URL out of the argv the launcher
+      #          hands to curl, so changing the URL template turns it red;
+      #   part 2 actually fetches those URLs. GH_TOKEN is needed because the
+      #          repo is private and raw.githubusercontent.com answers 404 —
+      #          not 401 — for an unauthenticated read, so without a working
+      #          token "missing branch" and "bad token" are indistinguishable.
+      #          The suite carries its own positive control for exactly that,
+      #          and downgrades to a loud SKIP if the control does not pass.
+      #
+      # The assertions deliberately do not trust the exit code, and they name
+      # the part-2 lines specifically: a suite that skipped its only networked
+      # check also exits 0, and that is the state this gate exists to prevent.
+      - name: aihub#305 launcher channel/url gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          bash plugins/polyforge/tests/launcher-channel-url.test.sh 2>&1 | tee channel_gate.log
+          for want in "PASS: no-config -> channel 'dev'" \
+                      "PASS: no-binary-section -> channel 'dev'" \
+                      "PASS: channel-stable -> channel 'dev'" \
+                      "PASS: channel-garbage -> channel 'dev'" \
+                      "PASS: channel-stable -> binary url on bins-dev" \
+                      "PASS: channel-stable -> warns and names the channel it used" \
+                      "PASS: channel-dev -> silent, as a valid config must be" \
+                      "PASS: negative control" \
+                      "PASS: every url the launcher resolves is published and fetchable"; do
+            grep -qF -- "$want" channel_gate.log \
+              || { echo "::error::launcher channel/url gate never reported \"$want\" — that check did not run"; exit 1; }
+          done
+          ! grep -q '^SKIP:' channel_gate.log \
+            || { echo "::error::the networked half of the launcher channel/url gate SKIPped — GH_TOKEN is not reaching raw.githubusercontent.com, so the one assertion that can tell a published channel from a 404 did not run"; exit 1; }
+          ! grep -q '^FAIL:' channel_gate.log \
+            || { echo "::error::launcher channel/url gate reported a FAIL"; exit 1; }
+          n=$(grep -c '^PASS: ' channel_gate.log)
+          [ "$n" -ge 22 ] \
+            || { echo "::error::launcher channel/url gate reported only $n PASSes (floor 22) — checks have gone missing"; exit 1; }
 
       # aihub#293: wire the two using-polyforge gates in. Until now ci.yml ran
       # exactly one suite out of plugins/polyforge/tests/ (the launcher one

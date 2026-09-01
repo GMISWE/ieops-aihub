@@ -817,9 +817,10 @@ api_key = "your-key-here"
 [server]
 url = "http://your-aihub-host"
 
-# Binary update channel (optional; default: stable)
+# Binary update channel (optional; "dev" is the only published channel and the
+# default, so you normally leave this out entirely)
 # [binary]
-# channel = "stable"   # stable | dev
+# channel = "dev"
 ` + "```" + `
 
 ---

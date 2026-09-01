@@ -20,7 +20,12 @@ package testname
 //	go test ./internal/citest/testname/ -count=1 -v
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -176,4 +181,95 @@ func flatten(pairs [][2]string) []string {
 		out = append(out, p[0], p[1])
 	}
 	return out
+}
+
+// TestSanitize_RepoCollisions replaces the census this package's doc comment
+// used to carry as prose. A number in a comment rots silently — the previous
+// one was stale within the same pull request that wrote it — whereas an
+// assertion over the live tree goes red.
+//
+// It walks the repository for test-function names, then measures both schemes:
+// the new one must produce NO collisions, and the old one is measured alongside
+// so the margin is visible rather than asserted. Run it with -v to see the
+// figures:
+//
+//	GOWORK=off go test ./internal/citest/testname/ -run RepoCollisions -v
+func TestSanitize_RepoCollisions(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	funcRE := regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]*)\(`)
+
+	seen := map[string]bool{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			n := d.Name()
+			if n == "vendor" || n == "testdata" || n == "node_modules" ||
+				(path != root && (strings.HasPrefix(n, ".") || strings.HasPrefix(n, "_"))) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path) // #nosec G304 -- walking the repo under test
+		if err != nil {
+			return err
+		}
+		for _, m := range funcRE.FindAllStringSubmatch(string(src), -1) {
+			seen[m[1]] = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(seen))
+	for n := range seen {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	// A floor, not an exact count: this must notice the walk silently finding
+	// nothing, without going red every time somebody adds a test.
+	if len(names) < 500 {
+		t.Fatalf("found only %d test functions under %s — the walk has stopped seeing the repo", len(names), root)
+	}
+
+	census := func(fn func(string) string) (distinct int, groups [][]string) {
+		byKey := map[string][]string{}
+		for _, n := range names {
+			k := fn(n)
+			byKey[k] = append(byKey[k], n)
+		}
+		for _, v := range byKey {
+			if len(v) > 1 {
+				groups = append(groups, v)
+			}
+		}
+		return len(byKey), groups
+	}
+
+	oldDistinct, oldGroups := census(legacySanitize37)
+	newDistinct, newGroups := census(Sanitize)
+	oldColliding := 0
+	for _, g := range oldGroups {
+		oldColliding += len(g)
+	}
+	t.Logf("%d test-function names in the repo", len(names))
+	t.Logf("  truncate-to-37 (replaced): %d distinct keys, %d collision group(s) covering %d names",
+		oldDistinct, len(oldGroups), oldColliding)
+	t.Logf("  truncate-30 + 6 hex (now): %d distinct keys, %d collision group(s)", newDistinct, len(newGroups))
+
+	if len(newGroups) != 0 {
+		t.Errorf("the current scheme collides on %d group(s): %v", len(newGroups), newGroups)
+	}
+	// The old scheme must still be measurably worse, or this test has stopped
+	// discriminating and the whole change would be unmotivated.
+	if len(oldGroups) == 0 {
+		t.Errorf("the replaced scheme no longer collides on this repo's names, so this test proves nothing; " +
+			"either the fixture population changed or the comparison is broken")
+	}
 }

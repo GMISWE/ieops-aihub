@@ -235,18 +235,21 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+         set -o pipefail
           set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha|TestBeta' -count=1 -v 2>&1 | tee a.log
           grep -q -- "--- PASS: TestAlpha" a.log || exit 1
           ! grep -q -- '--- SKIP' a.log || exit 1
       - name: inline env
         run: |
+          set -o pipefail
           AIHUB_TEST_DB=postgres://y go test ./internal/server/ -run "TestGamma" -v 2>&1 | tee b.log
           ! grep -q -- '--- SKIP' b.log || exit 1
       - name: commented out
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           # go test ./internal/domain/ -run 'TestEpsilon' -v 2>&1 | tee e.log
           echo nothing to do
 `)
@@ -298,6 +301,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
           go test ./internal/server/ -run 'TestBeta' -v 2>&1 | tee b.log
@@ -326,6 +330,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' other.log || exit 1
 `)
@@ -349,6 +354,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -v 2>&1 | tee x.log
           ! grep -q -- '--- SKIP' prefix_x.log || exit 1
 `)
@@ -390,6 +396,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'Test' -skip 'TestSlow' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -410,6 +417,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -426,6 +434,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -442,6 +451,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -459,6 +469,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -483,6 +494,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -504,6 +516,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./... -count=1 -v 2>&1 | tee all.log
           ! grep -q -- '--- SKIP' all.log || exit 1
 `)
@@ -534,6 +547,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test $PKG -run 'TestAlpha' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -673,9 +687,17 @@ func setupOther(t *testing.T) {
 		t.Fatalf("got %d violations %v, want 2 (setupBad and setupSilent)", len(got), got)
 	}
 	joinedOut := strings.Join(got, "\n")
-	for _, want := range []string{"setupBad", "setupSilent"} {
+	// The DIAGNOSTIC, not just the name. Removing SkipNow from skipFuncNames
+	// changes which violation setupSilent draws (it becomes "never calls
+	// t.Skip") without changing the count or the names, so the old assertion
+	// could not see that mutant. "no constant message" is reachable only via
+	// the skip-message rule, which is what SkipNow feeds.
+	for _, want := range []string{
+		`setupBad reads AIHUB_TEST_DB but skips with "no test database configured"`,
+		"setupSilent reads AIHUB_TEST_DB but skips with no constant message",
+	} {
 		if !strings.Contains(joinedOut, want) {
-			t.Errorf("violations do not name %s:\n%s", want, joinedOut)
+			t.Errorf("violations do not report %q:\n%s", want, joinedOut)
 		}
 	}
 	if strings.Contains(joinedOut, "setupGood") || strings.Contains(joinedOut, "setupOther") {
@@ -721,6 +743,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run '^(TestCovered)$' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -748,6 +771,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run '^(TestCovered|TestUncovered)$' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -817,6 +841,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run '^(TestLive)$' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -1042,7 +1067,11 @@ func setupConcat(t *testing.T) {
 	}
 }
 `})
-	wantViolation(t, dir, "setupConcat")
+	// The diagnostic, not just the name: with `+` folding removed the
+	// unresolvable-argument rule reports setupConcat anyway, so asserting the
+	// name alone left that mutant alive. "skips with" only appears when the
+	// argument really was folded to AIHUB_TEST_DB.
+	wantViolation(t, dir, "setupConcat reads AIHUB_TEST_DB but skips with")
 }
 
 func TestCheckSkipMessages_TestMainGateIsAViolation(t *testing.T) {
@@ -1063,7 +1092,10 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 `})
-	wantViolation(t, dir, "TestMain")
+	// Not `wantViolation(t, dir, "TestMain")`: the generic "never calls t.Skip"
+	// message names the function too, so that pinned only THAT a violation
+	// fires, not WHICH. Dropping the special case left the suite green.
+	wantViolation(t, dir, "TestMain cannot SKIP")
 }
 
 func TestCheckSkipMessages_BuildConstraintOnATestFileIsAViolation(t *testing.T) {
@@ -1213,6 +1245,152 @@ func setupSlow(t *testing.T) {
 	wantViolation(t, dir, "setupSlow")
 }
 
+// ------------------------------- the gate must not fire on ordinary work
+//
+// A gate that rejects normal refactors gets switched off, which is the failure
+// this whole PR exists to prevent — so these two shapes matter as much as the
+// evasions above. Both were measured firing before this fix, and the first one
+// did so while its error text claimed the gate "cannot classify it as
+// AIHUB_TEST_DB-gated at all", which was false: it can, and does.
+
+// Hoisting the env read into an accessor is an ordinary refactor. The test
+// still SKIPs with a message naming the variable, so the inventory classifies
+// it exactly as before — nothing is hidden and there is nothing to report.
+func TestCheckSkipMessages_DSNAccessorWhoseCallersSkipIsFine(t *testing.T) {
+	dir := pkgDir(t, map[string]string{"helper_test.go": `package p
+
+import (
+	"os"
+	"testing"
+)
+
+func testDSN() string { return os.Getenv("AIHUB_TEST_DB") }
+
+func setupA(t *testing.T) string {
+	dsn := testDSN()
+	if dsn == "" {
+		t.Skip("set AIHUB_TEST_DB to run this integration test")
+	}
+	return dsn
+}
+
+// Two levels deep, because a one-hop answer would reject this.
+func setupB(t *testing.T) string { return setupA(t) }
+
+func TestNeedsDB(t *testing.T) { _ = setupB(t) }
+`})
+	got, err := checkSkipMessages(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("an accessor whose callers all skip naming %s hides nothing; want no violation, got:\n  %s",
+			dbEnvVar, strings.Join(got, "\n  "))
+	}
+
+	// Control: break the caller's message and the SAME code must be reported —
+	// so the tolerance above is about the caller's skip, not about giving up.
+	dir = pkgDir(t, map[string]string{"helper_test.go": `package p
+
+import (
+	"os"
+	"testing"
+)
+
+func testDSN() string { return os.Getenv("AIHUB_TEST_DB") }
+
+func setupA(t *testing.T) string {
+	dsn := testDSN()
+	if dsn == "" {
+		t.Skip("no test database")
+	}
+	return dsn
+}
+
+func TestNeedsDB(t *testing.T) { _ = setupA(t) }
+`})
+	wantViolation(t, dir, "setupA")
+}
+
+// A table-driven test over environment variables is ordinary Go, and it lives
+// in the packages that hold the DB tests. The unresolvable-argument rule used
+// to reject it on sight.
+func TestCheckSkipMessages_TableDrivenEnvTestIsFine(t *testing.T) {
+	dir := pkgDir(t, map[string]string{
+		"compliant_test.go": `package p
+
+import (
+	"os"
+	"testing"
+)
+
+func setupCompliant(t *testing.T) {
+	if os.Getenv("AIHUB_TEST_DB") == "" {
+		t.Skip("set AIHUB_TEST_DB to run this integration test")
+	}
+}
+`,
+		"env_table_test.go": `package p
+
+import (
+	"os"
+	"testing"
+)
+
+func TestEnvDefaults(t *testing.T) {
+	for _, c := range []struct{ key, want string }{
+		{"EMBEDDING_MODEL", ""},
+		{"PORT", ""},
+	} {
+		if got := os.Getenv(c.key); got != c.want {
+			t.Errorf("%s = %q, want %q", c.key, got, c.want)
+		}
+	}
+}
+`})
+	got, err := checkSkipMessages(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("a table-driven env test gates nothing; want no violation, got:\n  %s", strings.Join(got, "\n  "))
+	}
+}
+
+// ...but the shape that rule existed to close must stay closed. Here the name
+// really is being smuggled through a parameter, and the guard really does hide
+// a DB test: the caller's skip message does not name the variable, so the test
+// leaves no classifiable SKIP behind.
+func TestCheckSkipMessages_SmugglingTheNameThroughAParameterIsStillCaught(t *testing.T) {
+	dir := pkgDir(t, map[string]string{
+		"env.go": `package p
+
+const dbEnvConst = "AIHUB_TEST_DB"
+`,
+		"guard_test.go": `package p
+
+import (
+	"os"
+	"testing"
+)
+
+func envSet(key string) bool { return os.Getenv(key) != "" }
+
+func TestNeedsDB(t *testing.T) {
+	if !envSet(dbEnvConst) {
+		t.Skip("no test database")
+	}
+}
+`})
+	got, err := checkSkipMessages(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("passing the variable's name through a parameter must not be an escape hatch; got no violation")
+	}
+}
+
 func wantViolation(t *testing.T, dir, want string) {
 	t.Helper()
 	got, err := checkSkipMessages(dir)
@@ -1243,6 +1421,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           if [ -n "$RUN_DB_TESTS" ]; then
             go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
             ! grep -q -- '--- SKIP' a.log || exit 1
@@ -1260,6 +1439,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           if [ -n "$RUN_DB_TESTS" ]; then go test ./internal/domain/ -run 'TestAlpha' -v 2>&1 | tee a.log ; fi
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -1275,6 +1455,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           [ -n "$RUN_DB_TESTS" ] && go test ./internal/domain/ -run 'TestAlpha' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -1292,6 +1473,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           ! go test ./internal/domain/ -run 'TestAlpha' -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -1307,6 +1489,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -v > a.log &
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -1325,6 +1508,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -1360,6 +1544,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           echo "to reproduce locally: go test ./... -count=1 -v 2>&1 | tee a.log ; ! grep -q -- '--- SKIP' a.log || exit 1"
 `)
 	var out bytes.Buffer
@@ -1401,6 +1586,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -run 'TestNothingMatchesThis' -count=1 -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -1409,8 +1595,16 @@ jobs:
 	if err == nil {
 		t.Fatal("a second -run silently overrides the first; want an error, got a passing gate")
 	}
-	if !strings.Contains(err.Error(), "-run") {
-		t.Errorf("error does not explain the duplicated flag: %v", err)
+	// "-run" alone does NOT discriminate, and a review proved it: delete the
+	// duplicate check and the gate still fails — with the MISSING-COVERAGE
+	// error, whose "Fix:" sentence reads "name them in the -run of a ci.yml
+	// step", which also contains "-run". Both errors satisfied the assertion,
+	// so F3's regression test was hollow while F3 itself worked. Same defect as
+	// the one documented on TestRun_RejectsAQuotedGoTest above — caught once
+	// and missed here, which is why every substring assertion in this file was
+	// re-audited rather than just this one.
+	if !strings.Contains(err.Error(), "is given -run 2 times") {
+		t.Errorf("gate failed, but not because -run was duplicated: %v", err)
 	}
 }
 
@@ -1438,6 +1632,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' `+count+` -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -1476,6 +1671,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
           ` + guard + `
 `)
@@ -1509,6 +1705,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
           ` + guard + `
 `)
@@ -1543,6 +1740,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           echo "Reproduce locally:
           go test ./internal/domain/ -run '^(TestGhost)$' -count=1 -v 2>&1 | tee ghost.log
           ! grep -q -- '--- SKIP' ghost.log || exit 1
@@ -1553,7 +1751,7 @@ jobs:
 	if err == nil && len(scan.Invocations) != 0 {
 		t.Errorf("a `go test` inside a multi-line quoted string must credit no coverage, got %+v", scan.Invocations)
 	}
-	if err != nil && !strings.Contains(err.Error(), "quoted string") {
+	if err != nil && !strings.Contains(err.Error(), "`go test` appears inside a quoted string") {
 		t.Errorf("rejected, but not as quoted text: %v", err)
 	}
 
@@ -1567,6 +1765,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           echo "a
           b"
           go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
@@ -1605,6 +1804,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
           ` + guard + `
 `)
@@ -1632,6 +1832,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           ! grep -q -- '--- SKIP' a.log || exit 1
           go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
 `)
@@ -1654,6 +1855,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
@@ -1680,11 +1882,76 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log ` + tail + `
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
 		if _, err := ParseWorkflow(wf, testModule); err == nil {
 			t.Errorf("`go test ... %s` does not fail the step; want an error, got nil", tail)
+		}
+	}
+}
+
+// The last member of the "exit status consumed" class, and the only one that
+// lives a command away rather than on the same line: without `set -o pipefail`,
+// `go test … | tee log` exits with TEE's status, so a FAILING test leaves the
+// step green. The SKIP guard still catches skips; what goes silently green here
+// is a real failure.
+func TestParseWorkflow_RequiresPipefailForAPipedGoTest(t *testing.T) {
+	without := []byte(`
+jobs:
+  test:
+    steps:
+      - name: db suite
+        env:
+          AIHUB_TEST_DB: postgres://x
+        run: |
+          go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
+          ! grep -q -- '--- SKIP' a.log || exit 1
+`)
+	if _, err := ParseWorkflow(without, testModule); err == nil {
+		t.Error("a piped `go test` with no `set -o pipefail` reports tee's status; want an error, got nil")
+	}
+
+	// Every spelling ci.yml might reasonably use must be accepted...
+	for _, set := range []string{"set -o pipefail", "set -eo pipefail", "set -euo pipefail"} {
+		wf := []byte(`
+jobs:
+  test:
+    steps:
+      - name: db suite
+        env:
+          AIHUB_TEST_DB: postgres://x
+        run: |
+          ` + set + `
+          go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
+          ! grep -q -- '--- SKIP' a.log || exit 1
+`)
+		if _, err := ParseWorkflow(wf, testModule); err != nil {
+			t.Errorf("%q must be accepted, got %v", set, err)
+		}
+	}
+
+	// ...but a `set` that does not actually take effect must not count. Both of
+	// these mention pipefail and neither enables it for the invocation.
+	for _, set := range []string{
+		`echo "remember to set -o pipefail"`,
+		`[ -n "$STRICT" ] && set -o pipefail`,
+	} {
+		wf := []byte(`
+jobs:
+  test:
+    steps:
+      - name: db suite
+        env:
+          AIHUB_TEST_DB: postgres://x
+        run: |
+          ` + set + `
+          go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee a.log
+          ! grep -q -- '--- SKIP' a.log || exit 1
+`)
+		if _, err := ParseWorkflow(wf, testModule); err == nil {
+			t.Errorf("%q does not enable pipefail for the invocation; want an error, got nil", set)
 		}
 	}
 }
@@ -1700,6 +1967,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee /dev/null
           ! grep -q -- '--- SKIP' /dev/null || exit 1
 `)
@@ -1796,6 +2064,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           cat > /tmp/repro.sh <<'SH'
           go test ./... -count=1 -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
@@ -1824,6 +2093,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           cat > /tmp/repro.sh <<` + delim + `
           go test ./... -count=1 -v 2>&1 | tee a.log
           ! grep -q -- '--- SKIP' a.log || exit 1
@@ -1851,6 +2121,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           cat > /tmp/repro.sh <<'SH'
           not a command
           SH
@@ -1878,6 +2149,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           echo hi # go test ./... -count=1 -v 2>&1 | tee a.log ; ! grep -q -- '--- SKIP' a.log || exit 1
 `)
 	scan, err := ParseWorkflow(wf, testModule)
@@ -1898,6 +2170,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -count=1 -v 2>&1 | tee aihub#303.log
           ! grep -q -- '--- SKIP' aihub#303.log || { echo "::error::an aihub#289 test SKIPped"; exit 1; }
 `)
@@ -1922,6 +2195,7 @@ jobs:
         env:
           AIHUB_TEST_DB: postgres://x
         run: |
+          set -o pipefail
           go test ./internal/domain/ -run 'TestAlpha' -v 2>&1 | tee a.log ; go test ./internal/server/ -run 'TestBeta' -v 2>&1 | tee b.log
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)

@@ -612,10 +612,7 @@ func checkSkipMessages(root string) ([]string, error) {
 			byPkg[f.ast.Name.Name] = append(byPkg[f.ast.Name.Name], f)
 		}
 		for _, pkgFiles := range byPkg {
-			consts := packageStringConsts(pkgFiles)
-			for i := range pkgFiles {
-				violations = append(violations, checkFile(fset, &pkgFiles[i], consts)...)
-			}
+			violations = append(violations, checkPackage(fset, pkgFiles, packageStringConsts(pkgFiles))...)
 		}
 	}
 	sort.Strings(violations)
@@ -750,76 +747,152 @@ func constString(e ast.Expr, consts map[string]string) (string, bool) {
 	return "", false
 }
 
-func checkFile(fset *token.FileSet, f *goFile, consts map[string]string) []string {
+// funcInfo is what the package-scope pass knows about one function.
+type funcInfo struct {
+	file *goFile
+	decl *ast.FuncDecl
+	// guardsDB means the function's behaviour depends on dbEnvVar.
+	guardsDB bool
+	skips    []*ast.CallExpr
+	// namingSkip: it has at least one skip and every one of them names
+	// dbEnvVar, i.e. a test stopped here IS classifiable from its output.
+	namingSkip bool
+	// callees are the same-package function names it calls.
+	callees map[string]bool
+}
+
+// checkPackage audits one Go package. It is package- rather than file-scoped
+// because the two questions that decide a false positive from a real hole —
+// "does anything call this helper?" and "does that caller skip properly?" —
+// cannot be answered from one file.
+func checkPackage(fset *token.FileSet, files []goFile, consts map[string]string) []string {
 	var violations []string
 
-	// A constrained _test.go file is absent from the default build, so its
-	// tests never appear in the inventory at all — the same invisibility as a
-	// mis-worded skip message, reached by a different door. Enumerating tags is
-	// not attempted; carrying one at all is the violation.
-	if strings.HasSuffix(f.path, "_test.go") {
-		if c := buildConstraintOf(f.src); c != "" {
+	for i := range files {
+		f := &files[i]
+		// A constrained _test.go file is absent from the default build, so its
+		// tests never appear in the inventory at all — the same invisibility as
+		// a mis-worded skip message, reached by a different door. Enumerating
+		// tags is not attempted; carrying one at all is the violation.
+		if strings.HasSuffix(f.path, "_test.go") {
+			if c := buildConstraintOf(f.src); c != "" {
+				violations = append(violations, fmt.Sprintf(
+					"%s:1: carries the build constraint %q, so it is absent from the default build that produces dbtestcov's "+
+						"inventory — every test in it is invisible to this gate. Drop the constraint, or teach dbtestcov the tag",
+					f.path, c))
+			}
+		}
+		// A package-level declaration can read the environment too, and it
+		// cannot possibly skip:
+		//
+		//	var haveDB = func() bool { return os.Getenv(dbEnvVar) != "" }
+		//	var dsn     = os.Getenv(dbEnvVar)
+		//
+		// Both are one edit away from the bool-returning helper this check is
+		// built to catch, and neither is an *ast.FuncDecl.
+		for _, r := range envReadsOutsideFuncs(f, consts) {
+			pos := fset.Position(r.pos)
 			violations = append(violations, fmt.Sprintf(
-				"%s:1: carries the build constraint %q, so it is absent from the default build that produces dbtestcov's "+
-					"inventory — every test in it is invisible to this gate. Drop the constraint, or teach dbtestcov the tag",
-				f.path, c))
+				"%s:%d: a package-level declaration reads %s; a declaration cannot SKIP, so the tests that consult it are "+
+					"never classified as %s-gated. Move the read into the test helper that skips, naming %s in the message",
+				pos.Filename, pos.Line, dbEnvVar, dbEnvVar, dbEnvVar))
 		}
 	}
 
-	// A package-level declaration can read the environment too, and it cannot
-	// possibly skip:
-	//
-	//	var haveDB = func() bool { return os.Getenv(dbEnvVar) != "" }
-	//	var dsn     = os.Getenv(dbEnvVar)
-	//
-	// Both are one edit away from the bool-returning helper this check is built
-	// to catch, and neither is an *ast.FuncDecl, so walking only FuncDecls
-	// reopened the whole shape for four characters. Scanning what is left after
-	// the function bodies is what closes it for any declaration form, including
-	// ones nobody has thought of.
-	for _, r := range envReadsOutsideFuncs(f, consts) {
-		pos := fset.Position(r.pos)
-		violations = append(violations, fmt.Sprintf(
-			"%s:%d: a package-level declaration reads %s; a declaration cannot SKIP, so the tests that consult it are never "+
-				"classified as %s-gated. Move the read into the test helper that skips, naming %s in the message",
-			pos.Filename, pos.Line, dbEnvVar, dbEnvVar, dbEnvVar))
+	// ---- pass 1a: describe every function.
+	var funcs []*funcInfo
+	callers := map[string][]*funcInfo{}
+	scopes := map[*funcInfo]string{}
+	readsOf := map[*funcInfo][]envRead{}
+	envReaders := map[string]bool{}
+	for i := range files {
+		f := &files[i]
+		for _, decl := range f.ast.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			fi := &funcInfo{file: f, decl: fn, skips: skipCalls(fn.Body), callees: calleeNames(fn.Body)}
+			reads := envReadsIn(fn.Body, consts)
+			readsOf[fi] = reads
+			scopes[fi] = funcSource(fset, f, fn)
+			if len(reads) > 0 {
+				envReaders[fn.Name.Name] = true
+			}
+			fi.namingSkip = len(fi.skips) > 0
+			for _, call := range fi.skips {
+				msg, hasMsg := skipMessage(call, consts)
+				if !hasMsg || !strings.Contains(msg, dbEnvVar) {
+					fi.namingSkip = false
+				}
+			}
+			funcs = append(funcs, fi)
+		}
 	}
 
-	for _, decl := range f.ast.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
-		}
-		reads := envReadsIn(fn.Body, consts)
-		if len(reads) == 0 {
-			continue
-		}
-		scope := funcSource(fset, f, fn)
+	// ---- pass 1b: decide which functions gate on the database, and report the
+	// unresolvable-argument hazard.
+	for _, fi := range funcs {
+		fn := fi.decl
+		reads := readsOf[fi]
 
-		readsDB := strings.Contains(scope, dbEnvVar)
+		// A function gates on the database only if it actually TOUCHES the
+		// environment — reads it, or hands the variable's name to a
+		// same-package function that reads it. Merely mentioning the name is
+		// not enough: internal/domain's mustNotSkip names AIHUB_TEST_DB in a
+		// t.Fatalf string to say which database to point at, and this command's
+		// own tests carry it inside fixture source strings. Nor is passing it
+		// to anything at all enough — that flagged dbtestcov's own
+		// fmt.Sprintf("... %s ...", dbEnvVar) error messages. Both were
+		// measured as false positives while narrowing this.
+		passesName := passesDBEnvToAnEnvReader(fn.Body, consts, envReaders)
+		touchesEnv := len(reads) > 0 || passesName
+		namesDB := strings.Contains(scopes[fi], dbEnvVar) || passesName
 		for _, r := range reads {
 			if r.resolved && r.name == dbEnvVar {
-				readsDB = true
+				namesDB = true
 			}
-			// An environment read whose variable name is decided somewhere this
-			// command cannot see is the escape hatch that makes every check
-			// below optional, so it is a violation on its own. It is free
-			// today: every env read in every package that mentions
-			// AIHUB_TEST_DB names its variable with a literal.
+		}
+		fi.guardsDB = touchesEnv && namesDB
+
+		// An env read whose variable name is decided somewhere this command
+		// cannot see would make every check below optional. But it is only a
+		// hazard in a function that can actually GATE something, so the rule is
+		// scoped to functions that skip. Unscoped it rejects an ordinary
+		// table-driven env test — a shape that appears in the four most-edited
+		// packages in this repo — and a gate that fires on ordinary work is a
+		// gate that gets switched off. The shape it existed to close,
+		// `envSet(dbEnvConst)` where envSet takes the name as a parameter, is
+		// now caught by the caller analysis in pass 2 instead.
+		if len(fi.skips) == 0 {
+			continue
+		}
+		for _, r := range reads {
 			if !r.resolved && !r.wildcard {
 				pos := fset.Position(r.pos)
 				violations = append(violations, fmt.Sprintf(
-					"%s:%d: %s reads an environment variable whose name dbtestcov cannot determine statically, so it cannot "+
-						"tell whether this is a %s guard. Name it with a string literal or a package-level string constant",
+					"%s:%d: %s reads an environment variable whose name dbtestcov cannot determine statically AND skips, so "+
+						"this may be a %s guard the gate cannot see. Name the variable with a string literal or a "+
+						"package-level string constant",
 					pos.Filename, pos.Line, fn.Name.Name, dbEnvVar))
 			}
 		}
-		if !readsDB {
+	}
+
+	for _, fi := range funcs {
+		for callee := range fi.callees {
+			callers[callee] = append(callers[callee], fi)
+		}
+	}
+
+	// ---- pass 2: the verdicts.
+	reaches := namingSkipReachability(funcs, callers)
+	for _, fi := range funcs {
+		if !fi.guardsDB {
 			continue
 		}
-
+		fn := fi.decl
 		pos := fset.Position(fn.Pos())
-		skips := skipCalls(fn.Body)
 
 		// TestMain cannot skip: it either runs the package's tests or it does
 		// not. Gating it on the database makes every test in the package vanish
@@ -832,20 +905,26 @@ func checkFile(fset *token.FileSet, f *goFile, consts map[string]string) []strin
 			continue
 		}
 
-		// A function that reads the variable and merely RETURNS is not skipped,
-		// so no SKIP line exists for the inventory to classify — invisible by
-		// construction. Same verdict for a bool-returning helper whose caller
-		// does the skipping: dbtestcov cannot see the caller's message from
-		// here, so the guard has to skip where it reads.
-		if len(skips) == 0 {
+		if len(fi.skips) == 0 {
+			// It reads the variable and never skips. That is only a problem if
+			// no caller skips properly either: a helper that merely RETURNS the
+			// DSN is fine when the setup around it skips naming the variable,
+			// because the test then SKIPs with a classifiable message. Saying
+			// otherwise would reject an ordinary accessor refactor — and would
+			// say something untrue while doing it.
+			if reaches[fn.Name.Name] {
+				continue
+			}
 			violations = append(violations, fmt.Sprintf(
-				"%s:%d: %s reads %s but never calls t.Skip; a test that returns (or a helper that reports the answer to its "+
-					"caller) produces no SKIP line, so dbtestcov cannot classify it as %s-gated at all. Skip here, naming %s",
-				pos.Filename, pos.Line, fn.Name.Name, dbEnvVar, dbEnvVar, dbEnvVar))
+				"%s:%d: %s reads %s, never calls t.Skip, and %s. A test stopped this way emits no SKIP line naming %s, so "+
+					"the inventory cannot classify it and no CI step is ever required to run it. Either skip here naming %s, "+
+					"or make every caller skip with a message that names it",
+				pos.Filename, pos.Line, fn.Name.Name, dbEnvVar,
+				describeCallers(fset, callers[fn.Name.Name], reaches), dbEnvVar, dbEnvVar))
 			continue
 		}
 
-		for _, call := range skips {
+		for _, call := range fi.skips {
 			msg, hasMsg := skipMessage(call, consts)
 			if hasMsg && strings.Contains(msg, dbEnvVar) {
 				continue
@@ -857,6 +936,154 @@ func checkFile(fset *token.FileSet, f *goFile, consts map[string]string) []strin
 		}
 	}
 	return violations
+}
+
+// namingSkipReachability answers, for every function in the package, "does
+// stopping inside this function still produce a SKIP whose message names
+// dbEnvVar?" — directly, or through every one of its callers.
+//
+// A least-fixpoint over callers, not a single hop: `dsn()` <- `setup()` <-
+// `TestX()` is an ordinary two-level helper chain, and answering it one level
+// deep would reject it. Unknown callers and cycles resolve to false, so the
+// uncertain answer is the strict one.
+func namingSkipReachability(funcs []*funcInfo, callers map[string][]*funcInfo) map[string]bool {
+	byName := map[string]*funcInfo{}
+	ambiguous := map[string]bool{}
+	for _, fi := range funcs {
+		n := fi.decl.Name.Name
+		if _, dup := byName[n]; dup {
+			ambiguous[n] = true
+		}
+		byName[n] = fi
+	}
+
+	const (
+		unknown = iota
+		inProgress
+		yes
+		no
+	)
+	state := map[string]int{}
+	var ok func(name string) bool
+	ok = func(name string) bool {
+		switch state[name] {
+		case yes:
+			return true
+		case no, inProgress: // a cycle proves nothing, so it proves nothing good
+			return false
+		}
+		fi, found := byName[name]
+		if !found || ambiguous[name] {
+			state[name] = no
+			return false
+		}
+		state[name] = inProgress
+		result := false
+		switch {
+		case fi.namingSkip:
+			result = true
+		case len(fi.skips) > 0:
+			// It skips, but not with a message that names the variable. That is
+			// reported separately; it cannot rescue anything.
+			result = false
+		default:
+			cs := callers[name]
+			result = len(cs) > 0
+			for _, c := range cs {
+				if !ok(c.decl.Name.Name) {
+					result = false
+					break
+				}
+			}
+		}
+		if result {
+			state[name] = yes
+		} else {
+			state[name] = no
+		}
+		return result
+	}
+
+	out := map[string]bool{}
+	for _, fi := range funcs {
+		out[fi.decl.Name.Name] = ok(fi.decl.Name.Name)
+	}
+	return out
+}
+
+// describeCallers renders the reason a helper's callers do not rescue it, so
+// the message says what is actually wrong rather than a generic claim.
+func describeCallers(fset *token.FileSet, cs []*funcInfo, reaches map[string]bool) string {
+	if len(cs) == 0 {
+		return "nothing in this package calls it, so there is no caller whose skip message could classify it"
+	}
+	var bad []string
+	for _, c := range cs {
+		if !reaches[c.decl.Name.Name] {
+			pos := fset.Position(c.decl.Pos())
+			bad = append(bad, fmt.Sprintf("%s (%s:%d)", c.decl.Name.Name, filepath.Base(pos.Filename), pos.Line))
+		}
+	}
+	sort.Strings(bad)
+	return "its caller(s) " + strings.Join(bad, ", ") + " do not skip with a message naming " + dbEnvVar
+}
+
+// calleeNames returns the same-package function names a body calls. Method
+// selectors are included by their final name: resolving receivers is out of
+// scope, and being generous here only ever makes a helper look MORE rescued,
+// which is the direction that avoids false positives.
+func calleeNames(body *ast.BlockStmt) map[string]bool {
+	out := map[string]bool{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fun := call.Fun.(type) {
+		case *ast.Ident:
+			out[fun.Name] = true
+		case *ast.SelectorExpr:
+			out[fun.Sel.Name] = true
+		}
+		return true
+	})
+	return out
+}
+
+// passesDBEnvToAnEnvReader reports whether the body hands a constant folding to
+// dbEnvVar to a same-package function that reads the environment.
+//
+// Both halves of that are load-bearing, and each was measured. Without the
+// constant fold, `envSet(dbEnvConst)` — where envSet takes the variable name as
+// a parameter — is invisible. Without the "is an env reader" restriction, every
+// `fmt.Sprintf("... %s ...", dbEnvVar)` in this very file counts, and the gate
+// reports itself.
+func passesDBEnvToAnEnvReader(body *ast.BlockStmt, consts map[string]string, envReaders map[string]bool) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name := ""
+		switch fun := call.Fun.(type) {
+		case *ast.Ident:
+			name = fun.Name
+		case *ast.SelectorExpr:
+			name = fun.Sel.Name
+		}
+		if !envReaders[name] {
+			return true
+		}
+		for _, arg := range call.Args {
+			if v, ok := constString(arg, consts); ok && v == dbEnvVar {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 // buildConstraintOf returns the file's first //go:build or // +build line, or
@@ -1347,6 +1574,33 @@ func parseShellScript(script string) *shellScript {
 	return sc
 }
 
+// pipefailRE matches the `set` that makes a pipeline report its first failure.
+var pipefailRE = regexp.MustCompile(`^set\s+[^;&|]*\bpipefail\b`)
+
+// setsPipefailBefore reports whether an unquoted, unconditional `set … pipefail`
+// runs earlier in the script than the given line.
+//
+// Without it, `go test … | tee log` exits with TEE's status, so a FAILING test
+// leaves the step green. That is the same "exit status consumed" class as
+// `go test … || true` and `&`-backgrounding, which are already rejected — this
+// is the member of it that lives one command away instead of on the same line.
+// The SKIP guard still catches skips; what goes silently green here is a real
+// failure.
+func (sc *shellScript) setsPipefailBefore(line int) bool {
+	for _, c := range sc.Commands {
+		if c.Line >= line {
+			break
+		}
+		if c.Quote != 0 || c.Ungated != "" {
+			continue
+		}
+		if pipefailRE.MatchString(c.Text) {
+			return true
+		}
+	}
+	return false
+}
+
 // firstWord returns the first shell word of a command, skipping a leading `!`.
 func firstWord(text string) string {
 	text = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "!"))
@@ -1457,6 +1711,13 @@ func ParseWorkflow(data []byte, module string) (*WorkflowScan, error) {
 					if inv == nil {
 						scan.Dropped = append(scan.Dropped, fmt.Sprintf("%s: %s", stepName, cmd.Text))
 						continue
+					}
+					if inv.Log != "" && !sc.setsPipefailBefore(cmd.Line) {
+						return nil, fmt.Errorf(
+							"step %q (job %q), line %d: `go test` is piped into `tee` but the step never runs "+
+								"`set -o pipefail`, so the pipeline exits with tee's status and a FAILING test leaves this "+
+								"step green. Add `set -o pipefail` as the step's first command: %s",
+							stepName, jobName, cmd.Line, cmd.Text)
 					}
 					scan.Invocations = append(scan.Invocations, *inv)
 					if inv.Log == "" || inv.Log == "/dev/null" {

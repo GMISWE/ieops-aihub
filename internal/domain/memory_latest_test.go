@@ -95,12 +95,25 @@ func testProject(t *testing.T, pool *pgxpool.Pool, ownerUserID string) string {
 // the rest of this file) cannot break out of the quotes.
 //
 // These are six separate statements on a pool, NOT one transaction, and that is
-// deliberate (revisited in aihub#303). Everything the ordering above relies on
-// is checked at end of STATEMENT: no FK in internal/db/migrations is declared
-// DEFERRABLE, so a surrounding BEGIN would not let the deletes be reordered or
-// merged. And the state a transaction would prevent — a half-applied reset — is
-// indistinguishable to the next caller from a reset that never ran, which this
-// function is already idempotent against.
+// deliberate (revisited in aihub#303). What makes that safe, in the order the
+// argument actually depends on:
+//
+//  1. The function is idempotent, and the only state a transaction would
+//     prevent — a half-applied reset — is indistinguishable to the next caller
+//     from a reset that never ran. The next call simply redoes it.
+//  2. Every statement is scoped to `proj`, which is derived from t.Name(), so
+//     no other test names these rows.
+//  3. Nothing in this package calls t.Parallel(), so no second test is inside
+//     this window. Verify with:
+//     `grep -rn 't.Parallel()' internal/domain/ internal/server/ internal/mcp/`
+//     (empty as of aihub#303). If that ever stops being empty, revisit this.
+//
+// An earlier revision of this comment justified it by "no FK in
+// internal/db/migrations is declared DEFERRABLE". That is true, and it does
+// mean a surrounding BEGIN would not let the deletes be reordered — but it is
+// not what makes the current form safe, and stating it as the reason would have
+// left the real load-bearing conditions (2) and (3) unrecorded and free to
+// change without anything noticing.
 func resetTestProject(t *testing.T, pool *pgxpool.Pool, proj string) {
 	t.Helper()
 	wis := `(SELECT id FROM work_items WHERE project='` + proj + `')`

@@ -3,11 +3,22 @@
 //
 // It exists as an ordinary (non-_test.go) package so that test files in
 // several packages can share ONE implementation. Before aihub#303 there were
-// two byte-identical copies — one in internal/domain, one in internal/server —
-// and `go test ./...` runs those two packages in PARALLEL against a single
-// database, so a name collision across the copies was a live race rather than a
-// theoretical one. Nothing outside a _test.go file imports this package, so it
-// never reaches a production binary.
+// two byte-identical copies, one in internal/domain and one in internal/server.
+//
+// Be precise about why that was worth fixing, because the obvious reason is not
+// the measured one. `go test ./...` does run those two packages in PARALLEL
+// against a single database, so a cross-package collision WOULD be a live race
+// — but there are no cross-package collisions today under either the old or the
+// new scheme, and none of the old scheme's colliding groups contained a test
+// that calls this function at all. So this change is preventive: it removes a
+// hazard (two copies free to drift, and a truncation that collides by
+// construction) that had not yet produced a failure. The margin between "does
+// not collide today" and "cannot collide" is what TestSanitize_RepoCollisions
+// keeps, and that test — not a number in this comment — is the thing that goes
+// red if it stops holding.
+//
+// Nothing outside a _test.go file imports this package, so it never reaches a
+// production binary.
 package testname
 
 import (
@@ -21,12 +32,15 @@ const (
 	// splices the result after a 2-character prefix ("p_", "u_", …), so 38
 	// would already be one too many.
 	maxLen = 37
-	// hashLen hex digits is 24 bits of the digest. Two names only collide
-	// now if they ALSO share the same 30-character prefix: measured over
-	// this repo's 1047 test-function names, 103 of them fall into 38 such
-	// prefix groups, the largest holding 8 — so on the order of 1e-5
-	// aggregate collision probability, against 10 CERTAIN collisions
-	// (21 names) under the plain 37-character truncation this replaced.
+	// hashLen hex digits is 24 bits of the digest, so two names collide only
+	// if they share BOTH the 30-character prefix and those 24 bits.
+	//
+	// No census is quoted here on purpose: an earlier revision of this comment
+	// stated a test-function count that was already stale by the end of the
+	// same pull request. TestSanitize_RepoCollisions measures it instead and
+	// prints the figures, so they are re-derivable rather than remembered:
+	//
+	//	GOWORK=off go test ./internal/citest/testname/ -run RepoCollisions -v
 	hashLen = 6
 	// prefixLen is what is left for the readable prefix once the hash and
 	// its '_' separator are subtracted, so the long path is exactly maxLen.

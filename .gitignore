@@ -223,3 +223,15 @@ __marimo__/
 # polyforge step state files (written by pf-execute, must not enter git)
 .pf_meta.json
 .pf_steps.json
+
+# Go binaries dropped at the repo root by a single-package `go build`.
+# `go build ./...` discards its output when it builds several packages, but
+# `go build ./internal/citest/dbtestcov/` writes ./dbtestcov — which is how a
+# 4.7 MB binary reached a commit in aihub#303. One entry per main package, each
+# anchored with a leading '/' so the tracked bin/aihub and bin/polyforge are
+# unaffected. Derive the list with:
+#   GOWORK=off go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...
+/aihub
+/aihub-embed-backfill
+/polyforge
+/dbtestcov

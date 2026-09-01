@@ -193,27 +193,128 @@ func (s *Server) registerLifecycleTools() {
 								relation = "owner"
 								memberRole = "owner"
 							} else if membersRaw != nil {
-								// Parse members to find caller's role
-								var membersBytes []byte
+								// Parse members to find caller's role.
+								//
+								// aihub#312: []any is the shape that actually
+								// arrives, and it used to be the one shape this
+								// switch did NOT handle. The server sends members
+								// as a JSON array (domain.Project.Members is a
+								// json.RawMessage) and client.ListProjects decodes
+								// the whole response into map[string]any
+								// (pkg/client/client.go), so proj["members"] is
+								// []any. With only the string and []byte cases
+								// below, nothing matched, no members were ever
+								// parsed, and EVERY non-admin non-owner member
+								// fell through to the public/viewer defaults set
+								// just above.
+								//
+								// string and []byte are kept, but note that
+								// s.client is always the HTTP client, so the only
+								// way to reach them is a project row whose members
+								// JSONB holds a double-encoded JSON string instead
+								// of a JSON array. They are legacy-data cases, not
+								// caller-shape cases.
+								//
+								// ⚠️ SECOND DERIVATION, STILL UNFIXED.
+								// internal/server/middleware.go:116-131
+								// derives the same "caller's role out of
+								// projects.members" fact independently, to
+								// fill /v1/users/me's project_roles, and it
+								// still carries BOTH defects fixed here:
+								//
+								//   - Wholesale discard. It decodes into a
+								//     TYPED slice and `continue`s on error
+								//     (lines 120-122), so ONE junk element
+								//     drops that project's membership
+								//     entirely — even though encoding/json
+								//     had already filled the good entries in
+								//     (see the []any case below). Same shape
+								//     as the guard aihub#312 removed here.
+								//   - Bare identity compare. Line 124 is
+								//     `m.UserID == uc.UserID` with no
+								//     `!= ""` guard. That is safe today only
+								//     by accident of its inputs — uc.UserID
+								//     comes from an authenticated API key and
+								//     the SQL pre-filters with `members @>`
+								//     — not by anything at that line.
+								//
+								// Deliberately NOT fixed in aihub#312: out of
+								// scope here, and as of 2026-09-01 no work
+								// item covers it, so this note has no landing
+								// point yet. If you edit either derivation,
+								// edit the other or file one. The per-fixture
+								// divergence is measured in
+								// tools_whoami_members_test.go, on
+								// middlewareProjectRoles.
+								var members []map[string]any
 								switch m := membersRaw.(type) {
-								case string:
-									membersBytes = []byte(m)
-								case []byte:
-									membersBytes = m
-								}
-								if len(membersBytes) > 0 {
-									var members []map[string]any
-									if json.Unmarshal(membersBytes, &members) == nil {
-										for _, mem := range members {
-											uid, _ := mem["user_id"].(string)
-											if uid == callerID {
-												relation = "member"
-												if r, ok := mem["role"].(string); ok {
-													memberRole = r
-												}
-												break
-											}
+								case []any:
+									// Walked element by element rather than
+									// re-marshalled and re-parsed in one go.
+									//
+									// NOT because a whole-list json.Unmarshal
+									// would fail wholesale on one non-object
+									// entry — it does not. encoding/json records
+									// the FIRST *json.UnmarshalTypeError it hits
+									// inside a slice and KEEPS DECODING the rest.
+									// Measured: `[{u_a,writer}, 5, {u_b,viewer}]`
+									// into []map[string]any yields a length-3
+									// slice holding u_a, a nil map, and u_b —
+									// entries on BOTH sides of the bad one are
+									// filled — together with a non-nil error.
+									//
+									// The wholesale discard was the GUARD, not the
+									// decoder. The pre-change code read
+									// `if json.Unmarshal(...) == nil { ...use... }`,
+									// so one junk entry made the error non-nil and
+									// threw away a result that was in fact almost
+									// entirely populated, degrading every other
+									// member to public/viewer — the exact failure
+									// mode aihub#312 was.
+									//
+									// Walking []any is still the right shape: it
+									// has no error return at all, so there is
+									// nothing here for a later edit to re-guard on
+									// and a junk entry can only ever cost its own
+									// element.
+									members = make([]map[string]any, 0, len(m))
+									for _, entry := range m {
+										if mem, ok := entry.(map[string]any); ok {
+											members = append(members, mem)
 										}
+									}
+								// The dropped errors below are deliberate and are
+								// NOT the swallow that caused aihub#312: a failed
+								// json.Unmarshal still fills in every element it
+								// could decode, on BOTH sides of the bad one —
+								// only the bad element itself is left at its zero
+								// value. Keeping that partial result therefore
+								// degrades per entry exactly like the []any case
+								// above, whereas discarding it on error would
+								// throw away memberships that parsed cleanly. The
+								// uid != "" check below is what stops the
+								// zero-valued entry from matching.
+								case string:
+									_ = json.Unmarshal([]byte(m), &members)
+								case []byte:
+									_ = json.Unmarshal(m, &members)
+								}
+								for _, mem := range members {
+									uid, _ := mem["user_id"].(string)
+									// uid != "" matters now that this loop is
+									// reachable at all. Both sides fall back to ""
+									// when the field is absent or not a string, so
+									// an entry with no user_id would match a caller
+									// whose own user_id failed to decode and report
+									// them as a member with that entry's role.
+									// aihub#312 under-reported privilege; matching
+									// on "" would over-report it, which is worse.
+									if uid != "" && uid == callerID {
+										relation = "member"
+										if r, ok := mem["role"].(string); ok {
+											memberRole = r
+										}
+										break
 									}
 								}
 							}

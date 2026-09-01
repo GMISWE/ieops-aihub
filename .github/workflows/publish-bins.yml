@@ -21,6 +21,21 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # aihub#305: `bins-dev` is the only channel any client reads. The launcher
+      # (plugins/polyforge/bin/polyforge-mcp.sh) no longer accepts `stable` as a
+      # channel name and maps the legacy value onto dev.
+      #
+      # The tag branch below is kept because it is the seed of a real, tag-gated
+      # release channel — but be clear about what it does TODAY: pushing a `v*`
+      # tag creates `bins-stable`, and nothing downloads from it. Do not read
+      # "we publish a stable channel" off this step. `bins-stable` has in fact
+      # never been created: this workflow landed one day AFTER the repo's only
+      # tag (v1.0.0, 2026-05-25), so that tag never triggered it, and no tag has
+      # been pushed since. That is the whole of aihub#305 — the launcher
+      # defaulted to a branch this step had never produced.
+      #
+      # Restoring `stable` as a channel means re-teaching the launcher the name
+      # at the same time; changing only this side republishes into the void.
       - name: Determine channel
         id: channel
         run: |

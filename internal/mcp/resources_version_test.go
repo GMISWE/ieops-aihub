@@ -82,8 +82,69 @@ func TestResourcesVersionDescriptionExplainsCAS(t *testing.T) {
 			t.Errorf("description does not tell the caller what a failed CAS returns (%q missing); got %q", want, desc)
 		}
 	}
-	if !strings.Contains(desc, "Omit") {
-		t.Errorf("description does not say that omitting the field overwrites unconditionally; got %q", desc)
+	// aihub#337 replaced the previous `strings.Contains(desc, "Omit")` here. That
+	// assertion demanded the very sentence the work item exists to delete: the
+	// description used to end by instructing the caller to omit the field in
+	// order to overwrite unconditionally, i.e. it listed the unsafe path as a
+	// sanctioned option, and callers act on documented options. (The sentence is
+	// not quoted verbatim anywhere in internal/ on purpose — aihub#337's
+	// acceptance check is a grep for it, and a guard that trips its own criterion
+	// wastes the next reader's time. `git show b4ed4f5` has the original.)
+	// aihub#260 reproduced the consequence on the twin parameter over real HTTP
+	// against real Postgres — one writer omitting the version silently discards
+	// the other's whole list while both get a 200 — and for declared_resources
+	// that list is what the server derives this work item's locks from.
+	//
+	// TWO assertions, because either alone is satisfied by the wrong text:
+	//
+	//   - the positive alone was green on the pre-fix wording, which stated the
+	//     behaviour in exactly the offending imperative;
+	//   - the negative alone is green if somebody simply DELETES the sentence,
+	//     which is worse than the defect it removes. The behaviour is unchanged
+	//     (aihub#337 is a docs change on purpose — requiring the version would be
+	//     a breaking API change), so a description that hides it leaves a caller
+	//     who omits the field with no warning at all.
+	//
+	// The negative is the discriminating half; the positive is what makes the
+	// cheapest way of passing it cost as much as complying.
+	if !strings.Contains(desc, "overwrites unconditionally") {
+		t.Errorf("description no longer states that leaving the version out overwrites unconditionally — the behaviour did not change, and hiding it is worse than advertising it (aihub#337); got %q", desc)
+	}
+	if m := regexp.MustCompile(`(?i)\bomit`).FindString(desc); m != "" {
+		t.Errorf("description says %q — it is offering the unsafe path as an option again. State the behaviour without the imperative, the way aihub#260 did on members_version (\"Leaving it out overwrites unconditionally: ...\"); got %q", m, desc)
+	}
+}
+
+// TestNoToolDescriptionAdvertisesUnconditionalOverwrite is aihub#337's first
+// acceptance criterion, as a test rather than as a grep somebody has to remember
+// to run: no tool description in internal/ may instruct the caller to omit a
+// compare-and-set version in order to overwrite unconditionally.
+//
+// Scoped to this package rather than to the one parameter above, because the
+// defect travelled once already — aihub#260 fixed this exact sentence on
+// pf_update_project's members_version in internal/mcp/tools_projects.go and left
+// the identical one on pf_update_work_item's resources_version, which is why
+// aihub#337 exists at all. The next compare-and-set parameter to be added will
+// be copied from one of them.
+func TestNoToolDescriptionAdvertisesUnconditionalOverwrite(t *testing.T) {
+	// A PATTERN, not the one 33-character sentence the pre-fix description ended
+	// with. That literal is one spelling of an unbounded class, and two cheap
+	// rewrites escape it while reintroducing the defect exactly: a paraphrase
+	// ("Omitting it overwrites unconditionally", "Leave it out to overwrite
+	// unconditionally"), and the same sentence split across a Go `+`
+	// concatenation — which is the prevailing style for long descriptions in
+	// tools_lifecycle.go, so it is the likely accident rather than an exotic one.
+	//
+	// Both are handled: `" + "` joins are stitched back together and whitespace
+	// is collapsed before matching, and the regex is the SHAPE of the offer —
+	// an imperative "omit/leave out" within a short distance of "unconditional".
+	src := packageSource(t)
+	joined := regexp.MustCompile(`"\s*\+\s*"`).ReplaceAllString(src, "")
+	joined = regexp.MustCompile(`\s+`).ReplaceAllString(joined, " ")
+
+	offer := regexp.MustCompile(`(?i)\b(omit|leave (it |them )?out)\b[^"]{0,40}\bunconditional`)
+	if m := offer.FindString(joined); m != "" {
+		t.Errorf("a tool description in this package offers omitting a compare-and-set version as a way to overwrite unconditionally: %q. Every such guard in polyforge is opt-in, so the only thing a caller learns from that phrasing is that skipping it is allowed — it is not, and aihub#260 reproduced the silent data loss over real HTTP against real Postgres. State the behaviour without the imperative: \"Leaving it out overwrites unconditionally: ...\" is aihub#260's wording.", m)
 	}
 }
 

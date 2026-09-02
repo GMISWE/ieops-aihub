@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -572,11 +573,21 @@ func (s *Server) registerLifecycleTools() {
 			"reclassify_reason":      prop("string", "Reason for wi_type change (min 10 chars)"),
 			"labels":                 prop("array", "Updated labels"),
 			"declared_resources":     declaredResourcesProp("Updated declared resources"),
-			"resources_version":      prop("integer", "Compare-and-set guard for declared_resources: the resources_version you last read from this work item. The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version. Omit to overwrite unconditionally. Every write of declared_resources increments this counter."),
-			"attrs":                  prop("object", "REPLACES the whole attrs object: every key you do not resend is DELETED. Use it only when you intend to overwrite attrs wholesale (e.g. after reading the current value). To add or change keys without destroying the others, use attrs_patch. Cannot be combined with attrs_patch/attrs_unset."),
-			"attrs_patch":            prop("object", "Merge these keys into attrs, leaving every other key untouched (aihub#288). Shallow: a top-level key in the patch replaces that key's stored value outright, it is NOT merged into it recursively, and null STORES a JSON null rather than deleting. To delete keys use attrs_unset. Cannot be combined with attrs."),
-			"attrs_unset":            prop("array", "Top-level attrs keys to delete (array of strings). Applied AFTER attrs_patch, so a key in both ends up deleted. Cannot be combined with attrs."),
-			"content":                prop("string", contentPropDescription),
+			// aihub#337, mirroring aihub#260 on pf_update_project's members_version:
+			// omitting it is still the behaviour, so it is still stated — but it is no
+			// longer offered as an option, because callers act on the options a tool
+			// description lists and this one is never the right choice. It also names
+			// the tool that returns the token, for the aihub#260 reason: a guard whose
+			// input nobody can find is a guard nobody passes.
+			//
+			// ⚠️ LENGTH IS A REAL COST — this string ships in every tools/list
+			// response. Measured: 325 -> 427 characters, +102, against the +90 the
+			// members_version rewrite spent. Budget any further edit against that.
+			"resources_version": prop("integer", "Compare-and-set guard for declared_resources: ALWAYS send the resources_version pf_get_work_item returned. The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version. Every write of declared_resources increments this counter. Leaving it out overwrites unconditionally: a concurrent writer's list is silently discarded, locks and all, and you still get a 200."),
+			"attrs":             prop("object", "REPLACES the whole attrs object: every key you do not resend is DELETED. Use it only when you intend to overwrite attrs wholesale (e.g. after reading the current value). To add or change keys without destroying the others, use attrs_patch. Cannot be combined with attrs_patch/attrs_unset."),
+			"attrs_patch":       prop("object", "Merge these keys into attrs, leaving every other key untouched (aihub#288). Shallow: a top-level key in the patch replaces that key's stored value outright, it is NOT merged into it recursively, and null STORES a JSON null rather than deleting. To delete keys use attrs_unset. Cannot be combined with attrs."),
+			"attrs_unset":       prop("array", "Top-level attrs keys to delete (array of strings). Applied AFTER attrs_patch, so a key in both ends up deleted. Cannot be combined with attrs."),
+			"content":           prop("string", contentPropDescription),
 			// aihub#281. The echo suppression above needs no flag because it only
 			// removes bytes the caller sent. THIS case is different and genuinely
 			// lossy: an update that touches nothing but attrs or priority still
@@ -756,12 +767,60 @@ func (s *Server) registerLifecycleTools() {
 		// Persist the canonical-keyed state file and remove any orphan slug stub
 		// the C6-2 pre-claim write left behind (see config.WriteClaimState). (aihub#141)
 		if err := config.WriteClaimState(wiID, canonicalWIID, sf); err != nil {
-			return errResult(fmt.Errorf("update state file: %w", err))
+			// aihub#323. Returning the error is right (aihub#319 settled that: a
+			// best-effort `_ =` answers ok:true and then every later tool dies on
+			// "state file not found", a whole diagnosis away from the cause). What
+			// was missing is that "update state file: ..." reads as "nothing
+			// happened" — while ClaimWorkItem's tx.Commit ran before this line, so
+			// the attempt is live, holds this work item's locks, and if a previous
+			// holder was displaced it is already gone.
+			//
+			// ⚠️ THE RECOVERY IS A **NEW** idempotency_key, NOT A REPLAY OF THIS
+			// ONE. Read off internal/domain/run_attempts.go, not assumed: a claim
+			// carrying an already-used key takes the idempotency branch, which
+			// returns the EXISTING attempt and never touches session_secret_hash —
+			// while this handler mints a fresh session_secret on every call, so the
+			// state file it writes would hold a secret the server has never seen and
+			// every later call 401s "invalid session_secret". With a new key the
+			// same-user branch treats it as an implicit takeover and issues a fresh
+			// attempt bound to the secret this call generated.
+			//
+			// ⚠️ DO NOT say here that the session_secret "existed only in memory".
+			// That is true of pf_force_takeover and FALSE here: the C6-2 pre-claim
+			// write at the top of this handler already persisted this same secret,
+			// and it must have succeeded or we would have returned there. When the
+			// failure is in MkdirAll — which is the common shape, a broken or
+			// read-only state directory — os.WriteFile is never reached and that
+			// earlier file is still on disk. What is actually lost is the BINDING:
+			// the pre-claim stub carries claimed=false and no attempt_id, so
+			// ResolveStateFile skips it and no later call can authenticate as this
+			// attempt. Say that instead.
+			attemptDesc := fmt.Sprintf("Attempt %s (epoch %d)", sf.AttemptID, sf.ClaimEpoch)
+			if sf.AttemptID == "" {
+				// An old server that did not echo attempt_id would otherwise render
+				// "Attempt  (epoch 0)", which reads as data rather than as absence.
+				attemptDesc = "A new attempt (the server did not echo its id)"
+			}
+			return errResult(fmt.Errorf("update state file: %w"+
+				" — ⚠️ NOT A NO-OP: the claim ALREADY SUCCEEDED on the server."+
+				" %s is running under your name and holds whatever locks this work item declares;"+
+				" only this machine's local record of it failed, and without that record nothing here can authenticate as the attempt."+
+				" RECOVERY: call pf_claim_work_item again with a NEW idempotency_key — replaying the same key returns this attempt without registering a new secret, leaving every later call unauthorized."+
+				" The re-claim is not destructive: you already own the attempt, so it costs one epoch bump and one superseded attempt."+
+				" %s",
+				err, attemptDesc, stateWriteFilesystemAdvice))
 		}
 
 		// Create git worktrees for each repo in the project (non-fatal).
 		// Worktree path format: pf.<project>-<seq>/<repo>/
 		// Branch name: polyforge/<project>-<seq>-<kebab goal> (newClaimBranchNames).
+		//
+		// aihub#328: declared out here so a directory rejected below can be reported
+		// on the RESPONSE. The loop's existing failure mode is one line on stderr,
+		// which an MCP server writes to a log the calling agent never reads — and
+		// "adopted forever, noticed by nobody" is the whole defect, so moving it from
+		// a silent adoption to a silent skip would only change its shape.
+		var worktreeProblems []string
 		if sf.Project != "" {
 			wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
 			if wsRoot == "" {
@@ -799,8 +858,40 @@ func (s *Server) registerLifecycleTools() {
 							srcPath := filepath.Join(wsRoot, ".repo", repo.Name)
 							wtPath := filepath.Join(wsRoot, wtDir, repo.Name)
 
-							// If the worktree directory already exists, reuse it directly.
+							// If the worktree directory already exists, reuse it — but only
+							// once git agrees it IS one. aihub#328: existence is not
+							// health, and adoption is permanent, because what gets adopted
+							// is written to the state file and short-circuits every later
+							// claim.
 							if _, statErr := os.Stat(wtPath); statErr == nil {
+								if vErr := verifyClaimWorktree(wtPath); vErr != nil {
+									// Report, do NOT repair. The directory can hold
+									// uncommitted work — a checkout killed at 90% still has
+									// the other 90% — so `rm -rf` here would destroy it on a
+									// guess, and `worktree add` onto a non-empty path fails
+									// anyway. Skipping leaves this repo without a worktree,
+									// which is the honest outcome and is what the message
+									// says.
+									// ⚠️ THE ORDER OF THE TWO CLEANUP COMMANDS IS
+									// LOAD-BEARING and was wrong in the first draft.
+									// `git worktree prune` only drops admin entries whose
+									// working tree is MISSING, so running it first, while
+									// the directory still exists, is a no-op; the rm then
+									// leaves the registration behind and the next
+									// `worktree add` on that path fails with "is a missing
+									// but already registered worktree". Measured on git
+									// 2.43.0: prune-then-rm made the re-add exit 128,
+									// rm-then-prune made it exit 0. Advice that produces
+									// the failure it was written to prevent is worse than
+									// no advice.
+									problem := fmt.Sprintf("%s: %s exists but is not a usable git worktree (%v), so this claim created NO worktree for that repo. "+
+										"Inspect it first — a half-finished checkout still holds whatever was written before it died. "+
+										"Once you are sure nothing there is worth keeping, IN THIS ORDER: `rm -rf %s && git -C %s worktree prune`, then claim again.",
+										repo.Name, wtPath, vErr, wtPath, srcPath)
+									fmt.Fprintf(os.Stderr, "polyforge: %s\n", problem)
+									worktreeProblems = append(worktreeProblems, problem)
+									continue
+								}
 								worktrees[repo.Name] = wtPath
 								writeWorktreeExcludes(wtPath)
 								continue
@@ -844,6 +935,13 @@ func (s *Server) registerLifecycleTools() {
 			}
 		}
 		addWorktrees(safeResult, sf.Worktrees)
+		// aihub#328: a rejected directory has to reach the caller, not just stderr.
+		// The claim itself succeeded, so this is a warning on an ok:true response
+		// rather than an error — but without it the agent proceeds believing it has
+		// a worktree it does not have, which is the same blindness in a new place.
+		if len(worktreeProblems) > 0 {
+			safeResult["worktree_problems"] = worktreeProblems
+		}
 		return jsonResult(safeResult)
 	})
 
@@ -1026,7 +1124,38 @@ func (s *Server) registerLifecycleTools() {
 		// Persist the canonical-keyed state file and remove any orphan slug stub a
 		// prior slug-keyed write left behind, mirroring claim's WriteClaimState.
 		if err := config.WriteClaimState(id, canonicalWIID, sf); err != nil {
-			return errResult(fmt.Errorf("write state file: %w", err))
+			// aihub#323, the other half of the same defect — see the claim handler
+			// above for why the error is returned rather than swallowed.
+			//
+			// ForceTakeover's tx.Commit ran before this line, so by now the prior
+			// attempt is 'superseded', its resource_locks are deleted, a
+			// force_takeover event is on the timeline, a new running attempt exists
+			// carrying THIS caller's secret hash, and current_attempt_id/epoch have
+			// advanced. "write state file: ..." alone reads as "the takeover failed",
+			// which is the one reading under which the previous holder is dead and
+			// nobody knows it.
+			//
+			// Re-running the same call is safe, read off internal/domain/
+			// run_attempts.go rather than assumed: ForceTakeover requires
+			// wi.Status == "running" (true — this takeover made it so) and admits
+			// isSelf, which the caller now is because it owns the current attempt.
+			// Its idempotency_key is synthesised server-side per attempt, so unlike
+			// pf_claim_work_item there is no replay branch to fall into.
+			prior, _ := result["prior_actor_display"].(string)
+			if prior == "" {
+				prior = "the previous holder"
+			}
+			// The "only in memory" clause IS true on this path — unlike the claim
+			// handler, which persists the secret before calling the server, this one
+			// generates it at :1023 and writes it nowhere until the line above.
+			return errResult(fmt.Errorf("write state file: %w"+
+				" — ⚠️ NOT A NO-OP: the takeover ALREADY SUCCEEDED on the server."+
+				" %s has been evicted, and attempt %s (epoch %d) is running under your name holding whatever locks this work item declares;"+
+				" only this machine's local record of it failed, and the session_secret it needed lived in memory alone and is now gone."+
+				" RECOVERY: re-run this exact pf_force_takeover call — you now own the current attempt, so the server admits it as a self-takeover."+
+				" It is not destructive: it costs one epoch bump, one superseded attempt and one timeline event."+
+				" %s",
+				err, prior, sf.AttemptID, sf.ClaimEpoch, stateWriteFilesystemAdvice))
 		}
 
 		// Return result without session_secret.
@@ -1174,6 +1303,137 @@ func (s *Server) registerLifecycleTools() {
 		}
 		return jsonResult(result)
 	})
+}
+
+// stateWriteFilesystemAdvice closes both aihub#323 messages.
+//
+// It is the third thing a caller needs and the one it is easiest to leave out:
+// the two failures the state write can hit are os.MkdirAll and os.WriteFile,
+// which do not fail transiently. Without this sentence the "re-run the call"
+// advice above reads as a retry loop, and the caller spends its budget bumping
+// epochs against a full disk.
+const stateWriteFilesystemAdvice = "If the write fails again the fault is this machine's filesystem (disk full, read-only mount, wrong ownership on <workspace>/.polyforge/state) rather than the server, and no number of retries helps until that is fixed."
+
+// verifyClaimWorktree answers whether wtPath is a usable git worktree, as
+// opposed to a directory that merely exists.
+//
+// The claim handler used to adopt any existing directory on os.Stat alone,
+// record it in the state file, and then take that early return on every later
+// claim. So a `git worktree add` that died part-way through its checkout — disk
+// full, SIGKILL, the machine rebooting — left a half-populated directory that
+// was adopted permanently and never repaired, while pf_diff / pf_commit /
+// pf_ship downstream were handed a path that is not a worktree. (aihub#328)
+//
+// ⚠️ `rev-parse --git-dir` ALONE IS NOT ENOUGH, and this is measured rather than
+// reasoned. git searches PARENT directories, and a polyforge workspace root is
+// itself commonly a git repository (the live gmi-ws workspace is one), so a
+// directory with no .git at all at <wsRoot>/pf.<project>-<seq>/<repo> answers
+// exit 0. Measured on git 2.43.0 against exactly that layout: `rev-parse
+// --git-dir` printed <wsRoot>/.git and exited 0, i.e. the naive check calls the
+// broken directory healthy. `--show-toplevel` printed <wsRoot>, which is NOT
+// wtPath — comparing it against wtPath is what separates the two, because a real
+// worktree's toplevel is its own path (verified: the control printed wtPath).
+//
+// The other half-built shape, a .git FILE whose `gitdir:` pointer names a
+// missing admin directory, fails both forms with exit 128 ("fatal: not a git
+// repository: ...").
+//
+// ⚠️ WHAT THIS DOES NOT DETECT, and the first entry is the one the work item's
+// own motivation names, so read it before trusting this function:
+//
+//  1. A STRUCTURALLY VALID WORKTREE WHOSE CHECKOUT NEVER FINISHED. git writes
+//     the .git file and the $GIT_DIR/worktrees/<id>/ admin directory BEFORE it
+//     populates the working tree, so a `worktree add` stopped by SIGKILL or by
+//     the machine rebooting mid-checkout leaves exactly that: an intact pointer
+//     over a half-populated tree, whose --show-toplevel is its own path. It
+//     passes. (The disk-full case usually does NOT reach here: git's own error
+//     path removes the admin directory, which produces the dangling pointer of
+//     case 1 in the paragraph above and IS caught.) Closing this needs a notion
+//     of "the checkout is complete", and git has no such query — `git status`
+//     reports the missing files as deletions, which is indistinguishable from a
+//     developer who deleted them. That is an API-shape decision, not an
+//     oversight to patch here.
+//  2. A perfectly good worktree of some OTHER repository, whose toplevel is
+//     itself and so passes. The wrong repo rather than a broken one; rejecting
+//     it needs a notion of which origin a repo ought to have, which this path
+//     does not carry.
+func verifyClaimWorktree(wtPath string) error {
+	cmd := exec.Command("git", "-C", wtPath, "rev-parse", "--show-toplevel")
+	// ⚠️ .Output(), NOT .CombinedOutput(). This is the only place in this file
+	// that PARSES git's stdout — everywhere else the combined buffer is error
+	// text — and git writes diagnostics to stderr while still exiting 0.
+	// Measured: with GIT_TRACE=1 in the environment, CombinedOutput returns
+	// "trace: built-in: git rev-parse --show-toplevel\n<path>", TrimSpace keeps
+	// the trace line, the comparison below fails, and EVERY healthy worktree is
+	// rejected — with a message telling the operator to rm -rf it.
+	//
+	// GIT_DIR/GIT_WORK_TREE are scrubbed for the same class of reason: `-C`
+	// alone does not beat them. Measured — with both set, `git -C <worktree>
+	// rev-parse --show-toplevel` printed the OTHER repository's root and exited
+	// 0, which would likewise reject every worktree at once.
+	cmd.Env = envWithout(os.Environ(), "GIT_DIR", "GIT_WORK_TREE")
+	out, err := cmd.Output()
+	if err != nil {
+		detail := err.Error()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			detail = strings.TrimSpace(string(ee.Stderr))
+		}
+		return fmt.Errorf("git rev-parse --show-toplevel: %w: %s", err, detail)
+	}
+	top := strings.TrimSpace(string(out))
+	if !sameDirPath(top, wtPath) {
+		return fmt.Errorf("not the root of a git worktree: git resolves this directory to the repository at %q", top)
+	}
+	return nil
+}
+
+// envWithout returns env with the named variables removed.
+func envWithout(env []string, drop ...string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		keep := true
+		for _, d := range drop {
+			if strings.HasPrefix(kv, d+"=") {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// sameDirPath compares two directory paths after making both absolute and
+// resolving symlinks.
+//
+// A plain string compare would be wrong in three ways: git prints an ABSOLUTE
+// PHYSICAL path, while wtPath is built by joining POLYFORGE_WORKSPACE_ROOT as
+// the caller gave it — which can be relative (config.FindWorkspaceRoot returns
+// "." when os.Getwd fails) and can run through a symlink. On macOS a
+// t.TempDir() under /var is /private/var to git, so a string compare there
+// would declare every healthy worktree broken. filepath.EvalSymlinks does not
+// absolutize, which is why Abs runs first.
+func sameDirPath(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ra, errA := absReal(a)
+	rb, errB := absReal(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return ra == rb
+}
+
+func absReal(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
 }
 
 // writeWorktreeExcludes adds polyforge scratch-file patterns to a worktree's
@@ -1795,12 +2055,22 @@ var claimFetchTimeout = 90 * time.Second
 // it — and creates a branch off origin/main only when nothing matches.
 //
 // ctx is the MCP request context and bounds the fetch, and ONLY the fetch. The
-// local git invocations are deliberately left uncancellable: the claim handler
-// short-circuits on os.Stat(wtPath), so a `worktree add` killed part-way through
-// its checkout leaves a half-populated directory that every later claim then
-// adopts and never repairs. A local command that outlives a cancelled request
-// costs a few seconds of CPU; a silently half-checked-out worktree costs a
-// debugging session.
+// local git invocations are deliberately left uncancellable.
+//
+// ⚠️ THE STATED REASON FOR THAT HAS MOVED — recorded rather than quietly left in
+// place, because it was the premise the decision was argued from. It used to be
+// that the claim handler short-circuited on os.Stat(wtPath) alone, so a
+// `worktree add` killed part-way through its checkout left a half-populated
+// directory that every later claim adopted and never repaired. aihub#328 made
+// that early return validate the directory with verifyClaimWorktree, so a
+// half-built one is now refused instead of adopted, and "adopted forever" is no
+// longer a consequence of cancelling here.
+//
+// They stay uncancellable on the weaker reason that survives: a refused
+// directory leaves that repo with NO worktree until somebody clears it by hand.
+// That is a visible, reported failure rather than a silent one, but it is still
+// worse than not making the mess. A local command that outlives a cancelled
+// request costs a few seconds of CPU.
 func addClaimWorktree(ctx context.Context, srcPath, wtPath string, n claimBranchNames) error {
 	if n.Branch == "" {
 		return fmt.Errorf("empty branch name")

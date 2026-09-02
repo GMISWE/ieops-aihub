@@ -315,7 +315,7 @@ func DeleteDependency(ctx context.Context, pool *pgxpool.Pool, blockedWIID, bloc
 		blockedWIID, blockingWIID, kind,
 	)
 	if err != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to delete dependency: %v", err))
+		return dbErrCause(err, "failed to delete dependency")
 	}
 	if result.RowsAffected() == 0 {
 		return NewErr(ErrNotFound, "dependency not found")
@@ -341,6 +341,9 @@ func DeleteDependency(ctx context.Context, pool *pgxpool.Pool, blockedWIID, bloc
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		if aerr := retryConflictErr(err, "failed to commit dependency deletion"); aerr != nil { // aihub#334
+			return aerr
+		}
 		return NewErr(ErrInternalError, "failed to commit dependency deletion")
 	}
 	return nil

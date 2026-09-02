@@ -785,6 +785,12 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, NewErr(ErrProjectNotFound, fmt.Sprintf("project %q not found", name))
 		}
+		// aihub#334: above READ COMMITTED this is where a concurrent committed
+		// update turns the FOR UPDATE wait into SQLSTATE 40001. That is a
+		// retryable conflict, not a broken server.
+		if aerr := retryConflictErr(err, "lock project"); aerr != nil {
+			return nil, aerr
+		}
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("lock project: %v", err))
 	}
 	// Re-validate ownership inside the transaction to close the TOCTOU window.
@@ -811,10 +817,19 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 		if upd.CAS && errors.Is(scanErr, pgx.ErrNoRows) {
 			return nil, membersCASConflictErr(*req.MembersVersion, lockedMembersVersion)
 		}
+		if aerr := retryConflictErr(scanErr, "update project"); aerr != nil {
+			return nil, aerr
+		}
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("update project: %v", scanErr))
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		// aihub#334: under SERIALIZABLE, SSI reports most conflicts HERE rather
+		// than at the statement that caused them, so this hop needs the same
+		// mapping as the two above and not a bare INTERNAL_ERROR.
+		if aerr := retryConflictErr(err, "commit update project"); aerr != nil {
+			return nil, aerr
+		}
 		return nil, NewErr(ErrInternalError, "commit update project")
 	}
 	return p, nil

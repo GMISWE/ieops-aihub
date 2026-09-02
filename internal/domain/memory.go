@@ -650,9 +650,20 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			SELECT id FROM up WHERE supersedes_id IS NULL
 			ORDER BY depth DESC LIMIT 1`, *req.SupersedesMemID,
 		).Scan(&rootID); err != nil {
+			// aihub#334: every hop from here to tx.Commit runs inside the
+			// supersede transaction, so any of them can come back as a class 40
+			// rollback (40001 above READ COMMITTED, 40P01 at any level — this
+			// path's own comments above record a reproduced 40P01 at N=8). That
+			// is a retryable conflict, not a broken server.
+			if aerr := retryConflictErr(err, "failed to resolve lineage root"); aerr != nil {
+				return nil, false, aerr
+			}
 			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to resolve lineage root: %v", err))
 		}
 		if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, rootID); err != nil {
+			if aerr := retryConflictErr(err, "failed to acquire lineage lock"); aerr != nil {
+				return nil, false, aerr
+			}
 			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to acquire lineage lock: %v", err))
 		}
 	}
@@ -669,12 +680,30 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			if err := q.QueryRow(ctx, `
 				SELECT COALESCE(latest_id, id) FROM memories WHERE id=$1`, startID,
 			).Scan(&head); err != nil || head == "" {
+				// aihub#334: `break` here is the same swallow shape as
+				// unblockDependentWI's. A class 40 rollback would leave the
+				// loop, fail the oldHead=="" check below, and be reported as
+				// "failed to resolve and archive supersede head after retries"
+				// — an INTERNAL_ERROR that names the wrong cause and hides a
+				// SQLSTATE the caller could have acted on. Classify while the
+				// *pgconn.PgError is still in hand.
+				if aerr := retryConflictErr(err, "failed to read supersede head"); aerr != nil {
+					return nil, false, aerr
+				}
 				break
 			}
 			tag, err := q.Exec(ctx, `
 				UPDATE memories SET status='archived', updated_at=clock_timestamp()
 				WHERE id=$1 AND status='active'`, head)
 			if err != nil {
+				// aihub#334 instance 2, measured: this is the hop that actually
+				// fires. The loser blocks here on the winner's row lock and, at
+				// SERIALIZABLE, is woken with 40001 rather than proceeding.
+				// Note the shape — a plain DML statement, neither a
+				// `SELECT ... FOR UPDATE` nor a commit.
+				if aerr := retryConflictErr(err, "failed to archive head"); aerr != nil {
+					return nil, false, aerr
+				}
 				return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to archive head: %v", err))
 			}
 			if tag.RowsAffected() == 1 {
@@ -718,8 +747,7 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 				SELECT last_activated_at, last_activated_by, activation_count
 				FROM memories WHERE id=$1`, oldHead,
 			).Scan(&inhAt, &inhBy, &inhCount); err != nil {
-				return nil, false, NewErr(ErrInternalError,
-					fmt.Sprintf("failed to inherit activation state from supersede head: %v", err))
+				return nil, false, dbErrCause(err, "failed to inherit activation state from supersede head")
 			}
 			req.LastActivatedAt, req.LastActivatedBy, req.ActivationCount = inhAt, inhBy, inhCount
 			// stabilityDays was computed above from a zero ActivationCount, so it
@@ -766,6 +794,11 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		&mem.Attrs, &mem.RenderedHTML, &mem.Commits, &mem.LatestID, &mem.CreatedAt, &mem.UpdatedAt,
 	)
 	if err != nil {
+		// aihub#334: on the supersede path this INSERT runs on the transaction
+		// (`q` is the tx), so it can lose the same concurrency race.
+		if aerr := retryConflictErr(err, "failed to insert memory"); aerr != nil {
+			return nil, false, aerr
+		}
 		return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to insert memory: %v", err))
 	}
 
@@ -792,12 +825,23 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			)
 			UPDATE memories SET latest_id=$1
 			WHERE id IN (SELECT id FROM targets)`, newID, oldHead); err != nil {
+			// aihub#334: the ORDER BY id FOR UPDATE above is what makes 40P01
+			// unlikely here, not impossible — and it does nothing at all about
+			// 40001 above READ COMMITTED.
+			if aerr := retryConflictErr(err, "failed to propagate latest_id"); aerr != nil {
+				return nil, false, aerr
+			}
 			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to propagate latest_id: %v", err))
 		}
 	}
 
 	if tx != nil {
 		if err := tx.Commit(ctx); err != nil {
+			// aihub#334: SSI reports most SERIALIZABLE conflicts at COMMIT
+			// rather than at the statement that caused them.
+			if aerr := retryConflictErr(err, "failed to commit supersede tx"); aerr != nil {
+				return nil, false, aerr
+			}
 			return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to commit supersede tx: %v", err))
 		}
 		tx = nil // the deferred Rollback becomes a no-op after a successful Commit

@@ -142,6 +142,14 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, NewErr(ErrNotFound, fmt.Sprintf("work item %q not found", wiID))
 		}
+		// aihub#334: this transaction is SERIALIZABLE (see the BeginTx above), so
+		// two agents claiming the same work item at once make one of them lose
+		// the FOR UPDATE race with SQLSTATE 40001 — a retryable conflict, not a
+		// broken server. Unlike UpdateProject's copy of this hop, which needs
+		// someone to raise an isolation level first, this one is reachable TODAY.
+		if aerr := retryConflictErr(err, "failed to lock work_item"); aerr != nil {
+			return nil, aerr
+		}
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to lock work_item: %v", err))
 	}
 
@@ -169,6 +177,16 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 				}
 			}
 			lockRows.Close()
+			// aihub#334: this is the same shape as unblockDependentWI's sweep —
+			// a lazily-streamed result set whose error has no other exit. This
+			// transaction is SERIALIZABLE, so 40001 here is reachable, and
+			// without this the loop just looks empty and the caller is told 500
+			// at commit with no SQLSTATE left.
+			if err := lockRows.Err(); err != nil {
+				if aerr := retryConflictErr(err, "failed to load locks for idempotent claim"); aerr != nil {
+					return nil, aerr
+				}
+			}
 		}
 
 		// Recompute step_recovery_hint identically to the fresh path.
@@ -187,6 +205,11 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		}
 
 		if err := tx.Commit(ctx); err != nil {
+			// aihub#334: SSI reports most SERIALIZABLE conflicts at COMMIT
+			// rather than at the statement that caused them.
+			if aerr := retryConflictErr(err, "failed to commit idempotent claim"); aerr != nil {
+				return nil, aerr
+			}
 			return nil, NewErr(ErrInternalError, "failed to commit idempotent claim")
 		}
 		return &ClaimResponse{
@@ -382,11 +405,11 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			UPDATE run_attempts SET status='superseded', ended_at=clock_timestamp()
 			WHERE id=$1`, priorAttemptID)
 		if err != nil {
-			return nil, NewErr(ErrInternalError, "failed to supersede prior attempt")
+			return nil, dbErr(err, "failed to supersede prior attempt")
 		}
 		_, err = tx.Exec(ctx, `DELETE FROM resource_locks WHERE owner_attempt_id=$1`, priorAttemptID)
 		if err != nil {
-			return nil, NewErr(ErrInternalError, "failed to delete prior attempt locks")
+			return nil, dbErr(err, "failed to delete prior attempt locks")
 		}
 
 		// N5: supersede event emitted after new attempt INSERT (see below)
@@ -412,7 +435,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		nilIfEmpty(priorAttemptID),
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to insert run_attempt: %v", err))
+		return nil, dbErrCause(err, "failed to insert run_attempt")
 	}
 
 	// N5: emit attempt_superseded event now that we have the real newAttemptID
@@ -441,7 +464,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			l.ResourceType, l.ResourceKey, newAttemptID, newEpoch,
 		)
 		if err != nil {
-			return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to acquire lock %s:%s: %v", l.ResourceType, l.ResourceKey, err))
+			return nil, dbErrCause(err, fmt.Sprintf("failed to acquire lock %s:%s", l.ResourceType, l.ResourceKey))
 		}
 		acquiredLocks = append(acquiredLocks, ResourceLock{
 			ResourceType:   l.ResourceType,
@@ -459,7 +482,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		newAttemptID, newEpoch, wi.ID,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to update work_item status")
+		return nil, dbErr(err, "failed to update work_item status")
 	}
 
 	// Bug fix: read step state BEFORE the upsert resets it to idle.
@@ -495,7 +518,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			resolvedRHS, wi.ID,
 		)
 		if err != nil {
-			return nil, NewErr(ErrInternalError, "failed to set requires_human_session")
+			return nil, dbErr(err, "failed to set requires_human_session")
 		}
 		// Emit wi_classification_resolved event
 		evtID := NewID("evt")
@@ -556,6 +579,9 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		if aerr := retryConflictErr(err, "failed to commit claim transaction"); aerr != nil { // aihub#334
+			return nil, aerr
+		}
 		return nil, NewErr(ErrInternalError, "failed to commit claim transaction")
 	}
 
@@ -621,6 +647,9 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 		if errors.Is(err, pgx.ErrNoRows) {
 			return NewErr(ErrNotFound, "work item not found")
 		}
+		if aerr := retryConflictErr(err, "failed to lock work_item"); aerr != nil { // aihub#334
+			return aerr
+		}
 		return NewErr(ErrInternalError, "failed to lock work_item")
 	}
 
@@ -658,7 +687,7 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 		req.Status, req.PauseReason, req.AttemptID,
 	)
 	if err != nil {
-		return NewErr(ErrInternalError, "failed to update run_attempt status")
+		return dbErr(err, "failed to update run_attempt status")
 	}
 
 	// N4 (revised): on paused, release only file_scope locks (acquired mid-attempt via
@@ -672,12 +701,12 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	if req.Status != "paused" {
 		_, err = tx.Exec(ctx, `DELETE FROM resource_locks WHERE owner_attempt_id=$1`, req.AttemptID)
 		if err != nil {
-			return NewErr(ErrInternalError, "failed to release resource locks")
+			return dbErr(err, "failed to release resource locks")
 		}
 	} else {
 		_, err = tx.Exec(ctx, acquireLocksReleasePausedSQL, req.AttemptID)
 		if err != nil {
-			return NewErr(ErrInternalError, "failed to release file_scope locks on pause")
+			return dbErr(err, "failed to release file_scope locks on pause")
 		}
 	}
 
@@ -692,7 +721,7 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 
 	_, err = tx.Exec(ctx, `UPDATE work_items SET status=$1 WHERE id=$2`, wiStatus, wi.ID)
 	if err != nil {
-		return NewErr(ErrInternalError, "failed to update work_item status")
+		return dbErr(err, "failed to update work_item status")
 	}
 
 	// Emit attempt_completed event
@@ -713,7 +742,14 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	// If terminal (wrapped/failed): unblock dependent wi + set methodology expires_at
 	if req.Status == "wrapped" || req.Status == "failed" {
 		if aihubErr := unblockDependentWI(ctx, tx, wi.ID, wi.Project); aihubErr != nil {
-			_ = aihubErr // non-fatal
+			// aihub#334: the second half of instance 3. Discarding this used to
+			// be safe because unblockDependentWI never returned anything but
+			// nil; it now returns non-nil ONLY when the transaction has already
+			// been rolled back by Postgres (see its return contract), and
+			// "non-fatal" is exactly the wrong word for that — nothing below
+			// can commit, so continuing only replaces a classified 409 with an
+			// unclassifiable 500 at tx.Commit.
+			return aihubErr
 		}
 		// C4: set methodology.* memory expires_at = closed_at + 90d
 		_, _ = tx.Exec(ctx, `
@@ -723,6 +759,9 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		if aerr := retryConflictErr(err, "failed to commit complete_attempt"); aerr != nil { // aihub#334
+			return aerr
+		}
 		return NewErr(ErrInternalError, "failed to commit complete_attempt")
 	}
 	return nil
@@ -754,7 +793,7 @@ func fnForceTerminateStep(ctx context.Context, tx pgx.Tx, wiID, attemptID string
 		scID, wiID, *currentStep, saID, attemptID,
 	)
 	if err != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to insert step_completion for force_terminate: %v", err))
+		return dbErrCause(err, "failed to insert step_completion for force_terminate")
 	}
 
 	// Emit step_failed event (§4.3 force_terminate_step flow)
@@ -779,13 +818,20 @@ func fnForceTerminateStep(ctx context.Context, tx pgx.Tx, wiID, attemptID string
 		WHERE work_item_id=$1`, wiID,
 	)
 	if err != nil {
-		return NewErr(ErrInternalError, "failed to reset wi_step_state")
+		return dbErr(err, "failed to reset wi_step_state")
 	}
 	return nil
 }
 
 // unblockDependentWI handles the unblock sweep after a wi completes.
 // Implements C-R7-2: FOR UPDATE ORDER BY id to prevent deadlocks.
+//
+// Return contract (aihub#334): a non-nil result means THE TRANSACTION IS DEAD,
+// not merely that the sweep did not finish. Everything this function can fail
+// at is best-effort and reported by leaving a wi blocked — except a Postgres
+// class 40 rollback, which aborts the enclosing transaction, so every statement
+// after it is a no-op and the caller's Commit is guaranteed to fail. The caller
+// must therefore propagate a non-nil result rather than treat it as advisory.
 func unblockDependentWI(ctx context.Context, tx pgx.Tx, wiID, project string) *AihubError {
 	// Get candidate blocked wi IDs (that were blocked by wiID), locked FOR UPDATE ORDER BY id
 	rows, err := tx.Query(ctx, `
@@ -798,6 +844,20 @@ func unblockDependentWI(ctx context.Context, tx pgx.Tx, wiID, project string) *A
 		FOR UPDATE`, wiID,
 	)
 	if err != nil {
+		// aihub#334: this hop is why a fix placed only at the pgx-error ->
+		// AihubError conversion point does not close this defect. Swallowing
+		// the error here does not make it go away — it makes it UNRECOGNISABLE.
+		// A 40001 raised by this FOR UPDATE aborts the transaction; the caller
+		// then reaches tx.Commit, where pgx returns pgx.ErrTxCommitRollback,
+		// which is not a *pgconn.PgError and carries no SQLSTATE. Every
+		// SQLSTATE-based classifier downstream sees an unremarkable error and
+		// emits 500, with every test still green. The classification has to
+		// happen HERE, while the *pgconn.PgError is still in hand.
+		if aerr := retryConflictErr(err, "failed to lock dependent work_items"); aerr != nil {
+			return aerr
+		}
+		// Any other error stays best-effort, as before: the sweep is a
+		// convenience, and leaving a dependent wi blocked is recoverable.
 		return nil
 	}
 	var candidateIDs []string
@@ -808,6 +868,27 @@ func unblockDependentWI(ctx context.Context, tx pgx.Tx, wiID, project string) *A
 		}
 	}
 	rows.Close()
+	// aihub#334, measured: this is where the 40001 actually arrives, NOT at the
+	// `err` returned by tx.Query above. pgx's extended-protocol Query is lazy —
+	// it returns a Rows with no error and the server's failure only materialises
+	// while the result set is drained, at which point it is reachable ONLY
+	// through rows.Err(). This loop never called it, so the error had no exit
+	// from this function at all: the transaction was already dead, `rows` simply
+	// looked empty, the sweep "found no candidates", and the caller went on to
+	// tx.Commit and got pgx.ErrTxCommitRollback with no SQLSTATE attached.
+	//
+	// This is the shape that makes instance 3 immune to a central pgx-error ->
+	// AihubError conversion point, and it is one step further from the surface
+	// than "the FOR UPDATE error is discarded": there was no discarded error
+	// value, because nothing ever asked for one.
+	if err := rows.Err(); err != nil {
+		if aerr := retryConflictErr(err, "failed to lock dependent work_items"); aerr != nil {
+			return aerr
+		}
+		// Any other error stays best-effort, as before: the sweep is a
+		// convenience, and leaving a dependent wi blocked is recoverable.
+		return nil
+	}
 
 	for _, blockedID := range candidateIDs {
 		// aihub#242: status recompute now lives in the shared requeueIfUnblocked
@@ -815,6 +896,14 @@ func unblockDependentWI(ctx context.Context, tx pgx.Tx, wiID, project string) *A
 		// blocker, matching this function's pre-refactor SQL exactly.
 		unblocked, err := requeueIfUnblocked(ctx, tx, blockedID, wiID)
 		if err != nil {
+			// aihub#334: same reasoning as the FOR UPDATE above — a class 40
+			// rollback here has killed the transaction, so "skip this one and
+			// carry on" would spend the rest of the loop issuing statements
+			// that cannot execute and then hand the caller an unclassifiable
+			// commit failure.
+			if aerr := retryConflictErr(err, "failed to requeue dependent work_item"); aerr != nil {
+				return aerr
+			}
 			// Fail closed: skip this blockedID and leave it blocked. This is a
 			// deliberate behaviour change from the pre-refactor code, not a
 			// continuation of it — the old inline query did
@@ -893,7 +982,7 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		*wi.CurrentAttemptID,
 	).Scan(&currentActorUserID, &currentActorDisplay)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to load current attempt")
+		return nil, dbErr(err, "failed to load current attempt")
 	}
 
 	// Permission check per §9.4 and v1.21 ownership-only model.
@@ -929,7 +1018,7 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	_, err2 = tx.Exec(ctx, `
 		UPDATE run_attempts SET status='superseded', ended_at=clock_timestamp() WHERE id=$1`, priorID)
 	if err2 != nil {
-		return nil, NewErr(ErrInternalError, "failed to supersede prior attempt")
+		return nil, dbErr(err2, "failed to supersede prior attempt")
 	}
 	// Delete locks
 	tx.Exec(ctx, `DELETE FROM resource_locks WHERE owner_attempt_id=$1`, priorID) //nolint:errcheck
@@ -982,7 +1071,7 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		priorID, // parent_attempt_id = superseded attempt
 	)
 	if err2 != nil {
-		return nil, NewErr(ErrInternalError, "failed to create new attempt after force_takeover")
+		return nil, dbErr(err2, "failed to create new attempt after force_takeover")
 	}
 
 	// Re-INSERT resource_locks for new attempt based on wi.DeclaredResources
@@ -1016,10 +1105,13 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		UPDATE work_items SET status='running', current_attempt_id=$1, current_attempt_epoch=$2 WHERE id=$3`,
 		newAttemptID, newEpoch, wi.ID)
 	if err2 != nil {
-		return nil, NewErr(ErrInternalError, "failed to update work_item after force_takeover")
+		return nil, dbErr(err2, "failed to update work_item after force_takeover")
 	}
 
 	if err2 = tx.Commit(ctx); err2 != nil {
+		if aerr := retryConflictErr(err2, "failed to commit force_takeover"); aerr != nil { // aihub#334
+			return nil, aerr
+		}
 		return nil, NewErr(ErrInternalError, "failed to commit force_takeover")
 	}
 
@@ -1067,7 +1159,7 @@ func verifyAttemptCredential(ctx context.Context, tx pgx.Tx, wi WorkItem, attemp
 		if errors.Is(err, pgx.ErrNoRows) {
 			return NewErr(ErrNotFound, "run_attempt not found")
 		}
-		return NewErr(ErrInternalError, "failed to load run_attempt")
+		return dbErr(err, "failed to load run_attempt")
 	}
 
 	// 3. Verify claim_epoch
@@ -1219,6 +1311,9 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, NewErr(ErrNotFound, fmt.Sprintf("work item %q not found", wiID))
 		}
+		if aerr := retryConflictErr(err, "failed to lock work_item"); aerr != nil { // aihub#334
+			return nil, aerr
+		}
 		return nil, NewErr(ErrInternalError, "failed to lock work_item")
 	}
 
@@ -1299,7 +1394,7 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 		// No existing lock — attempt to insert (DO NOTHING on conflict to avoid stealing).
 		tag, execErr := tx.Exec(ctx, acquireLocksInsertSQL, t.lockType, t.lockKey, req.AttemptID, req.ClaimEpoch)
 		if execErr != nil {
-			return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to acquire lock %s:%s: %v", t.lockType, t.lockKey, execErr))
+			return nil, dbErrCause(execErr, fmt.Sprintf("failed to acquire lock %s:%s", t.lockType, t.lockKey))
 		}
 		if tag.RowsAffected() == 0 {
 			// DO NOTHING hit an existing row. Re-check who owns it (live attempts only).
@@ -1336,11 +1431,11 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 				if _, delErr := tx.Exec(ctx,
 					`DELETE FROM resource_locks WHERE resource_type=$1 AND resource_key=$2`,
 					t.lockType, t.lockKey); delErr != nil {
-					return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to reclaim orphan lock %s:%s", t.lockType, t.lockKey))
+					return nil, dbErr(delErr, fmt.Sprintf("failed to reclaim orphan lock %s:%s", t.lockType, t.lockKey))
 				}
 				if _, insErr := tx.Exec(ctx, acquireLocksInsertSQL,
 					t.lockType, t.lockKey, req.AttemptID, req.ClaimEpoch); insErr != nil {
-					return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to acquire reclaimed lock %s:%s", t.lockType, t.lockKey))
+					return nil, dbErr(insErr, fmt.Sprintf("failed to acquire reclaimed lock %s:%s", t.lockType, t.lockKey))
 				}
 				acquired = append(acquired, ResourceLock{
 					ResourceType:   t.lockType,
@@ -1362,6 +1457,9 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		if aerr := retryConflictErr(err, "failed to commit acquire_locks"); aerr != nil { // aihub#334
+			return nil, aerr
+		}
 		return nil, NewErr(ErrInternalError, "failed to commit acquire_locks")
 	}
 	return &AcquireLocksResponse{Acquired: acquired, AlreadyHeld: alreadyHeld}, nil

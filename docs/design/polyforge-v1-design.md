@@ -3080,6 +3080,10 @@ HTTP 409
   WI_TYPE_MISMATCH                wi_type 在 phase.yaml 里不存在（§8.4 / §22 校验）
                                   details: {wi_type, available_wi_types:[...]}
   WI_RECLASSIFY_FORBIDDEN         PATCH wi_type 时权限不足或 wi.status 不允许（需 queued/paused）
+  CONFLICT_SERIALIZATION_FAILURE  Postgres class 40 事务回滚（40001 序列化失败 / 40P01 死锁）：
+                                  服务端正常、请求合法，只是这个事务输掉了并发竞争，重试即可
+                                  （aihub#334；此前漏成 500 INTERNAL_ERROR）
+                                  details: {retryable: true, sqlstate: "40001"|"40P01"}
 
 HTTP 412
   PRECONDITION_FAILED      ⚠️ 勘误 #8：从未实现。原计划用于 step state 的 CAS，但

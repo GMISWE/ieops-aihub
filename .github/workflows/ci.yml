@@ -277,6 +277,27 @@ jobs:
       #             conflicted textually on the same anchor. Both deltas are
       #             kept above in landing order; the resolution was to re-run
       #             the gate on the merged tree, not to pick the larger number.
+      #   131 -> 132 aihub#151 added 1 DB-gated function in internal/domain
+      #             (TestSetMemoryVisibility_PreShareTier in
+      #             memory_share_visibility_db_test.go), carrying five subtests
+      #             for the same reason the aihub#334 entry gives: this gate
+      #             counts functions, and the per-arm claim belongs in the
+      #             step's `--- PASS:` assertions. It needs only a database, so
+      #             the required set goes 128 -> 129 and it does need a new step
+      #             ("aihub#151 pre-share visibility DB tests").
+      #             Measured on this branch off origin/main 7f02bad, with
+      #             GOWORK=off and no AIHUB_TEST_DB in the inventory run, BEFORE
+      #             the new step existed — which is why the last line names the
+      #             function as uncovered rather than reading 129/129. Verbatim:
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 132
+      #                 (require only a DB: 129, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 128/129
+      #             The `131` this starts from is the value on that same
+      #             origin/main, where 131 = 128 + 3; here 132 = 129 + 3.
+      #             ⚠️ This branch carries three work items (aihub#151/#152/#315)
+      #             and only aihub#151 moves this number: the other two add no
+      #             AIHUB_TEST_DB-gated function. Do not read the +1 as "one per
+      #             work item".
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -292,7 +313,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 131
+            -min-gated 132
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
@@ -1207,6 +1228,40 @@ jobs:
           done
           ! grep -q -- '--- SKIP' reinforce_wi_e2e.log \
             || { echo "::error::an aihub#325 E2E test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#151: the pre-share visibility bookkeeping in SetMemoryVisibility.
+      #
+      # The fix for "unshare hard-codes visibility=project, which WIDENS access
+      # for a memory that was private or admin before it was shared" is split
+      # across two layers, and only one of them is assertable without a database:
+      #
+      #   - which tier the handler asks for is decided in Go and is covered by
+      #     TestUnshareArtifact_* in internal/server, which always run; but
+      #   - whether that tier was ever WRITTEN DOWN is a jsonb_set/`-` expression
+      #     inside one UPDATE. Get it wrong — record 'public' over the real tier
+      #     on a second share, say — and every handler test stays green while the
+      #     fix is a no-op.
+      #
+      # Five subtests of ONE function, not five functions, because the coverage
+      # gate at the top of this job counts functions and this is one guard.
+      # It needs only a database (no embedding service), so the required set goes
+      # 128 -> 129.
+      - name: aihub#151 pre-share visibility DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestSetMemoryVisibility_PreShareTier$' -count=1 -v 2>&1 | tee pre_share_visibility.log
+          for want in 'TestSetMemoryVisibility_PreShareTier/share_records_the_tier_being_left_behind' \
+                      'TestSetMemoryVisibility_PreShareTier/re-sharing_an_already_public_memory_does_not_overwrite_the_record' \
+                      'TestSetMemoryVisibility_PreShareTier/unshare_clears_the_record' \
+                      'TestSetMemoryVisibility_PreShareTier/other_attrs_keys_survive_both_directions' \
+                      'TestSetMemoryVisibility_PreShareTier/missing_row_still_reports_not_found'; do
+            grep -q -- "--- PASS: $want" pre_share_visibility.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#151 pre-share recording is not actually verified"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' pre_share_visibility.log \
+            || { echo "::error::an aihub#151 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#303: the 26 DB-gated test functions that, until this step, no
       # `-run` in this file named — so they SKIPped on every CI run since the

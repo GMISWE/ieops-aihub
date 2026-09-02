@@ -68,6 +68,39 @@ func InitRenderTypes(envVal string) {
 	fmt.Fprintf(os.Stderr, "aihub: render types: %v\n", keys)
 }
 
+// IsRenderType reports whether memType is one of the configured render types —
+// i.e. whether a memory of this type is an ARTIFACT in the sense the rest of the
+// system uses: something whose markdown the deployment renders to HTML for a
+// viewer, rather than a note/decision/observation that merely happens to have an
+// html payload attached.
+//
+// aihub#151 needs this because rendered_html is not a usable artifact test.
+// resolveRenderedHTML precedence #1 stores an explicit `html=` verbatim for ANY
+// type, so "has rendered_html" was satisfiable by any writer on any memory, and
+// the share endpoint used exactly that check before publishing a row to the
+// unauthenticated /share/:id route.
+//
+// It deliberately reads the same renderTypes set rather than restating a list:
+// aihub#312/#315 are what a second, drifting copy of one fact costs.
+func IsRenderType(memType string) bool {
+	renderTypesMu.RLock()
+	defer renderTypesMu.RUnlock()
+	return renderTypes[memType]
+}
+
+// RenderTypeNames returns the configured render types, sorted, for error messages.
+// Callers must not mutate the result; it is a fresh slice each call.
+func RenderTypeNames() []string {
+	renderTypesMu.RLock()
+	names := make([]string, 0, len(renderTypes))
+	for t := range renderTypes {
+		names = append(names, t)
+	}
+	renderTypesMu.RUnlock()
+	sort.Strings(names)
+	return names
+}
+
 // resolveRenderedHTML decides the value stored in memories.rendered_html on save
 // (aihub#27 / aihub#104). Precedence:
 //  1. explicit non-empty HTML (pf_save_artifact html=) → stored verbatim, any type;
@@ -1978,13 +2011,44 @@ func UpdateMemory(ctx context.Context, pool *pgxpool.Pool, id string, req *Updat
 	return m, err
 }
 
+// PreShareVisibilityKey is the attrs key in which SetMemoryVisibility parks the
+// visibility tier a memory held immediately before it was made public, so unshare
+// can put it back (aihub#151). It is written and cleared by SetMemoryVisibility
+// alone; nothing else should set it.
+const PreShareVisibilityKey = "pre_share_visibility"
+
 // SetMemoryVisibility updates a single memory's visibility tier. Used by the artifact
-// share endpoints to toggle public/project. Touches only the visibility column, so it
-// is immune to the multi-site Scan column-ordering hazard.
+// share endpoints to toggle public/project.
+//
+// It also maintains attrs.pre_share_visibility, in the SAME statement as the column
+// write so the two can never disagree:
+//
+//   - moving TO 'public' from anything else records the tier being left behind;
+//   - moving to anything other than 'public' clears the key, because the memory is
+//     no longer in the borrowed-visibility state the key describes.
+//
+// aihub#151: unshare used to hard-code 'project' as the restore target, which
+// WIDENED access for any memory that was 'private' (author-only) or 'admin' before
+// it was shared — a share→unshare round trip published it to the whole project.
+// Restoring needs the pre-share tier to have been written down at share time, and
+// the row's own attrs is the only place that survives a process restart.
+//
+// Recording on the way in rather than on the way out matters: at unshare time the
+// column already reads 'public' and the original tier is unrecoverable.
 func SetMemoryVisibility(ctx context.Context, pool *pgxpool.Pool, id, visibility string) *AihubError {
 	tag, err := pool.Exec(ctx,
-		`UPDATE memories SET visibility=$1, updated_at=clock_timestamp() WHERE id=$2`,
-		visibility, id)
+		`UPDATE memories
+		    SET visibility = $1,
+		        attrs = CASE
+		                  WHEN $1 = 'public' AND visibility <> 'public'
+		                    THEN jsonb_set(COALESCE(attrs, '{}'::jsonb), $3::text[], to_jsonb(visibility))
+		                  WHEN $1 <> 'public'
+		                    THEN COALESCE(attrs, '{}'::jsonb) - $2::text
+		                  ELSE attrs
+		                END,
+		        updated_at = clock_timestamp()
+		  WHERE id = $4`,
+		visibility, PreShareVisibilityKey, []string{PreShareVisibilityKey}, id)
 	if err != nil {
 		return NewErr(ErrInternalError, "failed to update memory visibility")
 	}

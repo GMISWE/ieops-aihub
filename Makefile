@@ -1,9 +1,5 @@
 .PHONY: build migrate-up migrate-down test lint deploy
 
-PROD_HOST  ?= 10.146.0.16
-GCR_IMAGE  := us-west1-docker.pkg.dev/devv-404803/public/aihub
-COMPOSE_DIR := /root/manifests/aihub-v1
-
 VERSION ?= dev
 # Full 40-char SHA, NOT --short. polyforge-mcp.sh's update check extracts the
 # running binary's commit with `grep -oE '[a-f0-9]{40}'`; a 7-char short SHA
@@ -34,12 +30,32 @@ test:
 lint:
 	golangci-lint run ./...
 
-# Deploy latest image to prod server.
-# GCR auth must be configured on $(PROD_HOST): docker login us-west1-docker.pkg.dev
-# Key: ~/.gcp/devv-404803-2ab2fee8bad0.json (artifact-service@devv-404803)
+# Deploying is deliberately not a make target.
+#
+# It needs four things this file cannot carry: a database backup, a recorded
+# rollback anchor, migrations applied strictly BEFORE the new binary starts,
+# and a check afterwards that the read path still answers. A one-line target
+# invites skipping all four, which is how the previous one came to be wrong.
+#
+# What was here was written for a setup that has not existed for months: it
+# ssh'd to a host that no longer answers, ran `docker compose up` in a compose
+# directory production does not have (it runs bare `docker run` against Cloud
+# SQL), pulled `:latest` where the documented flow pins a git-SHA tag, and
+# never ran migrations at all. That last one stopped being survivable when
+# 0032 added a column every project READ selects: a binary-first rollout now
+# fails GET /v1/projects outright with SQLSTATE 42703.
+#
+# Correcting only the host would have turned a loud failure into a quiet wrong
+# deploy, so this points at the real procedure instead. It carries no host, no
+# image tag and no directory, so there is nothing here left to go stale.
 deploy:
-	ssh $(PROD_HOST) " \
-	  docker pull $(GCR_IMAGE):latest && \
-	  cd $(COMPOSE_DIR) && \
-	  docker compose up -d --no-deps --force-recreate aihub \
-	"
+	@echo 'make deploy is not the deploy path, and has not been for months.'
+	@echo
+	@echo 'The procedure is in docs/deployment.md, section'
+	@echo '  "Current production (Cloud SQL + bare docker run)"'
+	@echo 'and is run on the host, not from here.'
+	@echo
+	@echo 'It backs up the database, records a rollback anchor, pulls the image'
+	@echo 'by git-SHA tag, applies migrations BEFORE swapping the container, and'
+	@echo 'verifies GET /v1/projects still answers afterwards.'
+	@exit 1

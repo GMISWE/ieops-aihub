@@ -7,6 +7,8 @@ import (
 	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -171,34 +173,107 @@ func TestDirtyMemberStillAuthorizes(t *testing.T) {
 	}
 }
 
-// TestBearerAuth_UsesSharedMembersParser is the wiring hop. aihub#315 exists
-// because the members derivation was copied — pf_whoami had one, BearerAuth had
-// another, and fixing one left the other broken for 26 days. The unit tests above
-// only cover roleForUserInMembers; this asserts BearerAuth actually routes through
-// it and has not grown a second, private derivation beside it.
+// TestProjectRolesHaveOneDerivation is the wiring hop, and the scope of it is the
+// point. aihub#315 exists because the members derivation was COPIED — pf_whoami
+// had one, BearerAuth had another, and fixing one left the other broken for 26
+// days.
 //
-// It reads the AST rather than the file's text so it cannot be defeated by
-// reformatting, line wrapping, or how the call is spelled.
-func TestBearerAuth_UsesSharedMembersParser(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "middleware.go", nil, 0)
+// The first version of this gate inspected BearerAuth alone, because BearerAuth
+// was the function being fixed. That is the mistake this comment exists to stop
+// anyone repeating: a gate scoped to the file you are editing cannot see a defect
+// one hop away, and there WAS one. `loadUserByAPIKeyID` in ui_handlers_auth.go
+// held a third character-identical copy with both defects intact, serving every
+// /ui page load, and it stayed green through the entire BearerAuth fix. It was
+// found by grepping for writers of ProjectRoles afterwards.
+//
+// So the anchor is the authorization map, not a function name: EVERY function in
+// this package that writes UserContext.ProjectRoles must obtain the role from
+// roleForUserInMembers, and none of them may decode JSON themselves. A fourth
+// copy — in a file that does not exist yet — fails this the moment it assigns
+// into that map.
+//
+// It reads the AST rather than the files' text, so reformatting, line wrapping,
+// or how the call is spelled cannot defeat it.
+func TestProjectRolesHaveOneDerivation(t *testing.T) {
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parse middleware.go: %v", err)
+		t.Fatalf("read package dir: %v", err)
 	}
 
-	var fn *ast.FuncDecl
-	for _, decl := range file.Decls {
-		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == "BearerAuth" && fd.Recv == nil {
-			fn = fd
-			break
+	fset := token.NewFileSet()
+	writers := map[string]string{} // function name -> file
+	checked := 0
+
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		checked++
+		file, perr := parser.ParseFile(fset, name, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", name, perr)
+		}
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			if !writesProjectRoles(fd) {
+				continue
+			}
+			writers[fd.Name.Name] = name
+
+			shared, unmarshals := countMembersParsing(fd)
+			if shared == 0 {
+				t.Errorf("%s (%s) writes ProjectRoles but never calls roleForUserInMembers; that is a second derivation of the caller's role, which is the whole of aihub#315", fd.Name.Name, name)
+			}
+			if unmarshals != 0 {
+				t.Errorf("%s (%s) writes ProjectRoles and decodes JSON inline %d time(s); the members derivation must stay in roleForUserInMembers so the next fix cannot miss a copy", fd.Name.Name, name, unmarshals)
+			}
 		}
 	}
-	if fn == nil {
-		t.Fatalf("BearerAuth not found in middleware.go")
-	}
 
-	sharedCalls, unmarshalCalls := 0, 0
-	ast.Inspect(fn, func(n ast.Node) bool {
+	if checked == 0 {
+		t.Fatalf("no non-test .go files were parsed; the walk is broken, not the code")
+	}
+	// Both known writers must be present. Without this the test passes vacuously
+	// the day someone renames the field and the walk silently matches nothing —
+	// which is exactly how a gate stops gating without going red.
+	for _, want := range []string{"BearerAuth", "loadUserByAPIKeyID"} {
+		if _, ok := writers[want]; !ok {
+			t.Errorf("%s no longer appears to write ProjectRoles; if that is deliberate remove it from this list, but do not leave the list matching nothing", want)
+		}
+	}
+}
+
+// writesProjectRoles reports whether fd contains an assignment into a
+// `.ProjectRoles[...]` map.
+func writesProjectRoles(fd *ast.FuncDecl) bool {
+	found := false
+	ast.Inspect(fd, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range assign.Lhs {
+			idx, ok := lhs.(*ast.IndexExpr)
+			if !ok {
+				continue
+			}
+			if sel, ok := idx.X.(*ast.SelectorExpr); ok && sel.Sel.Name == "ProjectRoles" {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// countMembersParsing returns how many times fd calls roleForUserInMembers and
+// how many times it decodes JSON itself.
+func countMembersParsing(fd *ast.FuncDecl) (shared, unmarshals int) {
+	ast.Inspect(fd, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -206,21 +281,15 @@ func TestBearerAuth_UsesSharedMembersParser(t *testing.T) {
 		switch f := call.Fun.(type) {
 		case *ast.Ident:
 			if f.Name == "roleForUserInMembers" {
-				sharedCalls++
+				shared++
 			}
 		case *ast.SelectorExpr:
 			pkg, ok := f.X.(*ast.Ident)
 			if ok && pkg.Name == "json" && (f.Sel.Name == "Unmarshal" || f.Sel.Name == "NewDecoder") {
-				unmarshalCalls++
+				unmarshals++
 			}
 		}
 		return true
 	})
-
-	if sharedCalls != 1 {
-		t.Fatalf("BearerAuth calls roleForUserInMembers %d times, want exactly 1", sharedCalls)
-	}
-	if unmarshalCalls != 0 {
-		t.Fatalf("BearerAuth decodes JSON inline %d time(s); the members derivation must stay in roleForUserInMembers so the next fix cannot miss a copy", unmarshalCalls)
-	}
+	return shared, unmarshals
 }

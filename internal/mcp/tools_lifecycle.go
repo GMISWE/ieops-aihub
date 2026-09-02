@@ -216,37 +216,71 @@ func (s *Server) registerLifecycleTools() {
 								// of a JSON array. They are legacy-data cases, not
 								// caller-shape cases.
 								//
-								// ⚠️ SECOND DERIVATION, STILL UNFIXED.
-								// internal/server/middleware.go:116-131
-								// derives the same "caller's role out of
-								// projects.members" fact independently, to
-								// fill /v1/users/me's project_roles, and it
-								// still carries BOTH defects fixed here:
+								// ⚠️ SECOND DERIVATION — both now correct,
+								// still DUPLICATED.
+								// internal/server/roleForUserInMembers derives
+								// the same "caller's role out of
+								// projects.members" fact independently, to fill
+								// project_roles. It serves BOTH server auth
+								// paths — BearerAuth for /v1 and
+								// loadUserByAPIKeyID for the /ui session cookie
+								// — which were themselves two inline copies
+								// until aihub#315 collapsed them. So the repo
+								// holds three call sites and two
+								// implementations: this one, and that one.
 								//
-								//   - Wholesale discard. It decodes into a
-								//     TYPED slice and `continue`s on error
-								//     (lines 120-122), so ONE junk element
-								//     drops that project's membership
-								//     entirely — even though encoding/json
-								//     had already filled the good entries in
-								//     (see the []any case below). Same shape
-								//     as the guard aihub#312 removed here.
-								//   - Bare identity compare. Line 124 is
-								//     `m.UserID == uc.UserID` with no
-								//     `!= ""` guard. That is safe today only
-								//     by accident of its inputs — uc.UserID
-								//     comes from an authenticated API key and
-								//     the SQL pre-filters with `members @>`
-								//     — not by anything at that line.
+								// It used to carry both of the defects fixed
+								// here, and this block used to say so. It no
+								// longer does: aihub#315 fixed that side on
+								// 2026-09-02, the same way aihub#312 fixed this
+								// one. Concretely, over there:
 								//
-								// Deliberately NOT fixed in aihub#312: out of
-								// scope here, and as of 2026-09-01 no work
-								// item covers it, so this note has no landing
-								// point yet. If you edit either derivation,
-								// edit the other or file one. The per-fixture
-								// divergence is measured in
-								// tools_whoami_members_test.go, on
-								// middlewareProjectRoles.
+								//   - the wholesale discard is gone. It still
+								//     decodes into a TYPED slice, but keeps the
+								//     partially-filled result instead of
+								//     `continue`ing on error, which is sound
+								//     for the reason spelled out in the []any
+								//     case below — encoding/json fills the good
+								//     entries in regardless. The guard was
+								//     always the bug, not the decoder.
+								//   - the identity compare is guarded. It
+								//     returns early on an empty caller id, so
+								//     the `"" == ""` match a zero-valued junk
+								//     entry would otherwise allow is closed by
+								//     that line rather than by an accident of
+								//     its inputs.
+								//
+								// What is NOT fixed is the duplication itself.
+								// Two implementations still derive one fact, and
+								// nothing makes them agree — this comment is
+								// the only thing connecting them, and a comment
+								// asserting a fact about another file goes stale
+								// SILENTLY. It just did: aihub#315 made the
+								// paragraph above false the moment it landed and
+								// nothing went red, which is why it is written
+								// as a dated claim you should re-measure rather
+								// than a standing one you should believe.
+								//
+								// Within the server package the duplication IS
+								// gated now (TestProjectRolesHaveOneDerivation
+								// requires every writer of ProjectRoles to go
+								// through the shared parser). Nothing gates it
+								// across the mcp/server boundary, so this pair
+								// is still held together by prose alone.
+								//
+								// Measured 2026-09-02, real function against the
+								// eight call sites in
+								// tools_whoami_members_test.go: 8/8 agree, the
+								// junk-entry fixture included. One shape OUTSIDE
+								// that set still differs — a member whose `role`
+								// is not a string yields ("",found) over there
+								// and ("",not-found) here, so project_roles gets
+								// {"aihub":""} rather than {}. checkProjectAccess
+								// denies on both, so it is a payload difference,
+								// not an authorization one.
+								//
+								// If you edit either derivation, edit the other,
+								// or collapse them and delete this block.
 								var members []map[string]any
 								switch m := membersRaw.(type) {
 								case []any:

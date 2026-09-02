@@ -505,6 +505,19 @@ func (c *Client) GetProject(ctx context.Context, name string) (map[string]any, e
 }
 
 // UpdateProject calls PATCH /v1/projects/:name.
+//
+// body is forwarded verbatim, so a key the caller puts in it reaches the server
+// unchanged — including aihub#260's `members_version` compare-and-set
+// precondition. That is load-bearing rather than incidental: this repo has
+// shipped a parameter that existed in the MCP schema and was silently dropped
+// one hop later, which is indistinguishable at the call site from a guard that
+// passed. TestClientUpdateProjectForwardsMembersVersionOnTheWire pins it by
+// reading the bytes off the wire.
+//
+// On a failed compare-and-set the server answers 409 CONFLICT_CAS_FAILED and
+// do() folds the error envelope's details — which carry
+// current_members_version — into the returned error's text, so the caller can
+// retry with the right version without a second read.
 func (c *Client) UpdateProject(ctx context.Context, name string, body any) (map[string]any, error) {
 	var out map[string]any
 	return out, c.do(ctx, "PATCH", "/v1/projects/"+seg(name), body, &out)

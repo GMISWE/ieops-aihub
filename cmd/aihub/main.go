@@ -124,6 +124,15 @@ func main() {
 		}
 	}()
 
+	// aihub#152: the idempotency cache's own sweep. PurgeExpiredIdempotencyCache
+	// existed from the start and had no caller anywhere in cmd/ or internal/, so
+	// the only eviction that ever ran was the lazy one on a cache hit after
+	// expiry — which by construction never fires for the entries that accumulate.
+	// It is a separate ticker rather than another arm of the GC loop above
+	// because that loop is the DATABASE sweep scheduler (domain.RunDue against
+	// pool) and this is process-local memory with no row behind it.
+	server.StartIdempotencyCachePurger(ctx, 10*time.Minute)
+
 	cookieSecret := loadUICookieSecret()
 	e := server.NewRouter(pool, cookieSecret)
 

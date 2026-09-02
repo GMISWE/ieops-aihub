@@ -54,6 +54,13 @@ const (
 	// likely succeed. Details carry {retryable:true, sqlstate:"40001"|"40P01"}
 	// so a client can decide without parsing the message. See aihub#334.
 	ErrConflictSerializationFailure ErrCode = "CONFLICT_SERIALIZATION_FAILURE"
+	// ErrIdempotencyKeyReused is returned when an Idempotency-Key that is still
+	// cached is presented with a DIFFERENT request (method, target or body). The
+	// key names one operation, so the server can neither replay the first
+	// response — that was the aihub#152 defect, a stale body served for an
+	// unrelated call — nor execute the second under a key that already stands for
+	// something else. Retry with a fresh key.
+	ErrIdempotencyKeyReused ErrCode = "IDEMPOTENCY_KEY_REUSED"
 
 	// HTTP 412
 	ErrPreconditionFailed ErrCode = "PRECONDITION_FAILED"
@@ -128,6 +135,7 @@ func codeToHTTPStatus(code ErrCode) int {
 		ErrConflictLockTaken, ErrConflictDualWIAgent,
 		ErrRequiresHumanSessionMismatch, ErrConflictVersionMismatch,
 		ErrConflictTerminalState, ErrConflictSerializationFailure,
+		ErrIdempotencyKeyReused,
 		// G6 / design §17: WI_TYPE_MISMATCH is 409 (conflict between wi_type and config)
 		ErrWITypeMismatch,
 		// G6 / design §4.3 line 1138: GOAL_CHANGE_NOT_ALLOWED is 409, not 400

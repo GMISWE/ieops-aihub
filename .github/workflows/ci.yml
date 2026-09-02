@@ -285,15 +285,29 @@ jobs:
       #             step's `--- PASS:` assertions. It needs only a database, so
       #             the required set goes 128 -> 129 and it does need a new step
       #             ("aihub#151 pre-share visibility DB tests").
-      #             Measured on this branch off origin/main 7f02bad, with
-      #             GOWORK=off and no AIHUB_TEST_DB in the inventory run, BEFORE
-      #             the new step existed — which is why the last line names the
-      #             function as uncovered rather than reading 129/129. Verbatim:
+      #             Measured twice, both with GOWORK=off and no AIHUB_TEST_DB in
+      #             the inventory run, so the database is untouched.
+      #             (i) On this branch off origin/main 7f02bad, BEFORE the new
+      #             step existed — which is why the last line names the function
+      #             as uncovered rather than reading 129/129. Verbatim:
       #               dbtestcov: AIHUB_TEST_DB-gated test functions: 132
       #                 (require only a DB: 129, need extra env: 3)
       #               dbtestcov: covered by a CI step: 128/129
-      #             The `131` this starts from is the value on that same
-      #             origin/main, where 131 = 128 + 3; here 132 = 129 + 3.
+      #             (ii) origin/main then moved 7f02bad -> 3ea6933 (aihub#181's
+      #             landing, #300) while this branch was being written, so the
+      #             gate was re-run on the tree that actually resolves that
+      #             merge, WITH the new step. Verbatim:
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 132
+      #                 (require only a DB: 129, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 129/129
+      #             #300 added internal/citest/wfroutes and touched
+      #             publish-bins.yml; it introduced no AIHUB_TEST_DB-gated
+      #             function and did not touch this file, which is why the two
+      #             readings agree. They are recorded separately anyway, because
+      #             "the number did not move" is a measurement, not an excuse to
+      #             skip one.
+      #             The `131` this starts from is the value on origin/main at
+      #             both of those commits, where 131 = 128 + 3; here 132 = 129 + 3.
       #             ⚠️ This branch carries three work items (aihub#151/#152/#315)
       #             and only aihub#151 moves this number: the other two add no
       #             AIHUB_TEST_DB-gated function. Do not read the +1 as "one per

@@ -895,6 +895,12 @@ func listWorkItemsNextCursor(last *WorkItem, sortCol string) *string {
 type ListWorkItemsResult struct {
 	Items      []*WorkItem `json:"items"`
 	NextCursor *string     `json:"next_cursor"`
+	// RequestAdjusted names the caller-supplied parameters this endpoint changed
+	// on the way in — today only `limit`, which ListWorkItems resets to 50 when it
+	// arrives above 200 (aihub#267). Omitted when nothing was adjusted; see
+	// request_adjusted.go for why absence rather than an empty list, and for the
+	// one case this cannot report.
+	RequestAdjusted []RequestAdjustment `json:"request_adjusted,omitempty"`
 }
 
 // ListWorkItems returns a paginated list of work items.
@@ -1121,11 +1127,36 @@ func buildListWorkItemsQuery(project string, f ListWorkItemsFilter) (query strin
 	return query, args, sortCol
 }
 
+// ListWorkItems bounds the caller's page size, runs the query, and DISCLOSES the
+// bound if it fired.
+//
+// The clamp itself is unchanged (aihub#267 asks for the reset to stop being
+// silent, not for a different reset). What changes is that a caller who asked for
+// 500 items and got 50 can now see that from the response instead of having to
+// guess whether the project simply has 50 matching work items.
+//
+// 🔴 The disclosure is attached HERE, wrapped around the routing, and not at the
+// two `return` statements inside listWorkItemsPage. Those are the vector path and
+// the text path, and annotating both is two chances to forget one — which is
+// precisely how aihub#280's include_step_state worked on every query except a
+// semantically-matched one. The same reasoning put handleRecall's unmatched_types
+// outside domain.Recall rather than at its four exits.
 func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f ListWorkItemsFilter) (*ListWorkItemsResult, *AihubError) {
+	requestedLimit := f.Limit
 	if f.Limit <= 0 || f.Limit > 200 {
 		f.Limit = 50
 	}
+	res, err := listWorkItemsPage(ctx, pool, project, f)
+	if err != nil || res == nil {
+		return res, err
+	}
+	res.RequestAdjusted = appendIntAdjustment(res.RequestAdjusted, "limit", requestedLimit, f.Limit)
+	return res, nil
+}
 
+// listWorkItemsPage is ListWorkItems with the page size already bounded. Split
+// out so the disclosure above covers every way this can return.
+func listWorkItemsPage(ctx context.Context, pool *pgxpool.Pool, project string, f ListWorkItemsFilter) (*ListWorkItemsResult, *AihubError) {
 	// aihub#273: semantic path first when the caller sent query= and an
 	// embedding provider is active. Any error or an empty result falls through
 	// to the ILIKE text path below (via buildListWorkItemsWhere's Query guard)

@@ -267,6 +267,19 @@ type RecallResponse struct {
 	// content_truncated. When this is set, UnmatchedTypes is nil and says nothing
 	// about the type filter either way; it is never a partial answer.
 	UnmatchedTypesError string `json:"unmatched_types_error,omitempty"`
+	// RequestAdjusted names the caller-supplied parameters this endpoint changed
+	// on the way in — today only `top_k`, which normalizeRecallTopK caps at 200
+	// and replaces with 20 when it arrives negative. Omitted when nothing was
+	// adjusted, for the reason spelled out in request_adjusted.go.
+	//
+	// This is the field normalizeRecallTopK's comment says did not exist: it
+	// argued that "a dedicated top_k_clamped field would not survive
+	// slimRecallResult's opt-in whitelist, so disclosure by new field would reach
+	// REST callers while silently missing the pf_recall callers who are the
+	// population that has the problem". That is why aihub#314 widened the
+	// whitelist FIRST and made the field generic — so this is the last time that
+	// argument has to be made.
+	RequestAdjusted []RequestAdjustment `json:"request_adjusted,omitempty"`
 }
 
 // ─── Forgetting Curve (§7.2) ──────────────────────────────────────────────────
@@ -1317,10 +1330,27 @@ func normalizeRecallTopK(requested int) int {
 	return requested
 }
 
-// Recall retrieves memories per §7.5. It is the router: it decides between the pgvector
+// Recall bounds the caller's page size, routes the request, and DISCLOSES the
+// bound if it fired (aihub#314).
+//
+// 🔴 The disclosure is attached HERE, around the router, rather than at
+// recallRouted's four return points — for the same reason handleRecall attaches
+// unmatched_types around this call rather than inside it: four exits are four
+// chances to forget one, and the one that gets forgotten is silent.
+func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*RecallResponse, error) {
+	adjusted := appendIntAdjustment(nil, "top_k", req.TopK, normalizeRecallTopK(req.TopK))
+	resp, err := recallRouted(ctx, pool, req)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	resp.RequestAdjusted = adjusted
+	return resp, nil
+}
+
+// recallRouted retrieves memories per §7.5. It is the router: it decides between the pgvector
 // path (RecallWithVector) and the text/tag path (recallText), and — because those two
 // paths own disjoint halves of the corpus — merges them when a request spans both.
-func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*RecallResponse, error) {
+func recallRouted(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*RecallResponse, error) {
 	req.TopK = normalizeRecallTopK(req.TopK)
 	if req.MinStrength <= 0 {
 		req.MinStrength = 0.3

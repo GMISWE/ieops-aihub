@@ -198,6 +198,30 @@ jobs:
       #             `121` this starts from was read off the merged tree, not
       #             carried over from the branch's own earlier measurement of
       #             104 -> 109, which was taken before aihub#260 landed.
+      #
+      #   126 -> 128 aihub#314 added 2 DB-gated functions in internal/mcp
+      #             (TestE2ERequestAdjustedDisclosesListLimitClamp and
+      #             TestE2ERequestAdjustedDisclosesRecallTopKCap in
+      #             request_adjusted_e2e_db_test.go). Both need only a database —
+      #             they stand the real router up in-process, like aihub#281's
+      #             pair — so the required set goes 123 -> 125 and they do need a
+      #             new step ("aihub#314 request_adjusted disclosure E2E DB
+      #             tests").
+      #             Measured, not predicted, and RE-measured twice as this branch
+      #             was rebased under two landings. Its own earlier runs printed
+      #             `106` (before aihub#260) and `123` (before aihub#148); BOTH
+      #             are now wrong, and either one written here would have walked
+      #             the ratchet BACKWARDS while looking like a normal delta line —
+      #             by 20 and by 3 respectively. That is the aihub#320 failure the
+      #             aihub#260 entry above warns about, arriving from the other
+      #             direction: a stale "to" rather than a stale "from", and a
+      #             branch can grow one just by sitting still. On the tree AFTER
+      #             merging origin/main at 7cb982f, database rebuilt from zero
+      #             through 0032, the gate printed
+      #             `128 (require only a DB: 125, need extra env: 3)` with both
+      #             functions listed as executed by no step, before the step
+      #             existed. 126 + 2 = 128 happens to agree; the 128 written below
+      #             is the measurement, not the sum.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -213,7 +237,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 126
+            -min-gated 128
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
@@ -1025,6 +1049,39 @@ jobs:
           done
           ! grep -q -- '--- SKIP' recall_threshold.log \
             || { echo "::error::an aihub#148 threshold test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#314: `request_adjusted` — the server's statement that it rewrote a
+      # value the caller sent — must reach BOTH a REST caller and the model.
+      #
+      # These two cases are the only ones in the change that can answer the
+      # question it exists to answer, and the reason is the same one the
+      # aihub#281 step above gives. The fake-backed cases in
+      # request_adjusted_wiring_test.go prove the MCP hop forwards the field on
+      # whatever it is handed; with a fake on the other end they stay green
+      # against a server that discloses nothing at all. Only a real
+      # domain.ListWorkItems can show that the aihub#267 limit reset is recorded,
+      # and only asking that same live server twice — once over HTTP, once over
+      # the MCP transport — can show the two ends agree. A contract with two hops
+      # needs two assertions; asserting the REST body alone reproduces the bug
+      # being fixed, since pf_recall's opt-in whitelist is exactly where the
+      # previous three such fields died.
+      #
+      # Needs only a database (real router in-process via httptest, real SDK
+      # client), so no extra service. Same -v + grep discipline as every DB step
+      # here: a suite in which everything SKIPped still exits 0.
+      - name: aihub#314 request_adjusted disclosure E2E DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/mcp/ -run '^(TestE2ERequestAdjustedDisclosesListLimitClamp|TestE2ERequestAdjustedDisclosesRecallTopKCap)$' -count=1 -v 2>&1 | tee request_adjusted_e2e.log
+          for want in TestE2ERequestAdjustedDisclosesListLimitClamp \
+                      TestE2ERequestAdjustedDisclosesRecallTopKCap; do
+            grep -q -- "--- PASS: $want (" request_adjusted_e2e.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#314 disclosure is not actually verified end to end"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' request_adjusted_e2e.log \
+            || { echo "::error::an aihub#314 E2E test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#303: the 26 DB-gated test functions that, until this step, no
       # `-run` in this file named — so they SKIPped on every CI run since the

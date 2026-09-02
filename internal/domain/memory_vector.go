@@ -15,9 +15,9 @@ import (
 	"github.com/GMISWE/ieops-aihub/internal/embedding"
 )
 
-// RecallWithVector embeds req.Query and returns the TopK memories ordered by a
-// fusion score that blends cosine similarity (0.7 weight) with Ebbinghaus
-// effective_strength (0.3 weight).
+// RecallWithVector embeds req.Query and returns the TopK memories ordered by
+// cosine similarity as the primary key (bucketed to 0.01), with Ebbinghaus
+// effective_strength breaking ties only inside a bucket (aihub#311).
 //
 // Only memories that have emb_model matching the current provider and a non-NULL
 // emb_vector are candidates — unembedded memories fall through to the text path.
@@ -28,8 +28,9 @@ import (
 // at the same relative position (between commits and created_at) as those
 // sites, keeping all lockstep Scan sites in sync.
 //
-// ponytail: fusion weights (0.7 similarity / 0.3 strength) are tunable; adjust
-// when the recall quality tradeoff between freshness and semantic match shifts.
+// ponytail: the 0.01 cosine bucket is the freshness/semantic-match tradeoff dial.
+// Widening it lets strength decide more often; narrowing it toward 0 approaches a
+// pure cosine sort. Do NOT reintroduce a weighted sum of the two (see aihub#311).
 func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*RecallResponse, error) {
 	qvec, err := embProvider.Embed(ctx, req.Query)
 	if err != nil {
@@ -144,12 +145,30 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 	limitIdx := idx
 	args = append(args, topK)
 
-	// Fusion score: 0.7*cosine_similarity + 0.3*normalized_strength.
-	// cosine_similarity = 1 - (emb_vector <=> query_vector)  (pgvector cosine distance)
-	// normalized_strength = tanh(effective_strength) maps (0,∞)→(0,1).
+	// Ordering: cosine similarity is the PRIMARY key, bucketed to 0.01; eff_strength
+	// breaks ties only within a bucket. cosine = 1 - (emb_vector <=> query_vector).
 	//
-	// ponytail: cursor-based pagination is skipped on the vector path because ORDER BY
-	// a fusion score is incompatible with the timestamp cursor used by the text path.
+	// aihub#311: this used to be a single fused score, 0.7*cosine + 0.3*tanh(strength),
+	// and that is what the bug was. Querying a memory with a VERBATIM SUBSTRING OF ITS
+	// OWN CONTENT did not return it first: mem_03hogVcW held the highest cosine in the
+	// whole result set (0.7227) yet ranked #2 behind a row at 0.7202, because it was
+	// fresh and weak (base_strength=3, activation_count=0) and the 0.3 strength term
+	// outweighed a 0.0025 cosine gap. The `similarity` column returned is raw cosine,
+	// so the displayed numbers did not even match the row order.
+	//
+	// Why bucketing rather than simply reweighting to, say, 0.9/0.1: the 0.6B embedding
+	// model packs every cosine in a result set into a band roughly 0.04 wide (0.68-0.72
+	// in the reported case), so ANY non-trivial strength weight can still flip a gap
+	// that small. Cosine has to be the dominant sort key, not merely a heavier one.
+	// round(...,2) keeps recency useful where it is legitimate - rows within 0.01
+	// cosine of each other are genuinely near-tied, and there the stronger memory wins.
+	//
+	// eff_strength is the SELECT alias, ordered directly rather than through tanh():
+	// tanh is strictly increasing, so it cannot change a DESC ordering, and dropping it
+	// avoids restating the decay expression a second time.
+	//
+	// ponytail: cursor-based pagination is skipped on the vector path because ordering
+	// by similarity is incompatible with the timestamp cursor used by the text path.
 	// Vector recall always returns the top TopK by score; callers that need paging
 	// should reduce TopK or fall back to the text path.
 	query := fmt.Sprintf(`
@@ -166,11 +185,8 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 		FROM memories
 		WHERE %s
 		ORDER BY
-			0.7 * (1 - (emb_vector <=> %s)) +
-			0.3 * tanh(base_strength * exp(
-				-extract(epoch from (clock_timestamp() - `+memRefTimeSQL+`))/86400.0
-				/ NULLIF(stability_days, 0)
-			)) DESC
+			round((1 - (emb_vector <=> %s))::numeric, 2) DESC,
+			eff_strength DESC
 		LIMIT $%d`, qvecPlaceholder, where, qvecPlaceholder, limitIdx)
 
 	rows, err := pool.Query(ctx, query, args...)

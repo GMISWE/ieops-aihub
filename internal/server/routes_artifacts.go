@@ -359,10 +359,16 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			uiChrome := buildUIChrome(mem.WorkItemID, mem.Type, mem.ID, "", theme, u)
 
 			// aihub#154: build the Share control + share.js — /ui path only, and
-			// only for artifacts that actually have stored rendered HTML (i.e.
-			// methodology.spec / plan / review). The handlers behind it 412 when
-			// rendered_html is NULL, so gating the control on the same condition
-			// keeps the UI honest. The fragment (control + script) is injected just
+			// only for artifacts the share handler would actually accept. It used
+			// to be gated on rendered_html alone, which matched the handler when
+			// the handler's only content check was the same one. aihub#151 added
+			// two more refusals, so the gate now asks shareRefusal as well —
+			// otherwise a note saved with an explicit html= payload gets a Share
+			// button that always answers 403. "Gate the control on the same
+			// condition as the handler" is the claim this comment has always made;
+			// calling the handler's own predicate is what makes it true rather
+			// than a thing two places happen to agree on.
+			// The fragment (control + script) is injected just
 			// after the first </h1> so it renders directly below the document title;
 			// it never reaches /v1 or /share, preserving their byte-identical output.
 			shareControlHTML := ""
@@ -370,7 +376,7 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			// a separate document whose CSP admits no script but our nonced bridge — the
 			// control would render inert inside the frame. Suppressed rather than shipped
 			// broken; rehoming it to the parent chrome is part of aihub#245 (P1).
-			if mem.RenderedHTML != nil && !sandboxBody {
+			if mem.RenderedHTML != nil && shareRefusal(mem) == nil && !sandboxBody {
 				shareURL := c.Scheme() + "://" + c.Request().Host + "/share/" + mem.ID
 				shared := mem.Visibility == "public"
 				shareControlHTML = buildShareControlHTML(mem.ID, shareURL, shared, av)
@@ -1010,9 +1016,56 @@ func handleSharedArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 	}
 }
 
+// nonPublishableVisibilities are the tiers that are NARROWER than the project, and
+// so cannot be published to the anonymous /share/:id route by a project writer
+// (aihub#151). 'private' is author-only and 'admin' is global-admin-only; a writer
+// who is neither would otherwise be publishing someone else's restricted memory to
+// the whole internet, and the round trip back through unshare cannot restore what
+// was never a project-wide tier to begin with.
+var nonPublishableVisibilities = map[string]bool{
+	"private": true,
+	"admin":   true,
+}
+
+// shareRefusal returns the reason this memory may not be published to the
+// anonymous /share/:id route, or nil if there is none. It covers the two grounds
+// that do NOT depend on rendered_html, both added by aihub#151:
+//
+//  1. the memory's TYPE must be a configured render type (domain.IsRenderType).
+//     "has rendered_html" is not an artifact test: resolveRenderedHTML stores an
+//     explicit `html=` verbatim for any type at all, so before this check a writer
+//     could pf_save_artifact a note/decision with an html payload and publish it
+//     world-readable.
+//  2. the memory's current visibility must not be narrower than the project
+//     (see nonPublishableVisibilities). Note that this is a property of the ROW,
+//     not of the caller: even the author of a private memory has to widen it to
+//     the project first, so that "who could already read this" is a question with
+//     one answer before it is published to everyone. That is why both are 403 and
+//     not, say, 404 — the object is not a publishable one, whoever is asking.
+//
+// It is a function rather than two inline checks because handleArtifactHTML asks
+// the same question when it decides whether to render the /ui Share button. Two
+// copies would put a button on the page that always 403s — which is what the
+// first draft of this change did.
+func shareRefusal(mem *domain.Memory) *domain.AihubError {
+	if !domain.IsRenderType(mem.Type) {
+		return domain.NewErr(domain.ErrForbidden,
+			fmt.Sprintf("memory type %q is not a shareable artifact type (shareable: %s)",
+				mem.Type, strings.Join(domain.RenderTypeNames(), ", ")))
+	}
+	if nonPublishableVisibilities[mem.Visibility] {
+		return domain.NewErr(domain.ErrForbidden,
+			fmt.Sprintf("artifact visibility %q is narrower than the project and cannot be published; change it to \"project\" first if that is what you intend", mem.Visibility))
+	}
+	return nil
+}
+
 // handleShareArtifact marks a spec/plan artifact public so it can be viewed without auth
-// at /share/:id. Requires writer on the artifact's project; only artifacts that have
-// rendered_html can be shared (412 otherwise — there is no 422 in this codebase).
+// at /share/:id. Requires writer on the artifact's project, then shareRefusal (403),
+// then rendered_html (412 — there is no 422 in this codebase).
+//
+// The 412 stays LAST so a spec that simply has not been rendered yet still gets
+// the precondition answer rather than a forbidden one.
 func handleShareArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -1026,9 +1079,13 @@ func handleShareArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 		if err := checkProjectAccess(c, u, mem.Project, "writer"); err != nil {
 			return err
 		}
+		if aerr := shareRefusal(mem); aerr != nil {
+			return writeError(c, aerr)
+		}
 		if mem.RenderedHTML == nil {
 			return writeError(c, domain.NewErr(domain.ErrPreconditionFailed,
-				"artifact has no rendered HTML to share (only methodology.spec / methodology.plan / methodology.review render)"))
+				"artifact has no rendered HTML to share (renderable types: "+
+					strings.Join(domain.RenderTypeNames(), ", ")+")"))
 		}
 		if aihubErr := setMemoryVisibilityFn(ctx, pool, mem.ID, "public"); aihubErr != nil {
 			return writeError(c, aihubErr)
@@ -1042,8 +1099,50 @@ func handleShareArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 	}
 }
 
-// handleUnshareArtifact revokes public sharing by resetting visibility to project.
-// Same id is 404 on /share/:id immediately afterwards. Requires writer.
+// restorableVisibilities is the set unshare is willing to put a memory back into.
+// It is the memories_visibility_check constraint (migration 0023) minus 'public',
+// because restoring to 'public' is not an unshare.
+var restorableVisibilities = map[string]bool{
+	"private": true,
+	"project": true,
+	"team":    true,
+	"admin":   true,
+}
+
+// preShareVisibility reads the tier SetMemoryVisibility recorded when the memory
+// was published. It returns "" when there is nothing usable to restore — no attrs,
+// unparseable attrs, the key absent, or a value outside the schema's tier set —
+// and the caller falls back to "project".
+//
+// A value outside restorableVisibilities is treated as absent rather than passed
+// through: this string goes straight into an UPDATE against a CHECK constraint, and
+// the fallback must not be "whatever attrs happened to contain".
+func preShareVisibility(attrs json.RawMessage) string {
+	if len(attrs) == 0 {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(attrs, &obj); err != nil {
+		return ""
+	}
+	v, _ := obj[domain.PreShareVisibilityKey].(string)
+	if !restorableVisibilities[v] {
+		return ""
+	}
+	return v
+}
+
+// handleUnshareArtifact revokes public sharing by restoring the visibility tier the
+// memory held before it was shared. Same id is 404 on /share/:id immediately
+// afterwards. Requires writer.
+//
+// aihub#151: this used to hard-code "project". For a memory that was 'private'
+// (author-only) or 'admin' before sharing, that was not a revoke — it was a WIDENING,
+// leaving the row readable by every member of the project, and silently, since the
+// endpoint answers {"ok":true} either way. The pre-share tier is recorded in attrs by
+// SetMemoryVisibility at share time; "project" survives only as the fallback for rows
+// shared before that recording existed, which is the tier those rows have always been
+// restored to anyway.
 func handleUnshareArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -1057,10 +1156,26 @@ func handleUnshareArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 		if err := checkProjectAccess(c, u, mem.Project, "writer"); err != nil {
 			return err
 		}
-		if aihubErr := setMemoryVisibilityFn(ctx, pool, mem.ID, "project"); aihubErr != nil {
+		// Only a public memory has anything to revoke, and only a public memory
+		// has a pre-share tier recorded. Without this guard, DELETE on an already
+		// non-public artifact — previously a no-op — would move it to whatever
+		// attrs.pre_share_visibility happened to say, and attrs is caller-writable
+		// (RememberRequest.Attrs is bound straight from the request body, and
+		// UpdateMemory inherits the head's attrs wholesale). The direction is only
+		// ever narrowing, since 'public' is excluded from restorableVisibilities,
+		// but "narrowing by an amount the caller chose" is still not what an
+		// unshare of an unshared artifact should do.
+		if mem.Visibility != "public" {
+			return c.JSON(http.StatusOK, map[string]any{"ok": true, "visibility": mem.Visibility})
+		}
+		target := preShareVisibility(mem.Attrs)
+		if target == "" {
+			target = "project"
+		}
+		if aihubErr := setMemoryVisibilityFn(ctx, pool, mem.ID, target); aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
-		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
+		return c.JSON(http.StatusOK, map[string]any{"ok": true, "visibility": target})
 	}
 }
 

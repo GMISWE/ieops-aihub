@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"html/template"
 	"net/http"
 	"strings"
@@ -127,7 +126,22 @@ func lookupAPIKey(ctx context.Context, pool *pgxpool.Pool, keyHash string) (user
 
 // loadUserByAPIKeyID rebuilds the same UserContext that BearerAuth would
 // produce, given an api_key_id (the cookie carries the id, not the raw key).
-// Used by the UI middleware.
+// Used by the UI middleware, so this is the /ui cookie-session equivalent of the
+// Bearer path — every /ui page load for a non-admin comes through here.
+//
+// aihub#315: the project_roles derivation below was a THIRD inline copy of the
+// members parsing, character-for-character the same as the one in BearerAuth,
+// and it carried both of that copy's defects — a `continue` on any decode error
+// that discarded a whole project's membership, and an unguarded identity
+// compare. It was found by grepping for writers of ProjectRoles AFTER the
+// BearerAuth fix landed, not before: the fix and its gate had both been scoped
+// to the file being edited, so a defect one hop away was compliant. For a few
+// commits /ui and /v1 disagreed about the same user's roles.
+//
+// Both now call roleForUserInMembers, and TestProjectRolesHaveOneDerivation
+// asserts that every function in this package which writes ProjectRoles gets the
+// role from it — the claim in the first line of this comment is gated rather
+// than merely asserted.
 func loadUserByAPIKeyID(ctx context.Context, pool *pgxpool.Pool, apiKeyID string) (*UserContext, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT u.id, u.email, u.display_name, u.user_type, u.role,
@@ -172,20 +186,15 @@ func loadUserByAPIKeyID(ctx context.Context, pool *pgxpool.Pool, apiKeyID string
 				if err := prows.Scan(&projName, &membersRaw); err != nil {
 					continue
 				}
-				var members []struct {
-					UserID string `json:"user_id"`
-					Role   string `json:"role"`
+				role, found, decodeErr := roleForUserInMembers(membersRaw, uc.UserID)
+				if decodeErr != nil {
+					warnMalformedMembersOnce(projName, decodeErr)
 				}
-				if json.Unmarshal(membersRaw, &members) != nil {
+				if !found {
 					continue
 				}
-				for _, m := range members {
-					if m.UserID == uc.UserID {
-						if projectScope == nil || *projectScope == projName {
-							uc.ProjectRoles[projName] = m.Role
-						}
-						break
-					}
+				if projectScope == nil || *projectScope == projName {
+					uc.ProjectRoles[projName] = role
 				}
 			}
 			prows.Close()

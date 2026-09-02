@@ -39,36 +39,37 @@ import (
 )
 
 // middlewareProjectRoles fills /v1/users/me's project_roles so the fixtures
-// below carry a complete payload. It APPROXIMATES what internal/server
-// /middleware.go:102-134 would put there; it is not a fidelity oracle, and on
-// one fixture it and the real server disagree. Read the exception before
-// writing any assertion on project_roles.
+// below carry a complete payload. It APPROXIMATES what internal/server's
+// BearerAuth would put there. It is still not a fidelity oracle — nothing
+// compares the two — but as of aihub#315 it is no longer knowingly wrong.
 //
-// EXCEPTION — "caller listed alongside a non-object junk entry". Measured by
-// transcribing middleware.go:110-131 verbatim and running it and this helper
-// over each fixture's members JSON: seven of the eight call sites agree (the
-// six cases in the table below plus the two byte-identity goldens); that one
-// diverges. The real server emits `project_roles: {}` there, this helper emits
-// {"aihub":"writer"}. Two independent reasons, both costing the real server a
-// membership it should have kept:
+// HISTORY, because this comment is the exact thing it warns about. It used to
+// document an EXCEPTION: on the "caller listed alongside a non-object junk
+// entry" fixture the real server emitted `project_roles: {}` while this helper
+// emitted {"aihub":"writer"}, because middleware.go discarded a whole project's
+// members on any decode error and compared identities without an empty guard.
+// aihub#315 fixed both on 2026-09-02, so that exception no longer exists — and
+// NOTHING WENT RED WHEN IT STOPPED BEING TRUE. The old text had been measured,
+// carefully, by transcribing middleware.go verbatim; a transcription is a copy,
+// and a copy of code in a comment rots the moment the original changes. Treat
+// everything below as a dated reading, not a standing fact.
 //
-//   - middleware.go:116-120 decodes members into a TYPED
-//     []struct{UserID, Role string} and `continue`s to the next project row on
-//     any error. A JSON number element makes that unmarshal return
-//     *json.UnmarshalTypeError, so the whole row is dropped. It is the
-//     `continue` that loses the membership, NOT the decoder — encoding/json
-//     fills the good entries in regardless (see the []any case in
-//     tools_lifecycle.go). That is the same wholesale-discard shape aihub#312
-//     removed on the pf_whoami side, still live over there.
-//   - middleware.go:124 matches on a bare `m.UserID == uc.UserID`, with no
-//     `uid != ""` guard. The body below has one. (Named by what it is rather
-//     than by line number: editing this comment moves that line.)
+// Re-measured 2026-09-02 by running the REAL internal/server function (not a
+// transcription of it) against this helper over every fixture's members JSON:
+// 8/8 call sites agree — the six cases in the table below plus the two
+// byte-identity goldens, junk-entry fixture included.
 //
-// Nothing is falsely green: no assertion in this file reads project_roles for
-// the diverging fixture. The only two goldens that quote project_roles at all
-// are the admin case and the non-admin-owner case, and the helper agrees with
-// the real server on both. The divergence is written down because an assertion
-// added later would silently inherit it.
+// One shape OUTSIDE that set still differs, recorded so nobody reads "8/8" as
+// equivalence: a member entry whose `role` is not a string. The real server
+// finds the membership with an empty role and emits {"aihub":""}; this helper's
+// `r, ok := m["role"].(string)` fails the type assert and emits {}.
+// checkProjectAccess treats a missing key and an empty role the same way, so
+// that is a payload difference and not an authorization one — but an assertion
+// on project_roles for such a fixture would inherit it.
+//
+// Nothing here is falsely green either way: the only two goldens that quote
+// project_roles are the admin case and the non-admin-owner case, and the helper
+// agrees with the real server on both.
 //
 // Worth knowing while reading these tests: that middleware already parses the
 // same projects.members JSONB and hands pf_whoami the caller's role for free,
@@ -79,6 +80,12 @@ import (
 // same payload. Collapsing the two is NOT done here — the middleware skips the
 // query entirely for admins, so project_roles is empty for exactly the callers
 // the short-circuit branch serves and cannot simply replace the enrichment.
+//
+// Both derivations are now correct (aihub#312 here, aihub#315 in the server),
+// so the duplication currently costs nothing observable. That is the dangerous
+// state, not the safe one: the two are held in agreement by nobody, and the
+// last time they drifted it took 26 days and a static read of the code to
+// notice. See the block in tools_lifecycle.go for the measured comparison.
 func middlewareProjectRoles(callerID, callerRole string, members []any) map[string]any {
 	roles := map[string]any{}
 	if callerRole == "admin" {

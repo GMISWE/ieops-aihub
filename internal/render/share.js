@@ -57,16 +57,32 @@
     return Promise.reject(new Error('no clipboard'));
   }
 
-  function errMessage(status) {
-    if (status === 403) return 'You need writer access to share';
-    if (status === 412) return 'Only spec/plan/review can be shared';
+  // aihub#151: these are FALLBACKS, not the message. They used to be the whole
+  // answer, and both were wrong the moment the server grew more reasons: 403 now
+  // covers "not a shareable artifact type" and "visibility is narrower than the
+  // project" as well as "you need writer access", and the 412 text named three
+  // types when six render by default and the set is configurable
+  // (RENDER_MEMORY_TYPES). A canned client-side string cannot track that, so
+  // showError prefers the server's own message and only falls back to these when
+  // the body is missing or unparseable.
+  function errFallback(status) {
+    if (status === 403) return 'Not allowed to share this artifact';
+    if (status === 412) return 'This artifact has no rendered HTML to share';
     return 'Share failed (' + status + ')';
+  }
+
+  function showError(res) {
+    res.json().then(function (data) {
+      showToast((data && data.message) || errFallback(res.status));
+    }).catch(function () {
+      showToast(errFallback(res.status));
+    });
   }
 
   function doShare() {
     fetch('/ui/artifacts/' + encodeURIComponent(memId) + '/share', { method: 'POST' })
       .then(function (res) {
-        if (!res.ok) { showToast(errMessage(res.status)); return; }
+        if (!res.ok) { showError(res); return; }
         return res.json().then(function (data) {
           var url = (data && data.share_url) || '';
           setShared(true, url);
@@ -83,7 +99,7 @@
   function doUnshare() {
     fetch('/ui/artifacts/' + encodeURIComponent(memId) + '/share', { method: 'DELETE' })
       .then(function (res) {
-        if (!res.ok) { showToast(errMessage(res.status)); return; }
+        if (!res.ok) { showError(res); return; }
         setShared(false, '');
         showToast('Sharing stopped');
       })

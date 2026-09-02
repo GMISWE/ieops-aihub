@@ -13,6 +13,20 @@ import (
 // WorktreePath returns the absolute worktree path for a given work item and repo.
 // It reads the state file and looks up the worktrees map (primary path).
 //
+// wiID may be a canonical work_items.id OR a slug, so the lookup goes through
+// config.ResolveStateFile rather than a bare filename read. Four MCP tools —
+// pf_diff, pf_commit, pf_push and pf_pr — hand their raw work_item_id argument
+// straight to this function, so a filename read here reproduced the aihub#141
+// defect one layer down from the call sites that were migrated: addressed by
+// slug, it found the C6-2 pre-claim stub (which has no worktrees map and no
+// project/slug to rebuild one from) or nothing at all, and the tool failed with
+// "worktree path not found" for a work item that had a perfectly good worktree.
+// (aihub#319)
+//
+// Callers that already hold a resolved state file pass sf.WIID, a canonical id,
+// which ResolveStateFile answers from the direct lookup — so this is a no-op for
+// coding.Ship and coding.Wrap.
+//
 // Fallback (state files written before worktree creation ran): reconstructs the
 // path from state file fields Project + Slug using the canonical directory format
 // pf.<project>-<seq>/<repo>/ (e.g. pf.aihub-80/aihub).
@@ -20,7 +34,7 @@ import (
 // Returns a clear error if the path cannot be determined; no silent fallback to
 // an incorrect path.
 func WorktreePath(wiID, repo, workspaceRoot string) (string, error) {
-	sf, err := config.ReadStateFile(wiID)
+	sf, err := config.ResolveStateFile(wiID)
 	if err != nil {
 		return "", fmt.Errorf("read state file for wi %s: %w", wiID, err)
 	}

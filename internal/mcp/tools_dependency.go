@@ -33,7 +33,7 @@ func (s *Server) registerDependencyTools() {
 		}
 
 		wiID := strArg(args, "work_item_id")
-		sf, err := config.ReadStateFile(wiID)
+		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
@@ -79,7 +79,7 @@ func (s *Server) registerDependencyTools() {
 		}
 
 		wiID := strArg(args, "work_item_id")
-		sf, err := config.ReadStateFile(wiID)
+		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}

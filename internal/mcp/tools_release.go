@@ -34,7 +34,7 @@ func (s *Server) registerReleaseTools() {
 			return errResult(fmt.Errorf("project is required"))
 		}
 
-		sf, err := config.ReadStateFile(wiID)
+		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
@@ -79,7 +79,7 @@ func (s *Server) registerReleaseTools() {
 			return errResult(fmt.Errorf("work_item_id is required"))
 		}
 
-		sf, err := config.ReadStateFile(wiID)
+		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}

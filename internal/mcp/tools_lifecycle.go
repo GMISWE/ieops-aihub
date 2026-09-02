@@ -994,9 +994,18 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(err)
 		}
 
-		// Write state file with new credentials
+		// Write state file with new credentials. Key by the canonical work_items.id
+		// the server returns (the input id may be a slug like "aihub#1"); persisting
+		// the slug would write a state file with an empty Slug that
+		// ResolveStateFile's slug-scan can never match, so a later canonical-id
+		// update would miss it. Populate Slug/Project too — mirror
+		// pf_claim_work_item. (aihub#149)
+		canonicalWIID := id
+		if v, ok := result["id"].(string); ok && v != "" {
+			canonicalWIID = v
+		}
 		sf := &config.StateFile{
-			WIID:          id,
+			WIID:          canonicalWIID,
 			SessionSecret: sessionSecret,
 			Claimed:       true,
 			ClaimedAt:     time.Now().UTC().Format(time.RFC3339),
@@ -1012,7 +1021,33 @@ func (s *Server) registerLifecycleTools() {
 				sf.ClaimEpoch = ce
 			}
 		}
-		_ = config.WriteStateFile(sf)
+		if v, ok := result["slug"].(string); ok {
+			sf.Slug = v
+		}
+		if v, ok := result["project"].(string); ok {
+			sf.Project = v
+		}
+		// Carry the worktree map over from whatever state file this machine already
+		// holds for the wi. Nothing in the takeover response carries it — only
+		// pf_claim_work_item ever creates worktrees — and this write now REPLACES
+		// the canonical-keyed file rather than sitting beside it under the slug, so
+		// building sf from scratch would destroy the map a prior claim recorded.
+		// The next pf_ship / pf_diff / pf_commit / pf_push / pf_pr would then find
+		// no worktrees map, and with no workspace_root argument to reconstruct a
+		// path from would fail outright. (aihub#319)
+		//
+		// Keyed on canonicalWIID rather than the caller-supplied id so it also
+		// finds the map when the takeover was addressed by slug; ResolveStateFile
+		// rather than ReadStateFile so it still finds it when an old server did not
+		// echo `id` and canonicalWIID is therefore itself a slug.
+		if prior, priorErr := config.ResolveStateFile(canonicalWIID); priorErr == nil && len(prior.Worktrees) > 0 {
+			sf.Worktrees = prior.Worktrees
+		}
+		// Persist the canonical-keyed state file and remove any orphan slug stub a
+		// prior slug-keyed write left behind, mirroring claim's WriteClaimState.
+		if err := config.WriteClaimState(id, canonicalWIID, sf); err != nil {
+			return errResult(fmt.Errorf("write state file: %w", err))
+		}
 
 		// Return result without session_secret.
 		// v1.21 ownership-only: no expires_at; do not surface that field.

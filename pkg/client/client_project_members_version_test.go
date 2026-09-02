@@ -10,6 +10,28 @@ package client
 // wire rather than trusting the shape of the function.
 //
 // No database: an httptest server is the peer.
+//
+// ─── READ THIS BEFORE TREATING A GREEN RUN HERE AS EVIDENCE ─────────────────
+//
+// These two tests are a REGRESSION GUARD, not evidence that this hop was ever
+// broken and then fixed. Measured, not assumed: both were run against the
+// pre-change tree (359a435) and both PASSED there. UpdateProject was already a
+// verbatim passthrough, so aihub#260 changed nothing in this file's subject
+// beyond a doc comment — every other new assertion in this change fails on
+// 359a435, and these two do not.
+//
+// So do not read "the client tests are green" as "the parameter was being
+// dropped here and now is not". Nothing was dropped here. What these tests buy
+// is the FUTURE: they go red if anyone later adds filtering, allowlisting or a
+// typed body to UpdateProject and quietly strips members_version on the way
+// past. That is not idle worry — an observability field being dropped by a
+// client-side allowlist is a defect this codebase has actually shipped.
+//
+// Their discriminating power is verified rather than asserted: mutation
+// "g_drop_at_pkg_client" (delete members_version from the map inside
+// UpdateProject) turns TestClientUpdateProjectForwardsMembersVersionOnTheWire
+// red, along with two of the MCP end-to-end cases. A guard whose mutant
+// survives is decoration; this one's does not.
 
 import (
 	"context"

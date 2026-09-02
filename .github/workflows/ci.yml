@@ -148,6 +148,31 @@ jobs:
       #             `104 (require only a DB: 101, need extra env: 3)` with that
       #             one function listed as executed by no step, before the step
       #             existed.
+      #
+      #   104 -> 121 aihub#260 added 17 DB-gated functions across three packages:
+      #             8 in internal/domain (projects_members_cas_db_test.go, all
+      #             named TestUpdateProjectMembersCAS*), 5 in internal/server
+      #             (routes_projects_cas_db_test.go, all named
+      #             TestProjectMembersVersionHTTP*) and 4 in internal/mcp
+      #             (project_members_cas_e2e_db_test.go, named
+      #             TestProjectMembersCAS*). A fifth function in that last file,
+      #             TestProjectMembersCASToolSchemaAdvertisesMembersVersion,
+      #             reads the advertised tool schema and needs no database, so it
+      #             is NOT one of the 17 — but the -run regex below does select
+      #             it, which is why that step asserts 5 passes in internal/mcp
+      #             and not 4. All 17 need only a database, so the required set
+      #             goes 101 -> 118 and they do need a new step ("aihub#260
+      #             project members CAS DB tests").
+      #             Measured, not predicted, and measured TWICE: first before the
+      #             0032 migration existed, then again on the tree as it will
+      #             merge (migration applied, database rebuilt from zero). Both
+      #             runs printed
+      #             `121 (require only a DB: 118, need extra env: 3)` with all 17
+      #             listed as executed by no step, before the step existed.
+      #             The `104` this starts from was re-read off origin/main
+      #             (4c1e726) at the moment this line was written, not recalled
+      #             from earlier in the session — see aihub#320 on why a stale
+      #             "from" value survives auto-merge while destroying the audit.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -163,7 +188,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 104
+            -min-gated 121
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
@@ -242,6 +267,84 @@ jobs:
           done
           ! grep -q -- '--- SKIP' wi_cas.log \
             || { echo "::error::a TestUpdateWorkItemCAS case SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#260: exercise the projects.members compare-and-set — the same
+      # pattern as the aihub#241 step above, applied to the other whole-list
+      # REPLACE column, against the same already-migrated Postgres service.
+      #
+      # Three packages rather than one, because the defect this guards is not
+      # "the domain function is wrong" but "the precondition never reaches the
+      # domain function". members_version has to survive the MCP tool schema,
+      # the MCP handler's body construction, pkg/client, and echo's binder; a
+      # parameter that exists in the schema and is dropped one hop later is
+      # indistinguishable at the call site from a guard that passed. So each hop
+      # gets its own step-visible assertion here, not just the innermost one.
+      # (pkg/client's two cases need no database and run in "Unit tests".)
+      #
+      # Scoped with -run rather than by setting AIHUB_TEST_DB on the "Unit
+      # tests" step, for the same reason as every step above: these packages
+      # hold other AIHUB_TEST_DB-gated suites that would switch on with it and
+      # that this change did not verify.
+      #
+      # Named one by one rather than counted, matching the aihub#241 step: a
+      # count stays green when a test is renamed away and a different one takes
+      # its place, which is exactly how coverage evaporates quietly. The
+      # `--- SKIP` guard is the second half — `go test` prints ok and exits 0
+      # when every selected test skips, and all of these skip whenever
+      # AIHUB_TEST_DB is empty.
+      #
+      # ONE SKIP guard PER invocation, each naming exactly one log. A single
+      # combined `! grep -q -- '--- SKIP' a.log b.log c.log` reads as equivalent
+      # and is not: dbtestcov models each `go test` invocation separately and
+      # rejects it, because one grep over three files cannot say WHICH
+      # invocation was asserted about. That is not a style rule I inferred — the
+      # first draft of this step used the combined form and both the coverage
+      # gate and its own unit test (TestParseWorkflow_RealCIWorkflow, which
+      # parses this very file) went red on it.
+      #
+      # Requires migration 0032_projects_members_version.sql; without it every
+      # project read fails, because projectSelectCols names the column.
+      - name: aihub#260 project members CAS DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestUpdateProjectMembersCAS' -count=1 -v 2>&1 | tee members_domain.log
+          go test ./internal/server/ -run 'TestProjectMembersVersionHTTP' -count=1 -v 2>&1 | tee members_server.log
+          go test ./internal/mcp/ -run 'TestProjectMembersCAS' -count=1 -v 2>&1 | tee members_mcp.log
+          for want in TestUpdateProjectMembersCASVersionAdvancesAcrossWrites \
+                      TestUpdateProjectMembersCASUnrelatedWriteLeavesVersionAlone \
+                      TestUpdateProjectMembersCASStaleVersionReturns409AndReportsCurrent \
+                      TestUpdateProjectMembersCASCorrectVersionSucceedsAndAdvances \
+                      TestUpdateProjectMembersCASOmittedVersionOverwritesUnconditionally \
+                      TestUpdateProjectMembersCASConcurrentAddsBothSurvive \
+                      TestUpdateProjectMembersCASConcurrentAddsWithoutTheGuardLoseOne \
+                      TestUpdateProjectMembersCASDoesNotPreventAccidentalTruncation; do
+            grep -q -- "--- PASS: $want" members_domain.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the DB-gated members CAS coverage is not actually executing"; exit 1; }
+          done
+          for want in TestProjectMembersVersionHTTPStaleVersionIs409 \
+                      TestProjectMembersVersionHTTPCurrentVersionSucceeds \
+                      TestProjectMembersVersionHTTPIsReadableFromBothReadPaths \
+                      TestProjectMembersVersionHTTPZeroIsSerialised \
+                      TestProjectMembersVersionHTTPGuardWithNothingToWriteIs400; do
+            grep -q -- "--- PASS: $want" members_server.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the HTTP hop of the members CAS is unguarded"; exit 1; }
+          done
+          for want in TestProjectMembersCASToolSchemaAdvertisesMembersVersion \
+                      TestProjectMembersCASVersionIsReadableFromListProjects \
+                      TestProjectMembersCASStaleVersionIsRefusedEndToEnd \
+                      TestProjectMembersCASConcurrentAddsBothSurviveEndToEnd \
+                      TestProjectMembersCASDoesNotStopSelfInflictedTruncationEndToEnd; do
+            grep -q -- "--- PASS: $want" members_mcp.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the MCP hop of the members CAS is unguarded"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' members_domain.log \
+            || { echo "::error::an aihub#260 internal/domain test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+          ! grep -q -- '--- SKIP' members_server.log \
+            || { echo "::error::an aihub#260 internal/server test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+          ! grep -q -- '--- SKIP' members_mcp.log \
+            || { echo "::error::an aihub#260 internal/mcp test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#288: exercise the work_items.attrs merge path (attrs_patch /
       # attrs_unset) against the same Postgres service, already migrated by the

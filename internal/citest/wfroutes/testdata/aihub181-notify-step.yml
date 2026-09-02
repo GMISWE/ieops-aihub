@@ -1,0 +1,37 @@
+# The "Notify aihub (non-blocking)" step exactly as it stood in
+# .github/workflows/publish-bins.yml before aihub#181 deleted it, wrapped in the
+# smallest workflow that will parse. This is the positive control for the gate:
+# the fixture is the real defect verbatim, not a shape invented to match the
+# detector, so a scanner change that stops seeing PUT /v1/binary fails here.
+#
+# Do not "fix" this file. It is supposed to be broken.
+name: Publish Bins (aihub#181 fixture)
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify aihub (non-blocking)
+        continue-on-error: true
+        env:
+          POLYFORGE_API_KEY: ${{ secrets.POLYFORGE_API_KEY }}
+          AIHUB_URL: ${{ secrets.AIHUB_URL }}
+        run: |
+          [ -z "$POLYFORGE_API_KEY" ] && echo "POLYFORGE_API_KEY not set, skipping" && exit 0
+          [ -z "$AIHUB_URL" ] && echo "AIHUB_URL not set, skipping" && exit 0
+          CHANNEL="${{ steps.channel.outputs.channel }}"
+          # Read source commit SHA from version.txt written in build step.
+          # Do NOT use `git rev-parse HEAD` here — after --orphan checkout, HEAD
+          # points to the bins branch commit, not the original source commit.
+          COMMIT_SHA=$(cat bin/version.txt 2>/dev/null | tr -d '[:space:]')
+          [ -z "$COMMIT_SHA" ] && echo "version.txt missing, skipping notify" && exit 0
+          curl -sf -X PUT \
+            -H "Authorization: Bearer ${POLYFORGE_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"channel\":\"${CHANNEL}\",\"commit\":\"${COMMIT_SHA}\",\"published_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
+            "${AIHUB_URL}/v1/binary" \
+            && echo "aihub notify ok" || echo "aihub notify failed (non-blocking)"

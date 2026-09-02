@@ -126,7 +126,10 @@ Confirm write (Enter) / Revise (enter revision notes) / Cancel (skip):
 
 The scenario repo (polyforge-coding) holds fleet-executable prompt content, so it must land
 via a PR, not a direct push to `main` -- use the crystallize chore wi's own claim (from Step
-2; its worktree is `pf.<project>-<seq>/polyforge-coding/`, branch `polyforge/<wi_id>`).
+2; its worktree is `pf.<project>-<seq>/polyforge-coding/`, branch
+`polyforge/<project>-<seq>-<short-kebab-goal>` — never assume the name, read it with
+`git -C <worktree> rev-parse --abbrev-ref HEAD`, since older claims are still on
+`polyforge/<ulid8>`. See pf-work's "Task branch naming").
 
 After the user confirms:
 

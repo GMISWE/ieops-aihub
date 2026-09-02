@@ -43,6 +43,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/GMISWE/ieops-aihub/internal/auth"
+	"github.com/GMISWE/ieops-aihub/internal/citest/testname"
 	"github.com/GMISWE/ieops-aihub/internal/mcp"
 	"github.com/GMISWE/ieops-aihub/internal/server"
 	"github.com/GMISWE/ieops-aihub/pkg/client"
@@ -179,11 +180,19 @@ func newProjCASStack(t *testing.T) *projCASStack {
 	}
 	t.Cleanup(pool.Close)
 
-	const (
-		uid    = "u_proj_cas_e2e"
-		rawKey = "pfk_proj_cas_e2e_test_key"
-	)
-	project := "p_proj_cas_e2e"
+	// Identifiers are derived from t.Name(), the same way testUser/testProject
+	// in internal/domain and newMembersVersionStack in internal/server do it:
+	// fixed names would make two tests in this file — and any two runs sharing
+	// one database — write to the same project row, and every version asserted
+	// below is absolute.
+	//
+	// The API key is derived too, not a shared constant. The auth middleware
+	// resolves a key by scanning users for a matching key_hash and takes the
+	// FIRST row (internal/server/middleware.go), so N users holding one key hash
+	// would authenticate as an arbitrary one of them.
+	uid := "u_" + testname.Sanitize(t.Name())
+	project := "p_" + testname.Sanitize(t.Name())
+	rawKey := "pfk_" + testname.Sanitize(t.Name())
 
 	keys, err := json.Marshal([]map[string]any{{"id": "k_proj_cas", "key_hash": auth.HashKey(rawKey)}})
 	if err != nil {
@@ -201,11 +210,12 @@ func newProjCASStack(t *testing.T) *projCASStack {
 		t.Fatalf("seed project: %v", err)
 	}
 	// Reset the member list AND the counter. Every version asserted below is
-	// absolute, and this project name is shared by each test in this file and
-	// reused on every run, so without resetting the counter the second run — and
-	// each test after the first within one run — inherits the previous writes.
-	// Measured: this suite went red on exactly that before the reset covered
-	// members_version.
+	// absolute, and the name above is derived from t.Name(), so it is the same
+	// string on every run against the same database — the isolation it buys is
+	// between tests, never between runs. Without this reset the second run
+	// inherits the first run's writes. Measured: this suite went red on exactly
+	// that (when the project name was shared by every test here too) before the
+	// reset covered members_version.
 	//
 	// Raw SQL, not the API under test: a fixture must not be built out of the
 	// function it exists to catch a bug in.
@@ -493,7 +503,8 @@ func TestProjectMembersCASConcurrentAddsBothSurviveEndToEnd(t *testing.T) {
 // writer's addition is lost). The second — a caller who reads all N and sends
 // back N-1 by mistake — is NOT fixed and cannot be by a compare-and-set: that
 // caller's version matches, so the guard passes and the members are gone
-// anyway. Pinned here so the work item cannot be read as closed.
+// anyway. Pinned here so the work item cannot be read as closed; the gap itself
+// is tracked as aihub#333.
 func TestProjectMembersCASDoesNotStopSelfInflictedTruncationEndToEnd(t *testing.T) {
 	s := newProjCASStack(t)
 	session := s.session(t, "proj-cas-truncate")
@@ -526,9 +537,10 @@ func TestProjectMembersCASDoesNotStopSelfInflictedTruncationEndToEnd(t *testing.
 	final := projCASReadProject(t, session, s.project)
 	if strings.Contains(fmt.Sprint(final["members"]), "u_two") {
 		t.Fatal("u_two survived a truncating write — if that is now prevented, this test is stale and the " +
-			"truncation half of aihub#260 has been addressed somewhere; update the work item rather than this test")
+			"truncation half of aihub#260 has been addressed somewhere; update aihub#333 rather than this test")
 	}
 	t.Logf("two members were removed with no error and a passing compare-and-set: %v. "+
 		"Fixing this needs incremental add_member/remove_member operations or a removal-count "+
-		"precondition — a separate API-shape decision, not part of aihub#260.", final["members"])
+		"precondition — a separate API-shape decision, not part of aihub#260, tracked as aihub#333.",
+		final["members"])
 }

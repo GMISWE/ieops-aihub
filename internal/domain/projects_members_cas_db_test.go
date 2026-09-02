@@ -460,7 +460,14 @@ func TestUpdateProjectMembersCASConcurrentAddsWithoutTheGuardLoseOne(t *testing.
 //
 // Fixing that needs incremental add_member/remove_member operations, or a
 // "you are removing M members, confirm" precondition. Both are API-shape
-// decisions and neither is in aihub#260.
+// decisions, neither is in aihub#260, and the gap is tracked as aihub#333.
+//
+// This is a CHARACTERIZATION test: it pins today's behaviour, not an invariant.
+// Every failure message below therefore says so — going red here most likely
+// means aihub#333 shipped, in which case this test is stale and the work item
+// is what needs updating, not the test. Its end-to-end twin is
+// TestProjectMembersCASDoesNotStopSelfInflictedTruncationEndToEnd in
+// internal/mcp/project_members_cas_e2e_db_test.go.
 func TestUpdateProjectMembersCASDoesNotPreventAccidentalTruncation(t *testing.T) {
 	pool := setupLatestTestDB(t)
 	u := testUser(t, pool)
@@ -483,9 +490,13 @@ func TestUpdateProjectMembersCASDoesNotPreventAccidentalTruncation(t *testing.T)
 	p2, aerr := UpdateProject(ctx, pool, project, caller,
 		UpdateProjectRequest{Members: &truncated, MembersVersion: &current})
 	require.Nil(t, aerr,
-		"the guard passed, as it must: nobody else wrote. This is the half aihub#260 does NOT fix.")
+		"a truncating write that nobody raced was refused (%v) — if short lists are now rejected, this "+
+			"characterization is stale and the truncation half of aihub#260 has been addressed somewhere; "+
+			"update aihub#333 rather than this test", aerr)
 	assert.Equal(t, []string{"u_one"}, casMembersOf(t, p2.Members),
 		"two members were removed with no error and no confirmation — compare-and-set cannot see this, "+
-			"because the version matched. Fixing it needs incremental add/remove operations or a "+
-			"removal-count precondition, which is a separate API-shape decision.")
+			"because the version matched. If members survived instead, this characterization is stale: "+
+			"something now prevents self-inflicted truncation, and aihub#333 is what should be updated, "+
+			"not this test. (Fixing it needs incremental add/remove operations or a removal-count "+
+			"precondition, which is a separate API-shape decision.)")
 }

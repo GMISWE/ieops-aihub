@@ -66,7 +66,7 @@ func (s *Server) registerProjectTools() {
 			// Postgres on every members write, so it is a token for "the list I
 			// read", not a timestamp — see buildProjectUpdate in
 			// internal/domain/projects.go for why not updated_at.
-			"members_version": prop("integer", "Compare-and-set guard for members: the members_version you last read from this project (pf_list_projects returns it). The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version in details.current_members_version — reread and retry. Omit to overwrite unconditionally. Every write of members increments this counter. NOTE: this protects you against a CONCURRENT writer; it does NOT protect against sending a short list yourself, which still removes everyone you left out."),
+			"members_version": prop("integer", "Compare-and-set guard for members: ALWAYS send the members_version you read alongside the list (pf_list_projects returns it). The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version in details.current_members_version — reread and retry. Every write of members increments this counter. Leaving it out overwrites unconditionally: a concurrent writer's edit is then silently discarded and you still get a 200. NOTE: this protects you against a CONCURRENT writer; it does NOT protect against sending a short list yourself, which still removes everyone you left out."),
 		}, []string{"name"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)

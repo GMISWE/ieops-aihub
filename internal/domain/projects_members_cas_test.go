@@ -26,6 +26,12 @@ package domain
 
 import (
 	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -330,10 +336,83 @@ func TestMembersCASConflictErr_ReportsBothVersions(t *testing.T) {
 	}
 }
 
+// ─── the compiled statement must reach the database unmodified ──────────────
+
+// parseDomainSource parses a file of this package for the structural guard
+// below. Structure rather than text: a substring scan can only ever forbid the
+// spellings somebody thought of.
+func parseDomainSource(t *testing.T, path string) (*token.FileSet, *ast.File) {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	return fset, f
+}
+
+// funcDeclNamed returns the top-level (non-method) func declaration named name,
+// and fails the test if there is none — so moving or renaming the function under
+// guard turns the guard red instead of silently inert.
+func funcDeclNamed(t *testing.T, fset *token.FileSet, f *ast.File, name string) *ast.FuncDecl {
+	t.Helper()
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if ok && fn.Recv == nil && fn.Name.Name == name && fn.Body != nil {
+			return fn
+		}
+	}
+	t.Fatalf("no top-level func %s with a body in %s — it was renamed, moved to another file, or turned "+
+		"into a method. This guard now checks nothing; point it at the new declaration.",
+		name, fset.Position(f.Pos()).Filename)
+	return nil
+}
+
+// rootIdentOf peels selectors, indexes, slices, derefs and parens off an
+// expression and returns the identifier at its base: `upd`, `upd.Query`,
+// `upd.Args[0]`, `(*upd).Query` and `upd.Args[1:]` all root at `upd`. An
+// expression not rooted at a plain identifier (a call result, a literal)
+// returns nil.
+func rootIdentOf(e ast.Expr) *ast.Ident {
+	for {
+		switch v := e.(type) {
+		case *ast.Ident:
+			return v
+		case *ast.ParenExpr:
+			e = v.X
+		case *ast.SelectorExpr:
+			e = v.X
+		case *ast.IndexExpr:
+			e = v.X
+		case *ast.IndexListExpr:
+			e = v.X
+		case *ast.SliceExpr:
+			e = v.X
+		case *ast.StarExpr:
+			e = v.X
+		case *ast.TypeAssertExpr:
+			e = v.X
+		default:
+			return nil
+		}
+	}
+}
+
+// renderNode prints a node back to source with its whitespace collapsed, so an
+// expression assertion survives gofmt alignment and line wrapping.
+func renderNode(t *testing.T, fset *token.FileSet, n ast.Node) string {
+	t.Helper()
+	var b strings.Builder
+	if err := printer.Fprint(&b, fset, n); err != nil {
+		t.Fatalf("render %T: %v", n, err)
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
 // UpdateProject must execute exactly the statement buildProjectUpdate compiled.
 //
-// A source-scan guard, and deliberately so: this is the one aihub#241 invariant
-// with no behavioural test that can fail. Rewriting
+// A source-structure guard, and deliberately so: this is the one aihub#241
+// invariant with no behavioural test that can fail. Rewriting
 // `members_version = members_version + 1` into a literal computed in Go from the
 // row read under SELECT ... FOR UPDATE produces identical results in every test
 // above — the row lock serialises the two writers, so the Go-computed value is
@@ -341,22 +420,171 @@ func TestMembersCASConflictErr_ReportsBothVersions(t *testing.T) {
 // correctness rests entirely on that lock rather than on the arithmetic, and the
 // lock is not what anybody reading the SET clause would check.
 //
-// Mutation-verified: this guard is the ONLY thing in the repo that goes red when
-// UpdateProject patches upd.Query on its way to Exec.
+// ─── what this asserts ──────────────────────────────────────────────────────
 //
-// The negative assertion is paired with a positive one on purpose: bodyOf
-// truncating early (or the function being renamed) would silently satisfy a lone
-// "does not contain" check.
+// Over UpdateProject's AST, with the variable name read off the
+// buildProjectUpdate call site rather than hardcoded:
+//
+//  1. buildProjectUpdate is called exactly once, and its result is bound to a
+//     plain identifier (call it `upd`). Otherwise: fatal, this guard is lost.
+//  2. `tx.QueryRow(ctx, upd.Query, upd.Args...)` appears exactly once. Fatal,
+//     because a guard that no longer sees the execution site guards nothing.
+//  3. Nothing other than that one declaration assigns to anything rooted at
+//     `upd` — no `upd = …`, `upd.Query = …`, `upd.Query += …`, `upd.Args[0] = …`,
+//     `upd.X++`, `for upd.X = range …` — and `upd` is never taken by address
+//     (`&upd`, `&upd.Query`), which is the other way a callee could rewrite it.
+//  4. In buildProjectUpdate, the string literal
+//     `members_version = members_version + 1` appears exactly ONCE — a count,
+//     not a boolean, so appending a second increment (which would advance the
+//     counter by 2 and invalidate every token a caller is holding) is red too.
+//
+// An earlier version of this guard tested `strings.Contains(body, "upd.Query =")`.
+// That was one spelling of an unbounded class, and it was measured green against
+// a whole-struct reassignment (`upd = projectUpdate{Query: patched, …}`) that
+// expressed exactly the defect the guard exists to catch. Adding more substrings
+// would not have closed it. The AST form is mutation-verified against three
+// mutants: whole-struct reassignment, `upd.Query += …`, and `upd.Query = upd.Query`.
+//
+// ─── what it does NOT cover ─────────────────────────────────────────────────
+//
+// It is a syntactic check over one function in one file, with no type
+// information, so it cannot see:
+//
+//   - a pointer-receiver method call, `upd.patch()`, which takes the address
+//     implicitly and appears in the AST as neither an assignment nor a `&`;
+//   - mutation through an alias of a reference-typed field —
+//     `a := upd.Args; a[0] = …` writes the same backing array;
+//   - anything wrong INSIDE buildProjectUpdate (that is what every other test
+//     in this file is for) or in any other function UpdateProject calls;
+//   - a rewrite of `req` before buildProjectUpdate is called.
+//
+// The reason it is still worth having is that the cheapest way to introduce
+// aihub#241 failure mode 1 is to patch the compiled string in place, and every
+// in-place patch has to name `upd` on a left-hand side or take its address.
 func TestUpdateProjectExecutesTheCompiledStatementUnmodified(t *testing.T) {
-	body := bodyOf(t, sourceOf(t, "projects.go"), "UpdateProject")
-	if !strings.Contains(body, "tx.QueryRow(ctx, upd.Query, upd.Args...)") {
-		t.Fatal("UpdateProject no longer executes buildProjectUpdate's compiled query directly — " +
-			"update this guard, and make sure whatever replaced it still runs the statement verbatim")
+	fset, file := parseDomainSource(t, "projects.go")
+	fn := funcDeclNamed(t, fset, file, "UpdateProject")
+
+	// (1) Locate the compiled statement and learn what it is called here.
+	var buildCall *ast.CallExpr
+	buildCalls := 0
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "buildProjectUpdate" {
+			buildCalls++
+			buildCall = call
+		}
+		return true
+	})
+	if buildCalls != 1 {
+		t.Fatalf("UpdateProject calls buildProjectUpdate %d times, want exactly 1 — this guard cannot tell "+
+			"which result reaches the database, so it is asserting nothing. Update it.", buildCalls)
 	}
-	if strings.Contains(body, "upd.Query =") {
-		t.Error("UpdateProject rewrites the statement buildProjectUpdate compiled. Every assertion about " +
-			"the SET clause lives in projects_members_cas_test.go and is made against buildProjectUpdate's " +
-			"output, so a rewrite here is invisible to all of them — including the one that requires " +
-			"members_version to be incremented by Postgres rather than computed in Go (aihub#241 failure mode 1)")
+	var declStmt *ast.AssignStmt
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, rhs := range as.Rhs {
+			if rhs == ast.Expr(buildCall) {
+				declStmt = as
+			}
+		}
+		return true
+	})
+	if declStmt == nil || len(declStmt.Lhs) == 0 {
+		t.Fatal("buildProjectUpdate's result is not bound to a variable in UpdateProject — this guard tracks " +
+			"that variable, so it can no longer see whether the compiled statement is patched. Update it.")
+	}
+	updIdent, ok := declStmt.Lhs[0].(*ast.Ident)
+	if !ok || updIdent.Name == "_" {
+		t.Fatalf("buildProjectUpdate's result is bound to %q, not a plain named variable, so this guard "+
+			"cannot follow it. Update it.", renderNode(t, fset, declStmt.Lhs[0]))
+	}
+	upd := updIdent.Name
+
+	// (2) The compiled statement is what gets executed, verbatim and once.
+	// Fatal: without this, the negative assertion below could be satisfied by
+	// the execution site having moved somewhere this guard does not look.
+	wantExec := fmt.Sprintf("tx.QueryRow(ctx, %s.Query, %s.Args...)", upd, upd)
+	execs := 0
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && renderNode(t, fset, call) == wantExec {
+			execs++
+		}
+		return true
+	})
+	if execs != 1 {
+		t.Fatalf("UpdateProject contains %d occurrences of %s, want exactly 1 — it no longer executes "+
+			"buildProjectUpdate's compiled query directly. Update this guard, and make sure whatever "+
+			"replaced it still runs the statement verbatim.", execs, wantExec)
+	}
+
+	// (3) Nothing patches it on the way there.
+	const why = "Every assertion about the SET clause is made against buildProjectUpdate's output, so a " +
+		"rewrite here is invisible to all of them — including the one that requires members_version to be " +
+		"incremented by Postgres rather than computed in Go (aihub#241 failure mode 1)."
+	flag := func(what string, n ast.Node) {
+		t.Errorf("UpdateProject modifies the statement buildProjectUpdate compiled: %s at %s\n  %s\n%s",
+			what, fset.Position(n.Pos()), renderNode(t, fset, n), why)
+	}
+	checkLHS := func(what string, n ast.Node, targets ...ast.Expr) {
+		for _, e := range targets {
+			if e == nil {
+				continue
+			}
+			if id := rootIdentOf(e); id != nil && id.Name == upd {
+				flag(what, n)
+				return
+			}
+		}
+	}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch s := n.(type) {
+		case *ast.AssignStmt:
+			if s == declStmt {
+				// The one legitimate write: the declaration itself. Its
+				// right-hand side is still walked, so `&upd` hidden in there
+				// would still be caught.
+				return true
+			}
+			checkLHS(fmt.Sprintf("assignment (%s)", s.Tok), s, s.Lhs...)
+		case *ast.IncDecStmt:
+			checkLHS(fmt.Sprintf("%s statement", s.Tok), s, s.X)
+		case *ast.RangeStmt:
+			checkLHS("range assignment", s, s.Key, s.Value)
+		case *ast.UnaryExpr:
+			if s.Op == token.AND {
+				checkLHS("address taken (a callee can write through it)", s, s.X)
+			}
+		}
+		return true
+	})
+
+	// (4) And the increment it compiles is there exactly once.
+	const incr = "members_version = members_version + 1"
+	build := funcDeclNamed(t, fset, file, "buildProjectUpdate")
+	incrs := 0
+	ast.Inspect(build.Body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		s, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			s = lit.Value
+		}
+		incrs += strings.Count(s, incr)
+		return true
+	})
+	if incrs != 1 {
+		t.Errorf("buildProjectUpdate's string literals contain %q %d times, want exactly 1.\n"+
+			"0 means the in-database increment is gone (aihub#241 failure mode 1); more than 1 means a "+
+			"members write advances the counter by more than one step, which invalidates the token every "+
+			"caller is holding and turns a correct compare-and-set into a 409.", incr, incrs)
 	}
 }

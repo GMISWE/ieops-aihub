@@ -1,5 +1,11 @@
 -- +goose Up
 
+-- DEPLOY ORDER: this migration must land STRICTLY BEFORE the binary that reads
+-- members_version. The new code SELECTs the column on every project READ, so
+-- against schema 31 `GET /v1/projects` fails outright with
+-- `column "members_version" of relation "projects" does not exist (SQLSTATE 42703)`
+-- — measured, not inferred. Binary-first breaks reads, not just member writes.
+--
 -- aihub#260: compare-and-set counter for projects.members.
 --
 -- `members` is a whole-list REPLACE, so adding one person means reading all N

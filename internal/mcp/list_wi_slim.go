@@ -131,6 +131,28 @@ package mcp
 // `total` vanished from pf_recall. Here `next_cursor` — and any top-level key
 // added to ListWorkItemsResult later — survives because it is never touched.
 // Pinned by TestSlimListWorkItems_KeepsUnknownTopLevelKeys.
+//
+// ─── aihub#314's `request_adjusted`, and why there is no entry for it here ───
+//
+// GET /v1/work_items resets a `limit` above 200 to 50 and has never said so
+// (aihub#267): "I sent nothing", "I sent 50" and "I sent 500" all come back as
+// 50 items. domain.ListWorkItems now appends a `request_adjusted` entry when that
+// fires, and it reaches the model through THIS function.
+//
+// It needed a line in recall_slim.go's whitelist and needs none here, and that
+// asymmetry is the entire thesis of aihub#314 rather than an inconsistency: a
+// keep-list makes silence the cheapest outcome, a delete-list makes disclosure
+// the cheapest outcome. The rule above — a key goes only when its value is null —
+// already licenses nothing for a top-level list of adjustments, so the field
+// arrives by default and the file needs no maintenance to keep it arriving.
+//
+// 🔴 That is a claim about the SHAPE of this function, so it is pinned by a test
+// on this function and not by inspection: TestSlimListWorkItems_KeepsRequestAdjusted
+// (request_adjusted_test.go) and TestListWorkItemsResponseCarriesRequestAdjusted
+// (request_adjusted_wiring_test.go, through the registered tool). Both go red if
+// this ever becomes a rebuild — the M5 mutation in the table at the top of
+// list_wi_slim_e2e_test.go, re-run for aihub#314 and recorded there. Do not
+// replace the guarantee with the argument; the argument is what would rot.
 func slimListWorkItemsResult(result map[string]any) map[string]any {
 	if result == nil {
 		return nil

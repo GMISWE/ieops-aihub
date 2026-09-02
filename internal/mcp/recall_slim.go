@@ -157,6 +157,30 @@ func slimRecallResultMode(result map[string]any, brief bool) map[string]any {
 	if ue, ok := result["unmatched_types_error"]; ok && ue != nil {
 		res["unmatched_types_error"] = ue
 	}
+	// aihub#314: request_adjusted lists the caller-supplied parameters the server
+	// rewrote or clamped — today `top_k`, capped at 200 by
+	// domain.normalizeRecallTopK. THIS COPY IS THE WHOLE POINT OF THE WORK ITEM,
+	// so read the INVARIANT note at the top of this function before deciding it
+	// looks redundant.
+	//
+	// The three fields above were each added to the REST response and then eaten
+	// here by default, because this whitelist is opt-in: `total` (aihub#249), the
+	// truncation pair (aihub#269), unmatched_types (aihub#289). The cost of
+	// telling a caller "I changed your request" was therefore an edit to THIS
+	// file, in another package, while saying nothing cost zero — so aihub#309,
+	// facing exactly that, deleted its clamp rather than disclose it and wrote
+	// down why (see the closing paragraph of domain.normalizeRecallTopK).
+	//
+	// One generic field ends that: it is whitelisted once and every future clamp
+	// APPENDS to it, so the next one costs nothing to disclose and there is no
+	// fourth instance to have. Absent when nothing was adjusted, so the healthy
+	// call pays zero tokens — same conditional-copy shape as total above, and
+	// deliberately `!= nil` rather than a length check, because an empty list
+	// reaching here is still the server's statement and not this file's to
+	// reinterpret.
+	if ra, ok := result["request_adjusted"]; ok && ra != nil {
+		res["request_adjusted"] = ra
+	}
 	return res
 }
 

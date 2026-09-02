@@ -14,7 +14,7 @@ The end-to-end flow is:
 6. [(Optional) Switch to the dev channel or build from source](#6-optional-switch-to-the-dev-channel-or-build-from-source)
 7. [Demo: create a work item and view it in the Web UI](#7-demo-create-a-work-item)
 
-The team runs a shared `aihub` server at `http://10.146.0.16:8080`, so you do
+The team runs a shared `aihub` server at `http://10.146.0.34:8080`, so you do
 not need to stand up your own backend.
 
 ---
@@ -41,7 +41,7 @@ cat > ~/.polyforge/config.toml <<'EOF'
 api_key = "pf_k1_REPLACE_ME"
 
 [server]
-url = "http://10.146.0.16:8080"
+url = "http://10.146.0.34:8080"
 EOF
 chmod 600 ~/.polyforge/config.toml
 ```
@@ -187,7 +187,12 @@ pf_whoami
 You should see your user id, display name, and the server URL from your
 `config.toml`. If you see a 401, double-check that the `api_key` in
 `~/.polyforge/config.toml` matches the one the owner handed you and that
-the file is readable by your user (`ls -l ~/.polyforge/config.toml`).
+the file is readable by your user (`ls -l ~/.polyforge/config.toml`). A
+connection error instead — `connection refused`, or a hang with no HTTP
+status at all — never reached the server, so the key is not the problem:
+check that the `[server] url` in that same file matches the address the
+owner gave you. It is an internal address, so you also have to be on a
+machine that can reach the team network.
 
 ### Did the binary actually download? (`~/.polyforge/binary-status.txt`)
 
@@ -290,13 +295,13 @@ example:
 ```
 
 That triggers the `polyforge:pf-work` skill, which talks to the shared
-`aihub` at `http://10.146.0.16:8080` to claim or create a work item for you.
+`aihub` at `http://10.146.0.34:8080` to claim or create a work item for you.
 
 To see the work item land server-side, open the Web UI:
 
-1. Visit `http://10.146.0.16:8080/ui/login` and paste your API key. The
+1. Visit `http://10.146.0.34:8080/ui/login` and paste your API key. The
    server mints a 7-day signed session cookie.
-2. Browse to `http://10.146.0.16:8080/ui/wi` — the list polls every 5 s, so
+2. Browse to `http://10.146.0.34:8080/ui/wi` — the list polls every 5 s, so
    your new wi shows up without a manual refresh.
 3. Click through to `/ui/wi/<id>` for the full timeline, declared resources,
    and step state.

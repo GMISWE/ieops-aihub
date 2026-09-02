@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,6 +43,64 @@ func GetUser(c echo.Context) *UserContext {
 	}
 	u, _ := v.(*UserContext)
 	return u
+}
+
+// projectMember is one element of the projects.members JSONB array, as the
+// authorization path needs to read it: who, and with what role.
+type projectMember struct {
+	UserID string `json:"user_id"`
+	Role   string `json:"role"`
+}
+
+// roleForUserInMembers returns the role recorded for callerUserID in one project's
+// members JSONB. found reports whether a membership element for that user existed;
+// decodeErr is non-nil when at least one element of the array was malformed, and is
+// for logging only — it never suppresses the elements that did decode.
+//
+// This is a function, not an inline block, for two reasons that are the whole
+// point of aihub#315: the same derivation exists on the pf_whoami side
+// (internal/mcp/tools_lifecycle.go, fixed in aihub#312) and drifted from this one,
+// and a defect that only exists inline in BearerAuth cannot be exercised without a
+// database — so the mutant lands where nothing can see it (aihub#309's lesson).
+//
+// The two properties it exists to hold, both of which the inline version got wrong:
+//
+//  1. A malformed element must not discard the rest of the array. encoding/json
+//     does not fail a slice wholesale: it records the first *json.UnmarshalTypeError
+//     and keeps decoding, so the elements on either side of a bad one are filled
+//     correctly and only the bad one is left zero-valued. Measured, not assumed —
+//     `[{u_a,writer}, 5, {u_b,viewer}]` decodes to `[{u_a,writer}, {"",""},
+//     {u_b,viewer}]` together with a non-nil error. Bailing out on that error threw
+//     away data that had already decoded, and the user-visible effect was the whole
+//     project disappearing from ProjectRoles — an unexplained permission denial
+//     whose cause was one dirty row in a possibly unrelated project. Keeping the
+//     partial result is never worse than bailing out: when members is not an array
+//     at all the error is a whole-value type error and the slice comes back nil,
+//     which is exactly what the old `continue` produced.
+//
+//  2. The identity comparison must be guarded on a non-empty caller id. A malformed
+//     element decodes to UserID == "", so an empty callerUserID would match it and
+//     inherit whatever Role that element happened to carry — `{"user_id":5,
+//     "role":"viewer"}` decodes to `{"", "viewer"}`, a live over-report. Fixing (1)
+//     is what makes that reachable, which is why both halves land together
+//     (aihub#312 hit the same coupling). callerUserID is empty only if a users row
+//     has an empty id, which no production path produces today; that is an upstream
+//     accident rather than a local guarantee, so it is asserted here instead of
+//     being asserted in a comment.
+func roleForUserInMembers(membersRaw []byte, callerUserID string) (role string, found bool, decodeErr error) {
+	if callerUserID == "" {
+		return "", false, nil
+	}
+	var members []projectMember
+	// The error is captured rather than acted on: the partially decoded slice is
+	// the useful result. See (1) above.
+	decodeErr = json.Unmarshal(membersRaw, &members)
+	for _, m := range members {
+		if m.UserID == callerUserID {
+			return m.Role, true, decodeErr
+		}
+	}
+	return "", false, decodeErr
 }
 
 // BearerAuth validates the Authorization: Bearer <key> header and sets the user in context.
@@ -113,21 +172,21 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 						if perr := prows.Scan(&projName, &membersRaw); perr != nil {
 							continue
 						}
-						var members []struct {
-							UserID string `json:"user_id"`
-							Role   string `json:"role"`
+						role, found, decodeErr := roleForUserInMembers(membersRaw, uc.UserID)
+						if decodeErr != nil {
+							// Loud, because the failure this replaced was silent: the user
+							// saw a permission denial and nothing said the cause was a dirty
+							// row in some project's members array.
+							fmt.Fprintf(os.Stderr,
+								"auth: project %q has a malformed members element (%v); the well-formed elements were still applied\n",
+								projName, decodeErr)
 						}
-						if json.Unmarshal(membersRaw, &members) != nil {
+						if !found {
 							continue
 						}
-						for _, m := range members {
-							if m.UserID == uc.UserID {
-								// Respect project_scope on the API key if set.
-								if projectScope == nil || *projectScope == projName {
-									uc.ProjectRoles[projName] = m.Role
-								}
-								break
-							}
+						// Respect project_scope on the API key if set.
+						if projectScope == nil || *projectScope == projName {
+							uc.ProjectRoles[projName] = role
 						}
 					}
 					prows.Close()

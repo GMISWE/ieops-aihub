@@ -7,8 +7,10 @@ was written; the gotchas in [Troubleshooting](#troubleshooting) are real failure
 hit during that run, not hypotheticals.
 
 For local development (running the binary straight from source) see
-[`../README.md`](../README.md). The team's existing one-command deploy is kept at
-the end under [Team deployment](#team-deployment-reference).
+[`../README.md`](../README.md). What production runs today, and the procedure for
+replacing that container, is at the end under
+[Team deployment](#team-deployment-reference). There is no one-command deploy:
+`make deploy` prints a pointer to that section and exits 1.
 
 ## Contents
 
@@ -199,15 +201,19 @@ docker compose up -d postgres
 docker compose run --rm aihub migrate-up
 ```
 
-Expected tail (the version number grows as migrations are added):
+Expected tail:
 
 ```
 Running database migrations...
 2026/... OK   0001_initial.sql
 ...
-2026/... OK   0027_run_attempts_pause_reason.sql
-2026/... goose: successfully migrated database to version: 27
+2026/... goose: successfully migrated database to version: <N>
 ```
+
+Signal: `<N>` is the highest migration number present in
+`internal/db/migrations/` at the revision you are deploying — read it off that
+directory, not off a number written here, which would be stale one migration
+later. `no migrations to run` is also a pass: the database is already there.
 
 Run migrations **before** starting a new server build whenever the release adds or
 changes a migration. goose is forward-and-back per migration and there is no
@@ -633,7 +639,9 @@ idempotent (only rows missing a vector for the current model are touched).
 
 The earlier shared instance ran server + Postgres via Compose on `10.146.0.16`,
 wrapped by `make deploy`. That host has been retired in favour of the Cloud SQL
-setup above; the Makefile target and its variables are kept for reference only:
+setup above, and `aihub#341` removed the target and its variables from the
+`Makefile` — none of the following still exists. It is recorded because older
+notes and scripts refer to it:
 
 | | |
 |---|---|
@@ -641,15 +649,15 @@ setup above; the Makefile target and its variables are kept for reference only:
 | Compose dir on host | `/root/manifests/aihub-v1` (`COMPOSE_DIR`) |
 | Image | `us-west1-docker.pkg.dev/devv-404803/public/aihub` (`GCR_IMAGE`) |
 
-```bash
-make deploy
-# ssh PROD_HOST: docker pull GCR_IMAGE:latest
-#                cd COMPOSE_DIR && docker compose up -d --no-deps --force-recreate aihub
+```
+make deploy, as it was — it pulled :latest, never ran migrations, and did:
+  ssh PROD_HOST: docker pull GCR_IMAGE:latest
+                 cd COMPOSE_DIR && docker compose up -d --no-deps --force-recreate aihub
 ```
 
-Typical release order (unchanged in spirit): merge to `main` → wait for CI to push
-the SHA tag → run `migrate-up` if the release changed migrations → recreate the
-server → verify `/v1/health` and `/v1/version`.
+The current release order is the numbered procedure in
+[Current production](#current-production-cloud-sql--bare-docker-run), which is
+the only authoritative copy of it.
 
 ## Health & version endpoints
 

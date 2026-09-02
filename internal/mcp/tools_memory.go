@@ -20,20 +20,7 @@ func (s *Server) registerMemoryTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_remember",
 		Description: "Store a memory in aihub. type must use full name (e.g. experience.debug). Rejects methodology.* types — write spec/plan/review/execute/retro/wrap_summary via pf_save_artifact.",
-		InputSchema: objectSchema(map[string]any{
-			"project":              prop("string", "Project name"),
-			"type":                 propEnum("string", "Memory type (full name e.g. experience.debug). methodology.* is not accepted here — use pf_save_artifact.", domain.PfRememberTypeEnum),
-			"content":              prop("string", "Memory content"),
-			"visibility":           prop("string", "private|project|team|admin"),
-			"work_item_id":         prop("string", "Associated work item ID"),
-			"base_strength":        prop("number", "Initial strength (0-1)"),
-			"attrs":                prop("object", "Additional attributes"),
-			"expires_at":           prop("string", "Expiry timestamp (RFC3339)"),
-			"dedup_mode":           prop("string", "Deduplication mode"),
-			"related_memory_ids":   prop("array", "Related memory IDs"),
-			"context_snippet":      prop("string", "Context snippet for embedding"),
-			"supersedes_memory_id": prop("string", "Memory ID this supersedes"),
-		}, []string{"project", "type", "content", "visibility"}),
+		InputSchema: rememberSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -97,9 +84,7 @@ func (s *Server) registerMemoryTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_get_memory",
 		Description: "Fetch one memory by id with its FULL, untruncated content — the follow-up read for a pf_recall item whose content_truncated is true.",
-		InputSchema: objectSchema(map[string]any{
-			"memory_id": prop("string", "Memory ID (the `id` of a pf_recall item)"),
-		}, []string{"memory_id"}),
+		InputSchema: getMemorySchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -122,9 +107,7 @@ func (s *Server) registerMemoryTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_activate_memory",
 		Description: "Activate a memory (increments activation count, updates stability)",
-		InputSchema: objectSchema(map[string]any{
-			"memory_id": prop("string", "Memory ID"),
-		}, []string{"memory_id"}),
+		InputSchema: activateMemorySchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -145,12 +128,7 @@ func (s *Server) registerMemoryTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_reinforce_memory",
 		Description: "Reinforce a memory with additional context (mutating — credentials from state file)",
-		InputSchema: objectSchema(map[string]any{
-			"memory_id":          prop("string", "Memory ID"),
-			"additional_context": prop("string", "Additional context for the memory"),
-			"strength_delta":     prop("number", "Strength delta"),
-			"work_item_id":       prop("string", "Work item ID (for credential injection)"),
-		}, []string{"memory_id", "additional_context", "work_item_id"}),
+		InputSchema: reinforceMemorySchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -168,16 +146,7 @@ func (s *Server) registerMemoryTools() {
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
-		body := map[string]any{
-			"additional_context": strArg(args, "additional_context"),
-			"attempt_id":         sf.AttemptID,
-			"claim_epoch":        sf.ClaimEpoch,
-			"session_secret":     sf.SessionSecret,
-		}
-		if v, ok := args["strength_delta"]; ok {
-			body["strength_delta"] = v
-		}
-		result, err := s.client.ReinforceMemory(ctx, memID, body)
+		result, err := s.client.ReinforceMemory(ctx, memID, buildReinforceMemoryBody(args, sf))
 		if err != nil {
 			return errResult(err)
 		}
@@ -188,14 +157,7 @@ func (s *Server) registerMemoryTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_update_memory",
 		Description: "Update a memory (creates a new version and advances the latest_id cursor). Credentials injected from state file.",
-		InputSchema: objectSchema(map[string]any{
-			"memory_id":     prop("string", "Memory ID (any id in the lineage)"),
-			"content":       prop("string", "New content (omit to keep current)"),
-			"visibility":    prop("string", "New visibility (omit to keep current)"),
-			"tags":          prop("array", "New tags (omit to keep current)"),
-			"base_strength": prop("number", "New base strength (omit to keep current)"),
-			"work_item_id":  prop("string", "Work item ID (for credential injection)"),
-		}, []string{"memory_id", "work_item_id"}),
+		InputSchema: updateMemorySchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -213,18 +175,7 @@ func (s *Server) registerMemoryTools() {
 		if err != nil {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
-		body := map[string]any{
-			"attempt_id":     sf.AttemptID,
-			"claim_epoch":    sf.ClaimEpoch,
-			"session_secret": sf.SessionSecret,
-			"work_item_id":   wiID,
-		}
-		for _, k := range []string{"content", "visibility", "tags", "base_strength"} {
-			if v, ok := args[k]; ok {
-				body[k] = v
-			}
-		}
-		result, err := s.client.UpdateMemory(ctx, memID, body)
+		result, err := s.client.UpdateMemory(ctx, memID, buildUpdateMemoryBody(args, sf))
 		if err != nil {
 			return errResult(err)
 		}
@@ -235,10 +186,7 @@ func (s *Server) registerMemoryTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_redact_memory",
 		Description: "Redact (soft-delete) a memory",
-		InputSchema: objectSchema(map[string]any{
-			"memory_id": prop("string", "Memory ID"),
-			"reason":    prop("string", "Reason for redaction"),
-		}, []string{"memory_id", "reason"}),
+		InputSchema: redactMemorySchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -248,8 +196,7 @@ func (s *Server) registerMemoryTools() {
 		if memID == "" {
 			return errResult(fmt.Errorf("memory_id is required"))
 		}
-		body := map[string]any{"reason": strArg(args, "reason")}
-		result, err := s.client.RedactMemory(ctx, memID, body)
+		result, err := s.client.RedactMemory(ctx, memID, buildRedactMemoryBody(args))
 		if err != nil {
 			return errResult(err)
 		}
@@ -260,16 +207,7 @@ func (s *Server) registerMemoryTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_save_artifact",
 		Description: "Save a methodology artifact (methodology.spec|plan|review|execute|retro|wrap_summary). Credentials injected from state file.",
-		InputSchema: objectSchema(map[string]any{
-			"type":                 propEnum("string", "Artifact type (must be one of the methodology.* kinds)", domain.MethodologyTypeEnum),
-			"work_item_id":         prop("string", "Work item ID"),
-			"content":              prop("string", "Artifact content (inline). Provide content OR path, not both."),
-			"path":                 prop("string", "Local filesystem path to a UTF-8 markdown file to read as the artifact content (read by the local MCP process; must resolve within the workspace, <=1 MiB). Provide content OR path, not both."),
-			"structured_payload":   prop("object", "Optional structured payload"),
-			"visibility":           prop("string", "private|project|team|admin (default: project)"),
-			"supersedes_memory_id": prop("string", "Memory ID this supersedes"),
-			"html":                 prop("string", "Optional pre-rendered HTML stored verbatim in rendered_html (full standalone document or body fragment). Overrides server-side markdown auto-render; use for custom-styled artifact views served by the artifact HTML viewer."),
-		}, []string{"type", "work_item_id"}),
+		InputSchema: saveArtifactSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -293,28 +231,7 @@ func (s *Server) registerMemoryTools() {
 			return errResult(fmt.Errorf("read state file: %w", err))
 		}
 
-		body := map[string]any{
-			"type":           artifactType,
-			"work_item_id":   wiID,
-			"content":        artifactContent,
-			"attempt_id":     sf.AttemptID,
-			"claim_epoch":    sf.ClaimEpoch,
-			"session_secret": sf.SessionSecret,
-		}
-		if v := strArg(args, "visibility"); v != "" {
-			body["visibility"] = v
-		}
-		if v, ok := args["structured_payload"]; ok {
-			body["structured_payload"] = v
-		}
-		if v := strArg(args, "supersedes_memory_id"); v != "" {
-			body["supersedes_memory_id"] = v
-		}
-		if v := strArg(args, "html"); v != "" {
-			body["rendered_html"] = v
-		}
-
-		result, err := s.client.Remember(ctx, body)
+		result, err := s.client.Remember(ctx, buildSaveArtifactBody(args, sf, artifactContent))
 		if err != nil {
 			return errResult(err)
 		}
@@ -327,11 +244,7 @@ func (s *Server) registerMemoryTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_adopt_artifact",
 		Description: "Mark an artifact as adopted (wrapper around pf_emit_event artifact_action)",
-		InputSchema: objectSchema(map[string]any{
-			"work_item_id":  prop("string", "Work item ID"),
-			"memory_id":     prop("string", "Artifact memory ID"),
-			"artifact_type": prop("string", "Artifact type"),
-		}, []string{"work_item_id", "memory_id"}),
+		InputSchema: artifactActionSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		return s.emitArtifactAction(ctx, req, "adopt")
 	})
@@ -340,11 +253,7 @@ func (s *Server) registerMemoryTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_close_artifact",
 		Description: "Mark an artifact as closed (wrapper around pf_emit_event artifact_action)",
-		InputSchema: objectSchema(map[string]any{
-			"work_item_id":  prop("string", "Work item ID"),
-			"memory_id":     prop("string", "Artifact memory ID"),
-			"artifact_type": prop("string", "Artifact type"),
-		}, []string{"work_item_id", "memory_id"}),
+		InputSchema: artifactActionSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		return s.emitArtifactAction(ctx, req, "close")
 	})
@@ -353,11 +262,7 @@ func (s *Server) registerMemoryTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_ignore_artifact",
 		Description: "Mark an artifact as ignored (wrapper around pf_emit_event artifact_action)",
-		InputSchema: objectSchema(map[string]any{
-			"work_item_id":  prop("string", "Work item ID"),
-			"memory_id":     prop("string", "Artifact memory ID"),
-			"artifact_type": prop("string", "Artifact type"),
-		}, []string{"work_item_id", "memory_id"}),
+		InputSchema: artifactActionSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		return s.emitArtifactAction(ctx, req, "ignore")
 	})
@@ -366,11 +271,7 @@ func (s *Server) registerMemoryTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_resolve_commit",
 		Description: "Resolve a spec/plan commit annotation with an AI reply (marks status=resolved, emits memory_commit_resolved).",
-		InputSchema: objectSchema(map[string]any{
-			"memory_id": prop("string", "Memory ID"),
-			"commit_id": prop("string", "Commit annotation ID"),
-			"reply":     prop("string", "AI reply explaining what was changed or why the annotation is resolved"),
-		}, []string{"memory_id", "commit_id", "reply"}),
+		InputSchema: resolveCommitSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -384,11 +285,10 @@ func (s *Server) registerMemoryTools() {
 		if commitID == "" {
 			return errResult(fmt.Errorf("commit_id is required"))
 		}
-		reply := strArg(args, "reply")
-		if reply == "" {
+		if strArg(args, "reply") == "" {
 			return errResult(fmt.Errorf("reply is required"))
 		}
-		result, err := s.client.ResolveCommit(ctx, memID, commitID, map[string]any{"reply": reply})
+		result, err := s.client.ResolveCommit(ctx, memID, commitID, buildResolveCommitBody(args))
 		if err != nil {
 			return errResult(err)
 		}
@@ -587,22 +487,254 @@ func (s *Server) emitArtifactAction(ctx context.Context, req *sdkmcp.CallToolReq
 		return errResult(fmt.Errorf("read state file: %w", err))
 	}
 
-	payload := map[string]any{
-		"artifact_key":  memID,
-		"artifact_type": strArg(args, "artifact_type"),
-		"action":        action,
-	}
-	body := map[string]any{
-		"work_item_id":   wiID,
-		"attempt_id":     sf.AttemptID,
-		"claim_epoch":    sf.ClaimEpoch,
-		"session_secret": sf.SessionSecret,
-		"event_type":     "artifact_action",
-		"payload":        payload,
-	}
-	result, err := s.client.EmitEvent(ctx, body)
+	result, err := s.client.EmitEvent(ctx, buildArtifactActionBody(args, sf, action))
 	if err != nil {
 		return errResult(err)
 	}
 	return jsonResult(result)
+}
+
+// ─── The other memory tools' two hops, made assertable (aihub#325) ───────────
+//
+// aihub#148 split pf_recall's schema literal and its forwarding block into named
+// functions so a guard could compare them (recall_params_wiring_test.go). It
+// covered pf_recall alone, and the very next tool along had the same defect:
+// pf_reinforce_memory declared work_item_id REQUIRED, refused the call without
+// one, and then built a body that did not contain it. Every non-methodology
+// reinforce answered
+//
+//	400  work_item_id is required when attempt_id/session_secret are provided
+//
+// because the MCP handler always sends attempt_id/session_secret (they come from
+// the state file, unconditionally) and enforceMethodologyAttemptGate's
+// non-methodology branch demands work_item_id whenever credentials are present
+// (internal/server/routes_memory.go). methodology.* memories take the other
+// branch, which binds to the TARGET memory's own work item and never reads the
+// request's — which is why pf_save_artifact traffic was unaffected and nobody
+// noticed.
+//
+// Both halves of every memory tool are now named functions for the same reason
+// pf_recall's are: a schema inside an AddTool literal and a body inside a closure
+// are unreachable from a test, so the contract between them cannot be asserted
+// at all. memory_tools_wire_test.go is the guard over the whole set — it drives
+// each tool through the real handler and asserts on the request bytes, so a
+// builder that is correct but no longer CALLED fails it too.
+//
+// 🔴 These builders take the resolved *config.StateFile rather than reading it
+// themselves. That is what lets the guard run with no workspace on disk, and it
+// keeps the credential read in exactly one place per handler.
+
+// rememberSchema is pf_remember's published InputSchema.
+//
+// pf_remember has no forwarding block to drift from: its handler passes the
+// argument map to pkg/client verbatim, so every published property is on the
+// wire by construction. The guard states that identity rather than assuming it.
+func rememberSchema() json.RawMessage {
+	return objectSchema(map[string]any{
+		"project":              prop("string", "Project name"),
+		"type":                 propEnum("string", "Memory type (full name e.g. experience.debug). methodology.* is not accepted here — use pf_save_artifact.", domain.PfRememberTypeEnum),
+		"content":              prop("string", "Memory content"),
+		"visibility":           prop("string", "private|project|team|admin"),
+		"work_item_id":         prop("string", "Associated work item ID"),
+		"base_strength":        prop("number", "Initial strength (0-1)"),
+		"attrs":                prop("object", "Additional attributes"),
+		"expires_at":           prop("string", "Expiry timestamp (RFC3339)"),
+		"dedup_mode":           prop("string", "Deduplication mode"),
+		"related_memory_ids":   prop("array", "Related memory IDs"),
+		"context_snippet":      prop("string", "Context snippet for embedding"),
+		"supersedes_memory_id": prop("string", "Memory ID this supersedes"),
+	}, []string{"project", "type", "content", "visibility"})
+}
+
+// getMemorySchema is pf_get_memory's published InputSchema.
+func getMemorySchema() json.RawMessage {
+	return objectSchema(map[string]any{
+		"memory_id": prop("string", "Memory ID (the `id` of a pf_recall item)"),
+	}, []string{"memory_id"})
+}
+
+// activateMemorySchema is pf_activate_memory's published InputSchema.
+func activateMemorySchema() json.RawMessage {
+	return objectSchema(map[string]any{
+		"memory_id": prop("string", "Memory ID"),
+	}, []string{"memory_id"})
+}
+
+// reinforceMemorySchema is pf_reinforce_memory's published InputSchema — hop 1.
+func reinforceMemorySchema() json.RawMessage {
+	return objectSchema(map[string]any{
+		"memory_id":          prop("string", "Memory ID"),
+		"additional_context": prop("string", "Additional context for the memory"),
+		"strength_delta":     prop("number", "Strength delta"),
+		"work_item_id":       prop("string", "Work item ID (for credential injection)"),
+	}, []string{"memory_id", "additional_context", "work_item_id"})
+}
+
+// buildReinforceMemoryBody renders pf_reinforce_memory's arguments and the
+// resolved state file into the body of PATCH /v1/memories/:id/reinforce — hop 2.
+//
+// 🔴 work_item_id is not decoration. The server VERIFIES the attempt credentials
+// against it (domain.VerifyAttemptCredentialPool), and writes it into
+// attrs.reinforcements[].from_wi as the provenance of the reinforcement. Sending
+// the credentials without the work item they belong to is the one combination
+// the gate rejects outright.
+//
+// memory_id is absent on purpose: it is the :id path segment. That is asserted
+// on the real request URL by memory_tools_wire_test.go rather than exempted on
+// trust — "it goes in the path" is a claim, and an unchecked claim is how a
+// published parameter goes missing.
+func buildReinforceMemoryBody(args map[string]any, sf *config.StateFile) map[string]any {
+	body := map[string]any{
+		"additional_context": strArg(args, "additional_context"),
+		"attempt_id":         sf.AttemptID,
+		"claim_epoch":        sf.ClaimEpoch,
+		"session_secret":     sf.SessionSecret,
+		"work_item_id":       strArg(args, "work_item_id"),
+	}
+	if v, ok := args["strength_delta"]; ok {
+		body["strength_delta"] = v
+	}
+	return body
+}
+
+// updateMemorySchema is pf_update_memory's published InputSchema.
+func updateMemorySchema() json.RawMessage {
+	return objectSchema(map[string]any{
+		"memory_id":     prop("string", "Memory ID (any id in the lineage)"),
+		"content":       prop("string", "New content (omit to keep current)"),
+		"visibility":    prop("string", "New visibility (omit to keep current)"),
+		"tags":          prop("array", "New tags (omit to keep current)"),
+		"base_strength": prop("number", "New base strength (omit to keep current)"),
+		"work_item_id":  prop("string", "Work item ID (for credential injection)"),
+	}, []string{"memory_id", "work_item_id"})
+}
+
+// updateMemoryPassthroughFields are the pf_update_memory arguments forwarded
+// under their own names, and only when present — absent means "keep current",
+// which is not the same as sending a zero value.
+var updateMemoryPassthroughFields = []string{"content", "visibility", "tags", "base_strength"}
+
+// buildUpdateMemoryBody renders pf_update_memory's arguments and the resolved
+// state file into the body of PATCH /v1/memories/:id/update.
+func buildUpdateMemoryBody(args map[string]any, sf *config.StateFile) map[string]any {
+	body := map[string]any{
+		"attempt_id":     sf.AttemptID,
+		"claim_epoch":    sf.ClaimEpoch,
+		"session_secret": sf.SessionSecret,
+		"work_item_id":   strArg(args, "work_item_id"),
+	}
+	for _, k := range updateMemoryPassthroughFields {
+		if v, ok := args[k]; ok {
+			body[k] = v
+		}
+	}
+	return body
+}
+
+// redactMemorySchema is pf_redact_memory's published InputSchema.
+func redactMemorySchema() json.RawMessage {
+	return objectSchema(map[string]any{
+		"memory_id": prop("string", "Memory ID"),
+		"reason":    prop("string", "Reason for redaction"),
+	}, []string{"memory_id", "reason"})
+}
+
+// buildRedactMemoryBody renders pf_redact_memory's arguments into the body of
+// PATCH /v1/memories/:id/redact.
+func buildRedactMemoryBody(args map[string]any) map[string]any {
+	return map[string]any{"reason": strArg(args, "reason")}
+}
+
+// saveArtifactSchema is pf_save_artifact's published InputSchema.
+func saveArtifactSchema() json.RawMessage {
+	return objectSchema(map[string]any{
+		"type":                 propEnum("string", "Artifact type (must be one of the methodology.* kinds)", domain.MethodologyTypeEnum),
+		"work_item_id":         prop("string", "Work item ID"),
+		"content":              prop("string", "Artifact content (inline). Provide content OR path, not both."),
+		"path":                 prop("string", "Local filesystem path to a UTF-8 markdown file to read as the artifact content (read by the local MCP process; must resolve within the workspace, <=1 MiB). Provide content OR path, not both."),
+		"structured_payload":   prop("object", "Optional structured payload"),
+		"visibility":           prop("string", "private|project|team|admin (default: project)"),
+		"supersedes_memory_id": prop("string", "Memory ID this supersedes"),
+		"html":                 prop("string", "Optional pre-rendered HTML stored verbatim in rendered_html (full standalone document or body fragment). Overrides server-side markdown auto-render; use for custom-styled artifact views served by the artifact HTML viewer."),
+	}, []string{"type", "work_item_id"})
+}
+
+// buildSaveArtifactBody renders pf_save_artifact's arguments, the resolved state
+// file and the already-resolved content into the body of POST /v1/memories.
+//
+// content is a parameter rather than read from args because `path` and `content`
+// are two spellings of the same field: resolveArtifactContent collapses them
+// (reading the file where necessary) before this is called, which is why `path`
+// has no landing of its own.
+//
+// `html` lands as `rendered_html` — the one renamed field in this file. A guard
+// that matched names rather than values would call that a drop.
+func buildSaveArtifactBody(args map[string]any, sf *config.StateFile, content string) map[string]any {
+	body := map[string]any{
+		"type":           strArg(args, "type"),
+		"work_item_id":   strArg(args, "work_item_id"),
+		"content":        content,
+		"attempt_id":     sf.AttemptID,
+		"claim_epoch":    sf.ClaimEpoch,
+		"session_secret": sf.SessionSecret,
+	}
+	if v := strArg(args, "visibility"); v != "" {
+		body["visibility"] = v
+	}
+	if v, ok := args["structured_payload"]; ok {
+		body["structured_payload"] = v
+	}
+	if v := strArg(args, "supersedes_memory_id"); v != "" {
+		body["supersedes_memory_id"] = v
+	}
+	if v := strArg(args, "html"); v != "" {
+		body["rendered_html"] = v
+	}
+	return body
+}
+
+// artifactActionSchema is the InputSchema shared by pf_adopt_artifact,
+// pf_close_artifact and pf_ignore_artifact.
+func artifactActionSchema() json.RawMessage {
+	return objectSchema(map[string]any{
+		"work_item_id":  prop("string", "Work item ID"),
+		"memory_id":     prop("string", "Artifact memory ID"),
+		"artifact_type": prop("string", "Artifact type"),
+	}, []string{"work_item_id", "memory_id"})
+}
+
+// buildArtifactActionBody renders an adopt/close/ignore call into the body of
+// POST /v1/events.
+//
+// memory_id lands NESTED and RENAMED, as payload.artifact_key. Both are why the
+// guard walks JSON paths instead of comparing top-level key sets.
+func buildArtifactActionBody(args map[string]any, sf *config.StateFile, action string) map[string]any {
+	return map[string]any{
+		"work_item_id":   strArg(args, "work_item_id"),
+		"attempt_id":     sf.AttemptID,
+		"claim_epoch":    sf.ClaimEpoch,
+		"session_secret": sf.SessionSecret,
+		"event_type":     "artifact_action",
+		"payload": map[string]any{
+			"artifact_key":  strArg(args, "memory_id"),
+			"artifact_type": strArg(args, "artifact_type"),
+			"action":        action,
+		},
+	}
+}
+
+// resolveCommitSchema is pf_resolve_commit's published InputSchema.
+func resolveCommitSchema() json.RawMessage {
+	return objectSchema(map[string]any{
+		"memory_id": prop("string", "Memory ID"),
+		"commit_id": prop("string", "Commit annotation ID"),
+		"reply":     prop("string", "AI reply explaining what was changed or why the annotation is resolved"),
+	}, []string{"memory_id", "commit_id", "reply"})
+}
+
+// buildResolveCommitBody renders pf_resolve_commit's arguments into the body of
+// POST /v1/memories/:id/commit/:commit_id/resolve. memory_id and commit_id are
+// path segments, not body fields.
+func buildResolveCommitBody(args map[string]any) map[string]any {
+	return map[string]any{"reply": strArg(args, "reply")}
 }

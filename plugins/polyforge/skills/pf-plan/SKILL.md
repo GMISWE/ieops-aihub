@@ -130,22 +130,28 @@ Parse the plan's per-step `Touched files:` lines into a `declared_resources` lis
 - Steps marked `(no file edits)` → skip (no resource entry)
 
 Collect unique file entries across all steps — if the same path appears as both write and
-read, keep only the `write` entry (write is the stronger intent) — then:
+read, keep only the `write` entry (write is the stronger intent) — then read the wi for its
+current `resources_version` and write the list back:
 
 ```
+# `resources_version` is a top-level integer field of the response.
+# brief=true only drops `content`; every other field, this one included, is still there.
+wi = pf_get_work_item(work_item_id=<current>, brief=true)
+
 pf_update_work_item(
   work_item_id=<current>,
   declared_resources=[
     {"type": "path", "uri": "file:<repo-relative-path>", "intent": "write"},
     ...
   ],
-  resources_version=<the integer pf_get_work_item returned for this wi>
+  resources_version=<wi.resources_version>
 )
 ```
 
-- **Always send `resources_version`.** It is one integer, already in the `pf_get_work_item`
-  response, and it is never the wrong thing to send. The update then applies only if nobody
-  has changed `declared_resources` since you read it; otherwise it fails with
+- **Always send `resources_version`.** Read it here, immediately before the write: the guarded
+  window is exactly that read-to-write gap, so a value fetched earlier in the session only
+  widens it for no benefit. It is never the wrong thing to send. The update then applies only
+  if nobody has changed `declared_resources` since you read it; otherwise it fails with
   **409 `CONFLICT_CAS_FAILED`** carrying `details.current_resources_version` and leaves the
   stored list untouched — re-read the wi, re-derive from the plan, retry. Every successful
   write of `declared_resources` increments the counter, so the number is a token for "the

@@ -19,12 +19,13 @@ import (
 //	hop 3  projection -> tool output TEXT    assertions below are on the text
 //	hop 4  (deliberately absent)             see TestRecallFieldsNeedsNoServerHop
 //
-// This is the aihub#282 hazard, stated precisely. #282 is about a parameter
+// This is the aihub#148 hazard, stated precisely. #148 is about a parameter
 // (`similarity_threshold`) that is published in pf_recall's InputSchema, is not in
 // the handler's forwarding loop, and is not parsed by handleRecall either — while
 // being fully implemented in domain. Live-confirmed on the pre-change build while
 // writing this wi: passing 0.99 and passing nothing returned the same 20 items in
-// the same order, min similarity 0.154.
+// the same order, min similarity 0.154. (aihub#282 was a duplicate of #148 and is
+// closed as superseded; #148 carries the evidence and the fix.)
 //
 // `fields` is immune to that failure by construction rather than by care, and the
 // fake below is what proves it: it answers /v1/memories with ONE fixed payload and
@@ -56,10 +57,11 @@ func recallProbeItems() []any {
 }
 
 // TestRecallFieldsBriefArrivesAndProjects is the POSITIVE probe, in the direction
-// aihub#282 could not go: the same request, the same server payload, one argument
-// different, and a different answer. If `fields` were dropped anywhere between the
-// tool call and the projection, these two texts would be byte-identical — which is
-// exactly the evidence #282 produced for similarity_threshold.
+// aihub#148 could not go before it was fixed: the same request, the same server
+// payload, one argument different, and a different answer. If `fields` were dropped
+// anywhere between the tool call and the projection, these two texts would be
+// byte-identical — which is exactly the evidence #148 produced for
+// similarity_threshold.
 func TestRecallFieldsBriefArrivesAndProjects(t *testing.T) {
 	base := map[string]any{"project": "aihub", "query": "token cost"}
 
@@ -74,7 +76,7 @@ func TestRecallFieldsBriefArrivesAndProjects(t *testing.T) {
 
 	if fullText == briefText {
 		t.Fatalf("fields=\"brief\" changed nothing — the parameter never reached the projection. "+
-			"This is aihub#282's exact signature (a schema-declared param that no hop consumes).\n text: %s", fullText)
+			"This is aihub#148's exact signature (a schema-declared param that no hop consumes).\n text: %s", fullText)
 	}
 
 	// Hop 3 is asserted on the TEXT, not the decoded map: bytes in the transcript

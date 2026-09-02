@@ -173,6 +173,31 @@ jobs:
       #             (4c1e726) at the moment this line was written, not recalled
       #             from earlier in the session — see aihub#320 on why a stale
       #             "from" value survives auto-merge while destroying the audit.
+      #
+      #   121 -> 126 aihub#148 added 5 DB-gated functions: 2 in internal/server
+      #             (routes_memory_similarity_threshold_db_test.go, named
+      #             TestHandleRecall_SimilarityThreshold*, hops 3 and 4 of
+      #             pf_recall's similarity_threshold) and 3 in internal/mcp
+      #             (recall_threshold_e2e_db_test.go, named TestE2ERecall*, all
+      #             four hops through the real router, client and MCP handler).
+      #             The hop-1/hop-2 halves of the same guard are in
+      #             recall_params_wiring_test.go and recall_wire_query_test.go
+      #             and need no database, so they are NOT among the 5 — they run
+      #             in "Unit tests" like any other test. All 5 need only a
+      #             database (the embedding provider is internal/citest/
+      #             embedprobe, a deterministic offline fake with known cosines,
+      #             not a live endpoint), so the required set goes 118 -> 123 and
+      #             they do need a new step ("aihub#148 pf_recall
+      #             similarity_threshold DB tests").
+      #             Measured, not predicted, and measured on the tree AFTER
+      #             merging origin/main at 58e67b3 rather than on the older base
+      #             this branch started from: the gate was run locally exactly as
+      #             it runs here and printed
+      #             `126 (require only a DB: 123, need extra env: 3)` with all 5
+      #             listed as executed by no step, before the step existed. The
+      #             `121` this starts from was read off the merged tree, not
+      #             carried over from the branch's own earlier measurement of
+      #             104 -> 109, which was taken before aihub#260 landed.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -188,7 +213,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 121
+            -min-gated 126
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
@@ -970,6 +995,36 @@ jobs:
           done
           ! grep -q -- '--- SKIP' wi_echo_e2e.log \
             || { echo "::error::an aihub#281 E2E test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#148: pf_recall's `similarity_threshold` was published in the MCP
+      # InputSchema and fully implemented in internal/domain, with NEITHER hop
+      # in between carrying it — passing 0.99 and passing nothing returned
+      # byte-identical results in production. The five functions below are the
+      # hop-3, hop-4 and end-to-end halves of that guard; the hop-1/hop-2 halves
+      # need no database and already run in the "Unit tests" step.
+      #
+      # They must run against a real pgvector database because the floor is a
+      # SQL predicate spliced into a hand-built WHERE with hand-threaded $N
+      # placeholders, and the count query drops a trailing unreferenced bind
+      # value when the floor is off — a placeholder that drifts out of step with
+      # its args list is a runtime bind error, not a compile error.
+      - name: aihub#148 pf_recall similarity_threshold DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^(TestHandleRecall_SimilarityThresholdIsReachable|TestHandleRecall_SimilarityThresholdFiltersTotal)$' -count=1 -v 2>&1 | tee recall_threshold.log
+          go test ./internal/mcp/ -run '^(TestE2ERecallSimilarityThresholdReachesSQL|TestE2ERecallSimilarityThresholdSelectsRatherThanTruncates|TestE2ERecallTopKAcceptsAJSONNumber)$' -count=1 -v 2>&1 | tee -a recall_threshold.log
+          for want in TestHandleRecall_SimilarityThresholdIsReachable \
+                      TestHandleRecall_SimilarityThresholdFiltersTotal \
+                      TestE2ERecallSimilarityThresholdReachesSQL \
+                      TestE2ERecallSimilarityThresholdSelectsRatherThanTruncates \
+                      TestE2ERecallTopKAcceptsAJSONNumber; do
+            grep -q -- "--- PASS: $want (" recall_threshold.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#148 similarity_threshold coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' recall_threshold.log \
+            || { echo "::error::an aihub#148 threshold test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#303: the 26 DB-gated test functions that, until this step, no
       # `-run` in this file named — so they SKIPped on every CI run since the

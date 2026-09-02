@@ -2,9 +2,11 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -51,49 +53,7 @@ func (s *Server) registerMemoryTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_recall",
 		Description: "Recall memories from aihub with optional semantic search. type is an ARRAY of type names, e.g. [\"experience.*\",\"rule.work\"] — one filter per entry; a '|' inside an entry is NOT a separator and is rejected. An entry ending in .* is a prefix wildcard. Any entry matching no memory comes back in unmatched_types, which distinguishes a wrong type name from a project that genuinely holds no such memory. An item with content_truncated=true holds only a prefix of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest.",
-		InputSchema: objectSchema(map[string]any{
-			"project": prop("string", "Project name"),
-			"query":   prop("string", "Semantic search query"),
-			// aihub#289: the shape is the whole point of this description. Three
-			// SKILL.md templates taught type="a|b|c", nothing split it, and the
-			// resulting empty set read as "no relevant memory". The model reads this
-			// string, so this string has to state the contract.
-			"type":                 prop("array", "Memory types to filter — an ARRAY of names, one per entry: [\"experience.*\",\"rule.work\"]. Entries ending in .* are prefix wildcards. Do NOT pack several types into one string with '|' — that is not a separator and is rejected with a 400."),
-			"visibility":           prop("string", "Filter by visibility"),
-			"work_item_id":         prop("string", "Filter by work item ID"),
-			"top_k":                prop("string", "Max results"),
-			"similarity_threshold": prop("number", "Min similarity score"),
-			"min_strength":         prop("number", "Min memory strength (default 0.3)"),
-			"include_archived":     prop("boolean", "Include archived memories (default false)"),
-			"recency_weight":       prop("number", "Recency weight (default 0.3)"),
-			// aihub#313. This string is charged on EVERY request of EVERY session,
-			// whether or not pf_recall is called — the standing cost that closed
-			// aihub#279 as net negative — so it is priced, not written to taste.
-			// Measured on the REAL tools/list payload: +59 net (this property +64, the
-			// Description reword above -5), against a pf_recall tool object of 415 tok
-			// and a 50-tool block of 11,634. Three wordings were measured; the one
-			// below is 36 tok cheaper than a version that also enumerated the kept
-			// fields (redundant — the model can see them in the response) and 22 tok
-			// dearer than one that dropped the rune cap and the dropped-field list
-			// (NOT redundant — a caller that needs `related` has to learn brief drops
-			// it before spending a call). Do NOT re-price this with
-			// `dump-mcp-schemas`: its contract JSON omits per-property descriptions
-			// and reports +18, understating the real cost 3x.
-			//
-			// Break-even: one briefed no-top_k call saves 5,200 tok x 47.3 re-billings
-			// = ~246,000 tok, paying for ~4,150 requests of this standing cost, against
-			// a measured density of 16 briefed calls per 63 requests.
-			//
-			// propEnum, not prop: `fields` conventionally names a field LIST, so
-			// fields="id,type" is a natural guess that would silently return the full
-			// 6,966-token response — the exact cost this exists to remove, with no
-			// signal that the request was misunderstood. The enum makes the single
-			// legal value discoverable. It stays advisory (the SDK does not reject
-			// other values — verified, the wiring tests still pass while sending
-			// "Brief"/"BRIEF"/""), so the safe "anything but brief == full" default
-			// still holds for a client that ignores the enum.
-			"fields": propEnum("string", "\"brief\" replaces each item body with its first line (<=120 runes) and drops related/tags; content_truncated marks the cut, pf_get_memory(id) returns the full text.", []string{"brief"}),
-		}, []string{"project"}),
+		InputSchema: recallSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -102,65 +62,26 @@ func (s *Server) registerMemoryTools() {
 		if strArg(args, "project") == "" {
 			return errResult(fmt.Errorf("project is required"))
 		}
-		params := url.Values{}
-		for _, k := range []string{"project", "query", "visibility", "work_item_id", "top_k", "cursor"} {
-			setIfNonempty(params, k, strArg(args, k))
-		}
-		// min_strength and recency_weight are numbers — format as string
-		if v := numArg(args, "min_strength"); v != 0 {
-			params.Set("min_strength", fmt.Sprintf("%g", v))
-		}
-		if v := numArg(args, "recency_weight"); v != 0 {
-			params.Set("recency_weight", fmt.Sprintf("%g", v))
-		}
-		// type is an array — join as comma-separated
-		if types, ok := args["type"]; ok {
-			switch t := types.(type) {
-			case []any:
-				strs := make([]string, 0, len(t))
-				for _, v := range t {
-					if s, ok := v.(string); ok {
-						strs = append(strs, s)
-					}
-				}
-				if len(strs) > 0 {
-					params.Set("type", strings.Join(strs, ","))
-				}
-			case string:
-				params.Set("type", t)
-			}
-		}
-		if boolArg(args, "include_archived") {
-			params.Set("include_archived", "true")
-		}
-		// recall_algo: explicit arg wins, else env (POLYFORGE_RECALL_ALGO) lets a plugin
-		// build opt into the opt③ L1 lexical-relevance recall path server-side without
-		// changing the tool contract. Empty -> server default (recency).
-		if algo := strArg(args, "recall_algo"); algo != "" {
-			params.Set("recall_algo", algo)
-		} else if algo := os.Getenv("POLYFORGE_RECALL_ALGO"); algo != "" {
-			params.Set("recall_algo", algo)
-		}
-		result, err := s.client.Recall(ctx, params)
+		result, err := s.client.Recall(ctx, buildRecallParams(args))
 		if err != nil {
 			return errResult(err)
 		}
-		// aihub#313: `fields` is deliberately NOT added to the params loop above.
+		// aihub#313: `fields` is deliberately NOT forwarded by buildRecallParams.
 		//
-		// That loop is the hop aihub#282 is about. `similarity_threshold` is
-		// published in this very InputSchema, is never forwarded here, and is never
-		// parsed by handleRecall either, while being fully implemented in domain —
-		// so nothing reaches it. Re-confirmed live while writing this: passing 0.99
-		// and passing nothing return the same 20 items in the same order, min
-		// similarity 0.154, differing only in effective_strength's 10th decimal
-		// (decay between the two calls).
+		// That forwarding loop is the hop aihub#148 is about. `similarity_threshold`
+		// is published in this very InputSchema; until aihub#148 it was never
+		// forwarded there and never parsed by handleRecall either, while being fully
+		// implemented in domain — so nothing reached it. Confirmed live on the
+		// pre-fix build: passing 0.99 and passing nothing returned the same 20 items
+		// in the same order, min similarity 0.154, differing only in
+		// effective_strength's 10th decimal (decay between the two calls).
 		//
 		// `fields` cannot repeat that because it has no server hop to be dropped on.
 		// The projection is a property of what the MCP process HANDS THE MODEL, and
 		// this process is the last hop before the model, so the parameter is consumed
 		// exactly where it is read: one hop, no wire contract, no REST parse, no
 		// domain change. Adding it to the loop would be strictly worse — handleRecall
-		// would ignore the query param (a third instance of aihub#282), and
+		// would ignore the query param (a third instance of aihub#148), and
 		// routes_memory.go is aihub#309's declared file besides.
 		//
 		// This is the OPPOSITE error from aihub#287's 4_wrong_landing_point ("only
@@ -473,6 +394,162 @@ func (s *Server) registerMemoryTools() {
 		}
 		return jsonResult(result)
 	})
+}
+
+// ─── pf_recall's parameter contract, hops 1 and 2 (aihub#148) ────────────────
+//
+// Split out of the tool handler for the same reason buildListWorkItemsParams was
+// (aihub#280): hop 2 has to be assertable on the values that actually reach the
+// wire. `similarity_threshold` was published here, fully implemented in
+// internal/domain/memory_vector.go, and carried by neither hop in between — and
+// no test could see that, because the schema lived inside an AddTool literal and
+// the forwarding lived inside a closure. Both are now named functions with a
+// guard over them (recall_params_wiring_test.go).
+
+// recallStringParams are the pf_recall arguments forwarded to GET /v1/memories
+// verbatim as query strings.
+//
+// scalarArg, not strArg: `top_k` is published as a string, but "max results: 10"
+// is most naturally written as a JSON *number*, and strArg returns "" for a
+// non-string — so setIfNonempty dropped it and the server silently applied its
+// own default page size of 20. The caller got a page it did not ask for with
+// nothing anywhere to notice. Identical defect and identical fix to `limit` in
+// buildListWorkItemsParams (aihub#280 B6).
+//
+// `cursor` is forwarded but deliberately not published: paging is driven by
+// next_cursor from a previous response, not composed by the model.
+var recallStringParams = []string{"project", "query", "visibility", "work_item_id", "top_k", "cursor"}
+
+// recallNumberParams are the pf_recall arguments published as JSON numbers.
+//
+// Zero means "not specified" for all three, which is why they are not in the
+// scalarArg loop above: 0 is similarity_threshold's OFF value, and min_strength
+// / recency_weight both have server-side defaults that forwarding a literal 0
+// would overwrite.
+//
+// 🔴 similarity_threshold has NO default and must keep none. Measured on
+// project=ieops with limit=200: a pure-punctuation noise query scores 0.4712 at
+// its WORST hit while a real Chinese query whose top hit is the correct answer
+// scores 0.4798 at its BEST — 0.0086 apart, and the wrong way round for six of
+// the noise query's hits. No global cutoff separates noise from signal, so the
+// job here is to make the knob reachable, never to turn it on.
+var recallNumberParams = []string{"similarity_threshold", "min_strength", "recency_weight"}
+
+// recallSchema is pf_recall's published InputSchema — hop 1.
+func recallSchema() json.RawMessage {
+	return objectSchema(map[string]any{
+		"project": prop("string", "Project name"),
+		"query":   prop("string", "Semantic search query"),
+		// aihub#289: the shape is the whole point of this description. Three
+		// SKILL.md templates taught type="a|b|c", nothing split it, and the
+		// resulting empty set read as "no relevant memory". The model reads this
+		// string, so this string has to state the contract.
+		"type":         prop("array", "Memory types to filter — an ARRAY of names, one per entry: [\"experience.*\",\"rule.work\"]. Entries ending in .* are prefix wildcards. Do NOT pack several types into one string with '|' — that is not a separator and is rejected with a 400."),
+		"visibility":   prop("string", "Filter by visibility"),
+		"work_item_id": prop("string", "Filter by work item ID"),
+		"top_k": prop("string", "Max results (default 20, ceiling 200). A JSON number is also "+
+			"accepted, and is what most callers send."),
+		"similarity_threshold": prop("number", "Minimum cosine similarity, 0-1. Applies to the "+
+			"semantic (vector) half of the recall only, and is OFF by default — scores are not "+
+			"comparable across queries, so there is no safe global cutoff. A threshold that "+
+			"matches nothing returns an empty list rather than falling back to text search: "+
+			"empty is the intended answer when you set one."),
+		"min_strength":     prop("number", "Min memory strength (default 0.3)"),
+		"include_archived": prop("boolean", "Include archived memories (default false)"),
+		"recency_weight":   prop("number", "Recency weight (default 0.3)"),
+		// aihub#313. This string is charged on EVERY request of EVERY session,
+		// whether or not pf_recall is called — the standing cost that closed
+		// aihub#279 as net negative — so it is priced, not written to taste.
+		// Measured on the REAL tools/list payload: +59 net (this property +64, the
+		// Description reword above -5), against a pf_recall tool object of 415 tok
+		// and a 50-tool block of 11,634. Three wordings were measured; the one
+		// below is 36 tok cheaper than a version that also enumerated the kept
+		// fields (redundant — the model can see them in the response) and 22 tok
+		// dearer than one that dropped the rune cap and the dropped-field list
+		// (NOT redundant — a caller that needs `related` has to learn brief drops
+		// it before spending a call). Do NOT re-price this with
+		// `dump-mcp-schemas`: its contract JSON omits per-property descriptions
+		// and reports +18, understating the real cost 3x.
+		//
+		// Break-even: one briefed no-top_k call saves 5,200 tok x 47.3 re-billings
+		// = ~246,000 tok, paying for ~4,150 requests of this standing cost, against
+		// a measured density of 16 briefed calls per 63 requests.
+		//
+		// propEnum, not prop: `fields` conventionally names a field LIST, so
+		// fields="id,type" is a natural guess that would silently return the full
+		// 6,966-token response — the exact cost this exists to remove, with no
+		// signal that the request was misunderstood. The enum makes the single
+		// legal value discoverable. It stays advisory (the SDK does not reject
+		// other values — verified, the wiring tests still pass while sending
+		// "Brief"/"BRIEF"/""), so the safe "anything but brief == full" default
+		// still holds for a client that ignores the enum.
+		"fields": propEnum("string", "\"brief\" replaces each item body with its first line (<=120 runes) and drops related/tags; content_truncated marks the cut, pf_get_memory(id) returns the full text.", []string{"brief"}),
+	}, []string{"project"})
+}
+
+// recallNumArg reads one of recallNumberParams, tolerating the JSON *string*
+// spelling of a number.
+//
+// numArg alone would return 0 for `similarity_threshold: "0.99"`, and 0 is this
+// tool's "not specified" — so a caller that quoted the value would have its
+// filter silently discarded. That is defect 2 of aihub#148 (a value dropped
+// because its wire shape disagrees with its declared type) pointed at the very
+// parameter defect 1 is about, and nothing at any hop would have said so.
+// Unparseable text still yields 0 rather than an error, matching what the whole
+// forwarding block does with a value it cannot read.
+func recallNumArg(args map[string]any, key string) float64 {
+	if s, ok := args[key].(string); ok {
+		f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+		if err != nil {
+			return 0
+		}
+		return f
+	}
+	return numArg(args, key)
+}
+
+// buildRecallParams renders pf_recall's MCP arguments into the query string for
+// GET /v1/memories — hop 2 of the four-hop contract.
+func buildRecallParams(args map[string]any) url.Values {
+	params := url.Values{}
+	for _, k := range recallStringParams {
+		setIfNonempty(params, k, scalarArg(args, k))
+	}
+	// Numbers, formatted as %g. A zero is "not specified" — see recallNumberParams.
+	for _, k := range recallNumberParams {
+		if v := recallNumArg(args, k); v != 0 {
+			params.Set(k, fmt.Sprintf("%g", v))
+		}
+	}
+	// type is an array — join as comma-separated
+	if types, ok := args["type"]; ok {
+		switch t := types.(type) {
+		case []any:
+			strs := make([]string, 0, len(t))
+			for _, v := range t {
+				if s, ok := v.(string); ok {
+					strs = append(strs, s)
+				}
+			}
+			if len(strs) > 0 {
+				params.Set("type", strings.Join(strs, ","))
+			}
+		case string:
+			params.Set("type", t)
+		}
+	}
+	if boolArg(args, "include_archived") {
+		params.Set("include_archived", "true")
+	}
+	// recall_algo: explicit arg wins, else env (POLYFORGE_RECALL_ALGO) lets a plugin
+	// build opt into the opt③ L1 lexical-relevance recall path server-side without
+	// changing the tool contract. Empty -> server default (recency).
+	if algo := strArg(args, "recall_algo"); algo != "" {
+		params.Set("recall_algo", algo)
+	} else if algo := os.Getenv("POLYFORGE_RECALL_ALGO"); algo != "" {
+		params.Set("recall_algo", algo)
+	}
+	return params
 }
 
 // validatePfRememberArgs enforces pf_remember's contract before the HTTP call:

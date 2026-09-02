@@ -1046,8 +1046,9 @@ func (s *Server) registerLifecycleTools() {
 		Name:        "pf_get_ready_queue",
 		Description: "Get the LCRS (6-section) ready queue for a project. For Orchestrator use.",
 		InputSchema: objectSchema(map[string]any{
-			"project":         prop("string", "Project name"),
-			"max":             prop("string", "Max items in ready section"),
+			"project": prop("string", "Project name"),
+			"max": prop("string", "Max items in ready section (default 10). A JSON number is "+
+				"also accepted, and is what most callers send."),
 			"non_conflicting": prop("boolean", "Only return non-conflicting items"),
 		}, []string{"project"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
@@ -1061,7 +1062,12 @@ func (s *Server) registerLifecycleTools() {
 		}
 		params := url.Values{}
 		params.Set("project", project)
-		setIfNonempty(params, "max", strArg(args, "max"))
+		// scalarArg, not strArg: `max` is published as a string, but "max items:
+		// 5" is most naturally written as a JSON number, and strArg returns "" for
+		// a non-string — so setIfNonempty dropped it and handleGetReadyQueue fell
+		// back to its own default of 10, with no error at any hop. Same defect and
+		// same fix as `limit` above (aihub#280 B6 / aihub#148).
+		setIfNonempty(params, "max", scalarArg(args, "max"))
 		if boolArg(args, "non_conflicting") {
 			params.Set("non_conflicting", "true")
 		}

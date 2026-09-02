@@ -130,6 +130,14 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
     - Context: relevant information, known constraints, related discussions
     - Do NOT include solution approach (that belongs in spec/plan)
 
+    **Split the facts into two labelled groups — every claim goes in one of them:**
+    - **Measured** — you ran it or read it this session; cite the command or `file:line`.
+    - **Unverified / inferred** — say so, and name the one command that would settle it.
+
+    A plausible reading that was never run is the usual way a wi ships a spec whose premise
+    is false; the executing agent then either loses the run to it or delivers a no-op that
+    looks like a fix. If you cannot label a claim, it belongs in the unverified group.
+
     Show the draft to the user for confirmation/modification:
     ```
     --- content draft ---

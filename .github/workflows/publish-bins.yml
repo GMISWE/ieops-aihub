@@ -94,23 +94,15 @@ jobs:
           git commit -m "publish: ${COMMIT_SHA} [${CHANNEL}]"
           git push --force origin "HEAD:refs/heads/bins-${CHANNEL}"
 
-      - name: Notify aihub (non-blocking)
-        continue-on-error: true
-        env:
-          POLYFORGE_API_KEY: ${{ secrets.POLYFORGE_API_KEY }}
-          AIHUB_URL: ${{ secrets.AIHUB_URL }}
-        run: |
-          [ -z "$POLYFORGE_API_KEY" ] && echo "POLYFORGE_API_KEY not set, skipping" && exit 0
-          [ -z "$AIHUB_URL" ] && echo "AIHUB_URL not set, skipping" && exit 0
-          CHANNEL="${{ steps.channel.outputs.channel }}"
-          # Read source commit SHA from version.txt written in build step.
-          # Do NOT use `git rev-parse HEAD` here — after --orphan checkout, HEAD
-          # points to the bins branch commit, not the original source commit.
-          COMMIT_SHA=$(cat bin/version.txt 2>/dev/null | tr -d '[:space:]')
-          [ -z "$COMMIT_SHA" ] && echo "version.txt missing, skipping notify" && exit 0
-          curl -sf -X PUT \
-            -H "Authorization: Bearer ${POLYFORGE_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d "{\"channel\":\"${CHANNEL}\",\"commit\":\"${COMMIT_SHA}\",\"published_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
-            "${AIHUB_URL}/v1/binary" \
-            && echo "aihub notify ok" || echo "aihub notify failed (non-blocking)"
+      # aihub#181: there is deliberately no "notify aihub" step here. One used to
+      # exist and curled `PUT ${AIHUB_URL}/v1/binary` — an endpoint the server has
+      # never registered (zero PUT routes exist anywhere in this repo), wrapped in
+      # continue-on-error plus `|| echo "aihub notify failed (non-blocking)"`, so
+      # every publish printed one calm line instead of surfacing a 404.
+      #
+      # Nothing consumed such a record: the launcher reads the published version
+      # straight from raw.githubusercontent.com/.../bins-<channel>/bin/version.txt
+      # (plugins/polyforge/bin/polyforge-mcp.sh), so the orphan branch pushed above
+      # IS the channel state. Adding the notification back means implementing the
+      # endpoint first — internal/citest/wfroutes now fails the build if a workflow
+      # calls an aihub route the router does not serve.

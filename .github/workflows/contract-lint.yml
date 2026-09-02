@@ -11,10 +11,30 @@ on:
   pull_request:
     paths:
       - 'plugins/polyforge/**'
-      # Server-side MCP contract surface: a tool/param change here can break the
-      # plugin's references, so re-lint against the freshly-built schema. (A pure
-      # internal/domain enum change without an internal/mcp edit is the one gap.)
+      # Server-side source that ships INSIDE the polyforge binary. Derived, not
+      # guessed: these are the first-party internal/ packages that cmd/polyforge
+      # links and no other cmd/ links, so an edit here changes what the plugin does
+      # while changing nothing that ships elsewhere. Two distinct reasons, both real:
+      # a tool/param change under internal/mcp can break the plugin's references, and
+      # internal/cli holds dump_schemas.go — the instrument that produces the schema
+      # this job lints against.
+      #
+      # The "paths: filter covers every plugin-only package" step below recomputes
+      # that set with `go list -deps` on every run and fails if this list stops
+      # covering it, so the next package to join the set goes red instead of
+      # escaping the gate. This list is not trustworthy on its own: internal/cli was
+      # missing for real, and PR#283 changed `polyforge doctor` behaviour in
+      # internal/cli/doctor.go while this job never ran (aihub#326).
+      #
+      # Packages cmd/polyforge SHARES with cmd/aihub (auth, domain, embedding,
+      # render, version) are deliberately absent, and the derived check does not ask
+      # for them. They do reach the plugin binary, so a pure internal/domain enum
+      # change with no internal/mcp edit remains a known gap — but triggering on them
+      # would run this job on most server PRs for no added signal.
       - 'internal/mcp/**'
+      - 'internal/cli/**'
+      - 'internal/coding/**'
+      - 'internal/config/**'
       - 'cmd/polyforge/**'
       - 'scripts/pf_contract_lint.py'
       - 'scripts/pf_contract_lint_baseline.json'
@@ -93,6 +113,126 @@ jobs:
         with:
           go-version: "1.26.3"
           cache: true
+
+      # aihub#326. The paths: filter above decides whether this whole job runs, and
+      # nothing used to check it against reality — which is why internal/cli fell out
+      # of it and PR#283 shipped a `polyforge doctor` behaviour change without ever
+      # running this job. A filter that is present but wrong is the same as absent.
+      #
+      # This step derives the answer instead of restating it: the ground truth for
+      # "this source ships in the plugin" is the link graph, so it asks `go list -deps`
+      # which first-party internal/ packages cmd/polyforge links that no other cmd/
+      # links, and requires paths: to cover each one. Deliberately NOT a second
+      # hand-maintained list — there is no allowlist to edit, and the only way to make
+      # a red here green is to add the missing glob above, which IS the fix.
+      #
+      # Closure: a package can only join the plugin-only set when some package already
+      # in that set (or cmd/polyforge) adds the import, and every one of those is in
+      # paths: — so the PR that creates the hole is the PR that runs this check. The
+      # residual gap is the other direction: cmd/aihub DROPPING an import can move a
+      # shared package into the plugin-only set from a diff that touches nothing in
+      # paths:, and no run of this step would see it.
+      #
+      # `go list -deps` resolves imports without compiling: ~0.5s measured, against a
+      # job that already builds the binary. `!cancelled()` for the same reason as the
+      # bump gate — a PR carrying both defects should see both in one run.
+      - name: "paths: filter covers every plugin-only package"
+        if: ${{ !cancelled() }}
+        env:
+          # No go.work exists in CI; set explicitly so a local run reproduces CI.
+          GOWORK: "off"
+        run: |
+          set -euo pipefail
+          python3 - .github/workflows/contract-lint.yml <<'PY'
+          import re, subprocess, sys
+
+          WF = sys.argv[1] if len(sys.argv) > 1 else ".github/workflows/contract-lint.yml"
+
+          def go(*args):
+              return subprocess.run(["go", *args], stdout=subprocess.PIPE,
+                                    check=True, text=True).stdout.split()
+
+          def glob_re(g):
+              """GitHub path-filter glob -> regex. '**' crosses '/', '*' and '?' do not."""
+              out, i = [], 0
+              while i < len(g):
+                  if g[i] == "*":
+                      if g[i + 1:i + 2] == "*":
+                          out.append(".*"); i += 2
+                      else:
+                          out.append("[^/]*"); i += 1
+                  elif g[i] == "?":
+                      out.append("[^/]"); i += 1
+                  else:
+                      out.append(re.escape(g[i])); i += 1
+              return re.compile("^" + "".join(out) + "$")
+
+          # The matcher IS the check. Degrade it to "matches everything" and this step
+          # passes vacuously with nothing downstream able to see it, so pin it here.
+          for g, p, want in [("internal/cli/**", "internal/cli/doctor.go", True),
+                             ("internal/cli/**", "internal/domain/x.go", False),
+                             ("internal/*", "internal/cli/doctor.go", False),
+                             ("plugins/polyforge/**", "plugins/polyforge/a/b.md", True)]:
+              if bool(glob_re(g).match(p)) is not want:
+                  sys.exit("::error::glob matcher is broken on %r vs %r" % (g, p))
+
+          globs, in_block = [], False
+          for line in open(WF, encoding="utf-8").read().splitlines():
+              if not in_block:
+                  in_block = re.match(r"^\s*paths:\s*$", line) is not None
+                  continue
+              s = line.strip()
+              if not s or s.startswith("#"):
+                  continue
+              m = re.match(r"""^-\s*'([^']*)'$|^-\s*"([^"]*)"$|^-\s*(\S+)$""", s)
+              if not m:
+                  break
+              globs.append(next(x for x in m.groups() if x is not None))
+
+          if not in_block:
+              print("no paths: filter -> job runs on every PR; coverage trivially met")
+              sys.exit(0)
+          if not globs:
+              sys.exit("::error::%s has a paths: key with no globs under it" % WF)
+          if any(g.startswith("!") for g in globs):
+              sys.exit("::error::%s uses a negated path filter. This check does not "
+                       "implement negation and must not pretend to: teach it, do not "
+                       "delete it." % WF)
+
+          mod = go("list", "-m")[0]
+          cmds = go("list", "./cmd/...")
+          target = mod + "/cmd/polyforge"
+          if target not in cmds:
+              sys.exit("::error::%s is not a main package; nothing could be derived, "
+                       "and this check must not pass vacuously" % target)
+          prefix = mod + "/internal/"
+
+          def internals(pkg):
+              return {p[len(prefix):] for p in go("list", "-deps", pkg)
+                      if p.startswith(prefix)}
+
+          mine = internals(target)
+          shared = set().union(*[internals(c) for c in cmds if c != target])
+          plugin_only = sorted(mine - shared)
+
+          res = [glob_re(g) for g in globs]
+          missing = [p for p in plugin_only
+                     if not any(r.match("internal/%s/x.go" % p) for r in res)]
+          if not any(r.match("cmd/polyforge/main.go") for r in res):
+              missing.append("(cmd/polyforge itself)")
+
+          print("paths: globs        %s" % " ".join(globs))
+          print("cmd/polyforge links %s" % " ".join(sorted(mine)))
+          print("plugin-only         %s" % " ".join(plugin_only))
+          if missing:
+              sys.exit("::error::the paths: filter does not cover %s. Those package(s) "
+                       "are linked into the polyforge binary and into nothing else, so "
+                       "editing them changes what the plugin does while this job never "
+                       "runs (aihub#326). Add to paths: in %s:\n%s"
+                       % (", ".join(missing), WF,
+                          "\n".join("      - 'internal/%s/**'" % p for p in missing)))
+          print("OK: paths: covers every plugin-only package")
+          PY
 
       - name: Build polyforge and dump MCP schemas (fresh, in-repo)
         run: |

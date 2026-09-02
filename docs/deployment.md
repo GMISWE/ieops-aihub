@@ -7,8 +7,10 @@ was written; the gotchas in [Troubleshooting](#troubleshooting) are real failure
 hit during that run, not hypotheticals.
 
 For local development (running the binary straight from source) see
-[`../README.md`](../README.md). The team's existing one-command deploy is kept at
-the end under [Team deployment](#team-deployment-reference).
+[`../README.md`](../README.md). What production runs today, and the procedure for
+replacing that container, is at the end under
+[Team deployment](#team-deployment-reference). There is no one-command deploy:
+`make deploy` prints a pointer to that section and exits 1.
 
 ## Contents
 
@@ -199,15 +201,19 @@ docker compose up -d postgres
 docker compose run --rm aihub migrate-up
 ```
 
-Expected tail (the version number grows as migrations are added):
+Expected tail:
 
 ```
 Running database migrations...
 2026/... OK   0001_initial.sql
 ...
-2026/... OK   0027_run_attempts_pause_reason.sql
-2026/... goose: successfully migrated database to version: 27
+2026/... goose: successfully migrated database to version: <N>
 ```
+
+Signal: `<N>` is the highest migration number present in
+`internal/db/migrations/` at the revision you are deploying — read it off that
+directory, not off a number written here, which would be stale one migration
+later. `no migrations to run` is also a pass: the database is already there.
 
 Run migrations **before** starting a new server build whenever the release adds or
 changes a migration. goose is forward-and-back per migration and there is no
@@ -393,44 +399,234 @@ co-located embedding service, and starts the server as a **bare `docker run`**
 |---|---|
 | Host | `10.146.0.34` (GPU host; its public IP changes across stop/start — use the internal IP over the jump host) |
 | Database | **Cloud SQL** — managed Postgres 18 + pgvector at `10.20.80.3:5432`, `sslmode=require`. This is the "managed Postgres" path from [What you are deploying](#what-you-are-deploying); there is **no `postgres` container** |
-| Embedding | a TEI container named `tei` on the same host and Docker network `aihub-net`, published on `:8085` |
+| Embedding | a TEI container named `tei` on the same host and Docker network `aihub-net`, published on `:8085`. A deploy never touches it |
 | Server | one `docker run` container named `aihub` on `aihub-net`, `-p 8080:8080`, `--env-file /root/aihub.env` (holds `DATABASE_URL`, the `EMBEDDING_*` vars, `PORT`, `ADMIN_BOOTSTRAP_KEY`) — **no Compose file** |
-| Image | `us-west1-docker.pkg.dev/devv-404803/public/aihub`, pulled by **git-SHA tag** (not `:latest`) |
+| Image | `us-west1-docker.pkg.dev/devv-404803/public/aihub`, pulled by **git-SHA tag** (not `:latest`). CI tags with the full 40-char commit SHA |
+| Rollback anchor | the container being replaced is **stopped and renamed** to `aihub-prev-<short sha>`, never deleted. Exactly one anchor is kept |
 
-The steps mirror the Compose flow above (pull → `migrate-up` → start → verify);
-only the mechanics differ (bare `docker run`, managed DB). Run from the host:
+The steps mirror the Compose flow above (back up → pull → `migrate-up` → swap →
+verify); only the mechanics differ (bare `docker run`, managed DB). Everything
+below runs **on the host**. `make deploy` is not the deploy path — it prints a
+pointer to this section and exits 1, because a one-line target cannot carry the
+four things this procedure exists for: a database backup (step 1), a recorded
+rollback anchor (steps 2 and 6), migrations applied strictly **before** the new
+binary starts (step 4 before step 6), and a check afterwards that the **read
+path** still answers (step 7).
+
+Two of the four deserve their reasons spelled out, because both are places where
+the obvious shortcut is the one that hurts:
+
+**Migrations land strictly before the new binary starts.** A migration that adds
+a column the new code reads makes the reverse order fail loudly and immediately:
+`0032` added `projects.members_version`, which the new binary selects on *every*
+project read, so a binary-first rollout answers `GET /v1/projects` with
+`500` and `column "members_version" of relation "projects" does not exist
+(SQLSTATE 42703)`. Schema-first is safe in the other direction only while
+migrations stay additive — the server selects an explicit column list, never
+`SELECT *`, so a column an older binary does not know about is invisible to it.
+**Read the release's migrations before deploying.** If one drops or renames
+anything, the older binary will not survive the new schema and the container
+anchor below is not enough on its own; the step-1 dump is.
+
+**The container being replaced is renamed, not deleted.** A stopped container
+keeps its image, env-file contents, network, port bindings and restart policy,
+so rolling back is one `docker start`. After a `docker rm -f` all of that is
+gone and the only way back is to reconstruct the whole `docker run` line — right
+tag, right env-file, right network, right ports — at the moment you least want
+to be reconstructing anything. `docker rm -f` is also the step most likely to be
+refused: during the 2026-09-02 deploy an automated command-safety policy blocked
+`docker rm -f aihub` outright (a judgement about the command itself, not a
+missing permission), while `docker stop` + `docker rename` went through
+unremarked.
 
 ```bash
 IMG=us-west1-docker.pkg.dev/devv-404803/public/aihub
-SHA=<target git sha on main>          # after CI's "Build & Push Docker image (main)" is green
+SHA=<target git sha on main>   # full 40-char SHA — the tag CI pushes. Wait for
+                               # "Build & Push Docker image (main)" to be green.
+
+# Identity of what is running now, captured BEFORE anything changes.
+CUR=$(docker inspect -f '{{.Config.Image}}' aihub)   # …/aihub:<outgoing sha>
+PREV=${CUR##*:}                                      # outgoing sha
+ANCHOR=aihub-prev-$(printf %.7s "$PREV")             # e.g. aihub-prev-359a435
+
+# DATABASE_URL is read out of the RUNNING container so the dump cannot be
+# pointed at the wrong database by a typo. It contains the database password:
+# assign it, never echo/cat it, never paste it anywhere.
 DBURL=$(docker inspect aihub --format '{{range .Config.Env}}{{println .}}{{end}}' | grep ^DATABASE_URL= | cut -d= -f2-)
 
-# 1. Back up Cloud SQL — run pg_dump on aihub-net so it can reach the DB.
-docker run --rm --network aihub-net -v /root/backups:/backups pgvector/pgvector:pg18 \
-  pg_dump -Fc -d "$DBURL" -f /backups/cloudsql_$(date +%Y%m%d_%H%M%S).dump
-
-# 2. Record the rollback anchor (current image + commit) BEFORE changing anything.
-docker inspect -f '{{.Config.Image}}' aihub; curl -s localhost:8080/v1/version
-
-# 3. Pull the target image by SHA (a SHA tag never lags the way :latest can).
-docker pull "$IMG:$SHA"
-
-# 4. Apply migrations — same migrate-up mechanism as Compose, via docker run.
-docker run --rm --network aihub-net --env-file /root/aihub.env "$IMG:$SHA" migrate-up
-
-# 5. Recreate the server container on the new image.
-docker rm -f aihub
-docker run -d --name aihub --network aihub-net -p 8080:8080 --restart unless-stopped \
-  --env-file /root/aihub.env "$IMG:$SHA"
-
-# 6. Verify.
-curl -s localhost:8080/v1/version   # git_commit == $SHA
-curl -s localhost:8080/v1/health    # {"db_ok":true,"embedding_ok":true,...,"status":"ok"}
+# An API key with access to at least one project — step 7 needs it. `read -rs`
+# keeps it off the screen and out of the shell history.
+read -rsp 'aihub API key: ' KEY; echo
 ```
 
-**Rollback** is steps 3 + 5 with the previous SHA (kept from step 2). Additive
-migrations mean a server rollback alone is safe — see
-[Upgrades & rollback](#10-upgrades--rollback).
+**1. Back up Cloud SQL.** `pg_dump` runs on `aihub-net` so it can reach the DB.
+
+```bash
+mkdir -p /root/backups
+DUMP=cloudsql_$(date +%Y%m%d_%H%M%S).dump   # /root/backups on the host == /backups in the container
+docker run --rm --network aihub-net -v /root/backups:/backups pgvector/pgvector:pg18 \
+  pg_dump -Fc -d "$DBURL" -f "/backups/$DUMP"
+ls -lh "/root/backups/$DUMP"
+docker run --rm -v /root/backups:/backups pgvector/pgvector:pg18 \
+  pg_restore -l "/backups/$DUMP" | tail -3
+```
+
+Signal: `pg_restore -l` lists TOC entries (it reads the archive, so it catches a
+truncated one that a zero exit status would not), and the file is the size of a
+database rather than of an error — **136 MB** on 2026-09-02. A dump of a few KB
+means it wrote nothing useful; do not continue on one.
+
+**2. Record the rollback anchor.**
+
+```bash
+echo "$CUR"                          # image the current container was created from
+curl -s localhost:8080/v1/version    # git_commit must equal $PREV
+```
+
+Signal: `git_commit` equals `$PREV`. Note `version` reads `dev` on every
+main-branch image — CI passes `GIT_COMMIT` but not `VERSION` — so `git_commit`,
+not `version`, is the field that identifies a build.
+
+**3. Pull the target image by SHA** (a SHA tag never lags the way `:latest` can).
+
+```bash
+docker pull "$IMG:$SHA"
+```
+
+Signal: `Status: Downloaded newer image for …:$SHA` (or `Image is up to date`).
+`manifest unknown` means CI has not pushed that SHA yet — wait for it. Do not
+fall back to `:latest`.
+
+**4. Apply migrations** — same `migrate-up` mechanism as Compose, via
+`docker run`. This runs the *new* image's goose against the live database while
+the *old* container keeps serving; nothing is down yet.
+
+```bash
+docker run --rm --network aihub-net --env-file /root/aihub.env "$IMG:$SHA" migrate-up
+```
+
+Expected tail (2026-09-02, the `0032` release):
+
+```
+Running database migrations...
+2026/09/02 ... OK   0032_projects_members_version.sql (7.83ms)
+2026/09/02 ... goose: successfully migrated database to version: 32
+```
+
+Signal: `successfully migrated database to version: N`, where N is the highest
+migration number in `internal/db/migrations/` at `$SHA`. `no migrations to run`
+is also a pass — it means the release changed no schema. Anything else: stop
+here. The old container is still serving and nothing needs undoing.
+
+**5. Start the downtime poll** (optional; this is how the number below was
+measured). In a second shell, before step 6:
+
+```bash
+while :; do
+  printf '%s %s\n' "$(date +%s.%N)" \
+    "$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 localhost:8080/v1/health)"
+  sleep 0.1
+done | tee /root/swap-poll.log
+```
+
+Downtime is the gap from the last `200` before the swap to the first `200`
+after. The `sleep 0.1` is that number's resolution. Ctrl-C it after step 7.
+
+**6. Swap the container** — stop, rename, run.
+
+```bash
+docker stop aihub                     # graceful SIGTERM; releases :8080
+docker rename aihub "$ANCHOR"         # the old container survives as the rollback anchor
+docker run -d --name aihub --network aihub-net -p 8080:8080 --restart unless-stopped \
+  --env-file /root/aihub.env "$IMG:$SHA"
+docker ps -a --filter name=aihub --format '{{.Names}}\t{{.Status}}\t{{.Image}}'
+```
+
+Signals:
+
+- Exactly two rows: `aihub` `Up …` on `$IMG:$SHA`, and `$ANCHOR` `Exited (…)` on
+  the outgoing image.
+- `docker inspect -f '{{.State.Status}} {{.HostConfig.RestartPolicy.Name}}' "$ANCHOR"`
+  → `exited unless-stopped`. The anchor stays down on its own: `unless-stopped`,
+  unlike `always`, does not restart a container that was stopped explicitly, so
+  it cannot come back and take `:8080` from the new one.
+- `docker rename` failing with a name conflict is not a nuisance — it means a
+  previous anchor was never cleaned up (step 9). Resolve that before continuing.
+
+**7. Verify. "The container is up" is not the check.** Three checks, in order;
+each fails differently:
+
+| check | command | pass |
+|---|---|---|
+| the intended build is serving | `curl -s localhost:8080/v1/version` | `git_commit` == `$SHA` (ignore `version` — it is `dev` on main images) |
+| the process and its dependencies are alive | `curl -s localhost:8080/v1/health` | `{"db_ok":true,"embedding_ok":true,…,"status":"ok"}` — 200 either way, the verdict is in the body |
+| **the read path answers** | `curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $KEY" localhost:8080/v1/projects` | `200` |
+
+The third one is why this section exists, and neither of the first two can stand
+in for it. `/v1/health`'s `db_ok` is a connection `Ping`, which succeeds against
+*any* schema — a binary reading a column the database does not have still
+reports `"status":"ok"` while 500ing on real traffic. And `/v1/projects` sits
+behind `BearerAuth`: an **unauthenticated call returns 401 without ever touching
+the `projects` table**, so a 401 proves nothing. Use a real key.
+
+A 500 whose body carries `SQLSTATE 42703` is exactly the failure the
+migrate-first order prevents — roll back (step 8), then find the missing
+migration.
+
+Then the two quieter checks:
+
+```bash
+docker logs aihub --since 10m 2>&1 | grep -Ei 'error|42703' | head   # expect no output
+docker inspect -f '{{.State.StartedAt}}' tei                         # expect it UNCHANGED
+```
+
+`tei` must not have restarted: the swap replaces one container, and a restarted
+embedding backend would mean the blast radius was wider than intended.
+
+**8. Roll back** if any check in step 7 fails.
+
+```bash
+docker stop aihub
+docker rename aihub aihub-failed-$(printf %.7s "$SHA")   # keep it: its logs are the postmortem
+docker rename "$ANCHOR" aihub
+docker start aihub
+curl -s localhost:8080/v1/version    # git_commit back to $PREV
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $KEY" \
+  localhost:8080/v1/projects         # 200
+```
+
+Renaming the failed container aside rather than deleting it keeps its logs, and
+keeps the invariant that the serving container is the one called `aihub`.
+
+Nothing has to be un-migrated for an additive release: on 2026-09-02 the old
+binary (`359a435`) ran against schema 32 and stayed healthy — measured on the
+day, not assumed. If the release's migration was **not** additive, roll the
+schema back too (the `goose … down` invocation is in
+[Upgrades & rollback](#10-upgrades--rollback)) or restore the step-1 dump.
+
+**9. Clean up the previous anchor — at the start of the *next* deploy, not the
+end of this one.**
+
+```bash
+docker ps -a --filter name=aihub-prev- --format '{{.Names}}\t{{.Status}}'
+docker rm aihub-prev-<older sha>
+```
+
+Keeping exactly one anchor is what makes the `docker rename` in step 6 fail
+loudly when someone forgot.
+
+**What the 2026-09-02 run measured** (`359a435` → `b4ed4f5`, one additive
+migration). These are observations from that one run — not targets, not an SLO:
+
+| | measured |
+|---|---|
+| Cloud SQL dump (step 1) | 136 MB |
+| Migration `0032` (step 4) | 7.83 ms, applied **before** the container swap |
+| Downtime across the swap (step 6) | **0.596 s**, from the 0.1 s poll loop in step 5 — that interval is the number's resolution, so read it as "about 0.6 s" |
+| Old binary on the new schema | healthy — which is why the rollback anchor is known to work rather than assumed to |
+| `tei` container | not restarted |
+| `error` / `42703` in the new container's log | 0 |
+| Anchor left behind | `aihub-prev-359a435` |
 
 **Embedding backfill** — only when a release adds or changes embeddings. Run
 `aihub-embed-backfill` *on the host* with `DATABASE_URL` and the `EMBEDDING_*`
@@ -443,7 +639,9 @@ idempotent (only rows missing a vector for the current model are touched).
 
 The earlier shared instance ran server + Postgres via Compose on `10.146.0.16`,
 wrapped by `make deploy`. That host has been retired in favour of the Cloud SQL
-setup above; the Makefile target and its variables are kept for reference only:
+setup above, and `aihub#341` removed the target and its variables from the
+`Makefile` — none of the following still exists. It is recorded because older
+notes and scripts refer to it:
 
 | | |
 |---|---|
@@ -451,15 +649,15 @@ setup above; the Makefile target and its variables are kept for reference only:
 | Compose dir on host | `/root/manifests/aihub-v1` (`COMPOSE_DIR`) |
 | Image | `us-west1-docker.pkg.dev/devv-404803/public/aihub` (`GCR_IMAGE`) |
 
-```bash
-make deploy
-# ssh PROD_HOST: docker pull GCR_IMAGE:latest
-#                cd COMPOSE_DIR && docker compose up -d --no-deps --force-recreate aihub
+```
+make deploy, as it was — it pulled :latest, never ran migrations, and did:
+  ssh PROD_HOST: docker pull GCR_IMAGE:latest
+                 cd COMPOSE_DIR && docker compose up -d --no-deps --force-recreate aihub
 ```
 
-Typical release order (unchanged in spirit): merge to `main` → wait for CI to push
-the SHA tag → run `migrate-up` if the release changed migrations → recreate the
-server → verify `/v1/health` and `/v1/version`.
+The current release order is the numbered procedure in
+[Current production](#current-production-cloud-sql--bare-docker-run), which is
+the only authoritative copy of it.
 
 ## Health & version endpoints
 

@@ -223,6 +223,19 @@ jobs:
       #             existed. 126 + 2 = 128 happens to agree; the 128 written below
       #             is the measurement, not the sum.
       #
+      #   128 -> 130 aihub#325 added 2 DB-gated functions in internal/mcp
+      #             (TestE2EReinforceMemoryWorkItemIDReachesTheGate and
+      #             TestE2EReinforceMemoryRejectsAMismatchedWorkItem in
+      #             reinforce_wi_e2e_db_test.go). Both need only a database, so
+      #             the required set goes 125 -> 127, and they do need a new step
+      #             ("aihub#325 pf_reinforce_memory work_item_id E2E DB tests").
+      #             Measured on the tree AFTER fast-forwarding to origin/main at
+      #             6dbc510, from the same DB-free inventory run this gate uses:
+      #             `130 (require only a DB: 127, need extra env: 3)` with both
+      #             functions named as executed by no step, before the step
+      #             existed. The "from" was checked against main at the same
+      #             moment rather than carried from the branch, per the rule the
+      #             aihub#314 entry above had to learn twice.
       #   130 -> 131 aihub#334 added 1 DB-gated function in internal/domain
       #             (TestSerializationFailureSurfacesAsRetryable409 in
       #             serialization_failure_db_test.go). It carries FIVE arms —
@@ -234,28 +247,36 @@ jobs:
       #             `--- PASS:` on each subtest name, which is where the real
       #             per-instance coverage claim lives. It needs only a database
       #             (the races are real backends contending over real rows; no
-      #             embedding service), so the required set goes 128 -> 129 and
+      #             embedding service), so the required set goes 127 -> 128 and
       #             it does need a new step ("aihub#334 serialization-failure
       #             mapping DB tests").
       #             Measured, not predicted, and NOT computed as "130 plus the
       #             one I added" — arithmetic that lands on the right answer is
-      #             how this log rots. Taken on a throwaway clone outside the
-      #             task worktree, on the tree formed by merging origin/main at
-      #             761ac3b into this branch at 9f0d74e (merge 65a8841),
-      #             database untouched because the inventory run sets no
-      #             AIHUB_TEST_DB. The gate printed, verbatim:
+      #             how this log rots. Read off the tree that actually resolves
+      #             the merge of origin/main 666c747 into this branch, in the
+      #             worktree, with GOWORK=off; the database is untouched because
+      #             the inventory run sets no AIHUB_TEST_DB. Verbatim:
       #               dbtestcov: AIHUB_TEST_DB-gated test functions: 131
       #                 (require only a DB: 128, need extra env: 3)
       #               dbtestcov: covered by a CI step: 128/128
       #             The `130` this starts from is the value on that same
-      #             origin/main, read off the merged tree.
-      #             ⚠️ origin/main moved TWICE while this branch was being
-      #             written (9a32bac -> af274ad -> 761ac3b, both siblings'
-      #             landings). If it gains further DB tests before this merges,
-      #             this line is a FLOOR and stays valid; but the line itself
-      #             conflicts textually with main's 130, and the resolution is
-      #             to re-run the gate on the merged tree rather than to pick
-      #             the larger number.
+      #             origin/main, and 130 = 127 + 3 there while 131 = 128 + 3
+      #             here, which is what fixes the required-set delta above.
+      #             ⚠️ An earlier draft of this entry wrote that delta as
+      #             `128 -> 129`, measured against a base that no longer
+      #             existed by the time the branch merged. Nothing would have
+      #             caught it: the gate reads only `-min-gated`, never these
+      #             comments, so a wrong number here is invisible to CI and is
+      #             exactly the rot this log exists to prevent. If you edit any
+      #             number in this block, re-run the gate and copy its output —
+      #             do not adjust a number to make the chain look continuous.
+      #             ⚠️ origin/main moved FOUR times while this branch was being
+      #             written (9a32bac -> af274ad -> 761ac3b -> 666c747, all
+      #             siblings' landings), and aihub#325 took the ratchet
+      #             128 -> 130 in that window, so this branch's line and main's
+      #             conflicted textually on the same anchor. Both deltas are
+      #             kept above in landing order; the resolution was to re-run
+      #             the gate on the merged tree, not to pick the larger number.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -1165,6 +1186,27 @@ jobs:
           done
           ! grep -q -- '--- SKIP' request_adjusted_e2e.log \
             || { echo "::error::an aihub#314 E2E test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#325: pf_reinforce_memory declared work_item_id required and then
+      # left it out of the body it sent, so the server's credential gate refused
+      # every non-methodology reinforcement with a 400. Measured against a real
+      # router before the fix, not inferred. The mismatch case is here for a
+      # reason: it would have passed on the old build too (the call was refused
+      # either way), so it asserts the rejection text is the credential one and
+      # not the missing-field one.
+      - name: aihub#325 pf_reinforce_memory work_item_id E2E DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/mcp/ -run '^(TestE2EReinforceMemoryWorkItemIDReachesTheGate|TestE2EReinforceMemoryRejectsAMismatchedWorkItem)$' -count=1 -v 2>&1 | tee reinforce_wi_e2e.log
+          for want in TestE2EReinforceMemoryWorkItemIDReachesTheGate \
+                      TestE2EReinforceMemoryRejectsAMismatchedWorkItem; do
+            grep -q -- "--- PASS: $want (" reinforce_wi_e2e.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#325 work_item_id fix is not actually verified end to end"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' reinforce_wi_e2e.log \
+            || { echo "::error::an aihub#325 E2E test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#303: the 26 DB-gated test functions that, until this step, no
       # `-run` in this file named — so they SKIPped on every CI run since the

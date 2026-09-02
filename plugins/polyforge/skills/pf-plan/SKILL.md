@@ -130,27 +130,43 @@ Parse the plan's per-step `Touched files:` lines into a `declared_resources` lis
 - Steps marked `(no file edits)` → skip (no resource entry)
 
 Collect unique file entries across all steps — if the same path appears as both write and
-read, keep only the `write` entry (write is the stronger intent) — then:
+read, keep only the `write` entry (write is the stronger intent) — then read the wi for its
+current `resources_version` and write the list back:
 
 ```
+# `resources_version` is a top-level integer field of the response.
+# brief=true only drops `content`; every other field, this one included, is still there.
+wi = pf_get_work_item(work_item_id=<current>, brief=true)
+
 pf_update_work_item(
   work_item_id=<current>,
   declared_resources=[
     {"type": "path", "uri": "file:<repo-relative-path>", "intent": "write"},
     ...
-  ]
+  ],
+  resources_version=<wi.resources_version>
 )
 ```
 
-- `resources_version` is optional. Omit it to overwrite unconditionally (the normal plan-step
-  case — you are the only writer). Pass the `resources_version` you last read from the wi when
-  another session might be editing the same declaration concurrently: the write then applies
-  only if nobody has changed `declared_resources` since, and otherwise fails with
-  **409 `CONFLICT_CAS_FAILED`** reporting the current version, instead of silently clobbering
-  the other writer. Every successful write of `declared_resources` increments the counter.
-  (Before aihub#241 this argument always returned 400 and the counter never advanced, so the
-  earlier instruction here was "never pass it" — that is fixed; re-read the version from the
-  response rather than assuming it is still 0.)
+- **Always send `resources_version`.** Read it here, immediately before the write: the guarded
+  window is exactly that read-to-write gap, so a value fetched earlier in the session only
+  widens it for no benefit. It is never the wrong thing to send. The update then applies only
+  if nobody has changed `declared_resources` since you read it; otherwise it fails with
+  **409 `CONFLICT_CAS_FAILED`** carrying `details.current_resources_version` and leaves the
+  stored list untouched — re-read the wi, re-derive from the plan, retry. Every successful
+  write of `declared_resources` increments the counter, so the number is a token for "the
+  list I read", not a timestamp.
+- **Omitting it overwrites unconditionally**, and that is safe only when nothing wrote
+  `declared_resources` between your read and your write — which you cannot establish
+  afterwards, because both outcomes return 200. Do not assume the plan step is the only
+  writer: any session with project access can call `pf_update_work_item`, `declared_resources`
+  is a whole-list REPLACE, and file_scope locks are derived from whatever is stored at claim
+  time and re-derived by `pf_acquire_locks` mid-attempt. So a clobber silently drops the other
+  writer's paths *and* the locks protecting them. "I am the only writer" is precisely the
+  assumption aihub#260 disproved on the identical shape in `pf_update_project`'s `members`.
+  (Before aihub#241 passing this argument always returned 400 and the counter never advanced,
+  so the instruction here used to be "never pass it" — that is fixed; read the new version off
+  the update response rather than assuming it is still 0.)
 - If the plan has no file changes at all, still call `pf_update_work_item` with an empty
   list to clear any stale resources.
 

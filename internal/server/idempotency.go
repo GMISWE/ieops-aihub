@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
@@ -32,7 +31,23 @@ const (
 	// maxIdempotencyBodyBytes caps the RESPONSE body a single entry may hold.
 	// Without it one large response defeats the entry cap on its own — the cap
 	// that matters is bytes, and entries are only a proxy for it.
-	maxIdempotencyBodyBytes = 256 << 10 // 256 KiB
+	//
+	// ⚠️ This is a real narrowing of the guarantee, and it is deliberate: a
+	// response over the cap is served to the client in full but is NOT stored, so
+	// a retry of it re-executes rather than replays. The alternative — cache any
+	// response at all — is the unbounded growth this work item is about, so the
+	// only question is where the line goes. 1 MiB is chosen to sit above the
+	// payloads this API actually produces: memories.content is capped at 20,000
+	// characters by the MCP layer, and the largest response shape is an artifact
+	// with its rendered_html. maxIdempotencyEntries * this is the worst-case
+	// footprint, so raising one means re-checking the other.
+	maxIdempotencyBodyBytes = 1 << 20 // 1 MiB
+
+	// idempotencyPurgeInterval is how often the sweep runs. It is not derived
+	// from idempotencyTTL: with a 24h TTL any interval from minutes to hours
+	// reclaims the same memory, and a sweep is one pass over a map the entry cap
+	// holds to maxIdempotencyEntries.
+	idempotencyPurgeInterval = 10 * time.Minute
 
 	// maxIdempotencyRequestBytes caps the REQUEST body this middleware is
 	// willing to buffer in order to fingerprint it. A request above the cap is
@@ -295,18 +310,24 @@ func IdempotencyCacheLen() int {
 	return len(idempotencyCache)
 }
 
-// StartIdempotencyCachePurger runs PurgeExpiredIdempotencyCache on a ticker until
-// ctx is done. It returns immediately; the loop runs in its own goroutine.
+// StartIdempotencyCachePurger runs PurgeExpiredIdempotencyCache on
+// idempotencyPurgeInterval until ctx is done. It returns immediately; the loop
+// runs in its own goroutine. Called once from cmd/aihub/main.go.
 //
-// Called once from cmd/aihub/main.go. The interval is the caller's to choose and
-// is not derived from idempotencyTTL: with a 24h TTL any interval from minutes to
-// hours reclaims the same memory, and the cost of a sweep is one pass over a map
-// that the entry cap holds to maxIdempotencyEntries.
-func StartIdempotencyCachePurger(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		fmt.Fprintf(os.Stderr, "idempotency: purger not started, interval %v is not positive\n", interval)
-		return
-	}
+// It takes NO interval parameter, and that is deliberate. The first version did,
+// and an independent review measured the consequence: passing 0 made the function
+// log and return without starting anything — the production purger silently never
+// ran, which is exactly the aihub#152 defect — and the test asserting main()
+// schedules it stayed GREEN, because an AST check on the call site counts
+// arguments and cannot evaluate them. A parameter whose bad values must be caught
+// by a test is a hole; a package constant has no bad values to catch.
+func StartIdempotencyCachePurger(ctx context.Context) {
+	startIdempotencyCachePurger(ctx, idempotencyPurgeInterval)
+}
+
+// startIdempotencyCachePurger is the parameterised form, unexported so only tests
+// can choose a tick fast enough to observe.
+func startIdempotencyCachePurger(ctx context.Context, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()

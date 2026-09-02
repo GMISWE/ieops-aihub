@@ -131,7 +131,7 @@ func main() {
 	// It is a separate ticker rather than another arm of the GC loop above
 	// because that loop is the DATABASE sweep scheduler (domain.RunDue against
 	// pool) and this is process-local memory with no row behind it.
-	server.StartIdempotencyCachePurger(ctx, 10*time.Minute)
+	server.StartIdempotencyCachePurger(ctx)
 
 	cookieSecret := loadUICookieSecret()
 	e := server.NewRouter(pool, cookieSecret)

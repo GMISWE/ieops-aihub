@@ -20,6 +20,7 @@ import (
 	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -315,19 +316,59 @@ func TestIdempotency_EntryCapBoundsTheCache(t *testing.T) {
 	t.Cleanup(resetIdempotencyCache)
 
 	now := time.Now()
-	for i := range maxIdempotencyEntries + 500 {
-		storeIdempotent(
-			"k_1:flood-"+string(rune('a'+i%26))+"-"+time.Duration(i).String(),
-			&cachedResponse{StatusCode: 200, Body: []byte("x"), Fingerprint: "f", ExpiresAt: now.Add(idempotencyTTL)},
-		)
+	const overflow = 500
+	keys := make([]string, 0, maxIdempotencyEntries+overflow)
+	for i := range maxIdempotencyEntries + overflow {
+		key := "k_1:flood-" + strconv.Itoa(i)
+		keys = append(keys, key)
+		// Distinct, increasing ExpiresAt: with a constant TTL that is insertion
+		// order, so this is what makes the FIFO claim in storeIdempotent's doc
+		// comment falsifiable. Seeding them all with one timestamp — the first
+		// version of this test — leaves eviction picking an arbitrary map entry
+		// and the ordering untested.
+		storeIdempotent(key, &cachedResponse{
+			StatusCode:  200,
+			Body:        []byte("x"),
+			Fingerprint: "f",
+			ExpiresAt:   now.Add(idempotencyTTL + time.Duration(i)*time.Millisecond),
+		})
 	}
 
+	if len(keys) != len(uniqueStrings(keys)) {
+		t.Fatalf("the fixture generated duplicate keys, so it never reached the cap")
+	}
 	if n := IdempotencyCacheLen(); n > maxIdempotencyEntries {
 		t.Fatalf("cache holds %d entries, cap is %d — nothing bounds it", n, maxIdempotencyEntries)
 	}
 	if n := IdempotencyCacheLen(); n < maxIdempotencyEntries/2 {
 		t.Fatalf("cache holds only %d entries; eviction is throwing away far more than it needs to", n)
 	}
+
+	// FIFO: the oldest keys went first and the newest are all still there.
+	for _, key := range keys[:overflow] {
+		if _, ok := loadIdempotent(key); ok {
+			t.Fatalf("%s survived; eviction is not dropping the entry closest to expiry first", key)
+		}
+	}
+	for _, key := range keys[len(keys)-overflow:] {
+		if _, ok := loadIdempotent(key); !ok {
+			t.Fatalf("%s was evicted; the most recent entries must be the ones kept", key)
+		}
+	}
+}
+
+// uniqueStrings is a test helper: the set of distinct values in s.
+func uniqueStrings(s []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(s))
+	for _, v := range s {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }
 
 // TestPurgeExpiredIdempotencyCache_DropsOnlyExpired covers the function that
@@ -359,25 +400,46 @@ func TestStartIdempotencyCachePurger_RunsAndStops(t *testing.T) {
 
 	storeIdempotent("k_1:stale", &cachedResponse{StatusCode: 200, Fingerprint: "f", ExpiresAt: time.Now().Add(-time.Second)})
 
+	const tick = 2 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	StartIdempotencyCachePurger(ctx, time.Millisecond)
+	startIdempotencyCachePurger(ctx, tick)
 
 	deadline := time.Now().Add(5 * time.Second)
 	for IdempotencyCacheLen() != 0 {
 		if time.Now().After(deadline) {
 			t.Fatalf("the purger never ran: cache still holds %d expired entries", IdempotencyCacheLen())
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(tick)
 	}
 
-	// Stopping: after cancel, a newly inserted expired entry must survive.
+	// Stopping: after cancel, a newly inserted expired entry must survive. The
+	// generous margins are deliberate — a sweep already in flight when cancel
+	// lands must be allowed to finish BEFORE the probe entry is inserted, or a
+	// scheduling stall makes this test flake rather than fail.
 	cancel()
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(100 * tick)
 	storeIdempotent("k_1:stale2", &cachedResponse{StatusCode: 200, Fingerprint: "f", ExpiresAt: time.Now().Add(-time.Second)})
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * tick)
 	if n := IdempotencyCacheLen(); n != 1 {
 		t.Fatalf("cache holds %d entries after cancel, want 1 — the purger goroutine outlived its context", n)
+	}
+}
+
+// TestIdempotencyPurgeInterval_IsPositive is the assertion that replaces the one
+// an independent review measured to be unfalsifiable. The scheduler used to take
+// an interval argument, and passing 0 made it return without starting anything —
+// the production purger never ran and TestMainSchedulesTheIdempotencyPurger below
+// stayed green, because counting a call's arguments in an AST says nothing about
+// their values. The argument is gone; this pins the constant that replaced it,
+// which is a value a test CAN evaluate.
+func TestIdempotencyPurgeInterval_IsPositive(t *testing.T) {
+	if idempotencyPurgeInterval <= 0 {
+		t.Fatalf("idempotencyPurgeInterval is %v; a non-positive interval means the sweep never runs", idempotencyPurgeInterval)
+	}
+	if idempotencyPurgeInterval >= idempotencyTTL {
+		t.Fatalf("idempotencyPurgeInterval %v is not shorter than the TTL %v, so entries outlive their expiry by a whole sweep",
+			idempotencyPurgeInterval, idempotencyTTL)
 	}
 }
 
@@ -440,8 +502,12 @@ func TestMainSchedulesTheIdempotencyPurger(t *testing.T) {
 		pkg, ok := sel.X.(*ast.Ident)
 		if ok && pkg.Name == "server" && sel.Sel.Name == "StartIdempotencyCachePurger" {
 			calls++
-			if len(call.Args) != 2 {
-				t.Errorf("server.StartIdempotencyCachePurger called with %d args, want 2 (ctx, interval)", len(call.Args))
+			// One argument, the context. The cadence is a package constant
+			// (idempotencyPurgeInterval) precisely so that this test does not have
+			// to reason about an argument's VALUE, which it cannot do — see
+			// TestIdempotencyPurgeInterval_IsPositive.
+			if len(call.Args) != 1 {
+				t.Errorf("server.StartIdempotencyCachePurger called with %d args, want 1 (ctx)", len(call.Args))
 			}
 		}
 		return true

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
@@ -103,6 +104,31 @@ func roleForUserInMembers(membersRaw []byte, callerUserID string) (role string, 
 	return "", false, decodeErr
 }
 
+// malformedMembersWarned records which projects have already had a malformed
+// members element reported, so the warning below is emitted once per project per
+// process rather than once per request.
+var malformedMembersWarned sync.Map
+
+// warnMalformedMembersOnce reports a project whose members JSONB has a malformed
+// element, at most once per project for the life of the process.
+//
+// Loud, because the failure this replaced was silent: the user saw a permission
+// denial and nothing said the cause was a dirty row in some project's members
+// array. Once, because BearerAuth runs this query on EVERY authenticated
+// non-admin request — an unconditional write here would put a synchronous stderr
+// write on the hot auth path, at request rate, for as long as the dirty row
+// exists. A restart re-arms it, which is the right cadence for a condition an
+// operator has to go and fix in the database.
+func warnMalformedMembersOnce(projName string, decodeErr error) {
+	if _, seen := malformedMembersWarned.LoadOrStore(projName, struct{}{}); seen {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"auth: project %q has a malformed members element (%v); the well-formed elements were still applied. "+
+			"This is reported once per process; fix the row in projects.members.\n",
+		projName, decodeErr)
+}
+
 // BearerAuth validates the Authorization: Bearer <key> header and sets the user in context.
 func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
@@ -174,12 +200,7 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 						}
 						role, found, decodeErr := roleForUserInMembers(membersRaw, uc.UserID)
 						if decodeErr != nil {
-							// Loud, because the failure this replaced was silent: the user
-							// saw a permission denial and nothing said the cause was a dirty
-							// row in some project's members array.
-							fmt.Fprintf(os.Stderr,
-								"auth: project %q has a malformed members element (%v); the well-formed elements were still applied\n",
-								projName, decodeErr)
+							warnMalformedMembersOnce(projName, decodeErr)
 						}
 						if !found {
 							continue

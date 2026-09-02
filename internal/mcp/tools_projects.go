@@ -10,8 +10,12 @@ import (
 func (s *Server) registerProjectTools() {
 	// pf_list_projects
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_list_projects",
-		Description: "List all projects visible to the caller (public + member + owned)",
+		Name: "pf_list_projects",
+		// aihub#260: each project carries members_version. It is the token
+		// pf_update_project's compare-and-set consumes, and this is where a
+		// caller reads it, so say so here — a guard nobody can find the input
+		// for is a guard nobody passes.
+		Description: "List all projects visible to the caller (public + member + owned). Each project includes members_version, the compare-and-set token to pass back to pf_update_project when changing members.",
 		InputSchema: emptyObjectSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		result, err := s.client.ListProjects(ctx, nil)
@@ -57,7 +61,12 @@ func (s *Server) registerProjectTools() {
 			"visible":     prop("boolean", "Updated visibility"),
 			"scenario":    prop("string", "Updated scenario repo URL (e.g. git@github.com:GMISWE/polyforge-coding.git)"),
 			"repos":       prop("array", "Updated repository list. Each: {name, url, github_owner_repo?, description?, and an optional all-or-nothing structured block: positioning(string), tech_stack([string]), main_modules([{path,role}]), change_scenarios([string]), generated_at(RFC3339), generated_commit(string)}. If any structured field is set, all four content fields are required (English)."),
-			"members":     prop("array", "Replace member list: [{user_id, role}] where role is viewer|writer|maintainer"),
+			"members":     prop("array", "REPLACES the whole member list: [{user_id, role}] where role is viewer|writer|maintainer. Every member you do not resend is REMOVED, so to add one person you must read the current list (pf_list_projects) and send it back with the addition. Pass members_version with it to make that read-modify-write safe against a concurrent one."),
+			// aihub#260. The counter lives on the project row and is bumped by
+			// Postgres on every members write, so it is a token for "the list I
+			// read", not a timestamp — see buildProjectUpdate in
+			// internal/domain/projects.go for why not updated_at.
+			"members_version": prop("integer", "Compare-and-set guard for members: ALWAYS send the members_version you read alongside the list (pf_list_projects returns it). The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version in details.current_members_version — reread and retry. Every write of members increments this counter. Leaving it out overwrites unconditionally: a concurrent writer's edit is then silently discarded and you still get a 200. NOTE: this protects you against a CONCURRENT writer; it does NOT protect against sending a short list yourself, which still removes everyone you left out."),
 		}, []string{"name"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -67,6 +76,15 @@ func (s *Server) registerProjectTools() {
 		name := strArg(args, "name")
 		if name == "" {
 			return errResult(fmt.Errorf("name is required"))
+		}
+		// aihub#260, mirroring aihub#241: members_version is an INT column and
+		// *int on the wire. Coerce before building the body so a quoted "3"
+		// from a mixed-version client becomes a JSON number here, instead of
+		// failing c.Bind two layers away as an opaque 400 "invalid request
+		// body" — which is indistinguishable from the server not knowing the
+		// parameter at all.
+		if err := normalizeIntArg(args, "members_version"); err != nil {
+			return errResult(err)
 		}
 		body := make(map[string]any)
 		for k, v := range args {

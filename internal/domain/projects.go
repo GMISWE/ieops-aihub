@@ -61,11 +61,20 @@ type Project struct {
 	IdentifierPrefix *string         `json:"identifier_prefix,omitempty"`
 	Repos            json.RawMessage `json:"repos"`
 	Members          json.RawMessage `json:"members"`
-	WISeq            int64           `json:"wi_seq"`
-	Scenario         *string         `json:"scenario"`
-	OwnerUserID      string          `json:"owner_user_id"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
+	// MembersVersion is the aihub#260 compare-and-set counter for `members`.
+	// It is returned by every read (list/get) and every write so a caller that
+	// has just read the project holds the token it needs to guard its own
+	// read-modify-write. No omitempty: version 0 is a legitimate, common value
+	// (it is where every project starts), and dropping the key at 0 would make
+	// "this project has never had a members write" indistinguishable from "this
+	// server does not implement the guard at all" — an absent field is exactly
+	// how a caller detects an old server, so 0 must be sent as 0.
+	MembersVersion int       `json:"members_version"`
+	WISeq          int64     `json:"wi_seq"`
+	Scenario       *string   `json:"scenario"`
+	OwnerUserID    string    `json:"owner_user_id"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // CreateProjectRequest is the body for POST /v1/projects.
@@ -90,7 +99,21 @@ type UpdateProjectRequest struct {
 	Scenario    *string         `json:"scenario"`
 	Repos       json.RawMessage `json:"repos"`
 	// Members, when non-nil, replaces the entire members list.
+	//
+	// aihub#260: REPLACE is unchanged and deliberately so — changing it to a
+	// delta would silently rewrite the meaning of every caller that exists
+	// today and would remove the only way to REMOVE a member. What aihub#260
+	// adds is MembersVersion, the guard that makes the read-modify-write this
+	// forces on callers safe against a concurrent one.
 	Members *[]MemberInput `json:"members"`
+	// MembersVersion, when non-nil, is a compare-and-set precondition: the
+	// members_version the caller last read. The whole update is applied only if
+	// the stored value still matches; otherwise nothing is written and the call
+	// fails with 409 CONFLICT_CAS_FAILED carrying the current version.
+	//
+	// Omitting it keeps the historical unconditional overwrite, which existing
+	// callers depend on.
+	MembersVersion *int `json:"members_version"`
 }
 
 // projectMember is a single entry in the members JSONB array.
@@ -152,7 +175,7 @@ func scanProject(row pgx.Row) (*Project, error) {
 	var repos, members []byte
 	err := row.Scan(
 		&p.Name, &p.Description, &p.Visible,
-		&p.IdentifierPrefix, &repos, &members,
+		&p.IdentifierPrefix, &repos, &members, &p.MembersVersion,
 		&p.WISeq, &p.Scenario, &p.OwnerUserID,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
@@ -172,7 +195,7 @@ func scanProject(row pgx.Row) (*Project, error) {
 	return &p, nil
 }
 
-const projectSelectCols = `name, description, visible, identifier_prefix, repos, members,
+const projectSelectCols = `name, description, visible, identifier_prefix, repos, members, members_version,
        wi_seq, scenario, owner_user_id, created_at, updated_at`
 
 // validateRepos checks that repo names and URLs are unique within the list.
@@ -364,12 +387,12 @@ func getProjectByNameWithHash(ctx context.Context, conn *pgxpool.Pool, name stri
 	var p projectWithHash
 	var repos, members []byte
 	err := conn.QueryRow(ctx,
-		`SELECT name, description, visible, identifier_prefix, repos, members,
+		`SELECT name, description, visible, identifier_prefix, repos, members, members_version,
 		        wi_seq, scenario, owner_user_id, created_at, updated_at, identifier_hash
 		 FROM projects WHERE name = $1`, name,
 	).Scan(
 		&p.Name, &p.Description, &p.Visible,
-		&p.IdentifierPrefix, &repos, &members,
+		&p.IdentifierPrefix, &repos, &members, &p.MembersVersion,
 		&p.WISeq, &p.Scenario, &p.OwnerUserID,
 		&p.CreatedAt, &p.UpdatedAt, &p.identifierHash,
 	)
@@ -492,7 +515,7 @@ func ListProjects(ctx context.Context, conn *pgxpool.Pool, caller *UserRecord) (
 		var repos, members []byte
 		if scanErr := rows.Scan(
 			&p.Name, &p.Description, &p.Visible,
-			&p.IdentifierPrefix, &repos, &members,
+			&p.IdentifierPrefix, &repos, &members, &p.MembersVersion,
 			&p.WISeq, &p.Scenario, &p.OwnerUserID,
 			&p.CreatedAt, &p.UpdatedAt,
 		); scanErr != nil {
@@ -517,8 +540,191 @@ func ListProjects(ctx context.Context, conn *pgxpool.Pool, caller *UserRecord) (
 	return projects, nil
 }
 
+// projectUpdate is the compiled UPDATE for UpdateProject.
+//
+// Split out of UpdateProject as a pure function for the reason spelled out at
+// buildWorkItemUpdate (work_items.go): UpdateProject reaches the database before
+// it gets here, so any behavioural test of this logic would have to be DB-gated,
+// and a DB-gated test in this repo runs only in its own scoped CI step — it
+// SKIPs on `go test ./...` while still reading as coverage. Compiling the
+// statement in a pure function gives the two aihub#260 invariants assertions
+// that execute everywhere.
+type projectUpdate struct {
+	Query string
+	Args  []any
+	// CAS is true when the WHERE clause carries a members_version predicate,
+	// i.e. the caller asked for compare-and-set. Zero rows returned is then a
+	// version conflict rather than a vanished row.
+	CAS bool
+	// Empty is true when the caller supplied no field to change at all, in
+	// which case Query is "" and no statement should be executed.
+	Empty bool
+}
+
+// projectUpdateWritesSomething reports whether the request asks for any column
+// to change. UpdateProject uses it before it touches the pool, to reject a
+// members_version that guards nothing.
+//
+// It must agree with buildProjectUpdate's Empty exactly — if a new writable
+// field is ever added to one and not the other, a request carrying only that
+// field plus a version would be rejected as "changes nothing" (or, the other
+// way round, a version would be silently accepted with no statement to guard).
+// TestProjectUpdateWritesSomethingAgreesWithBuild pins the two together.
+func projectUpdateWritesSomething(req *UpdateProjectRequest) bool {
+	return req.Description != nil || req.Visible != nil || req.Scenario != nil ||
+		req.Members != nil || (len(req.Repos) > 0 && string(req.Repos) != "null")
+}
+
+// buildProjectUpdate compiles the SET/WHERE clauses for UpdateProject.
+//
+// # aihub#260: the members lost update
+//
+// `members` is a whole-list REPLACE (see UpdateProjectRequest.Members), so the
+// only way to add one member is read all N and send back N+1. Two admins doing
+// that at once used to mean the later write silently dropped the earlier one's
+// addition, and afterwards the result was indistinguishable from "that person
+// was never added" — updated_at is rewritten by trg_projects_updated_at on
+// every write, so even the timestamp carried no evidence. Directly observed on
+// 2026-08-24 with a read-modify-write window of roughly two minutes.
+//
+// The guard is the same shape aihub#241 gave work_items.declared_resources, and
+// it is worth restating WHY that shape, because aihub#241's doc comment records
+// two earlier attempts that both failed while looking correct:
+//
+//   - The counter must advance in the DATABASE. `members_version =
+//     members_version + 1` is computed by Postgres from the stored value, never
+//     in Go from anything the caller sent or from a row this process read
+//     earlier. aihub#241's first attempt wrote `= <caller value> + 1`, so on the
+//     ordinary path (no version supplied) the counter never moved at all and
+//     every caller read 0 forever — a working compare-and-set on top of that
+//     could never detect anything. Here the increment is keyed purely on
+//     `members` being written and is independent of req.MembersVersion.
+//     Concretely, a Go-computed version would be read by UpdateProject's
+//     pre-transaction checkProjectAccess, i.e. BEFORE the row lock is taken, so
+//     two racing writers would both compute the same next value.
+//
+//   - Supplying the version must add a WHERE PREDICATE. aihub#241's second
+//     attempt accepted the parameter and changed what got stored but added no
+//     precondition, so a stale writer still won silently. Here the version is a
+//     precondition and nothing else: it is never stored, and there is no Go-side
+//     comparison anywhere that could keep the behaviour correct if this line
+//     were deleted.
+//
+// The two are deliberately orthogonal, exactly as in work_items: the increment
+// is keyed on `members` being written, the precondition on the caller supplying
+// a version. Omitting the version keeps the historical unconditional overwrite.
+//
+// The increment is keyed on `members` and NOT on "any update", which is the
+// whole reason this is a dedicated counter rather than a compare-and-set on
+// updated_at:
+//
+//   - updated_at moves on every write (the trigger), so a members guard keyed on
+//     it would 409 because somebody edited the description — a guard that cries
+//     wolf gets passed `nil` by the next caller who hits it.
+//   - a timestamp compare-and-set compares REPRESENTATIONS, not values.
+//     TIMESTAMPTZ is microsecond precision and RFC3339 drops trailing zeros on
+//     the way out through JSON, so `.120000` comes back as `.12` and the
+//     round-trip is not guaranteed to reproduce the stored value bit for bit.
+//     An integer has no such trap.
+//
+// A members_version with nothing to update is rejected by UpdateProject rather
+// than silently returning the row: a precondition that quietly checks nothing is
+// the failure this work item exists to remove.
+func buildProjectUpdate(req *UpdateProjectRequest, name string) (projectUpdate, *AihubError) {
+	setClauses := []string{}
+	args := []any{}
+	idx := 1
+
+	add := func(clause string, val any) {
+		setClauses = append(setClauses, fmt.Sprintf(clause, idx))
+		args = append(args, val)
+		idx++
+	}
+
+	if req.Description != nil {
+		add("description=$%d", *req.Description)
+	}
+	if req.Visible != nil {
+		add("visible=$%d", *req.Visible)
+	}
+	if req.Scenario != nil {
+		add("scenario=$%d", *req.Scenario)
+	}
+	if len(req.Repos) > 0 && string(req.Repos) != "null" {
+		add("repos=$%d", []byte(req.Repos))
+	}
+	if req.Members != nil {
+		membersJSON, err := json.Marshal(*req.Members)
+		if err != nil {
+			return projectUpdate{}, NewErr(ErrInternalError, "failed to marshal members")
+		}
+		add("members=$%d", membersJSON)
+		// Computed by Postgres from the stored value, not from anything the
+		// caller sent and not from any row this process read — that is what
+		// makes it a usable CAS counter. See the doc comment above.
+		setClauses = append(setClauses, "members_version = members_version + 1")
+	}
+
+	if len(setClauses) == 0 {
+		return projectUpdate{Empty: true}, nil
+	}
+
+	whereClauses := []string{fmt.Sprintf("name=$%d", idx)}
+	args = append(args, name)
+	idx++
+
+	cas := req.MembersVersion != nil
+	if cas {
+		whereClauses = append(whereClauses, fmt.Sprintf("members_version=$%d", idx))
+		args = append(args, *req.MembersVersion)
+	}
+
+	return projectUpdate{
+		Query: fmt.Sprintf("UPDATE projects SET %s WHERE %s RETURNING %s",
+			joinStrings(setClauses, ", "), joinStrings(whereClauses, " AND "), projectSelectCols),
+		Args: args,
+		CAS:  cas,
+	}, nil
+}
+
+// membersCASConflictErr builds the 409 for a failed members compare-and-set
+// (aihub#260). Never a 400: the caller's payload was well-formed, someone else
+// simply wrote members first.
+//
+// `current` is always known, unlike work_items' equivalent, which needs a
+// casVersionUnknown placeholder because it re-reads after the fact. Here
+// UpdateProject has already read members_version under SELECT ... FOR UPDATE in
+// this same transaction, so the row cannot have moved between that read and the
+// failed UPDATE, and the number handed back is exactly what the caller must
+// retry with.
+func membersCASConflictErr(expected, current int) *AihubError {
+	return NewErrDetails(ErrConflictCASFailed,
+		fmt.Sprintf("project members CAS failed: members_version is %d, not the expected %d — "+
+			"reread the project (pf_list_projects) and retry with its current members_version",
+			current, expected),
+		map[string]any{
+			"expected_members_version": expected,
+			"current_members_version":  current,
+		})
+}
+
 // UpdateProject patches a project (owner/admin only).
 func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller *UserRecord, req UpdateProjectRequest) (*Project, *AihubError) {
+	// aihub#260: a precondition attached to nothing is worse than no
+	// precondition, because the caller reads the 200 as "the guard passed".
+	// members_version is a compare-and-set on a write, so there must be a write.
+	//
+	// Checked here, before the pool is touched, so it has a behavioural test that
+	// needs no database (TestUpdateProject_MembersVersionWithNothingToWriteIs400
+	// passes a nil pool). A check living below checkProjectAccess could only be
+	// covered by a DB-gated test, and a DB-gated test in this repo SKIPs on
+	// `go test ./...` while still reading as coverage.
+	if req.MembersVersion != nil && !projectUpdateWritesSomething(&req) {
+		return nil, NewErr(ErrBadRequest,
+			"members_version is a compare-and-set precondition for an update, but this request changes nothing; "+
+				"send it together with the fields you want to write")
+	}
+
 	// Check owner/admin access
 	existing, aerr := checkProjectAccess(ctx, conn, name, caller, "", "owner")
 	if aerr != nil {
@@ -547,6 +753,14 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 		req.Scenario = &norm
 	}
 
+	if req.Members != nil {
+		for _, m := range *req.Members {
+			if m.Role != "viewer" && m.Role != "writer" && m.Role != "maintainer" {
+				return nil, NewErr(ErrBadRequest, fmt.Sprintf("invalid role %q for member %s: must be viewer, writer, or maintainer", m.Role, m.UserID))
+			}
+		}
+	}
+
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return nil, NewErr(ErrInternalError, "begin transaction")
@@ -556,10 +770,18 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 	// SELECT FOR UPDATE to prevent concurrent members/repos writes.
 	// Also fetch owner_user_id so we can re-validate after acquiring the lock
 	// (owner may have been transferred between the pre-transaction access check and here).
+	//
+	// members_version rides along for aihub#260. The row is locked for the rest
+	// of this transaction, so this value is still what the UPDATE below compares
+	// against and is safe to report in a conflict — no second read needed. Note
+	// this is NOT the compare-and-set: the guard is the WHERE predicate compiled
+	// by buildProjectUpdate, and deleting that predicate must break the
+	// behaviour, so nothing here compares the two in Go.
 	var lockedOwnerID string
+	var lockedMembersVersion int
 	if err := tx.QueryRow(ctx,
-		`SELECT owner_user_id FROM projects WHERE name=$1 FOR UPDATE`, name,
-	).Scan(&lockedOwnerID); err != nil {
+		`SELECT owner_user_id, members_version FROM projects WHERE name=$1 FOR UPDATE`, name,
+	).Scan(&lockedOwnerID, &lockedMembersVersion); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, NewErr(ErrProjectNotFound, fmt.Sprintf("project %q not found", name))
 		}
@@ -570,58 +792,25 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 		return nil, NewErr(ErrProjectOwnerRequired, "only owner or admin can update project")
 	}
 
-	setClauses := []string{}
-	args := []any{}
-	idx := 1
-
-	if req.Description != nil {
-		setClauses = append(setClauses, fmt.Sprintf("description=$%d", idx))
-		args = append(args, *req.Description)
-		idx++
+	upd, aerr := buildProjectUpdate(&req, name)
+	if aerr != nil {
+		return nil, aerr
 	}
-	if req.Visible != nil {
-		setClauses = append(setClauses, fmt.Sprintf("visible=$%d", idx))
-		args = append(args, *req.Visible)
-		idx++
-	}
-	if req.Scenario != nil {
-		setClauses = append(setClauses, fmt.Sprintf("scenario=$%d", idx))
-		args = append(args, *req.Scenario)
-		idx++
-	}
-	if len(req.Repos) > 0 && string(req.Repos) != "null" {
-		setClauses = append(setClauses, fmt.Sprintf("repos=$%d", idx))
-		args = append(args, []byte(req.Repos))
-		idx++
-	}
-	if req.Members != nil {
-		for _, m := range *req.Members {
-			if m.Role != "viewer" && m.Role != "writer" && m.Role != "maintainer" {
-				return nil, NewErr(ErrBadRequest, fmt.Sprintf("invalid role %q for member %s: must be viewer, writer, or maintainer", m.Role, m.UserID))
-			}
-		}
-		membersJSON, err := json.Marshal(*req.Members)
-		if err != nil {
-			return nil, NewErr(ErrInternalError, "failed to marshal members")
-		}
-		setClauses = append(setClauses, fmt.Sprintf("members=$%d", idx))
-		args = append(args, membersJSON)
-		idx++
-	}
-
-	if len(setClauses) == 0 {
+	if upd.Empty {
 		// Nothing to update — return current state
 		_ = tx.Rollback(ctx)
 		return existing, nil
 	}
 
-	args = append(args, name)
-	query := fmt.Sprintf("UPDATE projects SET %s WHERE name=$%d RETURNING "+projectSelectCols,
-		joinStrings(setClauses, ", "), idx)
-
-	row := tx.QueryRow(ctx, query, args...)
+	row := tx.QueryRow(ctx, upd.Query, upd.Args...)
 	p, scanErr := scanProject(row)
 	if scanErr != nil {
+		// The row is held by this transaction's FOR UPDATE, so it cannot have
+		// vanished: with a compare-and-set requested, no rows can only mean the
+		// members_version precondition did not match.
+		if upd.CAS && errors.Is(scanErr, pgx.ErrNoRows) {
+			return nil, membersCASConflictErr(*req.MembersVersion, lockedMembersVersion)
+		}
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("update project: %v", scanErr))
 	}
 

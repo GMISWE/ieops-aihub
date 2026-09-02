@@ -99,6 +99,19 @@ func handleGetProject(pool *pgxpool.Pool) echo.HandlerFunc {
 }
 
 // handleUpdateProject handles PATCH /v1/projects/:name.
+//
+// aihub#260: the body binds into domain.UpdateProjectRequest, whose
+// MembersVersion field carries the members compare-and-set precondition. There
+// is no code here that names it — it rides the struct — and that is exactly the
+// hop this repo has silently lost a parameter on before, so it gets its own
+// assertion rather than being trusted: TestPatchProjectCarriesMembersVersion
+// (internal/server/routes_projects_cas_db_test.go) drives a real HTTP PATCH and
+// requires the 409, so a handler that dropped the field would go red here even
+// though the domain function and the MCP schema were both correct.
+//
+// A failed precondition surfaces as 409 CONFLICT_CAS_FAILED through domainErr,
+// with details.current_members_version — errorResponse copies AihubError.Details
+// into the envelope, so the caller learns what to retry with.
 func handleUpdateProject(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)

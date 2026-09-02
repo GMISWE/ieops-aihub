@@ -222,6 +222,40 @@ jobs:
       #             functions listed as executed by no step, before the step
       #             existed. 126 + 2 = 128 happens to agree; the 128 written below
       #             is the measurement, not the sum.
+      #
+      #   130 -> 131 aihub#334 added 1 DB-gated function in internal/domain
+      #             (TestSerializationFailureSurfacesAsRetryable409 in
+      #             serialization_failure_db_test.go). It carries FIVE arms —
+      #             three instances of the defect, one that is reachable today
+      #             on pf_claim_work_item, and a READ COMMITTED control — as
+      #             SUBTESTS of one function rather than five functions, because
+      #             this gate counts functions and five would move the ratchet
+      #             five times for one guard. The step below therefore asserts
+      #             `--- PASS:` on each subtest name, which is where the real
+      #             per-instance coverage claim lives. It needs only a database
+      #             (the races are real backends contending over real rows; no
+      #             embedding service), so the required set goes 128 -> 129 and
+      #             it does need a new step ("aihub#334 serialization-failure
+      #             mapping DB tests").
+      #             Measured, not predicted, and NOT computed as "130 plus the
+      #             one I added" — arithmetic that lands on the right answer is
+      #             how this log rots. Taken on a throwaway clone outside the
+      #             task worktree, on the tree formed by merging origin/main at
+      #             761ac3b into this branch at 9f0d74e (merge 65a8841),
+      #             database untouched because the inventory run sets no
+      #             AIHUB_TEST_DB. The gate printed, verbatim:
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 131
+      #                 (require only a DB: 128, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 128/128
+      #             The `130` this starts from is the value on that same
+      #             origin/main, read off the merged tree.
+      #             ⚠️ origin/main moved TWICE while this branch was being
+      #             written (9a32bac -> af274ad -> 761ac3b, both siblings'
+      #             landings). If it gains further DB tests before this merges,
+      #             this line is a FLOOR and stays valid; but the line itself
+      #             conflicts textually with main's 130, and the resolution is
+      #             to re-run the gate on the merged tree rather than to pick
+      #             the larger number.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -237,7 +271,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 128
+            -min-gated 131
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
@@ -394,6 +428,55 @@ jobs:
             || { echo "::error::an aihub#260 internal/server test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
           ! grep -q -- '--- SKIP' members_mcp.log \
             || { echo "::error::an aihub#260 internal/mcp test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#334: Postgres class 40 (40001 serialization_failure / 40P01
+      # deadlock_detected) must reach the caller as a retryable 409, never as a
+      # 500 that sends them to read logs instead of retrying.
+      #
+      # This cannot be a unit test. 40001 is produced by the server's own
+      # concurrency control at the instant a blocked writer is released by the
+      # committing writer that changed the row underneath it; a hand-built
+      # *pgconn.PgError would only prove the classifier compiles. Those
+      # hand-built cases DO exist, in internal/domain/pgx_err_test.go, and they
+      # run in "Unit tests" — they are the negative half (40002, 40003, 23505
+      # must NOT be reclassified), not this.
+      #
+      # Asserted per subtest rather than on the parent, because the three
+      # instances fail for DIFFERENT reasons and are fixed in different places:
+      #
+      #   - the UpdateProject arm loses at `SELECT ... FOR UPDATE`;
+      #   - the claim arm loses at the same shape but is reachable TODAY
+      #     (FnClaimWorkItem already opens SERIALIZABLE, nobody has to raise an
+      #     isolation level first);
+      #   - the unblock-sweep arm loses inside a lazily-streamed result set
+      #     whose error nobody asked for, so by the time it reaches the caller
+      #     it is pgx.ErrTxCommitRollback with NO SQLSTATE at all. A fix placed
+      #     only at a central pgx-error -> AihubError conversion point leaves
+      #     this one returning 500 with every other assertion green — measured;
+      #   - the memory-supersede arm loses at a plain `UPDATE`, neither a row
+      #     lock nor a commit, which is what stops the fix from being scoped to
+      #     the two hop shapes the other arms happen to use.
+      #
+      # The last name in the list is the control, not a fourth instance: at READ
+      # COMMITTED the same interleaving must still SUCCEED. Without it, "turn
+      # every contended write into a 409" would satisfy all four assertions
+      # above and break every existing caller.
+      - name: aihub#334 serialization-failure mapping DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestSerializationFailureSurfacesAsRetryable409' -count=1 -v 2>&1 | tee serialization_failure.log
+          for want in 'TestSerializationFailureSurfacesAsRetryable409/serializable_loser_gets_a_retryable_409,_not_a_500' \
+                      'TestSerializationFailureSurfacesAsRetryable409/concurrent_claim_gets_a_retryable_409,_not_a_500' \
+                      'TestSerializationFailureSurfacesAsRetryable409/unblock_sweep_row-lock_error_still_must_not_500' \
+                      'TestSerializationFailureSurfacesAsRetryable409/memory_supersede_loser_gets_a_retryable_409,_not_a_500' \
+                      'TestSerializationFailureSurfacesAsRetryable409/read_committed_loser_still_succeeds'; do
+            grep -q -- "--- PASS: $want" serialization_failure.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); an aihub#334 instance is unguarded"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' serialization_failure.log \
+            || { echo "::error::an aihub#334 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#288: exercise the work_items.attrs merge path (attrs_patch /
       # attrs_unset) against the same Postgres service, already migrated by the

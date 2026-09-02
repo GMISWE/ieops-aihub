@@ -320,7 +320,7 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, NewErr(ErrProjectNotFound, fmt.Sprintf("project %q not found", req.Project))
 		}
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("increment wi_seq: %v", err))
+		return nil, dbErrCause(err, "increment wi_seq")
 	}
 
 	wiID := newWorkItemID()
@@ -345,7 +345,7 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		embModel, embDims, embVecLit,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to insert work_item: %v", err))
+		return nil, dbErrCause(err, "failed to insert work_item")
 	}
 
 	// Emit work_item_filed event
@@ -362,7 +362,7 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		evtID, wiID, callerUserID, callerDisplay, evtPayload, req.Project,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to emit work_item_filed event")
+		return nil, dbErr(err, "failed to emit work_item_filed event")
 	}
 
 	// Insert blocked_by dependencies
@@ -373,7 +373,7 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 			wiID, blockingID, callerUserID,
 		)
 		if err != nil {
-			return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to create dependency for blocking_wi %s: %v", blockingID, err))
+			return nil, dbErrCause(err, fmt.Sprintf("failed to create dependency for blocking_wi %s", blockingID))
 		}
 	}
 
@@ -381,11 +381,14 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	if len(req.BlockedBy) > 0 {
 		_, err = tx.Exec(ctx, `UPDATE work_items SET status='blocked' WHERE id=$1`, wiID)
 		if err != nil {
-			return nil, NewErr(ErrInternalError, "failed to set blocked status")
+			return nil, dbErr(err, "failed to set blocked status")
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		if aerr := retryConflictErr(err, "failed to commit transaction"); aerr != nil { // aihub#334
+			return nil, aerr
+		}
 		return nil, NewErr(ErrInternalError, "failed to commit transaction")
 	}
 
@@ -696,6 +699,18 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 		}
 	}
 	rows.Close()
+	// aihub#334: pgx's Query is lazy, so a server-side failure while streaming
+	// this result set is reachable only here. Dedup is best-effort and stays
+	// best-effort for ordinary failures — but a class 40 rollback has already
+	// killed the transaction CreateWorkItem is holding, so "allow creation" is
+	// not a fallback, it is the caller being told 500 two statements later with
+	// the SQLSTATE gone.
+	if err := rows.Err(); err != nil {
+		if aerr := retryConflictErr(err, "failed to scan dedup candidates"); aerr != nil {
+			return aerr
+		}
+		return nil // Dedup is best-effort, as above.
+	}
 
 	if len(partials) > 0 {
 		candidates := make([]map[string]any, len(partials))
@@ -1638,7 +1653,7 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 	upd := buildWorkItemUpdate(req, wi.ID)
 	tag, err := tx.Exec(ctx, upd.Query, upd.Args...)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to update work_item: %v", err))
+		return nil, dbErrCause(err, "failed to update work_item")
 	}
 	if isCASConflict(upd.CAS, tag.RowsAffected()) {
 		// Re-read inside the same transaction to find out what the row actually
@@ -1679,7 +1694,7 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 			evtID, wi.ID, callerUserID, "", payload, wi.Project,
 		)
 		if err != nil {
-			return nil, NewErr(ErrInternalError, "failed to emit wi_goal_updated event")
+			return nil, dbErr(err, "failed to emit wi_goal_updated event")
 		}
 	}
 
@@ -1710,7 +1725,7 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 			evtID, wi.ID, callerUserID, "", payload, wi.Project,
 		)
 		if err != nil {
-			return nil, NewErr(ErrInternalError, "failed to emit wi_reclassified event")
+			return nil, dbErr(err, "failed to emit wi_reclassified event")
 		}
 	}
 
@@ -1734,11 +1749,14 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 			evtID, wi.ID, callerUserID, "", payload, wi.Project,
 		)
 		if err != nil {
-			return nil, NewErr(ErrInternalError, "failed to emit wi_content_updated event")
+			return nil, dbErr(err, "failed to emit wi_content_updated event")
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		if aerr := retryConflictErr(err, "failed to commit update"); aerr != nil { // aihub#334
+			return nil, aerr
+		}
 		return nil, NewErr(ErrInternalError, "failed to commit update")
 	}
 

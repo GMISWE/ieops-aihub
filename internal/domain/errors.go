@@ -48,6 +48,12 @@ const (
 	ErrRequiresHumanSessionMismatch ErrCode = "REQUIRES_HUMAN_SESSION_MISMATCH"
 	ErrConflictVersionMismatch      ErrCode = "CONFLICT_VERSION_MISMATCH"
 	ErrConflictTerminalState        ErrCode = "CONFLICT_TERMINAL_STATE"
+	// ErrConflictSerializationFailure is Postgres class 40 (transaction
+	// rollback) surfaced to the caller: the server is healthy and the request
+	// was valid, the transaction just lost a race and re-running it will very
+	// likely succeed. Details carry {retryable:true, sqlstate:"40001"|"40P01"}
+	// so a client can decide without parsing the message. See aihub#334.
+	ErrConflictSerializationFailure ErrCode = "CONFLICT_SERIALIZATION_FAILURE"
 
 	// HTTP 412
 	ErrPreconditionFailed ErrCode = "PRECONDITION_FAILED"
@@ -121,7 +127,7 @@ func codeToHTTPStatus(code ErrCode) int {
 		ErrConflictSimilarMemory, ErrConflictDependencyCycle,
 		ErrConflictLockTaken, ErrConflictDualWIAgent,
 		ErrRequiresHumanSessionMismatch, ErrConflictVersionMismatch,
-		ErrConflictTerminalState,
+		ErrConflictTerminalState, ErrConflictSerializationFailure,
 		// G6 / design §17: WI_TYPE_MISMATCH is 409 (conflict between wi_type and config)
 		ErrWITypeMismatch,
 		// G6 / design §4.3 line 1138: GOAL_CHANGE_NOT_ALLOWED is 409, not 400

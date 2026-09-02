@@ -11,30 +11,65 @@ on:
   pull_request:
     paths:
       - 'plugins/polyforge/**'
-      # Server-side source that ships INSIDE the polyforge binary. Derived, not
-      # guessed: these are the first-party internal/ packages that cmd/polyforge
-      # links and no other cmd/ links, so an edit here changes what the plugin does
-      # while changing nothing that ships elsewhere. Two distinct reasons, both real:
-      # a tool/param change under internal/mcp can break the plugin's references, and
-      # internal/cli holds dump_schemas.go — the instrument that produces the schema
-      # this job lints against.
-      #
-      # The "paths: filter covers every plugin-only package" step below recomputes
-      # that set with `go list -deps` on every run and fails if this list stops
-      # covering it, so the next package to join the set goes red instead of
-      # escaping the gate. This list is not trustworthy on its own: internal/cli was
-      # missing for real, and PR#283 changed `polyforge doctor` behaviour in
+      # EVERY first-party package cmd/polyforge links — i.e. every package whose
+      # source ships inside the plugin binary. Derived, not guessed: the "paths:
+      # filter covers every package the plugin links" step below recomputes the set
+      # with `go list -deps` on each run and goes red if this list stops covering
+      # it. The list is not trustworthy on its own: internal/cli was missing for
+      # real, and PR#283 changed `polyforge doctor` behaviour in
       # internal/cli/doctor.go while this job never ran (aihub#326).
       #
-      # Packages cmd/polyforge SHARES with cmd/aihub (auth, domain, embedding,
-      # render, version) are deliberately absent, and the derived check does not ask
-      # for them. They do reach the plugin binary, so a pure internal/domain enum
-      # change with no internal/mcp edit remains a known gap — but triggering on them
-      # would run this job on most server PRs for no added signal.
-      - 'internal/mcp/**'
+      # aihub#347 widened the rule from "packages ONLY cmd/polyforge links" to
+      # "packages cmd/polyforge links", for two measured reasons.
+      #
+      # 1. The excluded half was not signal-free. This block used to omit the
+      #    packages cmd/polyforge shares with cmd/aihub (auth, domain, embedding,
+      #    render, version) on the stated grounds that triggering on them "would run
+      #    this job on most server PRs for no added signal". Measured false:
+      #    internal/mcp builds four tool-param enums straight out of internal/domain
+      #    (PfRememberTypeEnum, MethodologyTypeEnum, DeclaredResourceTypeList,
+      #    ResourceLockTypeList) and dump-mcp-schemas emits `enum` into the contract.
+      #    Renaming one MemoryTypeEnum entry in internal/domain/memory.go — a
+      #    one-file diff matching none of the old globs — makes pf_contract_lint.py
+      #    exit 1 with two ENUM_VIOLATION errors against pf-spec and pf-revise.
+      #    PR#278 and PR#282 each edited internal/domain and each carried 6 checks
+      #    where a triggering PR carries 7: Contract Lint was absent, and both were
+      #    green. Green because the check did not exist on that PR, not because it
+      #    passed.
+      #
+      # 2. Subtracting the other cmds made the requirement depend on state nothing
+      #    here watches. Under plugin_only = links(cmd/polyforge) - links(other
+      #    cmds), cmd/aihub or internal/server DROPPING an import moves a package
+      #    into the set from a diff that touches nothing in this block, so the job
+      #    does not run and the step that checks the set does not run either.
+      #    Measured: deleting the internal/version import from cmd/aihub/main.go and
+      #    internal/server/router.go makes internal/version plugin-only and the
+      #    coverage step FAIL — from a two-file diff matching no glob here. Dropping
+      #    the subtraction removes the dependency. links(cmd/polyforge) can only GROW
+      #    when a package already in it (or cmd/polyforge itself) adds an import, and
+      #    every one of those is in this list, so the PR that opens the hole is the
+      #    PR that runs the check. Do not reintroduce the subtraction.
+      #
+      # pkg/client was a third escapee, surfaced by the same rewrite: cmd/polyforge
+      # links it and no other cmd does, so it was plugin-only under the OLD rule as
+      # well — but the old check filtered candidates to the internal/ prefix and
+      # could therefore never report it. The check no longer filters by prefix.
+      #
+      # Cost, measured over the last 165 first-parent commits on main: 80 (48%)
+      # matched the old filter, 122 (74%) match this one — +42 runs, 1.52x. A run is
+      # ~30s wall and bills 0 ms. The extra runs are extra coverage, not extra red:
+      # check_bump skips any plugin whose source dir has no changed file, so the
+      # NO_VERSION_BUMP gate does not fire on server-only PRs.
+      - 'internal/auth/**'
       - 'internal/cli/**'
       - 'internal/coding/**'
       - 'internal/config/**'
+      - 'internal/domain/**'
+      - 'internal/embedding/**'
+      - 'internal/mcp/**'
+      - 'internal/render/**'
+      - 'internal/version/**'
+      - 'pkg/client/**'
       - 'cmd/polyforge/**'
       - 'scripts/pf_contract_lint.py'
       - 'scripts/pf_contract_lint_baseline.json'
@@ -121,22 +156,39 @@ jobs:
       #
       # This step derives the answer instead of restating it: the ground truth for
       # "this source ships in the plugin" is the link graph, so it asks `go list -deps`
-      # which first-party internal/ packages cmd/polyforge links that no other cmd/
-      # links, and requires paths: to cover each one. Deliberately NOT a second
-      # hand-maintained list — there is no allowlist to edit, and the only way to make
-      # a red here green is to add the missing glob above, which IS the fix.
+      # for every first-party package cmd/polyforge links and requires paths: to cover
+      # each one. Deliberately NOT a second hand-maintained list — there is no
+      # allowlist to edit, and the only way to make a red here green is to add the
+      # missing glob above, which IS the fix.
       #
-      # Closure: a package can only join the plugin-only set when some package already
-      # in that set (or cmd/polyforge) adds the import, and every one of those is in
-      # paths: — so the PR that creates the hole is the PR that runs this check. The
-      # residual gap is the other direction: cmd/aihub DROPPING an import can move a
-      # shared package into the plugin-only set from a diff that touches nothing in
-      # paths:, and no run of this step would see it.
+      # aihub#347 changed the requirement in two ways, both of which are load-bearing
+      # and neither of which may be reverted without reopening a measured hole.
+      #
+      # No subtraction. It used to require only the packages NO OTHER cmd links
+      # (links(cmd/polyforge) - links(other cmds)). That made the requirement a
+      # function of cmd/aihub's imports, which paths: does not watch, so cmd/aihub
+      # dropping an import could enlarge the required set from a diff that never ran
+      # this job — the check could not see the hole it was written to see. Verified by
+      # deleting the internal/version import from cmd/aihub/main.go and
+      # internal/server/router.go: internal/version became plugin-only, this step's
+      # own logic returned FAIL, and the two changed files matched none of the globs.
+      # With the subtraction gone, the required set depends only on imports inside
+      # cmd/polyforge and the packages it already links — all of which are in paths:.
+      # So the closure argument now runs in BOTH directions: take the first newly
+      # added import edge on any path from cmd/polyforge to a newly required package;
+      # its source package was already reachable, hence already in paths:, hence the
+      # PR that adds it is a PR that runs this check.
+      #
+      # No prefix filter. It used to consider only packages under internal/, which is
+      # why pkg/client — linked by cmd/polyforge and by nothing else, so in the
+      # required set even under the old rule — was invisible to it. Anything with the
+      # module path as its prefix now counts, so a future pkg/ or a package moved out
+      # of internal/ cannot slip out of the check by changing directory.
       #
       # `go list -deps` resolves imports without compiling: ~0.5s measured, against a
       # job that already builds the binary. `!cancelled()` for the same reason as the
       # bump gate — a PR carrying both defects should see both in one run.
-      - name: "paths: filter covers every plugin-only package"
+      - name: "paths: filter covers every package the plugin links"
         if: ${{ !cancelled() }}
         env:
           # No go.work exists in CI; set explicitly so a local run reproduces CI.
@@ -172,7 +224,18 @@ jobs:
           for g, p, want in [("internal/cli/**", "internal/cli/doctor.go", True),
                              ("internal/cli/**", "internal/domain/x.go", False),
                              ("internal/*", "internal/cli/doctor.go", False),
-                             ("plugins/polyforge/**", "plugins/polyforge/a/b.md", True)]:
+                             ("plugins/polyforge/**", "plugins/polyforge/a/b.md", True),
+                             # aihub#347: the requirement is no longer internal/-only,
+                             # so the probe paths it is fed no longer share a prefix.
+                             # A pkg/ or cmd/ package must match its own glob and must
+                             # NOT be swallowed by an internal/ one.
+                             ("pkg/client/**", "pkg/client/x.go", True),
+                             ("internal/**", "pkg/client/x.go", False),
+                             ("cmd/polyforge/**", "cmd/polyforge/x.go", True),
+                             ("cmd/polyforge/**", "cmd/aihub/x.go", False),
+                             # Prefix-vs-boundary: 'internal/domain/**' must not match a
+                             # sibling package whose name merely starts with 'domain'.
+                             ("internal/domain/**", "internal/domainx/x.go", False)]:
               if bool(glob_re(g).match(p)) is not want:
                   sys.exit("::error::glob matcher is broken on %r vs %r" % (g, p))
 
@@ -205,33 +268,40 @@ jobs:
           if target not in cmds:
               sys.exit("::error::%s is not a main package; nothing could be derived, "
                        "and this check must not pass vacuously" % target)
-          prefix = mod + "/internal/"
+          prefix = mod + "/"
 
-          def internals(pkg):
-              return {p[len(prefix):] for p in go("list", "-deps", pkg)
-                      if p.startswith(prefix)}
+          # Every first-party package the plugin binary links, as a repo-relative dir.
+          # No prefix filter beyond the module path (pkg/client escaped an internal/-only
+          # rule) and no subtraction of the other cmds (that made the requirement depend
+          # on cmd/aihub, which paths: does not watch) — see the step comment above.
+          # `target` is itself in `go list -deps` output, so cmd/polyforge needs no
+          # special case.
+          linked = sorted(p[len(prefix):] for p in go("list", "-deps", target)
+                          if p.startswith(prefix))
 
-          mine = internals(target)
-          shared = set().union(*[internals(c) for c in cmds if c != target])
-          plugin_only = sorted(mine - shared)
+          # A go.work, a broken import graph or a renamed target could each reduce this
+          # to nothing, and an empty requirement is satisfied by any filter at all. The
+          # binary cannot link zero first-party packages, so treat it as instrument
+          # failure rather than a pass.
+          if "cmd/polyforge" not in linked:
+              sys.exit("::error::derived link set does not contain cmd/polyforge itself "
+                       "(got %r) — the derivation is broken and this check must not pass "
+                       "vacuously" % linked)
 
           res = [glob_re(g) for g in globs]
-          missing = [p for p in plugin_only
-                     if not any(r.match("internal/%s/x.go" % p) for r in res)]
-          if not any(r.match("cmd/polyforge/main.go") for r in res):
-              missing.append("(cmd/polyforge itself)")
+          missing = [p for p in linked
+                     if not any(r.match("%s/x.go" % p) for r in res)]
 
           print("paths: globs        %s" % " ".join(globs))
-          print("cmd/polyforge links %s" % " ".join(sorted(mine)))
-          print("plugin-only         %s" % " ".join(plugin_only))
+          print("plugin links        %s" % " ".join(linked))
           if missing:
               sys.exit("::error::the paths: filter does not cover %s. Those package(s) "
-                       "are linked into the polyforge binary and into nothing else, so "
-                       "editing them changes what the plugin does while this job never "
-                       "runs (aihub#326). Add to paths: in %s:\n%s"
+                       "are linked into the polyforge binary, so editing them changes "
+                       "what the plugin ships while this job never runs (aihub#326, "
+                       "aihub#347). Add to paths: in %s:\n%s"
                        % (", ".join(missing), WF,
-                          "\n".join("      - 'internal/%s/**'" % p for p in missing)))
-          print("OK: paths: covers every plugin-only package")
+                          "\n".join("      - '%s/**'" % p for p in missing)))
+          print("OK: paths: covers every package the plugin links")
           PY
 
       - name: Build polyforge and dump MCP schemas (fresh, in-repo)

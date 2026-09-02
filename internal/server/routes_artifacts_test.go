@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -2348,9 +2349,180 @@ func TestShareArtifact_412MessageNamesTheConfiguredTypes(t *testing.T) {
 	if rec.Code != http.StatusPreconditionFailed {
 		t.Fatalf("status: got %d, want 412 (body=%s)", rec.Code, rec.Body.String())
 	}
+	// Without this the loop below is vacuous: an empty render-type set would make
+	// every assertion in it pass by never running.
+	if len(domain.RenderTypeNames()) < 2 {
+		t.Fatalf("expected the default render-type set to be non-trivial, got %v", domain.RenderTypeNames())
+	}
 	for _, want := range domain.RenderTypeNames() {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("412 body omits configured render type %q: %s", want, rec.Body.String())
 		}
+	}
+}
+
+// TestVisibilityTierSetsMatchTheSchema is the gate for a hazard an independent
+// review caught in the first draft of aihub#151: nonPublishableVisibilities and
+// restorableVisibilities each restate the memories_visibility_check vocabulary,
+// and nothing connected either one to the migration that defines it. A later
+// migration adding a tier would leave restorableVisibilities silently rejecting
+// it — so unshare falls back to "project", which IS the widening bug aihub#151
+// exists to fix — while nonPublishableVisibilities silently treats it as
+// publishable. Both failures are silent and both are in the unsafe direction.
+//
+// The assertion is CLASSIFICATION, not equality with a copied list: every tier
+// the schema allows must be accounted for by this file. The migration is parsed
+// rather than restated, because a restated list is the thing being guarded
+// against.
+func TestVisibilityTierSetsMatchTheSchema(t *testing.T) {
+	const migration = "../db/migrations/0023_memories_visibility_public.sql"
+	raw, err := os.ReadFile(migration)
+	if err != nil {
+		t.Fatalf("read %s: %v", migration, err)
+	}
+	// The file carries an Up and a Down section, each with its own CHECK. Take
+	// only the Up one — goose delimits them, and the Down constraint is the
+	// pre-aihub#96 vocabulary, which is exactly the wrong answer.
+	up, _, found := strings.Cut(string(raw), "-- +goose Down")
+	if !found {
+		t.Fatalf("%s has no '-- +goose Down' delimiter; the Up/Down split this test relies on is gone", migration)
+	}
+	_, after, found := strings.Cut(up, "visibility IN (")
+	if !found {
+		t.Fatalf("%s Up section has no `visibility IN (` constraint any more; re-derive this test", migration)
+	}
+	list, _, found := strings.Cut(after, ")")
+	if !found {
+		t.Fatalf("unterminated visibility IN ( ... ) in %s", migration)
+	}
+
+	schemaTiers := map[string]bool{}
+	for _, part := range strings.Split(list, ",") {
+		tier := strings.Trim(strings.TrimSpace(part), "'")
+		if tier != "" {
+			schemaTiers[tier] = true
+		}
+	}
+	if len(schemaTiers) < 4 {
+		t.Fatalf("parsed only %d tiers from %s (%v); the parse is wrong, not the code", len(schemaTiers), migration, schemaTiers)
+	}
+
+	// Every tier the schema allows is either 'public' or restorable. A new tier
+	// that nobody classified fails here rather than in production.
+	for tier := range schemaTiers {
+		if tier == "public" {
+			continue
+		}
+		if !restorableVisibilities[tier] {
+			t.Errorf("schema allows visibility %q but restorableVisibilities does not list it; unshare would silently fall back to \"project\" for it", tier)
+		}
+	}
+	// And nothing here invents a tier the schema does not have — that would go
+	// straight into an UPDATE against the CHECK constraint.
+	for tier := range restorableVisibilities {
+		if !schemaTiers[tier] {
+			t.Errorf("restorableVisibilities lists %q, which %s does not allow", tier, migration)
+		}
+	}
+	if restorableVisibilities["public"] {
+		t.Errorf("restorableVisibilities must not contain \"public\": restoring to public is not an unshare")
+	}
+	for tier := range nonPublishableVisibilities {
+		if !schemaTiers[tier] {
+			t.Errorf("nonPublishableVisibilities lists %q, which %s does not allow", tier, migration)
+		}
+	}
+}
+
+// TestUnshareArtifact_NonPublicIsANoOp covers the guard added after review:
+// attrs is caller-writable (RememberRequest.Attrs binds straight from the request
+// body and UpdateMemory inherits the head's attrs), so deriving a restore target
+// for a memory that is not currently public would let a caller pick the tier an
+// unshare moves it to. An unshare of something that is not shared changes nothing.
+func TestUnshareArtifact_NonPublicIsANoOp(t *testing.T) {
+	for _, vis := range []string{"project", "team", "private", "admin"} {
+		t.Run(vis, func(t *testing.T) {
+			mem := publicSharedMem()
+			mem.Visibility = vis
+			mem.Attrs = shareAttrs("private") // a tier the caller could have planted
+
+			defer withLoadMemoryOverride(mem, nil)()
+			gotID, _, cleanup := withSetVisibilityOverride(nil)
+			defer cleanup()
+
+			e := echo.New()
+			c, rec := newUIContext(e, http.MethodDelete, "/v1/artifacts/mem_share1/share", "mem_share1")
+			setUser(c, authorUser())
+			if err := handleUnshareArtifact(nil)(c); err != nil {
+				e.HTTPErrorHandler(err, c)
+			}
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+			}
+			if *gotID != "" {
+				t.Fatalf("the visibility setter ran for a %q memory; unsharing something that is not shared must write nothing", vis)
+			}
+			if !strings.Contains(rec.Body.String(), `"visibility":"`+vis+`"`) {
+				t.Fatalf("response must report the tier the memory still has: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestUIArtifactHTML_ShareControlMatchesTheHandler is the other half of the same
+// review finding: the /ui viewer used to offer a Share button whenever
+// rendered_html was non-nil, which stopped matching the handler the moment
+// aihub#151 added two refusals that do not depend on rendered_html. A button that
+// always answers 403 is worse than no button.
+func TestUIArtifactHTML_ShareControlMatchesTheHandler(t *testing.T) {
+	// The caller varies because checkMemoryVisibility runs first and would 403 the
+	// admin-tier row for a project writer — the viewer would never render, and the
+	// case would "pass" for a reason that has nothing to do with the share control.
+	cases := []struct {
+		name       string
+		memType    string
+		visibility string
+		caller     *UserContext
+		wantButton bool
+	}{
+		{name: "shareable spec", memType: "methodology.spec", visibility: "project", caller: authorUser(), wantButton: true},
+		{name: "note with an html payload", memType: "note", visibility: "project", caller: authorUser(), wantButton: false},
+		{name: "decision with an html payload", memType: "decision", visibility: "project", caller: authorUser(), wantButton: false},
+		{name: "private spec seen by its author", memType: "methodology.spec", visibility: "private", caller: authorUser(), wantButton: false},
+		{name: "admin spec seen by an admin", memType: "methodology.spec", visibility: "admin", caller: adminUser(), wantButton: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer withVersionChainOverride()()
+			mem := publicSharedMem()
+			mem.Type = tc.memType
+			mem.Visibility = tc.visibility
+			defer withLoadMemoryOverride(mem, nil)()
+
+			e := echo.New()
+			c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_share1/html", "mem_share1")
+			c.SetPath("/ui/artifacts/:id/html")
+			setUser(c, tc.caller)
+			if err := handleArtifactHTML(nil)(c); err != nil {
+				e.HTTPErrorHandler(err, c)
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+			}
+
+			gotButton := strings.Contains(rec.Body.String(), `id="pf-share"`)
+			if gotButton != tc.wantButton {
+				t.Fatalf("share control present=%v, want %v — the viewer must offer the button exactly when the handler would accept the share", gotButton, tc.wantButton)
+			}
+
+			// The control's presence must agree with the handler's own answer, not
+			// merely with this table.
+			refused := shareRefusal(mem) != nil
+			if gotButton == refused {
+				t.Fatalf("share control present=%v while shareRefusal says refused=%v", gotButton, refused)
+			}
+		})
 	}
 }

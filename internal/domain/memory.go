@@ -2013,8 +2013,16 @@ func UpdateMemory(ctx context.Context, pool *pgxpool.Pool, id string, req *Updat
 
 // PreShareVisibilityKey is the attrs key in which SetMemoryVisibility parks the
 // visibility tier a memory held immediately before it was made public, so unshare
-// can put it back (aihub#151). It is written and cleared by SetMemoryVisibility
-// alone; nothing else should set it.
+// can put it back (aihub#151).
+//
+// ⚠️ It is not a trusted field. attrs is caller-writable — RememberRequest.Attrs
+// binds straight from the request body and UpdateMemory inherits the head row's
+// attrs wholesale — so a caller can plant any value here. Everything that reads
+// it must treat it as a HINT: handleUnshareArtifact acts on it only when the row
+// is actually public, and validates the value against the visibility enum before
+// it reaches an UPDATE. An earlier draft of this comment claimed the key was
+// "written and cleared by SetMemoryVisibility alone", which was simply false and
+// is exactly the kind of assertion-in-a-comment that gets believed.
 const PreShareVisibilityKey = "pre_share_visibility"
 
 // SetMemoryVisibility updates a single memory's visibility tier. Used by the artifact

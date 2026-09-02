@@ -343,6 +343,25 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 				req.RecencyWeight = f
 			}
 		}
+		// aihub#148, hop 3 of four. The cosine floor is fully implemented in
+		// domain (memory_vector.go's `if req.SimilarityThreshold > 0`, plus
+		// Recall's rule that a caller-set threshold suppresses the empty-vector
+		// text fallback because empty is then the intended answer) — and until
+		// this line, nothing ever set the field. Published in pf_recall's
+		// InputSchema, dropped by the MCP forwarding loop, not parsed here:
+		// measured live on 2026-08-29, `?similarity_threshold=0.99` and no
+		// threshold at all returned byte-identical bodies, n=10 total=181 both
+		// times, where 0.99 should have returned nothing.
+		//
+		// No default, deliberately: 0 leaves the filter off. Noise queries
+		// measurably outscore real matches on this corpus (a punctuation-only
+		// query's worst hit is 0.4712 against a correct answer's best at 0.4798),
+		// so a global cutoff would drop true positives to remove nothing.
+		if st := c.QueryParam("similarity_threshold"); st != "" {
+			if f, err := strconv.ParseFloat(st, 64); err == nil {
+				req.SimilarityThreshold = f
+			}
+		}
 		if c.QueryParam("include_archived") == "true" {
 			req.IncludeArchived = true
 		}

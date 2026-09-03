@@ -83,6 +83,26 @@ on:
       - '.claude-plugin/marketplace.json'
       - 'marketplace.json'
       - 'scripts/pf_version_check.py'
+      # Docs contract (aihub#352). docs/mcp-tools.md carries a tool total and a
+      # per-section count whose authority is `polyforge dump-mcp-schemas`, which
+      # this job already builds and dumps below. Both trigger directions are
+      # needed and neither is redundant:
+      #   - a tool added/removed/renamed under internal/mcp/** already runs this
+      #     job via the globs above, and now also fails if the doc was not
+      #     updated with it;
+      #   - a docs-only edit that breaks the inventory, or reintroduces a
+      #     line-number citation, matches NO glob above and would otherwise
+      #     never be checked. An absent check reports green.
+      #
+      # The glob is 'docs/**' and not the two files this job's check was written
+      # for, because check C1 scans ALL of docs/. Naming only docs/mcp-tools.md
+      # and docs/superpowers/** would leave the other five markdown files —
+      # including design/polyforge-v1-design.md, the sole reason C1 needs an
+      # allowlist at all — enforced in the script but untriggered in CI. That is
+      # the same "the check did not exist on that PR" hole aihub#326/#347 above
+      # were about: the defect just moves one file over and stays green.
+      - 'docs/**'
+      - 'scripts/pf_docs_contract_check.py'
 
 jobs:
   contract-lint:
@@ -312,6 +332,17 @@ jobs:
 
       - name: Linter self-test
         run: python3 scripts/pf_contract_lint.py --self-test
+
+      # aihub#352. Uses the SAME fresh in-repo dump as the plugin lint above, so
+      # the doc is checked against this PR's tool registry rather than against a
+      # published schema that lags a merge behind.
+      - name: Docs-contract self-test
+        run: python3 scripts/pf_docs_contract_check.py --self-test
+
+      - name: Docs contract (mcp-tools inventory, line-number citations)
+        run: |
+          python3 scripts/pf_docs_contract_check.py \
+            --schemas /tmp/pf-tool-schemas.json
 
       - name: Contract-lint the polyforge plugin
         run: |

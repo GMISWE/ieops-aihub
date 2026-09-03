@@ -75,8 +75,10 @@ import (
 // same projects.members JSONB and hands pf_whoami the caller's role for free,
 // which pf_whoami then re-derives from ListProjects — one response carrying two
 // independent derivations of one fact. That is how aihub#312 first showed up in
-// the wild (see docs/superpowers/specs/2026-08-06-memory-recall-ranking-design.md
-// :137): project_roles said "writer" while projects[] said public/viewer in the
+// the wild (see docs/superpowers/archive/2026-08-06-memory-recall-ranking-spec.md,
+// section "Ruled out: the Mine view / membership hypothesis" — the file moved and
+// the line anchor was dropped in aihub#352): project_roles said "writer" while
+// projects[] said public/viewer in the
 // same payload. Collapsing the two is NOT done here — the middleware skips the
 // query entirely for admins, so project_roles is empty for exactly the callers
 // the short-circuit branch serves and cannot simply replace the enrichment.

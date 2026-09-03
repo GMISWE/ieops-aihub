@@ -486,6 +486,51 @@ jobs:
       #               dbtestcov: AIHUB_TEST_DB-gated test functions: 146
       #                 (require only a DB: 143, need extra env: 3)
       #               dbtestcov: covered by a CI step: 143/143
+      #
+      #   180 -> 186 aihub#354 added 6 DB-gated functions for ONE work item, all
+      #             in internal/server/routes_step_dbgated_test.go. They are the
+      #             behavioural half of the aihub#265 step-history guards. The
+      #             DB-free ones in routes_step_authority_test.go are static —
+      #             they read completedStepsQuery's text and CompletedStep's
+      #             field order — so they cannot reach handleGetStep at all, and
+      #             five separate mutants were measured GREEN on all five gates
+      #             before this file existed, including the one that made a
+      #             completed step's summary come back under BOTH
+      #             artifact_summary and error_type against a live database.
+      #
+      #             Six functions rather than subtests because this gate counts
+      #             functions and each closes a different defect; one function
+      #             whose six arms report under a single name cannot say WHICH
+      #             one regressed. All six need only a database, so the required
+      #             set goes 177 -> 183 and they share ONE step, "aihub#354
+      #             step-history behavioural DB tests" — one work item, one
+      #             package, and the per-invocation `--- PASS:` assertions
+      #             already recover the per-test resolution.
+      #
+      #             The `180` this starts from is READ OFF the manifest on
+      #             origin/main 6fc2d00, not derived from the 146 above: entries
+      #             landed between 146 and 180 without a line in this ledger, so
+      #             continuing the arithmetic from 146 would produce a number
+      #             that looks right and is wrong. (That gap is pre-existing and
+      #             is not repaired here — provenance is in `git blame`, which is
+      #             where this comment block says provenance lives.)
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched. The gate found
+      #             all six itself, naming them as executed by no step, before
+      #             the step existed. Verbatim, on this branch off origin/main
+      #             6fc2d00, BEFORE the step was written and with the manifest
+      #             still at 180:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 180 entries,
+      #                 inventory measured 186
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 186
+      #                 (require only a DB: 183, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 177/183
+      #             and after the step and the manifest lines were added:
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 186
+      #                 (require only a DB: 183, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 183/183
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -1094,6 +1139,59 @@ jobs:
           done
           ! grep -q -- '--- SKIP' step_fused.log \
             || { echo "::error::an aihub#290 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#354: exercise the aihub#265 step-history guarantees that only a
+      # real database can reach, against the same Postgres service already
+      # migrated by the "Apply migrations (aihub#242 DB tests)" step above.
+      #
+      # Why the DB-free guards in routes_step_authority_test.go do not cover
+      # these. Those are static: they read completedStepsQuery's text and
+      # CompletedStep's field order. What they cannot see is the handler. Five
+      # mutants were measured GREEN on all five gates — build, vet, `go test
+      # ./...`, `go test ./...` with a database, and golangci-lint — before this
+      # step existed:
+      #
+      #   * COALESCE(artifact_summary, error_type) in the outer SELECT list; the
+      #     live handler then answered one completed step's summary under BOTH
+      #     artifact_summary and error_type, and one failed step's error under
+      #     both. That is the aihub#354 defect.
+      #   * assigning nil instead of truncateCompletedSteps' result, so the wire
+      #     carried "completed_steps":null — the third spelling of empty, on a
+      #     field whose contract is that [] and absent differ.
+      #   * reverting the wi_step_state read to "any error means idle/version 0",
+      #     which is byte-identical to "this work item has not started a step".
+      #   * reverting the failed-path INSERT's escalated column.
+      #   * replacing the history-read 500's fixed message with the pgx error,
+      #     which carries relation names and SQLSTATEs to any project VIEWER.
+      #
+      # Two of those are about a read that FAILS rather than one that returns
+      # nothing, so the tests make one fail on purpose: a role denied SELECT on a
+      # single table (see newTableDeniedPool). That needs CREATE ROLE and SET
+      # ROLE, which the service container's postgres superuser has. It creates
+      # no data and drops nothing.
+      #
+      # Same -v + grep guard as every DB step above, and for the same reason: `go
+      # test` prints "ok" and exits 0 when every selected test SKIPs, and these
+      # skip whenever AIHUB_TEST_DB is empty — so without the guard, anything
+      # that stops the env var reaching this step restores zero coverage while CI
+      # stays green.
+      - name: aihub#354 step-history behavioural DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^(TestHandleGetStep_EmptyHistoryIsAnEmptyArrayNeverNull|TestHandleGetStep_HistoryReadFailureIsAnErrorNotAnEmptyHistory|TestHandleGetStep_MissingStepStateRowStillReturnsTheHistory|TestHandleGetStep_StepStateReadFailureIsNotReportedAsIdle|TestHandleGetStep_SummaryAndErrorTypeLandInTheirOwnFields|TestHandleUpdateStep_EscalatedSurvivesToTheHistoryRead)$' -count=1 -v 2>&1 | tee step_history.log
+          for want in TestHandleGetStep_EmptyHistoryIsAnEmptyArrayNeverNull \
+                      TestHandleGetStep_HistoryReadFailureIsAnErrorNotAnEmptyHistory \
+                      TestHandleGetStep_MissingStepStateRowStillReturnsTheHistory \
+                      TestHandleGetStep_StepStateReadFailureIsNotReportedAsIdle \
+                      TestHandleGetStep_SummaryAndErrorTypeLandInTheirOwnFields \
+                      TestHandleUpdateStep_EscalatedSurvivesToTheHistoryRead; do
+            grep -q -- "--- PASS: $want" step_history.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#354 step-history coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' step_history.log \
+            || { echo "::error::an aihub#354 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       - name: aihub#239 recall cursor tie + supersede carry DB tests
         env:

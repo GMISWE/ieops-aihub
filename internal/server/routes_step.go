@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"reflect"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -12,6 +14,50 @@ import (
 
 	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
+
+// CompletedStep is one row of a work item's step history — one attempt that
+// reached a terminal outcome, with the summary that attempt recorded.
+//
+// This is the record that used to have no read path (aihub#265). PATCH
+// /v1/work_items/:id/step has written wi_step_completions since 0005, and every
+// scenario step graph nevertheless opened by telling the agent to read prior
+// context out of a hand-written `.pf_steps.json` in the worktree root, because
+// the server offered nothing to read instead.
+//
+// Be precise about what "nothing writes it" means, because the loose version of
+// this sentence was wrong. NO CODE PATH reads or writes it: in this repository
+// its only non-prose references are a .gitignore entry, the
+// writeWorktreeExcludes pattern list, and one comment. The file is produced
+// entirely by natural-language instructions to an agent — in polyforge-coding's
+// step templates (removed by the companion change) and in this repo's own
+// plugins/polyforge/skills/pf-execute/ skill, which still tells the agent to
+// read and write it. That plugin contradiction is real and is NOT fixed here;
+// touching plugins/ forces a version bump, so it is reported rather than made.
+//
+// The load-bearing figure is the zero, not a ratio. For the record, 6 of the 258
+// repo worktrees on this build host held one on 2026-09-03 — but that
+// denominator counts worktrees whose work item never ran a step, and it moves as
+// work items come and go. What does not move is that no code path creates it.
+//
+// Measured evidence that the two records really are written independently, which
+// is the defect itself: for ieops#961, three sampled steps have DIFFERENT prose
+// on the two sides (code_review 244 chars locally against ~640 on the server,
+// each containing detail the other lacks). If the plugin's
+// `read_json(".pf_steps.json")` were the source of the stored summary they would
+// be byte-identical.
+//
+// ArtifactSummary and ErrorType are pointers WITHOUT omitempty on purpose: the
+// column is nullable, and "this step recorded no summary" has to stay
+// distinguishable from "this response does not carry summaries".
+type CompletedStep struct {
+	StepID          string    `json:"step_id"`
+	Status          string    `json:"status"` // "completed" | "failed"
+	ArtifactSummary *string   `json:"artifact_summary"`
+	ErrorType       *string   `json:"error_type"`
+	Escalated       bool      `json:"escalated"`
+	RunAttemptID    *string   `json:"run_attempt_id"`
+	CompletedAt     time.Time `json:"completed_at"`
+}
 
 // StepState is returned by GET /v1/work_items/:id/step.
 type StepState struct {
@@ -23,7 +69,123 @@ type StepState struct {
 	StepStartedAt      *time.Time `json:"step_started_at,omitempty"`
 	Version            int64      `json:"version"`
 	ScenarioRef        *string    `json:"scenario_ref,omitempty"`
+
+	// CompletedSteps is the prior-step context a resuming agent needs in order
+	// to skip work that is already done, oldest first, retries included.
+	//
+	// 🔴 NO omitempty, and handleGetStep never leaves it nil. Three states have
+	// to stay distinguishable and omitempty collapses two of them:
+	//
+	//	[]      -> this work item has completed no step
+	//	[...]   -> these steps are done; do not redo them
+	//	absent  -> the server predates aihub#265 and cannot answer the question
+	//
+	// With omitempty the first and third both serialise to nothing, so a client
+	// talking to an old server would read "nothing is done yet" and start over
+	// from step 1 — which is the exact failure aihub#265 is about, relocated
+	// from a stale file to a confident-looking server response.
+	CompletedSteps []CompletedStep `json:"completed_steps"`
+	// CompletedStepsTruncated discloses that completedStepsLimit was hit and the
+	// OLDEST rows were dropped. A ceiling without disclosure would be a fresh
+	// instance of the defect this field exists to prevent — the same argument
+	// GET /v1/events makes for having no ceiling at all.
+	CompletedStepsTruncated bool `json:"completed_steps_truncated"`
 }
+
+// completedStepsLimit caps the step history one response carries.
+//
+// It is not expected to fire: the longest step graph in polyforge-coding is 10
+// steps (feature.tether.md and critical_bug.ieops.md, counted by `^## Step:`
+// headings on 2026-09-03), so a work item would need 20 attempts per step to
+// reach it. It is here because wi_step_completions is append-only and a client
+// looping step transitions can grow it without bound, and because a cap that
+// fires silently is worse than no cap — hence CompletedStepsTruncated.
+const completedStepsLimit = 200
+
+// completedStepsFetch is what the QUERY asks for: one more row than the response
+// carries, so the caller can tell "exactly at the cap" from "over it".
+//
+// Fetching exactly completedStepsLimit is a silent defect, not an off-by-one you
+// would notice: truncateCompletedSteps could then never report truncation, and a
+// history that is exactly full would be served as if it were complete. Named
+// here, and pinned by TestTruncateCompletedSteps, because the arithmetic is
+// invisible from either side alone.
+const completedStepsFetch = completedStepsLimit + 1
+
+// truncateCompletedSteps trims a history read to the response cap and reports
+// whether anything was dropped.
+//
+// It is a separate, pure function on purpose. The assembly of this response is
+// otherwise reachable only with a database, and the DB-gated test that would
+// cover it cannot land while .github/workflows/ci.yml is held by another work
+// item — so the arithmetic and the empty-vs-nil handling are pulled out to where
+// a table test can reach them. What that does NOT cover is that handleGetStep
+// passes it the real query result; see routes_step_authority_test.go.
+//
+// `rows` arrives oldest-first with at most limit+1 entries, and the surplus is
+// at the FRONT: loadCompletedSteps asks the database for the NEWEST limit+1 and
+// flips them, so a truncated response keeps the recent history rather than the
+// first 200 attempts of a runaway loop.
+//
+// It never returns nil. A nil slice marshals to `null`, which is a third
+// spelling of "empty" on a field whose whole point is that `[]` and absent mean
+// different things (see StepState.CompletedSteps).
+func truncateCompletedSteps(rows []CompletedStep, limit int) ([]CompletedStep, bool) {
+	if len(rows) <= limit {
+		if rows == nil {
+			return []CompletedStep{}, false
+		}
+		return rows, false
+	}
+	return rows[len(rows)-limit:], true
+}
+
+// scanTargets returns pointers to this row's fields in DECLARATION order, which
+// is the order completedStepsQuery selects them in.
+//
+// It is built by reflection rather than written out, so the positional Scan
+// cannot drift from the struct. A hand-written argument list is one
+// transposition away from filing every step's summary under error_type and
+// every error under artifact_summary — both are *string, so neither the
+// compiler, nor vet, nor the driver, nor any test that only checks "a row came
+// back" would notice. This removes that failure mode instead of trying to detect
+// it; what remains is keeping the SQL column list in the same order, which
+// TestCompletedStepsQueryMatchesStructOrder pins without a database.
+//
+// Cost is one reflect walk per row over at most completedStepsLimit+1 rows.
+func (cs *CompletedStep) scanTargets() []any {
+	v := reflect.ValueOf(cs).Elem()
+	out := make([]any, v.NumField())
+	for i := range out {
+		out[i] = v.Field(i).Addr().Interface()
+	}
+	return out
+}
+
+// completedStepsQuery reads the step history for one work item.
+//
+// 🔴 The outer SELECT list must stay in CompletedStep's field-declaration order:
+// scanTargets is positional and derives from the struct, so the SQL is the half
+// that can drift. TestCompletedStepsQueryMatchesStructOrder asserts the two
+// agree, and it is DB-free, so it runs on every PR.
+//
+// The subquery takes the NEWEST rows and the outer query flips them back to
+// oldest-first: when the cap fires, an agent needs the recent history, not the
+// first 200 attempts of a runaway loop. Ordering is (completed_at, id) rather
+// than completed_at alone so that two rows written inside one clock_timestamp()
+// tick still come back in a stable order.
+const completedStepsQuery = `
+	SELECT step_id, status, artifact_summary, error_type,
+	       COALESCE(escalated, false), run_attempt_id, completed_at
+	FROM (
+		SELECT step_id, status, artifact_summary, error_type, escalated,
+		       run_attempt_id, completed_at, id
+		FROM wi_step_completions
+		WHERE work_item_id = $1
+		ORDER BY completed_at DESC, id DESC
+		LIMIT $2
+	) recent
+	ORDER BY completed_at ASC, id ASC`
 
 // UpdateStepRequest is the body for PATCH /v1/work_items/:id/step.
 //
@@ -102,12 +264,79 @@ func handleGetStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			FROM wi_step_state WHERE work_item_id = $1`, wiID,
 		).Scan(&s.WIType, &s.CurrentStep, &s.CurrentStepStatus,
 			&s.CurrentStepAttempt, &s.StepStartedAt, &s.Version, &s.ScenarioRef)
-		if scanErr != nil {
+		switch {
+		case scanErr == nil:
+			// nothing to do
+		case errors.Is(scanErr, pgx.ErrNoRows):
+			// No row is a real answer: this work item has not started a step.
 			s.CurrentStepStatus = "idle"
 			s.Version = 0
+		default:
+			// A genuine query failure is NOT "idle, version 0". That reply is
+			// indistinguishable from "nothing has started", which is precisely
+			// the false-negative aihub#265 exists to remove — the code below
+			// refuses to make it for the history read, and making it here would
+			// leave the same lie reachable through the other query on the same
+			// pool.
+			return writeError(c, domain.NewErr(domain.ErrInternalError,
+				"step state read failed"))
 		}
+
+		// The step history is read even when wi_step_state has no row. Those two
+		// tables are written independently (wi_step_completions is append-only
+		// and survives a wi_step_state reset), so keying the history read on the
+		// current-state read succeeding would reintroduce a silent empty answer
+		// on exactly the resume path this exists for.
+		//
+		// A history read failure is NOT swallowed. Returning 200 with
+		// `completed_steps: []` after a failed query would tell a resuming agent
+		// "nothing is done" — the same lie the stale local file told, which is
+		// what makes it worth an error here rather than a best-effort skip.
+		//
+		// The error TEXT is deliberately not the driver's. This endpoint is open
+		// to any project viewer, and pgx errors carry relation names, column
+		// names and SQLSTATEs; the detail belongs in the server log, not in a
+		// reply. Callers get a stable message and a 500 they cannot mistake for
+		// an empty history.
+		steps, histErr := loadCompletedSteps(c.Request().Context(), pool, wiID)
+		if histErr != nil {
+			c.Logger().Errorf("get_step: history read failed for %s: %v", wiID, histErr)
+			return writeError(c, domain.NewErr(domain.ErrInternalError,
+				"step history read failed"))
+		}
+		s.CompletedSteps, s.CompletedStepsTruncated =
+			truncateCompletedSteps(steps, completedStepsLimit)
 		return c.JSON(http.StatusOK, s)
 	}
+}
+
+// loadCompletedSteps returns one work item's step history, oldest first, with
+// one row more than completedStepsLimit when there is one so the caller can
+// tell "exactly at the cap" from "over the cap".
+//
+// wiID must already be the canonical work_items.id. A slug reaches no rows
+// here, and would come back as an empty history rather than an error — the
+// resolution is handleGetStep's job (aihub#127) and this function is the reason
+// it stays there.
+func loadCompletedSteps(ctx context.Context, pool *pgxpool.Pool, wiID string) ([]CompletedStep, error) {
+	rows, err := pool.Query(ctx, completedStepsQuery, wiID, completedStepsFetch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]CompletedStep, 0, 16)
+	for rows.Next() {
+		var cs CompletedStep
+		if scanErr := rows.Scan(cs.scanTargets()...); scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, cs)
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	return out, nil
 }
 
 func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
@@ -276,9 +505,9 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				// does not abort the surrounding transaction.
 				tx.Exec(c.Request().Context(), `SAVEPOINT bp`) //nolint:errcheck
 				if _, bpErr := tx.Exec(c.Request().Context(), `
-					INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status, artifact_summary, error_type)
-					VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7)`,
-					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep), req.ArtifactSummary, req.ErrorType); bpErr != nil {
+					INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status, artifact_summary, error_type, escalated)
+					VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7, $8)`,
+					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep), req.ArtifactSummary, req.ErrorType, req.Escalated); bpErr != nil {
 					tx.Exec(c.Request().Context(), `ROLLBACK TO SAVEPOINT bp`) //nolint:errcheck
 				} else {
 					tx.Exec(c.Request().Context(), `RELEASE SAVEPOINT bp`) //nolint:errcheck

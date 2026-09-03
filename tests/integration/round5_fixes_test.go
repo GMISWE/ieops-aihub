@@ -147,11 +147,7 @@ func TestRemoveDependencyUnblocksWorkItem(t *testing.T) {
 
 	// 3. Remove the dependency WITHOUT the blocker ever reaching a terminal
 	//    status — this is exactly the aihub#242 scenario.
-	if _, err := c.RemoveDependency(ctx, map[string]any{
-		"blocked_wi_id":  blockedID,
-		"blocking_wi_id": blockerID,
-		"kind":           "blocks",
-	}); err != nil {
+	if _, err := c.RemoveDependency(ctx, blockedID, blockerID, "blocks"); err != nil {
 		t.Fatalf("RemoveDependency: %v", err)
 	}
 

@@ -377,22 +377,19 @@ func (c *Client) CreateDependency(ctx context.Context, body any) (map[string]any
 }
 
 // RemoveDependency calls DELETE /v1/work_items/:blocked_id/dependencies/:blocking_id/:kind.
-// body must include blocked_wi_id, blocking_wi_id, kind.
-func (c *Client) RemoveDependency(ctx context.Context, body any) (map[string]any, error) {
-	blockedID, blockingID, kind := "", "", ""
-	if m, ok := body.(map[string]any); ok {
-		if s, ok := m["blocked_wi_id"].(string); ok {
-			blockedID = s
-		}
-		if s, ok := m["blocking_wi_id"].(string); ok {
-			blockingID = s
-		}
-		if s, ok := m["kind"].(string); ok {
-			kind = s
-		}
-	}
+//
+// It takes the three path segments directly, and deliberately takes no body
+// (aihub#324). The previous signature was `body any`: it picked the three
+// segments out of the map and then called do() with a nil body, so every OTHER
+// key the caller had put in that map was silently discarded — which is exactly
+// what happened to the attempt_id / claim_epoch / session_secret that
+// internal/mcp/tools_dependency.go used to build here. A map-shaped parameter on
+// a request that carries no body makes that mistake expressible; three strings
+// do not. The endpoint has no body to send: it is a DELETE addressed entirely by
+// its path, authorized by project role alone.
+func (c *Client) RemoveDependency(ctx context.Context, blockedID, blockingID, kind string) (map[string]any, error) {
 	if blockedID == "" || blockingID == "" || kind == "" {
-		return nil, fmt.Errorf("RemoveDependency: blocked_wi_id, blocking_wi_id, kind are required in body")
+		return nil, fmt.Errorf("RemoveDependency: blockedID, blockingID and kind are all required")
 	}
 	var out map[string]any
 	return out, c.do(ctx, "DELETE",

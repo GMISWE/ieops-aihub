@@ -31,8 +31,10 @@ package mcp_test
 //	              WriteClaimState deletes the stub. Pre-change: the tool dies
 //	              with "state file not found". Post-change: it works.
 //
-// stubCleaned is the shape that discriminates even for a tool whose credentials
-// never reach the wire at all (pf_remove_dependency — see its row).
+// stubCleaned used to be the only shape that discriminated for a tool whose
+// credentials never reached the wire at all — pf_remove_dependency. aihub#324
+// removed that tool's credential injection instead of repairing it, so no such
+// row remains and both shapes now assert on the wire for every site.
 //
 // ⚠️ The credential sites are only half of it. `git grep -c config.ReadStateFile
 // -- internal/mcp` reaching 0 is TRUE AND MEANINGLESS on its own: the same defect
@@ -216,10 +218,14 @@ type credSite struct {
 	// wantPath is the upstream request path, asserted so a row cannot pass by
 	// exercising some other endpoint.
 	wantPath string
-	// credsOnWire is false for the one site whose pkg/client method sends NO
-	// body, so the injected credentials are unobservable downstream. Such a row
-	// is only discriminating in the stubCleaned shape; see the row's comment.
-	credsOnWire bool
+	// There used to be a `credsOnWire bool` here, false for the one site whose
+	// pkg/client method sent no body at all. Its only two rows were the
+	// dependency tools, and aihub#324 deleted their credential injection
+	// outright, which left the field true everywhere — an always-true
+	// discriminator that still reads like it discriminates, and a skip branch
+	// nothing could reach. Every row below now carries its credentials on the
+	// wire and is asserted directly. Reintroduce the field WITH a row that
+	// sets it false, or not at all.
 }
 
 func credSites() []credSite {
@@ -230,7 +236,7 @@ func credSites() []credSite {
 			args: map[string]any{
 				"memory_id": "mem_res", "additional_context": "still true", "work_item_id": resolveSlug,
 			},
-			wantPath: "/v1/memories/mem_res/reinforce", credsOnWire: true,
+			wantPath: "/v1/memories/mem_res/reinforce",
 		},
 		{
 			site: "internal/mcp/tools_memory.go pf_update_memory (aihub#319, post-dated Anne's PR)",
@@ -238,7 +244,7 @@ func credSites() []credSite {
 			args: map[string]any{
 				"memory_id": "mem_res", "content": "a newer body", "work_item_id": resolveSlug,
 			},
-			wantPath: "/v1/memories/mem_res/update", credsOnWire: true,
+			wantPath: "/v1/memories/mem_res/update",
 		},
 		{
 			site: "internal/mcp/tools_memory.go pf_save_artifact",
@@ -246,7 +252,7 @@ func credSites() []credSite {
 			args: map[string]any{
 				"type": "methodology.spec", "work_item_id": resolveSlug, "content": "# spec",
 			},
-			wantPath: "/v1/memories", credsOnWire: true,
+			wantPath: "/v1/memories",
 		},
 		{
 			site: "internal/mcp/tools_memory.go emitArtifactAction (adopt/close/ignore)",
@@ -254,40 +260,32 @@ func credSites() []credSite {
 			args: map[string]any{
 				"work_item_id": resolveSlug, "memory_id": "mem_res", "artifact_type": "methodology.spec",
 			},
-			wantPath: "/v1/events", credsOnWire: true,
+			wantPath: "/v1/events",
 		},
-		{
-			site: "internal/mcp/tools_dependency.go pf_create_dependency",
-			tool: "pf_create_dependency",
-			args: map[string]any{
-				"blocked_wi_id": "wi_blocked", "blocking_wi_id": "wi_blocking",
-				"kind": "blocks", "work_item_id": resolveSlug,
-			},
-			wantPath: "/v1/work_items/wi_blocked/dependencies", credsOnWire: true,
-		},
-		{
-			// credsOnWire is false ON PURPOSE, and it is a finding rather than a
-			// convenience: pkg/client.RemoveDependency issues a DELETE with a nil
-			// body (client.go), so the attempt_id / claim_epoch / session_secret
-			// this handler injects are built and then thrown away. Nothing
-			// downstream can observe which state file was read, so the
-			// stubShadowed shape cannot distinguish the two functions here. The
-			// stubCleaned shape can, because there ReadStateFile fails outright.
-			site: "internal/mcp/tools_dependency.go pf_remove_dependency",
-			tool: "pf_remove_dependency",
-			args: map[string]any{
-				"blocked_wi_id": "wi_blocked", "blocking_wi_id": "wi_blocking",
-				"kind": "blocks", "work_item_id": resolveSlug,
-			},
-			wantPath: "/v1/work_items/wi_blocked/dependencies/wi_blocking/blocks", credsOnWire: false,
-		},
+		// pf_create_dependency and pf_remove_dependency USED TO BE HERE, and their
+		// removal is aihub#324 rather than a lost row.
+		//
+		// The remove row carried `credsOnWire: false` with a note calling it a
+		// finding: pkg/client.RemoveDependency issued a DELETE with a nil body, so
+		// the attempt_id / claim_epoch / session_secret the handler injected were
+		// built and thrown away in the same function. aihub#324 followed that
+		// finding to its end and found the create side no better off — the server
+		// authorizes both endpoints on project role alone and reads no credential
+		// from either — so the injection was deleted instead of completed, and
+		// with it the `work_item_id` parameter that existed only to name a state
+		// file. Neither tool resolves a state file any more, so neither can be a
+		// slug-resolution site.
+		//
+		// What replaced them is an assertion about the model rather than the
+		// plumbing: TestE2EDependencyMutationsNeedNoAttemptCredential in
+		// dependency_authz_e2e_db_test.go, against a real server.
 		{
 			site: "internal/mcp/tools_release.go pf_cut_alpha",
 			tool: "pf_cut_alpha",
 			args: map[string]any{
 				"project": "aihub", "repos": []any{"aihub"}, "work_item_id": resolveSlug,
 			},
-			wantPath: "/v1/releases/alpha", credsOnWire: true,
+			wantPath: "/v1/releases/alpha",
 		},
 		{
 			site: "internal/mcp/tools_release.go pf_promote",
@@ -296,7 +294,7 @@ func credSites() []credSite {
 				"source_alpha_tag": "v1.0.0-alpha.1", "new_stable_tag": "v1.0.0",
 				"project": "aihub", "work_item_id": resolveSlug,
 			},
-			wantPath: "/v1/releases/promote", credsOnWire: true,
+			wantPath: "/v1/releases/promote",
 		},
 	}
 }
@@ -325,11 +323,6 @@ func TestSlugAddressedToolsSendCanonicalCredentials(t *testing.T) {
 			if calls[0].Path != s.wantPath {
 				t.Fatalf("%s hit %s, want %s", s.tool, calls[0].Path, s.wantPath)
 			}
-			if !s.credsOnWire {
-				t.Skipf("%s injects credentials the client never sends (nil DELETE body), so this shape "+
-					"cannot distinguish ReadStateFile from ResolveStateFile; "+
-					"TestSlugAddressedToolsResolveWhenOnlyTheCanonicalFileExists covers %s", s.tool, s.site)
-			}
 			assertCanonicalCredentials(t, s.site, calls[0].Body)
 		})
 	}
@@ -340,8 +333,9 @@ func TestSlugAddressedToolsSendCanonicalCredentials(t *testing.T) {
 // removes the stub. A filename lookup on the slug finds nothing, so pre-change
 // every row dies with "state file not found" and sends no request at all.
 //
-// This is the shape that covers pf_remove_dependency, whose credentials are
-// unobservable downstream.
+// This shape used to be the only cover for pf_remove_dependency, whose injected
+// credentials were unobservable downstream; aihub#324 deleted that injection, so
+// every remaining row is asserted on the wire in both shapes.
 func TestSlugAddressedToolsResolveWhenOnlyTheCanonicalFileExists(t *testing.T) {
 	for _, s := range credSites() {
 		t.Run(s.tool, func(t *testing.T) {
@@ -362,9 +356,7 @@ func TestSlugAddressedToolsResolveWhenOnlyTheCanonicalFileExists(t *testing.T) {
 			if calls[0].Path != s.wantPath {
 				t.Fatalf("%s hit %s, want %s", s.tool, calls[0].Path, s.wantPath)
 			}
-			if s.credsOnWire {
-				assertCanonicalCredentials(t, s.site, calls[0].Body)
-			}
+			assertCanonicalCredentials(t, s.site, calls[0].Body)
 		})
 	}
 }

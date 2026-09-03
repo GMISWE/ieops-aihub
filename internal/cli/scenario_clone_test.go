@@ -259,6 +259,52 @@ func TestScenarioCloneRefusesADirectoryHoldingAnotherRemote(t *testing.T) {
 	}
 }
 
+// TestScenarioCloneRecoversFromAnEmptyLeftoverDirectory covers the state the
+// refusal above would otherwise make permanent. An interrupted clone can leave
+// an empty directory at the destination; an unconditional refusal would mean
+// `polyforge init` could never recover from its own half-finished work.
+//
+// Paired with the negative: a directory that is NOT empty is someone's, and must
+// be declined rather than deleted.
+func TestScenarioCloneRecoversFromAnEmptyLeftoverDirectory(t *testing.T) {
+	root := t.TempDir()
+	origins := filepath.Join(root, "origins")
+	url := newScenarioOrigin(t, origins, "GMISWE", scenarioRepoBasename, "STEP GRAPH")
+	dir := scenarioDirName(url)
+
+	repoDir := filepath.Join(root, "ws", ".repo")
+	if err := os.MkdirAll(filepath.Join(repoDir, dir), 0o755); err != nil {
+		t.Fatalf("plant empty leftover: %v", err)
+	}
+	got := cloneScenarioRepos(repoDir, []serverProject{scenarioProject("solo", url)}, fixtureUID)
+	if len(got) != 1 || got[0].Status != scenarioCloneOK {
+		t.Fatalf("empty leftover: %+v, want %q — init cannot recover from its own "+
+			"interrupted clone", got, scenarioCloneOK)
+	}
+	if body := readTemplate(t, repoDir, dir); body != "STEP GRAPH" {
+		t.Errorf(".repo/%s/feature.md = %q, want %q", dir, body, "STEP GRAPH")
+	}
+
+	// Negative: not empty => decline, and leave every byte where it was.
+	root2 := t.TempDir()
+	repoDir2 := filepath.Join(root2, "ws", ".repo")
+	if err := os.MkdirAll(filepath.Join(repoDir2, dir), 0o755); err != nil {
+		t.Fatalf("plant occupied leftover: %v", err)
+	}
+	keep := filepath.Join(repoDir2, dir, "someones-file.txt")
+	if err := os.WriteFile(keep, []byte("do not delete me"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got2 := cloneScenarioRepos(repoDir2, []serverProject{scenarioProject("solo", url)}, fixtureUID)
+	if len(got2) != 1 || got2[0].Status != scenarioCloneMismatch {
+		t.Errorf("occupied leftover: %+v, want %q", got2, scenarioCloneMismatch)
+	}
+	if b, err := os.ReadFile(keep); err != nil || string(b) != "do not delete me" {
+		t.Errorf("occupied leftover: %s = %q (err %v) — init deleted or overwrote a file "+
+			"that was not its own", keep, string(b), err)
+	}
+}
+
 // TestCloneOrSyncKeepsLocalModifications pins the other half of "idempotent":
 // syncing an existing clone must not silently throw away tracked-file edits.
 // cloneOrSync's `git reset --hard` did exactly that, with no message.
@@ -559,23 +605,28 @@ func TestScenarioPathSpellingIsOwnerQualified(t *testing.T) {
 // that has not re-inited.
 func TestScenarioReadFallbackIsRemoteChecked(t *testing.T) {
 	root := pluginRoot(t)
-	// The full rule lives in the on-demand detail file (engine.native.md and
-	// pf-work/SKILL.md share a hard character budget with the other resident
-	// fragments), so that is where the fallback must be spelled out.
-	rel := "skills/pf-execute/references/engine-native-details.md"
-	b, err := os.ReadFile(filepath.Join(root, rel))
-	if err != nil {
-		t.Fatalf("read %s: %v", rel, err)
-	}
-	body := string(b)
-	for _, want := range []string{
-		"remote get-url origin", // the check itself
-		"aihub#327",             // why it is there, findable from the text
+	// BOTH resolvers, not just one. pf-work resolves the scenario when a wi is
+	// CREATED and the native engine resolves it when a wi is EXECUTED; a session
+	// can reach the clone through either, so guarding one and leaving the other
+	// bare would leave the silent mix-up reachable by the other half of the flow.
+	for _, rel := range []string{
+		"skills/pf-execute/references/engine-native-details.md",
+		"skills/pf-work/SKILL.md",
 	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("%s does not mention %q — the legacy-path fallback is either absent or "+
-				"unguarded, and an unguarded fallback serves another owner's step graph "+
-				"silently in every workspace that has not re-run polyforge init", rel, want)
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		body := string(b)
+		for _, want := range []string{
+			"remote get-url origin", // the check itself
+			"aihub#327",             // why it is there, findable from the text
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s does not mention %q — the legacy-path fallback is either absent or "+
+					"unguarded, and an unguarded fallback serves another owner's step graph "+
+					"silently in every workspace that has not re-run polyforge init", rel, want)
+			}
 		}
 	}
 }

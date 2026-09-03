@@ -781,15 +781,23 @@ func syncScenarioClone(repoDir, dirName, url string) scenarioCloneOutcome {
 	if _, err := os.Stat(dest); err == nil {
 		out, rerr := exec.Command("git", "-C", dest, "remote", "get-url", "origin").Output()
 		if rerr != nil {
-			return scenarioCloneOutcome{
-				Dir: dirName, Status: scenarioCloneMismatch,
-				Detail: fmt.Sprintf(".repo/%s exists but has no origin remote (%v) — "+
-					"not syncing it as the scenario clone for %s. Move it aside and re-run "+
-					"`polyforge init`.", dirName, rerr, redactGitURL(url)),
+			// Not a git clone at all. An EMPTY DIRECTORY here is the residue of an
+			// interrupted clone with nothing in it to protect, so drop it and clone
+			// properly — otherwise `polyforge init` could never recover from its own
+			// half-finished work without a human. Anything else — a non-empty
+			// directory, or a plain file — belongs to someone, so decline instead of
+			// deleting it. (os.Remove alone is not that test: it happily removes a
+			// file, and this path must never delete one.)
+			ents, dirErr := os.ReadDir(dest)
+			if dirErr != nil || len(ents) > 0 || os.Remove(dest) != nil {
+				return scenarioCloneOutcome{
+					Dir: dirName, Status: scenarioCloneMismatch,
+					Detail: fmt.Sprintf(".repo/%s exists but is not a git clone (%v) — "+
+						"not syncing it as the scenario clone for %s. Move it aside and re-run "+
+						"`polyforge init`.", dirName, rerr, redactGitURL(url)),
+				}
 			}
-		}
-		actual := strings.TrimSpace(string(out))
-		if !sameGitRemote(actual, url) {
+		} else if actual := strings.TrimSpace(string(out)); !sameGitRemote(actual, url) {
 			return scenarioCloneOutcome{
 				Dir: dirName, Status: scenarioCloneMismatch,
 				Detail: fmt.Sprintf(".repo/%s is a clone of %s, but the scenario is declared as "+

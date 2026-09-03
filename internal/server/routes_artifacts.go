@@ -437,33 +437,49 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 					for _, v := range versions {
 						// aihub#248 review (W1): domain.MemoryVersionChain's SQL filters
 						// only status != 'redacted' — no project/visibility predicate — so
-						// its rows (domain.MemoryVersionRef: id/created_at/status/is_current
-						// only) are not enough on their own to answer "can THIS caller see
-						// this row". Without this check a caller denied a lineage member
-						// would still see that row's id, date, and link rendered in this
-						// side rail — exactly the leak spec decision 4 exists to prevent.
+						// a caller denied a lineage member must be filtered out HERE, or
+						// that row's id, date and link render in this side rail and
+						// disclose a version they may not see. That is the leak spec
+						// decision 4 exists to prevent, and it is why this loop cannot
+						// simply render the chain.
+						//
 						// v.ID == mem.ID is always safe to include as-is: mem was already
 						// authorized above via the side-effecting
-						// checkProjectAccess/checkMemoryVisibility. Every other row needs
-						// its own full record — MemoryVersionRef carries no Project or
-						// Visibility — loaded via the same loadMemoryFn seam used for the
-						// primary record, then checked with the same pure predicates
-						// (hasProjectAccess/memoryVisibleTo) used for the head redirect
-						// above, so a denied row is omitted entirely rather than merely
-						// stripped of its link.
-						if v.ID != mem.ID {
-							full, ferr := loadMemoryFn(ctx, pool, v.ID)
-							// aihub#248 review (minor 5): ferr != nil is deliberately treated
-							// the same as "denied" (fail-closed), not a bug to be "fixed" into
-							// fail-open. This loop is on a leak-prevention path (W1): a
-							// transient load failure that instead rendered the row would risk
-							// showing an id/date/link the caller may not be authorized for.
-							// Losing one row on a rare transient DB hiccup is an acceptable
-							// cost for never leaking on a permissions path.
-							if ferr != nil || full == nil ||
-								!hasProjectAccess(u, full.Project, "viewer") || !memoryVisibleTo(u, full) {
-								continue
-							}
+						// checkProjectAccess/checkMemoryVisibility.
+						//
+						// aihub#253: every other row is authorized from the chain row
+						// itself. The predicates are unchanged — the same pure
+						// hasProjectAccess/memoryVisibleTo pair used for the head redirect
+						// above — and so are their inputs; only where those inputs come
+						// from changed. MemoryVersionChain now selects project, visibility
+						// and author_user_id (json:"-", authorization-only), which is
+						// every field either predicate reads, so the AUTHORIZATION decision
+						// is the same one the old per-row GetMemoryByID produced — same
+						// predicates, same three column values, same row, same
+						// status != 'redacted' filter — while costing no extra statement.
+						// Measured at the pgx pool: a 20-version chain went from 21
+						// statements and 5.86 MB to 2 statements.
+						//
+						// One behaviour did change, and it is not an authorization one.
+						// The old per-row load was fail-closed on error (aihub#248 review
+						// minor 5: ferr != nil || full == nil was deliberately treated as
+						// "denied"), which also dropped a row hard-deleted or redacted in
+						// the window BETWEEN the chain query and that row's own read.
+						// There is no per-row read now, so such a row renders from the
+						// chain snapshot instead of vanishing. That is read staleness on
+						// status, measured in the microseconds the render takes, not a
+						// permissions hole — the authorization inputs travel with the row.
+						// Fail-closed is preserved where an error can still happen: if the
+						// chain query fails, verErr != nil and the whole rail is omitted.
+						//
+						// The zero-value hazard this creates is guarded, not assumed:
+						// memoryVisibleTo takes a *domain.Memory and is handed a partial
+						// one, so a read of any field beyond those three would silently
+						// see "". versionRefVisibleTo's doc comment has the detail, and
+						// TestMemoryVisibleTo_ReadsOnlyTheFieldsTheChainRowSupplies fails
+						// naming the field if that ever happens.
+						if v.ID != mem.ID && !versionRefVisibleTo(u, v) {
+							continue
 						}
 						// aihub#248 review (minor 4): label from the FILTERED slice
 						// (len(srVersions), the count of rows already kept), not the
@@ -593,6 +609,47 @@ type sideRailMeta struct {
 	Author, Type, Project, Visibility string
 	WorkItemHref, WorkItemLabel       string
 	Strength, Created, Updated        string
+}
+
+// versionRefVisibleTo reports whether u may see one member of a memory's
+// supersede lineage, given only the chain row (aihub#253).
+//
+// It is deliberately a thin adapter and not a re-implementation: the decision
+// is still hasProjectAccess + memoryVisibleTo, the same pure pair the head
+// redirect in handleArtifactHTML uses, so this file adds no second copy of the
+// "may this caller see this memory" rule. All this function does is supply
+// those predicates' inputs from a MemoryVersionRef instead of from a freshly
+// loaded 26-column row.
+//
+// Two callers now, not one. ui_handlers_wi.go's fetchArtifactLinks used to hand
+// the whole unfiltered lineage to wi_detail.html.tmpl, so /ui/wi/:id disclosed
+// the id, timestamp and status of lineage members the caller may not see — the
+// same aihub#248 W1 class this rail was fixed for, in a second file. It now
+// calls this function too, gated by
+// TestWIDetailVersionRail_OmitsLineageMembersTheCallerCannotSee. Adding a THIRD
+// renderer of a lineage means calling this, not re-deriving the rule.
+//
+// Still hand-inlined there: the visibility half of the rule for the artifact
+// HEADS fetchArtifactLinks lists (ui_handlers_wi.go, the `m.Visibility ==
+// "private"` guard). That one is defence in depth behind Recall's own filter,
+// not the sole gate, so it is a duplication rather than a hole.
+//
+// The partial *domain.Memory is the one sharp edge. memoryVisibleTo reads
+// Visibility and AuthorUserID and nothing else today, so every field it
+// consults is populated below; a future read of some other field would see a
+// zero value here and could silently answer "visible" for a row that is not.
+// TestMemoryVisibleTo_ReadsOnlyTheFieldsTheChainRowSupplies turns that into a
+// red test naming the field, rather than a leak. It reads the AST rather than
+// probing behaviour, because "which fields does this function read" is a
+// syntactic question and a probe value cannot discover which value a field is
+// compared against.
+func versionRefVisibleTo(u *UserContext, v domain.MemoryVersionRef) bool {
+	return hasProjectAccess(u, v.Project, "viewer") &&
+		memoryVisibleTo(u, &domain.Memory{
+			Project:      v.Project,
+			Visibility:   v.Visibility,
+			AuthorUserID: v.AuthorUserID,
+		})
 }
 
 // buildSideRail builds the consolidated /ui artifact-viewer right rail (aihub#159

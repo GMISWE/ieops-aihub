@@ -2669,6 +2669,33 @@ type MemoryVersionRef struct {
 	CreatedAt string `json:"created_at"` // RFC3339
 	Status    string `json:"status"`
 	IsCurrent bool   `json:"is_current"` // true for the single active (non-archived, non-superseded) head
+
+	// Project, Visibility and AuthorUserID are the three scalars a caller-scoped
+	// permission decision needs, and they are here so that decision can be made
+	// on the chain row itself (aihub#253).
+	//
+	// Without them, a renderer that must drop lineage members the caller may not
+	// see — which /ui's artifact side rail must, or it leaks the id and date of a
+	// hidden version (aihub#248 W1) — had no choice but to re-read every row
+	// through GetMemoryByID. That is a 26-column SELECT per version, dragging
+	// content + rendered_html + commits into the process to read these three
+	// strings — three, not the two aihub#253 was filed for: memoryVisibleTo also
+	// reads author_user_id, because "private" means "visible to its author", not
+	// "visible to admins only". Measured at the pgx pool, a 20-version chain cost
+	// 21 statements and 5.86 MB for a 300 KB-per-version document; it now costs 2
+	// statements and 0.29 MB at any chain length. UpdateMemory lets a new version's
+	// visibility (and in principle project) diverge from its predecessor's, so
+	// these must be per-row and cannot be inherited from the head.
+	//
+	// json:"-" is deliberate. These fields exist for server-side authorization,
+	// never for a response body: this type is template-only today (the /ui
+	// artifact side rail and wi_detail.html.tmpl), and author_user_id in
+	// particular is not something any existing consumer of a version list asked
+	// for. Serializing them would put the identity and visibility of rows a
+	// caller may not see one json.Marshal away from the wire.
+	Project      string `json:"-"`
+	Visibility   string `json:"-"`
+	AuthorUserID string `json:"-"`
 }
 
 // orderVersionChain takes a flat map of {id → {supersedesID, status, createdAt}} and
@@ -2721,9 +2748,12 @@ func orderVersionChain(nodes map[string]versionNode, startID string, maxChainLen
 		}
 		seenForward[cur] = true
 		chain = append(chain, MemoryVersionRef{
-			ID:        cur,
-			CreatedAt: n.CreatedAt,
-			Status:    n.Status,
+			ID:           cur,
+			CreatedAt:    n.CreatedAt,
+			Status:       n.Status,
+			Project:      n.Project,
+			Visibility:   n.Visibility,
+			AuthorUserID: n.AuthorUserID,
 		})
 		next, hasNewer := newerOf[cur]
 		if !hasNewer {
@@ -2752,6 +2782,12 @@ type versionNode struct {
 	SupersedesID string // empty when this is the oldest version
 	Status       string
 	CreatedAt    string // RFC3339
+	// Authorization scalars, carried through to MemoryVersionRef — see the
+	// field comment there for why the chain row has to answer "may this caller
+	// see this version" without a second read (aihub#253).
+	Project      string
+	Visibility   string
+	AuthorUserID string
 }
 
 // maxVersionChainLen caps the chain walk so corrupt/adversarial data cannot loop forever.
@@ -2762,18 +2798,69 @@ const maxVersionChainLen = 100
 // memory (no chain) returns a 1-element slice. An unknown id returns an empty
 // slice (not an error, to keep callers simple).
 //
-// Implementation: two queries — one recursive CTE that walks the supersedes_id
+// Implementation: ONE query — a recursive CTE that walks the supersedes_id
 // chain in both directions (ancestors via supersedes_id, descendants via reverse
 // lookup), collecting all nodes into a flat map that orderVersionChain sorts.
+// This line read "two queries" until aihub#253; it was describing the two
+// chained CTEs inside the single statement, and a pgx QueryTracer confirms the
+// pool sees exactly one.
 func MemoryVersionChain(ctx context.Context, pool *pgxpool.Pool, memID string) ([]MemoryVersionRef, error) {
-	// CTE strategy: start from memID, walk UP (older) via supersedes_id, and DOWN
-	// (newer) via reverse. We use two CTEs chained together to avoid an infinite
-	// recursion issue with bidirectional traversal in one CTE.
-	//
-	// Step 1: collect all ancestors (including self) via supersedes_id.
-	// Step 2: for each ancestor, collect all descendants (including self) via reverse.
-	// Combine both sets, deduplicate, exclude redacted.
-	const q = `
+	rows, err := pool.Query(ctx, memoryVersionChainQuery, memID)
+	if err != nil {
+		return nil, fmt.Errorf("MemoryVersionChain: %w", err)
+	}
+	defer rows.Close()
+
+	nodes := make(map[string]versionNode)
+	for rows.Next() {
+		var id, supersedesID, status, createdAt, project, visibility, authorUserID string
+		if err := rows.Scan(&id, &supersedesID, &status, &createdAt, &project, &visibility, &authorUserID); err != nil {
+			return nil, fmt.Errorf("MemoryVersionChain scan: %w", err)
+		}
+		nodes[id] = versionNode{
+			SupersedesID: supersedesID,
+			Status:       status,
+			CreatedAt:    createdAt,
+			Project:      project,
+			Visibility:   visibility,
+			AuthorUserID: authorUserID,
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("MemoryVersionChain rows: %w", err)
+	}
+
+	if len(nodes) == 0 {
+		return nil, nil // memID not found or redacted
+	}
+
+	return orderVersionChain(nodes, memID, maxVersionChainLen), nil
+}
+
+// memoryVersionChainQuery is MemoryVersionChain's SQL.
+//
+// CTE strategy: start from memID, walk UP (older) via supersedes_id, and DOWN
+// (newer) via reverse. Two CTEs chained together, to avoid an infinite
+// recursion issue with bidirectional traversal in one CTE.
+//
+// Step 1: collect all ancestors (including self) via supersedes_id.
+// Step 2: for each ancestor, collect all descendants (including self) via reverse.
+// Combine both sets, deduplicate, exclude redacted.
+//
+// It is a package-level const rather than a local one so a DB-free test can
+// read the projection: the final SELECT list is scanned POSITIONALLY above, and
+// three of its columns (project, visibility, author_user_id) are what the /ui
+// side rail authorizes each lineage row with (aihub#253). Adding or dropping a
+// column is caught loudly by pgx — the destination count stops matching — but
+// TRANSPOSING two of them is not, and transposing visibility with
+// author_user_id in particular would hand the caller-visibility predicate a
+// user id, which falls through its switch to "visible".
+//
+// TestMemoryVersionChain_ProjectionAndScanOrderAgree therefore reads BOTH this
+// list and the rows.Scan destinations above out of the source and compares them
+// as sequences. Pinning only this side would have left the same transposition
+// available one line up.
+const memoryVersionChainQuery = `
 WITH RECURSIVE
 ancestors(id) AS (
     SELECT id FROM memories WHERE id = $1 AND status != 'redacted'
@@ -2795,32 +2882,10 @@ descendants(id) AS (
 SELECT m.id,
        COALESCE(m.supersedes_id, '') AS supersedes_id,
        m.status,
-       m.created_at::text
+       m.created_at::text,
+       m.project,
+       m.visibility,
+       m.author_user_id
 FROM memories m
 JOIN descendants d ON m.id = d.id
 WHERE m.status != 'redacted'`
-
-	rows, err := pool.Query(ctx, q, memID)
-	if err != nil {
-		return nil, fmt.Errorf("MemoryVersionChain: %w", err)
-	}
-	defer rows.Close()
-
-	nodes := make(map[string]versionNode)
-	for rows.Next() {
-		var id, supersedesID, status, createdAt string
-		if err := rows.Scan(&id, &supersedesID, &status, &createdAt); err != nil {
-			return nil, fmt.Errorf("MemoryVersionChain scan: %w", err)
-		}
-		nodes[id] = versionNode{SupersedesID: supersedesID, Status: status, CreatedAt: createdAt}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("MemoryVersionChain rows: %w", err)
-	}
-
-	if len(nodes) == 0 {
-		return nil, nil // memID not found or redacted
-	}
-
-	return orderVersionChain(nodes, memID, maxVersionChainLen), nil
-}

@@ -86,9 +86,17 @@ jobs:
       # the moment aihub#281 landed the internal/mcp pair on main with no `-run`
       # naming them — found by the gate, not by anyone remembering.
       #
-      # This step recomputes the difference on every run instead of trusting a
-      # checked-in list, because a checked-in list of "the DB tests" would rot
-      # exactly as silently as the gap it describes.
+      # This step recomputes the COVERAGE difference on every run instead of
+      # trusting a checked-in list of which tests are covered, because such a
+      # list would rot exactly as silently as the gap it describes.
+      #
+      # aihub#320 added a checked-in list of a different thing — the DB-gated
+      # test functions themselves, in internal/citest/dbtestcov/gated_tests.txt
+      # — and the distinction is the whole reason it is safe. That file is never
+      # read to DECIDE anything; it is compared against the measurement on every
+      # run and any divergence fails. A list that is re-verified each run cannot
+      # rot: the moment it disagrees with the tree, the gate is red. What it
+      # buys is that dropping an entry is a diff hunk somebody has to write.
       #
       # What counts as DB-gated is measured, not inferred: the inventory is a
       # `go test ./...` run with AIHUB_TEST_DB explicitly unset, and a test is
@@ -106,16 +114,57 @@ jobs:
       # `|| true` is credited as coverage by anything that reads lines instead
       # of modelling the shell. See internal/citest/dbtestcov/main.go. Note
       # what all of those have in common: none of them changes the gated count,
-      # so -min-gated below cannot substitute for any of them.
+      # so the ratchet below cannot substitute for any of them.
       #
       # `env -u` rather than merely omitting an env: block, so that adding a
       # job-level AIHUB_TEST_DB later cannot silently turn this into a green
       # no-op (with the variable set, nothing SKIPs, the inventory is empty and
-      # every check below passes vacuously). -min-gated is the second guard on
-      # the same failure, pinned to the measured count: raise it when you add DB
-      # tests, lower it only when you deliberately remove one.
+      # every check below passes vacuously). The second guard on the same
+      # failure is the ratchet: internal/citest/dbtestcov/gated_tests.txt lists
+      # every DB-gated test function by name, and the gate demands the
+      # measurement equal it exactly. Add a DB test, add its line (the gate
+      # prints the line to paste); remove one deliberately, delete its line in
+      # the same change.
       #
-      # Since then -min-gated has moved, and each delta is recorded rather than
+      # ┌─ aihub#320 ────────────────────────────────────────────────────────┐
+      # │ That ratchet used to be `-min-gated N` — one integer, on the line  │
+      # │ below, hand-edited by every branch that added a DB test. The delta │
+      # │ log that follows is what it cost, and it is kept verbatim as the   │
+      # │ record. Three failures, all measured on this repository:           │
+      # │                                                                    │
+      # │  1. Two branches off one base both edit that line, so the merge    │
+      # │     conflicts. A conflicting PR has no refs/pull/N/merge, and      │
+      # │     `pull_request` workflows check that ref out — so the symptom   │
+      # │     is not a red build, it is NO BUILD (aihub#325 vs #334,         │
+      # │     2026-09-02: mergeable CONFLICTING, zero runs on the head SHA). │
+      # │  2. A branch goes wrong by standing still: the number is only      │
+      # │     right relative to the main it was measured against, so every   │
+      # │     sibling landing invalidates it. aihub#314 was re-measured      │
+      # │     twice; either earlier value would have walked the ratchet      │
+      # │     BACKWARDS while looking like a normal delta line.              │
+      # │  3. A count cannot see a swap — delete one DB test and add         │
+      # │     another and the floor stays satisfied.                         │
+      # │                                                                    │
+      # │ A set of names has none of the three. (2) is gone outright: a      │
+      # │ branch's own line stays true no matter what lands under it, and    │
+      # │ the union of both branches' lines IS the measurement on the merged │
+      # │ tree, so nothing needs re-measuring when main moves. (3) is gone:  │
+      # │ a swap is two named differences. (1) is reduced, not gone —        │
+      # │ measured: two branches adding entries in different packages merge  │
+      # │ CLEAN, two adding adjacent names in one package still conflict on  │
+      # │ that file. What changed is the resolution: keep both lines, no     │
+      # │ measurement, and dropping one goes red here.                       │
+      # │                                                                    │
+      # │ ⚠️ Still open: two branches that each add a DB STEP below insert    │
+      # │ at the same anchor and conflict on THIS file, which is enough to   │
+      # │ suppress the merge ref. That half of aihub#320 is not fixed here.  │
+      # │                                                                    │
+      # │ Provenance moved to `git blame` on the manifest, which cannot rot, │
+      # │ so this log ENDS at 137 — do not add entries to it.                │
+      # └────────────────────────────────────────────────────────────────────┘
+      #
+      # The log below records every move -min-gated made before it was retired
+      # (eleven, from 86 to 137). Each delta was recorded rather than
       # folded into the derivation above — that block is the record of aihub#303's
       # own measurement, and rewriting it would destroy the audit it exists to be.
       # The bases below are therefore the value at the time, not always 85:
@@ -401,7 +450,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 137
+            -gated-set internal/citest/dbtestcov/gated_tests.txt
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which

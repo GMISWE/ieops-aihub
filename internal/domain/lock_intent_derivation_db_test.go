@@ -134,8 +134,8 @@ func claimFresh(t *testing.T, pool *pgxpool.Pool, wiID, userID, idemKey string) 
 // keeps it honest.
 //
 // One function with subtests rather than four functions: internal/citest/
-// dbtestcov counts DB-gated FUNCTIONS, and four would move the -min-gated
-// ratchet four times for one guard. ci.yml asserts `--- PASS:` per subtest.
+// dbtestcov counts DB-gated FUNCTIONS, and four would mean four entries in its
+// gated-test manifest for one guard. ci.yml asserts `--- PASS:` per subtest.
 func TestReadIntentTakesNoWriteLock(t *testing.T) {
 	pool := setupLatestTestDB(t)
 	ctx := context.Background()

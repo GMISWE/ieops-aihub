@@ -51,7 +51,7 @@ package domain
 //	run_attempts.go FnForceTakeover          TestFileScopeRepoKey_ForceTakeoverDerivesRepoQualifiedKey
 //	run_attempts.go FnAcquireLocks           TestFileScopeRepoKey_AcquireLocksDoesNotCollideAcrossRepos
 //
-// and the fifth caller, derivedFileScopeLockKeys (the aihub#264 narrowing
+// and the fifth caller, derivedFileScopeLocks (the aihub#264 narrowing
 // release), gets TestFileScopeRepoKey_NarrowingReleasesRepoQualifiedLock.
 //
 // Run:
@@ -62,6 +62,7 @@ package domain
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 
@@ -356,7 +357,7 @@ func TestFileScopeRepoKey_PredictRule1NoHardBlockAcrossRepos(t *testing.T) {
 }
 
 // TestFileScopeRepoKey_NarrowingReleasesRepoQualifiedLock covers the fifth
-// caller, derivedFileScopeLockKeys (aihub#264). It compares derived keys against
+// caller, derivedFileScopeLocks (aihub#264). It compares derived keys against
 // the rows actually held, so if it derived an unqualified key while claim
 // inserted a qualified one, a narrowing would release NOTHING and the lock would
 // be held until the attempt ended — silently.
@@ -435,6 +436,8 @@ func TestFileScopeRepoKey_ProbeSQLAndGoAgree(t *testing.T) {
 		{"proj", "", "file:100%_done.md"},
 		{"proj", "repo-a", "file:100%_done.md"},
 		{"pro_j", "", "file:go.mod"},
+		{"proj", "", `file:a\\b.go`},
+		{"proj", "repo-a", `file:a\\b.go`},
 	}
 	existing := []string{
 		"proj:go.mod",
@@ -451,6 +454,10 @@ func TestFileScopeRepoKey_ProbeSQLAndGoAgree(t *testing.T) {
 		"pro_j:go.mod",
 		"proXj:go.mod", // `_` in the PROJECT name, same trap one segment left
 		"pro_j:repo-a:go.mod",
+		`proj:a\\b.go`,
+		`proj:repo-a:a\\b.go`,
+		"proj:repo-a:aXb.go", // an unescaped backslash-escape would let this through
+		"proj::go.mod",       // the empty repo segment: `%` matches zero characters
 	}
 
 	for _, c := range candidates {
@@ -694,4 +701,149 @@ func TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite(t *testing.T) {
 			t.Errorf("after narrowing, held = %v, want [%q] — the repo pre-pass did not run on the release path", held, want)
 		}
 	})
+}
+
+// TestFileScopeRepoKey_DroppingTheRepoEntryDoesNotReleaseStillDeclaredLocks is
+// the regression that repo-qualified keys introduce into aihub#264's release.
+//
+// releaseUndeclaredFileScopeLocks releases `derived(prior) − derived(next)`.
+// That subtraction assumed a derived key changes only when its PATH is dropped.
+// Once the key carries a repo, it also changes when the payload's repo inference
+// changes with the paths untouched — and then every still-declared path looks
+// "removed", its lock is deleted, and nothing re-acquires it.
+//
+// This is the ordinary polyforge flow, not a corner case: pf-plan Step 5
+// (plugins/polyforge/skills/pf-plan/SKILL.md) derives declared_resources from
+// the plan's `Touched files:` lines as PATH ENTRIES ONLY and writes them as a
+// whole-list replace. So a work item claimed with a {"type":"repo"} entry holds
+// repo-qualified locks, and the very next /pf-plan drops the repo entry — which
+// must not drop the locks.
+func TestFileScopeRepoKey_DroppingTheRepoEntryDoesNotReleaseStillDeclaredLocks(t *testing.T) {
+	pool := setupLatestTestDB(t)
+	ctx := context.Background()
+	uid := testUser(t, pool)
+	proj := testProject(t, pool, uid)
+
+	withRepo, err := json.Marshal([]map[string]any{
+		{"type": "repo", "uri": "repo:repo-a", "intent": "write", "task_branch": "pf261-drop"},
+		{"type": "path", "uri": "file:go.mod", "intent": "write"},
+		{"type": "path", "uri": "file:go.sum", "intent": "write"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	wi := seedWIWithResources(t, pool, proj, uid, "loses its locks when the repo entry goes away", withRepo)
+	claim, aerr := claimWI(t, pool, uid, wi.ID, "idem-261-drop")
+	if aerr != nil {
+		t.Fatalf("claim: %v", aerr)
+	}
+	if got := len(fileScopeKeys(claim.AcquiredLocks)); got != 2 {
+		t.Fatalf("fixture check: claim took %d file_scope locks, want 2", got)
+	}
+
+	// pf-plan's rewrite: same two paths, no repo entry.
+	pathsOnly, err := json.Marshal([]map[string]any{
+		{"type": "path", "uri": "file:go.mod", "intent": "write"},
+		{"type": "path", "uri": "file:go.sum", "intent": "write"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, aerr := UpdateWorkItem(ctx, pool, wi.ID, uid, "admin", map[string]string{proj: "owner"},
+		&UpdateWorkItemRequest{DeclaredResources: pathsOnly}); aerr != nil {
+		t.Fatalf("update: %v", aerr)
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT rl.resource_key FROM resource_locks rl
+		JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
+		WHERE ra.work_item_id=$1 AND rl.resource_type='file_scope' ORDER BY 1`, wi.ID)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	var held []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		held = append(held, k)
+	}
+	if len(held) != 2 {
+		t.Errorf("after dropping the repo entry the attempt holds %v (%d locks), want 2 — "+
+			"both paths are STILL declared, so neither lock may be released; "+
+			"the work item is now running with no write protection", held, len(held))
+	}
+}
+
+// TestFileScopeRepoKey_WrongTypedRepoDoesNotZeroOutEveryLock. Adding a
+// caller-controllable field to a STRICTLY decoded payload adds a way to make the
+// whole payload derive nothing.
+//
+// ValidateDeclaredResources decodes into []map[string]any and only type-asserts
+// `type` and `uri`, so {"repo":123} is stored with a 200. A typed unmarshal then
+// fails on that one field with an UnmarshalTypeError and takes the WHOLE array
+// down, so the work item claims with NO locks at all and no error anywhere —
+// the "fake all-clear" aihub#238 exists to remove. derivedFileScopeLocks
+// already documents this exact hazard for `intent`; the shared decoder must not
+// reintroduce it for `repo`.
+func TestFileScopeRepoKey_WrongTypedRepoDoesNotZeroOutEveryLock(t *testing.T) {
+	pool := setupLatestTestDB(t)
+	uid := testUser(t, pool)
+	proj := testProject(t, pool, uid)
+
+	bad, err := json.Marshal([]map[string]any{
+		{"type": "path", "uri": "file:go.mod", "intent": "write", "repo": 123},
+		{"type": "path", "uri": "file:go.sum", "intent": "write", "repo": "repo-a"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	wi := seedWIWithResources(t, pool, proj, uid, "wrong-typed repo field", bad)
+	claim, aerr := claimWI(t, pool, uid, wi.ID, "idem-261-badrepo")
+	if aerr != nil {
+		t.Fatalf("claim: %v", aerr)
+	}
+	got := fileScopeKeys(claim.AcquiredLocks)
+	// The bad entry degrades to "no repo declared" (conservative, over-blocking);
+	// the good entry keeps its repo. Neither may vanish.
+	want := []string{proj + ":go.mod", proj + ":repo-a:go.sum"}
+	if len(got) != 2 {
+		t.Fatalf("claim acquired %v, want %v — one wrong-typed optional field silently disabled every lock", got, want)
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("claim acquired %v, want %v", got, want)
+			break
+		}
+	}
+}
+
+// TestFileScopeRepoKey_RepoNameIsTrimmed. A repo name is spliced into the lock
+// key verbatim, so "repo-a " and "repo-a" would key differently and two work
+// items editing the same physical file would NOT conflict — a missed conflict
+// produced purely by whitespace. A whitespace-only repo must mean "unspecified",
+// not a repo literally named " ".
+func TestFileScopeRepoKey_RepoNameIsTrimmed(t *testing.T) {
+	if got, want := fileScopeLockKey("p", "repo-a", "file:go.mod"), "p:repo-a:go.mod"; got != want {
+		t.Errorf("fileScopeLockKey = %q, want %q", got, want)
+	}
+	items := []DeclaredResourceItem{
+		{Type: "repo", URI: "repo: repo-a "},
+		{Type: "path", URI: "file:go.mod", Intent: "write"},
+	}
+	if _, k := derivedLock(resolveDeclaredRepos(items)[1], "p"); k != "p:repo-a:go.mod" {
+		t.Errorf("inferred-from-repo-entry key = %q, want %q (repo name must be trimmed)", k, "p:repo-a:go.mod")
+	}
+	explicit := DeclaredResourceItem{Type: "path", URI: "file:go.mod", Intent: "write", Repo: " repo-a "}
+	if _, k := derivedLock(explicit, "p"); k != "p:repo-a:go.mod" {
+		t.Errorf("explicit repo key = %q, want %q (repo name must be trimmed)", k, "p:repo-a:go.mod")
+	}
+	blank := DeclaredResourceItem{Type: "path", URI: "file:go.mod", Intent: "write", Repo: "   "}
+	if _, k := derivedLock(blank, "p"); k != "p:go.mod" {
+		t.Errorf("whitespace-only repo key = %q, want %q (must mean unspecified)", k, "p:go.mod")
+	}
 }

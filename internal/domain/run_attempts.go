@@ -1381,13 +1381,10 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 	// decoder exists to kill the hand-written-struct hazard, and this site never
 	// had one: it already decodes into DeclaredResourceItem, so the repo field
 	// reaches it regardless.
-	var declared []DeclaredResourceItem
-	if len(wi.DeclaredResources) > 0 {
-		if jsonErr := json.Unmarshal(wi.DeclaredResources, &declared); jsonErr != nil {
-			return nil, NewErr(ErrInternalError, "failed to parse declared_resources")
-		}
+	declared, decodeOK := decodeDeclaredResources(wi.DeclaredResources)
+	if !decodeOK {
+		return nil, NewErr(ErrInternalError, "failed to parse declared_resources")
 	}
-	declared = resolveDeclaredRepos(declared)
 
 	type targetLock struct {
 		lockType string

@@ -470,20 +470,28 @@ func derivedLockProbe(res DeclaredResourceItem, project string) (lockType, lockK
 // unambiguously said which tree those repo-relative paths are in, and
 // ieops#571 — one half of the reported collision — is exactly that shape.
 //
-// 🔴 Requiring EXACTLY one is the safety property, not a simplification. With
-// two or more declared repos the payload does not say which tree any given path
-// belongs to, and guessing would produce a key naming a repo the work item may
-// not be editing — a wrong key is a missed conflict, whereas returning "" falls
-// back to the unqualified key, which conflicts with everything it used to.
-// Ambiguity therefore resolves toward over-blocking, in the same direction as
-// every other choice in lockConflictProbe.
+// 🔴 Requiring EXACTLY one bounds the guess; it does not make the guess correct.
+// With two or more declared repos the payload does not say which tree any given
+// path belongs to, so returning "" falls back to the unqualified key, which
+// conflicts with everything it used to — ambiguity resolves toward over-blocking,
+// in the same direction as every other choice in lockConflictProbe.
+//
+// What it does NOT establish, and no code here does: that a path actually LIVES
+// in the declared repo. Nothing validates that, and a `repo:` entry's real job is
+// to name the branch/worktree the work item is on, not to scope every path it
+// touches. A work item declaring repo:ieops-core while editing a path that lives
+// in ieops-v2 gets a key naming ieops-core, which conflicts with nothing naming
+// ieops-v2 — a missed conflict from a MIS-declaration, reachable with exactly one
+// declared repo. The explicit per-entry `repo` field is the escape hatch for a
+// payload whose paths span repos; the inference is a convenience for the common
+// single-repo case, not a proof of correctness.
 func declaredRepoDefault(items []DeclaredResourceItem) string {
 	repo := ""
 	for _, it := range items {
 		if it.Type != "repo" {
 			continue
 		}
-		name := strings.TrimPrefix(it.URI, "repo:")
+		name := normalizeRepo(strings.TrimPrefix(it.URI, "repo:"))
 		if name == "" {
 			continue
 		}
@@ -500,8 +508,11 @@ func declaredRepoDefault(items []DeclaredResourceItem) string {
 // locks. It is a whole-payload operation because the repo of one entry is
 // carried by a different entry, which is why it cannot live inside derivedLock.
 //
-// An explicit per-entry `repo` always wins: a payload that declares repo:A but
-// marks one path as belonging to repo:B means it.
+// An explicit per-entry `repo` wins whenever it is non-empty: a payload that
+// declares repo:A but marks one path as belonging to repo:B means it. An
+// explicitly empty `"repo": ""` is indistinguishable from an absent field and so
+// inherits the default — Go has no way to tell the two apart here, and
+// "unspecified" is the conservative reading of both.
 func resolveDeclaredRepos(items []DeclaredResourceItem) []DeclaredResourceItem {
 	def := declaredRepoDefault(items)
 	if def == "" {
@@ -517,99 +528,61 @@ func resolveDeclaredRepos(items []DeclaredResourceItem) []DeclaredResourceItem {
 	return out
 }
 
-// unmarshalDeclaredResources decodes a stored declared_resources payload into
-// the shared item type and applies the repo pre-pass.
+// decodeDeclaredResources is the ONE decoder for a stored declared_resources
+// payload: it converts to the shared item type, applies the repo pre-pass, and
+// reports whether the payload could be read at all (ok=false means it is not a
+// JSON array of objects).
 //
-// 🔴 It exists to delete three hand-written anonymous structs. FnClaimWorkItem,
-// FnForceTakeover and FnAcquireLocks each used to unmarshal into their own local
-// struct with a hardcoded field list, and aihub#342's post-mortem named that as
-// "the quietest form of this defect": a field absent from one of those lists
-// never reaches the mapper, there is nothing to grep for, and every check
-// downstream reads the zero value and passes. aihub#261 adds exactly such a
-// field, so the lists are removed rather than extended — the failure mode is
-// designed out instead of being re-tested for.
+// 🔴 It exists to delete two hand-written anonymous structs. FnClaimWorkItem and
+// FnForceTakeover each unmarshalled into their own local struct with a hardcoded
+// field list, and aihub#342's post-mortem named that as "the quietest form of
+// this defect": a field absent from one of those lists never reaches the mapper,
+// there is nothing to grep for, and every check downstream reads the zero value
+// and passes. aihub#261 adds exactly such a field (`repo`), so the lists are
+// removed rather than extended — the failure mode is designed out instead of
+// being re-tested for. (FnAcquireLocks never had such a struct; it already
+// decoded into DeclaredResourceItem. It uses this decoder for the repo pre-pass
+// and for the permissiveness below, not to lose a field list.)
 //
-// Stored data is never rejected here: a payload that will not parse yields no
-// entries, matching the pre-existing behaviour at all three sites, because
-// failing would make historical work items unclaimable (~14% of stored entries
-// are malformed — see ValidateDeclaredResources).
-func unmarshalDeclaredResources(raw json.RawMessage) []DeclaredResourceItem {
-	if len(raw) == 0 {
-		return nil
-	}
-	var items []DeclaredResourceItem
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return nil
-	}
-	return resolveDeclaredRepos(items)
-}
-
-// derivedFileScopeLockKeys returns the set of file_scope lock keys a stored
-// declared_resources payload justifies, and whether it could be read at all.
-//
-// aihub#264. Deriving through derivedLock rather than re-implementing the
-// mapping is the point: this set is compared against the CURRENT lock rows to
-// decide which ones a narrowing has orphaned, so if it disagreed with the
-// derivation used at acquisition by even one entry, the difference would show up
-// as a lock silently released or silently kept. derivedLock's own doc comment
-// lists the four sites that must go through it; this is the fifth caller and the
-// only one asking the question in reverse ("which locks does this payload still
-// justify") rather than forward ("what should I take").
-//
-// Inheriting the intent rule is a behavioural consequence, not an accident: an
-// entry flipped from write to read maps to no lock here exactly as it maps to no
-// lock at claim, so the write lock it already holds is released. Anything else
-// would let intent=read enforce like intent=write for the lifetime of the
-// attempt, which is the contradiction aihub#342 exists to remove.
-//
-// ok=false means the payload is not a JSON array of objects at all. Callers must
-// then release NOTHING: an unreadable declaration says nothing about which locks
-// it produced, and guessing in either direction is worse than leaving the
-// pre-existing rows alone. ValidateDeclaredResources' own doc comment reports
-// that roughly 14% of stored entries would fail it, so the stored side must
-// never be assumed well-formed. (That figure is quoted from there, not
-// re-measured here.)
-//
-// 🔴 The decode is deliberately as permissive as ValidateDeclaredResources', and
-// that is a bug fix, not a style choice. Unmarshalling straight into
-// []DeclaredResourceItem is STRICTER than the validator: the validator decodes
-// into []map[string]any and only type-asserts `type` and `uri`, so an entry like
+// 🔴 The decode is deliberately PERMISSIVE — as permissive as
+// ValidateDeclaredResources — and that is a bug fix, not a style choice.
+// Unmarshalling straight into []DeclaredResourceItem is STRICTER than the
+// validator: the validator decodes into []map[string]any and only type-asserts
+// `type` and `uri`, so an entry like
 //
 //	{"type":"path","uri":"file:a.go","intent":true}
+//	{"type":"path","uri":"file:a.go","repo":123}
 //
-// passes validation, while a typed unmarshal fails on `intent` with an
-// UnmarshalTypeError and takes the WHOLE array down with it. Measured: with the
-// strict decode, such an update narrowed declared_resources, bumped
-// resources_version, returned 200 — and released nothing, which is precisely the
-// aihub#264 defect this function exists to prevent, reachable straight from
-// caller input. Ignoring a wrong-typed optional field instead means the entry
-// still yields its key.
+// passes validation and is stored with a 200, while a typed unmarshal fails on
+// that one field with an UnmarshalTypeError and takes the WHOLE ARRAY down with
+// it. Measured on the strict decode: a work item storing the second entry then
+// claimed with NO locks at all and no error anywhere — the "fake all-clear"
+// aihub#238 exists to remove, reachable straight from caller input.
 //
-// Erring toward MORE keys is the safe direction here: a key that turns out not
-// to be held makes the release a no-op, whereas a missing key leaks a lock.
-func derivedFileScopeLockKeys(raw json.RawMessage, project string) (keys map[string]bool, ok bool) {
-	keys = map[string]bool{}
+// Every new optional field is another way to reach that state, which is why the
+// permissiveness lives in the decoder and not in a rule each caller remembers:
+// a wrong-typed optional field degrades to its zero value, and for `repo` the
+// zero value means "unspecified", which over-blocks. Erring toward MORE keys is
+// the safe direction — a key that turns out not to be held makes a release a
+// no-op, whereas a missing key leaks a lock.
+func decodeDeclaredResources(raw json.RawMessage) ([]DeclaredResourceItem, bool) {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
-		return keys, true
+		return nil, true
 	}
 	var items []map[string]any
 	if err := json.Unmarshal(raw, &items); err != nil {
 		return nil, false
 	}
-	// Convert first, THEN resolve repos, then derive: the repo an entry inherits
-	// is carried by a different entry, so the pre-pass cannot run per item
-	// (aihub#261). Deriving inside the conversion loop would have produced
-	// unqualified keys here while the acquire path produced qualified ones —
-	// which, for a function whose whole job is to diff derived keys against held
-	// rows, means releasing nothing and orphaning the lock instead.
-	converted := make([]DeclaredResourceItem, 0, len(items))
+	// Convert first, THEN resolve repos: the repo an entry inherits is carried by
+	// a DIFFERENT entry, so the pre-pass cannot run per item (aihub#261).
+	out := make([]DeclaredResourceItem, 0, len(items))
 	for _, item := range items {
 		str := func(key string) string {
 			s, _ := item[key].(string)
 			return s
 		}
-		converted = append(converted, DeclaredResourceItem{
+		out = append(out, DeclaredResourceItem{
 			Type:       str("type"),
 			URI:        str("uri"),
 			Repo:       str("repo"),
@@ -618,13 +591,68 @@ func derivedFileScopeLockKeys(raw json.RawMessage, project string) (keys map[str
 			TaskBranch: str("task_branch"),
 		})
 	}
-	for _, res := range resolveDeclaredRepos(converted) {
+	return resolveDeclaredRepos(out), true
+}
+
+// unmarshalDeclaredResources is decodeDeclaredResources for the two callers that
+// must never fail on stored data: an unreadable payload yields no entries rather
+// than an error, because failing would make historical work items unclaimable
+// (~14% of stored entries are malformed — see ValidateDeclaredResources).
+func unmarshalDeclaredResources(raw json.RawMessage) []DeclaredResourceItem {
+	items, _ := decodeDeclaredResources(raw)
+	return items
+}
+
+// derivedFileScopeLocks returns, for a stored declared_resources payload, a map
+// from each file_scope lock key the payload justifies to the DECLARED PATH that
+// key protects — and whether the payload could be read at all.
+//
+// aihub#264. Deriving through derivedLock rather than re-implementing the
+// mapping is the point: this is compared against the CURRENT lock rows to decide
+// which ones a narrowing has orphaned, so if it disagreed with the derivation
+// used at acquisition by even one entry, the difference would show up as a lock
+// silently released or silently kept.
+//
+// Inheriting the intent rule is a behavioural consequence, not an accident: an
+// entry flipped from write to read maps to no lock here exactly as it maps to no
+// lock at claim, so it is absent from this map and the write lock it already
+// holds is released. Anything else would let intent=read enforce like
+// intent=write for the lifetime of the attempt, which is the contradiction
+// aihub#342 exists to remove.
+//
+// 🔴 The PATH in the value, not just the key, is what aihub#261 forced. The
+// caller used to release `keys(prior) − keys(next)`, which silently assumed a
+// derived key changes only when its path is dropped. Once the key carries a
+// repo, it ALSO changes when the payload's repo inference changes with the paths
+// untouched — and then every still-declared path looks removed, its lock is
+// deleted, and nothing re-acquires it.
+//
+// That is not a corner case, it is the ordinary polyforge flow: pf-plan Step 5
+// derives declared_resources from the plan's `Touched files:` lines as PATH
+// ENTRIES ONLY and writes them as a whole-list replace. A work item claimed with
+// a {"type":"repo"} entry holds repo-qualified locks, and the very next /pf-plan
+// drops that entry. Measured on the key-subtraction version: the attempt was
+// left running with ZERO file_scope locks, silently. Subtracting on the path
+// makes the release immune to any future change of key FORMAT, which is the
+// property that was missing rather than any particular format being wrong.
+//
+// ok=false means the payload is not a JSON array of objects at all. Callers must
+// then release NOTHING: an unreadable declaration says nothing about which locks
+// it produced, and guessing in either direction is worse than leaving the
+// pre-existing rows alone.
+func derivedFileScopeLocks(raw json.RawMessage, project string) (byKey map[string]string, ok bool) {
+	byKey = map[string]string{}
+	items, ok := decodeDeclaredResources(raw)
+	if !ok {
+		return nil, false
+	}
+	for _, res := range items {
 		lockType, lockKey := derivedLock(res, project)
 		if lockType == "file_scope" && lockKey != "" {
-			keys[lockKey] = true
+			byKey[lockKey] = fileURIToLockKey(res.URI)
 		}
 	}
-	return keys, true
+	return byKey, true
 }
 
 // resourceToLock converts a DeclaredResourceItem to a (resource_type, resource_key) pair per §25 mapping.
@@ -696,27 +724,48 @@ func resourceToLock(res DeclaredResourceItem, project string) (lockType, lockKey
 // is releaseUndeclaredLocksSQL (work_items.go), the aihub#264 narrowing release,
 // and it is scoped to a single work item.
 //
-// 🔴 The failure mode being ACCEPTED, stated plainly: an attempt that is already
-// running across the binary swap AND declares exactly one repo holds an
-// unqualified row, while a later pf_acquire_locks on the same attempt derives
-// the qualified key and inserts a second row. For that attempt, and only until
-// it ends or pauses, one path is covered by two rows, and a narrowing would
-// release only the qualified one. Both rows are released together by
-// owner_attempt_id at pause/complete/takeover, and the extra row can only
-// over-block, never under-block. This is bounded, self-healing, and in the
-// conservative direction; the alternative — rewriting live rows in a migration —
-// would have to guess the repo for every existing declaration, which is the one
-// thing that could produce a wrong key and therefore a missed conflict.
+// 🔴 The failure mode being ACCEPTED, stated plainly: an existing row is never
+// UPGRADED. A lock taken as "<project>:<path>" keeps that key for the life of the
+// attempt even after the same work item starts deriving a repo-qualified key.
+//
+// What that does and does not cost, each checked rather than assumed:
+//
+//   - It still blocks correctly. Every qualified probe carries the unqualified
+//     key and every unqualified probe carries the any-repo LIKE, so the stale row
+//     is found from both directions (lockConflictProbe).
+//   - It is still released. Every terminal path deletes by owner_attempt_id, and
+//     the narrowing release matches every key FORM of a dropped path
+//     (releaseUndeclaredLocksSQL), so the old format is covered there too.
+//   - No duplicate row appears. pf_acquire_locks probes before inserting, finds
+//     the stale row is owned by this very attempt, and no-ops. An earlier version
+//     of this comment claimed a second row was inserted; that was wrong, and the
+//     probe is why.
+//
+// So the residue is a key that names less than it protects until the attempt
+// ends — conservative in every direction. The alternative, rewriting live rows in
+// a migration, would have to GUESS the repo for every existing declaration, and a
+// wrong repo segment is a missed conflict: the one outcome worse than the bug.
 //
 // Only file_scope keys are namespaced: git_branch keys are already
 // repo-qualified (repo/branch), and deploy_env keys (service) are intentionally
 // global so cross-project deploys to one environment still conflict.
 func fileScopeLockKey(project, repo, uri string) string {
+	repo = normalizeRepo(repo)
 	if repo == "" {
 		return project + ":" + fileURIToLockKey(uri)
 	}
 	return project + ":" + repo + ":" + fileURIToLockKey(uri)
 }
+
+// normalizeRepo trims a repo name before it is spliced into a lock key.
+//
+// Without it "repo-a " and "repo-a" key differently, so two work items editing
+// the same physical file would NOT conflict — a missed conflict produced purely
+// by whitespace, and the qualified probe is exact so nothing else catches it.
+// A whitespace-only value must mean "unspecified" rather than a repo literally
+// named " ", because "unspecified" is the conservative reading: it conflicts
+// with every repo's copy of the path instead of with none of them.
+func normalizeRepo(repo string) string { return strings.TrimSpace(repo) }
 
 // lockConflictProbe is the set of EXISTING resource_locks keys that a candidate
 // declaration conflicts with. It exists because "which key do I insert" and
@@ -773,7 +822,7 @@ func exactProbe(key string) lockConflictProbe {
 // fileScopeConflictProbe builds the probe for a file_scope declaration.
 func fileScopeConflictProbe(project, repo, uri string) lockConflictProbe {
 	path := fileURIToLockKey(uri)
-	if repo == "" {
+	if normalizeRepo(repo) == "" {
 		// "Some repo, unspecified": conflict with the legacy/unqualified key and
 		// with every repo-qualified variant of the same path.
 		return lockConflictProbe{

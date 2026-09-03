@@ -1613,13 +1613,28 @@ func casConflictErr(expected, current int) *AihubError {
 // an attempt that is no longer current. Joining on work_item_id reaches that
 // residue while still making it impossible to touch a lock belonging to any
 // OTHER work item, whatever its key looks like.
+// $2 is the set of exact keys and $3 the set of LIKE patterns that together
+// cover EVERY key form a removed path can be held under (aihub#261): the
+// unqualified "<project>:<path>" and any repo-qualified "<project>:<repo>:<path>".
+//
+// 🔴 Matching only the currently-derived key is not enough, and that is measured,
+// not theoretical. A lock row is written once and never rewritten, so a work item
+// that took "<project>:<repo>:<path>" and later dropped its {"type":"repo"} entry
+// derives "<project>:<path>" from then on. Deleting only that misses the row the
+// attempt actually holds, and the lock survives a declaration that no longer
+// mentions the path at all — silent over-holding, the mirror of the silent
+// under-holding this function exists to prevent.
+//
+// Widening the match cannot reach another work item's lock: ra.work_item_id = $1
+// still scopes every row, so the patterns only ever range over key forms of paths
+// THIS work item declared and has now dropped.
 const releaseUndeclaredLocksSQL = `
 	DELETE FROM resource_locks rl
 	USING run_attempts ra
 	WHERE rl.owner_attempt_id = ra.id
 	  AND ra.work_item_id = $1
 	  AND rl.resource_type = 'file_scope'
-	  AND rl.resource_key = ANY($2::text[])`
+	  AND (rl.resource_key = ANY($2::text[]) OR rl.resource_key LIKE ANY($3::text[]))`
 
 // releaseUndeclaredFileScopeLocks releases the file_scope locks that `prior`
 // justified and `next` no longer does (aihub#264).
@@ -1671,14 +1686,14 @@ const releaseUndeclaredLocksSQL = `
 // worth opening for a narrowing either. A work item that really means to give up
 // a branch can pause, which already releases file_scope and re-derives the rest.
 func releaseUndeclaredFileScopeLocks(ctx context.Context, tx pgx.Tx, wiID, project string, prior, next json.RawMessage) *AihubError {
-	priorKeys, ok := derivedFileScopeLockKeys(prior, project)
+	priorLocks, ok := derivedFileScopeLocks(prior, project)
 	if !ok {
 		// Unparseable stored declarations: which locks they produced is unknown,
 		// so releasing any of them would be a guess. Leaving them is the
 		// pre-aihub#264 behaviour and is the safe direction.
 		return nil
 	}
-	nextKeys, ok := derivedFileScopeLockKeys(next, project)
+	nextLocks, ok := derivedFileScopeLocks(next, project)
 	if !ok {
 		// Unreachable from the REST/MCP surface: UpdateWorkItem runs
 		// ValidateDeclaredResources on caller input before opening the
@@ -1687,14 +1702,51 @@ func releaseUndeclaredFileScopeLocks(ctx context.Context, tx pgx.Tx, wiID, proje
 		return nil
 	}
 
-	removed := make([]string, 0, len(priorKeys))
-	for key := range priorKeys {
-		if !nextKeys[key] {
-			removed = append(removed, key)
+	// 🔴 Subtract on the declared PATH, not on the derived key (aihub#261).
+	//
+	// `keys(prior) − keys(next)` silently assumed a derived key changes only when
+	// its path is dropped. Since the key gained a repo segment that is false: the
+	// key also changes when the payload's repo inference changes with the paths
+	// untouched, and then every still-declared path looks removed and its lock is
+	// deleted with nothing to re-acquire it.
+	//
+	// The reachable case is the ordinary flow, not a corner: pf-plan Step 5
+	// rewrites declared_resources as PATH ENTRIES ONLY, in a whole-list replace.
+	// A work item claimed with a {"type":"repo"} entry holds repo-qualified locks,
+	// and the next /pf-plan drops that entry. Measured on the key subtraction:
+	// the attempt was left running with ZERO file_scope locks, silently — the
+	// exact loss-of-protection aihub#264 exists to prevent.
+	//
+	// Releasing by path also makes this immune to any FUTURE change of key
+	// format, which is the property that was missing rather than this particular
+	// format being wrong. The keys still come from the prior derivation, so what
+	// is deleted is always a key that derivation really produced.
+	stillDeclared := make(map[string]bool, len(nextLocks))
+	for _, path := range nextLocks {
+		stillDeclared[path] = true
+	}
+	removedPaths := map[string]bool{}
+	for _, path := range priorLocks {
+		if !stillDeclared[path] {
+			removedPaths[path] = true
 		}
 	}
-	if len(removed) == 0 {
+	if len(removedPaths) == 0 {
 		return nil
+	}
+	// Every key form each removed path could be held under, because the row was
+	// written once under whatever format was current then and is never rewritten.
+	// fileScopeConflictProbe with an empty repo is exactly "this path in ANY
+	// repo", which is the set wanted here, so the coverage rule lives in one
+	// place rather than being spelled a second time.
+	removed := make([]string, 0, len(removedPaths))
+	patterns := make([]string, 0, len(removedPaths))
+	for path := range removedPaths {
+		probe := fileScopeConflictProbe(project, "", "file:"+path)
+		removed = append(removed, probe.Keys...)
+		if probe.LikePattern != "" {
+			patterns = append(patterns, probe.LikePattern)
+		}
 	}
 	// Sorted so the statement's parameters are deterministic and a failure is
 	// reproducible. That is the whole claim: `resource_key = ANY($2)` does not
@@ -1706,7 +1758,8 @@ func releaseUndeclaredFileScopeLocks(ctx context.Context, tx pgx.Tx, wiID, proje
 	// dbErrCause already maps a class 40 rollback to a retryable 409 before
 	// falling back to ErrInternalError (aihub#334), and ErrInternalError is
 	// exactly the non-conflict outcome wanted here, so it is the whole mapping.
-	if _, err := tx.Exec(ctx, releaseUndeclaredLocksSQL, wiID, removed); err != nil {
+	sort.Strings(patterns)
+	if _, err := tx.Exec(ctx, releaseUndeclaredLocksSQL, wiID, removed, patterns); err != nil {
 		return dbErrCause(err, "failed to release locks for removed declared_resources")
 	}
 	return nil

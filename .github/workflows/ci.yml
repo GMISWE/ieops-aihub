@@ -1594,7 +1594,10 @@ jobs:
                       'TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite/force_takeover' \
                       'TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite/acquire_locks' \
                       'TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite/predict_rule_1' \
-                      'TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite/narrowing_release'; do
+                      'TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite/narrowing_release' \
+                      'TestFileScopeRepoKey_DroppingTheRepoEntryDoesNotReleaseStillDeclaredLocks' \
+                      'TestFileScopeRepoKey_WrongTypedRepoDoesNotZeroOutEveryLock' \
+                      'TestFileScopeRepoKey_RepoNameIsTrimmed'; do
             grep -q -- "--- PASS: $want" file_scope_repo_key.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); that aihub#261 derivation site is not actually covered"; exit 1; }
           done

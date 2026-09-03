@@ -25,9 +25,9 @@ import (
 //
 // This stands in for GET /v1/work_items and GET /v1/work_items/:id, and it
 // reproduces the ONE server behaviour that makes aihub#307 possible rather than
-// an idealised list endpoint: the limit is capped at 200 and the cap FAILS OPEN,
-// so limit<=0 (i.e. "no limit param") and limit>200 both silently become 50
-// (aihub#267, internal/domain/work_items.go).
+// an idealised list endpoint: a page size the caller did not name yields a SHORT
+// page plus a cursor, so code that reads page 1 and stops silently sees part of
+// the set.
 //
 // Measured against production on 2026-08-31, project ieops, 127 open items:
 //
@@ -35,6 +35,16 @@ import (
 //	limit=50     -> 50 rows + next_cursor
 //	limit=200    -> 127 rows, no next_cursor
 //	limit=500    -> 50 rows + next_cursor   <- the "just ask for a big number" fix
+//
+// ⚠️ The last line is HISTORY as of aihub#267: limit=500 now yields 200 rows, not
+// 50. The fake is deliberately NOT updated, and this note is why. What these
+// tests exercise is the cursor walk — "does the caller keep paging until the
+// cursor runs out" — and that is driven by "a short page plus a cursor", which
+// the first three lines still produce for every deployed and undeployed server.
+// Changing the fake to the new value would weaken the fixture (a 200-row page
+// covers the 127-item case in one shot, so the walk would stop being exercised)
+// while proving nothing extra. It is modelling a WORSE server than the real one
+// on purpose, which is the right direction for a fake to be wrong in.
 //
 // A fake that returned everything for any limit would let the pre-fix code pass,
 // which is the only thing these tests exist to prevent.

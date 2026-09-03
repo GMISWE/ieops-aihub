@@ -1166,7 +1166,8 @@ func TestDoneSegment_PageSizeFollowsLimit(t *testing.T) {
 					t.Errorf("limit=%d: done query used Limit=%d, want %d", limit, f.Limit, limit)
 				}
 				if f.Limit > 200 {
-					t.Errorf("limit=%d: done query Limit=%d exceeds domain's 200 cap and would silently degrade to 50", limit, f.Limit)
+					t.Errorf("limit=%d: done query Limit=%d exceeds domain's 200 cap and would be clamped to 200, "+
+						"returning a short page this handler treats as complete", limit, f.Limit)
 				}
 			}
 		}

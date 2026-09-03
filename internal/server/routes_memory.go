@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -263,15 +263,27 @@ func firstPipedType(types []string) (string, bool) {
 // diagnostic, an empty list that looks like an empty project, and the piped value
 // round-tripped back into the page's own links. Two readers of one parameter with
 // opposite behaviour is how the next variant of this bug gets in.
-func parseRecallTypes(raw string) (types []string, badPipe string) {
-	if raw == "" {
-		return nil, ""
+// The third return, `empty`, is "the caller sent this param and it names no
+// type". The two surfaces answer it differently on purpose: /v1 rejects it
+// (Rule 1 — `?type=,` asking for everything is not what the caller meant), /ui
+// falls back to no filter, which is the leniency exemption queryparam.go states.
+func parseRecallTypes(raw string) (types []string, badPipe string, empty bool) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, "", false
 	}
-	types = strings.Split(raw, ",")
+	// Split via the shared reader so the one conversion this function performs is
+	// the policy file's, not a fourth private one. Note the semantic change that
+	// comes with it and is wanted: entries are trimmed and empties dropped, so
+	// `?type=rule.work, fact.a` stops silently matching nothing on its second
+	// entry — the same silent miss aihub#289 removed from the piped spelling.
+	types = splitCSVParam(raw)
+	if len(types) == 0 {
+		return nil, "", true
+	}
 	if bad, ok := firstPipedType(types); ok {
-		return nil, bad
+		return nil, bad, false
 	}
-	return types, ""
+	return types, "", false
 }
 
 // pipedTypeMessage is the one actionable explanation both surfaces show. Kept in one
@@ -308,9 +320,14 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 
 		// Parse type filter (comma-separated or repeated params)
-		types, badPipe := parseRecallTypes(c.QueryParam("type"))
+		types, badPipe, emptyTypes := parseRecallTypes(c.QueryParam("type"))
 		if badPipe != "" {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, pipedTypeMessage(badPipe)))
+		}
+		if emptyTypes {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, fmt.Sprintf(
+				"type was sent but names nothing (got %q); omit it to apply no filter",
+				c.QueryParam("type"))))
 		}
 		req.Types = types
 		if vis := c.QueryParam("visibility"); vis != "" {
@@ -324,24 +341,49 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 		// parsed here (Recall()'s TopK still defaults to 20 / clamps to 200
 		// regardless of which name supplied it). When both are sent, `top_k` wins.
 		//
-		// A malformed `top_k` falls THROUGH to `limit` rather than discarding it:
-		// silently dropping a caller-supplied page size is the exact failure mode
-		// this wi exists to remove, so we must not reintroduce it here. Atoi("")
-		// errors, so the empty case needs no separate guard.
-		if n, err := strconv.Atoi(c.QueryParam("top_k")); err == nil {
-			req.TopK = n
-		} else if n, err := strconv.Atoi(c.QueryParam("limit")); err == nil {
-			req.TopK = n
+		// 🔴 aihub#340 changed what happens to a MALFORMED one. It used to fall
+		// through to `limit` and then to the default, on the argument that
+		// silently dropping a caller-supplied page size is the failure mode
+		// aihub#249 existed to remove. Rejecting drops nothing at all and is
+		// strictly the better answer to that same argument: `top_k=abc` reaching
+		// the default 20 was indistinguishable from sending no top_k, so the
+		// caller never learned their client was emitting garbage.
+		topK, topKPresent, topKErr := queryInt(c, "top_k")
+		if topKErr != nil {
+			return writeError(c, topKErr)
 		}
-		if minS := c.QueryParam("min_strength"); minS != "" {
-			if f, err := strconv.ParseFloat(minS, 64); err == nil {
-				req.MinStrength = f
+		if !topKPresent {
+			topK, topKPresent, topKErr = queryInt(c, "limit")
+			if topKErr != nil {
+				return writeError(c, topKErr)
 			}
 		}
-		if rw := c.QueryParam("recency_weight"); rw != "" {
-			if f, err := strconv.ParseFloat(rw, 64); err == nil {
-				req.RecencyWeight = f
-			}
+		if topKPresent {
+			req.TopK = topK
+		}
+		// min_strength has a floor and no ceiling: strength is an accumulated
+		// quantity with no defined maximum, so inventing an upper bound here
+		// would reject a value the domain would have honoured. Non-positive is
+		// legal and means "unset" — Recall reads it as its 0.3 default.
+		minStrength, minPresent, minErr := queryFloatInRange(c, "min_strength", 0, math.Inf(1))
+		if minErr != nil {
+			return writeError(c, minErr)
+		}
+		if minPresent {
+			req.MinStrength = minStrength
+		}
+		// recency_weight is deliberately range-UNCHECKED beyond being a finite
+		// number. It is a reserved-but-unused knob (see the note on it in
+		// domain.Recall): every value is equally inert today, so any range this
+		// file declared would be a contract invented by the validator rather than
+		// one the ranking code keeps. Rule 1's parse check still applies —
+		// `recency_weight=notanumber` is a caller bug whatever the knob does.
+		recencyWeight, rwPresent, rwErr := queryFloat(c, "recency_weight")
+		if rwErr != nil {
+			return writeError(c, rwErr)
+		}
+		if rwPresent {
+			req.RecencyWeight = recencyWeight
 		}
 		// aihub#148, hop 3 of four. The cosine floor is fully implemented in
 		// domain (memory_vector.go's `if req.SimilarityThreshold > 0`, plus
@@ -357,14 +399,29 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 		// measurably outscore real matches on this corpus (a punctuation-only
 		// query's worst hit is 0.4712 against a correct answer's best at 0.4798),
 		// so a global cutoff would drop true positives to remove nothing.
-		if st := c.QueryParam("similarity_threshold"); st != "" {
-			if f, err := strconv.ParseFloat(st, 64); err == nil {
-				req.SimilarityThreshold = f
-			}
+		//
+		// 🔴 The range is [0,1] and violations are REJECTED, not clamped — this is
+		// Rule 1, not Rule 2 (see queryparam.go). A cosine similarity cannot
+		// exceed 1, so `similarity_threshold=5` asks for a floor nothing can ever
+		// clear; the caller meant 0.5 and can send 0.5. Clamping it to 1 would
+		// hand back an empty page that looks exactly like a real empty result,
+		// which is the same silence aihub#148 removed from this very parameter.
+		// A negative value is the mirror image: the domain's `> 0` test reads it
+		// as "filter off", so it silently disabled the thing the caller was
+		// trying to turn on. 0 stays legal and still means off — that spelling is
+		// pinned by TestHandleRecall_SimilarityThresholdIsReachable.
+		threshold, thresholdPresent, thresholdErr := queryFloatInRange(c, "similarity_threshold", 0, 1)
+		if thresholdErr != nil {
+			return writeError(c, thresholdErr)
 		}
-		if c.QueryParam("include_archived") == "true" {
-			req.IncludeArchived = true
+		if thresholdPresent {
+			req.SimilarityThreshold = threshold
 		}
+		includeArchived, _, archivedErr := queryBool(c, "include_archived")
+		if archivedErr != nil {
+			return writeError(c, archivedErr)
+		}
+		req.IncludeArchived = includeArchived
 		if algo := c.QueryParam("recall_algo"); algo != "" {
 			req.RecallAlgo = algo
 		}
@@ -723,23 +780,61 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 		if userID := c.QueryParam("user_id"); userID != "" {
 			f.UserID = &userID
 		}
-		if types := c.QueryParam("types"); types != "" {
-			f.Types = strings.Split(types, ",")
+		types, typesErr := queryCSVStrict(c, "types")
+		if typesErr != nil {
+			return writeError(c, typesErr)
 		}
-		if since := c.QueryParam("since"); since != "" {
-			f.Since = &since
+		f.Types = types
+		// `since` is validated here for the first time (aihub#340). It used to be
+		// taken raw into an `e.created_at > $N` bind, so `?since=abc` came back
+		// 200 with `{"events":null}` — measured, not read off the code — which is
+		// indistinguishable from "this project has no events since then". The
+		// same parameter name on /v1/work_items has always been strict; two
+		// readings of one parameter name is how the next variant gets in.
+		//
+		// The PARSED time is forwarded, not the caller's text, so what reaches the
+		// query is a value this server produced.
+		sinceTS, sincePresent, sinceErr := queryRFC3339(c, "since")
+		if sinceErr != nil {
+			return writeError(c, sinceErr)
+		}
+		if sincePresent {
+			formatted := sinceTS.Format(time.RFC3339Nano)
+			f.Since = &formatted
 		}
 		if cursor := c.QueryParam("cursor"); cursor != "" {
 			f.Cursor = &cursor
 		}
-		if limit := c.QueryParam("limit"); limit != "" {
-			if n, err := strconv.Atoi(limit); err == nil {
-				f.Limit = n
-			}
+		// ⚠️ Rule 1 only. Unlike the other three list endpoints, /v1/events has NO
+		// page-size ceiling: ListEvents replaces a non-positive limit with 50 and
+		// otherwise honours whatever it is given.
+		//
+		// Measured against a running server over 500 seeded events, rather than
+		// read off the code — and note which arms are the discriminating ones,
+		// because "limit=50000 returned 500" proves nothing on its own when only
+		// 500 rows exist:
+		//
+		//	no limit -> 50    limit=200 -> 200    limit=201 -> 201    limit=500 -> 500
+		//
+		// 201 and 500 are the answer: every other endpoint here would have capped
+		// them at 200.
+		//
+		// That gap is real and is deliberately NOT closed here. Adding a ceiling
+		// means adding a disclosure field to ListEventsResponse, and a ceiling
+		// without disclosure would create a fresh instance of the very defect this
+		// change removes.
+		limit, limitPresent, limitErr := queryInt(c, "limit")
+		if limitErr != nil {
+			return writeError(c, limitErr)
 		}
-		if c.QueryParam("pinned_first") == "true" {
-			f.PinnedFirst = true
+		if limitPresent {
+			f.Limit = limit
 		}
+		pinnedFirst, _, pinnedErr := queryBool(c, "pinned_first")
+		if pinnedErr != nil {
+			return writeError(c, pinnedErr)
+		}
+		f.PinnedFirst = pinnedFirst
 
 		resp, aihubErr := domain.ListEvents(ctx, pool, f)
 		if aihubErr != nil {

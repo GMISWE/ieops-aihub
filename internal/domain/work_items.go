@@ -839,6 +839,28 @@ func ListWorkItemsOrderValues() []string {
 	return []string{ListWorkItemsOrderDesc, ListWorkItemsOrderAsc}
 }
 
+// WorkItemStatusValues returns the legal `status` values, in the order the schema
+// declares them.
+//
+// 🔴 This is a SECOND COPY of a vocabulary whose authority is the database, not
+// this file: work_items.status carries
+//
+//	CHECK (status IN ('queued','running','paused','blocked','wrapped','failed','cancelled'))
+//
+// from internal/db/migrations/0002_work_items.sql. Copies drift, so this one is
+// not trusted — TestWorkItemStatusValuesMatchTheSchemaCheck reads the constraint
+// back out of a live database with the migrations applied and fails on any
+// divergence in either direction. Add a status in a migration without adding it
+// here and the gate is red; the list can never silently go stale.
+//
+// A Go copy exists at all because the alternative is worse: rejecting an unknown
+// `?status=` by asking Postgres would mean the rejection depends on a query, and
+// the whole point (aihub#255) is to bound the request BEFORE it reaches the
+// database.
+func WorkItemStatusValues() []string {
+	return []string{"queued", "running", "paused", "blocked", "wrapped", "failed", "cancelled"}
+}
+
 // NormalizeListWorkItemsSort validates caller-supplied sort/order and fills in
 // the defaults (created_at / desc) for empty input, returning the lowercased
 // values to store on the filter.
@@ -912,8 +934,9 @@ type ListWorkItemsResult struct {
 	Items      []*WorkItem `json:"items"`
 	NextCursor *string     `json:"next_cursor"`
 	// RequestAdjusted names the caller-supplied parameters this endpoint changed
-	// on the way in — today only `limit`, which ListWorkItems resets to 50 when it
-	// arrives above 200 (aihub#267). Omitted when nothing was adjusted; see
+	// on the way in — today only `limit`, which NormalizeListWorkItemsLimit clamps
+	// to 200 when it arrives above the ceiling and replaces with 50 when it arrives
+	// non-positive (aihub#267). Omitted when nothing was adjusted; see
 	// request_adjusted.go for why absence rather than an empty list, and for the
 	// one case this cannot report.
 	RequestAdjusted []RequestAdjustment `json:"request_adjusted,omitempty"`
@@ -1143,13 +1166,59 @@ func buildListWorkItemsQuery(project string, f ListWorkItemsFilter) (query strin
 	return query, args, sortCol
 }
 
+// Page-size bounds for ListWorkItems.
+//
+// INVARIANT: ListWorkItemsLimitCeiling >= ListWorkItemsLimitDefault, for the
+// reason spelled out on recallTopKCeiling — a ceiling below the default inverts
+// the endpoint, so asking for a bigger page returns fewer items.
+//
+// Exported only so the HTTP handler can seed filter.Limit with the same default
+// the domain would apply; no test may derive an expectation from either (the
+// tests spell 50 and 200 out), because a fixture read off the constant under
+// test moves with the defect instead of catching it.
+const (
+	ListWorkItemsLimitDefault = 50
+	ListWorkItemsLimitCeiling = 200
+)
+
+// NormalizeListWorkItemsLimit resolves a requested page size into the one
+// ListWorkItems uses. It is the recall side's normalizeRecallTopK, deliberately
+// down to its shape (aihub#267).
+//
+// 🔴 What changed here: a request ABOVE the ceiling now yields the CEILING, where
+// it used to yield the default of 50. The two halves of one API had opposite
+// answers to the same question — `top_k=300` on GET /v1/memories returned 200
+// items while `limit=300` on GET /v1/work_items returned 50 — and 50 is the worse
+// of the two in the direction that costs something: the caller asked for more
+// than the endpoint will give and got less than it would have given.
+//
+// That is not hypothetical. An audit of two aihub instances on 2026-08-27
+// enumerated work items with limit=5000, received a silently truncated 308, and
+// concluded 11 work items existed on one instance only. Correct pagination
+// showed the true figure was zero. The retraction is in aihub#267; the number was
+// wrong in the direction that would have driven the opposite operational call.
+//
+// A NON-POSITIVE request is neither malformed nor out of range: it means the
+// caller named no page size and yields the default. That is normalizeRecallTopK's
+// rule, and the aihub#249 contract behind it — bad input falls back to the
+// DEFAULT, never to a smaller page.
+//
+// This is the ONLY place a work-item page size may be bounded. A cap applied
+// upstream is invisible from here, so nothing can hold it to the invariant above;
+// that is exactly how aihub#309 made the recall ceiling unreachable, and why
+// handleListWorkItems now forwards whatever it parsed, negatives included.
+func NormalizeListWorkItemsLimit(requested int) int {
+	if requested <= 0 {
+		return ListWorkItemsLimitDefault
+	}
+	if requested > ListWorkItemsLimitCeiling {
+		return ListWorkItemsLimitCeiling
+	}
+	return requested
+}
+
 // ListWorkItems bounds the caller's page size, runs the query, and DISCLOSES the
 // bound if it fired.
-//
-// The clamp itself is unchanged (aihub#267 asks for the reset to stop being
-// silent, not for a different reset). What changes is that a caller who asked for
-// 500 items and got 50 can now see that from the response instead of having to
-// guess whether the project simply has 50 matching work items.
 //
 // 🔴 The disclosure is attached HERE, wrapped around the routing, and not at the
 // two `return` statements inside listWorkItemsPage. Those are the vector path and
@@ -1159,9 +1228,7 @@ func buildListWorkItemsQuery(project string, f ListWorkItemsFilter) (query strin
 // outside domain.Recall rather than at its four exits.
 func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f ListWorkItemsFilter) (*ListWorkItemsResult, *AihubError) {
 	requestedLimit := f.Limit
-	if f.Limit <= 0 || f.Limit > 200 {
-		f.Limit = 50
-	}
+	f.Limit = NormalizeListWorkItemsLimit(f.Limit)
 	res, err := listWorkItemsPage(ctx, pool, project, f)
 	if err != nil || res == nil {
 		return res, err
@@ -2032,6 +2099,18 @@ func buildReadyQueueItemsQuery() string {
 
 // GetReadyQueue returns the six-segment LCRS view for a project.
 func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max int) (*ReadyQueue, *AihubError) {
+	// ⚠️ This clamp obeys half of queryparam.go's Rule 2 and not the other half:
+	// it clamps to the CEILING rather than back to the default (which is right,
+	// and is what aihub#267 made ListWorkItems do too), but it does NOT disclose.
+	// `max=5000` and `max=200` return byte-identical responses.
+	//
+	// Left open deliberately rather than overlooked. Disclosing means a
+	// `request_adjusted` field on ReadyQueue, which has none, and the six-segment
+	// response is consumed by pf_get_ready_queue and /ui. That is a wider change
+	// than aihub#255/#267/#340 asked for, and a half-done version — clamping
+	// louder without a field to say so — would be no better than this. Stated
+	// here so the next reader finds a known gap rather than an inconsistency
+	// they have to re-derive.
 	if max <= 0 {
 		max = 10
 	}

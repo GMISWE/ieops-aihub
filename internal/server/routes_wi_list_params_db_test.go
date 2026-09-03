@@ -12,7 +12,8 @@ package server
 //  1. n=50 was the *limit*, so "the filter applied and >50 rows still match" and
 //     "the parameter was discarded" produce the identical number.
 //  2. The obvious repair — raise the limit — reproduces the illusion, because
-//     limit>200 is silently clamped back to 50 (aihub#267, work_items.go).
+//     limit>200 is clamped to the 200 ceiling and disclosed in request_adjusted
+//     (aihub#267/#314, work_items.go). It used to be reset to 50, silently.
 //
 // So this suite is built the only way that discriminates:
 //

@@ -103,26 +103,38 @@ func TestHandleRecall_TotalAndLimitAlias(t *testing.T) {
 	require.Equal(t, 7, resp3.Total)
 	require.Nil(t, resp3.NextCursor)
 
-	// review_fix (code_review minor finding a): a MALFORMED `top_k` must fall
-	// through to a valid `limit` rather than discarding it. Silently dropping a
-	// caller-supplied page size is the precise failure mode this wi removes, so
-	// the alias must not reintroduce it on the bad-input path.
+	// ── REPLACED by aihub#340, not deleted ──────────────────────────────────
+	//
+	// These two cases used to assert that a MALFORMED `top_k` falls through to
+	// `limit`, and that both malformed falls all the way to the default page.
+	// The reason given was that silently dropping a caller-supplied page size is
+	// the failure mode aihub#249 removed — which is right, and is exactly why the
+	// answer is now a 400. Rejecting drops nothing: it hands the caller the one
+	// fact a fallback hides, that their client emitted garbage. `top_k=abc`
+	// reaching the default 20 was byte-identical to sending no top_k at all.
+	//
+	// The alias itself is unchanged and still covered above: top_k wins when both
+	// are present, and `limit` alone still sets the page size.
 	c4, rec4 := newRecallRequest(t, "project="+project+"&top_k=abc&limit=3", uc)
 	require.NoError(t, handleRecall(pool)(c4))
-	require.Equal(t, http.StatusOK, rec4.Code, rec4.Body.String())
-	var resp4 domain.RecallResponse
-	require.NoError(t, json.Unmarshal(rec4.Body.Bytes(), &resp4))
-	require.Len(t, resp4.Items, 3, "a malformed top_k must fall through to limit=3, not silently drop it and use the default 20")
-	require.Equal(t, 7, resp4.Total)
+	require.Equal(t, http.StatusBadRequest, rec4.Code,
+		"a malformed top_k is rejected rather than falling through to limit (aihub#340)")
+	require.Contains(t, rec4.Body.String(), "top_k", "the message must name the offending parameter")
+	require.Contains(t, rec4.Body.String(), "abc", "the message must quote the offending value")
 
-	// Both malformed: fall all the way back to Recall()'s default page size.
 	c5, rec5 := newRecallRequest(t, "project="+project+"&top_k=abc&limit=xyz", uc)
 	require.NoError(t, handleRecall(pool)(c5))
-	require.Equal(t, http.StatusOK, rec5.Code, rec5.Body.String())
-	var resp5 domain.RecallResponse
-	require.NoError(t, json.Unmarshal(rec5.Body.Bytes(), &resp5))
-	require.Len(t, resp5.Items, 7, "both params malformed -> default page size (20) still returns all 7 seeded rows")
-	require.Equal(t, 7, resp5.Total)
+	require.Equal(t, http.StatusBadRequest, rec5.Code,
+		"both page-size spellings malformed is still one 400, not a silent default (aihub#340)")
+
+	// The other half of the guard, without which the two above are satisfied by a
+	// handler that rejects every page size: a well-formed one still works.
+	c6, rec6 := newRecallRequest(t, "project="+project+"&top_k=3", uc)
+	require.NoError(t, handleRecall(pool)(c6))
+	require.Equal(t, http.StatusOK, rec6.Code, rec6.Body.String())
+	var resp6 domain.RecallResponse
+	require.NoError(t, json.Unmarshal(rec6.Body.Bytes(), &resp6))
+	require.Len(t, resp6.Items, 3)
 }
 
 // TestHandleRecall_BiggerPageIsNotASmallerPage is aihub#309 at the hop that was
@@ -202,9 +214,15 @@ func TestHandleRecall_BiggerPageIsNotASmallerPage(t *testing.T) {
 	viaLimit, _ := pageSize(t, "limit=30")
 	require.Equal(t, 30, viaLimit, "limit=30 is the aihub#249 alias for top_k=30 and must page the same")
 
-	// REVERSE DIRECTION — aihub#249's contract, which this fix must not break: bad
-	// input falls back to the DEFAULT, never to a smaller page.
-	for _, params := range []string{"top_k=0", "top_k=-5", "top_k=abc&limit=xyz"} {
+	// REVERSE DIRECTION — aihub#249's contract, which this fix must not break: an
+	// UNNAMED page size falls back to the DEFAULT, never to a smaller page.
+	//
+	// `top_k=abc&limit=xyz` was in this list until aihub#340 and has moved to
+	// TestHandleRecall_TotalAndLimitAlias, where it is now asserted to be a 400.
+	// The two cases left here are not malformed: a non-positive page size is a
+	// number the server understands and reads as "no page size named", which is
+	// the distinction queryparam.go's Rule 1 / Rule 2 turns on.
+	for _, params := range []string{"top_k=0", "top_k=-5"} {
 		got, more := pageSize(t, params)
 		require.Equal(t, 20, got,
 			"%s must fall back to the default page of 20, not to a smaller page", params)

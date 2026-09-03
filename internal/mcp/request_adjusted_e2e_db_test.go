@@ -177,13 +177,18 @@ func TestE2ERequestAdjustedDisclosesListLimitClamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("REST list work_items: %v", err)
 	}
-	wantAdjustment(t, rest, "limit", 500, 50, "REST GET /v1/work_items?limit=500")
+	// 200, not 50: aihub#267 changed the clamp from "reset to the default" to
+	// "clamp to the ceiling", matching normalizeRecallTopK on the recall side. The
+	// disclosure mechanism this test guards is unchanged; only the value it
+	// reports moved, and reporting the OLD value would now be reporting a clamp
+	// that no longer happens.
+	wantAdjustment(t, rest, "limit", 500, 200, "REST GET /v1/work_items?limit=500")
 
 	// ── hop 2: what the model sees, same server ─────────────────────────────
 	_, mcpResult := s.call(t, "pf_list_work_items", map[string]any{
 		"project": s.project, "limit": 500,
 	})
-	wantAdjustment(t, mcpResult, "limit", 500, 50, "pf_list_work_items(limit=500)")
+	wantAdjustment(t, mcpResult, "limit", 500, 200, "pf_list_work_items(limit=500)")
 	// `content` is null on every row this endpoint serves and the projection
 	// deletes it (aihub#278), so its absence is the proof the projection ran.
 	assertProjectionRan(t, rest, mcpResult, "content", "pf_list_work_items(limit=500)")

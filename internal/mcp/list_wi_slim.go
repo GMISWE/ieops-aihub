@@ -134,10 +134,11 @@ package mcp
 //
 // ─── aihub#314's `request_adjusted`, and why there is no entry for it here ───
 //
-// GET /v1/work_items resets a `limit` above 200 to 50 and has never said so
-// (aihub#267): "I sent nothing", "I sent 50" and "I sent 500" all come back as
-// 50 items. domain.ListWorkItems now appends a `request_adjusted` entry when that
-// fires, and it reaches the model through THIS function.
+// GET /v1/work_items bounds a caller-supplied `limit` and used to do it silently
+// (aihub#267): "I sent nothing", "I sent 50" and "I sent 500" all came back as 50
+// items. domain.ListWorkItems now clamps to the 200 ceiling instead of resetting
+// to the default, and appends a `request_adjusted` entry when that fires, which
+// reaches the model through THIS function.
 //
 // It needed a line in recall_slim.go's whitelist and needs none here, and that
 // asymmetry is the entire thesis of aihub#314 rather than an inconsistency: a

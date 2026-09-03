@@ -61,7 +61,7 @@ func parseBoolArg(args map[string]any, key string) (value, present, ok bool) {
 	case bool:
 		return typed, true, true
 	case string:
-		// Same spellings strconv.ParseBool accepts, matching parseListWIBool on
+		// Same spellings strconv.ParseBool accepts, matching queryBool on
 		// the server side so the two ends of the hop agree on what a bool is.
 		b, err := strconv.ParseBool(strings.TrimSpace(typed))
 		if err != nil {

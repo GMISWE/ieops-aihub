@@ -133,8 +133,9 @@ func TestRequestAdjustedReachesPfRecallBrief(t *testing.T) {
 }
 
 // TestListWorkItemsResponseCarriesRequestAdjusted is the aihub#267 case at the
-// transport level: the work-item list endpoint resets a limit over 200 to 50, and
-// the model must be able to see that it did.
+// transport level: the work-item list endpoint bounds a limit over 200 (to 200,
+// the ceiling — it used to reset to the default of 50), and the model must be
+// able to see that it did.
 //
 // Named in the note in list_wi_slim.go, which argues that this field needs no
 // whitelist entry there because that projection returns the SAME top-level map.
@@ -145,7 +146,7 @@ func TestListWorkItemsResponseCarriesRequestAdjusted(t *testing.T) {
 	f.on("/v1/work_items", func(map[string]any) (int, any) {
 		body := oneFullWorkItem()
 		body["request_adjusted"] = []any{
-			map[string]any{"param": "limit", "requested": float64(500), "applied": float64(50)},
+			map[string]any{"param": "limit", "requested": float64(500), "applied": float64(200)},
 		}
 		return http.StatusOK, body
 	})
@@ -156,7 +157,10 @@ func TestListWorkItemsResponseCarriesRequestAdjusted(t *testing.T) {
 	if isErr {
 		t.Fatalf("pf_list_work_items failed: %v", result)
 	}
-	oneAdjustment(t, result, "limit", 500, 50)
+	// 200, not 50: the fixture must be a response the real server can actually
+	// produce, or this test pins the transport against a shape that no longer
+	// exists anywhere upstream of it.
+	oneAdjustment(t, result, "limit", 500, 200)
 
 	// Anti-vacuity, same reason as above: the item projection must be running, or
 	// this is a test about an unprojected map.

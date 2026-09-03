@@ -70,15 +70,18 @@ var fetchDoneCountFn = fetchDoneCount
 // The empty string maps to "active" = queued + running + paused + blocked.
 // "failed" is included (aihub#185) so the Done segment can surface failed wi's,
 // which were previously absent from the enum and therefore invisible in any view.
-var validWIStatuses = map[string]bool{
-	"queued":    true,
-	"running":   true,
-	"paused":    true,
-	"blocked":   true,
-	"cancelled": true,
-	"wrapped":   true,
-	"failed":    true,
-}
+// Derived from domain.WorkItemStatusValues() rather than hand-written, so this
+// stops being a third copy of a vocabulary the database owns (aihub#255): the
+// migration's CHECK constraint is the authority, the domain list is checked
+// against it by TestWorkItemStatusValuesMatchTheSchemaCheck, and /ui and /v1 now
+// accept exactly the same set. They did not before — /v1 accepted anything.
+var validWIStatuses = func() map[string]bool {
+	m := make(map[string]bool, len(domain.WorkItemStatusValues()))
+	for _, s := range domain.WorkItemStatusValues() {
+		m[s] = true
+	}
+	return m
+}()
 
 // doneStatuses are the terminal statuses folded into the "Done" sidebar segment
 // (aihub#185). failed is included here so previously-invisible failed wi's get a
@@ -626,16 +629,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 			data.Mine = true
 		}
 
-		limit := 50
-		if raw := strings.TrimSpace(c.QueryParam("limit")); raw != "" {
-			if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-				if n > 200 {
-					n = 200
-				}
-				limit = n
-			}
-		}
-		data.Limit = limit
+		data.Limit = queryIntLenientUI(c, "limit", 50, 200)
 
 		// No project selected (and not view-all) = no listing yet — the
 		// dropdown still renders so the user can pick one.
@@ -648,7 +642,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 			return renderTemplate(c, tmpl, renderName, data)
 		}
 
-		filter := domain.ListWorkItemsFilter{Limit: limit}
+		filter := domain.ListWorkItemsFilter{Limit: data.Limit}
 		// Multi-status: pass the union to the domain layer, which already does
 		// `wi.status = ANY($n)` — no domain API change. Empty selection falls
 		// back to the active-status set.

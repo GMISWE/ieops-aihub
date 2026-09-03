@@ -129,8 +129,8 @@ func TestSlimRecallResult_StillDropsUnwhitelistedTopLevelKeys(t *testing.T) {
 }
 
 // TestSlimListWorkItems_KeepsRequestAdjusted is the aihub#267 half: the work-item
-// list endpoint resets a `limit` over 200 to 50, and this is the projection that
-// stands between that disclosure and the model.
+// list endpoint clamps a `limit` over 200 down to 200, and this is the projection
+// that stands between that disclosure and the model.
 //
 // It needs no whitelist entry — slimListWorkItemsResult returns the SAME map, so
 // top-level keys survive by construction — and that is exactly why it is asserted
@@ -139,7 +139,7 @@ func TestSlimRecallResult_StillDropsUnwhitelistedTopLevelKeys(t *testing.T) {
 // pf_recall. This test is what turns that edit red.
 func TestSlimListWorkItems_KeepsRequestAdjusted(t *testing.T) {
 	adjustment := []any{
-		map[string]any{"param": "limit", "requested": float64(500), "applied": float64(50)},
+		map[string]any{"param": "limit", "requested": float64(500), "applied": float64(200)},
 	}
 	result := map[string]any{
 		"items":            []any{fullListItem()},
@@ -152,7 +152,7 @@ func TestSlimListWorkItems_KeepsRequestAdjusted(t *testing.T) {
 	got, present := out["request_adjusted"]
 	if !present {
 		t.Fatalf("request_adjusted was dropped — a caller who asked for 500 work items and got "+
-			"50 cannot tell that from a project with 50 work items (aihub#267): %+v", out)
+			"200 cannot tell that from a project with 200 work items (aihub#267): %+v", out)
 	}
 	if !reflect.DeepEqual(got, adjustment) {
 		t.Errorf("request_adjusted = %#v, want %#v", got, adjustment)

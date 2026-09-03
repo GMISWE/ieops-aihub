@@ -618,6 +618,40 @@ func checkRepos(wsRoot string, cfg *config.Config) checkResult {
 		}
 	}
 
+	// Scenario clones live under .repo/ as well, keyed by owner+repo (aihub#327).
+	// They are NOT in proj.Repos, so until this loop existed nothing checked them
+	// at all — which is precisely how a project whose declared scenario URL
+	// resolved to another org's clone stayed invisible: init only fetch+reset an
+	// existing checkout without ever comparing its remote, and wi_type validation
+	// asks whether the template file exists, never which repo it came from.
+	seenScenario := map[string]bool{}
+	for projName, proj := range cfg.Projects {
+		if proj.Scenario == "" || seenScenario[proj.Scenario] {
+			continue
+		}
+		seenScenario[proj.Scenario] = true
+		dir := scenarioDirName(proj.Scenario)
+		if dir == "" {
+			mismatch = append(mismatch, fmt.Sprintf("scenario of %s(%s is not a git URL)",
+				projName, redactGitURL(proj.Scenario)))
+			continue
+		}
+		scenarioPath := filepath.Join(repoBase, dir)
+		if _, err := os.Stat(scenarioPath); os.IsNotExist(err) {
+			missing = append(missing, "scenario "+dir)
+			continue
+		}
+		out, err := exec.Command("git", "-C", scenarioPath, "remote", "get-url", "origin").Output()
+		if err != nil {
+			mismatch = append(mismatch, "scenario "+dir+"(remote-err)")
+			continue
+		}
+		if actual := strings.TrimSpace(string(out)); !sameGitRemote(actual, proj.Scenario) {
+			mismatch = append(mismatch, fmt.Sprintf("scenario %s(want %s got %s)",
+				dir, redactGitURL(proj.Scenario), redactGitURL(actual)))
+		}
+	}
+
 	if len(missing) == 0 && len(mismatch) == 0 {
 		return checkResult{Name: "repos", Status: "ok", Message: "all repos present and remotes match"}
 	}

@@ -79,7 +79,9 @@ Combining both, extract an ordered step list:
 
 ### Step 4: Common skill extraction
 
-For each step, scan the `.repo/polyforge-coding/common/` directory and use LLM judgment to assess the match:
+For each step, scan the `<scenario_path>/common/` directory and use LLM judgment to assess the match
+(`scenario_path` is the project's own scenario clone, resolved as in pf-execute §0 — do NOT hardcode
+an org, two orgs can have same-named scenario repos):
 
 **a. Matches an existing common/ skill (>80% overlap)**
 → Replace with `@include: common/<name>/SKILL.md`

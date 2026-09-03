@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GMISWE/ieops-aihub/internal/config"
 )
 
 // aihub#327 — scenario clones are keyed on the repo NAME alone, so two scenario
@@ -306,6 +308,162 @@ func TestCloneOrSyncKeepsLocalModifications(t *testing.T) {
 	if string(b) != "LOCAL EDIT" {
 		t.Errorf(".repo/demo/feature.md = %q after sync, want %q — `polyforge init` discarded a "+
 			"tracked local modification with no message", string(b), "LOCAL EDIT")
+	}
+}
+
+// TestScenarioCloneReportsAFailedClone keeps the outcome list honest. Every other
+// case in this file asserts on Status, so a cloneScenarioRepos that returned
+// scenarioCloneOK unconditionally would still satisfy most of them — and callers
+// (RunInit, and anything that grows out of it) would print nothing when a
+// scenario never landed.
+func TestScenarioCloneReportsAFailedClone(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "ws", ".repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir .repo: %v", err)
+	}
+	missing := "file://" + filepath.Join(root, "origins", "nobody", "not-a-repo.git")
+
+	got := cloneScenarioRepos(repoDir, []serverProject{scenarioProject("p", missing)}, fixtureUID)
+	if len(got) != 1 {
+		t.Fatalf("outcomes = %+v, want exactly one", got)
+	}
+	if got[0].Status != scenarioCloneFailed {
+		t.Errorf("status = %q (%s), want %q for a URL that cannot be cloned",
+			got[0].Status, got[0].Detail, scenarioCloneFailed)
+	}
+}
+
+// TestScenarioCloneSkipsAValueThatIsNotAURL covers the other non-OK exit: a
+// project whose scenario is a bare logical name has no directory to derive, and
+// must be reported rather than turned into a directory named after itself.
+func TestScenarioCloneSkipsAValueThatIsNotAURL(t *testing.T) {
+	repoDir := filepath.Join(t.TempDir(), ".repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir .repo: %v", err)
+	}
+	got := cloneScenarioRepos(repoDir, []serverProject{scenarioProject("p", "coding")}, fixtureUID)
+	if len(got) != 1 || got[0].Status != scenarioCloneUnparseable {
+		t.Fatalf("outcomes = %+v, want one %q", got, scenarioCloneUnparseable)
+	}
+	if names := mustReadDirNames(t, repoDir); len(names) != 0 {
+		t.Errorf(".repo/ = %v, want empty — a non-URL scenario must not create a directory", names)
+	}
+}
+
+// TestScenarioDirNameAndRemoteMatchAgree pins the derivation itself, including
+// the shapes the end-to-end cases above cannot reach with a file:// fixture.
+//
+// The two functions are asserted TOGETHER on purpose. The directory a URL clones
+// into and the comparison that decides whether an existing directory belongs to
+// that URL have to accept the same set of inputs: if they disagreed, a URL would
+// get a directory on the first init and be called a mismatch on the second, and
+// `polyforge init` would stop being idempotent for that URL alone.
+func TestScenarioDirNameAndRemoteMatchAgree(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  string
+		dir  string
+	}{
+		{"scp-style github", "git@github.com:GMISWE/polyforge-coding.git", "GMISWE__polyforge-coding"},
+		{"https github", "https://github.com/GMISWE/polyforge-coding.git", "GMISWE__polyforge-coding"},
+		{"https no .git", "https://github.com/yingfang-ai/polyforge-coding", "yingfang-ai__polyforge-coding"},
+		{"ssh scheme", "ssh://git@github.com/GMISWE/polyforge-coding.git", "GMISWE__polyforge-coding"},
+		{"token in url", "https://ghp_tok@github.com/GMISWE/polyforge-coding.git", "GMISWE__polyforge-coding"},
+		{"host with port", "https://git.example.com:8443/org/repo.git", "org__repo"},
+		{"gitlab subgroup keeps the last group", "https://gitlab.com/grp/sub/repo.git", "sub__repo"},
+		{"trailing slash", "https://github.com/GMISWE/polyforge-coding/", "GMISWE__polyforge-coding"},
+		{"single path segment keeps the bare name", "ssh://git@host/repo.git", "repo"},
+		{"file url", "file:///srv/mirrors/acme/repo.git", "acme__repo"},
+		{"not a url", "coding", ""},
+		{"empty", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := scenarioDirName(tc.url); got != tc.dir {
+				t.Errorf("scenarioDirName(%q) = %q, want %q", tc.url, got, tc.dir)
+			}
+			// Every URL that gets a directory must also match itself, or the
+			// second init would refuse the clone the first one made.
+			if tc.dir != "" && !sameGitRemote(tc.url, tc.url) {
+				t.Errorf("sameGitRemote(%q, %q) = false — init would refuse its own clone", tc.url, tc.url)
+			}
+		})
+	}
+}
+
+// TestSameGitRemoteDiscriminates is the negative half: the check that guards the
+// refusal must not be a function that says "yes" to everything. Equivalent
+// spellings of one repo match (they have to — runClone rewrites SSH to
+// token-bearing HTTPS on fallback, so a clone's origin legitimately differs from
+// the declared URL) and different repos do not.
+func TestSameGitRemoteDiscriminates(t *testing.T) {
+	same := [][2]string{
+		{"git@github.com:GMISWE/polyforge-coding.git", "https://github.com/GMISWE/polyforge-coding.git"},
+		{"git@github.com:GMISWE/polyforge-coding.git", "https://ghp_token@github.com/GMISWE/polyforge-coding.git"},
+		{"https://github.com/GMISWE/polyforge-coding", "https://GitHub.com/GMISWE/polyforge-coding.git/"},
+		{"ssh://git@github.com/GMISWE/x.git", "git@github.com:GMISWE/x"},
+	}
+	for _, p := range same {
+		if !sameGitRemote(p[0], p[1]) {
+			t.Errorf("sameGitRemote(%q, %q) = false, want true — a token-cloned or "+
+				"scheme-rewritten origin would be reported as someone else's repo", p[0], p[1])
+		}
+	}
+	differ := [][2]string{
+		{"git@github.com:GMISWE/polyforge-coding.git", "git@github.com:yingfang-ai/polyforge-coding.git"},
+		{"git@github.com:GMISWE/polyforge-coding.git", "git@gitlab.com:GMISWE/polyforge-coding.git"},
+		{"git@github.com:GMISWE/a.git", "git@github.com:GMISWE/b.git"},
+		{"coding", "coding"}, // not a URL at all: must not match, not even itself
+	}
+	for _, p := range differ {
+		if sameGitRemote(p[0], p[1]) {
+			t.Errorf("sameGitRemote(%q, %q) = true, want false — the mismatch guard would "+
+				"fetch+reset one project's scenario clone for another's URL", p[0], p[1])
+		}
+	}
+}
+
+// TestDoctorChecksScenarioClones covers the third surface. `polyforge doctor`
+// walked proj.Repos only, so the scenario clone — the one directory whose
+// contents decide which step graph every wi in the project runs — was the one
+// thing under .repo/ nothing verified. Two states, because a check that only
+// fired on the broken layout could be a check that always fires.
+func TestDoctorChecksScenarioClones(t *testing.T) {
+	root := t.TempDir()
+	origins := filepath.Join(root, "origins")
+	url := newScenarioOrigin(t, origins, "GMISWE", scenarioRepoBasename, "STEP GRAPH")
+
+	ws := filepath.Join(root, "ws")
+	repoDir := filepath.Join(ws, ".repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir .repo: %v", err)
+	}
+	cfg := &config.Config{Projects: map[string]config.Project{
+		"solo": {Scenario: url},
+	}}
+
+	// State 1 — the pre-upgrade layout: the clone exists, but under the bare
+	// repo name. doctor must say so, because that is the workspace where a
+	// second org's scenario would silently resolve to this one.
+	if out, err := exec.Command("git", "clone", "-q", url,
+		filepath.Join(repoDir, scenarioRepoBasename)).CombinedOutput(); err != nil {
+		t.Fatalf("plant legacy clone: %v\n%s", err, out)
+	}
+	got := checkRepos(ws, cfg)
+	if got.Status != "warning" || !strings.Contains(got.Message, scenarioDirName(url)) {
+		t.Errorf("legacy layout: checkRepos = %+v, want a warning naming %q — a clone under "+
+			"the bare repo name is exactly the state this layout change leaves behind",
+			got, scenarioDirName(url))
+	}
+
+	// State 2 — after `polyforge init` on the new binary. Same workspace, same
+	// leftover directory, plus the owner-qualified clone: healthy.
+	if got := cloneScenarioRepos(repoDir, []serverProject{scenarioProject("solo", url)}, fixtureUID); got[0].Status != scenarioCloneOK {
+		t.Fatalf("clone to the owner-qualified path: %+v", got)
+	}
+	if got := checkRepos(ws, cfg); got.Status != "ok" {
+		t.Errorf("after init: checkRepos = %+v, want ok — the leftover .repo/%s must not keep "+
+			"the workspace permanently in warning", got, scenarioRepoBasename)
 	}
 }
 

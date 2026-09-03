@@ -176,6 +176,22 @@ func cloneOrSync(repoDir, repoName, url string) {
 				defaultBranch = "origin/" + parts[3]
 			}
 		}
+		// Never `reset --hard` over uncommitted work. The comment on the
+		// pf-repo-sync hook calls base clones safe to reset because "work happens
+		// in worktrees" — but that is an assertion about how people use .repo/,
+		// not something anything enforces, and when it is wrong the cost is
+		// silent, unrecoverable data loss. Fetching still happened above, so the
+		// refs are current either way; the clone is merely left where it was.
+		//
+		// -uno on purpose: `git reset --hard` does not delete untracked files, so
+		// counting them would strand clones as permanently stale over build
+		// output that was never at risk.
+		if dirty, derr := exec.Command("git", "-C", destPath, "status", "--porcelain", "-uno").Output(); derr == nil && len(strings.TrimSpace(string(dirty))) > 0 {
+			fmt.Fprintf(os.Stderr, "pf init: .repo/%s has uncommitted changes to tracked files — "+
+				"fetched, but NOT reset to %s. Commit, stash or discard them and re-run to sync.\n",
+				repoName, defaultBranch)
+			return
+		}
 		reset := exec.Command("git", "-C", destPath, "reset", "--hard", defaultBranch)
 		reset.Stdout = os.Stdout
 		reset.Stderr = os.Stderr
@@ -734,21 +750,64 @@ func cloneScenarioRepos(repoDir string, projects []serverProject, currentUserID 
 			continue
 		}
 		seen[url] = true
-		name := scenarioRepoName(url)
-		if name == "" || name == url {
+		name := scenarioDirName(url)
+		if name == "" {
 			out = append(out, scenarioCloneOutcome{
 				Project: sp.Name, URL: url, Status: scenarioCloneUnparseable,
 				Detail: fmt.Sprintf("skipping scenario %q for project %s — expected a git URL "+
-					"(e.g. git@github.com:GMISWE/polyforge-coding.git)", url, sp.Name),
+					"(e.g. git@github.com:GMISWE/polyforge-coding.git)", redactGitURL(url), sp.Name),
 			})
 			continue
 		}
-		cloneOrSync(repoDir, name, url)
-		out = append(out, scenarioCloneOutcome{
-			Project: sp.Name, URL: url, Dir: name, Status: scenarioCloneOK,
-		})
+		o := syncScenarioClone(repoDir, name, url)
+		o.Project, o.URL = sp.Name, url
+		out = append(out, o)
 	}
 	return out
+}
+
+// syncScenarioClone clones or syncs one scenario repo into .repo/<dirName>,
+// REFUSING to touch a directory that is already a clone of something else.
+//
+// cloneOrSync alone is not safe here. It identifies a clone by its path and
+// nothing else, so when two declared scenario URLs map to one directory it
+// quietly fetch+resets whichever clone got there first and reports "ok synced".
+// Owner-qualifying the path removes the collision this was filed for, but it
+// cannot remove every one — two forges can host the same owner/repo, and a
+// directory can predate the layout or be made by hand. Whatever is left has to
+// stop loudly rather than serve another owner's step graph (aihub#327).
+func syncScenarioClone(repoDir, dirName, url string) scenarioCloneOutcome {
+	dest := filepath.Join(repoDir, dirName)
+	if _, err := os.Stat(dest); err == nil {
+		out, rerr := exec.Command("git", "-C", dest, "remote", "get-url", "origin").Output()
+		if rerr != nil {
+			return scenarioCloneOutcome{
+				Dir: dirName, Status: scenarioCloneMismatch,
+				Detail: fmt.Sprintf(".repo/%s exists but has no origin remote (%v) — "+
+					"not syncing it as the scenario clone for %s. Move it aside and re-run "+
+					"`polyforge init`.", dirName, rerr, redactGitURL(url)),
+			}
+		}
+		actual := strings.TrimSpace(string(out))
+		if !sameGitRemote(actual, url) {
+			return scenarioCloneOutcome{
+				Dir: dirName, Status: scenarioCloneMismatch,
+				Detail: fmt.Sprintf(".repo/%s is a clone of %s, but the scenario is declared as "+
+					"%s. Refusing to fetch/reset it — that would silently serve one project's "+
+					"step graph to another. Move .repo/%s aside and re-run `polyforge init`.",
+					dirName, redactGitURL(actual), redactGitURL(url), dirName),
+			}
+		}
+	}
+	cloneOrSync(repoDir, dirName, url)
+	if _, err := os.Stat(filepath.Join(dest, ".git")); err != nil {
+		return scenarioCloneOutcome{
+			Dir: dirName, Status: scenarioCloneFailed,
+			Detail: fmt.Sprintf("scenario %s did not land in .repo/%s — see the git output above",
+				redactGitURL(url), dirName),
+		}
+	}
+	return scenarioCloneOutcome{Dir: dirName, Status: scenarioCloneOK}
 }
 
 // scenarioDirSep joins the owner and the repo name in a scenario clone's
@@ -757,15 +816,167 @@ func cloneScenarioRepos(repoDir string, projects []serverProject, currentUserID 
 // from prose, and internal/cli/scenario_clone_test.go pins the two together.
 const scenarioDirSep = "__"
 
-// scenarioRepoName extracts a filesystem-safe repo name from a scenario URL.
-// "git@github.com:GMISWE/polyforge-coding.git" → "polyforge-coding"
-// "https://github.com/GMISWE/polyforge-coding.git" → "polyforge-coding"
-func scenarioRepoName(url string) string {
-	url = strings.TrimSuffix(url, ".git")
-	if i := strings.LastIndexAny(url, "/:"); i >= 0 {
-		return url[i+1:]
+// scenarioDirName is the directory under .repo/ that a scenario URL clones into.
+//
+//	"git@github.com:GMISWE/polyforge-coding.git"      → "GMISWE__polyforge-coding"
+//	"https://github.com/yingfang-ai/polyforge-coding" → "yingfang-ai__polyforge-coding"
+//
+// It returns "" when the value is not a git URL at all (a bare logical name such
+// as "coding"), which is the caller's signal to skip rather than invent a name.
+//
+// Owner-qualified because the previous rule — last path segment, strip .git —
+// gave two orgs' same-named scenario repos ONE directory. The second was never
+// cloned and its projects silently ran the first org's step graph, with no
+// error anywhere: `polyforge init` only fetch+resets an existing checkout and
+// never compares its remote, and wi_type validation only asks whether the
+// template file exists, never which repo it came from (aihub#327).
+//
+// The owner is the second-to-last path segment, not the whole path: it keeps
+// the name short and it is the same "owner/repo" pair GitHub, GitLab and Gitea
+// URLs all end with. Deeper namespaces (GitLab subgroups) collapse to their
+// last group, and two forges can still host the same owner/repo — both residues
+// are caught by syncScenarioClone's remote check, loudly, instead of silently.
+//
+// A URL with only ONE path segment (ssh://git@host/repo.git, as self-hosted
+// gitolite serves) keeps the bare name it has always had. validateScenario in
+// internal/domain accepts those, so requiring an owner here would newly refuse
+// a workspace that works today — a worse trade than leaving a shape that has no
+// owner to collide on in the first place.
+func scenarioDirName(url string) string {
+	owner, repo := splitOwnerRepo(url)
+	if repo == "" {
+		return ""
 	}
-	return url
+	if owner == "" {
+		return sanitizePathSegment(repo)
+	}
+	return sanitizePathSegment(owner) + scenarioDirSep + sanitizePathSegment(repo)
+}
+
+// splitOwnerRepo pulls the last two path segments out of a git URL.
+//
+// It goes through normalizeGitRemote on purpose: the name a URL clones INTO and
+// the comparison that decides whether an existing clone matches that URL have to
+// accept exactly the same set of inputs. If they disagreed, a URL could be given
+// a directory on the first init and be called a mismatch on the second.
+// Returns owner=="" (with repo set) for a single-segment path — see
+// scenarioDirName for why that shape is kept rather than rejected.
+func splitOwnerRepo(url string) (owner, repo string) {
+	_, path := normalizeGitRemote(url)
+	if path == "" {
+		return "", ""
+	}
+	segs := strings.Split(path, "/")
+	if len(segs) < 2 {
+		return "", segs[len(segs)-1]
+	}
+	return segs[len(segs)-2], segs[len(segs)-1]
+}
+
+// sanitizePathSegment keeps a derived directory name to one path component.
+func sanitizePathSegment(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '\\', 0:
+			return '_'
+		}
+		return r
+	}, s)
+}
+
+// sameGitRemote reports whether two git URLs name the same repository.
+//
+// It cannot be a string comparison: runClone falls back to cloning
+// `https://<token>@github.com/...` when SSH fails, so a clone made from
+// `git@github.com:GMISWE/x.git` legitimately stores an https origin with an
+// embedded credential. Comparing raw strings would call every token-cloned repo
+// a mismatch and refuse to sync it.
+//
+// Host is compared case-insensitively; the path is not folded, so a hand-edited
+// remote that differs in case reports a mismatch (a refusal to sync, which is
+// recoverable) rather than a false match (serving the wrong templates, which is
+// the defect).
+func sameGitRemote(a, b string) bool {
+	ha, pa := normalizeGitRemote(a)
+	hb, pb := normalizeGitRemote(b)
+	// An empty PATH means the URL was not understood; an empty HOST is normal
+	// (file:///abs/path has none) and must not be treated as "did not parse".
+	if pa == "" || pb == "" {
+		return false
+	}
+	return strings.EqualFold(ha, hb) && pa == pb
+}
+
+// normalizeGitRemote reduces a git URL to (host, path), dropping the scheme, any
+// credentials, the port, a trailing slash and a trailing .git.
+//
+// Credentials and the port are stripped from the AUTHORITY only, never from the
+// whole string: a path segment is allowed to contain "@" or ":".
+func normalizeGitRemote(url string) (host, path string) {
+	s := strings.TrimSpace(url)
+	s = strings.TrimSuffix(s, "/")
+	s = strings.TrimSuffix(s, ".git")
+
+	var authority, rest string
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+		if j := strings.Index(s, "/"); j >= 0 {
+			authority, rest = s[:j], s[j+1:]
+		} else {
+			authority, rest = s, ""
+		}
+	} else if i := strings.Index(s, ":"); i >= 0 {
+		// scp-style: [user@]host:path
+		authority, rest = s[:i], s[i+1:]
+	} else {
+		// Neither form — not a git URL this tool can key a directory on.
+		return "", ""
+	}
+
+	if at := strings.LastIndex(authority, "@"); at >= 0 {
+		authority = authority[at+1:]
+	}
+	if c := strings.LastIndex(authority, ":"); c >= 0 && isAllDigits(authority[c+1:]) {
+		authority = authority[:c]
+	}
+	return authority, strings.Trim(rest, "/")
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// redactGitURL strips any credential before printing a URL. runClone can put a
+// gh token into a clone's origin, so the URLs this file reports on are not all
+// safe to echo verbatim.
+//
+// Only the AUTHORITY is inspected: a path segment may legitimately contain "@"
+// (a ref-pinned URL), and cutting at the last one would print a mangled URL that
+// sends whoever reads the error to the wrong repo. scp-style URLs are returned
+// unchanged — their "@" is the ssh user, and no token path produces one.
+func redactGitURL(url string) string {
+	i := strings.Index(url, "://")
+	if i < 0 {
+		return url
+	}
+	rest := url[i+3:]
+	end := strings.Index(rest, "/")
+	if end < 0 {
+		end = len(rest)
+	}
+	at := strings.LastIndex(rest[:end], "@")
+	if at < 0 {
+		return url
+	}
+	return url[:i+3] + "***@" + rest[at+1:]
 }
 
 // skillOwnedUsageSections are the `## ` headings this template used to emit and that the

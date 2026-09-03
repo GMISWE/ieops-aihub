@@ -2844,7 +2844,9 @@ pf wrap [--wi-id=<id>]                 # → pf_wrap（coding scenario）
 ```
 1. workspace  从任意子目录能找到 .polyforge.yaml（向上搜索）
 2. config     ~/.polyforge/config.toml 存在，aihub url 可达（pf_whoami ping）
-3. repos      所有 .repo/<name>/ 存在且 remote 匹配 .polyforge.yaml
+3. repos      所有 .repo/<name>/ 存在且 remote 匹配 .polyforge.yaml；
+              scenario 仓落在 .repo/<owner>__<repo>/（带 owner，否则不同 owner
+              的同名 scenario 仓会共用一个目录，aihub#327）
 4. worktrees  pf.<xxx>/ 列表 vs server wi 列表，标红 orphan
 5. version    GET /v1/version，比对 min_client_version 与本地 binary
 6. claude_md  CLAUDE.md 托管块的格式 + .polyforge/repo-map/ 的完整性（aihub#291）

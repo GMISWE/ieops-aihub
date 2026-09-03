@@ -47,7 +47,7 @@ The CLI runs 7 checks (§12.1) and prints `[ok]`, `[warn]`, or `[FAIL]` per chec
 |---|-------|---------------|----------|
 | 1 | workspace | `.polyforge.yaml` found via upward search from wsRoot | `polyforge init` |
 | 2 | config | `~/.polyforge/config.toml` valid; aihub URL reachable (GET /health) | manual |
-| 3 | repos | `.repo/<name>/` exists for each project repo; remote URL matches `.polyforge.yaml` | `polyforge init` (**not** `--apply` — that is a no-op) |
+| 3 | repos | `.repo/<name>/` exists for each project repo, and `.repo/<owner>__<repo>/` for each project's `scenario:` URL; remote URL matches `.polyforge.yaml` in both cases | `polyforge init` (**not** `--apply` — that is a no-op) |
 | 4 | worktrees | `pf.*` dirs cross-checked vs the server's **full** wi list (paginated); flags orphans | `polyforge doctor --fix` |
 | 5 | version | Server `min_client_version` vs local binary; prompts upgrade if behind | `pf-init` skill |
 | 6 | claude_md | CLAUDE.md `## Workspace` block format (slim vs legacy inline) + `.polyforge/repo-map/<project>.md` present for every project | `polyforge init` |
@@ -90,6 +90,12 @@ Missing or mismatched `.repo/` dirs.
   a fix and does nothing (aihub#307).
 - Remote mismatch: `git -C .repo/<name> remote set-url origin <correct-url>`.
   `init` cannot do this for you — it only fetches and resets an existing checkout.
+- `missing: scenario <owner>__<repo>` after upgrading the binary is expected once:
+  scenario clones used to be keyed on the repo name alone, so two orgs' same-named
+  scenario repos shared one directory and the second silently ran the first's step
+  graph (aihub#327). `polyforge init` clones to the owner-qualified path and leaves
+  the old `.repo/<repo>/` where it is — do NOT delete that directory reflexively, in
+  most workspaces it is also a project repo in its own right.
 
 ### Check 4 — worktrees warn
 Orphan `pf.*` directories found (no matching active wi on the server).

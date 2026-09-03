@@ -63,13 +63,26 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
    Read the project's scenario clone from `.repo/` (cloned by `polyforge init`):
    ```bash
    scenario_url  = project.scenario  // from .polyforge.yaml
-   scenario_name = <last path segment of URL, strip .git>
-                   // "git@github.com:GMISWE/polyforge-coding.git" → "polyforge-coding"
-   scenario_path = <workspace_root>/.repo/<scenario_name>/
+   owner, repo   = <the last two path segments of the URL, strip .git>
+                   // "git@github.com:GMISWE/polyforge-coding.git" → "GMISWE", "polyforge-coding"
+                   // a URL with only ONE path segment has no owner: use the bare repo name
+   scenario_path = <workspace_root>/.repo/<owner>__<repo>/
+                   // Owner-qualified. Keying on the repo name alone gave two orgs'
+                   // same-named scenario repos ONE directory, and the second silently
+                   // ran the first org's step graph (aihub#327).
 
-   // Scenario not cloned yet?
+   // Not cloned there? A workspace whose last `polyforge init` predates the
+   // owner-qualified layout still holds the clone under the bare repo name.
+   // Fall back to it ONLY after checking it is really the declared repo.
    if scenario_path does not exist:
-       STOP: "⚠️ Scenario repo not cloned yet; please run polyforge init first."
+       legacy = <workspace_root>/.repo/<repo>/
+       if legacy exists AND `git -C <legacy> remote get-url origin` names the same repo
+          as scenario_url (ignore scheme, credentials and .git):
+           scenario_path = legacy
+       else:
+           STOP: "⚠️ Scenario repo not cloned at <scenario_path>; please run polyforge init first."
+           // Never read a legacy directory whose origin is a different repo: an
+           // unguarded fallback re-opens the silent cross-owner mix-up.
 
    // Infer valid wi_type from .md file names
    // List all *.md files under scenario_path, extract the {wi_type} prefix (before the first .)

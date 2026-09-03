@@ -152,6 +152,28 @@ func (s *Server) registerEventTools() {
 		setIfNonempty(params, "work_item_id", wiID)
 		setIfNonempty(params, "project", project)
 		setIfNonempty(params, "user_id", strArg(args, "user_id"))
+		// aihub#259: `types` was published in the schema above and never put on
+		// the wire, so GET /v1/events was always called unfiltered. Neither end
+		// was broken — the handler splits `types` on commas and ListEvents turns
+		// it into `event_type IN (...)` — the parameter simply never left this
+		// process, which is why a type that cannot exist filtered nothing and
+		// returned the full stream.
+		//
+		// That shape is the reason this is worse than a missing feature. The
+		// parameter's main use is checking whether an irreversible operation
+		// happened ("was any of these cancelled?"), and a silently unfiltered
+		// answer is a false green in BOTH directions: a non-empty result reads as
+		// "those events exist" when they are some other type entirely, and not
+		// finding a work item in the result reads as "it was never cancelled"
+		// when no filtering ever occurred. ieops#680's executor came within one
+		// step of publishing a "zero cancels" report over 44 real cancellations.
+		//
+		// csvArg, not strSliceArg: the parameter arrives from the model as a JSON
+		// array and GET /v1/events parses it with strings.Split(...,","), so the
+		// array has to be rendered comma-separated. csvArg also accepts a bare
+		// string, which is the aihub#280 lesson — a caller sending the scalar form
+		// of an array-typed param must not be silently dropped either.
+		setIfNonempty(params, "types", csvArg(args, "types"))
 		setIfNonempty(params, "since", strArg(args, "since"))
 		setIfNonempty(params, "limit", strArg(args, "limit"))
 		if boolArg(args, "pinned_first") {

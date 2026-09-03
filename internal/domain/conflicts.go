@@ -417,6 +417,50 @@ func derivedLock(res DeclaredResourceItem, project string) (lockType, lockKey st
 	return lockType, lockKey
 }
 
+// derivedFileScopeLockKeys returns the set of file_scope lock keys a stored
+// declared_resources payload justifies, and whether it could be read at all.
+//
+// aihub#264. Deriving through derivedLock rather than re-implementing the
+// mapping is the point: this set is compared against the CURRENT lock rows to
+// decide which ones a narrowing has orphaned, so if it disagreed with the
+// derivation used at acquisition by even one entry, the difference would show up
+// as a lock silently released or silently kept. derivedLock's own doc comment
+// lists the four sites that must go through it; this is the fifth caller and the
+// only one asking the question in reverse ("which locks does this payload still
+// justify") rather than forward ("what should I take").
+//
+// Inheriting the intent rule is a behavioural consequence, not an accident: an
+// entry flipped from write to read maps to no lock here exactly as it maps to no
+// lock at claim, so the write lock it already holds is released. Anything else
+// would let intent=read enforce like intent=write for the lifetime of the
+// attempt, which is the contradiction aihub#342 exists to remove.
+//
+// ok=false means the payload is not a JSON array of resource objects. Callers
+// must then release NOTHING: an unreadable declaration says nothing about which
+// locks it produced, and guessing in either direction is worse than leaving the
+// pre-existing rows alone. Only the stored (prior) value can realistically hit
+// this — ValidateDeclaredResources has already rejected caller input by then —
+// and roughly 14% of historical rows fail that validator, which is why the
+// stored side must never be assumed parseable.
+func derivedFileScopeLockKeys(raw json.RawMessage, project string) (keys map[string]bool, ok bool) {
+	keys = map[string]bool{}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return keys, true
+	}
+	var items []DeclaredResourceItem
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, false
+	}
+	for _, item := range items {
+		lockType, lockKey := derivedLock(item, project)
+		if lockType == "file_scope" && lockKey != "" {
+			keys[lockKey] = true
+		}
+	}
+	return keys, true
+}
+
 // resourceToLock converts a DeclaredResourceItem to a (resource_type, resource_key) pair per §25 mapping.
 // project namespaces file_scope keys (aihub#222); it is ignored for git_branch/deploy_env.
 //

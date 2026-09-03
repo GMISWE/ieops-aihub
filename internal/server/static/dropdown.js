@@ -124,6 +124,34 @@
     var b = e.target.closest ? e.target.closest("[data-me-toggle]") : null;
     if (!b) return;
     b.classList.toggle("on");
+    // Mine and Watching are mutually exclusive view scopes (aihub#143): turning
+    // one on turns the other off. Done here as well as server-side because the
+    // request is built from these pills' LIVE classes — leaving both lit would
+    // send owner + watching together, which the handler resolves in Watching's
+    // favour, and the user would be looking at a "me" pill that is on and doing
+    // nothing.
+    if (b.classList.contains("on")) {
+      var w = document.querySelector("[data-watch-toggle]");
+      if (w) w.classList.remove("on");
+    }
+    fireFilter(0);
+  });
+
+  // ---- "watching" scope toggle (header, aihub#143) -------------------------
+
+  // Header pill ([data-watch-toggle]): on = only work items I watch, off = the
+  // Mine/All owner scopes. Same delegated-click + configRequest-injection shape
+  // as the "me" toggle above, for the same reason: the .grp header is inside
+  // #wi-list-body and is replaced on every swap, so a directly-bound listener
+  // would survive exactly one request.
+  document.body.addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("[data-watch-toggle]") : null;
+    if (!b) return;
+    b.classList.toggle("on");
+    if (b.classList.contains("on")) {
+      var me = document.querySelector("[data-me-toggle]");
+      if (me) me.classList.remove("on");
+    }
     fireFilter(0);
   });
 
@@ -156,6 +184,15 @@
     // page has exactly one owner-injection point on purpose.
     var me = document.querySelector("[data-me-toggle]");
     e.detail.parameters.owner = (me && me.classList.contains("on")) ? (me.getAttribute("data-me-owner") || "") : "";
+    // watching: the third view scope (aihub#143), injected at the SAME single
+    // point and for the same reason — the pill lives inside the swapped
+    // #wi-list-body, so its state has to be read at request time or a segment
+    // click silently drops the scope. Empty = off. Always assigned, never
+    // conditionally omitted: an absent parameter and "watching=" both mean off
+    // to the handler, but only the explicit form also overwrites a stale
+    // watching=1 sitting in the form's hidden field from the last render.
+    var wt = document.querySelector("[data-watch-toggle]");
+    e.detail.parameters.watching = (wt && wt.classList.contains("on")) ? "1" : "";
     // seg: for the form reload, read the live active sidebar item (the form's
     // hidden seg input lives outside the swap and would be stale).
     if (isForm) {

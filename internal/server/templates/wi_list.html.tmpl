@@ -43,6 +43,10 @@
   {{/* owner: no-JS fallback / initial. With JS the header "me" toggle's live state
        is injected at request time (dropdown.js htmx:configRequest). Empty = All. */}}
   <input type="hidden" name="owner" value="{{.Owner}}">
+  {{/* watching: no-JS fallback / initial, same arrangement as owner. With JS the
+       live state of the header [data-watch-toggle] pill is injected at request
+       time. Empty = off (the All / Mine scopes). aihub#143. */}}
+  <input type="hidden" name="watching" value="{{if .Watching}}1{{end}}">
   {{/* seg: no-JS fallback; with JS the live selected segment (active sidebar item)
        is injected at request time so a project/owner reload preserves it. */}}
   <input type="hidden" name="seg" value="{{.SelectedSeg}}" data-seg-keep>
@@ -53,7 +57,10 @@
   </label>
 
   {{/* Owner scope moved to the header "me" toggle (aihub#185 follow-up); default
-       view is All. Watching removed — re-added by aihub#143 when it lands. */}}
+       view is All. The third scope aihub#129 designed — Watching — is the
+       "watching" pill sitting beside it, wired here by aihub#143. Both live in
+       the .grp header inside #wi-list-body, not in this filter bar, because they
+       have to re-render with the segment they scope. */}}
   <noscript><button type="submit" class="btn sm">Apply</button></noscript>
 </form>
 
@@ -80,6 +87,13 @@
       <div class="grp">
         {{range .Segments}}{{if .On}}<span class="grp-l">{{.Label}}</span>{{end}}{{end}}
         {{if .User}}<button type="button" class="grp-me{{if .Mine}} on{{end}}" data-me-toggle data-me-owner="{{.User.DisplayName}}" title="只看我认领的(关闭=全部)">me</button>{{end}}
+        {{/* Watching scope (aihub#143) — the third view scope from the aihub#129
+             design, finally backed by a real relation (wi_watches). Mutually
+             exclusive with "me": dropdown.js turns that one off when this goes
+             on, and the handler enforces the same exclusivity server-side so a
+             hand-built URL carrying both cannot reach a fourth, unnameable
+             scope. Watch/unwatch itself happens on the wi detail page. */}}
+        {{if .User}}<button type="button" class="grp-me wch{{if .Watching}} on{{end}}" data-watch-toggle title="只看我关注的 wi(在 wi 详情页点 ☆ Watch 添加)">watching</button>{{end}}
         <button type="button" class="grp-sort" data-wi-sort title="按创建时间排序(点击切换最新/最旧在前)" aria-label="toggle sort order">↓</button>
         <span class="grp-n">{{index .SegCounts .SelectedSeg}}</span>
       </div>
@@ -135,7 +149,7 @@
         <span style="flex:1"></span>
         {{if .DoneCursor}}
         <a class="pg-btn" data-done-newest
-           href="/ui/wi?seg=done&project={{$dproj}}&owner={{.Owner}}&limit={{.Limit}}"
+           href="/ui/wi?seg=done&project={{$dproj}}&owner={{.Owner}}&watching={{if .Watching}}1{{end}}&limit={{.Limit}}"
            hx-get="/ui/wi?seg=done&project={{$dproj}}&limit={{.Limit}}"
            hx-target="#wi-list-body" hx-swap="innerHTML" hx-push-url="true">↑ 最新</a>
         {{end}}
@@ -149,7 +163,7 @@
              Writing the two lines the same way keeps the asymmetry from looking
              like an accident to whoever edits this next. */}}
         <a class="pg-btn" data-done-older
-           href="/ui/wi?seg=done&project={{$dproj}}&owner={{.Owner}}&limit={{.Limit}}&done_cursor={{urlquery .DoneNextCursor}}"
+           href="/ui/wi?seg=done&project={{$dproj}}&owner={{.Owner}}&watching={{if .Watching}}1{{end}}&limit={{.Limit}}&done_cursor={{urlquery .DoneNextCursor}}"
            hx-get="/ui/wi?seg=done&project={{$dproj}}&limit={{.Limit}}&done_cursor={{urlquery .DoneNextCursor}}"
            hx-target="#wi-list-body" hx-swap="innerHTML" hx-push-url="true">更早 →</a>
         {{end}}
@@ -185,8 +199,11 @@
     {{$proj := "__all__"}}{{if not .AllMode}}{{$proj = .Project}}{{end}}
     {{range .Segments}}
     {{if .Divider}}<div class="seg-div"></div>{{end}}
+    {{/* href carries owner + watching for the no-JS path; hx-get deliberately
+         does not, because dropdown.js's htmx:configRequest injects both from
+         their live pill state (see the single injection point there). */}}
     <a class="seg-item{{if .On}} on{{end}}" data-seg-key="{{.Key}}"
-       href="/ui/wi?seg={{.Key}}&project={{$proj}}&owner={{$.Owner}}"
+       href="/ui/wi?seg={{.Key}}&project={{$proj}}&owner={{$.Owner}}&watching={{if $.Watching}}1{{end}}"
        hx-get="/ui/wi?seg={{.Key}}&project={{$proj}}"
        hx-target="#wi-list-body" hx-swap="innerHTML" hx-push-url="true">
       {{.Label}}<span class="cnt">{{.Count}}</span>

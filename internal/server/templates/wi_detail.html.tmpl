@@ -31,6 +31,12 @@
       {{if .WIType}}<span class="badge b-{{.WIType}}">{{.WIType}}</span>{{end}}
       <span class="badge b-{{or .WI.Priority "normal"}}">{{or .WI.Priority "normal"}}</span>
       <span class="badge b-{{.WI.Status}}">{{if or (eq .WI.Status "running") (eq .WI.Status "queued")}}<span class="dot"></span>{{end}}{{.WI.Status}}</span>
+      {{/* Watch toggle (aihub#143) — the entry point that CREATES the relation
+           the list's Watching scope filters on. Only for a signed-in viewer:
+           the row is keyed by user_id, so there is nothing to write without
+           one. Pushed right by the spacer so it reads as an action, not another
+           badge. */}}
+      {{if .User}}<span style="flex:1"></span>{{template "wi_watch_toggle.html.tmpl" .Watch}}{{end}}
     </div>
 
     <h1 class="h-title">{{.WI.Goal}}</h1>

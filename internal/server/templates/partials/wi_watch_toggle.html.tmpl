@@ -1,0 +1,34 @@
+{{define "wi_watch_toggle.html.tmpl"}}
+{{/* Watch / Unwatch toggle for a work item (aihub#143). Data is a watchToggle.
+
+     ONE definition, two render paths: the detail page includes this partial,
+     and POST/DELETE /ui/wi/<ref>/watch re-render this same block and swap it
+     with hx-swap="outerHTML". So the button after a click and the button after
+     a reload cannot disagree — the alternative (the endpoint returning
+     hand-written markup) is how a toggle ends up rendering one label live and
+     another on refresh.
+
+     The method flips with the state: watching -> DELETE removes, not-watching
+     -> POST adds. There is no "toggle" verb, deliberately — a single idempotent
+     verb per direction means a double click, or a retry after a dropped
+     response, converges on the state the user asked for instead of flipping
+     back.
+
+     hx-target="this" keeps the swap local; the rest of the page (including the
+     5s activity poll) is untouched. */}}
+<button type="button"
+        class="grp-me wch{{if .Watching}} on{{end}}"
+        data-wi-watch
+        data-watching="{{if .Watching}}true{{else}}false{{end}}"
+        {{if .Watching}}
+        hx-delete="{{wiref .Ref}}/watch"
+        title="Stop watching this work item"
+        aria-pressed="true"
+        {{else}}
+        hx-post="{{wiref .Ref}}/watch"
+        title="Watch this work item — it will appear in the Watching scope on the work-item list"
+        aria-pressed="false"
+        {{end}}
+        hx-target="this"
+        hx-swap="outerHTML">{{if .Watching}}★ Watching{{else}}☆ Watch{{end}}</button>
+{{end}}

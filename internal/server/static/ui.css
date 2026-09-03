@@ -1127,6 +1127,16 @@ details.card[open] > summary.hd .chev { transform: rotate(45deg); }
 .grp-me:hover { background: var(--surface-2); color: var(--text); }
 .grp-me.on { background: var(--selected); color: var(--text); border-color: var(--border-strong); }
 
+/* aihub#143 watch pills. Both the list header's "watching" scope toggle and the
+   wi-detail "☆ Watch" button are .grp-me pills — same shape, same on-state — so
+   the two controls for one concept do not look like two features. .wch only
+   corrects for context: on the detail page the pill sits at the right edge of
+   .metaline, where .grp-me's margin-right (there to separate it from its
+   neighbour in the list header) would read as a stray indent, and .metaline is
+   not the uppercase small-caps context .grp is. */
+.metaline .wch { margin-right: 0; }
+.wch.on { color: var(--accent); }
+
 /* in-list pager footer (aihub#185): one clean footer row inside the .list card
    — page-info + per-page picker + numbered page buttons. */
 .list .pager { margin: 0; padding: 8px var(--s3); border-top: 1px solid var(--border); background: var(--surface); }

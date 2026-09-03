@@ -219,6 +219,7 @@ type wiListPageData struct {
 	Reporter          string
 	Owner             string
 	Mine              bool     // true when the Owner filter equals the current user (the "Mine" segment)
+	Watching          bool     // true when ?watching=1 is on (aihub#143) — the third view scope, exclusive with Mine
 	ReporterOptions   []string // distinct reporter display names for the filter dropdown
 	OwnerOptions      []string // distinct owner display names for the filter dropdown
 	Limit             int
@@ -323,8 +324,23 @@ type wiDetailPageData struct {
 	Children       []depEntry // child wi links ordered by seq ASC (aihub#142); empty when none
 	Events         []eventView
 	Artifacts      []artifactLink
+	Watch          watchToggle // aihub#143 watch/unwatch control
 	Err            string
 	AccessDenied   bool
+}
+
+// watchToggle is the view-model for the aihub#143 watch control, shared by the
+// detail page and by the POST/DELETE endpoints that re-render just the button.
+// It is a named type rather than two fields on wiDetailPageData precisely so the
+// two render paths cannot drift: the fragment endpoint executes the SAME
+// partial against the SAME struct the full page does, so "what the button looks
+// like after a click" and "what it looks like on reload" are one definition.
+type watchToggle struct {
+	// Ref is the id-or-slug in the request path, echoed back so the button
+	// posts to the URL the user is already on rather than to a canonical form
+	// the session may not be able to resolve.
+	Ref      string
+	Watching bool
 }
 
 // depView is the template-friendly projection of DependenciesResponse with
@@ -500,12 +516,102 @@ type artifactLink struct {
 // blocks don't collide across files.
 func registerUIWIHandlers(g *echo.Group, pool *pgxpool.Pool, _ *template.Template) {
 	listTmpl := pageTemplate("wi_list.html.tmpl")
-	detailTmpl := pageTemplate("wi_detail.html.tmpl", "events_timeline.html.tmpl")
+	detailTmpl := wiDetailTemplate()
+	watchTmpl := partialTemplate("wi_watch_toggle.html.tmpl")
 
 	g.GET("/wi", handleUIWIList(pool, listTmpl))
 	g.GET("/wi/:id", handleUIWIDetail(pool, detailTmpl))
 	g.GET("/wi/:id/events/partial", handleUIWIEventsPartial(pool, detailTmpl))
+
+	// aihub#143 watch/unwatch. POST adds, DELETE removes; both answer with the
+	// re-rendered button so htmx can swap it in place (hx-swap="outerHTML").
+	//
+	// /ui-only, no /v1 mirror: watching is a property of a *person's* view of
+	// the tracker, and the only client that has a person is the browser session.
+	// A bearer-token caller is an agent; giving it an endpoint to watch things
+	// on a user's behalf would create relations no user asked for.
+	//
+	// These are the only state-changing routes in this file. They are safe
+	// against cross-site submission by the same mechanism as the existing /ui
+	// POSTs (artifact share/commit/reply): the session cookie is
+	// SameSite=Lax (ui_handlers_auth.go), which browsers do not attach to a
+	// cross-site POST or DELETE.
+	g.POST("/wi/:id/watch", handleUIWIWatchToggle(pool, watchTmpl, true))
+	g.DELETE("/wi/:id/watch", handleUIWIWatchToggle(pool, watchTmpl, false))
 }
+
+// wiDetailTemplate builds the wi-detail page's template tree.
+//
+// One constructor rather than the partial list spelled out at each call site.
+// The list was duplicated in routes_artifacts_test.go, and Go templates resolve
+// {{template}} at EXECUTE time: adding a partial to the handler and not to the
+// other builder does not fail the build or the parse — it fails the render, as a
+// 500 whose body reads `no such template`, and only for whoever happens to run
+// that one test.
+func wiDetailTemplate() *template.Template {
+	return pageTemplate("wi_detail.html.tmpl",
+		"events_timeline.html.tmpl",
+		"wi_watch_toggle.html.tmpl")
+}
+
+// handleUIWIWatchToggle adds (watch=true) or removes (watch=false) the current
+// viewer's watch on a work item and answers with the re-rendered toggle button.
+//
+// 🔴 The project access check is NOT optional and NOT redundant with the list
+// scope's. The list intersects watches with the caller's projects at read time,
+// so an unauthorized watch row could never make a work item VISIBLE — but it
+// would still let anyone with a session write a row naming any work item id in
+// the database, i.e. confirm which ids exist (404 vs 200) and accumulate state
+// on other teams' items. Authorize the write on its own terms.
+func handleUIWIWatchToggle(pool *pgxpool.Pool, tmpl *template.Template, watch bool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		if u == nil {
+			return c.NoContent(http.StatusUnauthorized)
+		}
+		idOrSlug := strings.TrimSpace(c.Param("id"))
+		if idOrSlug == "" {
+			return c.NoContent(http.StatusBadRequest)
+		}
+
+		ctx, cancel := contextWithTimeout(c)
+		defer cancel()
+
+		wi, aerr := getWorkItemFn(ctx, pool, idOrSlug)
+		if aerr != nil {
+			return c.NoContent(http.StatusNotFound)
+		}
+		if err := checkProjectAccessSoft(u, wi.Project); err != nil {
+			return c.NoContent(http.StatusForbidden)
+		}
+
+		var werr *domain.AihubError
+		if watch {
+			werr = watchWorkItemFn(ctx, pool, u.UserID, wi.ID)
+		} else {
+			werr = unwatchWorkItemFn(ctx, pool, u.UserID, wi.ID)
+		}
+		if werr != nil {
+			// Unlike the detail page's best-effort read, a failed WRITE is
+			// reported. The user pressed a button; answering with a button that
+			// shows the state they asked for, while the row was not written,
+			// would be a lie the next reload silently corrects.
+			return c.NoContent(http.StatusInternalServerError)
+		}
+
+		// Echo back the state we just wrote rather than re-reading it: the write
+		// is the authority here, and a re-read only adds a round trip plus a way
+		// for the button to disagree with the row that was just committed.
+		return renderTemplate(c, tmpl, "wi_watch_toggle.html.tmpl",
+			watchToggle{Ref: idOrSlug, Watching: watch})
+	}
+}
+
+// watchWorkItemFn / unwatchWorkItemFn / isWatchingFn are the package-level seams
+// for tests, matching listWorkItemsFn above.
+var watchWorkItemFn = domain.WatchWorkItem
+var unwatchWorkItemFn = domain.UnwatchWorkItem
+var isWatchingFn = domain.IsWatchingWorkItem
 
 // handleUIWIList renders the work-item list page.
 //
@@ -623,6 +729,25 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 			data.Mine = true
 		}
 
+		// Watching scope (aihub#143): the third view scope aihub#129 designed
+		// alongside Mine and All. ?watching=1 narrows the list to work items the
+		// CURRENT VIEWER watches — the user_id is taken from the session, never
+		// from the query string, so there is no "show me what someone else
+		// watches" request to authorize in the first place.
+		//
+		// Exclusive with Mine, and Watching wins: "watched AND owned by me" is a
+		// fourth scope nothing in the UI can express or clear, so a request
+		// carrying both (a stale hidden field, a hand-built URL) would silently
+		// answer a question the user did not ask. Clearing owner here also keeps
+		// data.Mine false, which is what stops segmentListRows from applying its
+		// in-memory owner scoping on top.
+		data.Watching = queryBoolLenientUI(c, "watching")
+		if data.Watching {
+			ownerParam = ""
+			data.Owner = ""
+			data.Mine = false
+		}
+
 		data.Limit = queryIntLenientUI(c, "limit", 50, 200)
 
 		// No project selected (and not view-all) = no listing yet — the
@@ -660,6 +785,15 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		if ownerParam != "" && !data.Mine {
 			filter.OwnerDisplay = &ownerParam
 		}
+		// Watching scope (aihub#143). Pushed into the DB query rather than
+		// filtered in memory like Mine, because Mine's in-memory pass exists only
+		// to keep the ownerless Unclaimed pool visible — a pool that has no
+		// meaning here. "Unclaimed and watched by me" is a real, narrower thing,
+		// and it is what the DB predicate returns.
+		if data.Watching {
+			watcher := u.UserID
+			filter.WatcherUserID = &watcher
+		}
 
 		// queryProject is what we hand to the domain layer: "" in view-all
 		// mode (so it scopes by AccessibleProjects), else the single project.
@@ -670,6 +804,26 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 			queryProject = ""
 			if u.Role != "admin" || u.ProjectScope != nil {
 				// non-admin (or scoped admin) view-all is bounded to their member/scoped projects
+				//
+				// 🔴 An EMPTY project set here is not "no bound", it is "bound to
+				// nothing", and the two are opposite answers. buildListWorkItemsWhere
+				// emits the `wi.project = ANY($n)` predicate only when
+				// AccessibleProjects is non-empty, so handing it an empty slice
+				// produced a query with NO project predicate at all — every work item
+				// in the database, to a caller with access to none of them. Reachable
+				// today: a non-admin with zero project roles asking for
+				// /ui/wi?project=__all__ gets allMode=true and project="__all__", so
+				// the "no project selected" guard above (which tests project == "")
+				// does not fire. Found while adding the Watching scope (aihub#143),
+				// which has to intersect with this predicate to be safe and therefore
+				// cannot be safe while the predicate can be absent.
+				//
+				// Refused here rather than papered over downstream: there is no page
+				// of work items that is correct to render for this caller.
+				if len(projects) == 0 {
+					data.Err = "no projects accessible — ask an admin to add you to a project."
+					return renderTemplate(c, tmpl, renderName, data)
+				}
 				filter.AccessibleProjects = projects
 				facetScope = projects
 			}
@@ -753,7 +907,14 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 				doneScope = projects
 			}
 		}
-		segCounts["done"] = fetchDoneCountFn(ctx, pool, doneScope)
+		// The Done count carries the Watching scope for the reason spelled out on
+		// fetchDoneCount: Done's count and Done's rows come from two different
+		// statements, and only the rows inherit filter.WatcherUserID.
+		doneWatcher := ""
+		if data.Watching {
+			doneWatcher = u.UserID
+		}
+		segCounts["done"] = fetchDoneCountFn(ctx, pool, doneScope, doneWatcher)
 		data.SegCounts = segCounts
 
 		// Ordered sidebar nav for the template (Done sits below a divider).
@@ -1029,10 +1190,11 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			eventsErr error
 			arts      []artifactLink
 			ownerInfo attemptOwner
+			watching  bool
 			wg        sync.WaitGroup
 		)
 
-		wg.Add(6)
+		wg.Add(7)
 
 		go func() {
 			defer wg.Done()
@@ -1080,6 +1242,11 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			if wi.CurrentAttemptID != nil {
 				ownerInfo = fetchAttemptOwner(ctx, pool, *wi.CurrentAttemptID)
 			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			watching = fetchWatching(ctx, pool, u, wi.ID)
 		}()
 
 		wg.Wait()
@@ -1140,6 +1307,7 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		data.Reporter = chipFor(wi.ReporterDisplay)
 		data.Assignee = chipFor(ownerInfo.Display)
 		data.Labels = wi.Labels
+		data.Watch = watchToggle{Ref: idOrSlug, Watching: watching}
 
 		// needs-you bar: this item is awaiting the current user — they own the
 		// active attempt and it is paused/blocked (mirrors the list's Needs you
@@ -1151,6 +1319,30 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 
 		return renderTemplate(c, tmpl, "layout", data)
 	}
+}
+
+// fetchWatching reports whether u watches wiID, for the detail page's toggle.
+//
+// 🔴 BEST-EFFORT BY DESIGN: any failure — nil pool, query error, or the
+// wi_watches table not existing yet — reads as "not watching" rather than
+// breaking the page. This is the one place in the feature that degrades
+// silently, and it is deliberate: the watch control is a single button on a page
+// whose content (goal, activity, dependencies, artifacts) has nothing to do with
+// watching, and every other side-load in this handler already degrades the same
+// way. Concretely it means a BINARY-BEFORE-MIGRATION deploy renders the detail
+// page intact with the button reading "Watch" for everyone, instead of 500ing
+// the page — see the DEPLOY ORDER note in migration 0033. The write path
+// (handleUIWIWatchToggle) does NOT swallow errors, so the mistake is still
+// observable the moment anyone clicks.
+func fetchWatching(ctx context.Context, pool *pgxpool.Pool, u *UserContext, wiID string) bool {
+	if pool == nil || u == nil || u.UserID == "" {
+		return false
+	}
+	watching, err := isWatchingFn(ctx, pool, u.UserID, wiID)
+	if err != nil {
+		return false
+	}
+	return watching
 }
 
 // handleUIWIEventsPartial returns just the events timeline fragment (no layout

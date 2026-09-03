@@ -324,6 +324,25 @@ func queryIntLenientUI(c echo.Context, name string, def, ceiling int) int {
 	return n
 }
 
+// queryBoolLenientUI reads a boolean toggle for a /ui page: absent, empty or
+// unparseable all mean false. See the exemption note above; do NOT call this
+// from a /v1 handler.
+//
+// There is no Rule-2 half here — a boolean has no ceiling to clamp to — so this
+// differs from the strict queryBool in exactly one way: `?watching=yeah` turns
+// the scope OFF instead of returning a 400. That is the right default direction
+// for a scope toggle specifically: false is the page's normal state (All), so a
+// garbled value degrades to the view the user would have got by not clicking,
+// never to a narrower one that hides work items while looking like a complete
+// list.
+func queryBoolLenientUI(c echo.Context, name string) bool {
+	b, present, err := queryBool(c, name)
+	if err != nil || !present {
+		return false
+	}
+	return b
+}
+
 // queryFloatLenientUI reads a float query param for a /ui page, falling back to
 // def for anything that does not parse or falls outside [min,max]. See the
 // exemption note above; do NOT call this from a /v1 handler.

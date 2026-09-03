@@ -73,23 +73,29 @@ func tryAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, lockID int64) (boo
 
 // ─── Sweep 1: Orphan Lock Cleanup ────────────────────────────────────────────
 
-// orphanLockSweepSQL deletes resource_locks whose owner attempt is no longer
-// holding them per the lock-retention contract. A lock is retained while its
-// owner attempt is 'running' OR 'paused': FnCompleteAttempt keeps the locks on
-// paused so resume can reclaim them (N4 / C5-3 design invariant), and the claim
-// conflict-check (run_attempts.go) treats the retention set as IN ('running',
-// 'paused'). The sweep predicate must match that set, otherwise the GC tick
-// deletes a paused attempt's locks within 60s — breaking the resume invariant
-// and allowing a concurrent claim to steal the resource (aihub#145).
-const orphanLockSweepSQL = `
-	DELETE FROM resource_locks rl
-	WHERE NOT EXISTS (
-		SELECT 1 FROM run_attempts ra
-		WHERE ra.id = rl.owner_attempt_id AND ra.status IN ('running', 'paused')
-	)`
+// orphanLockSweepSQL, the DELETE this sweep runs, lives in resource_events.go
+// with every other statement that mutates resource_locks (aihub#343). Its doc
+// comment moved with it; gc_test.go still pins its predicate.
 
 // RunOrphanLockSweep removes resource_locks whose owner_attempt_id points to an
 // attempt that is neither running nor paused (i.e. genuinely orphaned).
+//
+// aihub#343: this sweep is the one lock mutation with no caller and no attempt
+// credential behind it, which makes it the one whose effects were hardest to
+// explain after the fact — "my lock is gone and nothing I did removed it" has no
+// other answer. It now runs through releaseLocks, so every row it deletes leaves
+// a lock_released event on the timeline of the work item that held it, with
+// cause=orphan_sweep.
+//
+// The sweep moved from a single autocommit Exec into an explicit transaction so
+// the deletes and their events commit together. The DELETE itself is unchanged —
+// it was already one statement over an unbounded row set, which Postgres runs in
+// an implicit transaction of its own — but be precise about what DID change: the
+// row locks it takes are now held across the event INSERT as well, instead of
+// being dropped at autocommit, and this function now holds two pooled
+// connections at once (tryAdvisoryLock keeps one for the advisory lock, pool.Begin
+// takes a second). Both are fine at the current pool size; neither was true
+// before.
 func RunOrphanLockSweep(ctx context.Context, pool *pgxpool.Pool) GCResult {
 	result := GCResult{SweepType: sweepOrphanLockCleanup}
 	acquired, release, err := tryAdvisoryLock(ctx, pool, gcLockOrphanLocks)
@@ -103,12 +109,24 @@ func RunOrphanLockSweep(ctx context.Context, pool *pgxpool.Pool) GCResult {
 	}
 	defer release()
 
-	tag, err := pool.Exec(ctx, orphanLockSweepSQL)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		result.Error = fmt.Sprintf("orphan lock sweep: begin: %v", err)
+		return result
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	released, err := releaseLocks(ctx, tx, orphanLockSweepSQL,
+		newLockOp(lockCauseOrphanSweep, lockEventActor{}))
 	if err != nil {
 		result.Error = fmt.Sprintf("orphan lock sweep: %v", err)
 		return result
 	}
-	result.Affected = tag.RowsAffected()
+	if err := tx.Commit(ctx); err != nil {
+		result.Error = fmt.Sprintf("orphan lock sweep: commit: %v", err)
+		return result
+	}
+	result.Affected = int64(len(released))
 	return result
 }
 

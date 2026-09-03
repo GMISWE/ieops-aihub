@@ -1672,36 +1672,9 @@ func casConflictErr(expected, current int) *AihubError {
 		})
 }
 
-// releaseUndeclaredLocksSQL drops the file_scope locks a narrowing orphaned.
-//
-// Scoped by work_item_id through run_attempts rather than by a single attempt id
-// on purpose: the reported instance (ieops#798) was on claim epoch 7, and each
-// re-claim mints a new attempt row, so residue from an earlier epoch is owned by
-// an attempt that is no longer current. Joining on work_item_id reaches that
-// residue while still making it impossible to touch a lock belonging to any
-// OTHER work item, whatever its key looks like.
-// $2 is the set of exact keys and $3 the set of LIKE patterns that together
-// cover EVERY key form a removed path can be held under (aihub#261): the
-// unqualified "<project>:<path>" and any repo-qualified "<project>:<repo>:<path>".
-//
-// 🔴 Matching only the currently-derived key is not enough, and that is measured,
-// not theoretical. A lock row is written once and never rewritten, so a work item
-// that took "<project>:<repo>:<path>" and later dropped its {"type":"repo"} entry
-// derives "<project>:<path>" from then on. Deleting only that misses the row the
-// attempt actually holds, and the lock survives a declaration that no longer
-// mentions the path at all — silent over-holding, the mirror of the silent
-// under-holding this function exists to prevent.
-//
-// Widening the match cannot reach another work item's lock: ra.work_item_id = $1
-// still scopes every row, so the patterns only ever range over key forms of paths
-// THIS work item declared and has now dropped.
-const releaseUndeclaredLocksSQL = `
-	DELETE FROM resource_locks rl
-	USING run_attempts ra
-	WHERE rl.owner_attempt_id = ra.id
-	  AND ra.work_item_id = $1
-	  AND rl.resource_type = 'file_scope'
-	  AND (rl.resource_key = ANY($2::text[]) OR rl.resource_key LIKE ANY($3::text[]))`
+// releaseUndeclaredLocksSQL, the DELETE this function runs, lives in
+// resource_events.go with every other statement that mutates resource_locks
+// (aihub#343). Its doc comment moved with it.
 
 // releaseUndeclaredFileScopeLocks releases the file_scope locks that `prior`
 // justified and `next` no longer does (aihub#264).
@@ -1752,13 +1725,34 @@ const releaseUndeclaredLocksSQL = `
 // derivedLock's comment already refuses to open for intent=read, and it is not
 // worth opening for a narrowing either. A work item that really means to give up
 // a branch can pause, which already releases file_scope and re-derives the rest.
-func releaseUndeclaredFileScopeLocks(ctx context.Context, tx pgx.Tx, wiID, project string, prior, next json.RawMessage) *AihubError {
+//
+// # 🔴 It also REPORTS the subtraction it performed (aihub#343)
+//
+// The returned narrowingDiff is what wi_resources_updated is built from, and
+// that is a correctness requirement rather than convenience. The first version
+// of that event recomputed the diff from the derived KEYS while this function
+// subtracts on the declared PATHS, and those are different answers in the flow
+// the comment above calls "the ordinary polyforge flow": drop a
+// {"type":"repo"} entry with the paths untouched and every key changes while
+// every path stays. Measured on the repo's own aihub#261 fixture, the key-based
+// record reported the two keys that were STILL HELD as removed and two keys
+// held by NOBODY as added — a checkable, wrong record, which this file's own
+// comments call worse than none.
+//
+// So there is exactly ONE subtraction in the codebase and the audit describes
+// it by construction. Do not recompute it anywhere.
+func releaseUndeclaredFileScopeLocks(ctx context.Context, tx pgx.Tx, wiID, project string, prior, next json.RawMessage, op lockOpCtx) (narrowingDiff, *AihubError) {
 	priorLocks, ok := derivedFileScopeLocks(prior, project)
 	if !ok {
 		// Unparseable stored declarations: which locks they produced is unknown,
 		// so releasing any of them would be a guess. Leaving them is the
 		// pre-aihub#264 behaviour and is the safe direction.
-		return nil
+		//
+		// Reported as Readable=false rather than as an empty diff: "the
+		// declaration justified no locks" and "we could not read the
+		// declaration" must not look alike in an audit record, and the
+		// unreadable case is the common one here (~14% of stored payloads).
+		return narrowingDiff{}, nil
 	}
 	nextLocks, ok := derivedFileScopeLocks(next, project)
 	if !ok {
@@ -1766,7 +1760,7 @@ func releaseUndeclaredFileScopeLocks(ctx context.Context, tx pgx.Tx, wiID, proje
 		// ValidateDeclaredResources on caller input before opening the
 		// transaction. Guarded rather than asserted, because "release everything
 		// the old payload had" is the wrong answer to a payload we cannot read.
-		return nil
+		return narrowingDiff{}, nil
 	}
 
 	// 🔴 Subtract on the declared PATH, not on the derived key (aihub#261).
@@ -1798,8 +1792,27 @@ func releaseUndeclaredFileScopeLocks(ctx context.Context, tx pgx.Tx, wiID, proje
 			removedPaths[path] = true
 		}
 	}
+	// aihub#343: the diff is assembled here, from the values this function
+	// actually subtracted, and handed back for the audit record.
+	diff := narrowingDiff{
+		Readable:     true,
+		PriorPaths:   uniqueSorted(priorLocks),
+		NextPaths:    uniqueSorted(nextLocks),
+		RemovedPaths: sortedSetMembers(removedPaths),
+	}
+	wasDeclared := make(map[string]bool, len(priorLocks))
+	for _, path := range priorLocks {
+		wasDeclared[path] = true
+	}
+	for _, path := range nextLocks {
+		if !wasDeclared[path] {
+			diff.AddedPaths = append(diff.AddedPaths, path)
+		}
+	}
+	sort.Strings(diff.AddedPaths)
+
 	if len(removedPaths) == 0 {
-		return nil
+		return diff, nil
 	}
 	// Every key form each removed path could be held under, because the row was
 	// written once under whatever format was current then and is never rewritten.
@@ -1826,10 +1839,82 @@ func releaseUndeclaredFileScopeLocks(ctx context.Context, tx pgx.Tx, wiID, proje
 	// falling back to ErrInternalError (aihub#334), and ErrInternalError is
 	// exactly the non-conflict outcome wanted here, so it is the whole mapping.
 	sort.Strings(patterns)
-	if _, err := tx.Exec(ctx, releaseUndeclaredLocksSQL, wiID, removed, patterns); err != nil {
-		return dbErrCause(err, "failed to release locks for removed declared_resources")
+	// aihub#343: through releaseLocks, so each lock this narrowing actually drops
+	// gets a lock_released event carrying cause=declaration_narrowed. This is the
+	// replay set in aihub#343's acceptance criterion — a wi declares a path, gets
+	// the lock, removes the declaration, and a second wi claims the same path.
+	// Without this event the second claimer cannot tell "the release happened"
+	// from "the release never happened and the row is stale".
+	//
+	// No `removed` list is attached to the per-lock payloads. Each lock_released
+	// already carries its own resource_key, so the list would be the same data
+	// repeated once per event — O(N²) bytes against a 64KB payload cap, under a
+	// field name wi_resources_updated uses for a different computation. The op_id
+	// is the join; duplication is what lets two records disagree.
+	released, err := releaseLocks(ctx, tx, releaseUndeclaredLocksSQL, op, wiID, removed, patterns)
+	if err != nil {
+		return diff, dbErrCause(err, "failed to release locks for removed declared_resources")
 	}
-	return nil
+	for _, r := range released {
+		diff.ReleasedKeys = append(diff.ReleasedKeys, r.ResourceKey)
+	}
+	sort.Strings(diff.ReleasedKeys)
+	return diff, nil
+}
+
+// narrowingDiff is the subtraction releaseUndeclaredFileScopeLocks performed,
+// reported so wi_resources_updated describes THAT computation rather than a
+// second one that can disagree with it (aihub#343).
+//
+// Paths, not derived keys, on every field except ReleasedKeys. A path is what
+// the declaration says and is immune to changes in lock-key FORMAT; a key
+// changes whenever the payload's repo inference changes, with the paths
+// untouched. Subtracting on keys is the defect aihub#261 removed from the
+// release path, and it reappeared in the audit record until this type existed.
+//
+// ReleasedKeys is the exception on purpose: it is not a subtraction at all, it
+// is what the DELETE's RETURNING clause actually reported, so it names the rows
+// that really went away rather than the rows that ought to have.
+type narrowingDiff struct {
+	// Readable is false when a stored declaration could not be decoded, in which
+	// case no other field means anything. Reported separately so "justified no
+	// locks" and "could not be read" do not look alike.
+	Readable     bool
+	PriorPaths   []string
+	NextPaths    []string
+	AddedPaths   []string
+	RemovedPaths []string
+	ReleasedKeys []string
+}
+
+// uniqueSorted returns the distinct values of a key→path map, sorted. Distinct
+// because two declared entries (a `path` and a `document`, say) can name one
+// path and would otherwise be counted twice in the audit record.
+func uniqueSorted(byKey map[string]string) []string {
+	seen := make(map[string]bool, len(byKey))
+	out := make([]string, 0, len(byKey))
+	for _, v := range byKey {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// sortedSetMembers returns a set's members, sorted. Named for the set rather
+// than `sortedKeys`, which declared_resources.go already uses to render a TYPE
+// set into an error message — two functions with one name in one package would
+// have been a compile error today and a confusing near-miss if either moved.
+func sortedSetMembers(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // UpdateWorkItem applies a patch to a work item.
@@ -1925,11 +2010,18 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 	// resource_locks — same order (work_items then resource_locks) in both, so the
 	// two cannot deadlock against each other. Taken only when declared_resources
 	// is part of the patch, so no other update path changes its locking.
+	//
+	// aihub#343: resources_version comes out of the SAME row read, not from the
+	// pre-transaction GetWorkItem. The audit event's whole job is to settle
+	// arguments about this number (see emitResourcesUpdated), so reading it from
+	// a snapshot that a concurrent writer may already have moved would make the
+	// record wrong in exactly the case somebody goes looking.
 	var priorDeclared json.RawMessage
+	priorResourcesVersion := casVersionUnknown
 	if req.DeclaredResources != nil {
 		if scanErr := tx.QueryRow(ctx,
-			`SELECT declared_resources FROM work_items WHERE id = $1 FOR UPDATE`, wi.ID,
-		).Scan(&priorDeclared); scanErr != nil {
+			`SELECT declared_resources, resources_version FROM work_items WHERE id = $1 FOR UPDATE`, wi.ID,
+		).Scan(&priorDeclared, &priorResourcesVersion); scanErr != nil {
 			if errors.Is(scanErr, pgx.ErrNoRows) {
 				return nil, NewErr(ErrNotFound, fmt.Sprintf("work item %q not found", wi.ID))
 			}
@@ -1975,9 +2067,38 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 	// back, so it can never leave locks released against a version that did not
 	// move.
 	if req.DeclaredResources != nil {
-		if aerr := releaseUndeclaredFileScopeLocks(ctx, tx, wi.ID, wi.Project, priorDeclared, req.DeclaredResources); aerr != nil {
+		// aihub#343: ONE lock operation for the whole declaration change, so the
+		// wi_resources_updated event and every lock_released it caused share an
+		// op_id. That is what lets a reader say "these three locks went away
+		// BECAUSE of that declaration change" instead of inferring it from
+		// adjacent timestamps.
+		resOp := newLockOp(lockCauseDeclarationNarrowed,
+			lockEventActor{UserID: callerUserID})
+		rel, aerr := releaseUndeclaredFileScopeLocks(ctx, tx, wi.ID, wi.Project, priorDeclared, req.DeclaredResources, resOp)
+		if aerr != nil {
 			return nil, aerr
 		}
+		// Read the new version back rather than computing prior+1: the UPDATE is
+		// assembled by buildWorkItemUpdate and whether it incremented is that
+		// function's decision, not this one's. An audit record that reported a
+		// version the row does not hold would be checkable and wrong, which is
+		// worse than absent.
+		newResourcesVersion := casVersionUnknown
+		if scanErr := tx.QueryRow(ctx,
+			`SELECT resources_version FROM work_items WHERE id = $1`, wi.ID,
+		).Scan(&newResourcesVersion); scanErr != nil {
+			if aerr := retryConflictErr(scanErr, "failed to re-read resources_version"); aerr != nil {
+				return nil, aerr
+			}
+			return nil, NewErr(ErrInternalError, "failed to re-read resources_version")
+		}
+		// `rel` — the subtraction the release above actually performed — not a
+		// second computation. See narrowingDiff for the measurement that forced
+		// this.
+		emitResourcesUpdated(ctx, tx, wi.ID, wi.Project,
+			priorResourcesVersion, newResourcesVersion,
+			declaredEntryCount(priorDeclared), declaredEntryCount(req.DeclaredResources),
+			rel, lockEventActor{UserID: callerUserID}, resOp.OpID)
 	}
 
 	// Emit goal_updated event if goal changed

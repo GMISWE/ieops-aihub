@@ -751,7 +751,7 @@ jobs:
 	writeFile(t, gomod, "module "+testModule+"\n\ngo 1.26.3\n")
 
 	var out bytes.Buffer
-	err := run(inv, wf, gomod, dir, 1, &out)
+	err := run(inv, wf, gomod, dir, "", &out)
 	if err == nil {
 		t.Fatal("want a failure for the uncovered DB-gated test, got nil")
 	}
@@ -776,7 +776,7 @@ jobs:
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
 	out.Reset()
-	if err := run(inv, wf, gomod, dir, 1, &out); err != nil {
+	if err := run(inv, wf, gomod, dir, "", &out); err != nil {
 		t.Fatalf("want success once both tests are named, got %v", err)
 	}
 	if !strings.Contains(out.String(), "covered by a CI step: 2/2") {
@@ -784,10 +784,46 @@ jobs:
 	}
 }
 
+// ------------------------------------------------- the ratchet (aihub#320)
+
+// manifestFixture writes the three inputs every manifest test needs: an
+// inventory holding the named DB-gated tests, a workflow whose single step runs
+// all of them, and a go.mod. The workflow covers everything so that a failure in
+// these tests can only come from the manifest check.
+func manifestFixture(t *testing.T, dir string, tests ...string) (inv, wf, gomod string) {
+	t.Helper()
+	evs := make([][3]string, 0, 2*len(tests))
+	for _, name := range tests {
+		evs = append(evs,
+			[3]string{"output", name, "    a_test.go:1: set AIHUB_TEST_DB to run this integration test\n"},
+			[3]string{"skip", name, ""})
+	}
+	inv = filepath.Join(dir, "inv.json")
+	writeFile(t, inv, jsonEvents(t, testModule+"/internal/domain", evs))
+	wf = filepath.Join(dir, "ci.yml")
+	writeFile(t, wf, `
+jobs:
+  test:
+    steps:
+      - name: db suite
+        env:
+          AIHUB_TEST_DB: postgres://x
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -v 2>&1 | tee a.log
+          ! grep -q -- '--- SKIP' a.log || exit 1
+`)
+	gomod = filepath.Join(dir, "go.mod")
+	writeFile(t, gomod, "module "+testModule+"\n\ngo 1.26.3\n")
+	return inv, wf, gomod
+}
+
 // An inventory taken with AIHUB_TEST_DB SET classifies nothing as DB-gated, so
-// every check below it passes vacuously. The floor is what turns that into a
-// hard failure instead of a green no-op.
-func TestRun_FloorCatchesAVacuousInventory(t *testing.T) {
+// every check below it passes vacuously. This is the failure the old -min-gated
+// floor existed for, and the manifest has to keep catching it — with a message
+// that names the cause rather than printing the whole file back as 137
+// individual deletions.
+func TestRun_ManifestCatchesAVacuousInventory(t *testing.T) {
 	dir := t.TempDir()
 	inv := filepath.Join(dir, "inv.json")
 	writeFile(t, inv, jsonEvents(t, testModule+"/internal/domain", [][3]string{
@@ -798,14 +834,215 @@ func TestRun_FloorCatchesAVacuousInventory(t *testing.T) {
 	writeFile(t, wf, "jobs:\n  test:\n    steps: []\n")
 	gomod := filepath.Join(dir, "go.mod")
 	writeFile(t, gomod, "module "+testModule+"\n")
+	man := filepath.Join(dir, "gated_tests.txt")
+	writeFile(t, man, "internal/domain TestNeedsDB\n")
 
 	var out bytes.Buffer
-	err := run(inv, wf, gomod, dir, 5, &out)
+	err := run(inv, wf, gomod, dir, man, &out)
 	if err == nil {
-		t.Fatal("want a failure when the inventory holds fewer gated tests than the floor, got nil")
+		t.Fatal("want a failure when the inventory classifies nothing as DB-gated, got nil")
 	}
-	if !strings.Contains(err.Error(), "floor is 5") {
-		t.Errorf("error does not explain the floor: %v", err)
+	if !strings.Contains(err.Error(), "holds NO AIHUB_TEST_DB-gated test functions") {
+		t.Errorf("error does not diagnose the vacuous inventory: %v", err)
+	}
+	if !strings.Contains(err.Error(), "env -u AIHUB_TEST_DB") {
+		t.Errorf("error does not say how to re-take the inventory: %v", err)
+	}
+	// The 137-deletions listing would bury the actual cause.
+	if strings.Contains(err.Error(), "are in the manifest") {
+		t.Errorf("vacuous inventory was reported as individual deletions: %v", err)
+	}
+}
+
+// The ratchet proper. A DB-gated test that disappears from the tree must fail
+// the gate until its line is deleted too, so that giving up coverage costs a
+// diff hunk that names what was given up.
+func TestRun_ManifestCatchesADeletedDBTest(t *testing.T) {
+	dir := t.TempDir()
+	inv, wf, gomod := manifestFixture(t, dir, "TestKept")
+	man := filepath.Join(dir, "gated_tests.txt")
+	writeFile(t, man, "internal/domain TestDeleted\ninternal/domain TestKept\n")
+
+	var out bytes.Buffer
+	err := run(inv, wf, gomod, dir, man, &out)
+	if err == nil {
+		t.Fatal("want a failure when a manifest entry is no longer measured, got nil")
+	}
+	if !strings.Contains(err.Error(), "internal/domain TestDeleted") {
+		t.Errorf("error does not name the vanished test: %v", err)
+	}
+	if strings.Contains(err.Error(), "internal/domain TestKept\n") {
+		t.Errorf("error wrongly names the surviving test: %v", err)
+	}
+
+	// Deleting the line — the reviewable act — makes the same tree pass.
+	writeFile(t, man, "internal/domain TestKept\n")
+	out.Reset()
+	if err := run(inv, wf, gomod, dir, man, &out); err != nil {
+		t.Fatalf("want success once the manifest line is removed too, got %v", err)
+	}
+}
+
+// The reason this is a set and not a count: swap one DB-gated test for another
+// and the count does not move, so `-min-gated N` stayed satisfied while a test
+// CI used to run was gone. Both halves must be reported.
+func TestRun_ManifestSeesASwapThatLeavesTheCountUnmoved(t *testing.T) {
+	dir := t.TempDir()
+	inv, wf, gomod := manifestFixture(t, dir, "TestKept", "TestNewlyAdded")
+	man := filepath.Join(dir, "gated_tests.txt")
+	writeFile(t, man, "internal/domain TestKept\ninternal/domain TestSilentlyDropped\n")
+
+	var out bytes.Buffer
+	err := run(inv, wf, gomod, dir, man, &out)
+	if err == nil {
+		t.Fatal("want a failure for a swap that leaves the gated count unchanged, got nil")
+	}
+	if !strings.Contains(err.Error(), "internal/domain TestSilentlyDropped") {
+		t.Errorf("error does not name the test that disappeared: %v", err)
+	}
+	if !strings.Contains(err.Error(), "internal/domain TestNewlyAdded") {
+		t.Errorf("error does not name the test nobody wrote down: %v", err)
+	}
+	if !strings.Contains(out.String(), "2 entries, inventory measured 2") {
+		t.Errorf("summary hides that the two counts agree:\n%s", out.String())
+	}
+}
+
+// The line the gate prints must be the line the gate accepts. Otherwise the
+// remedy in the error message is prose, and pasting it fails a second time.
+func TestRun_ManifestErrorPrintsAPasteableLine(t *testing.T) {
+	dir := t.TempDir()
+	inv, wf, gomod := manifestFixture(t, dir, "TestOne", "TestTwo")
+	man := filepath.Join(dir, "gated_tests.txt")
+	writeFile(t, man, "internal/domain TestTwo\n")
+
+	var out bytes.Buffer
+	err := run(inv, wf, gomod, dir, man, &out)
+	if err == nil {
+		t.Fatal("want a failure while TestOne is missing from the manifest, got nil")
+	}
+	var line string
+	for _, l := range strings.Split(err.Error(), "\n") {
+		if strings.Contains(l, "TestOne") {
+			line = strings.TrimSpace(l)
+		}
+	}
+	if line == "" {
+		t.Fatalf("error does not print a line for the missing entry: %v", err)
+	}
+	writeFile(t, man, line+"\ninternal/domain TestTwo\n")
+	out.Reset()
+	if err := run(inv, wf, gomod, dir, man, &out); err != nil {
+		t.Fatalf("pasting the printed line %q did not make the gate pass: %v", line, err)
+	}
+}
+
+// An empty manifest agrees with an empty inventory: every difference is zero
+// and both halves of the comparison are blind at once. That is the one shape a
+// set-based ratchet has that a numeric floor did not, so it is refused
+// explicitly rather than left to the diff review.
+func TestRun_ManifestRefusesToAgreeWithNothing(t *testing.T) {
+	dir := t.TempDir()
+	inv := filepath.Join(dir, "inv.json")
+	writeFile(t, inv, jsonEvents(t, testModule+"/internal/domain", [][3]string{
+		{"output", "TestNeedsDB", "    a_test.go:1: ok\n"},
+		{"pass", "TestNeedsDB", ""},
+	}))
+	wf := filepath.Join(dir, "ci.yml")
+	writeFile(t, wf, "jobs:\n  test:\n    steps: []\n")
+	gomod := filepath.Join(dir, "go.mod")
+	writeFile(t, gomod, "module "+testModule+"\n")
+	man := filepath.Join(dir, "gated_tests.txt")
+	// Comments only: parses fine, lists nothing.
+	writeFile(t, man, "# every entry deleted\n\n")
+
+	var out bytes.Buffer
+	err := run(inv, wf, gomod, dir, man, &out)
+	if err == nil {
+		t.Fatal("want a failure when an empty manifest is compared against an empty inventory, got nil")
+	}
+	if !strings.Contains(err.Error(), "lists no test functions") {
+		t.Errorf("error does not diagnose the empty manifest: %v", err)
+	}
+}
+
+// A test that gains or loses an extra-environment requirement moves between the
+// required set and the excluded one. That is the only way to drop a test from
+// what CI must run without deleting it, so it is a diff hunk too.
+func TestRun_ManifestCatchesAReclassification(t *testing.T) {
+	dir := t.TempDir()
+	inv := filepath.Join(dir, "inv.json")
+	writeFile(t, inv, jsonEvents(t, testModule+"/internal/domain", [][3]string{
+		{"output", "TestLive", "    a_test.go:1: set AIHUB_TEST_DB and EMBEDDING_BASE_URL to run the live test\n"},
+		{"skip", "TestLive", ""},
+	}))
+	wf := filepath.Join(dir, "ci.yml")
+	writeFile(t, wf, "jobs:\n  test:\n    steps: []\n")
+	gomod := filepath.Join(dir, "go.mod")
+	writeFile(t, gomod, "module "+testModule+"\n")
+	man := filepath.Join(dir, "gated_tests.txt")
+	writeFile(t, man, "internal/domain TestLive\n")
+
+	var out bytes.Buffer
+	err := run(inv, wf, gomod, dir, man, &out)
+	if err == nil {
+		t.Fatal("want a failure when a test's extra-env classification changed, got nil")
+	}
+	if !strings.Contains(err.Error(), "EMBEDDING_BASE_URL") {
+		t.Errorf("error does not name the requirement that appeared: %v", err)
+	}
+
+	writeFile(t, man, "internal/domain TestLive +EMBEDDING_BASE_URL\n")
+	out.Reset()
+	if err := run(inv, wf, gomod, dir, man, &out); err != nil {
+		t.Fatalf("want success once the manifest records the exclusion, got %v", err)
+	}
+}
+
+// Sortedness is not cosmetic: it is the property that keeps two branches adding
+// tests from colliding. A duplicate is worse — a deletion can hide behind the
+// entry's own second copy.
+func TestParseManifest_RejectsUnsortedAndDuplicateAndMalformedLines(t *testing.T) {
+	dir := t.TempDir()
+	man := filepath.Join(dir, "gated_tests.txt")
+	writeFile(t, man, "# a comment\n\ninternal/mcp TestB\ninternal/domain TestA\ninternal/mcp TestB\ninternal/mcp TestC EMBEDDING_BASE_URL\nbroken\n")
+
+	entries, problems, err := parseManifest(man)
+	if err != nil {
+		t.Fatalf("parseManifest: %v", err)
+	}
+	joined := strings.Join(problems, "\n")
+	for _, want := range []string{
+		"sorts before",
+		"is already listed on line 3",
+		"write it as +EMBEDDING_BASE_URL",
+		`"broken" is not`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("problems do not mention %q:\n%s", want, joined)
+		}
+	}
+	// Comments and blank lines are not entries; the four real lines that parsed
+	// are (TestB, TestA, TestC-rejected, broken-rejected) minus the two rejected.
+	if len(entries) != 2 {
+		t.Errorf("want 2 parsed entries (the duplicate and the malformed ones dropped), got %d: %v", len(entries), entries)
+	}
+}
+
+// The flag default and the file in the tree are two statements of one fact.
+// Moving or renaming either without the other would leave CI reading a path
+// that does not exist — or, worse, a stale copy.
+func TestManifestDefaultPathIsTheCheckedInFile(t *testing.T) {
+	path := filepath.Join("..", "..", "..", defaultManifestPath)
+	entries, problems, err := parseManifest(path)
+	if err != nil {
+		t.Fatalf("the checked-in manifest is not readable at the default path %s: %v", defaultManifestPath, err)
+	}
+	if len(problems) > 0 {
+		t.Errorf("the checked-in manifest has structural problems:\n  %s", strings.Join(problems, "\n  "))
+	}
+	if len(entries) == 0 {
+		t.Fatalf("the checked-in manifest at %s is empty", defaultManifestPath)
 	}
 }
 
@@ -826,7 +1063,7 @@ func TestRun_RejectsCoveringATestThatNeedsExtraEnv(t *testing.T) {
 	wf := filepath.Join(dir, "ci.yml")
 	writeFile(t, wf, "jobs:\n  test:\n    steps: []\n")
 	var out bytes.Buffer
-	if err := run(inv, wf, gomod, dir, 1, &out); err != nil {
+	if err := run(inv, wf, gomod, dir, "", &out); err != nil {
 		t.Fatalf("an excluded test that no step names must be fine, got %v", err)
 	}
 	if !strings.Contains(out.String(), "EMBEDDING_BASE_URL") {
@@ -846,7 +1083,7 @@ jobs:
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
 	out.Reset()
-	err := run(inv, wf, gomod, dir, 1, &out)
+	err := run(inv, wf, gomod, dir, "", &out)
 	if err == nil {
 		t.Fatal("want a failure when a step names a test it cannot actually run, got nil")
 	}
@@ -871,7 +1108,7 @@ func TestRun_UnknownExtraEnvIsAnError(t *testing.T) {
 	writeFile(t, gomod, "module "+testModule+"\n")
 
 	var out bytes.Buffer
-	err := run(inv, wf, gomod, dir, 1, &out)
+	err := run(inv, wf, gomod, dir, "", &out)
 	if err == nil {
 		t.Fatal("want an error for an unknown extra environment variable, got nil")
 	}
@@ -940,8 +1177,9 @@ func pkgDir(t *testing.T, files map[string]string) string {
 //
 // Every fixture below was written into the real repository, and the gate said
 // `dbtestcov: OK` with the gated count UNCHANGED at 85. That last part is what
-// makes these blockers rather than gaps: -min-gated cannot catch a hole that
-// does not move the count, so the fix has to be in the detector.
+// makes these blockers rather than gaps: no ratchet on the gated set — the
+// -min-gated floor then, the manifest now — can catch a hole that leaves that
+// set unchanged, so the fix has to be in the detector.
 //
 // Each subtest asserts a violation is reported. All eight are measured RED
 // against the pre-fix detector.
@@ -1548,7 +1786,7 @@ jobs:
           echo "to reproduce locally: go test ./... -count=1 -v 2>&1 | tee a.log ; ! grep -q -- '--- SKIP' a.log || exit 1"
 `)
 	var out bytes.Buffer
-	err := run(inv, wf, gomod, dir, 1, &out)
+	err := run(inv, wf, gomod, dir, "", &out)
 	if err == nil {
 		t.Fatal("a quoted `go test` must not credit coverage (nor satisfy the SKIP guard), got a passing gate")
 	}
@@ -1591,7 +1829,7 @@ jobs:
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
 	var out bytes.Buffer
-	err := run(inv, wf, gomod, dir, 1, &out)
+	err := run(inv, wf, gomod, dir, "", &out)
 	if err == nil {
 		t.Fatal("a second -run silently overrides the first; want an error, got a passing gate")
 	}
@@ -1637,7 +1875,7 @@ jobs:
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
 		var out bytes.Buffer
-		if err := run(inv, wf, gomod, dir, 1, &out); err == nil {
+		if err := run(inv, wf, gomod, dir, "", &out); err == nil {
 			t.Errorf("`go test %s` runs no test at all; want an error, got a passing gate", count)
 		}
 	}
@@ -1982,7 +2220,7 @@ jobs:
 
 // Shape 1 reopened: neither a func literal bound to a var nor a var initialised
 // from the environment is an *ast.FuncDecl, so walking only function bodies
-// missed both. The gated count is unmoved in each case, so -min-gated cannot
+// missed both. The gated set is unmoved in each case, so the ratchet cannot
 // stand in for this.
 func TestCheckSkipMessages_PackageLevelEnvReadIsAViolation(t *testing.T) {
 	for name, decl := range map[string]string{

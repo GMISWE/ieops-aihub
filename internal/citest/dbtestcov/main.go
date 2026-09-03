@@ -24,7 +24,7 @@
 // does NOT mean the classification is free of a convention. The convention is
 // the skip MESSAGE, and wording it wrongly is the cheapest way to make this
 // gate go quiet — cheaper than fixing the coverage: a DB test that skips with
-// `t.Skip("no test database")` never enters the required set, and -min-gated
+// `t.Skip("no test database")` never enters the required set, and the manifest
 // cannot see it because it was never counted.
 //
 // checkSkipMessages closes that door by auditing the SOURCE, and it has to be
@@ -39,8 +39,9 @@
 // an *ast.FuncDecl, so walking only function bodies missed both.
 //
 // Note the common property of all ten: none of them moves the gated count, so
-// raising -min-gated could never have caught any of them. See
-// checkSkipMessages for what closes each one.
+// no ratchet on that count — neither the -min-gated floor this command used to
+// carry nor the manifest that replaced it — could ever have caught any of them.
+// See checkSkipMessages for what closes each one.
 //
 // A test whose skip message names a second environment variable (e.g.
 // EMBEDDING_BASE_URL) needs more than a database, so CI cannot run it: it is
@@ -84,6 +85,59 @@
 // searched for, because `grep -q ... || exit 1` (inverted: it REQUIRES a skip)
 // and `... || true` (can never fail) both mention the marker while asserting
 // the opposite of, or nothing about, what the guard is for.
+//
+// # The ratchet, and why it is a set rather than a number (aihub#320)
+//
+// A second, independent failure is the inventory that stops enumerating: with
+// AIHUB_TEST_DB set for the run that produced it, or with a package that failed
+// to build, nothing SKIPs, the gated list is empty and every check above passes
+// vacuously. The same guard has to catch a DB-gated test simply disappearing.
+//
+// That used to be `-min-gated N`: a floor on the count, hand-edited upward in
+// ci.yml by every branch that added a DB test. Three properties made it a
+// defect generator rather than a guard, all three measured on this repository:
+//
+//   - Two branches off one base that both raise it edit the SAME line, so the
+//     merge conflicts. On GitHub a conflicting PR has no refs/pull/N/merge, and
+//     `pull_request` workflows check that ref out — so the observable symptom
+//     is not a red build, it is NO BUILD AT ALL. aihub#325 and aihub#334 hit
+//     this on 2026-09-02; #334's PR reported mergeable CONFLICTING and zero
+//     workflow runs were ever dispatched on its head SHA.
+//   - A branch goes wrong by standing still. The number is only correct
+//     relative to whatever main held when it was measured, so every landing by
+//     a sibling silently invalidates it. aihub#314 was re-measured twice under
+//     two landings; either earlier value, written down, would have walked the
+//     ratchet BACKWARDS while looking exactly like a normal delta line.
+//   - A count cannot see a swap. Delete one DB-gated test and add another and
+//     the count does not move, so the floor stays satisfied while a test that
+//     CI used to run is gone.
+//
+// A set of names answers all three, though not all three equally. The second
+// is gone outright: a branch's own line stays true whatever lands under it, and
+// the union of both branches' lines IS the measurement on the merged tree, so
+// nothing has to be re-measured when main moves. The third is gone because the
+// entries are named, so a swap is two reported differences rather than an
+// unmoved integer.
+//
+// The first is REDUCED, not eliminated, and the difference was measured rather
+// than assumed: two branches adding entries in different packages merge clean,
+// two adding adjacent names inside one package still conflict, because git's
+// three lines of context overlap. What changes is the cost of the resolution —
+// keep both lines, no re-measurement — and that dropping one is caught here
+// instead of being invisible. Two branches that each add a DB STEP to ci.yml
+// still conflict on that file regardless; this command does not fix that.
+//
+// It is NOT a mirror of the tree: the file is checked in, and the gate demands
+// the measurement equal it EXACTLY. Deleting a DB-gated test therefore fails
+// until the author deletes its line too — a reviewable diff hunk that names
+// what was given up, which is the whole thing the floor was reaching for. The
+// gate never rewrites the file; the error message prints the exact lines to add
+// or remove, so the only way to move the ratchet is to write the line down.
+//
+// The classification travels with the name (a trailing `+VAR` marks a test that
+// needs more than a database), so moving a test into or out of the excluded set
+// — the one way to drop a test from the required set without deleting it — is
+// also a diff hunk rather than a silent reclassification.
 //
 // Usage:
 //
@@ -182,21 +236,30 @@ func main() {
 	workflow := flag.String("workflow", ".github/workflows/ci.yml", "path to the CI workflow to audit")
 	gomod := flag.String("gomod", "go.mod", "path to go.mod, read for the module path")
 	sourceRoot := flag.String("source-root", ".", "repository root, walked for .go files to audit the "+dbEnvVar+" skip-guard convention")
-	minGated := flag.Int("min-gated", 1, "ratchet floor: fail if the inventory holds fewer DB-gated tests than this. Raise it when you add DB tests; it is what catches an inventory that stopped enumerating (for example because "+dbEnvVar+" leaked into the run that produced it, making everything pass instead of skip). It canNOT substitute for the source audit in checkSkipMessages: every known way of silencing a DB guard leaves this count unchanged.")
+	gatedSet := flag.String("gated-set", defaultManifestPath, "path to the checked-in manifest of "+dbEnvVar+"-gated test functions. The measured inventory must equal it exactly: an entry the inventory no longer holds is a DB test that vanished (or an inventory that stopped enumerating), and one it holds that the file does not is a DB test nobody wrote down. This is the ratchet — it replaced a -min-gated integer, which conflicted between branches, went stale when main moved, and could not see a test being swapped out for another. It canNOT substitute for the source audit in checkSkipMessages: every known way of silencing a DB guard leaves the manifest unchanged too.")
 	flag.Parse()
 
 	if *inventory == "" {
 		fmt.Fprintln(os.Stderr, "dbtestcov: -inventory is required")
 		os.Exit(2)
 	}
+	// An empty -gated-set disables the ratchet, which is exactly the shape a
+	// green-at-any-cost edit would reach for, so it is refused here rather than
+	// treated as "no manifest configured". run() still accepts "" because its
+	// own unit tests exercise the other checks on fixtures that have no
+	// manifest; nothing reachable from CI can get there.
+	if *gatedSet == "" {
+		fmt.Fprintln(os.Stderr, "dbtestcov: -gated-set must name the manifest of "+dbEnvVar+"-gated tests; it is the ratchet, and an empty value would silently disable it")
+		os.Exit(2)
+	}
 
-	if err := run(*inventory, *workflow, *gomod, *sourceRoot, *minGated, os.Stdout); err != nil {
+	if err := run(*inventory, *workflow, *gomod, *sourceRoot, *gatedSet, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "::error::%v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(inventoryPath, workflowPath, gomodPath, sourceRoot string, minGated int, out io.Writer) error {
+func run(inventoryPath, workflowPath, gomodPath, sourceRoot, manifestPath string, out io.Writer) error {
 	module, err := readModulePath(gomodPath)
 	if err != nil {
 		return err
@@ -211,13 +274,6 @@ func run(inventoryPath, workflowPath, gomodPath, sourceRoot string, minGated int
 	gated, err := ParseInventory(invFile)
 	if err != nil {
 		return fmt.Errorf("parse inventory %s: %w", inventoryPath, err)
-	}
-	if len(gated) < minGated {
-		return fmt.Errorf(
-			"inventory %s holds only %d %s-gated test functions, floor is %d — the inventory run is not measuring what it should. "+
-				"The usual cause is %s being set for the run that produced it: everything then PASSes instead of SKIPping and this gate "+
-				"passes vacuously. Re-take it with `env -u %s go test ./... -count=1 -json`",
-			inventoryPath, len(gated), dbEnvVar, minGated, dbEnvVar, dbEnvVar)
 	}
 
 	wfData, err := os.ReadFile(workflowPath) // #nosec G304 -- path is a CI-controlled flag
@@ -276,6 +332,11 @@ func run(inventoryPath, workflowPath, gomodPath, sourceRoot string, minGated int
 		return err
 	}
 
+	manifestProblems, err := checkManifest(manifestPath, module, gated, out)
+	if err != nil {
+		return err
+	}
+
 	report(out, "dbtestcov: %s-gated test functions: %d (require only a DB: %d, need extra env: %d)\n",
 		dbEnvVar, len(gated), len(required), len(extraEnv))
 	report(out, "dbtestcov: %s go test invocations found in %s: %d\n", dbEnvVar, workflowPath, len(scan.Invocations))
@@ -286,6 +347,7 @@ func run(inventoryPath, workflowPath, gomodPath, sourceRoot string, minGated int
 	report(out, "dbtestcov: covered by a CI step: %d/%d\n", len(required)-len(missing), len(required))
 
 	var problems []string
+	problems = append(problems, manifestProblems...)
 	if len(missing) > 0 {
 		var b strings.Builder
 		fmt.Fprintf(&b, "%d %s-gated test function(s) are executed by NO CI step, so they SKIP forever and CI stays green:",
@@ -385,6 +447,228 @@ func shortPkg(p string) string {
 	return p
 }
 
+// ----------------------------------------------------------------- manifest
+
+// defaultManifestPath is where the checked-in manifest lives, relative to the
+// repository root (which is where CI and the Makefile invoke this command
+// from). TestManifestDefaultPathIsTheCheckedInFile pins it against the file
+// actually in the tree, so moving or renaming one without the other is red.
+const defaultManifestPath = "internal/citest/dbtestcov/gated_tests.txt"
+
+// manifestEntry is one line of the manifest: a DB-gated test function,
+// identified by its module-relative package and name, with the extra
+// environment variables its skip message asks for.
+type manifestEntry struct {
+	Pkg   string
+	Name  string
+	Extra []string
+}
+
+// String renders the entry in the manifest's own line format, which is also the
+// format every error message prints. Keeping one renderer means the lines the
+// gate tells you to paste are byte-identical to the lines it will accept.
+func (e manifestEntry) String() string {
+	line := e.Pkg + " " + e.Name
+	for _, v := range e.Extra {
+		line += " +" + v
+	}
+	return line
+}
+
+func (e manifestEntry) key() string { return e.Pkg + " " + e.Name }
+
+// entryFor converts a measured GatedTest into the manifest's coordinates. The
+// package is made module-relative so the lines stay short and stable, and so
+// that a manifest cannot be made to "match" by editing go.mod's module path.
+func entryFor(module string, g GatedTest) manifestEntry {
+	pkg := strings.TrimPrefix(g.Package, module+"/")
+	return manifestEntry{Pkg: pkg, Name: g.Name, Extra: g.ExtraEnv}
+}
+
+// parseManifest reads the checked-in manifest. Blank lines and `#` comments are
+// ignored; everything else must be `<pkg> <Test> [+VAR ...]`.
+//
+// Sortedness and uniqueness are enforced rather than tolerated. An unsorted
+// file makes the merges this manifest exists to keep clean go dirty again — two
+// branches appending at the end collide where two branches inserting in sorted
+// position do not — and a duplicate line lets a deletion hide behind its own
+// second copy.
+func parseManifest(path string) ([]manifestEntry, []string, error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- path is a CI-controlled flag
+	if err != nil {
+		return nil, nil, fmt.Errorf("read gated-test manifest: %w", err)
+	}
+
+	var entries []manifestEntry
+	var problems []string
+	seen := map[string]int{}
+	prev := ""
+	for i, raw := range strings.Split(string(data), "\n") {
+		lineNo := i + 1
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			problems = append(problems, fmt.Sprintf("%s:%d: %q is not `<package> <TestName> [+EXTRA_ENV ...]`", path, lineNo, line))
+			continue
+		}
+		e := manifestEntry{Pkg: fields[0], Name: fields[1]}
+		bad := false
+		for _, f := range fields[2:] {
+			if !strings.HasPrefix(f, "+") || len(f) == 1 {
+				problems = append(problems, fmt.Sprintf("%s:%d: %q is not an extra-env marker; write it as +%s", path, lineNo, f, strings.TrimPrefix(f, "+")))
+				bad = true
+				continue
+			}
+			e.Extra = append(e.Extra, strings.TrimPrefix(f, "+"))
+		}
+		if bad {
+			continue
+		}
+		sort.Strings(e.Extra)
+		if first, dup := seen[e.key()]; dup {
+			problems = append(problems, fmt.Sprintf("%s:%d: %s is already listed on line %d", path, lineNo, e.key(), first))
+			continue
+		}
+		seen[e.key()] = lineNo
+		if prev != "" && e.key() < prev {
+			problems = append(problems, fmt.Sprintf("%s:%d: %s sorts before %q on the line above; keep the file sorted so that two branches adding tests do not collide", path, lineNo, e.key(), prev))
+		}
+		prev = e.key()
+		entries = append(entries, e)
+	}
+	return entries, problems, nil
+}
+
+// checkManifest is the ratchet: the measured inventory must equal the
+// checked-in manifest, entry for entry, classification included.
+//
+// It reports rather than repairs, and it prints the exact lines to add or
+// remove. There is deliberately no flag that rewrites the file: regenerating is
+// the cheapest possible way to make a deletion disappear, and the point of the
+// manifest is that giving a DB test up costs a reviewable diff hunk that names
+// it.
+//
+// manifestPath == "" disables the check. Only run()'s own unit tests use that;
+// main() refuses an empty -gated-set.
+func checkManifest(manifestPath, module string, gated []GatedTest, out io.Writer) ([]string, error) {
+	if manifestPath == "" {
+		return nil, nil
+	}
+
+	want, problems, err := parseManifest(manifestPath)
+	if err != nil {
+		return nil, err
+	}
+
+	got := make([]manifestEntry, 0, len(gated))
+	for _, g := range gated {
+		got = append(got, entryFor(module, g))
+	}
+
+	wantBy := make(map[string]manifestEntry, len(want))
+	for _, e := range want {
+		wantBy[e.key()] = e
+	}
+	gotBy := make(map[string]manifestEntry, len(got))
+	for _, e := range got {
+		gotBy[e.key()] = e
+	}
+
+	var added, removed, reclassified []string
+	for _, e := range got {
+		w, ok := wantBy[e.key()]
+		if !ok {
+			added = append(added, e.String())
+			continue
+		}
+		if strings.Join(w.Extra, ",") != strings.Join(e.Extra, ",") {
+			reclassified = append(reclassified,
+				fmt.Sprintf("%s: manifest says %q, measured %q", e.key(), w.String(), e.String()))
+		}
+	}
+	for _, e := range want {
+		if _, ok := gotBy[e.key()]; !ok {
+			removed = append(removed, e.String())
+		}
+	}
+
+	report(out, "dbtestcov: gated-test manifest %s: %d entries, inventory measured %d\n", manifestPath, len(want), len(got))
+
+	// An empty manifest against an empty inventory agrees with itself, so every
+	// difference below is zero and the gate would pass with nothing measured
+	// and nothing to measure against. This repository cannot legitimately reach
+	// that state — it is the gate for DB-gated tests, and it is only wired up
+	// because there are some — so the degenerate agreement is refused outright
+	// rather than left as the one shape both halves of the check are blind to.
+	if len(want) == 0 {
+		problems = append(problems, fmt.Sprintf(
+			"the gated-test manifest %s lists no test functions. It is the ratchet: an empty one agrees with an empty inventory, "+
+				"so emptying it would make this gate pass while measuring nothing. Restore it, or re-derive it from a %s-free "+
+				"`go test ./... -count=1 -json` run — this command prints every line it expects",
+			manifestPath, dbEnvVar))
+		return problems, nil
+	}
+
+	// The whole manifest missing is not 137 separate deletions, it is one
+	// inventory that stopped enumerating — by far the likeliest cause, and the
+	// failure -min-gated was originally written for. Say that instead of
+	// printing the file back.
+	if len(got) == 0 && len(want) > 0 {
+		problems = append(problems, fmt.Sprintf(
+			"the inventory %s holds NO %s-gated test functions while the manifest %s lists %d, so the inventory run is not measuring what it should. "+
+				"The usual cause is %s being set for the run that produced it: everything then PASSes instead of SKIPping and every check here passes vacuously. "+
+				"Re-take it with `env -u %s go test ./... -count=1 -json`",
+			manifestPath, dbEnvVar, manifestPath, len(want), dbEnvVar, dbEnvVar))
+		return problems, nil
+	}
+
+	if len(removed) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d %s-gated test function(s) are in the manifest %s but were NOT measured — a DB test CI used to run is gone:",
+			len(removed), dbEnvVar, manifestPath)
+		writeCapped(&b, removed)
+		b.WriteString("\n  If that removal is deliberate, delete those exact lines from " + manifestPath +
+			" in this change, so the diff records which coverage was given up. If it is not, the test was renamed, deleted, or its skip message stopped naming " +
+			dbEnvVar + " — check that first.")
+		problems = append(problems, b.String())
+	}
+	if len(added) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d %s-gated test function(s) were measured but are not in the manifest %s. Add these lines, keeping the file sorted:",
+			len(added), dbEnvVar, manifestPath)
+		writeCapped(&b, added)
+		problems = append(problems, b.String())
+	}
+	if len(reclassified) > 0 {
+		var b strings.Builder
+		b.WriteString("a test's extra-environment classification changed, which moves it into or out of the set CI is required to run — the one way to drop a test from the required set without deleting it:")
+		writeCapped(&b, reclassified)
+		b.WriteString("\n  Fix: update those lines in " + manifestPath + " if the change is intended, otherwise restore the skip message.")
+		problems = append(problems, b.String())
+	}
+	return problems, nil
+}
+
+// manifestListCap bounds how many entries an error prints. It is deliberately
+// larger than the manifest itself: the one case that differs by hundreds is the
+// vacuous inventory, which is diagnosed separately above, so every other
+// difference is a real edit whose every line the author needs to see. The cap
+// exists only so that a pathological input cannot flood the CI log.
+const manifestListCap = 500
+
+func writeCapped(b *strings.Builder, lines []string) {
+	for i, s := range lines {
+		if i == manifestListCap {
+			fmt.Fprintf(b, "\n    ... and %d more", len(lines)-manifestListCap)
+			break
+		}
+		fmt.Fprintf(b, "\n    %s", s)
+	}
+}
+
 // ---------------------------------------------------------------- inventory
 
 type testEvent struct {
@@ -419,7 +703,8 @@ func ParseInventory(r io.Reader) ([]GatedTest, error) {
 		var ev testEvent
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			// A build failure prints plain text on the same stream; skip it
-			// here — an empty inventory is caught by the -min-gated floor.
+			// here — an inventory that lost a package is caught by the manifest
+			// check, which names every entry that went missing.
 			continue
 		}
 		if ev.Test == "" || strings.Contains(ev.Test, "/") {
@@ -523,8 +808,8 @@ var envReadFuncs = map[string]bool{
 //
 // It has to be robust rather than merely present, because silencing the gate
 // must not be cheaper than complying with it. Every one of these shapes used to
-// be invisible, all of them leaving the gated count unchanged — so no
-// -min-gated floor could ever have caught them:
+// be invisible, all of them leaving the gated count unchanged — and leaving
+// the manifest unchanged with it — so no ratchet could ever have caught them:
 //
 //	if !haveDB() { t.Skip("no db") }         // the env read is in a helper
 //	os.LookupEnv(dbEnvVar)                   // not os.Getenv

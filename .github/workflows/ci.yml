@@ -2223,6 +2223,97 @@ jobs:
           ! grep -q -- '--- SKIP' lock_events_slug.log \
             || { echo "::error::an aihub#343 slug test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#130: markdown→HTML rendering moved off the write path onto a
+      # bounded background pool. The three tests below are the only evidence
+      # that it actually did, and each one exists because the obvious assertion
+      # does not work here.
+      #
+      # The obvious assertion is "save an artifact, then check rendered_html is
+      # non-empty". It passes on the old synchronous code, on the new
+      # asynchronous code, and on a build where the background pool has been
+      # deleted outright — because the viewer LAZY-RENDERS whenever the column
+      # is NULL (aihub#81/#146), so reading the value is what produces it. A
+      # green suite would have meant nothing.
+      #
+      # So the three separate the producers instead of counting the output:
+      #   _WritePathReturnsWithNothingRendered  holds a render OPEN and reads
+      #       the row while no render can have finished. On the pre-#130 code
+      #       Remember blocks inside goldmark and never returns.
+      #   _BackgroundWorkerFillsRenderedHTML    same gate, then releases it and
+      #       waits (bounded, fails on deadline) for NULL → real goldmark output.
+      #       The NULL-first half is what attributes the value to the worker.
+      #   _DroppedRenderLeavesNullForLazyFallback  disables the producer (error,
+      #       then panic) and asserts the save still succeeds, the column stays
+      #       NULL — the state the fallback serves from — and the drop is
+      #       COUNTED, since "NULL" is also what a job that was never enqueued
+      #       looks like. Its panic arm is a gate on runRenderJob's recover(),
+      #       and on a stronger property than it first appears: an unrecovered
+      #       panic in a goroutine terminates the PROCESS, so without that
+      #       recover one malformed artifact takes the server down.
+      #
+      # The `^TestDeferredRender_` regex also picks up
+      # _QueueFullShedsInsteadOfBlocking, which needs no database and therefore
+      # already ran in "Unit tests". It is left in rather than excluded: it
+      # covers the BOUND (at capacity the queue sheds instead of blocking the
+      # writer, which would be the synchronous path by the back door), it costs
+      # milliseconds, and a regex that has to enumerate exclusions rots.
+      #
+      # Named individually rather than by a prefix regex alone for the reason
+      # every step in this job does it: `go test` prints ok and exits 0 when
+      # every selected test SKIPs, and the DB ones SKIP whenever AIHUB_TEST_DB
+      # is empty. The SKIP check below is the second half of that guard.
+      - name: aihub#130 deferred markdown render DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestDeferredRender_' -count=1 -v 2>&1 | tee deferred_render.log
+          for want in 'TestDeferredRender_WritePathReturnsWithNothingRendered' \
+                      'TestDeferredRender_BackgroundWorkerFillsRenderedHTML' \
+                      'TestDeferredRender_DroppedRenderLeavesNullForLazyFallback' \
+                      'TestDeferredRender_DroppedRenderLeavesNullForLazyFallback/render_error' \
+                      'TestDeferredRender_DroppedRenderLeavesNullForLazyFallback/render_panic_does_not_take_the_worker_pool_down'; do
+            grep -q -- "--- PASS: $want " deferred_render.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); nothing then distinguishes a save that skipped rendering from one that rendered synchronously — the lazy fallback satisfies every other assertion about rendered_html"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' deferred_render.log \
+            || { echo "::error::an aihub#130 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+          # The read half of the same argument, and the reason this work item had
+          # to touch routes_artifacts.go at all. A dropped render is only
+          # survivable because every read path re-derives the HTML from content
+          # when rendered_html is NULL — and /share did not: it gated on
+          # `rendered_html != nil` and answered 404 otherwise, with a
+          # TODO(aihub#81) admitting it. Under deferred rendering that would have
+          # made a dropped render a permanently unreachable artifact on that one
+          # route, and "share the spec you just wrote" a race against the worker.
+          #
+          # No database: these drive the handlers through the loadMemoryFn /
+          # setMemoryVisibilityFn seams, so they also run in the "Unit tests"
+          # step. They are named here because they are half of one acceptance
+          # argument with the DB tests above, and a reader who deletes that step
+          # should see what else goes with it.
+          #
+          # The two _StillNotFound / _412Still arms are negative controls: they
+          # are what separates "the gate was relaxed" from "the gate was deleted".
+          go test ./internal/server/ -run '^TestSharedArtifact_|^TestShareArtifact_Publishes|^TestShareArtifact_412Still|^TestArtifactBody_UIv1Share|^TestUIArtifactHTML_(NothingToShare|UnrenderedButShareable)' -count=1 -v 2>&1 | tee deferred_render_share.log
+          for want in 'TestSharedArtifact_LazyRenders_WhenDeferredRenderHasNotLanded' \
+                      'TestSharedArtifact_StillNotFoundWithNothingToServe' \
+                      'TestShareArtifact_PublishesArtifactWhoseRenderHasNotLanded' \
+                      'TestShareArtifact_412StillReachableWithNothingToRender' \
+                      'TestArtifactBody_UIv1ShareAgreeOnTheLazyRender' \
+                      'TestUIArtifactHTML_NothingToShare_NoShareControl' \
+                      'TestUIArtifactHTML_UnrenderedButShareable_HasShareControl'; do
+            grep -q -- "--- PASS: $want " deferred_render_share.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); /share may again 404 an artifact whose deferred render was dropped"; exit 1; }
+          done
+          # These need no database today, so nothing here can SKIP for want of
+          # one. The guard is kept anyway, and dbtestcov requires it: the day
+          # somebody gives one of them a DB-gated seed, its silent SKIP would
+          # otherwise be indistinguishable from a pass.
+          ! grep -q -- '--- SKIP' deferred_render_share.log \
+            || { echo "::error::an aihub#130 /share test SKIPped; it is not actually executing"; exit 1; }
+
       - name: Launcher update-check regression suite
         run: bash plugins/polyforge/tests/launcher-update-check.test.sh
 

@@ -872,8 +872,14 @@ jobs:
       # UPDATE (aihub#305, second half): launcher-visibility.test.sh is wired
       # below as well. It is hermetic — the thing it gates is what the launcher
       # SAYS when a download fails, which needs no real network, only a failing
-      # one. So the unwired list above is now: launcher-bash32, pf-commit-guard,
-      # pf-repo-sync, pf-seam-check, pf-skill-router.
+      # one.
+      # UPDATE (aihub#272): pf-commit-guard.test.sh is wired below as well —
+      # hermetic (python3 + `git init` under mktemp). It was the worst one to
+      # leave advisory: the guard it covers is the ONLY enforcement of the
+      # <undercover> rule, it is a PreToolUse hook so no Go test reaches it, and
+      # the defect aihub#272 fixed had been live since the guard shipped. So the
+      # unwired list above is now: launcher-bash32, pf-repo-sync, pf-seam-check,
+      # pf-skill-router.
       # aihub#249: GET /v1/memories previously parsed only `top_k` (a `?limit=N`
       # caller was silently ignored) and RecallResponse carried no `total`; and
       # GET /v1/memories/:id did not exist at all. These run against the
@@ -2305,6 +2311,50 @@ jobs:
           [ "${n:-0}" -ge 22 ] \
             || { echo "::error::only $n PASS lines from using-polyforge-manifest.test.sh, floor is 22 — checks have gone missing"; exit 1; }
           echo "using-polyforge manifest gate: $n checks passed"
+
+      # aihub#272 closes half of the aihub#254 gap: pf-commit-guard.test.sh has
+      # existed since the guard did and has never run in CI, so every assertion in
+      # it was advisory — it turned red only when somebody remembered to invoke
+      # it by hand. The guard is the only mechanism behind the <undercover> rule
+      # and it is a PreToolUse hook, so `go test` cannot see it either. Wiring it
+      # in costs one hermetic step: the suite shells out to python3 and git and
+      # builds its fixtures under mktemp — no docker, no network, no database.
+      #
+      # The named checks below are the two-sided acceptance criterion of
+      # aihub#272, one from each half. Asserting only the "still blocks" side
+      # would stay green under a fix that just widened the allow-list, and
+      # asserting only the "audit passes" side would stay green under a fix that
+      # deleted the matcher. Neither half proves the change on its own, so both
+      # are named here rather than left to the PASS-count floor.
+      - name: aihub#272 commit-guard gate
+        run: |
+          set -o pipefail
+          bash plugins/polyforge/tests/pf-commit-guard.test.sh 2>&1 | tee commit_guard.log
+          for want in "PASS: blocks git commit -m carries a trailer" \
+                      "PASS: blocks message assembled in a shell variable" \
+                      "PASS: blocks heredoc message on stdin" \
+                      "PASS: blocks git commit -F <file> with attribution" \
+                      "PASS: blocks git commit -F <file> written by the same command" \
+                      "PASS: allows audit: loop over commits and grep each" \
+                      "PASS: allows audit: gh pr view body | grep" \
+                      "PASS: allows audit: path segment .claude-plugin in a log command" \
+                      "PASS: allows legal name: Siteboon AI B.V." \
+                      "PASS: allows technical prose: AI gateway" \
+                      "PASS: blocks bare AI in a trailer block" \
+                      "PASS: blocks standalone AI" \
+                      "ALL PASS"; do
+            grep -qF -- "$want" commit_guard.log \
+              || { echo "::error::pf-commit-guard.test.sh did not report '$want' — the commit-guard gate is not actually executing"; exit 1; }
+          done
+          # The suite short-circuits to exit 0 when python3 or the executable bit
+          # is missing, so the exit code alone cannot tell "all checks passed"
+          # from "no check ran".
+          ! grep -q '^SKIP:' commit_guard.log \
+            || { echo "::error::pf-commit-guard.test.sh SKIPped (python3 missing on the runner?) — it exits 0 in that case, so this step would otherwise be a green no-op"; exit 1; }
+          n=$(grep -c '^  PASS: ' commit_guard.log || true)
+          [ "${n:-0}" -ge 90 ] \
+            || { echo "::error::only $n PASS lines from pf-commit-guard.test.sh, floor is 90 — checks have gone missing"; exit 1; }
+          echo "commit-guard gate: $n checks passed"
 
   publish-schemas:
     name: Publish MCP Schemas

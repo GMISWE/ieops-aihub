@@ -8,7 +8,8 @@
 ## Bracket every step
 
 **No `pf_get_step` before `pf_update_step`** — the bracket needs no version number and the server
-guards concurrency itself. Start the FIRST step, then complete-and-advance:
+guards concurrency itself. Do call it for prior-step context (`completed_steps`). Start the FIRST
+step, then complete-and-advance:
 
 ```
 sa_id = new_ulid()
@@ -17,7 +18,7 @@ pf_update_step(work_item_id=<current>, step_id=<first step>, status="in_progress
 next_sa = new_ulid()
 pf_update_step(work_item_id=<current>, step_id=<this step>, status="completed",
                step_attempt_id=sa_id,
-               artifact_summary="<one sentence, status only, <=4096 chars>",
+               artifact_summary="<[structured line] status sentence, <=4096 chars>",
                next_step=<next step>, next_step_attempt_id=next_sa)   # starts the next one
 sa_id = next_sa
 ```
@@ -26,7 +27,8 @@ sa_id = next_sa
   step and on `failed` (rejected there, not ignored). ⚠️ If `pf_update_step` does not publish it
   the binary is older — read the on-demand file, that fallback has a trap.
 - `step_id` is the scenario `## Step:` name; unvalidated, so a typo is silent.
-- `artifact_summary` is status only — never diff / plan / code / artifact content.
+- `artifact_summary`: status only (no diff / plan / code); it may lead with one structured line —
+  `pr=<owner/repo>#<number> base=<branch>` or `Pattern <A|B>:`.
 - Long steps: add `heartbeat=true` to an `in_progress` call every ~5 min.
 
 ## Ownership
@@ -36,8 +38,8 @@ claim / locks / `pf_update_step` / `pf_save_artifact` / commit / push / PR / wra
 rule is about skipping claim / step / artifact / wrap. **Execute boundary (D6)**: let superpowers
 run its implementation loop but **stop before `superpowers:finishing-a-development-branch`**.
 
-**`.pf_*` hygiene**: never stage `.pf_meta.json` / `.pf_steps.json` — write them outside the
-worktree, `git checkout HEAD --` them, or use `pf_commit(paths=[...])`.
+**`.pf_*` hygiene**: never stage `.pf_meta.json` (the only file the engine writes) — `git
+checkout HEAD --` it, or use `pf_commit(paths=[...])`.
 
 ## Execute step only: `pf_acquire_locks(work_item_id=<current>)` BEFORE the loop
 

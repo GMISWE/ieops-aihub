@@ -100,13 +100,24 @@ const (
 // (skills/**/references/, reached by a `📄 Read …` pointer in the resident fragment).
 //
 // ⚠️ `native` is the binding branch and it is nearly full: ~150 characters of resident headroom
-// under its own gate, and ~500 of worst-case headroom under the harness limit — against the
-// ~3,000 the superpowers branch enjoys. A third `📄` pointer alone costs 125 of the worst case
-// (see routerAssumedRootLen). So the next contributor who needs to add a paragraph to a
-// native-branch fragment must RE-TIER something out to skills/**/references/, not re-budget.
+// under its own gate and ~200 of worst-case headroom under the harness limit, against the ~2,850
+// the superpowers branch enjoys. Two ceilings bind before this map does, and neither can be
+// bought off by raising a number here:
+//
+//   - normLen must stay under ~9,600, or gate+slack+2 pointers crosses 10,000 and the worst-case
+//     assertion below fires whatever is written here;
+//   - normLen must stay under ~9,460, or TestRoutedSkillHook_SizeGateDiscriminates degrades on
+//     its own +400-character probe (the probe renders from a copy under an ~85-char TMPDIR path)
+//     and control 5a stops being able to measure the gate at all. aihub#353 hit exactly that:
+//     the native branch reached 9,523 and the control went red before this ratchet did.
+//
+// A third `📄` pointer alone costs a further 125 of the worst case (see routerAssumedRootLen), so
+// deferred sections are reached by a section reference (`§0e`) through an EXISTING pointer. The
+// next contributor who needs to add a paragraph to a native-branch fragment must RE-TIER
+// something out to skills/**/references/, not re-budget.
 var routerBudget = map[string]int{
-	"pf-execute/superpowers": 6803 + routerGateSlack,
-	"pf-execute/native":      9256 + routerGateSlack,
+	"pf-execute/superpowers": 6996 + routerGateSlack,
+	"pf-execute/native":      9391 + routerGateSlack,
 }
 
 // routerBranches are the engine branches the router can select. The gate measures every one:

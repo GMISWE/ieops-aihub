@@ -621,12 +621,18 @@ type sideRailMeta struct {
 // those predicates' inputs from a MemoryVersionRef instead of from a freshly
 // loaded 26-column row.
 //
-// Not the only copy in the package, though: ui_handlers_wi.go hand-inlines the
-// visibility half of the rule for the artifact HEADS it lists, and — separately
-// and still open — hands the whole unfiltered lineage to wi_detail.html.tmpl,
-// so /ui/wi/:id discloses lineage members the caller may not see. That is the
-// same aihub#248 W1 class this rail was fixed for; it predates aihub#253, which
-// only makes it a one-call fix by putting the scalars on the row.
+// Two callers now, not one. ui_handlers_wi.go's fetchArtifactLinks used to hand
+// the whole unfiltered lineage to wi_detail.html.tmpl, so /ui/wi/:id disclosed
+// the id, timestamp and status of lineage members the caller may not see — the
+// same aihub#248 W1 class this rail was fixed for, in a second file. It now
+// calls this function too, gated by
+// TestWIDetailVersionRail_OmitsLineageMembersTheCallerCannotSee. Adding a THIRD
+// renderer of a lineage means calling this, not re-deriving the rule.
+//
+// Still hand-inlined there: the visibility half of the rule for the artifact
+// HEADS fetchArtifactLinks lists (ui_handlers_wi.go, the `m.Visibility ==
+// "private"` guard). That one is defence in depth behind Recall's own filter,
+// not the sole gate, so it is a duplication rather than a hole.
 //
 // The partial *domain.Memory is the one sharp edge. memoryVisibleTo reads
 // Visibility and AuthorUserID and nothing else today, so every field it

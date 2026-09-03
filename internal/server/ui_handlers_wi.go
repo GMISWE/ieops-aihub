@@ -1251,9 +1251,30 @@ func fetchArtifactLinks(ctx context.Context, pool *pgxpool.Pool, u *UserContext,
 					continue
 				}
 				seen[headID] = true
+				// aihub#253: filter before rendering, exactly as the artifact
+				// page does at routes_artifacts.go:481.
+				//
+				// MemoryVersionChain returns every member of the lineage without
+				// consulting the caller, and wi_detail.html.tmpl renders each
+				// member's id (inside the View link), date and status. Assigning
+				// the raw chain therefore disclosed the existence, timestamp and
+				// status of versions this caller may not see — another author's
+				// `private`, or a member that lives in a project they are not in.
+				// Confirmed at the handler level, not inferred.
+				//
+				// The head is always kept: it is the row Recall just returned to
+				// this caller, so its visibility is already established, and
+				// dropping it would empty the rail for a legitimate reader.
+				visible := make([]domain.MemoryVersionRef, 0, len(versions))
+				for _, v := range versions {
+					if v.ID != m.ID && !versionRefVisibleTo(u, v) {
+						continue
+					}
+					visible = append(visible, v)
+				}
 				// Display newest-first (review feedback): reverse the
 				// oldest->newest chain so the current version sits on top.
-				link.Versions = reverseVersionRefs(versions)
+				link.Versions = reverseVersionRefs(visible)
 			}
 		}
 		out = append(out, link)

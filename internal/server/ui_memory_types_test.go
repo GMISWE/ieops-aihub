@@ -106,21 +106,33 @@ func TestUIMemories_PipeFreeTypeReachesTheRecall(t *testing.T) {
 // TestParseRecallTypes covers the helper both surfaces now share.
 func TestParseRecallTypes(t *testing.T) {
 	for _, tc := range []struct {
-		raw      string
-		wantType []string
-		wantBad  string
+		raw       string
+		wantType  []string
+		wantBad   string
+		wantEmpty bool
 	}{
-		{"", nil, ""},
-		{"rule.work", []string{"rule.work"}, ""},
-		{"rule.work,experience.*", []string{"rule.work", "experience.*"}, ""},
-		{"a|b", nil, "a|b"},
-		{"rule.work,a|b", nil, "a|b"},
-		{"a|b,c|d", nil, "a|b"},
+		{"", nil, "", false},
+		{"rule.work", []string{"rule.work"}, "", false},
+		{"rule.work,experience.*", []string{"rule.work", "experience.*"}, "", false},
+		{"a|b", nil, "a|b", false},
+		{"rule.work,a|b", nil, "a|b", false},
+		{"a|b,c|d", nil, "a|b", false},
+		// aihub#340: entries are trimmed now, so the spelling a human writes
+		// works instead of silently matching nothing on its second entry.
+		{"rule.work, experience.*", []string{"rule.work", "experience.*"}, "", false},
+		// 🔴 "sent, but names nothing" is its own outcome and must not collapse
+		// into "no filter". It used to reach SQL as IN ('','') and match NOTHING;
+		// trimming empties would otherwise turn it into the UNFILTERED stream,
+		// which is the same silence pointing the other way.
+		{",", nil, "", true},
+		{" , , ", nil, "", true},
+		{"   ", nil, "", false}, // all whitespace is "not sent"
 	} {
-		types, bad := parseRecallTypes(tc.raw)
+		types, bad, empty := parseRecallTypes(tc.raw)
 		require.Equal(t, tc.wantBad, bad, "raw=%q", tc.raw)
 		require.Equal(t, tc.wantType, types, "raw=%q", tc.raw)
-		if bad != "" {
+		require.Equal(t, tc.wantEmpty, empty, "raw=%q", tc.raw)
+		if bad != "" || empty {
 			require.Nil(t, types,
 				"a rejected filter must not also hand back types — a caller that ignored "+
 					"the error would then run an unguarded query")

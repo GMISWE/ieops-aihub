@@ -629,12 +629,22 @@ func checkRepos(wsRoot string, cfg *config.Config) checkResult {
 // listPageLimit is the page size checkWorktrees asks for, and it is exactly 200
 // rather than "a big number" on purpose.
 //
-// The server's cap fails OPEN. domain.ListWorkItems treats `limit <= 0 || limit
-// > 200` as "unset" and substitutes 50 (aihub#267), so the two intuitive ways to
-// write this — omit limit, or ask for 1000 — are the same wrong answer, and both
-// return a full-looking page. Measured against production 2026-08-31 on a
-// project with 127 open items: limit absent → 50, limit=50 → 50, limit=200 →
-// 127, limit=500 → 50.
+// 200 is the server's CEILING, and asking for exactly the ceiling is the only
+// spelling that is right both before and after aihub#267 changed what happens
+// above it.
+//
+// ⚠️ The reason recorded here was "the server's cap fails OPEN": ListWorkItems
+// treated `limit <= 0 || limit > 200` as unset and substituted 50, so omitting
+// limit and asking for 1000 were the same wrong answer and both returned a
+// full-looking page. Measured against production 2026-08-31 on a project with
+// 127 open items: limit absent → 50, limit=50 → 50, limit=200 → 127,
+// limit=500 → 50.
+//
+// That is HISTORY as of aihub#267, not current behaviour. `limit=500` is now
+// served as 200 and says so in `request_adjusted`, and a non-integer limit is a
+// 400 rather than a silent 50. The constant does not change — 200 is still the
+// most this endpoint will give — but do not re-derive anything from the old
+// failure mode.
 const listPageLimit = 200
 
 // listPageBudget bounds the cursor walk so a server that keeps handing back a

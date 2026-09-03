@@ -145,8 +145,9 @@ func listWorkItemsSchema() json.RawMessage {
 		"query": prop("string", "Semantic search over goal+content (aihub#273): "+
 			"embedding cosine when the server has a provider, ILIKE fallback otherwise. "+
 			"Results are similarity-ordered; not combinable with sort/order/cursor."),
-		"limit": prop("string", "Max items to return. A JSON number is also accepted "+
-			"(and is what most callers send); values above 200 fall back to the default of 50."),
+		"limit": prop("string", "Max items to return (default 50, ceiling 200). A JSON number "+
+			"is also accepted, and is what most callers send. A value above 200 is served as 200 "+
+			"and reported in `request_adjusted`; a value that is not an integer is rejected with 400."),
 		"cursor": prop("string", "Pagination cursor. Carries the value of the column named by `sort`, "+
 			"so pass it back unchanged and do not mix cursors between different sort orders."),
 		// The enums come from the server's enforced sets (aihub#224) rather than

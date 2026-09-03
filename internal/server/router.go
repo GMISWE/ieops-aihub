@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -229,25 +228,6 @@ func handleCreateWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 	}
 }
 
-// parseListWIBool reads a boolean query param for GET /v1/work_items. It returns
-// (value, true) for an absent param or a recognised spelling, and (false, false)
-// for anything else so the caller can reject it.
-//
-// strconv.ParseBool's set is used rather than a hand-rolled `== "true"` so the
-// spellings a caller is likely to try (True, TRUE, T, 1, 0, f) are all either
-// honoured or refused — never silently read as false (aihub#280).
-func parseListWIBool(c echo.Context, name string) (value, ok bool) {
-	raw := strings.TrimSpace(c.QueryParam(name))
-	if raw == "" {
-		return false, true
-	}
-	b, err := strconv.ParseBool(raw)
-	if err != nil {
-		return false, false
-	}
-	return b, true
-}
-
 // trimmedParam reads a query param with surrounding whitespace removed.
 //
 // Every scalar filter on GET /v1/work_items goes through this, because a
@@ -258,24 +238,6 @@ func trimmedParam(c echo.Context, name string) string {
 	return strings.TrimSpace(c.QueryParam(name))
 }
 
-// splitCSVParam splits a comma-separated query param, trimming each entry and
-// dropping empties.
-//
-// Trimming is load-bearing, not tidiness: `ids=wi_a, wi_b` is the form a human
-// or an agent writes, and an untrimmed " wi_b" matches no row while looking like
-// a working filter — the same silent-miss this wi exists to close. /ui already
-// trims its equivalents (ui_handlers_wi.go); this endpoint did not (aihub#280).
-func splitCSVParam(raw string) []string {
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 // handleListWorkItems handles GET /v1/work_items.
 func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
@@ -284,10 +246,10 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		defer cancel()
 
 		project := c.QueryParam("project")
-		ids := splitCSVParam(c.QueryParam("ids"))
+		ids := queryCSV(c, "ids")
 
 		filter := domain.ListWorkItemsFilter{
-			Limit: 50,
+			Limit: domain.ListWorkItemsLimitDefault,
 		}
 
 		// aihub#280: an ids= lookup no longer requires project=.
@@ -370,9 +332,15 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 			}
 		}
 
-		if status := c.QueryParam("status"); status != "" {
-			filter.Status = splitCSVParam(status) // supports "running,paused,queued"
+		// `status` supports "running,paused,queued". Every entry must be one of
+		// the seven the work_items CHECK constraint allows (aihub#255); an
+		// unknown one is Rule 1 malformed, and the allowlist is also what bounds
+		// the list — see queryEnumCSV.
+		statuses, statusErr := queryEnumCSV(c, "status", domain.WorkItemStatusValues())
+		if statusErr != nil {
+			return writeError(c, statusErr)
 		}
+		filter.Status = statuses
 		// `kind` is a deprecated spelling of `wi_type`. It is kept rather than
 		// removed because the MCP schema published it first and /ui still reads
 		// `kind` (and only `kind`) for what it folds onto filter.WIType
@@ -427,36 +395,39 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		// The distinction matters in the dangerous direction: a created_at filter
 		// is silently UNDER-inclusive, and a caller cannot tell a short list from
 		// a complete one.
-		if since := trimmedParam(c, "since"); since != "" {
-			ts, parseErr := time.Parse(time.RFC3339, since)
-			if parseErr != nil {
-				return writeError(c, domain.NewErr(domain.ErrBadRequest,
-					fmt.Sprintf("since must be an RFC3339 timestamp, got %q", since)))
-			}
-			filter.Since = &ts
+		since, sincePresent, sinceErr := queryRFC3339(c, "since")
+		if sinceErr != nil {
+			return writeError(c, sinceErr)
+		}
+		if sincePresent {
+			filter.Since = &since
 		}
 		// Booleans are rejected rather than coerced, for the same reason `since`
 		// is: `ready_only=True` or `ready_only=yes` silently meaning false is the
 		// defect class this whole wi is about, and it would be indistinguishable
 		// from not sending the param at all (aihub#280).
-		if b, ok := parseListWIBool(c, "ready_only"); !ok {
-			return writeError(c, domain.NewErr(domain.ErrBadRequest,
-				fmt.Sprintf("ready_only must be true or false, got %q", c.QueryParam("ready_only"))))
-		} else {
-			filter.ReadyOnly = b
+		readyOnly, _, readyErr := queryBool(c, "ready_only")
+		if readyErr != nil {
+			return writeError(c, readyErr)
 		}
-		if b, ok := parseListWIBool(c, "include_step_state"); !ok {
-			return writeError(c, domain.NewErr(domain.ErrBadRequest,
-				fmt.Sprintf("include_step_state must be true or false, got %q", c.QueryParam("include_step_state"))))
-		} else {
-			filter.IncludeStepState = b
+		filter.ReadyOnly = readyOnly
+		includeStepState, _, stepErr := queryBool(c, "include_step_state")
+		if stepErr != nil {
+			return writeError(c, stepErr)
 		}
-		if limit := c.QueryParam("limit"); limit != "" {
-			var n int
-			fmt.Sscanf(limit, "%d", &n) //nolint:errcheck // parse error -> n stays 0 -> default kicks in
-			if n > 0 {
-				filter.Limit = n
-			}
+		filter.IncludeStepState = includeStepState
+		// The parsed value is forwarded WHATEVER it is, including 0 and
+		// negatives, so the bound and its disclosure live in one place
+		// (domain.NormalizeListWorkItemsLimit). The old `if n > 0` guard here
+		// meant `limit=-5` reached the domain as 50 and was reported as no
+		// adjustment at all — a second, invisible clamp upstream of the real one,
+		// which is precisely the shape aihub#309 shipped on the recall side.
+		limit, limitPresent, limitErr := queryInt(c, "limit")
+		if limitErr != nil {
+			return writeError(c, limitErr)
+		}
+		if limitPresent {
+			filter.Limit = limit
 		}
 		if cursor := c.QueryParam("cursor"); cursor != "" {
 			filter.Cursor = &cursor
@@ -745,13 +716,10 @@ func handleGetReadyQueue(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		max := 10
-		if m := c.QueryParam("max"); m != "" {
-			var n int
-			fmt.Sscanf(m, "%d", &n) //nolint:errcheck // parse error -> n stays 0 -> default kicks in
-			if n > 0 {
-				max = n
-			}
+		// Forwarded as sent; GetReadyQueue owns the default and the ceiling.
+		max, _, maxErr := queryInt(c, "max")
+		if maxErr != nil {
+			return writeError(c, maxErr)
 		}
 		result, aihubErr := domain.GetReadyQueue(ctx, pool, project, max)
 		if aihubErr != nil {

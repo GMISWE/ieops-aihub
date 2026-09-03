@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"html/template"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -242,27 +243,12 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			WorkItemID:        c.QueryParam("wi"),
 		}
 
-		// Strength filter — default 0.3, clamp to non-negative.
-		if raw := c.QueryParam("strength_min"); raw != "" {
-			if f, err := strconv.ParseFloat(raw, 64); err == nil && f >= 0 {
-				data.StrengthMin = f
-			} else {
-				data.StrengthMin = 0.3
-			}
-		} else {
-			data.StrengthMin = 0.3
-		}
+		// Strength filter — default 0.3, non-negative and otherwise unbounded,
+		// matching GET /v1/memories' min_strength. Lenient because this is /ui.
+		data.StrengthMin = queryFloatLenientUI(c, "strength_min", 0, math.Inf(1), 0.3)
 
 		// Limit — default 50, max 200.
-		data.Limit = 50
-		if raw := c.QueryParam("limit"); raw != "" {
-			if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-				if n > 200 {
-					n = 200
-				}
-				data.Limit = n
-			}
-		}
+		data.Limit = queryIntLenientUI(c, "limit", 50, 200)
 
 		// Build filter-query string for "self link" pagination / detail back-link.
 		data.FilterQuery = buildMemFilterQuery(project, data.Type, data.StrengthMin, data.Query, data.WorkItemID, data.Limit)
@@ -302,7 +288,7 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			CallerRole:   u.Role,
 		}
 		if data.Type != "" {
-			types, badPipe := parseRecallTypes(data.Type)
+			types, badPipe, _ := parseRecallTypes(data.Type)
 			if badPipe != "" {
 				// Same explanation the API's 400 carries, and no recall is run: an empty
 				// list plus no message is precisely the failure being fixed. The typed

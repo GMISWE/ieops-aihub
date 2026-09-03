@@ -171,10 +171,31 @@ func TestHandleRecall_SimilarityThresholdIsReachable(t *testing.T) {
 			"item %d differs between no threshold and threshold=0", i)
 	}
 
-	// A malformed value must not become a silent filter. ParseFloat fails, the
-	// field stays 0, the floor stays off.
-	garbage := recallWithParams(t, pool, uc, project, "similarity_threshold=notanumber")
-	require.Len(t, garbage.Items, seeded, "an unparseable threshold must leave the filter off, not empty the page")
+	// ── REPLACED by aihub#340, not deleted ──────────────────────────────────
+	//
+	// This assertion used to pin the pre-aihub#340 behaviour: ParseFloat fails,
+	// the field stays 0, the floor stays off. aihub#340 filed that as the defect
+	// rather than the contract, and it is right — 0 is the value that MEANS "off",
+	// so an unparseable threshold was indistinguishable from a caller who
+	// deliberately disabled the filter, and from one who never set it. The caller
+	// got an unfiltered page believing it was filtered.
+	//
+	// It is replaced rather than removed because the question it asks is still the
+	// right one; only the answer changed.
+	c, rec := newRecallRequest(t, "project="+project+"&query=probe&similarity_threshold=notanumber", uc)
+	require.NoError(t, handleRecall(pool)(c))
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"an unparseable threshold is rejected, not silently read as 'filter off' (aihub#340)")
+	require.Contains(t, rec.Body.String(), "similarity_threshold")
+	require.Contains(t, rec.Body.String(), "notanumber")
+
+	// Out of range is the same class and gets the same answer: a cosine floor
+	// above 1 can never match, and a negative one is read by the domain as off.
+	for _, bad := range []string{"similarity_threshold=5", "similarity_threshold=-1"} {
+		c, rec := newRecallRequest(t, "project="+project+"&query=probe&"+bad, uc)
+		require.NoError(t, handleRecall(pool)(c))
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%s must be rejected", bad)
+	}
 }
 
 // TestHandleRecall_SimilarityThresholdFiltersTotal is aihub#148 acceptance 3.

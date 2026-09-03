@@ -969,16 +969,6 @@ details.card[open] > summary.hd .chev { transform: rotate(45deg); }
 .pell { color: var(--text-subtle); font-size: 12px; padding: 0 2px; }
 .grp-wrap:last-child .row:last-child { border-bottom: 0; }
 
-/* drag handle + dragging state for the reorderable status dropdown rows
-   (round-3 #3). The grip is a purely presentational two-line affordance. */
-.dd-grip {
-  width: 8px; height: 10px; flex: none; cursor: grab; opacity: .55;
-  background-image: linear-gradient(var(--text-subtle) 1.5px, transparent 1.5px);
-  background-size: 100% 4px; background-position: 0 1px; background-repeat: repeat-y;
-}
-.dd-it[draggable="true"] { cursor: grab; }
-.dd-it.dragging { opacity: .5; background: var(--surface-2); }
-
 /* memory cards */
 .mcard {
   border: 1px solid var(--border); border-radius: var(--r-lg);

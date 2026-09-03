@@ -1,15 +1,16 @@
 // dropdown.js — custom dropdowns, segmented filters, and client-side search for
 // the polyforge /ui work-item list.
 //
-// Filtering is HTMX-driven and IN PLACE. The custom dropdowns and the
-// All/Mine segmented control DO NOT navigate: they write their value into the
-// shared filter <form> (the project switcher into a hidden field; the status
-// multi-select into one hidden <input name="status"> per checked box) and then
-// fire a single `pf-filter` event on the form. The form carries hx-get +
-// hx-target="#wi-list-body" + hx-include="this", so each request swaps just the
-// list body while carrying the COMPLETE current param set. This is what makes a
-// status toggle auto-apply (problem #2) and a project switch preserve the status
-// filter (problem #1) — the statuses ride along as form inputs on every request.
+// Filtering is HTMX-driven and IN PLACE. The project switcher and the "me"
+// toggle DO NOT navigate: they write their value into the shared filter <form>
+// (the switcher into a hidden field, the toggle via htmx:configRequest below)
+// and then fire a single `pf-filter` event on the form. The form carries hx-get
+// + hx-target="#wi-list-body" + hx-include="this", so each request swaps just
+// the list body while carrying the COMPLETE current param set — which is what
+// makes a project switch preserve the selected segment and the owner scope.
+//
+// Status is NOT a dropdown any more: since the aihub#185 redesign it is the
+// LCRS segment sidebar, rendered server-side inside #wi-list-body.
 //
 // Search is purely client-side: it shows/hides already-rendered rows by text
 // match. There is no server-side text search in the domain, so this is an
@@ -30,7 +31,7 @@
     return document.querySelector("[data-wi-filters], [data-mem-filters]");
   }
 
-  // Fire the form's hx-get in place. Debounced so a burst of checkbox toggles
+  // Fire the form's hx-get in place. Debounced so a burst of control changes
   // collapses into one request. HTMX listens for `pf-filter` (see the form's
   // hx-trigger) and includes the whole form (hx-include="this").
   var fireTimer = null;
@@ -54,22 +55,6 @@
     return document.querySelector('[data-dd-input="' + field + '"]');
   }
 
-  // Rebuild the per-status hidden inputs inside [data-status-params] so the
-  // form carries exactly one <input name="status"> per currently-checked box.
-  // This is the multi-status param set that travels with EVERY request.
-  function syncStatusParams(values) {
-    var box = document.querySelector("[data-status-params]");
-    if (!box) return;
-    box.textContent = "";
-    values.forEach(function (v) {
-      var inp = document.createElement("input");
-      inp.type = "hidden";
-      inp.name = "status";
-      inp.value = v;
-      box.appendChild(inp);
-    });
-  }
-
   // Close every open menu.
   function closeAllMenus(except) {
     document.querySelectorAll("[data-dd]").forEach(function (dd) {
@@ -81,9 +66,17 @@
 
   // ---- custom dropdowns (.dd) ---------------------------------------------
 
-  // Single-select dropdown (the project switcher): choosing an item writes the
-  // hidden field and fires the shared in-place filter request. Because the
-  // status params already live on the form, switching project preserves them.
+  // Single-select dropdown — the only dropdown kind left. It backs the wi-list
+  // project switcher and all four of the memories page's ([data-dd] x4:
+  // project, type, sort, per-page). Choosing an item writes the hidden field
+  // named by data-dd-field and fires the shared in-place filter request; an
+  // item with NO data-dd-field (memories' sort / per-page) just relabels and
+  // closes, and memories.js handles it from there.
+  //
+  // On the wi list the segment and owner scope ride along on the form (see
+  // htmx:configRequest below), so switching project preserves them. The
+  // memories form ([data-mem-filters]) matches none of those selectors and
+  // submits its own params.
   function wireDropdown(dd) {
     var btn = dd.querySelector("[data-dd-btn]");
     var menu = dd.querySelector(".dd-menu");
@@ -116,184 +109,7 @@
     });
   }
 
-  // Multi-select dropdown (status): checkbox items toggle in place and the menu
-  // STAYS OPEN. Each toggle rebuilds the hidden status params and fires the
-  // in-place request (debounced) — no navigation, no apply-on-close. The
-  // selection is mirrored to localStorage as a secondary fallback for arrivals
-  // that carry no ?status= in the URL.
-  function wireMultiDropdown(dd) {
-    var field = dd.dataset.ddMulti;
-    var btn = dd.querySelector("[data-dd-btn]");
-    var menu = dd.querySelector(".dd-menu");
-    var lbl = dd.querySelector(".lbl");
-    if (!field || !btn || !menu) return;
-
-    var storeKey = "pf.wi-list." + field;
-
-    function selected() {
-      var out = [];
-      menu.querySelectorAll("[data-dd-multi-value]").forEach(function (it) {
-        if (it.classList.contains("on")) out.push(it.dataset.ddMultiValue);
-      });
-      return out;
-    }
-
-    function relabel() {
-      var sel = selected();
-      if (!lbl) return;
-      if (sel.length === 0) lbl.textContent = "All status";
-      else if (sel.length === 1) {
-        lbl.textContent = sel[0].charAt(0).toUpperCase() + sel[0].slice(1);
-      } else lbl.textContent = sel.length + " selected";
-    }
-
-    // Push the current selection into the form (hidden status inputs) and fire
-    // the in-place request. Also persist to localStorage as the fallback.
-    function apply(delay) {
-      var sel = selected();
-      try { localStorage.setItem(storeKey, JSON.stringify(sel)); } catch (e) {}
-      syncStatusParams(sel);
-      relabel();
-      fireFilter(delay);
-    }
-
-    // Restore persisted selection when the URL carries no explicit status
-    // (e.g. arriving via an internal link). The server is the source of truth
-    // when ?status= is present, so we only override when it is absent — and in
-    // that case we push the restored set into the form WITHOUT firing a request
-    // (the page already rendered; no need to reload on load).
-    (function restore() {
-      var url = new URL(window.location.href);
-      if (url.searchParams.has("status")) {
-        try { localStorage.setItem(storeKey, JSON.stringify(selected())); } catch (e) {}
-        syncStatusParams(selected());
-        return;
-      }
-      var saved;
-      try { saved = JSON.parse(localStorage.getItem(storeKey) || "[]"); } catch (e) { saved = []; }
-      if (!saved || !saved.length) return;
-      var want = {};
-      saved.forEach(function (v) { want[v] = true; });
-      menu.querySelectorAll("[data-dd-multi-value]").forEach(function (it) {
-        it.classList.toggle("on", !!want[it.dataset.ddMultiValue]);
-      });
-      var clear = menu.querySelector("[data-dd-multi-clear]");
-      if (clear) clear.classList.toggle("on", saved.length === 0);
-      // Sync the hidden status params so the NEXT in-place request (the user's
-      // next filter action — a project switch, a segment, a further toggle)
-      // already carries the restored selection. We deliberately do NOT fire a
-      // request here: the page already rendered, and auto-firing on load would
-      // be a redundant round-trip / flicker. localStorage is a secondary
-      // fallback — explicit user actions are the primary path.
-      syncStatusParams(selected());
-      relabel();
-    })();
-
-    btn.addEventListener("click", function (e) {
-      e.stopPropagation();
-      var willOpen = menu.hidden;
-      closeAllMenus(menu);
-      menu.hidden = !willOpen;
-    });
-
-    menu.querySelectorAll(".dd-it").forEach(function (it) {
-      it.addEventListener("click", function (e) {
-        e.stopPropagation(); // stay open while toggling
-        // A drag that ends on the same item fires a click — ignore it so a
-        // reorder never accidentally toggles the checkbox.
-        if (dd._didDrag) {
-          dd._didDrag = false;
-          return;
-        }
-        if (it.hasAttribute("data-dd-multi-clear")) {
-          menu.querySelectorAll("[data-dd-multi-value]").forEach(function (x) {
-            x.classList.remove("on");
-          });
-          it.classList.add("on");
-        } else {
-          it.classList.toggle("on");
-          var clear = menu.querySelector("[data-dd-multi-clear]");
-          if (clear) clear.classList.toggle("on", selected().length === 0);
-        }
-        // Live update — debounce so rapid toggles collapse into one request,
-        // but the menu stays open throughout.
-        apply(200);
-      });
-    });
-
-    wireSortable(dd, menu, field);
-  }
-
-  // wireSortable makes the draggable status rows reorderable via the native
-  // HTML5 drag-and-drop API (no external library). The resulting order is
-  // persisted to localStorage as pf.wi-list.<field>-order and drives the
-  // display order of the status group sections in the list (round-3 #3). It is
-  // applied on the next render by applyStatusGroupOrder below; we do NOT reload
-  // on drop, so reordering is cheap and does not disturb the current filter.
-  function wireSortable(dd, menu, field) {
-    var box = menu.querySelector("[data-dd-sortable]");
-    if (!box) return;
-    var orderKey = "pf.wi-list." + field + "-order";
-    var dragEl = null;
-
-    function persist() {
-      var order = [];
-      box.querySelectorAll("[data-dd-multi-value]").forEach(function (it) {
-        order.push(it.dataset.ddMultiValue);
-      });
-      try { localStorage.setItem(orderKey, JSON.stringify(order)); } catch (e) {}
-    }
-
-    // Return the row that a drop at clientY should land before (or null = end).
-    function afterEl(y) {
-      var rows = Array.prototype.slice.call(box.querySelectorAll("[data-dd-multi-value]"));
-      for (var i = 0; i < rows.length; i++) {
-        var box2 = rows[i].getBoundingClientRect();
-        if (y < box2.top + box2.height / 2) return rows[i];
-      }
-      return null;
-    }
-
-    box.querySelectorAll("[data-dd-multi-value]").forEach(function (it) {
-      it.addEventListener("dragstart", function (e) {
-        dragEl = it;
-        dd._didDrag = true;
-        it.classList.add("dragging");
-        if (e.dataTransfer) {
-          e.dataTransfer.effectAllowed = "move";
-          // Firefox requires data to be set for the drag to start.
-          try { e.dataTransfer.setData("text/plain", it.dataset.ddMultiValue); } catch (err) {}
-        }
-      });
-      it.addEventListener("dragend", function () {
-        if (dragEl) dragEl.classList.remove("dragging");
-        dragEl = null;
-        persist();
-        // Re-apply the status group order to the (current) list in place.
-        applyStatusGroupOrder();
-      });
-    });
-
-    box.addEventListener("dragover", function (e) {
-      e.preventDefault(); // allow drop
-      if (!dragEl) return;
-      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-      var ref = afterEl(e.clientY);
-      if (ref === dragEl) return;
-      if (ref) box.insertBefore(dragEl, ref);
-      else box.appendChild(dragEl);
-    });
-
-    box.addEventListener("drop", function (e) {
-      e.preventDefault();
-      e.stopPropagation();
-    });
-  }
-
-  document.querySelectorAll("[data-dd]").forEach(function (dd) {
-    if (dd.dataset.ddMulti) wireMultiDropdown(dd);
-    else wireDropdown(dd);
-  });
+  document.querySelectorAll("[data-dd]").forEach(wireDropdown);
   document.addEventListener("click", function () {
     closeAllMenus(null);
   });
@@ -518,7 +334,6 @@
     // the pager entirely when a single page covers every matched row. Re-run
     // after search so pages reflect only the matched subset.
     wrap._applyPager = function () {
-      ensureFillers();
       var rs = rows();
       var pages = Math.ceil(rs.length / PAGE_SIZE);
       // The footer (page-info + per-page picker + page buttons) is shown whenever
@@ -532,6 +347,9 @@
         wrap._page = 1;
         return;
       }
+      // Only past the empty early-return: an empty segment shows its empty state,
+      // never a padded page, so building fillers for it is pure DOM waste.
+      ensureFillers();
       if (wrap._page > pages) wrap._page = 1;
       if (pages <= 1) {
         // One page: show every matched row, no padding, no page buttons (but the
@@ -546,10 +364,11 @@
       pager.hidden = false;
       go(wrap._page, rs, pages);
     };
-
-    wrap._applyPager();
   }
 
+  // wirePager only INSTALLS wrap._applyPager; it deliberately does not run it.
+  // initListBody drives exactly one paging pass per (re)render, via applySearch
+  // — running it here too paged every block twice on every init and swap.
   function wirePagers() {
     document.querySelectorAll("[data-wi-list] [data-grp]").forEach(wirePager);
   }
@@ -559,10 +378,12 @@
   // Apply the current search text to the rendered rows. Factored out so it can
   // re-run after an HTMX swap replaces the list body (the search box itself
   // lives outside #wi-list-body and survives the swap, so its value persists).
+  // It must stay safe to call with no search box on the page: this is the single
+  // paging pass initListBody relies on, so an early return here would leave the
+  // blocks unpaginated. No box simply means an empty query.
   function applySearch() {
     var search = document.querySelector("[data-wi-search]");
-    if (!search) return;
-    var q = search.value.trim().toLowerCase();
+    var q = search ? search.value.trim().toLowerCase() : "";
     document.querySelectorAll("[data-wi-list] [data-grp]").forEach(function (wrap) {
       var rowsBox = wrap.querySelector("[data-grp-rows]");
       if (!rowsBox) return;
@@ -571,10 +392,23 @@
         if (!el.hasAttribute("data-wi-row")) return;
         var hay = (el.getAttribute("data-wi-text") || "").toLowerCase();
         var miss = q !== "" && hay.indexOf(q) === -1;
-        // Mark search misses so the pager skips them when capping.
-        if (miss) el.dataset.searchHidden = "1";
-        else delete el.dataset.searchHidden;
-        if (!miss) anyVisible = true;
+        // Drive `hidden` from BOTH sides, and mark misses so the pager skips
+        // them when capping. Hiding a miss is what actually filters the list:
+        // _applyPager only ever touches the matched set, so an unhidden miss on
+        // the visible page would sit there next to a "1–1 of 1" page-info.
+        // Un-hiding a hit is the other half, and it is not symmetry for its own
+        // sake — Done (aihub#298) renders a SERVER pager, so wirePager finds no
+        // [data-grp-pager], never installs wrap._applyPager, and nothing below
+        // would ever restore a row this function hid. Clearing the query there
+        // has to be able to bring every row back on its own.
+        if (miss) {
+          el.dataset.searchHidden = "1";
+          el.hidden = true;
+        } else {
+          delete el.dataset.searchHidden;
+          el.hidden = false;
+          anyVisible = true;
+        }
       });
       // Re-run the pager so pages are recomputed from the matched subset
       // (reset to page 1); cleared search restores full pagination.
@@ -588,61 +422,6 @@
     var search = document.querySelector("[data-wi-search]");
     if (search) search.addEventListener("input", applySearch);
   })();
-
-  // ---- status group reordering (round-3 #3) -------------------------------
-
-  // The status filter dropdown persists a drag order under pf.wi-list.status-order.
-  // Apply that order to the "status"-kind blocks in the list (Model A) so the
-  // rendered blocks follow the user's chosen order. The smart sections "Needs
-  // you" (Kind "personal", pinned first) and "Unclaimed" (Kind "pool", pinned
-  // last) are never matched here, so they keep their fixed top/bottom position.
-  //
-  // The server re-renders the list body in the canonical status order on every
-  // HTMX swap, so this MUST run again after each swap (see initListBody) to
-  // re-impose the saved order on the freshly rendered blocks.
-  function applyStatusGroupOrder() {
-    var list = document.querySelector("[data-wi-list]");
-    if (!list) return;
-    var order;
-    try {
-      order = JSON.parse(localStorage.getItem("pf.wi-list.status-order") || "[]");
-    } catch (e) {
-      order = [];
-    }
-    // No saved order -> leave the server's canonical order untouched.
-    if (!order || !order.length) return;
-
-    var statusGroups = Array.prototype.filter.call(
-      list.querySelectorAll("[data-grp]"),
-      function (g) {
-        return g.dataset.grpKind === "status";
-      }
-    );
-    if (statusGroups.length < 2) return; // nothing to reorder
-
-    // Place a stable marker where the first status block currently sits, then
-    // reinsert the status blocks in the persisted order at that marker. The
-    // marker keeps a fixed boundary so the smart sections before (Needs you)
-    // and after (Unclaimed) stay put. Statuses absent from the saved order keep
-    // their relative order AFTER the explicitly-ordered ones.
-    var marker = document.createComment("status-order");
-    list.insertBefore(marker, statusGroups[0]);
-    var rank = {};
-    order.forEach(function (s, i) {
-      rank[s] = i;
-    });
-    var sorted = statusGroups.slice().sort(function (a, b) {
-      var ra = rank[a.dataset.grpStatus];
-      var rb = rank[b.dataset.grpStatus];
-      if (ra === undefined) ra = Infinity;
-      if (rb === undefined) rb = Infinity;
-      return ra - rb;
-    });
-    sorted.forEach(function (g) {
-      list.insertBefore(g, marker);
-    });
-    marker.remove();
-  }
 
   // ---- client-side sort (aihub#185) ---------------------------------------
 
@@ -711,14 +490,13 @@
 
   // Re-run the per-render wiring against the current list body. Called once on
   // load and again after every HTMX swap of #wi-list-body so the freshly
-  // rendered rows get pagers, the persisted status-group order, and the active
-  // search filter re-applied.
+  // rendered rows get pagers, the current sort order, and the active search
+  // filter re-applied.
   function initListBody() {
-    wirePagers();
-    applyStatusGroupOrder();
+    wirePagers();       // installs wrap._applyPager, does not run it
     applySort();
     applyPerPageState();
-    applySearch();
+    applySearch();      // the ONE paging pass, over the reordered+filtered set
   }
 
   initListBody();

@@ -1308,10 +1308,18 @@ type AcquireLocksResponse struct {
 	// together they are exactly the attempt's lock set.
 	//
 	// It includes locks with no live declaration behind them: git_branch and
-	// deploy_env locks taken at claim, and file_scope locks whose
-	// declared_resources entry has since been removed — removing a declaration
-	// does NOT release its lock, and an attempt that believes otherwise writes
-	// unprotected.
+	// deploy_env locks taken at claim, locks from a client-supplied
+	// requested_locks, and file_scope locks whose declared_resources entry was
+	// removed before aihub#264.
+	//
+	// ⚠️ aihub#264 changed the last of those. Removing a path from
+	// declared_resources through UpdateWorkItem now DOES release its file_scope
+	// lock, in the same transaction as the update — so that population is no
+	// longer produced by the ordinary API path, and this field reports it only
+	// for locks that predate the change or were never derived from a declaration
+	// at all. git_branch and deploy_env are deliberately NOT released that way,
+	// so they remain the main reason an attempt holds a lock it cannot explain
+	// from its current declarations.
 	AlreadyHeld []ResourceLock `json:"already_held"`
 }
 

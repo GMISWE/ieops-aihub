@@ -355,6 +355,37 @@ jobs:
       #             The `132` this starts from is the value on origin/main at
       #             both cfc3705 and 5198f37, where 132 = 129 + 3; here
       #             135 = 132 + 3.
+      #
+      #   135 -> 137 aihub#264/#259 added 1 DB-gated function each:
+      #             domain.TestNarrowingDeclaredResourcesReleasesItsLocks (7
+      #             subtests) and mcp.TestE2EReadEventsTypesFilterDiscriminates
+      #             (5 subtests). One function per work item, subtests for the
+      #             per-arm claims — so the +2 here IS one per work item, which
+      #             the aihub#151 entry above warns is normally the wrong
+      #             reading. Both need only a database, so the required set goes
+      #             132 -> 134 and each needs its own step: "aihub#264
+      #             declared_resources lock release DB tests" and "aihub#259
+      #             read_events types filter E2E DB tests".
+      #
+      #             aihub#259's wire-query tests are deliberately NOT counted
+      #             here and get no step: they need no database, so they already
+      #             run in "Unit tests" above. Only the end-to-end function is
+      #             DB-gated. Reading "+2" as "the two work items' whole test
+      #             surface" would be wrong.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched. The gate found
+      #             both functions itself, naming them as executed by no step,
+      #             before either step existed. Verbatim, on this branch off
+      #             origin/main 10c8eca, BEFORE the steps were written and with
+      #             the ratchet still at 135:
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 137
+      #                 (require only a DB: 134, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 132/134
+      #             and after both steps were added, with the ratchet at 137:
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 137
+      #                 (require only a DB: 134, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 134/134
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -370,7 +401,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 135
+            -min-gated 137
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
@@ -1426,6 +1457,86 @@ jobs:
           done
           ! grep -q -- '--- SKIP' response_echo.log \
             || { echo "::error::an aihub#329 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#264: narrowing declared_resources must RELEASE the file_scope locks
+      # the removed entries were holding. Acquisition lives on the claim path and
+      # mutation on the update path, and nothing connected them, so a lock
+      # outlived its declaration and was held to terminal state — ieops#824 hit a
+      # 409 on a path its holder had not declared since resources_version 17.
+      #
+      # Three of the nine arms are CONTROLS that stay green against a mutant with
+      # the release deleted, and they are not decoration: "a still declared lock
+      # survives" and "widening still takes the new lock" are what separate a
+      # release from a server that simply stopped taking locks, and "a rejected
+      # CAS releases nothing" keeps the release inside the transaction that moved
+      # resources_version. Four go red against that mutant — measured, not
+      # assumed.
+      #
+      # Two arms have their own mutants, because they cover ways the release can
+      # be silently skipped rather than absent:
+      #   - "a wrong typed optional field ..." goes red if derivedFileScopeLockKeys
+      #     is decoded with a strict []DeclaredResourceItem unmarshal. That decode
+      #     is stricter than ValidateDeclaredResources, so caller input it accepts
+      #     (a non-string `intent`) killed the whole diff and released nothing.
+      #   - "an explicit null declaration ..." goes red if the
+      #     normalizeDeclaredResources fold is removed: a literal JSON null wiped
+      #     the declarations AND dropped every file_scope lock, with HTTP 200.
+      #
+      # Every arm ends at a real FnClaimWorkItem by a second work item where it
+      # can — the hop a blocked caller actually sees — because the resource_locks
+      # table alone was never what ieops#824 could observe.
+      - name: aihub#264 declared_resources lock release DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestNarrowingDeclaredResourcesReleasesItsLocks$' -count=1 -v 2>&1 | tee declared_resources_release.log
+          for want in 'TestNarrowingDeclaredResourcesReleasesItsLocks/a_removed_declaration_releases_its_lock' \
+                      'TestNarrowingDeclaredResourcesReleasesItsLocks/a_released_lock_is_absent_from_already_held_not_merely_unreported' \
+                      'TestNarrowingDeclaredResourcesReleasesItsLocks/a_still_declared_lock_survives' \
+                      'TestNarrowingDeclaredResourcesReleasesItsLocks/widening_still_takes_the_new_lock' \
+                      'TestNarrowingDeclaredResourcesReleasesItsLocks/flipping_a_declaration_to_read_intent_releases_its_write_lock' \
+                      'TestNarrowingDeclaredResourcesReleasesItsLocks/a_rejected_CAS_releases_nothing' \
+                      'TestNarrowingDeclaredResourcesReleasesItsLocks/a_wrong_typed_optional_field_does_not_disable_the_release' \
+                      'TestNarrowingDeclaredResourcesReleasesItsLocks/an_explicit_null_declaration_changes_nothing' \
+                      'TestNarrowingDeclaredResourcesReleasesItsLocks/another_work_items_lock_is_untouched'; do
+            grep -q -- "--- PASS: $want" declared_resources_release.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#264 release contract is not actually verified for that case"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' declared_resources_release.log \
+            || { echo "::error::an aihub#264 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#259: pf_read_events published a `types` filter that the MCP tool
+      # never put on the wire, so GET /v1/events was always called unfiltered.
+      # The handler and the SQL both implemented it correctly — only the MCP hop
+      # dropped it — which is why the same call over REST did filter.
+      #
+      # This step runs the END-TO-END function (real router, real client, real
+      # database), not the wire-query unit tests, which need no database and run
+      # in the "Unit tests" step above. It is the only arm that covers all three
+      # layers at once.
+      #
+      # The arms compare two states the defect makes IDENTICAL: a real type and a
+      # type that cannot exist. With the bug present both returned the full event
+      # stream, so any assertion that merely wanted a usable response was green
+      # for the whole life of the defect — and that false green nearly published
+      # a "zero cancellations" report over 44 real ones (ieops#680).
+      - name: aihub#259 read_events types filter E2E DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/mcp/ -run '^TestE2EReadEventsTypesFilterDiscriminates$' -count=1 -v 2>&1 | tee read_events_types.log
+          for want in 'TestE2EReadEventsTypesFilterDiscriminates/a_real_type_returns_only_that_type' \
+                      'TestE2EReadEventsTypesFilterDiscriminates/a_type_that_cannot_exist_returns_nothing' \
+                      'TestE2EReadEventsTypesFilterDiscriminates/the_real_and_impossible_type_return_different_id_sets' \
+                      'TestE2EReadEventsTypesFilterDiscriminates/two_types_return_their_union' \
+                      'TestE2EReadEventsTypesFilterDiscriminates/an_unfiltered_read_still_returns_everything'; do
+            grep -q -- "--- PASS: $want" read_events_types.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#259 types filter is not actually verified for that case"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' read_events_types.log \
+            || { echo "::error::an aihub#259 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#303: the 26 DB-gated test functions that, until this step, no
       # `-run` in this file named — so they SKIPped on every CI run since the

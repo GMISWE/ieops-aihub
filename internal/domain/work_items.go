@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1499,6 +1500,37 @@ func normalizeAttrsPatch(req *UpdateWorkItemRequest) {
 	}
 }
 
+// normalizeDeclaredResources treats an explicit JSON `null` for
+// declared_resources as "not specified" (aihub#264).
+//
+// A separate one-line function rather than a branch inside UpdateWorkItem for
+// the reason cancelGate and isCASConflict are separate: the only behavioural
+// test of a check living inline in UpdateWorkItem would be DB-gated, and a
+// DB-gated test here runs only in its own scoped CI step, so deleting the check
+// would leave `go test ./...` entirely green.
+//
+// json.RawMessage preserves `"declared_resources": null` as the four literal
+// bytes, so `!= nil` is true and the field counted as part of the patch.
+// ValidateDeclaredResources returns early for "null" without complaint, so the
+// column was overwritten with a jsonb null: every declaration silently
+// destroyed, resources_version bumped, HTTP 200.
+//
+// That was already wrong before this work item, and the lock release makes it
+// materially worse — a null payload derives an EMPTY key set, so it would also
+// drop every file_scope lock the work item holds. A caller sending null meaning
+// "leave this alone" would lose its declarations AND its write protection in one
+// call with nothing to notice, which is the exact silent-loss-of-protection
+// shape aihub#264 is about. Measured before the fold was added: the update
+// returned 200, stored `null`, and left the attempt holding no locks.
+//
+// Folded to "not specified", matching normalizeAttrsPatch. Clearing declarations
+// still has a spelling, and it is the one the schema documents: an empty array.
+func normalizeDeclaredResources(req *UpdateWorkItemRequest) {
+	if req.DeclaredResources != nil && bytes.Equal(bytes.TrimSpace(req.DeclaredResources), []byte("null")) {
+		req.DeclaredResources = nil
+	}
+}
+
 // validateAttrsPatch rejects the two attrs payloads that must never reach
 // Postgres (aihub#288). Run normalizeAttrsPatch first.
 //
@@ -1573,12 +1605,123 @@ func casConflictErr(expected, current int) *AihubError {
 		})
 }
 
+// releaseUndeclaredLocksSQL drops the file_scope locks a narrowing orphaned.
+//
+// Scoped by work_item_id through run_attempts rather than by a single attempt id
+// on purpose: the reported instance (ieops#798) was on claim epoch 7, and each
+// re-claim mints a new attempt row, so residue from an earlier epoch is owned by
+// an attempt that is no longer current. Joining on work_item_id reaches that
+// residue while still making it impossible to touch a lock belonging to any
+// OTHER work item, whatever its key looks like.
+const releaseUndeclaredLocksSQL = `
+	DELETE FROM resource_locks rl
+	USING run_attempts ra
+	WHERE rl.owner_attempt_id = ra.id
+	  AND ra.work_item_id = $1
+	  AND rl.resource_type = 'file_scope'
+	  AND rl.resource_key = ANY($2::text[])`
+
+// releaseUndeclaredFileScopeLocks releases the file_scope locks that `prior`
+// justified and `next` no longer does (aihub#264).
+//
+// 🔴 PREVENTION, NOT CLEANUP — and the reported lock is not in scope.
+//
+// The candidate set is `prior − next`, so only a key present in the declaration
+// this update REPLACES can be released. ieops#798's leaked lock came from a
+// declaration dropped several resources_versions before the one it now stores,
+// so it is in neither side and no future update of that work item will release
+// it. This change stops new residue accruing; it does not sweep residue that
+// already exists. The recoveries for an already-leaked lock are to re-declare
+// the path and remove it again (one narrowing, now effective), to end the
+// attempt, or to let the orphan sweep in gc.go take it once the owning attempt
+// is no longer live.
+//
+// Widening the candidate set to "every file_scope lock this work item's attempts
+// hold, minus next" WOULD clear that residue, and was deliberately not taken:
+// it would also release locks from a client-supplied requested_locks that never
+// had a declaration behind them (run_attempts.go:325-332 — the raw-API path the
+// plugin never uses, but which is trusted verbatim when present). That is a
+// bigger behaviour change than this item asked for, and it belongs with a
+// decision about whether an undeclared lock should be able to exist at all.
+//
+// # Why this hangs off the update path
+//
+// Acquisition lives on the claim path and mutation lives here, and nothing
+// connected them — which is the whole defect. It is fixed at the moment the
+// declaration changes rather than when a blocked caller asks, deliberately: a
+// holder can be between two declaration updates, so deciding "not in the current
+// declarations, therefore free" at QUERY time would hand away a lock the holder
+// is about to re-declare. Releasing at write time has no such window, and it
+// keeps resources_version and the lock set moving together — this runs inside the
+// same transaction as the UPDATE and after the CAS check, so a rejected update
+// releases nothing and there is never a committed state where the version did not
+// advance but the locks changed.
+//
+// # Why file_scope only
+//
+// Not an oversight, and not simply "that is what was reported" — it is a
+// reversibility argument. FnAcquireLocks re-acquires file_scope and nothing else,
+// so every lock this function can release has a documented way to be taken back
+// within the same attempt, and a narrowing made by mistake costs one
+// pf_acquire_locks call. git_branch and deploy_env have no such path: they are
+// taken at claim and re-derived only on the next claim/resume, so releasing one
+// here would leave the work item unprotected until then, and would let a second
+// attempt take a branch this one still has checked out. That is the same hazard
+// derivedLock's comment already refuses to open for intent=read, and it is not
+// worth opening for a narrowing either. A work item that really means to give up
+// a branch can pause, which already releases file_scope and re-derives the rest.
+func releaseUndeclaredFileScopeLocks(ctx context.Context, tx pgx.Tx, wiID, project string, prior, next json.RawMessage) *AihubError {
+	priorKeys, ok := derivedFileScopeLockKeys(prior, project)
+	if !ok {
+		// Unparseable stored declarations: which locks they produced is unknown,
+		// so releasing any of them would be a guess. Leaving them is the
+		// pre-aihub#264 behaviour and is the safe direction.
+		return nil
+	}
+	nextKeys, ok := derivedFileScopeLockKeys(next, project)
+	if !ok {
+		// Unreachable from the REST/MCP surface: UpdateWorkItem runs
+		// ValidateDeclaredResources on caller input before opening the
+		// transaction. Guarded rather than asserted, because "release everything
+		// the old payload had" is the wrong answer to a payload we cannot read.
+		return nil
+	}
+
+	removed := make([]string, 0, len(priorKeys))
+	for key := range priorKeys {
+		if !nextKeys[key] {
+			removed = append(removed, key)
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	// Sorted so the statement's parameters are deterministic and a failure is
+	// reproducible. That is the whole claim: `resource_key = ANY($2)` does not
+	// scan or row-lock in array order, so this does NOT influence lock ordering,
+	// and it does not need to — two different work items can never target
+	// overlapping rows here, so these deletes cannot deadlock against each other.
+	sort.Strings(removed)
+
+	// dbErrCause already maps a class 40 rollback to a retryable 409 before
+	// falling back to ErrInternalError (aihub#334), and ErrInternalError is
+	// exactly the non-conflict outcome wanted here, so it is the whole mapping.
+	if _, err := tx.Exec(ctx, releaseUndeclaredLocksSQL, wiID, removed); err != nil {
+		return dbErrCause(err, "failed to release locks for removed declared_resources")
+	}
+	return nil
+}
+
 // UpdateWorkItem applies a patch to a work item.
 func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, callerUserID, callerRole string, callerProjectRoles map[string]string, req *UpdateWorkItemRequest) (*WorkItem, *AihubError) {
 	wi, aihubErr := GetWorkItem(ctx, pool, idOrSlug)
 	if aihubErr != nil {
 		return nil, aihubErr
 	}
+
+	// aihub#264: fold an explicit null away BEFORE anything reads the field, so
+	// validation, the UPDATE and the lock release all agree it was not supplied.
+	normalizeDeclaredResources(req)
 
 	// aihub#238: same entry-point validation as CreateWorkItem — an update must
 	// not be able to replace good declared_resources with silently lockless ones.
@@ -1650,6 +1793,33 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 		}
 	}
 
+	// aihub#264: read the declaration this update is about to replace, inside the
+	// transaction and FOR UPDATE, so the diff below is computed against the value
+	// the UPDATE actually overwrites.
+	//
+	// The GetWorkItem at the top of this function ran on the pool before the
+	// transaction opened, so wi.DeclaredResources is a pre-transaction read and
+	// using it would leave a window in which a concurrent narrowing's locks are
+	// resurrected or a concurrent widening's are dropped. FOR UPDATE also matches
+	// FnAcquireLocks, which takes the same row lock before touching
+	// resource_locks — same order (work_items then resource_locks) in both, so the
+	// two cannot deadlock against each other. Taken only when declared_resources
+	// is part of the patch, so no other update path changes its locking.
+	var priorDeclared json.RawMessage
+	if req.DeclaredResources != nil {
+		if scanErr := tx.QueryRow(ctx,
+			`SELECT declared_resources FROM work_items WHERE id = $1 FOR UPDATE`, wi.ID,
+		).Scan(&priorDeclared); scanErr != nil {
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				return nil, NewErr(ErrNotFound, fmt.Sprintf("work item %q not found", wi.ID))
+			}
+			if aerr := retryConflictErr(scanErr, "failed to read declared_resources for update"); aerr != nil {
+				return nil, aerr
+			}
+			return nil, NewErr(ErrInternalError, "failed to read declared_resources for update")
+		}
+	}
+
 	upd := buildWorkItemUpdate(req, wi.ID)
 	tag, err := tx.Exec(ctx, upd.Query, upd.Args...)
 	if err != nil {
@@ -1677,6 +1847,17 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 			return nil, NewErr(ErrNotFound, fmt.Sprintf("work item %q not found", wi.ID))
 		}
 		return nil, casConflictErr(*req.ResourcesVersion, current)
+	}
+
+	// aihub#264: the UPDATE has been applied and the CAS (if any) has passed, so
+	// the narrowing is real — release the file_scope locks it orphaned. Placed
+	// after the CAS check on purpose: a rejected update returns above and rolls
+	// back, so it can never leave locks released against a version that did not
+	// move.
+	if req.DeclaredResources != nil {
+		if aerr := releaseUndeclaredFileScopeLocks(ctx, tx, wi.ID, wi.Project, priorDeclared, req.DeclaredResources); aerr != nil {
+			return nil, aerr
+		}
 	}
 
 	// Emit goal_updated event if goal changed

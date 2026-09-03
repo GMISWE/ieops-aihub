@@ -417,6 +417,78 @@ func derivedLock(res DeclaredResourceItem, project string) (lockType, lockKey st
 	return lockType, lockKey
 }
 
+// derivedFileScopeLockKeys returns the set of file_scope lock keys a stored
+// declared_resources payload justifies, and whether it could be read at all.
+//
+// aihub#264. Deriving through derivedLock rather than re-implementing the
+// mapping is the point: this set is compared against the CURRENT lock rows to
+// decide which ones a narrowing has orphaned, so if it disagreed with the
+// derivation used at acquisition by even one entry, the difference would show up
+// as a lock silently released or silently kept. derivedLock's own doc comment
+// lists the four sites that must go through it; this is the fifth caller and the
+// only one asking the question in reverse ("which locks does this payload still
+// justify") rather than forward ("what should I take").
+//
+// Inheriting the intent rule is a behavioural consequence, not an accident: an
+// entry flipped from write to read maps to no lock here exactly as it maps to no
+// lock at claim, so the write lock it already holds is released. Anything else
+// would let intent=read enforce like intent=write for the lifetime of the
+// attempt, which is the contradiction aihub#342 exists to remove.
+//
+// ok=false means the payload is not a JSON array of objects at all. Callers must
+// then release NOTHING: an unreadable declaration says nothing about which locks
+// it produced, and guessing in either direction is worse than leaving the
+// pre-existing rows alone. ValidateDeclaredResources' own doc comment reports
+// that roughly 14% of stored entries would fail it, so the stored side must
+// never be assumed well-formed. (That figure is quoted from there, not
+// re-measured here.)
+//
+// 🔴 The decode is deliberately as permissive as ValidateDeclaredResources', and
+// that is a bug fix, not a style choice. Unmarshalling straight into
+// []DeclaredResourceItem is STRICTER than the validator: the validator decodes
+// into []map[string]any and only type-asserts `type` and `uri`, so an entry like
+//
+//	{"type":"path","uri":"file:a.go","intent":true}
+//
+// passes validation, while a typed unmarshal fails on `intent` with an
+// UnmarshalTypeError and takes the WHOLE array down with it. Measured: with the
+// strict decode, such an update narrowed declared_resources, bumped
+// resources_version, returned 200 — and released nothing, which is precisely the
+// aihub#264 defect this function exists to prevent, reachable straight from
+// caller input. Ignoring a wrong-typed optional field instead means the entry
+// still yields its key.
+//
+// Erring toward MORE keys is the safe direction here: a key that turns out not
+// to be held makes the release a no-op, whereas a missing key leaks a lock.
+func derivedFileScopeLockKeys(raw json.RawMessage, project string) (keys map[string]bool, ok bool) {
+	keys = map[string]bool{}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return keys, true
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, false
+	}
+	for _, item := range items {
+		str := func(key string) string {
+			s, _ := item[key].(string)
+			return s
+		}
+		lockType, lockKey := derivedLock(DeclaredResourceItem{
+			Type:       str("type"),
+			URI:        str("uri"),
+			Intent:     str("intent"),
+			BaseBranch: str("base_branch"),
+			TaskBranch: str("task_branch"),
+		}, project)
+		if lockType == "file_scope" && lockKey != "" {
+			keys[lockKey] = true
+		}
+	}
+	return keys, true
+}
+
 // resourceToLock converts a DeclaredResourceItem to a (resource_type, resource_key) pair per §25 mapping.
 // project namespaces file_scope keys (aihub#222); it is ignored for git_branch/deploy_env.
 //

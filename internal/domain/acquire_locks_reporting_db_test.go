@@ -30,6 +30,20 @@ package domain
 //	             - the lock came from a client-supplied requested_locks at claim
 //	               time and has no declared_resources entry behind it at all
 //
+// ⚠️ aihub#264 has since shrunk the first bullet, and this comment would rot
+// silently without saying so: removing a declaration through UpdateWorkItem now
+// releases its file_scope lock in the same transaction, so that population is no
+// longer produced by the ordinary API path. It still exists — locks taken before
+// aihub#264, locks from a client-supplied requested_locks, and the git_branch /
+// deploy_env locks aihub#264 deliberately leaves alone — and `already_held` must
+// still report every one of them, which is why nothing below was deleted.
+//
+// One caveat, so that list is not read as broader than it is: a file_scope lock
+// taken from a client-supplied requested_locks survives a narrowing only while
+// its key is NOT also in the declaration being replaced. If it is, the aihub#264
+// diff releases it like any other — the release is keyed on the lock KEY and
+// cannot tell which mechanism created the row.
+//
 // Both recorded incidents are the first bullet or the second, and both ended
 // with someone writing down "this attempt holds zero locks". The second one put
 // that sentence in a delivery report as a *Correction* to a premise that had
@@ -159,9 +173,28 @@ func TestAcquireLocksReportsEveryHeldLock(t *testing.T) {
 		// and recorded "the init.go write lock released". A day later the
 		// server was still 409ing on it.
 		//
-		// Raw UPDATE rather than UpdateWorkItem: this arm is about what the
-		// LOCK TABLE contains versus what the tool says, and going through the
-		// CAS path would add a second suspect.
+		// 🔴 aihub#264 CHANGED THE BEHAVIOUR THIS ARM RECORDS. When this test was
+		// written, removing a declaration through UpdateWorkItem left the lock in
+		// place — that was the defect aihub#264 then fixed, and the fixture check
+		// below ("dropping a declaration must NOT release the lock") was a true
+		// statement about the whole system. It no longer is: a removal made
+		// through the API now releases the lock in the same transaction.
+		//
+		// The arm still passes, and still tests what it always tested, for one
+		// reason: it drives declared_resources with a RAW UPDATE. That was
+		// originally a way to keep the CAS path from adding a second suspect;
+		// after aihub#264 it is also the only reason this state is still
+		// reachable here, so it is now LOAD-BEARING. Do not "tidy" it into
+		// UpdateWorkItem — that would release the lock, and this arm would stop
+		// measuring under-reporting.
+		//
+		// The state is still reachable in production, which is why the arm is
+		// kept rather than deleted: locks predating aihub#264, locks from a
+		// client-supplied requested_locks with no declaration behind them, and
+		// git_branch/deploy_env locks, which aihub#264 deliberately does not
+		// release. The API-path behaviour after aihub#264 is pinned separately,
+		// by TestNarrowingDeclaredResourcesReleasesItsLocks/
+		// a_released_lock_is_absent_from_already_held_not_merely_unreported.
 		_, err := pool.Exec(ctx,
 			`UPDATE work_items SET declared_resources = $1::jsonb WHERE id = $2`,
 			`[{"type":"repo","uri":"repo:aihub","intent":"write","task_branch":"aihub345"},`+
@@ -169,8 +202,10 @@ func TestAcquireLocksReportsEveryHeldLock(t *testing.T) {
 		require.NoError(t, err)
 
 		require.Contains(t, heldLockKeys(t, pool, attemptID), droppedKey,
-			"fixture check: dropping a declaration must NOT release the lock — if it did, the premise of this "+
-				"whole item is gone and the assertion below would be testing nothing")
+			"fixture check: a raw UPDATE of declared_resources must not release the lock, or the assertion "+
+				"below would be testing nothing. If this fails, the release added by aihub#264 has been "+
+				"moved out of UpdateWorkItem and onto the column itself (a trigger, or a rewrite of this "+
+				"line to use UpdateWorkItem) — re-seed the lock some other way rather than deleting the arm")
 
 		resp := acquire(t)
 		assert.Contains(t, reportedKeys(resp.AlreadyHeld), droppedKey,

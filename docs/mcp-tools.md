@@ -10,8 +10,16 @@ pf_* tool  ->  pkg/client  ->  HTTP handler  ->  internal/domain
 
 There is no separate logic in the tool layer - it parses arguments and calls
 the client. Mutating tools (`pf_commit`, `pf_emit_event`, lifecycle writes)
-inject the per-work-item attempt credential from the local state file
-(`<workspace>/.polyforge/state/<wi_id>.json`).
+inject the per-work-item attempt credential from the local state file under
+`<workspace>/.polyforge/state/`. That file is keyed by **either** the canonical
+id (`wi_xxx.json`) **or** the slug (`project#seq.json`), and both shapes exist
+on disk at once during a claim, so it must be read through
+`config.ResolveStateFile` and never by filename: a slug-addressed
+`ReadStateFile` finds the pre-claim stub, sends an empty `attempt_id`, and the
+server answers 409 `CONFLICT_EPOCH_MISMATCH` — which reads as "someone stole my
+attempt" when the real cause is reading the wrong local file (aihub#141,
+aihub#149, aihub#319). Authority: `internal/config/state.go`
+(`ResolveStateFile`).
 
 This page is a curated index. The **authoritative, always-current schema** for
 every tool (argument names, types, required fields) is emitted by:
@@ -20,10 +28,16 @@ every tool (argument names, types, required fields) is emitted by:
 polyforge dump-mcp-schemas        # full JSON schema for all tools (CI contract)
 ```
 
+Do not copy argument lists into this page. The tool count in the heading above
+and the per-section counts below are checked against that dump on every run of
+the `Contract Lint` job (`scripts/pf_docs_contract_check.py`, check C3), by set
+equality on the tool names rather than by count alone — so a tool added,
+removed or renamed without touching this file turns the build red.
+
 The tools are registered in `internal/mcp/tools_*.go`; the grouping below
 follows those files.
 
-## Work item lifecycle (13) - `tools_lifecycle.go`
+## Work item lifecycle (13) - `internal/mcp/tools_lifecycle.go`
 
 | tool | purpose |
 |---|---|
@@ -41,12 +55,12 @@ follows those files.
 | `pf_pause_attempt` | Pause: release `file_scope` locks, retain `git_branch`/`deploy_env` for resume. |
 | `pf_acquire_locks` | Acquire declared `file_scope` locks mid-attempt (blocks on conflict, never steals). |
 
-## Memory and artifacts (12) - `tools_memory.go`
+## Memory and artifacts (12) - `internal/mcp/tools_memory.go`
 
 | tool | purpose |
 |---|---|
 | `pf_remember` | Store a memory (type, visibility, strength, expiry). Rejects `methodology.*` types - use `pf_save_artifact`. |
-| `pf_recall` | Recall memories with filters. Item `content` is truncated to 800 runes; such items carry `content_truncated: true` and `content_full_len` (full rune length) — read the rest with `pf_get_memory` (aihub#269). **`request_adjusted` (aihub#314):** present only when the server changed a parameter you sent — a list of `{param, requested, applied}`. Today the one case is `top_k`, which is capped at 200 (and replaced with the default 20 when negative); an absent key means nothing was adjusted. **Note:** ranking is recency-based today; semantic/vector recall is in flight (aihub#192). |
+| `pf_recall` | Recall memories with filters. Item `content` is truncated to 800 runes; such items carry `content_truncated: true` and `content_full_len` (full rune length) — read the rest with `pf_get_memory` (aihub#269). **`request_adjusted` (aihub#314):** present only when the server changed a parameter you sent — a list of `{param, requested, applied}`. Today the one case is `top_k`, which is capped at 200 (and replaced with the default 20 when negative); an absent key means nothing was adjusted. **Ranking (aihub#192, shipped):** pgvector semantic recall is live, not pending. `Recall` is a router — it takes the vector path when an embedding provider is configured, `query` is non-empty and no `work_item_id` filter is set (a wi-scoped recall is deterministic, not semantic), the text/tag path otherwise, and merges both when a request spans them (aihub#270). Either path orders by `GREATEST(last_activated_at, created_at)`, never by a `NULLS LAST` tier (aihub#236). There is **no** similarity floor by default; pass `similarity_threshold` to impose one (aihub#148), and note that similarity values are not comparable across different queries. Authority: `internal/domain/memory.go` (`recallRouted`) and `internal/domain/memory_vector.go` (`RecallWithVector`). |
 | `pf_get_memory` | Fetch one memory by id with its full, untruncated content. The follow-up read for a `pf_recall` item whose `content_truncated` is true. |
 | `pf_activate_memory` | Increment activation count and update stability. |
 | `pf_reinforce_memory` | Add context and adjust strength (same row, no new version). |
@@ -58,21 +72,21 @@ follows those files.
 | `pf_ignore_artifact` | Mark an artifact ignored. |
 | `pf_resolve_commit` | Resolve a spec/plan annotation commit with a reply. |
 
-## Events (2) - `tools_events.go`
+## Events (2) - `internal/mcp/tools_events.go`
 
 | tool | purpose |
 |---|---|
 | `pf_emit_event` | Emit an event on a work item (note, wi_reclassified, step_started, ...). |
 | `pf_read_events` | Read events for a work item or a whole project. |
 
-## Step state (2) - `tools_step.go`
+## Step state (2) - `internal/mcp/tools_step.go`
 
 | tool | purpose |
 |---|---|
 | `pf_get_step` | Current step graph, status, progress, and previous steps. |
 | `pf_update_step` | Update the current step (`in_progress`/`completed`/`failed`, heartbeat, artifact summary). `next_step` completes one step and starts its successor in one call. No version/CAS argument - concurrency is guarded by the server's idle-step predicate, so no `pf_get_step` is needed first. |
 
-## Dependencies (3) - `tools_dependency.go`
+## Dependencies (3) - `internal/mcp/tools_dependency.go`
 
 | tool | purpose |
 |---|---|
@@ -80,13 +94,13 @@ follows those files.
 | `pf_remove_dependency` | Remove a dependency. |
 | `pf_list_dependencies` | List blocking + blocked_by (cross-project items folded if no viewer access). |
 
-## Conflicts (1) - `tools_conflicts.go`
+## Conflicts (1) - `internal/mcp/tools_conflicts.go`
 
 | tool | purpose |
 |---|---|
 | `pf_predict_conflicts` | Predict resource-lock conflicts for a set of declared resources; also returns `will_unlock`. |
 
-## Coding / git (6) - `tools_coding.go`
+## Coding / git (6) - `internal/mcp/tools_coding.go`
 
 Credentials are injected from the state file; these operate inside the wi
 worktree.
@@ -100,7 +114,7 @@ worktree.
 | `pf_ship` | **Commit + push + PR in one call**, and the push is the same force-push as `pf_push`. Prefer it over the three separately: those cost three round-trips for three confirmations no decision depends on. On failure the response is JSON with `stage` (which of commit/push/pr failed) and `side_effects` (typically an unpushed local commit). Retrying never duplicates a commit. |
 | `pf_wrap` | Push + PR + `complete_attempt(wrapped)` + delete state file. Idempotent only when a PR already covers local HEAD; see `pr_action` in the response. `note` records the closing note in the same call. |
 
-## Projects (4) - `tools_projects.go`
+## Projects (4) - `internal/mcp/tools_projects.go`
 
 | tool | purpose |
 |---|---|
@@ -109,7 +123,7 @@ worktree.
 | `pf_update_project` | Update repos, members, description, scenario, visibility. |
 | `pf_rotate_identifier` | Rotate the project access identifier (returned once). |
 
-## Release (2) - `tools_release.go`
+## Release (2) - `internal/mcp/tools_release.go`
 
 Admin / release-manager only.
 
@@ -118,7 +132,7 @@ Admin / release-manager only.
 | `pf_cut_alpha` | Cut the next alpha release (tag + manifest). |
 | `pf_promote` | Promote an alpha channel to stable. |
 
-## Users and API keys (5) - `tools_users.go`
+## Users and API keys (5) - `internal/mcp/tools_users.go`
 
 Admin only.
 

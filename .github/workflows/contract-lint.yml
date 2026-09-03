@@ -83,6 +83,19 @@ on:
       - '.claude-plugin/marketplace.json'
       - 'marketplace.json'
       - 'scripts/pf_version_check.py'
+      # Docs contract (aihub#352). docs/mcp-tools.md carries a tool total and a
+      # per-section count whose authority is `polyforge dump-mcp-schemas`, which
+      # this job already builds and dumps below. Both trigger directions are
+      # needed and neither is redundant:
+      #   - a tool added/removed/renamed under internal/mcp/** already runs this
+      #     job via the globs above, and now also fails if the doc was not
+      #     updated with it;
+      #   - a docs-only edit that breaks the inventory, or reintroduces a
+      #     line-number citation, matches NO glob above and would otherwise
+      #     never be checked. An absent check reports green.
+      - 'docs/mcp-tools.md'
+      - 'docs/superpowers/**'
+      - 'scripts/pf_docs_contract_check.py'
 
 jobs:
   contract-lint:
@@ -312,6 +325,17 @@ jobs:
 
       - name: Linter self-test
         run: python3 scripts/pf_contract_lint.py --self-test
+
+      # aihub#352. Uses the SAME fresh in-repo dump as the plugin lint above, so
+      # the doc is checked against this PR's tool registry rather than against a
+      # published schema that lags a merge behind.
+      - name: Docs-contract self-test
+        run: python3 scripts/pf_docs_contract_check.py --self-test
+
+      - name: Docs contract (mcp-tools inventory, line-number citations)
+        run: |
+          python3 scripts/pf_docs_contract_check.py \
+            --schemas /tmp/pf-tool-schemas.json
 
       - name: Contract-lint the polyforge plugin
         run: |

@@ -684,10 +684,40 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 	}
 
 	// --- Scenario repo cloning ---
-	// Clone scenario repos into .repo/ alongside other repos. Source of truth
-	// is the server payload so this runs identically for owner and member
-	// workspaces (members have no local .polyforge.yaml on first init).
-	// Multiple projects sharing the same URL share one clone (dedup by URL).
+	for _, o := range cloneScenarioRepos(repoDir, projects, currentUserID) {
+		if o.Status == scenarioCloneOK {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "pf init: %s\n", o.Detail)
+	}
+}
+
+// Statuses reported by cloneScenarioRepos. Only scenarioCloneOK is silent at the
+// RunInit call site; every other value carries a Detail line that gets printed.
+const (
+	scenarioCloneOK          = "ok"          // cloned, or synced against a matching remote
+	scenarioCloneUnparseable = "unparseable" // the scenario value is not a git URL
+	scenarioCloneMismatch    = "mismatch"    // a directory is already there for a DIFFERENT remote
+	scenarioCloneFailed      = "failed"      // git clone/fetch failed
+)
+
+// scenarioCloneOutcome is one line of the scenario clone loop's decision log.
+// The loop returns these rather than printing them so a test can assert on what
+// it decided without having to capture stderr.
+type scenarioCloneOutcome struct {
+	Project string
+	URL     string // as declared by the server
+	Dir     string // directory name under .repo/; "" when the URL could not be parsed
+	Status  string
+	Detail  string // human-readable; safe to print (credentials redacted)
+}
+
+// cloneScenarioRepos clones each visible project's scenario repo into .repo/.
+// Source of truth is the server payload so this runs identically for owner and
+// member workspaces (members have no local .polyforge.yaml on first init).
+// Multiple projects sharing the same URL share one clone (dedup by URL).
+func cloneScenarioRepos(repoDir string, projects []serverProject, currentUserID string) []scenarioCloneOutcome {
+	var out []scenarioCloneOutcome
 	seen := map[string]bool{}
 	for _, sp := range projects {
 		if !sp.Visible || sp.Scenario == nil || *sp.Scenario == "" {
@@ -706,12 +736,26 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 		seen[url] = true
 		name := scenarioRepoName(url)
 		if name == "" || name == url {
-			fmt.Fprintf(os.Stderr, "pf init: skipping scenario %q for project %s — expected a git URL (e.g. git@github.com:GMISWE/polyforge-coding.git)\n", url, sp.Name)
+			out = append(out, scenarioCloneOutcome{
+				Project: sp.Name, URL: url, Status: scenarioCloneUnparseable,
+				Detail: fmt.Sprintf("skipping scenario %q for project %s — expected a git URL "+
+					"(e.g. git@github.com:GMISWE/polyforge-coding.git)", url, sp.Name),
+			})
 			continue
 		}
 		cloneOrSync(repoDir, name, url)
+		out = append(out, scenarioCloneOutcome{
+			Project: sp.Name, URL: url, Dir: name, Status: scenarioCloneOK,
+		})
 	}
+	return out
 }
+
+// scenarioDirSep joins the owner and the repo name in a scenario clone's
+// directory name under .repo/. It is a const because it is a CONTRACT, not an
+// implementation detail: the sessions that read the clone derive the same path
+// from prose, and internal/cli/scenario_clone_test.go pins the two together.
+const scenarioDirSep = "__"
 
 // scenarioRepoName extracts a filesystem-safe repo name from a scenario URL.
 // "git@github.com:GMISWE/polyforge-coding.git" → "polyforge-coding"

@@ -2,7 +2,7 @@
 
 > # 🗄️ ARCHIVED — DO NOT EXECUTE
 >
-> **This plan was delivered. aihub#236 is `wrapped` (closed 2026-06-25).** It is
+> **This plan was delivered. aihub#236 is `wrapped` (closed 2026-08-07).** It is
 > kept for the reasoning, not as work to do. Executing it would re-apply changes
 > that are already in `main` and would revert two of them (see below).
 >
@@ -559,7 +559,7 @@ Append to `internal/domain/memory_reftime_test.go` (add `"encoding/json"` to its
 ```go
 // Activation state is server-derived and MUST NOT be settable by a client.
 // handleRemember binds the HTTP body straight into domain.RememberRequest
-// (internal/server/routes_memory.go, handleRemember) with no DTO, so an
+// (internal/server/routes_memory.go, handleRemember) with no intermediate DTO, so an
 // exported field with a JSON name would let any project writer pin a memory to
 // the top of every recall. Regression guard: this fails if the json:"-" tags
 // are ever dropped.

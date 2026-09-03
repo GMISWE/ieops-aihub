@@ -4,7 +4,7 @@
 
 > # 🗄️ ARCHIVED — historical record
 >
-> **aihub#236 is `wrapped` (closed 2026-06-25); this design shipped.** The
+> **aihub#236 is `wrapped` (closed 2026-08-07); this design shipped.** The
 > diagnosis below is the authoritative account of *why* the bug existed and why
 > `GREATEST` was chosen over `COALESCE` — that reasoning is preserved verbatim
 > and is the reason this file is archived rather than deleted. For what the code
@@ -283,8 +283,9 @@ scope.
 
 Adding columns to the `Remember` INSERT shifts every positional parameter after `$11`, and
 the `RETURNING` list feeds a 26-field positional `Scan` in the same statement. The codebase already
-carries scar tissue here: `scanMemoryLite` logs `"possible column drift"` and **continues**
-(`scanMemoryLite`), so a misalignment silently drops rows from recall instead of failing loudly —
+carries scar tissue here: `scanMemoryLite` (`internal/domain/memory.go`) logs
+`"possible column drift"` and **continues**, so a misalignment silently drops rows
+from recall instead of failing loudly —
 the same class of silent invisibility this wi is about.
 
 Column list, parameter numbering, `RETURNING` clause and `Scan` targets change as one unit,

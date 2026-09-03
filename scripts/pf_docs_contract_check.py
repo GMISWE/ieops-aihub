@@ -37,7 +37,9 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCS = os.path.join(REPO_ROOT, "docs")
@@ -277,22 +279,66 @@ def self_test() -> int:
         True,
     )
 
-    # C1 regex: fires on a citation, ignores a bare filename.
-    assert GO_LINE_CITATION.search("see internal/domain/memory.go:1444 for it")
-    assert GO_LINE_CITATION.search("migrations/0006_events.sql:141 is NOT NULL")
-    assert not GO_LINE_CITATION.search("see internal/domain/memory.go for it")
-    assert not GO_LINE_CITATION.search("`UpdateMemory` in internal/domain/memory.go")
+    # C1 and C2 are driven through the real check functions against a temporary
+    # docs tree, not through bare `assert`s on their regexes. Two reasons: a
+    # regex assertion does not prove the function reports anything, and `assert`
+    # is stripped entirely under `python3 -O`, which would void these silently.
+    global REPO_ROOT, DOCS
+    real_root, real_docs = REPO_ROOT, DOCS
+    tmp = tempfile.mkdtemp(prefix="pf-docs-selftest-")
+    try:
+        REPO_ROOT = tmp
+        DOCS = os.path.join(tmp, "docs")
+        os.makedirs(os.path.join(DOCS, "design"))
+        os.makedirs(os.path.join(tmp, "internal", "domain"))
+        with open(os.path.join(tmp, "internal", "domain", "memory.go"), "w") as fh:
+            fh.write("package domain\n")
 
-    # C1b: range anchors fire; ports must NOT. docs/deployment.md carries five
-    # `:8080`/`:8085` ports and a regex that flags them is useless.
-    assert BARE_LINE_ANCHOR.search("the cursor predicate at `:1195-1202` and")
-    assert not BARE_LINE_ANCHOR.search("a single Go HTTP server (listens on `:8080`)")
-    assert not BARE_LINE_ANCHOR.search("published on `:8085`. A deploy never touches it")
-    assert not BARE_LINE_ANCHOR.search("`-p 8080:8080`")
+        def write(rel, text):
+            path = os.path.join(DOCS, rel)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return path
 
-    # C2 regex: path-qualified only.
-    assert GO_PATH_REF.search("internal/domain/memory.go")
-    assert not GO_PATH_REF.search("just memory.go alone")
+        cases = [
+            ("C1 clean file", "clean.md",
+             "`UpdateMemory` in `internal/domain/memory.go`\n", False),
+            ("C1 go citation fires", "cited.md",
+             "see internal/domain/memory.go:1444 for it\n", True),
+            ("C1 non-Go citation fires", "sql.md",
+             "migrations/0006_events.sql:141 is NOT NULL\n", True),
+            ("C1b range anchor fires", "range.md",
+             "the cursor predicate at `:1195-1202` and\n", True),
+            # Ports must NOT fire: docs/deployment.md carries five of these, and
+            # a check that reports them buries real findings in false positives.
+            ("C1b ports do not fire", "ports.md",
+             "HTTP on `:8080`, TEI on `:8085`, `-p 8080:8080`\n", False),
+            # The allowlist must excuse its token ONLY inside its own file.
+            ("C1 allowlist suppresses in its own file",
+             "design/polyforge-v1-design.md", 'summary: "fixed auth.go:42"\n', False),
+            ("C1 allowlist does NOT suppress elsewhere", "elsewhere.md",
+             'summary: "fixed auth.go:42"\n', True),
+        ]
+        for label, rel, text, should_fire in cases:
+            expect(label, check_c1_no_line_citations([write(rel, text)]), should_fire)
+
+        c2_cases = [
+            ("C2 existing path", "ref_ok.md",
+             "see `internal/domain/memory.go` (`Recall`)\n", False),
+            ("C2 missing path fires", "ref_bad.md",
+             "see `internal/domain/gone.go` (`Recall`)\n", True),
+            ("C2 ignores an unqualified filename", "ref_bare.md",
+             "see `memory.go` on its own\n", False),
+        ]
+        for label, rel, text, should_fire in c2_cases:
+            expect(
+                label,
+                check_c2_referenced_go_files_exist([write(rel, text)]),
+                should_fire,
+            )
+    finally:
+        REPO_ROOT, DOCS = real_root, real_docs
+        shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:
         for failure in failures:
@@ -335,9 +381,47 @@ def main() -> int:
         )
         return 2
 
+    # An empty file list satisfies every check vacuously, so the instrument has
+    # to prove it found something before its silence can mean anything. This
+    # matters concretely: docs/superpowers/ now holds exactly two archived
+    # files, so one reorganization would turn C2 into a no-op that still
+    # prints OK. Treat an empty scan as instrument failure, not a pass.
+    # Guard the globs that can legitimately go empty. Note this checks the
+    # SUPERPOWERS glob on its own rather than C2's full input list: c2_files
+    # always contains MCP_TOOLS_MD, so a guard on the combined list could never
+    # fire and would only look like protection.
+    c1_files = markdown_files(DOCS)
+    superpowers_files = markdown_files(SUPERPOWERS)
+    for label, files, root in (
+        ("C1", c1_files, DOCS),
+        ("C2", superpowers_files, SUPERPOWERS),
+    ):
+        if not files:
+            print(
+                f"error: {label} matched no markdown files under {root}. That is "
+                "instrument failure, not a clean result — the check cannot pass "
+                "by having nothing to look at.",
+                file=sys.stderr,
+            )
+            return 2
+    if not os.path.exists(MCP_TOOLS_MD):
+        print(
+            f"error: {MCP_TOOLS_MD} is missing, so C3 has no inventory to check. "
+            "If the page was intentionally removed, remove check C3 with it "
+            "rather than letting it disappear silently.",
+            file=sys.stderr,
+        )
+        return 2
+    c2_files = superpowers_files + [MCP_TOOLS_MD]
+
     errors: list[str] = []
-    errors += check_c1_no_line_citations(markdown_files(DOCS))
-    errors += check_c2_referenced_go_files_exist(markdown_files(SUPERPOWERS))
+    errors += check_c1_no_line_citations(c1_files)
+    # C2 covers docs/mcp-tools.md as well as the archive: that file is where
+    # this gate's own headline fix put path-qualified anchors, and an anchor
+    # nothing checks rots exactly as quietly as the line number it replaced.
+    # It deliberately does NOT cover docs/design/polyforge-v1-design.md, which
+    # is a design document and legitimately names files that do not exist yet.
+    errors += check_c2_referenced_go_files_exist(c2_files)
 
     with open(args.schemas, encoding="utf-8") as fh:
         schema_tools = set(json.load(fh)["tools"])

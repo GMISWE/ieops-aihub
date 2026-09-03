@@ -93,8 +93,15 @@ on:
       #   - a docs-only edit that breaks the inventory, or reintroduces a
       #     line-number citation, matches NO glob above and would otherwise
       #     never be checked. An absent check reports green.
-      - 'docs/mcp-tools.md'
-      - 'docs/superpowers/**'
+      #
+      # The glob is 'docs/**' and not the two files this job's check was written
+      # for, because check C1 scans ALL of docs/. Naming only docs/mcp-tools.md
+      # and docs/superpowers/** would leave the other five markdown files —
+      # including design/polyforge-v1-design.md, the sole reason C1 needs an
+      # allowlist at all — enforced in the script but untriggered in CI. That is
+      # the same "the check did not exist on that PR" hole aihub#326/#347 above
+      # were about: the defect just moves one file over and stays green.
+      - 'docs/**'
       - 'scripts/pf_docs_contract_check.py'
 
 jobs:

@@ -121,11 +121,15 @@
             </div>
             {{if $a.Versions}}
             {{/* Collapsible mini version timeline (supersede chain). Native
-                 <details> — no JS. MemoryVersionRef carries id / created_at /
-                 status / is_current only; there is no author or change-summary in
-                 the domain type, so each row shows the version label, date, and
-                 the current marker. Each version links to its own
-                 /ui/artifacts/<id>/html. */}}
+                 <details> — no JS. Each row shows the version label, date and
+                 the current marker, and links to its own
+                 /ui/artifacts/<id>/html.
+                 No author column: MemoryVersionRef does carry AuthorUserID
+                 since aihub#253, but it is one of three authorization-only
+                 fields on that type (json:"-", alongside Project and
+                 Visibility) — they exist so a renderer can decide whether the
+                 caller may see a row, not to be displayed. There is still no
+                 change-summary in the domain type. */}}
             <details class="vers-details">
               <summary><span class="chev"></span>{{len $a.Versions}} versions</summary>
               {{/* Versions are reversed newest-first in the handler; the version

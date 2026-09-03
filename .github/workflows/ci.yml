@@ -312,6 +312,39 @@ jobs:
       #             and only aihub#151 moves this number: the other two add no
       #             AIHUB_TEST_DB-gated function. Do not read the +1 as "one per
       #             work item".
+      #   132 -> 135 aihub#342/#345/#329 added 1 DB-gated function each, all in
+      #             internal/domain: TestReadIntentTakesNoWriteLock
+      #             (lock_intent_derivation_db_test.go, 4 subtests),
+      #             TestAcquireLocksReportsEveryHeldLock
+      #             (acquire_locks_reporting_db_test.go, 5 subtests) and
+      #             TestServerFilledResponseFieldsAreEchoed
+      #             (claim_response_echo_db_test.go, 3 subtests). One function
+      #             per work item, subtests for the per-arm claims, for the
+      #             reason the aihub#334 entry gives — so here the +3 IS one per
+      #             work item, which the aihub#151 entry above warns is normally
+      #             the wrong reading. All three need only a database (real
+      #             resource_locks rows and real transactions; no embedding
+      #             service), so the required set goes 129 -> 132 and each needs
+      #             its own step: "aihub#342 read-intent lock derivation DB
+      #             tests", "aihub#345 acquire_locks held-lock reporting DB
+      #             tests", "aihub#329 claim/takeover response echo DB tests".
+      #             Measured, not predicted, and NOT computed as "132 plus my
+      #             three". Read off this branch with GOWORK=off, from the same
+      #             DB-free inventory run this gate uses (so the database is
+      #             untouched), with the three steps written but before the
+      #             ratchet was raised — which is why the last line reads 129/132
+      #             and names the three as uncovered rather than 132/132.
+      #             Verbatim:
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 135
+      #                 (require only a DB: 132, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 129/132
+      #             The `132` this starts from was re-read off origin/main at
+      #             cfc3705 at the moment this line was written, and this branch
+      #             is at cfc3705 with no merge in between, so there is no second
+      #             reading to record. If origin/main moves before this lands,
+      #             re-run the gate on the merged tree and add BOTH readings —
+      #             do not adjust either number to make the chain look
+      #             continuous.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -327,7 +360,7 @@ jobs:
           go run ./internal/citest/dbtestcov \
             -inventory "$inventory" \
             -workflow .github/workflows/ci.yml \
-            -min-gated 132
+            -min-gated 135
 
       # aihub#242: exercise the DeleteDependency requeue regression (Change A)
       # against the real Postgres service already started for this job, which
@@ -1276,6 +1309,101 @@ jobs:
           done
           ! grep -q -- '--- SKIP' pre_share_visibility.log \
             || { echo "::error::an aihub#151 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#342: every path that DERIVES a lock from a declared resource must
+      # apply the intent rule the tool schemas state ("read ... takes no write
+      # lock"). Three of the four derivation sites ignored it; the fourth,
+      # FnAcquireLocks, was the only one that had it, which is why the fix moved
+      # the rule into one function (derivedLock) instead of repeating the check.
+      #
+      # Each read arm is paired with a write control, because aihub#342 says in
+      # so many words that "the claim succeeded" is NOT the criterion — a claim
+      # that waved everything through would satisfy it. The last subtest is the
+      # criterion: predict and claim must answer the same input the same way.
+      #
+      # Four subtests of ONE function, not four functions, for the reason the
+      # aihub#334 and aihub#151 entries give: the gate counts functions and this
+      # is one guard.
+      - name: aihub#342 read-intent lock derivation DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestReadIntentTakesNoWriteLock$' -count=1 -v 2>&1 | tee read_intent_locks.log
+          for want in 'TestReadIntentTakesNoWriteLock/claim_derives_no_lock_for_a_read_declaration' \
+                      'TestReadIntentTakesNoWriteLock/write_declaration_still_takes_the_lock' \
+                      'TestReadIntentTakesNoWriteLock/force_takeover_derives_no_lock_for_a_read_declaration' \
+                      'TestReadIntentTakesNoWriteLock/predict_and_claim_agree_on_a_read_declaration_over_a_held_lock'; do
+            grep -q -- "--- PASS: $want" read_intent_locks.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#342 intent rule is not actually verified on that derivation path"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' read_intent_locks.log \
+            || { echo "::error::an aihub#342 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#345: pf_acquire_locks must report the locks its attempt HOLDS, not
+      # the subset it happened to re-derive from the current declared_resources.
+      #
+      # The first subtest is the population that always worked and it is not
+      # decoration: a reporter who only ever tests a still-declared lock gets a
+      # correct answer every time and closes the report. The remaining four are
+      # the silent populations — a removed declaration, a non-file_scope lock, a
+      # read-intent lock predating aihub#342 — plus the partition check that
+      # keeps "report everything held" from being satisfied by listing new locks
+      # in both arrays.
+      #
+      # Every assertion reads the resource_locks TABLE. The tool under test is
+      # the one that misreports, so its own return value cannot be the oracle.
+      - name: aihub#345 acquire_locks held-lock reporting DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestAcquireLocksReportsEveryHeldLock$' -count=1 -v 2>&1 | tee acquire_locks_reporting.log
+          for want in 'TestAcquireLocksReportsEveryHeldLock/a_still-declared_lock_is_reported' \
+                      'TestAcquireLocksReportsEveryHeldLock/a_lock_whose_declaration_was_removed_is_still_reported' \
+                      'TestAcquireLocksReportsEveryHeldLock/a_non-file-scope_lock_is_reported' \
+                      'TestAcquireLocksReportsEveryHeldLock/a_newly_taken_lock_is_acquired_not_already_held' \
+                      'TestAcquireLocksReportsEveryHeldLock/a_lock_behind_a_read_declaration_is_reported'; do
+            grep -q -- "--- PASS: $want" acquire_locks_reporting.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#345 already_held contract is not actually verified for that population"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' acquire_locks_reporting.log \
+            || { echo "::error::an aihub#345 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#329: the SERVER's fill of the response fields the MCP client
+      # consumes to name or key something local — ClaimResponse.Goal (the task
+      # branch name), and ID/Slug/Project on both claim exits and on
+      # ForceTakeoverResponse (the state file key and the slug scan that finds
+      # it).
+      #
+      # This step exists because the existing suite is provably blind to it.
+      # Measured on this branch: with BOTH ClaimResponse.Goal fills blanked,
+      # `env -u AIHUB_TEST_DB GOWORK=off go test -count=1 -race ./...` still
+      # exits 0 — internal/mcp/claim_handler_wiring_test.go's fake aihub
+      # hardcodes "goal" into its response, so it pins the three client-side
+      # hops and cannot see the server one. The fields are `omitempty` and the
+      # client reads them with a discarded comma-ok, so a server that stops
+      # filling them produces `polyforge/<project>-<seq>` — a legal, unremarkable
+      # branch name — and nothing else changes.
+      #
+      # Three subtests of ONE function, one per exit. Assert them individually:
+      # the fresh claim and the idempotent REPLAY are separate literals, and the
+      # replay is the one a retry sees — and a retry still has to build the
+      # worktree.
+      - name: aihub#329 claim/takeover response echo DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestServerFilledResponseFieldsAreEchoed$' -count=1 -v 2>&1 | tee response_echo.log
+          for want in 'TestServerFilledResponseFieldsAreEchoed/fresh_claim' \
+                      'TestServerFilledResponseFieldsAreEchoed/idempotent_replay' \
+                      'TestServerFilledResponseFieldsAreEchoed/force_takeover'; do
+            grep -q -- "--- PASS: $want" response_echo.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); that exit's server-side fill is unguarded again"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' response_echo.log \
+            || { echo "::error::an aihub#329 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#303: the 26 DB-gated test functions that, until this step, no
       # `-run` in this file named — so they SKIPped on every CI run since the

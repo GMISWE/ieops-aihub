@@ -110,9 +110,16 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 
 	// Rule 1: resource_lock conflict (hard_block)
 	// Skip if dry_run=true (advisory only)
+	//
+	// derivedLock, not resourceToLock (aihub#342): rule 1 answers "would taking
+	// this resource's lock collide", and a declaration that takes no lock cannot
+	// collide with one. Before this, an intent=read path over a held lock got
+	// hard_block from rule 1 and info from rule 3 — two rules of one function
+	// contradicting each other on a single input, with only dry_run deciding
+	// which one the caller saw.
 	if !req.DryRun {
 		for _, res := range resources {
-			lockType, lockKey := resourceToLock(res, effectiveProject)
+			lockType, lockKey := derivedLock(res, effectiveProject)
 			if lockType == "" {
 				continue
 			}
@@ -355,8 +362,42 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 	return result, nil
 }
 
+// derivedLock returns the write lock a declared resource takes, or ("", "") if
+// it takes none. It is the ONE place the intent rule lives, and every path that
+// turns declared_resources into resource_locks rows must go through it:
+// FnClaimWorkItem, FnForceTakeover, FnAcquireLocks, and PredictConflicts rule 1.
+//
+// aihub#342. The rule is not new — it is the contract stated in three MCP tool
+// schemas ("read ... takes no write lock") and it was already implemented, once,
+// inside FnAcquireLocks. The other three derivation sites each re-implemented
+// the mapping without it, so a work item whose sole declared resource was
+// {"type":"path","uri":"file:.gitignore","intent":"read"} had a file_scope write
+// lock taken for it at claim, then 409'd somebody else, while
+// pf_predict_conflicts — the pre-claim gate — reported the same input as `info`.
+// Two tools, one input, opposite answers.
+//
+// Split from resourceToLock rather than folded into it, because the two
+// questions are genuinely different and one caller needs the other answer:
+// PredictConflicts rule 3 derives a key to COMPARE against existing locks (a
+// read declaration still overlaps; it just reports the overlap as `info`), so
+// it must keep calling resourceToLock. Putting the intent check inside
+// resourceToLock would silently delete rule 3's read predictions, turning the
+// contract's "report as info" into "report nothing" — a quieter version of the
+// same defect.
+func derivedLock(res DeclaredResourceItem, project string) (lockType, lockKey string) {
+	if res.Intent == "read" {
+		return "", ""
+	}
+	return resourceToLock(res, project)
+}
+
 // resourceToLock converts a DeclaredResourceItem to a (resource_type, resource_key) pair per §25 mapping.
 // project namespaces file_scope keys (aihub#222); it is ignored for git_branch/deploy_env.
+//
+// ⚠️ This mapper answers "which lock KEY does this resource correspond to", not
+// "does this resource take a lock". It deliberately ignores Intent. If you are
+// about to insert a resource_locks row or check one for a conflict, call
+// derivedLock instead (aihub#342).
 func resourceToLock(res DeclaredResourceItem, project string) (lockType, lockKey string) {
 	switch res.Type {
 	case "repo":

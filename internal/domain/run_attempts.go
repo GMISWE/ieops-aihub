@@ -338,7 +338,13 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		}
 		if jsonErr := json.Unmarshal(wi.DeclaredResources, &declared); jsonErr == nil {
 			for _, d := range declared {
-				lockType, lockKey := resourceToLock(DeclaredResourceItem{
+				// derivedLock, not resourceToLock (aihub#342): an intent=read
+				// declaration takes no write lock. This line is the reported
+				// instance — claim took a file_scope lock for a read-only path
+				// and then 409'd the next claimer, while pf_predict_conflicts
+				// reported the identical input as `info`, so the pre-claim gate
+				// had no predictive value at all.
+				lockType, lockKey := derivedLock(DeclaredResourceItem{
 					Type: d.Type, URI: d.URI, Intent: d.Intent, TaskBranch: d.TaskBranch,
 				}, wi.Project)
 				// aihub#238: an empty key is possible from bad stored data (a
@@ -1076,9 +1082,17 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 
 	// Re-INSERT resource_locks for new attempt based on wi.DeclaredResources
 	// (prior locks were deleted above; new attempt must hold them for conflict detection)
+	//
+	// aihub#342: `Intent` is a field of this struct, and that is load-bearing.
+	// It used to be absent, so the value could not reach the mapper no matter
+	// what the mapper did — a takeover re-created write locks for declarations
+	// that had asked for none. A missing struct field is the quietest form of
+	// this defect: nothing to grep for, and every `intent == "read"` check
+	// downstream reads the zero value and passes.
 	var declaredRes []struct {
 		Type       string `json:"type"`
 		URI        string `json:"uri"`
+		Intent     string `json:"intent,omitempty"`
 		TaskBranch string `json:"task_branch,omitempty"`
 	}
 	if len(wi.DeclaredResources) > 0 {
@@ -1088,7 +1102,9 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	// Stored data, so this must not fail the takeover; the subsequent fresh claim
 	// reports them via ClaimResponse.unrecognized_resources.
 	for _, res := range declaredRes {
-		lockType, lockKey := resourceToLock(DeclaredResourceItem{Type: res.Type, URI: res.URI, TaskBranch: res.TaskBranch}, wi.Project)
+		lockType, lockKey := derivedLock(DeclaredResourceItem{
+			Type: res.Type, URI: res.URI, Intent: res.Intent, TaskBranch: res.TaskBranch,
+		}, wi.Project)
 		if lockType == "" {
 			continue
 		}
@@ -1283,7 +1299,19 @@ type AcquireLocksRequest struct {
 
 // AcquireLocksResponse is returned by FnAcquireLocks.
 type AcquireLocksResponse struct {
-	Acquired    []ResourceLock `json:"acquired"`
+	// Acquired lists the locks THIS call took: file_scope only, one per
+	// write-intent path in the work item's declared_resources that was free.
+	Acquired []ResourceLock `json:"acquired"`
+	// AlreadyHeld lists every OTHER lock this attempt holds, of every type,
+	// read straight from resource_locks — not just the ones this call would
+	// have re-derived (aihub#345). Acquired and AlreadyHeld are disjoint, and
+	// together they are exactly the attempt's lock set.
+	//
+	// It includes locks with no live declaration behind them: git_branch and
+	// deploy_env locks taken at claim, and file_scope locks whose
+	// declared_resources entry has since been removed — removing a declaration
+	// does NOT release its lock, and an attempt that believes otherwise writes
+	// unprotected.
 	AlreadyHeld []ResourceLock `json:"already_held"`
 }
 
@@ -1341,10 +1369,10 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 	}
 	var targets []targetLock
 	for _, d := range declared {
-		if d.Intent == "read" {
-			continue // read-only resources never need a write lock
-		}
-		lType, lKey := resourceToLock(d, wi.Project)
+		// aihub#342: the read rule used to be spelled out here, and this was the
+		// only one of four derivation sites that had it. It now lives in
+		// derivedLock so claim, force_takeover and predict rule 1 share it.
+		lType, lKey := derivedLock(d, wi.Project)
 		if lType != "file_scope" {
 			continue // this endpoint handles file_scope only
 		}
@@ -1355,7 +1383,6 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 	}
 
 	acquired := make([]ResourceLock, 0)
-	alreadyHeld := make([]ResourceLock, 0)
 
 	for _, t := range targets {
 		var ownerAttemptID, ownerActorDisplay, ownerWISlug string
@@ -1364,15 +1391,7 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 
 		if scanErr == nil {
 			// A live attempt holds this lock.
-			if ownerAttemptID == req.AttemptID {
-				// Already held by this very attempt — no-op.
-				alreadyHeld = append(alreadyHeld, ResourceLock{
-					ResourceType:   t.lockType,
-					ResourceKey:    t.lockKey,
-					OwnerAttemptID: req.AttemptID,
-					ClaimEpoch:     req.ClaimEpoch,
-				})
-			} else {
+			if ownerAttemptID != req.AttemptID {
 				// Held by a different live attempt — conflict; rollback and error.
 				return nil, NewErrDetails(ErrConflictLockTaken,
 					fmt.Sprintf("resource %s:%s is already locked", t.lockType, t.lockKey),
@@ -1385,6 +1404,11 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 					},
 				)
 			}
+			// Already held by this very attempt — no-op. Deliberately NOT
+			// recorded here: already_held is read from the table below
+			// (aihub#345), because building it inside this loop is precisely
+			// what made it report the re-derived target set instead of what the
+			// attempt holds.
 			continue
 		}
 		if !errors.Is(scanErr, pgx.ErrNoRows) {
@@ -1403,13 +1427,8 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 				Scan(&raceOwnerID, &raceActorDisplay, &raceWISlug)
 			switch {
 			case reScanErr == nil && raceOwnerID == req.AttemptID:
-				// We already own it — no-op.
-				alreadyHeld = append(alreadyHeld, ResourceLock{
-					ResourceType:   t.lockType,
-					ResourceKey:    t.lockKey,
-					OwnerAttemptID: req.AttemptID,
-					ClaimEpoch:     req.ClaimEpoch,
-				})
+				// We already own it — no-op. Reported by the table read below
+				// (aihub#345), not from here.
 				continue
 			case reScanErr == nil:
 				// A different live attempt owns it — conflict.
@@ -1454,6 +1473,70 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 			OwnerAttemptID: req.AttemptID,
 			ClaimEpoch:     req.ClaimEpoch,
 		})
+	}
+
+	// aihub#345: read already_held from the LOCK TABLE, inside the same
+	// transaction, rather than from the loop above.
+	//
+	// The loop only ever visited the targets re-derived from the work item's
+	// CURRENT declared_resources, so already_held answered "of the locks I would
+	// take right now, which do I have" — while every caller read it as "which
+	// locks does this attempt hold". Anything outside that recomputed set was
+	// silent though the server kept enforcing it: a declaration since REMOVED
+	// (aihub#283's internal/cli/init.go, still 409ing a day after already_held
+	// reported none), an intent=read declaration whose lock predates aihub#342,
+	// a git_branch or deploy_env lock this endpoint never acquires, or a lock
+	// from a client-supplied requested_locks with no declaration behind it.
+	//
+	// The cost of the old shape was not a confused reviewer. An execute agent
+	// read {"acquired":[],"already_held":[]} and published "this attempt holds
+	// zero locks" as a correction to a premise that had been right — a tool that
+	// misleads agents, not just people. Since there is no other way to ask (the
+	// only cross-checked route was pf_predict_conflicts with intent=write and no
+	// work_item_id), the field has to be complete or it cannot be used at all.
+	//
+	// Excluding `acquired` keeps the two arrays a partition, which is how repeat
+	// calls already read: what moved is in acquired, what was already there is
+	// in already_held.
+	alreadyHeld := make([]ResourceLock, 0)
+	heldRows, heldErr := tx.Query(ctx, `
+		SELECT resource_type, resource_key, owner_attempt_id, claim_epoch
+		FROM resource_locks WHERE owner_attempt_id=$1
+		ORDER BY resource_type, resource_key`, req.AttemptID)
+	if heldErr != nil {
+		if aerr := retryConflictErr(heldErr, "failed to list held locks"); aerr != nil { // aihub#334
+			return nil, aerr
+		}
+		return nil, NewErr(ErrInternalError, "failed to list held locks")
+	}
+	justAcquired := make(map[string]bool, len(acquired))
+	for _, l := range acquired {
+		justAcquired[l.ResourceType+":"+l.ResourceKey] = true
+	}
+	for heldRows.Next() {
+		var l ResourceLock
+		if scanErr := heldRows.Scan(&l.ResourceType, &l.ResourceKey, &l.OwnerAttemptID, &l.ClaimEpoch); scanErr != nil {
+			heldRows.Close()
+			if aerr := retryConflictErr(scanErr, "failed to scan held locks"); aerr != nil { // aihub#334
+				return nil, aerr
+			}
+			return nil, NewErr(ErrInternalError, "failed to scan held locks")
+		}
+		if justAcquired[l.ResourceType+":"+l.ResourceKey] {
+			continue
+		}
+		alreadyHeld = append(alreadyHeld, l)
+	}
+	heldRows.Close()
+	// aihub#334: a lazily-streamed result set's error has no other exit, and
+	// this transaction is SERIALIZABLE so 40001 is reachable here. Without this
+	// the loop just looks empty — which is the exact failure this whole change
+	// exists to remove, arriving by a different route.
+	if err := heldRows.Err(); err != nil {
+		if aerr := retryConflictErr(err, "failed to list held locks"); aerr != nil {
+			return nil, aerr
+		}
+		return nil, NewErr(ErrInternalError, "failed to list held locks")
 	}
 
 	if err := tx.Commit(ctx); err != nil {

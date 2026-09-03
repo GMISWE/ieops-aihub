@@ -1307,9 +1307,17 @@ func (s *Server) registerLifecycleTools() {
 	})
 
 	// pf_acquire_locks
+	//
+	// aihub#345: the already_held sentence in the description below is the fix,
+	// not decoration. This tool used to report only the locks it had just
+	// re-derived from declared_resources, so `already_held: []` was read as
+	// "this attempt holds no locks" while the server went on enforcing locks it
+	// had not mentioned — and an execute agent published exactly that conclusion
+	// as a correction to a premise that had been right.
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_acquire_locks",
-		Description: "Acquire file_scope locks for the current running attempt from the work item's declared_resources (reconcile mid-attempt; blocks on conflict, never steals).",
+		Name: "pf_acquire_locks",
+		Description: "Acquire file_scope locks for the current running attempt from the work item's declared_resources (reconcile mid-attempt; blocks on conflict, never steals). " +
+			"`acquired` is what THIS call took; `already_held` is every other lock the attempt holds, of every type, read from the lock table — including locks whose declared_resources entry was since removed, which does NOT release them. The two are disjoint and together are the attempt's full lock set.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID (used to find state file)"),
 		}, []string{"work_item_id"}),

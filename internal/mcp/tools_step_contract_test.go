@@ -28,6 +28,7 @@ package mcp_test
 import (
 	"encoding/json"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -270,5 +271,268 @@ func TestBatchCreateItemFieldsMatchSingleCreate(t *testing.T) {
 		if _, ok := single[field]; !ok {
 			t.Errorf("a batch item accepts %q but pf_create_work_item does not", field)
 		}
+	}
+}
+
+// ─── aihub#265: pf_get_step's description IS its response contract ──────────
+//
+// The defect this closes is not a dropped parameter but a dropped ANSWER.
+// pf_get_step advertised "step graph, current status, progress, previous steps"
+// and server.StepState carried the current wi_step_state row and nothing else —
+// no history, no summaries, no graph. Measured on production 2026-09-03,
+// pf_get_step("tether#167") returned exactly five keys:
+// current_step, current_step_status, version, wi_type, work_item_id.
+//
+// Nothing went red, because both layers were internally consistent: the schema
+// declares only work_item_id (which is bound), and the struct is a valid struct.
+// It is only visible by holding the description against the response type, which
+// is what these two tests do. The consequence was two record points for one
+// fact: every scenario step graph told the agent to read prior context from a
+// hand-written `.pf_steps.json`, because this tool had nothing to read.
+
+// getStepAdvertised pairs a claim pf_get_step's description makes about its
+// RESPONSE with the JSON key of server.StepState that has to deliver it.
+//
+// Kept explicit for the reason stepBodyFieldFor is: a claim removed from the
+// description, or a field removed from the struct, has to be acknowledged here —
+// which is the moment to ask whether the other side moved too.
+var getStepAdvertised = []struct{ Claim, JSONKey string }{
+	{"completed_steps", "completed_steps"},
+	{"artifact_summary", "completed_steps"}, // carried inside each entry
+	{"current_step_status", "current_step_status"},
+	{"current_step", "current_step"},
+	{"work_item_id", "work_item_id"},
+	{"version", "version"},
+}
+
+// getStepRequiredPhrases are sentences the description must keep that name no
+// field at all, so getStepAdvertised cannot cover them.
+//
+// This exists because of a measured hole: the field-name assertions all stayed
+// GREEN when the prohibition sentence was deleted, and that sentence is the only
+// thing telling a caller who is NOT running a polyforge step template to
+// distrust a progress file it finds in the worktree. The templates carry the
+// same warning, but a caller reaching pf_get_step directly never reads them.
+// A 989 -> 756 char trim of this description could have taken it out unnoticed.
+var getStepRequiredPhrases = []struct{ Phrase, Why string }{
+	{"Never take step progress from a file in the worktree",
+		"the prohibition; the only warning a non-template caller ever sees"},
+	{"absent only on a server older than",
+		"absent vs [] is a different answer, and reading absent as empty is the original defect"},
+}
+
+// getStepAdvertisedMayBeAbsent records advertised keys that carry omitempty, and
+// why that is acceptable. boundJSONKeys deliberately strips the option, so
+// without this table the guard cannot tell "always on the wire" from "may
+// vanish" — and a key that vanishes on exactly the resume path is the same class
+// of defect as the one this file exists to close.
+var getStepAdvertisedMayBeAbsent = map[string]string{
+	"current_step": "absent when the work item has never started a step; completed_steps " +
+		"answers the resume question on its own, and [] there is unambiguous",
+}
+
+// getStepDescriptionNonFields are snake_case tokens in pf_get_step's
+// description that are deliberately NOT response fields, each with why. The
+// general guard below rejects anything else, so a new promise cannot be added
+// without either a field to back it or an entry here.
+var getStepDescriptionNonFields = map[string]string{
+	"step_id":        "a key of each completed_steps entry, not of StepState itself",
+	"pf_recall":      "a sibling tool this description points callers at",
+	"pf_read_events": "a sibling tool this description points callers at",
+}
+
+// Deliberately NOT listed above: work_item_id and completed_steps. Both ARE
+// bound keys, so listing them here would let the loop wave them through if the
+// field were later deleted — an allowlist entry for a real field is an escape
+// hatch cheaper than the fix.
+
+// snakeCaseToken matches the identifier shape this codebase uses for JSON keys
+// and tool names, so the guard sees what a reader would read as a field name.
+var snakeCaseToken = regexp.MustCompile(`\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b`)
+
+// jsonTagOption reports whether a struct field's json tag carries an option
+// (e.g. "omitempty").
+func jsonTagOption(t *testing.T, v any, jsonKey, option string) bool {
+	t.Helper()
+	typ := reflect.TypeOf(v)
+	if typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	for i := 0; i < typ.NumField(); i++ {
+		tag := typ.Field(i).Tag.Get("json")
+		name, opts, _ := strings.Cut(tag, ",")
+		if name != jsonKey {
+			continue
+		}
+		for _, o := range strings.Split(opts, ",") {
+			if o == option {
+				return true
+			}
+		}
+		return false
+	}
+	t.Fatalf("%T binds no json key %q", v, jsonKey)
+	return false
+}
+
+// TestGetStepAdvertisesAResponseItActuallyReturns is the guard proper, in both
+// directions.
+//
+// How it was proven red, stated precisely because the loose version of this
+// sentence was wrong. Against the pre-aihub#265 build with this test file added,
+// the package does not COMPILE (server.CompletedStep and StepState.CompletedSteps
+// do not exist) — and a compile error is the weaker outcome, because it reads as
+// a broken build rather than as the defect. The discriminating red is the
+// description-only mutant: restore the old description, KEEP the struct field,
+// and this fails on 5 assertions plus the anti-vacuity t.Fatal. Renaming the
+// json tag to step_history is red in both directions. Both were measured.
+func TestGetStepAdvertisesAResponseItActuallyReturns(t *testing.T) {
+	desc := publishedTool(t, "pf_get_step").Description
+	bound := boundJSONKeys(t, server.StepState{})
+
+	// Direction 1: every advertised claim is present in the description AND
+	// backed by a bound field.
+	for _, promise := range getStepAdvertised {
+		if !strings.Contains(desc, promise.Claim) {
+			t.Errorf("pf_get_step's description no longer mentions %q. It was advertised as part of the "+
+				"response, so callers were told to rely on it; if it is genuinely gone, delete the entry "+
+				"from getStepAdvertised in the same change so the removal is reviewable.", promise.Claim)
+		}
+		if !bound[promise.JSONKey] {
+			t.Errorf("pf_get_step's description advertises %q but server.StepState binds no %q key — "+
+				"the response cannot carry it, and a caller reading the description will conclude the "+
+				"work it names is already accounted for. This is the aihub#265 defect: the tool promised "+
+				"\"previous steps\" and returned only the current wi_step_state row.",
+				promise.Claim, promise.JSONKey)
+		}
+	}
+
+	// Direction 2, the general half: every field-shaped token the description
+	// uses must be a real key somewhere in the response, or declared a non-field
+	// with a reason. This is what makes the guard close the class rather than
+	// this instance — a future description cannot invent a response field.
+	stepKeys := boundJSONKeys(t, server.CompletedStep{})
+	tokens := snakeCaseToken.FindAllString(desc, -1)
+	if len(tokens) == 0 {
+		t.Fatal("no snake_case tokens found in pf_get_step's description — the general guard below would " +
+			"pass vacuously, so this is a failure of the guard, not a clean description")
+	}
+	sawCompletedSteps := false
+	for _, tok := range tokens {
+		if tok == "completed_steps" {
+			sawCompletedSteps = true
+		}
+		if bound[tok] || stepKeys[tok] {
+			continue
+		}
+		if _, ok := getStepDescriptionNonFields[tok]; ok {
+			continue
+		}
+		t.Errorf("pf_get_step's description names %q, which is neither a JSON key of server.StepState "+
+			"nor of server.CompletedStep. Either add the field, or add %q to "+
+			"getStepDescriptionNonFields with the reason it is not one.", tok, tok)
+	}
+	// A stale allowlist entry is dead weight that silently widens the guard: it
+	// keeps waving through a token the description no longer uses, so the next
+	// person to reintroduce that token gets a free pass. Require every entry to
+	// be earning its place.
+	for tok, why := range getStepDescriptionNonFields {
+		if !strings.Contains(desc, tok) {
+			t.Errorf("getStepDescriptionNonFields lists %q (%s) but the description does not use it. "+
+				"Delete the entry — an allowlist entry for an absent token pre-approves its return.", tok, why)
+		}
+	}
+
+	// The phrases that carry no field name and would otherwise be unguarded.
+	for _, req := range getStepRequiredPhrases {
+		if !strings.Contains(desc, req.Phrase) {
+			t.Errorf("pf_get_step's description no longer contains %q — %s. Every field-name "+
+				"assertion in this test stays green without it, which is why it is listed separately.",
+				req.Phrase, req.Why)
+		}
+	}
+
+	// N1: advertised keys that may be omitted have to say so out loud.
+	for _, promise := range getStepAdvertised {
+		if !jsonTagOption(t, server.StepState{}, promise.JSONKey, "omitempty") {
+			continue
+		}
+		if _, ok := getStepAdvertisedMayBeAbsent[promise.JSONKey]; !ok {
+			t.Errorf("the description advertises %q and server.StepState omits it when empty, so a "+
+				"caller told to rely on it can find it missing. Either drop omitempty or record why "+
+				"absence is acceptable in getStepAdvertisedMayBeAbsent.", promise.JSONKey)
+		}
+	}
+
+	if !sawCompletedSteps {
+		t.Error("pf_get_step's description does not name completed_steps, so nothing tells a resuming " +
+			"agent that the server holds its prior-step history — which is the whole of aihub#265")
+	}
+
+	// The description must not claim to return the step graph. It never did: the
+	// graph is a scenario template in polyforge-coding, and advertising it here
+	// is what let an agent believe one call would list the remaining steps.
+	if strings.Contains(desc, "step graph, ") || strings.Contains(desc, "returns the step graph") {
+		t.Error("pf_get_step's description claims to return the step graph again. aihub does not store " +
+			"one — the graph is a scenario template, pinned per work item by scenario_ref.")
+	}
+}
+
+// TestGetStepCompletedStepsDistinguishesEmptyFromAbsent guards the wire
+// encoding, which is where this fix can be silently undone.
+//
+// `[]` and absent must not be the same bytes. `[]` means "this work item has
+// completed no step"; absent means "this server predates aihub#265 and cannot
+// answer". omitempty collapses them, and the collapsed value reads as "nothing
+// is done" — so a client talking to an old server would start again from step 1
+// while believing it had consulted the authority. That is the original defect
+// with the stale local file swapped for a confident server response.
+func TestGetStepCompletedStepsDistinguishesEmptyFromAbsent(t *testing.T) {
+	if jsonTagOption(t, server.StepState{}, "completed_steps", "omitempty") {
+		t.Error("server.StepState.CompletedSteps carries omitempty: an empty history and a server that " +
+			"cannot report one now serialise identically, so a resuming agent cannot tell them apart")
+	}
+
+	empty, err := json.Marshal(server.StepState{CompletedSteps: []server.CompletedStep{}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(empty), `"completed_steps":[]`) {
+		t.Errorf("an empty history does not serialise as \"completed_steps\":[] — got %s", empty)
+	}
+
+	// A nil slice marshals to null, and the zero value of StepState HAS a nil
+	// slice — so this asserts the hazard exists rather than pretending it does
+	// not. The guarantee that callers never see it lives one layer down:
+	// handleGetStep assigns from truncateCompletedSteps, which never returns nil
+	// (TestTruncateCompletedSteps, internal/server).
+	//
+	// The earlier version of this assertion checked only that the key was
+	// present, which PASSES on `"completed_steps":null` — the third spelling the
+	// comment above it warned against. Checking for the key is not checking the
+	// value.
+	nilled, err := json.Marshal(server.StepState{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(nilled), `"completed_steps":null`) {
+		t.Errorf("StepState's zero value no longer marshals completed_steps as null — got %s.\n"+
+			"That is not necessarily wrong, but it changes which spellings exist on the wire, so "+
+			"update this assertion and truncateCompletedSteps' contract together.", nilled)
+	}
+
+	// Each entry has to carry what a resuming agent reads. step_id says which
+	// step is done; artifact_summary is the content that used to live in
+	// `.pf_steps.json` and is the reason a pointer at the server is a
+	// replacement for that file rather than a downgrade.
+	entry := boundJSONKeys(t, server.CompletedStep{})
+	for _, key := range []string{"step_id", "status", "artifact_summary", "completed_at"} {
+		if !entry[key] {
+			t.Errorf("server.CompletedStep binds no %q key; a resuming agent cannot use the history without it", key)
+		}
+	}
+	if jsonTagOption(t, server.CompletedStep{}, "artifact_summary", "omitempty") {
+		t.Error("CompletedStep.ArtifactSummary carries omitempty: a step that recorded no summary and a " +
+			"response that does not carry summaries become the same thing")
 	}
 }

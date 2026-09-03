@@ -12,9 +12,35 @@ import (
 
 func (s *Server) registerStepTools() {
 	// pf_get_step
+	//
+	// aihub#265: this description used to advertise "step graph, current status,
+	// progress, previous steps" and the endpoint returned none of the last two —
+	// StepState carried the current row of wi_step_state and nothing else, while
+	// the step history sat unread in wi_step_completions. Every scenario step
+	// graph therefore opened by telling the agent to read prior context out of a
+	// hand-written `.pf_steps.json`, because this tool had nothing to offer — and
+	// no code path anywhere creates that file, so a resuming agent read whatever
+	// the previous one happened to leave behind, or nothing at all.
+	//
+	// The description is now the contract: internal/mcp/tools_step_contract_test.go
+	// asserts that every response field named here is a bound JSON key on
+	// server.StepState, in BOTH directions, so it cannot go back to promising
+	// something the struct does not carry.
+	//
+	// "step graph" is deliberately gone rather than reworded: the graph lives in
+	// the scenario template, not in aihub, and naming it here is what made an
+	// agent believe one call would tell it what the remaining steps are.
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_get_step",
-		Description: "Get the current step state for a work item (step graph, current status, progress, previous steps)",
+		Name: "pf_get_step",
+		Description: "Read the AUTHORITATIVE step record for a work item, and the only one. Returns " +
+			"current_step / current_step_status / version, plus completed_steps: the step history, oldest " +
+			"first, retries included, each entry carrying step_id, status and that step's artifact_summary. " +
+			"A resuming agent should call this FIRST and treat every step_id in completed_steps as done. " +
+			"Never take step progress from a file in the worktree; nothing writes one. completed_steps is [] " +
+			"when nothing has completed, and absent only on a server older than aihub#265 — not the same " +
+			"answer. Takes a slug or a canonical id and echoes the canonical one in work_item_id; pass THAT " +
+			"to pf_recall / pf_read_events, which return nothing for a slug. No step graph here — that is " +
+			"the scenario template.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID"),
 		}, []string{"work_item_id"}),

@@ -228,6 +228,29 @@ func headArtifactMem(id, memType string) *domain.Memory {
 	}
 }
 
+// versionRefOf builds the lineage row domain.MemoryVersionChain would return
+// for m.
+//
+// aihub#253 made the three authorization scalars part of
+// domain.MemoryVersionRef, because the /ui side rail now decides whether the
+// caller may see each row FROM THE ROW — it no longer re-reads every version's
+// full record through loadMemoryFn just to read them. A hand-written ref that
+// leaves Project/Visibility/AuthorUserID empty therefore describes a version in
+// no project, which is denied to every non-admin caller; deriving the ref from
+// the same *domain.Memory the loadMemoryFn fake serves keeps the two halves of
+// a fixture from disagreeing about who may see what.
+func versionRefOf(m *domain.Memory, createdAt string) domain.MemoryVersionRef {
+	return domain.MemoryVersionRef{
+		ID:           m.ID,
+		CreatedAt:    createdAt,
+		Status:       m.Status,
+		IsCurrent:    m.Status == "active",
+		Project:      m.Project,
+		Visibility:   m.Visibility,
+		AuthorUserID: m.AuthorUserID,
+	}
+}
+
 func TestArtifactHTML_UI_LatestIDNil_NoRedirect(t *testing.T) {
 	defer withVersionChainOverride()()
 	mem := supersededArtifactMem("mem_old1", "", "experience.debug")
@@ -1267,9 +1290,13 @@ func TestUIArtifactHTML_ShareControlInjected(t *testing.T) {
 func TestUIArtifactHTML_ShareAboveVersionHistory(t *testing.T) {
 	prev := versionChainFn
 	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
+		// Both rows are in publicSharedMem()'s project with its visibility, so
+		// authorUser() may see both and the version-history card renders.
 		return []domain.MemoryVersionRef{
-			{ID: "mem_share1", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
-			{ID: "mem_v2", CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+			{ID: "mem_share1", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false,
+				Project: "testproj", Visibility: "public", AuthorUserID: "u_author"},
+			{ID: "mem_v2", CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true,
+				Project: "testproj", Visibility: "public", AuthorUserID: "u_author"},
 		}, nil
 	}
 	defer func() { versionChainFn = prev }()
@@ -1756,8 +1783,10 @@ func TestArtifactHTML_UI_SideRail_EmitsExactVersionMarker(t *testing.T) {
 	prevVCF := versionChainFn
 	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
 		return []domain.MemoryVersionRef{
-			{ID: "mem_old_marker", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
-			{ID: mem.ID, CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+			{ID: "mem_old_marker", CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false,
+				Project: mem.Project, Visibility: mem.Visibility, AuthorUserID: mem.AuthorUserID},
+			{ID: mem.ID, CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true,
+				Project: mem.Project, Visibility: mem.Visibility, AuthorUserID: mem.AuthorUserID},
 		}, nil
 	}
 	defer func() { versionChainFn = prevVCF }()
@@ -1801,9 +1830,9 @@ func TestArtifactHTML_UI_SideRail_DeniedVersion_Omitted(t *testing.T) {
 	prevVCF := versionChainFn
 	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
 		return []domain.MemoryVersionRef{
-			{ID: denied.ID, CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
-			{ID: visibleOther.ID, CreatedAt: "2024-03-01T00:00:00Z", Status: "archived", IsCurrent: false},
-			{ID: cur.ID, CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+			versionRefOf(denied, "2024-01-01T00:00:00Z"),
+			versionRefOf(visibleOther, "2024-03-01T00:00:00Z"),
+			versionRefOf(cur, "2024-06-01T00:00:00Z"),
 		}, nil
 	}
 	defer func() { versionChainFn = prevVCF }()
@@ -2108,9 +2137,9 @@ func TestArtifactHTML_UI_SideRail_Labels_ContiguousAfterFilter(t *testing.T) {
 	prevVCF := versionChainFn
 	versionChainFn = func(_ context.Context, _ *pgxpool.Pool, _ string) ([]domain.MemoryVersionRef, error) {
 		return []domain.MemoryVersionRef{
-			{ID: denied.ID, CreatedAt: "2024-01-01T00:00:00Z", Status: "archived", IsCurrent: false},
-			{ID: visibleOther.ID, CreatedAt: "2024-03-01T00:00:00Z", Status: "archived", IsCurrent: false},
-			{ID: cur.ID, CreatedAt: "2024-06-01T00:00:00Z", Status: "active", IsCurrent: true},
+			versionRefOf(denied, "2024-01-01T00:00:00Z"),
+			versionRefOf(visibleOther, "2024-03-01T00:00:00Z"),
+			versionRefOf(cur, "2024-06-01T00:00:00Z"),
 		}, nil
 	}
 	defer func() { versionChainFn = prevVCF }()

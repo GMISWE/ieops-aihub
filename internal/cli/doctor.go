@@ -169,9 +169,21 @@ func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot
 	// line they belong to. Building the whole slice first put them at the very
 	// top of the report, above the first check, formatted like continuations of
 	// something several lines away.
+	// Resolve the endpoint here rather than reading it off the client, so the
+	// report can still name it when there is no client at all (no API key).
+	// Since aihub#335 the address is not written down in any document, which
+	// makes this line — not a doc — the answer to "which aihub am I talking
+	// to?", and it is the only place an override you forgot about shows up.
+	mc, _ := config.LoadMachineConfig()
+	wsAihubURL := ""
+	if cfg != nil {
+		wsAihubURL = cfg.AIHub.URL
+	}
+	endpoint, endpointSource := config.EffectiveAihubURL(mc, wsAihubURL)
+
 	checks := []func() checkResult{
 		func() checkResult { return checkWorkspace(wsRoot, cfg) },
-		func() checkResult { return checkConfig(ctx, c) },
+		func() checkResult { return checkConfig(ctx, c, endpoint, endpointSource) },
 		func() checkResult { return checkRepos(wsRoot, cfg) },
 		func() checkResult { return checkWorktrees(ctx, c, cfg, wsRoot, opts, os.Stdout) },
 		func() checkResult { return checkBranchUpstreams(ctx, cfg, wsRoot) },
@@ -233,12 +245,23 @@ func checkWorkspace(wsRoot string, cfg *config.Config) checkResult {
 // branch (see handleHealth in internal/server/router.go), because container
 // liveness probes and this very check treat its reachability as liveness. The
 // verdict is in the body or nowhere.
-func checkConfig(ctx context.Context, c *client.Client) checkResult {
+// endpoint/source come from config.EffectiveAihubURL and are printed on every
+// branch, including the ones that contacted nothing. That is deliberate:
+// aihub#335 removed the address from the documents precisely so that no stale
+// copy of it can exist, which makes this report the place a human reads it, and
+// "unreachable" is only actionable next to WHICH address was tried and WHICH
+// layer chose it. The old wording — "POLYFORGE_API_KEY / POLYFORGE_AIHUB_URL not
+// set" — named the URL as a cause it can no longer be (EffectiveAihubURL never
+// returns "", so a nil client means the key and nothing else).
+func checkConfig(ctx context.Context, c *client.Client, endpoint, source string) checkResult {
 	if c == nil {
 		return checkResult{
-			Name:    "config",
-			Status:  "warning",
-			Message: "aihub client not configured (POLYFORGE_API_KEY / POLYFORGE_AIHUB_URL not set)",
+			Name:   "config",
+			Status: "warning",
+			Message: fmt.Sprintf("no API key, so nothing was contacted — the endpoint would be %s (%s)",
+				endpoint, source),
+			FixCmd: "put your key in ~/.polyforge/config.toml under [auth] api_key " +
+				"(or export POLYFORGE_API_KEY)",
 		}
 	}
 	var health map[string]any
@@ -246,10 +269,12 @@ func checkConfig(ctx context.Context, c *client.Client) checkResult {
 		return checkResult{
 			Name:    "config",
 			Status:  "error",
-			Message: fmt.Sprintf("aihub unreachable: %v", err),
+			Message: fmt.Sprintf("aihub unreachable at %s (%s): %v", endpoint, source, err),
 		}
 	}
-	return healthVerdict(health)
+	res := healthVerdict(health)
+	res.Message = fmt.Sprintf("%s (%s) — %s", endpoint, source, res.Message)
+	return res
 }
 
 // healthBoolField reads a /v1/health boolean that MAY NOT BE THERE, and that

@@ -2,6 +2,32 @@
 
 **wi**: aihub#236 (`wi_RVfgEGWu`) · **reporter**: jason.z · **date**: 2026-08-06
 
+> # 🗄️ ARCHIVED — historical record
+>
+> **aihub#236 is `wrapped` (closed 2026-08-07); this design shipped.** The
+> diagnosis below is the authoritative account of *why* the bug existed and why
+> `GREATEST` was chosen over `COALESCE` — that reasoning is preserved verbatim
+> and is the reason this file is archived rather than deleted. For what the code
+> does *now*, read the code: `internal/domain/memory.go` (`recallRouted`,
+> `memoryRefTime`, `memRefTimeSQL`) and `internal/domain/memory_vector.go`.
+>
+> **Erratum (aihub#352, 2026-09-03).** §2's *"These fields MUST be tagged
+> `json:"-"`"* is **wrong as a defence**, and the shipped code says so at the
+> callsite. `json:"-"` stops `encoding/json` only; echo's `DefaultBinder` sends
+> `application/xml` and `text/xml` bodies to `encoding/xml`, which ignores json
+> tags and falls back to the Go field name, so
+> `<ActivationCount>9999</ActivationCount>` bound straight through — exactly the
+> privilege escalation §2 set out to prevent. The real guard zeroes the trio
+> *after* `Bind` (`b41c60f`); see `internal/server/routes_memory.go`
+> (`handleRemember`). The reasoning in §2 about *why* activation state must be
+> server-derived remains correct; only the mechanism it prescribes was
+> insufficient.
+>
+> **All line numbers have been removed** (aihub#352) and replaced with
+> file-plus-symbol anchors, which `scripts/pf_docs_contract_check.py` checks.
+> Measured before removal: of the 23 line-number citations in this file and the
+> plan, 18 pointed at the wrong line.
+
 ## Summary
 
 `domain.Recall`'s default ordering uses `NULLS LAST`, which splits results into two hard
@@ -34,8 +60,8 @@ while a 2026-07-24 `fact.reference` with `activation_count=1` ranked **#10**.
 
 | definition | site | semantics |
 |---|---|---|
-| strength / filtering | `MemoryStrength`, `internal/domain/memory.go:243-252` | `last_activated_at` **if set, else** `created_at` — a *fallback* |
-| ordering | `Recall`, `internal/domain/memory.go:1238` | `last_activated_at DESC **NULLS LAST**, created_at DESC` — a *tier* |
+| strength / filtering | `MemoryStrength`, `internal/domain/memory.go` | `last_activated_at` **if set, else** `created_at` — a *fallback* |
+| ordering | `Recall`, `internal/domain/memory.go` | `last_activated_at DESC **NULLS LAST**, created_at DESC` — a *tier* |
 
 Identical intent, incompatible implementation. The ordering treats "never activated" as a
 sorting class rather than as a value, so `created_at` is only ever consulted *within* the
@@ -52,10 +78,10 @@ definition, which does not. The score shown to clients and the score used to sor
 
 ### Every edit pushes a document down
 
-`Remember`'s INSERT (`memory.go:553-576`) hardcodes `activation_count` to the literal `0`
-(`:563`) and omits `last_activated_at` from the column list entirely, so it defaults to NULL.
+`Remember`'s INSERT (`internal/domain/memory.go`, `Remember`) hardcodes
+`activation_count` to the literal `0` and omits `last_activated_at` from the column list entirely, so it defaults to NULL.
 
-`UpdateMemory` (`memory.go:1444-1483`) creates each new version by rebuilding a
+`UpdateMemory` (`internal/domain/memory.go`) creates each new version by rebuilding a
 `RememberRequest` from the lineage head. It copies `Project`, `Type`, `WorkItemID`,
 `Visibility`, `Tags`, `Content`, `Attrs`, `BaseStrength` and `SupersedesMemID` — but not the
 activation trio. So each edit produces a head in tier 2 and leaves the activation history on
@@ -63,7 +89,7 @@ the archived row it superseded. Repeated editing actively demotes a document.
 
 ### Nothing can reach past the cap
 
-`handleUIMemories` (`internal/server/ui_handlers_memory.go:213-221, 249-264`) defaults
+`handleUIMemories` (`internal/server/ui_handlers_memory.go`) defaults
 `limit=50` (max 200) and passes **no cursor** — `grep Cursor internal/server/ui_handlers_memory.go`
 returns zero hits. There is no pagination in the memories UI. A row ranked past `limit` is not
 on "page 2"; it is unreachable. Rank #54 under a 50-row cap is invisible.
@@ -79,11 +105,11 @@ clients: "Callers" {
   mcp: "pf_recall / GET /v1/memories\ntop_k, cursor"
 }
 
-recall: "domain.Recall  (memory.go:1129-1240)" {
+recall: "domain.Recall  (internal/domain/memory.go)" {
   reftime: "reference time\nTWO definitions disagree"
-  filter: "WHERE min_strength\n:1185  COALESCE(last_act, created)"
-  order: "ORDER BY\n:1238  last_act DESC NULLS LAST"
-  cursor: "cursor predicate\n:1195-1202  two-branch NULL split"
+  filter: "WHERE min_strength\nCOALESCE(last_act, created)"
+  order: "ORDER BY\nlast_act DESC NULLS LAST"
+  cursor: "cursor predicate\ntwo-branch NULL split"
 
   filter -> order
   order -> cursor
@@ -95,9 +121,9 @@ db: "memories table" {
 }
 
 write: "Write paths" {
-  remember: "Remember INSERT :553-576\nactivation_count = 0 (literal)\nlast_activated_at omitted -> NULL"
-  update: "UpdateMemory :1444-1483\ncopies 9 fields,\nDROPS activation trio"
-  activate: "Activate :1540-1560\nUPDATE sets last_activated_at\n+ stability_days"
+  remember: "Remember INSERT\nactivation_count = 0 (literal)\nlast_activated_at omitted -> NULL"
+  update: "UpdateMemory\ncopies 9 fields,\nDROPS activation trio"
+  activate: "Activate\nUPDATE sets last_activated_at\n+ stability_days"
 }
 
 clients.ui -> recall.filter: "TopK=50"
@@ -130,8 +156,8 @@ The wi proposed that the `Mine` view diverges from MCP on `latest_id` resolution
   pagination") rests on a filter that does not exist — the page lists *all* project memories,
   ranked, capped at 50.
 - **`visibility=project` is not gated out.** `memoryVisibleTo`
-  (`ui_handlers_memory.go:358-374`) rejects only `private` (non-author) and `admin`; `project`
-  falls through to `return true`. The page-level gate (`:239-244`) checks
+  (`internal/server/ui_handlers_memory.go`, `memoryVisibleTo`) rejects only `private` (non-author) and `admin`; `project`
+  falls through to `return true`. The page-level gate in `handleUIMemories` checks
   `u.ProjectRoles[project]`, the same field `pf_whoami` reports as `writer`.
 
 **Separately confirmed, and genuinely a bug — but not this one:** `pf_whoami` returns two
@@ -150,7 +176,7 @@ addressed by this spec.
 - Go: a `memoryRefTime(lastActivatedAt *time.Time, createdAt time.Time) time.Time` helper
 
 Both are **total** — never NULL, never tiered. `created_at` is `NOT NULL`
-(`internal/db/migrations/0006_events_memories.sql:141`), and PostgreSQL's `GREATEST` *ignores*
+(`internal/db/migrations/0006_events_memories.sql`), and PostgreSQL's `GREATEST` *ignores*
 NULL arguments, returning NULL only when every argument is NULL. This differs from Oracle and
 MySQL, where any NULL argument yields NULL, so it is pinned by an explicit test rather than
 trusted.
@@ -159,10 +185,10 @@ Four sites currently spell this concept out inconsistently; all four adopt the s
 
 | site | before | after |
 |---|---|---|
-| `memory.go:1238` default `ORDER BY` | `last_activated_at DESC NULLS LAST, created_at DESC` | `GREATEST(last_activated_at, created_at) DESC` |
-| `memory.go:1185` `min_strength` filter | `COALESCE(last_activated_at, created_at)` | `GREATEST(last_activated_at, created_at)` |
-| `memory.go:1226` lexical secondary sort | `COALESCE(last_activated_at, created_at)` | `GREATEST(last_activated_at, created_at)` |
-| `memory.go:243-252` `MemoryStrength` | `ref = *lastActivatedAt` when non-nil | later of the two |
+| `Recall` default `ORDER BY` | `last_activated_at DESC NULLS LAST, created_at DESC` | `GREATEST(last_activated_at, created_at) DESC` |
+| `Recall` `min_strength` filter | `COALESCE(last_activated_at, created_at)` | `GREATEST(last_activated_at, created_at)` |
+| `Recall` lexical secondary sort | `COALESCE(last_activated_at, created_at)` | `GREATEST(last_activated_at, created_at)` |
+| `MemoryStrength` | `ref = *lastActivatedAt` when non-nil | later of the two |
 
 The two `COALESCE` sites are not bugs today — they are already tier-free. They must change
 anyway, because once §2 carries `last_activated_at` forward, `COALESCE` would prefer a *stale*
@@ -172,8 +198,8 @@ activation timestamp over the new head's fresh `created_at` and compute decay ag
 `GREATEST` is immune by construction. Changing three of four sites would be strictly worse
 than changing none.
 
-**The cursor becomes coherent as a side effect.** The predicate at `:1195-1202` and the
-`nextCursor` computation at `:1271-1275` both collapse onto the same single expression, so
+**The cursor becomes coherent as a side effect.** The cursor predicate and the
+`nextCursor` computation both collapse onto the same single expression, so
 their two-branch NULL handling disappears:
 
 ```sql
@@ -204,16 +230,17 @@ rr.LastActivatedBy = head.LastActivatedBy
 rr.ActivationCount = head.ActivationCount
 ```
 
-`Remember` threads them into the INSERT, replacing the literal `0` at `:563` and adding
+`Remember` threads them into the INSERT, replacing the literal `0` and adding
 `last_activated_at` / `last_activated_by` to the column list. They default to `0` / `NULL`
 when unset, so plain `pf_remember` behaviour is unchanged — only `UpdateMemory` populates them.
 
-`memory.go:384` becomes `computeStabilityDays(req.Type, carriedCount)`.
+The `stabilityDays` computation in `Remember` becomes
+`computeStabilityDays(req.Type, carriedCount)`.
 
 #### These fields MUST be tagged `json:"-"`
 
 `handleRemember` binds the request body directly into `domain.RememberRequest`
-(`internal/server/routes_memory.go:60-61`) with no intermediate DTO. Untagged, any project
+(`internal/server/routes_memory.go`, `handleRemember`) with no intermediate DTO. Untagged, any project
 writer could `POST /v1/memories` with `{"activation_count": 9999, "last_activated_at":
 "2030-01-01"}` and pin an arbitrary memory to the top of every recall in the project.
 
@@ -238,9 +265,9 @@ and must never be settable by a client.
 
 The `computeStabilityDays(req.Type, carriedCount)` change reaches `experience.*` only. For
 `rule.*` / `fact.*` / `methodology.*`, `trg_mem_immortal`
-(`0006_events_memories.sql:158-182`) fires `BEFORE INSERT` and re-forces `stability_days` to
+(`internal/db/migrations/0006_events_memories.sql`) fires `BEFORE INSERT` and re-forces `stability_days` to
 the type default (36500 / 180 / 36500), overwriting whatever the Go layer computed. Because
-`Activate` raises stability via `UPDATE` (`memory.go:1540-1560`), the trigger does not fire
+`Activate` raises stability via `UPDATE` (`internal/domain/memory.go`, `Activate`), the trigger does not fire
 there and the raised value sticks — until the next version insert resets it.
 
 Concretely: a `fact.*` memory activated once holds `180 × (1 + 1×0.5) = 270`; editing it
@@ -255,9 +282,10 @@ scope.
 ## Implementation hazard
 
 Adding columns to the `Remember` INSERT shifts every positional parameter after `$11`, and
-the `RETURNING` list feeds a 26-field positional `Scan` (`:577-583`). The codebase already
-carries scar tissue here: `scanMemoryLite` logs `"possible column drift"` and **continues**
-(`:1250-1254`), so a misalignment silently drops rows from recall instead of failing loudly —
+the `RETURNING` list feeds a 26-field positional `Scan` in the same statement. The codebase already
+carries scar tissue here: `scanMemoryLite` (`internal/domain/memory.go`) logs
+`"possible column drift"` and **continues**, so a misalignment silently drops rows
+from recall instead of failing loudly —
 the same class of silent invisibility this wi is about.
 
 Column list, parameter numbering, `RETURNING` clause and `Scan` targets change as one unit,

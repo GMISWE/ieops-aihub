@@ -759,7 +759,6 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 		f := &domain.ListEventsFilter{}
 
 		if wiID := c.QueryParam("work_item_id"); wiID != "" {
-			f.WorkItemID = &wiID
 			// C1: require viewer access to this wi's project
 			wi, aihubErr := domain.GetWorkItem(ctx, pool, wiID)
 			if aihubErr != nil {
@@ -768,6 +767,30 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 			if err := checkProjectAccess(c, u, wi.Project, "viewer"); err != nil {
 				return err
 			}
+			// 🔴 wi.ID, not the caller's parameter (aihub#343). This is the READ
+			// side of the defect aihub#127 fixed on the write side: the handler
+			// resolves id-or-slug for the access check and then used the RAW value
+			// in the query, while ListEvents compares it to agent_events.work_item_id,
+			// which FK-references work_items(id) and therefore only ever holds a
+			// canonical `wi_...`.
+			//
+			// The write-side instances announced themselves — a slug reaching a
+			// work_item_id column is an FK violation, hence the 500s aihub#127 was
+			// filed for. A READ has no constraint to trip: `WHERE work_item_id =
+			// 'aihub#343'` matches nothing and returns 200 with an empty list.
+			// Measured against production before this fix, both arms, same wi:
+			//
+			//	pf_read_events(work_item_id="aihub#343")   -> {"events":null}
+			//	pf_read_events(work_item_id="wi_V7ph7bYu") -> 2 events
+			//
+			// That silent empty is why it outlived aihub#127 by eight months, and
+			// it is load-bearing for aihub#343 rather than a drive-by: that work
+			// item's acceptance criterion is "decide from pf_read_events' return
+			// alone whether this lock should be held", and a slug — which is what
+			// every human and skill types — answered every such question with
+			// "nothing was recorded". Emitting the events would not have been
+			// enough while this stood.
+			f.WorkItemID = &wi.ID
 		} else if proj := c.QueryParam("project"); proj != "" {
 			f.Project = &proj
 			if err := checkProjectAccess(c, u, proj, "viewer"); err != nil {

@@ -1,6 +1,42 @@
 # Memory Recall Ranking Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> # 🗄️ ARCHIVED — DO NOT EXECUTE
+>
+> **This plan was delivered. aihub#236 is `wrapped` (closed 2026-08-07).** It is
+> kept for the reasoning, not as work to do. Executing it would re-apply changes
+> that are already in `main` and would revert two of them (see below).
+>
+> The instruction that used to sit here told an agent to implement this plan
+> task-by-task with `superpowers:subagent-driven-development`. That is why this
+> banner is loud: the file's own opening line was an active hazard, not merely
+> stale, and nothing in CI would have gone red.
+>
+> **Shipped as:** `8a3deb2` (reference-time test) · `5a9a3e2` (rank by
+> `GREATEST`, drop the `NULLS LAST` tier) · `e75e224` (share the reference time
+> with the GC sweep and vector recall) · `b41c60f` (clear activation state after
+> `Bind`) · `34aff04` · `1e74314` (carry activation state on **every** supersede
+> path; make the recall cursor a compound keyset).
+>
+> **Where the implementation diverged from this plan — the code is the authority:**
+>
+> 1. **`json:"-"` was not sufficient.** Task 3 rests on it. echo's
+>    `DefaultBinder` routes `application/xml` and `text/xml` to `encoding/xml`,
+>    which ignores json tags and falls back to the Go field name, so
+>    `<ActivationCount>9999</ActivationCount>` bound straight through. The fix
+>    zeroes the trio after `Bind` (`b41c60f`); see
+>    `internal/server/routes_memory.go` (`handleRemember`).
+> 2. **The cursor became a compound keyset**, not the single RFC3339Nano
+>    timestamp Task 2 Step 4 specifies — see `formatRecallCursor` in
+>    `internal/domain/memory.go` (`1e74314`).
+> 3. **Carry-over covers every supersede path**, not only `UpdateMemory`.
+> 4. **Reference time also reached the GC sweep and the vector path**
+>    (`internal/domain/gc.go`, `internal/domain/memory_vector.go`) — not in this
+>    plan at all.
+>
+> **All line numbers have been removed** (aihub#352). They were measured wrong:
+> of the 23 line-number citations across this file and the spec, 18 pointed at
+> the wrong line and 3 more were off by one or two. File-plus-symbol anchors
+> replace them and are checked by `scripts/pf_docs_contract_check.py`.
 
 **Goal:** Stop `domain.Recall` from exiling never-activated memories below every ever-activated one, and stop `pf_update_memory` from resetting a lineage's activation state on each edit.
 
@@ -12,8 +48,9 @@
 
 - Go toolchain is **1.26.3** — `golangci-lint` must be built with an explicitly pinned matching toolchain or it refuses to run (see Task 5).
 - **No DB migration.** This change is Go-only. Do not add files under `internal/db/migrations/`.
-- DB-backed tests in `internal/domain` are gated on the `AIHUB_TEST_DB` env var and must `t.Skip` when it is unset, so plain `go test ./...` stays green without a database. Follow the existing pattern in `internal/domain/memory_latest_test.go:23-34`.
-- **PostgreSQL `GREATEST` ignores NULL arguments** (returns NULL only if every argument is NULL). This differs from Oracle and MySQL. `memories.created_at` is `NOT NULL` (`internal/db/migrations/0006_events_memories.sql:141`), so `GREATEST(last_activated_at, created_at)` is total. This property is load-bearing and is pinned by a test.
+- DB-backed tests in `internal/domain` are gated on the `AIHUB_TEST_DB` env var and must `t.Skip` when it is unset, so plain `go test ./...` stays green without a database. Follow the existing pattern in `internal/domain/memory_latest_test.go`
+(`setupLatestTestDB`).
+- **PostgreSQL `GREATEST` ignores NULL arguments** (returns NULL only if every argument is NULL). This differs from Oracle and MySQL. `memories.created_at` is `NOT NULL` (`internal/db/migrations/0006_events_memories.sql`), so `GREATEST(last_activated_at, created_at)` is total. This property is load-bearing and is pinned by a test.
 - Never use `COALESCE(last_activated_at, created_at)` for reference time. It picks the *stale* activation timestamp over a fresher `created_at`, which is precisely the regression Task 4 would otherwise introduce.
 - The `/v1` and `/share` artifact output is frozen byte-identical (the aihub#160 boundary); d2 rendering is `/ui`-only. Do not "fix" raw d2 fences appearing in `/v1` output.
 - Do not raise the `/ui/memories` 50-row limit or add pagination. Declared non-goals.
@@ -75,7 +112,7 @@ sites.s2 -> out.keep: "prevents stale-decay\nregression"
 ### Task 1: Reference-time helper and strength math
 
 **Files:**
-- Modify: `internal/domain/memory.go:240-253` (`MemoryStrength`)
+- Modify: `internal/domain/memory.go` (`MemoryStrength`)
 - Test: `internal/domain/memory_reftime_test.go` (create)
 
 **Touched files:** `internal/domain/memory.go` (write), `internal/domain/memory_reftime_test.go` (write)
@@ -153,7 +190,7 @@ Expected: FAIL — compile error `undefined: memoryRefTime`.
 
 - [ ] **Step 3: Add the helper and rewrite MemoryStrength**
 
-In `internal/domain/memory.go`, replace the `MemoryStrength` function at `:240-253` with:
+In `internal/domain/memory.go`, replace the `MemoryStrength` function with:
 
 ```go
 // memoryRefTime returns the reference timestamp used for BOTH decay and
@@ -206,7 +243,7 @@ two instead (aihub#236)."
 ### Task 2: One reference time in SQL — ranking and cursor
 
 **Files:**
-- Modify: `internal/domain/memory.go:1183-1189` (min_strength filter), `:1195-1202` (cursor predicate), `:1224-1228` (lexical secondary sort), `:1236-1239` (default ORDER BY), `:1264-1277` (nextCursor)
+- Modify: `internal/domain/memory.go` (`Recall`) — the min_strength filter, the cursor predicate, the lexical secondary sort, the default ORDER BY, and the `nextCursor` computation
 - Test: `internal/domain/memory_ranking_test.go` (create)
 
 **Touched files:** `internal/domain/memory.go` (write), `internal/domain/memory_ranking_test.go` (write)
@@ -401,7 +438,7 @@ const memRefTimeSQL = `GREATEST(last_activated_at, created_at)`
 
 - [ ] **Step 4: Apply it at the three SQL sites and the cursor**
 
-In `Recall`, replace the `min_strength` filter (currently `:1183-1189`):
+In `Recall`, replace the `min_strength` filter:
 
 ```go
 	// H9: min_strength filter in SQL (not Go-side post-LIMIT) using inline Ebbinghaus formula.
@@ -416,7 +453,7 @@ In `Recall`, replace the `min_strength` filter (currently `:1183-1189`):
 	idx++
 ```
 
-Replace the cursor predicate (currently `:1191-1202`) with:
+Replace the cursor predicate with:
 
 ```go
 	// Cursor-based pagination. ORDER BY is a single total expression
@@ -432,7 +469,7 @@ Replace the cursor predicate (currently `:1191-1202`) with:
 	}
 ```
 
-In the lexical branch, replace the secondary sort expression (currently `:1225-1227`):
+In the lexical branch, replace the secondary sort expression:
 
 ```go
 			ORDER BY ts_rank(content_tsv, replace(plainto_tsquery('english', $%d)::text, ' & ', ' | ')::tsquery) DESC,
@@ -441,7 +478,7 @@ In the lexical branch, replace the secondary sort expression (currently `:1225-1
 					/ NULLIF(stability_days, 0))) DESC
 ```
 
-In the default branch, replace the ORDER BY (currently `:1238`):
+In the default branch, replace the ORDER BY:
 
 ```go
 			ORDER BY `+memRefTimeSQL+` DESC, id DESC
@@ -449,7 +486,7 @@ In the default branch, replace the ORDER BY (currently `:1238`):
 
 `id DESC` is a deterministic tiebreaker for rows sharing a reference timestamp; without it equal-timestamp ordering is arbitrary between queries, which makes paging unstable. (Rows whose reference time is exactly equal to a cursor value are still excluded by the strict `<`; that pre-existing edge is unchanged and out of scope.)
 
-Finally replace the `nextCursor` computation (currently `:1264-1277`) so it uses the same definition as the ORDER BY:
+Finally replace the `nextCursor` computation so it uses the same definition as the ORDER BY:
 
 ```go
 	var nextCursor *string
@@ -463,7 +500,7 @@ Finally replace the `nextCursor` computation (currently `:1264-1277`) so it uses
 	}
 ```
 
-Delete the now-stale comment block at `:1129-1133` that claims the text path "orders strictly by last_activated_at DESC NULLS LAST" — it documents the removed behaviour. Keep the sentence noting `RecencyWeight` is a reserved no-op:
+Delete the now-stale comment block at the head of the text/tag recall path that claims the text path "orders strictly by last_activated_at DESC NULLS LAST" — it documents the removed behaviour. Keep the sentence noting `RecencyWeight` is a reserved no-op:
 
 ```go
 	// NOTE: RecencyWeight is currently a reserved-but-unused knob. The text/tag
@@ -505,7 +542,8 @@ that was skipping rows across the tier boundary (aihub#236)."
 ### Task 3: Make activation state carryable, but not client-settable
 
 **Files:**
-- Modify: `internal/domain/memory.go:149-180` (`RememberRequest`), `:384` (stability), `:552-583` (`Remember` INSERT)
+- Modify: `internal/domain/memory.go` — `RememberRequest`, the `stabilityDays`
+  computation, and the `Remember` INSERT
 - Test: `internal/domain/memory_reftime_test.go` (append)
 
 **Touched files:** `internal/domain/memory.go` (write), `internal/domain/memory_reftime_test.go` (write), `internal/server/routes_memory.go` (read)
@@ -521,7 +559,7 @@ Append to `internal/domain/memory_reftime_test.go` (add `"encoding/json"` to its
 ```go
 // Activation state is server-derived and MUST NOT be settable by a client.
 // handleRemember binds the HTTP body straight into domain.RememberRequest
-// (internal/server/routes_memory.go:60) with no intermediate DTO, so an
+// (internal/server/routes_memory.go, handleRemember) with no intermediate DTO, so an
 // exported field with a JSON name would let any project writer pin a memory to
 // the top of every recall. Regression guard: this fails if the json:"-" tags
 // are ever dropped.
@@ -572,7 +610,8 @@ In `internal/domain/memory.go`, inside `type RememberRequest struct`, after the 
 	// previously dropped every new version into the NULLS-LAST ranking tier).
 	//
 	// json:"-" is REQUIRED, not stylistic. handleRemember binds the request body
-	// directly into this struct (internal/server/routes_memory.go:60) with no
+	// directly into this struct (internal/server/routes_memory.go,
+	// handleRemember) with no
 	// intermediate DTO, so a JSON-named field here would let any project writer
 	// POST /v1/memories with activation_count=9999 and pin their memory to the
 	// top of every recall in the project. Only UpdateMemory sets these.
@@ -592,13 +631,14 @@ Expected: PASS.
 
 Only the column list and `VALUES` change here. `RETURNING`/`Scan` already include these columns and stay untouched.
 
-First, at `:384`, use the carried count so stability reflects accrued activations:
+First, where `stabilityDays` is computed, use the carried count so stability
+reflects accrued activations:
 
 ```go
 	stabilityDays := computeStabilityDays(req.Type, req.ActivationCount)
 ```
 
-Then replace the INSERT's column list and `VALUES` block (`:553-566`) with:
+Then replace the INSERT's column list and `VALUES` block with:
 
 ```go
 	err := q.QueryRow(ctx, `
@@ -656,7 +696,7 @@ aihub#236 version carry-over."
 ### Task 4: Carry activation state across versions
 
 **Files:**
-- Modify: `internal/domain/memory.go:1444-1483` (`UpdateMemory`)
+- Modify: `internal/domain/memory.go` (`UpdateMemory`)
 - Test: `internal/domain/memory_ranking_test.go` (append)
 
 **Touched files:** `internal/domain/memory.go` (write), `internal/domain/memory_ranking_test.go` (write)
@@ -750,7 +790,8 @@ Run:
 AIHUB_TEST_DB=postgres://postgres:test@localhost:5440/aihub_test?sslmode=disable \
   go test ./internal/domain/ -run TestUpdateMemory_ -v -count=1
 ```
-Expected: `TestUpdateMemory_CarriesActivationState` FAILs with `activation_count: got 0, want 2`. The existing `TestUpdateMemory` at `memory_latest_test.go:359` must still PASS.
+Expected: `TestUpdateMemory_CarriesActivationState` FAILs with `activation_count: got 0, want 2`. The existing `TestUpdateMemory` in `internal/domain/memory_latest_test.go`
+must still PASS.
 
 - [ ] **Step 3: Carry the three fields**
 
@@ -872,6 +913,6 @@ If the reported memories still do not surface, do **not** widen the fix. Re-open
 
 **Placeholder scan.** No TBD/TODO, no "add error handling", no "similar to Task N". Every code step carries the actual code; every run step carries the actual command and expected output, including the failure text expected at each red step.
 
-**Type consistency.** `memoryRefTime(*time.Time, time.Time) time.Time` is defined in Task 1 and used in Task 2 Step 4 (`nextCursor`) with that exact signature. `memRefTimeSQL` is declared in Task 2 Step 3 and referenced in Steps 4 of the same task. The three `RememberRequest` field names (`LastActivatedAt`, `LastActivatedBy`, `ActivationCount`) are declared in Task 3 and set in Task 4 with identical spelling and types, and match the `Memory` struct field names at `memory.go:112-114`. Test helpers `seedRankedMemory`, `recallAll` and `rankOf` are defined in Task 2's new file and reused in Task 4; `setupLatestTestDB`, `testUser`, `testProject`, `mustExec` and `strp` are pre-existing in package `domain` and are not redefined.
+**Type consistency.** `memoryRefTime(*time.Time, time.Time) time.Time` is defined in Task 1 and used in Task 2 Step 4 (`nextCursor`) with that exact signature. `memRefTimeSQL` is declared in Task 2 Step 3 and referenced in Steps 4 of the same task. The three `RememberRequest` field names (`LastActivatedAt`, `LastActivatedBy`, `ActivationCount`) are declared in Task 3 and set in Task 4 with identical spelling and types, and match the `Memory` struct field names in `internal/domain/memory.go`. Test helpers `seedRankedMemory`, `recallAll` and `rankOf` are defined in Task 2's new file and reused in Task 4; `setupLatestTestDB`, `testUser`, `testProject`, `mustExec` and `strp` are pre-existing in package `domain` and are not redefined.
 
 **Ordering note.** Task 3 must land before Task 4 (Task 4 sets fields Task 3 declares). Task 2 is independent of Tasks 3-4 and could run in parallel, but Task 4's `min_strength` test depends on Task 2's change, so sequential execution in the listed order is the safe path.

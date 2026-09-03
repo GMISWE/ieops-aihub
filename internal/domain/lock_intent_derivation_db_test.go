@@ -3,8 +3,11 @@ package domain
 // DB-gated integration tests for aihub#342: every place that DERIVES a lock
 // from a declared resource must apply the same intent rule.
 //
-// The contract, stated identically in three MCP tool schemas
-// (pf_predict_conflicts / pf_claim_work_item / pf_update_work_item):
+// The contract, carried by one string — declaredResourcesProp in
+// internal/mcp/tools_lifecycle.go — and advertised on pf_predict_conflicts,
+// pf_update_work_item, pf_create_work_item and pf_batch_create_work_items
+// (pf_claim_work_item takes no declared_resources argument, so it does NOT
+// carry it):
 //
 //	only two values carry behaviour: "read" (takes no write lock, and path
 //	overlaps report as info instead of soft_block)
@@ -23,22 +26,26 @@ package domain
 //
 // Searching for the reported symptom (claim) finds one site. Anchoring on what
 // the defect IS — "who turns a declared_resources entry into a resource_locks
-// key" — finds four, and resourceToLock's four call sites are the whole
-// population:
+// key" — finds four, and those four are the whole population:
 //
-//	conflicts.go   PredictConflicts rule 1  ignored intent  (hard_block on a read path)
-//	conflicts.go   PredictConflicts rule 3  honoured intent (info, per contract)
-//	run_attempts.go FnClaimWorkItem         ignored intent  (the reported bug)
-//	run_attempts.go FnForceTakeover         ignored intent, and worse: its local
-//	                                        struct has no Intent FIELD, so the
-//	                                        value never even reaches the mapper
-//	run_attempts.go FnAcquireLocks          honoured intent (`if d.Intent == "read" { continue }`)
+//	conflicts.go    PredictConflicts rule 1  ignored intent (hard_block on a read path)
+//	run_attempts.go FnClaimWorkItem          ignored intent (the reported bug)
+//	run_attempts.go FnForceTakeover          ignored intent, and worse: its local
+//	                                         struct has no Intent FIELD, so the
+//	                                         value never even reaches the mapper
+//	run_attempts.go FnAcquireLocks           honoured it (`if d.Intent == "read" { continue }`)
 //
-// Three of five were wrong and one implementation was already right, which is
-// why the fix is to give the rule ONE home (derivedLock in conflicts.go) rather
-// than to repeat `if intent == "read"` a third time. Rule 3 is untouched: it
-// does not derive a lock to take, it derives a key to COMPARE, and its
-// read -> info mapping is the contract itself.
+// Three of four were wrong and one implementation was already right, which is
+// why the fix gives the rule ONE home (derivedLock in conflicts.go) rather than
+// repeating `if intent == "read"` a third time.
+//
+// PredictConflicts rule 3 is a fifth site that reads a lock KEY but derives no
+// lock, and it is untouched. It does not go through resourceToLock at all — it
+// builds its key straight from fileScopeLockKey — and its read -> info mapping
+// IS the contract. The last subtest below asserts rule 3 still emits that
+// prediction, because "read now takes no lock" and "read overlaps report as
+// info" are two separate halves of one sentence and a fix that quietly deleted
+// the second half would look identical from rule 1's side.
 //
 // # What the acceptance criterion is
 //
@@ -199,7 +206,7 @@ func TestReadIntentTakesNoWriteLock(t *testing.T) {
 		require.Equal(t, 0, countFileScopeLocks(t, pool, readKey),
 			"fixture check: seedRunAttempt must not create locks, or this arm measures claim instead")
 
-		_, aerr := FnForceTakeover(ctx, pool, wi.ID, u, "tester", "admin",
+		resp, aerr := FnForceTakeover(ctx, pool, wi.ID, u, "tester", "admin",
 			map[string]string{project: "maintainer"},
 			&ForceTakeoverRequest{
 				Reason:      "aihub#342: re-derive locks for the new attempt",
@@ -209,9 +216,49 @@ func TestReadIntentTakesNoWriteLock(t *testing.T) {
 
 		assert.Equal(t, 0, countFileScopeLocks(t, pool, readKey),
 			"force_takeover re-created a write lock for an intent=read declaration on %q", readKey)
-		assert.Equal(t, 1, countFileScopeLocks(t, pool, writeKey),
-			"force_takeover must still hand the new attempt the locks the wi really declares, "+
-				"or the takeover leaves the work item unprotected")
+		// Owner, not just count: "the new attempt holds it" is the claim, and a
+		// takeover that left the superseded attempt's row in place would satisfy
+		// a bare count of 1.
+		var writeOwner string
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT owner_attempt_id FROM resource_locks WHERE resource_type='file_scope' AND resource_key=$1`,
+			writeKey).Scan(&writeOwner))
+		assert.Equal(t, resp.NewAttemptID, writeOwner,
+			"force_takeover must hand the NEW attempt the locks the wi really declares; %q is owned by %q "+
+				"but the new attempt is %q, so the takeover left the work item unprotected",
+			writeKey, writeOwner, resp.NewAttemptID)
+	})
+
+	// The scope marker for the decision recorded on derivedLock: the read rule
+	// is applied to file_scope ONLY. A `repo` entry keeps its git_branch lock
+	// whatever its intent says, because a branch is not a per-file exclusion two
+	// readers can share, and because PredictConflicts rule 2 has no intent check
+	// either — applying the rule here and not there would rebuild, on `repo`,
+	// the very contradiction this file closes on `path`.
+	//
+	// MUTANT: in derivedLock, drop the `lockType == "file_scope" &&` guard. Only
+	// this subtest goes red — which is the point: widening that rule is a real
+	// decision about branch safety and must not be reachable by accident.
+	t.Run("a read declaration on a repo still takes its branch lock", func(t *testing.T) {
+		wi := seedClaimableWI(t, pool, project, u,
+			"declare a repo as read and keep the branch to yourself anyway",
+			`[{"type":"repo","uri":"repo:aihub","intent":"read","task_branch":"aihub342-scope"}]`)
+
+		resp := claimFresh(t, pool, wi.ID, u, "aihub342-repo-read")
+
+		require.Len(t, resp.AcquiredLocks, 1,
+			"a repo declaration must still take its git_branch lock regardless of intent; got %+v", resp.AcquiredLocks)
+		assert.Equal(t, "git_branch", resp.AcquiredLocks[0].ResourceType)
+		assert.Equal(t, "aihub/aihub342-scope", resp.AcquiredLocks[0].ResourceKey)
+
+		var n int
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT count(*) FROM resource_locks WHERE resource_type='git_branch' AND resource_key=$1`,
+			"aihub/aihub342-scope").Scan(&n))
+		assert.Equal(t, 1, n,
+			"the branch lock must exist in the table: without it a second attempt can check out the same "+
+				"branch, and because both takeover paths DELETE prior locks before re-deriving, an existing "+
+				"branch lock would be RELEASED on the next takeover rather than merely not taken")
 	})
 
 	// MUTANT: internal/domain/conflicts.go, PredictConflicts rule 1 — drop the
@@ -250,6 +297,30 @@ func TestReadIntentTakesNoWriteLock(t *testing.T) {
 			assert.NotEqual(t, 1, p.Rule,
 				"rule 1 is the lock-conflict rule; a declaration that takes no lock cannot conflict with one. got %+v", p)
 		}
+
+		// 🔴 The positive half, and the one that is easy to leave out: the two
+		// assertions above are BOTH satisfied by an empty Predictions slice.
+		// "read takes no write lock" and "read overlaps report as info" are two
+		// halves of one contract sentence, and only the first has any code of
+		// its own now — so a follow-on edit that reasoned "read takes no lock,
+		// so rule 3 should skip it too" would delete the second half and be
+		// indistinguishable from a correct fix under a test that only asserts
+		// what must NOT be there. Assert what must BE there.
+		//
+		// MUTANT: add `if res.Intent == "read" { continue }` to rule 3's loop in
+		// internal/domain/conflicts.go. Only this pair of assertions goes red.
+		var rule3 *ConflictPrediction
+		for i := range pred.Predictions {
+			if pred.Predictions[i].Rule == 3 && pred.Predictions[i].ResourceKey == key {
+				rule3 = &pred.Predictions[i]
+			}
+		}
+		require.NotNil(t, rule3,
+			"rule 3 must still report the overlap for a read declaration — silently reporting NOTHING is a "+
+				"quieter version of the defect this file exists to close, and it passes every 'must not be "+
+				"hard_block' assertion. predictions=%+v", pred.Predictions)
+		assert.Equal(t, SeverityInfo, rule3.Severity,
+			"the contract is `info`, not silence and not soft_block; got %+v", rule3)
 
 		// And the other half of the criterion: the claim must reach the same
 		// verdict. Before the fix this 409'd CONFLICT_LOCK_TAKEN while rule 3

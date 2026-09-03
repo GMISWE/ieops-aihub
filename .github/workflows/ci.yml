@@ -1329,9 +1329,20 @@ jobs:
       # Each read arm is paired with a write control, because aihub#342 says in
       # so many words that "the claim succeeded" is NOT the criterion — a claim
       # that waved everything through would satisfy it. The last subtest is the
-      # criterion: predict and claim must answer the same input the same way.
+      # criterion: predict and claim must answer the same input the same way,
+      # and it asserts rule 3 still EMITS its `info` prediction, not merely that
+      # rule 1 stopped emitting hard_block — "read takes no write lock" and
+      # "read overlaps report as info" are two halves of one contract sentence
+      # and only the first half has code of its own.
       #
-      # Four subtests of ONE function, not four functions, for the reason the
+      # The repo subtest is a scope marker, not coverage: the read rule is
+      # applied to file_scope ONLY, so a `repo` entry keeps its git_branch lock
+      # whatever its intent says. Dropping that would let a second attempt take
+      # a branch another attempt is on, and — because both takeover paths DELETE
+      # prior locks before re-deriving — would RELEASE an existing branch lock
+      # on the next takeover rather than merely not take it.
+      #
+      # Five subtests of ONE function, not five functions, for the reason the
       # aihub#334 and aihub#151 entries give: the gate counts functions and this
       # is one guard.
       - name: aihub#342 read-intent lock derivation DB tests
@@ -1343,6 +1354,7 @@ jobs:
           for want in 'TestReadIntentTakesNoWriteLock/claim_derives_no_lock_for_a_read_declaration' \
                       'TestReadIntentTakesNoWriteLock/write_declaration_still_takes_the_lock' \
                       'TestReadIntentTakesNoWriteLock/force_takeover_derives_no_lock_for_a_read_declaration' \
+                      'TestReadIntentTakesNoWriteLock/a_read_declaration_on_a_repo_still_takes_its_branch_lock' \
                       'TestReadIntentTakesNoWriteLock/predict_and_claim_agree_on_a_read_declaration_over_a_held_lock'; do
             grep -q -- "--- PASS: $want" read_intent_locks.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#342 intent rule is not actually verified on that derivation path"; exit 1; }

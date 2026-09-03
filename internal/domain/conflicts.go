@@ -367,28 +367,54 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 // turns declared_resources into resource_locks rows must go through it:
 // FnClaimWorkItem, FnForceTakeover, FnAcquireLocks, and PredictConflicts rule 1.
 //
-// aihub#342. The rule is not new — it is the contract stated in three MCP tool
-// schemas ("read ... takes no write lock") and it was already implemented, once,
-// inside FnAcquireLocks. The other three derivation sites each re-implemented
-// the mapping without it, so a work item whose sole declared resource was
+// aihub#342. The rule is not new — it is the contract carried by
+// declaredResourcesProp in internal/mcp ("read ... takes no write lock, and path
+// overlaps report as info instead of soft_block"), advertised on
+// pf_predict_conflicts, pf_update_work_item, pf_create_work_item and
+// pf_batch_create_work_items — and it was already implemented, once, inside
+// FnAcquireLocks. The other three derivation sites each re-implemented the
+// mapping without it, so a work item whose sole declared resource was
 // {"type":"path","uri":"file:.gitignore","intent":"read"} had a file_scope write
 // lock taken for it at claim, then 409'd somebody else, while
 // pf_predict_conflicts — the pre-claim gate — reported the same input as `info`.
 // Two tools, one input, opposite answers.
 //
-// Split from resourceToLock rather than folded into it, because the two
-// questions are genuinely different and one caller needs the other answer:
-// PredictConflicts rule 3 derives a key to COMPARE against existing locks (a
-// read declaration still overlaps; it just reports the overlap as `info`), so
-// it must keep calling resourceToLock. Putting the intent check inside
-// resourceToLock would silently delete rule 3's read predictions, turning the
-// contract's "report as info" into "report nothing" — a quieter version of the
-// same defect.
+// 🔴 The read rule is deliberately scoped to file_scope, NOT applied to every
+// lock type. That is a decision, not an oversight, and it is written as a
+// condition on lockType rather than on res.Type so that widening it cannot
+// happen by accident:
+//
+//   - Both halves of the contract sentence are about paths, every recorded
+//     instance is a path, and pf-plan's guidance only ever teaches intent=read
+//     on a `path` entry.
+//   - git_branch and deploy_env are NOT per-file exclusions that a reader can
+//     harmlessly share. Dropping them for intent=read would let a second
+//     attempt take a branch another attempt is on — and because both takeover
+//     paths DELETE the prior attempt's locks before re-deriving, an existing
+//     branch lock would be silently released on the next takeover rather than
+//     merely not taken.
+//   - PredictConflicts rule 2 (same-repo git_branch) has no intent check
+//     either, so leaving repo alone keeps derivation and prediction in
+//     agreement for repo entries. Applying the rule here and not there would
+//     recreate, on `repo`, exactly the rule-1-vs-rule-3 contradiction this
+//     change exists to remove. Whether intent=read should mean anything at all
+//     for repo/service is genuinely undecided; deciding it needs rule 2 changed
+//     in the same breath.
+//
+// Kept as a separate function from resourceToLock, and NOT folded into it. Note
+// what that split does and does not buy: rule 3 does not call resourceToLock at
+// all (it builds its comparison key straight from fileScopeLockKey), so as of
+// today resourceToLock has exactly one caller and folding the check in would be
+// behaviour-identical. The split is about which QUESTION each name answers —
+// "what key does this map to" versus "does this take a lock" — so that the next
+// caller that wants only a key does not silently inherit the lock decision, and
+// so this comment has somewhere to live.
 func derivedLock(res DeclaredResourceItem, project string) (lockType, lockKey string) {
-	if res.Intent == "read" {
+	lockType, lockKey = resourceToLock(res, project)
+	if lockType == "file_scope" && res.Intent == "read" {
 		return "", ""
 	}
-	return resourceToLock(res, project)
+	return lockType, lockKey
 }
 
 // resourceToLock converts a DeclaredResourceItem to a (resource_type, resource_key) pair per §25 mapping.

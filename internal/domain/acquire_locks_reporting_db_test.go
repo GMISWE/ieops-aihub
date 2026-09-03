@@ -52,7 +52,11 @@ package domain
 // already had.
 //
 // ⚠️ Do NOT verify any of this with pf_acquire_locks' own return value; it is
-// the object under test. Every assertion below reads the resource_locks TABLE.
+// the object under test. Every subtest below pairs its claim about the RESPONSE
+// with a read of the resource_locks TABLE for the same key, so "reported" is
+// always checked against a fact the object under test did not supply. Where a
+// subtest asserts under-reporting, the table read is what establishes the lock
+// exists at all; where it asserts the partition, the table read is the total.
 //
 // Run:
 //
@@ -138,6 +142,8 @@ func TestAcquireLocksReportsEveryHeldLock(t *testing.T) {
 	// because it is the reason the bug survived: a reporter who tests only this
 	// shape sees a correct answer every time and closes the report.
 	t.Run("a still-declared lock is reported", func(t *testing.T) {
+		require.Contains(t, heldLockKeys(t, pool, attemptID), keptKey,
+			"fixture check: the attempt must really hold %q, or 'it was reported' proves nothing", keptKey)
 		resp := acquire(t)
 		assert.Contains(t, reportedKeys(resp.AlreadyHeld), keptKey,
 			"this is the case that already worked; if it broke, the fix replaced one gap with another")
@@ -179,6 +185,8 @@ func TestAcquireLocksReportsEveryHeldLock(t *testing.T) {
 	// declaration and released only at wrap, so it is held for the entire life
 	// of every ordinary attempt.
 	t.Run("a non-file-scope lock is reported", func(t *testing.T) {
+		require.Contains(t, heldLockKeys(t, pool, attemptID), "aihub/aihub345",
+			"fixture check: the git_branch lock must really be held, or this arm asserts nothing")
 		resp := acquire(t)
 		assert.Contains(t, reportedKeys(resp.AlreadyHeld), "aihub/aihub345",
 			"this endpoint only ACQUIRES file_scope, but the question `already_held` answers is what the "+
@@ -225,6 +233,10 @@ func TestAcquireLocksReportsEveryHeldLock(t *testing.T) {
 			`UPDATE work_items SET declared_resources = $1::jsonb WHERE id = $2`,
 			`[{"type":"path","uri":"file:`+readPath+`","intent":"read"}]`, wi.ID)
 		require.NoError(t, err)
+
+		require.Contains(t, heldLockKeys(t, pool, attemptID), readKey,
+			"fixture check: the seeded lock row must be in the table and owned by this attempt, or the "+
+				"assertion below is about a lock that does not exist")
 
 		resp := acquire(t)
 		assert.Contains(t, reportedKeys(resp.AlreadyHeld), readKey,

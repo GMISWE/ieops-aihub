@@ -53,8 +53,13 @@ package domain
 // added Goal to ClaimResponse — internal/mcp/tools_lifecycle.go reads
 // result["id"]/["slug"]/["project"] there too, to key the state file and keep
 // ResolveStateFile's slug scan able to find it — and nothing asserted that fill
-// either. Same struct tag, same discarded comma-ok, same invisible degradation.
-// So this file covers all three exits.
+// either. So this file covers all three exits.
+//
+// The takeover fields are NOT omitempty (`json:"id"`, not `json:"id,omitempty"`),
+// so a blanked one arrives as `"id":""` rather than as an absent key. The
+// mechanism differs; the outcome does not, because the client-side read is the
+// same discarded comma-ok and "" is what it ends up with either way. Recorded
+// because "same struct tag" would be a false reason to trust this arm.
 //
 // Run:
 //
@@ -177,9 +182,22 @@ func TestServerFilledResponseFieldsAreEchoed(t *testing.T) {
 			"force takeover: a state file written with an empty Slug is invisible to ResolveStateFile's slug scan")
 		assert.Equal(t, project, resp.Project,
 			"force takeover: pf_ship / pf_diff / pf_commit resolve worktree paths through the state file's Project")
-		assert.NotEmpty(t, resp.NewAttemptID,
-			"force takeover: the state file's credentials are useless without the attempt they belong to")
-		assert.NotZero(t, resp.NewClaimEpoch,
-			"force takeover: a zero epoch fails verifyAttemptCredential on the very next call")
+		// Not NotEmpty/NotZero: a response echoing the PRIOR attempt id, or
+		// epoch 1 instead of the incremented one, satisfies both while writing a
+		// state file that fails verifyAttemptCredential on the very next call.
+		// The independent oracle is the work_items row the takeover just wrote.
+		var liveAttemptID string
+		var liveEpoch int64
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT current_attempt_id, current_attempt_epoch FROM work_items WHERE id=$1`, wi.ID,
+		).Scan(&liveAttemptID, &liveEpoch))
+		assert.Equal(t, liveAttemptID, resp.NewAttemptID,
+			"force takeover: the echoed attempt id must be the one the server actually made current, or the "+
+				"state file authenticates as nothing")
+		assert.Equal(t, liveEpoch, resp.NewClaimEpoch,
+			"force takeover: the echoed epoch must match the stored one, or every later call 409s on epoch mismatch")
+		assert.NotEqual(t, resp.PriorAttemptID, resp.NewAttemptID,
+			"force takeover: echoing the superseded attempt would look well-formed and authenticate as a "+
+				"dead attempt")
 	})
 }

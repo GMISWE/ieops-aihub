@@ -410,6 +410,11 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		}
 	}
 
+	// aihub#343: one lock operation per claim, so the lock_acquired /
+	// lock_released events this call emits share an op_id and can be regrouped
+	// without inferring the grouping from timestamps.
+	lockActor := lockEventActor{UserID: callerUserID, Display: callerDisplay, APIKeyID: callerAPIKeyID}
+
 	// If takeover: supersede old attempt, delete its locks
 	if isTakeover && priorAttemptID != "" {
 		_, err = tx.Exec(ctx, `
@@ -418,9 +423,16 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		if err != nil {
 			return nil, dbErr(err, "failed to supersede prior attempt")
 		}
-		_, err = tx.Exec(ctx, `DELETE FROM resource_locks WHERE owner_attempt_id=$1`, priorAttemptID)
-		if err != nil {
-			return nil, dbErr(err, "failed to delete prior attempt locks")
+		// aihub#343: through releaseLocks, so each row this DELETE actually
+		// removes gets a lock_released event. This is the release whose absence
+		// made aihub#283's "the init.go write lock was released" claim
+		// unfalsifiable.
+		if _, relErr := releaseLocks(ctx, tx, lockDeleteByAttemptSQL,
+			newLockOp(lockCauseClaimTakeover, lockActor).withExtra(map[string]any{
+				"superseded_attempt_id": priorAttemptID,
+			}), priorAttemptID,
+		); relErr != nil {
+			return nil, dbErr(relErr, "failed to delete prior attempt locks")
 		}
 
 		// N5: supersede event emitted after new attempt INSERT (see below)
@@ -464,22 +476,28 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		)
 	}
 
-	// Insert resource_locks for requested locks
+	// Insert resource_locks for requested locks.
+	//
+	// aihub#343: through acquireLockUpsert, which emits one lock_acquired per row
+	// AND a lock_released for any owner the upsert displaced. The displacement
+	// half matters: ON CONFLICT DO UPDATE can rewrite an un-swept orphan row's
+	// owner, and recording only the acquisition would leave a reader following
+	// the previous owner with an unmatched lock_acquired — reading as "still
+	// held" for a lock that changed hands.
+	claimOp := newLockOp(lockCauseClaim, lockActor).withExtra(map[string]any{
+		"is_takeover": isTakeover,
+		"is_resume":   req.Mode == "resume",
+	})
 	acquiredLocks := make([]ResourceLock, 0, len(req.RequestedLocks))
 	for _, l := range req.RequestedLocks {
-		_, err = tx.Exec(ctx, `
-			INSERT INTO resource_locks (resource_type, resource_key, owner_attempt_id, claim_epoch)
-			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (resource_type, resource_key) DO UPDATE
-			  SET owner_attempt_id=$3, claim_epoch=$4, acquired_at=clock_timestamp()`,
-			l.ResourceType, l.ResourceKey, newAttemptID, newEpoch,
-		)
-		if err != nil {
-			return nil, dbErrCause(err, fmt.Sprintf("failed to acquire lock %s:%s", l.ResourceType, l.ResourceKey))
+		got, upErr := acquireLockUpsert(ctx, tx, l.ResourceType, l.ResourceKey,
+			newAttemptID, newEpoch, wi.Project, wi.ID, claimOp)
+		if upErr != nil {
+			return nil, dbErrCause(upErr, fmt.Sprintf("failed to acquire lock %s:%s", l.ResourceType, l.ResourceKey))
 		}
 		acquiredLocks = append(acquiredLocks, ResourceLock{
-			ResourceType:   l.ResourceType,
-			ResourceKey:    l.ResourceKey,
+			ResourceType:   got.ResourceType,
+			ResourceKey:    got.ResourceKey,
 			OwnerAttemptID: newAttemptID,
 			ClaimEpoch:     newEpoch,
 		})
@@ -709,15 +727,28 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	// runs first in the same tx and hard-fails if another attempt took the file while
 	// paused — so resume surfaces a conflict rather than stealing. This ordering is
 	// load-bearing: do not move the DO UPDATE ahead of the conflict check.
+	//
+	// aihub#343: both branches go through releaseLocks, so a reader can tell the
+	// two apart from the event stream alone. That distinction is the whole
+	// question a later claimer asks — a paused attempt legitimately keeps its
+	// git_branch/deploy_env locks, so "this attempt ended and the lock is still
+	// there" is correct on pause and a leak on terminal, and the `cause` field is
+	// what separates them.
 	if req.Status != "paused" {
-		_, err = tx.Exec(ctx, `DELETE FROM resource_locks WHERE owner_attempt_id=$1`, req.AttemptID)
-		if err != nil {
-			return dbErr(err, "failed to release resource locks")
+		if _, relErr := releaseLocks(ctx, tx, lockDeleteByAttemptSQL,
+			newLockOp(lockCauseAttemptTerminal, lockEventActor{}).withExtra(map[string]any{
+				"attempt_status": req.Status,
+			}), req.AttemptID,
+		); relErr != nil {
+			return dbErr(relErr, "failed to release resource locks")
 		}
 	} else {
-		_, err = tx.Exec(ctx, acquireLocksReleasePausedSQL, req.AttemptID)
-		if err != nil {
-			return dbErr(err, "failed to release file_scope locks on pause")
+		if _, relErr := releaseLocks(ctx, tx, acquireLocksReleasePausedSQL,
+			newLockOp(lockCauseAttemptPaused, lockEventActor{}).withExtra(map[string]any{
+				"retained_types": "git_branch, deploy_env, worktree, tcp_port",
+			}), req.AttemptID,
+		); relErr != nil {
+			return dbErr(relErr, "failed to release file_scope locks on pause")
 		}
 	}
 
@@ -1031,8 +1062,18 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	if err2 != nil {
 		return nil, dbErr(err2, "failed to supersede prior attempt")
 	}
-	// Delete locks
-	tx.Exec(ctx, `DELETE FROM resource_locks WHERE owner_attempt_id=$1`, priorID) //nolint:errcheck
+	// Delete locks.
+	//
+	// aihub#343: through releaseLocks, so the prior holder's locks leave a
+	// lock_released trail. The error stays discarded, matching what this line has
+	// always done — a force takeover is a recovery operation and failing it over
+	// a lock delete would leave the work item stuck with an attempt nobody holds.
+	ftActor := lockEventActor{UserID: callerUserID, Display: callerDisplay}
+	ftOp := newLockOp(lockCauseForceTakeover, ftActor).withExtra(map[string]any{
+		"prior_attempt_id": priorID,
+		"reason":           req.Reason,
+	})
+	releaseLocks(ctx, tx, lockDeleteByAttemptSQL, ftOp, priorID) //nolint:errcheck
 
 	// Emit force_takeover event
 	evtID := NewID("evt")
@@ -1104,17 +1145,17 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	// aihub#238: entries the mapper cannot understand yield no lock here either.
 	// Stored data, so this must not fail the takeover; the subsequent fresh claim
 	// reports them via ClaimResponse.unrecognized_resources.
+	//
+	// aihub#343: through acquireLockUpsert, one lock_acquired per row. The error
+	// stays discarded here as it always was, for the same reason as the delete
+	// above.
 	for _, res := range declaredRes {
 		lockType, lockKey := derivedLock(res, wi.Project)
 		if lockType == "" {
 			continue
 		}
-		_, _ = tx.Exec(ctx, `
-			INSERT INTO resource_locks (resource_type, resource_key, owner_attempt_id, claim_epoch)
-			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (resource_type, resource_key) DO UPDATE
-			  SET owner_attempt_id=$3, claim_epoch=$4, acquired_at=clock_timestamp()`,
-			lockType, lockKey, newAttemptID, newEpoch)
+		acquireLockUpsert(ctx, tx, lockType, lockKey, newAttemptID, newEpoch, //nolint:errcheck
+			wi.Project, wi.ID, ftOp)
 	}
 
 	// Update work_item to running with new attempt
@@ -1263,7 +1304,13 @@ func VerifyAttemptCredentialPool(ctx context.Context, pool *pgxpool.Pool, wiID, 
 // ─── Acquire-locks SQL constants ─────────────────────────────────────────────
 //
 // These are package-level consts so the domain tests can inspect them without
-// a live DB (same pattern as orphanLockSweepSQL in gc.go).
+// a live DB (same pattern as orphanLockSweepSQL in resource_events.go).
+//
+// ⚠️ Only the read-only collision probe lives here. acquireLocksInsertSQL and
+// acquireLocksReleasePausedSQL moved to resource_events.go with every other
+// statement that MUTATES resource_locks (aihub#343) — see that file's authority
+// rule, and TestLockEvents_NoLockMutatingSQLOutsideThisFile for the gate that
+// keeps them there.
 
 // acquireLocksCollisionSQL is the SELECT used to detect lock conflicts during
 // FnAcquireLocks. It mirrors the claim-time conflict check (:290-298) exactly
@@ -1275,19 +1322,6 @@ const acquireLocksCollisionSQL = `
 	JOIN work_items wi2 ON wi2.id = ra.work_item_id
 	WHERE ` + lockConflictWhereClause + `
 	  AND ra.status IN ('running', 'paused')`
-
-// acquireLocksInsertSQL inserts a lock without stealing (DO NOTHING on conflict).
-// A non-zero RowsAffected means we took a free key; 0 means a row already exists
-// (held by us, by another live attempt, or an un-GC'd orphan) and the caller must
-// re-check the owner to decide no-op / conflict / reclaim.
-const acquireLocksInsertSQL = `
-	INSERT INTO resource_locks (resource_type, resource_key, owner_attempt_id, claim_epoch)
-	VALUES ($1, $2, $3, $4)
-	ON CONFLICT (resource_type, resource_key) DO NOTHING`
-
-// acquireLocksReleasePausedSQL releases only file_scope locks when an attempt
-// transitions to paused (git_branch / deploy_env locks are kept for resume).
-const acquireLocksReleasePausedSQL = `DELETE FROM resource_locks WHERE owner_attempt_id=$1 AND resource_type='file_scope'`
 
 // ─── AcquireLocks request / response ────────────────────────────────────────
 
@@ -1408,6 +1442,16 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 
 	acquired := make([]ResourceLock, 0)
 
+	// aihub#343: one op_id for the plain acquisitions of this call. An orphan
+	// RECLAIM mints its own (see reclaimOp below) because it is a distinct
+	// operation on a lock that belonged to somebody else — its release and its
+	// re-acquisition group together, not with the rest of this call.
+	//
+	// The actor is empty on purpose: this endpoint authenticates an ATTEMPT
+	// credential, not a user, so there is no caller identity to stamp that would
+	// not be a guess. The attempt id in the payload is the identity that matters.
+	alOp := newLockOp(lockCauseAcquireLocks, lockEventActor{})
+
 	for _, t := range targets {
 		var ownerAttemptID, ownerActorDisplay, ownerWISlug string
 		scanErr := tx.QueryRow(ctx, acquireLocksCollisionSQL, t.lockType, t.probe.Keys, t.probe.LikePattern).
@@ -1439,12 +1483,16 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 			return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to check lock collision for %s:%s", t.lockType, t.lockKey))
 		}
 
-		// No existing lock — attempt to insert (DO NOTHING on conflict to avoid stealing).
-		tag, execErr := tx.Exec(ctx, acquireLocksInsertSQL, t.lockType, t.lockKey, req.AttemptID, req.ClaimEpoch)
+		// No existing lock — attempt to insert (DO NOTHING on conflict to avoid
+		// stealing). aihub#343: acquireLockIfFree emits lock_acquired only when a
+		// row really came back from RETURNING, so a DO NOTHING that took nothing
+		// records nothing.
+		took, execErr := acquireLockIfFree(ctx, tx, t.lockType, t.lockKey,
+			req.AttemptID, req.ClaimEpoch, wi.Project, wi.ID, alOp)
 		if execErr != nil {
 			return nil, dbErrCause(execErr, fmt.Sprintf("failed to acquire lock %s:%s", t.lockType, t.lockKey))
 		}
-		if tag.RowsAffected() == 0 {
+		if !took {
 			// DO NOTHING hit an existing row. Re-check who owns it (live attempts only).
 			var raceOwnerID, raceActorDisplay, raceWISlug string
 			reScanErr := tx.QueryRow(ctx, acquireLocksCollisionSQL, t.lockType, t.probe.Keys, t.probe.LikePattern).
@@ -1471,13 +1519,21 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 				// crashed/expired attempt the orphan-sweep (gc.go) has not yet reclaimed.
 				// Reclaim it: delete the dead row and insert for this attempt. Matches the
 				// orphan-sweep contract (a lock owned by a non-live attempt is free).
-				if _, delErr := tx.Exec(ctx,
-					`DELETE FROM resource_locks WHERE resource_type=$1 AND resource_key=$2`,
+				//
+				// aihub#343: releaseLocks resolves the DELETED row's own work item
+				// rather than this caller's. An orphan row can belong to a
+				// DIFFERENT work item, and filing its release under the reclaiming
+				// work item's timeline would hide it from the only reader who has a
+				// reason to look — the person wondering where their lock went.
+				reclaimOp := newLockOp(lockCauseOrphanReclaim, lockEventActor{}).withExtra(map[string]any{
+					"reclaimed_by_attempt_id": req.AttemptID,
+				})
+				if _, delErr := releaseLocks(ctx, tx, lockDeleteByKeySQL, reclaimOp,
 					t.lockType, t.lockKey); delErr != nil {
 					return nil, dbErr(delErr, fmt.Sprintf("failed to reclaim orphan lock %s:%s", t.lockType, t.lockKey))
 				}
-				if _, insErr := tx.Exec(ctx, acquireLocksInsertSQL,
-					t.lockType, t.lockKey, req.AttemptID, req.ClaimEpoch); insErr != nil {
+				if _, insErr := acquireLockIfFree(ctx, tx, t.lockType, t.lockKey,
+					req.AttemptID, req.ClaimEpoch, wi.Project, wi.ID, reclaimOp); insErr != nil {
 					return nil, dbErr(insErr, fmt.Sprintf("failed to acquire reclaimed lock %s:%s", t.lockType, t.lockKey))
 				}
 				acquired = append(acquired, ResourceLock{

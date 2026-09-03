@@ -127,13 +127,38 @@ func (s *Server) registerEventTools() {
 
 	// pf_read_events
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_read_events",
-		Description: "Read events for a work item or project. work_item_id or project must be provided.",
+		Name: "pf_read_events",
+		// aihub#343: the cutover caveat is ON THE TOOL, not only in the docs
+		// (docs/design/polyforge-v1-design.md §19.0). The failure mode that work
+		// item exists to prevent is a reader taking an empty stream as proof that
+		// nothing happened — and the reader at risk is the one who never opens
+		// the source. Lock and declared_resources events did not exist before the
+		// aihub#343 DEPLOY, and nothing could be backfilled because resource_locks
+		// keeps no trace of a deleted row.
+		//
+		// ⚠️ Deploy, not commit, and the wording says so: aihub rollouts need an
+		// explicit human instruction and can trail the merge by days. A hard
+		// start date would be wrong in the direction that matters — during that
+		// gap there are still no events, and a reader holding the commit date
+		// would read the emptiness as "the recorder was running and saw nothing".
+		//
+		// Cost, measured rather than waved at: the two additions here are +437
+		// chars of wire text on every tools/list — ~109 tokens, 0.66% of the
+		// 66,091 chars of quoted schema text in internal/mcp/tools_*.go. Kept
+		// because the empty result this warns about is the exact thing the tool
+		// would otherwise be read as proving. (An earlier draft cost +542; the
+		// prose was cut, not the two facts.)
+		Description: "Read events for a work item or project. work_item_id or project must be provided. " +
+			"NOTE: lock_acquired / lock_released / wi_resources_updated exist only from the deploy that " +
+			"shipped aihub#343 (2026-09-03 at the earliest; no backfill) — their absence before then is " +
+			"not evidence that no lock or declaration changed.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID (or use project)"),
 			"project":      prop("string", "Project name (or use work_item_id)"),
 			"user_id":      prop("string", "Filter by user"),
-			"types":        prop("array", "Filter by event types"),
+			"types": prop("array", "Filter by event types (whitelist). Lock churn is "+
+				"lock_acquired/lock_released, declaration changes wi_resources_updated. A claim emits one "+
+				"lock_acquired PER declared path, so unfiltered these can fill a page (default limit 50)."),
 			"since":        prop("string", "Since timestamp (RFC3339)"),
 			"limit":        prop("string", "Max events to return"),
 			"pinned_first": prop("boolean", "Return pinned events first"),

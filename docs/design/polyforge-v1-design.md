@@ -3383,6 +3383,50 @@ interface Memory {
 
 ## 19. 事件 Payload Schema
 
+### 🔴 19.0 锁与 declared_resources 事件只从 `aihub#343` 上线那一刻起可信
+
+⚠️ 判据是**部署时刻**，不是 commit 时刻 —— aihub 的部署要人显式下令，可能比合入晚
+好几天。下限是 **2026-09-03**（本节写下的日期），真实起点看那次 rollout。
+把一个写死的日期当成起点会在部署延后的那几天里**反向出错**：那段时间同样没有事件，
+而按写死的日期读会以为"有记录且为空"。
+
+`lock_acquired` / `lock_released` / `wi_resources_updated` 三个类型是 `aihub#343`
+落地的，**历史一律没有补录，也补录不了**：没有锁历史表，`resource_locks`
+只对**仍然存在**的行保留 `acquired_at`，被删掉的行不留任何痕迹。
+
+从存活的锁行合成 `lock_acquired` 是**被明确否决的方案**：合成事件和真事件长得一模一样，
+却仍然对任何一次 release 说不出话，结果是缺口从「看得见」变成「看不见」——
+比没有事件更坏。
+
+⇒ 必须写在这里，也写在 `pf_read_events` 的工具描述里（`internal/mcp/tools_events.go`）：
+
+> **`aihub#343` 上线之前没有这三类事件，不等于那段时间没有发生过锁变更或声明变更，
+> 只等于当时没有任何东西在记录它。**
+
+这正是 `aihub#343` 要防的失效模式（有人拿空事件流当「没发生过」的证据），
+所以这句话不能只留在源码注释里 —— 真正会踩坑的读者恰恰是不会打开源码的那个。
+
+### 19.0.1 向后兼容影响：新类型进入 `pf_read_events` 的公共词表
+
+事件类型词表是**公共 API**（`pf_read_events(types=[...])` 直接 `event_type IN (...)`），
+所以加类型是一次兼容性事件。实测（不是读代码得出，见
+`internal/domain/resource_events_db_test.go` 与 `aihub#343` 的 PR）：
+
+| 调用方式 | 影响 |
+|---|---|
+| `types=[<旧类型>]` | **逐字节不变**。白名单过滤，没点名的类型既不会出现也不会挤掉任何行。实测 `types=["attempt_started"]` 仍然只返回 1 条 `attempt_started`。 |
+| 不传 `types` | 新行按 `created_at` 混排进来。**实测同一窗口 8 条事件里 5 条是新类型**。 |
+| 不传 `types` + `limit=N` | 🔴 **唯一真实的退化面**。实测 `limit=3` 时返回的**三条全是新类型**，旧类型一条都没进页。一次 claim 对**每条声明路径**发一个 `lock_acquired`，所以声明 20 条路径的 wi 一次 claim 就吃掉默认 50 条配额的 40%。修法在调用方：点名要的 `types`。 |
+| `types=["lock_acquired"]`（防御性预写的旧调用方） | 以前恒为 `[]`，现在会返回行。本仓内不存在这样的调用方（schema 注释之外没有任何地方提到这两个串），但这是真实的行为变化。 |
+| 迁移 / 部署顺序 | **无 migration**。`chk_evt_work_item_id` 只约束 `work_item_id IS NULL` 的行，而这三类事件永远带 work item（`emitResourceEvents` 拒绝插入解析不出 owner 的事件）⇒ 没有「先迁移后二进制」的顺序约束，**回滚也安全**：旧二进制照样读得到新行，只是它自己永远不写。 |
+
+词表形状上**没有**选「一个 `resources_changed` 带 `op` 字段」：`types` 是唯一的服务端过滤器，
+合成一个类型会强迫「只想看锁变动」的调用方连声明变动一起拉回来在客户端再过一遍，
+而 `/v1/events` 没有 page-size 上限但有默认 50 条 —— 多出来的行直接从调用方的配额里出。
+锁的两个名字也不是新造的：`0006_events_memories.sql` 从建表起就在
+`agent_events` 注释里写着 `locks: lock_acquired, lock_released`，本节下面的 payload
+schema 也一直在，只是从来没有代码发过它们。
+
 每个 `event_type` 的 `payload` 结构如下（其余字段自由扩展）：
 
 ```typescript
@@ -3402,11 +3446,47 @@ interface Memory {
 // force_takeover
 { prior_attempt_id: string; prior_actor: string; reason: string }
 
-// lock_acquired
-{ resource_type: string; resource_key: string }
+// lock_acquired  (aihub#343 — implemented; one event PER LOCK ROW)
+{ resource_type: string; resource_key: string;
+  attempt_id: string; claim_epoch: number;
+  cause: "claim"|"force_takeover"|"acquire_locks"|"orphan_reclaim";
+  op_id: string;                          // groups the events of ONE operation
+  actor_user_id?: string; actor_display?: string;
+  replaced_prior_owner?: string }         // set when an upsert displaced an owner
 
-// lock_released
-{ resource_type: string; resource_key: string }
+// lock_released  (aihub#343 — implemented; one event PER LOCK ROW)
+{ resource_type: string; resource_key: string;
+  attempt_id: string;                     // the attempt that HELD it
+  claim_epoch: number;
+  cause: "claim_takeover"|"attempt_terminal"|"attempt_paused"|"force_takeover"
+       |"orphan_reclaim"|"declaration_narrowed"|"orphan_sweep"|"owner_replaced";
+  op_id: string;
+  actor_user_id?: string; actor_display?: string;
+  replaced_by_attempt_id?: string; replaced_cause?: string }  // cause=owner_replaced
+
+// wi_resources_updated  (aihub#343)
+// 🔴 FOUR separate numbers, deliberately. The recorded argument this event
+// exists to settle was one side reading `resources_version: 0` as "the
+// declaration now has zero entries" and the other as "the CAS guard expected
+// version 0" — both defensible about a single number, so there is never one.
+// The locked-path sets say what the entry counts cannot: an intent=read entry
+// counts but justifies no lock.
+//
+// 🔴 PATHS, not derived lock keys, on every set except released_file_scope_keys,
+// and the diff is the one releaseUndeclaredFileScopeLocks performed rather than
+// a recomputation. A key changes whenever the payload's repo inference changes
+// with the paths untouched (aihub#261), so a key-based diff reports still-held
+// locks as "removed" in the ordinary /pf-plan flow — measured, and the reason
+// this shape exists. released_file_scope_keys is not a diff at all: it is what
+// the DELETE's RETURNING clause reported.
+{ prior_resources_version: number; new_resources_version: number;
+  prior_entry_count: number;  new_entry_count: number;   // -1 = unparseable
+  prior_locked_paths: string[]; new_locked_paths: string[];
+  added_locked_paths: string[]; removed_locked_paths: string[];
+  released_file_scope_keys: string[];                    // from RETURNING, not a diff
+  locked_paths_unreadable?: true;                        // a stored payload could not be decoded
+  keys_truncated?: true; keys_truncated_at?: number;     // payload has a 64KB cap
+  op_id: string; changed_by?: string }
 
 // commit
 { repo: string; sha: string; message: string; files: string[] }

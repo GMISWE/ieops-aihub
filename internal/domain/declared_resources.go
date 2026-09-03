@@ -204,7 +204,7 @@ func ValidateRequestedLocks(locks []ResourceLockReq) *AihubError {
 				map[string]any{
 					"index":       i,
 					"entry_shape": `{"resource_type":"file_scope","resource_key":"<project>:<path>"}`,
-					"hint":        "file_scope keys are project-namespaced as \"<project>:<repo-relative-path>\" (aihub#222); git_branch keys are \"<repo>/<branch>\"",
+					"hint":        "file_scope keys are \"<project>:<repo>:<repo-relative-path>\", or \"<project>:<repo-relative-path>\" when the declaration names no repo (aihub#222, aihub#261); git_branch keys are \"<repo>/<branch>\"",
 				})
 		}
 	}

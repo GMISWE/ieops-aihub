@@ -1686,7 +1686,7 @@ func cloneArgs(in map[string]any) map[string]any {
 // enforces it.
 func declaredResourcesProp(description string) map[string]any {
 	p := prop("array", description+
-		` — entries are {"type","uri","intent"}. NOTE: type takes a DECLARED type (repo/path/document/section/service/external_ref), NOT a lock type: file_scope/git_branch/worktree/tcp_port/deploy_env are resource_locks.resource_type values the server derives. A file path is type="path", uri="file:<repo-relative-path>". The path field is `+"`uri`"+`, not value/path/scope.`)
+		` — entries are {"type","uri","intent"} plus an optional "repo" on path entries (aihub#261). NOTE: type takes a DECLARED type (repo/path/document/section/service/external_ref), NOT a lock type: file_scope/git_branch/worktree/tcp_port/deploy_env are resource_locks.resource_type values the server derives. A file path is type="path", uri="file:<repo-relative-path>". The path field is `+"`uri`"+`, not value/path/scope.`)
 	p["items"] = map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -1702,6 +1702,19 @@ func declaredResourcesProp(description string) map[string]any {
 			// the semantics instead and let unknown values through as inert. (aihub#238)
 			"intent": prop("string",
 				`Access intent. Not validated by the server; only two values carry behaviour: "read" (takes no write lock, and path overlaps report as info instead of soft_block) and "refactor" (on a repo entry, flags other refactors of the same repo). "write" is the conventional default; other values are accepted but inert.`),
+			// aihub#261. The uri of a path/document/section entry is REPO-relative,
+			// and until this field existed nothing in the payload said which repo —
+			// so in a multi-repo project every repo's go.mod / Makefile / README.md
+			// derived one lock key and hard-blocked each other (measured: 409
+			// CONFLICT_LOCK_TAKEN between two work items editing two different files).
+			//
+			// Optional, and omitting it is not an error: the key then keeps its
+			// pre-aihub#261 "<project>:<path>" form and conflicts with every repo's
+			// copy of that path, exactly as before. Saying "unspecified means all
+			// repos" in the description is the point — a caller who reads it as
+			// "means no repo" would expect isolation the server does not give.
+			"repo": prop("string",
+				`Repo the uri is relative to (path/document/section entries only), e.g. "ieops-core". Optional but recommended in a multi-repo project: without it the lock key cannot tell one repo's go.mod/Makefile/README.md from another's, so unrelated work items block each other. Omitted means "unspecified repo", which still conflicts with every repo's copy of that path. Defaults to the repo named by this payload's own {"type":"repo"} entry when it names exactly one.`),
 			"base_branch": prop("string", "Base branch (repo entries only)"),
 			"task_branch": prop("string", "Task branch (repo entries only); defaults to main for lock-key derivation"),
 		},
@@ -1729,7 +1742,7 @@ func requestedLocksProp(description string) map[string]any {
 		"properties": map[string]any{
 			"resource_type": propEnum("string", "Lock type (NOT a declared_resources type)", domain.ResourceLockTypeList()),
 			"resource_key": prop("string",
-				`Lock key. file_scope is project-namespaced "<project>:<repo-relative-path>" (aihub#222); git_branch is "<repo>/<branch>"; deploy_env is the bare service name.`),
+				`Lock key. file_scope is "<project>:<repo>:<repo-relative-path>", or "<project>:<repo-relative-path>" when the declaration names no repo (aihub#222, aihub#261); git_branch is "<repo>/<branch>"; deploy_env is the bare service name.`),
 		},
 		"required": []string{"resource_type", "resource_key"},
 	}

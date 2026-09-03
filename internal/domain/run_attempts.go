@@ -329,36 +329,41 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	// file_scope keys are NOT re-namespaced here; the standard polyforge flow always
 	// leaves RequestedLocks empty and derives server-side, so this raw-API path is
 	// a known, low-exposure limitation rather than a normal code path.
+	//
+	// lockProbes[i] pairs with req.RequestedLocks[i] and holds the set of
+	// EXISTING keys that block that lock (aihub#261). A client-supplied lock is
+	// trusted verbatim, so its probe is plain key equality — the pre-aihub#261
+	// behaviour, unchanged.
+	lockProbes := make([]lockConflictProbe, 0, len(req.RequestedLocks))
+	for _, l := range req.RequestedLocks {
+		lockProbes = append(lockProbes, exactProbe(l.ResourceKey))
+	}
 	if len(req.RequestedLocks) == 0 && len(wi.DeclaredResources) > 0 {
-		var declared []struct {
-			Type       string `json:"type"`
-			URI        string `json:"uri"`
-			Intent     string `json:"intent,omitempty"`
-			TaskBranch string `json:"task_branch,omitempty"`
-		}
-		if jsonErr := json.Unmarshal(wi.DeclaredResources, &declared); jsonErr == nil {
-			for _, d := range declared {
-				// derivedLock, not resourceToLock (aihub#342): an intent=read
-				// declaration takes no write lock. This line is the reported
-				// instance — claim took a file_scope lock for a read-only path
-				// and then 409'd the next claimer, while pf_predict_conflicts
-				// reported the identical input as `info`, so the pre-claim gate
-				// had no predictive value at all.
-				lockType, lockKey := derivedLock(DeclaredResourceItem{
-					Type: d.Type, URI: d.URI, Intent: d.Intent, TaskBranch: d.TaskBranch,
-				}, wi.Project)
-				// aihub#238: an empty key is possible from bad stored data (a
-				// `service`/`path` entry with no uri). Never insert it — the row is
-				// meaningless as a lock and would collide with every other empty-key
-				// row of the same type. Skipping keeps the wi claimable; the entry is
-				// reported via unrecognizedResources below rather than dropped silently.
-				if lockType == "" || lockKey == "" {
-					continue
-				}
-				req.RequestedLocks = append(req.RequestedLocks, ResourceLockReq{
-					ResourceType: lockType, ResourceKey: lockKey,
-				})
+		// aihub#261: unmarshalDeclaredResources replaces the local anonymous
+		// struct this site used to declare. That struct's hand-written field list
+		// was the failure mode aihub#342 called the quietest form of this class —
+		// a field missing from the list never reaches the mapper and reads as a
+		// zero value — and the `repo` field added here is exactly such a field.
+		for _, d := range unmarshalDeclaredResources(wi.DeclaredResources) {
+			// derivedLockProbe, not resourceToLock (aihub#342): an intent=read
+			// declaration takes no write lock. This line is the reported
+			// instance — claim took a file_scope lock for a read-only path
+			// and then 409'd the next claimer, while pf_predict_conflicts
+			// reported the identical input as `info`, so the pre-claim gate
+			// had no predictive value at all.
+			lockType, lockKey, probe := derivedLockProbe(d, wi.Project)
+			// aihub#238: an empty key is possible from bad stored data (a
+			// `service`/`path` entry with no uri). Never insert it — the row is
+			// meaningless as a lock and would collide with every other empty-key
+			// row of the same type. Skipping keeps the wi claimable; the entry is
+			// reported via unrecognizedResources below rather than dropped silently.
+			if lockType == "" || lockKey == "" {
+				continue
 			}
+			req.RequestedLocks = append(req.RequestedLocks, ResourceLockReq{
+				ResourceType: lockType, ResourceKey: lockKey,
+			})
+			lockProbes = append(lockProbes, probe)
 		}
 	}
 
@@ -372,23 +377,23 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 
 	// Check lock conflicts (advisory — actual conflict resolution in claim)
 	if len(req.RequestedLocks) > 0 && !isTakeover {
-		resourceKeys := make([]string, len(req.RequestedLocks))
-		resourceTypes := make([]string, len(req.RequestedLocks))
-		for i, l := range req.RequestedLocks {
-			resourceKeys[i] = l.ResourceKey
-			resourceTypes[i] = l.ResourceType
-		}
 		var conflictAttemptID, conflictActorDisplay, conflictWISlug string
 		for i, l := range req.RequestedLocks {
+			// aihub#261: probe the set of keys that block this lock, not just the
+			// key it will insert. For an unqualified file_scope declaration those
+			// differ — it must still collide with every repo-qualified variant of
+			// the same path, or making keys finer would buy the fix a missed
+			// conflict, which is the one direction that is worse than the bug.
+			probe := lockProbes[i]
 			err = tx.QueryRow(ctx, `
 				SELECT rl.owner_attempt_id, ra.actor_display, wi2.slug
 				FROM resource_locks rl
 				JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
 				JOIN work_items wi2 ON wi2.id = ra.work_item_id
-				WHERE rl.resource_type = $1 AND rl.resource_key = $2
+				WHERE `+lockConflictWhereClause+`
 				  AND ra.status IN ('running', 'paused')
-				  AND ra.work_item_id != $3`,
-				resourceTypes[i], resourceKeys[i], wi.ID,
+				  AND ra.work_item_id != $4`,
+				l.ResourceType, probe.Keys, probe.LikePattern, wi.ID,
 			).Scan(&conflictAttemptID, &conflictActorDisplay, &conflictWISlug)
 			if err == nil {
 				return nil, NewErrDetails(ErrConflictLockTaken,
@@ -1089,22 +1094,18 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	// that had asked for none. A missing struct field is the quietest form of
 	// this defect: nothing to grep for, and every `intent == "read"` check
 	// downstream reads the zero value and passes.
-	var declaredRes []struct {
-		Type       string `json:"type"`
-		URI        string `json:"uri"`
-		Intent     string `json:"intent,omitempty"`
-		TaskBranch string `json:"task_branch,omitempty"`
-	}
-	if len(wi.DeclaredResources) > 0 {
-		json.Unmarshal(wi.DeclaredResources, &declaredRes) //nolint:errcheck
-	}
+	//
+	// aihub#261: the local anonymous struct this loop used to declare is gone,
+	// replaced by unmarshalDeclaredResources. The comment above describes exactly
+	// why: a field absent from a hand-written list never reaches the mapper. The
+	// `repo` field added by aihub#261 would have been the second instance of that
+	// bug in this same function, so the list is deleted rather than extended.
+	declaredRes := unmarshalDeclaredResources(wi.DeclaredResources)
 	// aihub#238: entries the mapper cannot understand yield no lock here either.
 	// Stored data, so this must not fail the takeover; the subsequent fresh claim
 	// reports them via ClaimResponse.unrecognized_resources.
 	for _, res := range declaredRes {
-		lockType, lockKey := derivedLock(DeclaredResourceItem{
-			Type: res.Type, URI: res.URI, Intent: res.Intent, TaskBranch: res.TaskBranch,
-		}, wi.Project)
+		lockType, lockKey := derivedLock(res, wi.Project)
 		if lockType == "" {
 			continue
 		}
@@ -1272,7 +1273,7 @@ const acquireLocksCollisionSQL = `
 	FROM resource_locks rl
 	JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
 	JOIN work_items wi2 ON wi2.id = ra.work_item_id
-	WHERE rl.resource_type = $1 AND rl.resource_key = $2
+	WHERE ` + lockConflictWhereClause + `
 	  AND ra.status IN ('running', 'paused')`
 
 // acquireLocksInsertSQL inserts a lock without stealing (DO NOTHING on conflict).
@@ -1364,37 +1365,52 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 	}
 
 	// Derive target locks: file_scope + write-intent only.
-	var declared []DeclaredResourceItem
-	if len(wi.DeclaredResources) > 0 {
-		if jsonErr := json.Unmarshal(wi.DeclaredResources, &declared); jsonErr != nil {
-			return nil, NewErr(ErrInternalError, "failed to parse declared_resources")
-		}
+	//
+	// aihub#261: resolveDeclaredRepos, so a path entry inherits the repo the
+	// payload declares exactly as it does at claim. Without it this endpoint
+	// would acquire the unqualified key for a work item whose claim took the
+	// qualified one — the same path, twice, under two names.
+	//
+	// 🔴 Deliberately NOT routed through unmarshalDeclaredResources, unlike claim
+	// and force_takeover. Those two are tolerant of an unparseable payload by
+	// design (a work item must stay claimable), whereas this endpoint has always
+	// returned an error for one, and it should: its whole contract is "tell me
+	// which locks I now hold". Silently deriving zero targets would answer that
+	// question with an empty list and a 200 — a caller that reads it as "I hold
+	// nothing else" is being told something the server never checked. The shared
+	// decoder exists to kill the hand-written-struct hazard, and this site never
+	// had one: it already decodes into DeclaredResourceItem, so the repo field
+	// reaches it regardless.
+	declared, decodeOK := decodeDeclaredResources(wi.DeclaredResources)
+	if !decodeOK {
+		return nil, NewErr(ErrInternalError, "failed to parse declared_resources")
 	}
 
 	type targetLock struct {
 		lockType string
 		lockKey  string
+		probe    lockConflictProbe
 	}
 	var targets []targetLock
 	for _, d := range declared {
 		// aihub#342: the read rule used to be spelled out here, and this was the
 		// only one of four derivation sites that had it. It now lives in
 		// derivedLock so claim, force_takeover and predict rule 1 share it.
-		lType, lKey := derivedLock(d, wi.Project)
+		lType, lKey, probe := derivedLockProbe(d, wi.Project)
 		if lType != "file_scope" {
 			continue // this endpoint handles file_scope only
 		}
 		if lKey == "" {
 			continue
 		}
-		targets = append(targets, targetLock{lType, lKey})
+		targets = append(targets, targetLock{lType, lKey, probe})
 	}
 
 	acquired := make([]ResourceLock, 0)
 
 	for _, t := range targets {
 		var ownerAttemptID, ownerActorDisplay, ownerWISlug string
-		scanErr := tx.QueryRow(ctx, acquireLocksCollisionSQL, t.lockType, t.lockKey).
+		scanErr := tx.QueryRow(ctx, acquireLocksCollisionSQL, t.lockType, t.probe.Keys, t.probe.LikePattern).
 			Scan(&ownerAttemptID, &ownerActorDisplay, &ownerWISlug)
 
 		if scanErr == nil {
@@ -1431,7 +1447,7 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 		if tag.RowsAffected() == 0 {
 			// DO NOTHING hit an existing row. Re-check who owns it (live attempts only).
 			var raceOwnerID, raceActorDisplay, raceWISlug string
-			reScanErr := tx.QueryRow(ctx, acquireLocksCollisionSQL, t.lockType, t.lockKey).
+			reScanErr := tx.QueryRow(ctx, acquireLocksCollisionSQL, t.lockType, t.probe.Keys, t.probe.LikePattern).
 				Scan(&raceOwnerID, &raceActorDisplay, &raceWISlug)
 			switch {
 			case reScanErr == nil && raceOwnerID == req.AttemptID:

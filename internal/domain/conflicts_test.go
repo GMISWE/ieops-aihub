@@ -64,9 +64,15 @@ func TestResourceToLock_BranchAndEnvKeysUnaffectedByProject(t *testing.T) {
 	}
 }
 
-// fileScopeLockKey is the single source of the "<project>:<path>" shape.
+// fileScopeLockKey is the single source of the file_scope key shape. Both forms
+// are pinned here: the unqualified one is what every row written before
+// aihub#261 contains, and the whole no-migration argument rests on the new code
+// re-deriving it byte-for-byte from a declaration with no repo.
 func TestFileScopeLockKey_Shape(t *testing.T) {
-	if got := fileScopeLockKey("aihub", "file:a/b.go"); got != "aihub:a/b.go" {
-		t.Errorf("fileScopeLockKey = %q, want %q", got, "aihub:a/b.go")
+	if got := fileScopeLockKey("aihub", "", "file:a/b.go"); got != "aihub:a/b.go" {
+		t.Errorf("fileScopeLockKey(no repo) = %q, want %q", got, "aihub:a/b.go")
+	}
+	if got := fileScopeLockKey("aihub", "ieops-core", "file:a/b.go"); got != "aihub:ieops-core:a/b.go" {
+		t.Errorf("fileScopeLockKey(repo) = %q, want %q", got, "aihub:ieops-core:a/b.go")
 	}
 }

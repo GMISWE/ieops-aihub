@@ -101,10 +101,12 @@ func TestNarrowingDeclaredResourcesReleasesItsLocks(t *testing.T) {
 	const dropped = "internal/domain/dropped264.go"
 	const widened = "internal/domain/widened264.go"
 	const flipped = "internal/domain/flipped264.go"
-	keptKey := project + ":" + kept
-	droppedKey := project + ":" + dropped
-	widenedKey := project + ":" + widened
-	flippedKey := project + ":" + flipped
+	// The ":aihub:" segment is the repo (aihub#261): declaredAll below declares
+	// {"type":"repo","uri":"repo:aihub"}, so these repo-relative paths inherit it.
+	keptKey := project + ":aihub:" + kept
+	droppedKey := project + ":aihub:" + dropped
+	widenedKey := project + ":aihub:" + widened
+	flippedKey := project + ":aihub:" + flipped
 
 	declaredAll := `[{"type":"repo","uri":"repo:aihub","intent":"write","task_branch":"aihub264"},` +
 		`{"type":"path","uri":"file:` + kept + `","intent":"write"},` +

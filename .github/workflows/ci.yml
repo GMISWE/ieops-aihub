@@ -1016,6 +1016,41 @@ jobs:
           grep -q -- "--- PASS: TestHandleListWorkItems_Query" wi_query.log             || { echo "::error::TestHandleListWorkItems_Query did not run; the aihub#273 DB-gated coverage is not executing"; exit 1; }
           ! grep -q -- '--- SKIP' wi_query.log             || { echo "::error::an aihub#273 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#276 / aihub#277: document→document recall (similar_to=) and the
+      # semantic response metadata that replaced the similarity floor nobody can
+      # calibrate.
+      #
+      # These need a real database for a reason no fake can cover: the whole
+      # contract is expressed in pgvector's own operators. `similar_to` binds a
+      # vector read straight back out of the table as a literal, the source's
+      # self-similarity has to come out at EXACTLY 1.0 through `<=>`,
+      # `ranked_candidates` is a `count(*) OVER ()` evaluated before LIMIT, and
+      # the width guard exists because pgvector raises "different vector
+      # dimensions" per row. Every one of those is a statement about what
+      # Postgres does, so a stubbed pool would assert the stub.
+      #
+      # Six PASS assertions rather than one wildcard: `go test` exits 0 when the
+      # selected tests all SKIP, so the exit code alone cannot tell "ran and
+      # passed" from "AIHUB_TEST_DB never arrived". Naming each one also means
+      # deleting a test turns this red instead of quietly shrinking the set.
+      - name: aihub#276/#277 wi similar_to + semantic metadata DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run 'TestSimilarTo' -count=1 -v 2>&1 | tee wi_similar_to.log
+          for t in \
+            TestSimilarTo_RetrievesItselfFirstAtExactlyOne \
+            TestSimilarTo_MinSimilarityIsReachableAndDefaultsOff \
+            TestSimilarTo_SemanticBlockDistinguishesThePaths \
+            TestSimilarTo_FloorMakesAnEmptyVectorPageAuthoritative \
+            TestSimilarTo_ProviderOutageWithAFloorIsNotBlamedOnTheCaller \
+            TestSimilarTo_RejectionsAreExplicitNeverSilent \
+          ; do
+            grep -q -- "--- PASS: $t" wi_similar_to.log             || { echo "::error::$t did not report PASS; the aihub#276/#277 DB-gated coverage is not executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' wi_similar_to.log             || { echo "::error::an aihub#276/#277 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#290: exercise the fused step transition (next_step completes one
       # step and starts its successor in a single request) against the same
       # Postgres service, already migrated by the "Apply migrations (aihub#242 DB
@@ -1968,6 +2003,114 @@ jobs:
           done
           ! grep -q -- '--- SKIP' memlifecycle_server.log \
             || { echo "::error::an aihub#175 server test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#343: resource_locks rows were created and destroyed with NO audit
+      # trail, so no claim a step summary made about locks or declarations could
+      # be checked afterwards. Two recorded instances: a review called a step
+      # summary's "the init.go write lock was released" FABRICATED and the
+      # producer answered that the reviewer had misread a compare-and-set guard
+      # as an entry count — neither side could settle it; and a note asserting a
+      # release was contradicted a day later by a 409 CONFLICT_LOCK_TAKEN from
+      # that same attempt, with no way to tell "the release never happened" from
+      # "it happened and the row outlived it".
+      #
+      # What the arms below are and are not:
+      #
+      #   * The REPLAY arms are the work item's own acceptance criterion, and
+      #     they never read resource_locks to check an event against it. They run
+      #     lockVerdictFromEvents — a decision procedure whose only input is what
+      #     pf_read_events returns — and check its verdict against what the
+      #     server actually enforces. A test that read the table would prove the
+      #     event exists, not that it is SUFFICIENT, which is what was asked for.
+      #   * `an unrelated key stays undecidable` is the control that keeps the
+      #     replay honest: if the verdict defaulted to "not held" for a key the
+      #     stream says nothing about, the released arm would pass on an EMPTY
+      #     event stream — reproducing, inside its own test, the "absence read as
+      #     proof" failure this work item exists to prevent.
+      #   * EveryMutationSiteEmits reaches all eleven lock-mutating SQL
+      #     statements through their real entry points, never through the shared
+      #     helper. aihub#261 established why: a test of the helper stays green
+      #     when one CALL SITE stops using it, which is how the previous four
+      #     fixes in this area (aihub#238/#261/#264/#342) were each defeated.
+      #   * FailedEventInsert... has a NEGATIVE control that is the point of it.
+      #     `_, _ = tx.Exec(ctx, "INSERT INTO agent_events ...")` appears all over
+      #     internal/domain and LOOKS like "ignore a failed event"; it is not,
+      #     because a failed statement aborts the whole Postgres transaction. The
+      #     `without a savepoint the operation dies` arm measures that, so the
+      #     savepoint in emitResourceEvents is justified by a measurement rather
+      #     than by its own comment.
+      #
+      # Measured RED, nine mutants, each snapshotted immediately before its own
+      # injection and restored byte-identically after (see the aihub#343 PR body
+      # for the transcript). Notably m3 — emit on a DO NOTHING insert that took
+      # nothing — was GREEN on the first version of this suite and exposed a real
+      # hole: FnAcquireLocks' collision SELECT short-circuits before the insert
+      # when the caller already owns the key, so the "three repeat calls" arm
+      # never reached the helper. The assertion that catches it now lives in the
+      # orphan-reclaim arm, the only one that reaches acquireLockIfFree with the
+      # key already taken.
+      #
+      # The structural half of the gate (TestLockEvents_*, no DB) runs in the
+      # "Unit tests" step: it asserts that lock-mutating SQL exists ONLY in
+      # internal/domain/resource_events.go, which is the only arm here that can
+      # fail for a call site that does not exist yet.
+      - name: aihub#343 lock / declared_resources event auditability DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestLockEventsDB_' -count=1 -v 2>&1 | tee lock_events.log
+          for want in 'TestLockEventsDB_ReplayTheUndecidableRelease/released_is_decidable_as_released' \
+                      'TestLockEventsDB_ReplayTheUndecidableRelease/still_held_is_decidable_as_held' \
+                      'TestLockEventsDB_ReplayTheUndecidableRelease/an_unrelated_key_stays_undecidable' \
+                      'TestLockEventsDB_EveryMutationSiteEmits/claim_upsert' \
+                      'TestLockEventsDB_EveryMutationSiteEmits/claim_takeover_release' \
+                      'TestLockEventsDB_EveryMutationSiteEmits/complete_attempt_terminal_release' \
+                      'TestLockEventsDB_EveryMutationSiteEmits/complete_attempt_paused_release' \
+                      'TestLockEventsDB_EveryMutationSiteEmits/force_takeover_release_and_re-acquire' \
+                      'TestLockEventsDB_EveryMutationSiteEmits/acquire_locks_insert' \
+                      'TestLockEventsDB_EveryMutationSiteEmits/acquire_locks_emits_nothing_when_it_took_nothing' \
+                      'TestLockEventsDB_EveryMutationSiteEmits/orphan_reclaim_release_and_re-acquire' \
+                      'TestLockEventsDB_EveryMutationSiteEmits/narrowing_release' \
+                      'TestLockEventsDB_EveryMutationSiteEmits/orphan_sweep_release' \
+                      'TestLockEventsDB_EveryMutationSiteEmits/upsert_displacing_an_owner_emits_both_halves' \
+                      'TestLockEventsDB_ResourcesUpdatedSettlesTheVersionArgument' \
+                      'TestLockEventsDB_RejectedCASRecordsNothing' \
+                      'TestLockEventsDB_FailedEventInsertDoesNotAbortTheOperation/without_a_savepoint_the_operation_dies' \
+                      'TestLockEventsDB_FailedEventInsertDoesNotAbortTheOperation/with_the_savepoint_the_operation_survives' \
+                      'TestLockEventsDB_FailedEventInsertDoesNotAbortTheOperation/a_batch_past_the_bind-parameter_ceiling_still_lands' \
+                      'TestLockEventsDB_FailedEventInsertDoesNotAbortTheOperation/an_unrecordable_release_does_not_poison_the_transaction' \
+                      'TestLockEventsDB_ResourcesUpdatedAgreesWithTheReleaseItDescribes'; do
+            grep -q -- "--- PASS: $want " lock_events.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); that lock mutation's effect on the lock set is not actually verifiable from the event stream"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' lock_events.log \
+            || { echo "::error::an aihub#343 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+          # The read side of aihub#127's slug-resolution defect, found while
+          # verifying the arms above against production: GET /v1/events resolved
+          # id-or-slug for its ACCESS check and then queried on the caller's raw
+          # parameter, so a slug matched nothing and returned 200 with an empty
+          # list. Every instance aihub#127 fixed was a WRITE, where a slug in a
+          # work_item_id column trips the FK and 500s; a read has no constraint
+          # to trip, which is why this one survived. It is load-bearing here
+          # rather than incidental — aihub#343's criterion is "decide from
+          # pf_read_events' return ALONE", and a slug (what every human and skill
+          # types) answered every such question with "nothing was recorded".
+          # Measured on production before the fix, same wi:
+          #   work_item_id="aihub#343"   -> {"events":null}
+          #   work_item_id="wi_V7ph7bYu" -> 2 events
+          # The _StillScopesToTheWorkItem arm is the control: resolving the slug
+          # must not degrade into "return the whole project", which is what the
+          # equality assertion alone could not tell apart.
+          go test ./internal/server/ -run '^TestListEventsBySlug_' -count=1 -v 2>&1 | tee lock_events_slug.log
+          for want in 'TestListEventsBySlug_ReturnsTheSameStreamAsByID' \
+                      'TestListEventsBySlug_StillScopesToTheWorkItem'; do
+            grep -q -- "--- PASS: $want (" lock_events_slug.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); GET /v1/events may again answer a slug with a silently empty stream"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' lock_events_slug.log \
+            || { echo "::error::an aihub#343 slug test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       - name: Launcher update-check regression suite
         run: bash plugins/polyforge/tests/launcher-update-check.test.sh

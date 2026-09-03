@@ -61,12 +61,26 @@ func (s *Server) registerProjectTools() {
 			"visible":     prop("boolean", "Updated visibility"),
 			"scenario":    prop("string", "Updated scenario repo URL (e.g. git@github.com:GMISWE/polyforge-coding.git)"),
 			"repos":       prop("array", "Updated repository list. Each: {name, url, github_owner_repo?, description?, and an optional all-or-nothing structured block: positioning(string), tech_stack([string]), main_modules([{path,role}]), change_scenarios([string]), generated_at(RFC3339), generated_commit(string)}. If any structured field is set, all four content fields are required (English)."),
-			"members":     prop("array", "REPLACES the whole member list: [{user_id, role}] where role is viewer|writer|maintainer. Every member you do not resend is REMOVED, so to add one person you must read the current list (pf_list_projects) and send it back with the addition. Pass members_version with it to make that read-modify-write safe against a concurrent one."),
+			"members":     prop("array", "REPLACES the whole member list: [{user_id, role}] where role is viewer|writer|maintainer. Anyone missing from the list you send loses access, so to add one person you must read the current list (pf_list_projects) and send it back with the addition. A write that would drop somebody you did not name in expected_removals is refused with 412 PROJECT_MEMBERS_UNDECLARED_REMOVAL, which lists them."),
 			// aihub#260. The counter lives on the project row and is bumped by
 			// Postgres on every members write, so it is a token for "the list I
 			// read", not a timestamp — see buildProjectUpdate in
 			// internal/domain/projects.go for why not updated_at.
-			"members_version": prop("integer", "Compare-and-set guard for members: ALWAYS send the members_version you read alongside the list (pf_list_projects returns it). The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version in details.current_members_version — reread and retry. Every write of members increments this counter. Leaving it out overwrites unconditionally: a concurrent writer's edit is then silently discarded and you still get a 200. NOTE: this protects you against a CONCURRENT writer; it does NOT protect against sending a short list yourself, which still removes everyone you left out."),
+			//
+			// aihub#333 deleted this description's closing NOTE ("it does NOT
+			// protect against sending a short list yourself"). The note was true
+			// and was the honest thing to say while the gap was open; it is a
+			// LIE now, and a stale warning is worse than none — a caller who
+			// reads it either sends expected_removals it says nothing about, or
+			// concludes the API cannot protect them and stops looking. The
+			// replacement is not a reassurance, it is the parameter below.
+			"members_version": prop("integer", "Compare-and-set guard for members: ALWAYS send the members_version you read alongside the list (pf_list_projects returns it). The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version in details.current_members_version — reread and retry. Every write of members increments this counter. Leaving it out overwrites unconditionally: a concurrent writer's edit is then silently discarded and you still get a 200."),
+			// aihub#333. The redundancy with `members` is the whole point, the
+			// same way `git push --force-with-lease` restates what you think the
+			// remote is: a truncated list and a deliberate removal are the same
+			// bytes, so intent has to be stated somewhere the accident cannot
+			// reach.
+			"expected_removals": prop("array", "user_ids this members write is allowed to REMOVE. Send it whenever the list you send drops somebody — a same-size swap counts, changing only a role does not — because any removal you do not name here is refused with 412 PROJECT_MEMBERS_UNDECLARED_REMOVAL. Leave it out when you are only adding members or changing their roles. This is what tells the server \"I mean to remove these two\" apart from \"my list was short by two\"; members_version cannot, because a caller who truncates their own list holds a version that matches."),
 		}, []string{"name"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -84,6 +98,15 @@ func (s *Server) registerProjectTools() {
 		// body" — which is indistinguishable from the server not knowing the
 		// parameter at all.
 		if err := normalizeIntArg(args, "members_version"); err != nil {
+			return errResult(err)
+		}
+		// aihub#333, same hazard one type over: expected_removals binds to a
+		// []string, so a caller sending the bare string "u_two" — the natural
+		// mistake when removing exactly one person — otherwise died at c.Bind as
+		// an opaque 400 that named nothing. Coerced rather than dropped: a
+		// dropped declaration comes back as 412 "you did not declare this
+		// removal" while the declaration is sitting in the caller's own request.
+		if err := normalizeStringSliceArg(args, "expected_removals"); err != nil {
 			return errResult(err)
 		}
 		body := make(map[string]any)

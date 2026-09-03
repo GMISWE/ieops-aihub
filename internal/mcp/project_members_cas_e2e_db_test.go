@@ -32,8 +32,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -498,16 +502,270 @@ func TestProjectMembersCASConcurrentAddsBothSurviveEndToEnd(t *testing.T) {
 	}
 }
 
-// EXPLICITLY OUT OF SCOPE. aihub#260 describes two consequences of `members`
-// being a whole-list REPLACE. This change fixes the first (a concurrent
-// writer's addition is lost). The second — a caller who reads all N and sends
-// back N-1 by mistake — is NOT fixed and cannot be by a compare-and-set: that
-// caller's version matches, so the guard passes and the members are gone
-// anyway. Pinned here so the work item cannot be read as closed; the gap itself
-// is tracked as aihub#333.
-func TestProjectMembersCASDoesNotStopSelfInflictedTruncationEndToEnd(t *testing.T) {
+// ─── aihub#333: the truncation half, end to end ─────────────────────────────
+//
+// This section replaces TestProjectMembersCASDoesNotStopSelfInflictedTruncation-
+// EndToEnd, aihub#260's characterization of the gap it deliberately left open (a
+// caller who reads all N and sends back N-1 wipes the rest, because their
+// version matches perfectly so the compare-and-set passes). That test's own
+// failure messages said that going red most likely meant aihub#333 had shipped
+// and the test was the stale thing. It has, so the test is gone rather than
+// inverted in place: its name asserted the opposite of the behaviour, and the
+// manifest line it lost (internal/citest/dbtestcov/gated_tests.txt) is the
+// reviewable record that the characterization was given up on purpose.
+
+// projUpdateProps returns pf_update_project's advertised property descriptions.
+func projUpdateProps(t *testing.T) map[string]struct {
+	Type        string `json:"type"`
+	Description string `json:"description"`
+} {
+	t.Helper()
+	session := projCASToolSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tools, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	for _, tool := range tools.Tools {
+		if tool.Name != "pf_update_project" {
+			continue
+		}
+		raw, merr := json.Marshal(tool.InputSchema)
+		if merr != nil {
+			t.Fatalf("marshal input schema: %v", merr)
+		}
+		var schema struct {
+			Properties map[string]struct {
+				Type        string `json:"type"`
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		if uerr := json.Unmarshal(raw, &schema); uerr != nil {
+			t.Fatalf("decode input schema %s: %v", raw, uerr)
+		}
+		return schema.Properties
+	}
+	t.Fatal("pf_update_project is not advertised at all")
+	return nil
+}
+
+// Not DB-gated: what a tool advertises is a property of the process, and it is
+// the one hop whose regression stays invisible until somebody reads a model
+// transcript. This is aihub#333's third acceptance criterion — the description
+// no longer needs aihub#260's closing NOTE ("it does NOT protect against sending
+// a short list yourself") — expressed as the two things that have to be true for
+// that NOTE to be unnecessary rather than merely deleted.
+func TestProjectMembersRemovalToolSchemaAdvertisesExpectedRemovals(t *testing.T) {
+	props := projUpdateProps(t)
+
+	er, present := props["expected_removals"]
+	if !present {
+		t.Fatalf("pf_update_project does not advertise expected_removals, so no caller can authorise a "+
+			"removal and every legitimate one is a 412 nobody can clear. Advertised: %v", keysOf(props))
+	}
+	if er.Type != "array" {
+		t.Errorf("expected_removals is advertised as %q, want \"array\" — it binds to a []string", er.Type)
+	}
+	if !strings.Contains(er.Description, "PROJECT_MEMBERS_UNDECLARED_REMOVAL") {
+		t.Errorf("the expected_removals description does not name the error a caller has to handle: %q",
+			er.Description)
+	}
+
+	// The caller who needs this parameter is reading `members`, not looking for
+	// it — they do not know they are about to remove anybody. So `members` is
+	// where it has to be mentioned.
+	members, present := props["members"]
+	if !present {
+		t.Fatal("pf_update_project does not advertise members")
+	}
+	if !strings.Contains(members.Description, "expected_removals") {
+		t.Errorf("the members description does not point at expected_removals, so the guard is only "+
+			"discoverable by somebody who already knows it exists: %q", members.Description)
+	}
+
+	// The negative half, as a SHAPE and not as the 100-character sentence
+	// aihub#260 ended with: that literal is one spelling of an unbounded class,
+	// and a paraphrase would reintroduce it exactly. What must not be there is
+	// any claim that the server cannot protect the caller from their own short
+	// list — it now can, and a stale warning is worse than none, because a caller
+	// who believes it stops looking for the parameter that does protect them.
+	stale := regexp.MustCompile(`(?i)\b(does ?n[o']?t|cannot|can ?not|no) (protect|protection)`)
+	for name, p := range props {
+		if m := stale.FindString(p.Description); m != "" {
+			t.Errorf("pf_update_project's %q description still tells the caller the server %q them against "+
+				"their own list. aihub#333 closed that gap: an undeclared removal is refused with 412 "+
+				"PROJECT_MEMBERS_UNDECLARED_REMOVAL. Description: %q", name, m, p.Description)
+		}
+	}
+}
+
+// Also NOT DB-gated, and deliberately so. The two end-to-end cases below cover
+// this hop as well, but they SKIP without AIHUB_TEST_DB — which means on the
+// `go test ./...` that CI's "Unit tests" step runs, nothing at all would assert
+// that expected_removals survives the MCP handler's body construction and
+// pkg/client. An httptest peer needs no database, so this one runs everywhere.
+//
+// It is the SUCCESS half that can see this hop: a request whose declaration was
+// dropped en route is refused, and a refusal is what the undeclared-removal test
+// expects anyway. So a dropped parameter is invisible to every "it was refused"
+// assertion in this change, which is exactly why the bytes get read here.
+func TestProjectMembersRemovalToolForwardsExpectedRemovalsOnTheWire(t *testing.T) {
+	// Both argument shapes a caller can plausibly send. The scalar case is the
+	// natural mistake when removing exactly one person, and it is also what a
+	// client that coerces to the declared type can produce. Before aihub#333
+	// added normalizeStringSliceArg it reached echo's c.Bind as a bare string and
+	// died there as 400 BAD_REQUEST "invalid request body" — a message that names
+	// nothing and is indistinguishable from the server not knowing the parameter,
+	// which is exactly the aihub#241 B1 defect one type over. This test's own
+	// comment used to describe that hazard while asserting only the happy path.
+	cases := []struct {
+		name string
+		arg  any
+		want []any
+	}{
+		{name: "Array", arg: []string{"u_two", "u_three"}, want: []any{"u_two", "u_three"}},
+		{name: "BareStringIsCoercedNotRejected", arg: "u_two", want: []any{"u_two"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody []byte
+			var gotMethod, gotPath string
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod, gotPath = r.Method, r.URL.Path
+				gotBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"name":"p","members":[],"members_version":7}`))
+			}))
+			defer ts.Close()
+
+			ctx := context.Background()
+			mcpServer := mcp.New(nil, client.New(ts.URL, "pfk_wire_probe"))
+			cTransport, sTransport := sdkmcp.NewInMemoryTransports()
+			serverCtx, cancel := context.WithCancel(ctx)
+			t.Cleanup(cancel)
+			go func() {
+				srv, err := mcpServer.Connect(serverCtx, sTransport)
+				if err != nil {
+					return
+				}
+				_ = srv.Wait()
+			}()
+			cl := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "proj-removal-wire", Version: "1.0.0"}, nil)
+			session, err := cl.Connect(ctx, cTransport, nil)
+			if err != nil {
+				t.Fatalf("mcp client connect: %v", err)
+			}
+			t.Cleanup(func() { _ = session.Close() })
+
+			text, _, isErr := projCASCall(t, session, "pf_update_project", map[string]any{
+				"name":              "p",
+				"members":           []map[string]any{{"user_id": "u_one", "role": "viewer"}},
+				"members_version":   3,
+				"expected_removals": tc.arg,
+			})
+			if isErr {
+				t.Fatalf("pf_update_project failed against the capture peer: %s", text)
+			}
+			if gotMethod != http.MethodPatch || gotPath != "/v1/projects/p" {
+				t.Errorf("request was %s %s, want PATCH /v1/projects/p", gotMethod, gotPath)
+			}
+
+			// Decode rather than substring-match: `"expected_removals":["u_two"…]`
+			// as text would also be satisfied by the value arriving as a single
+			// joined string, which the server's []string rejects two hops away.
+			var sent map[string]any
+			if uerr := json.Unmarshal(gotBody, &sent); uerr != nil {
+				t.Fatalf("the server saw a non-JSON body %q: %v", gotBody, uerr)
+			}
+			raw, present := sent["expected_removals"]
+			if !present {
+				t.Fatalf("expected_removals never reached the wire, so every declared removal would be "+
+					"refused as undeclared. The server saw %s", gotBody)
+			}
+			list, ok := raw.([]any)
+			if !ok {
+				t.Fatalf("expected_removals arrived as %T (%#v), not a JSON array — the server binds it "+
+					"into a []string and would answer an opaque 400", raw, raw)
+			}
+			if !reflect.DeepEqual(list, tc.want) {
+				t.Errorf("expected_removals = %#v on the wire, want %#v", list, tc.want)
+			}
+			// The other two members fields must still be there: a handler that
+			// started filtering its arguments would drop all three together.
+			for _, k := range []string{"members", "members_version"} {
+				if _, ok := sent[k]; !ok {
+					t.Errorf("%s did not reach the wire alongside expected_removals; the server saw %s",
+						k, gotBody)
+				}
+			}
+		})
+	}
+}
+
+// Half one over the whole stack: the truncating call the old characterization
+// asserted would SUCCEED must now be refused, with the names it refused to
+// remove, and nothing may be written.
+func TestProjectMembersRemovalUndeclaredTruncationIsRefusedEndToEnd(t *testing.T) {
 	s := newProjCASStack(t)
-	session := s.session(t, "proj-cas-truncate")
+	session := s.session(t, "proj-removal-undeclared")
+
+	text, _, isErr := projCASCall(t, session, "pf_update_project", map[string]any{
+		"name": s.project,
+		"members": []map[string]any{
+			{"user_id": "u_one", "role": "viewer"},
+			{"user_id": "u_two", "role": "writer"},
+			{"user_id": "u_three", "role": "maintainer"},
+		},
+	})
+	if isErr {
+		t.Fatalf("seed write failed: %s", text)
+	}
+	p := projCASReadProject(t, session, s.project)
+
+	// The caller holds the CURRENT version, so aihub#260's guard passes. That is
+	// the point: this refusal cannot come from the compare-and-set.
+	args := map[string]any{
+		"name":    s.project,
+		"members": []map[string]any{{"user_id": "u_one", "role": "viewer"}},
+	}
+	if v, ok := p["members_version"]; ok && v != nil {
+		args["members_version"] = v
+	}
+	text, _, isErr = projCASCall(t, session, "pf_update_project", args)
+	if !isErr {
+		t.Fatalf("a list short by two was accepted end to end with a matching members_version; two people "+
+			"lost access and the caller was told nothing. Reply: %s", text)
+	}
+	if !strings.Contains(text, "PROJECT_MEMBERS_UNDECLARED_REMOVAL") {
+		t.Errorf("the refusal is not reported as an undeclared removal: %s", text)
+	}
+	for _, who := range []string{"u_two", "u_three"} {
+		if !strings.Contains(text, who) {
+			t.Errorf("the refusal does not name %s, so the caller cannot see who it was about to remove: %s",
+				who, text)
+		}
+	}
+
+	final := projCASReadProject(t, session, s.project)
+	for _, who := range []string{"u_one", "u_two", "u_three"} {
+		if !strings.Contains(fmt.Sprint(final["members"]), who) {
+			t.Errorf("%s is gone although the write was refused: %v", who, final["members"])
+		}
+	}
+	if final["members_version"] != p["members_version"] {
+		t.Errorf("members_version moved from %v to %v on a refused write, so the refusal happened after the "+
+			"UPDATE", p["members_version"], final["members_version"])
+	}
+}
+
+// Half two over the whole stack, and the assertion that expected_removals is not
+// dropped between the MCP handler's body construction, pkg/client and echo's
+// binder. Without it, a server that refused every members write would satisfy
+// the test above — which would replace silent data loss with an outage.
+func TestProjectMembersRemovalDeclaredRemovalSucceedsEndToEnd(t *testing.T) {
+	s := newProjCASStack(t)
+	session := s.session(t, "proj-removal-declared")
 
 	text, _, isErr := projCASCall(t, session, "pf_update_project", map[string]any{
 		"name": s.project,
@@ -523,24 +781,28 @@ func TestProjectMembersCASDoesNotStopSelfInflictedTruncationEndToEnd(t *testing.
 	p := projCASReadProject(t, session, s.project)
 
 	args := map[string]any{
-		"name":    s.project,
-		"members": []map[string]any{{"user_id": "u_one", "role": "viewer"}},
+		"name":              s.project,
+		"members":           []map[string]any{{"user_id": "u_one", "role": "viewer"}},
+		"expected_removals": []string{"u_two", "u_three"},
 	}
 	if v, ok := p["members_version"]; ok && v != nil {
 		args["members_version"] = v
 	}
 	text, _, isErr = projCASCall(t, session, "pf_update_project", args)
 	if isErr {
-		t.Fatalf("the guard rejected a write nobody raced: %s", text)
+		t.Fatalf("a removal that declared exactly the two user_ids it removes was refused end to end. "+
+			"Either expected_removals is dropped on one of the hops between the tool and the domain, or "+
+			"removing a member is now impossible. Reply: %s", text)
 	}
 
 	final := projCASReadProject(t, session, s.project)
-	if strings.Contains(fmt.Sprint(final["members"]), "u_two") {
-		t.Fatal("u_two survived a truncating write — if that is now prevented, this test is stale and the " +
-			"truncation half of aihub#260 has been addressed somewhere; update aihub#333 rather than this test")
+	got := fmt.Sprint(final["members"])
+	if !strings.Contains(got, "u_one") {
+		t.Errorf("u_one was not kept: %v", final["members"])
 	}
-	t.Logf("two members were removed with no error and a passing compare-and-set: %v. "+
-		"Fixing this needs incremental add_member/remove_member operations or a removal-count "+
-		"precondition — a separate API-shape decision, not part of aihub#260, tracked as aihub#333.",
-		final["members"])
+	for _, who := range []string{"u_two", "u_three"} {
+		if strings.Contains(got, who) {
+			t.Errorf("%s survived a DECLARED removal, so the write did not take effect: %v", who, final["members"])
+		}
+	}
 }

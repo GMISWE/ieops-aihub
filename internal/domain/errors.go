@@ -64,6 +64,20 @@ const (
 
 	// HTTP 412
 	ErrPreconditionFailed ErrCode = "PRECONDITION_FAILED"
+	// ErrProjectMembersUndeclaredRemoval is aihub#333: a `members` write would
+	// take access away from somebody the request did not name in
+	// expected_removals. `members` is a whole-list REPLACE, so a caller who
+	// sends a short list removes everyone they left out — and aihub#260's
+	// members_version cannot see that, because a truncating caller's version
+	// matches perfectly.
+	//
+	// 412 and not 409, deliberately. A 409 CONFLICT_CAS_FAILED means "somebody
+	// wrote before you, reread and retry" and clients loop on it; retrying this
+	// one re-sends the same short list forever. The request is well-formed and
+	// its acceptability depends on stored state, which is what 412 is for, and
+	// details carry retryable:false so a client need not parse the message to
+	// know that.
+	ErrProjectMembersUndeclaredRemoval ErrCode = "PROJECT_MEMBERS_UNDECLARED_REMOVAL"
 
 	// HTTP 413
 	ErrPayloadTooLarge ErrCode = "PAYLOAD_TOO_LARGE"
@@ -141,7 +155,7 @@ func codeToHTTPStatus(code ErrCode) int {
 		// G6 / design §4.3 line 1138: GOAL_CHANGE_NOT_ALLOWED is 409, not 400
 		ErrGoalChangeNotAllowed:
 		return 409
-	case ErrPreconditionFailed:
+	case ErrPreconditionFailed, ErrProjectMembersUndeclaredRemoval:
 		return 412
 	case ErrPayloadTooLarge:
 		return 413

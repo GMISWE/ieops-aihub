@@ -110,9 +110,16 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 
 	// Rule 1: resource_lock conflict (hard_block)
 	// Skip if dry_run=true (advisory only)
+	//
+	// derivedLock, not resourceToLock (aihub#342): rule 1 answers "would taking
+	// this resource's lock collide", and a declaration that takes no lock cannot
+	// collide with one. Before this, an intent=read path over a held lock got
+	// hard_block from rule 1 and info from rule 3 — two rules of one function
+	// contradicting each other on a single input, with only dry_run deciding
+	// which one the caller saw.
 	if !req.DryRun {
 		for _, res := range resources {
-			lockType, lockKey := resourceToLock(res, effectiveProject)
+			lockType, lockKey := derivedLock(res, effectiveProject)
 			if lockType == "" {
 				continue
 			}
@@ -355,8 +362,68 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 	return result, nil
 }
 
+// derivedLock returns the write lock a declared resource takes, or ("", "") if
+// it takes none. It is the ONE place the intent rule lives, and every path that
+// turns declared_resources into resource_locks rows must go through it:
+// FnClaimWorkItem, FnForceTakeover, FnAcquireLocks, and PredictConflicts rule 1.
+//
+// aihub#342. The rule is not new — it is the contract carried by
+// declaredResourcesProp in internal/mcp ("read ... takes no write lock, and path
+// overlaps report as info instead of soft_block"), advertised on
+// pf_predict_conflicts, pf_update_work_item, pf_create_work_item and
+// pf_batch_create_work_items — and it was already implemented, once, inside
+// FnAcquireLocks. The other three derivation sites each re-implemented the
+// mapping without it, so a work item whose sole declared resource was
+// {"type":"path","uri":"file:.gitignore","intent":"read"} had a file_scope write
+// lock taken for it at claim, then 409'd somebody else, while
+// pf_predict_conflicts — the pre-claim gate — reported the same input as `info`.
+// Two tools, one input, opposite answers.
+//
+// 🔴 The read rule is deliberately scoped to file_scope, NOT applied to every
+// lock type. That is a decision, not an oversight, and it is written as a
+// condition on lockType rather than on res.Type so that widening it cannot
+// happen by accident:
+//
+//   - Both halves of the contract sentence are about paths, every recorded
+//     instance is a path, and pf-plan's guidance only ever teaches intent=read
+//     on a `path` entry.
+//   - git_branch and deploy_env are NOT per-file exclusions that a reader can
+//     harmlessly share. Dropping them for intent=read would let a second
+//     attempt take a branch another attempt is on — and because both takeover
+//     paths DELETE the prior attempt's locks before re-deriving, an existing
+//     branch lock would be silently released on the next takeover rather than
+//     merely not taken.
+//   - PredictConflicts rule 2 (same-repo git_branch) has no intent check
+//     either, so leaving repo alone keeps derivation and prediction in
+//     agreement for repo entries. Applying the rule here and not there would
+//     recreate, on `repo`, exactly the rule-1-vs-rule-3 contradiction this
+//     change exists to remove. Whether intent=read should mean anything at all
+//     for repo/service is genuinely undecided; deciding it needs rule 2 changed
+//     in the same breath.
+//
+// Kept as a separate function from resourceToLock, and NOT folded into it. Note
+// what that split does and does not buy: rule 3 does not call resourceToLock at
+// all (it builds its comparison key straight from fileScopeLockKey), so as of
+// today resourceToLock has exactly one caller and folding the check in would be
+// behaviour-identical. The split is about which QUESTION each name answers —
+// "what key does this map to" versus "does this take a lock" — so that the next
+// caller that wants only a key does not silently inherit the lock decision, and
+// so this comment has somewhere to live.
+func derivedLock(res DeclaredResourceItem, project string) (lockType, lockKey string) {
+	lockType, lockKey = resourceToLock(res, project)
+	if lockType == "file_scope" && res.Intent == "read" {
+		return "", ""
+	}
+	return lockType, lockKey
+}
+
 // resourceToLock converts a DeclaredResourceItem to a (resource_type, resource_key) pair per §25 mapping.
 // project namespaces file_scope keys (aihub#222); it is ignored for git_branch/deploy_env.
+//
+// ⚠️ This mapper answers "which lock KEY does this resource correspond to", not
+// "does this resource take a lock". It deliberately ignores Intent. If you are
+// about to insert a resource_locks row or check one for a conflict, call
+// derivedLock instead (aihub#342).
 func resourceToLock(res DeclaredResourceItem, project string) (lockType, lockKey string) {
 	switch res.Type {
 	case "repo":

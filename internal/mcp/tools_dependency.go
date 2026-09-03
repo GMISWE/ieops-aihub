@@ -1,50 +1,71 @@
 package mcp
 
+// Dependency tools carry NO run-attempt credentials, and that is a decision
+// rather than an omission (aihub#324).
+//
+// ─── what used to be here ────────────────────────────────────────────────────
+//
+// Both handlers resolved the caller's state file and built `attempt_id`,
+// `claim_epoch` and `session_secret` into the request body, and both tools took
+// a REQUIRED `work_item_id` whose only purpose was naming the state file to
+// read those three out of. Nothing consumed any of it:
+//
+//   - the server authorizes dependency create and delete on project role alone
+//     (handleCreateDependency / handleDeleteDependency in
+//     internal/server/router.go) and never reads a credential from either; and
+//   - pkg/client.RemoveDependency did not even put the body on the wire — it
+//     issued the DELETE with a nil body, and do() only marshals a non-nil one,
+//     so the remove side's three fields were constructed and dropped inside the
+//     same function.
+//
+// ─── why deleting it is the fix, rather than making it real ──────────────────
+//
+// A credential that nothing checks is worse than no credential at all: a reader
+// of this file — including a reviewer — concludes the path is attempt-gated, and
+// the code shape agrees with them. Removing the fields makes the file say what
+// the system does. Adding genuine validation is a separate, deliberate,
+// BREAKING change; it is not "restoring" anything, because this was never a gate.
+//
+// The model this leaves in force — project `writer` on the blocked work item's
+// project, nothing else — is written out at handleDeleteDependency and pinned by
+// TestE2EDependencyMutationsNeedNoAttemptCredential in
+// dependency_authz_e2e_db_test.go.
+
 import (
 	"context"
 	"fmt"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/GMISWE/ieops-aihub/internal/config"
 )
 
 func (s *Server) registerDependencyTools() {
 	// pf_create_dependency
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_create_dependency",
-		Description: "Create a dependency between two work items. Credentials injected from state file.",
+		Name: "pf_create_dependency",
+		Description: "Create a dependency between two work items. Authorized by project role " +
+			"(writer on the blocked item's project, viewer on the blocking item's if they differ); " +
+			"no run-attempt credential is involved.",
 		InputSchema: objectSchema(map[string]any{
 			"blocked_wi_id":  prop("string", "Work item that is blocked"),
 			"blocking_wi_id": prop("string", "Work item that is blocking"),
 			"kind":           prop("string", "blocks|supersedes|related"),
-			"work_item_id":   prop("string", "Work item ID for credential injection (must be claimed)"),
 			"note":           prop("string", "Optional note"),
-		}, []string{"blocked_wi_id", "blocking_wi_id", "kind", "work_item_id"}),
+		}, []string{"blocked_wi_id", "blocking_wi_id", "kind"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
 			return errResult(err)
 		}
-		for _, f := range []string{"blocked_wi_id", "blocking_wi_id", "kind", "work_item_id"} {
+		for _, f := range []string{"blocked_wi_id", "blocking_wi_id", "kind"} {
 			if strArg(args, f) == "" {
 				return errResult(fmt.Errorf("%s is required", f))
 			}
-		}
-
-		wiID := strArg(args, "work_item_id")
-		sf, err := config.ResolveStateFile(wiID)
-		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
 		}
 
 		body := map[string]any{
 			"blocked_wi_id":  strArg(args, "blocked_wi_id"),
 			"blocking_wi_id": strArg(args, "blocking_wi_id"),
 			"kind":           strArg(args, "kind"),
-			"attempt_id":     sf.AttemptID,
-			"claim_epoch":    sf.ClaimEpoch,
-			"session_secret": sf.SessionSecret,
 		}
 		if note := strArg(args, "note"); note != "" {
 			body["note"] = note
@@ -59,41 +80,27 @@ func (s *Server) registerDependencyTools() {
 
 	// pf_remove_dependency
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_remove_dependency",
-		Description: "Remove a dependency between two work items. Credentials injected from state file.",
+		Name: "pf_remove_dependency",
+		Description: "Remove a dependency between two work items. Authorized by project writer " +
+			"on the blocked item's project; no run-attempt credential is involved.",
 		InputSchema: objectSchema(map[string]any{
 			"blocked_wi_id":  prop("string", "Work item that is blocked"),
 			"blocking_wi_id": prop("string", "Work item that is blocking"),
 			"kind":           prop("string", "blocks|supersedes|related"),
-			"work_item_id":   prop("string", "Work item ID for credential injection"),
-		}, []string{"blocked_wi_id", "blocking_wi_id", "kind", "work_item_id"}),
+		}, []string{"blocked_wi_id", "blocking_wi_id", "kind"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
 			return errResult(err)
 		}
-		for _, f := range []string{"blocked_wi_id", "blocking_wi_id", "kind", "work_item_id"} {
+		for _, f := range []string{"blocked_wi_id", "blocking_wi_id", "kind"} {
 			if strArg(args, f) == "" {
 				return errResult(fmt.Errorf("%s is required", f))
 			}
 		}
 
-		wiID := strArg(args, "work_item_id")
-		sf, err := config.ResolveStateFile(wiID)
-		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
-		}
-
-		body := map[string]any{
-			"blocked_wi_id":  strArg(args, "blocked_wi_id"),
-			"blocking_wi_id": strArg(args, "blocking_wi_id"),
-			"kind":           strArg(args, "kind"),
-			"attempt_id":     sf.AttemptID,
-			"claim_epoch":    sf.ClaimEpoch,
-			"session_secret": sf.SessionSecret,
-		}
-
-		result, err := s.client.RemoveDependency(ctx, body)
+		result, err := s.client.RemoveDependency(ctx,
+			strArg(args, "blocked_wi_id"), strArg(args, "blocking_wi_id"), strArg(args, "kind"))
 		if err != nil {
 			return errResult(err)
 		}

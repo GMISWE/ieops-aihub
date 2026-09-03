@@ -59,7 +59,13 @@ func CreateDependency(ctx context.Context, pool *pgxpool.Pool, req *CreateDepend
 		return NewErr(ErrBadRequest, "kind must be blocks, supersedes, or related")
 	}
 
-	// Permission check: caller must be the current running attempt holder for blocked_wi
+	// Existence check, NOT a permission check. This line used to be commented
+	// "caller must be the current running attempt holder for blocked_wi", which
+	// described a gate that has never existed anywhere in this function: it
+	// looks the project up so the cross-project rule below can compare it, and
+	// no attempt is consulted here or in the HTTP handler. Authorization is
+	// bearer auth + project role, decided in handleCreateDependency; see the
+	// model note above it (aihub#324).
 	var blockedProject string
 	if err := pool.QueryRow(ctx, `SELECT project FROM work_items WHERE id=$1`, req.BlockedWIID).Scan(&blockedProject); err != nil {
 		return NewErr(ErrNotFound, fmt.Sprintf("blocked work item %s not found", req.BlockedWIID))

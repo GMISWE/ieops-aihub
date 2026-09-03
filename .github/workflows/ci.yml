@@ -1587,6 +1587,48 @@ jobs:
           ! grep -q -- '--- SKIP' read_events_types.log \
             || { echo "::error::an aihub#259 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#324: the dependency endpoints' authorization model, asserted as a
+      # SUCCESS on purpose.
+      #
+      # These two cases are unusual and the next person to see them go red needs
+      # to know why before they "fix" them. The first asserts that a project
+      # writer holding NO run attempt, with no state file on disk, can add and
+      # remove a dependency on a work item somebody ELSE is running. That is
+      # today's model, and aihub#324 removed the code that pretended otherwise:
+      # the MCP handlers used to build attempt_id / claim_epoch / session_secret
+      # into both requests, and pkg/client.RemoveDependency then issued the
+      # DELETE with a nil body and dropped all of it.
+      #
+      # 🔴 If somebody later adds genuine credential validation to those
+      # endpoints, this step goes red BY DESIGN. The correct response is to
+      # update the model note above handleCreateDependency in
+      # internal/server/router.go and retire the test in the same change — not to
+      # hand the test credentials, which would rebuild exactly the "looks
+      # guarded, guards nothing" state that was just removed.
+      #
+      # The second case is what stops the first from being vacuous: a project
+      # VIEWER must still be refused both operations. Without a caller that
+      # FAILS, "the writer succeeded" is equally consistent with endpoints that
+      # authorize nobody out. Measured 2026-09-03 against the real router:
+      # weakening either handler's checkProjectAccess from writer to viewer fails
+      # the second case and leaves the first green; adding an attempt check to
+      # handleDeleteDependency fails the first and leaves the second green.
+      #
+      # Both need only a database.
+      - name: aihub#324 dependency authorization-model DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/mcp/ -run '^(TestE2EDependencyMutationsNeedNoAttemptCredential|TestE2EDependencyMutationsStillRequireProjectWriter)$' -count=1 -v 2>&1 | tee dep_authz_e2e.log
+          for want in TestE2EDependencyMutationsNeedNoAttemptCredential \
+                      TestE2EDependencyMutationsStillRequireProjectWriter; do
+            grep -q -- "--- PASS: $want (" dep_authz_e2e.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#324 dependency authorization model is not actually pinned"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' dep_authz_e2e.log \
+            || { echo "::error::an aihub#324 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#303: the 26 DB-gated test functions that, until this step, no
       # `-run` in this file named — so they SKIPped on every CI run since the
       # day they were written, and `go test` printed "ok" and exited 0 each

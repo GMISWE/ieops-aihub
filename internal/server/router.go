@@ -761,6 +761,40 @@ func handleGetReadyQueue(pool *pgxpool.Pool) echo.HandlerFunc {
 	}
 }
 
+// ─── the dependency endpoints' authorization model (aihub#324) ───────────────
+//
+// Dependency create and delete are gated on BEARER AUTH + PROJECT ROLE ONLY.
+// Neither reads a run-attempt credential, and that is deliberate, not an
+// oversight: any `writer` on the blocked item's project may add or remove one of
+// its dependencies, including while somebody else holds a running attempt on it.
+//
+// This differs from the memory and step endpoints, which verify credentials via
+// domain.VerifyAttemptCredentialPool (routes_memory.go, routes_step.go), and
+// from FnCompleteAttempt / FnAcquireLocks / EmitEvent, which verify via the two
+// unexported variants. The dependency path calls none of the three.
+//
+// ⚠️ WHY it was built role-only is NOT recorded anywhere, and this note does not
+// invent a reason. It documents the behaviour and the decision to keep it for
+// now — nothing here argues the model is right. What IS established: the whole
+// dependency subsystem is internally consistent (create and delete gate
+// identically), and dependencies are also created by a completely different
+// route that has never involved an attempt either — CreateWorkItem's blocked_by
+// inserts wi_dependencies rows at creation time under the same role check
+// (internal/domain/work_items.go). Anyone revisiting the model should start by
+// establishing the intent that this comment deliberately leaves blank.
+//
+// aihub#324 recorded the decision because the code used to imply the opposite:
+// internal/mcp/tools_dependency.go built attempt_id / claim_epoch /
+// session_secret into both request bodies and pkg/client.RemoveDependency then
+// threw the body away, so the path LOOKED attempt-gated from every angle except
+// the one hop where the credentials were dropped. Those fields are gone.
+//
+// 🔴 If you are adding real credential validation here, expect
+// TestE2EDependencyMutationsNeedNoAttemptCredential (internal/mcp,
+// dependency_authz_e2e_db_test.go) to fail. That test pins TODAY'S model on
+// purpose. Its going red is the signal that the model changed and this comment
+// needs rewriting — not a regression to route around.
+
 // handleCreateDependency handles POST /v1/dependencies.
 func handleCreateDependency(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
@@ -837,6 +871,9 @@ func handleListDependencies(pool *pgxpool.Pool) echo.HandlerFunc {
 }
 
 // handleDeleteDependency handles DELETE /v1/dependencies/:blocked_id/:blocking_id/:kind.
+//
+// Project writer is the WHOLE gate — see the authorization-model note above
+// handleCreateDependency. The request carries no body and none is read.
 func handleDeleteDependency(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)

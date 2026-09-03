@@ -1694,17 +1694,23 @@ pf_update_step(work_item_id, attempt_id, claim_epoch, session_secret,
 ### 5.5 Dependency Tools（3 个）（C6）
 
 ```
+-- 授权模型（aihub#324）：依赖增删【只看 bearer auth + project role】，
+-- 不校验 attempt 凭据，也不接受凭据参数。原先签名里的
+-- attempt_id / claim_epoch / session_secret 是死参数：服务端从未读过，
+-- 而 remove 那一侧连网线都没上（pkg/client 以 nil body 发 DELETE）。
+-- 已删除，并由 internal/mcp/dependency_authz_e2e_db_test.go 的
+-- TestE2EDependencyMutationsNeedNoAttemptCredential 把现行模型钉住。
 pf_create_dependency(blocked_wi_id, blocking_wi_id,
                      kind:blocks|supersedes|related,
-                     attempt_id, claim_epoch, session_secret,
                      note?)
+  -- 权限：caller 对 blocked_wi.project 需 writer+
   -- 跨 project 权限：blocking_wi 属于不同 project 时，
   -- caller 必须对 blocking_wi.project 有 viewer+ 权限（能看到才能引用）
   -- 否则返回 403 FORBIDDEN（防止信息泄漏：不能引用不可见的 wi）
   → {ok} | 409 CONFLICT_DEPENDENCY_CYCLE
 
-pf_remove_dependency(blocked_wi_id, blocking_wi_id, kind,
-                     attempt_id, claim_epoch, session_secret)
+pf_remove_dependency(blocked_wi_id, blocking_wi_id, kind)
+  -- 权限：caller 对 blocked_wi.project 需 writer+，无 body
   → {ok}
 
 pf_list_dependencies(wi_id)
@@ -4216,6 +4222,12 @@ v2 在 MCP server 层硬限制（通过 step_context 检测活跃的 step_attemp
            skill mechanic 标注为 Phase 2 实现，v1 只提供 SKILL.md stub
 -- M-R3-11: pf_create_dependency 携带的 attempt_id 校验 blocked_wi_id 的归属
            调用方必须是 blocked_wi 的当前 running attempt holder
+           🔴 从未实现，且已于 aihub#324 撤销（2026-09-03）。条目保留是因为它
+           是一条历史评审决定的记录，不是现状描述：实际实现里 create 和 delete
+           都只做 checkProjectAccess(writer)，三个凭据字段无人消费，remove 那侧
+           更是连网线都没上。现行模型见 §5.5 与 internal/server/router.go
+           中 handleCreateDependency 之上的说明。要重新引入校验，那是一次
+           明确的破坏性变更，不是「补上本该有的东西」。
 -- M-R3-12: FK ON DELETE 策略统一
            所有引用 work_items 的外键：使用 ON DELETE RESTRICT（禁止物理删）
            admin 软删通过 wi.status='cancelled' 实现，不物理 DELETE

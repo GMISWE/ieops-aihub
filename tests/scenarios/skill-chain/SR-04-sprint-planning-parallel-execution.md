@@ -41,28 +41,25 @@ ADMIN creates 5 wi's (all requires_human_session=false):
     declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
       "task_branch":"polyforge/docs-sr04"}])
 
-ADMIN creates dependencies (pf_create_dependency requires a claimed wi for credentials;
-Admin must claim a coordinator wi first, OR use a wi they already have claimed):
+ADMIN creates dependencies (no claim needed: aihub#324 removed the credential
+injection these tools never used — authorization is project role alone):
 
 NOTE on pf_create_dependency params (from tools_dependency.go):
   - blocked_wi_id: the wi that becomes blocked (waits for the other)
   - blocking_wi_id: the wi that must complete first
   - kind: "blocks" | "supersedes" | "related"
-  - work_item_id: a CLAIMED wi id for credential injection (Admin's active attempt)
 
   pf_create_dependency(
     blocked_wi_id=WI_API,
     blocking_wi_id=WI_DB,
-    kind="blocks",
-    work_item_id=<admin_claimed_wi>
+    kind="blocks"
   )
   → WI_API is blocked until WI_DB wraps
 
   pf_create_dependency(
     blocked_wi_id=WI_TEST,
     blocking_wi_id=WI_API,
-    kind="blocks",
-    work_item_id=<admin_claimed_wi>
+    kind="blocks"
   )
   → WI_TEST is blocked until WI_API wraps
 
@@ -138,4 +135,4 @@ Dependency ordering enforced (stalled[] correctly populated);
 blocked wi's move to items[] after blocker wraps (cascade unblock works);
 high-priority tasks picked first; parallel agents don't conflict on separate branches;
 all wrap calls use pf_wrap (coding scenario);
-pf_create_dependency uses correct params: blocked_wi_id, blocking_wi_id, kind, work_item_id.
+pf_create_dependency uses correct params: blocked_wi_id, blocking_wi_id, kind.

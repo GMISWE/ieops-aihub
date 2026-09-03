@@ -329,22 +329,32 @@ jobs:
       #             tests", "aihub#345 acquire_locks held-lock reporting DB
       #             tests", "aihub#329 claim/takeover response echo DB tests".
       #             Measured, not predicted, and NOT computed as "132 plus my
-      #             three". Read off this branch with GOWORK=off, from the same
-      #             DB-free inventory run this gate uses (so the database is
-      #             untouched), with the three steps written but before the
-      #             ratchet was raised — which is why the last line reads 129/132
-      #             and names the three as uncovered rather than 132/132.
-      #             Verbatim:
+      #             three". Measured twice, both with GOWORK=off and no
+      #             AIHUB_TEST_DB in the inventory run, so the database is
+      #             untouched.
+      #             (i) On this branch off origin/main cfc3705, with the three
+      #             steps written but BEFORE the ratchet was raised — which is
+      #             why the last line reads 129/132 and names the three as
+      #             executed by no step rather than 132/132. Verbatim:
       #               dbtestcov: AIHUB_TEST_DB-gated test functions: 135
       #                 (require only a DB: 132, need extra env: 3)
       #               dbtestcov: covered by a CI step: 129/132
-      #             The `132` this starts from was re-read off origin/main at
-      #             cfc3705 at the moment this line was written, and this branch
-      #             is at cfc3705 with no merge in between, so there is no second
-      #             reading to record. If origin/main moves before this lands,
-      #             re-run the gate on the merged tree and add BOTH readings —
-      #             do not adjust either number to make the chain look
-      #             continuous.
+      #             (ii) origin/main then moved cfc3705 -> 5198f37 (#302) while
+      #             this branch was being written, so the gate was re-run on the
+      #             tree that actually resolves that merge, WITH the ratchet at
+      #             135. Verbatim:
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 135
+      #                 (require only a DB: 132, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 132/132
+      #             #302 changed only docs/using-polyforge.md: no Go file, no
+      #             AIHUB_TEST_DB-gated function, and it did not touch this file,
+      #             which is why the two readings agree. They are recorded
+      #             separately anyway, for the reason the aihub#151 entry above
+      #             gives — "the number did not move" is a measurement, not an
+      #             excuse to skip one.
+      #             The `132` this starts from is the value on origin/main at
+      #             both cfc3705 and 5198f37, where 132 = 129 + 3; here
+      #             135 = 132 + 3.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail

@@ -125,7 +125,7 @@ Server-side environment variables:
 | `DATABASE_URL` | yes | PostgreSQL DSN (targets PostgreSQL 18+). |
 | `PORT` | no | Listen port (default `8080`). |
 | `ADMIN_BOOTSTRAP_KEY` | no | Enables `POST /v1/bootstrap` until the first admin exists. |
-| `POLYFORGE_UI_COOKIE_SECRET` | recommended | 32+ bytes (raw or hex), the HMAC key for `/ui/*` session cookies. If unset, the server generates an ephemeral secret on each start and logs a warning - UI sessions will not survive a restart. |
+| `POLYFORGE_UI_COOKIE_SECRET` | yes | 32+ bytes (raw or hex), the HMAC key for `/ui/*` session cookies. Generate with `openssl rand -hex 32`. It must be the **same value across restarts** - a new key signs out every `/ui` user, so keep it as carefully as `DATABASE_URL`. **The server refuses to start when it is unset** (aihub#344): it used to generate a per-process key and log a warning, which meant every deploy silently signed everybody out. Where sessions are genuinely disposable, set it to the literal `ephemeral` to ask for that behaviour explicitly. |
 | `RENDER_MEMORY_TYPES` | no | Comma-separated memory types whose markdown is pre-rendered to HTML on save (for the artifact viewer). |
 | `EMBEDDING_ENABLED` | no | Set to `true`/`1` to turn on optional pgvector semantic recall. When enabled, set `EMBEDDING_PROVIDER` (`openai`/`ollama`), `EMBEDDING_MODEL`, and `EMBEDDING_DIMS` (plus `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` as the provider needs). Defaults off; recall then uses recency and strength only. |
 

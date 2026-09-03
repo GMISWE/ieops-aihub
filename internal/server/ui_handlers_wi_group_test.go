@@ -332,22 +332,3 @@ func TestSortListRows_GlobalOrder(t *testing.T) {
 		}
 	}
 }
-
-// TestStatusFilterLabel covers the multi-select button label.
-func TestStatusFilterLabel(t *testing.T) {
-	cases := []struct {
-		in   []string
-		want string
-	}{
-		{nil, "All status"},
-		{[]string{}, "All status"},
-		{[]string{"queued"}, "Queued"},
-		{[]string{"queued", "running"}, "2 selected"},
-		{[]string{"queued", "running", "paused"}, "3 selected"},
-	}
-	for _, c := range cases {
-		if got := statusFilterLabel(c.in); got != c.want {
-			t.Errorf("statusFilterLabel(%v) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}

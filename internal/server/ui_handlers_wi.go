@@ -16,7 +16,6 @@ import (
 	"html/template"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -216,8 +215,6 @@ type wiListPageData struct {
 	TotalCount        int             // sum of ProjectCounts (the "All projects" count)
 	AllMode           bool            // true when viewing across all accessible projects
 	Status            string          // legacy single-status (kept for the hidden field / back-compat)
-	Statuses          map[string]bool // multi-select status filter — set of selected status values
-	StatusLabel       string          // human label for the status-filter button
 	Kind              string
 	Reporter          string
 	Owner             string
@@ -260,10 +257,6 @@ type segNav struct {
 	On      bool
 	Divider bool
 }
-
-// StatusOn reports whether the given status value is currently selected in the
-// multi-select status filter. Used by the template to mark dropdown checkboxes.
-func (d *wiListPageData) StatusOn(s string) bool { return d.Statuses[s] }
 
 // wiListGroup is a display bucket of rows under a single heading. When Rows is
 // empty the template renders the .empty empty-state component instead of
@@ -592,9 +585,11 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 
 		// Filter params.
 		//
-		// Status is multi-select: the dropdown emits repeated ?status= params
-		// (one per checked box). We keep the union of valid values. The legacy
-		// single ?status= shape still works (one value = a one-element set).
+		// ?status= is repeatable and we keep the union of valid values. No UI
+		// emits it any more — the status multi-select died with aihub#185 and
+		// the LCRS sidebar filters by segment instead — but the parameter is
+		// still honoured for hand-built and bookmarked URLs, and a single
+		// ?status= is just a one-element set.
 		statusParams := c.QueryParams()["status"]
 		selStatuses := map[string]bool{}
 		var statusList []string // deterministic order for the label / hidden field
@@ -609,7 +604,6 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		if kindParam != "" && !validWIKinds[kindParam] {
 			kindParam = ""
 		}
-		data.Statuses = selStatuses
 		// data.Status keeps the first selected value so the legacy hidden field
 		// and any single-value consumers stay populated.
 		if len(statusList) > 0 {
@@ -617,7 +611,6 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		}
 		data.Kind = kindParam
 		data.Reporter = strings.TrimSpace(c.QueryParam("reporter"))
-		data.StatusLabel = statusFilterLabel(statusList)
 
 		// Owner filter (aihub#185 follow-up): the list now DEFAULTS to All
 		// (everyone's items). The header "me" toggle opts into a personal view by
@@ -1483,8 +1476,9 @@ func titleASCII(s string) string {
 // reordering. What survives reads Groups only through groupCountsFromGroups,
 // which matches on Kind/Status/Label rather than position — and no template
 // ranges over .Groups at all (wi_list renders .SegRows). So changing the order
-// of this slice changes nothing a user can see; changing its MEMBERSHIP still
-// changes the Running headline count.
+// of this slice changes nothing a user can see. Membership is not entirely
+// inert, but only for one entry: removing "running" zeroes the Running
+// headline count, since that is the only status groupCountsFromGroups reads.
 var statusBlockOrder = []string{"queued", "running", "paused", "blocked", "wrapped", "cancelled"}
 
 // groupListRows buckets the flat row list into display groups under the
@@ -1606,20 +1600,6 @@ func groupCountsFromGroups(groups []wiListGroup) stripCounts {
 		}
 	}
 	return s
-}
-
-// statusFilterLabel builds the human label for the multi-select status filter
-// button: "All status" when nothing is selected, the single status name when
-// exactly one is chosen, or "N selected" for two or more.
-func statusFilterLabel(sel []string) string {
-	switch len(sel) {
-	case 0:
-		return "All status"
-	case 1:
-		return titleASCII(sel[0])
-	default:
-		return strconv.Itoa(len(sel)) + " selected"
-	}
 }
 
 // renderHTMLStatus is a 404-aware variant of renderTemplate. The shared

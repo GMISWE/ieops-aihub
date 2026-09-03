@@ -22,7 +22,7 @@
 依次会发生：
 
 1. **推断 `wi_type`**。候选来自你项目 scenario 仓里的 `*.md` 文件名前缀
-   （`<workspace>/.repo/<scenario>/`，例如 `polyforge-coding` 下的
+   （`<workspace>/.repo/<owner>__<repo>/`，例如 `GMISWE__polyforge-coding` 下的
    `fix_bug` / `feature` / `chore` / `release` …）。选中的类型必须真的存在
    `<wi_type>.<project>.md` 或 `<wi_type>.md`，且文件里至少有一个 `## Step:` 小节；
    都不满足就退回内置的 `default`，并提示你一句。

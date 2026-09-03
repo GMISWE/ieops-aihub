@@ -23,9 +23,10 @@ var projectNameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,39}$`)
 
 // scenarioURLRe validates that a project's scenario field holds a git repo URL
 // (not a bare logical name like "coding"). The scenario value is consumed by
-// internal/cli/init.go's scenarioRepoName()+cloneOrSync() to clone the scenario
-// repo; a bare name has no host/owner so cloning is impossible and pf init silently
-// skips it. We accept the two forms git remotes actually use:
+// internal/cli/init.go's scenarioDirName()+syncScenarioClone() to clone the
+// scenario repo into .repo/<owner>__<repo>; a bare name has no host/owner so
+// cloning is impossible and pf init silently skips it. We accept the two forms
+// git remotes actually use:
 //
 //	SSH scp-like : git@github.com:GMISWE/polyforge-coding.git
 //	URL (any scheme, e.g. https/ssh/git) : https://github.com/GMISWE/polyforge-coding.git

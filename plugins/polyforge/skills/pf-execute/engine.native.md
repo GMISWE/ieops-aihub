@@ -7,7 +7,8 @@
 
 ## Startup — 🔴 run the on-demand file §0 first
 
-Six steps: read the wi, resolve `<workspace_root>/.repo/<scenario_name>/`, **pin the scenario
+Six steps: read the wi, resolve `<workspace_root>/.repo/<owner>__<repo>/` (§0 has the guarded
+legacy fallback), **pin the scenario
 SHA** into `.pf_meta.json`, resolve `{wi_type}.{project}.md` (falling back to `{wi_type}.md`),
 scan `^## Step: (\w+)\s*$` in document order, and expand each section's `@include`s at the pinned
 sha. **§0 has the exact commands and the `@include`/`level:` pair-parsing rule — `Read` it; the

@@ -141,6 +141,40 @@ else
 fi
 if [ -f "$ws/.polyforge/cache/repo-sync/r1.stamp" ]; then pass "stamp written"; else bad "no stamp written"; fi
 
+echo "== a dirty base clone is fetched but NOT reset over =="
+# The header calls `reset --hard` on a base clone safe because "work happens in worktrees".
+# That is an assertion about how people use .repo/, not something anything enforces, and when
+# it is wrong this hook destroys tracked edits silently, in the background, at session start.
+# Pairing: the "sync brings the base clone up to date" case above is the other state — a CLEAN
+# clone must still be advanced, so a guard that simply stopped resetting would fail there.
+ws="$(new_ws dirty 1)"; mkshim "$ws" pass 0
+seed="$tmproot/dirty-seed1"; repo="$ws/.repo/r1"
+( cd "$seed" && printf 'upstream\n' > f.txt \
+  && "$REAL_GIT" add f.txt \
+  && "$REAL_GIT" -c user.email=t@t -c user.name=t commit --quiet -m tracked \
+  && "$REAL_GIT" push --quiet origin main ) >/dev/null 2>&1
+"$REAL_GIT" -C "$repo" fetch --quiet origin >/dev/null 2>&1
+"$REAL_GIT" -C "$repo" reset --hard --quiet origin/main >/dev/null 2>&1
+printf 'LOCAL EDIT\n' > "$repo/f.txt"
+advance_origin dirty 1     # so the hook has a real reset to perform
+dirty_before="$(head_of "$repo")"
+run_hook "$ws" PF_REPO_SYNC_TTL=0
+ck "dirty clone keeps its tracked local edit" "$(cat "$repo/f.txt")" "LOCAL EDIT"
+ck "dirty clone was not reset" "$(head_of "$repo")" "$dirty_before"
+ck "dirty clone was still fetched" "$(fetches "$ws")" "1"
+
+echo "== an untracked-only clone is still reset (the -uno half of the guard) =="
+# Without this case the -uno flag is unguarded: dropping it leaves the whole suite green
+# while every clone holding a stray build artefact silently stops syncing forever.
+# `reset --hard` never deletes untracked files, so they were never at risk.
+ws="$(new_ws stray 1)"; mkshim "$ws" pass 0
+repo="$ws/.repo/r1"
+printf 'artefact\n' > "$repo/build.out"
+advance_origin stray 1
+run_hook "$ws" PF_REPO_SYNC_TTL=0
+ck "untracked-only clone was still advanced" "$(head_of "$repo")" "$(origin_head_of "$repo")"
+if [ -f "$repo/build.out" ]; then pass "untracked file survived the reset"; else bad "untracked file was deleted"; fi
+
 echo "== TTL throttle =="
 ws="$(new_ws ttl 1)"; mkshim "$ws" pass 0
 run_hook "$ws" PF_REPO_SYNC_TTL=900

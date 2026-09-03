@@ -44,9 +44,11 @@
 #   PF_REPO_SYNC_TIMEOUT=8   per-repo wall-clock budget for `git fetch`
 #   PF_REPO_SYNC_JOBS=8      max concurrent per-repo fetches (0/invalid -> 8)
 #
-# Safe: base clones hold no uncommitted work (work happens in worktrees pf.*/); `reset --hard` on
-# a base clone does NOT touch worktrees (separate working dirs + branches). Fetch/reset are scoped
-# to .repo/*; nothing else is modified.
+# Safe: `reset --hard` on a base clone does NOT touch worktrees (separate working dirs +
+# branches), and fetch/reset are scoped to .repo/*; nothing else is modified. This used to
+# also claim base clones hold no uncommitted work because work happens in worktrees pf.*/ —
+# true as a convention, enforced by nothing, and the cost of it being wrong was silent
+# unrecoverable data loss in a background job. sync_one now checks instead of assuming.
 #
 # Portability: must run under macOS stock GNU bash 3.2 (see tests/launcher-bash32.test.sh), so no
 # bash>=4 syntax and no `wait -n`. macOS also ships no timeout(1), hence run_bounded's fallback.
@@ -171,7 +173,26 @@ sync_one() {
   _head="$(git -C "$_repo" rev-parse HEAD 2>/dev/null || echo unknown-head)"
   _target="$(git -C "$_repo" rev-parse "$_def" 2>/dev/null || echo unknown-target)"
   if [ "$_head" != "$_target" ]; then
-    git -C "$_repo" reset --hard "$_def" --quiet 2>/dev/null || true
+    # ...and never over uncommitted work. The header above calls this safe because
+    # "base clones hold no uncommitted work" — that is an assertion about how people
+    # use .repo/, not something anything enforces, and when it is wrong this hook
+    # destroys tracked edits silently, in the background, at session start. The fetch
+    # above already happened, so skipping the reset only leaves the clone where it was.
+    # -uno on purpose: `reset --hard` does not delete untracked files, so counting them
+    # would strand clones as permanently stale over build output never at risk.
+    # cloneOrSync in internal/cli/init.go carries the same guard; keep the two in step.
+    #
+    # Skips the RESET only, not the stamp: the fetch succeeded, so re-running it every
+    # session for as long as the clone stays dirty would spend the TTL throttle that the
+    # latency contract above depends on.
+    #
+    # Fails CLOSED, hence the separate exit-status capture: `[ -z "$(... 2>/dev/null)" ]`
+    # alone reads a git that ERRORED as a clean tree and goes on to reset. For a guard
+    # whose failure mode is permanent data loss, "could not tell" must mean "do not".
+    _dirty="$(git -C "$_repo" status --porcelain -uno 2>/dev/null)"; _dirty_rc=$?
+    if [ "$_dirty_rc" -eq 0 ] && [ -z "$_dirty" ]; then
+      git -C "$_repo" reset --hard "$_def" --quiet 2>/dev/null || true
+    fi
   fi
 
   printf '%s\n' "$now" > "$_stamp" 2>/dev/null || :

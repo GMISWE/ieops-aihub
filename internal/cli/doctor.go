@@ -611,10 +611,50 @@ func checkRepos(wsRoot string, cfg *config.Config) checkResult {
 				mismatch = append(mismatch, r.Name+"(remote-err)")
 				continue
 			}
+			// redactGitURL on the OBSERVED url, not only on the declared one:
+			// runClone stores `https://<gh token>@github.com/...` as origin on its
+			// token fallback, and these are the same .repo/ clones it made. Without
+			// this, a remote mismatch prints a live credential to the terminal (and
+			// into whatever captured it).
 			actual := strings.TrimSpace(string(out))
 			if r.URL != "" && actual != r.URL {
-				mismatch = append(mismatch, fmt.Sprintf("%s(want %s got %s)", r.Name, r.URL, actual))
+				mismatch = append(mismatch, fmt.Sprintf("%s(want %s got %s)",
+					r.Name, redactGitURL(r.URL), redactGitURL(actual)))
 			}
+		}
+	}
+
+	// Scenario clones live under .repo/ as well, keyed by owner+repo (aihub#327).
+	// They are NOT in proj.Repos, so until this loop existed nothing checked them
+	// at all — which is precisely how a project whose declared scenario URL
+	// resolved to another org's clone stayed invisible: init only fetch+reset an
+	// existing checkout without ever comparing its remote, and wi_type validation
+	// asks whether the template file exists, never which repo it came from.
+	seenScenario := map[string]bool{}
+	for projName, proj := range cfg.Projects {
+		if proj.Scenario == "" || seenScenario[proj.Scenario] {
+			continue
+		}
+		seenScenario[proj.Scenario] = true
+		dir := scenarioDirName(proj.Scenario)
+		if dir == "" {
+			mismatch = append(mismatch, fmt.Sprintf("scenario of %s(%s is not a git URL)",
+				projName, redactGitURL(proj.Scenario)))
+			continue
+		}
+		scenarioPath := filepath.Join(repoBase, dir)
+		if _, err := os.Stat(scenarioPath); os.IsNotExist(err) {
+			missing = append(missing, "scenario "+dir)
+			continue
+		}
+		out, err := exec.Command("git", "-C", scenarioPath, "remote", "get-url", "origin").Output()
+		if err != nil {
+			mismatch = append(mismatch, "scenario "+dir+"(remote-err)")
+			continue
+		}
+		if actual := strings.TrimSpace(string(out)); !sameGitRemote(actual, proj.Scenario) {
+			mismatch = append(mismatch, fmt.Sprintf("scenario %s(want %s got %s)",
+				dir, redactGitURL(proj.Scenario), redactGitURL(actual)))
 		}
 	}
 

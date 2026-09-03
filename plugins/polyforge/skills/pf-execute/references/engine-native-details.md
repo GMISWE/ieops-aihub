@@ -13,8 +13,25 @@
 ## 0. Startup — the exact commands
 
 1. Read the wi info: `wi_info = pf_list_work_items(ids=[<current_wi_id>])`.
-2. Resolve the scenario repo path from `.polyforge.yaml`:
-   `scenario_path = <workspace_root>/.repo/<scenario_name>/`.
+2. Resolve the scenario repo path from `.polyforge.yaml`. `owner` and `repo` are the last two
+   path segments of `project.scenario` with `.git` stripped
+   (`git@github.com:GMISWE/polyforge-coding.git` → `GMISWE`, `polyforge-coding`; a URL with
+   only ONE path segment has no owner and keeps the bare repo name):
+   `scenario_path = <workspace_root>/.repo/<owner>__<repo>/`.
+
+   Owner-qualified because keying on the repo name alone gave two orgs' same-named scenario
+   repos ONE directory: the second was never cloned, its projects silently ran the first
+   org's step graph, and nothing went red — `polyforge init` only fetch+reset an existing
+   checkout without comparing its remote, and wi_type validation asks whether the template
+   file exists, never which repo it came from (aihub#327).
+
+   **Legacy fallback — and it is guarded.** A workspace whose last `polyforge init` predates
+   this layout still holds the clone at `<workspace_root>/.repo/<repo>/`. Use it only when
+   `git -C <workspace_root>/.repo/<repo> remote get-url origin` names the same repo as
+   `project.scenario` (ignore scheme, credentials and `.git`). If it names a different repo,
+   or the directory is absent, STOP and report that `polyforge init` has not been run with a
+   binary that knows this layout. An unguarded fallback re-opens the exact silent mix-up in
+   every workspace that has not re-inited.
 3. **SHA pinning** — write it to `.pf_meta.json` in the worktree root:
    ```bash
    sha = git -C <scenario_path> rev-parse HEAD

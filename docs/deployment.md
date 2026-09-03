@@ -210,7 +210,7 @@ So there are three states and no fourth:
 
 | value | behaviour |
 |---|---|
-| 32+ bytes, hex or raw | signs sessions with it; sessions survive restarts. Surrounding whitespace is trimmed, so `…=abc ` and `…=abc` are the same key |
+| 32+ bytes, hex or raw | signs sessions with it; sessions survive restarts. Surrounding whitespace is trimmed, so `…=abc ` and `…=abc` are the same key — gated by `TestUICookieSecretTrimmedValueIsTheSameKey`, which mints a session in one process and verifies it in another started from the untrimmed spelling |
 | the literal `ephemeral` | random key per process — the old behaviour, now something you have to ask for. The server warns on every start, and the choice is visible in the env-file |
 | unset | **the server refuses to start** and prints the `openssl` line to fix it |
 
@@ -449,8 +449,8 @@ is safe.
   Their cookies were signed with a key the new process does not have. Three
   causes: the variable is absent (only possible on a build older than
   aihub#344 — a newer one would not have started), it is set to `ephemeral`, or
-  its **value changed** between the two containers. The log line separates the
-  first two:
+  its **value changed** between the two containers. The startup line settles
+  the first two — it is printed in both states, so it is never silent:
 
   ```bash
   docker logs aihub --since 10m 2>&1 | grep -F '/ui session key'
@@ -461,14 +461,19 @@ is safe.
 
   ```bash
   for c in aihub aihub-prev-<sha>; do
-    printf '%s ' "$c"
-    docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' \
-      | grep '^POLYFORGE_UI_COOKIE_SECRET=' | sha256sum
+    v=$(docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+        | grep '^POLYFORGE_UI_COOKIE_SECRET=')
+    printf '%s %s\n' "$c" "$([ -n "$v" ] && printf '%s' "$v" | sha256sum || echo 'NO KEY SET')"
   done
   ```
 
   Equal digests mean the key was not what changed; look at `ephemeral` instead.
-  A missing line for either container means that one had no key at all.
+  The `[ -n "$v" ]` guard matters: `sha256sum` of empty input is the constant
+  `e3b0c442…`, which looks exactly like a real digest, so without it "this
+  container had no key" and "this container had a key" are indistinguishable.
+  ⚠️ A digest is only opaque if the value has entropy — the server enforces no
+  minimum length, so if someone set a short passphrase its digest is
+  dictionary-attackable once it is in a scrollback.
 
 ## Team deployment (reference)
 
@@ -544,9 +549,13 @@ read -rsp 'aihub API key: ' KEY; echo
 
 # Pre-flight: the env-file must carry a /ui session key, or the new container
 # exits at startup. Prints the NAME only, never the value.
-grep -q '^POLYFORGE_UI_COOKIE_SECRET=' /root/aihub.env \
+#
+# [^[:space:]] is load-bearing: the server also refuses an EMPTY or
+# whitespace-only value, so a bare `=` anchor would report "present" for a
+# configuration that will not start.
+grep -Eq '^POLYFORGE_UI_COOKIE_SECRET=[^[:space:]]' /root/aihub.env \
   && echo 'POLYFORGE_UI_COOKIE_SECRET: present' \
-  || echo 'POLYFORGE_UI_COOKIE_SECRET: MISSING — stop, see below'
+  || echo 'POLYFORGE_UI_COOKIE_SECRET: MISSING or empty — stop, see below'
 ```
 
 **If the pre-flight says MISSING, fix it before step 6, not after.** The server
@@ -685,20 +694,27 @@ docker logs aihub --since 10m 2>&1 | grep -F '/ui session key'       # expect th
 docker inspect -f '{{.State.StartedAt}}' tei                         # expect it UNCHANGED
 ```
 
-The `/ui` line must read:
+**That grep prints exactly one line, and the line is the verdict.** Both startup
+states carry the string `/ui session key`, on purpose, so there is no state in
+which the check is silent:
 
-```
-aihub: /ui session key from POLYFORGE_UI_COOKIE_SECRET (32 bytes) — sessions survive restarts
-```
+| line | meaning |
+|---|---|
+| `aihub: /ui session key from POLYFORGE_UI_COOKIE_SECRET (32 bytes) — sessions survive restarts` | good. The byte count is the resolved key's length, so a truncated env-file value shows up here (`32` for the prescribed `openssl rand -hex 32`; a raw passphrase reports its own length) |
+| `warn: /ui session key is EPHEMERAL (…=ephemeral) — random per process; …` | the env-file says `=ephemeral`. The users signed in right now will be signed out by the next deploy |
+| *no output* | neither — so you are looking at the wrong container, a rotated log, or a build older than aihub#344 |
 
-A line starting `warn:` instead means the env-file says `=ephemeral`, and the
-users signed in right now will be signed out by the next deploy. **Assert on
-that line, not on the absence of a warning** — a rotated log and a grep against
-the wrong container both produce "no warning" too, and the byte count is how a
-truncated env-file value shows up. This check exists because the three checks in
-the table above cannot fail on an ephemeral session key: `/v1/version`,
-`/v1/health` and the authed read path are all green while every `/ui` user is
-being signed out on each deploy (aihub#344).
+**Assert on the line, not on the absence of a warning.** "No warning" is also
+what a rotated log and the wrong container produce, which is why both states
+print the same greppable tag rather than only the bad one — a check that goes
+quiet in the state it exists to catch is not a check. That is gated by
+`TestUISessionSurvivesProcessRestart` in `cmd/aihub/ui_cookie_secret_test.go`,
+so the two lines cannot drift apart from this table.
+
+This check exists because the three checks in the table above cannot fail on an
+ephemeral session key: `/v1/version`, `/v1/health` and the authed read path are
+all green while every `/ui` user is being signed out on each deploy
+(aihub#344).
 
 `tei` must not have restarted: the swap replaces one container, and a restarted
 embedding backend would mean the blast radius was wider than intended.

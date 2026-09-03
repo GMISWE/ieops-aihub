@@ -20,6 +20,13 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:testpass@postgres:5432/aihub_test?sslmode=disable
       PORT: 8080
+      # Required since aihub#344 — the server refuses to start without it. A
+      # fixed value rather than `ephemeral` so a test can restart this container
+      # and find its /ui session still valid, which is the property aihub#344
+      # is about; `ephemeral` would make that untestable here. Not a secret:
+      # this stack is a throwaway on localhost:8081 with a hard-coded database
+      # password two lines up.
+      POLYFORGE_UI_COOKIE_SECRET: integration-test-fixed-key-not-a-secret
     ports:
       - "8081:8080"
     depends_on:

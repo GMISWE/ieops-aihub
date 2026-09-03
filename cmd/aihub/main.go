@@ -247,6 +247,18 @@ const (
 	// per-process random keys. Not valid hex and far short of 32 bytes, so it
 	// cannot be confused with a real key.
 	uiCookieSecretEphemeral = "ephemeral"
+
+	// uiCookieSecretLogTag appears in BOTH startup lines — the one that reports
+	// a configured key and the warn that reports an ephemeral one.
+	//
+	// It is one constant rather than two hand-written strings because the
+	// operator's check is a single `docker logs … | grep -F '/ui session key'`,
+	// and a token present in only one of the two lines makes that grep silent
+	// on exactly the state it was added to detect: empty output would then mean
+	// "ephemeral" and "wrong container" and "rotated log" all at once. Shared,
+	// the grep always prints one line and the line says which state it is.
+	// TestUISessionKeyIsGreppableInEveryStartedState pins that.
+	uiCookieSecretLogTag = "/ui session key"
 )
 
 // errUICookieSecretUnset is the startup failure when the variable is absent.
@@ -285,7 +297,10 @@ func loadUICookieSecret() ([]byte, error) {
 }
 
 // resolveUICookieSecret is loadUICookieSecret with the environment read out, so
-// the decision can be exercised without mutating process state.
+// the decision can be exercised without setting an environment variable. It is
+// not otherwise side-effect free: it reports which of the three states it landed
+// in on stdout or stderr, because that report IS half of what this function is
+// for (see uiCookieSecretLogTag).
 //
 // A configured value is accepted as hex (auto-decoded when the whole string
 // decodes) or as raw bytes. No minimum length is enforced: dev and test use
@@ -318,22 +333,24 @@ func resolveUICookieSecret(raw string) ([]byte, error) {
 			return nil, fmt.Errorf("fatal: generating an ephemeral /ui session key: %w", err)
 		}
 		fmt.Fprintf(os.Stderr,
-			"warn: %s=%s — /ui sessions are signed with a per-process random key; "+
+			"warn: %s is EPHEMERAL (%s=%s) — random per process; "+
 				"every restart signs out every /ui user\n",
-			uiCookieSecretEnv, uiCookieSecretEphemeral)
+			uiCookieSecretLogTag, uiCookieSecretEnv, uiCookieSecretEphemeral)
 		return buf, nil
 
 	default:
+		// No len(decoded) > 0 guard: the only string hex-decoding to zero bytes
+		// is "", which the first case already returned on.
 		secret := []byte(trimmed)
-		if decoded, err := hex.DecodeString(trimmed); err == nil && len(decoded) > 0 {
+		if decoded, err := hex.DecodeString(trimmed); err == nil {
 			secret = decoded
 		}
 		// A positive line, not just the absence of a warning: a log that has
 		// rotated, or a grep against the wrong container, also produces "no
 		// warning". This one can be asserted on. It reports the length so a
 		// truncated env-file value is visible; the length is not the secret.
-		fmt.Printf("aihub: /ui session key from %s (%d bytes) — sessions survive restarts\n",
-			uiCookieSecretEnv, len(secret))
+		fmt.Printf("aihub: %s from %s (%d bytes) — sessions survive restarts\n",
+			uiCookieSecretLogTag, uiCookieSecretEnv, len(secret))
 		return secret, nil
 	}
 }

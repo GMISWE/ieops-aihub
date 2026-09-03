@@ -1464,11 +1464,23 @@ jobs:
       # outlived its declaration and was held to terminal state — ieops#824 hit a
       # 409 on a path its holder had not declared since resources_version 17.
       #
-      # Three of the five arms would pass against a server that simply stopped
-      # taking locks, so the controls are not decoration: "a still declared lock
+      # Three of the nine arms are CONTROLS that stay green against a mutant with
+      # the release deleted, and they are not decoration: "a still declared lock
       # survives" and "widening still takes the new lock" are what separate a
-      # release from a regression, and "a rejected CAS releases nothing" is what
-      # keeps the release inside the transaction that moved resources_version.
+      # release from a server that simply stopped taking locks, and "a rejected
+      # CAS releases nothing" keeps the release inside the transaction that moved
+      # resources_version. Four go red against that mutant — measured, not
+      # assumed.
+      #
+      # Two arms have their own mutants, because they cover ways the release can
+      # be silently skipped rather than absent:
+      #   - "a wrong typed optional field ..." goes red if derivedFileScopeLockKeys
+      #     is decoded with a strict []DeclaredResourceItem unmarshal. That decode
+      #     is stricter than ValidateDeclaredResources, so caller input it accepts
+      #     (a non-string `intent`) killed the whole diff and released nothing.
+      #   - "an explicit null declaration ..." goes red if the
+      #     normalizeDeclaredResources fold is removed: a literal JSON null wiped
+      #     the declarations AND dropped every file_scope lock, with HTTP 200.
       #
       # Every arm ends at a real FnClaimWorkItem by a second work item where it
       # can — the hop a blocked caller actually sees — because the resource_locks
@@ -1485,6 +1497,8 @@ jobs:
                       'TestNarrowingDeclaredResourcesReleasesItsLocks/widening_still_takes_the_new_lock' \
                       'TestNarrowingDeclaredResourcesReleasesItsLocks/flipping_a_declaration_to_read_intent_releases_its_write_lock' \
                       'TestNarrowingDeclaredResourcesReleasesItsLocks/a_rejected_CAS_releases_nothing' \
+                      'TestNarrowingDeclaredResourcesReleasesItsLocks/a_wrong_typed_optional_field_does_not_disable_the_release' \
+                      'TestNarrowingDeclaredResourcesReleasesItsLocks/an_explicit_null_declaration_changes_nothing' \
                       'TestNarrowingDeclaredResourcesReleasesItsLocks/another_work_items_lock_is_untouched'; do
             grep -q -- "--- PASS: $want" declared_resources_release.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#264 release contract is not actually verified for that case"; exit 1; }

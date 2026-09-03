@@ -44,6 +44,7 @@ package domain
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -268,6 +269,65 @@ func TestNarrowingDeclaredResourcesReleasesItsLocks(t *testing.T) {
 			"the update was rejected, so resources_version did not move and neither may the locks — "+
 				"a release that outlives its own transaction is exactly the 'version unchanged but locks "+
 				"changed' intermediate state the item warns about")
+	})
+
+	// An entry the VALIDATOR accepts but a typed unmarshal rejects must not
+	// disable the release for the whole array.
+	//
+	// ValidateDeclaredResources decodes into []map[string]any and type-asserts
+	// only `type` and `uri`, so `intent` (or task_branch/base_branch) holding a
+	// non-string sails through it. Deriving keys with a strict
+	// []DeclaredResourceItem unmarshal then failed on the whole payload, and the
+	// release was skipped in silence: measured on that version, this update
+	// narrowed the declaration, bumped resources_version, returned no error, and
+	// left the lock in place — aihub#264's own defect, reachable from caller
+	// input, straight through the fix for it.
+	t.Run("a wrong typed optional field does not disable the release", func(t *testing.T) {
+		const odd = "internal/domain/odd264.go"
+		oddKey := project + ":" + odd
+
+		updateDeclared(t, pool, holder.ID, u,
+			`[{"type":"path","uri":"file:`+kept+`","intent":"write"},`+
+				`{"type":"path","uri":"file:`+odd+`","intent":"write"}]`)
+		resp, aerr := FnAcquireLocks(ctx, pool, holder.ID, &AcquireLocksRequest{
+			AttemptID:     claim.AttemptID,
+			ClaimEpoch:    claim.ClaimEpoch,
+			SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
+		})
+		require.Nil(t, aerr, "acquire_locks failed: %+v", aerr)
+		require.Contains(t, reportedKeys(resp.Acquired), oddKey, "fixture check: %q must be locked", oddKey)
+
+		// `intent` is a BOOLEAN here. The entry for `odd` is gone, so its lock
+		// must go with it — the malformed field on the SURVIVING entry must not
+		// take the whole diff down.
+		updateDeclared(t, pool, holder.ID, u,
+			`[{"type":"path","uri":"file:`+kept+`","intent":true}]`)
+
+		assert.Equal(t, 0, countFileScopeLocks(t, pool, oddKey),
+			"%q was dropped from the declaration, so its lock must be released even though a "+
+				"SIBLING entry carries a wrong-typed `intent`. A decoder stricter than the validator "+
+				"silently skips the release for the entire array. held=%v",
+			oddKey, heldLockKeys(t, pool, claim.AttemptID))
+	})
+
+	// An explicit JSON null must be "not specified", not "declare nothing".
+	// Before the fold, this stored a jsonb null — destroying every declaration —
+	// and the release then derived an empty key set and dropped every file_scope
+	// lock the work item held. Both halves silent, both with HTTP 200.
+	t.Run("an explicit null declaration changes nothing", func(t *testing.T) {
+		before := heldLockKeys(t, pool, claim.AttemptID)
+		require.NotEmpty(t, before, "fixture check: the attempt must hold something going into this arm")
+
+		wi, aerr := UpdateWorkItem(ctx, pool, holder.ID, u, "tester", map[string]string{},
+			&UpdateWorkItemRequest{DeclaredResources: json.RawMessage(`null`)})
+		require.Nil(t, aerr, "a null declared_resources must be accepted as a no-op: %+v", aerr)
+
+		assert.ElementsMatch(t, before, heldLockKeys(t, pool, claim.AttemptID),
+			"a null payload must not release anything — a caller sending null meaning 'leave this "+
+				"alone' would otherwise lose every file lock it holds, silently")
+		assert.NotEqual(t, "null", strings.TrimSpace(string(wi.DeclaredResources)),
+			"and it must not overwrite the stored declarations with a jsonb null either; "+
+				"clearing them is spelled []")
 	})
 
 	// Blast radius: the release is keyed on the work item being updated. A

@@ -38,6 +38,12 @@ package domain
 // deploy_env locks aihub#264 deliberately leaves alone — and `already_held` must
 // still report every one of them, which is why nothing below was deleted.
 //
+// One caveat, so that list is not read as broader than it is: a file_scope lock
+// taken from a client-supplied requested_locks survives a narrowing only while
+// its key is NOT also in the declaration being replaced. If it is, the aihub#264
+// diff releases it like any other — the release is keyed on the lock KEY and
+// cannot tell which mechanism created the row.
+//
 // Both recorded incidents are the first bullet or the second, and both ended
 // with someone writing down "this attempt holds zero locks". The second one put
 // that sentence in a delivery report as a *Correction* to a premise that had

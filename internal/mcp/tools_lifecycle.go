@@ -1317,7 +1317,8 @@ func (s *Server) registerLifecycleTools() {
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name: "pf_acquire_locks",
 		Description: "Acquire file_scope locks for the current running attempt from the work item's declared_resources (reconcile mid-attempt; blocks on conflict, never steals). " +
-			"`acquired` is what THIS call took; `already_held` is every other lock the attempt holds, of every type, read from the lock table — including locks whose declared_resources entry was since removed, which does NOT release them. The two are disjoint and together are the attempt's full lock set.",
+			"`acquired` is what THIS call took; `already_held` is every other lock the attempt holds, of every type, read from the lock table — including locks with no live declaration behind them: git_branch and deploy_env locks, locks taken from a client-supplied requested_locks, and file_scope locks predating aihub#264. The two are disjoint and together are the attempt's full lock set. " +
+			"Since aihub#264, removing a path from declared_resources DOES release its file_scope lock, at the moment of the update; git_branch and deploy_env locks are not released that way and are held until the attempt ends.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID (used to find state file)"),
 		}, []string{"work_item_id"}),

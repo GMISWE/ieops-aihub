@@ -1500,6 +1500,37 @@ func normalizeAttrsPatch(req *UpdateWorkItemRequest) {
 	}
 }
 
+// normalizeDeclaredResources treats an explicit JSON `null` for
+// declared_resources as "not specified" (aihub#264).
+//
+// A separate one-line function rather than a branch inside UpdateWorkItem for
+// the reason cancelGate and isCASConflict are separate: the only behavioural
+// test of a check living inline in UpdateWorkItem would be DB-gated, and a
+// DB-gated test here runs only in its own scoped CI step, so deleting the check
+// would leave `go test ./...` entirely green.
+//
+// json.RawMessage preserves `"declared_resources": null` as the four literal
+// bytes, so `!= nil` is true and the field counted as part of the patch.
+// ValidateDeclaredResources returns early for "null" without complaint, so the
+// column was overwritten with a jsonb null: every declaration silently
+// destroyed, resources_version bumped, HTTP 200.
+//
+// That was already wrong before this work item, and the lock release makes it
+// materially worse — a null payload derives an EMPTY key set, so it would also
+// drop every file_scope lock the work item holds. A caller sending null meaning
+// "leave this alone" would lose its declarations AND its write protection in one
+// call with nothing to notice, which is the exact silent-loss-of-protection
+// shape aihub#264 is about. Measured before the fold was added: the update
+// returned 200, stored `null`, and left the attempt holding no locks.
+//
+// Folded to "not specified", matching normalizeAttrsPatch. Clearing declarations
+// still has a spelling, and it is the one the schema documents: an empty array.
+func normalizeDeclaredResources(req *UpdateWorkItemRequest) {
+	if req.DeclaredResources != nil && bytes.Equal(bytes.TrimSpace(req.DeclaredResources), []byte("null")) {
+		req.DeclaredResources = nil
+	}
+}
+
 // validateAttrsPatch rejects the two attrs payloads that must never reach
 // Postgres (aihub#288). Run normalizeAttrsPatch first.
 //
@@ -1593,6 +1624,26 @@ const releaseUndeclaredLocksSQL = `
 // releaseUndeclaredFileScopeLocks releases the file_scope locks that `prior`
 // justified and `next` no longer does (aihub#264).
 //
+// 🔴 PREVENTION, NOT CLEANUP — and the reported lock is not in scope.
+//
+// The candidate set is `prior − next`, so only a key present in the declaration
+// this update REPLACES can be released. ieops#798's leaked lock came from a
+// declaration dropped several resources_versions before the one it now stores,
+// so it is in neither side and no future update of that work item will release
+// it. This change stops new residue accruing; it does not sweep residue that
+// already exists. The recoveries for an already-leaked lock are to re-declare
+// the path and remove it again (one narrowing, now effective), to end the
+// attempt, or to let the orphan sweep in gc.go take it once the owning attempt
+// is no longer live.
+//
+// Widening the candidate set to "every file_scope lock this work item's attempts
+// hold, minus next" WOULD clear that residue, and was deliberately not taken:
+// it would also release locks from a client-supplied requested_locks that never
+// had a declaration behind them (run_attempts.go:325-332 — the raw-API path the
+// plugin never uses, but which is trusted verbatim when present). That is a
+// bigger behaviour change than this item asked for, and it belongs with a
+// decision about whether an undeclared lock should be able to exist at all.
+//
 // # Why this hangs off the update path
 //
 // Acquisition lives on the claim path and mutation lives here, and nothing
@@ -1645,14 +1696,17 @@ func releaseUndeclaredFileScopeLocks(ctx context.Context, tx pgx.Tx, wiID, proje
 	if len(removed) == 0 {
 		return nil
 	}
-	// Sorted so the statement's parameters are deterministic, which keeps a
-	// failure reproducible and the lock-acquisition order stable across callers.
+	// Sorted so the statement's parameters are deterministic and a failure is
+	// reproducible. That is the whole claim: `resource_key = ANY($2)` does not
+	// scan or row-lock in array order, so this does NOT influence lock ordering,
+	// and it does not need to — two different work items can never target
+	// overlapping rows here, so these deletes cannot deadlock against each other.
 	sort.Strings(removed)
 
+	// dbErrCause already maps a class 40 rollback to a retryable 409 before
+	// falling back to ErrInternalError (aihub#334), and ErrInternalError is
+	// exactly the non-conflict outcome wanted here, so it is the whole mapping.
 	if _, err := tx.Exec(ctx, releaseUndeclaredLocksSQL, wiID, removed); err != nil {
-		if aerr := retryConflictErr(err, "failed to release locks for removed declared_resources"); aerr != nil {
-			return aerr
-		}
 		return dbErrCause(err, "failed to release locks for removed declared_resources")
 	}
 	return nil
@@ -1664,6 +1718,10 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 	if aihubErr != nil {
 		return nil, aihubErr
 	}
+
+	// aihub#264: fold an explicit null away BEFORE anything reads the field, so
+	// validation, the UPDATE and the lock release all agree it was not supplied.
+	normalizeDeclaredResources(req)
 
 	// aihub#238: same entry-point validation as CreateWorkItem — an update must
 	// not be able to replace good declared_resources with silently lockless ones.

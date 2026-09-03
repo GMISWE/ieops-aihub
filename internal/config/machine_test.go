@@ -173,3 +173,94 @@ func TestResolveBinaryChannel(t *testing.T) {
 		})
 	}
 }
+
+// TestEffectiveAihubURL pins the four-layer precedence and, more importantly,
+// that the last layer EXISTS. aihub#335 removed the address from
+// docs/onboarding.md's config.toml heredoc on the strength of this function
+// answering for a machine that configured nothing; if the default layer is ever
+// dropped, that document becomes a guide with no way to reach the server and
+// nothing else in the tree would notice.
+func TestEffectiveAihubURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		serverURL  string // config.toml [server] url ("" = no [server] block)
+		envURL     string // POLYFORGE_AIHUB_URL ("" = unset)
+		wsURL      string // .polyforge.yaml aihub.url
+		want       string
+		wantSource string
+	}{
+		{
+			name:       "nothing configured falls back to the built-in default",
+			want:       AihubURLDefault,
+			wantSource: "built-in default",
+		},
+		{
+			name:       "workspace url beats the default",
+			wsURL:      "http://ws.example",
+			want:       "http://ws.example",
+			wantSource: ".polyforge.yaml aihub.url",
+		},
+		{
+			name:       "config.toml beats the workspace",
+			serverURL:  "http://config.example",
+			wsURL:      "http://ws.example",
+			want:       "http://config.example",
+			wantSource: "~/.polyforge/config.toml [server] url",
+		},
+		{
+			name:       "env beats everything",
+			serverURL:  "http://config.example",
+			wsURL:      "http://ws.example",
+			envURL:     "http://env.example",
+			want:       "http://env.example",
+			wantSource: "POLYFORGE_AIHUB_URL",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("POLYFORGE_AIHUB_URL", tt.envURL)
+
+			mc := &MachineConfig{}
+			if tt.serverURL != "" {
+				mc.Server = &MachineServer{URL: tt.serverURL}
+			}
+			got, source := EffectiveAihubURL(mc, tt.wsURL)
+			if got != tt.want {
+				t.Errorf("EffectiveAihubURL() url = %q, want %q", got, tt.want)
+			}
+			if source != tt.wantSource {
+				t.Errorf("EffectiveAihubURL() source = %q, want %q", source, tt.wantSource)
+			}
+		})
+	}
+}
+
+// TestEffectiveAihubURLToleratesANilMachineConfig covers doctor.go's caller,
+// which reaches this function with whatever LoadMachineConfig returned and
+// ignores the error — a config.toml that does not parse yields (nil, err), and
+// a diagnostic command must not panic on the machine it was run to diagnose.
+func TestEffectiveAihubURLToleratesANilMachineConfig(t *testing.T) {
+	t.Setenv("POLYFORGE_AIHUB_URL", "")
+
+	got, source := EffectiveAihubURL(nil, "")
+	if got != AihubURLDefault || source != "built-in default" {
+		t.Errorf("EffectiveAihubURL(nil, \"\") = (%q, %q), want (%q, %q)",
+			got, source, AihubURLDefault, "built-in default")
+	}
+}
+
+// TestResolveAihubURLStillReportsAnUnconfiguredMachineAsEmpty guards the
+// distinction EffectiveAihubURL's doc comment depends on. writePolyforgeYAML
+// copies ResolveAihubURL's result into .polyforge.yaml; if this ever started
+// returning the built-in default, every workspace would get a hard copy of
+// today's address in a file no release can update — the same defect aihub#335
+// removed from the documents, re-created one file per workspace.
+func TestResolveAihubURLStillReportsAnUnconfiguredMachineAsEmpty(t *testing.T) {
+	t.Setenv("POLYFORGE_AIHUB_URL", "")
+
+	if got := (&MachineConfig{}).ResolveAihubURL(); got != "" {
+		t.Errorf("ResolveAihubURL() on an unconfigured machine = %q, want \"\" — see "+
+			"EffectiveAihubURL's comment: this value gets PERSISTED into .polyforge.yaml", got)
+	}
+}

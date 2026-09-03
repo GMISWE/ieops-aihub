@@ -531,6 +531,13 @@ jobs:
       #               dbtestcov: AIHUB_TEST_DB-gated test functions: 186
       #                 (require only a DB: 183, need extra env: 3)
       #               dbtestcov: covered by a CI step: 183/183
+      #
+      #             Re-measured after rebasing onto origin/main 59dfee8, which
+      #             landed in between and edits this file: unchanged, 186/186 and
+      #             183/183. Recorded because a single-number ratchet shared with
+      #             other branches can rot on a merge without either side
+      #             conflicting, and arithmetic cannot tell you that — only a run
+      #             on the merged tree can.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail

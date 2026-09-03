@@ -782,8 +782,16 @@ type ListWorkItemsFilter struct {
 	ReporterDisplay    *string  // case-insensitive contains on wi.reporter_display
 	OwnerDisplay       *string  // case-insensitive contains on run_attempts.actor_display (current attempt)
 	AccessibleProjects []string // project allow-list for "view all" when project arg is ""
-	Source             *string
-	Scenario           *string
+	// WatcherUserID narrows the set to work items this user watches — the
+	// aihub#143 "Watching" scope. It is a MEMBERSHIP filter, never an access
+	// grant: buildListWorkItemsWhere ANDs it with the project /
+	// AccessibleProjects predicate rather than replacing it, because a
+	// wi_watches row outlives the project access that allowed it to be created
+	// (removing someone from a project does not walk that table). See the
+	// header of wi_watches.go.
+	WatcherUserID *string
+	Source        *string
+	Scenario      *string
 	// ReadyOnly narrows the set to the ready-queue's items[] segment — see
 	// readyOnlyPredicate for the exact definition and why it is that one.
 	ReadyOnly bool
@@ -1030,6 +1038,26 @@ func buildListWorkItemsWhere(project string, f ListWorkItemsFilter) (joinClause,
 	} else if len(f.AccessibleProjects) > 0 {
 		conds = append(conds, fmt.Sprintf("wi.project = ANY($%d)", argIdx))
 		args = append(args, f.AccessibleProjects)
+		argIdx++
+	}
+
+	// aihub#143 Watching scope. Appended to conds — i.e. ANDed with the project
+	// predicate just built above — and NOT as a replacement for it. That
+	// placement is the whole authorization story of this feature: a wi_watches
+	// row records that someone once pressed Watch, and it survives them losing
+	// access to the project, so a watch that escaped the project predicate
+	// would be a standing read grant nobody issued.
+	//
+	// EXISTS rather than `JOIN wi_watches`: the composite primary key makes at
+	// most one row match, so the two are equivalent today — but a JOIN's row
+	// count is a property of the join key, and if wi_watches ever grows a
+	// second row per pair the JOIN starts duplicating work items in the page
+	// (and quietly consuming the LIMIT) while EXISTS cannot. Semi-join is what
+	// is meant, so semi-join is what is written.
+	if f.WatcherUserID != nil && *f.WatcherUserID != "" {
+		conds = append(conds, fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM wi_watches w WHERE w.work_item_id = wi.id AND w.user_id = $%d)", argIdx))
+		args = append(args, *f.WatcherUserID)
 		argIdx++
 	}
 

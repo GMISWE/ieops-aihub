@@ -77,6 +77,7 @@ var parseCalls = map[string]bool{
 var lenientReaders = map[string]bool{
 	"queryIntLenientUI":   true,
 	"queryFloatLenientUI": true,
+	"queryBoolLenientUI":  true,
 }
 
 func serverSourceFiles(t *testing.T) []string {

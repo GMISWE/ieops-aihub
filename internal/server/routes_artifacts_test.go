@@ -1944,7 +1944,10 @@ func TestArtifactHTML_UI_SideRail_DeniedVersion_Omitted(t *testing.T) {
 // marker while the per-artifact "Open" link (wi_detail.html.tmpl:120) does
 // NOT — it is an ordinary cross-link and must keep self-healing to the head.
 func TestUIWIDetail_VersionLink_CarriesExactMarker_OpenLinkDoesNot(t *testing.T) {
-	tmpl := pageTemplate("wi_detail.html.tmpl", "events_timeline.html.tmpl")
+	// Shared constructor, not a second copy of the partial list — see
+	// wiDetailTemplate's comment for why a divergence here fails at render time
+	// rather than at build time.
+	tmpl := wiDetailTemplate()
 
 	data := &wiDetailPageData{
 		Title:  "wi test",

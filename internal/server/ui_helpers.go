@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -304,15 +305,34 @@ func fetchProjectWICounts(ctx context.Context, pool *pgxpool.Pool, projects []st
 // scoping: an empty projects slice means "all projects" (admin view-all). View-layer
 // only — a presentation count; errors degrade to 0 so the sidebar simply shows no
 // Done count rather than 500ing.
-func fetchDoneCount(ctx context.Context, pool *pgxpool.Pool, projects []string) int {
+//
+// watcherUserID is the aihub#143 Watching scope, empty when that scope is off.
+// It has to be here rather than only on the row query because the Done segment
+// is the one segment whose COUNT and whose ROWS come from two different
+// statements: the rows go through fetchListRowsPaged, which inherits
+// filter.WatcherUserID, while this count is a standalone COUNT(*). Leaving the
+// count watcher-blind would print e.g. "3 / 417" — three watched rows under an
+// archive-wide total — which reads as a truncated page, the exact illusion
+// aihub#298 was filed to remove.
+//
+// The predicate is the same EXISTS semi-join buildListWorkItemsWhere uses, and
+// it is ANDed with the project scope for the same reason: a watch row is not a
+// read grant (see internal/domain/wi_watches.go).
+func fetchDoneCount(ctx context.Context, pool *pgxpool.Pool, projects []string, watcherUserID string) int {
 	if pool == nil {
 		return 0
 	}
-	query := `SELECT COUNT(*) FROM work_items WHERE status = ANY($1)`
+	query := `SELECT COUNT(*) FROM work_items wi WHERE wi.status = ANY($1)`
 	args := []any{[]string{"wrapped", "cancelled", "failed"}}
 	if len(projects) > 0 {
-		query += ` AND project = ANY($2)`
 		args = append(args, projects)
+		query += fmt.Sprintf(` AND wi.project = ANY($%d)`, len(args))
+	}
+	if watcherUserID != "" {
+		args = append(args, watcherUserID)
+		query += fmt.Sprintf(
+			` AND EXISTS (SELECT 1 FROM wi_watches w WHERE w.work_item_id = wi.id AND w.user_id = $%d)`,
+			len(args))
 	}
 	var n int
 	if err := pool.QueryRow(ctx, query, args...).Scan(&n); err != nil {

@@ -538,6 +538,45 @@ jobs:
       #             other branches can rot on a merge without either side
       #             conflicting, and arithmetic cannot tell you that — only a run
       #             on the merged tree can.
+      #   189 -> 194 aihub#143 added 5 DB-gated functions, all in internal/server
+      #             (ui_handlers_wi_watching_db_test.go:
+      #             TestWatchingScope_ListsOnlyWatchedItems,
+      #             TestWatchingScope_ProjectAccessStillBounds,
+      #             TestWatchingScope_ViewAllWithNoAccessibleProjectsListsNothing,
+      #             TestWatchToggle_RoundTripsAndIsIdempotent,
+      #             TestWatchToggle_RefusesAnUnreadableWorkItem). Five FUNCTIONS
+      #             rather than subtests of one, which is the opposite call from
+      #             the aihub#151 entry above and for a stated reason: these are
+      #             five independent claims about the watching relation, not five
+      #             arms of one guard, so collapsing them would let one of them
+      #             regress behind another's PASS line. All five need only a
+      #             database, so the required set goes 186 -> 191 and they share
+      #             ONE step, "aihub#143 watching scope DB tests".
+      #
+      #             The `189` this starts from is READ OFF the manifest on
+      #             origin/main 595617b, not continued from the 180 above — that
+      #             ledger entry's own note applies again: entries landed between
+      #             180 and 189 without a line here.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched. The gate found
+      #             all five itself and named them as executed by no step, before
+      #             the step existed. Verbatim, on this branch off origin/main
+      #             595617b, with the tests written but BEFORE the manifest lines
+      #             and the CI step were added:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 189 entries,
+      #                 inventory measured 194
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 194
+      #                 (require only a DB: 191, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 186/191
+      #             and after both were added:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 194 entries,
+      #                 inventory measured 194
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 194
+      #                 (require only a DB: 191, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 191/191
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -1656,6 +1695,49 @@ jobs:
           done
           ! grep -q -- '--- SKIP' pre_share_visibility.log \
             || { echo "::error::an aihub#151 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#143: the /ui Watching scope and the watch/unwatch write path.
+      #
+      # The unit half (ui_handlers_wi_watching_test.go, work_items_watching_test.go)
+      # runs in the "Unit tests" step above and needs nothing from this one — it
+      # pins the wiring and the generated WHERE clause. What it structurally
+      # cannot pin is the AUTHORIZATION property, because its ListWorkItems is a
+      # fake that returns whatever it was handed:
+      #
+      #   a wi_watches row OUTLIVES the project access that created it (nothing
+      #   walks that table when a membership is revoked), so "watched" and
+      #   "readable" are independent facts, and the question "does a watch put an
+      #   unreadable work item on the user's screen" is answered by how two SQL
+      #   predicates compose. Only a real query answers it.
+      #
+      # Five functions rather than five subtests of one, deliberately, and it is
+      # the opposite call from the aihub#151 step above: these are five separate
+      # claims (the scope filters; the project bound survives it; an empty
+      # allow-list means nothing rather than everything; the write is idempotent;
+      # the write is authorized), not five arms of one guard. Each needs only a
+      # database — no embedding service — so the required set goes 186 -> 191.
+      # Measured on the tree, not computed: see the "189 -> 194" entry in the log
+      # at the top of this job.
+      #
+      # The migrations step above applies 0033_wi_watches.sql; without it every
+      # test here fails on `relation "wi_watches" does not exist` rather than
+      # skipping, which is the loud direction.
+      - name: aihub#143 watching scope DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^(TestWatchingScope_ListsOnlyWatchedItems|TestWatchingScope_ProjectAccessStillBounds|TestWatchingScope_ViewAllWithNoAccessibleProjectsListsNothing|TestWatchToggle_RoundTripsAndIsIdempotent|TestWatchToggle_RefusesAnUnreadableWorkItem)$' -count=1 -v 2>&1 | tee watching_scope.log
+          for want in TestWatchingScope_ListsOnlyWatchedItems \
+                      TestWatchingScope_ProjectAccessStillBounds \
+                      TestWatchingScope_ViewAllWithNoAccessibleProjectsListsNothing \
+                      TestWatchToggle_RoundTripsAndIsIdempotent \
+                      TestWatchToggle_RefusesAnUnreadableWorkItem; do
+            grep -q -- "--- PASS: $want (" watching_scope.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#143 watching scope is not actually verified against a database"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' watching_scope.log \
+            || { echo "::error::an aihub#143 watching test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#342: every path that DERIVES a lock from a declared resource must
       # apply the intent rule the tool schemas state ("read ... takes no write

@@ -1113,7 +1113,7 @@ func renderWIList(t *testing.T, url string) string {
 func withDoneCount(t *testing.T, n int) {
 	t.Helper()
 	prev := fetchDoneCountFn
-	fetchDoneCountFn = func(_ context.Context, _ *pgxpool.Pool, _ []string) int { return n }
+	fetchDoneCountFn = func(_ context.Context, _ *pgxpool.Pool, _ []string, _ string) int { return n }
 	t.Cleanup(func() { fetchDoneCountFn = prev })
 }
 

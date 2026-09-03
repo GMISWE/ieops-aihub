@@ -238,6 +238,29 @@ func goSourceFiles(t *testing.T, dirs []string, keep func(string) bool) map[stri
 // 4295px against an ~800px column, and the whole reason this code exists is that scaling that to
 // fit turns 24px labels into 4.5px.
 func TestNarrowerLayout_RelayoutsAnOverWideGraph(t *testing.T) {
+	// This test's subject is the LAYOUT — is the re-laid-out figure narrower, still an
+	// svg, still gated, still legible at 800px. It is not a benchmark of the d2
+	// compiler, and it does not exist to police DefaultDiagramCompileTimeout: that
+	// constant has its own seven tests in diagram_timeout_test.go, every one of them
+	// driving a stubbed compile so that what they assert is the timeout MECHANISM rather
+	// than the speed of the machine underneath it.
+	//
+	// Left on the production default, though, this test does police that budget, by
+	// accident and badly: the fixture is the largest real figure in the repo and its two
+	// compiles take ~2.2s each under -race, against a 5s per-compile deadline. One
+	// competing process pinned to the same core is enough to push a compile past 5s, at
+	// which point RenderDiagram correctly returns errDiagramTimeout and this test reports
+	// it as "compile as authored: d2 compile exceeded deadline after 5s" — a red that
+	// says nothing about layout and everything about who else was on the box (aihub#339;
+	// reproduced 4/4 at one competitor, 0/12 with none).
+	//
+	// So the budget is lifted to the production maximum for the duration of this test —
+	// not raised in production, and not raised on the assertions that guard it. What
+	// replaces it as a cost guard here is the compile COUNT asserted below, which is what
+	// this test can actually hold the re-layout path to.
+	restoreDiagramTimeout(t)
+	SetDiagramCompileTimeout(MaxDiagramCompileTimeout)
+
 	src, err := os.ReadFile("../../test/render/fixtures/spike_architecture.md")
 	if err != nil {
 		t.Fatalf("fixture: %v", err)
@@ -251,6 +274,10 @@ func TestNarrowerLayout_RelayoutsAnOverWideGraph(t *testing.T) {
 		t.Skip("fixture no longer lays out horizontally; nothing to re-layout")
 	}
 
+	// Flushed so both compiles below are real misses, which is what makes the
+	// diagramCacheMisses delta a count of compiles rather than of cache lookups.
+	flushDiagramCache()
+
 	wide, err := RenderDiagram(d2src)
 	if err != nil {
 		t.Fatalf("compile as authored: %v", err)
@@ -260,7 +287,17 @@ func TestNarrowerLayout_RelayoutsAnOverWideGraph(t *testing.T) {
 		t.Skipf("authored layout is already %vpx, under the %dpx threshold", wideW, wideFigurePx)
 	}
 
+	// How expensive re-layout is allowed to be, counted rather than timed. narrowerLayout
+	// gets ONE extra compile — the vertical variant — and the fallback paths it takes when
+	// that variant is unusable (error, no <svg>, not actually narrower, refused by belt 2)
+	// must each return the original figure rather than reach for the compiler again. A
+	// second compile here would double the cost of every wide figure on the /ui read path,
+	// and unlike a wall-clock ceiling this notices that on a busy machine too.
+	compilesBefore := diagramCacheMisses.Load()
 	got := narrowerLayout(d2src, wide)
+	if n := diagramCacheMisses.Load() - compilesBefore; n != 1 {
+		t.Errorf("re-layout ran %d compiles, want exactly 1 (the vertical variant)", n)
+	}
 	gotW := svgIntrinsicWidth(got)
 	t.Logf("authored %vpx → re-laid-out %vpx", wideW, gotW)
 
@@ -295,7 +332,16 @@ func TestNarrowerLayout_LeavesNarrowFiguresAlone(t *testing.T) {
 	if w := svgIntrinsicWidth(svg); w > wideFigurePx {
 		t.Skipf("two-node graph is %vpx, unexpectedly over threshold", w)
 	}
-	if got := narrowerLayout("a -> b", svg); got != svg {
+	// "or every ordinary diagram pays for a second compile" is the half of this test's
+	// own doc comment that byte-identity does not actually check: a narrowerLayout that
+	// compiled the vertical variant and then threw it away would still return svg
+	// unchanged and still pass. Count the compiles, which is the cost being claimed.
+	compilesBefore := diagramCacheMisses.Load()
+	got := narrowerLayout("a -> b", svg)
+	if n := diagramCacheMisses.Load() - compilesBefore; n != 0 {
+		t.Errorf("a figure that already fits ran %d compile(s), want 0 — every ordinary diagram now pays for a second layout", n)
+	}
+	if got != svg {
 		t.Error("a figure that already fits must be returned unchanged")
 	}
 }

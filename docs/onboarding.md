@@ -14,8 +14,11 @@ The end-to-end flow is:
 6. [(Optional) Switch to the dev channel or build from source](#6-optional-switch-to-the-dev-channel-or-build-from-source)
 7. [Demo: create a work item and view it in the Web UI](#7-demo-create-a-work-item)
 
-The team runs a shared `aihub` server at `http://10.146.0.34:8080`, so you do
-not need to stand up your own backend.
+The team runs a shared `aihub` server, so you do not need to stand up your own
+backend — and you do not need to be told its address. It is compiled into the
+`polyforge` binary you install in step 4, and
+[`polyforge doctor`](#which-aihub-am-i-talking-to) prints the one in use. This
+page deliberately does not name it; see step 2 for why.
 
 ---
 
@@ -39,12 +42,27 @@ mkdir -p ~/.polyforge
 cat > ~/.polyforge/config.toml <<'EOF'
 [auth]
 api_key = "pf_k1_REPLACE_ME"
-
-[server]
-url = "http://10.146.0.34:8080"
 EOF
 chmod 600 ~/.polyforge/config.toml
 ```
+
+**Your key is the only thing in that file.** There is no `[server] url` line to
+copy: the team's endpoint ships inside the `polyforge` binary, as
+`AihubURLDefault` in `internal/config/machine.go` — the one place in the repo a
+client reads it from.
+
+That is not just tidiness. This page used to carry the address in the heredoc
+above, which meant every newcomer took a *snapshot* of it into a file no release
+can reach. When the server moved hosts, those snapshots kept pointing at the old
+one, and the resulting timeout looks exactly like a rejected API key — that
+debugging session is `aihub#331`, and `aihub#335` removed the cause. Because the
+value now travels with the binary, and the launcher refreshes the binary daily
+from the `dev` channel, a move reaches your machine without you editing
+anything.
+
+Add a `[server] url` **only** to point at a *different* aihub — your own, or a
+staging instance. It wins over the built-in value, as does the
+`POLYFORGE_AIHUB_URL` environment variable, which wins over both.
 
 ## 3. GitHub access (`gh` CLI + SSH key)
 
@@ -184,15 +202,50 @@ tool (not a shell command) — just ask the agent for it in chat:
 pf_whoami
 ```
 
-You should see your user id, display name, and the server URL from your
-`config.toml`. If you see a 401, double-check that the `api_key` in
+You should see your user id, display name, role, and the projects you have
+access to. It does **not** report the server URL — for that see
+[Which aihub am I talking to?](#which-aihub-am-i-talking-to) just below.
+
+If you see a 401, double-check that the `api_key` in
 `~/.polyforge/config.toml` matches the one the owner handed you and that
 the file is readable by your user (`ls -l ~/.polyforge/config.toml`). A
 connection error instead — `connection refused`, or a hang with no HTTP
-status at all — never reached the server, so the key is not the problem:
-check that the `[server] url` in that same file matches the address the
-owner gave you. It is an internal address, so you also have to be on a
-machine that can reach the team network.
+status at all — never reached the server, so the key is not the problem. The
+endpoint is an internal address, so you have to be on a machine that can reach
+the team network; check that first. If the network is fine, ask the owner
+whether the server has moved rather than editing an address into your
+`config.toml` — a move is fixed by picking up a newer binary
+(`rm -f ~/.polyforge/.last_binary_check`, then restart), and a hand-written
+override would then keep you pinned to the dead host.
+
+### Which aihub am I talking to?
+
+```bash
+polyforge doctor
+```
+
+The `config` line names the endpoint **and the layer that chose it**:
+
+```
+[ok] config: http://<host>:8080 (built-in default) — aihub reachable
+```
+
+`built-in default` is the normal answer. The other three sources, in descending
+priority, are all overrides: `POLYFORGE_AIHUB_URL`, then `[server] url` in
+`~/.polyforge/config.toml`, then `aihub.url` in the workspace's
+`.polyforge.yaml`. Seeing one of those named here is how you discover an
+override you forgot you set. The line is printed even when the server cannot be
+reached, and even when you have no API key at all, so it also answers "is it me
+or is it the address?".
+
+`polyforge` is normally on your `PATH` after step 5, because the launcher keeps
+`/usr/local/bin/polyforge` pointed at the binary it manages. It skips that when
+the directory is not writable, and in a few other cases — so if the command is
+not found, call the binary directly at `"$CLAUDE_PLUGIN_ROOT/bin/polyforge"`.
+
+Run before step 7, `doctor` also reports `[FAIL] workspace: .polyforge.yaml not
+found in <dir>` and exits non-zero. That is expected this early; every check
+still runs and the `config` line is printed anyway.
 
 ### Did the binary actually download? (`~/.polyforge/binary-status.txt`)
 
@@ -294,17 +347,22 @@ example:
 /pf-status # to see existing work items and their states
 ```
 
-That triggers the `polyforge:pf-work` skill, which talks to the shared
-`aihub` at `http://10.146.0.34:8080` to claim or create a work item for you.
+That triggers the `polyforge:pf-work` skill, which talks to the shared `aihub`
+to claim or create a work item for you.
 
-To see the work item land server-side, open the Web UI:
+To see the work item land server-side, open the Web UI. Take the base URL from
+the tool, not from this page:
 
-1. Visit `http://10.146.0.34:8080/ui/login` and paste your API key. The
-   server mints a 7-day signed session cookie.
-2. Browse to `http://10.146.0.34:8080/ui/wi` — the list polls every 5 s, so
-   your new wi shows up without a manual refresh.
-3. Click through to `/ui/wi/<id>` for the full timeline, declared resources,
-   and step state.
+```bash
+polyforge doctor | grep '] config:'
+```
+
+1. Visit `<base>/ui/login` and paste your API key. The server mints a 7-day
+   signed session cookie.
+2. Browse to `<base>/ui/wi` — the list polls every 5 s, so your new wi shows up
+   without a manual refresh.
+3. Click through to `<base>/ui/wi/<id>` for the full timeline, declared
+   resources, and step state.
 
 Routing for the UI lives in `internal/server/ui_routes.go` (the
 `RegisterUIRoutes` entry point) if you want to dig into how queue, list, and

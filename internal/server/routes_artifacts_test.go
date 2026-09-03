@@ -770,11 +770,27 @@ func TestSharedArtifact_NonPublic_404(t *testing.T) {
 	}
 }
 
-// Scenario 4: POST /v1/artifacts/:id/share on an artifact with rendered_html=NULL → 412.
-func TestShareArtifact_NoRenderedHTML_412(t *testing.T) {
+// Scenario 4: POST /v1/artifacts/:id/share on an artifact with nothing to serve → 412.
+//
+// aihub#130: this used to be named _NoRenderedHTML_412 and its comments said
+// "rendered_html=NULL → 412" and "not a spec/plan → nothing to share". Both were
+// false even before this work item — publicSharedMem() is a methodology.spec —
+// and rendered_html=NULL is no longer a precondition failure at all, because a
+// deferred render that has not landed yet leaves exactly that state on an
+// artifact that is perfectly shareable. What has always actually driven this
+// test's 412 is that publicSharedMem() leaves Content empty, so setting
+// RenderedHTML=nil leaves the memory with no body from either source. Renamed
+// and re-commented to say that, and Content is now cleared EXPLICITLY rather
+// than inherited from the fixture, so a future fixture that grows a body cannot
+// silently turn this into a test of nothing.
+//
+// TestShareArtifact_PublishesArtifactWhoseRenderHasNotLanded in
+// routes_artifacts_share_lazy_test.go is the complementary case.
+func TestShareArtifact_NothingToServe_412(t *testing.T) {
 	mem := publicSharedMem()
 	mem.Visibility = "project"
-	mem.RenderedHTML = nil // not a spec/plan → nothing to share
+	mem.RenderedHTML = nil // no stored HTML...
+	mem.Content = ""       // ...and no content to lazy-render either
 	defer withLoadMemoryOverride(mem, nil)()
 
 	e := echo.New()
@@ -1339,12 +1355,29 @@ func TestUIArtifactHTML_ShareAboveVersionHistory(t *testing.T) {
 	}
 }
 
-// TestUIArtifactHTML_NoRenderedHTML_NoShareControl covers acceptance 5: when
-// rendered_html == nil the /ui viewer must NOT inject the share control.
-func TestUIArtifactHTML_NoRenderedHTML_NoShareControl(t *testing.T) {
+// TestUIArtifactHTML_NothingToShare_NoShareControl covers aihub#154 acceptance 5:
+// the /ui viewer must NOT inject the share control for an artifact that cannot
+// be shared.
+//
+// aihub#130 changed WHICH artifacts those are, and the invariant that governs
+// this test is not "rendered_html is nil" — it is the one stated on shareRefusal:
+// the button and POST /share must answer the same question, or the page grows a
+// button that always fails. handleShareArtifact's precondition became
+// hasRenderableBody (stored HTML, or content to render), because with rendering
+// deferred to a background worker a NULL column is the state of EVERY artifact
+// for a moment after it is saved, and the permanent state of any whose render
+// was dropped. So the button now follows the same predicate, and this test moved
+// with it: the case that must hide the control is an artifact with nothing to
+// serve at all, which is the case the acceptance was really about.
+//
+// The complementary direction — a NULL rendered_html with content DOES get the
+// button, and POST /share accepts it — is covered in
+// routes_artifacts_share_lazy_test.go.
+func TestUIArtifactHTML_NothingToShare_NoShareControl(t *testing.T) {
 	defer withVersionChainOverride()()
 
-	mem := retroMemNullHTML() // rendered_html = nil, lazy-rendered body
+	mem := retroMemNullHTML() // rendered_html = nil
+	mem.Content = ""          // ...and nothing to lazy-render either
 	defer withLoadMemoryOverride(mem, nil)()
 
 	e := echo.New()
@@ -1360,10 +1393,44 @@ func TestUIArtifactHTML_NoRenderedHTML_NoShareControl(t *testing.T) {
 	}
 	body := rec.Body.String()
 	if strings.Contains(body, `id="pf-share"`) {
-		t.Errorf("share control must be absent when rendered_html is nil; excerpt: %s", excerptStr(body))
+		t.Errorf("share control must be absent when there is nothing to share; excerpt: %s", excerptStr(body))
 	}
 	if strings.Contains(body, "/ui/static/share.js") {
-		t.Errorf("share.js must be absent when rendered_html is nil; excerpt: %s", excerptStr(body))
+		t.Errorf("share.js must be absent when there is nothing to share; excerpt: %s", excerptStr(body))
+	}
+}
+
+// TestUIArtifactHTML_UnrenderedButShareable_HasShareControl is the other half of
+// the pair above, and the reason it is a pair: without it, "the button follows
+// hasRenderableBody" and "the button was deleted" look identical.
+//
+// It also pins the button/handler agreement that shareRefusal's comment names.
+// An artifact whose deferred render has not landed is shareable (see
+// TestShareArtifact_PublishesArtifactWhoseRenderHasNotLanded), so hiding the
+// button for it would leave a user unable to share a spec they had just written,
+// with no error to explain why.
+func TestUIArtifactHTML_UnrenderedButShareable_HasShareControl(t *testing.T) {
+	defer withVersionChainOverride()()
+
+	mem := retroMemNullHTML() // rendered_html = nil, content intact
+	mem.Type = "methodology.spec"
+	defer withLoadMemoryOverride(mem, nil)()
+
+	e := echo.New()
+	c, rec := newUIContext(e, http.MethodGet, "/ui/artifacts/mem_retro1/html", "mem_retro1")
+	c.SetPath("/ui/artifacts/:id/html")
+	setUser(c, authorUser())
+
+	if err := handleArtifactHTML(nil)(c); err != nil {
+		e.HTTPErrorHandler(err, c)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, excerptStr(rec.Body.String()))
+	}
+	if !strings.Contains(rec.Body.String(), `id="pf-share"`) {
+		t.Errorf("share control must be offered for an artifact whose deferred render has not landed "+
+			"— POST /share accepts it, so hiding the button strands the user; excerpt: %s",
+			excerptStr(rec.Body.String()))
 	}
 }
 

@@ -16,7 +16,6 @@ import (
 	"html/template"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -216,8 +215,6 @@ type wiListPageData struct {
 	TotalCount        int             // sum of ProjectCounts (the "All projects" count)
 	AllMode           bool            // true when viewing across all accessible projects
 	Status            string          // legacy single-status (kept for the hidden field / back-compat)
-	Statuses          map[string]bool // multi-select status filter — set of selected status values
-	StatusLabel       string          // human label for the status-filter button
 	Kind              string
 	Reporter          string
 	Owner             string
@@ -261,10 +258,6 @@ type segNav struct {
 	Divider bool
 }
 
-// StatusOn reports whether the given status value is currently selected in the
-// multi-select status filter. Used by the template to mark dropdown checkboxes.
-func (d *wiListPageData) StatusOn(s string) bool { return d.Statuses[s] }
-
 // wiListGroup is a display bucket of rows under a single heading. When Rows is
 // empty the template renders the .empty empty-state component instead of
 // silently dropping the section (the smart sections are always emitted; status
@@ -274,7 +267,8 @@ func (d *wiListPageData) StatusOn(s string) bool { return d.Statuses[s] }
 // Kind classifies the bucket so the template + client JS can treat them
 // differently: "personal" (Needs you) and "pool" (Unclaimed) are smart sections
 // that keep a fixed position (top / bottom respectively), while "status" blocks
-// are drag-reorderable keyed by Status (the raw lowercase status value).
+// are keyed by Status (the raw lowercase status value). They were once
+// drag-reorderable in the client; aihub#187 removed that.
 type wiListGroup struct {
 	Label  string
 	Kind   string // "personal" | "pool" | "status"
@@ -591,9 +585,11 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 
 		// Filter params.
 		//
-		// Status is multi-select: the dropdown emits repeated ?status= params
-		// (one per checked box). We keep the union of valid values. The legacy
-		// single ?status= shape still works (one value = a one-element set).
+		// ?status= is repeatable and we keep the union of valid values. No UI
+		// emits it any more — the status multi-select died with aihub#185 and
+		// the LCRS sidebar filters by segment instead — but the parameter is
+		// still honoured for hand-built and bookmarked URLs, and a single
+		// ?status= is just a one-element set.
 		statusParams := c.QueryParams()["status"]
 		selStatuses := map[string]bool{}
 		var statusList []string // deterministic order for the label / hidden field
@@ -608,7 +604,6 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		if kindParam != "" && !validWIKinds[kindParam] {
 			kindParam = ""
 		}
-		data.Statuses = selStatuses
 		// data.Status keeps the first selected value so the legacy hidden field
 		// and any single-value consumers stay populated.
 		if len(statusList) > 0 {
@@ -616,7 +611,6 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		}
 		data.Kind = kindParam
 		data.Reporter = strings.TrimSpace(c.QueryParam("reporter"))
-		data.StatusLabel = statusFilterLabel(statusList)
 
 		// Owner filter (aihub#185 follow-up): the list now DEFAULTS to All
 		// (everyone's items). The header "me" toggle opts into a personal view by
@@ -1474,10 +1468,17 @@ func titleASCII(s string) string {
 	return string(b)
 }
 
-// statusBlockOrder is the canonical default order of the six status blocks
-// (top->bottom) when no drag order is applied. The client may reorder these
-// live (see dropdown.js applyStatusGroupOrder); the server always emits them in
-// this order so the saved drag order has a stable base to permute.
+// statusBlockOrder is the set of statuses that get a block, in a fixed order.
+//
+// Only the SET is observable today. It used to be a display order the client
+// could permute live from a saved drag order, but aihub#185 made the LCRS
+// segment sidebar the status control and aihub#187 deleted the client-side
+// reordering. What survives reads Groups only through groupCountsFromGroups,
+// which matches on Kind/Status/Label rather than position — and no template
+// ranges over .Groups at all (wi_list renders .SegRows). So changing the order
+// of this slice changes nothing a user can see. Membership is not entirely
+// inert, but only for one entry: removing "running" zeroes the Running
+// headline count, since that is the only status groupCountsFromGroups reads.
 var statusBlockOrder = []string{"queued", "running", "paused", "blocked", "wrapped", "cancelled"}
 
 // groupListRows buckets the flat row list into display groups under the
@@ -1502,15 +1503,17 @@ var statusBlockOrder = []string{"queued", "running", "paused", "blocked", "wrapp
 //     requires owner == viewer by definition.
 //   - "Unclaimed" is NOT owner-scoped — it is always shown in both views.
 //
-// Which status blocks render is driven by selStatuses (the statuses chosen in
-// the multi-select). The SERVER emits a block for every SELECTED status even
+// Which status blocks render is driven by selStatuses. That used to be the
+// status multi-select, which aihub#185 replaced with the LCRS segment sidebar;
+// the parameter survives and is still honoured. The SERVER emits a block for every SELECTED status even
 // when it has zero items (the template renders the .empty state inside it), so
 // the filter's effect is always perceptible. When no status is selected the
 // full six blocks render (empty ones included). "Needs you" / "Unclaimed" are
 // always emitted (empty -> empty-state) and are never part of selStatuses.
 //
-// Render order top->bottom: Needs you -> status blocks (canonical order;
-// reordered live by the client) -> Unclaimed.
+// Build order: Needs you -> status blocks (statusBlockOrder) -> Unclaimed.
+// Nothing renders this slice directly any more (see statusBlockOrder), so the
+// order matters only to a future reader, not to the page.
 //
 // A requires_human_session item with no owner is NOT "Needs you" — it has not
 // been claimed by the viewer, so it belongs in Unclaimed (the aihub#4 bug).
@@ -1550,11 +1553,10 @@ func groupListRows(rows []*wiListRow, viewer string, mine bool, selStatuses map[
 
 	out := make([]wiListGroup, 0, 2+len(statusBuckets))
 	// "Needs you" is the smart section pinned FIRST — always emitted (empty ->
-	// empty-state). Not drag-reorderable, not part of selStatuses.
+	// empty-state). Not part of selStatuses.
 	out = append(out, wiListGroup{Label: gNeeds, Kind: "personal", Rows: needs})
-	// Status blocks in canonical order; the client permutes them live per the
-	// saved drag order. Emitted for every selected status (or all six when none
-	// is selected), empty ones included.
+	// Status blocks in statusBlockOrder. Emitted for every selected status (or
+	// all six when none is selected), empty ones included.
 	for _, k := range statusBlockOrder {
 		rs, ok := statusBuckets[k]
 		if !ok {
@@ -1563,7 +1565,7 @@ func groupListRows(rows []*wiListRow, viewer string, mine bool, selStatuses map[
 		out = append(out, wiListGroup{Label: titleASCII(k), Kind: "status", Status: k, Rows: rs})
 	}
 	// "Unclaimed" is the smart pool pinned LAST — always emitted (empty ->
-	// empty-state). Not owner-scoped, not drag-reorderable.
+	// empty-state). Not owner-scoped.
 	out = append(out, wiListGroup{Label: gUnclaimed, Kind: "pool", Rows: unclaimed})
 	return out
 }
@@ -1598,20 +1600,6 @@ func groupCountsFromGroups(groups []wiListGroup) stripCounts {
 		}
 	}
 	return s
-}
-
-// statusFilterLabel builds the human label for the multi-select status filter
-// button: "All status" when nothing is selected, the single status name when
-// exactly one is chosen, or "N selected" for two or more.
-func statusFilterLabel(sel []string) string {
-	switch len(sel) {
-	case 0:
-		return "All status"
-	case 1:
-		return titleASCII(sel[0])
-	default:
-		return strconv.Itoa(len(sel)) + " selected"
-	}
 }
 
 // renderHTMLStatus is a 404-aware variant of renderTemplate. The shared

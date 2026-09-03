@@ -168,6 +168,28 @@ func main() {
 	if err := e.Shutdown(shutdownCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "shutdown error: %v\n", err)
 	}
+
+	// aihub#130: markdown→HTML now renders on a background pool instead of on the
+	// request goroutine, so at this instant there may be renders queued or running.
+	//
+	// This call is AFTER e.Shutdown so that the great majority of handlers have
+	// already finished and their renders are already queued — but note that
+	// e.Shutdown returning is NOT a guarantee that no handler is still running:
+	// it returns its context's error when the grace period expires with requests
+	// in flight. DrainRenderQueue does not rely on the ordering for safety; it
+	// sheds anything offered while it is draining, precisely so a late
+	// enqueue cannot Add to the WaitGroup it is waiting on.
+	//
+	// Timing out is survivable rather than an error to escalate: an unrendered
+	// artifact still serves, because every read path re-derives the HTML from
+	// content when rendered_html is NULL (aihub#81/#146 for /ui and /v1,
+	// aihub#130 for /share). It is logged because a drain that ALWAYS times out
+	// means the pool is wedged, and that is worth seeing.
+	if err := domain.DrainRenderQueue(shutdownCtx); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"deferred renders still in flight at shutdown: %v; they are dropped and "+
+				"the viewer re-renders those artifacts from content on first read\n", err)
+	}
 	fmt.Println("aihub stopped")
 }
 

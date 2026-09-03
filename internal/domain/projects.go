@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -105,6 +106,9 @@ type UpdateProjectRequest struct {
 	// today and would remove the only way to REMOVE a member. What aihub#260
 	// adds is MembersVersion, the guard that makes the read-modify-write this
 	// forces on callers safe against a concurrent one.
+	//
+	// aihub#333: REPLACE is *still* unchanged, but it is no longer allowed to
+	// remove anybody silently — see ExpectedRemovals.
 	Members *[]MemberInput `json:"members"`
 	// MembersVersion, when non-nil, is a compare-and-set precondition: the
 	// members_version the caller last read. The whole update is applied only if
@@ -114,6 +118,45 @@ type UpdateProjectRequest struct {
 	// Omitting it keeps the historical unconditional overwrite, which existing
 	// callers depend on.
 	MembersVersion *int `json:"members_version"`
+	// ExpectedRemovals is the set of member user_ids this write is ALLOWED to
+	// remove (aihub#333). Any user_id that is in the stored list and not in
+	// Members, and not named here, makes the whole update fail with
+	// 412 PROJECT_MEMBERS_UNDECLARED_REMOVAL.
+	//
+	// # Why this and not the version
+	//
+	// MembersVersion answers "has the list changed under me". It cannot answer
+	// "is the list I am sending the one I meant to send", because a caller who
+	// truncates their own list holds a version that matches perfectly — the two
+	// requests are byte-identical on the wire, and afterwards so are the rows.
+	// A counter therefore cannot distinguish "I mean to remove two people" from
+	// "I lost two people"; that is not a gap aihub#260 left open by accident,
+	// it is one a counter cannot close.
+	//
+	// # Why a SET of user_ids and not a COUNT
+	//
+	// aihub#333 offered `expected_removals: N`. A count is strictly weaker: a
+	// caller who means to remove u_a, and whose list accidentally drops u_b
+	// while keeping u_a, still removes exactly one member, so N=1 passes and the
+	// wrong person loses access. A set costs the caller nothing — anybody who
+	// knows they are removing somebody knows who — and rejects that case.
+	// TestUndeclaredRemovals_SwapOfEqualSizeIsARemoval is the assertion a count
+	// cannot satisfy.
+	//
+	// # Why nil and empty mean the same thing
+	//
+	// Both mean "this write removes nobody". There is deliberately no third
+	// state: making absence safe is what lets every existing additive caller
+	// (internal/cli/init.go, and any read-add-write) keep working untouched
+	// while the accident it exists to stop is refused by default. A `*[]string`
+	// would invite a distinction that has no meaning and would put an
+	// omitempty-shaped trap between "sent []" and "sent nothing".
+	//
+	// It is a SUBSET test, not equality: declaring somebody who turns out not to
+	// be there is allowed, so that retrying a removal that already landed is a
+	// no-op rather than a 412. What is refused is a removal that was NOT
+	// declared.
+	ExpectedRemovals []string `json:"expected_removals"`
 }
 
 // projectMember is a single entry in the members JSONB array.
@@ -708,6 +751,93 @@ func membersCASConflictErr(expected, current int) *AihubError {
 		})
 }
 
+// undeclaredRemovals reports which member user_ids replacing `stored` with
+// `submitted` would remove without `declared` authorising it (aihub#333). The
+// result is sorted and deduplicated, so the message and details a caller sees
+// do not depend on JSONB or map ordering.
+//
+// A member is REMOVED when its user_id is in stored and not in submitted. Two
+// consequences worth stating, because both are load-bearing and neither is what
+// a naive implementation does:
+//
+//   - A same-size SWAP is a removal. `[u_a] -> [u_b]` takes u_a's access away
+//     just as `[u_a,u_b] -> [u_b]` does, so comparing LENGTHS (or counting
+//     removals) would wave it through. Roles are irrelevant to this: identity
+//     is the user_id.
+//   - A ROLE CHANGE is not a removal. `[{u_a,viewer}] -> [{u_a,writer}]`
+//     removes nobody, so it needs no declaration and callers that only ever
+//     re-grade members are untouched. Comparing whole member OBJECTS would
+//     refuse it.
+//
+// Pure, and split out for the reason spelled out at buildProjectUpdate:
+// UpdateProject reaches the database before it can call this, so a behavioural
+// test of the arithmetic through UpdateProject would have to be DB-gated, and a
+// DB-gated test in this repo SKIPs on `go test ./...` while still reading as
+// coverage. The set arithmetic is the part most likely to be got subtly wrong,
+// so it gets assertions that execute everywhere
+// (projects_members_removal_test.go); the DB-gated tests cover the wiring.
+func undeclaredRemovals(stored []projectMember, submitted []MemberInput, declared []string) []string {
+	keep := make(map[string]struct{}, len(submitted))
+	for _, m := range submitted {
+		keep[m.UserID] = struct{}{}
+	}
+	allowed := make(map[string]struct{}, len(declared))
+	for _, id := range declared {
+		allowed[id] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(stored))
+	var out []string
+	for _, m := range stored {
+		if _, staying := keep[m.UserID]; staying {
+			continue
+		}
+		if _, ok := allowed[m.UserID]; ok {
+			continue
+		}
+		if _, dup := seen[m.UserID]; dup {
+			continue
+		}
+		seen[m.UserID] = struct{}{}
+		out = append(out, m.UserID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// undeclaredMemberRemovalErr builds the 412 for aihub#333.
+//
+// The refused user_ids are in the message AND in details. Both, on purpose: the
+// details are what a program reads, and the message is what an operator or an
+// agent actually sees — a refusal that only says "no" leaves the caller unable
+// to tell an accident from a permission problem, and the accident this exists to
+// catch is one the caller does not know they are committing. The message also
+// spells out the exact parameter to add, because the only surface that can teach
+// it (plugins/, which ships the skills) does not document `members` at all.
+func undeclaredMemberRemovalErr(undeclared, declared []string, storedCount, submittedCount int) *AihubError {
+	if declared == nil {
+		declared = []string{}
+	}
+	return NewErrDetails(ErrProjectMembersUndeclaredRemoval,
+		fmt.Sprintf("this members write would remove %d member(s) the request did not declare: %s. "+
+			"`members` REPLACES the whole list, so everybody missing from it loses access, and "+
+			"members_version cannot catch this because your version matched. If the removal is "+
+			"intended, resend with expected_removals naming exactly those user_ids; if it is not, "+
+			"reread the project (pf_list_projects) and send the full list. "+
+			"(stored %d member(s), request carried %d)",
+			len(undeclared), joinStrings(undeclared, ", "), storedCount, submittedCount),
+		map[string]any{
+			"undeclared_removals":    undeclared,
+			"expected_removals":      declared,
+			"stored_member_count":    storedCount,
+			"submitted_member_count": submittedCount,
+			// Unlike CONFLICT_CAS_FAILED and CONFLICT_SERIALIZATION_FAILURE,
+			// re-sending this request unchanged will fail again forever. Said in
+			// details as well as in the code so a client's retry policy need not
+			// pattern-match on the message (aihub#334 set the precedent).
+			"retryable": false,
+		})
+}
+
 // UpdateProject patches a project (owner/admin only).
 func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller *UserRecord, req UpdateProjectRequest) (*Project, *AihubError) {
 	// aihub#260: a precondition attached to nothing is worse than no
@@ -723,6 +853,19 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 		return nil, NewErr(ErrBadRequest,
 			"members_version is a compare-and-set precondition for an update, but this request changes nothing; "+
 				"send it together with the fields you want to write")
+	}
+	// aihub#333, same reasoning one field over: expected_removals authorises
+	// removals from the list in `members`, so without `members` there is nothing
+	// for it to authorise. Answering 200 would tell the caller their removal was
+	// accepted when no removal was even attempted.
+	//
+	// Keyed on `members` specifically, not on projectUpdateWritesSomething: a
+	// request that changes the description and declares removals is just as
+	// meaningless, and must not be let through because some OTHER column moved.
+	if len(req.ExpectedRemovals) > 0 && req.Members == nil {
+		return nil, NewErr(ErrBadRequest,
+			"expected_removals authorises removals from the members list this request sends, but the "+
+				"request carries no members; send it together with the members list you want to write")
 	}
 
 	// Check owner/admin access
@@ -777,11 +920,19 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 	// this is NOT the compare-and-set: the guard is the WHERE predicate compiled
 	// by buildProjectUpdate, and deleting that predicate must break the
 	// behaviour, so nothing here compares the two in Go.
+	//
+	// `members` rides along too, for aihub#333. It has to be read HERE and not
+	// from `existing` (which checkProjectAccess fetched before the transaction
+	// opened): the removal set must be computed against the list the UPDATE is
+	// about to overwrite, and a pre-lock read can be one concurrent write out of
+	// date, which would make the check refuse removals that are not happening
+	// and wave through ones that are.
 	var lockedOwnerID string
 	var lockedMembersVersion int
+	var lockedMembers []byte
 	if err := tx.QueryRow(ctx,
-		`SELECT owner_user_id, members_version FROM projects WHERE name=$1 FOR UPDATE`, name,
-	).Scan(&lockedOwnerID, &lockedMembersVersion); err != nil {
+		`SELECT owner_user_id, members_version, members FROM projects WHERE name=$1 FOR UPDATE`, name,
+	).Scan(&lockedOwnerID, &lockedMembersVersion, &lockedMembers); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, NewErr(ErrProjectNotFound, fmt.Sprintf("project %q not found", name))
 		}
@@ -796,6 +947,33 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 	// Re-validate ownership inside the transaction to close the TOCTOU window.
 	if caller.Role != "admin" && lockedOwnerID != caller.ID {
 		return nil, NewErr(ErrProjectOwnerRequired, "only owner or admin can update project")
+	}
+
+	// aihub#333: refuse a write that would take access away from somebody the
+	// request did not name. Evaluated against lockedMembers, under the row lock,
+	// so no concurrent write can slip in between the comparison and the UPDATE.
+	//
+	// The `MembersVersion` condition is SEQUENCING, not a guard. When the caller
+	// supplied a version that no longer matches, their whole view of the list is
+	// stale, so a removal set computed against a list they never read is noise —
+	// the right answer is the compare-and-set conflict, and the thing that
+	// produces it is the WHERE predicate buildProjectUpdate compiles, below.
+	// Nothing here returns a CAS error, and deleting this condition would not
+	// make a stale version pass: it would only change which of two refusals the
+	// caller is told about. That is what keeps aihub#260's mutation guarantee
+	// intact — delete the WHERE predicate and
+	// TestUpdateProjectMembersCASStaleVersionReturns409AndReportsCurrent still
+	// goes red (verified by injecting exactly that mutant).
+	if req.Members != nil && (req.MembersVersion == nil || *req.MembersVersion == lockedMembersVersion) {
+		var stored []projectMember
+		if len(lockedMembers) > 0 {
+			if err := json.Unmarshal(lockedMembers, &stored); err != nil {
+				return nil, NewErr(ErrInternalError, fmt.Sprintf("decode stored members: %v", err))
+			}
+		}
+		if undeclared := undeclaredRemovals(stored, *req.Members, req.ExpectedRemovals); len(undeclared) > 0 {
+			return nil, undeclaredMemberRemovalErr(undeclared, req.ExpectedRemovals, len(stored), len(*req.Members))
+		}
 	}
 
 	upd, aerr := buildProjectUpdate(&req, name)

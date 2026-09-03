@@ -128,7 +128,7 @@ func TestAllErrCodesMapped(t *testing.T) {
 		ErrConflictLockTaken, ErrConflictDualWIAgent,
 		ErrRequiresHumanSessionMismatch, ErrConflictVersionMismatch,
 		ErrConflictTerminalState,
-		ErrPreconditionFailed,
+		ErrPreconditionFailed, ErrProjectMembersUndeclaredRemoval,
 		ErrPayloadTooLarge,
 		ErrServiceUnavailable, ErrAihubUnavailable,
 	}

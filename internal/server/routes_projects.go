@@ -112,6 +112,21 @@ func handleGetProject(pool *pgxpool.Pool) echo.HandlerFunc {
 // A failed precondition surfaces as 409 CONFLICT_CAS_FAILED through domainErr,
 // with details.current_members_version — errorResponse copies AihubError.Details
 // into the envelope, so the caller learns what to retry with.
+//
+// aihub#333 added a second precondition on the same field and the same hop:
+// ExpectedRemovals, the user_ids a `members` write is allowed to drop. It rides
+// the struct the same way, so it has the same assertion rather than the same
+// trust — TestProjectMembersRemovalHTTPDeclaredShrinkSucceeds
+// (internal/server/project_members_removal_db_test.go) drives a real PATCH and
+// requires the 200, so a handler that dropped the field would go red there even
+// though the domain check and the MCP schema were both correct. Note which half
+// of the property that is: the REFUSAL is green whether or not the parameter
+// arrives, because a dropped declaration refuses the write. Only the success
+// half can see this hop.
+//
+// It surfaces as 412 PROJECT_MEMBERS_UNDECLARED_REMOVAL, deliberately not 409:
+// re-sending the same short list can never succeed, so it must not land in a
+// client's compare-and-set retry loop.
 func handleUpdateProject(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)

@@ -205,8 +205,16 @@ func TestUpdateProjectMembersCASOmittedVersionOverwritesUnconditionally(t *testi
 		require.Nil(t, aerr)
 	}
 
+	// The swap declares the removal it performs. aihub#333 refuses a members
+	// write that drops somebody the request did not name, and `[u_one]` ->
+	// `[u_other]` drops u_one even though the list is the same LENGTH. Declaring
+	// it keeps this test measuring what it is named for — that omitting
+	// members_version never produces a CONFLICT_CAS_FAILED — instead of failing
+	// on an unrelated precondition. The two guards are independent: this request
+	// carries no version, and expected_removals is not one.
 	other := []MemberInput{{UserID: "u_other", Role: "writer"}}
-	p, aerr := UpdateProject(ctx, pool, project, caller, UpdateProjectRequest{Members: &other})
+	p, aerr := UpdateProject(ctx, pool, project, caller,
+		UpdateProjectRequest{Members: &other, ExpectedRemovals: []string{"u_one"}})
 	require.Nil(t, aerr, "an update with no members_version must never conflict")
 	assert.Equal(t, []string{"u_other"}, casMembersOf(t, p.Members))
 	assert.Equal(t, 5, p.MembersVersion)
@@ -308,10 +316,13 @@ func (b *casBarrier) releaseWhenAllArrived(t *testing.T, n int) {
 // the assertion on `conflicts` is for: without it a run in which the two
 // happened not to overlap would pass while measuring nothing at all.
 //
-// TestUpdateProjectMembersCASConcurrentAddsWithoutTheGuardLoseOne is the
-// reference side of the same experiment: identical interleaving, no version,
-// and a member IS lost. If the window ever stopped opening, that test goes red
-// and tells us this one has stopped being a race.
+// The reference side of the same experiment is
+// TestUpdateProjectMembersRemovalUnguardedConcurrentAddsRefuseTheLoserInsteadOfLosingIt
+// (projects_members_removal_db_test.go): identical interleaving, no version, and
+// the loser is REFUSED. Until aihub#333 that test was
+// ...ConcurrentAddsWithoutTheGuardLoseOne and a member was silently lost; the
+// pairing is unchanged, only the loser's fate is. If the window ever stopped
+// opening, that test goes red and tells us this one has stopped being a race.
 func TestUpdateProjectMembersCASConcurrentAddsBothSurvive(t *testing.T) {
 	pool := setupLatestTestDB(t)
 	u := testUser(t, pool)
@@ -373,17 +384,36 @@ func TestUpdateProjectMembersCASConcurrentAddsBothSurvive(t *testing.T) {
 		final.MembersVersion)
 }
 
-// The reference side of the acceptance test, and a characterisation of what
-// omitting the guard still does. Same forced interleaving, no members_version:
-// one addition is silently lost and NOBODY gets an error. That is the defect
-// aihub#260 reports, and it remains the behaviour when no version is sent — by
-// design, because turning the guard on by default would break every caller that
-// exists today.
+// The unguarded path's own invariant: the counter counts WRITES, and Postgres is
+// what counts them.
 //
-// It is also the alarm on the test above: if this ever stops losing a member,
-// the interleaving has stopped producing a race and "both survive" has stopped
-// measuring anything.
-func TestUpdateProjectMembersCASConcurrentAddsWithoutTheGuardLoseOne(t *testing.T) {
+// This was TestUpdateProjectMembersCASConcurrentAddsWithoutTheGuardLoseOne, the
+// characterisation of what omitting members_version still cost you — same
+// interleaving, two DIFFERENT people added, one addition silently lost and
+// nobody told. aihub#333 made that unreachable: the loser's list omits the
+// member the winner just added, which is now an undeclared removal, so it is
+// refused instead of overwriting. What replaced it is
+// TestUpdateProjectMembersRemovalUnguardedConcurrentAddsRefuseTheLoserInsteadOfLosingIt
+// (projects_members_removal_db_test.go), and the loss is no longer expressible
+// here.
+//
+// The assertion below is why this test still exists rather than being deleted
+// with the characterisation. It kills a counter computed in Go from
+// UpdateProject's PRE-transaction read: both writers would derive the same next
+// value and the counter would land on 2, leaving a third party's stale token
+// looking valid. Found by mutation testing — every other assertion in this file
+// survived that mutant, because the WHERE predicate keeps the GUARDED path
+// correct even with a Go-computed increment, so the unguarded path is the only
+// place the difference is observable.
+//
+// Observing it needs both writers to have READ before either WROTE, and that is
+// exactly what the barrier enforces: releaseWhenAllArrived t.Fatals if both
+// workers do not reach it, and each worker arrives after its read and blocks
+// until released. So the overlap is structural here, not an outcome this test
+// has to detect afterwards. Both workers add the SAME member so that neither
+// list drops anybody and both writes are therefore allowed to land — which is
+// what makes two increments observable at all.
+func TestUpdateProjectMembersCASUnguardedConcurrentWritesEachAdvanceTheCounter(t *testing.T) {
 	pool := setupLatestTestDB(t)
 	u := testUser(t, pool)
 	project := casProject(t, pool, u)
@@ -401,7 +431,7 @@ func TestUpdateProjectMembersCASConcurrentAddsWithoutTheGuardLoseOne(t *testing.
 	)
 	barrier := newCASBarrier(2)
 	errs := make([]error, 2)
-	for i, who := range []string{"u_alice", "u_bob"} {
+	for i, who := range []string{"u_same", "u_same"} {
 		wg.Add(1)
 		go func(idx int, member string) {
 			defer wg.Done()
@@ -418,85 +448,22 @@ func TestUpdateProjectMembersCASConcurrentAddsWithoutTheGuardLoseOne(t *testing.
 		t.Fatal("the unguarded add-member workers did not finish within 60s")
 	}
 	for i, err := range errs {
-		require.NoError(t, err, "worker %d failed (an unguarded write must never error)", i)
+		require.NoError(t, err, "worker %d failed. An unguarded write that removes nobody must never "+
+			"error: it carries no members_version so it cannot conflict, and it drops no member so "+
+			"aihub#333 has nothing to refuse", i)
 	}
 
 	final, gerr := GetProject(ctx, pool, project, caller, "")
 	require.Nil(t, gerr)
-	got := casMembersOf(t, final.Members)
-	assert.Len(t, got, 2,
-		"the unguarded read-modify-write kept every member (%v) — the two writers did not actually "+
-			"overlap, so TestUpdateProjectMembersCASConcurrentAddsBothSurvive is no longer testing a race", got)
+	assert.Equal(t, []string{"u_incumbent", "u_same"}, casMembersOf(t, final.Members))
 
 	mu.Lock()
 	seen := conflicts
 	mu.Unlock()
 	assert.Equal(t, int64(0), seen, "an update carrying no members_version must never conflict")
 
-	// The counter must count WRITES, not what any reader believed the version
-	// was. One seed plus two unguarded writes is three, even though both writers
-	// read the same value and one of their lists was thrown away.
-	//
-	// This is the assertion that kills a counter computed in Go from
-	// UpdateProject's PRE-transaction read: both writers would derive the same
-	// next value and the counter would land on 2, leaving a third party's stale
-	// token looking valid. Found by mutation testing — every other assertion in
-	// this file survived that mutant, because the WHERE predicate keeps the
-	// GUARDED path correct even with a Go-computed increment. The unguarded path
-	// is the only place the difference is observable.
 	assert.Equal(t, 3, final.MembersVersion,
 		"members_version = %d after 1 seed + 2 unguarded concurrent writes, want 3: the counter must be "+
 			"incremented by Postgres from the stored value, not computed from a value some caller read",
 		final.MembersVersion)
-}
-
-// EXPLICITLY OUT OF SCOPE, pinned so nobody reads aihub#260 as closed.
-//
-// The work item describes two consequences of members being a whole-list
-// REPLACE. The compare-and-set fixes the first (a concurrent writer's addition
-// is lost). It does NOT fix the second: a caller who reads all N and sends back
-// N-1 by mistake still wipes the rest, because that caller's version matches
-// perfectly — the guard passes and the members are gone anyway.
-//
-// Fixing that needs incremental add_member/remove_member operations, or a
-// "you are removing M members, confirm" precondition. Both are API-shape
-// decisions, neither is in aihub#260, and the gap is tracked as aihub#333.
-//
-// This is a CHARACTERIZATION test: it pins today's behaviour, not an invariant.
-// Every failure message below therefore says so — going red here most likely
-// means aihub#333 shipped, in which case this test is stale and the work item
-// is what needs updating, not the test. Its end-to-end twin is
-// TestProjectMembersCASDoesNotStopSelfInflictedTruncationEndToEnd in
-// internal/mcp/project_members_cas_e2e_db_test.go.
-func TestUpdateProjectMembersCASDoesNotPreventAccidentalTruncation(t *testing.T) {
-	pool := setupLatestTestDB(t)
-	u := testUser(t, pool)
-	project := casProject(t, pool, u)
-	caller := &UserRecord{ID: u, Role: "admin"}
-	ctx := context.Background()
-
-	full := []MemberInput{
-		{UserID: "u_one", Role: "viewer"},
-		{UserID: "u_two", Role: "writer"},
-		{UserID: "u_three", Role: "maintainer"},
-	}
-	p1, aerr := UpdateProject(ctx, pool, project, caller, UpdateProjectRequest{Members: &full})
-	require.Nil(t, aerr)
-	require.Len(t, casMembersOf(t, p1.Members), 3)
-
-	// A caller holding the CORRECT version, sending a list that is short by two.
-	current := p1.MembersVersion
-	truncated := []MemberInput{{UserID: "u_one", Role: "viewer"}}
-	p2, aerr := UpdateProject(ctx, pool, project, caller,
-		UpdateProjectRequest{Members: &truncated, MembersVersion: &current})
-	require.Nil(t, aerr,
-		"a truncating write that nobody raced was refused (%v) — if short lists are now rejected, this "+
-			"characterization is stale and the truncation half of aihub#260 has been addressed somewhere; "+
-			"update aihub#333 rather than this test", aerr)
-	assert.Equal(t, []string{"u_one"}, casMembersOf(t, p2.Members),
-		"two members were removed with no error and no confirmation — compare-and-set cannot see this, "+
-			"because the version matched. If members survived instead, this characterization is stale: "+
-			"something now prevents self-inflicted truncation, and aihub#333 is what should be updated, "+
-			"not this test. (Fixing it needs incremental add/remove operations or a removal-count "+
-			"precondition, which is a separate API-shape decision.)")
 }

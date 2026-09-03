@@ -631,8 +631,7 @@ jobs:
                       TestUpdateProjectMembersCASCorrectVersionSucceedsAndAdvances \
                       TestUpdateProjectMembersCASOmittedVersionOverwritesUnconditionally \
                       TestUpdateProjectMembersCASConcurrentAddsBothSurvive \
-                      TestUpdateProjectMembersCASConcurrentAddsWithoutTheGuardLoseOne \
-                      TestUpdateProjectMembersCASDoesNotPreventAccidentalTruncation; do
+                      TestUpdateProjectMembersCASUnguardedConcurrentWritesEachAdvanceTheCounter; do
             grep -q -- "--- PASS: $want" members_domain.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the DB-gated members CAS coverage is not actually executing"; exit 1; }
           done
@@ -647,8 +646,7 @@ jobs:
           for want in TestProjectMembersCASToolSchemaAdvertisesMembersVersion \
                       TestProjectMembersCASVersionIsReadableFromListProjects \
                       TestProjectMembersCASStaleVersionIsRefusedEndToEnd \
-                      TestProjectMembersCASConcurrentAddsBothSurviveEndToEnd \
-                      TestProjectMembersCASDoesNotStopSelfInflictedTruncationEndToEnd; do
+                      TestProjectMembersCASConcurrentAddsBothSurviveEndToEnd; do
             grep -q -- "--- PASS: $want" members_mcp.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the MCP hop of the members CAS is unguarded"; exit 1; }
           done
@@ -658,6 +656,66 @@ jobs:
             || { echo "::error::an aihub#260 internal/server test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
           ! grep -q -- '--- SKIP' members_mcp.log \
             || { echo "::error::an aihub#260 internal/mcp test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#333: `members` is a whole-list REPLACE, so a caller who sends a
+      # short list removes everybody they left out — and aihub#260's
+      # members_version cannot see it, because a truncating caller's version
+      # matches perfectly. UpdateProject now refuses a members write that would
+      # drop a user_id the request did not name in expected_removals.
+      #
+      # A separate step from aihub#260's rather than folded into it: these are
+      # separate preconditions with separate failure codes (412
+      # PROJECT_MEMBERS_UNDECLARED_REMOVAL vs 409 CONFLICT_CAS_FAILED), and one
+      # step whose name says #260 going red for a #333 reason sends the next
+      # reader to the wrong work item.
+      #
+      # BOTH HALVES of the property are named below, per invocation. Half one
+      # alone (an undeclared shrink is refused) is satisfied by a server that
+      # refuses every members write, which is an outage rather than a fix; half
+      # two (a declared shrink still succeeds) is what rejects that. The pairing
+      # is not incidental to the tests either — the DECLARED half is the only
+      # one that can see the HTTP and MCP hops at all, because a request whose
+      # expected_removals was dropped en route is refused, so half one stays
+      # green whether or not the parameter arrives.
+      #
+      # Requires migration 0032_projects_members_version.sql (aihub#260's).
+      # aihub#333 adds NO migration: expected_removals is a request-only
+      # precondition, never stored, so there is no column and nothing to
+      # sequence a deploy around.
+      - name: aihub#333 project members removal-declaration DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestUpdateProjectMembersRemoval' -count=1 -v 2>&1 | tee removal_domain.log
+          go test ./internal/server/ -run 'TestProjectMembersRemovalHTTP' -count=1 -v 2>&1 | tee removal_server.log
+          go test ./internal/mcp/ -run 'TestProjectMembersRemoval' -count=1 -v 2>&1 | tee removal_mcp.log
+          for want in TestUpdateProjectMembersRemovalUndeclaredShrinkIsRefusedAndWritesNothing \
+                      TestUpdateProjectMembersRemovalDeclaredShrinkSucceedsAndAdvancesVersion \
+                      TestUpdateProjectMembersRemovalCallerWhoDoesNotKnowTheListCannotWipeIt \
+                      TestUpdateProjectMembersRemovalStaleVersionConflictTakesPrecedence \
+                      TestUpdateProjectMembersRemovalUnguardedConcurrentAddsRefuseTheLoserInsteadOfLosingIt; do
+            grep -q -- "--- PASS: $want" removal_domain.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the DB-gated aihub#333 removal coverage is not actually executing"; exit 1; }
+          done
+          for want in TestProjectMembersRemovalHTTPUndeclaredShrinkIs412 \
+                      TestProjectMembersRemovalHTTPDeclaredShrinkSucceeds; do
+            grep -q -- "--- PASS: $want" removal_server.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the HTTP hop of expected_removals is unguarded, and a dropped declaration refuses the write rather than failing loudly"; exit 1; }
+          done
+          for want in TestProjectMembersRemovalToolSchemaAdvertisesExpectedRemovals \
+                      TestProjectMembersRemovalToolForwardsExpectedRemovalsOnTheWire \
+                      TestProjectMembersRemovalUndeclaredTruncationIsRefusedEndToEnd \
+                      TestProjectMembersRemovalDeclaredRemovalSucceedsEndToEnd; do
+            grep -q -- "--- PASS: $want" removal_mcp.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the MCP hop of expected_removals is unguarded"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' removal_domain.log \
+            || { echo "::error::an aihub#333 internal/domain test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+          ! grep -q -- '--- SKIP' removal_server.log \
+            || { echo "::error::an aihub#333 internal/server test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+          ! grep -q -- '--- SKIP' removal_mcp.log \
+            || { echo "::error::an aihub#333 internal/mcp test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#334: Postgres class 40 (40001 serialization_failure / 40P01
       # deadlock_detected) must reach the caller as a retryable 409, never as a

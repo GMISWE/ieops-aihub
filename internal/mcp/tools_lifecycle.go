@@ -16,6 +16,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/GMISWE/ieops-aihub/internal/coding"
 	"github.com/GMISWE/ieops-aihub/internal/config"
 	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
@@ -928,6 +929,14 @@ func (s *Server) registerLifecycleTools() {
 								}
 								worktrees[repo.Name] = wtPath
 								writeWorktreeExcludes(wtPath)
+								// aihub#257. THIS is the branch the 199 already-hazardous
+								// worktrees take, and putting the repair only inside
+								// addClaimWorktree would have missed every one of them: a
+								// linked worktree has a directory on disk by definition, so
+								// os.Stat succeeds and the code below never runs. Same shape
+								// as aihub#264, which shipped prevention that could not
+								// reach the instances it was filed for.
+								repairReusedWorktreeUpstream(ctx, srcPath, wtPath)
 								continue
 							}
 
@@ -2119,7 +2128,10 @@ func addClaimWorktree(ctx context.Context, srcPath, wtPath string, n claimBranch
 		return fmt.Errorf("empty branch name")
 	}
 	if existing := resolveClaimBranch(srcPath, n); existing != "" {
-		return attachWorktree(srcPath, wtPath, existing)
+		if err := attachWorktree(srcPath, wtPath, existing); err != nil {
+			return err
+		}
+		return clearBaseUpstream(ctx, srcPath, existing)
 	}
 	// Nothing to attach to: a genuinely new work item, or one whose branch was
 	// deleted. Create it rather than failing and leaving the repo with no
@@ -2136,9 +2148,13 @@ func addClaimWorktree(ctx context.Context, srcPath, wtPath string, n claimBranch
 		fmt.Fprintf(os.Stderr, "polyforge: fetch origin in %s: %v: %s\n", srcPath, fetchErr, string(out))
 	}
 
-	err := runGit(srcPath, "worktree", "add", "-b", n.Branch, wtPath, "origin/main")
+	// --no-track is what stops the new branch from being configured to push to
+	// main; see clearBaseUpstream for the measurement and the consequence.
+	// It goes before -b because `worktree add`'s option parser stops at the
+	// first non-option argument, and -b takes the branch name as its value.
+	err := runGit(srcPath, "worktree", "add", "--no-track", "-b", n.Branch, wtPath, "origin/main")
 	if err == nil {
-		return nil
+		return clearBaseUpstream(ctx, srcPath, n.Branch)
 	}
 	// Branch may already exist (a racing retry of the same claim, or a ref
 	// resolveClaimBranch could not see) — fall back to attach.
@@ -2151,9 +2167,90 @@ func addClaimWorktree(ctx context.Context, srcPath, wtPath string, n claimBranch
 	// older or newer git, and deleting it is a behaviour change on a path this
 	// work item is not about. The live matcher is "already exists".
 	if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "already checked out") {
-		return runGit(srcPath, "worktree", "add", wtPath, n.Branch)
+		if err := runGit(srcPath, "worktree", "add", wtPath, n.Branch); err != nil {
+			return err
+		}
+		return clearBaseUpstream(ctx, srcPath, n.Branch)
 	}
 	return err
+}
+
+// clearBaseUpstream drops an upstream pointing at a protected branch from the
+// task branch this claim just materialised (aihub#257).
+//
+// It runs on all three exits of addClaimWorktree, and each one needs it for a
+// different reason:
+//
+//   - on the CREATE path it is DEFENCE IN DEPTH and nothing more. --no-track
+//     wins over branch.autoSetupMerge=always — measured on git 2.43.0, the
+//     branch comes out with no upstream — so on any git that accepts the flag
+//     this call has no reachable behaviour. It is kept because the invariant
+//     worth holding is "the branch is not configured to push to main" rather
+//     than "the flag was passed", and a git too old for --no-track would break
+//     the flag and not the check. ⚠️ An earlier draft of this comment claimed
+//     autoSetupMerge=always was a second live reason. It is not; it was written
+//     from reasoning and disproved by measuring.
+//   - the two ATTACH paths take a branch that already exists, and every task
+//     branch created before this change carries upstream=origin/main. This is
+//     the exit that repairs, and it is deliberately NOT a workspace-wide sweep
+//     — see `polyforge doctor`'s branch-upstream check, which reports the rest
+//     and repairs nothing.
+//
+// ⚠️ THE ATTACH EXITS ARE NOT WHERE MOST OF THE DAMAGE IS. An existing task
+// worktree has a directory on disk, so the claim handler's os.Stat reuse fires
+// and addClaimWorktree is never called at all. repairReusedWorktreeUpstream
+// covers that path; this function covers only the case where the branch
+// survived but its directory did not.
+//
+// ctx has its cancellation stripped: the surrounding claim path deliberately
+// runs local git uncancellably (see addClaimWorktree), and a repair that failed
+// with "context canceled" after `worktree add` had already succeeded would fail
+// the whole claim for that repo and drop a healthy worktree from the state file.
+//
+// A genuine failure IS returned rather than swallowed: it means `git branch
+// --unset-upstream` failed on a branch that reported having an upstream, which
+// is a broken repo, not a routine outcome. Nothing here fails merely because
+// the branch has no upstream — GitClearProtectedUpstream reports that as
+// "nothing to clear".
+func clearBaseUpstream(ctx context.Context, srcPath, branch string) error {
+	cleared, err := coding.GitClearProtectedUpstream(context.WithoutCancel(ctx), srcPath, branch)
+	if err != nil {
+		return err
+	}
+	if cleared != "" {
+		fmt.Fprintf(os.Stderr, "polyforge: %s tracked %s and would have pushed there; upstream cleared\n", branch, cleared)
+	}
+	return nil
+}
+
+// repairReusedWorktreeUpstream clears a protected upstream from the branch an
+// ALREADY-EXISTING worktree has checked out (aihub#257).
+//
+// It reads the branch from the WORKTREE rather than using the name this claim
+// computed. A reused directory is routinely on a name today's derivation does
+// not produce — a pre-aihub#322 polyforge/<ulid8>, or a name from before the
+// work item's goal was edited — and unsetting the upstream of the name we
+// happen to have computed would either do nothing or touch an unrelated branch.
+// The worktree's own HEAD is the only authority on what is checked out in it.
+//
+// Failure is logged, never propagated. The caller has already decided this
+// worktree is healthy and is about to record it in the state file; a claim must
+// not be downgraded to "no worktree for this repo" because a repair of a
+// pre-existing condition did not work out.
+func repairReusedWorktreeUpstream(ctx context.Context, srcPath, wtPath string) {
+	out, err := exec.Command("git", "-C", wtPath, "symbolic-ref", "--quiet", "--short", "HEAD").Output()
+	if err != nil {
+		// Detached HEAD (exit 1) or an unreadable worktree. Neither has a branch
+		// whose upstream could send anything anywhere.
+		return
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return
+	}
+	if err := clearBaseUpstream(ctx, srcPath, branch); err != nil {
+		fmt.Fprintf(os.Stderr, "polyforge: could not clear %s's upstream in %s: %v\n", branch, srcPath, err)
+	}
 }
 
 // runGit runs a local git command in srcPath, folding its combined output into

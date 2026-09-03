@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GMISWE/ieops-aihub/internal/coding"
 	"github.com/GMISWE/ieops-aihub/internal/config"
 	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
@@ -137,17 +138,21 @@ func parseDoctorArgs(args []string) (doctorOpts, error) {
 	return opts, nil
 }
 
-// RunDoctor runs 7 diagnostic checks and reports their status.
+// RunDoctor runs 8 diagnostic checks and reports their status.
 // With --fix: attempts to auto-repair fixable issues.
 //
 // Checks (§12.1):
-//  1. workspace  – can locate .polyforge.yaml from wsRoot
-//  2. config     – ~/.polyforge/config not required in v1, checks aihub reachability
-//  3. repos      – .repo/<name>/ exist and match .polyforge.yaml remotes
-//  4. worktrees  – pf.<project>-<seq>/ list vs server wi list; flag orphans
-//  5. version    – GET /v1/version; compare min_client_version vs local binary
-//  6. claude_md  – CLAUDE.md managed block format + .polyforge/repo-map/ presence
-//  7. usage_md   – .polyforge/usage.md still carrying rules using-polyforge owns
+//  1. workspace       – can locate .polyforge.yaml from wsRoot
+//  2. config          – ~/.polyforge/config not required in v1, checks aihub reachability
+//  3. repos           – .repo/<name>/ exist and match .polyforge.yaml remotes
+//  4. worktrees       – pf.<project>-<seq>/ list vs server wi list; flag orphans
+//  5. branch-upstream – task worktrees whose branch tracks main/master/dev/tot
+//  6. version         – GET /v1/version; compare min_client_version vs local binary
+//  7. claude_md       – CLAUDE.md managed block format + .polyforge/repo-map/ presence
+//  8. usage_md        – .polyforge/usage.md still carrying rules using-polyforge owns
+//
+// ⚠️ --fix does NOT act on check 5. Its FixCmd is a command for a human to run
+// per worktree; see checkBranchUpstreams for why a sweep is the wrong shape.
 func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot string, args []string) {
 	opts, err := parseDoctorArgs(args)
 	if err != nil {
@@ -169,6 +174,7 @@ func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot
 		func() checkResult { return checkConfig(ctx, c) },
 		func() checkResult { return checkRepos(wsRoot, cfg) },
 		func() checkResult { return checkWorktrees(ctx, c, cfg, wsRoot, opts, os.Stdout) },
+		func() checkResult { return checkBranchUpstreams(ctx, cfg, wsRoot) },
 		func() checkResult { return checkVersion(ctx, c) },
 		func() checkResult { return checkClaudeMd(wsRoot) },
 		func() checkResult { return checkUsageMd(wsRoot) },
@@ -352,6 +358,210 @@ func healthVerdict(health map[string]any) checkResult {
 				strings.Join(unreadable, ", "), suffix)}
 	}
 	return checkResult{Name: name, Status: "ok", Message: "aihub reachable" + suffix}
+}
+
+// upstreamOffender is one task worktree configured to push to a protected
+// branch.
+type upstreamOffender struct {
+	Repo     string // the .repo/<name> the worktree belongs to
+	Worktree string // absolute path of the linked worktree
+	Branch   string // the branch it has checked out
+	Upstream string // the protected upstream, as `<remote>/<branch>`
+}
+
+// checkBranchUpstreams reports task worktrees whose checked-out branch tracks a
+// protected branch — the state in which a bare `git push` can land on main.
+//
+// WHY IT IS A SEPARATE CHECK FROM `worktrees`. That one asks whether a
+// directory should still exist. This one asks whether the branch inside it is
+// aimed somewhere dangerous, which is orthogonal: a perfectly live worktree of
+// a running work item is exactly the case that matters most here.
+//
+// WHAT IT COUNTS, stated because three different numbers were available and two
+// of them are the wrong instrument (measured 2026-09-03 in this workspace):
+//
+//   - 5,580 LOCAL BRANCHES across the 45 clones track origin/main. Most belong
+//     to no worktree at all. A branch that is not checked out anywhere cannot
+//     receive a bare `git push`, so counting these reports a hazard four times
+//     larger than the one that exists, and buries the live cases in it.
+//   - 273 worktrees exist counting each clone's own main worktree. Those are
+//     legitimately on main tracking origin/main and must never be flagged,
+//     which is what the branch != remoteBranch guard in
+//     GitClearProtectedUpstream is for.
+//   - 227 LINKED worktrees are on a branch, and ~198 of those branches track
+//     origin/main. That is the hazard surface, and it is what this counts.
+//
+// ⚠️ THAT LAST NUMBER IS DELIBERATELY APPROXIMATE. Two measurements an hour
+// apart on the same day gave 199 and then 198 — a worktree's branch acquired
+// its own upstream in between, because the workspace is live and other people
+// are working in it. A comment that pinned an exact figure would be wrong by
+// the afternoon; the whole reason this is a check and not a docs table is that
+// the count has to be taken, not remembered.
+//
+// IT REPAIRS NOTHING, including under --fix. Changing an upstream rewrites the
+// meaning of `git push` in a directory somebody else may be working in right
+// now, and the fleet-wide version of that is a one-command edit to 199
+// checkouts belonging to other people. The remedy is printed per branch and
+// left to a human. The claim path repairs the ONE branch it is materialising
+// (clearBaseUpstream), which is the only branch polyforge is the actor on.
+func checkBranchUpstreams(ctx context.Context, cfg *config.Config, wsRoot string) checkResult {
+	const name = "branch-upstream"
+	if cfg == nil {
+		return checkResult{Name: name, Status: "warning", Message: "skipped (no config)"}
+	}
+
+	seen := map[string]bool{}
+	var offenders []upstreamOffender
+	var unreadable []string
+	scanned := 0
+	for _, proj := range cfg.Projects {
+		for _, r := range proj.Repos {
+			repoPath := filepath.Join(wsRoot, ".repo", r.Name)
+			if seen[repoPath] {
+				continue // a repo shared by two projects is one clone
+			}
+			seen[repoPath] = true
+			if _, err := os.Stat(repoPath); err != nil {
+				continue // checkRepos owns "the clone is missing"
+			}
+			wts, listErr := linkedWorktreeBranches(ctx, repoPath)
+			if listErr != nil {
+				unreadable = append(unreadable, r.Name)
+				continue
+			}
+			for wt, branch := range wts {
+				scanned++
+				remote, remoteBranch, err := coding.GitUpstream(ctx, repoPath, branch)
+				if err != nil {
+					unreadable = append(unreadable, r.Name+"/"+branch)
+					continue
+				}
+				if remote == "" || remote == "." {
+					continue
+				}
+				if remoteBranch == branch || !coding.IsProtectedBranch(remoteBranch) {
+					continue
+				}
+				offenders = append(offenders, upstreamOffender{
+					Repo: r.Name, Worktree: wt, Branch: branch, Upstream: remote + "/" + remoteBranch,
+				})
+			}
+		}
+	}
+
+	// "Nothing found" and "nothing looked" must not print the same line. Without
+	// this, a git that is missing or broken for every repo produces scanned == 0
+	// and an [ok] that reads exactly like a clean workspace.
+	sort.Strings(unreadable)
+	suffix := ""
+	if len(unreadable) > 0 {
+		suffix = fmt.Sprintf("; %d could not be read: %s", len(unreadable), strings.Join(unreadable, ", "))
+	}
+	unreadableStatus := "ok"
+	if len(unreadable) > 0 {
+		unreadableStatus = "warning"
+	}
+
+	if scanned == 0 {
+		return checkResult{Name: name, Status: unreadableStatus,
+			Message: "no task worktrees to check" + suffix}
+	}
+	if len(offenders) == 0 {
+		return checkResult{Name: name, Status: unreadableStatus,
+			Message: fmt.Sprintf("%d task worktrees, none tracking a protected branch%s", scanned, suffix)}
+	}
+
+	sort.Slice(offenders, func(i, j int) bool { return offenders[i].Worktree < offenders[j].Worktree })
+	const showAtMost = 5
+	shown := make([]string, 0, showAtMost)
+	for _, o := range offenders[:min(len(offenders), showAtMost)] {
+		// The pf.<project>-<seq> directory AND the repo: one work item can have a
+		// worktree per repo, and labelling by directory alone renders those as
+		// several identical entries.
+		shown = append(shown, fmt.Sprintf("%s/%s -> %s",
+			filepath.Base(filepath.Dir(o.Worktree)), o.Repo, o.Upstream))
+	}
+	msg := fmt.Sprintf("%d of %d task worktrees track a protected branch, so `git push` with "+
+		"push.default=upstream would push them there: %s",
+		len(offenders), scanned, strings.Join(shown, ", "))
+	if len(offenders) > showAtMost {
+		msg += fmt.Sprintf(" (+%d more)", len(offenders)-showAtMost)
+	}
+	return checkResult{Name: name, Status: "warning", Message: msg + suffix,
+		FixCmd: "either `git config --global push.default current`, which makes a bare push " +
+			"target the branch's own name everywhere and touches no branch config; or, per " +
+			"worktree and only where you know nobody else is working: git branch --unset-upstream"}
+}
+
+// linkedWorktreeBranches maps each LINKED worktree of repoPath that is on a
+// branch AND still exists on disk to that branch. Three kinds of entry are
+// excluded, each for a different reason:
+//
+//   - the clone's own main worktree — tracking origin/main there is correct.
+//   - a detached HEAD — no branch, so no upstream to aim anywhere.
+//   - a PRUNABLE entry — a worktree whose directory was deleted but whose
+//     registration survives. Git still prints its `branch refs/heads/<b>` line,
+//     so without this it inflates the denominator and can be reported as an
+//     offender with a remedy that says "run this in a directory" that is gone.
+//     It also cannot receive a bare push, which is the whole criterion.
+//
+// `worktree list --porcelain` emits the main worktree first, which is the only
+// documented ordering guarantee, so it is skipped by comparing paths rather
+// than by position. ⚠️ filepath.Abs comes before EvalSymlinks because
+// EvalSymlinks on a relative path returns a relative path while git always
+// prints an absolute one; POLYFORGE_WORKSPACE_ROOT accepts a relative value, and
+// the two would then never compare equal — the exclusion would silently stop
+// working and every clone's main worktree would re-enter the count.
+//
+// An error is returned rather than folded into an empty map: "git could not be
+// run here" and "this repo has no task worktrees" are the same value otherwise,
+// and the caller reports them differently on purpose.
+func linkedWorktreeBranches(ctx context.Context, repoPath string) (map[string]string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return nil, fmt.Errorf("git -C %s worktree list: %w", repoPath, err)
+	}
+	main := repoPath
+	if abs, absErr := filepath.Abs(repoPath); absErr == nil {
+		main = abs
+	}
+	if resolved, symErr := filepath.EvalSymlinks(main); symErr == nil {
+		main = resolved
+	}
+
+	res := map[string]string{}
+	// Entries are blank-line separated blocks, so a block's flags can follow its
+	// branch line; the branch is therefore recorded per block and committed only
+	// once the block ends.
+	cur, branch, prunable := "", "", false
+	flush := func() {
+		if cur != "" && branch != "" && !prunable {
+			resolved := cur
+			if r, symErr := filepath.EvalSymlinks(cur); symErr == nil {
+				resolved = r
+			}
+			if resolved != main {
+				res[cur] = branch
+			}
+		}
+		cur, branch, prunable = "", "", false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case line == "":
+			flush()
+		case strings.HasPrefix(line, "worktree "):
+			flush()
+			cur = strings.TrimPrefix(line, "worktree ")
+		case strings.HasPrefix(line, "branch refs/heads/"):
+			branch = strings.TrimPrefix(line, "branch refs/heads/")
+		case line == "prunable" || strings.HasPrefix(line, "prunable "):
+			prunable = true
+		}
+	}
+	flush()
+	return res, nil
 }
 
 // checkRepos verifies that .repo/<name>/ directories exist and their remote

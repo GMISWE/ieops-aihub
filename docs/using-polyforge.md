@@ -103,6 +103,26 @@ wrap note 里各写一次：**A** 类已关闭（给出闸的 `file:line`，并�
   终态调用会删掉 state 文件，凭据没了，之后再补一个 `pf_emit_event` 会因为没凭据而失败。
 - 终态**不会**帮你删 worktree 目录。自己 `git worktree remove`，或者跑 `polyforge doctor --fix`。
 
+### task 分支的 upstream（`aihub#257`）
+
+polyforge 以前用 `git worktree add -b <task> <path> origin/main` 建 task 分支，git 的
+`branch.autoSetupMerge` 默认值会把 **`origin/main` 设成这个分支的 upstream**。它一直没炸，只是因为
+`push.default` 没人设过、走 git 内置的 `simple`（名字不匹配就拒绝）。**谁把 `push.default` 设成
+`upstream` 或 `tracking`（全局或仓级），那条裸 `git push` 就会把 task 分支的 commit 直接推到 `main`，
+exit 0，没有任何警告。**
+
+现在：
+
+- 新建的 task 分支带 `--no-track`，**没有 upstream**；claim 一个已存在的 worktree 会顺手把它那条
+  指向 `main` 的 upstream 清掉。
+- `pf_push` / `pf_ship` 推完会把 upstream 设成 `origin/<task 分支>`。
+- ⚠️ **因此裸 `git pull` 的含义变了**：第一次 push 之后它合的是 `origin/<task 分支>` 而不是
+  `origin/main`；第一次 push 之前它会直接报 "no tracking information" 而不是悄悄把 main 合进来。
+  **要合基线分支就显式写 `git merge origin/main`。**
+- 想知道自己工作区里还剩多少个旧的危险 worktree：`polyforge doctor` 的 `branch-upstream` 一行。
+  它**只报不修** —— 改别人正在用的 worktree 的 `git push` 含义，不该由一条命令替所有人决定。
+  最省事的缓解是 `git config --global push.default current`（裸 push 一律推同名分支，不动任何分支配置）。
+
 ---
 
 ## 再往下

@@ -122,6 +122,133 @@ var protectedBranches = map[string]bool{
 	"tot":    true,
 }
 
+// IsProtectedBranch reports whether name is one of the branches this package
+// refuses to push to directly.
+//
+// Exported so the same list answers both questions that depend on it — "may I
+// push here" (GitPush) and "is this task branch configured to push here"
+// (GitClearProtectedUpstream, and the doctor check that scans the workspace).
+// A second copy of the list in another package is the shape BaseMovedMarker's
+// comment above describes: two literals that must agree with nothing forcing
+// them to, so `dev` gets added here and the scanner silently keeps missing it.
+func IsProtectedBranch(name string) bool { return protectedBranches[name] }
+
+// GitUpstream reports the remote and the remote-side branch that `branch` in
+// gitDir is configured to track. Both are "" when the branch tracks nothing,
+// which is not an error.
+//
+// It reads %(upstream:remotename) and %(upstream:remoteref) rather than
+// %(upstream:short) because the short form is `<remote>/<branch>` with no
+// escaping, and every task branch this repo produces is named
+// `polyforge/<project>-<seq>-<desc>` — splitting that on "/" to recover the
+// remote gives "origin" and "polyforge/..." for one case and "polyforge" and
+// "aihub-257-..." for the other, from strings of identical shape. The two
+// atoms are already parsed by git and cannot be confused.
+//
+// gitDir may be any working tree or repository of the branch: branch config
+// lives in the shared config file, so a linked worktree and its main clone
+// answer identically.
+func GitUpstream(ctx context.Context, gitDir, branch string) (remote, remoteBranch string, err error) {
+	want := "refs/heads/" + branch
+	out, err := exec.CommandContext(ctx, "git", "-C", gitDir, "for-each-ref",
+		"--format=%(refname)%09%(upstream:remotename)%09%(upstream:remoteref)",
+		want).Output()
+	if err != nil {
+		return "", "", fmt.Errorf("git for-each-ref %s: %w", want, err)
+	}
+	// ⚠️ for-each-ref's pattern is NOT an exact match: a pattern with no globbing
+	// character matches the ref itself OR anything under it as a directory, so
+	// `refs/heads/polyforge` matches every polyforge/<task> branch in the repo.
+	// Neither caller can reach that today — both pass a branch that exists, and
+	// `refs/heads/X` and `refs/heads/X/Y` are a git D/F conflict — but reading
+	// the first of several lines would report one branch's upstream as another's.
+	//
+	// %(refname) IS IN THE FORMAT FOR THIS REASON, not for display. Without it a
+	// ref with no upstream prints an all-empty line, blank-line filtering drops
+	// it, and a two-ref over-match where only one ref has an upstream counts as
+	// one — measured on git 2.43.0 with pfx/one tracking origin/main and pfx/two
+	// tracking nothing: the pattern `refs/heads/pfx` printed `origin\trefs/heads/
+	// main` and `\t`, so a filter-then-count guard returned origin/main for the
+	// name "pfx", which is no branch at all. Counting REFS and requiring the one
+	// match to be the ref asked for is immune to what those refs are configured
+	// to track.
+	var refs [][3]string
+	for _, l := range strings.Split(string(out), "\n") {
+		if l = strings.TrimRight(l, "\r"); l == "" {
+			continue
+		}
+		f := strings.SplitN(l, "\t", 3)
+		if len(f) != 3 {
+			continue
+		}
+		refs = append(refs, [3]string{f[0], f[1], f[2]})
+	}
+	if len(refs) != 1 || refs[0][0] != want {
+		// Zero: no such branch — indistinguishable here from "branch with no
+		// upstream", and deliberately so, because both callers want "nothing to
+		// clear". Otherwise: the pattern over-matched.
+		return "", "", nil
+	}
+	if refs[0][1] == "" || refs[0][2] == "" {
+		return "", "", nil
+	}
+	return refs[0][1], strings.TrimPrefix(refs[0][2], "refs/heads/"), nil
+}
+
+// GitClearProtectedUpstream removes `branch`'s upstream when it points at a
+// protected branch that is not `branch` itself, and reports what it cleared
+// ("" when there was nothing to clear).
+//
+// WHY THIS EXISTS. A branch's upstream is where a bare `git push` sends it
+// under push.default=upstream (and its alias `tracking`). polyforge used to
+// create every task branch with `git worktree add -b <task> <path> origin/main`,
+// and git's branch.autoSetupMerge default makes a start point that is a
+// remote-tracking branch the new branch's upstream — so every task branch was
+// configured to push to main. Nothing pushed to main only because push.default
+// was unset everywhere, leaving git's built-in `simple`, which refuses when the
+// upstream's name differs from the branch's. Measured in a scratch repo (git
+// 2.43.0): with push.default=upstream, a bare `git push --dry-run --porcelain`
+// on such a branch reports `refs/heads/polyforge/...:refs/heads/main` and exits
+// 0. One config line, global or per-repo, and the accident is a fast-forward of
+// main with no prompt.
+//
+// ⚠️ THE FAILING CASE IS THE ONE THAT SUCCEEDS. Do not test this by checking
+// that a push fails; test the destination ref the dry run names.
+//
+// THREE THINGS ARE DELIBERATELY LEFT ALONE, and each one is a value some other
+// part of the system depends on:
+//
+//   - `origin/<branch>` — the correct setting, and what GitPush's --set-upstream
+//     leaves behind. Cleared by a repair written as "unset any upstream on a
+//     task branch", and nothing would go red, because "no upstream" is also not
+//     a dangerous upstream.
+//   - main tracking origin/main — kept by remoteBranch != branch. Stripping it
+//     breaks `git pull` in every .repo/<name> clone with no diagnostic.
+//   - a LOCAL-tracking upstream, `branch.<n>.remote = "."` — what `git branch
+//     --set-upstream-to=main <task>` and branch.autoSetupMerge=always off a
+//     local base produce. Measured on git 2.43.0: %(upstream:remotename) is "."
+//     and %(upstream:remoteref) is refs/heads/main, so without the remote != "."
+//     guard this reads as a protected upstream and gets unset. It is NOT the
+//     hazard — a push to "." cannot move origin/main, and git refuses to update
+//     a checked-out branch in a non-bare repo — and it is exactly what gives a
+//     task worktree its ahead/behind-vs-main readout in `git status`. Clearing
+//     it would delete the information this change is accused of costing.
+func GitClearProtectedUpstream(ctx context.Context, gitDir, branch string) (string, error) {
+	remote, remoteBranch, err := GitUpstream(ctx, gitDir, branch)
+	if err != nil {
+		return "", err
+	}
+	if remote == "" || remote == "." || remoteBranch == branch || !IsProtectedBranch(remoteBranch) {
+		return "", nil
+	}
+	out, err := exec.CommandContext(ctx, "git", "-C", gitDir,
+		"branch", "--unset-upstream", branch).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git branch --unset-upstream %s: %w\n%s", branch, err, out)
+	}
+	return remote + "/" + remoteBranch, nil
+}
+
 // GitRemoteBranchExists reports whether branch currently exists on origin.
 //
 // This asks the remote rather than reading refs/remotes/origin/<branch>, because
@@ -155,6 +282,32 @@ func GitRemoteBranchExists(ctx context.Context, worktreePath, branch string) (bo
 //
 // The refspec is explicit (HEAD:refs/heads/<branch>) rather than a bare HEAD so
 // the destination does not depend on the repo's push.default setting.
+//
+// --set-upstream is passed for the OTHER direction of the same concern: it
+// leaves the branch tracking origin/<branch>, which is the value that makes a
+// human's bare `git push` in that worktree correct under every push.default,
+// including the `upstream`/`tracking` values that used to send it to main (see
+// GitClearProtectedUpstream). It is deliberately not conditional — re-setting
+// an upstream that already holds the right value is a no-op, and a claim that
+// resumes an older worktree is exactly the case that needs it set.
+//
+// ⚠️ CONSEQUENCE, recorded because it is a real behaviour change: `git pull`
+// with no arguments in a task worktree now merges origin/<task branch> rather
+// than origin/main, and before the first push it fails outright ("no tracking
+// information") instead of quietly merging main. Merging the base branch is
+// now an explicit `git merge origin/main`. That is louder, not silent, which
+// is the trade this accepts. Documented for humans in docs/using-polyforge.md;
+// a behaviour change that reaches no user-facing text is one people rediscover
+// as a bug.
+//
+// ⚠️ SECOND-ORDER, accepted rather than fixed: --set-upstream writes branch.*
+// into the clone's SHARED config file, so two pushes from two worktrees of the
+// same clone can collide on config.lock. Git does not retry, so GitPush can
+// return an error for a push that already succeeded on the remote. It is
+// idempotent on retry — the branch is then present on origin and the retry
+// takes the --force-with-lease path — but it is a new way for a successful
+// push to be reported as a failure, and it is here so the next person seeing
+// "cannot lock config file" does not go looking for a lease problem.
 func GitPush(ctx context.Context, worktreePath string) (string, error) {
 	// Get current branch
 	branchOut, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD").Output()
@@ -173,7 +326,7 @@ func GitPush(ctx context.Context, worktreePath string) (string, error) {
 		return "", err
 	}
 
-	args := []string{"-C", worktreePath, "push"}
+	args := []string{"-C", worktreePath, "push", "--set-upstream"}
 	if remoteExists {
 		args = append(args, "--force-with-lease")
 	}

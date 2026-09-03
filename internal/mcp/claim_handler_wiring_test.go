@@ -215,3 +215,74 @@ func TestClaimHandlerNamesTheBranchAfterTheGoal(t *testing.T) {
 		t.Errorf("worktree is on %q, want %q — the goal did not reach the branch name", got, want)
 	}
 }
+
+// TestClaimHandlerRepairsAnExistingWorktreeUpstream is the aihub#257 wiring
+// assertion, and the one that decides whether that change reaches anybody.
+//
+// WHY IT CANNOT BE A claim_worktree_test.go TEST. Every test in that file calls
+// addClaimWorktree directly, and its fixture FATALS when the worktree directory
+// already exists (claimRepo.add) — because "the directory is absent" is the
+// precondition addClaimWorktree needs. But the 199 hazardous worktrees measured
+// in the live workspace are LINKED WORKTREES: each has a directory on disk by
+// definition. So for every one of them the handler's os.Stat reuse fires and
+// addClaimWorktree is never called at all. A fix placed only inside that
+// function is green on fifteen tests and reaches none of the population it was
+// written for. That is the aihub#264 shape — prevention that cannot touch the
+// instances the work item was filed about.
+//
+// MUTANT: delete the repairReusedWorktreeUpstream call from the claim handler's
+// reuse branch. Every test in claim_worktree_upstream_test.go stays green and
+// this one reports upstream=origin/main.
+func TestClaimHandlerRepairsAnExistingWorktreeUpstream(t *testing.T) {
+	const wiID = "wi_01JREUSEUPSTREAM1"
+	const branch = "polyforge/aihub-257-reused"
+
+	w := newClaimWorkspace(t)
+	wtPath := filepath.Join(w.root, "pf.aihub-257", "aihub")
+
+	// Exactly what a pre-fix claim left behind: a real linked worktree whose
+	// branch tracks origin/main.
+	wsGit(t, w.src, "worktree", "add", "-q", "-b", branch, wtPath, "origin/main")
+	if up := wsGit(t, w.src, "for-each-ref", "--format=%(upstream:short)", "refs/heads/"+branch); up != "origin/main" {
+		t.Fatalf("fixture did not reproduce the hazardous state: upstream is %q", up)
+	}
+
+	f := newFakeAihub(t)
+	f.on("/v1/work_items/"+wiID+"/claim", func(map[string]any) (int, any) {
+		return 200, claimResponse(wiID, "aihub#257", "aihub", "reused")
+	})
+
+	result, isErr := callTool(t, f, "pf_claim_work_item", map[string]any{
+		"work_item_id":    wiID,
+		"idempotency_key": "idem-reuse-upstream",
+	})
+	if isErr {
+		t.Fatalf("pf_claim_work_item failed: %v", result)
+	}
+
+	worktrees, ok := result["worktrees"].(map[string]any)
+	if !ok || fmt.Sprint(worktrees["aihub"]) != wtPath {
+		t.Fatalf("the claim did not reuse the existing worktree at %s: %v", wtPath, result)
+	}
+	if got := wsGit(t, wtPath, "rev-parse", "--abbrev-ref", "HEAD"); got != branch {
+		t.Fatalf("reused worktree is on %q, want %q", got, branch)
+	}
+
+	if up := wsGit(t, w.src, "for-each-ref", "--format=%(upstream:short)", "refs/heads/"+branch); up == "origin/main" {
+		t.Errorf("after a claim reused this worktree its branch still tracks origin/main, so a "+
+			"bare `git push` here still targets main; the repair never ran on the path every "+
+			"existing worktree takes (branch %s)", branch)
+	}
+
+	// The consequence, measured the same way as everywhere else in this change:
+	// the destination ref a bare push would name, under the push.default value
+	// that makes the hazard live.
+	wsGit(t, w.src, "config", "push.default", "upstream")
+	wsWrite(t, wtPath, "task.txt", "work")
+	wsGit(t, wtPath, "add", "task.txt")
+	wsGit(t, wtPath, "commit", "-q", "-m", "task commit")
+	out, _ := exec.Command("git", "-C", wtPath, "push", "--dry-run", "--porcelain").CombinedOutput()
+	if strings.Contains(string(out), ":refs/heads/main") {
+		t.Errorf("a bare `git push` in the reused worktree would write refs/heads/main:\n%s", out)
+	}
+}

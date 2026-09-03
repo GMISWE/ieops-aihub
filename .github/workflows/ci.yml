@@ -1606,6 +1606,55 @@ jobs:
           ! grep -q -- '--- SKIP' declared_resources_release.log \
             || { echo "::error::an aihub#264 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#261: the file_scope lock key had no repo segment, so in a multi-repo
+      # project every repo's go.mod / go.sum / Makefile / README.md / Dockerfile
+      # derived ONE key. Measured on the acquire path, that is a hard block: two
+      # work items editing two physically different files 409 each other
+      # (ieops#606 vs ieops#571, aihub#256).
+      #
+      # Every arm here goes through a real entry point rather than through the
+      # mapper, and that is the point of the step rather than a style choice.
+      # aihub#342 established that this repo has FOUR sites which turn a declared
+      # resource into a lock key, two of which decode into a local anonymous
+      # struct whose field list is written out by hand — so a new field reaches
+      # the mapper at some sites and silently reads as its zero value at others,
+      # with nothing to grep for. A test that pinned derivedLock's output would
+      # be green while claim and force_takeover still collided.
+      #
+      # The pairs are load-bearing. Each "these two no longer collide" arm is
+      # matched by a "and this pair still does" arm, because the fix makes lock
+      # keys FINER and a finer key is the direction that can MISS a conflict —
+      # silent, unlike the noisy false conflict being removed.
+      - name: aihub#261 file_scope repo-qualified lock key DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestFileScopeRepoKey' -count=1 -v 2>&1 | tee file_scope_repo_key.log
+          for want in 'TestFileScopeRepoKey_ClaimDoesNotCollideAcrossRepos' \
+                      'TestFileScopeRepoKey_ClaimStillCollidesWithinOneRepo' \
+                      'TestFileScopeRepoKey_UnqualifiedDeclarationStillConflictsWithQualifiedHolder/qualified_holder_blocks_unqualified_claimer' \
+                      'TestFileScopeRepoKey_UnqualifiedDeclarationStillConflictsWithQualifiedHolder/unqualified_holder_blocks_qualified_claimer' \
+                      'TestFileScopeRepoKey_ForceTakeoverDerivesRepoQualifiedKey' \
+                      'TestFileScopeRepoKey_AcquireLocksDoesNotCollideAcrossRepos' \
+                      'TestFileScopeRepoKey_PredictRule1NoHardBlockAcrossRepos' \
+                      'TestFileScopeRepoKey_NarrowingReleasesRepoQualifiedLock' \
+                      'TestFileScopeRepoKey_ProbeSQLAndGoAgree' \
+                      'TestFileScopeRepoKey_RepoDefaultIsSingleRepoOnly' \
+                      'TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite/claim' \
+                      'TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite/force_takeover' \
+                      'TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite/acquire_locks' \
+                      'TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite/predict_rule_1' \
+                      'TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite/narrowing_release' \
+                      'TestFileScopeRepoKey_DroppingTheRepoEntryDoesNotReleaseStillDeclaredLocks' \
+                      'TestFileScopeRepoKey_WrongTypedRepoDoesNotZeroOutEveryLock' \
+                      'TestFileScopeRepoKey_RepoNameIsTrimmed'; do
+            grep -q -- "--- PASS: $want" file_scope_repo_key.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); that aihub#261 derivation site is not actually covered"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' file_scope_repo_key.log \
+            || { echo "::error::an aihub#261 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#259: pf_read_events published a `types` filter that the MCP tool
       # never put on the wire, so GET /v1/events was always called unfiltered.
       # The handler and the SQL both implemented it correctly — only the MCP hop

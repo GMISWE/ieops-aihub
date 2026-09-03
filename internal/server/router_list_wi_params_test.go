@@ -137,6 +137,30 @@ func TestListWorkItems_EveryFilterParamReachesTheFilter(t *testing.T) {
 				t.Errorf("filter.IncludeStepState = false — the include_step_state param never reached the filter")
 			}
 		}},
+		// aihub#277. Hop 4 for this one is NOT in
+		// work_items_list_filters_test.go's table: SimilarTo and MinSimilarity
+		// reach SQL through listWorkItemsByVector, not through
+		// buildListWorkItemsWhere, so that table's completeness check cannot
+		// see them however carefully it is written. Their hop 4 lives in
+		// internal/server/routes_wi_similar_to_db_test.go.
+		{"similar_to", "similar_to=aihub%23276", func(t *testing.T, f domain.ListWorkItemsFilter) {
+			if f.SimilarTo == nil {
+				t.Fatalf("filter.SimilarTo is nil — the similar_to param never reached the filter")
+			}
+			if *f.SimilarTo != "aihub#276" {
+				t.Errorf("filter.SimilarTo = %q, want %q", *f.SimilarTo, "aihub#276")
+			}
+		}},
+		// aihub#276. Probed with a value that is NOT the zero value, because 0
+		// is exactly what "no floor" means: a min_similarity that never reached
+		// the filter would leave the field at 0 and be indistinguishable from a
+		// caller who never sent one. That is the shape queryparam.go's header
+		// records for `similarity_threshold=notanumber`.
+		{"min_similarity", "min_similarity=0.75", func(t *testing.T, f domain.ListWorkItemsFilter) {
+			if f.MinSimilarity != 0.75 {
+				t.Errorf("filter.MinSimilarity = %v, want 0.75 — the min_similarity param never reached the filter", f.MinSimilarity)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, project, rec := captureListWIFilter(t, "project=testproject&"+tc.query)

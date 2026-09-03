@@ -268,14 +268,40 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		// against, the query is bounded to the projects this caller can see via
 		// AccessibleProjects (the same mechanism the /ui view-all option uses),
 		// so an id outside that set simply returns no rows.
+		//
+		// aihub#277 puts similar_to= in the same category, for the same reason:
+		// it names exactly one source work item, so there is no project for the
+		// caller to restate either, and omitting project is what makes
+		// CROSS-project neighbour search reachable — the motivating case, since
+		// semantic dedup wants to know about a near-duplicate wherever it lives.
+		// The same AccessibleProjects bound applies to the results AND to the
+		// source lookup (semanticQuerySource scopes the source to exactly this
+		// set), so a source outside it reads as not found rather than being used.
+		//
+		// 🔴 Both params are read early because this guard runs long before the
+		// semantic block below, and the whole point of the guard is to decide
+		// whether project may be omitted.
+		//
+		// They are NOT read the same way, and the asymmetry is deliberate but
+		// worth knowing: `query` is taken raw, as it has been since aihub#273
+		// (trimming it would change which text gets embedded, and the domain
+		// does its own TrimSpace when deciding whether the query is empty),
+		// while `similar_to` is trimmed because it is an identifier, and
+		// `similar_to=%20` must not read as "an identifier was supplied". One
+		// visible consequence: `query=%20&similar_to=X` is rejected as "both
+		// supplied" rather than treated as similar_to alone.
+		q := c.QueryParam("query")
+		similarTo := trimmedParam(c, "similar_to")
 		if project == "" {
 			// len(ids)==0 rather than the raw param being empty: `ids=,` and
 			// `ids=%20` are non-empty strings that carry no id, and treating
 			// those as "an ids lookup" would drop the project requirement and
-			// then list every accessible project in full.
-			if len(ids) == 0 {
+			// then list every accessible project in full. similarTo goes
+			// through trimmedParam for the same reason.
+			if len(ids) == 0 && similarTo == "" {
 				return writeError(c, domain.NewErr(domain.ErrBadRequest,
-					"project query parameter is required (or pass ids= to look up work items by id)"))
+					"project query parameter is required (or pass ids= to look up work items by id, "+
+						"or similar_to= to find work items similar to one)"))
 			}
 			if u == nil {
 				return writeError(c, domain.NewErr(domain.ErrUnauthorized, "not authenticated"))
@@ -438,12 +464,51 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		// aihub#273: semantic search. Similarity ordering has no stable
 		// pagination key and overrides sort — reject the combinations loudly
 		// instead of silently ignoring a parameter (the aihub#267/#271 family).
-		if q := c.QueryParam("query"); q != "" {
+		//
+		// aihub#277 adds similar_to=, the document→document shape. It is a
+		// second SOURCE for the same similarity ordering, so it inherits the
+		// same sort/order/cursor rejection, and the two sources are mutually
+		// exclusive: a request naming both is asking for two different query
+		// vectors at once, and picking one silently is what this family of
+		// work items exists to stop.
+		if q != "" && similarTo != "" {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest,
+				"query and similar_to are mutually exclusive: query embeds the text you pass, "+
+					"similar_to reuses another work item's stored vector — pass exactly one"))
+		}
+		if q != "" || similarTo != "" {
 			if c.QueryParam("sort") != "" || c.QueryParam("order") != "" || c.QueryParam("cursor") != "" {
 				return writeError(c, domain.NewErr(domain.ErrBadRequest,
-					"query (semantic search) does not combine with sort, order, or cursor"))
+					"semantic search (query or similar_to) does not combine with sort, order, or cursor"))
 			}
+		}
+		if q != "" {
 			filter.Query = &q
+		}
+		if similarTo != "" {
+			filter.SimilarTo = &similarTo
+		}
+		// min_similarity: opt-in cosine floor, default 0 = off. Parsed here so
+		// a malformed or out-of-range value is a 400 rather than reaching the
+		// SQL — and so it is NEVER defaulted on a parse failure, which would
+		// make "0.9 typo'd" and "not sent" the same request.
+		//
+		// 🔴 The default is 0 and must stay 0: there is no globally valid
+		// floor. See internal/domain/wi_vector.go's header for the 20-query
+		// measurement that refutes every candidate value.
+		// Through queryFloatInRange, not a hand-rolled ParseFloat: cosine
+		// similarity has a closed domain, so an out-of-range floor is Rule 1
+		// (the caller's mistake, and rejected) rather than something to clamp.
+		// Rejecting matters in the silent direction — min_similarity=1.5 would
+		// otherwise return an empty page indistinguishable from "no
+		// neighbours", and NaN compares false against every bound and so would
+		// disable the filter from the inside.
+		minSim, minSimPresent, minSimErr := queryFloatInRange(c, "min_similarity", 0, 1)
+		if minSimErr != nil {
+			return writeError(c, minSimErr)
+		}
+		if minSimPresent {
+			filter.MinSimilarity = minSim
 		}
 		// sort/order (aihub#224). Both default to the historical behaviour
 		// (created_at desc); an unrecognised value is rejected rather than

@@ -600,7 +600,7 @@ func TestRedactHeadRepointsCursor(t *testing.T) {
 	require.Equal(t, v2.ID, latestOf(t, pool, v1.ID), "precondition: v2 is the active head")
 
 	// Redact the active head (v2). v1 is the newest surviving row.
-	aerr := Redact(context.Background(), pool, v2.ID, u, "writer")
+	aerr := Redact(context.Background(), pool, v2.ID, u, u, "writer", "aihub#201 lineage-head test")
 	require.Nil(t, aerr)
 
 	assert.Equal(t, "redacted", statusOf(t, pool, v2.ID))

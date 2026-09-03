@@ -539,7 +539,33 @@ func handleRedactMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "memory id is required"))
 		}
 
-		if aihubErr := domain.Redact(ctx, pool, memID, u.UserID, u.Role); aihubErr != nil {
+		// aihub#175 finding 1: enforce project-writer access BEFORE redacting,
+		// mirroring handleActivateMemory (aihub#146) exactly. domain.Redact's own
+		// check is "author or global admin", which never consults the project —
+		// so an author whose project access was revoked could still redact
+		// (IDOR). The project gate is the one that expires; the author check is
+		// not a substitute for it. A memory's project is immutable, so a
+		// pre-check has no TOCTOU concern.
+		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
+		if loadErr != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+		}
+		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+			return err
+		}
+
+		// aihub#175 finding 2 / aihub#349: `reason` is REQUIRED by
+		// pf_redact_memory's schema and has always reached the wire (see
+		// internal/mcp/memory_tools_wire_test.go), but nothing bound it here, so
+		// every redaction's stated reason was dropped. Best-effort bind: the
+		// reason is audit metadata, never a gate, so a malformed or absent body
+		// must not change which requests this endpoint accepts.
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		_ = c.Bind(&body)
+
+		if aihubErr := domain.Redact(ctx, pool, memID, u.UserID, u.DisplayName, u.Role, body.Reason); aihubErr != nil {
 			return domainErr(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})

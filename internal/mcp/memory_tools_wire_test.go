@@ -156,15 +156,15 @@ var memoryToolWire = map[string]toolWire{
 		base: map[string]any{"memory_id": probeMemory, "reason": "why"},
 		probes: map[string]wireProbe{
 			"memory_id": {shape: probeMemory, landing: landPath},
-			// 🔴 FOUND WHILE WRITING THIS TABLE, NOT FIXED HERE: `reason` is
-			// REQUIRED by the schema and does reach the wire (this probe is
-			// green), and then handleRedactMemory binds no body at all —
-			// domain.Redact(ctx, pool, memID, callerUserID, callerRole) has no
-			// parameter for it and stores nothing. So every redaction's stated
-			// reason is discarded at hop 3. Same family as aihub#325, one hop
-			// further out; fixing it means changing domain.Redact's signature
-			// and deciding where the reason is stored, which is outside this
-			// change's file scope. Reported, not filed.
+			// Was 🔴 here: `reason` is REQUIRED by the schema and reached the
+			// wire (this probe was already green), and then handleRedactMemory
+			// bound no body at all, so every redaction's stated reason was
+			// discarded at hop 3. Tracked separately as aihub#349 and FIXED
+			// by aihub#175: the handler now binds it and domain.Redact stores it
+			// in memories.redaction_reason and in the memory_redacted event's
+			// payload. This probe covers hops 1-2 (tool arg -> HTTP body);
+			// hop 3 (body -> row) is asserted end-to-end by
+			// server.TestRedactMemory_ProjectWriterIsAuditedWithReason.
 			"reason": {shape: "superseded by a newer note", landing: landBody, at: "reason"},
 		},
 	},

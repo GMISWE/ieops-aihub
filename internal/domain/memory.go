@@ -2069,12 +2069,32 @@ func SetMemoryVisibility(ctx context.Context, pool *pgxpool.Pool, id, visibility
 // ─── Activate (§7.3) ──────────────────────────────────────────────────────────
 
 // activationTargetStatus returns the status an activated memory should take.
-// Activation normally revives a memory to "active" (it was just used). The one
-// exception (aihub#214): a superseded (archived) methodology.* artifact stays
-// archived — activate is an unauthenticated read-side recall signal and must not
-// resurrect a stale spec/plan head over its successor.
-func activationTargetStatus(curStatus, memType string) string {
-	if curStatus == "archived" && strings.HasPrefix(memType, "methodology.") {
+// Activation normally revives a memory to "active" (it was just used). Two
+// exceptions keep an archived row archived:
+//
+//   - superseded (aihub#175 finding 3): some non-redacted row has
+//     supersedes_id = this row, i.e. this version has a successor. Reviving it
+//     puts TWO active rows in one lineage, and orderVersionChain marks every
+//     active entry IsCurrent, so the chain then reports two current heads.
+//     Applies to EVERY type: Remember archives the old head on every supersede
+//     (see its `SET status='archived'`), not just for methodology.*.
+//   - methodology.* (aihub#214): an archived methodology.* artifact stays
+//     archived even with no successor row, because activate is an
+//     unauthenticated read-side recall signal and must not resurrect a stale
+//     spec/plan head.
+//
+// Deliberately NOT an error: this mirrors aihub#214's choice. Activation still
+// counts (activation_count/stability/last_activated_at all advance) — only the
+// status transition is refused, so a recall signal on an old version is still
+// recorded rather than 403'd.
+func activationTargetStatus(curStatus, memType string, superseded bool) string {
+	if curStatus != "archived" {
+		return "active"
+	}
+	if superseded {
+		return "archived"
+	}
+	if strings.HasPrefix(memType, "methodology.") {
 		return "archived"
 	}
 	return "active"
@@ -2090,13 +2110,19 @@ func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, call
 	var lastActivatedAt *time.Time
 	var status string
 	var createdAt time.Time
+	var superseded bool
 
+	// aihub#175 finding 3: `superseded` is read in the SAME statement as the
+	// status it qualifies. A separate query could observe a supersede committed
+	// between the two reads and revive a row that now has a successor.
 	err := pool.QueryRow(ctx, `
-		SELECT type, base_strength, stability_days, activation_count,
-		       last_activated_at, status, created_at
-		FROM memories WHERE id = $1`, memID,
+		SELECT m.type, m.base_strength, m.stability_days, m.activation_count,
+		       m.last_activated_at, m.status, m.created_at,
+		       EXISTS (SELECT 1 FROM memories s
+		                WHERE s.supersedes_id = m.id AND s.status <> 'redacted')
+		FROM memories m WHERE m.id = $1`, memID,
 	).Scan(&memType, &baseStrength, &stabilityDays, &activationCount,
-		&lastActivatedAt, &status, &createdAt)
+		&lastActivatedAt, &status, &createdAt, &superseded)
 	if err != nil {
 		return nil, pgxErr(err, "memory not found", "failed to load memory")
 	}
@@ -2107,12 +2133,12 @@ func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, call
 	newCount := activationCount + 1
 	newStability := computeStabilityDays(memType, newCount)
 
-	// aihub#214: activation revives an archived memory to active — correct for
-	// experience/fact/rule (used again -> live again), but WRONG for a superseded
-	// (archived) methodology.* artifact: activate is an unauthenticated read-side
-	// recall signal, so it must not resurrect a stale spec/plan head. Keep an
-	// archived methodology.* archived; every other case still revives to active.
-	newStatus := activationTargetStatus(status, memType)
+	// aihub#214 + aihub#175 finding 3: activation revives an archived memory to
+	// active — correct for a genuinely decayed experience/fact/rule (used again
+	// -> live again), but WRONG for any archived row that already has a
+	// successor, and wrong for an archived methodology.* artifact regardless.
+	// See activationTargetStatus for why each case stays archived.
+	newStatus := activationTargetStatus(status, memType, superseded)
 
 	var newLastActivatedAt time.Time
 	err = pool.QueryRow(ctx, `
@@ -2156,8 +2182,22 @@ func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, call
 // ─── Redact (§4.3) ────────────────────────────────────────────────────────────
 
 // Redact soft-deletes a memory (status='redacted', expires_at=now()).
-// Only the author or an admin can redact.
-func Redact(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, callerRole string) error {
+// Only the author or an admin can redact. Callers must additionally hold writer
+// access on the memory's project — that gate lives in handleRedactMemory
+// (aihub#175 finding 1), because the author check here never expires.
+//
+// aihub#175 finding 2 / aihub#349: redaction used to leave NO trace at all. The
+// schema has carried redacted_at/redaction_reason since migration 0006 and
+// nothing in the codebase ever wrote either column, and no agent_event was
+// emitted, so "who deleted this memory, when, and why" was unanswerable from
+// the database. `reason` reaches the server (pf_redact_memory declares it
+// REQUIRED and puts it on the wire) and was discarded at the handler.
+//
+// Both halves of the record are written: the columns answer the question from
+// the row itself even after the event partition is GC'd, and the
+// memory_redacted event carries the actor, for which the memories table has no
+// column (there is no redacted_by). Neither one alone survives both ways.
+func Redact(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, callerDisplay, callerRole, reason string) error {
 	var authorID, status string
 	err := pool.QueryRow(ctx, `SELECT author_user_id, status FROM memories WHERE id = $1`, memID).
 		Scan(&authorID, &status)
@@ -2171,14 +2211,32 @@ func Redact(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, caller
 		return NewErr(ErrForbidden, "only the author or an admin can redact this memory")
 	}
 
+	// NULLIF so an omitted reason stores NULL rather than '' — "not supplied"
+	// and "supplied as empty" must stay distinguishable in the audit record.
 	_, err = pool.Exec(ctx, `
 		UPDATE memories
 		SET status = 'redacted', is_immortal = false,
+		    redacted_at = clock_timestamp(), redaction_reason = NULLIF($2, ''),
 		    expires_at = clock_timestamp(), updated_at = clock_timestamp()
-		WHERE id = $1`, memID)
+		WHERE id = $1`, memID, reason)
 	if err != nil {
 		return NewErr(ErrInternalError, fmt.Sprintf("failed to redact memory: %v", err))
 	}
+
+	// Emit memory_redacted (already on migration 0025's agent_events whitelist,
+	// so this needs no migration). Fire-and-forget with the same shape as
+	// Activate's memory_activated: the redaction itself is committed, and losing
+	// the event must not fail the request.
+	redactPayload, _ := json.Marshal(map[string]any{
+		"memory_id": memID,
+		"reason":    reason,
+	})
+	_, _ = pool.Exec(ctx, `
+		INSERT INTO agent_events (id, actor_user_id, actor_display, event_type, payload, project)
+		SELECT $1, $2, $3, 'memory_redacted', $4, project
+		FROM memories WHERE id = $5`,
+		NewID("evt"), callerUserID, callerDisplay, redactPayload, memID,
+	) //nolint:errcheck
 
 	// aihub#201 BUG2: if the row we just redacted was a lineage head (some row
 	// — possibly itself — has latest_id = memID), that cursor now points at a

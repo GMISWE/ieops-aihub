@@ -54,13 +54,16 @@ template the loop dispatches:
 ```
 You are executing step {step_id} of wi {wi_id}.
 
-Read .pf_steps.json in the worktree root for prior-step context (if any).
+Call pf_get_step(work_item_id={wi_id}) FIRST — it is the only authority for prior-step context.
+Treat every step_id in completed_steps as already done and read their artifact_summary. Never
+take step progress from a file in the worktree; nothing writes one.
 
 --- step instructions ---
 {expanded}
 --- END ---
 
-When done, append this step's summary to .pf_steps.json: {"step_id": "one-line summary"}.
+When done, RETURN your one-line summary of this step in your output; the loop passes it straight
+to pf_update_step(artifact_summary=...). Do not write it to a file.
 If there are learnings worth keeping, call pf_remember to store them in aihub.
 ```
 
@@ -99,6 +102,47 @@ Started executing <slug>, N steps total.
 
 `mode` is `auto` when `requires_human_session=false` and `human` when it is true.
 
+## 0e. The paused-attempt exit, in full (aihub#182)
+
+`engine.native.md` carries this as a two-line branch in the auto loop. The reasoning:
+
+A step template that hits a blocker calls `pf_emit_event(note)` + `pf_pause_attempt` and hands
+the wi to a human. From that moment the attempt is no longer `running`, and the server's
+`verifyAttemptCredential` hard-rejects EVERY credential-checked `pf_*` call — `pf_update_step`,
+`pf_save_artifact`, `pf_complete_attempt`, all of them. Pausing therefore cannot corrupt step
+state; the loop simply cannot advance. What it *can* do is walk into a cascade of surprise
+credential errors and retry them, which is what this branch exists to prevent.
+
+Break out of the loop on either signal:
+
+- the step's own output says it paused the attempt (it called `pf_pause_attempt`), or
+- any `pf_*` call is rejected because the attempt is not running. The paused case has its own
+  error code — `ErrAttemptPaused`, "attempt is paused; resume it before continuing" — which is
+  deliberately distinct from a stale credential, so do not treat it as one.
+
+On that path:
+
+- **Do NOT retry.** Nothing can succeed until a human resumes; a retry only burns tokens.
+- **Do NOT call `pf_complete_attempt`.** The attempt must STAY paused — that is the state the
+  human resumes into, and a terminal call destroys it. This is the one loop exit that ends with
+  no terminal call, and the server would reject it anyway.
+- **Do NOT report the step completed**, and do not start the next step.
+- Report three-segment, needs-you:
+
+```
+## Result
+Step <step_id> paused the attempt for <slug> — a human needs to look at it.
+
+## Status
+| wi     | <slug>              |
+| step   | <step_id>           |
+| status | paused (needs you)  |
+
+## Next steps
+- See what it needs: /pf-status <slug>
+- Resume once it is resolved: /pf-work <slug>
+```
+
 ## 1. Execute (rhs=true, interactive mode) — the loop in full
 
 > ⚠️ **Why this one is deferred, when the auto loop is not.** Interactive mode is a *per-step*
@@ -110,7 +154,9 @@ Started executing <slug>, N steps total.
 > this is the first thing that should come back.
 
 ```python
-# Same bracket as auto mode: start the first step, then complete-and-advance. No pf_get_step.
+# Same bracket as auto mode: start the first step, then complete-and-advance. No pf_get_step
+# is needed FOR THE BRACKET (it carries no version token); it is still the authority for
+# prior-step context.
 sa_id = new_ulid()
 pf_update_step(work_item_id=<current>, step_id=sections[0].step_id, status="in_progress")
 
@@ -122,7 +168,7 @@ for i, (step_id, content) in enumerate(sections):
     wait for user input:
       "continue" / "done" / "ok"  -> fall through to the completed report below, then move to the
                                      next step
-      "skip"                      -> record in .pf_steps.json; **do NOT report this step**;
+      "skip"                      -> note it in your own output; **do NOT report this step**;
                                      continue to the next step WITHOUT calling pf_update_step at
                                      all. The skipped step stays in_progress and stays the
                                      server's current_step; the next step you actually complete
@@ -144,7 +190,7 @@ for i, (step_id, content) in enumerate(sections):
     next_sa = new_ulid() if i + 1 < len(sections) else None
     pf_update_step(work_item_id=<current>, step_id=step_id, status="completed",
                    step_attempt_id=sa_id,
-                   artifact_summary=read_json(".pf_steps.json").get(step_id, ""),
+                   artifact_summary=<one-line summary of what this step produced>,
                    next_step=sections[i+1].step_id if next_sa else None,
                    next_step_attempt_id=next_sa)
     sa_id = next_sa

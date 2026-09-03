@@ -413,6 +413,171 @@ GIT_PR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# aihub#272 — WHICH PART OF A BASH COMMAND IS "TEXT DESTINED FOR GIT"
+#
+# This guard used to scan the WHOLE command string. That predicate cannot tell
+# text about to be WRITTEN into a commit/PR from a pattern used to SEARCH commits
+# for that same text, so it denied the only automated check the <undercover> rule
+# has:
+#
+#   for c in $(git rev-list origin/main..HEAD); do git log -1 --format=%B $c; \
+#     done | grep -icE 'claude|co-authored'      # audit each commit
+#   gh pr view 42 --json body -q .body | grep -iE 'co-authored-by'
+#
+# Both are read-only audits OF THIS VERY RULE, and both were denied — leaving the
+# rule with no machine check at all on an autonomous lane, only the agent's own
+# diligence. It also denied any git command whose PATH argument happens to contain
+# a watched literal (`.claude-plugin/marketplace.json`). Same family as "a gate
+# must read the change, not the state": the predicate was applied to the wrong
+# object.
+#
+# So the scan is narrowed to the VALUES of the flags that actually carry text into
+# git, plus the contents of any message file named by -F/--file. Everything else on
+# the command line — subcommands, paths, grep patterns, pipeline stages — is not
+# destined for git and is not scanned.
+#
+# 🔴 NARROWING IS ONLY SAFE WHERE THE PARSE IS TRUSTWORTHY. Four shapes put the
+# message somewhere this parser cannot see, and each falls back to the old
+# whole-command scan rather than reporting "clean":
+#   * shlex cannot split the command;
+#   * a heredoc (`<<`) — `git commit -F -` takes its message from the command text;
+#   * a message file named `-` (stdin), same reason;
+#   * an extracted value containing a shell expansion ($VAR, $(...), `...`), or a
+#     named message file that cannot be read — which usually means an earlier part
+#     of the same command line is about to create it.
+# Fail toward the wider scan, never toward silence.
+# ---------------------------------------------------------------------------
+
+# Flags whose VALUE is text that lands in git. `-t` and `-F` mean different things
+# to the two tools (`git commit -t` is a template, `gh pr create -F` is the body
+# file), so the tables are per-tool rather than merged.
+GIT_TEXT_FLAGS = {"-m", "--message"}
+GIT_FILE_FLAGS = {"-F", "--file"}
+GH_TEXT_FLAGS = {"-t", "--title", "-b", "--body", "--subject", "--notes"}
+GH_FILE_FLAGS = {"-F", "--body-file", "--notes-file"}
+
+# Tokens that end one command and begin another inside a single Bash call.
+SHELL_SEPARATORS = {"|", "||", "&&", ";", "&", "(", ")", "{", "}", "!"}
+
+# A value the guard cannot resolve to a literal: it is produced by the shell.
+SHELL_EXPANSION_RE = re.compile(r"\$\(|\$\{|\$[A-Za-z_]|`")
+
+
+def _tool_invocations(toks):
+    """Every `git` / `gh` invocation in a token stream, as (prog, tokens).
+
+    The tool is NOT assumed to be the first word: it can sit inside a loop body
+    (`for c in ...; do git log ...; done`), behind a wrapper (`FOO=1 sudo git
+    commit`), inside `find -exec`, or after `cd /x &&`. An invocation runs until
+    the next tool token or the next shell separator, whichever comes first, so a
+    flag is never attributed to the wrong tool."""
+    out = []
+    prog, cur = None, []
+    for t in toks:
+        if t in SHELL_SEPARATORS:
+            if prog:
+                out.append((prog, cur))
+            prog, cur = None, []
+            continue
+        base = os.path.basename(t)
+        if base in ("git", "gh") and (t == base or t.endswith("/" + base)):
+            if prog:
+                out.append((prog, cur))
+            prog, cur = base, [t]
+            continue
+        if prog:
+            cur.append(t)
+    if prog:
+        out.append((prog, cur))
+    return out
+
+
+def _flag_values(seg, text_flags, file_flags):
+    """Pull (flag, value) pairs off one command segment. Handles `-m V`,
+    `--message=V`, `-mV` and clustered short flags such as `-am V`."""
+    texts, files = [], []
+    both = text_flags | file_flags
+    short = {f for f in both if len(f) == 2 and f.startswith("-")}
+    cluster_re = re.compile(r"^-([A-Za-z]*)([" + "".join(sorted(f[1] for f in short)) + r"])(.*)$") \
+        if short else None
+
+    i = 1
+    while i < len(seg):
+        t = seg[i]
+        flag = val = None
+        if t in both:
+            flag = t
+            if i + 1 < len(seg):
+                val = seg[i + 1]
+                i += 1
+        elif t.startswith("--") and "=" in t:
+            head = t.split("=", 1)[0]
+            if head in both:
+                flag, val = head, t.split("=", 1)[1]
+        elif cluster_re is not None and not t.startswith("--") and len(t) > 2:
+            m = cluster_re.match(t)
+            if m and ("-" + m.group(2)) in both:
+                flag = "-" + m.group(2)
+                if m.group(3):
+                    val = m.group(3)
+                elif i + 1 < len(seg):
+                    val = seg[i + 1]
+                    i += 1
+        if flag is not None and val is not None:
+            (texts if flag in text_flags else files).append((flag, val))
+        i += 1
+    return texts, files
+
+
+def bash_attribution_fields(cmd, payload):
+    """The (label, text) pairs of a Bash command that are destined for git.
+
+    Returns [("command", cmd)] — the pre-aihub#272 whole-command scan — whenever
+    the command's shape means the message could be somewhere this parser does not
+    look. Never returns [] for such a command."""
+    if "<<" in cmd:  # heredoc: the message body IS the command text
+        return [("command", cmd)]
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        return [("command", cmd)]
+
+    edir = effective_dir(cmd, payload) or "."
+    fields = []
+    invocations = _tool_invocations(toks)
+    for prog, seg in invocations:
+        if prog == "git":
+            texts, files = _flag_values(seg, GIT_TEXT_FLAGS, GIT_FILE_FLAGS)
+        else:
+            texts, files = _flag_values(seg, GH_TEXT_FLAGS, GH_FILE_FLAGS)
+
+        for flag, val in texts:
+            if SHELL_EXPANSION_RE.search(val):
+                return [("command", cmd)]  # the literal lives elsewhere on the line
+            if val:
+                fields.append(("%s %s value" % (prog, flag), val))
+        for flag, val in files:
+            if val == "-" or SHELL_EXPANSION_RE.search(val):
+                return [("command", cmd)]
+            fpath = val if os.path.isabs(val) else os.path.join(edir, val)
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
+                    content = fh.read()
+            except OSError:
+                # Named but unreadable: most often an earlier stage of this same
+                # command line is about to write it. Cannot vouch -> widen.
+                return [("command", cmd)]
+            if content:
+                fields.append(("%s %s file: %s" % (prog, flag, val), content))
+
+    if not invocations:
+        # GIT_PR_RE matched but no token is a bare `git`/`gh` invocation (an alias,
+        # a quoted command handed to another program, a shell function). Nothing to
+        # attribute flags to -> widen.
+        return [("command", cmd)]
+    return fields
+
 # Tool name is prefix-agnostic: Claude Code exposes the plugin MCP tools as
 # mcp__plugin_polyforge_polyforge__pf_*, Codex as mcp__polyforge__pf_*. Match on the bare
 # tool name after the last "__" so the guard fires identically under both runtimes (Bash has
@@ -460,29 +625,10 @@ if bash_cmd is not None:
         pass
 
     if GIT_PR_RE.search(bash_cmd):
-        fields = [("command", bash_cmd)]
-        # -F <file> / --file <file>: message comes from a file; scan its contents too.
         try:
-            toks = split_command(bash_cmd)
-            edir = effective_dir(bash_cmd, payload) or "."
-            for i, t in enumerate(toks):
-                msgfile = None
-                if t in ("-F", "--file") and i + 1 < len(toks):
-                    msgfile = toks[i + 1]
-                elif t.startswith("--file="):
-                    msgfile = t[len("--file="):]
-                if not msgfile or msgfile == "-":
-                    continue
-                fpath = msgfile if os.path.isabs(msgfile) else os.path.join(edir, msgfile)
-                try:
-                    with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
-                        content = fh.read()
-                    if content:
-                        fields.append(("command -F file: " + msgfile, content))
-                except OSError:
-                    pass  # unreadable -> fail-open on this specific enrichment
+            fields = bash_attribution_fields(bash_cmd, payload)
         except Exception:
-            pass
+            fields = [("command", bash_cmd)]  # parser bug -> the old, wider scan
 
 fields = [f for f in fields if f]
 if not fields:
@@ -501,16 +647,56 @@ ALTS = [
     r"sonnet",
     r"haiku",
     r"llm",
-    r"ai",                # standalone token only
     r"co[\s-]?authored[\s-]?by",
     r"generated[\s-]+(?:by|with)",
-    r"ai[\s-]+assisted",
+    # aihub#272: `ai` used to be listed here as a standalone token, and it denied a
+    # PR body for containing "Siteboon AI B.V." — the legal name of an upstream
+    # copyright holder, quoted while doing AGPL section 7 attribution compliance.
+    # Naming the copyright holder IS that task; there is no wording around it. It
+    # also denies ordinary technical prose ("the AI gateway", "AI-native").
+    #
+    # A whitelist of exceptions was rejected: it would need "Siteboon AI B.V.",
+    # then the next vendor, then the next, and it rots silently in the direction
+    # of more false positives. Instead the SHAPE is matched: `ai` counts when it
+    # appears in an attribution construction, and separately (below) anywhere
+    # inside a trailer block, which is where AI attribution actually lives. The
+    # word on its own in a sentence was never what this rule was defending.
+    r"ai[\s-]?(?:assisted|generated|authored|written|drafted)",
+    r"(?:by|using|used|via)[\s-]+(?:an?[\s-]+|the[\s-]+)?ai",
 ]
 BANNED = re.compile(B + r"(?:" + r"|".join(ALTS) + r")" + B2, re.IGNORECASE)
 
+# The trailer block is the real carrier of an attribution trailer, so the bare
+# token `ai` is still judged there — and only there.
+BARE_AI = re.compile(B + r"ai" + B2, re.IGNORECASE)
+TRAILER_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*:\s*\S")
+
+def trailer_zone(text):
+    """The message's trailer block, or "" when it has none.
+
+    git's own definition, reduced to what matters here: the LAST paragraph, every
+    line of which is `Key: value` with a space-free key. It must not also be the
+    FIRST paragraph — otherwise a one-line conventional-commit subject like
+    "feat: AI gateway" parses as a trailer block and the narrowing above is undone
+    by this function."""
+    paragraphs = re.split(r"\n\s*\n", text.strip())
+    if len(paragraphs) < 2:
+        return ""
+    lines = [ln for ln in paragraphs[-1].split("\n") if ln.strip()]
+    if not lines or not all(TRAILER_LINE_RE.match(ln) for ln in lines):
+        return ""
+    return paragraphs[-1]
+
 def first_hit(text):
     m = BANNED.search(text)
-    return m.group(0) if m else None
+    if m:
+        return m.group(0)
+    zone = trailer_zone(text)
+    if zone:
+        m = BARE_AI.search(zone)
+        if m:
+            return m.group(0)
+    return None
 
 for fname, value in fields:
     term = first_hit(value)

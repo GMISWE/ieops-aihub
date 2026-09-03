@@ -656,25 +656,85 @@ func buildNestedUnbalancedSVGDocument(n int) string {
 	return sb.String()
 }
 
-// renderAndCountSteps renders src and returns the wall-clock time and the number of
-// findSVGBlockEnd tokenizer steps spent on it (svgTokenizerStepsForTest), a robust,
-// deterministic proxy for work done — preferred here over wall-clock alone per the
-// review's guidance, since step counts don't flake under machine load.
+// renderWork is what one render of a document cost, measured four ways. Three of the
+// four (the counters) are deterministic: they are identical run to run and, unlike
+// elapsed, identical no matter how busy the machine is. Only elapsed is reported to a
+// human; nothing in this file asserts on it — see assertFenceScanIsOnePass below and
+// aihub#339 for why every absolute wall-clock ceiling here was replaced by a counter.
+type renderWork struct {
+	elapsed            time.Duration
+	tokenizerSteps     int64 // svgTokenizerStepsForTest delta: findSVGBlockEnd lookahead work
+	fenceScanLines     int64 // svgFenceScanLinesForTest delta: lines walked for fence offsets
+	fenceBoundaryCalls int64 // svgFenceBoundaryCallsForTest delta: firstFenceBoundary calls
+}
+
+// renderAndCountWork renders src and returns the work it cost — the wall-clock time plus
+// the three process-wide work counters this package exports for tests
+// (svgTokenizerStepsForTest, svgFenceScanLinesForTest, svgFenceBoundaryCallsForTest).
+// The counters are robust, deterministic proxies for work done, preferred here over
+// wall-clock per the review's guidance, since counts don't flake under machine load.
 //
-// Must not be called from a t.Parallel() test: svgTokenizerStepsForTest is a single
-// process-wide counter, and the before/after delta this function computes is only
-// meaningful if nothing else in the process is concurrently rendering SVG blocks and
-// bumping that same counter in between.
-func renderAndCountSteps(t *testing.T, src string) (time.Duration, int64) {
+// Must not be called from a t.Parallel() test: all three are single process-wide
+// counters, and the before/after deltas this function computes are only meaningful if
+// nothing else in the process is concurrently rendering SVG blocks and bumping them in
+// between.
+func renderAndCountWork(t *testing.T, src string) renderWork {
 	t.Helper()
-	before := svgTokenizerStepsForTest.Load()
+	beforeSteps := svgTokenizerStepsForTest.Load()
+	beforeScanLines := svgFenceScanLinesForTest.Load()
+	beforeBoundaryCalls := svgFenceBoundaryCallsForTest.Load()
 	start := time.Now()
 	if _, err := Markdown(src); err != nil {
 		t.Fatal(err)
 	}
 	elapsed := time.Since(start)
-	steps := svgTokenizerStepsForTest.Load() - before
-	return elapsed, steps
+	return renderWork{
+		elapsed:            elapsed,
+		tokenizerSteps:     svgTokenizerStepsForTest.Load() - beforeSteps,
+		fenceScanLines:     svgFenceScanLinesForTest.Load() - beforeScanLines,
+		fenceBoundaryCalls: svgFenceBoundaryCallsForTest.Load() - beforeBoundaryCalls,
+	}
+}
+
+// sourceLines counts the lines computeFenceOffsets walks for src: it consumes source
+// byte-by-byte to the end, so a document ending in "\n" has exactly as many lines as it
+// has newlines, and one more otherwise.
+func sourceLines(src string) int64 {
+	n := int64(strings.Count(src, "\n"))
+	if !strings.HasSuffix(src, "\n") {
+		n++
+	}
+	return n
+}
+
+// assertFenceScanIsOnePass asserts that the fence-offset lookup for a whole parse of src
+// cost exactly ONE pass over the document, no matter how many <svg> opener lines it
+// contains. computeFenceOffsets runs at most once per parse (its result is cached on
+// parser.Context under svgFenceOffsetsKey) and walks every line exactly once, so its
+// counter must come out equal to the document's line count on the nose; firstFenceBoundary
+// binary-searches that cached index and walks no lines at all, so it can only ever be
+// called once per Open() attempt, never more than there are lines.
+//
+// This is the load-immune replacement (aihub#339) for the absolute wall-clock ceilings
+// that used to sit at the end of each test below. Those ceilings were nominally the
+// backstop for "a regression the tokenizer-step counter cannot see", and the one concrete
+// regression of that kind on record is round 3's per-call rescan of the rest of the
+// document inside firstFenceBoundary — O(n^2) line walks with the step count unchanged.
+// A wall-clock ceiling detected that only if the extra walking happened to cross a fixed
+// number of seconds, which at these document sizes it does not; this equality detects it
+// outright, and is unaffected by how many other tests, packages or agents are competing
+// for the CPU at the time.
+func assertFenceScanIsOnePass(t *testing.T, label, src string, w renderWork) {
+	t.Helper()
+	totalLines := sourceLines(src)
+	if w.fenceScanLines != totalLines {
+		t.Fatalf("%s: computeFenceOffsets walked %d lines rendering a %d-line document, want exactly %d (one cached pass over the whole document) — a larger value means fence lookup is re-scanning per Open() call instead of using the cached index, reintroducing the O(n^2) blowup round 3 removed",
+			label, w.fenceScanLines, totalLines, totalLines)
+	}
+	if w.fenceBoundaryCalls > totalLines {
+		t.Fatalf("%s: firstFenceBoundary was called %d times rendering a %d-line document, want at most one call per line (%d) — more means Open() is consulting the fence index repeatedly per attempt",
+			label, w.fenceBoundaryCalls, totalLines, totalLines)
+	}
 }
 
 // assertStepsWithinBudget asserts that the tokenizer steps spent rendering a document of
@@ -702,15 +762,19 @@ func TestSVGBlock_PathologicalRepeatedUnclosedIsLinearNotQuadratic(t *testing.T)
 	const big = small * 16 // 4000
 
 	smallSrc := buildUnclosedSVGDocument(small)
-	_, smallSteps := renderAndCountSteps(t, smallSrc)
+	smallWork := renderAndCountWork(t, smallSrc)
+	smallSteps := smallWork.tokenizerSteps
 	assertStepsWithinBudget(t, "small", len(smallSrc), smallSteps)
+	assertFenceScanIsOnePass(t, "small", smallSrc, smallWork)
 
 	bigSrc := buildUnclosedSVGDocument(big)
-	elapsed, bigSteps := renderAndCountSteps(t, bigSrc)
+	bigWork := renderAndCountWork(t, bigSrc)
+	bigSteps, elapsed := bigWork.tokenizerSteps, bigWork.elapsed
 	assertStepsWithinBudget(t, "big", len(bigSrc), bigSteps)
+	assertFenceScanIsOnePass(t, "big", bigSrc, bigWork)
 
-	t.Logf("repeated-unclosed: %d lines -> %d steps; %d lines -> %d steps (ratio %.1fx for a %.0fx line-count increase); %d-line render took %s",
-		small, smallSteps, big, bigSteps, float64(bigSteps)/float64(smallSteps), float64(big)/float64(small), big, elapsed)
+	t.Logf("repeated-unclosed: %d lines -> %d steps; %d lines -> %d steps (ratio %.1fx for a %.0fx line-count increase); %d-line render took %s (fence scan %d lines / %d calls)",
+		small, smallSteps, big, bigSteps, float64(bigSteps)/float64(smallSteps), float64(big)/float64(small), big, elapsed, bigWork.fenceScanLines, bigWork.fenceBoundaryCalls)
 
 	// Linear growth would be ~16x; quadratic would be ~256x. Use a generous threshold
 	// (40x) that comfortably separates the two without being sensitive to small
@@ -721,14 +785,14 @@ func TestSVGBlock_PathologicalRepeatedUnclosedIsLinearNotQuadratic(t *testing.T)
 			small, smallSteps, big, bigSteps, ratio, maxAcceptableRatio)
 	}
 
-	// Secondary, generous wall-clock sanity (per the review: prefer counting work done,
-	// but a coarse ceiling still catches a totally different kind of regression). The
-	// pre-fix renderer took ~1.14s at 4000 lines. This ceiling is generous enough to
-	// absorb -race instrumentation overhead while still being far below what a
-	// quadratic blowup (or the multi-minute pre-fix behavior) would take at this size.
-	if elapsed > 5*time.Second {
-		t.Fatalf("%d-line pathological document took %s, want well under 5s", big, elapsed)
-	}
+	// The `elapsed > 5*time.Second` ceiling that used to close this test was deleted in
+	// aihub#339. Measured on a 12-core box under -race, this render takes 2.82-3.44s
+	// idle — 1.45x below its own ceiling — and 6.6-7.7s with a single competing process
+	// pinned to the same core, so the assertion reddened on machine load rather than on
+	// anything about this package. The counters above are unmoved by that same load
+	// (60000 and 960000 steps, exactly, at every contention level measured), and
+	// assertFenceScanIsOnePass covers the "regression the step counter cannot see" the
+	// deleted ceiling was nominally standing in for. See that helper's doc comment.
 }
 
 // TestSVGBlock_PathologicalNestedUnbalancedIsLinearNotQuadratic is the performance
@@ -743,15 +807,19 @@ func TestSVGBlock_PathologicalNestedUnbalancedIsLinearNotQuadratic(t *testing.T)
 	const big = small * 16 // 4000
 
 	smallSrc := buildNestedUnbalancedSVGDocument(small)
-	_, smallSteps := renderAndCountSteps(t, smallSrc)
+	smallWork := renderAndCountWork(t, smallSrc)
+	smallSteps := smallWork.tokenizerSteps
 	assertStepsWithinBudget(t, "small", len(smallSrc), smallSteps)
+	assertFenceScanIsOnePass(t, "small", smallSrc, smallWork)
 
 	bigSrc := buildNestedUnbalancedSVGDocument(big)
-	elapsed, bigSteps := renderAndCountSteps(t, bigSrc)
+	bigWork := renderAndCountWork(t, bigSrc)
+	bigSteps, elapsed := bigWork.tokenizerSteps, bigWork.elapsed
 	assertStepsWithinBudget(t, "big", len(bigSrc), bigSteps)
+	assertFenceScanIsOnePass(t, "big", bigSrc, bigWork)
 
-	t.Logf("nested-unbalanced: %d groups -> %d steps; %d groups -> %d steps (ratio %.1fx for a %.0fx group-count increase); %d-group render took %s",
-		small, smallSteps, big, bigSteps, float64(bigSteps)/float64(smallSteps), float64(big)/float64(small), big, elapsed)
+	t.Logf("nested-unbalanced: %d groups -> %d steps; %d groups -> %d steps (ratio %.1fx for a %.0fx group-count increase); %d-group render took %s (fence scan %d lines / %d calls)",
+		small, smallSteps, big, bigSteps, float64(bigSteps)/float64(smallSteps), float64(big)/float64(small), big, elapsed, bigWork.fenceScanLines, bigWork.fenceBoundaryCalls)
 
 	const maxAcceptableRatio = 40.0
 	if ratio := float64(bigSteps) / float64(smallSteps); ratio > maxAcceptableRatio {
@@ -759,10 +827,10 @@ func TestSVGBlock_PathologicalNestedUnbalancedIsLinearNotQuadratic(t *testing.T)
 			small, smallSteps, big, bigSteps, ratio, maxAcceptableRatio)
 	}
 
-	// See the comment on the analogous check above for why this ceiling is generous.
-	if elapsed > 5*time.Second {
-		t.Fatalf("%d-group nested-unbalanced document took %s, want well under 5s", big, elapsed)
-	}
+	// The `elapsed > 5*time.Second` ceiling here was deleted alongside its twin above in
+	// aihub#339, for the same reason and on the same evidence: 0.98-1.30s idle, 2.01s
+	// with one competing process on the same core, i.e. a ceiling that measures the
+	// machine. See assertFenceScanIsOnePass for what replaced it.
 }
 
 // TestSVGBlock_PathologicalAt256KiB is the explicit measurement round 2 asked for, for
@@ -781,28 +849,28 @@ func TestSVGBlock_PathologicalAt256KiB(t *testing.T) {
 
 	repeatedN := target / len("<svg width=\"10\" height=\"10\">\n\n")
 	repeatedSrc := buildUnclosedSVGDocument(repeatedN)
-	repeatedElapsed, repeatedSteps := renderAndCountSteps(t, repeatedSrc)
-	assertStepsWithinBudget(t, "repeated-unclosed @ 256KiB", len(repeatedSrc), repeatedSteps)
-	t.Logf("repeated-unclosed @ 256KiB: %d bytes, %s, %d tokenizer steps (%.2fx document size)",
-		len(repeatedSrc), repeatedElapsed, repeatedSteps, float64(repeatedSteps)/float64(len(repeatedSrc)))
-	// Tight: at this size, post-fix rendering (both the K*n tokenizer-step budget from
-	// round 2 and the per-parse fence-offset index from round 3) is expected to take well
-	// under a second even under -race. 20s leaves a wide margin for slow CI hardware
-	// while still being far too tight for a reintroduced quadratic blowup to hide behind.
-	if repeatedElapsed > 20*time.Second {
-		t.Fatalf("repeated-unclosed @ 256KiB took %s, want well under 20s", repeatedElapsed)
-	}
+	repeated := renderAndCountWork(t, repeatedSrc)
+	assertStepsWithinBudget(t, "repeated-unclosed @ 256KiB", len(repeatedSrc), repeated.tokenizerSteps)
+	assertFenceScanIsOnePass(t, "repeated-unclosed @ 256KiB", repeatedSrc, repeated)
+	t.Logf("repeated-unclosed @ 256KiB: %d bytes, %s, %d tokenizer steps (%.2fx document size), fence scan %d lines / %d calls",
+		len(repeatedSrc), repeated.elapsed, repeated.tokenizerSteps, float64(repeated.tokenizerSteps)/float64(len(repeatedSrc)), repeated.fenceScanLines, repeated.fenceBoundaryCalls)
 
 	nestedN := target / len("<svg>\n<svg>\n</svg>\n\n")
 	nestedSrc := buildNestedUnbalancedSVGDocument(nestedN)
-	nestedElapsed, nestedSteps := renderAndCountSteps(t, nestedSrc)
-	assertStepsWithinBudget(t, "nested-unbalanced @ 256KiB", len(nestedSrc), nestedSteps)
-	t.Logf("nested-unbalanced @ 256KiB: %d bytes, %s, %d tokenizer steps (%.2fx document size)",
-		len(nestedSrc), nestedElapsed, nestedSteps, float64(nestedSteps)/float64(len(nestedSrc)))
-	// See the comment on the analogous check above.
-	if nestedElapsed > 20*time.Second {
-		t.Fatalf("nested-unbalanced @ 256KiB took %s, want well under 20s", nestedElapsed)
-	}
+	nested := renderAndCountWork(t, nestedSrc)
+	assertStepsWithinBudget(t, "nested-unbalanced @ 256KiB", len(nestedSrc), nested.tokenizerSteps)
+	assertFenceScanIsOnePass(t, "nested-unbalanced @ 256KiB", nestedSrc, nested)
+	t.Logf("nested-unbalanced @ 256KiB: %d bytes, %s, %d tokenizer steps (%.2fx document size), fence scan %d lines / %d calls",
+		len(nestedSrc), nested.elapsed, nested.tokenizerSteps, float64(nested.tokenizerSteps)/float64(len(nestedSrc)), nested.fenceScanLines, nested.fenceBoundaryCalls)
+
+	// The two `elapsed > 20*time.Second` ceilings that used to close this test were
+	// deleted in aihub#339. They were the ones this test's own doc comment above calls
+	// "genuinely TIGHT" — and they were: the repeated-unclosed render measures 7.0s idle
+	// and 13.1s with a single competing process pinned to the same core, i.e. 65% of the
+	// ceiling consumed by one busy neighbour. That is not a tight gate, it is a gate one
+	// unrelated CI job away from red. Both are replaced by the counter assertions above,
+	// which measured identical (2097120 steps, 8.00x document size, exactly) at every
+	// contention level.
 }
 
 // TestSVGBlock_PathologicalAtOneMegabyte is the full ~1MB measurement, for BOTH
@@ -826,27 +894,26 @@ func TestSVGBlock_PathologicalAtOneMegabyte(t *testing.T) {
 
 	repeatedN := target / len("<svg width=\"10\" height=\"10\">\n\n")
 	repeatedSrc := buildUnclosedSVGDocument(repeatedN)
-	repeatedElapsed, repeatedSteps := renderAndCountSteps(t, repeatedSrc)
-	assertStepsWithinBudget(t, "repeated-unclosed @ ~1MB", len(repeatedSrc), repeatedSteps)
-	t.Logf("repeated-unclosed @ ~1MB: %d bytes, %s, %d tokenizer steps (%.2fx document size)",
-		len(repeatedSrc), repeatedElapsed, repeatedSteps, float64(repeatedSteps)/float64(len(repeatedSrc)))
-	// Generous enough to absorb -race instrumentation overhead while remaining
-	// dramatically below the pre-fix multi-minute-to-8m20s blowup this test exists to
-	// catch.
-	if repeatedElapsed > 2*time.Minute {
-		t.Fatalf("repeated-unclosed @ ~1MB took %s, want well under 2m", repeatedElapsed)
-	}
+	repeated := renderAndCountWork(t, repeatedSrc)
+	assertStepsWithinBudget(t, "repeated-unclosed @ ~1MB", len(repeatedSrc), repeated.tokenizerSteps)
+	assertFenceScanIsOnePass(t, "repeated-unclosed @ ~1MB", repeatedSrc, repeated)
+	t.Logf("repeated-unclosed @ ~1MB: %d bytes, %s, %d tokenizer steps (%.2fx document size), fence scan %d lines / %d calls",
+		len(repeatedSrc), repeated.elapsed, repeated.tokenizerSteps, float64(repeated.tokenizerSteps)/float64(len(repeatedSrc)), repeated.fenceScanLines, repeated.fenceBoundaryCalls)
 
 	nestedN := target / len("<svg>\n<svg>\n</svg>\n\n")
 	nestedSrc := buildNestedUnbalancedSVGDocument(nestedN)
-	nestedElapsed, nestedSteps := renderAndCountSteps(t, nestedSrc)
-	assertStepsWithinBudget(t, "nested-unbalanced @ ~1MB", len(nestedSrc), nestedSteps)
-	t.Logf("nested-unbalanced @ ~1MB: %d bytes, %s, %d tokenizer steps (%.2fx document size)",
-		len(nestedSrc), nestedElapsed, nestedSteps, float64(nestedSteps)/float64(len(nestedSrc)))
-	// See the comment on the analogous check above.
-	if nestedElapsed > 2*time.Minute {
-		t.Fatalf("nested-unbalanced @ ~1MB took %s, want well under 2m (was 8m20s pre-fix)", nestedElapsed)
-	}
+	nested := renderAndCountWork(t, nestedSrc)
+	assertStepsWithinBudget(t, "nested-unbalanced @ ~1MB", len(nestedSrc), nested.tokenizerSteps)
+	assertFenceScanIsOnePass(t, "nested-unbalanced @ ~1MB", nestedSrc, nested)
+	t.Logf("nested-unbalanced @ ~1MB: %d bytes, %s, %d tokenizer steps (%.2fx document size), fence scan %d lines / %d calls",
+		len(nestedSrc), nested.elapsed, nested.tokenizerSteps, float64(nested.tokenizerSteps)/float64(len(nestedSrc)), nested.fenceScanLines, nested.fenceBoundaryCalls)
+
+	// The two `elapsed > 2*time.Minute` ceilings here were deleted in aihub#339 with the
+	// rest of this file's absolute wall-clock ceilings. This pair was the clearest case:
+	// this test's own sibling doc comment already records that a 2-minute ceiling would
+	// have let the 82.5s regression it exists to catch "sail through unnoticed" — a
+	// ceiling that cannot fail on the defect, but can fail on a busy machine, is pure
+	// noise. The counter assertions above are exact and load-immune.
 }
 
 // buildWellFormedSingleLineSVGDocument returns a document of n well-formed, complete,
@@ -898,15 +965,14 @@ func TestSVGBlock_WellFormedSingleLineSVGLegendsIsLinearNotQuadratic(t *testing.
 	}
 
 	t.Logf("%d well-formed single-line svg legends (%d bytes) rendered in %s", n, len(src), elapsed)
-	// Tight ceiling: this shape's per-line cost (both the tokenizer scan and, post-fix,
-	// the fence-offset lookup) is O(1) amortized, so total work is O(n) in document
-	// size/line count. The reviewer measured up to 339x slowdowns (82.5s at 1MB) for the
-	// bug this closes; 5s at a quarter of that size leaves an enormous margin without
-	// being able to pass a reintroduced quadratic blowup through unnoticed the way a
-	// multi-minute ceiling would.
-	if elapsed > 5*time.Second {
-		t.Fatalf("%d well-formed single-line svg legends (%d bytes) took %s, want well under 5s", n, len(src), elapsed)
-	}
+	// The `elapsed > 5*time.Second` ceiling that used to sit here was deleted in
+	// aihub#339. It described itself as a "tight ceiling" with "an enormous margin", and
+	// both cannot be true at once: measured under -race on a 12-core box this render
+	// takes 1.77s idle and 3.70s with one competing process pinned to the same core, so
+	// two busy neighbours redden it. The deterministic guard immediately below, added in
+	// round 5 for exactly this reason, already covers the same O(n²) fence rescan on the
+	// same document — with an equality rather than a threshold. The ceiling added
+	// nothing but a way for an unrelated CI job to fail this one.
 
 	// --- round-5 review-fix: deterministic fence-lookup-work guard ---------------------
 	//

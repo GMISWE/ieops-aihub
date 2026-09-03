@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -610,75 +611,95 @@ func TestProjectMembersRemovalToolSchemaAdvertisesExpectedRemovals(t *testing.T)
 // expects anyway. So a dropped parameter is invisible to every "it was refused"
 // assertion in this change, which is exactly why the bytes get read here.
 func TestProjectMembersRemovalToolForwardsExpectedRemovalsOnTheWire(t *testing.T) {
-	var gotBody []byte
-	var gotMethod, gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod, gotPath = r.Method, r.URL.Path
-		gotBody, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"name":"p","members":[],"members_version":7}`))
-	}))
-	defer ts.Close()
+	// Both argument shapes a caller can plausibly send. The scalar case is the
+	// natural mistake when removing exactly one person, and it is also what a
+	// client that coerces to the declared type can produce. Before aihub#333
+	// added normalizeStringSliceArg it reached echo's c.Bind as a bare string and
+	// died there as 400 BAD_REQUEST "invalid request body" — a message that names
+	// nothing and is indistinguishable from the server not knowing the parameter,
+	// which is exactly the aihub#241 B1 defect one type over. This test's own
+	// comment used to describe that hazard while asserting only the happy path.
+	cases := []struct {
+		name string
+		arg  any
+		want []any
+	}{
+		{name: "Array", arg: []string{"u_two", "u_three"}, want: []any{"u_two", "u_three"}},
+		{name: "BareStringIsCoercedNotRejected", arg: "u_two", want: []any{"u_two"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody []byte
+			var gotMethod, gotPath string
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod, gotPath = r.Method, r.URL.Path
+				gotBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"name":"p","members":[],"members_version":7}`))
+			}))
+			defer ts.Close()
 
-	ctx := context.Background()
-	mcpServer := mcp.New(nil, client.New(ts.URL, "pfk_wire_probe"))
-	cTransport, sTransport := sdkmcp.NewInMemoryTransports()
-	serverCtx, cancel := context.WithCancel(ctx)
-	t.Cleanup(cancel)
-	go func() {
-		srv, err := mcpServer.Connect(serverCtx, sTransport)
-		if err != nil {
-			return
-		}
-		_ = srv.Wait()
-	}()
-	cl := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "proj-removal-wire", Version: "1.0.0"}, nil)
-	session, err := cl.Connect(ctx, cTransport, nil)
-	if err != nil {
-		t.Fatalf("mcp client connect: %v", err)
-	}
-	t.Cleanup(func() { _ = session.Close() })
+			ctx := context.Background()
+			mcpServer := mcp.New(nil, client.New(ts.URL, "pfk_wire_probe"))
+			cTransport, sTransport := sdkmcp.NewInMemoryTransports()
+			serverCtx, cancel := context.WithCancel(ctx)
+			t.Cleanup(cancel)
+			go func() {
+				srv, err := mcpServer.Connect(serverCtx, sTransport)
+				if err != nil {
+					return
+				}
+				_ = srv.Wait()
+			}()
+			cl := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "proj-removal-wire", Version: "1.0.0"}, nil)
+			session, err := cl.Connect(ctx, cTransport, nil)
+			if err != nil {
+				t.Fatalf("mcp client connect: %v", err)
+			}
+			t.Cleanup(func() { _ = session.Close() })
 
-	text, _, isErr := projCASCall(t, session, "pf_update_project", map[string]any{
-		"name":              "p",
-		"members":           []map[string]any{{"user_id": "u_one", "role": "viewer"}},
-		"members_version":   3,
-		"expected_removals": []string{"u_two", "u_three"},
-	})
-	if isErr {
-		t.Fatalf("pf_update_project failed against the capture peer: %s", text)
-	}
-	if gotMethod != http.MethodPatch || gotPath != "/v1/projects/p" {
-		t.Errorf("request was %s %s, want PATCH /v1/projects/p", gotMethod, gotPath)
-	}
+			text, _, isErr := projCASCall(t, session, "pf_update_project", map[string]any{
+				"name":              "p",
+				"members":           []map[string]any{{"user_id": "u_one", "role": "viewer"}},
+				"members_version":   3,
+				"expected_removals": tc.arg,
+			})
+			if isErr {
+				t.Fatalf("pf_update_project failed against the capture peer: %s", text)
+			}
+			if gotMethod != http.MethodPatch || gotPath != "/v1/projects/p" {
+				t.Errorf("request was %s %s, want PATCH /v1/projects/p", gotMethod, gotPath)
+			}
 
-	// Decode rather than substring-match: `"expected_removals":["u_two"...]` as
-	// text would also be satisfied by the value arriving as a single joined
-	// string, which the server's []string would reject two hops away as an
-	// opaque 400 — the aihub#241 B1 shape.
-	var sent map[string]any
-	if uerr := json.Unmarshal(gotBody, &sent); uerr != nil {
-		t.Fatalf("the server saw a non-JSON body %q: %v", gotBody, uerr)
-	}
-	raw, present := sent["expected_removals"]
-	if !present {
-		t.Fatalf("expected_removals never reached the wire, so every declared removal would be refused "+
-			"as undeclared. The server saw %s", gotBody)
-	}
-	list, ok := raw.([]any)
-	if !ok {
-		t.Fatalf("expected_removals arrived as %T (%#v), not a JSON array — the server binds it into a "+
-			"[]string", raw, raw)
-	}
-	if len(list) != 2 || list[0] != "u_two" || list[1] != "u_three" {
-		t.Errorf("expected_removals = %#v on the wire, want [u_two u_three]", list)
-	}
-	// The other two members fields must still be there: a handler that started
-	// filtering its arguments would drop all three together.
-	for _, k := range []string{"members", "members_version"} {
-		if _, ok := sent[k]; !ok {
-			t.Errorf("%s did not reach the wire alongside expected_removals; the server saw %s", k, gotBody)
-		}
+			// Decode rather than substring-match: `"expected_removals":["u_two"…]`
+			// as text would also be satisfied by the value arriving as a single
+			// joined string, which the server's []string rejects two hops away.
+			var sent map[string]any
+			if uerr := json.Unmarshal(gotBody, &sent); uerr != nil {
+				t.Fatalf("the server saw a non-JSON body %q: %v", gotBody, uerr)
+			}
+			raw, present := sent["expected_removals"]
+			if !present {
+				t.Fatalf("expected_removals never reached the wire, so every declared removal would be "+
+					"refused as undeclared. The server saw %s", gotBody)
+			}
+			list, ok := raw.([]any)
+			if !ok {
+				t.Fatalf("expected_removals arrived as %T (%#v), not a JSON array — the server binds it "+
+					"into a []string and would answer an opaque 400", raw, raw)
+			}
+			if !reflect.DeepEqual(list, tc.want) {
+				t.Errorf("expected_removals = %#v on the wire, want %#v", list, tc.want)
+			}
+			// The other two members fields must still be there: a handler that
+			// started filtering its arguments would drop all three together.
+			for _, k := range []string{"members", "members_version"} {
+				if _, ok := sent[k]; !ok {
+					t.Errorf("%s did not reach the wire alongside expected_removals; the server saw %s",
+						k, gotBody)
+				}
+			}
+		})
 	}
 }
 

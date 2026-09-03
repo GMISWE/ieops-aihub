@@ -195,6 +195,103 @@ func TestUpdateProjectMembersRemovalStaleVersionConflictTakesPrecedence(t *testi
 	assert.Equal(t, []string{"u_one", "u_two", "u_three"}, casMembersOf(t, fresh.Members))
 }
 
+// ── malformed stored data must stay REPAIRABLE through the API ──────────────
+//
+// Nothing constrains projects.members to be an array of well-formed member
+// objects, and this codebase already has a documented policy for the case:
+// internal/server/middleware.go's warnMalformedMembersOnce applies the elements
+// that do decode, warns once, and tells the operator to "fix the row in
+// projects.members". A members write is the only way to follow that advice
+// through the API, so decoding the stored list must not be able to refuse one.
+//
+// Found in review of aihub#333's first cut, which unmarshalled the locked list
+// strictly and answered 500 INTERNAL_ERROR — turning the one supported repair
+// path into a dead end reachable only by raw SQL. Measured on the pre-fix
+// commit: `[{"user_id":"u_a","role":"viewer"},"oops"]` gave
+// `INTERNAL_ERROR: decode stored members: json: cannot unmarshal string into Go
+// value of type domain.projectMember`, where base 6555a15 had repaired the row.
+func TestUpdateProjectMembersRemovalMalformedStoredListStaysRepairable(t *testing.T) {
+	pool := setupLatestTestDB(t)
+	u := testUser(t, pool)
+	project := casProject(t, pool, u)
+	caller := &UserRecord{ID: u, Role: "admin"}
+	ctx := context.Background()
+
+	// Raw SQL: this row cannot be produced through the API, which is the point.
+	_, err := pool.Exec(ctx,
+		`UPDATE projects SET members='[{"user_id":"u_a","role":"viewer"},"oops",{"user_id":"u_b","role":"writer"}]'::jsonb
+		 WHERE name=$1`, project)
+	require.NoError(t, err)
+
+	// Sending everybody who is really there removes nobody, so it needs no
+	// declaration and must simply succeed.
+	repaired := []MemberInput{{UserID: "u_a", Role: "viewer"}, {UserID: "u_b", Role: "writer"}}
+	p, aerr := UpdateProject(ctx, pool, project, caller, UpdateProjectRequest{Members: &repaired})
+	require.Nil(t, aerr, "a members write against a row with one malformed element was refused (%v). "+
+		"warnMalformedMembersOnce tells operators to fix such a row in projects.members, and a members "+
+		"write is the only way to do that through the API", aerr)
+	assert.Equal(t, []string{"u_a", "u_b"}, casMembersOf(t, p.Members))
+
+	// And the elements that DO decode are still protected: dropping u_b from a
+	// malformed row is still an undeclared removal, so tolerating the junk must
+	// not tolerate the truncation next to it.
+	_, err = pool.Exec(ctx,
+		`UPDATE projects SET members='[{"user_id":"u_a","role":"viewer"},"oops",{"user_id":"u_b","role":"writer"}]'::jsonb
+		 WHERE name=$1`, project)
+	require.NoError(t, err)
+	short := []MemberInput{{UserID: "u_a", Role: "viewer"}}
+	_, aerr = UpdateProject(ctx, pool, project, caller, UpdateProjectRequest{Members: &short})
+	require.NotNil(t, aerr, "one malformed element disabled the removal check for the well-formed ones")
+	assert.Equal(t, ErrProjectMembersUndeclaredRemoval, aerr.Code)
+	details, ok := aerr.Details.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, []string{"u_b"}, details["undeclared_removals"])
+}
+
+// ── a member entry that names nobody must not become a sticky refusal ───────
+//
+// Two halves of one defect found in review.
+//
+// Input: UpdateProject validated `role` and never `user_id`, so
+// `[{"user_id":"","role":"viewer"}]` was accepted and stored. It grants access to
+// nobody, and afterwards every members write was refused with a message whose
+// list of names read literally "did not declare: ." — the escape hatch
+// (expected_removals: [""]) is not guessable from that, so the project's member
+// list was stuck.
+//
+// Stored: rejecting the input cannot help a row that already has one, or one
+// written by raw SQL or a future migration. So a stored entry with a blank
+// user_id is also not treated as a removable member: it names nobody, and the
+// check exists to protect ACCESS, which a blank user_id does not grant.
+func TestUpdateProjectMembersRemovalBlankUserIDIsRejectedAndNeverSticks(t *testing.T) {
+	pool := setupLatestTestDB(t)
+	u := testUser(t, pool)
+	project := casProject(t, pool, u)
+	caller := &UserRecord{ID: u, Role: "admin"}
+	ctx := context.Background()
+
+	for _, blank := range []string{"", "   "} {
+		bad := []MemberInput{{UserID: "u_a", Role: "viewer"}, {UserID: blank, Role: "viewer"}}
+		_, aerr := UpdateProject(ctx, pool, project, caller, UpdateProjectRequest{Members: &bad})
+		require.NotNil(t, aerr, "a member entry with user_id %q was accepted; it grants access to nobody "+
+			"and makes every later members write fail with a refusal that names nobody", blank)
+		assert.Equal(t, ErrBadRequest, aerr.Code)
+		assert.Contains(t, aerr.Message, "user_id")
+	}
+
+	// A row that already carries one (only reachable by raw SQL now) must not
+	// block a legitimate write.
+	_, err := pool.Exec(ctx,
+		`UPDATE projects SET members='[{"user_id":"u_a","role":"viewer"},{"user_id":"","role":"viewer"}]'::jsonb
+		 WHERE name=$1`, project)
+	require.NoError(t, err)
+	fixed := []MemberInput{{UserID: "u_a", Role: "viewer"}}
+	p, aerr := UpdateProject(ctx, pool, project, caller, UpdateProjectRequest{Members: &fixed})
+	require.Nil(t, aerr, "a stored member entry with a blank user_id blocked a write that removes nobody "+
+		"real (%v); the project's member list would be unfixable through the API", aerr)
+	assert.Equal(t, []string{"u_a"}, casMembersOf(t, p.Members))
+}
+
 // ── the reference side of TestUpdateProjectMembersCASConcurrentAddsBothSurvive ──
 //
 // Same forced interleaving as the guarded acceptance test, no members_version.

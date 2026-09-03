@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -65,6 +66,76 @@ func TestAddWorktrees(t *testing.T) {
 		addWorktrees(result, map[string]string{})
 		if _, ok := result["worktrees"]; ok {
 			t.Errorf("result[worktrees] should be absent for empty input, got %#v", result["worktrees"])
+		}
+	})
+}
+
+// aihub#333: expected_removals binds to a []string on the server, so a bare
+// string must be coerced here rather than becoming an opaque 400 at c.Bind two
+// layers away — the aihub#241 B1 shape, which normalizeIntArg exists to prevent
+// for the integer next to it.
+//
+// The wrong-type cases assert an ERROR rather than a silent drop, and that is
+// the discriminating half: dropping expected_removals turns a declared removal
+// into an undeclared one and answers 412, so the caller would be told they did
+// not declare a removal while the declaration sits in their own request.
+func TestNormalizeStringSliceArg(t *testing.T) {
+	t.Run("BareStringBecomesOneElementList", func(t *testing.T) {
+		args := map[string]any{"expected_removals": "u_two"}
+		if err := normalizeStringSliceArg(args, "expected_removals"); err != nil {
+			t.Fatalf("a single user_id sent as a bare string was rejected: %v", err)
+		}
+		got, ok := args["expected_removals"].([]string)
+		if !ok || len(got) != 1 || got[0] != "u_two" {
+			t.Errorf("got %#v, want []string{\"u_two\"}", args["expected_removals"])
+		}
+	})
+
+	t.Run("JSONArrayBecomesStringSlice", func(t *testing.T) {
+		args := map[string]any{"expected_removals": []any{"u_two", "u_three"}}
+		if err := normalizeStringSliceArg(args, "expected_removals"); err != nil {
+			t.Fatalf("the ordinary array form was rejected: %v", err)
+		}
+		got, _ := args["expected_removals"].([]string)
+		if len(got) != 2 || got[0] != "u_two" || got[1] != "u_three" {
+			t.Errorf("got %#v, want []string{\"u_two\",\"u_three\"}", args["expected_removals"])
+		}
+	})
+
+	t.Run("AbsentAndNullAreLeftAlone", func(t *testing.T) {
+		args := map[string]any{}
+		if err := normalizeStringSliceArg(args, "expected_removals"); err != nil {
+			t.Errorf("an absent key must not error: %v", err)
+		}
+		if _, present := args["expected_removals"]; present {
+			t.Error("an absent key must not be materialised; no declaration means 'removes nobody'")
+		}
+		args = map[string]any{"expected_removals": nil}
+		if err := normalizeStringSliceArg(args, "expected_removals"); err != nil {
+			t.Errorf("a null value must not error: %v", err)
+		}
+	})
+
+	t.Run("NonStringElementIsNamedNotDropped", func(t *testing.T) {
+		args := map[string]any{"expected_removals": []any{"u_two", 7}}
+		err := normalizeStringSliceArg(args, "expected_removals")
+		if err == nil {
+			t.Fatal("an array with a non-string element was accepted; whatever happens next, the caller " +
+				"will not learn that their declaration was malformed")
+		}
+		if !strings.Contains(err.Error(), "expected_removals") {
+			t.Errorf("the error does not name the field: %v", err)
+		}
+	})
+
+	t.Run("WrongTypeIsNamedNotDropped", func(t *testing.T) {
+		args := map[string]any{"expected_removals": 7}
+		err := normalizeStringSliceArg(args, "expected_removals")
+		if err == nil {
+			t.Fatal("a number was accepted as a removal declaration")
+		}
+		if !strings.Contains(err.Error(), "expected_removals") {
+			t.Errorf("the error does not name the field: %v", err)
 		}
 	})
 }

@@ -406,13 +406,19 @@ func TestUpdateProjectMembersCASConcurrentAddsBothSurvive(t *testing.T) {
 // correct even with a Go-computed increment, so the unguarded path is the only
 // place the difference is observable.
 //
-// Observing it needs both writers to have READ before either WROTE, and that is
-// exactly what the barrier enforces: releaseWhenAllArrived t.Fatals if both
-// workers do not reach it, and each worker arrives after its read and blocks
-// until released. So the overlap is structural here, not an outcome this test
-// has to detect afterwards. Both workers add the SAME member so that neither
+// Observing it needs both writers to have READ the same version before either
+// WROTE, and the barrier is what arranges that: releaseWhenAllArrived t.Fatals
+// if both workers do not reach it, and each worker arrives after its GetProject
+// and blocks until released. Both workers add the SAME member so that neither
 // list drops anybody and both writes are therefore allowed to land — which is
 // what makes two increments observable at all.
+//
+// Not fully structural, and the difference matters if this ever flakes: the
+// barrier orders casAddMember's reads, but the Go-computed mutant would derive
+// its value from UpdateProject's OWN pre-transaction checkProjectAccess read,
+// which the barrier does not order. Measured 10/10 kills, so the window is wide
+// in practice — but the kill is probabilistic, not guaranteed by construction.
+// A green run here is therefore evidence, not proof, that the mutant is dead.
 func TestUpdateProjectMembersCASUnguardedConcurrentWritesEachAdvanceTheCounter(t *testing.T) {
 	pool := setupLatestTestDB(t)
 	u := testUser(t, pool)

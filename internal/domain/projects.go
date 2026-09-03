@@ -140,15 +140,19 @@ type UpdateProjectRequest struct {
 	// while keeping u_a, still removes exactly one member, so N=1 passes and the
 	// wrong person loses access. A set costs the caller nothing — anybody who
 	// knows they are removing somebody knows who — and rejects that case.
-	// TestUndeclaredRemovals_SwapOfEqualSizeIsARemoval is the assertion a count
-	// cannot satisfy.
+	// TestUndeclaredRemovals/SwapOfEqualSizeIsARemoval is the assertion a count
+	// cannot satisfy (a subtest — `-run` needs the slash, not an underscore).
 	//
 	// # Why nil and empty mean the same thing
 	//
 	// Both mean "this write removes nobody". There is deliberately no third
-	// state: making absence safe is what lets every existing additive caller
-	// (internal/cli/init.go, and any read-add-write) keep working untouched
-	// while the accident it exists to stop is refused by default. A `*[]string`
+	// state: making absence safe is what lets any existing additive caller — a
+	// read-add-write that sends the list back with one more entry — keep working
+	// untouched while the accident it exists to stop is refused by default.
+	// (No production caller writes `members` at all today: internal/cli/init.go
+	// patches only `repos` and merely READS Members to gate auto-init. So the
+	// additive path has no named witness in-tree, which is precisely why it is
+	// asserted in a test rather than trusted.) A `*[]string`
 	// would invite a distinction that has no meaning and would put an
 	// omitempty-shaped trap between "sent []" and "sent nothing".
 	//
@@ -769,6 +773,23 @@ func membersCASConflictErr(expected, current int) *AihubError {
 //     re-grade members are untouched. Comparing whole member OBJECTS would
 //     refuse it.
 //
+// A stored entry whose user_id is blank is not a removable member and is
+// skipped. It grants access to nobody, so dropping it takes nothing away — and
+// this is the same guard, for the same reason, that roleForUserInMembers
+// (internal/server/middleware.go) puts on its identity comparison: encoding/json
+// keeps decoding a slice past a malformed element and leaves that one
+// zero-valued, so `[{u_a,viewer}, "oops"]` yields a `{"",""}` member. Without
+// this skip such a row makes EVERY subsequent members write fail with a refusal
+// whose list of names reads "did not declare: ", whose escape hatch
+// (expected_removals: [""]) is not guessable from it, and which therefore leaves
+// the project's access list unfixable through the API. Found in review; pinned by
+// TestUpdateProjectMembersRemovalMalformedStoredListStaysRepairable and
+// TestUpdateProjectMembersRemovalBlankUserIDIsRejectedAndNeverSticks.
+//
+// Blank means empty-or-whitespace. Anything else is compared literally, so
+// `" u_a "` vs `"u_a"` reads as a removal — failing CLOSED, which is the safe
+// direction for an access list.
+//
 // Pure, and split out for the reason spelled out at buildProjectUpdate:
 // UpdateProject reaches the database before it can call this, so a behavioural
 // test of the arithmetic through UpdateProject would have to be DB-gated, and a
@@ -788,6 +809,9 @@ func undeclaredRemovals(stored []projectMember, submitted []MemberInput, declare
 	seen := make(map[string]struct{}, len(stored))
 	var out []string
 	for _, m := range stored {
+		if strings.TrimSpace(m.UserID) == "" {
+			continue
+		}
 		if _, staying := keep[m.UserID]; staying {
 			continue
 		}
@@ -898,6 +922,18 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 
 	if req.Members != nil {
 		for _, m := range *req.Members {
+			// Checked BEFORE the role, and added by aihub#333: an entry with a
+			// blank user_id grants access to nobody, and once stored it used to
+			// make every later members write fail with a refusal that named
+			// nobody (see undeclaredRemovals). The role message below would also
+			// read "for member " with nothing after it. Rejecting it here is what
+			// keeps that state from being creatable through the API at all;
+			// undeclaredRemovals tolerates rows that already have one.
+			if strings.TrimSpace(m.UserID) == "" {
+				return nil, NewErr(ErrBadRequest,
+					"a members entry has an empty user_id: every member must name a user, because an "+
+						"entry that names nobody grants no access and cannot be removed by name")
+			}
 			if m.Role != "viewer" && m.Role != "writer" && m.Role != "maintainer" {
 				return nil, NewErr(ErrBadRequest, fmt.Sprintf("invalid role %q for member %s: must be viewer, writer, or maintainer", m.Role, m.UserID))
 			}
@@ -966,11 +1002,21 @@ func UpdateProject(ctx context.Context, conn *pgxpool.Pool, name string, caller 
 	// goes red (verified by injecting exactly that mutant).
 	if req.Members != nil && (req.MembersVersion == nil || *req.MembersVersion == lockedMembersVersion) {
 		var stored []projectMember
-		if len(lockedMembers) > 0 {
-			if err := json.Unmarshal(lockedMembers, &stored); err != nil {
-				return nil, NewErr(ErrInternalError, fmt.Sprintf("decode stored members: %v", err))
-			}
-		}
+		// The decode error is DISCARDED, not acted on, and that is the whole
+		// point. encoding/json does not fail a slice wholesale: it records the
+		// first type error and keeps going, so the elements either side of a
+		// malformed one decode correctly and only the bad one is left
+		// zero-valued. Refusing on the error instead threw away data that had
+		// already decoded and answered 500 — which made a members write, the only
+		// repair for such a row that exists through the API, impossible on
+		// exactly the rows that need it (warnMalformedMembersOnce in
+		// internal/server/middleware.go tells operators to go and fix them).
+		// Same policy, same reasoning and same measurement as
+		// roleForUserInMembers there; undeclaredRemovals skips the zero-valued
+		// entry, so tolerating the junk does not tolerate a truncation beside it.
+		// When members is not an array at all the whole value fails and stored
+		// comes back nil, which is the safe reading of "no members to lose".
+		_ = json.Unmarshal(lockedMembers, &stored)
 		if undeclared := undeclaredRemovals(stored, *req.Members, req.ExpectedRemovals); len(undeclared) > 0 {
 			return nil, undeclaredMemberRemovalErr(undeclared, req.ExpectedRemovals, len(stored), len(*req.Members))
 		}

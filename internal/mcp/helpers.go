@@ -259,6 +259,53 @@ func normalizeIntArg(args map[string]any, key string) error {
 	}
 }
 
+// normalizeStringSliceArg rewrites args[key] in place to a []string so it
+// serializes into the request body as a JSON array of strings.
+//
+// aihub#333, and the same lesson as normalizeIntArg one type over. The server
+// binds `expected_removals` into a []string, so a caller sending the bare string
+// `"u_two"` — the natural mistake when removing exactly one person, and what a
+// client coercing to a scalar produces — died at echo's c.Bind as 400
+// BAD_REQUEST "invalid request body", two layers from the mistake and naming
+// nothing. That message is indistinguishable from the server not knowing the
+// parameter at all, which is exactly the aihub#241 B1 failure.
+//
+// A single string is accepted as a one-element list, matching csvArg's
+// both-shapes policy (aihub#280). Unlike csvArg this NEVER silently drops a
+// wrong type: a dropped expected_removals turns the caller's declared removal
+// into an undeclared one and answers 412, so the caller would be told their
+// removal was not declared while looking at the declaration in their own
+// request. An error naming the field is the only outcome that leads anywhere.
+//
+// Absent and null are left untouched and report no error — no declaration means
+// "this write removes nobody", which is the safe default the domain relies on.
+func normalizeStringSliceArg(args map[string]any, key string) error {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case []string:
+		return nil
+	case string:
+		args[key] = []string{t}
+		return nil
+	case []any:
+		out := make([]string, 0, len(t))
+		for i, item := range t {
+			s, isStr := item.(string)
+			if !isStr {
+				return fmt.Errorf("%s[%d] must be a string, got %T", key, i, item)
+			}
+			out = append(out, s)
+		}
+		args[key] = out
+		return nil
+	default:
+		return fmt.Errorf("%s must be an array of strings, got %T", key, v)
+	}
+}
+
 // setIfNonempty adds key=value to params if value is non-empty.
 func setIfNonempty(params url.Values, key, value string) {
 	if value != "" {

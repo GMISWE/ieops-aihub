@@ -100,6 +100,15 @@ func (s *Server) registerProjectTools() {
 		if err := normalizeIntArg(args, "members_version"); err != nil {
 			return errResult(err)
 		}
+		// aihub#333, same hazard one type over: expected_removals binds to a
+		// []string, so a caller sending the bare string "u_two" — the natural
+		// mistake when removing exactly one person — otherwise died at c.Bind as
+		// an opaque 400 that named nothing. Coerced rather than dropped: a
+		// dropped declaration comes back as 412 "you did not declare this
+		// removal" while the declaration is sitting in the caller's own request.
+		if err := normalizeStringSliceArg(args, "expected_removals"); err != nil {
+			return errResult(err)
+		}
 		body := make(map[string]any)
 		for k, v := range args {
 			if k != "name" {

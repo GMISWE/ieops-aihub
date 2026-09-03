@@ -694,7 +694,9 @@ jobs:
                       TestUpdateProjectMembersRemovalDeclaredShrinkSucceedsAndAdvancesVersion \
                       TestUpdateProjectMembersRemovalCallerWhoDoesNotKnowTheListCannotWipeIt \
                       TestUpdateProjectMembersRemovalStaleVersionConflictTakesPrecedence \
-                      TestUpdateProjectMembersRemovalUnguardedConcurrentAddsRefuseTheLoserInsteadOfLosingIt; do
+                      TestUpdateProjectMembersRemovalUnguardedConcurrentAddsRefuseTheLoserInsteadOfLosingIt \
+                      TestUpdateProjectMembersRemovalMalformedStoredListStaysRepairable \
+                      TestUpdateProjectMembersRemovalBlankUserIDIsRejectedAndNeverSticks; do
             grep -q -- "--- PASS: $want" removal_domain.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the DB-gated aihub#333 removal coverage is not actually executing"; exit 1; }
           done

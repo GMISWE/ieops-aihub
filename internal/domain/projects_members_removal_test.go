@@ -17,7 +17,15 @@ package domain
 //     in every field and removes nobody.
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -55,9 +63,11 @@ func TestUndeclaredRemovals(t *testing.T) {
 			stored:    stored("u_a", "viewer"),
 			submitted: submitted("u_a", "viewer", "u_b", "writer"),
 			want:      nil,
-			why: "adding a member removes nobody. This is the case every existing caller is in " +
-				"(internal/cli/init.go, and any read-add-write), and it must keep working with no new " +
-				"parameter or aihub#333 is a breaking change for everyone rather than for the mistake",
+			why: "adding a member removes nobody. This is the case any read-add-write caller is in, and " +
+				"it must keep working with no new parameter or aihub#333 is a breaking change for " +
+				"everyone rather than for the mistake. No production caller writes members today " +
+				"(internal/cli/init.go patches repos only and reads Members to gate auto-init), so this " +
+				"is the assertion standing in for the callers that do not exist yet",
 		},
 		{
 			name:      "EmptyStoredListRemovesNobody",
@@ -133,6 +143,24 @@ func TestUndeclaredRemovals(t *testing.T) {
 				"named twice in the message an operator reads",
 		},
 		{
+			name:      "BlankStoredUserIDIsNotARemovableMember",
+			stored:    stored("u_a", "viewer", "", "viewer", "   ", "writer"),
+			submitted: submitted("u_a", "viewer"),
+			want:      nil,
+			why: "an entry that names nobody grants no access, so dropping it takes nothing away. This is " +
+				"how a malformed members element arrives — encoding/json leaves the bad one zero-valued " +
+				"while decoding its neighbours — and without the skip such a row makes every later " +
+				"members write fail with a refusal reading \"did not declare: \", which nobody can act on",
+		},
+		{
+			name:      "BlankStoredUserIDDoesNotMaskARealRemovalBesideIt",
+			stored:    stored("u_a", "viewer", "", "viewer", "u_b", "writer"),
+			submitted: submitted("u_a", "viewer"),
+			want:      []string{"u_b"},
+			why: "tolerating the junk entry must not tolerate the truncation next to it — that would turn " +
+				"one dirty row into a licence to wipe the project's access list",
+		},
+		{
 			name:      "ResultIsSortedNotJSONBOrder",
 			stored:    stored("u_z", "viewer", "u_a", "writer", "u_m", "maintainer"),
 			submitted: submitted(),
@@ -149,51 +177,123 @@ func TestUndeclaredRemovals(t *testing.T) {
 	}
 }
 
-// The removal check has to dominate EVERY execution of the members UPDATE, and
-// today it does for a reason that is true by accident: buildProjectUpdate — the
-// one statement in this repo that writes the `members` column — has exactly one
-// production caller, and the check sits immediately above it in the same
-// transaction. Nothing enforces that. A second caller added later would be a
-// write path with no declaration check and no failing test, which is the shape
-// this repo has shipped four times: a guard pinned on a helper while a caller
-// goes round it.
+// The removal check has to dominate EVERY execution of every statement that
+// writes the `members` column. Today exactly one such statement exists and the
+// check sits immediately above it, inside the same transaction and under the same
+// row lock — but nothing enforces that, and a second statement added later would
+// be a write path with no declaration check and no failing test. That is the
+// shape this repo has shipped four times: a guard pinned on a helper while a
+// caller goes round it.
 //
-// So the count is the assertion. It is deliberately coarse — it does not try to
-// prove domination by reading control flow, only that there is exactly one place
-// where domination has to hold and exactly one check. If either number moves,
-// somebody has to look.
+// # Why this counts SQL and not a Go identifier
+//
+// The first version of this test counted occurrences of `buildProjectUpdate(`.
+// Review proved it blind to the exact bypass it is named for: a brand-new
+// `conn.Exec(ctx, "UPDATE projects SET members=$1, ...")` in this package, with
+// no undeclaredRemovals anywhere, left it GREEN — because it is not a caller of
+// that helper, it goes ROUND it. It also went RED on prose, when a doc comment
+// happened to contain the identifier followed by a paren, and blamed "a second
+// caller". A guard whose subject is a Go name cannot see a write path that
+// declines to use that name.
+//
+// So the subject is the SQL. String literals are extracted through go/ast rather
+// than by regex over the file: a BasicLit cannot be a comment, which kills the
+// prose false-positive structurally instead of by escaping.
+//
+// It stays deliberately coarse. It does not prove domination by reading control
+// flow, only that there is exactly one place where domination must hold and
+// exactly one check. If either number moves, somebody has to look.
 func TestMembersUpdateHasOneWritePathAndOneRemovalCheck(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	require.NoError(t, err)
+	// Assigns the members column: `members=$1`, `members = $1`, `members =
+	// members || ...`, `members=EXCLUDED.members`. Excludes members_version via
+	// the negative lookahead's stand-in — Go's regexp has no lookahead, so the
+	// word boundary is spelled out by requiring the next char to be = or space.
+	assign := regexp.MustCompile(`\bmembers\s*=`)
 	writes, checks := 0, 0
-	var writeFiles []string
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
+	var writeSites []string
+
+	root := repoRootFromDomainPackage(t)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
 		}
-		src, rerr := os.ReadFile(name)
-		require.NoError(t, rerr)
-		body := string(src)
-		// Skip the declarations themselves; only call sites count.
-		w := strings.Count(body, "buildProjectUpdate(") - strings.Count(body, "func buildProjectUpdate(")
-		c := strings.Count(body, "undeclaredRemovals(") - strings.Count(body, "func undeclaredRemovals(")
-		if w > 0 {
-			writeFiles = append(writeFiles, name)
+		if d.IsDir() {
+			// Vendored/third-party trees and the git dir have nothing to say
+			// about this invariant.
+			if n := d.Name(); n == ".git" || n == "vendor" || n == "node_modules" {
+				return fs.SkipDir
+			}
+			return nil
 		}
-		writes += w
-		checks += c
-	}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			return fmt.Errorf("parse %s: %w", path, perr)
+		}
+		rel, _ := filepath.Rel(root, path)
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.BasicLit:
+				if v.Kind != token.STRING {
+					return true
+				}
+				s, uerr := strconv.Unquote(v.Value)
+				if uerr != nil {
+					return true
+				}
+				// members_version is a different column and is assigned on the
+				// same statement, so strip it before looking for `members =`.
+				probe := strings.ReplaceAll(s, "members_version", "mv_column")
+				if assign.MatchString(probe) {
+					writes++
+					writeSites = append(writeSites, fmt.Sprintf("%s:%d %q", rel, fset.Position(v.Pos()).Line, s))
+				}
+			case *ast.CallExpr:
+				if id, ok := v.Fun.(*ast.Ident); ok && id.Name == "undeclaredRemovals" {
+					checks++
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	require.NoError(t, err)
+
 	assert.Equal(t, 1, writes,
-		"buildProjectUpdate has %d production call site(s) (%v), not 1. It compiles the only UPDATE that "+
-			"writes projects.members, so every one of its callers needs the aihub#333 removal check above "+
-			"it in the same transaction. If you added a second caller: add the check there too and raise "+
-			"both numbers in this test", writes, writeFiles)
+		"found %d SQL string(s) assigning the members column, not 1:\n  %s\nEvery statement that writes "+
+			"projects.members needs the aihub#333 removal check above it, in the same transaction and "+
+			"under the same row lock. If you added one: add the check there too, then raise both numbers "+
+			"here. Do NOT just raise the number", writes, strings.Join(writeSites, "\n  "))
 	assert.Equal(t, 1, checks,
-		"undeclaredRemovals has %d production call site(s), not 1. Zero means the aihub#333 check has been "+
-			"disconnected and every DB-gated test for it is now the only thing standing between a short "+
-			"list and a wiped access list; more than one means the write paths have multiplied and this "+
-			"test's pairing with buildProjectUpdate no longer says anything", checks)
+		"undeclaredRemovals has %d call site(s) in production code, not 1. Zero means the aihub#333 check "+
+			"is disconnected and nothing stands between a short list and a wiped access list; more than "+
+			"one means the write paths have multiplied and this test's pairing with the SQL count no "+
+			"longer says anything", checks)
+}
+
+// repoRootFromDomainPackage walks up from this package's directory to the module
+// root, so the scan above covers the whole repo rather than internal/domain. The
+// first version scanned only `.` and non-recursively, which would have missed a
+// write path added in any other package — and internal/server, internal/mcp and
+// internal/cli all touch projects.
+func repoRootFromDomainPackage(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.Abs(".")
+	require.NoError(t, err)
+	for i := 0; i < 8; i++ {
+		if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		require.NotEqual(t, dir, parent, "walked to the filesystem root without finding go.mod")
+		dir = parent
+	}
+	t.Fatal("go.mod not found within 8 levels above internal/domain; update this helper")
+	return ""
 }
 
 // A precondition attached to nothing must be refused rather than answered with a

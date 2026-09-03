@@ -435,6 +435,57 @@ jobs:
       #               dbtestcov: AIHUB_TEST_DB-gated test functions: 137
       #                 (require only a DB: 134, need extra env: 3)
       #               dbtestcov: covered by a CI step: 134/134
+      #
+      #   139 -> 146 aihub#175 added 7 DB-gated functions for ONE work item —
+      #             5 in internal/domain (memory_lifecycle_audit_db_test.go:
+      #             TestRedact_WritesAuditColumnsAndEmitsEvent,
+      #             TestRedact_OmittedReasonStoresNullNotEmptyString,
+      #             TestActivate_DoesNotReviveSupersededVersion,
+      #             TestActivate_StillRevivesADecayedVersionWithNoSuccessor,
+      #             TestActivate_RedactedSuccessorDoesNotCountAsSupersession)
+      #             and 2 in internal/server
+      #             (routes_memory_redact_idor_db_test.go:
+      #             TestRedactMemory_AuthorWithoutProjectAccessIsRefused,
+      #             TestRedactMemory_ProjectWriterIsAuditedWithReason).
+      #
+      #             So the +7 is emphatically NOT "one per work item" — this is
+      #             one work item carrying three independent defects, and two of
+      #             the seven are negative controls rather than gates. Functions
+      #             rather than subtests here because this gate counts
+      #             functions, and each of the three defects needs its own
+      #             failure name: a single function whose five arms all report
+      #             under one name cannot say WHICH defect regressed. All seven
+      #             need only a database, so the required set goes 136 -> 143
+      #             and they share ONE step, "aihub#175 memory redact
+      #             authz/audit + activate supersede DB tests" — one step
+      #             because they are one work item over two packages, which
+      #             costs nothing the per-invocation `--- PASS:` assertions do
+      #             not already recover.
+      #
+      #             The `139` this starts from is READ OFF origin/main 3753044,
+      #             not derived: the two entries between 137 and 139 were landed
+      #             without a line in this ledger, so continuing from `137` here
+      #             would have produced arithmetic that looks right and is
+      #             wrong. (That gap is pre-existing and is not repaired here —
+      #             the missing entries' provenance is in `git blame`, which is
+      #             where this comment block says provenance lives anyway.)
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched. The gate found
+      #             all seven itself, naming them as executed by no step, before
+      #             the step existed. Verbatim, on this branch off origin/main
+      #             3753044, BEFORE the step was written and with the manifest
+      #             still at 139:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 139 entries,
+      #                 inventory measured 146
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 146
+      #                 (require only a DB: 143, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 136/143
+      #             and after the step and the manifest lines were added:
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 146
+      #                 (require only a DB: 143, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 143/143
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -1742,6 +1793,72 @@ jobs:
           done
           ! grep -q -- '--- SKIP' invisible_step.log \
             || { echo "::error::a routes_step test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#175: the memory lifecycle's authorization / audit / state-machine
+      # trio. All seven cases are DB-gated because all three defects ARE
+      # database behaviour and nothing else:
+      #
+      #   finding 1 (IDOR) — PATCH /v1/memories/:id/redact had no project gate,
+      #     so an author whose project access had been REVOKED could still
+      #     delete the memory (domain.Redact's own rule is "author or global
+      #     admin", which never expires). The criterion here is the memory's
+      #     status column after the call, NOT the 403: a handler that redacts
+      #     and then answers 403 satisfies the status code and is still the bug.
+      #     Verified by mutation — moving the gate below domain.Redact leaves
+      #     the status code assertion green and is caught only by the column.
+      #
+      #   finding 2 (zero audit) — redacted_at / redaction_reason have existed
+      #     since migration 0006 and NOTHING in the codebase ever wrote either,
+      #     and no agent_event was emitted, so "who deleted this, when, why" was
+      #     unanswerable. Whether the event survives agent_events'
+      #     chk_evt_work_item_id whitelist (a redaction carries no work_item_id)
+      #     is a runtime property of that INSERT, not a compile-time one.
+      #
+      #   finding 3 (two active heads) — Activate revived a SUPERSEDED archived
+      #     version back to active beside its successor, and orderVersionChain
+      #     marks every active entry is_current, so the version chain then
+      #     reported two current heads. The guard is an EXISTS subquery;
+      #     activate_status_test.go (not DB-gated, runs in "Unit tests") covers
+      #     the decision function, but only this step can show the boolean fed
+      #     to it is the right boolean — mutating the subquery to a constant
+      #     false leaves that unit test green.
+      #
+      # Both negative controls are named below on purpose. "Superseded rows stay
+      # archived" is trivially satisfiable by never reviving anything, which
+      # would silently kill the forgetting curve, so
+      # StillRevivesADecayedVersionWithNoSuccessor and
+      # RedactedSuccessorDoesNotCountAsSupersession are what make the guard a
+      # guard rather than a latch.
+      #
+      # Two packages, two invocations, one step: they share a fixture shape and
+      # a work item, and the -run regexes are anchored so neither picks up an
+      # unrelated suite this change did not verify.
+      - name: aihub#175 memory redact authz/audit + activate supersede DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+
+          go test ./internal/domain/ -run '^(TestRedact_WritesAuditColumnsAndEmitsEvent|TestRedact_OmittedReasonStoresNullNotEmptyString|TestActivate_DoesNotReviveSupersededVersion|TestActivate_StillRevivesADecayedVersionWithNoSuccessor|TestActivate_RedactedSuccessorDoesNotCountAsSupersession)$' -count=1 -v 2>&1 | tee memlifecycle_domain.log
+          for want in TestRedact_WritesAuditColumnsAndEmitsEvent \
+                      TestRedact_OmittedReasonStoresNullNotEmptyString \
+                      TestActivate_DoesNotReviveSupersededVersion \
+                      TestActivate_StillRevivesADecayedVersionWithNoSuccessor \
+                      TestActivate_RedactedSuccessorDoesNotCountAsSupersession; do
+            grep -q -- "--- PASS: $want (" memlifecycle_domain.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#175 redact-audit / activate-supersede coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' memlifecycle_domain.log \
+            || { echo "::error::an aihub#175 domain test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+          go test ./internal/server/ -run '^(TestRedactMemory_AuthorWithoutProjectAccessIsRefused|TestRedactMemory_ProjectWriterIsAuditedWithReason)$' -count=1 -v 2>&1 | tee memlifecycle_server.log
+          for want in TestRedactMemory_AuthorWithoutProjectAccessIsRefused \
+                      TestRedactMemory_ProjectWriterIsAuditedWithReason; do
+            grep -q -- "--- PASS: $want (" memlifecycle_server.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#175 redact IDOR gate is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' memlifecycle_server.log \
+            || { echo "::error::an aihub#175 server test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       - name: Launcher update-check regression suite
         run: bash plugins/polyforge/tests/launcher-update-check.test.sh

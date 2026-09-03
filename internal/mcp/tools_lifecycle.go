@@ -40,6 +40,11 @@ var (
 		"project", "kind", "wi_type", "priority", "milestone", "scenario",
 		"label", "user_id", "source", "since", "limit", "cursor",
 		"sort", "order", "query",
+		// aihub#277 / aihub#276. Both go through scalarArg (like `limit`), so
+		// a caller sending min_similarity as a JSON number — which is the
+		// natural shape and what every caller will send — is forwarded rather
+		// than dropped by strArg.
+		"similar_to", "min_similarity",
 	}
 	// listWorkItemsBoolParams are forwarded as "true" when set.
 	listWorkItemsBoolParams = []string{"ready_only", "include_step_state"}
@@ -108,8 +113,10 @@ func listWorkItemsSchema() json.RawMessage {
 		"as well as \"does not exist\".")
 	idsProp["items"] = map[string]any{"type": "string"}
 	return objectSchema(map[string]any{
-		"project": prop("string", "Project name. Optional when `ids` is given, required otherwise."),
-		"ids":     idsProp,
+		"project": prop("string", "Project name. Optional when `ids` or `similar_to` is given "+
+			"(each already names a work item); required otherwise. Omitting it widens the "+
+			"search to every project you can see."),
+		"ids": idsProp,
 		"status": prop("string", "Filter by status; comma-separated for several "+
 			"(e.g. \"running,paused\"). An array of strings is also accepted."),
 		"wi_type":   prop("string", "Filter by work item type (e.g. fix_bug, feature)"),
@@ -142,9 +149,65 @@ func listWorkItemsSchema() json.RawMessage {
 			"This is creation time, not close time: combining it with status=wrapped does NOT give "+
 			"\"wrapped since T\" — an item created before T and wrapped after it is excluded. "+
 			"An unparseable value is rejected rather than ignored."),
+		// ─── Description budget for the three semantic params ────────────────
+		//
+		// An InputSchema sits in the prefix of EVERY request, so prose here is a
+		// standing charge, exactly like the tool Description below (whose note
+		// records +70 B clearing by ~20x while +220 B did not clear at all).
+		//
+		// MEASURED for this change (len(listWorkItemsSchema()), which is the
+		// wire content — NOT `polyforge dump-mcp-schemas`, whose contract JSON
+		// carries no descriptions at all and so cannot see any of this).
+		// The ceiling is enforced by TestListWorkItemsSchemaStaysWithinItsWire
+		// Budget, so these numbers cannot rot silently the way they would if
+		// they lived only here:
+		//
+		//	3,722 B  before
+		//	6,000 B  first draft   (+2,278 B ≈ +570 tok/request)
+		//	4,886 B  after trimming
+		//	5,306 B  as shipped    (+1,584 B ≈ +396 tok/request)
+		//
+		// The last step back up is review fallout, and it bought correctness
+		// rather than prose: `project` no longer claims it is required unless
+		// `ids` is given (similar_to now also makes it optional), `similar_to`
+		// no longer promises the source appears at 1.0 unconditionally (any
+		// other filter can exclude it), and `min_similarity` no longer implies
+		// that 0 is rejected. Each of those was a published statement the code
+		// does not honour, which is worse than the bytes.
+		//
+		// The first draft was an order of magnitude past the +220 B already
+		// judged too dear below. Two of the three params are NEW, so some of
+		// what remains is structural — a published param with no description is
+		// not usable. Trimmed to the sentences a caller gets WRONG without: that
+		// similarity has no absolute meaning (aihub#276 acceptance criterion 2,
+		// and the whole subject of that wi), that two new params exist at all,
+		// and each one's error contract. The persuasion — the 20-query
+		// measurement, the 81st-vs-1st comparison, the recalibration advice —
+		// moved to docs/mcp-tools.md and to wi_vector.go's header, neither of
+		// which is resident. Re-measure with the same one-line test before
+		// adding a sentence here.
 		"query": prop("string", "Semantic search over goal+content (aihub#273): "+
 			"embedding cosine when the server has a provider, ILIKE fallback otherwise. "+
-			"Results are similarity-ordered; not combinable with sort/order/cursor."),
+			"Similarity-ordered; not combinable with sort/order/cursor; mutually exclusive "+
+			"with similar_to. 🔴 `similarity` compares only WITHIN one result set — it has no "+
+			"absolute meaning and there is no relevance filter, so ANY input returns a full "+
+			"page. Judge by `semantic.ranked_candidates` (you got the top len(items) of that "+
+			"many) and by reading the goals. For \"like this work item\" use similar_to."),
+		"similar_to": prop("string", "Document→document recall (aihub#277): a work item id or "+
+			"slug whose STORED goal+content vector becomes the query vector — far sharper "+
+			"than approximating it with a one-line query=. Makes `project` optional the way "+
+			"`ids` does. The source is scoped like the results: 404 outside that scope, 412 "+
+			"if it has no embedding yet. It is an ordinary row in its own results (so at "+
+			"similarity 1.0, unless one of your other filters excludes it) — to confirm which "+
+			"row was used, read `semantic.source_work_item_id`, which is unconditional. "+
+			"`similarity` is still only comparable within this one result set. "+
+			"Excludes query=; no sort/order/cursor."),
+		"min_similarity": prop("string", "Opt-in cosine floor for the vector path; a JSON "+
+			"number is also accepted. Must be in [0,1]. 0 is the default and means OFF, so "+
+			"sending 0 is always accepted and always a no-op; any value above 0 requires "+
+			"query= or similar_to= and is a 400 otherwise, never a silent no-op. 🔴 No "+
+			"globally valid value exists, so none is ever defaulted: measured, garbage and "+
+			"real queries overlap on every similarity-derived statistic."),
 		"limit": prop("string", "Max items to return (default 50, ceiling 200). A JSON number "+
 			"is also accepted, and is what most callers send. A value above 200 is served as 200 "+
 			"and reported in `request_adjusted`; a value that is not an integer is rejected with 400."),

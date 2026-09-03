@@ -88,15 +88,35 @@ var listWIWireProbes = map[string][]struct {
 	want    string
 	wantErr bool
 }{
-	"project":   {{shape: "aihub", want: "aihub"}},
-	"label":     {{shape: "alpha", want: "alpha"}},
-	"user_id":   {{shape: "u_abc", want: "u_abc"}},
-	"source":    {{shape: "human", want: "human"}},
-	"since":     {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
-	"cursor":    {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
-	"sort":      {{shape: "closed_at", want: "closed_at"}},
-	"order":     {{shape: "asc", want: "asc"}},
-	"query":     {{shape: "latency", want: "latency"}},
+	"project": {{shape: "aihub", want: "aihub"}},
+	"label":   {{shape: "alpha", want: "alpha"}},
+	"user_id": {{shape: "u_abc", want: "u_abc"}},
+	"source":  {{shape: "human", want: "human"}},
+	"since":   {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
+	"cursor":  {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
+	"sort":    {{shape: "closed_at", want: "closed_at"}},
+	"order":   {{shape: "asc", want: "asc"}},
+	"query":   {{shape: "latency", want: "latency"}},
+	// aihub#277. A slug carries a '#', which url.Values.Encode percent-escapes
+	// on the wire; the probe compares the DECODED value, so "aihub#276" is what
+	// must come back out.
+	"similar_to": {
+		{shape: "aihub#276", want: "aihub#276"},
+		{shape: "wi_135MspYc", want: "wi_135MspYc"},
+	},
+	// aihub#276. Published as a string for the same reason `limit` is, and
+	// probed with a JSON number for the same reason too: a floor is a number,
+	// so that is the shape a caller will send, and strArg would drop it —
+	// leaving the request unfiltered while the caller believed it was filtered.
+	// That exact failure is what queryparam.go's header records for
+	// `similarity_threshold=notanumber`, and dropping the param reproduces it
+	// from the other side.
+	"min_similarity": {
+		{shape: "0.8", want: "0.8"},
+		{shape: float64(0.8), want: "0.8"},
+		{shape: float64(0), want: "0"},
+		{shape: float64(1), want: "1"},
+	},
 	"wi_type":   {{shape: "fix_bug", want: "fix_bug"}},
 	"kind":      {{shape: "fix_bug", want: "fix_bug"}},
 	"priority":  {{shape: "urgent", want: "urgent"}},

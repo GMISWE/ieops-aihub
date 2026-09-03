@@ -1016,6 +1016,41 @@ jobs:
           grep -q -- "--- PASS: TestHandleListWorkItems_Query" wi_query.log             || { echo "::error::TestHandleListWorkItems_Query did not run; the aihub#273 DB-gated coverage is not executing"; exit 1; }
           ! grep -q -- '--- SKIP' wi_query.log             || { echo "::error::an aihub#273 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#276 / aihub#277: document→document recall (similar_to=) and the
+      # semantic response metadata that replaced the similarity floor nobody can
+      # calibrate.
+      #
+      # These need a real database for a reason no fake can cover: the whole
+      # contract is expressed in pgvector's own operators. `similar_to` binds a
+      # vector read straight back out of the table as a literal, the source's
+      # self-similarity has to come out at EXACTLY 1.0 through `<=>`,
+      # `ranked_candidates` is a `count(*) OVER ()` evaluated before LIMIT, and
+      # the width guard exists because pgvector raises "different vector
+      # dimensions" per row. Every one of those is a statement about what
+      # Postgres does, so a stubbed pool would assert the stub.
+      #
+      # Six PASS assertions rather than one wildcard: `go test` exits 0 when the
+      # selected tests all SKIP, so the exit code alone cannot tell "ran and
+      # passed" from "AIHUB_TEST_DB never arrived". Naming each one also means
+      # deleting a test turns this red instead of quietly shrinking the set.
+      - name: aihub#276/#277 wi similar_to + semantic metadata DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run 'TestSimilarTo' -count=1 -v 2>&1 | tee wi_similar_to.log
+          for t in \
+            TestSimilarTo_RetrievesItselfFirstAtExactlyOne \
+            TestSimilarTo_MinSimilarityIsReachableAndDefaultsOff \
+            TestSimilarTo_SemanticBlockDistinguishesThePaths \
+            TestSimilarTo_FloorMakesAnEmptyVectorPageAuthoritative \
+            TestSimilarTo_ProviderOutageWithAFloorIsNotBlamedOnTheCaller \
+            TestSimilarTo_RejectionsAreExplicitNeverSilent \
+          ; do
+            grep -q -- "--- PASS: $t" wi_similar_to.log             || { echo "::error::$t did not report PASS; the aihub#276/#277 DB-gated coverage is not executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' wi_similar_to.log             || { echo "::error::an aihub#276/#277 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#290: exercise the fused step transition (next_step completes one
       # step and starts its successor in a single request) against the same
       # Postgres service, already migrated by the "Apply migrations (aihub#242 DB

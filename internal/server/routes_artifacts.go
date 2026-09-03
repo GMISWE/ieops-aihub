@@ -116,6 +116,83 @@ func uiPageCSPWithNonce(nonce string) string {
 		"frame-ancestors 'self'"
 }
 
+// resolveArtifactBody returns the HTML body fragment for mem: the stored
+// rendered_html when it is present, otherwise a lazy render of the markdown
+// content (aihub#81/#146), otherwise a safe <pre> block. It never returns "" for
+// a memory that has either.
+//
+// aihub#130 made this a shared function rather than a block inside
+// handleArtifactHTML, for two reasons that are not tidiness:
+//
+//  1. /share needs the same fallback now. Since rendered_html is filled by a
+//     background worker, "saved but not rendered yet" is an ordinary transient
+//     state rather than a legacy row — and a render that is dropped (queue full,
+//     panic, process exit) leaves it permanently. /share used to answer 404 for
+//     exactly that state, which would have turned a latency optimisation into
+//     data loss on that one route. This closes TODO(aihub#81) on
+//     handleSharedArtifact.
+//  2. /v1 and /share are contractually byte-identical (aihub#138,
+//     TestArtifactViewer_UIvsV1Share_BytePurity). One function is a structural
+//     guarantee of that; two copies of a fallback are a promise.
+func resolveArtifactBody(mem *domain.Memory) string {
+	if mem.RenderedHTML != nil {
+		return *mem.RenderedHTML
+	}
+	// Lazy-render: try goldmark first, fall back to a <pre> block.
+	if mem.Content != "" {
+		rendered, rerr := render.Markdown(mem.Content)
+		if rerr == nil && rendered != "" {
+			return rendered
+		}
+		// render error or empty output: safe <pre> fallback.
+		return fmt.Sprintf("<pre>%s</pre>", html.EscapeString(mem.Content))
+	}
+	// Empty content: serve a minimal placeholder.
+	return "<pre></pre>"
+}
+
+// hasRenderableBody reports whether there is anything the share routes are
+// willing to serve as mem's body: stored HTML, or — for a configured artifact
+// type only — content the reader can lazy-render into some.
+//
+// It replaces a bare `mem.RenderedHTML != nil` in the three share gates. Under
+// aihub#130 that check answered the wrong question: a spec saved a moment ago
+// has a NULL column and a perfectly serveable body, so the share button would
+// vanish and POST /share would answer 412 for a window after every save — and
+// forever for any artifact whose deferred render was dropped.
+//
+// 🔴 The domain.IsRenderType condition is the part that is load-bearing, and it
+// is here rather than at the call sites because only ONE of the three has any
+// other type check. Two of them (the /ui share button, handleShareArtifact) run
+// shareRefusal, which already refuses a non-artifact type — for them this
+// condition is redundant. handleSharedArtifact does not: it is the anonymous
+// read route and its only gate is visibility=='public'.
+//
+// So without this condition the relaxation below would have WIDENED that route.
+// Reachability at /share/:id is `public AND <this>`; `public` is settable by a
+// project writer straight from POST /v1/memories (RememberRequest.Visibility
+// binds from the body and is not checked against a whitelist — only the
+// migration-0023 CHECK constraint, which admits 'public'), so it is not by
+// itself a deliberate publication. Before aihub#130 a public NON-artifact
+// memory with no stored HTML answered 404 because rendered_html was NULL;
+// `RenderedHTML != nil || content != ""` would have started serving it to the
+// internet. Restricting the LAZY half to artifact types makes the served set
+// exactly what it was, plus artifact-type rows whose deferred render has not
+// landed — which is the entire intended change.
+//
+// Note what this deliberately does NOT do: a public non-artifact memory that
+// carries an explicit `html=` payload is still served, as it was before. That
+// is a pre-existing hole (aihub#151 closed it on handleShareArtifact's write
+// side but not on this read side), and closing it here would 404 links that
+// work today. It is out of scope for this work item, and narrowing the reach of
+// a change is not the same as endorsing what the change leaves alone.
+func hasRenderableBody(mem *domain.Memory) bool {
+	if mem.RenderedHTML != nil {
+		return true
+	}
+	return domain.IsRenderType(mem.Type) && strings.TrimSpace(mem.Content) != ""
+}
+
 func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -182,24 +259,7 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		// Resolve the HTML body fragment to serve. Prefer the stored rendered_html;
 		// if NULL, lazy-render on the fly so no renderable artifact ever 404s.
-		var bodyFragment string
-		if mem.RenderedHTML != nil {
-			bodyFragment = *mem.RenderedHTML
-		} else {
-			// Lazy-render: try goldmark first, fall back to a <pre> block.
-			if mem.Content != "" {
-				rendered, rerr := render.Markdown(mem.Content)
-				if rerr == nil && rendered != "" {
-					bodyFragment = rendered
-				} else {
-					// render error or empty output: safe <pre> fallback.
-					bodyFragment = fmt.Sprintf("<pre>%s</pre>", html.EscapeString(mem.Content))
-				}
-			} else {
-				// Empty content: serve a minimal placeholder.
-				bodyFragment = "<pre></pre>"
-			}
-		}
+		bodyFragment := resolveArtifactBody(mem)
 
 		// aihub#240 (resolves #144): agent-authored HTML reaches an authed reader here.
 		//
@@ -376,7 +436,7 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 			// a separate document whose CSP admits no script but our nonced bridge — the
 			// control would render inert inside the frame. Suppressed rather than shipped
 			// broken; rehoming it to the parent chrome is part of aihub#245 (P1).
-			if mem.RenderedHTML != nil && shareRefusal(mem) == nil && !sandboxBody {
+			if hasRenderableBody(mem) && shareRefusal(mem) == nil && !sandboxBody {
 				shareURL := c.Scheme() + "://" + c.Request().Host + "/share/" + mem.ID
 				shared := mem.Visibility == "public"
 				shareControlHTML = buildShareControlHTML(mem.ID, shareURL, shared, av)
@@ -1034,17 +1094,23 @@ func buildShareControlHTML(memID, shareURL string, shared bool, assetVersion str
 
 // handleSharedArtifact serves a publicly-shared artifact's rendered HTML with NO auth.
 // The memory_id is itself the unguessable share link. Only memories with
-// visibility='public' and non-null rendered_html are reachable; anything else returns a
+// visibility='public' and a renderable body are reachable; anything else returns a
 // uniform 404 so the endpoint never leaks whether a given id exists.
-// TODO(aihub#81): could apply the same lazy-render fallback here so artifacts shared
-// before rendered_html was populated still serve instead of returning 404.
+//
+// aihub#130 (closing TODO(aihub#81)): the gate is hasRenderableBody, not
+// `rendered_html != nil`, and the body comes from resolveArtifactBody — the same
+// lazy fallback /ui and /v1 have had since aihub#81/#146. This became mandatory
+// rather than nice-to-have when rendering moved to a background worker: NULL is
+// now the state of every freshly saved artifact for a moment, and the permanent
+// state of any whose render was dropped (queue full, panic, process exit). Left
+// as it was, this route would have answered 404 for both.
 func handleSharedArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
 		mem, aihubErr := loadMemoryFn(ctx, pool, c.Param("id"))
-		if aihubErr != nil || mem == nil || mem.Visibility != "public" || mem.RenderedHTML == nil {
+		if aihubErr != nil || mem == nil || mem.Visibility != "public" || !hasRenderableBody(mem) {
 			return writeError(c, domain.NewErr(domain.ErrNotFound, "not found"))
 		}
 		// rendered_html is produced with raw-HTML passthrough (render.Markdown uses
@@ -1069,7 +1135,7 @@ func handleSharedArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 		// renderArtifactBody (not render.Document) so a custom full-document artifact
 		// (pf_save_artifact html=) is served verbatim instead of double-wrapped; ""
 		// backHref because an anonymous viewer has no /ui/wi to navigate back to.
-		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBody(*mem.RenderedHTML, title, "")))
+		return c.HTMLBlob(http.StatusOK, []byte(renderArtifactBody(resolveArtifactBody(mem), title, "")))
 	}
 }
 
@@ -1119,10 +1185,15 @@ func shareRefusal(mem *domain.Memory) *domain.AihubError {
 
 // handleShareArtifact marks a spec/plan artifact public so it can be viewed without auth
 // at /share/:id. Requires writer on the artifact's project, then shareRefusal (403),
-// then rendered_html (412 — there is no 422 in this codebase).
+// then a renderable body (412 — there is no 422 in this codebase).
 //
-// The 412 stays LAST so a spec that simply has not been rendered yet still gets
-// the precondition answer rather than a forbidden one.
+// The 412 stays LAST so an artifact with genuinely nothing to serve still gets
+// the precondition answer rather than a forbidden one. aihub#130 narrowed what
+// reaches it: the condition was `rendered_html == nil`, which after this work
+// item is true of EVERY artifact for a moment after it is saved and permanently
+// for any whose deferred render was dropped — so "share the spec you just wrote"
+// would have started answering 412. It is now hasRenderableBody, and the 412 is
+// reserved for an artifact with no stored HTML and no content either.
 func handleShareArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -1139,9 +1210,9 @@ func handleShareArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 		if aerr := shareRefusal(mem); aerr != nil {
 			return writeError(c, aerr)
 		}
-		if mem.RenderedHTML == nil {
+		if !hasRenderableBody(mem) {
 			return writeError(c, domain.NewErr(domain.ErrPreconditionFailed,
-				"artifact has no rendered HTML to share (renderable types: "+
+				"artifact has no rendered HTML and no content to render (renderable types: "+
 					strings.Join(domain.RenderTypeNames(), ", ")+")"))
 		}
 		if aihubErr := setMemoryVisibilityFn(ctx, pool, mem.ID, "public"); aihubErr != nil {

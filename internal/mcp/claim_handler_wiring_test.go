@@ -177,8 +177,9 @@ func TestClaimHandlerCreatesTheWorktreeOnANonResumeClaim(t *testing.T) {
 // `go test ./...` at exit 0. And because the field is `json:"goal,omitempty"`,
 // a server that stopped echoing it would emit no key at all and silently degrade
 // every claim to the bare stem with nothing going red. Closing that hop needs a
-// DB-backed test, which would move ci.yml's -min-gated ratchet; it is filed
-// separately rather than smuggled in here.
+// DB-backed test, which would mean a new entry in dbtestcov's gated-test
+// manifest and a ci.yml step to run it; it is filed separately rather than
+// smuggled in here.
 //
 // MUTANT (for the three hops it does pin): delete the
 // `wiGoal, _ := result["goal"].(string)` line and pass "". The branch becomes

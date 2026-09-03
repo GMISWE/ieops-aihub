@@ -38,10 +38,13 @@
 // a package-level var, and in a plain `var dsn = os.Getenv(...)` — neither is
 // an *ast.FuncDecl, so walking only function bodies missed both.
 //
-// Note the common property of all ten: none of them moves the gated count, so
-// no ratchet on that count — neither the -min-gated floor this command used to
-// carry nor the manifest that replaced it — could ever have caught any of them.
-// See checkSkipMessages for what closes each one.
+// Note the common property of all ten: applied to a NEWLY written test, none of
+// them moves the gated set, so no ratchet over that set — neither the -min-gated
+// floor this command used to carry nor the manifest that replaced it — could
+// have caught any of them. (Applied to a test the manifest ALREADY lists, they
+// do move it: the test stops being classified as DB-gated and is reported as a
+// removal. That is a side effect, not the guard.) See checkSkipMessages for
+// what closes each one.
 //
 // A test whose skip message names a second environment variable (e.g.
 // EMBEDDING_BASE_URL) needs more than a database, so CI cannot run it: it is
@@ -236,7 +239,7 @@ func main() {
 	workflow := flag.String("workflow", ".github/workflows/ci.yml", "path to the CI workflow to audit")
 	gomod := flag.String("gomod", "go.mod", "path to go.mod, read for the module path")
 	sourceRoot := flag.String("source-root", ".", "repository root, walked for .go files to audit the "+dbEnvVar+" skip-guard convention")
-	gatedSet := flag.String("gated-set", defaultManifestPath, "path to the checked-in manifest of "+dbEnvVar+"-gated test functions. The measured inventory must equal it exactly: an entry the inventory no longer holds is a DB test that vanished (or an inventory that stopped enumerating), and one it holds that the file does not is a DB test nobody wrote down. This is the ratchet — it replaced a -min-gated integer, which conflicted between branches, went stale when main moved, and could not see a test being swapped out for another. It canNOT substitute for the source audit in checkSkipMessages: every known way of silencing a DB guard leaves the manifest unchanged too.")
+	gatedSet := flag.String("gated-set", defaultManifestPath, "path to the checked-in manifest of "+dbEnvVar+"-gated test functions. The measured inventory must equal it exactly: an entry the inventory no longer holds is a DB test that vanished (or an inventory that stopped enumerating), and one it holds that the file does not is a DB test nobody wrote down. This is the ratchet — it replaced a -min-gated integer, which conflicted between branches, went stale when main moved, and could not see a test being swapped out for another. It canNOT substitute for the source audit in checkSkipMessages: every known way of silencing a DB guard, written into a new test, leaves the manifest unchanged too.")
 	flag.Parse()
 
 	if *inventory == "" {
@@ -332,7 +335,7 @@ func run(inventoryPath, workflowPath, gomodPath, sourceRoot, manifestPath string
 		return err
 	}
 
-	manifestProblems, err := checkManifest(manifestPath, module, gated, out)
+	manifestProblems, err := checkManifest(manifestPath, inventoryPath, module, gated, out)
 	if err != nil {
 		return err
 	}
@@ -465,8 +468,11 @@ type manifestEntry struct {
 }
 
 // String renders the entry in the manifest's own line format, which is also the
-// format every error message prints. Keeping one renderer means the lines the
-// gate tells you to paste are byte-identical to the lines it will accept.
+// format the "add these lines" and "were NOT measured" reports print. Keeping
+// one renderer means the lines the gate tells you to paste are byte-identical
+// to the lines it will accept. (The reclassification report quotes its two
+// renderings with %q to set them side by side, so that one is for reading, not
+// for pasting.)
 func (e manifestEntry) String() string {
 	line := e.Pkg + " " + e.Name
 	for _, v := range e.Extra {
@@ -551,9 +557,15 @@ func parseManifest(path string) ([]manifestEntry, []string, error) {
 // manifest is that giving a DB test up costs a reviewable diff hunk that names
 // it.
 //
+// inventoryPath is carried only so that the vacuous-inventory message can name
+// the file that failed to enumerate. It is a different file from manifestPath
+// and the two must not be confused there: that message is the one this gate
+// emits for its highest-severity failure, and pointing it at the manifest sends
+// the reader to the wrong file.
+//
 // manifestPath == "" disables the check. Only run()'s own unit tests use that;
 // main() refuses an empty -gated-set.
-func checkManifest(manifestPath, module string, gated []GatedTest, out io.Writer) ([]string, error) {
+func checkManifest(manifestPath, inventoryPath, module string, gated []GatedTest, out io.Writer) ([]string, error) {
 	if manifestPath == "" {
 		return nil, nil
 	}
@@ -621,7 +633,7 @@ func checkManifest(manifestPath, module string, gated []GatedTest, out io.Writer
 			"the inventory %s holds NO %s-gated test functions while the manifest %s lists %d, so the inventory run is not measuring what it should. "+
 				"The usual cause is %s being set for the run that produced it: everything then PASSes instead of SKIPping and every check here passes vacuously. "+
 				"Re-take it with `env -u %s go test ./... -count=1 -json`",
-			manifestPath, dbEnvVar, manifestPath, len(want), dbEnvVar, dbEnvVar))
+			inventoryPath, dbEnvVar, manifestPath, len(want), dbEnvVar, dbEnvVar))
 		return problems, nil
 	}
 
@@ -808,8 +820,8 @@ var envReadFuncs = map[string]bool{
 //
 // It has to be robust rather than merely present, because silencing the gate
 // must not be cheaper than complying with it. Every one of these shapes used to
-// be invisible, all of them leaving the gated count unchanged — and leaving
-// the manifest unchanged with it — so no ratchet could ever have caught them:
+// be invisible: written into a new test, each leaves the gated set unchanged, so
+// no ratchet over that set could have caught them:
 //
 //	if !haveDB() { t.Skip("no db") }         // the env read is in a helper
 //	os.LookupEnv(dbEnvVar)                   // not os.Getenv

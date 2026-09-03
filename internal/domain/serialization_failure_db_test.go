@@ -226,8 +226,8 @@ func TestSerializationFailureSurfacesAsRetryable409(t *testing.T) {
 	//	        to concurrent update (SQLSTATE 40001)
 	//
 	// A subtest rather than its own Test function on purpose: dbtestcov counts
-	// DB-gated FUNCTIONS, and one more function would mean another -min-gated
-	// move for the same single guard.
+	// DB-gated FUNCTIONS, and one more function would mean another entry in its
+	// gated-test manifest for the same single guard.
 	t.Run("concurrent claim gets a retryable 409, not a 500", func(t *testing.T) {
 		ctx := context.Background()
 		u := testUser(t, pool)

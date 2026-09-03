@@ -86,9 +86,17 @@ jobs:
       # the moment aihub#281 landed the internal/mcp pair on main with no `-run`
       # naming them — found by the gate, not by anyone remembering.
       #
-      # This step recomputes the difference on every run instead of trusting a
-      # checked-in list, because a checked-in list of "the DB tests" would rot
-      # exactly as silently as the gap it describes.
+      # This step recomputes the COVERAGE difference on every run instead of
+      # trusting a checked-in list of which tests are covered, because such a
+      # list would rot exactly as silently as the gap it describes.
+      #
+      # aihub#320 added a checked-in list of a different thing — the DB-gated
+      # test functions themselves, in internal/citest/dbtestcov/gated_tests.txt
+      # — and the distinction is the whole reason it is safe. That file is never
+      # read to DECIDE anything; it is compared against the measurement on every
+      # run and any divergence fails. A list that is re-verified each run cannot
+      # rot: the moment it disagrees with the tree, the gate is red. What it
+      # buys is that dropping an entry is a diff hunk somebody has to write.
       #
       # What counts as DB-gated is measured, not inferred: the inventory is a
       # `go test ./...` run with AIHUB_TEST_DB explicitly unset, and a test is

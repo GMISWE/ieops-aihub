@@ -79,9 +79,9 @@ import (
 // own.
 //
 // One function with subtests rather than one per exit, because
-// internal/citest/dbtestcov counts DB-gated FUNCTIONS and three would move the
-// -min-gated ratchet three times for one guard. The per-exit claim lives in the
-// subtest names, which ci.yml asserts on individually.
+// internal/citest/dbtestcov counts DB-gated FUNCTIONS and three would mean three
+// entries in its gated-test manifest for one guard. The per-exit claim lives in
+// the subtest names, which ci.yml asserts on individually.
 func TestServerFilledResponseFieldsAreEchoed(t *testing.T) {
 	pool := setupLatestTestDB(t)
 	ctx := context.Background()

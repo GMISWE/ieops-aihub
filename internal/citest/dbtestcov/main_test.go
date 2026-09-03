@@ -848,6 +848,17 @@ func TestRun_ManifestCatchesAVacuousInventory(t *testing.T) {
 	if !strings.Contains(err.Error(), "env -u AIHUB_TEST_DB") {
 		t.Errorf("error does not say how to re-take the inventory: %v", err)
 	}
+	// The message must send the reader to the file that failed to enumerate.
+	// An earlier draft interpolated the manifest path into both slots, so it
+	// blamed the manifest for the inventory's failure and never printed the
+	// inventory at all — arity matched, so vet was silent and the substring
+	// assertions above still passed.
+	if !strings.Contains(err.Error(), inv) {
+		t.Errorf("error does not name the inventory file %s: %v", inv, err)
+	}
+	if strings.Contains(err.Error(), "the inventory "+man) {
+		t.Errorf("error names the manifest as the inventory that failed to enumerate: %v", err)
+	}
 	// The 137-deletions listing would bury the actual cause.
 	if strings.Contains(err.Error(), "are in the manifest") {
 		t.Errorf("vacuous inventory was reported as individual deletions: %v", err)
@@ -1022,8 +1033,10 @@ func TestParseManifest_RejectsUnsortedAndDuplicateAndMalformedLines(t *testing.T
 			t.Errorf("problems do not mention %q:\n%s", want, joined)
 		}
 	}
-	// Comments and blank lines are not entries; the four real lines that parsed
-	// are (TestB, TestA, TestC-rejected, broken-rejected) minus the two rejected.
+	// Five non-comment lines go in: TestB, TestA, the duplicate TestB, the
+	// malformed extra-env TestC, and "broken". Three are rejected, so two
+	// entries come out — and the unsorted TestA is kept, because reporting the
+	// order is not a reason to drop the entry.
 	if len(entries) != 2 {
 		t.Errorf("want 2 parsed entries (the duplicate and the malformed ones dropped), got %d: %v", len(entries), entries)
 	}
@@ -1177,9 +1190,9 @@ func pkgDir(t *testing.T, files map[string]string) string {
 //
 // Every fixture below was written into the real repository, and the gate said
 // `dbtestcov: OK` with the gated count UNCHANGED at 85. That last part is what
-// makes these blockers rather than gaps: no ratchet on the gated set — the
-// -min-gated floor then, the manifest now — can catch a hole that leaves that
-// set unchanged, so the fix has to be in the detector.
+// makes these blockers rather than gaps: written into a NEW test, none of these
+// shapes moves the gated set, so no ratchet over it — the -min-gated floor then,
+// the manifest now — can catch them, and the fix has to be in the detector.
 //
 // Each subtest asserts a violation is reported. All eight are measured RED
 // against the pre-fix detector.
@@ -2220,8 +2233,8 @@ jobs:
 
 // Shape 1 reopened: neither a func literal bound to a var nor a var initialised
 // from the environment is an *ast.FuncDecl, so walking only function bodies
-// missed both. The gated set is unmoved in each case, so the ratchet cannot
-// stand in for this.
+// missed both. Written into a new test, the gated set is unmoved in each case,
+// so the ratchet cannot stand in for this.
 func TestCheckSkipMessages_PackageLevelEnvReadIsAViolation(t *testing.T) {
 	for name, decl := range map[string]string{
 		"func literal bound to a var": `var haveDB = func() bool { return os.Getenv("AIHUB_TEST_DB") != "" }`,

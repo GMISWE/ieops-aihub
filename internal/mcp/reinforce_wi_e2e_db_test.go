@@ -37,8 +37,10 @@ package mcp_test
 //	AIHUB_TEST_DB='postgres://postgres:…@127.0.0.1:5446/aihub_test?sslmode=disable' \
 //	  go test ./internal/mcp/ -run TestE2EReinforce -count=1 -v
 //
-// 🔴 NOT yet wired into ci.yml's aihub#303 coverage gate (-min-gated): that file
-// is owned by another change in flight. See this wi's report for the number.
+// Wired into ci.yml's aihub#303 coverage gate: the step is "aihub#325
+// pf_reinforce_memory work_item_id E2E DB tests", and both functions below are
+// listed in internal/citest/dbtestcov/gated_tests.txt. (This comment used to say
+// NOT yet wired, which stopped being true when that step landed.)
 
 import (
 	"context"

@@ -172,10 +172,13 @@ func main() {
 	// aihub#130: markdown→HTML now renders on a background pool instead of on the
 	// request goroutine, so at this instant there may be renders queued or running.
 	//
-	// This call is AFTER e.Shutdown deliberately, and not only for tidiness:
-	// DrainRenderQueue waits on a sync.WaitGroup, and a WaitGroup forbids an Add
-	// that lifts the counter off zero from racing a Wait. "The server has stopped
-	// accepting requests" is what guarantees no further enqueues.
+	// This call is AFTER e.Shutdown so that the great majority of handlers have
+	// already finished and their renders are already queued — but note that
+	// e.Shutdown returning is NOT a guarantee that no handler is still running:
+	// it returns its context's error when the grace period expires with requests
+	// in flight. DrainRenderQueue does not rely on the ordering for safety; it
+	// sheds anything offered while it is draining, precisely so a late
+	// enqueue cannot Add to the WaitGroup it is waiting on.
 	//
 	// Timing out is survivable rather than an error to escalate: an unrendered
 	// artifact still serves, because every read path re-derives the HTML from

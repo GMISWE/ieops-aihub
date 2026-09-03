@@ -770,11 +770,27 @@ func TestSharedArtifact_NonPublic_404(t *testing.T) {
 	}
 }
 
-// Scenario 4: POST /v1/artifacts/:id/share on an artifact with rendered_html=NULL → 412.
-func TestShareArtifact_NoRenderedHTML_412(t *testing.T) {
+// Scenario 4: POST /v1/artifacts/:id/share on an artifact with nothing to serve → 412.
+//
+// aihub#130: this used to be named _NoRenderedHTML_412 and its comments said
+// "rendered_html=NULL → 412" and "not a spec/plan → nothing to share". Both were
+// false even before this work item — publicSharedMem() is a methodology.spec —
+// and rendered_html=NULL is no longer a precondition failure at all, because a
+// deferred render that has not landed yet leaves exactly that state on an
+// artifact that is perfectly shareable. What has always actually driven this
+// test's 412 is that publicSharedMem() leaves Content empty, so setting
+// RenderedHTML=nil leaves the memory with no body from either source. Renamed
+// and re-commented to say that, and Content is now cleared EXPLICITLY rather
+// than inherited from the fixture, so a future fixture that grows a body cannot
+// silently turn this into a test of nothing.
+//
+// TestShareArtifact_PublishesArtifactWhoseRenderHasNotLanded in
+// routes_artifacts_share_lazy_test.go is the complementary case.
+func TestShareArtifact_NothingToServe_412(t *testing.T) {
 	mem := publicSharedMem()
 	mem.Visibility = "project"
-	mem.RenderedHTML = nil // not a spec/plan → nothing to share
+	mem.RenderedHTML = nil // no stored HTML...
+	mem.Content = ""       // ...and no content to lazy-render either
 	defer withLoadMemoryOverride(mem, nil)()
 
 	e := echo.New()

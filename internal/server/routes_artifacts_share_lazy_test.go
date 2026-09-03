@@ -197,6 +197,11 @@ func TestArtifactBody_UIv1ShareAgreeOnTheLazyRender(t *testing.T) {
 	e := echo.New()
 
 	v1c, v1rec := newUIContext(e, http.MethodGet, "/v1/artifacts/mem_share1/html", "mem_share1")
+	// SetPath explicitly: handleArtifactHTML branches on c.Path(), not on the
+	// request URL, and newUIContext leaves it "". Without this the /v1 arm takes
+	// the non-/ui branch because the path is EMPTY, not because it is /v1 — which
+	// would make a route-vs-route comparison prove nothing about either route.
+	v1c.SetPath("/v1/artifacts/:id/html")
 	setUser(v1c, adminUser())
 	if err := handleArtifactHTML(nil)(v1c); err != nil {
 		e.HTTPErrorHandler(err, v1c)

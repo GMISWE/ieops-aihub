@@ -31,17 +31,30 @@ package domain
 //
 //	TestDeferredRender_DroppedRenderLeavesNullForLazyFallback
 //	    disables the producer (error, then panic) and asserts the save still
-//	    succeeds and the column stays NULL — the state the lazy fallback exists
-//	    to serve, and the state a dropped job leaves behind. It also proves one
-//	    bad document does not take a worker down and stall every later render.
+//	    succeeds, the column stays NULL — the state the lazy fallback exists to
+//	    serve, and the state a dropped job leaves behind — and that the drop is
+//	    COUNTED, because "NULL" is also what a job that was never enqueued looks
+//	    like. Its panic arm gates runRenderJob's recover(), whose real job is
+//	    keeping one malformed document from killing the process.
 //
-// A fourth test covers the BOUND rather than one of the three observables:
+// Two further tests cover the BOUND rather than the three observables. Neither
+// needs a database, so both run in the plain `go test ./...` step:
 //
 //	TestDeferredRender_QueueFullShedsInsteadOfBlocking
 //	    fills the queue with every worker parked and asserts the enqueue still
 //	    returns promptly and the shed counter moved. A queue that blocks when
-//	    full is the synchronous write path by the back door. It needs no
-//	    database, so it runs in the plain `go test ./...` step.
+//	    full is the synchronous write path by the back door.
+//
+//	TestDeferredRender_DrainShedsLateArrivalsInsteadOfPanicking
+//	    a job offered while DrainRenderQueue is waiting must be shed, not Added:
+//	    Adding to a WaitGroup someone is waiting on panics, and echo's Shutdown
+//	    can return with handlers still running, so that ordering is reachable.
+//
+// ⚠️ Those two count DIFFERENT counters (Shed vs DrainShed) and that is not
+// tidiness. The drain test first asserted the single shared counter and passed
+// with the drain-shed deleted, because the queue filled up behind two parked
+// workers and shed for the other reason. A counter that merges two causes cannot
+// gate either one.
 //
 // The other half of the third observable — that a NULL column still SERVES —
 // lives in internal/server/routes_artifacts_share_lazy_test.go, because it is a
@@ -237,6 +250,7 @@ func TestDeferredRender_BackgroundWorkerFillsRenderedHTML(t *testing.T) {
 	restore := swapRenderMarkdown(gatedRenderer(release))
 	defer restore()
 
+	before := renderQueueStats()
 	mem := rememberWithin(t, pool, deferredRenderReq(proj, uid, "BackgroundFill"), 20*time.Second)
 
 	if _, ok := readRenderedHTML(t, pool, mem.ID); ok {
@@ -259,6 +273,14 @@ func TestDeferredRender_BackgroundWorkerFillsRenderedHTML(t *testing.T) {
 	// The caller-visible object is still the un-rendered one it was handed. The
 	// worker writes to the database, not back into the response.
 	require.Nil(t, mem.RenderedHTML)
+
+	// A second, independent attribution of the same value: the producer counted
+	// a store, and shed/failed nothing. The row read above says "the column is
+	// populated"; this says "the background pool is what populated it".
+	after := renderQueueStats()
+	require.Equal(t, before.Stored+1, after.Stored, "the background pool did not record a store")
+	require.Equal(t, before.Failed, after.Failed)
+	require.Equal(t, before.Shed, after.Shed)
 }
 
 // ─── Observable 3a: a dropped render leaves the lazy-fallback state ──────────
@@ -269,10 +291,22 @@ func TestDeferredRender_BackgroundWorkerFillsRenderedHTML(t *testing.T) {
 //
 // Both arms assert the same two things: the save still succeeds (a render is
 // never allowed to fail a write), and rendered_html stays NULL (the exact state
-// the lazy fallback serves from). The panic arm additionally proves the worker
-// pool survives: a panic that killed a worker would silently halve, then zero,
-// the render capacity while every test kept passing, because the lazy fallback
-// would go on serving.
+// the lazy fallback serves from).
+//
+// What the panic arm actually gates, stated exactly, because the obvious reading
+// is wrong: an unrecovered panic in a goroutine terminates the PROCESS, it does
+// not merely kill that goroutine. So deleting runRenderJob's recover() does not
+// leave a quietly-degraded pool — it makes this test binary (and, in
+// production, the server) die outright. That is what makes the arm a gate, and
+// it is a very strong one; measured by removing the recover, which turns this
+// run into `panic: deliberate render panic` and a non-zero exit.
+//
+// The follow-up "AfterPanic" save is therefore NOT the thing that catches a
+// missing recover — with asyncRenderWorkers > 1 and one injected panic, another
+// worker would serve it anyway even if a worker really could die alone. It is
+// here for the weaker property it can actually observe: after a panic is
+// swallowed, the pool still renders. Do not upgrade that comment into a claim
+// about worker survival.
 //
 // This one cannot be RED before aihub#130 and it is not meant to be: leaving
 // NULL on a failed render is pre-existing behaviour (the old resolveRenderedHTML
@@ -298,12 +332,23 @@ func TestDeferredRender_DroppedRenderLeavesNullForLazyFallback(t *testing.T) {
 		})
 		defer restore()
 
+		before := renderQueueStats()
 		mem, _, err := Remember(context.Background(), pool, deferredRenderReq(proj, uid, "RenderError"))
 		require.NoError(t, err, "a failing render must not fail the save")
 		drain(t)
 
 		_, ok := readRenderedHTML(t, pool, mem.ID)
 		require.False(t, ok, "a failed render stored something; it must leave NULL for the lazy fallback")
+
+		// The drop has to be COUNTED, not merely absent. "rendered_html is NULL"
+		// is also what a job that was never enqueued looks like, and what a
+		// deleted background pool looks like; the counter is what says a producer
+		// ran and gave up, which is the case this arm is about.
+		after := renderQueueStats()
+		require.Equal(t, before.Failed+1, after.Failed,
+			"the failed render was not recorded; a drop that leaves no trace is indistinguishable "+
+				"from a job that was never enqueued")
+		require.Equal(t, before.Stored, after.Stored, "a failed render must not count as stored")
 	})
 
 	t.Run("render panic does not take the worker pool down", func(t *testing.T) {
@@ -324,9 +369,9 @@ func TestDeferredRender_DroppedRenderLeavesNullForLazyFallback(t *testing.T) {
 		_, ok := readRenderedHTML(t, pool, mem.ID)
 		require.False(t, ok, "a panicking render stored something")
 
-		// Every worker must still be alive. If the recover() were removed, the
-		// pool would be down one goroutine per panic and this next save would
-		// eventually never be rendered — with nothing else in the suite noticing.
+		// The pool still renders after swallowing a panic. See the note on this
+		// function: this is NOT what catches a deleted recover() — that kills the
+		// process — it is the weaker "the queue and workers still work" property.
 		next, _, err := Remember(context.Background(), pool, deferredRenderReq(proj, uid, "AfterPanic"))
 		require.NoError(t, err)
 		stored, ok := waitForRenderedHTML(t, pool, next.ID, 20*time.Second)
@@ -377,7 +422,9 @@ func TestDeferredRender_QueueFullShedsInsteadOfBlocking(t *testing.T) {
 			queueRenderJob(renderJob{
 				memID:   fmt.Sprintf("mem_shed%03d", i),
 				memType: "methodology.spec",
-				content: "# shed\n",
+				// Empty content on purpose: these jobs exist to occupy queue slots,
+				// and an empty render is the one outcome that neither logs nor
+				// counts, so 266 of them leave the CI log readable.
 			})
 		}
 		close(enqueued)
@@ -401,6 +448,75 @@ func TestDeferredRender_QueueFullShedsInsteadOfBlocking(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	require.NoError(t, DrainRenderQueue(ctx), "the shed burst did not settle")
+}
+
+// TestDeferredRender_DrainShedsLateArrivalsInsteadOfPanicking gates the one
+// thing standing between shutdown and a `sync: WaitGroup misuse: Add called
+// concurrently with Wait` panic on the way out.
+//
+// It is not hypothetical. echo's Shutdown returns its context's error when the
+// grace period expires WITH HANDLERS STILL RUNNING, so a Remember can reach
+// queueRenderJob after main.go has already called DrainRenderQueue. Lifting the
+// WaitGroup counter off zero with a waiter parked is exactly what panics.
+//
+// The mechanism under test is that a job offered during a drain is SHED rather
+// than Added. Asserted by counter, not by "it did not panic": a build that
+// simply never enqueued anything would also not panic.
+func TestDeferredRender_DrainShedsLateArrivalsInsteadOfPanicking(t *testing.T) {
+	release := make(chan struct{})
+	openGate := sync.OnceFunc(func() { close(release) })
+	defer openGate()
+	restore := swapRenderMarkdown(func(string) (string, error) {
+		<-release
+		return "", nil
+	})
+	defer restore()
+
+	// One job parked inside the gated renderer, so the drain below cannot finish
+	// and is guaranteed to still be draining while this test offers more work.
+	queueRenderJob(renderJob{memID: "mem_drainheld", memType: "methodology.spec"})
+
+	drainErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		drainErr <- DrainRenderQueue(ctx)
+	}()
+
+	// Offer jobs until one is shed. Bounded, with a real break condition: the
+	// drain sets its flag under a mutex before it starts waiting, so once the
+	// goroutine above is inside DrainRenderQueue every offer sheds; the loop only
+	// exists to cover the microseconds before it gets there.
+	before := renderQueueStats().DrainShed
+	deadline := time.Now().Add(20 * time.Second)
+	shedSeen := false
+	for !shedSeen {
+		queueRenderJob(renderJob{memID: "mem_drainlate", memType: "methodology.spec"})
+		if renderQueueStats().DrainShed > before {
+			shedSeen = true
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	openGate()
+	require.NoError(t, <-drainErr, "the drain did not settle once the held render was released")
+	require.True(t, shedSeen,
+		"no job offered during an in-progress drain was shed; a late enqueue then Adds to the "+
+			"WaitGroup DrainRenderQueue is waiting on, which panics the process at shutdown")
+
+	// And the queue is usable again afterwards — the drain flag must not be a
+	// one-way latch, or the first drain in a test binary would break every test
+	// after it.
+	after := renderQueueStats()
+	queueRenderJob(renderJob{memID: "mem_afterdrain", memType: "methodology.spec"})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	require.NoError(t, DrainRenderQueue(ctx))
+	require.Equal(t, after.DrainShed, renderQueueStats().DrainShed,
+		"a job enqueued after the drain returned was shed; the drain flag latched on")
 }
 
 // errRenderProbe is the failure a test renderer returns. A package-level value

@@ -2243,9 +2243,13 @@ jobs:
       #       waits (bounded, fails on deadline) for NULL → real goldmark output.
       #       The NULL-first half is what attributes the value to the worker.
       #   _DroppedRenderLeavesNullForLazyFallback  disables the producer (error,
-      #       then panic) and asserts the save still succeeds and the column
-      #       stays NULL — the state the fallback serves from — and that a panic
-      #       does not take a worker down and stall every later render.
+      #       then panic) and asserts the save still succeeds, the column stays
+      #       NULL — the state the fallback serves from — and the drop is
+      #       COUNTED, since "NULL" is also what a job that was never enqueued
+      #       looks like. Its panic arm is a gate on runRenderJob's recover(),
+      #       and on a stronger property than it first appears: an unrecovered
+      #       panic in a goroutine terminates the PROCESS, so without that
+      #       recover one malformed artifact takes the server down.
       #
       # The `^TestDeferredRender_` regex also picks up
       # _QueueFullShedsInsteadOfBlocking, which needs no database and therefore

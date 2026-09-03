@@ -149,10 +149,12 @@ func resolveRenderedHTML(explicit *string, memType, content string) (stored *str
 // there, so a dropped render would have been unrecoverable on that route.
 //
 // Jobs are dropped on purpose in three places, all backstopped as above:
-//   - the queue is full (load shedding — see queueRenderJob);
-//   - the render returns an error;
-//   - the render panics (recovered per job, so one bad document cannot take a
-//     worker down and stall every later render behind it);
+//   - the queue is full, or a drain is in progress (load shedding — see
+//     queueRenderJob);
+//   - the render returns an error, or produces nothing;
+//   - the render panics (recovered per job — in Go an unrecovered panic in ANY
+//     goroutine kills the process, so this is what keeps one malformed document
+//     from taking the server down);
 // and once by accident: process exit with jobs still queued. DrainRenderQueue
 // gives those the tail of the shutdown budget.
 
@@ -161,16 +163,38 @@ const (
 	// ever inside a render, no matter how many saves arrive. "one goroutine per
 	// save" would make a save burst a memory/CPU amplifier with no ceiling.
 	asyncRenderWorkers = 2
-	// asyncRenderQueueDepth bounds BACKLOG. Past this, queueRenderJob sheds
-	// rather than blocking — blocking would put the render back on the write
-	// path by the back door, which is the whole thing this change removes.
+	// asyncRenderQueueDepth bounds BACKLOG, in jobs — not in bytes. Each queued
+	// job retains its own copy of the memory's content, so the real ceiling is
+	// 256 × the largest artifact anyone saves, which for specs is tens of MB.
+	// Past the depth, queueRenderJob sheds rather than blocking — blocking would
+	// put the render back on the write path by the back door, which is the whole
+	// thing this change removes.
 	asyncRenderQueueDepth = 256
-	// asyncRenderTimeout caps one job's database write. The job runs on a fresh
-	// background context, NOT the request's: the HTTP context is cancelled the
-	// moment the response is written, so a job that inherited it would be
-	// cancelled essentially always.
-	asyncRenderTimeout = 30 * time.Second
+	// asyncRenderStoreTimeout caps one job's DATABASE WRITE — and nothing else.
+	// It is named for the write because the render is what a reader assumes a
+	// constant like this covers, and it does not.
+	//
+	// The job runs on a fresh background context, NOT the request's: the HTTP
+	// context is cancelled the moment the response is written, so a job that
+	// inherited it would be cancelled essentially always.
+	asyncRenderStoreTimeout = 30 * time.Second
 )
+
+// ⚠️ The RENDER itself is not bounded, and cannot be from here: goldmark is a
+// synchronous call with no context, so there is nothing to cancel. Two
+// pathological documents can therefore park both workers indefinitely, after
+// which every later save is shed.
+//
+// That unboundedness is not introduced here — before aihub#130 the same
+// uncancellable goldmark call ran on the request goroutine, where the aihub#250
+// server timeouts also could not stop it (they act on the connection, not the
+// handler). What changed is where it accumulates: a request goroutine per save
+// before, a pool of asyncRenderWorkers now.
+//
+// It is loud rather than silent if it happens: every shed logs a line, so a
+// wedged pool produces one stderr line PER SAVE, and DrainRenderQueue then times
+// out at every shutdown. Bounding the render properly needs an out-of-process or
+// input-size limit and is deliberately out of scope for this work item.
 
 // renderJob is one deferred markdown→HTML render, addressed by the row id the
 // result belongs to.
@@ -189,30 +213,56 @@ var (
 	// observe a spuriously-zero counter for a job that is already committed to.
 	renderInFlight sync.WaitGroup
 
+	// renderDrainMu / renderDraining make "no Add may race the Wait" a fact
+	// rather than a caller obligation. sync.WaitGroup panics with "WaitGroup
+	// misuse: Add called concurrently with Wait" when the counter is lifted off
+	// zero while a waiter is parked, and shutdown can genuinely produce that:
+	// echo's Shutdown returns its context's error when the grace period expires
+	// WITH HANDLERS STILL RUNNING, so an in-flight Remember can reach
+	// queueRenderJob after DrainRenderQueue has already started waiting.
+	//
+	// queueRenderJob takes the read lock across the check-and-Add; the drain
+	// takes the write lock to set the flag, which cannot happen while any Add is
+	// in progress and after which every caller sees it. Jobs offered during a
+	// drain are shed, which is the same survivable outcome as a full queue.
+	renderDrainMu  sync.RWMutex
+	renderDraining bool
+
 	// Each drop and each store is logged to stderr, which is the operator-facing
 	// signal. These counters exist because a log line is not a count: "did we
 	// shed anything under that burst" is a question a human reads a log for and
 	// a test cannot ask at all. renderQueueStats is the only reader.
-	renderShedCount   atomic.Int64
-	renderFailCount   atomic.Int64
-	renderStoredCount atomic.Int64
+	renderShedCount      atomic.Int64
+	renderDrainShedCount atomic.Int64
+	renderFailCount      atomic.Int64
+	renderStoredCount    atomic.Int64
 )
 
 // renderQueueCounters is a snapshot of the deferred renderer's outcomes.
+//
+// Shed and DrainShed are separate counters for the same reason two error codes
+// are better than one: they are different conditions with different responses
+// (a full queue means the pool is undersized or wedged; a drain shed is normal
+// shutdown), and a single counter cannot tell a caller which happened. It also
+// cost a real defect to learn — a test meant to gate the drain-time shed was
+// satisfied instead by the queue filling up behind two parked workers, so the
+// gate passed with the drain shed deleted.
 type renderQueueCounters struct {
-	Shed   int64 // dropped because the queue was at asyncRenderQueueDepth
-	Failed int64 // renderer returned an error, panicked, or the UPDATE failed
-	Stored int64 // rendered_html actually written
+	Shed      int64 // dropped because the queue was at asyncRenderQueueDepth
+	DrainShed int64 // dropped because DrainRenderQueue was in progress
+	Failed    int64 // non-empty content rendered to an error, a panic, "", or the UPDATE failed
+	Stored    int64 // rendered_html actually written
 }
 
-// renderQueueStats snapshots the counters. The three reads are not atomic with
-// respect to each other, which is fine for what it is used for: differences
-// across a burst, not an instantaneous invariant.
+// renderQueueStats snapshots the counters. The reads are not atomic with respect
+// to each other, which is fine for what they are used for: differences across a
+// burst, not an instantaneous invariant.
 func renderQueueStats() renderQueueCounters {
 	return renderQueueCounters{
-		Shed:   renderShedCount.Load(),
-		Failed: renderFailCount.Load(),
-		Stored: renderStoredCount.Load(),
+		Shed:      renderShedCount.Load(),
+		DrainShed: renderDrainShedCount.Load(),
+		Failed:    renderFailCount.Load(),
+		Stored:    renderStoredCount.Load(),
 	}
 }
 
@@ -262,14 +312,30 @@ func startRenderWorkers() {
 // for queue space is a save that is back on the synchronous path.
 func queueRenderJob(job renderJob) {
 	renderWorkersOnce.Do(startRenderWorkers)
-	renderInFlight.Add(1)
+
+	// Check-and-Add under the read lock: see renderDrainMu.
+	renderDrainMu.RLock()
+	draining := renderDraining
+	if !draining {
+		renderInFlight.Add(1)
+	}
+	renderDrainMu.RUnlock()
+	if draining {
+		renderDrainShedCount.Add(1)
+		fmt.Fprintf(os.Stderr,
+			"memory render: shutting down; dropping render for %s (type=%s). "+
+				"The artifact still serves — the viewer re-renders from content on read.\n",
+			job.memID, job.memType)
+		return
+	}
+
 	select {
 	case renderQueue <- job:
 	default:
 		renderInFlight.Done()
 		renderShedCount.Add(1)
 		fmt.Fprintf(os.Stderr,
-			"memory render: deferred-render queue full (depth=%d); dropping render for %s (type=%s). "+
+			"memory render: deferred-render queue full (depth=%d jobs); dropping render for %s (type=%s). "+
 				"The artifact still serves — the viewer re-renders from content on read.\n",
 			asyncRenderQueueDepth, job.memID, job.memType)
 	}
@@ -280,11 +346,19 @@ func queueRenderJob(job renderJob) {
 func runRenderJob(job renderJob) {
 	defer renderInFlight.Done()
 	defer func() {
-		// A panicking document must cost its own render and nothing else. Without
-		// this the worker goroutine dies, and since the pool is never replenished
-		// a second panic would leave zero workers and every later save silently
-		// unrendered — with nothing red anywhere, because the lazy fallback keeps
-		// serving.
+		// A panicking document must cost its own render and nothing else.
+		//
+		// Be precise about what this prevents, because the intuitive answer is
+		// wrong and understates it: an unrecovered panic in a goroutine does NOT
+		// just kill that goroutine, it terminates the PROCESS. So without this
+		// recover, one malformed artifact anywhere in the system takes the whole
+		// aihub server down, from a goroutine no request is waiting on.
+		//
+		// (The weaker failure — "the worker dies and render capacity decays to
+		// zero while the lazy fallback hides it" — is not a thing Go does. It is
+		// worth saying so here: a reader who believes it would rate this recover
+		// as defensive tidying rather than the only thing standing between a bad
+		// document and an outage.)
 		if r := recover(); r != nil {
 			renderFailCount.Add(1)
 			fmt.Fprintf(os.Stderr,
@@ -302,10 +376,24 @@ func runRenderJob(job renderJob) {
 		return
 	}
 	if h == "" {
+		// Empty content rendering to empty HTML is a no-op, not an event: there
+		// was nothing to produce. NON-empty content rendering to nothing is a
+		// different thing and worth both a count and a line — resolveArtifactBody
+		// treats empty render output as a FAILURE and falls back to a <pre>
+		// block, so it is a real condition, and dropping it silently (as the
+		// first draft of this did) leaves it invisible in the log AND in the
+		// counters.
+		if job.content != "" {
+			renderFailCount.Add(1)
+			fmt.Fprintf(os.Stderr,
+				"memory render: markdown→HTML produced empty output for %s (type=%s) from %d bytes of content; "+
+					"leaving rendered_html NULL (the viewer re-renders from content on read)\n",
+				job.memID, job.memType, len(job.content))
+		}
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), asyncRenderTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), asyncRenderStoreTimeout)
 	defer cancel()
 
 	// `rendered_html IS NULL` is the whole concurrency story, and it is worth
@@ -328,17 +416,29 @@ func runRenderJob(job renderJob) {
 	// so the content this job rendered is still the content of THIS row. Verified
 	// by inspection rather than asserted — re-verify with
 	//
-	//	grep -rn -A6 'UPDATE memories' --include='*.go' . | grep -v _test
+	//	grep -rn -A6 'UPDATE memories' . | grep -vE '_test\.go|^Binary'
 	//
-	// and check that none of the SET lists names `content`. (At the time of
-	// writing they set only emb_*, expires_at, rendered_html, status, latest_id,
-	// commits, visibility+attrs, activation_count and the redaction columns.) A
-	// content column that became mutable would need a `AND content=$3` here.
+	// and check that none of the SET lists names `content`. NOTE the absence of
+	// --include='*.go': the migrations are SQL, they mutate this table too, and
+	// scoping this recipe to Go files is exactly how the updated_at claim below
+	// came to be written backwards in the first draft.
 	//
-	// updated_at is deliberately NOT bumped. It is a semantic "when did this
-	// memory change" timestamp that the UI and the version chain show; a
-	// background render is not a change to the memory, and bumping it would make
-	// every artifact look edited a few milliseconds after it was written.
+	// A content column that became mutable would need `AND content=$3` here.
+	//
+	// updated_at IS bumped by this statement, and that is not avoidable from
+	// here: migration 0008 installs trg_mem_updated_at, a BEFORE UPDATE ... FOR
+	// EACH ROW trigger that sets NEW.updated_at = clock_timestamp() on every
+	// UPDATE of this table. Adding `updated_at=updated_at` to the SET list would
+	// not help — a BEFORE trigger overwrites NEW regardless.
+	//
+	// So a render-type row's updated_at is now created_at plus a few
+	// milliseconds, where before aihub#130 the row was never UPDATEd after INSERT
+	// and the two were equal. Checked before accepting it: the consumers are the
+	// `updated_at` JSON field, the /ui side-rail "Updated" value (formatted to a
+	// DATE, so a millisecond cannot move it) and aihub-embed-verify's
+	// `ORDER BY updated_at DESC` sampling. Nothing tests updated_at == created_at
+	// or reads the pair as an "edited" flag. If something ever does, this write
+	// is where the millisecond comes from.
 	tag, err := job.pool.Exec(ctx, `
 		UPDATE memories SET rendered_html=$2
 		WHERE id=$1 AND rendered_html IS NULL`, job.memID, h)
@@ -354,18 +454,38 @@ func runRenderJob(job renderJob) {
 	}
 }
 
-// DrainRenderQueue blocks until every enqueued render has finished or ctx
-// expires, and reports ctx's error if it expired first.
+// DrainRenderQueue blocks until every already-enqueued render has finished or
+// ctx expires, and reports ctx's error if it expired first.
 //
-// Call it from shutdown AFTER the HTTP server has stopped accepting requests.
-// That ordering is not a nicety: sync.WaitGroup forbids an Add that lifts the
-// counter off zero from racing a Wait, and "the server is no longer serving" is
-// what guarantees no further Adds. Timing out is not a failure to report to a
-// user — the jobs are dropped and the viewer re-renders on read — but it is
-// worth logging, because a drain that always times out means the pool is wedged.
+// For the duration of the drain, NEW jobs are shed rather than queued. That is
+// what makes the call safe to make while requests may still be in flight —
+// echo's Shutdown returns as soon as its grace period expires, handlers and all,
+// so "the server stopped accepting connections" does not mean "no goroutine will
+// call Remember again". Without the shed, such a call would Add to the WaitGroup
+// this function is waiting on, which panics. The flag is cleared on return, so
+// the queue is usable again afterwards (a test binary runs many of these; a
+// production process is exiting and never notices).
+//
+// Timing out is not an error to report to a user — the jobs are dropped and the
+// viewer re-renders on read — but it is worth logging, because a drain that
+// ALWAYS times out means the pool is wedged (see the note on the render being
+// uncancellable, above).
 func DrainRenderQueue(ctx context.Context) error {
+	renderDrainMu.Lock()
+	renderDraining = true
+	renderDrainMu.Unlock()
+	defer func() {
+		renderDrainMu.Lock()
+		renderDraining = false
+		renderDrainMu.Unlock()
+	}()
+
 	done := make(chan struct{})
 	go func() {
+		// On the ctx path this goroutine outlives the call. It cannot outlive it
+		// for long: no new job can be Added while renderDraining is set, so the
+		// counter is monotonically falling and the Wait returns as soon as the
+		// last in-flight job does.
 		renderInFlight.Wait()
 		close(done)
 	}()

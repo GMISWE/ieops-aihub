@@ -4,6 +4,11 @@
 （装好 CLI、配好 API key、装好插件），并且至少建过一个 work item。这篇从那一步之后开始，
 按**一次完整会话的时间顺序**走一遍：开工 → 它自己跑还是等你 → 你的代码在哪 → 收工。
 
+**下面这些 `/pf-xxx` 不用背。** 说人话就行 ——「开个 wi，把跨区 SCAN 改掉」「这条先停一下」「搞定了」——
+助手按 `using-polyforge` skill 里的 **NL Routing** 表把意图落到操作上；工作区的 `.polyforge/usage.md`
+里另有一份中文触发词，「搞定」「拍板」这类没有英文对应的说法也在其中。文中照旧写出命令名，因为它们是精确形式，
+而且会出现在输出里，你得认得。但那张表自己规定**意图不明时先问再做**：说得含糊，你先收到的是一句反问。
+
 ---
 
 ## 1. 开工：`/pf-work`
@@ -49,7 +54,7 @@ pf-* 技能的回复统一是 `Result` / `Status` / `Next steps` 三段。
 认领之后的走向，由 wi 上 `requires_human_session` 这一个字段决定。
 **`false`**：不出三段输出，直接把 `/pf-execute` 作为 subagent 派出去，照 step graph 一路跑到底，
 你只看它报进度。**`true`**：停住，出三段输出，其中 `Next steps` 按 `wi_type` 从路由表机械填出来
-（不是 AI 现编的），然后等你人工发话 —— 通常是你自己敲 `/pf-execute`，或先 `/pf-spec` 把范围定清楚。
+（不是 AI 现编的），然后等你人工发话 —— 通常是你说一句「执行」（`/pf-execute`），或先把范围定清楚（`/pf-spec`）。
 
 这个值**在建 wi 的时候定下来、存在 wi 上**：客户端读 scenario 仓的 `<wi_type>.<project>.md`
 frontmatter，没这个文件就退到 `<wi_type>.md`，两个都没有则取 `true`。
@@ -86,6 +91,12 @@ frontmatter，没这个文件就退到 `<wi_type>.md`，两个都没有则取 `t
 - **`/pf-stop --fail`** — 失败终态，`pf_complete_attempt(status="failed")`；
   和 wrap 一样**锁全部释放**、state 文件删掉。
 
+`--wrap` 还要一个**类还是实例**的标（scenario 仓 `common/commit_and_pr` 的 Step 4.5），PR body 和
+wrap note 里各写一次：**A** 类已关闭（给出闸的 `file:line`，并展示它修复前会红）· **B** 只修了实例
+（给出跟踪那个仍开着的类的 wi 编号）· **C** 做不出闸（仅当本次没改代码）。问它是想让「这个 bug 会不会
+再来」当场就有答案。**没有任何东西检查你答得诚不诚实** —— `.ci` 只保证这条要求还在模板里，wrap note
+是运行时数据，到不了 scenario 仓。靠自觉，所以 B 通常才是实话。
+
 两个常踩的点：
 
 - `--wrap` / `--fail` 的收尾说明要作为 `note=` 参数跟终态调用**同一次**发出去。
@@ -98,8 +109,8 @@ frontmatter，没这个文件就退到 `<wi_type>.md`，两个都没有则取 `t
 
 | 想知道 | 去哪 |
 |---|---|
-| 装机、配 key、装插件 | `docs/onboarding.md` |
-| 全部 MCP 工具 | `docs/mcp-tools.md` |
-| 命令速查 | 你 workspace 里的 `.polyforge/usage.md` |
-| 架构与规格 | `docs/design/polyforge-v1-design.md` |
-| 出问题了 | `/pf-doctor` |
+| 装机、配 key、装插件 | [`docs/onboarding.md`](onboarding.md) |
+| 全部 MCP 工具 | [`docs/mcp-tools.md`](mcp-tools.md) |
+| 命令速查 | `.polyforge/usage.md` —— 在你自己 workspace 根目录下，不在本仓，所以链不了 |
+| 架构与规格 | [`docs/design/polyforge-v1-design.md`](design/polyforge-v1-design.md) |
+| 出问题了 | `/pf-doctor`（一个 skill，不是文件） |

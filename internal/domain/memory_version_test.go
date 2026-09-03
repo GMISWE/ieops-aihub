@@ -1,6 +1,10 @@
 package domain
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -212,9 +216,10 @@ func TestOrderVersionChain_CarriesAuthorizationScalars(t *testing.T) {
 				"hasProjectAccess on this field", want.ID, got.Project, want.Project)
 		}
 		if got.Visibility != want.Visibility {
-			t.Errorf("%s.Visibility = %q, want %q — the /ui side rail decides this "+
-				"row's visibility from this field, and %q is the value that means "+
-				"\"visible to everyone\"", want.ID, got.Visibility, want.Visibility, "")
+			t.Errorf("%s.Visibility = %q, want %q — the /ui side rail decides this row's "+
+				"visibility from this field, and the empty string is not a denial: it "+
+				"falls through memoryVisibleTo's switch to \"visible\"",
+				want.ID, got.Visibility, want.Visibility)
 		}
 		if got.AuthorUserID != want.AuthorUserID {
 			t.Errorf("%s.AuthorUserID = %q, want %q — this is what makes a private "+
@@ -224,30 +229,71 @@ func TestOrderVersionChain_CarriesAuthorizationScalars(t *testing.T) {
 	}
 }
 
-// TestMemoryVersionChainQuery_ProjectionOrderIsPinned pins the first hop: the
-// final SELECT list of memoryVersionChainQuery is consumed by a POSITIONAL
-// rows.Scan in MemoryVersionChain.
+// TestMemoryVersionChain_ProjectionAndScanOrderAgree pins the first hop of the
+// aihub#253 contract: the correspondence between memoryVersionChainQuery's final
+// SELECT list and the rows.Scan destination list in MemoryVersionChain.
 //
-// Adding or removing a column is caught loudly at runtime — pgx refuses a
-// destination count that does not match the row description. Transposing two
-// columns of the same type is not caught by anything, and two of these columns
-// are `visibility` and `author_user_id`: swap them and every lineage row's
-// visibility becomes a user id, which is not one of the values the visibility
-// switch handles and therefore falls through to "visible". That turns a
-// permissions filter into a pass-through with no error, no failing scan and no
-// other failing test.
+// That correspondence is positional and unchecked by the compiler. Adding or
+// removing a column on one side is caught loudly at runtime — pgx refuses a
+// destination count that does not match the row description — but TRANSPOSING
+// two same-typed entries on EITHER side is caught by nothing. All seven
+// destinations are `string`, and two of the columns are `visibility` and
+// `author_user_id`: swap them and every lineage row's visibility becomes a user
+// id, which is not a case in memoryVisibleTo's switch and so falls through to
+// "visible". The /ui side rail's per-version permission filter silently becomes
+// a pass-through, with no error, no failing scan, and no other failing test.
 //
-// So this asserts the ORDER, normalized past the `m.` qualifiers and the
-// COALESCE/cast wrappers that are cosmetic here. It is deliberately a
-// projection-order assertion and not a whole-query string match: reformatting
-// the CTE must not redden it, transposing the projection must.
-func TestMemoryVersionChainQuery_ProjectionOrderIsPinned(t *testing.T) {
-	// Must stay in step with the rows.Scan destination order in
-	// MemoryVersionChain. Changing one without the other is the bug this catches.
-	want := []string{"id", "supersedes_id", "status", "created_at", "project", "visibility", "author_user_id"}
+// So both sides are read out of the source and compared as sequences. An
+// earlier version of this test read only the SQL side and claimed to have
+// "pinned the order"; it would not have noticed a transposition in the Scan.
+//
+// This does couple the test to the Scan variables' names. That is deliberate:
+// keeping them in obvious correspondence with their columns is what makes the
+// positional mapping reviewable at all, and a rename that breaks the
+// correspondence should make somebody look at this mapping rather than pass
+// silently.
+func TestMemoryVersionChain_ProjectionAndScanOrderAgree(t *testing.T) {
+	projection := chainQueryProjectionColumns(t)
+	dests := chainScanDestinations(t)
 
-	// The projection under test is the LAST SELECT in the statement (the CTEs
-	// above it each select a single bare id).
+	if len(projection) != len(dests) {
+		t.Fatalf("memoryVersionChainQuery selects %d columns %v but MemoryVersionChain "+
+			"scans into %d destinations %v. pgx would fail this at runtime; fix both "+
+			"sides together.", len(projection), projection, len(dests), dests)
+	}
+	if len(projection) == 0 {
+		t.Fatal("no columns found — the parse below is broken, so this gate is vacuous")
+	}
+
+	for i := range projection {
+		col, dest := projection[i], dests[i]
+		if normalizeIdent(col) != normalizeIdent(dest) {
+			t.Fatalf("position %d of the chain query's projection is column %q but it is "+
+				"scanned into %q.\n  projection: %v\n  scan dests: %v\n"+
+				"These two lists are matched POSITIONALLY and nothing else checks them. "+
+				"If this is a deliberate rename, rename both sides to correspond; if it "+
+				"is a transposition, note that swapping visibility with author_user_id "+
+				"turns the /ui side rail's permission filter into a pass-through.",
+				i, col, dest, projection, dests)
+		}
+	}
+}
+
+// normalizeIdent maps a SQL column and its Go scan variable onto a common form,
+// so author_user_id and authorUserID compare equal.
+func normalizeIdent(s string) string {
+	return strings.ToLower(strings.ReplaceAll(s, "_", ""))
+}
+
+// chainQueryProjectionColumns returns the column names of the FINAL SELECT in
+// memoryVersionChainQuery, in order. (The CTEs above it each select a bare id.)
+//
+// Normalization is deliberately narrow: it unwraps the `m.` qualifier, a
+// trailing ::text cast, an explicit alias, and a COALESCE(col, literal), which
+// is everything the current query uses. Anything else it cannot name reliably
+// fails the test rather than being guessed at.
+func chainQueryProjectionColumns(t *testing.T) []string {
+	t.Helper()
 	idx := strings.LastIndex(memoryVersionChainQuery, "SELECT")
 	if idx < 0 {
 		t.Fatal("no SELECT in memoryVersionChainQuery")
@@ -258,9 +304,12 @@ func TestMemoryVersionChainQuery_ProjectionOrderIsPinned(t *testing.T) {
 		t.Fatal("no FROM after the final SELECT in memoryVersionChainQuery")
 	}
 	projection := rest[:end]
+	if strings.Contains(projection, "--") {
+		t.Fatal("the chain query's projection contains a -- comment, which this parse " +
+			"does not model; either drop the comment or teach this test about it")
+	}
 
-	// Split on commas at paren-depth 0, so COALESCE(m.supersedes_id, '') stays one
-	// item instead of becoming two.
+	// Split on commas at paren depth 0, so COALESCE(m.supersedes_id, '') stays one item.
 	var items []string
 	depth, start := 0, 0
 	for i, r := range projection {
@@ -278,46 +327,112 @@ func TestMemoryVersionChainQuery_ProjectionOrderIsPinned(t *testing.T) {
 	}
 	items = append(items, projection[start:])
 
-	got := make([]string, 0, len(items))
+	out := make([]string, 0, len(items))
 	for _, it := range items {
 		it = strings.TrimSpace(it)
 		if it == "" {
 			continue
 		}
-		// An explicit alias wins — it is what the column is called.
-		if i := strings.LastIndex(strings.ToUpper(it), " AS "); i >= 0 {
-			got = append(got, strings.TrimSpace(it[i+4:]))
+		// An explicit alias is the column's name. Match " as " case-insensitively
+		// on token boundaries rather than by index arithmetic over a case-folded
+		// copy, whose offsets need not line up with the original.
+		fields := strings.Fields(it)
+		aliased := false
+		for i := 0; i+1 < len(fields); i++ {
+			if strings.EqualFold(fields[i], "AS") {
+				out = append(out, fields[i+1])
+				aliased = true
+				break
+			}
+		}
+		if aliased {
 			continue
 		}
-		// Otherwise take the last bare identifier: strips the `m.` qualifier and
-		// any ::text cast, and for a bare COALESCE(x, '') names the column x.
-		it = strings.NewReplacer("(", " ", ")", " ", ",", " ").Replace(it)
-		fields := strings.Fields(it)
-		last := ""
-		for _, f := range fields {
-			f = strings.TrimSuffix(f, "::text")
-			if f == "" || strings.HasPrefix(f, "'") {
-				continue // a literal, e.g. COALESCE's '' default
-			}
-			if i := strings.LastIndex(f, "."); i >= 0 {
-				f = f[i+1:]
-			}
-			last = f
+		// Otherwise: strip the m. qualifier and a ::text cast off a bare column
+		// reference, and reject anything more elaborate than that.
+		bare := strings.TrimSuffix(it, "::text")
+		if i := strings.LastIndex(bare, "."); i >= 0 {
+			bare = bare[i+1:]
 		}
-		got = append(got, last)
+		if bare == "" || strings.ContainsAny(bare, "()' \t\n") {
+			t.Fatalf("cannot name the column selected by %q. This test matches the "+
+				"projection against MemoryVersionChain's positional rows.Scan, so every "+
+				"entry must be nameable; give it an explicit AS alias.", it)
+		}
+		out = append(out, bare)
+	}
+	return out
+}
+
+// chainScanDestinations returns the identifier names passed to rows.Scan inside
+// MemoryVersionChain, in argument order — i.e. `&project` yields "project".
+func chainScanDestinations(t *testing.T) []string {
+	t.Helper()
+	const fnName = "MemoryVersionChain"
+
+	goFiles, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	fset := token.NewFileSet()
+	var fn *ast.FuncDecl
+	var found string
+	for _, f := range goFiles {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		parsed, perr := parser.ParseFile(fset, f, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", f, perr)
+		}
+		for _, decl := range parsed.Decls {
+			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == fnName {
+				if fn != nil {
+					t.Fatalf("found %s in both %s and %s", fnName, found, f)
+				}
+				fn, found = fd, f
+			}
+		}
+	}
+	if fn == nil {
+		t.Fatalf("could not find func %s in package domain; retarget this gate rather "+
+			"than deleting it — the projection/Scan correspondence it checks is what "+
+			"keeps a transposed visibility column from disabling the /ui side rail's "+
+			"permission filter.", fnName)
 	}
 
-	if len(got) != len(want) {
-		t.Fatalf("projection has %d columns %v, want %d %v", len(got), got, len(want), want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("memoryVersionChainQuery projection position %d is %q, want %q.\n"+
-				"got:  %v\nwant: %v\n"+
-				"This list is scanned positionally in MemoryVersionChain. If you meant "+
-				"to change the projection, change the rows.Scan destination order to "+
-				"match and update this test — do not update only one of the three.",
-				i, got[i], want[i], got, want)
+	var out []string
+	var calls int
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
 		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Scan" {
+			return true
+		}
+		calls++
+		out = nil
+		for _, arg := range call.Args {
+			unary, ok := arg.(*ast.UnaryExpr)
+			if !ok || unary.Op != token.AND {
+				t.Fatalf("%s: rows.Scan argument %d is not a plain &ident, which this "+
+					"gate cannot map to a column; keep the destinations as simple "+
+					"address-of locals.", fnName, len(out))
+			}
+			id, ok := unary.X.(*ast.Ident)
+			if !ok {
+				t.Fatalf("%s: rows.Scan argument %d takes the address of something that "+
+					"is not a plain identifier", fnName, len(out))
+			}
+			out = append(out, id.Name)
+		}
+		return true
+	})
+	if calls != 1 {
+		t.Fatalf("%s contains %d Scan calls; this gate assumes exactly one and would "+
+			"otherwise be pinning the wrong one", fnName, calls)
 	}
+	return out
 }

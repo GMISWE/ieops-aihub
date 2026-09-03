@@ -453,10 +453,24 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 						// above — and so are their inputs; only where those inputs come
 						// from changed. MemoryVersionChain now selects project, visibility
 						// and author_user_id (json:"-", authorization-only), which is
-						// every field either predicate reads, so the decision is identical
-						// to the one the old per-row GetMemoryByID produced while costing
-						// no extra statement. Measured at the pgx pool: a 20-version chain
-						// went from 21 statements and 5.86 MB to 2 statements.
+						// every field either predicate reads, so the AUTHORIZATION decision
+						// is the same one the old per-row GetMemoryByID produced — same
+						// predicates, same three column values, same row, same
+						// status != 'redacted' filter — while costing no extra statement.
+						// Measured at the pgx pool: a 20-version chain went from 21
+						// statements and 5.86 MB to 2 statements.
+						//
+						// One behaviour did change, and it is not an authorization one.
+						// The old per-row load was fail-closed on error (aihub#248 review
+						// minor 5: ferr != nil || full == nil was deliberately treated as
+						// "denied"), which also dropped a row hard-deleted or redacted in
+						// the window BETWEEN the chain query and that row's own read.
+						// There is no per-row read now, so such a row renders from the
+						// chain snapshot instead of vanishing. That is read staleness on
+						// status, measured in the microseconds the render takes, not a
+						// permissions hole — the authorization inputs travel with the row.
+						// Fail-closed is preserved where an error can still happen: if the
+						// chain query fails, verErr != nil and the whole rail is omitted.
 						//
 						// The zero-value hazard this creates is guarded, not assumed:
 						// memoryVisibleTo takes a *domain.Memory and is handed a partial
@@ -602,10 +616,17 @@ type sideRailMeta struct {
 //
 // It is deliberately a thin adapter and not a re-implementation: the decision
 // is still hasProjectAccess + memoryVisibleTo, the same pure pair the head
-// redirect in handleArtifactHTML uses, so there is exactly one copy of the
-// "may this caller see this memory" rule in the package. All this function does
-// is supply those predicates' inputs from a MemoryVersionRef instead of from a
-// freshly loaded 26-column row.
+// redirect in handleArtifactHTML uses, so this file adds no second copy of the
+// "may this caller see this memory" rule. All this function does is supply
+// those predicates' inputs from a MemoryVersionRef instead of from a freshly
+// loaded 26-column row.
+//
+// Not the only copy in the package, though: ui_handlers_wi.go hand-inlines the
+// visibility half of the rule for the artifact HEADS it lists, and — separately
+// and still open — hands the whole unfiltered lineage to wi_detail.html.tmpl,
+// so /ui/wi/:id discloses lineage members the caller may not see. That is the
+// same aihub#248 W1 class this rail was fixed for; it predates aihub#253, which
+// only makes it a one-call fix by putting the scalars on the row.
 //
 // The partial *domain.Memory is the one sharp edge. memoryVisibleTo reads
 // Visibility and AuthorUserID and nothing else today, so every field it

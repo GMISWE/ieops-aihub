@@ -2854,9 +2854,12 @@ func MemoryVersionChain(ctx context.Context, pool *pgxpool.Pool, memID string) (
 // column is caught loudly by pgx — the destination count stops matching — but
 // TRANSPOSING two of them is not, and transposing visibility with
 // author_user_id in particular would hand the caller-visibility predicate a
-// user id, which falls through its switch to "visible". So the order is pinned
-// by TestMemoryVersionChainQuery_ProjectionOrderIsPinned rather than by this
-// comment.
+// user id, which falls through its switch to "visible".
+//
+// TestMemoryVersionChain_ProjectionAndScanOrderAgree therefore reads BOTH this
+// list and the rows.Scan destinations above out of the source and compares them
+// as sequences. Pinning only this side would have left the same transposition
+// available one line up.
 const memoryVersionChainQuery = `
 WITH RECURSIVE
 ancestors(id) AS (

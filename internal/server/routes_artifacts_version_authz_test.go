@@ -111,15 +111,9 @@ func withVersionChain(chain []domain.MemoryVersionRef) func() {
 	return func() { versionChainFn = prev }
 }
 
-// withLoadMemoryByID installs an ID-DISPATCHING loadMemoryFn and counts calls.
-//
-// Dispatching on the id is load-bearing for gate A, not tidiness. A fake that
-// ignores its id argument and returns the head for every lookup would report
-// the head's visibility for every version, so the pre-aihub#253 code path
-// (which authorized each version from a full record fetched through this seam)
-// would authorize the hidden version as if it were the head — and gate A would
-// pass on broken code. This is the same trap aihub#248's review flagged as W3
-// for withResolveLatestOverride.
+// withLoadMemoryByID is withLoadMemoryDispatch plus a call counter — the seam
+// gate B measures. Gate A uses withLoadMemoryDispatch directly, since it cares
+// which rows render and not how many loads that took.
 func withLoadMemoryByID(t *testing.T, byID map[string]*domain.Memory, calls *int) func() {
 	t.Helper()
 	prev := loadMemoryFn
@@ -192,8 +186,19 @@ func TestArtifactSideRail_VersionCallerCannotSeeIsOmittedEntirely(t *testing.T) 
 		},
 		"mem_v3": {ID: "mem_v3", Project: authzChainProject, Visibility: "project", AuthorUserID: authzChainAuthor},
 	}
-	var calls int
-	defer withLoadMemoryByID(t, byID, &calls)()
+	// withLoadMemoryDispatch (routes_artifacts_test.go) rather than a counting
+	// fake: gate A is about WHICH rows render, and gate B owns the call count.
+	//
+	// byID deliberately carries an entry for every version even though the fixed
+	// code only ever looks up headID. Dispatching on the id is what keeps this
+	// gate honest across the change: with a fake that ignored its argument and
+	// returned the head for every lookup, the pre-aihub#253 code path — which
+	// authorized each version from a record fetched through this seam — would
+	// have authorized the hidden version as if it were the head, and this test
+	// would have passed on genuinely leaky code (the trap aihub#248's review
+	// filed as W3). Keeping the entries also means restoring the old loop is a
+	// one-file experiment that still exercises a real filter.
+	defer withLoadMemoryDispatch(byID)()
 
 	body := renderSideRail(t, headID, projectViewer("u_viewer"))
 
@@ -253,8 +258,7 @@ func TestArtifactSideRail_AdminSeesEveryVersion(t *testing.T) {
 		},
 		"mem_v3": {ID: "mem_v3", Project: authzChainProject, Visibility: "project", AuthorUserID: authzChainAuthor},
 	}
-	var calls int
-	defer withLoadMemoryByID(t, byID, &calls)()
+	defer withLoadMemoryDispatch(byID)()
 
 	body := renderSideRail(t, headID, adminUser())
 
@@ -288,8 +292,7 @@ func TestArtifactSideRail_PrivateVersionVisibleToItsOwnAuthor(t *testing.T) {
 			Visibility: "private", AuthorUserID: "u_viewer",
 		},
 	}
-	var calls int
-	defer withLoadMemoryByID(t, byID, &calls)()
+	defer withLoadMemoryDispatch(byID)()
 
 	body := renderSideRail(t, headID, projectViewer("u_viewer"))
 
@@ -324,8 +327,7 @@ func TestArtifactSideRail_VersionInAnotherProjectIsOmitted(t *testing.T) {
 			Visibility: "project", AuthorUserID: authzChainAuthor,
 		},
 	}
-	var calls int
-	defer withLoadMemoryByID(t, byID, &calls)()
+	defer withLoadMemoryDispatch(byID)()
 
 	body := renderSideRail(t, headID, projectViewer("u_viewer"))
 
@@ -337,15 +339,63 @@ func TestArtifactSideRail_VersionInAnotherProjectIsOmitted(t *testing.T) {
 	}
 }
 
+// TestArtifactSideRail_AdminTierVersionIsHiddenFromNonAdmin covers the third
+// arm of the visibility rule, which the other gate-A cases do not reach.
+// visibility="admin" is denied to every non-admin regardless of authorship — so
+// unlike "private", making the caller the row's author must NOT reveal it. That
+// distinction is the reason memoryVisibleTo has a switch rather than a single
+// author comparison, and it is the arm a fix that conflated "restricted" with
+// "mine" would break.
+func TestArtifactSideRail_AdminTierVersionIsHiddenFromNonAdmin(t *testing.T) {
+	const headID = "mem_head_v3"
+	// Authored by the CALLER, so only the admin tier can be hiding it.
+	chain := []domain.MemoryVersionRef{
+		versionRef("mem_v1", "2026-01-01", "project", authzChainAuthor, false),
+		versionRef(hiddenVersionID, hiddenVersionDate, "admin", "u_viewer", false),
+		versionRef(headID, "2026-03-03", "project", authzChainAuthor, true),
+	}
+	defer withVersionChain(chain)()
+
+	byID := map[string]*domain.Memory{
+		headID:   authzChainMem(headID),
+		"mem_v1": {ID: "mem_v1", Project: authzChainProject, Visibility: "project", AuthorUserID: authzChainAuthor},
+		hiddenVersionID: {
+			ID: hiddenVersionID, Project: authzChainProject,
+			Visibility: "admin", AuthorUserID: "u_viewer",
+		},
+	}
+	defer withLoadMemoryDispatch(byID)()
+
+	body := renderSideRail(t, headID, projectViewer("u_viewer"))
+	if strings.Contains(body, hiddenVersionID) {
+		t.Errorf("side rail showed an admin-tier version to a non-admin (it is the "+
+			"caller's own, which is irrelevant for this tier); excerpt: %s", excerptStr(body))
+	}
+	if strings.Contains(body, hiddenVersionDate) {
+		t.Errorf("side rail leaked the admin-tier version's date")
+	}
+	if got := countVersionRows(body); got != 2 {
+		t.Errorf("version rows: got %d, want 2", got)
+	}
+
+	// And an admin does see it, so the row is hidden by tier and not by accident.
+	if adminBody := renderSideRail(t, headID, adminUser()); !strings.Contains(adminBody, hiddenVersionID) {
+		t.Errorf("an admin must see the admin-tier version; excerpt: %s", excerptStr(adminBody))
+	}
+}
+
 // ─── Gate B: the N+1 itself, as a count ─────────────────────────────────────
 
 // TestArtifactSideRail_VersionChainCostsOneMemoryLoad is the N+1 gate.
 //
-// loadMemoryFn is domain.GetMemoryByID, which issues exactly one statement per
-// call — that 1:1 mapping was measured at the pgx pool with a QueryTracer over
-// chain lengths 1/2/3/5/20, where total statements were N+1 and loadMemoryFn
-// calls were N. So counting this seam counts SELECTs, and the count is exact
-// and load-immune where a duration would be neither.
+// What is counted is loadMemoryFn invocations. loadMemoryFn is
+// domain.GetMemoryByID, which issues exactly one statement per call, and that
+// 1:1 mapping was measured rather than assumed: a pgx QueryTracer on the pool
+// over chain lengths 1/2/3/5/20 saw total statements N+1 while this seam was
+// called N times. The pool is nil here, so the other DB seams on the page are
+// inert by construction rather than by measurement — this counts the one that
+// scaled with N, and the count is exact and load-immune where a duration would
+// be neither.
 //
 // The assertion is "1, for every N", not "fewer than before": a ceiling that
 // scales with N is not a gate, and a wall-clock budget would be a different
@@ -464,10 +514,13 @@ func TestMemoryVisibleTo_ReadsOnlyTheFieldsTheChainRowSupplies(t *testing.T) {
 	// hand-written list did silence a `mem.Status == "archived"` mutant with no
 	// other test objecting.
 	//
-	// Derived, the only way to widen the permitted set is to add the field to
-	// versionRefVisibleTo's composite literal — which either supplies it for real
-	// (the fix) or fails to compile because MemoryVersionRef does not carry it
-	// (forcing the fix). Every cheap path to green is now a correct one.
+	// Derived, widening the permitted set means adding the field to
+	// versionRefVisibleTo's composite literal AND populating it from the ref
+	// (fieldsPopulatedByVersionRefVisibleTo rejects a key whose value is not a
+	// field of the ref, so `Type: ""` buys nothing). That either supplies the
+	// field for real — the fix — or fails to compile because MemoryVersionRef
+	// does not carry it, which forces the fix one level down. The escape hatch is
+	// not merely more expensive than compliance; it IS compliance.
 	allowed := fieldsPopulatedByVersionRefVisibleTo(t)
 
 	const fnName = "memoryVisibleTo"
@@ -591,6 +644,7 @@ func fieldsPopulatedByVersionRefVisibleTo(t *testing.T) map[string]bool {
 	}
 	fset := token.NewFileSet()
 	var fn *ast.FuncDecl
+	var foundIn string
 	for _, f := range goFiles {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -601,7 +655,10 @@ func fieldsPopulatedByVersionRefVisibleTo(t *testing.T) map[string]bool {
 		}
 		for _, decl := range parsed.Decls {
 			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == fnName {
-				fn = fd
+				if fn != nil {
+					t.Fatalf("found %s in both %s and %s", fnName, foundIn, f)
+				}
+				fn, foundIn = fd, f
 			}
 		}
 	}
@@ -628,9 +685,30 @@ func fieldsPopulatedByVersionRefVisibleTo(t *testing.T) map[string]bool {
 				positional = true
 				continue
 			}
-			if id, ok := kv.Key.(*ast.Ident); ok {
-				out[id.Name] = true
+			id, ok := kv.Key.(*ast.Ident)
+			if !ok {
+				continue
 			}
+			// A key only counts as "supplied" if its value is actually read off
+			// the MemoryVersionRef. Otherwise `Type: ""` would widen the
+			// permitted set while supplying nothing — the same cheap-and-wrong
+			// escape the hand-written list offered, relocated.
+			val, ok := kv.Value.(*ast.SelectorExpr)
+			if !ok {
+				t.Errorf("%s populates domain.Memory.%s from something other than a "+
+					"MemoryVersionRef field. This gate treats the literal's keys as the "+
+					"fields the chain row genuinely supplies, so a constant or computed "+
+					"value here would license memoryVisibleTo to read %s while the real "+
+					"value is not carried. Populate it from the ref, or drop the key.",
+					fnName, id.Name, id.Name)
+				continue
+			}
+			if _, ok := val.X.(*ast.Ident); !ok {
+				t.Errorf("%s populates domain.Memory.%s from %T rather than a plain "+
+					"field of the MemoryVersionRef parameter", fnName, id.Name, val.X)
+				continue
+			}
+			out[id.Name] = true
 		}
 		return true
 	})

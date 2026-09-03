@@ -184,11 +184,59 @@ snippet above keeps them in sync via `$PGPW`.) Full variable reference:
 |---|---|---|
 | `DATABASE_URL` | **yes** | Postgres DSN. Inside compose use host `postgres`. Example: `postgres://aihub:<pw>@postgres:5432/aihub?sslmode=disable`. |
 | `PORT` | no | Listen port (default `8080`). |
-| `POLYFORGE_UI_COOKIE_SECRET` | recommended | 32+ bytes (raw or hex), the HMAC key for `/ui/*` session cookies. If unset, the server generates an ephemeral secret each start and logs a warning — UI logins do not survive a restart. |
+| `POLYFORGE_UI_COOKIE_SECRET` | **yes** | 32+ bytes (raw or hex), the HMAC key for `/ui/*` session cookies. **The server refuses to start without it** — see [The `/ui` session key](#the-ui-session-key) below for why, and for the one documented way to decline. |
 | `ADMIN_BOOTSTRAP_KEY` | first boot only | Enables `POST /v1/bootstrap` until the first admin exists (see step 6). Unset it afterwards. |
 | `RENDER_MEMORY_TYPES` | no | Comma-separated memory types whose markdown is pre-rendered to HTML on save (for the artifact viewer). |
 | `EMBEDDING_ENABLED` | no | `true`/`1` turns on optional pgvector semantic recall. When enabled also set `EMBEDDING_PROVIDER` (`openai`/`ollama`), `EMBEDDING_MODEL`, `EMBEDDING_DIMS`, and `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` as the provider needs. Default off; recall then uses recency + strength only. **`pgvector` is still required either way** because the schema migration creates the extension. |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | for the bundled DB | Consumed by the `postgres` service; must line up with `DATABASE_URL`. |
+
+### The `/ui` session key
+
+`POLYFORGE_UI_COOKIE_SECRET` is the HMAC key for `/ui/*` session cookies. The
+property that matters is not that it is secret — it is that it is **the same
+value in the next process**. A cookie minted by one process is verified by its
+successor, so a key that changes on restart signs out every `/ui` user at that
+moment, and they have to paste their API key again.
+
+It used to be optional: unset meant "32 random bytes per process, plus a warn
+line on stderr". Production ran that way from the day `/ui` shipped, so **every
+deploy silently signed everybody out** and the only trace was one line in the
+container log — [step 7](#7-verify) checks `/v1/version`, `/v1/health` and the
+authed read path, and an ephemeral cookie key leaves all three green. The
+variable was already documented here, accurately, and it was still never set;
+a signal nobody reads is not a signal (aihub#344).
+
+So there are three states and no fourth:
+
+| value | behaviour |
+|---|---|
+| 32+ bytes, hex or raw | signs sessions with it; sessions survive restarts. Surrounding whitespace is trimmed, so `…=abc ` and `…=abc` are the same key — gated by `TestUICookieSecretTrimmedValueIsTheSameKey`, which mints a session in one process and verifies it in another started from the untrimmed spelling |
+| the literal `ephemeral` | random key per process — the old behaviour, now something you have to ask for. The server warns on every start, and the choice is visible in the env-file |
+| unset | **the server refuses to start** and prints the `openssl` line to fix it |
+
+Refusing to start is deliberate, and it is a trade: a fresh install with no
+configuration now stops at boot instead of coming up. That failure is found in
+seconds by whoever is doing the install and is one line to fix; the one it
+replaces was a mass sign-out on every deploy of a running system that nothing
+could go red on. Two consequences worth knowing before you deploy:
+
+- **Add the variable to the env-file before rolling out a build that contains
+  this change**, or the new container will exit at startup. On production that
+  is `/root/aihub.env`; the pre-flight check in the
+  [current production procedure](#current-production-cloud-sql--bare-docker-run)
+  covers it.
+- **Setting it for the first time signs everybody out once**, because the
+  sessions currently in browsers were signed with the outgoing process's random
+  key. That is the last time it happens.
+
+```bash
+# Generate and append. mode 600 already; keep it that way.
+printf 'POLYFORGE_UI_COOKIE_SECRET=%s\n' "$(openssl rand -hex 32)" >> /root/aihub.env
+```
+
+Treat the value like `DATABASE_URL` from then on: **replacing** it signs
+everybody out exactly as losing it does, so it is not a variable to regenerate
+casually or to leave out when an env-file is rebuilt on a new host.
 
 ## 4. Run database migrations
 
@@ -284,9 +332,11 @@ Open `http://<host>:8080/ui/` in a browser and sign in with the admin API key.
 ## 8. TLS / reverse proxy (optional)
 
 The server speaks plain HTTP on `:8080`. For anything reachable off the host, put
-a TLS-terminating reverse proxy in front and set `POLYFORGE_UI_COOKIE_SECRET` so
-`/ui` sessions survive restarts. This section is best-practice guidance and is not
-part of the verified minimal path above. Example with Caddy (automatic HTTPS):
+a TLS-terminating reverse proxy in front. TLS also gets the session cookie its
+`Secure` flag: the server sets it from `X-Forwarded-Proto`, so a proxy that does
+not forward that header leaves the cookie without it. This section is
+best-practice guidance and is not part of the verified minimal path above.
+Example with Caddy (automatic HTTPS):
 
 ```
 # /etc/caddy/Caddyfile
@@ -386,6 +436,45 @@ is safe.
   so the endpoint reports the old verdict for up to that long after the backend
   dies. Two polls 15 s apart is the shortest reliable check.
 
+- **The container exits immediately; logs end with `fatal: no /ui session
+  signing key configured`.**
+  `POLYFORGE_UI_COOKIE_SECRET` is missing from the env-file. The log prints the
+  `openssl` line to fix it; the long form is
+  [The `/ui` session key](#the-ui-session-key). This is deliberate — it used to
+  start anyway with a per-process key, which signed out every `/ui` user on
+  every deploy and could not be detected from any endpoint (aihub#344). It is
+  not a reason to roll back: add the line and start the container again.
+
+- **`/ui` users have to paste their API key again after a deploy.**
+  Their cookies were signed with a key the new process does not have. Three
+  causes: the variable is absent (only possible on a build older than
+  aihub#344 — a newer one would not have started), it is set to `ephemeral`, or
+  its **value changed** between the two containers. The startup line settles
+  the first two — it is printed in both states, so it is never silent:
+
+  ```bash
+  docker logs aihub --since 10m 2>&1 | grep -F '/ui session key'
+  ```
+
+  For the third, compare the new container against the rollback anchor by
+  **digest**, which answers "same value?" without printing the value:
+
+  ```bash
+  for c in aihub aihub-prev-<sha>; do
+    v=$(docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+        | grep '^POLYFORGE_UI_COOKIE_SECRET=')
+    printf '%s %s\n' "$c" "$([ -n "$v" ] && printf '%s' "$v" | sha256sum || echo 'NO KEY SET')"
+  done
+  ```
+
+  Equal digests mean the key was not what changed; look at `ephemeral` instead.
+  The `[ -n "$v" ]` guard matters: `sha256sum` of empty input is the constant
+  `e3b0c442…`, which looks exactly like a real digest, so without it "this
+  container had no key" and "this container had a key" are indistinguishable.
+  ⚠️ A digest is only opaque if the value has entropy — the server enforces no
+  minimum length, so if someone set a short passphrase its digest is
+  dictionary-attackable once it is in a scrollback.
+
 ## Team deployment (reference)
 
 Production has moved on from the single-Compose host this section originally
@@ -400,7 +489,7 @@ co-located embedding service, and starts the server as a **bare `docker run`**
 | Host | `10.146.0.34` (GPU host; its public IP changes across stop/start — use the internal IP over the jump host) |
 | Database | **Cloud SQL** — managed Postgres 18 + pgvector at `10.20.80.3:5432`, `sslmode=require`. This is the "managed Postgres" path from [What you are deploying](#what-you-are-deploying); there is **no `postgres` container** |
 | Embedding | a TEI container named `tei` on the same host and Docker network `aihub-net`, published on `:8085`. A deploy never touches it |
-| Server | one `docker run` container named `aihub` on `aihub-net`, `-p 8080:8080`, `--env-file /root/aihub.env` (holds `DATABASE_URL`, the `EMBEDDING_*` vars, `PORT`, `ADMIN_BOOTSTRAP_KEY`) — **no Compose file** |
+| Server | one `docker run` container named `aihub` on `aihub-net`, `-p 8080:8080`, `--env-file /root/aihub.env` (holds `DATABASE_URL`, the `EMBEDDING_*` vars, `PORT`, `POLYFORGE_UI_COOKIE_SECRET`, `ADMIN_BOOTSTRAP_KEY`) — **no Compose file**. That file is the only place a generated secret survives a deploy: the container is replaced wholesale, so neither its writable layer nor the image can hold one |
 | Image | `us-west1-docker.pkg.dev/devv-404803/public/aihub`, pulled by **git-SHA tag** (not `:latest`). CI tags with the full 40-char commit SHA |
 | Rollback anchor | the container being replaced is **stopped and renamed** to `aihub-prev-<short sha>`, never deleted. Exactly one anchor is kept |
 
@@ -457,7 +546,31 @@ DBURL=$(docker inspect aihub --format '{{range .Config.Env}}{{println .}}{{end}}
 # An API key with access to at least one project — step 7 needs it. `read -rs`
 # keeps it off the screen and out of the shell history.
 read -rsp 'aihub API key: ' KEY; echo
+
+# Pre-flight: the env-file must carry a /ui session key, or the new container
+# exits at startup. Prints the NAME only, never the value.
+#
+# [^[:space:]] is load-bearing: the server also refuses an EMPTY or
+# whitespace-only value, so a bare `=` anchor would report "present" for a
+# configuration that will not start.
+grep -Eq '^POLYFORGE_UI_COOKIE_SECRET=[^[:space:]]' /root/aihub.env \
+  && echo 'POLYFORGE_UI_COOKIE_SECRET: present' \
+  || echo 'POLYFORGE_UI_COOKIE_SECRET: MISSING or empty — stop, see below'
 ```
+
+**If the pre-flight says MISSING, fix it before step 6, not after.** The server
+refuses to start without it (aihub#344), so a swap done first takes `/ui` and
+`/v1` down until the file is corrected. Nothing is down yet at this point:
+
+```bash
+printf 'POLYFORGE_UI_COOKIE_SECRET=%s\n' "$(openssl rand -hex 32)" >> /root/aihub.env
+```
+
+Adding it signs out the `/ui` users who are currently signed in — once — because
+their cookies were signed with the outgoing process's random key. Every deploy
+after this one leaves them signed in. See
+[The `/ui` session key](#the-ui-session-key) for why this is fatal rather than a
+warning, and what `=ephemeral` is for.
 
 **1. Back up Cloud SQL.** `pg_dump` runs on `aihub-net` so it can reach the DB.
 
@@ -573,12 +686,35 @@ A 500 whose body carries `SQLSTATE 42703` is exactly the failure the
 migrate-first order prevents — roll back (step 8), then find the missing
 migration.
 
-Then the two quieter checks:
+Then the three quieter checks:
 
 ```bash
 docker logs aihub --since 10m 2>&1 | grep -Ei 'error|42703' | head   # expect no output
+docker logs aihub --since 10m 2>&1 | grep -F '/ui session key'       # expect the "from ..." line
 docker inspect -f '{{.State.StartedAt}}' tei                         # expect it UNCHANGED
 ```
+
+**That grep prints exactly one line, and the line is the verdict.** Both startup
+states carry the string `/ui session key`, on purpose, so there is no state in
+which the check is silent:
+
+| line | meaning |
+|---|---|
+| `aihub: /ui session key from POLYFORGE_UI_COOKIE_SECRET (32 bytes) — sessions survive restarts` | good. The byte count is the resolved key's length, so a truncated env-file value shows up here (`32` for the prescribed `openssl rand -hex 32`; a raw passphrase reports its own length) |
+| `warn: /ui session key is EPHEMERAL (…=ephemeral) — random per process; …` | the env-file says `=ephemeral`. The users signed in right now will be signed out by the next deploy |
+| *no output* | neither — so you are looking at the wrong container, a rotated log, or a build older than aihub#344 |
+
+**Assert on the line, not on the absence of a warning.** "No warning" is also
+what a rotated log and the wrong container produce, which is why both states
+print the same greppable tag rather than only the bad one — a check that goes
+quiet in the state it exists to catch is not a check. That is gated by
+`TestUISessionSurvivesProcessRestart` in `cmd/aihub/ui_cookie_secret_test.go`,
+so the two lines cannot drift apart from this table.
+
+This check exists because the three checks in the table above cannot fail on an
+ephemeral session key: `/v1/version`, `/v1/health` and the authed read path are
+all green while every `/ui` user is being signed out on each deploy
+(aihub#344).
 
 `tei` must not have restarted: the swap replaces one container, and a restarted
 embedding backend would mean the blast radius was wider than intended.

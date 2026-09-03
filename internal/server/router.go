@@ -22,8 +22,11 @@ import (
 // NewRouter constructs the echo router with all routes.
 //
 // uiCookieSecret seeds the HMAC for /ui/* session cookies (see ui_session.go).
-// Pass at least 32 bytes for production; main.go reads POLYFORGE_UI_COOKIE_SECRET
-// or generates an ephemeral secret with a warning when unset.
+// Pass at least 32 bytes for production. main.go resolves it from
+// POLYFORGE_UI_COOKIE_SECRET and refuses to start when that is unset, because
+// the value has to be the same in the NEXT process or every /ui session is
+// invalidated on restart (aihub#344). Callers here are handed the resolved
+// bytes and make no decision about them.
 func NewRouter(pool *pgxpool.Pool, uiCookieSecret []byte) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true

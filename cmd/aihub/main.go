@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +31,16 @@ func main() {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		fmt.Fprintln(os.Stderr, "DATABASE_URL required")
+		os.Exit(1)
+	}
+
+	// Resolved here, next to the other required variable and BEFORE the database
+	// pool, so a misconfigured deployment fails in milliseconds without opening a
+	// connection. It used to be resolved just before NewRouter, after the pool,
+	// the embedding ping and two goroutines had already started.
+	cookieSecret, err := loadUICookieSecret()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n\n%s", err, uiCookieSecretGuidance)
 		os.Exit(1)
 	}
 
@@ -133,7 +145,6 @@ func main() {
 	// pool) and this is process-local memory with no row behind it.
 	server.StartIdempotencyCachePurger(ctx)
 
-	cookieSecret := loadUICookieSecret()
 	e := server.NewRouter(pool, cookieSecret)
 
 	port := os.Getenv("PORT")
@@ -195,32 +206,151 @@ func applyServerTimeouts(s *http.Server) {
 	s.IdleTimeout = serverIdleTimeout
 }
 
-// loadUICookieSecret resolves the secret used to sign /ui/* session cookies.
+// The /ui session signing key (aihub#344).
 //
-// Source order:
-//  1. POLYFORGE_UI_COOKIE_SECRET — preferred. Accepted as hex (auto-decoded
-//     if the string is even-length and all hex chars) or raw bytes.
-//  2. Random 32 bytes from crypto/rand — emits a stderr warning so operators
-//     know sessions will be invalidated on every restart.
+// POLYFORGE_UI_COOKIE_SECRET is the HMAC key for /ui/* session cookies. The
+// property that matters is not that it is secret — it is that it is the SAME
+// value in the NEXT process: a cookie minted by one process is verified by its
+// successor (internal/server/ui_session.go), so a key that changes on restart
+// signs out every /ui user at that moment.
 //
-// We do not enforce a minimum length on env-supplied secrets so dev/test can
-// use short values; for prod, supply 32+ bytes of high-entropy data.
-func loadUICookieSecret() []byte {
-	if raw := os.Getenv("POLYFORGE_UI_COOKIE_SECRET"); raw != "" {
-		if decoded, err := hex.DecodeString(raw); err == nil && len(decoded) > 0 {
-			return decoded
+// It used to be optional. Unset meant "32 random bytes per process, plus a warn
+// line", and production ran that way from the day /ui shipped: every deploy
+// signed everybody out, and the only trace was one line of stderr. Nothing in
+// the deploy procedure could go red on it — docs/deployment.md step 7 checks
+// /v1/version, /v1/health and the authed read path, and an ephemeral cookie key
+// leaves all three green. A signal nobody reads is not a signal, so the warn is
+// not the fix; requiring the value is.
+//
+// Three states, and no fourth:
+//
+//	POLYFORGE_UI_COOKIE_SECRET=<32+ bytes, hex or raw>   sessions survive restarts
+//	POLYFORGE_UI_COOKIE_SECRET=ephemeral                 old behaviour, opted into
+//	unset                                                refuse to start
+//
+// Why the opt-out is a sentinel VALUE of the same variable rather than a second
+// variable: the state being fixed was invisible — nothing, anywhere, recorded
+// that this deployment had thrown its sessions away. Spelling the opt-out inside
+// the same variable means `grep POLYFORGE_UI_COOKIE_SECRET /root/aihub.env`
+// answers "is this deployment persisting sessions?" with one line either way,
+// and there is no second name to drift out of step with the first.
+//
+// Why refusing to start is the right failure: it trades a loud stop at first
+// boot — one line to fix, found in seconds by whoever is doing the install — for
+// a silent mass sign-out on every deploy of an already-running system, which was
+// measured to survive undetected for months. TestUISessionSurvivesProcessRestart
+// gates it.
+const (
+	uiCookieSecretEnv = "POLYFORGE_UI_COOKIE_SECRET"
+
+	// uiCookieSecretEphemeral is the reserved value that opts a deployment INTO
+	// per-process random keys. Not valid hex and far short of 32 bytes, so it
+	// cannot be confused with a real key.
+	uiCookieSecretEphemeral = "ephemeral"
+
+	// uiCookieSecretLogTag appears in BOTH startup lines — the one that reports
+	// a configured key and the warn that reports an ephemeral one.
+	//
+	// It is one constant rather than two hand-written strings because the
+	// operator's check is a single `docker logs … | grep -F '/ui session key'`,
+	// and a token present in only one of the two lines makes that grep silent
+	// on exactly the state it was added to detect: empty output would then mean
+	// "ephemeral" and "wrong container" and "rotated log" all at once. Shared,
+	// the grep always prints one line and the line says which state it is.
+	// TestUISessionKeyIsGreppableInEveryStartedState pins that.
+	uiCookieSecretLogTag = "/ui session key"
+)
+
+// errUICookieSecretUnset is the startup failure when the variable is absent.
+var errUICookieSecretUnset = errors.New("fatal: no /ui session signing key configured")
+
+// uiCookieSecretGuidance is the remedy, printed after the error above.
+//
+// It names the file rather than only the variable: the variable was documented
+// (README and docs/deployment.md both described the consequence accurately) and
+// still nobody set it, so the missing half was never the explanation — it was
+// the copy-pasteable command.
+const uiCookieSecretGuidance = `POLYFORGE_UI_COOKIE_SECRET signs /ui/* session cookies. Without a stable value,
+every restart mints a new key and signs out every /ui user, so this is fatal
+rather than a warning (aihub#344).
+
+Generate one and add it to the env-file this server is started with — on
+production that is /root/aihub.env, mode 600 — then start the server again:
+
+    printf 'POLYFORGE_UI_COOKIE_SECRET=%s\n' "$(openssl rand -hex 32)" >> /root/aihub.env
+
+Treat it like DATABASE_URL from then on: replacing it signs everybody out just
+as losing it does.
+
+For local development, or anywhere sessions are genuinely disposable, set
+
+    POLYFORGE_UI_COOKIE_SECRET=ephemeral
+
+which restores the old per-process random key. That is a real choice with a real
+consequence, so it has to be written down where the rest of the configuration
+lives instead of being the invisible default.
+`
+
+// loadUICookieSecret resolves the /ui session signing key from the environment.
+func loadUICookieSecret() ([]byte, error) {
+	return resolveUICookieSecret(os.Getenv(uiCookieSecretEnv))
+}
+
+// resolveUICookieSecret is loadUICookieSecret with the environment read out, so
+// the decision can be exercised without setting an environment variable. It is
+// not otherwise side-effect free: it reports which of the three states it landed
+// in on stdout or stderr, because that report IS half of what this function is
+// for (see uiCookieSecretLogTag).
+//
+// A configured value is accepted as hex (auto-decoded when the whole string
+// decodes) or as raw bytes. No minimum length is enforced: dev and test use
+// short values, and a length floor here would be a second way to fail startup
+// for a deployment whose sessions do survive restarts, which is not this
+// function's job.
+//
+// Surrounding whitespace is trimmed. `FOO=abc ` in a docker --env-file carries
+// the trailing space through verbatim, and two edits of the same file that
+// differ only in whitespace would otherwise be two different keys — the exact
+// silent sign-out this is meant to end.
+func resolveUICookieSecret(raw string) ([]byte, error) {
+	trimmed := strings.TrimSpace(raw)
+	switch {
+	case trimmed == "":
+		return nil, errUICookieSecretUnset
+
+	// Case-insensitively, because the alternative is worse than a loose match:
+	// `=EPHEMERAL` would otherwise fall through and become a nine-byte literal
+	// key — restart-stable, so nothing here would complain, and trivially
+	// forgeable. Nobody's real 32-byte secret is the word "ephemeral" in any
+	// casing.
+	case strings.EqualFold(trimmed, uiCookieSecretEphemeral):
+		buf := make([]byte, 32)
+		if _, err := rand.Read(buf); err != nil {
+			// No constant fallback. The previous version returned a hard-coded
+			// string here, which is a signing key compiled into every copy of
+			// the binary: anyone holding it could forge a session for any user.
+			// Unreachable in practice is not the same as harmless to ship.
+			return nil, fmt.Errorf("fatal: generating an ephemeral /ui session key: %w", err)
 		}
-		return []byte(raw)
+		fmt.Fprintf(os.Stderr,
+			"warn: %s is EPHEMERAL (%s=%s) — random per process; "+
+				"every restart signs out every /ui user\n",
+			uiCookieSecretLogTag, uiCookieSecretEnv, uiCookieSecretEphemeral)
+		return buf, nil
+
+	default:
+		// No len(decoded) > 0 guard: the only string hex-decoding to zero bytes
+		// is "", which the first case already returned on.
+		secret := []byte(trimmed)
+		if decoded, err := hex.DecodeString(trimmed); err == nil {
+			secret = decoded
+		}
+		// A positive line, not just the absence of a warning: a log that has
+		// rotated, or a grep against the wrong container, also produces "no
+		// warning". This one can be asserted on. It reports the length so a
+		// truncated env-file value is visible; the length is not the secret.
+		fmt.Printf("aihub: %s from %s (%d bytes) — sessions survive restarts\n",
+			uiCookieSecretLogTag, uiCookieSecretEnv, len(secret))
+		return secret, nil
 	}
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		fmt.Fprintf(os.Stderr, "warn: failed to generate ephemeral UI cookie secret: %v\n", err)
-		// Fall back to a process-lifetime fixed value rather than crash —
-		// the UI is still usable, just brittle across restarts.
-		return []byte("aihub-ephemeral-fallback-secret")
-	}
-	fmt.Fprintln(os.Stderr,
-		"warn: POLYFORGE_UI_COOKIE_SECRET not set — using an ephemeral random secret. "+
-			"Existing UI sessions will be invalidated on the next restart.")
-	return buf
 }

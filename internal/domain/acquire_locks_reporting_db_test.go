@@ -126,9 +126,13 @@ func TestAcquireLocksReportsEveryHeldLock(t *testing.T) {
 	const kept = "internal/domain/kept.go"
 	const dropped = "internal/domain/dropped.go"
 	const added = "internal/domain/added.go"
-	keptKey := project + ":" + kept
-	droppedKey := project + ":" + dropped
-	addedKey := project + ":" + added
+	// The ":aihub:" segment is the repo, not a typo (aihub#261): this fixture
+	// declares {"type":"repo","uri":"repo:aihub"} alongside its paths, so the
+	// repo-relative paths inherit that repo and the derived keys name it. A
+	// fixture that declared no repo would still key on "<project>:<path>".
+	keptKey := project + ":aihub:" + kept
+	droppedKey := project + ":aihub:" + dropped
+	addedKey := project + ":aihub:" + added
 
 	wi := seedClaimableWI(t, pool, project, u,
 		"report the locks an attempt holds rather than the ones it would re-derive",

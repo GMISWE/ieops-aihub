@@ -611,9 +611,15 @@ func checkRepos(wsRoot string, cfg *config.Config) checkResult {
 				mismatch = append(mismatch, r.Name+"(remote-err)")
 				continue
 			}
+			// redactGitURL on the OBSERVED url, not only on the declared one:
+			// runClone stores `https://<gh token>@github.com/...` as origin on its
+			// token fallback, and these are the same .repo/ clones it made. Without
+			// this, a remote mismatch prints a live credential to the terminal (and
+			// into whatever captured it).
 			actual := strings.TrimSpace(string(out))
 			if r.URL != "" && actual != r.URL {
-				mismatch = append(mismatch, fmt.Sprintf("%s(want %s got %s)", r.Name, r.URL, actual))
+				mismatch = append(mismatch, fmt.Sprintf("%s(want %s got %s)",
+					r.Name, redactGitURL(r.URL), redactGitURL(actual)))
 			}
 		}
 	}

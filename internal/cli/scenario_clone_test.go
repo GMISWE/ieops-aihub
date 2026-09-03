@@ -357,6 +357,56 @@ func TestCloneOrSyncKeepsLocalModifications(t *testing.T) {
 	}
 }
 
+// TestCloneOrSyncStillSyncsOverUntrackedFiles is the other side of the -uno
+// decision, and without it that flag is unguarded: dropping it leaves every
+// assertion in this file green while every clone carrying a stray build artefact
+// silently stops being synced forever.
+//
+// `git reset --hard` does not delete untracked files, so they are never at risk
+// and must not block the reset.
+func TestCloneOrSyncStillSyncsOverUntrackedFiles(t *testing.T) {
+	root := t.TempDir()
+	origins := filepath.Join(root, "origins")
+	url := newScenarioOrigin(t, origins, "GMISWE", scenarioRepoBasename, "UPSTREAM V1")
+
+	repoDir := filepath.Join(root, "ws", ".repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir .repo: %v", err)
+	}
+	cloneOrSync(repoDir, "demo", url)
+	local := filepath.Join(repoDir, "demo")
+
+	// Untracked only — the shape of a build artefact or an editor scratch file.
+	stray := filepath.Join(local, "build.out")
+	if err := os.WriteFile(stray, []byte("artefact"), 0o644); err != nil {
+		t.Fatalf("write untracked: %v", err)
+	}
+
+	seed := filepath.Join(t.TempDir(), "advance")
+	if out, err := exec.Command("git", "clone", "-q", url, seed).CombinedOutput(); err != nil {
+		t.Fatalf("clone for advance: %v\n%s", err, out)
+	}
+	mustGit(t, seed, "config", "user.email", "t@t.test")
+	mustGit(t, seed, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(seed, "feature.md"), []byte("UPSTREAM V2"), 0o644); err != nil {
+		t.Fatalf("advance write: %v", err)
+	}
+	mustGit(t, seed, "add", "feature.md")
+	mustGit(t, seed, "commit", "-q", "-m", "advance")
+	mustGit(t, seed, "push", "-q", "origin", "main")
+
+	cloneOrSync(repoDir, "demo", url)
+
+	if got := readTemplate(t, repoDir, "demo"); got != "UPSTREAM V2" {
+		t.Errorf(".repo/demo/feature.md = %q after sync, want %q — an untracked file blocked the "+
+			"reset, so this clone is now permanently stale over a file `reset --hard` would "+
+			"never have touched", got, "UPSTREAM V2")
+	}
+	if _, err := os.Stat(stray); err != nil {
+		t.Errorf("untracked file %s disappeared: %v", stray, err)
+	}
+}
+
 // TestScenarioCloneReportsAFailedClone keeps the outcome list honest. Every other
 // case in this file asserts on Status, so a cloneScenarioRepos that returned
 // scenarioCloneOK unconditionally would still satisfy most of them — and callers
@@ -397,6 +447,47 @@ func TestScenarioCloneSkipsAValueThatIsNotAURL(t *testing.T) {
 	}
 }
 
+// TestScenarioCloneCannotEscapeTheRepoDirectory is the end-to-end half of the
+// traversal cases in the table below. The unit assertion says scenarioDirName
+// returns ""; this says what that buys — `.repo/` and everything beside it is
+// still there afterwards. Without the guard the destination resolves to `.repo`
+// itself, which is empty here, so the empty-directory recovery in
+// syncScenarioClone would remove it and clone the scenario repo in its place.
+func TestScenarioCloneCannotEscapeTheRepoDirectory(t *testing.T) {
+	for _, url := range []string{
+		"https://github.com/..",
+		"git@github.com:.",
+		"https://github.com/../polyforge-coding.git",
+	} {
+		t.Run(url, func(t *testing.T) {
+			ws := t.TempDir()
+			repoDir := filepath.Join(ws, ".repo")
+			if err := os.MkdirAll(repoDir, 0o755); err != nil {
+				t.Fatalf("mkdir .repo: %v", err)
+			}
+			sibling := filepath.Join(ws, "keep-me.txt")
+			if err := os.WriteFile(sibling, []byte("not yours"), 0o644); err != nil {
+				t.Fatalf("write sibling: %v", err)
+			}
+
+			got := cloneScenarioRepos(repoDir, []serverProject{scenarioProject("p", url)}, fixtureUID)
+			if len(got) != 1 || got[0].Status != scenarioCloneUnparseable {
+				t.Errorf("outcomes = %+v, want one %q", got, scenarioCloneUnparseable)
+			}
+			if fi, err := os.Stat(repoDir); err != nil || !fi.IsDir() {
+				t.Fatalf(".repo is gone or is no longer a directory (%v) — a scenario URL "+
+					"steered init onto the directory it clones into", err)
+			}
+			if names := mustReadDirNames(t, repoDir); len(names) != 0 {
+				t.Errorf(".repo/ = %v, want empty — nothing was cloned for a traversing URL", names)
+			}
+			if b, err := os.ReadFile(sibling); err != nil || string(b) != "not yours" {
+				t.Errorf("%s = %q (err %v) — init reached outside .repo/", sibling, string(b), err)
+			}
+		})
+	}
+}
+
 // TestScenarioDirNameAndRemoteMatchAgree pins the derivation itself, including
 // the shapes the end-to-end cases above cannot reach with a file:// fixture.
 //
@@ -420,9 +511,22 @@ func TestScenarioDirNameAndRemoteMatchAgree(t *testing.T) {
 		{"gitlab subgroup keeps the last group", "https://gitlab.com/grp/sub/repo.git", "sub__repo"},
 		{"trailing slash", "https://github.com/GMISWE/polyforge-coding/", "GMISWE__polyforge-coding"},
 		{"single path segment keeps the bare name", "ssh://git@host/repo.git", "repo"},
-		{"file url", "file:///srv/mirrors/acme/repo.git", "acme__repo"},
+		// file:// is this suite's TRANSPORT, not a supported scenario value:
+		// validateScenario's regex has no empty-host branch, so the server will
+		// not store one. Pinned anyway because every end-to-end case above
+		// depends on this derivation being right for the fixtures.
+		{"file url (test transport only)", "file:///srv/mirrors/acme/repo.git", "acme__repo"},
 		{"not a url", "coding", ""},
 		{"empty", "", ""},
+		// Traversal. Every one of these passes validateScenario in
+		// internal/domain, so a server can hold them; filepath.Join would then
+		// put the clone outside .repo/ — or ON it, where the empty-directory
+		// recovery in syncScenarioClone would remove and clone over the lot.
+		{"dot-dot as repo", "https://github.com/..", ""},
+		{"dot as repo", "git@github.com:.", ""},
+		{"dot-dot as owner", "https://github.com/../repo.git", ""},
+		{"dot-dot as the repo of a pair", "https://github.com/org/..", ""},
+		{"dot as owner", "https://github.com/./repo.git", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := scenarioDirName(tc.url); got != tc.dir {
@@ -511,6 +615,24 @@ func TestDoctorChecksScenarioClones(t *testing.T) {
 		t.Errorf("after init: checkRepos = %+v, want ok — the leftover .repo/%s must not keep "+
 			"the workspace permanently in warning", got, scenarioRepoBasename)
 	}
+
+	// State 3 — the state doctor was actually extended for: the owner-qualified
+	// directory is THERE but holds a different repo. "missing" and "ok" alone
+	// leave this branch untested, and a check that cannot see a wrong remote is
+	// the same blind spot at a new path.
+	other := newScenarioOrigin(t, origins, "someone-else", scenarioRepoBasename, "OTHER STEP GRAPH")
+	if err := os.RemoveAll(filepath.Join(repoDir, scenarioDirName(url))); err != nil {
+		t.Fatalf("clear owner-qualified clone: %v", err)
+	}
+	if out, err := exec.Command("git", "clone", "-q", other,
+		filepath.Join(repoDir, scenarioDirName(url))).CombinedOutput(); err != nil {
+		t.Fatalf("plant foreign clone: %v\n%s", err, out)
+	}
+	got = checkRepos(ws, cfg)
+	if got.Status != "warning" || !strings.Contains(got.Message, "want ") {
+		t.Errorf("wrong remote at the owner-qualified path: checkRepos = %+v, want a warning "+
+			"reporting the mismatch", got)
+	}
 }
 
 // --- the read side ------------------------------------------------------------
@@ -531,6 +653,18 @@ var scenarioPathDocs = []struct {
 	{"skills/pf-work/SKILL.md", "### Mode A — New wi"},
 	{"skills/pf-execute/engine.native.md", "## Execute (rhs=false, auto mode)"},
 	{"skills/pf-execute/references/engine-native-details.md", "--- step instructions ---"},
+}
+
+// scenarioPathBanOnlyDocs point AT the scenario clone without restating how to
+// derive it, so requiring the canonical spelling in them would be wrong — but
+// they still must not name a directory the owner has been dropped from.
+// pf-crystallize is here because it used to hardcode `.repo/polyforge-coding/`,
+// which is the same defect with the collision already baked in.
+var scenarioPathBanOnlyDocs = []struct {
+	rel    string
+	anchor string
+}{
+	{"skills/pf-crystallize/SKILL.md", "### Step 4: Common skill extraction"},
 }
 
 // legacyScenarioSpellings are the derivations that drop the owner. Any one of
@@ -568,30 +702,41 @@ func TestScenarioPathSpellingIsOwnerQualified(t *testing.T) {
 	canonical := "<owner>" + scenarioDirSep + "<repo>"
 
 	root := pluginRoot(t)
-	documented := 0
-	for _, d := range scenarioPathDocs {
-		b, rerr := os.ReadFile(filepath.Join(root, d.rel))
+	check := func(rel, anchor string, mustDocument bool) {
+		b, rerr := os.ReadFile(filepath.Join(root, rel))
 		if rerr != nil {
-			t.Fatalf("read %s: %v", d.rel, rerr)
+			t.Fatalf("read %s: %v", rel, rerr)
 		}
 		body := string(b)
-		if !strings.Contains(body, d.anchor) {
+		if !strings.Contains(body, anchor) {
 			t.Fatalf("%s no longer contains its anchor %q — this file was renamed, moved or "+
-				"rewritten, so the bans below would pass while asserting nothing", d.rel, d.anchor)
+				"rewritten, so the bans below would pass while asserting nothing", rel, anchor)
 		}
 		for _, legacy := range legacyScenarioSpellings {
 			if strings.Contains(body, legacy) {
 				t.Errorf("%s still derives the scenario path as %q, but the producer writes "+
 					"%s. A session told the legacy form opens the directory two owners share, "+
 					"which is the defect (aihub#327), not a cosmetic difference.",
-					d.rel, legacy, canonical)
+					rel, legacy, canonical)
 			}
 		}
-		documented += strings.Count(body, canonical)
+		// PER FILE, deliberately not summed across the set. A total lets one
+		// resolver be rewritten into some other owner-less spelling — one that is
+		// not on the ban list, because a ban list can only name spellings someone
+		// already thought of — while a sibling file's mention keeps the count
+		// non-zero and the gate green. Each file that derives the path must say so
+		// itself.
+		if mustDocument && !strings.Contains(body, canonical) {
+			t.Errorf("%s derives the scenario clone path but does not spell it %s. Whatever it "+
+				"says instead is unreviewed by this gate: only a file that states the canonical "+
+				"layout can be checked against the producer.", rel, canonical)
+		}
 	}
-	if documented == 0 {
-		t.Errorf("no delivered surface documents the scenario layout %s at all — this test "+
-			"would pass vacuously, so the absence is itself the failure", canonical)
+	for _, d := range scenarioPathDocs {
+		check(d.rel, d.anchor, true)
+	}
+	for _, d := range scenarioPathBanOnlyDocs {
+		check(d.rel, d.anchor, false)
 	}
 }
 

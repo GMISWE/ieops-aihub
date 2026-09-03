@@ -163,6 +163,18 @@ ck "dirty clone keeps its tracked local edit" "$(cat "$repo/f.txt")" "LOCAL EDIT
 ck "dirty clone was not reset" "$(head_of "$repo")" "$dirty_before"
 ck "dirty clone was still fetched" "$(fetches "$ws")" "1"
 
+echo "== an untracked-only clone is still reset (the -uno half of the guard) =="
+# Without this case the -uno flag is unguarded: dropping it leaves the whole suite green
+# while every clone holding a stray build artefact silently stops syncing forever.
+# `reset --hard` never deletes untracked files, so they were never at risk.
+ws="$(new_ws stray 1)"; mkshim "$ws" pass 0
+repo="$ws/.repo/r1"
+printf 'artefact\n' > "$repo/build.out"
+advance_origin stray 1
+run_hook "$ws" PF_REPO_SYNC_TTL=0
+ck "untracked-only clone was still advanced" "$(head_of "$repo")" "$(origin_head_of "$repo")"
+if [ -f "$repo/build.out" ]; then pass "untracked file survived the reset"; else bad "untracked file was deleted"; fi
+
 echo "== TTL throttle =="
 ws="$(new_ws ttl 1)"; mkshim "$ws" pass 0
 run_hook "$ws" PF_REPO_SYNC_TTL=900

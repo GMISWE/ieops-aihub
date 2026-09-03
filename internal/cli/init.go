@@ -186,10 +186,19 @@ func cloneOrSync(repoDir, repoName, url string) {
 		// -uno on purpose: `git reset --hard` does not delete untracked files, so
 		// counting them would strand clones as permanently stale over build
 		// output that was never at risk.
-		if dirty, derr := exec.Command("git", "-C", destPath, "status", "--porcelain", "-uno").Output(); derr == nil && len(strings.TrimSpace(string(dirty))) > 0 {
-			fmt.Fprintf(os.Stderr, "pf init: .repo/%s has uncommitted changes to tracked files — "+
-				"fetched, but NOT reset to %s. Commit, stash or discard them and re-run to sync.\n",
-				repoName, defaultBranch)
+		//
+		// Fails CLOSED: a `git status` that errors is treated as dirty, not as
+		// clean. The safe direction for a guard whose failure mode is permanent
+		// data loss is to skip the reset; the cost of being wrong that way is a
+		// stale clone that says so on the next line.
+		dirty, derr := exec.Command("git", "-C", destPath, "status", "--porcelain", "-uno").Output()
+		if derr != nil || len(strings.TrimSpace(string(dirty))) > 0 {
+			why := "has uncommitted changes to tracked files"
+			if derr != nil {
+				why = fmt.Sprintf("could not be checked for uncommitted changes (%v)", derr)
+			}
+			fmt.Fprintf(os.Stderr, "pf init: .repo/%s %s — fetched, but NOT reset to %s. "+
+				"Commit, stash or discard them and re-run to sync.\n", repoName, why, defaultBranch)
 			return
 		}
 		reset := exec.Command("git", "-C", destPath, "reset", "--hard", defaultBranch)
@@ -852,13 +861,17 @@ const scenarioDirSep = "__"
 // owner to collide on in the first place.
 func scenarioDirName(url string) string {
 	owner, repo := splitOwnerRepo(url)
+	repo = sanitizePathSegment(repo)
 	if repo == "" {
 		return ""
 	}
 	if owner == "" {
-		return sanitizePathSegment(repo)
+		return repo
 	}
-	return sanitizePathSegment(owner) + scenarioDirSep + sanitizePathSegment(repo)
+	if owner = sanitizePathSegment(owner); owner == "" {
+		return ""
+	}
+	return owner + scenarioDirSep + repo
 }
 
 // splitOwnerRepo pulls the last two path segments out of a git URL.
@@ -881,8 +894,22 @@ func splitOwnerRepo(url string) (owner, repo string) {
 	return segs[len(segs)-2], segs[len(segs)-1]
 }
 
-// sanitizePathSegment keeps a derived directory name to one path component.
+// sanitizePathSegment reduces one URL segment to a single INERT path component,
+// or "" if it cannot be one.
+//
+// Separators are not the whole job: "." and ".." are single components that
+// TRAVERSE. `https://github.com/..` satisfies validateScenario in
+// internal/domain, so a scenario value that a server will happily store can
+// otherwise steer filepath.Join(repoDir, dirName) out of .repo/ altogether — and
+// `git@host:.` lands it on .repo itself, where syncScenarioClone's
+// empty-directory recovery would then remove and clone over the whole directory.
+// Rejecting outright rather than rewriting: there is no sensible directory for
+// such a URL, and inventing one hides a scenario value that is certainly wrong.
 func sanitizePathSegment(s string) string {
+	switch s {
+	case "", ".", "..":
+		return ""
+	}
 	return strings.Map(func(r rune) rune {
 		switch r {
 		case '/', '\\', 0:

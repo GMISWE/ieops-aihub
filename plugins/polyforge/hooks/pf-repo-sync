@@ -185,7 +185,12 @@ sync_one() {
     # Skips the RESET only, not the stamp: the fetch succeeded, so re-running it every
     # session for as long as the clone stays dirty would spend the TTL throttle that the
     # latency contract above depends on.
-    if [ -z "$(git -C "$_repo" status --porcelain -uno 2>/dev/null)" ]; then
+    #
+    # Fails CLOSED, hence the separate exit-status capture: `[ -z "$(... 2>/dev/null)" ]`
+    # alone reads a git that ERRORED as a clean tree and goes on to reset. For a guard
+    # whose failure mode is permanent data loss, "could not tell" must mean "do not".
+    _dirty="$(git -C "$_repo" status --porcelain -uno 2>/dev/null)"; _dirty_rc=$?
+    if [ "$_dirty_rc" -eq 0 ] && [ -z "$_dirty" ]; then
       git -C "$_repo" reset --hard "$_def" --quiet 2>/dev/null || true
     fi
   fi

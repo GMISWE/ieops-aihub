@@ -2332,7 +2332,73 @@ func cancelGate(status string, isReporter bool, callerRole, projectRole string) 
 	return nil
 }
 
-// CancelWorkItem sets a work item's status to cancelled if it's not running.
+// CancelWorkItem sets a work item's status to cancelled if it's not running,
+// and releases every resource lock still held on its behalf (aihub#355).
+//
+// 🔴 The release is not housekeeping — without it the locks are unreachable
+// forever. cancelGate admits status='paused', and a paused attempt has
+// deliberately RETAINED its git_branch / deploy_env / worktree / tcp_port locks
+// so that a resume can go on holding the branch. Cancelling used to move the
+// work item and leave run_attempts alone, which left those locks owned by an
+// attempt that is still 'paused' — inside the retention predicate the orphan
+// sweep honours, so the sweep skips them, while every API path that could
+// release them (claim, force_takeover, complete_attempt) refuses a terminal
+// work item. See releaseCancelledWILocksSQL for the full argument and for why
+// the release is scoped by work item and covers every lock type.
+//
+// The gate is re-run INSIDE the transaction against a `FOR UPDATE` read of the
+// status, which the single-statement version did not need. It matters now: the
+// pre-transaction GetWorkItem could report 'queued' while a claim commits
+// underneath, and cancelling then would release a LIVE attempt's locks — a
+// worse failure than the leak being fixed. Holding the row means the claim path
+// either committed before this read (so the gate sees 'running' and rejects) or
+// waits behind it (and then fails its own terminal-status check).
+//
+// # Lock ordering, because this adds a THIRD transaction to that contention set
+//
+// work_items FOR UPDATE first, then resource_locks — the same order as
+// FnClaimWorkItem, FnCompleteAttempt, FnAcquireLocks and UpdateWorkItem (which
+// states the identical argument at :2118-2124). Two transactions in that order
+// cannot deadlock against each other.
+//
+// ⚠️ But the set is not unanimous, and saying "same order as its sibling" would
+// be true and still miss it. TWO paths take the opposite order:
+//
+//   - FnForceTakeover deletes the prior attempt's locks (run_attempts.go:1076,
+//     :1157) and only then UPDATEs work_items (:1163).
+//   - RunOrphanLockSweep (gc.go) deletes lock rows first, and then takes a
+//     FOR KEY SHARE on the parent work_items row implicitly — releaseLocks'
+//     agent_events insert carries an FK to work_items
+//     (0006_events_memories.sql), and FOR KEY SHARE conflicts with FOR UPDATE.
+//
+// So a 40P01 cycle IS reachable: cancel holds work_items(W) and waits for W's
+// lock rows while force_takeover holds those rows and waits for work_items(W).
+// This is pre-existing rather than introduced here — FnClaimWorkItem already
+// contended with both in exactly this direction — and cancel joins the majority
+// order, which is the only choice that does not make it worse. What makes it
+// tolerable is not the low probability: it is that every DB error on this path
+// goes through dbErr, so Postgres's chosen victim surfaces as a RETRYABLE 409
+// (aihub#334) rather than a 500, and the transaction rolls back whole, so no
+// lock is half-released. Reordering cancel to match force_takeover instead
+// would only move the cycle onto the four paths in the majority.
+//
+// # The alternative that was NOT taken, and why
+//
+// Setting the attempt to a terminal run_attempts.status would have let the
+// EXISTING orphan sweep collect these locks with no new SQL and no new cause,
+// and would also have fixed the residual oddity that a cancelled work item
+// keeps an attempt marked 'paused'. It was not taken for two reasons: the sweep
+// runs on a 60s tick, so the branch would stay blocked for up to a minute after
+// the cancel that was supposed to free it, and none of the six legal
+// run_attempts statuses means "its work item was cancelled" — 'superseded'
+// names a successor that does not exist here, and reusing it would make
+// supersededByDetails offer a takeover story for a wi nobody took over.
+// The residue is inert: all three IN ('running','paused') predicates
+// (resource_events.go, run_attempts.go's claim and acquire-locks probes) reach
+// attempts only THROUGH resource_locks, so with the rows gone none of them can
+// produce a false conflict. Retiring the attempt is still the tidier shape and
+// is worth doing if a status for it is ever added; it is a separate change
+// because it alters run_attempts semantics, not the lock set.
 func CancelWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug, callerUserID, callerRole string, callerProjectRoles map[string]string) *AihubError {
 	wi, aihubErr := GetWorkItem(ctx, pool, idOrSlug)
 	if aihubErr != nil {
@@ -2345,9 +2411,44 @@ func CancelWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug, callerUse
 		return gateErr
 	}
 
-	_, err := pool.Exec(ctx, `UPDATE work_items SET status='cancelled' WHERE id=$1`, wi.ID)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return NewErr(ErrInternalError, "failed to cancel work item")
+		return NewErr(ErrInternalError, "failed to begin transaction")
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var status string
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM work_items WHERE id=$1 FOR UPDATE`, wi.ID).Scan(&status); err != nil {
+		return dbErr(err, "failed to lock work_item")
+	}
+	if gateErr := cancelGate(status, isReporter, callerRole, projectRole); gateErr != nil {
+		return gateErr
+	}
+
+	// dbErr, not NewErr(ErrInternalError, …): this statement now runs inside a
+	// transaction, so the error it wraps may be SQLSTATE 40001/40P01 — a lost
+	// concurrency race the caller fixes by retrying (aihub#334). The
+	// single-statement version could not lose one.
+	if _, err := tx.Exec(ctx,
+		`UPDATE work_items SET status='cancelled' WHERE id=$1`, wi.ID); err != nil {
+		return dbErr(err, "failed to cancel work item")
+	}
+
+	// aihub#343: through releaseLocks, so each lock the cancel drops carries a
+	// lock_released event with cause=wi_cancelled. Without the event, "the
+	// cancel released it" and "the cancel never touched it" are the same empty
+	// stream — the exact indistinguishability aihub#355 was filed about.
+	if _, relErr := releaseLocks(ctx, tx, releaseCancelledWILocksSQL,
+		newLockOp(lockCauseWICancelled, lockEventActor{UserID: callerUserID}).withExtra(map[string]any{
+			"prior_wi_status": status,
+		}), wi.ID,
+	); relErr != nil {
+		return dbErr(relErr, "failed to release resource locks on cancel")
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return dbErr(err, "failed to commit work item cancel")
 	}
 	return nil
 }

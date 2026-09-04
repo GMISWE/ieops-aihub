@@ -577,6 +577,40 @@ jobs:
       #               dbtestcov: AIHUB_TEST_DB-gated test functions: 194
       #                 (require only a DB: 191, need extra env: 3)
       #               dbtestcov: covered by a CI step: 191/191
+      #   194 -> 195 aihub#355 added 1 DB-gated function in internal/domain
+      #             (cancel_lock_release_db_test.go:
+      #             TestCancelWorkItemReleasesEveryLockItStillHolds). ONE
+      #             function with four subtests rather than four functions —
+      #             the opposite call from the aihub#143 entry above, and for
+      #             the reason that entry states: these are four arms of ONE
+      #             guard over a single release, sharing one fixture (claim ->
+      #             pause -> cancel), not four independent claims. It needs
+      #             only a database, so the required set goes 191 -> 192 and it
+      #             gets ONE step, "aihub#355 cancel releases retained locks
+      #             DB tests".
+      #
+      #             Measured, not computed, and measured in BOTH directions on
+      #             the same inventory — the pre-change workflow and manifest
+      #             were re-run against it rather than reasoned about. With
+      #             GOWORK=off and AIHUB_TEST_DB unset in the inventory run, so
+      #             the database is untouched. Before, verbatim (the gate found
+      #             the test and named it as executed by no step, on its own):
+      #               dbtestcov: gated-test manifest <pre-change copy>:
+      #                 194 entries, inventory measured 195
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 195
+      #                 (require only a DB: 192, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 191/192
+      #             and after the manifest line and the step were added:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 195 entries,
+      #                 inventory measured 195
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 195
+      #                 (require only a DB: 192, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 192/192
+      #
+      #             The `194` this starts from is the value on origin/main
+      #             c353059, which is also this branch's base, so unlike the two
+      #             entries above it is continued rather than re-read.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -1887,12 +1921,50 @@ jobs:
                       'TestNarrowingDeclaredResourcesReleasesItsLocks/a_rejected_CAS_releases_nothing' \
                       'TestNarrowingDeclaredResourcesReleasesItsLocks/a_wrong_typed_optional_field_does_not_disable_the_release' \
                       'TestNarrowingDeclaredResourcesReleasesItsLocks/an_explicit_null_declaration_changes_nothing' \
-                      'TestNarrowingDeclaredResourcesReleasesItsLocks/another_work_items_lock_is_untouched'; do
+                      'TestNarrowingDeclaredResourcesReleasesItsLocks/another_work_items_lock_is_untouched' \
+                      'TestNarrowingDeclaredResourcesReleasesItsLocks/a_lock_with_no_declaration_behind_it_survives_a_narrowing'; do
             grep -q -- "--- PASS: $want" declared_resources_release.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#264 release contract is not actually verified for that case"; exit 1; }
           done
           ! grep -q -- '--- SKIP' declared_resources_release.log \
             || { echo "::error::an aihub#264 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#355: CancelWorkItem moved the WORK ITEM to 'cancelled' with one
+      # UPDATE and left run_attempts alone. Every other release path moves the
+      # ATTEMPT, and the orphan sweep is written against exactly that — it
+      # collects a lock only once the owner attempt is no longer running/paused.
+      # cancelGate admits status='paused', and a pause deliberately RETAINS
+      # git_branch/deploy_env/worktree/tcp_port for resume, so pause-then-cancel
+      # left those held by an attempt still marked 'paused': inside the retention
+      # predicate, skipped by the sweep, and unreachable by claim, force_takeover
+      # or complete_attempt because all three refuse a terminal work item.
+      #
+      # The last arm is the one that makes this a step rather than a unit test:
+      # a `{"type":"repo"}` entry with no task_branch derives git_branch
+      # `<repo>/main`, and the claim conflict probe matches holders whose attempt
+      # is running OR paused — so one pause-then-cancel of a wi declaring a repo
+      # blocks every later claim of that repo's default branch, permanently, with
+      # no holder to negotiate with.
+      #
+      # 'the_cancel_does_not_touch_another_work_items_lock' is the paired control:
+      # the release is scoped by work_item_id and reaches across claim epochs, so
+      # "every lock of this work item" is one edit away from "every lock". Without
+      # that arm, deleting the scoping predicate would leave this step green.
+      - name: aihub#355 cancel releases retained locks DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestCancelWorkItemReleasesEveryLockItStillHolds$' -count=1 -v 2>&1 | tee cancel_lock_release.log
+          for want in 'TestCancelWorkItemReleasesEveryLockItStillHolds/a_cancelled_work_item_holds_no_lock_of_any_type' \
+                      'TestCancelWorkItemReleasesEveryLockItStillHolds/the_release_is_decidable_from_the_event_stream_alone' \
+                      'TestCancelWorkItemReleasesEveryLockItStillHolds/the_party_those_locks_were_blocking_can_now_claim' \
+                      'TestCancelWorkItemReleasesEveryLockItStillHolds/the_cancel_does_not_touch_another_work_items_lock'; do
+            grep -q -- "--- PASS: $want" cancel_lock_release.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#355 cancel-release contract is not actually verified for that case"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' cancel_lock_release.log \
+            || { echo "::error::an aihub#355 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#261: the file_scope lock key had no repo segment, so in a multi-repo
       # project every repo's go.mod / go.sum / Makefile / README.md / Dockerfile

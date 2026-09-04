@@ -2543,6 +2543,8 @@ jobs:
                       "PASS: IR3 — inside preview window" \
                       "PASS: IR3 falls out of the window when iron-rules.md is moved last" \
                       "PASS: post-claim-routing.md not injected" \
+                      "PASS: dispatch rule: " \
+                      "PASS: emptying post-claim-dispatch.md removes all" \
                       "PASS: real tree" \
                       "PASS: degraded payload " \
                       "PASS: hook wrote the over-budget finding to stderr" \
@@ -2556,8 +2558,8 @@ jobs:
           ! grep -q '^SKIP:' payload_gate.log \
             || { echo "::error::using-polyforge-payload.test.sh SKIPped (python3 missing on the runner?) — it exits 0 in that case, so this step would otherwise be a green no-op"; exit 1; }
           n=$(grep -c '^  PASS: ' payload_gate.log || true)
-          [ "${n:-0}" -ge 38 ] \
-            || { echo "::error::only $n PASS lines from using-polyforge-payload.test.sh, floor is 38 — checks have gone missing"; exit 1; }
+          [ "${n:-0}" -ge 44 ] \
+            || { echo "::error::only $n PASS lines from using-polyforge-payload.test.sh, floor is 44 — checks have gone missing"; exit 1; }
           echo "using-polyforge payload gate: $n checks passed"
 
       - name: aihub#293 using-polyforge manifest gate

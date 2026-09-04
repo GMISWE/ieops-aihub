@@ -408,10 +408,20 @@ not use the Agent tool ... unless the user, a CLAUDE.md file, or a skill asks fo
 fragment that merely describes the dispatch does not satisfy that precondition; this one
 says "This skill is asking" in so many words, which does.
 
-`authority: self` is only true if this is the sole copy, so the four verbatim blocks in
-skills/pf-work/SKILL.md (Modes A/B/C/D) were collapsed to pointers at it. Leaving them
-would have rebuilt aihub#294 exactly: two copies, of which the maintained one is not the
-one that reaches a session.
+`authority: self` is only true if this is the sole copy on a MODEL-DELIVERY channel, so
+two restatements were removed. The four verbatim blocks in skills/pf-work/SKILL.md (Modes
+A/B/C/D) became pointers at it — leaving them would have rebuilt aihub#294 exactly: two
+copies, of which the maintained one is not the one that reaches a session. And
+fragments/post-claim-routing.md's parenthesis gave up both its copy of the action AND the
+words "it is already correct by construction" — a claim that was false, and whose falsity
+was the whole of this work item. That paragraph is now strictly shorter than it was, which
+the tier-rule BASELINE requires: post-claim-routing.md carries a per-path character cap
+that only ratchets down, so a fix there must pay for itself in the same file.
+
+⚠️ One restatement is left standing, deliberately: docs/using-polyforge.md:55-57 describes
+both branches in Chinese. docs/ is not one of the three channels in WHICH CHANNEL OWNS A
+RULE above — no model is ever delivered it — so it does not compete for authority. It can
+still drift, and nothing compares the two. If you change this rule, change that paragraph.
 
 WHAT PAID FOR IT. The band had 45 characters free, and THE TIER RULE forbids demoting any
 of the six resident rule fragments to make room. So it was paid for with the `authority:`

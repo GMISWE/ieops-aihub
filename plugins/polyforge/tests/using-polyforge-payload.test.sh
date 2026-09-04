@@ -208,13 +208,21 @@ echo "2b. the rhs=false dispatch rule reaches the model (aihub#338)"
 # this fragment exists to fix: the rule was PRESENT in the tree and absent from the payload,
 # and nothing was red for a month. Size is not a proxy for meaning, so assert the meaning.
 #
-# Three markers, one per part of the rule that carries behaviour:
-#   the TRIGGER  — which claims this applies to
-#   the ACTION   — what to do instead of reporting
-#   the PERMISSION — the main-session prompt forbids the Agent tool "unless the user, a
-#                    CLAUDE.md file, or a skill asks for it". A fragment that describes the
-#                    dispatch without asking for it does not clear that precondition, so
-#                    this sentence is load-bearing, not commentary.
+# FOUR markers, one per part of the rule that carries behaviour. Three is not enough, and
+# that is measured, not cautious: with only TRIGGER/ACTION/PERMISSION asserted, a reviewer
+# rewrote the fragment to "emit three-segment output, THEN dispatch /pf-execute", padded it
+# to the identical 543 characters so the two-sided size band could not see it, and the whole
+# suite stayed green -- restoring the exact defect this fragment exists to remove. The
+# SUPPRESSION clause is the half that was unguarded, and output-format.md's unconditional
+# "MUST follow this format exactly" actively pushes an editor toward that inversion.
+#   the TRIGGER     — which claims this applies to
+#   the SUPPRESSION — the report must NOT be emitted. Without this marker an inverted
+#                     fragment is indistinguishable from a correct one at every gate.
+#   the ACTION      — what to do instead of reporting
+#   the PERMISSION  — the main-session prompt forbids the Agent tool "unless the user, a
+#                     CLAUDE.md file, or a skill asks for it". A fragment that describes the
+#                     dispatch without asking for it does not clear that precondition, so
+#                     this sentence is load-bearing, not commentary.
 dispatch_frag="$plugin_root/skills/using-polyforge/fragments/post-claim-dispatch.md"
 if [ ! -f "$dispatch_frag" ]; then
   # Distinguished from "present but reworded" on purpose: run against a pre-aihub#338 tree
@@ -222,11 +230,11 @@ if [ ! -f "$dispatch_frag" ]; then
   # which reads like a wording drift when the truth is that the whole fragment is gone.
   bad "fragments/post-claim-dispatch.md does not exist. The rhs=false dispatch rule then lives only in skills/pf-work/SKILL.md (a skill BODY, charged only when the skill is invoked) and the on-demand tier — which IS the aihub#338 defect: present in the tree, absent from every session's context, and nothing red."
 else
-for mk in 'requires_human_session=false' 'dispatch `/pf-execute`' 'This skill is asking'; do
+for mk in 'requires_human_session=false' 'do **not** emit three-segment' 'dispatch `/pf-execute`' 'This skill is asking'; do
   # Bind each marker to that fragment first. Without this the check would pass on text some
   # OTHER fragment happens to emit, i.e. it would stop being a check about this fragment.
   if grep -qF -- "$mk" "$dispatch_frag" 2>/dev/null; then :; else
-    bad "post-claim-dispatch.md does not itself contain '$mk' — the payload check below would be measuring some other fragment's text"; continue
+    bad "post-claim-dispatch.md no longer contains '$mk'. Either (a) the rule was REWORDED AWAY — an inverted or weakened fragment is the aihub#338 defect restored, and a same-length reword is invisible to the two-sided size band above, so this marker is the only thing standing between it and a green build; or (b) the wording drifted and the marker needs updating with it. Establish which before touching either. Deleting the marker is not option (b)."; continue
   fi
   case "$ctx" in
     *"$mk"*) ok "dispatch rule: '$mk' reaches the payload";;
@@ -244,13 +252,13 @@ if [ -z "$dctl_ctx" ]; then
   bad "control build produced no payload at all, so it cannot show the markers are gone for the right reason"
 else
   leaked=""
-  for mk in 'requires_human_session=false' 'dispatch `/pf-execute`' 'This skill is asking'; do
+  for mk in 'requires_human_session=false' 'do **not** emit three-segment' 'dispatch `/pf-execute`' 'This skill is asking'; do
     case "$dctl_ctx" in *"$mk"*) leaked="$leaked '$mk'";; esac
   done
   if [ -n "$leaked" ]; then
     bad "with post-claim-dispatch.md emptied the payload STILL carries$leaked — those markers come from somewhere else, so the checks above do not test this fragment"
   else
-    ok "emptying post-claim-dispatch.md removes all three markers (the check discriminates)"
+    ok "emptying post-claim-dispatch.md removes all four markers (the check discriminates)"
   fi
   # ...and the control must still be a working payload, or "markers gone" is explained by
   # the hook having failed rather than by the fragment being empty.

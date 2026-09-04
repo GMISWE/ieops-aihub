@@ -246,19 +246,37 @@
     // full-page refresh in place in precisely that case.
     initPjax();
 
-    // The selection flow and the marker layer are both >=1100px affordances.
-    // renderLayer repeats this check itself rather than relying on this one,
-    // because applyResponseDocument also calls it and nothing on that path would
-    // apply a width gate: without it the FIRST in-place update on a narrow
-    // viewport installs the very marker layer this early return withheld on load.
-    if (!wideEnough()) return;
-
-    initSelectionFlow();
     // Seeded into the write chain rather than fired and forgotten: a submit made
     // while the first anchoring pass is still running would otherwise be the one
     // case the chain does not order.
-    _writeChain = renderLayer();
+    _writeChain = syncLayerToViewport();
     _writeChain.catch(function () {});
+  }
+
+  // syncLayerToViewport is the SINGLE owner of everything whose presence depends
+  // on the viewport width. Both entry points go through it: the initial load
+  // (main) and every in-place update (applyResponseDocument).
+  //
+  // 🔴 It exists because doing this by hand went wrong in both directions, and
+  // neither direction threw:
+  //
+  //   * The in-place path called renderLayer() and nothing else, so after a
+  //     narrow load that was later widened, a write produced highlights, markers
+  //     and the popover but NOT the floating "+ Annotate" button — quote-anchored
+  //     annotation was simply dead until the reader reloaded. Before aihub#131
+  //     that write was a full-page POST→303→reload, so main() re-ran and
+  //     installed it; the regression came in with the in-place update.
+  //   * Earlier in the same work item, renderLayer had no width check of its own,
+  //     so the first in-place write on a NARROW viewport installed a marker layer
+  //     the initial load had deliberately withheld.
+  //
+  // Same seam, opposite signs. Both are the same mistake: a caller reproducing a
+  // subset of another caller's setup. The fix is not two more width checks, it is
+  // that there is now one function to call and each piece it calls carries its own
+  // precondition — so the composition cannot drift out of step with itself.
+  function syncLayerToViewport() {
+    initSelectionFlow(); // install-once AND width-gated, both checks its own
+    return renderLayer(); // width-gated, its own check
   }
 
   // ─── Data island ────────────────────────────────────────────────────────────
@@ -307,8 +325,10 @@
 
     // Highlights and markers are a >=1100px affordance: below that, viewer.css
     // shows the flat list back and the marker layer has no column to live in.
-    // The check belongs HERE and not only in main(), because an in-place update
-    // re-enters through applyResponseDocument, which does not go past main().
+    // The check lives HERE, in the function that owns the marker layer, rather
+    // than in whichever caller happens to be invoking it — that is what stops a
+    // second caller from getting the width policy wrong, which has already
+    // happened once in each direction (see syncLayerToViewport).
     if (!wideEnough()) return Promise.resolve();
 
     var commits = Array.isArray(payload.commits) ? payload.commits : [];
@@ -845,6 +865,11 @@
   // boundaries computed before the highlights moved.
   function initSelectionFlow() {
     if (_selectionFlowReady) return;
+    // Width check BEFORE the ready flag, never after: a page opened narrow and
+    // later widened must still be able to install this on a subsequent call. If
+    // the flag were set here on a narrow viewport, the wide call would early-return
+    // and the "+ Annotate" button would never exist for the life of the page.
+    if (!wideEnough()) return;
     _selectionFlowReady = true;
 
     _selbtn = el('button', { 'class': 'pf-selbtn' });
@@ -1179,9 +1204,13 @@
     swapFlatList(doc);
     swapSideRailComments(doc);
     resetSelectionUI();
+    // syncLayerToViewport, NOT renderLayer: the in-place path must end in exactly
+    // the state a fresh server render would produce at this width, and renderLayer
+    // is only one of the two things that depend on width.
+    //
     // Returned, not discarded: the write chain awaits it, which is what makes
     // "no two renders overlap" true rather than merely likely.
-    return renderLayer();
+    return syncLayerToViewport();
   }
 
   // swapFlatList replaces the server-rendered thread groups — and only those.

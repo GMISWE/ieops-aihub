@@ -223,18 +223,189 @@ func TestPostSanitizeBoundary_ChromeElementsAreUnforgeable(t *testing.T) {
 		if strings.Contains(line, "getElementById(") {
 			t.Errorf("annot.js resolves a chrome element by bare id:\n  %s", trimmed)
 		}
-		// aihub#131: `document.querySelector('#pf-side-rail')` is the same lookup as
-		// getElementById with a different spelling, and the ban above — which matches
-		// the literal "getElementById(" rather than the property "resolves chrome by
-		// bare id" — did not see it. The cheapest way to satisfy a literal-string gate
-		// is to phrase the hazard differently, so the gate has to name the hazard.
-		for _, q := range []string{`querySelector('#`, `querySelector("#`, `querySelectorAll('#`, `querySelectorAll("#`} {
-			if strings.Contains(line, q) {
-				t.Errorf("annot.js resolves a chrome element by bare id through a CSS selector "+
-					"(use chromeEl/chromeElIn, which require data-pf-chrome):\n  %s", trimmed)
+	}
+	// The spelling-independent half of this rule lives in
+	// TestAnnotJS_DOMLookupsAreAllowlisted below. This loop stays because it names
+	// the historically most common form and gives a targeted message, but it is a
+	// denylist and must never be the only thing standing here.
+}
+
+// TestAnnotJS_DOMLookupsAreAllowlisted pins EVERY DOM lookup in annot.js against an
+// explicit list of sanctioned call sites.
+//
+// 🔴 Why an allowlist. The first version of this rule (aihub#131) was a denylist of
+// five spellings — `getElementById(`, `querySelector('#`, and three siblings. Nine
+// mutants were run against it: two were caught and SEVEN walked straight through,
+// including `querySelector('.pf-annotations')`, which is the verbatim defect a human
+// reviewer had already caught in this same work item:
+//
+//	querySelector('[id="pf-side-rail"]')            attribute selector
+//	querySelector(`#pf-side-rail`)                  template literal
+//	querySelector('aside#pf-side-rail')             type-qualified
+//	var _r='#pf-side-rail'; querySelector(_r)       indirection through a variable
+//	querySelectorAll('[id=pf-side-rail]')[0]        unquoted attribute value
+//	querySelector('.pf-annotations')                class instead of id
+//	querySelector('section.pf-annotations')         type-qualified class
+//
+// Ask the question that settles a gate: what is the cheapest single edit that makes
+// it green while reintroducing the bug? Against a denylist the answer is "spell the
+// selector differently", which costs less than complying. Against this list the
+// answer is "add an entry", which is a deliberate edit in a security-sensitive file
+// that a reviewer will see.
+//
+// So the rule is inverted: every occurrence of getElementById / querySelector /
+// querySelectorAll in annot.js must appear below with a reason it is safe. A new
+// lookup is red WHATEVER it is spelled like, because being absent from this map is
+// the failing condition — not matching some pattern.
+//
+// Three grounds make an entry safe, and every entry names which one it is:
+//
+//	SANCTIONED — the marker-qualified resolvers chromeElIn / islandIn themselves.
+//	UNFORGEABLE — the selector requires a data-* attribute or a <script> element.
+//	              Neither is on the sanitizer's allowlist, so agent content cannot
+//	              produce one (internal/render/sanitize.go).
+//	SCOPED — the receiver is an element already resolved through one of the above,
+//	         so artifact content elsewhere in the document is out of reach.
+//	BY DESIGN — the heading-anchor lookup, which is MEANT to resolve agent content.
+//
+// Note this test reads the file's raw text, comments included: a comment that spells
+// out one of these calls will fail it. That is the fail-closed direction and matches
+// the convention this package already follows for inlined assets.
+func TestAnnotJS_DOMLookupsAreAllowlisted(t *testing.T) {
+	allowed := map[string]string{
+		// ── SANCTIONED: the two resolvers everything else is supposed to go through.
+		`root.querySelector('[data-pf-chrome][id="' + id + '"]')`:             "chromeElIn — the marker-qualified resolver itself",
+		`root.querySelector('script#pf-annot-data[type="application/json"]')`: "islandIn — <script> is not on the sanitizer's element allowlist",
+
+		// ── BY DESIGN: resolves agent-authored content, which is the whole point.
+		`document.getElementById(anchor.heading_id)`:     "heading anchor — agent-supplied by design (aihub#125)",
+		`document.querySelectorAll('h1,h2,h3,h4,h5,h6')`: "heading anchor fallback by text — agent-supplied by design",
+
+		// ── UNFORGEABLE: data-* is on no sanitizer allowlist, in any form.
+		`document.querySelector('mark[data-commit-id="' + commit.id + '"]')`:                        "data-commit-id is unforgeable",
+		`document.querySelector('mark[data-commit-id="' + id + '"]')`:                               "data-commit-id is unforgeable",
+		`document.querySelectorAll('mark[data-commit-id="' + cid + '"]')`:                           "data-commit-id is unforgeable",
+		`document.querySelector('.pf-annot-marker[data-commit-id="' + id + '"]')`:                   "data-commit-id is unforgeable",
+		`document.querySelector('.pf-annot-entry[data-commit-id="' + cid + '"]')`:                   "data-commit-id is unforgeable",
+		`document.querySelector('.pf-annot-entry[data-commit-id="' + anchored[i].commit.id + '"]')`: "data-commit-id is unforgeable",
+
+		// ── SCOPED: receiver already resolved through a sanctioned lookup.
+		`_selform.querySelector('textarea[name="body"]')`:                    "scoped to #pf-selform (chromeEl)",
+		`_selform.querySelectorAll('[name="' + name + '"]')`:                 "scoped to #pf-selform (chromeEl)",
+		`form.querySelectorAll('button[type="submit"], button:not([type])')`: "scoped to the form being submitted",
+		`host.querySelector(':scope > .pf-annot-form')`:                      "scoped to #pf-annot-list (chromeEl)",
+		`host.querySelectorAll(':scope > .pf-annot-section')`:                "scoped to #pf-annot-list (chromeEl)",
+		`fresh.querySelectorAll(':scope > .pf-annot-section')`:               "scoped to the response document's #pf-annot-list (chromeElIn)",
+		`rail.querySelector('.pf-side-cmt')`:                                 "scoped to #pf-side-rail (chromeEl/chromeElIn)",
+		`root.querySelectorAll('.pf-side-cmt-item')`:                         "scoped to the Comments card just resolved from the rail",
+	}
+
+	js := string(render.AnnotJS())
+	sites := domLookupSites(js)
+	if len(sites) == 0 {
+		t.Fatal("found no DOM lookups in annot.js at all — the extractor is broken, and a " +
+			"broken extractor is a gate that passes everything")
+	}
+
+	used := map[string]bool{}
+	for _, s := range sites {
+		if _, ok := allowed[s.Expr]; !ok {
+			t.Errorf("annot.js:%d performs an unsanctioned DOM lookup:\n  %s\n"+
+				"Every lookup in this file must be listed in TestAnnotJS_DOMLookupsAreAllowlisted "+
+				"with the ground that makes it safe (SANCTIONED / UNFORGEABLE / SCOPED / BY DESIGN). "+
+				"If this resolves chrome, route it through chromeElIn or islandIn instead; if it is "+
+				"genuinely safe, add it to the map and say why.", s.Line, s.Expr)
+			continue
+		}
+		used[s.Expr] = true
+	}
+	for expr := range allowed {
+		if !used[expr] {
+			t.Errorf("allowlist entry no longer appears in annot.js, so it is a standing permission "+
+				"for a call site that does not exist — delete it:\n  %s", expr)
+		}
+	}
+}
+
+// domLookupSite is one getElementById/querySelector/querySelectorAll call in a JS source.
+type domLookupSite struct {
+	Line int
+	Expr string // receiver + method + arguments, whitespace-collapsed
+}
+
+// domLookupSites extracts every DOM lookup call, receiver included, from js.
+//
+// It is deliberately receiver-agnostic: keying on `document.` would miss
+// `doc.querySelector(...)` against a parsed response document (which carries the
+// same sanitized agent body), and would miss any future alias of either.
+func domLookupSites(js string) []domLookupSite {
+	var out []domLookupSite
+	for _, method := range []string{"getElementById(", "querySelector(", "querySelectorAll("} {
+		for i := 0; i+len(method) <= len(js); {
+			idx := strings.Index(js[i:], method)
+			if idx < 0 {
+				break
+			}
+			at := i + idx
+			i = at + len(method)
+
+			// Walk back over the receiver expression (identifiers, dots, subscripts).
+			start := at
+			for start > 0 && (isJSIdentByte(js[start-1]) || js[start-1] == '.') {
+				start--
+			}
+			// Scan forward to the matching ')', respecting quoted strings.
+			end, ok := matchCloseParen(js, at+len(method)-1)
+			if !ok {
+				continue
+			}
+			out = append(out, domLookupSite{
+				Line: 1 + strings.Count(js[:start], "\n"),
+				Expr: collapseWS(js[start : end+1]),
+			})
+		}
+	}
+	return out
+}
+
+func isJSIdentByte(c byte) bool {
+	return c == '_' || c == '$' || c == '[' || c == ']' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// matchCloseParen returns the index of the ')' closing the '(' at open.
+func matchCloseParen(s string, open int) (int, bool) {
+	depth := 0
+	var quote byte
+	for i := open; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			quote = c
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i, true
 			}
 		}
 	}
+	return 0, false
+}
+
+func collapseWS(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // elementsWithIDAndMarker counts elements carrying both the given id and data-pf-chrome,

@@ -88,6 +88,5 @@ exceptions (`release`, `critical_bug`, `default`). `/pf-spec` and `/pf-plan` are
 escape valves — listed as alternates, never as primary for `chore`/`fix_bug`/`feature`,
 because their scenario step graphs start with code-side steps, not a spec discussion.
 
-The `rhs=false` auto-dispatch path (which calls `/pf-execute` as a subagent without
-emitting three-segment output) is unaffected by this table — it is already correct by
-construction.
+The `rhs=false` path emits no three-segment output, so this table does not apply to it.
+`fragments/post-claim-dispatch.md` (resident) is authoritative for that branch.

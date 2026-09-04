@@ -4,8 +4,7 @@ This table **indexes** non-obvious intent → operation mappings; it is **not** 
 keyword classifier. Infer the user's intent and route to the nearest match — if nothing fits
 or intent is ambiguous, **ask rather than guess**. Each `/pf-*` skill's own `NL Triggers`
 section is authoritative for its triggers (this index may lag). NL Routing decides *what
-operation*; **Repo Routing** (below) decides *which repo*. A row that merely restates a skill's
-own name (`plan` → `/pf-plan`) is omitted on purpose — do not add one back.
+operation*; **Repo Routing** (below) decides *which repo*.
 
 | intent | operation |
 |---|---|

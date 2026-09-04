@@ -2,8 +2,7 @@
 
 In a polyforge workspace **all memory lives in aihub** (recall with `pf_recall`, write with
 `pf_remember` / `pf_save_artifact`). The harness's local Claude `.md` memory is deprecated
-here — do not read or write local memory files. For the type vocabulary, `related` links and
-update-vs-reinforce rules, read `fragments/memory-conventions.md` in this skill (on demand).
+here — do not read or write local memory files.
 
 Before every substantive action:
 

@@ -141,16 +141,22 @@ it. That move is now capped: the tier-rule BASELINE records a character cap per
 baselined fragment, because keyed by path alone it priced "pour new ungated rule text
 into an already-exempt file" at exactly zero (aihub#296). Neither baselined number is
 resident: both fragments are on-demand, so the payload is unaffected.
-⚠️ DO NOT hand-adjust these. Re-run the suite and copy what it prints:
+⚠️ THE VALUE IS NOT RECORDED HERE ANY MORE — only how to get it:
     bash tests/using-polyforge-manifest.test.sh | grep 'SUM(kind:rule'
-Today it prints 16,409.
-This block has now been wrong twice for two different reasons. First 17,127, from
-adding three BYTE sizes to a CHARACTER total — every figure here is characters, like
-the budget, and these fragments carry CJK and em-dashes, so `wc -c` reads high
-(memory-first is 745 chars but 753 bytes). Then 13,563, because the commit that fixed
-the units added 612 more characters to memory-conventions.md and did not recompute.
-A derived number copied by hand goes stale on the next edit to its inputs, including
-the edit that is fixing it.)
+It used to be written out, and it was wrong all THREE times it was written. First
+17,127, from adding three BYTE sizes to a CHARACTER total — every figure here is
+characters, like the budget, and these fragments carry CJK and em-dashes, so `wc -c`
+reads high (memory-first is 745 chars but 753 bytes). Then 13,563, because the commit
+that fixed the units added 612 more characters to memory-conventions.md and did not
+recompute. Then 16,409, which aihub#338 measured against a pristine `git archive
+origin/main` extract and found already stale by 1,566 — the suite printed 17,975 on
+main before #338 touched anything, and #338's own +18 was the smaller half of the gap.
+That third one is the argument for deleting the number rather than correcting it a
+third time: NOTHING compares the written value to the printed one, so a stale figure
+here has no observable failure mode — it is a decorative number that was wrong on
+every occasion anyone checked. A derived number copied by hand goes stale on the next
+edit to its inputs, including the edit that is fixing it. Keep the recipe, not the
+result.)
 
 ## WHICH CHANNEL OWNS A RULE (aihub#294)
 THREE channels put rule text in front of a model — not two. They differ on two axes
@@ -382,3 +388,72 @@ fragments/on-demand-index.md). Rationale per fragment:
 
 Nothing was deleted: every file above still ships and is still readable. It moved
 from a channel that silently dropped it to one that does not.
+
+## RESIDENT TIER — WHAT aihub#338 ADDED, AND WHAT PAID FOR IT
+fragments/post-claim-dispatch.md is resident because the rule it carries had NO resident
+presence at all. "Claim a `requires_human_session=false` wi -> dispatch `/pf-execute` as a
+subagent" lived in exactly two places, both of them off this channel: skills/pf-work/SKILL.md
+(a skill BODY, charged only when the skill is invoked) and the on-demand
+fragments/post-claim-routing.md. The 8,452-character payload mentioned that path exactly
+once, inside a parenthesis, in order to say that another fragment did not apply to it — so
+the payload proved the path existed and never once told anyone to walk it.
+
+That is not a theoretical gap. Measured 2026-09-04: the main session dispatched seven
+subagents that day, every one of them because a human decided to, and not one through this
+route. `requires_human_session` had no behavioural consequence.
+
+The fragment also carries the sentence that makes dispatching PERMISSIBLE, which is the
+half a rule stated anywhere else cannot supply. The main-session system prompt says "Do
+not use the Agent tool ... unless the user, a CLAUDE.md file, or a skill asks for it". A
+fragment that merely describes the dispatch does not satisfy that precondition; this one
+says "This skill is asking" in so many words, which does.
+
+`authority: self` is only true if this is the sole copy on a MODEL-DELIVERY channel, so
+two restatements were removed. The four verbatim blocks in skills/pf-work/SKILL.md (Modes
+A/B/C/D) became pointers at it — leaving them would have rebuilt aihub#294 exactly: two
+copies, of which the maintained one is not the one that reaches a session. And
+fragments/post-claim-routing.md's parenthesis gave up both its copy of the action AND the
+words "it is already correct by construction" — a claim that was false, and whose falsity
+was the whole of this work item. That paragraph is now strictly shorter than it was, which
+the tier-rule BASELINE requires: post-claim-routing.md carries a per-path character cap
+that only ratchets down, so a fix there must pay for itself in the same file.
+
+⚠️ One restatement is left standing, deliberately: docs/using-polyforge.md:55-57 describes
+both branches in Chinese. docs/ is not one of the three channels in WHICH CHANNEL OWNS A
+RULE above — no model is ever delivered it — so it does not compete for authority. It can
+still drift, and nothing compares the two. If you change this rule, change that paragraph.
+
+WHAT PAID FOR IT. The band had 45 characters free, and THE TIER RULE forbids demoting any
+of the six resident rule fragments to make room. So it was paid for with the `authority:`
+question — the same discriminator aihub#296 used — applied ACROSS fragments rather than
+within one. Each line below is a copy whose authority is elsewhere, not a line judged
+merely "not useful enough":
+
+  memory-first.md   "read fragments/memory-conventions.md for the type vocabulary,
+                    `related` links and update-vs-reinforce". on-demand-index.md is
+                    `self` for "what is in an on-demand file and when to read it", and
+                    its entry for that file says the same thing in MORE detail.   -138
+  bootstrap.md      Step 0's explanation of what the repo map IS and that `positioning`
+                    is one line per repo. repo-routing.md is `self` for exactly that.
+                    Step 0 keeps the three things only it says: the ORDERING, "do not
+                    re-read the file", and the absent-block fallback.             -274
+                    (Included in that figure: its `# using-polyforge — Session Bootstrap
+                    & NL Router` H1, which restated the hook's own LEDE line, and which
+                    as the one H1 among the fragments' H2s misdescribed the structure.)
+  nl-routing.md     "A row that merely restates a skill's own name is omitted on purpose
+                    — do not add one back." A MAINTAINER instruction: no model has ever
+                    acted on it, and every session paid for it. Moved below.      -113
+
+Net: 525 characters freed against 544 added (542 after the assembler's per-fragment
+`rstrip("\n")`, plus the 2-character separator). Payload 8,452 -> 8,471, inside the
+UNCHANGED [8,397, 8,497] band. The gate was not raised.
+
+⚠️ Do not read the three figures above as a budget to spend. They are the specific price
+of one fragment; the band is full again, and the next @include needs its own four-line
+argument of the same shape.
+
+## NL-ROUTING TABLE — WHAT NOT TO ADD BACK (moved off the resident tier by aihub#338)
+A row that merely restates a skill's own name (`plan` -> `/pf-plan`) is omitted on
+purpose. That table indexes NON-OBVIOUS intent -> operation mappings; a row a reader could
+have guessed from the skill's own name spends resident budget to say nothing, and each
+`/pf-*` skill's own `NL Triggers` section is authoritative for its triggers anyway.

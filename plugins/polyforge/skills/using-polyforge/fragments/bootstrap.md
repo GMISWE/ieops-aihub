@@ -1,16 +1,11 @@
-# using-polyforge — Session Bootstrap & NL Router
-
 ## Session Startup Scan
 
 On session start, before responding to any user message:
 
-**Step 0 — Repo map first.** Your context already includes CLAUDE.md's `## Workspace`
-managed block (auto-loaded by the harness). Consult it *before* anything else as your
-**repo map**: each repo's one-line `positioning` tells you at a glance what every repo is.
-Use it to route work — see [Repo Routing](#repo-routing-task--repo) below. Do **not** re-read the
-file; it's already in context. Only if the `## Workspace` block is absent (a subagent
-without injection, or a member who hasn't run `polyforge init`) → `Read` the workspace
-`CLAUDE.md`, or run `/pf-init` to generate it.
+**Step 0 — Repo map first.** CLAUDE.md's `## Workspace` managed block is already in your
+context. Consult it *before* anything else — it is the repo map Repo Routing below uses —
+and do **not** re-read the file. Absent (a subagent without injection, or a member who
+hasn't run `polyforge init`) → `Read` the workspace `CLAUDE.md`, or `/pf-init` to write it.
 
 Then run the state/wi scan:
 

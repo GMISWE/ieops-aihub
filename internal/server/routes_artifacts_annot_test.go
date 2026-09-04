@@ -872,3 +872,91 @@ func TestBuildVersionHistoryHTML_CollapsibleToggle(t *testing.T) {
 		t.Errorf("panel must be hidden by default; got: %s", excerptStr(got))
 	}
 }
+
+// TestAnnotHTML_EveryWriteFormCarriesChromeMarker locks the precondition that
+// aihub#131's in-place update depends on: annot.js decides whether to intercept a
+// submit (fetch + re-render the layer in place) or let it fall through to a
+// full-page POST by asking whether the <form> carries data-pf-chrome. A form this
+// package emits without the marker is therefore not broken in any visible way —
+// it just silently keeps the old full-page refresh, which is exactly the defect
+// aihub#131 exists to remove.
+//
+// 🔴 Read what this does and does not cover. It pins one PRECONDITION: every
+// form THIS PACKAGE emits is reachable by the interception selector. Three
+// things it does not cover, each of which would ship green:
+//
+//  1. Whether the layer actually re-renders in place, and whether the highlight
+//     cleanups are unloaded before it does.
+//  2. The two forms annot.js builds itself, inside the popover bubble. They carry
+//     the same marker for the same reason, and no Go test can see them — delete
+//     it from either and popover writes silently revert to a full-page reload
+//     with every check in this repo still green.
+//  3. The route match. isAnnotationAction requires the marker AND that the path
+//     segments are ui/artifacts/<id>/commit; renaming that route disables
+//     interception, and nothing here notices.
+//
+// This repo has no JavaScript test infrastructure and, as of 2026-09-03,
+// deliberately none is being added (mem_wXtZofhg). All three were verified once,
+// by hand, in a browser harness that does not live here.
+//
+// Why the marker and not the URL alone: `<form>` is not on the sanitizer's
+// element allowlist, so this is NOT closing a forgery hole. It is the same
+// unforgeable-marker convention chromeEl() already uses in annot.js, and it makes
+// the predicate fail closed — a form nobody marked is left to the browser rather
+// than intercepted on the strength of its action alone.
+func TestAnnotHTML_EveryWriteFormCarriesChromeMarker(t *testing.T) {
+	commits := marshalCommits(t, []CommitEntry{openCommitWithQuote(), resolvedCommit()})
+	annotHTML := buildAnnotationHTML("mem_spec_99", annotSpecBody, commits, "TESTNONCE")
+
+	tags := formStartTags(annotHTML)
+	if len(tags) < 4 {
+		t.Fatalf("expected at least 4 <form> tags (add-annotation, selection form, inline reply, "+
+			"inline resolve); got %d: %#v", len(tags), tags)
+	}
+	for _, tag := range tags {
+		if !strings.Contains(tag, "data-pf-chrome") {
+			t.Errorf("form is invisible to annot.js's interception selector (no data-pf-chrome), "+
+				"so it would keep full-page-refreshing: %s", tag)
+		}
+	}
+}
+
+// formStartTags returns every `<form ...>` start tag in s, verbatim.
+//
+// Quote-aware: a `>` inside an attribute value (a textarea placeholder is the
+// plausible source) would otherwise cut the tag short and fail the caller for a
+// reason that has nothing to do with the invariant.
+func formStartTags(s string) []string {
+	var out []string
+	rest := s
+	for {
+		i := strings.Index(rest, "<form")
+		if i < 0 {
+			return out
+		}
+		rest = rest[i:]
+		var quote byte
+		end := -1
+		for j := 0; j < len(rest); j++ {
+			c := rest[j]
+			switch {
+			case quote != 0:
+				if c == quote {
+					quote = 0
+				}
+			case c == '"' || c == '\'':
+				quote = c
+			case c == '>':
+				end = j
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end < 0 {
+			return append(out, rest)
+		}
+		out = append(out, rest[:end+1])
+		rest = rest[end+1:]
+	}
+}

@@ -95,6 +95,63 @@ type ClaimResponse struct {
 	Goal string `json:"goal,omitempty"`
 }
 
+// defaultRequiresHumanSession is what a claim falls back to when the work item row carries
+// no classification at all (requires_human_session IS NULL).
+//
+// It is a CONSTANT, not a lookup, and having a name is the whole point of it. The table that
+// once mapped wi_type -> requires_human_session (scenario_phase_configs) has been removed; the
+// per-wi_type defaults now live in the scenario repo, which only the client can read — the
+// create path in work_items.go says the same thing. The server therefore has nothing to
+// consult here, so it fails safe: when nobody classified the work item, assume a human has to
+// look at it.
+//
+// Do not "improve" this into a wi_type switch without first putting the defaults somewhere the
+// server can actually see. Guessing a per-type default here would silently disagree with the
+// scenario repo, which is the file the client already obeyed.
+const defaultRequiresHumanSession = true
+
+// classificationSourceServerDefault labels a wi_classification_resolved event as having come
+// from defaultRequiresHumanSession — which, on the only branch that emits the event, is the
+// one and only thing that can produce the value.
+const classificationSourceServerDefault = "server_default"
+
+// classificationResolvedEventPayload builds the MARSHALLED wi_classification_resolved payload.
+//
+// It deliberately does NOT name wi_type. The payload used to, and that was the defect fixed by
+// aihub#359: naming the wi_type made the event read as though the type had been looked up and
+// had driven the outcome. It never was. The branch that emits this event only runs when the wi
+// row is NULL, and on that branch the value is a fixed constant. Naming a field that took no
+// part in a decision sends the next reader hunting for a classification table that has not
+// existed for months. To see that for yourself, rather than trusting a number written here:
+//
+//	pf_read_events(project="aihub", types=["wi_classification_resolved"],
+//	               limit=200, since="2026-01-01T00:00:00Z")
+//
+// Every row it returns should carry requires_human_session=true, because a constant is the only
+// thing that has ever produced that field. A `false` in there would mean this analysis is wrong.
+//
+// "source" is here so the event still says where the value came from, without implying a
+// derivation that did not happen.
+//
+// WHY THIS RETURNS BYTES AND NOT A map. A map-returning builder can be wrapped at the call site
+// — json.Marshal(annotate(build(v), *wi.WIType)) — which puts wi_type straight back into the
+// stored event while a test that inspects only the builder's return value stays green. That is
+// not hypothetical: it was found by review of the first cut of aihub#359, and all five gates
+// passed with the defect fully reintroduced. Marshalling here makes the bytes this returns the
+// same bytes that reach agent_events, so the compiled test asserts on the real payload; the
+// structural gate separately pins the call site to a bare call to this function, so the
+// wrapping trick cannot come back. Do not "simplify" this back into returning a map.
+//
+// The json.Marshal error is discarded because a map of one bool and one string cannot fail to
+// marshal — there is no dynamic value in it, unlike the *string this used to dereference.
+func classificationResolvedEventPayload(requiresHumanSession bool) []byte {
+	b, _ := json.Marshal(map[string]any{
+		"requires_human_session": requiresHumanSession,
+		"source":                 classificationSourceServerDefault,
+	})
+	return b
+}
+
 // FnClaimWorkItem implements the atomic claim transaction per §7 / §8.4 of the design doc.
 // Implements C-R9-6, C-R9-10, C-R9-12 fixes.
 func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *ClaimRequest, callerUserID, callerAPIKeyID, callerDisplay string) (*ClaimResponse, *AihubError) {
@@ -236,17 +293,6 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	// C-R9-6: wi_type must be set before claim
 	if wi.WIType == nil || *wi.WIType == "" {
 		return nil, NewErr(ErrWITypeMismatch, "wi_type is not set; update it with pf_update_work_item(wi_type=...) before claiming")
-	}
-
-	// Determine requires_human_session for the wi_type.
-	// scenario_phase_configs has been removed; the client is responsible for
-	// setting requires_human_session on the wi before claiming. If it is already
-	// set on the wi row we use that value; if NULL we default to true (conservative).
-	wiTypeDef := struct {
-		RequiresHumanSession bool
-	}{RequiresHumanSession: true}
-	if wi.RequiresHumanSession != nil {
-		wiTypeDef.RequiresHumanSession = *wi.RequiresHumanSession
 	}
 
 	isTakeover := false
@@ -539,9 +585,20 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		fmt.Fprintf(os.Stderr, "claim: wi_step_state upsert failed (scenario_ref not written): %v\n", err)
 	}
 
-	// C-R9-12: If wi.requires_human_session IS NULL, write back resolved value from config
-	resolvedRHS := wiTypeDef.RequiresHumanSession
+	// C-R9-12: if the wi row carries no classification, fall back to the server default and
+	// write it back. A row that DOES carry one is simply left alone — the client set it from
+	// the scenario repo, which is the only copy of the per-wi_type defaults, so there is
+	// nothing here to cross-check it against and nothing to disagree with.
+	//
+	// There used to be an `else if *wi.RequiresHumanSession != resolvedRHS` here that returned
+	// 409 REQUIRES_HUMAN_SESSION_MISMATCH. It could never fire: reaching the else meant the
+	// value was non-nil, and the value it was compared against had just been assigned FROM that
+	// same field, so the condition was `x != x`. Its error text ("phase config says ...") named
+	// scenario_phase_configs, which had already been removed. Removed by aihub#359 — do not
+	// reinstate a mismatch check unless the server gains a second, independent source for the
+	// expected value; comparing the row against itself is not a check.
 	if wi.RequiresHumanSession == nil {
+		resolvedRHS := defaultRequiresHumanSession
 		_, err = tx.Exec(ctx, `
 			UPDATE work_items SET requires_human_session=$1 WHERE id=$2`,
 			resolvedRHS, wi.ID,
@@ -549,30 +606,18 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		if err != nil {
 			return nil, dbErr(err, "failed to set requires_human_session")
 		}
-		// Emit wi_classification_resolved event
+		// Emit wi_classification_resolved event. See classificationResolvedEventPayload: the
+		// payload names its source and NOT the wi_type, because the wi_type did not
+		// participate in the decision. Keep this a BARE call — wrapping it in anything that
+		// can add a key defeats the compiled gate, which asserts on that function's bytes.
 		evtID := NewID("evt")
-		evtPayload, _ := json.Marshal(map[string]any{
-			"wi_type":                *wi.WIType,
-			"requires_human_session": resolvedRHS,
-		})
+		evtPayload := classificationResolvedEventPayload(resolvedRHS)
 		_, _ = tx.Exec(ctx, `
 			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
 			VALUES ($1, $2, $3, $4, 'wi_classification_resolved', $5, $6)`,
 			evtID, wi.ID, callerUserID, callerDisplay, evtPayload, wi.Project,
 		)
 		wi.RequiresHumanSession = &resolvedRHS
-	} else if *wi.RequiresHumanSession != resolvedRHS {
-		// C-R9-12: mismatch → 409 REQUIRES_HUMAN_SESSION_MISMATCH
-		tx.Rollback(ctx) //nolint:errcheck
-		return nil, NewErrDetails(ErrRequiresHumanSessionMismatch,
-			fmt.Sprintf("wi.requires_human_session=%v but phase config says %v for wi_type %q",
-				*wi.RequiresHumanSession, resolvedRHS, *wi.WIType),
-			map[string]any{
-				"db_value":         *wi.RequiresHumanSession,
-				"phase_yaml_value": resolvedRHS,
-				"wi_type":          *wi.WIType,
-			},
-		)
 	}
 
 	// Emit attempt_started event

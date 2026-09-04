@@ -204,7 +204,9 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
      ⚠️ No `fields="brief"` on any claim path (aihub#313): these are wi-scoped handoff notes
      where the BODY is the payload. Briefing them makes a resuming agent fetch all ten by id.
      **rhs routing** (wi.requires_human_session):
-     - `false` → do not emit three-segment output; immediately dispatch `/pf-execute` as a subagent (the subagent emits its own execution progress).
+     - `false` → **`fragments/post-claim-dispatch.md` in `using-polyforge` is authoritative
+       for this branch** and is injected at session start. If it is not in your context — a
+       subagent, Codex, or Copilot CLI — `Read` it before acting.
      - `true`  → emit three-segment output ("Next steps" decided per the Post-claim routing table — `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
    
    → human says "no" / "not now" / "leave it" → emit three-segment output, wi stays on the queue.
@@ -260,7 +262,9 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
    ⚠️ No `fields="brief"` on any claim path (aihub#313): these are wi-scoped handoff notes
    where the BODY is the payload. Briefing them makes a resuming agent fetch all ten by id.
 4. **rhs routing** (wi.requires_human_session):
-   - `false` → do not emit three-segment output; immediately dispatch `/pf-execute` as a subagent (the subagent emits its own execution progress).
+   - `false` → **`fragments/post-claim-dispatch.md` in `using-polyforge` is authoritative
+     for this branch** and is injected at session start. If it is not in your context — a
+     subagent, Codex, or Copilot CLI — `Read` it before acting.
    - `true`  → emit three-segment output ("Next steps" decided per the Post-claim routing table — `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
 
 ---
@@ -295,7 +299,9 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
    where the BODY is the payload. Briefing them makes a resuming agent fetch all ten by id.
 3. Show step progress: "Resuming at step 2/4 (review)".
 4. **rhs routing** (wi.requires_human_session):
-   - `false` → do not emit three-segment output; immediately dispatch `/pf-execute` as a subagent (the subagent emits its own execution progress).
+   - `false` → **`fragments/post-claim-dispatch.md` in `using-polyforge` is authoritative
+     for this branch** and is injected at session start. If it is not in your context — a
+     subagent, Codex, or Copilot CLI — `Read` it before acting.
    - `true`  → emit three-segment output (including step progress; "Next steps" decided per the Post-claim routing table — `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
 
 ---
@@ -323,7 +329,9 @@ Steps:
    ⚠️ No `fields="brief"` on any claim path (aihub#313): these are wi-scoped handoff notes
    where the BODY is the payload. Briefing them makes a resuming agent fetch all ten by id.
 5. **rhs routing** (wi.requires_human_session):
-   - `false` → do not emit three-segment output; immediately dispatch `/pf-execute` as a subagent (the subagent emits its own execution progress).
+   - `false` → **`fragments/post-claim-dispatch.md` in `using-polyforge` is authoritative
+     for this branch** and is injected at session start. If it is not in your context — a
+     subagent, Codex, or Copilot CLI — `Read` it before acting.
    - `true`  → emit three-segment output ("Next steps" decided per the Post-claim routing table — `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
 
 ---

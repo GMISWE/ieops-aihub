@@ -49,6 +49,11 @@ kind: rule
 gate: none
 authority: self
 
+@include: fragments/post-claim-dispatch.md
+kind: rule
+gate: none
+authority: self
+
 @include: fragments/memory-first.md
 kind: rule
 gate: none

@@ -731,7 +731,14 @@ type sideRailComment struct {
 
 func buildSideRail(headings []render.HeadingRef, m sideRailMeta, versions []sideRailVersion, comments []sideRailComment, nonce string) string {
 	var b strings.Builder
-	b.WriteString("<aside id=\"pf-side-rail\">\n")
+	// data-pf-chrome: aihub#131 makes annot.js WRITE through this element (it swaps
+	// the Comments card in place after an annotation write), and the sanitizer allows
+	// `id` globally on elements it does allow — including <aside> and <div>. The agent
+	// body is inlined before this chrome, so an unmarked lookup would hand an artifact
+	// that supplied id="pf-side-rail" a set of imported reply/resolve forms with live
+	// same-origin actions. Same reasoning as #pf-selform / #pf-margin-rail; held by
+	// TestPostSanitizeBoundary_ChromeElementsAreUnforgeable.
+	b.WriteString("<aside id=\"pf-side-rail\" data-pf-chrome>\n")
 	// chev is the collapse caret appended to each card's <summary>.
 	const chev = "<span class=\"pf-side-chev\" aria-hidden=\"true\"></span>"
 	if len(headings) >= 2 {
@@ -1492,7 +1499,15 @@ func buildAnnotationHTMLWithExact(memID, renderedHTML string, commitsRaw json.Ra
 	}
 
 	// ─── Flat fallback list v2 ────────────────────────────────────────────────
-	b.WriteString("<section class=\"pf-annotations\">\n")
+	// id + data-pf-chrome so annot.js can reach this section through chromeEl, the
+	// same marker-qualified path every other chrome lookup uses (aihub#131 replaces
+	// the thread groups inside it after each write). The class stays — viewer.css
+	// selects on it — but a class alone is forgeable: `class` is on the sanitizer's
+	// global allowlist and <section>/<div> are allowed elements.
+	// The class stays FIRST: TestBuildAnnotationHTML_RouteAware matches the literal
+	// `<section class="pf-annotations"` to assert this section is /ui-only, and the
+	// route-awareness property it guards is worth more than the attribute order.
+	b.WriteString("<section class=\"pf-annotations\" id=\"pf-annot-list\" data-pf-chrome>\n")
 	b.WriteString("<h2 class=\"pf-annotations-heading\">Annotations</h2>\n")
 
 	// Group commits by heading id ("" = unanchored / general).
@@ -1616,14 +1631,22 @@ func buildAnnotationHTMLWithExact(memID, renderedHTML string, commitsRaw json.Ra
 			if e.IsOpen() {
 				replyAction := "/ui/artifacts/" + html.EscapeString(memID) + "/commit/" + html.EscapeString(e.ID) + "/reply" + exactSuffix
 				resolveAction := "/ui/artifacts/" + html.EscapeString(memID) + "/commit/" + html.EscapeString(e.ID) + "/resolve" + exactSuffix
+				// data-pf-chrome on every write form is what lets annot.js tell OUR forms
+				// from anything else on the page and submit them via fetch, re-rendering the
+				// annotation layer in place instead of taking the 303 as a full-page reload
+				// (aihub#131). A form emitted without it is not broken — it silently keeps
+				// the old refresh, which is the whole defect that work item removes, so
+				// TestAnnotHTML_EveryWriteFormCarriesChromeMarker holds the invariant.
+				// #pf-selform below already carried the marker for the unrelated reason
+				// chromeEl() documents.
 				b.WriteString("<div class=\"pf-annot-inline-forms\">\n")
-				b.WriteString("<form method=\"POST\" action=\"")
+				b.WriteString("<form data-pf-chrome method=\"POST\" action=\"")
 				b.WriteString(replyAction)
 				b.WriteString("\" class=\"pf-annot-inline-form\">\n")
 				b.WriteString("<textarea name=\"body\" rows=\"2\" placeholder=\"Reply…\" required></textarea>\n")
 				b.WriteString("<button type=\"submit\">Reply</button>\n")
 				b.WriteString("</form>\n")
-				b.WriteString("<form method=\"POST\" action=\"")
+				b.WriteString("<form data-pf-chrome method=\"POST\" action=\"")
 				b.WriteString(resolveAction)
 				b.WriteString("\" class=\"pf-annot-inline-form\">\n")
 				b.WriteString("<textarea name=\"reply\" rows=\"2\" placeholder=\"Resolution note (optional)\"></textarea>\n")
@@ -1640,7 +1663,7 @@ func buildAnnotationHTMLWithExact(memID, renderedHTML string, commitsRaw json.Ra
 	// ─── Add-comment form (unchanged — heading-dropdown creation path) ────────
 	b.WriteString("<div class=\"pf-annot-form\">\n")
 	b.WriteString("<h3 class=\"pf-annot-form-title\">Add annotation</h3>\n")
-	b.WriteString("<form method=\"POST\" action=\"/ui/artifacts/")
+	b.WriteString("<form data-pf-chrome method=\"POST\" action=\"/ui/artifacts/")
 	b.WriteString(html.EscapeString(memID))
 	b.WriteString("/commit" + exactSuffix + "\">\n")
 

@@ -180,7 +180,12 @@ func TestPostSanitizeBoundary_ChromeElementsAreUnforgeable(t *testing.T) {
 	//    evaluated as a DOM, not by counting the attribute. A total count passes while an
 	//    individual element loses its marker, which is exactly the mutation that has to fail:
 	//    dropping the marker from #pf-selform alone re-opens the placement primitive.
-	for _, id := range []string{"pf-doc-col", "pf-margin-rail", "pf-selform"} {
+	// aihub#131 added two more: the in-place update WRITES through the annotation
+	// section and the side rail (swapping thread groups and the Comments card), so
+	// an artifact that wins either lookup does not just break the update — it gets
+	// server-rendered reply/resolve forms, with live same-origin actions, imported
+	// into DOM it controls.
+	for _, id := range []string{"pf-doc-col", "pf-margin-rail", "pf-selform", "pf-annot-list", "pf-side-rail"} {
 		marked := elementsWithIDAndMarker(t, body, id)
 		if marked != 1 {
 			t.Errorf("%d elements have id=%q AND data-pf-chrome, want exactly 1 (the server's). "+
@@ -217,6 +222,17 @@ func TestPostSanitizeBoundary_ChromeElementsAreUnforgeable(t *testing.T) {
 		}
 		if strings.Contains(line, "getElementById(") {
 			t.Errorf("annot.js resolves a chrome element by bare id:\n  %s", trimmed)
+		}
+		// aihub#131: `document.querySelector('#pf-side-rail')` is the same lookup as
+		// getElementById with a different spelling, and the ban above — which matches
+		// the literal "getElementById(" rather than the property "resolves chrome by
+		// bare id" — did not see it. The cheapest way to satisfy a literal-string gate
+		// is to phrase the hazard differently, so the gate has to name the hazard.
+		for _, q := range []string{`querySelector('#`, `querySelector("#`, `querySelectorAll('#`, `querySelectorAll("#`} {
+			if strings.Contains(line, q) {
+				t.Errorf("annot.js resolves a chrome element by bare id through a CSS selector "+
+					"(use chromeEl/chromeElIn, which require data-pf-chrome):\n  %s", trimmed)
+			}
 		}
 	}
 }

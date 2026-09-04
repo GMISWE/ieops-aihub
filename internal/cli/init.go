@@ -258,6 +258,192 @@ func runClone(url, destPath string) error {
 	return cmd3.Run()
 }
 
+// descSyncDirection is which way ONE repo's description moved during an init.
+// The values are the words printed to the user, so a reader of init's output
+// and a reader of this file are looking at the same four outcomes.
+type descSyncDirection string
+
+const (
+	descInSync   descSyncDirection = "in sync"        // both sides already agree — no request, no write
+	descPush     descSyncDirection = "local → server" // aihub#34: the owner edited .polyforge.yaml
+	descPull     descSyncDirection = "server → local" // aihub#310: someone edited via MCP/UI
+	descConflict descSyncDirection = "conflict"       // both moved since the baseline — refuse
+)
+
+// descDecision is the three-way compare's verdict for one repo, plus the three
+// values it compared, so the conflict report can quote them without recomputing.
+type descDecision struct {
+	Repo      string
+	Direction descSyncDirection
+	Baseline  string // .polyforge.yaml's description_baseline — "" when never recorded
+	Local     string // .polyforge.yaml's description
+	Server    string // the project's repos[].description on the server
+}
+
+// reconcileDescription decides which side of a repo description is a CHANGE and
+// which is merely the value that was already there.
+//
+// The pre-aihub#310 rule compared two values and gave the difference to the
+// local file whenever it was non-empty. That reads STATE, not changes: a local
+// file that had simply not been refreshed was indistinguishable from one the
+// owner had just edited, so every description written through MCP or the web UI
+// was reverted by the next `polyforge init`, which then reported success.
+//
+// The baseline is what makes the two distinguishable. It is not a claim about
+// freshness (a timestamp in a hand-editable, gitignored file would be), it is
+// the recorded fact "this is the value both sides last held", so "changed" is a
+// comparison rather than a guess.
+//
+// Order matters. local == server is checked FIRST and unconditionally: when the
+// two sides already agree there is nothing to decide no matter what the
+// baseline says, and that is also what makes a workspace whose file predates
+// description_baseline migrate silently — every in-sync repo reads as in sync
+// against the empty baseline instead of as "both changed".
+//
+// A difference with NO baseline recorded lands in descConflict on purpose. That
+// is the honest answer: nothing on disk says which side moved, and the owner's
+// ruling for "unknown" is to stop and report rather than pick. It cannot fire
+// on a workspace that init has kept up to date, only where the two sides had
+// already diverged before this code shipped.
+func reconcileDescription(baseline, local, server string) descSyncDirection {
+	switch {
+	case local == server:
+		return descInSync
+	case local == baseline:
+		return descPull
+	case server == baseline:
+		return descPush
+	default:
+		return descConflict
+	}
+}
+
+// reconcileDescriptions runs the three-way compare for every repo that exists
+// on BOTH sides, in local-file order so the output is deterministic.
+//
+// Repos on only one side are deliberately absent from the result: a local-only
+// repo is an append (there is no server value to compare against) and a
+// server-only repo has no local edit to weigh, so neither has a direction.
+func reconcileDescriptions(localRepos []config.Repo, serverByName map[string]serverRepoEntry) []descDecision {
+	var out []descDecision
+	for _, lr := range localRepos {
+		if lr.Name == "" {
+			continue
+		}
+		sr, ok := serverByName[lr.Name]
+		if !ok {
+			continue
+		}
+		serverDesc := ""
+		if sr.Description != nil {
+			serverDesc = *sr.Description
+		}
+		d := descDecision{
+			Repo:     lr.Name,
+			Baseline: lr.DescriptionBaseline,
+			Local:    lr.Description,
+			Server:   serverDesc,
+		}
+		d.Direction = reconcileDescription(d.Baseline, d.Local, d.Server)
+		out = append(out, d)
+	}
+	return out
+}
+
+// localRepoDesc is what .polyforge.yaml should record for one repo once init
+// has acted on its decision: the description to write, and the baseline to
+// write beside it.
+//
+// Baseline is NOT always equal to Description. It only advances when a sync
+// actually happened, so a push whose PATCH failed keeps the old baseline and is
+// therefore retried on the next init instead of being mistaken for a
+// server-side change and pulled back down.
+type localRepoDesc struct {
+	Description string
+	Baseline    string
+}
+
+// localViewOf turns a decision into what the local file should say, given
+// whether the PATCH that carried the push side actually reached the server.
+func localViewOf(d descDecision, patchOK bool) localRepoDesc {
+	switch d.Direction {
+	case descPull:
+		// Adopt the server value; both sides now hold it.
+		return localRepoDesc{Description: d.Server, Baseline: d.Server}
+	case descPush:
+		if !patchOK {
+			// Keep the edit AND the old baseline: the publish is still pending.
+			return localRepoDesc{Description: d.Local, Baseline: d.Baseline}
+		}
+		return localRepoDesc{Description: d.Local, Baseline: d.Local}
+	case descConflict:
+		// Touch neither side, and do NOT advance the baseline — the conflict
+		// must keep being reported until a human resolves it. Advancing it here
+		// would silently adopt whichever value this run happened to write.
+		return localRepoDesc{Description: d.Local, Baseline: d.Baseline}
+	default: // descInSync
+		return localRepoDesc{Description: d.Local, Baseline: d.Local}
+	}
+}
+
+// namesWithDirection lists, in decision order, the repos that got one direction.
+func namesWithDirection(ds []descDecision, dir descSyncDirection) []string {
+	var names []string
+	for _, d := range ds {
+		if d.Direction == dir {
+			names = append(names, d.Repo)
+		}
+	}
+	return names
+}
+
+// describeDescriptionSync renders the ONE line init prints per project about
+// where descriptions went.
+//
+// It is a pure function returning a string rather than a series of Printf calls
+// so a test can assert on what init decided to say without capturing stdout —
+// the same reason cloneScenarioRepos returns outcomes instead of printing them.
+//
+// Every direction is named, including the in-sync count, and the line is
+// printed even when nothing moved. "Nothing was published" has to be something
+// the operator can READ, not something they infer from the absence of a line:
+// the defect this replaces (`descriptions synced: true` printed whichever way
+// the data flowed) was precisely an output that could not be read that way.
+func describeDescriptionSync(project string, ds []descDecision) string {
+	if len(ds) == 0 {
+		return ""
+	}
+	parts := []string{fmt.Sprintf("%d in sync", len(namesWithDirection(ds, descInSync)))}
+	for _, dir := range []descSyncDirection{descPush, descPull, descConflict} {
+		names := namesWithDirection(ds, dir)
+		if len(names) == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d %s (%s)", len(names), dir, strings.Join(names, ", ")))
+	}
+	return fmt.Sprintf("ok project %q descriptions: %s", project, strings.Join(parts, ", "))
+}
+
+// conflictReport is the stderr block printed for one refused repo. It quotes all
+// three values because the resolution is to make two of them agree, and the
+// user cannot do that against values they have not been shown.
+func conflictReport(project string, d descDecision) string {
+	baseline := fmt.Sprintf("%q", d.Baseline)
+	if d.Baseline == "" {
+		baseline = "(none recorded — this repo predates description_baseline)"
+	}
+	return fmt.Sprintf(
+		"pf init: CONFLICT project %q repo %q: the description changed on BOTH sides since the last sync.\n"+
+			"    local (.polyforge.yaml): %q\n"+
+			"    server:                  %q\n"+
+			"    baseline (last synced):  %s\n"+
+			"  Neither side was changed — polyforge init will not guess which one you meant.\n"+
+			"  To take the server's value: set this repo's `description` in .polyforge.yaml to it.\n"+
+			"  To publish yours:           set this repo's `description_baseline` to the server value above,\n"+
+			"                              then re-run `polyforge init`.\n",
+		project, d.Repo, d.Local, d.Server, baseline)
+}
+
 // runOwnerInit performs the owner-side init for a single project:
 //  1. Reads local .polyforge.yaml repos.
 //  2. Diffs against server repos: local-only → PATCH append; server-only → warning.
@@ -265,10 +451,17 @@ func runClone(url, destPath string) error {
 //  4. PATCHes server with merged repo list.
 //  5. GETs refreshed project for CLAUDE.md block.
 //
-// Returns the CLAUDE.md block plus the reconciled repo list (server ∪ local-only
+// Returns the CLAUDE.md block, the reconciled repo list (server ∪ local-only
 // appends) — the same list the clone loop walks, so .polyforge.yaml can be
-// refreshed from it instead of from the pre-PATCH server snapshot (aihub#228).
-func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, repoDir string, sp serverProject) (projectBlock, []serverRepoEntry) {
+// refreshed from it instead of from the pre-PATCH server snapshot (aihub#228) —
+// and what the local file should record for each repo's description.
+//
+// That third value exists because the repo list and the local file are no
+// longer the same thing. Step 4 sends what the SERVER should hold; on a
+// conflict, or on a push whose PATCH failed, the local file must keep something
+// else. Deriving one from the other would work for three of the four outcomes
+// and quietly resolve the fourth (aihub#310).
+func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, repoDir string, sp serverProject) (projectBlock, []serverRepoEntry, map[string]localRepoDesc) {
 	localRepos := []config.Repo{}
 	if cfg != nil {
 		if lp, ok := cfg.Projects[sp.Name]; ok {
@@ -318,30 +511,22 @@ func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, rep
 	// Merged repo list = server + appended local-only
 	merged := append(serverRepos, toAppend...)
 
-	// Check if any existing repo has a changed description (Bug 1 fix).
-	var hasDescriptionChanges bool
-	for _, lr := range localRepos {
-		if lr.Name == "" {
+	// Three-way compare each existing repo's description against the baseline
+	// recorded at the last sync (aihub#310). Only a LOCAL-side change is
+	// propagated into the merged list — that is aihub#34's publish path, intact.
+	// A server-side change needs no entry here at all: leaving the merged value
+	// as the server's is what "pull" means on this side.
+	decisions := reconcileDescriptions(localRepos, serverByName)
+	pushed := namesWithDirection(decisions, descPush)
+	for _, d := range decisions {
+		if d.Direction != descPush {
 			continue
 		}
-		if sr, ok := serverByName[lr.Name]; ok {
-			localDesc := lr.Description
-			serverDesc := ""
-			if sr.Description != nil {
-				serverDesc = *sr.Description
-			}
-			if localDesc != serverDesc {
-				hasDescriptionChanges = true
-				// Propagate the local description into the merged list.
-				if localDesc != "" {
-					for i, r := range merged {
-						if r.Name == lr.Name {
-							desc := localDesc
-							merged[i].Description = &desc
-							break
-						}
-					}
-				}
+		for i, r := range merged {
+			if r.Name == d.Repo {
+				desc := d.Local
+				merged[i].Description = &desc
+				break
 			}
 		}
 	}
@@ -354,19 +539,53 @@ func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, rep
 		cloneOrSync(repoDir, r.Name, r.URL)
 	}
 
-	// PATCH server if we have new repos to add or existing descriptions changed.
-	if len(toAppend) > 0 || hasDescriptionChanges {
+	// PATCH the server if we have new repos to add or local-side description
+	// edits to publish. A pull or a conflict never reaches here: the old code
+	// PATCHed on any difference, which is how a stale local file overwrote the
+	// server.
+	//
+	// patchOK starts true when there is nothing to send — "the server already
+	// holds everything this run owed it" is the condition the baseline write
+	// below depends on, and that is trivially satisfied by an empty payload.
+	needPatch := len(toAppend) > 0 || len(pushed) > 0
+	patchOK := !needPatch
+	if needPatch {
 		reposJSON, jerr := json.Marshal(merged)
-		if jerr == nil {
+		if jerr != nil {
+			// Previously swallowed. A payload that will not encode means the
+			// PATCH never happens, and staying silent about that is the same
+			// class of defect as the success line this wi is replacing.
+			fmt.Fprintf(os.Stderr, "pf init: encode repos for project %q: %v (server not updated)\n", sp.Name, jerr)
+		} else {
 			patch := map[string]any{
 				"repos": json.RawMessage(reposJSON),
 			}
 			if _, perr := c.UpdateProject(ctx, sp.Name, patch); perr != nil {
 				fmt.Fprintf(os.Stderr, "pf init: PATCH project %q repos: %v\n", sp.Name, perr)
 			} else {
-				fmt.Printf("ok updated server repos for project %q (%d added, descriptions synced: %v)\n", sp.Name, len(toAppend), hasDescriptionChanges)
+				patchOK = true
+				fmt.Printf("ok updated server repos for project %q (%d added)\n", sp.Name, len(toAppend))
 			}
 		}
+	}
+
+	// Report where every description went — including the ones that went
+	// nowhere — and refuse the ones that moved on both sides.
+	if line := describeDescriptionSync(sp.Name, decisions); line != "" {
+		fmt.Println(line)
+	}
+	for _, d := range decisions {
+		if d.Direction == descConflict {
+			fmt.Fprint(os.Stderr, conflictReport(sp.Name, d))
+		}
+	}
+
+	// What .polyforge.yaml should now say, per repo. Repos absent from this map
+	// — server-only ones, and the local-only appends — fall back in
+	// writePolyforgeYAML to the merged value with the baseline set to match.
+	localDescs := make(map[string]localRepoDesc, len(decisions))
+	for _, d := range decisions {
+		localDescs[d.Repo] = localViewOf(d, patchOK)
 	}
 
 	// GET refreshed project from server.
@@ -385,7 +604,7 @@ func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, rep
 	// The yaml gets `merged`, not the refreshed GET: if the PATCH above failed,
 	// the refreshed response would be missing the local-only repos and writing
 	// from it would delete them from the workspace config.
-	return block, merged
+	return block, merged, localDescs
 }
 
 // writePolyforgeYAML generates .polyforge.yaml as a local cache of the server's
@@ -418,7 +637,19 @@ func runOwnerInit(ctx context.Context, c *client.Client, cfg *config.Config, rep
 // local-only repos into the server list and PATCHes them up, but the `projects`
 // slice the caller holds is still the pre-PATCH GET response, so writing from it
 // would drop the repo that was just appended.
-func writePolyforgeYAML(path string, projects []serverProject, currentUserID string, reconciledRepos map[string][]serverRepoEntry) error {
+//
+// localDescs (project → repo → value) optionally overrides what this file
+// records for a repo's description and its baseline. Only the owner path
+// supplies it, and only there can the two differ from the server's value: a
+// refused conflict keeps the local text while the server keeps its own, and a
+// push whose PATCH failed keeps the OLD baseline so the publish is retried
+// rather than reinterpreted as a server-side edit (aihub#310).
+//
+// A repo with no entry — every repo on the member path, and the local-only ones
+// that were just appended — gets baseline = the description being written. That
+// is not a fallback that happens to work: for those repos the value in hand IS
+// the one both sides now hold, which is exactly what a baseline records.
+func writePolyforgeYAML(path string, projects []serverProject, currentUserID string, reconciledRepos map[string][]serverRepoEntry, localDescs map[string]map[string]localRepoDesc) error {
 	// Existing on-disk config, if any. A missing file is the normal first-init
 	// case and not an error. A file that exists but does not parse is different:
 	// everything this function preserves (the aihub block, unmanaged project
@@ -483,11 +714,16 @@ func writePolyforgeYAML(path string, projects []serverProject, currentUserID str
 			if r.Description != nil {
 				desc = *r.Description
 			}
+			baseline := desc
+			if lv, ok := localDescs[sp.Name][r.Name]; ok {
+				desc, baseline = lv.Description, lv.Baseline
+			}
 			repos = append(repos, config.Repo{
-				Name:            r.Name,
-				URL:             r.URL,
-				GithubOwnerRepo: ghOwnerRepo,
-				Description:     desc,
+				Name:                r.Name,
+				URL:                 r.URL,
+				GithubOwnerRepo:     ghOwnerRepo,
+				Description:         desc,
+				DescriptionBaseline: baseline,
 			})
 		}
 
@@ -508,8 +744,29 @@ func writePolyforgeYAML(path string, projects []serverProject, currentUserID str
 	if err != nil {
 		return err
 	}
-	header := "# polyforge workspace config — auto-generated by pf init\n" +
-		"# Source of truth is the server. Re-run polyforge init to refresh.\n\n"
+	// Authority is PER FIELD, and saying otherwise was itself a defect: the old
+	// header read "Source of truth is the server", while repos[].description was
+	// the one field init took from here and pushed UP — so the line asserted the
+	// opposite of what the code did for the only field a user is invited to edit
+	// (aihub#310). Each line below is what this writer and runOwnerInit actually
+	// do, not an aspiration about them.
+	header := "# polyforge workspace config — auto-generated by pf init. Authority is per field:\n" +
+		"#\n" +
+		"#   aihub:                      yours — carried over verbatim; init only fills it in when empty\n" +
+		"#   projects.<p>.description    server — a local value survives only while the server has none\n" +
+		"#   projects.<p>.scenario       server\n" +
+		"#   projects.<p>.repos[].name / .url / .github_owner_repo\n" +
+		"#                               server — this file is a cache of the project's repo list\n" +
+		"#   projects.<p>.repos[].description\n" +
+		"#                               BOTH — edit it here and init publishes it to the server; edit it\n" +
+		"#                               on the server (MCP/web UI) and init adopts it here. If it moved on\n" +
+		"#                               both sides since description_baseline, init changes NEITHER and\n" +
+		"#                               prints a CONFLICT telling you how to resolve it.\n" +
+		"#   projects.<p>.repos[].description_baseline\n" +
+		"#                               bookkeeping — the value at the last successful sync. Do not edit\n" +
+		"#                               it except to resolve a reported conflict.\n" +
+		"#\n" +
+		"# Re-run polyforge init to refresh.\n\n"
 	return os.WriteFile(path, append([]byte(header), b...), 0644)
 }
 
@@ -644,6 +901,10 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 	// path actually cloned. .polyforge.yaml is refreshed from these rather than
 	// from the pre-PATCH GET /v1/projects snapshot (aihub#228).
 	reconciledRepos := make(map[string][]serverRepoEntry)
+	// Per-project description/baseline overrides for .polyforge.yaml, produced
+	// only by the owner path — see writePolyforgeYAML for why these cannot be
+	// derived from reconciledRepos.
+	localDescs := make(map[string]map[string]localRepoDesc)
 	for _, sp := range projects {
 		if !sp.Visible {
 			continue
@@ -657,7 +918,9 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 		var blk projectBlock
 		var repos []serverRepoEntry
 		if currentUserID != "" && sp.OwnerUserID == currentUserID {
-			blk, repos = runOwnerInit(ctx, c, cfg, repoDir, sp)
+			var descs map[string]localRepoDesc
+			blk, repos, descs = runOwnerInit(ctx, c, cfg, repoDir, sp)
+			localDescs[sp.Name] = descs
 		} else {
 			blk, repos = runMemberInit(repoDir, sp)
 		}
@@ -675,7 +938,7 @@ func RunInit(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot s
 	// write, and rewriting the file from an empty set would be pure churn.
 	polyforgeYAMLPath := filepath.Join(wsRoot, ".polyforge.yaml")
 	if len(reconciledRepos) > 0 {
-		if werr := writePolyforgeYAML(polyforgeYAMLPath, projects, currentUserID, reconciledRepos); werr != nil {
+		if werr := writePolyforgeYAML(polyforgeYAMLPath, projects, currentUserID, reconciledRepos, localDescs); werr != nil {
 			fmt.Fprintf(os.Stderr, "pf init: write .polyforge.yaml: %v\n", werr)
 		} else {
 			fmt.Printf("ok .polyforge.yaml refreshed from server (%d project(s))\n", len(reconciledRepos))

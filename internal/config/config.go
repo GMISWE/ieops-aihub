@@ -30,6 +30,24 @@ type Repo struct {
 	URL             string `yaml:"url"`
 	GithubOwnerRepo string `yaml:"github_owner_repo"`
 	Description     string `yaml:"description"`
+
+	// DescriptionBaseline is Description as of the last time `polyforge init`
+	// saw this file and the server agree. It is bookkeeping written by init,
+	// not a value anyone is expected to author.
+	//
+	// It exists because Description is the one field here that BOTH sides may
+	// edit: the project owner edits it locally and init publishes it upward
+	// (aihub#34), while MCP and the web UI edit the server's copy. Two values
+	// cannot say which side moved, so init used to resolve every difference in
+	// favour of the local file and silently reverted server-side edits
+	// (aihub#310). Against a baseline the same comparison becomes three-way and
+	// each side's change is identifiable on its own.
+	//
+	// omitempty on purpose: an ABSENT baseline and an empty one mean the same
+	// thing to that comparison, so there is no third state needing a pointer to
+	// represent it, and workspaces whose file predates this field migrate with
+	// no special case — see reconcileDescription in internal/cli/init.go.
+	DescriptionBaseline string `yaml:"description_baseline,omitempty"`
 }
 
 // Load reads .polyforge.yaml from the given directory.

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1807,12 +1808,24 @@ type fakeProjectServer struct {
 	repos   json.RawMessage   // current server state; a PATCH replaces it
 	patches []json.RawMessage // the repos payload of each PATCH, in order
 	fail    bool              // when set, every PATCH answers 500
-	url     string
+
+	// Caller identity and the project's role table. The defaults make the
+	// caller the project OWNER, which is what the owner-path tests want; a
+	// member-path test overrides them before running init.
+	callerUserID string
+	ownerUserID  string
+	members      []map[string]any
+
+	url string
 }
 
 func newFakeProjectServer(t *testing.T, repos string) *fakeProjectServer {
 	t.Helper()
-	f := &fakeProjectServer{repos: json.RawMessage(repos)}
+	f := &fakeProjectServer{
+		repos:        json.RawMessage(repos),
+		callerUserID: "u_owner",
+		ownerUserID:  "u_owner",
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -1832,13 +1845,16 @@ func newFakeProjectServer(t *testing.T, repos string) *fakeProjectServer {
 			f.repos = body.Repos
 		}
 		project := map[string]any{
-			"name": "proj", "owner_user_id": "u_owner", "visible": true,
+			"name": "proj", "owner_user_id": f.ownerUserID, "visible": true,
 			"repos": f.repos,
+		}
+		if len(f.members) > 0 {
+			project["members"] = f.members
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/v1/users/me":
-			_ = json.NewEncoder(w).Encode(map[string]any{"user_id": "u_owner"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"user_id": f.callerUserID})
 		case "/v1/projects":
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{project}})
 		default:
@@ -2269,7 +2285,13 @@ func TestGeneratedHeaderStatesAuthorityPerField(t *testing.T) {
 			if tag == "" || tag == "-" {
 				continue
 			}
-			if !strings.Contains(header, tag) {
+			// Whole-token, not substring. strings.Contains passed for any tag
+			// that merely occurred INSIDE an already-documented one, so with
+			// "github_owner_repo" present a new `yaml:"owner"` field read as
+			// documented while nothing described it — and so did "name", "url"
+			// and "desc". The gate for undocumented fields was blind to the
+			// names most likely to be added next.
+			if !headerDocumentsTag(header, tag) {
 				t.Errorf("generated header does not say who owns %s.%s (yaml key %q) — "+
 					"a field this file carries with undocumented authority is how aihub#310 "+
 					"happened", typ.Name(), typ.Field(i).Name, tag)
@@ -2281,12 +2303,20 @@ func TestGeneratedHeaderStatesAuthorityPerField(t *testing.T) {
 		t.Error("the header still makes a blanket server-authority claim, which is false for " +
 			"repos[].description")
 	}
-	// The both-sided field must be described as both-sided somewhere near its
-	// own name, not merely mentioned.
-	descPart, _, _ := strings.Cut(header, "description_baseline")
-	if idx := strings.LastIndex(descPart, "repos[].description"); idx < 0 ||
-		!strings.Contains(descPart[idx:], "BOTH") {
-		t.Errorf("the header does not describe repos[].description as editable on both sides:\n%s", header)
+	// The both-sided field must be described as both-sided in ITS OWN entry, not
+	// merely somewhere in the header — and the publish half must be qualified by
+	// role, because only the owner path publishes. See
+	// TestRunInit_MemberHeaderDoesNotPromisePublishing for the measurement.
+	entry := headerEntryFor(t, header, "repos", "description")
+	toks := map[string]bool{}
+	for _, tok := range headerTokens(strings.ToLower(entry)) {
+		toks[tok] = true
+	}
+	for _, want := range []string{"owner", "member", "publishes", "adopts"} {
+		if !toks[want] {
+			t.Errorf("the repos[].description entry does not describe it as editable on both "+
+				"sides subject to role (missing %q):\n%s", want, entry)
+		}
 	}
 }
 
@@ -2466,10 +2496,257 @@ func TestConflictReport_InstructionsActuallyResolve(t *testing.T) {
 		t.Errorf("following the report's take-the-server advice yields %q, want %q.\n%s",
 			got, descInSync, report)
 	}
+	// "... or just delete BOTH `description` and `description_baseline`."
+	// Deleting one alone does NOT work — local "" against a non-empty baseline
+	// still reads as a local-side change and stays a conflict — which is why
+	// the word BOTH is load-bearing rather than emphasis.
+	if got := reconcileDescription("", "", server); got != descPull {
+		t.Errorf("following the report's delete-both advice yields %q, want %q.\n%s",
+			got, descPull, report)
+	}
+	if got := reconcileDescription(baseline, "", server); got != descConflict {
+		t.Errorf("deleting only `description` yields %q, want %q — if this ever stops being "+
+			"a conflict, the report's insistence on BOTH is misleading", got, descConflict)
+	}
+
 	// "To publish yours: set this repo's `description_baseline` to the server
 	// value above, then re-run."
 	if got := reconcileDescription(server, local, server); got != descPush {
 		t.Errorf("following the report's publish-mine advice yields %q, want %q — the "+
 			"instruction printed to users would be wrong.\n%s", got, descPush, report)
+	}
+}
+
+// TestRunInit_MemberHeaderDoesNotPromisePublishing: the header is written once
+// for the whole file, but publishing is an OWNER capability — runMemberInit
+// never PATCHes, and RunInit fills localDescs only in the owner branch. An
+// unqualified "edit it here and init publishes it" therefore invites a member
+// to make an edit that is silently reverted on their next init: the aihub#310
+// incident shape, reproduced one path over by the fix for it.
+//
+// The test measures the behaviour AND checks the claim, in one function. Either
+// half going red is real: if members ever start publishing, the behavioural
+// assertions fail; if the qualification is dropped from the header, the text
+// assertions fail. A test that only read the text could be satisfied by prose.
+func TestRunInit_MemberHeaderDoesNotPromisePublishing(t *testing.T) {
+	home, wsRoot := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+
+	f := newFakeProjectServer(t, `[{"name":"repo-a","description":"server value"}]`)
+	// The caller is a plain member of a project someone else owns.
+	f.callerUserID = "u_member"
+	f.ownerUserID = "u_someone_else"
+	f.members = []map[string]any{{"user_id": "u_member", "role": "writer"}}
+
+	// A clean push case: valid baseline, no conflict. On the owner path this is
+	// published. Here it must not be — and the member must not have been told
+	// it would be.
+	writeYAMLFixture(t, wsRoot, `version: 1
+projects:
+    proj:
+        repos:
+            - name: repo-a
+              description: MY LOCAL EDIT
+              description_baseline: server value
+`)
+	cfg, err := config.Load(wsRoot)
+	if err != nil {
+		t.Fatalf("seed config.Load: %v", err)
+	}
+
+	out := captureOutput(t, func() {
+		RunInit(t.Context(), client.New(f.url, "k"), cfg, wsRoot, nil)
+	})
+
+	// --- measured behaviour: a member publishes nothing, and loses the edit ---
+	if got := f.patchCount(); got != 0 {
+		t.Errorf("PATCHes sent by a member init = %d, want 0 — runMemberInit must not "+
+			"publish (this wi's non-goals)", got)
+	}
+	reloaded, err := config.Load(wsRoot)
+	if err != nil {
+		t.Fatalf("config.Load after init: %v", err)
+	}
+	r := reloaded.Projects["proj"].Repos[0]
+	if r.Description != "server value" {
+		t.Fatalf("fixture no longer reproduces the hazard: member's local edit survived as %q. "+
+			"If members now publish or retain edits, this test needs rewriting, not relaxing",
+			r.Description)
+	}
+	// And the revert is SILENT: runMemberInit is out of scope for this wi, so it
+	// still prints no direction line. That is precisely why the warning has to
+	// live in the header — the header is the only place a member is told.
+	if strings.Contains(out, "descriptions:") {
+		t.Errorf("member init now prints a descriptions line; the header wording and this "+
+			"test's premise both need revisiting:\n%s", out)
+	}
+
+	// --- the claim the member is left holding must match that behaviour ---
+	b, err := os.ReadFile(filepath.Join(wsRoot, ".polyforge.yaml"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	header, _, _ := strings.Cut(string(b), "\nversion:")
+	entry := headerEntryFor(t, header, "repos", "description")
+
+	// The substantive property is that the entry DISTINGUISHES the two roles —
+	// an unconditioned "init publishes it" is what misleads a member. Matched as
+	// whole tokens, case-insensitively, so the wording stays free to change.
+	toks := map[string]bool{}
+	for _, tok := range headerTokens(strings.ToLower(entry)) {
+		toks[tok] = true
+	}
+	for _, role := range []string{"owner", "member"} {
+		if !toks[role] {
+			t.Errorf("the repos[].description authority entry never names the %q role, so its "+
+				"publish claim reads as unconditional — and a member acting on it loses the edit "+
+				"this same test just measured being silently discarded. Entry:\n%s", role, entry)
+		}
+	}
+	if !toks["overwritten"] {
+		t.Errorf("the entry does not warn that a non-owner's local edit is overwritten:\n%s", entry)
+	}
+}
+
+// headerTokens splits one header line into identifier tokens — the same shape a
+// yaml key has. Tokenizing is what makes "owner" distinguishable from
+// "github_owner_repo"; a substring test cannot tell them apart.
+var headerTokenRe = regexp.MustCompile(`[A-Za-z0-9_]+`)
+
+func headerTokens(line string) []string { return headerTokenRe.FindAllString(line, -1) }
+
+// headerKeyColumn is the indent the generated header gives a key DECLARATION.
+// Continuation lines are indented past it, which is what lets prose be told
+// apart from a key path.
+const headerKeyColumn = "#   "
+
+// headerKeyTokens returns the identifier tokens of one header line's KEY PATH,
+// or nil if the line does not declare a key.
+//
+// Restricting to the key column matters twice over. A bare token match anywhere
+// on the line lets ordinary English in the descriptions answer for a yaml tag —
+// "repo" is a word in "a cache of the project's repo list", and so are "value",
+// "server" and "list". Those are exactly the names a future field might take, so
+// prose would silently vouch for an undocumented one.
+func headerKeyTokens(line string) []string {
+	rest, ok := strings.CutPrefix(line, headerKeyColumn)
+	if !ok || rest == "" || rest[0] == ' ' {
+		return nil // not a declaration line
+	}
+	// The key path ends at the first run of two or more spaces; single spaces
+	// are used to put several keys on one line ("name / .url / .x").
+	if i := strings.Index(rest, "  "); i >= 0 {
+		rest = rest[:i]
+	}
+	return headerTokens(rest)
+}
+
+// headerDocumentsTag reports whether the generated header DECLARES a yaml key —
+// as a whole token, in the key column.
+//
+// It replaced strings.Contains, which passed for any tag that merely occurred
+// inside a documented one: with "github_owner_repo" present, an undocumented
+// `yaml:"owner"` field read as documented, as would "desc" beside
+// "description". The gate meant to catch an undocumented field was blind to
+// exactly the names most likely to be added next.
+func headerDocumentsTag(header, tag string) bool {
+	for _, ln := range strings.Split(header, "\n") {
+		for _, tok := range headerKeyTokens(ln) {
+			if tok == tag {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// headerEntryFor returns the block of the generated header describing one yaml
+// key: the line whose key path ENDS with the given tokens, plus the indented
+// continuation lines under it.
+//
+// Assertions run against the entry rather than the whole header, so a word that
+// happens to appear in a neighbouring field's paragraph cannot satisfy a claim
+// about this one. Matching the path as a token sequence also keeps
+// "repos[].description" apart from both "projects.<p>.description" and
+// "repos[].description_baseline".
+func headerEntryFor(t *testing.T, header string, keyPath ...string) string {
+	t.Helper()
+	lines := strings.Split(header, "\n")
+	start := -1
+	for i, ln := range lines {
+		toks := headerKeyTokens(ln)
+		if len(toks) < len(keyPath) {
+			continue
+		}
+		if slices.Equal(toks[len(toks)-len(keyPath):], keyPath) {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("no header entry ending in %v in:\n%s", keyPath, header)
+	}
+	end := start + 1
+	for end < len(lines) && strings.HasPrefix(lines[end], "#") && headerKeyTokens(lines[end]) == nil {
+		end++
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+// TestHeaderDocumentsTag_MatchesWholeTokens pins the fix for the substring hole
+// in the authority gate itself.
+//
+// A gate is only as good as its matcher, and this one is the single class-level
+// check in the aihub#310 fix: it is what turns red when a future field is added
+// to this file with nobody saying who owns it. With strings.Contains it answered
+// "documented" for any tag that merely occurred inside a documented one, so the
+// very names most likely to be added next — `owner` beside `github_owner_repo`,
+// `desc` beside `description` — were exactly the ones it could not see.
+func TestHeaderDocumentsTag_MatchesWholeTokens(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	path := filepath.Join(tmp, ".polyforge.yaml")
+	projects := []serverProject{{
+		Name: "proj", OwnerUserID: "u_caller", Visible: true,
+		Repos: json.RawMessage(`[{"name":"r","description":"d"}]`),
+	}}
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil, nil); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	header, _, _ := strings.Cut(string(b), "\nversion:")
+
+	// Every key the writer actually emits is documented as a whole token.
+	for _, tag := range []string{
+		"repos", "description", "scenario",
+		"name", "url", "github_owner_repo", "description_baseline",
+	} {
+		if !headerDocumentsTag(header, tag) {
+			t.Errorf("headerDocumentsTag(%q) = false, want true — it is documented", tag)
+		}
+	}
+
+	// Undocumented tags that the header nonetheless CONTAINS, in two flavours:
+	//   - substrings of a documented key ("owner" inside "github_owner_repo",
+	//     "desc" inside "description") — these passed the old strings.Contains
+	//     check, so a real `yaml:"owner"` field was waved through undescribed;
+	//   - ordinary English from the prose columns ("repo", "value", "server",
+	//     "list") — these pass a bare whole-token match, so the descriptions
+	//     would vouch for a field nobody documented.
+	for _, tag := range []string{
+		"owner", "desc", "base", "ur", "scenari",
+		"repo", "value", "server", "list", "sync",
+	} {
+		if headerDocumentsTag(header, tag) {
+			t.Errorf("headerDocumentsTag(%q) = true, but %q is nowhere in the header as a "+
+				"whole token — this is the substring hole reopening", tag, tag)
+		}
+		if !strings.Contains(header, tag) {
+			t.Errorf("test premise broken: %q is not even a substring of the header, so it "+
+				"does not exercise the hole", tag)
+		}
 	}
 }

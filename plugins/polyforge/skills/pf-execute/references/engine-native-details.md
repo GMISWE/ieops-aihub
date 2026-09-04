@@ -60,8 +60,8 @@
    - any other line: keep as-is
    concatenate the expanded content with the remaining prose
    ```
-   **level=opus special case**: pf-execute dispatches that step with `model: opus` (via the Agent
-   tool's model parameter).
+   `level:` does NOT select a model. It is `common/review`'s review-depth argument and the loop
+   passes it through as `Review level: <value>` — nothing more. See §0f.
 
 ## 0b. The auto-mode subagent prompt, verbatim
 
@@ -159,6 +159,48 @@ Step <step_id> paused the attempt for <slug> — a human needs to look at it.
 - See what it needs: /pf-status <slug>
 - Resume once it is resolved: /pf-work <slug>
 ```
+
+## 0f. There is no per-step model tier, and `level:` cannot become one (aihub#358)
+
+Every step in both loops dispatches with `default_model`. This section exists because the engine
+spent 2.5 months claiming otherwise.
+
+**What the text used to say.** `engine.native.md` compared `step_level(content)` against the
+literal `"opus"` to pick the model, and this file called that comparison a "special case".
+Three things were wrong with it at once:
+
+1. `step_level` is defined nowhere — in any language, in any repo. It is pseudo-code a model
+   executes by reading it, so the comparison is only ever as real as the value it compares.
+2. **The two `level:`s are different parameters that happen to share a key name.** The one the
+   scenario repo emits is `common/review/SKILL.md`'s review-DEPTH argument, enumerated
+   `quick|medium|deep|challenge` (that file's frontmatter and its `structured_payload` contract
+   both state it). The one the selector wanted was a model name. Measured at
+   polyforge-coding@6231732: **9** `level:` lines, every one of them the line immediately after
+   `@include: common/review/SKILL.md`, values `quick`×4 / `deep`×5 — and not one occurrence of
+   `opus`, `sonnet` or `haiku` anywhere in that repo.
+3. So `{quick,medium,deep,challenge} ∩ {opus} = ∅` and the branch was unreachable: **every step
+   has always dispatched sonnet.** The tiering never fired once.
+
+**Why the key name makes this unfixable in place.** Because the two parameters share `level:`,
+putting a model name in that field to select a model *simultaneously* hands that model name to
+`common/review` as a review depth its enumeration does not contain. "deep review" and "opus
+model" cannot both be requested through this one key. Mapping a depth to a model is therefore a
+change of contract, and it changes cost on every project at once — 5 step-graph entries carry
+`level: deep` (`release.aihub`, `critical_bug.ieops`, `fix_bug.tether`, `feature.aihub`,
+`feature.tether`) and 4 carry `level: quick`. That is the owner's call, not an implementation
+detail.
+
+**Note the superpowers branch is unaffected and already has a working policy.**
+`hooks/pf-skill-router` injects, for that branch only, "sonnet for everything except
+review/architecture, which use opus" — keyed on the KIND OF TASK, not on `level:`. Whatever
+replaces the native tier should match that policy rather than invent a second one.
+
+**The gate.** `internal/cli/engine_native_contract_test.go`
+(`TestEngineNativeLevelVocabularyContract`) fails if either engine document ever names a
+`level:` value the scenario repo does not produce. It carries the scenario vocabulary as a
+pinned set because aihub's CI never checks out polyforge-coding, and reconciles that pinned set
+against the live repo whenever a checkout is reachable — so the pin cannot rot silently on any
+machine that has one.
 
 ## 1. Execute (rhs=true, interactive mode) — the loop in full
 

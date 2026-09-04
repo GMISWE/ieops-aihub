@@ -57,7 +57,7 @@ Polyforge does not pick or drive an authoring engine — use whatever your harne
 installed, or write it by hand. Examples only, no auto-detection:
 
 - `superpowers:writing-plans` (if the superpowers plugin is installed)
-- mattpocok's `to-issues`
+- mattpocock's `to-tickets`
 - OpenSpec's `/opsx:propose`
 - by hand, following the Contract above directly
 

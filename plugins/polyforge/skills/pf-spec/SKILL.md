@@ -49,7 +49,7 @@ Polyforge does not pick or drive an authoring engine — use whatever your harne
 installed, or write it by hand. Examples only, no auto-detection:
 
 - `superpowers:brainstorming` (if the superpowers plugin is installed)
-- mattpocok's `grill-with-docs` + `to-prd`
+- mattpocock's `grill-with-docs` + `to-spec`
 - OpenSpec's `/opsx:propose`
 - by hand, following the Contract above directly
 

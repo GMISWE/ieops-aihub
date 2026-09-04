@@ -9,14 +9,14 @@ hasn't run `polyforge init`) → `Read` the workspace `CLAUDE.md`, or `/pf-init`
 
 Then run the state/wi scan:
 
-1. Scan `~/.polyforge/state/*.json` for active state files.
-2. For each file, read `wi_id` + `attempt_id`.
-3. Call `pf_get_work_item(wi_id)` to get full wi detail including content.
+1. Scan `<workspace>/.polyforge/state/*.json`, not `~/` (holds none); skip `*.chain.json`.
+2. Read `wi_id` + `attempt_id` from each.
+3. `pf_get_work_item(wi_id)` for full wi detail including content.
 4. If attempt is still `running` → surface:
    ```
    ⚠️ You have an in-progress wi: [slug] — resume?
    Goal: [goal]
    Background: [content[:200]]...   ← only if content is non-null
    ```
-5. If attempt is `superseded` or `lost_lease` → prompt: "Stale state file found for [wi_id]. Delete it?"
+5. If attempt is `superseded`/`lost_lease` → prompt: "Stale state file for [wi_id]. Delete it?"
 6. Call `pf_get_ready_queue(project)` to show the current ready queue summary.

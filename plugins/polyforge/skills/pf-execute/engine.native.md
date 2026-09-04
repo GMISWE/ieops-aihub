@@ -12,27 +12,26 @@ legacy fallback), **pin the scenario
 SHA** into `.pf_meta.json`, resolve `{wi_type}.{project}.md` (falling back to `{wi_type}.md`),
 scan `^## Step: (\w+)\s*$` in document order, and expand each section's `@include`s at the pinned
 sha. **§0 has the exact commands and the `@include`/`level:` pair-parsing rule — `Read` it; the
-fallback chain and the pinning are easy to get subtly wrong.** `level: opus` on an include means
-dispatch that step with `model: opus`.
+fallback chain and the pinning are easy to get subtly wrong.** `level:` is review DEPTH, not a
+model — §0f says why there is no per-step model override.
 
 Prior-step context = `pf_get_step` → `completed_steps`; nothing writes a worktree step file.
 
 ## Execute (rhs=false, auto mode)
 
 ```python
-default_model = "sonnet"   # superpowers-off consistency; per-step `level: opus` overrides
+default_model = "sonnet"   # EVERY step; there is no per-step override (§0f)
 
 sa_id = new_ulid()
 pf_update_step(work_item_id=<current>, step_id=sections[0].step_id, status="in_progress")
 
 for i, (step_id, content) in enumerate(sections):
     expanded = expand_includes(content, sha)
-    model = "opus" if step_level(content) == "opus" else default_model
 
     # subagent prompt: step id + wi id, "call pf_get_step FIRST; every step_id in
     # completed_steps is done", the expanded instructions, and "return your one-line
     # summary in your output; pf_remember anything worth keeping".
-    dispatch subagent(model=model, prompt=...)
+    dispatch subagent(model=default_model, prompt=...)
 
     # long steps: pf_update_step(..., status="in_progress", heartbeat=true) every ~5 min
 
@@ -62,6 +61,8 @@ for i, (step_id, content) in enumerate(sections):
 
 **`parse_review_result(output)`** = the LAST `<!-- REVIEW_RESULT: (PASS|WARN|FAIL) -->` match;
 no marker → warn it is missing and return `WARN`, never an auto-fail.
+
+**No per-step model override exists** — §0f has the contract and its gate.
 
 ## Execute (rhs=true, interactive mode)
 

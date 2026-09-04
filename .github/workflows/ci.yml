@@ -2623,6 +2623,11 @@ jobs:
                       "PASS: +300 chars ->" \
                       "PASS: condition met -> fragment IS assembled" \
                       "PASS: condition unmet -> fragment is NOT assembled" \
+                      "PASS: state scan: bootstrap.md's '<workspace>/.polyforge/state' reaches the payload" \
+                      "PASS: state scan: the " \
+                      "PASS: control build (path reverted to " \
+                      "PASS: control build no longer carries '<workspace>/.polyforge/state'" \
+                      "PASS: state-scan control build is otherwise intact (IR1 still present)" \
                       "ALL PASS"; do
             grep -qF -- "$want" payload_gate.log \
               || { echo "::error::using-polyforge-payload.test.sh did not report '$want' — the payload budget gate is not actually executing"; exit 1; }
@@ -2630,8 +2635,8 @@ jobs:
           ! grep -q '^SKIP:' payload_gate.log \
             || { echo "::error::using-polyforge-payload.test.sh SKIPped (python3 missing on the runner?) — it exits 0 in that case, so this step would otherwise be a green no-op"; exit 1; }
           n=$(grep -c '^  PASS: ' payload_gate.log || true)
-          [ "${n:-0}" -ge 44 ] \
-            || { echo "::error::only $n PASS lines from using-polyforge-payload.test.sh, floor is 44 — checks have gone missing"; exit 1; }
+          [ "${n:-0}" -ge 49 ] \
+            || { echo "::error::only $n PASS lines from using-polyforge-payload.test.sh, floor is 49 — checks have gone missing"; exit 1; }
           echo "using-polyforge payload gate: $n checks passed"
 
       - name: aihub#293 using-polyforge manifest gate

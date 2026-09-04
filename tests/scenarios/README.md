@@ -76,7 +76,9 @@ curl -X POST $BASE/v1/work_items/$WI_ID/complete \
 
 Replace `<64hex>` / `<secret>` placeholders in scenario files with `MY_SECRET` bound this way.
 For scenarios where step 2 uses MCP pf_claim_work_item, read credentials from:
-`~/.polyforge/state/<wi_id>.json` → fields: `attempt_id`, `claim_epoch`, `session_secret`.
+`<WORKSPACE>/.polyforge/state/<wi_id>.json` → fields: `attempt_id`, `claim_epoch`, `session_secret`.
+`~/.polyforge/` holds no claim state — `config.StateDir()` is workspace-scoped
+(`internal/config/state.go:37`), and has been since 2026-05-22.
 
 ## Field format reference
 

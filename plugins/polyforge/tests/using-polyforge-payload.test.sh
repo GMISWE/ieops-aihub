@@ -268,6 +268,87 @@ fi
 fi
 
 echo
+echo "2c. the session-start scan points at the workspace state dir, not \$HOME (aihub#358)"
+# bootstrap.md told every session to scan the HOME-scoped .polyforge/state glob. Claims are
+# written to <workspace>/.polyforge/state/ — config.StateDir() has been workspace-scoped since
+# 2026-05-22 (internal/config/state.go), a month before this fragment was first written, so the
+# instruction was never right. $HOME carries no claim state, so the scan could not match anything
+# and it did NOT fail quietly: it answered "no active work item" while a claim was running.
+# A confident false negative is worse than silence, because nobody re-checks an answer.
+#
+# Size cannot see this. The correct and the broken line differ by a handful of characters, well
+# inside check 1's two-sided band, and 2b's markers belong to a different fragment. So assert the
+# CONTENT, in both directions.
+#
+# The banned string is ASSEMBLED rather than written out, because internal/cli/dead_pointer_test.go
+# scans this file too and bans that literal repo-wide. Both gates therefore stay honest without
+# either one needing an exemption list.
+STATE_HOME='~'"/.polyforge/state"
+STATE_WS="<workspace>/.polyforge/state"
+boot_frag="$plugin_root/skills/using-polyforge/fragments/bootstrap.md"
+if [ ! -f "$boot_frag" ]; then
+  bad "fragments/bootstrap.md does not exist — the session-start scan is gone altogether, which is a different (larger) problem than being mis-scoped"
+else
+  # Bind the positive marker to the fragment FIRST, exactly as 2b does: without this, a payload
+  # that happens to carry the workspace path from some other fragment satisfies the check and it
+  # stops being a check about bootstrap.md.
+  if grep -qF -- "$STATE_WS" "$boot_frag"; then
+    case "$ctx" in
+      *"$STATE_WS"*) ok "state scan: bootstrap.md's '$STATE_WS' reaches the payload";;
+      *)             bad "state scan: bootstrap.md names '$STATE_WS' but the assembled payload does not carry it — the fragment is in the tree and absent from every session, which is the aihub#338 shape of failure";;
+    esac
+  else
+    bad "bootstrap.md no longer names '$STATE_WS'. The scan has to name the workspace-scoped state dir: it is the only place a claim writes (config.StateDir(), internal/config/state.go). If the wording drifted, move this marker with it — deleting the marker is not the same change."
+  fi
+  case "$ctx" in
+    *"$STATE_HOME"*) bad "the payload still tells every session to scan the \$HOME-scoped state dir. No claim is ever written there, so the scan reports 'no active work item' however many are running — the aihub#358 false negative.";;
+    *)               ok "state scan: the \$HOME-scoped state dir is absent from the payload";;
+  esac
+fi
+
+# Negative control. Revert the path in a copy of the tree and BOTH directions must flip. Without
+# it, "the $HOME path is absent" passes just as happily on a payload that mentions no state
+# directory at all — i.e. on a fragment somebody deleted rather than fixed.
+sctl="$tmp/statectl"; cp -r "$plugin_root" "$sctl"
+sctl_err="$tmp/statectl.err"
+# Whether the rewrite HAPPENED is checked, not assumed. A copy of an already-broken tree still
+# contains the $HOME path and still lacks the workspace one, so all three assertions below would
+# report PASS having reverted nothing — a control that is green precisely when the tree is broken.
+# Measured: that is exactly what this section did on an unfixed tree before this guard existed.
+if STATE_HOME="$STATE_HOME" STATE_WS="$STATE_WS" python3 - \
+     "$sctl/skills/using-polyforge/fragments/bootstrap.md" 2>"$sctl_err" <<'PY'
+import os, sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+ws, home = os.environ["STATE_WS"], os.environ["STATE_HOME"]
+assert ws in s, "bootstrap.md no longer contains the workspace state path — update this control"
+open(p, "w", encoding="utf-8").write(s.replace(ws, home))
+PY
+then sctl_built=1
+else
+  sctl_built=0
+  bad "FIXTURE, NOT HOOK: the state-scan control could not be built — bootstrap.md does not contain '$STATE_WS' to revert, so there is nothing to prove the checks above discriminate. [$(tail -1 "$sctl_err" 2>/dev/null)]"
+fi
+if [ "$sctl_built" -eq 0 ]; then
+  :
+elif sctl_ctx="$(assemble "$sctl")"; [ -z "$sctl_ctx" ]; then
+  bad "state-scan control build produced no payload at all, so it cannot show either check discriminates"
+else
+  case "$sctl_ctx" in
+    *"$STATE_HOME"*) ok "control build (path reverted to \$HOME) carries the \$HOME-scoped dir — the ban can fire";;
+    *)               bad "the control reverted bootstrap.md to the \$HOME-scoped dir and the payload still does not contain it, so the ban above cannot fail and proves nothing";;
+  esac
+  case "$sctl_ctx" in
+    *"$STATE_WS"*) bad "the control reverted the path and the payload STILL carries '$STATE_WS' — it comes from somewhere else, so the presence check above is not testing bootstrap.md";;
+    *)             ok "control build no longer carries '$STATE_WS' — the presence check can fire";;
+  esac
+  case "$sctl_ctx" in
+    *"IR1 —"*) ok "state-scan control build is otherwise intact (IR1 still present)";;
+    *)         bad "state-scan control build lost IR1 too — the hook broke, so neither direction proves anything";;
+  esac
+fi
+
+echo
 echo "3. on-demand tier is deferred, not orphaned"
 index="$plugin_root/skills/using-polyforge/fragments/on-demand-index.md"
 check_deferred() { # fragment_basename, marker distinctive to that fragment

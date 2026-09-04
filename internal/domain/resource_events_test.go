@@ -64,6 +64,7 @@ var auditedLockStatements = []string{
 	"lockDeleteByKeySQL",
 	"lockUpsertSQL",
 	"orphanLockSweepSQL",
+	"releaseCancelledWILocksSQL",
 	"releaseUndeclaredLocksSQL",
 }
 
@@ -77,9 +78,18 @@ var auditedLockStatements = []string{
 // "is every lock mutation audited" is a question about one file.
 //
 // This is the gate that reaches a site that does not exist yet. The DB tests
-// below prove the eleven CURRENT statements emit events; only this one fails
-// when a twelfth is added somewhere else — and being added somewhere else is
-// precisely how the last four fixes in this area were defeated.
+// prove the CURRENT statements emit events; only this one fails when a NEW
+// one is added somewhere else — and being added somewhere else is precisely
+// how the last four fixes in this area were defeated.
+//
+// Deliberately stated without a count. The earlier wording named "the eleven
+// current statements" and "a twelfth", which conflated the 8 SQL CONSTANTS
+// this file's registry pins with the 12 EXECUTION SITES counted in
+// resource_events_db_test.go's header — two numbers that move independently
+// (aihub#355 added one of each, so neither of those figures was ever right at
+// the same time). A gate whose own doc has to be renumbered on every addition
+// is a gate whose doc goes stale; the two live counts have one home each and
+// this is neither of them.
 func TestLockEvents_NoLockMutatingSQLOutsideThisFile(t *testing.T) {
 	files := domainSourceFiles(t)
 	sawAuthority := false

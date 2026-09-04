@@ -18,25 +18,31 @@ package domain
 // event stream, and check that its verdict matches reality. A test that read the
 // table would prove the event exists, not that it is sufficient.
 //
-// # Coverage: 11 execution sites, 11 covered
+// # Coverage: 12 execution sites, 12 covered
 //
 // COUNTED, not asserted. Two different numbers, and conflating them is how a
 // coverage claim goes wrong:
 //
-//   - 7 lock-mutating SQL CONSTANTS, all in resource_events.go — the registry in
+//   - 8 lock-mutating SQL CONSTANTS, all in resource_events.go — the registry in
 //     resource_events_test.go, pinned in both directions by
 //     TestLockEvents_EveryAuditedStatementIsDeclaredAndRegistered.
-//   - 11 EXECUTION SITES, i.e. calls to releaseLocks / acquireLockUpsert /
-//     acquireLockIfFree: run_attempts.go has 9, gc.go 1, work_items.go 1.
+//   - 12 EXECUTION SITES, i.e. calls to releaseLocks / acquireLockUpsert /
+//     acquireLockIfFree: run_attempts.go has 9, gc.go 1, work_items.go 2.
 //     Reproduce the count with:
-//     grep -c 'releaseLocks(\|acquireLockUpsert(\|acquireLockIfFree(' on the
-//     three non-test files, minus the three declarations.
+//     grep -c 'releaseLocks(\|acquireLockUpsert(\|acquireLockIfFree(' on those
+//     three non-test files, and subtract NOTHING — the three helpers are
+//     DECLARED in resource_events.go, which is not one of the three, so no
+//     declaration is inside the count. (An earlier version of this line said
+//     "minus the three declarations", which yields 9. Stated here because the
+//     wrong recipe reproduced a plausible number, which is the kind of error
+//     that survives review.)
 //
 // A statement count would UNDER-report, because three constants run from more
 // than one site (lockDeleteByAttemptSQL from four; acquireLocksInsertSQL from
 // two). Coverage has to be per site, since a site is what can stop calling the
-// helper. Each of the 11 is reached here through its real entry point, never
-// through the helper:
+// helper. Each of the first 11 is reached here through its real entry point,
+// never through the helper; site 12 is reached the same way from another file
+// (see the note under the table):
 //
 //	 site                                            cause                  arm
 //	 1 FnClaimWorkItem     upsert                    claim                  claim upsert
@@ -50,6 +56,16 @@ package domain
 //	 9 FnAcquireLocks      orphan re-insert          orphan_reclaim         orphan reclaim ...
 //	10 UpdateWorkItem      narrowing DELETE          declaration_narrowed   narrowing release
 //	11 RunOrphanLockSweep  sweep DELETE              orphan_sweep           orphan sweep release
+//	12 CancelWorkItem      DELETE all of the wi      wi_cancelled           (see below)
+//
+// ⚠️ Site 12 is the one NOT reached from this function. It is covered through
+// its real entry point in cancel_lock_release_db_test.go
+// (TestCancelWorkItemReleasesEveryLockItStillHolds, subtest "the release is
+// decidable from the event stream alone"), which applies the same standard —
+// lockVerdictFromEvents over the stream alone, plus an assertion on the cause.
+// Said here rather than left to be noticed, because the sentence below ("each of
+// them is reached here") is the kind of coverage claim that goes quietly wrong
+// when a site is added elsewhere.
 //
 // plus two arms with no site of their own: the upsert's displaced-owner release
 // (owner_replaced, a branch inside acquireLockUpsert) and the DO NOTHING insert
@@ -324,12 +340,19 @@ func TestLockEventsDB_ReplayTheUndecidableRelease(t *testing.T) {
 
 // ─── Tag B: every mutation site emits ───────────────────────────────────────
 
-// TestLockEventsDB_EveryMutationSiteEmits reaches all eleven lock-mutating
-// statements through their real entry points.
+// TestLockEventsDB_EveryMutationSiteEmits reaches eleven of the twelve lock
+// mutation SITES through their real entry points.
 //
 // Deleting the releaseLocks / acquireLockUpsert / acquireLockIfFree call at ONE
-// site leaves the other ten arms green, which is the property that makes this a
-// coverage gate rather than a smoke test.
+// of those sites leaves the other ten arms green, which is the property that
+// makes this a coverage gate rather than a smoke test.
+//
+// ⚠️ Eleven of twelve, not all of them, and SITES rather than statements — the
+// two counts differ (8 statements, 12 sites; see the file header). Site 12,
+// CancelWorkItem, is covered to the same standard in
+// cancel_lock_release_db_test.go rather than here. Spelled out because a
+// completeness claim that quietly stops being true is worse than one that
+// names its own boundary.
 func TestLockEventsDB_EveryMutationSiteEmits(t *testing.T) {
 	pool := setupLatestTestDB(t)
 	ctx := context.Background()

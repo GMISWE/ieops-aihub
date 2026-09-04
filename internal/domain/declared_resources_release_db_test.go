@@ -355,4 +355,68 @@ func TestNarrowingDeclaredResourcesReleasesItsLocks(t *testing.T) {
 		assert.Equal(t, 0, countFileScopeLocks(t, pool, keptKey),
 			"the holder's own remaining file_scope lock IS released by narrowing to []")
 	})
+
+	// 🔴 aihub#355 criterion 2 — the negative control ON the release itself: a
+	// lock with NO declaration behind it must SURVIVE a narrowing.
+	//
+	// This is the property that makes the obvious fix wrong, and nothing guarded
+	// it until now. releaseUndeclaredFileScopeLocks subtracts `prior − next` over
+	// the declared PATHS, so a lock no declaration ever justified is not a
+	// candidate. The tempting alternative — "when declared_resources is written,
+	// sync the attempt's lock set to the declaration" — passes every other arm in
+	// this file and silently revokes exactly these locks, telling nobody.
+	// work_items.go:1806-1812 records the decision not to widen the candidate
+	// set; this arm is what stops a later refactor from quietly undoing it.
+	//
+	// The undeclared lock has to be taken through claim-time requested_locks, and
+	// that is not a testing artifact: pf_acquire_locks derives ONLY from
+	// declared_resources (AcquireLocksRequest carries no lock list at all), so
+	// requested_locks is the one way an attempt can hold a file_scope lock with
+	// no declaration behind it. aihub#355 originally specified this arm using
+	// pf_acquire_locks, which cannot express it.
+	//
+	// MUTANT: internal/domain/work_items.go — build the DELETE's candidate set
+	// from the file_scope locks the work item HOLDS minus the still-declared
+	// keys, instead of from `prior − next`. That is the naive sync; this arm goes
+	// red and every other arm in this file stays green.
+	t.Run("a lock with no declaration behind it survives a narrowing", func(t *testing.T) {
+		const declaredPath = "internal/domain/declared355.go"
+		const undeclaredPath = "internal/domain/undeclared355.go"
+		declaredKey := project + ":" + declaredPath
+		undeclaredKey := project + ":" + undeclaredPath
+
+		wi := seedClaimableWI(t, pool, project, u,
+			"an attempt holding one declared and one undeclared file_scope lock",
+			`[{"type":"path","uri":"file:`+declaredPath+`","intent":"write"}]`)
+
+		// requested_locks REPLACES the server-side derivation, so both keys are
+		// listed; only the first has a declaration behind it.
+		claimResp, aerr := FnClaimWorkItem(ctx, pool, wi.ID, &ClaimRequest{
+			IdempotencyKey: "aihub355-undeclared-claim",
+			SessionInfo:    SessionInfo{MachineID: "m_locktest", SessionSecret: testSecret},
+			RequestedLocks: []ResourceLockReq{
+				{ResourceType: "file_scope", ResourceKey: declaredKey},
+				{ResourceType: "file_scope", ResourceKey: undeclaredKey},
+			},
+			Mode: "fresh",
+		}, u, "", "tester")
+		require.Nil(t, aerr, "claim with requested_locks failed: %+v", aerr)
+		require.ElementsMatch(t, []string{declaredKey, undeclaredKey},
+			heldLockKeys(t, pool, claimResp.AttemptID),
+			"fixture check: the attempt must hold BOTH keys, or neither half of this arm measures anything")
+
+		// Narrowing to nothing at all — the widest removal, so a
+		// sync-to-declaration implementation gets the largest candidate set it
+		// could ever have.
+		updateDeclared(t, pool, wi.ID, u, `[]`)
+
+		assert.Equal(t, 0, countFileScopeLocks(t, pool, declaredKey),
+			"the DECLARED path was removed, so its lock must go. This half is what keeps the arm "+
+				"honest: without it, a release that did nothing at all would pass too")
+		assert.Equal(t, 1, countFileScopeLocks(t, pool, undeclaredKey),
+			"a narrowing revoked a lock that no declaration ever justified. Nothing in "+
+				"declared_resources put it there, so nothing in a declaration change can retire it — "+
+				"and whoever asked for it was never told it was gone. held now=%v",
+			heldLockKeys(t, pool, claimResp.AttemptID))
+	})
 }

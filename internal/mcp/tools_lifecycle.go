@@ -1315,9 +1315,28 @@ func (s *Server) registerLifecycleTools() {
 	})
 
 	// pf_cancel_work_item
+	//
+	// aihub#355 changed both halves of what this tool does and what it can
+	// return, so the description says so rather than leaving a caller to find
+	// out. Cancelling now RELEASES every resource lock held on the work item's
+	// behalf, and it now has two 409s where it used to answer 200 or 500.
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_cancel_work_item",
-		Description: "Cancel a work item",
+		Name: "pf_cancel_work_item",
+		Description: "Cancel a work item, and release every resource lock still held on its behalf. " +
+			"Legal from queued, paused or blocked; a RUNNING work item is refused with 409 " +
+			"CONFLICT_WI_ALREADY_CLAIMED (force_takeover first, then cancel) and an already-terminal one " +
+			"with 409 CONFLICT_TERMINAL_STATE. " +
+			"The lock release matters for a PAUSED work item: pausing keeps the git_branch / deploy_env / " +
+			"worktree / tcp_port locks so a resume can go on holding the branch, and before aihub#355 " +
+			"cancelling left them held forever — the work item was terminal, so no claim, force_takeover " +
+			"or complete_attempt could ever release them, and the orphan sweep skips a paused attempt's " +
+			"rows by design. Every release emits a lock_released event with cause=wi_cancelled, so " +
+			"pf_read_events can confirm it. " +
+			"🔴 RETRYABLE: the status check is now re-run inside the transaction against a locked row, so " +
+			"a cancel racing a claim can return 409 CONFLICT_WI_ALREADY_CLAIMED (correctly — the previous " +
+			"200 was a lie, and it released a live attempt's locks), and a lost concurrency race returns " +
+			"409 CONFLICT_SERIALIZATION_FAILURE with retryable=true. Both mean retry or re-read, not " +
+			"\"the server is broken\".",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID or slug"),
 			"reason":       prop("string", "Cancellation reason"),

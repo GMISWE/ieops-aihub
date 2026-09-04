@@ -185,6 +185,12 @@ const (
 	lockCauseOrphanReclaim       = "orphan_reclaim"
 	lockCauseDeclarationNarrowed = "declaration_narrowed"
 	lockCauseOrphanSweep         = "orphan_sweep"
+	// lockCauseWICancelled is the release CancelWorkItem performs. It is its own
+	// cause rather than reusing attempt_terminal because the ATTEMPT does not
+	// reach a terminal status here — only the work item does. A reader who saw
+	// attempt_terminal would go looking for a wrapped/failed attempt and find one
+	// still marked paused (see releaseCancelledWILocksSQL).
+	lockCauseWICancelled = "wi_cancelled"
 	// lockCauseOwnerReplaced is the release side of an upsert that rewrote an
 	// existing row's owner. It has no call site of its own: see lockUpsertSQL.
 	lockCauseOwnerReplaced = "owner_replaced"
@@ -406,6 +412,54 @@ const releaseUndeclaredLocksSQL = `
 	  AND ra.work_item_id = $1
 	  AND rl.resource_type = 'file_scope'
 	  AND (rl.resource_key = ANY($2::text[]) OR rl.resource_key LIKE ANY($3::text[]))`
+
+// releaseCancelledWILocksSQL drops every lock still held on behalf of a work
+// item that is being cancelled.
+//
+// 🔴 Why cancel needed a statement of its own, and why the sweep is not enough.
+//
+// The lock-retention contract (orphanLockSweepSQL below) is "a lock is retained
+// while its owner attempt is 'running' OR 'paused'", and every other way an
+// attempt stops holding locks moves the ATTEMPT: FnCompleteAttempt sets
+// wrapped/failed, the claim takeover and FnForceTakeover set 'superseded'.
+// CancelWorkItem moves the WORK ITEM and leaves run_attempts untouched — so a
+// paused attempt on a cancelled work item still satisfies the retention
+// predicate and the sweep deliberately skips it, forever.
+//
+// Measured on this repo (aihub#355): pause releases file_scope only and retains
+// git_branch / deploy_env / worktree / tcp_port for resume (see
+// acquireLocksReleasePausedSQL), and cancelGate ADMITS status='paused'. So
+// pause-then-cancel left those types held with every recovery path closed:
+// FnClaimWorkItem rejects a cancelled work item (run_attempts.go, the
+// wrapped/failed/cancelled branch), FnForceTakeover rejects anything not
+// running, and FnCompleteAttempt needs a live attempt on a non-terminal item.
+// Nothing in the API could release them again. A leaked git_branch key is the
+// bad case rather than a theoretical one: a `{"type":"repo"}` entry with no
+// task_branch derives `<repo>/main`, and the claim conflict probe matches
+// holders whose attempt is 'running' or 'paused' — so one pause-then-cancel of
+// a work item declaring a repo blocks every later claim of that repo's default
+// branch, permanently.
+//
+// Scoped by work_item_id through run_attempts, NOT by the current attempt id,
+// and NOT filtered by resource_type — the two ways this could have been written
+// too narrowly:
+//
+//   - By work item, because each re-claim mints a new attempt row, so residue
+//     from an earlier claim_epoch is owned by an attempt that is no longer
+//     current. That is the same reason releaseUndeclaredLocksSQL joins this way,
+//     and here it is strictly safe: `ra.work_item_id = $1` still makes it
+//     impossible to touch any OTHER work item's lock.
+//   - Every type, because a cancelled work item is terminal and unclaimable, so
+//     there is no resume for a git_branch or deploy_env lock to be retained FOR.
+//     This is the one release path where "everything this work item holds" is
+//     the whole and correct answer, which is why it does not need the
+//     declared-vs-explicit distinction releaseUndeclaredLocksSQL is careful
+//     about: nothing justifies a lock on a cancelled item, whatever its origin.
+const releaseCancelledWILocksSQL = `
+	DELETE FROM resource_locks rl
+	USING run_attempts ra
+	WHERE rl.owner_attempt_id = ra.id
+	  AND ra.work_item_id = $1`
 
 // orphanLockSweepSQL deletes resource_locks whose owner attempt is no longer
 // holding them per the lock-retention contract. A lock is retained while its

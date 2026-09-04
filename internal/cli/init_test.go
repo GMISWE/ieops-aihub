@@ -3,15 +3,21 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 // readSettings parses settings.json into a generic map for assertions.
@@ -678,7 +684,7 @@ func TestWritePolyforgeYAML_IncludesScenario(t *testing.T) {
 
 	path := filepath.Join(tmp, ".polyforge.yaml")
 	// Caller owns both projects (u_xxx), so both pass the callerHasRole filter.
-	if err := writePolyforgeYAML(path, projects, "u_xxx", nil); err != nil {
+	if err := writePolyforgeYAML(path, projects, "u_xxx", nil, nil); err != nil {
 		t.Fatalf("writePolyforgeYAML: %v", err)
 	}
 
@@ -738,7 +744,7 @@ func TestWritePolyforgeYAML_FiltersRoleless(t *testing.T) {
 	}
 
 	path := filepath.Join(tmp, ".polyforge.yaml")
-	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil, nil); err != nil {
 		t.Fatalf("writePolyforgeYAML: %v", err)
 	}
 	b, err := os.ReadFile(path)
@@ -822,7 +828,7 @@ projects:
 		]`),
 	}}
 
-	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil, nil); err != nil {
 		t.Fatalf("writePolyforgeYAML: %v", err)
 	}
 
@@ -856,7 +862,7 @@ projects:
 		Repos:       json.RawMessage(`[{"name":"aihub","url":"git@github.com:GMISWE/ieops-aihub.git"}]`),
 	}}
 
-	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil, nil); err != nil {
 		t.Fatalf("writePolyforgeYAML: %v", err)
 	}
 
@@ -894,7 +900,7 @@ projects:
 		Repos:       json.RawMessage(`[{"name":"aihub","url":"git@github.com:GMISWE/ieops-aihub.git"}]`),
 	}}
 
-	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil, nil); err != nil {
 		t.Fatalf("writePolyforgeYAML: %v", err)
 	}
 
@@ -934,7 +940,7 @@ projects:
 		Repos:       json.RawMessage(`[{"name":"aihub","url":"git@github.com:GMISWE/ieops-aihub.git"}]`),
 	}}
 
-	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil, nil); err != nil {
 		t.Fatalf("writePolyforgeYAML: %v", err)
 	}
 
@@ -968,7 +974,7 @@ func TestWritePolyforgeYAML_PrefersReconciledRepos(t *testing.T) {
 		},
 	}
 
-	if err := writePolyforgeYAML(path, projects, "u_caller", reconciled); err != nil {
+	if err := writePolyforgeYAML(path, projects, "u_caller", reconciled, nil); err != nil {
 		t.Fatalf("writePolyforgeYAML: %v", err)
 	}
 
@@ -1014,7 +1020,7 @@ projects:
 		},
 	}
 
-	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil, nil); err != nil {
 		t.Fatalf("writePolyforgeYAML: %v", err)
 	}
 
@@ -1044,7 +1050,7 @@ func TestWritePolyforgeYAML_CorruptExistingFile(t *testing.T) {
 		Repos:       json.RawMessage(`[{"name":"aihub","url":"git@github.com:GMISWE/ieops-aihub.git"}]`),
 	}}
 
-	if err := writePolyforgeYAML(path, projects, "u_caller", nil); err != nil {
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil, nil); err != nil {
 		t.Fatalf("writePolyforgeYAML on corrupt file: %v (must repair, not fail)", err)
 	}
 
@@ -1731,5 +1737,1016 @@ func TestServerProjectMembersParse(t *testing.T) {
 	}
 	if callerHasRole(projects[0], "u_eve") {
 		t.Errorf("callerHasRole(aihub, u_eve) = true, want false")
+	}
+}
+
+// ─── repo description three-way compare (aihub#310) ──────────────────────────
+//
+// The defect: `polyforge init` compared the local .polyforge.yaml description
+// against the server's and gave every difference to the local file whenever it
+// was non-empty, so a description written through MCP or the web UI was
+// reverted by the next init — which then printed "descriptions synced: true"
+// whichever way the data had flowed.
+//
+// The fix records a baseline and makes the comparison three-way. Four outcomes,
+// and ALL FOUR are pinned below, because the cheapest way to make the pull
+// direction pass is to delete the publish path outright — which would silently
+// remove the feature aihub#34 shipped (owner edits the local file, init
+// publishes it). See TestRunOwnerInit_PublishesLocalEdit for that half.
+
+func TestReconcileDescription_FourCells(t *testing.T) {
+	cases := []struct {
+		name                    string
+		baseline, local, server string
+		want                    descSyncDirection
+	}{
+		// The table from the owner's ruling, one row each.
+		{"local changed only → publish", "old", "mine", "old", descPush},
+		{"server changed only → adopt", "old", "old", "theirs", descPull},
+		{"both changed → refuse", "old", "mine", "theirs", descConflict},
+		{"neither changed → no-op", "old", "old", "old", descInSync},
+
+		// The exact shape of the reported incident: MCP wrote the server, the
+		// local file was simply stale. Before the fix this direction was the
+		// one that lost, every time.
+		{"stale local file loses to a server edit", "中文", "中文", "english", descPull},
+
+		// Migration: a workspace written before description_baseline existed has
+		// no baseline at all. Where the two sides agree — 27 of 27 repos in the
+		// workspace this was measured in — that must be silent, NOT a conflict
+		// against the empty baseline.
+		{"no baseline, sides agree", "", "same", "same", descInSync},
+		{"no baseline, only local has a value", "", "mine", "", descPush},
+		{"no baseline, only server has a value", "", "", "theirs", descPull},
+		{"no baseline, sides disagree → unknown, refuse", "", "mine", "theirs", descConflict},
+
+		// Empty is a VALUE, not "unset": clearing a description on one side is a
+		// change like any other and must move, not be ignored.
+		{"local cleared → publish the clearing", "old", "", "old", descPush},
+		{"server cleared → adopt the clearing", "old", "old", "", descPull},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := reconcileDescription(tc.baseline, tc.local, tc.server)
+			if got != tc.want {
+				t.Errorf("reconcileDescription(baseline=%q, local=%q, server=%q) = %q, want %q",
+					tc.baseline, tc.local, tc.server, got, tc.want)
+			}
+		})
+	}
+}
+
+// fakeProjectServer stands in for aihub on the two endpoints runOwnerInit
+// touches, and records every PATCH body it receives.
+//
+// The recorded body is the only place "was it actually published?" can be
+// answered. The printed line reports an INTENT; a test that read the line would
+// stay green against a build that never sent the request — the same shape of
+// unverified done-marker as the "descriptions synced: true" this replaces.
+type fakeProjectServer struct {
+	mu      sync.Mutex
+	repos   json.RawMessage   // current server state; a PATCH replaces it
+	patches []json.RawMessage // the repos payload of each PATCH, in order
+	fail    bool              // when set, every PATCH answers 500
+
+	// Caller identity and the project's role table. The defaults make the
+	// caller the project OWNER, which is what the owner-path tests want; a
+	// member-path test overrides them before running init.
+	callerUserID string
+	ownerUserID  string
+	members      []map[string]any
+
+	url string
+}
+
+func newFakeProjectServer(t *testing.T, repos string) *fakeProjectServer {
+	t.Helper()
+	f := &fakeProjectServer{
+		repos:        json.RawMessage(repos),
+		callerUserID: "u_owner",
+		ownerUserID:  "u_owner",
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if r.Method == http.MethodPatch {
+			var body struct {
+				Repos json.RawMessage `json:"repos"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			f.patches = append(f.patches, body.Repos)
+			if f.fail {
+				http.Error(w, `{"error":{"code":"BOOM","message":"patch refused"}}`, http.StatusInternalServerError)
+				return
+			}
+			f.repos = body.Repos
+		}
+		project := map[string]any{
+			"name": "proj", "owner_user_id": f.ownerUserID, "visible": true,
+			"repos": f.repos,
+		}
+		if len(f.members) > 0 {
+			project["members"] = f.members
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/users/me":
+			_ = json.NewEncoder(w).Encode(map[string]any{"user_id": f.callerUserID})
+		case "/v1/projects":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{project}})
+		default:
+			_ = json.NewEncoder(w).Encode(project)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	f.url = srv.URL
+	return f
+}
+
+// patchedDescriptions flattens the n-th PATCH body into repo → description.
+func (f *fakeProjectServer) patchedDescriptions(t *testing.T, n int) map[string]string {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if n >= len(f.patches) {
+		t.Fatalf("wanted PATCH #%d but only %d were sent", n, len(f.patches))
+	}
+	var repos []serverRepoEntry
+	if err := json.Unmarshal(f.patches[n], &repos); err != nil {
+		t.Fatalf("decode PATCH #%d: %v", n, err)
+	}
+	out := map[string]string{}
+	for _, r := range repos {
+		d := ""
+		if r.Description != nil {
+			d = *r.Description
+		}
+		out[r.Name] = d
+	}
+	return out
+}
+
+func (f *fakeProjectServer) patchCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.patches)
+}
+
+// captureOutput runs fn with os.Stdout and os.Stderr redirected, and returns
+// everything it printed. Init's report is user-facing behaviour, so the
+// direction it announces is asserted on the real bytes rather than on the pure
+// renderer alone — the renderer being right does not prove it is wired in.
+func captureOutput(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	origOut, origErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = w, w
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+	func() {
+		defer func() {
+			os.Stdout, os.Stderr = origOut, origErr
+			_ = w.Close()
+		}()
+		fn()
+	}()
+	out := <-done
+	_ = r.Close()
+	return out
+}
+
+// ownerInitResult bundles what one runOwnerInit call decided.
+type ownerInitResult struct {
+	Output string
+	Local  map[string]localRepoDesc
+	Merged []serverRepoEntry
+}
+
+// runOwnerInitAgainst drives the real runOwnerInit against the fake server.
+//
+// Repo URLs are deliberately empty: the clone loop skips a repo with no URL, so
+// the test exercises the description path without shelling out to git. Nothing
+// in that path reads URL.
+func runOwnerInitAgainst(t *testing.T, f *fakeProjectServer, localRepos []config.Repo) ownerInitResult {
+	t.Helper()
+	f.mu.Lock()
+	serverRepos := append(json.RawMessage(nil), f.repos...)
+	f.mu.Unlock()
+
+	cfg := &config.Config{
+		Version:  1,
+		Projects: map[string]config.Project{"proj": {Repos: localRepos}},
+	}
+	sp := serverProject{Name: "proj", OwnerUserID: "u_owner", Visible: true, Repos: serverRepos}
+	c := client.New(f.url, "test-key")
+
+	var res ownerInitResult
+	res.Output = captureOutput(t, func() {
+		_, res.Merged, res.Local = runOwnerInit(t.Context(), c, cfg, t.TempDir(), sp)
+	})
+	return res
+}
+
+func mergedDescription(t *testing.T, merged []serverRepoEntry, name string) string {
+	t.Helper()
+	for _, r := range merged {
+		if r.Name == name {
+			if r.Description == nil {
+				return ""
+			}
+			return *r.Description
+		}
+	}
+	t.Fatalf("repo %q not in merged list", name)
+	return ""
+}
+
+// TestRunOwnerInit_PublishesLocalEdit is the REVERSE criterion, and it is the
+// one that makes the rest of this fix safe to land.
+//
+// The forward criterion (a server edit must survive init) can be satisfied by
+// deleting the publish path wholesale. That would pass every other test here
+// while silently removing what aihub#34 shipped: the project owner edits
+// .polyforge.yaml and init pushes the change up. This test reads the PATCH off
+// the wire, so deleting that path turns it red.
+func TestRunOwnerInit_PublishesLocalEdit(t *testing.T) {
+	f := newFakeProjectServer(t, `[{"name":"repo-a","description":"as last synced"}]`)
+	res := runOwnerInitAgainst(t, f, []config.Repo{
+		{Name: "repo-a", Description: "edited by hand", DescriptionBaseline: "as last synced"},
+	})
+
+	if got := f.patchCount(); got != 1 {
+		t.Fatalf("PATCH count = %d, want exactly 1 — a local-only edit MUST be published "+
+			"(aihub#34); if this is 0 the publish path is gone", got)
+	}
+	if got := f.patchedDescriptions(t, 0)["repo-a"]; got != "edited by hand" {
+		t.Errorf("PATCHed description = %q, want %q — the local edit did not reach the server",
+			got, "edited by hand")
+	}
+	if got := res.Local["repo-a"]; got.Description != "edited by hand" || got.Baseline != "edited by hand" {
+		t.Errorf("local view = %+v, want both fields %q — after a successful publish the "+
+			"baseline must advance, or the next init reads the same edit as a server-side change",
+			got, "edited by hand")
+	}
+	if !strings.Contains(res.Output, "local → server") {
+		t.Errorf("output did not name the direction:\n%s", res.Output)
+	}
+}
+
+// TestRunOwnerInit_AdoptsServerEdit is the FORWARD criterion: the exact incident
+// that opened this wi. Someone edits a description through MCP; the local file
+// is merely stale. Before the fix the stale file won and the server value was
+// reverted with a success line.
+func TestRunOwnerInit_AdoptsServerEdit(t *testing.T) {
+	f := newFakeProjectServer(t, `[{"name":"repo-a","description":"english, written via MCP"}]`)
+	res := runOwnerInitAgainst(t, f, []config.Repo{
+		{Name: "repo-a", Description: "中文，本地陈旧", DescriptionBaseline: "中文，本地陈旧"},
+	})
+
+	if got := f.patchCount(); got != 0 {
+		descs := f.patchedDescriptions(t, 0)
+		t.Fatalf("PATCH count = %d, want 0 — a stale local file must not be pushed. "+
+			"It sent repo-a=%q", got, descs["repo-a"])
+	}
+	if got := res.Local["repo-a"]; got.Description != "english, written via MCP" ||
+		got.Baseline != "english, written via MCP" {
+		t.Errorf("local view = %+v, want the server value in both fields", got)
+	}
+	if got := mergedDescription(t, res.Merged, "repo-a"); got != "english, written via MCP" {
+		t.Errorf("merged description = %q, want the server value left alone", got)
+	}
+	if !strings.Contains(res.Output, "server → local") {
+		t.Errorf("output did not name the direction:\n%s", res.Output)
+	}
+}
+
+// TestRunOwnerInit_RefusesConflict: both sides moved since the baseline. The
+// owner's ruling is to stop and report, not to guess — so NEITHER side changes,
+// and the baseline does not advance, or the next run would silently adopt
+// whichever value this one happened to leave behind.
+func TestRunOwnerInit_RefusesConflict(t *testing.T) {
+	f := newFakeProjectServer(t, `[{"name":"repo-a","description":"server moved"}]`)
+	res := runOwnerInitAgainst(t, f, []config.Repo{
+		{Name: "repo-a", Description: "local moved", DescriptionBaseline: "what both last held"},
+	})
+
+	if got := f.patchCount(); got != 0 {
+		t.Fatalf("PATCH count = %d, want 0 — a conflict must not resolve itself upward", got)
+	}
+	if got := res.Local["repo-a"]; got.Description != "local moved" {
+		t.Errorf("local description = %q, want %q left untouched", got.Description, "local moved")
+	}
+	if got := res.Local["repo-a"].Baseline; got != "what both last held" {
+		t.Errorf("baseline = %q, want the old baseline %q kept — advancing it would silently "+
+			"resolve the conflict on the next run", got, "what both last held")
+	}
+	if got := mergedDescription(t, res.Merged, "repo-a"); got != "server moved" {
+		t.Errorf("merged description = %q, want the server value left untouched", got)
+	}
+	for _, want := range []string{"CONFLICT", "local moved", "server moved", "what both last held"} {
+		if !strings.Contains(res.Output, want) {
+			t.Errorf("conflict report does not mention %q — the user cannot resolve values "+
+				"they were not shown. Output:\n%s", want, res.Output)
+		}
+	}
+}
+
+// TestRunOwnerInit_NoOpIsSilentAndSaysSo: nothing to do must cost no request,
+// and must still be READABLE as "nothing was published". The output this
+// replaces could not be read that way.
+func TestRunOwnerInit_NoOpMakesNoRequestAndReportsInSync(t *testing.T) {
+	f := newFakeProjectServer(t, `[{"name":"repo-a","description":"same on both sides"}]`)
+	res := runOwnerInitAgainst(t, f, []config.Repo{
+		{Name: "repo-a", Description: "same on both sides", DescriptionBaseline: "same on both sides"},
+	})
+
+	if got := f.patchCount(); got != 0 {
+		t.Errorf("PATCH count = %d, want 0 — nothing changed on either side", got)
+	}
+	if !strings.Contains(res.Output, "1 in sync") {
+		t.Errorf("output does not state that the description was in sync:\n%s", res.Output)
+	}
+	for _, absent := range []string{"local → server", "server → local", "CONFLICT"} {
+		if strings.Contains(res.Output, absent) {
+			t.Errorf("output claims %q on a no-op run:\n%s", absent, res.Output)
+		}
+	}
+}
+
+// TestRunOwnerInit_BothDirectionsInOneRun is acceptance criterion 5: one repo
+// changed only on the server, another only locally, resolved in the SAME init.
+// Each must land on its own side — a rule that picks one winner globally cannot
+// pass this.
+func TestRunOwnerInit_BothDirectionsInOneRun(t *testing.T) {
+	f := newFakeProjectServer(t, `[
+		{"name":"pull-me","description":"server is newer"},
+		{"name":"push-me","description":"as last synced"},
+		{"name":"leave-me","description":"untouched"}
+	]`)
+	res := runOwnerInitAgainst(t, f, []config.Repo{
+		{Name: "pull-me", Description: "stale", DescriptionBaseline: "stale"},
+		{Name: "push-me", Description: "locally edited", DescriptionBaseline: "as last synced"},
+		{Name: "leave-me", Description: "untouched", DescriptionBaseline: "untouched"},
+	})
+
+	if got := f.patchCount(); got != 1 {
+		t.Fatalf("PATCH count = %d, want 1", got)
+	}
+	sent := f.patchedDescriptions(t, 0)
+	if sent["push-me"] != "locally edited" {
+		t.Errorf("PATCH push-me = %q, want the local edit published", sent["push-me"])
+	}
+	// The PATCH replaces the whole repos array, so the repo being pulled rides
+	// along in the same body. It must carry the SERVER's value: sending the
+	// stale local one would revert the very edit this run is adopting.
+	if sent["pull-me"] != "server is newer" {
+		t.Errorf("PATCH pull-me = %q, want %q — the publish body must not revert a repo it "+
+			"is adopting from the server", sent["pull-me"], "server is newer")
+	}
+	if sent["leave-me"] != "untouched" {
+		t.Errorf("PATCH leave-me = %q, want %q", sent["leave-me"], "untouched")
+	}
+	if got := res.Local["pull-me"].Description; got != "server is newer" {
+		t.Errorf("local pull-me = %q, want the server value", got)
+	}
+	if got := res.Local["push-me"].Description; got != "locally edited" {
+		t.Errorf("local push-me = %q, want the local value", got)
+	}
+	if !strings.Contains(res.Output, "local → server (push-me)") ||
+		!strings.Contains(res.Output, "server → local (pull-me)") {
+		t.Errorf("output does not name both directions with their repos:\n%s", res.Output)
+	}
+}
+
+// TestRunOwnerInit_FailedPatchKeepsBaseline: if the PATCH does not reach the
+// server, the local edit is still pending. Advancing the baseline anyway would
+// make the NEXT init read that same edit as a server-side change and pull it
+// back down — the fix would then eat exactly the data it was written to save.
+func TestRunOwnerInit_FailedPatchKeepsOldBaseline(t *testing.T) {
+	f := newFakeProjectServer(t, `[{"name":"repo-a","description":"as last synced"}]`)
+	f.fail = true
+	res := runOwnerInitAgainst(t, f, []config.Repo{
+		{Name: "repo-a", Description: "edited by hand", DescriptionBaseline: "as last synced"},
+	})
+
+	if got := f.patchCount(); got != 1 {
+		t.Fatalf("PATCH count = %d, want 1 attempt", got)
+	}
+	got := res.Local["repo-a"]
+	if got.Description != "edited by hand" {
+		t.Errorf("local description = %q, want the pending edit kept", got.Description)
+	}
+	if got.Baseline != "as last synced" {
+		t.Errorf("baseline = %q, want the OLD baseline %q kept after a failed PATCH — "+
+			"otherwise the next init pulls the unpublished edit back down",
+			got.Baseline, "as last synced")
+	}
+}
+
+// TestDescribeDescriptionSync_NamesEveryDirection pins the report itself. The
+// defect included an output that printed the same words whichever way the data
+// went, so "it printed something" is not the property under test — "the four
+// outcomes produce four different, attributable strings" is.
+func TestDescribeDescriptionSync_NamesEveryDirection(t *testing.T) {
+	ds := []descDecision{
+		{Repo: "a", Direction: descInSync},
+		{Repo: "b", Direction: descPush},
+		{Repo: "c", Direction: descPull},
+		{Repo: "d", Direction: descConflict},
+	}
+	got := describeDescriptionSync("proj", ds)
+	for _, want := range []string{"1 in sync", "1 local → server (b)", "1 server → local (c)", "1 conflict (d)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("line %q does not contain %q", got, want)
+		}
+	}
+
+	// Every direction must render differently from every other, or the line is
+	// the old `synced: %v` in new words.
+	seen := map[string]descSyncDirection{}
+	for _, dir := range []descSyncDirection{descInSync, descPush, descPull, descConflict} {
+		line := describeDescriptionSync("proj", []descDecision{{Repo: "r", Direction: dir}})
+		if prev, dup := seen[line]; dup {
+			t.Errorf("directions %q and %q both render as %q", prev, dir, line)
+		}
+		seen[line] = dir
+	}
+	if got := describeDescriptionSync("proj", nil); got != "" {
+		t.Errorf("a project with no comparable repos printed %q, want nothing", got)
+	}
+}
+
+// TestConflictReport_DistinguishesMissingBaseline: a repo carried over from
+// before this field existed has no baseline, and %q would render that as `""` —
+// indistinguishable from a baseline that really was the empty string. The
+// difference matters to whoever has to resolve it.
+func TestConflictReport_DistinguishesMissingBaseline(t *testing.T) {
+	none := conflictReport("proj", descDecision{Repo: "r", Local: "l", Server: "s", Baseline: ""})
+	empty := conflictReport("proj", descDecision{Repo: "r", Local: "l", Server: "s", Baseline: "x"})
+	if !strings.Contains(none, "none recorded") {
+		t.Errorf("missing baseline not called out:\n%s", none)
+	}
+	if none == empty {
+		t.Error("a missing baseline and a recorded one produce the same report")
+	}
+	for _, want := range []string{`"l"`, `"s"`, "description_baseline", "polyforge init"} {
+		if !strings.Contains(none, want) {
+			t.Errorf("report does not contain %q:\n%s", want, none)
+		}
+	}
+}
+
+// TestWritePolyforgeYAML_BaselineRoundTrips: the baseline is only useful if it
+// survives to the next run. It is written by init and read back by config.Load,
+// and if that round trip broke, the three-way compare would silently degrade to
+// the two-way one this wi is about — with every test above still green, because
+// they all pass the baseline in by hand.
+func TestWritePolyforgeYAML_BaselineRoundTrips(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	path := filepath.Join(tmp, ".polyforge.yaml")
+
+	projects := []serverProject{{
+		Name: "proj", OwnerUserID: "u_caller", Visible: true,
+		Repos: json.RawMessage(`[{"name":"kept","description":"server value"},{"name":"conflicted","description":"server value"}]`),
+	}}
+	localDescs := map[string]map[string]localRepoDesc{"proj": {
+		"conflicted": {Description: "local value", Baseline: "older shared value"},
+	}}
+
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil, localDescs); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
+	}
+	cfg := loadYAML(t, tmp)
+	byName := map[string]config.Repo{}
+	for _, r := range cfg.Projects["proj"].Repos {
+		byName[r.Name] = r
+	}
+
+	// No override supplied: the value in hand is what both sides now hold, so
+	// that is the baseline.
+	if got := byName["kept"]; got.Description != "server value" || got.DescriptionBaseline != "server value" {
+		t.Errorf("repo kept = %+v, want description and baseline both %q", got, "server value")
+	}
+	// Override supplied: the two differ, and BOTH must survive the round trip.
+	if got := byName["conflicted"]; got.Description != "local value" || got.DescriptionBaseline != "older shared value" {
+		t.Errorf("repo conflicted = %+v, want description %q with baseline %q — if the baseline "+
+			"does not round-trip, the next init has nothing to compare against",
+			got, "local value", "older shared value")
+	}
+
+	// And the decision this file drives must be reproduced from the file alone.
+	if got := reconcileDescription(byName["conflicted"].DescriptionBaseline,
+		byName["conflicted"].Description, "server value"); got != descConflict {
+		t.Errorf("re-reading the written file yields %q, want %q — the conflict must still be "+
+			"detected on the next run", got, descConflict)
+	}
+}
+
+// TestGeneratedHeaderStatesAuthorityPerField: the old header said "Source of
+// truth is the server" while repos[].description was the one field init took
+// FROM this file and pushed up — the header asserted the opposite of the code
+// for the only field a user is invited to edit.
+//
+// The gate is structural, not a string match: every yaml key this writer can
+// emit under a project must be named in the header. A new field on config.Repo
+// with no authority documented turns this red, which a fixed list of expected
+// substrings would not.
+func TestGeneratedHeaderStatesAuthorityPerField(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	path := filepath.Join(tmp, ".polyforge.yaml")
+	projects := []serverProject{{
+		Name: "proj", OwnerUserID: "u_caller", Visible: true,
+		Repos: json.RawMessage(`[{"name":"r","description":"d"}]`),
+	}}
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil, nil); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	header, _, _ := strings.Cut(string(b), "\nversion:")
+
+	for _, typ := range []reflect.Type{reflect.TypeOf(config.Project{}), reflect.TypeOf(config.Repo{})} {
+		for i := 0; i < typ.NumField(); i++ {
+			tag, _, _ := strings.Cut(typ.Field(i).Tag.Get("yaml"), ",")
+			if tag == "" || tag == "-" {
+				continue
+			}
+			// Whole-token, not substring. strings.Contains passed for any tag
+			// that merely occurred INSIDE an already-documented one, so with
+			// "github_owner_repo" present a new `yaml:"owner"` field read as
+			// documented while nothing described it — and so did "name", "url"
+			// and "desc". The gate for undocumented fields was blind to the
+			// names most likely to be added next.
+			if !headerDocumentsTag(header, tag) {
+				t.Errorf("generated header does not say who owns %s.%s (yaml key %q) — "+
+					"a field this file carries with undocumented authority is how aihub#310 "+
+					"happened", typ.Name(), typ.Field(i).Name, tag)
+			}
+		}
+	}
+
+	if strings.Contains(header, "Source of truth is the server.") {
+		t.Error("the header still makes a blanket server-authority claim, which is false for " +
+			"repos[].description")
+	}
+	// The both-sided field must be described as both-sided in ITS OWN entry, not
+	// merely somewhere in the header — and the publish half must be qualified by
+	// role, because only the owner path publishes. See
+	// TestRunInit_MemberHeaderDoesNotPromisePublishing for the measurement.
+	entry := headerEntryFor(t, header, "repos", "description")
+	toks := map[string]bool{}
+	for _, tok := range headerTokens(strings.ToLower(entry)) {
+		toks[tok] = true
+	}
+	for _, want := range []string{"owner", "member", "publishes", "adopts"} {
+		if !toks[want] {
+			t.Errorf("the repos[].description entry does not describe it as editable on both "+
+				"sides subject to role (missing %q):\n%s", want, entry)
+		}
+	}
+}
+
+// TestWritePolyforgeYAML_MemberPathGetsMatchingBaseline: members never publish
+// (runMemberInit does not PATCH), so their file is written straight from the
+// server. Its baseline must equal what was written, or a member who later
+// becomes owner would find every repo in conflict on their first init.
+func TestWritePolyforgeYAML_MemberPathGetsMatchingBaseline(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	path := filepath.Join(tmp, ".polyforge.yaml")
+	projects := []serverProject{{
+		Name: "proj", OwnerUserID: "u_someone_else", Visible: true,
+		Members: []serverProjectMember{{UserID: "u_member", Role: "writer"}},
+		Repos:   json.RawMessage(`[{"name":"r","description":"server value"}]`),
+	}}
+	// nil localDescs is exactly what RunInit passes for a member project.
+	if err := writePolyforgeYAML(path, projects, "u_member", nil, nil); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
+	}
+	r := loadYAML(t, tmp).Projects["proj"].Repos[0]
+	if r.DescriptionBaseline != r.Description {
+		t.Errorf("member baseline = %q, description = %q — they must match, or the member's "+
+			"first init as owner reports a conflict on every repo", r.DescriptionBaseline, r.Description)
+	}
+	if got := reconcileDescription(r.DescriptionBaseline, r.Description, "server value"); got != descInSync {
+		t.Errorf("a freshly written member file compares as %q, want %q", got, descInSync)
+	}
+}
+
+// TestRunInit_EndToEndThreeWayDescriptions drives the WHOLE of RunInit — the
+// command the acceptance criteria are written against — over a fake aihub, and
+// then reads the .polyforge.yaml it left on disk.
+//
+// The per-function tests above stop one hop short: runOwnerInit returns the
+// local view, but nothing there proves RunInit hands it to writePolyforgeYAML.
+// That hop is where a correct decision becomes a wrong file, and it is exactly
+// the shape of wiring bug this repo keeps shipping. Nothing here touches a real
+// server: HOME and the workspace root are temp dirs, and repo URLs are empty so
+// the clone loop never shells out to git.
+func TestRunInit_EndToEndThreeWayDescriptions(t *testing.T) {
+	home, wsRoot := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+
+	f := newFakeProjectServer(t, `[
+		{"name":"pull-me","description":"edited on the server via MCP"},
+		{"name":"push-me","description":"as last synced"},
+		{"name":"stuck","description":"server moved"}
+	]`)
+
+	// The conflicted repo is not decoration. For a push or a pull the value
+	// destined for the local file happens to equal the one destined for the
+	// server, so a RunInit that dropped the local view on the floor would still
+	// write a correct file and this test would pass. A conflict is the only
+	// outcome where the two differ — it is what gives the wiring hop a gate.
+	writeYAMLFixture(t, wsRoot, `version: 1
+projects:
+    proj:
+        repos:
+            - name: pull-me
+              description: stale local copy
+              description_baseline: stale local copy
+            - name: push-me
+              description: edited by hand in this file
+              description_baseline: as last synced
+            - name: stuck
+              description: local moved
+              description_baseline: what both last held
+`)
+	cfg, err := config.Load(wsRoot)
+	if err != nil {
+		t.Fatalf("seed config.Load: %v", err)
+	}
+
+	out := captureOutput(t, func() {
+		RunInit(t.Context(), client.New(f.url, "k"), cfg, wsRoot, nil)
+	})
+
+	// Server side: the hand edit was published, and the repo being adopted was
+	// NOT reverted by the same request.
+	if got := f.patchCount(); got != 1 {
+		t.Fatalf("PATCH count = %d, want 1\n%s", got, out)
+	}
+	sent := f.patchedDescriptions(t, 0)
+	if sent["push-me"] != "edited by hand in this file" {
+		t.Errorf("PATCH push-me = %q, want the hand edit published (aihub#34)", sent["push-me"])
+	}
+	if sent["pull-me"] != "edited on the server via MCP" {
+		t.Errorf("PATCH pull-me = %q, want %q — this is aihub#310 itself: the stale local "+
+			"value must not be pushed over the server's", sent["pull-me"], "edited on the server via MCP")
+	}
+	if sent["stuck"] != "server moved" {
+		t.Errorf("PATCH stuck = %q, want %q — a refused conflict must not resolve itself upward",
+			sent["stuck"], "server moved")
+	}
+
+	// Local side: read back through the real loader, the same parse path the
+	// NEXT init would use.
+	after := map[string]config.Repo{}
+	reloaded, err := config.Load(wsRoot)
+	if err != nil {
+		t.Fatalf("config.Load after init: %v", err)
+	}
+	for _, r := range reloaded.Projects["proj"].Repos {
+		after[r.Name] = r
+	}
+	if got := after["pull-me"]; got.Description != "edited on the server via MCP" {
+		t.Errorf("local pull-me = %q, want the server edit adopted", got.Description)
+	}
+	if got := after["push-me"]; got.Description != "edited by hand in this file" {
+		t.Errorf("local push-me = %q, want the hand edit kept", got.Description)
+	}
+	// Both baselines must have advanced, or the next init re-decides settled
+	// repos — the property that makes this file converge instead of ping-pong.
+	for name, want := range map[string]string{
+		"pull-me": "edited on the server via MCP",
+		"push-me": "edited by hand in this file",
+	} {
+		if got := after[name].DescriptionBaseline; got != want {
+			t.Errorf("%s baseline after init = %q, want %q", name, got, want)
+		}
+		if got := reconcileDescription(after[name].DescriptionBaseline, after[name].Description, want); got != descInSync {
+			t.Errorf("%s compares as %q on a hypothetical re-run, want %q — init did not converge",
+				name, got, descInSync)
+		}
+	}
+
+	// The conflicted repo must come out of a full init untouched on BOTH sides,
+	// with its baseline un-advanced. This is what fails if RunInit computes the
+	// local view and then does not hand it to the writer: the file would take
+	// the server's value and the conflict would vanish without anyone deciding.
+	if got := after["stuck"].Description; got != "local moved" {
+		t.Errorf("local stuck = %q, want %q kept — a refused conflict must not be resolved "+
+			"by the file writer", got, "local moved")
+	}
+	if got := after["stuck"].DescriptionBaseline; got != "what both last held" {
+		t.Errorf("stuck baseline = %q, want %q — advancing it silently settles the conflict",
+			got, "what both last held")
+	}
+	if got := reconcileDescription(after["stuck"].DescriptionBaseline,
+		after["stuck"].Description, "server moved"); got != descConflict {
+		t.Errorf("stuck compares as %q on the next run, want %q — the conflict must persist "+
+			"until a human resolves it", got, descConflict)
+	}
+
+	if !strings.Contains(out, "local → server (push-me)") || !strings.Contains(out, "server → local (pull-me)") {
+		t.Errorf("init did not report both directions:\n%s", out)
+	}
+	if !strings.Contains(out, "CONFLICT") || !strings.Contains(out, "1 conflict (stuck)") {
+		t.Errorf("init did not report the conflict:\n%s", out)
+	}
+	if strings.Contains(out, "descriptions synced:") {
+		t.Errorf("init still prints the direction-blind success line:\n%s", out)
+	}
+}
+
+// TestConflictReport_InstructionsActuallyResolve: the report tells the user two
+// ways out of a conflict. Those two sentences are assertions about
+// reconcileDescription, and an assertion in a message is exactly the kind that
+// rots unnoticed — nothing else in this file would go red if the advice became
+// wrong. So apply each instruction literally and check where it lands.
+func TestConflictReport_InstructionsActuallyResolve(t *testing.T) {
+	const (
+		baseline = "what both last held"
+		local    = "local moved"
+		server   = "server moved"
+	)
+	d := descDecision{Repo: "r", Baseline: baseline, Local: local, Server: server}
+	if got := reconcileDescription(d.Baseline, d.Local, d.Server); got != descConflict {
+		t.Fatalf("fixture is not a conflict: %q", got)
+	}
+	report := conflictReport("proj", d)
+
+	// "To take the server's value: set this repo's `description` in
+	// .polyforge.yaml to it."
+	if got := reconcileDescription(baseline, server, server); got != descInSync {
+		t.Errorf("following the report's take-the-server advice yields %q, want %q.\n%s",
+			got, descInSync, report)
+	}
+	// "... or just delete BOTH `description` and `description_baseline`."
+	// Deleting one alone does NOT work — local "" against a non-empty baseline
+	// still reads as a local-side change and stays a conflict — which is why
+	// the word BOTH is load-bearing rather than emphasis.
+	if got := reconcileDescription("", "", server); got != descPull {
+		t.Errorf("following the report's delete-both advice yields %q, want %q.\n%s",
+			got, descPull, report)
+	}
+	if got := reconcileDescription(baseline, "", server); got != descConflict {
+		t.Errorf("deleting only `description` yields %q, want %q — if this ever stops being "+
+			"a conflict, the report's insistence on BOTH is misleading", got, descConflict)
+	}
+
+	// "To publish yours: set this repo's `description_baseline` to the server
+	// value above, then re-run."
+	if got := reconcileDescription(server, local, server); got != descPush {
+		t.Errorf("following the report's publish-mine advice yields %q, want %q — the "+
+			"instruction printed to users would be wrong.\n%s", got, descPush, report)
+	}
+}
+
+// TestRunInit_MemberHeaderDoesNotPromisePublishing: the header is written once
+// for the whole file, but publishing is an OWNER capability — runMemberInit
+// never PATCHes, and RunInit fills localDescs only in the owner branch. An
+// unqualified "edit it here and init publishes it" therefore invites a member
+// to make an edit that is silently reverted on their next init: the aihub#310
+// incident shape, reproduced one path over by the fix for it.
+//
+// The test measures the behaviour AND checks the claim, in one function. Either
+// half going red is real: if members ever start publishing, the behavioural
+// assertions fail; if the qualification is dropped from the header, the text
+// assertions fail. A test that only read the text could be satisfied by prose.
+func TestRunInit_MemberHeaderDoesNotPromisePublishing(t *testing.T) {
+	home, wsRoot := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+
+	f := newFakeProjectServer(t, `[{"name":"repo-a","description":"server value"}]`)
+	// The caller is a plain member of a project someone else owns.
+	f.callerUserID = "u_member"
+	f.ownerUserID = "u_someone_else"
+	f.members = []map[string]any{{"user_id": "u_member", "role": "writer"}}
+
+	// A clean push case: valid baseline, no conflict. On the owner path this is
+	// published. Here it must not be — and the member must not have been told
+	// it would be.
+	writeYAMLFixture(t, wsRoot, `version: 1
+projects:
+    proj:
+        repos:
+            - name: repo-a
+              description: MY LOCAL EDIT
+              description_baseline: server value
+`)
+	cfg, err := config.Load(wsRoot)
+	if err != nil {
+		t.Fatalf("seed config.Load: %v", err)
+	}
+
+	out := captureOutput(t, func() {
+		RunInit(t.Context(), client.New(f.url, "k"), cfg, wsRoot, nil)
+	})
+
+	// --- measured behaviour: a member publishes nothing, and loses the edit ---
+	if got := f.patchCount(); got != 0 {
+		t.Errorf("PATCHes sent by a member init = %d, want 0 — runMemberInit must not "+
+			"publish (this wi's non-goals)", got)
+	}
+	reloaded, err := config.Load(wsRoot)
+	if err != nil {
+		t.Fatalf("config.Load after init: %v", err)
+	}
+	r := reloaded.Projects["proj"].Repos[0]
+	if r.Description != "server value" {
+		t.Fatalf("fixture no longer reproduces the hazard: member's local edit survived as %q. "+
+			"If members now publish or retain edits, this test needs rewriting, not relaxing",
+			r.Description)
+	}
+	// And the revert is SILENT: runMemberInit is out of scope for this wi, so it
+	// still prints no direction line. That is precisely why the warning has to
+	// live in the header — the header is the only place a member is told.
+	if strings.Contains(out, "descriptions:") {
+		t.Errorf("member init now prints a descriptions line; the header wording and this "+
+			"test's premise both need revisiting:\n%s", out)
+	}
+
+	// --- the claim the member is left holding must match that behaviour ---
+	b, err := os.ReadFile(filepath.Join(wsRoot, ".polyforge.yaml"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	header, _, _ := strings.Cut(string(b), "\nversion:")
+	entry := headerEntryFor(t, header, "repos", "description")
+
+	// The substantive property is that the entry DISTINGUISHES the two roles —
+	// an unconditioned "init publishes it" is what misleads a member. Matched as
+	// whole tokens, case-insensitively, so the wording stays free to change.
+	toks := map[string]bool{}
+	for _, tok := range headerTokens(strings.ToLower(entry)) {
+		toks[tok] = true
+	}
+	for _, role := range []string{"owner", "member"} {
+		if !toks[role] {
+			t.Errorf("the repos[].description authority entry never names the %q role, so its "+
+				"publish claim reads as unconditional — and a member acting on it loses the edit "+
+				"this same test just measured being silently discarded. Entry:\n%s", role, entry)
+		}
+	}
+	if !toks["overwritten"] {
+		t.Errorf("the entry does not warn that a non-owner's local edit is overwritten:\n%s", entry)
+	}
+}
+
+// headerTokens splits one header line into identifier tokens — the same shape a
+// yaml key has. Tokenizing is what makes "owner" distinguishable from
+// "github_owner_repo"; a substring test cannot tell them apart.
+var headerTokenRe = regexp.MustCompile(`[A-Za-z0-9_]+`)
+
+func headerTokens(line string) []string { return headerTokenRe.FindAllString(line, -1) }
+
+// headerKeyColumn is the indent the generated header gives a key DECLARATION.
+// Continuation lines are indented past it, which is what lets prose be told
+// apart from a key path.
+const headerKeyColumn = "#   "
+
+// headerKeyTokens returns the identifier tokens of one header line's KEY PATH,
+// or nil if the line does not declare a key.
+//
+// Restricting to the key column matters twice over. A bare token match anywhere
+// on the line lets ordinary English in the descriptions answer for a yaml tag —
+// "repo" is a word in "a cache of the project's repo list", and so are "value",
+// "server" and "list". Those are exactly the names a future field might take, so
+// prose would silently vouch for an undocumented one.
+func headerKeyTokens(line string) []string {
+	rest, ok := strings.CutPrefix(line, headerKeyColumn)
+	if !ok || rest == "" || rest[0] == ' ' {
+		return nil // not a declaration line
+	}
+	// The key path ends at the first run of two or more spaces; single spaces
+	// are used to put several keys on one line ("name / .url / .x").
+	if i := strings.Index(rest, "  "); i >= 0 {
+		rest = rest[:i]
+	}
+	return headerTokens(rest)
+}
+
+// headerDocumentsTag reports whether the generated header DECLARES a yaml key —
+// as a whole token, in the key column.
+//
+// It replaced strings.Contains, which passed for any tag that merely occurred
+// inside a documented one: with "github_owner_repo" present, an undocumented
+// `yaml:"owner"` field read as documented, as would "desc" beside
+// "description". The gate meant to catch an undocumented field was blind to
+// exactly the names most likely to be added next.
+func headerDocumentsTag(header, tag string) bool {
+	for _, ln := range strings.Split(header, "\n") {
+		for _, tok := range headerKeyTokens(ln) {
+			if tok == tag {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// headerEntryFor returns the block of the generated header describing one yaml
+// key: the line whose key path ENDS with the given tokens, plus the indented
+// continuation lines under it.
+//
+// Assertions run against the entry rather than the whole header, so a word that
+// happens to appear in a neighbouring field's paragraph cannot satisfy a claim
+// about this one. Matching the path as a token sequence also keeps
+// "repos[].description" apart from both "projects.<p>.description" and
+// "repos[].description_baseline".
+func headerEntryFor(t *testing.T, header string, keyPath ...string) string {
+	t.Helper()
+	lines := strings.Split(header, "\n")
+	start := -1
+	for i, ln := range lines {
+		toks := headerKeyTokens(ln)
+		if len(toks) < len(keyPath) {
+			continue
+		}
+		if slices.Equal(toks[len(toks)-len(keyPath):], keyPath) {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("no header entry ending in %v in:\n%s", keyPath, header)
+	}
+	end := start + 1
+	for end < len(lines) && strings.HasPrefix(lines[end], "#") && headerKeyTokens(lines[end]) == nil {
+		end++
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+// TestHeaderDocumentsTag_MatchesWholeTokens pins the fix for the substring hole
+// in the authority gate itself.
+//
+// A gate is only as good as its matcher, and this one is the single class-level
+// check in the aihub#310 fix: it is what turns red when a future field is added
+// to this file with nobody saying who owns it. With strings.Contains it answered
+// "documented" for any tag that merely occurred inside a documented one, so the
+// very names most likely to be added next — `owner` beside `github_owner_repo`,
+// `desc` beside `description` — were exactly the ones it could not see.
+func TestHeaderDocumentsTag_MatchesWholeTokens(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	path := filepath.Join(tmp, ".polyforge.yaml")
+	projects := []serverProject{{
+		Name: "proj", OwnerUserID: "u_caller", Visible: true,
+		Repos: json.RawMessage(`[{"name":"r","description":"d"}]`),
+	}}
+	if err := writePolyforgeYAML(path, projects, "u_caller", nil, nil); err != nil {
+		t.Fatalf("writePolyforgeYAML: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	header, _, _ := strings.Cut(string(b), "\nversion:")
+
+	// Every key the writer actually emits is documented as a whole token.
+	for _, tag := range []string{
+		"repos", "description", "scenario",
+		"name", "url", "github_owner_repo", "description_baseline",
+	} {
+		if !headerDocumentsTag(header, tag) {
+			t.Errorf("headerDocumentsTag(%q) = false, want true — it is documented", tag)
+		}
+	}
+
+	// Undocumented tags that the header nonetheless CONTAINS, in two flavours:
+	//   - substrings of a documented key ("owner" inside "github_owner_repo",
+	//     "desc" inside "description") — these passed the old strings.Contains
+	//     check, so a real `yaml:"owner"` field was waved through undescribed;
+	//   - ordinary English from the prose columns ("repo", "value", "server",
+	//     "list") — these pass a bare whole-token match, so the descriptions
+	//     would vouch for a field nobody documented.
+	for _, tag := range []string{
+		"owner", "desc", "base", "ur", "scenari",
+		"repo", "value", "server", "list", "sync",
+	} {
+		if headerDocumentsTag(header, tag) {
+			t.Errorf("headerDocumentsTag(%q) = true, but %q is nowhere in the header as a "+
+				"whole token — this is the substring hole reopening", tag, tag)
+		}
+		if !strings.Contains(header, tag) {
+			t.Errorf("test premise broken: %q is not even a substring of the header, so it "+
+				"does not exercise the hole", tag)
+		}
 	}
 }

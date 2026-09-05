@@ -968,11 +968,18 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	// network call to the embedding provider, so it MUST run before any
 	// transaction below begins — never hold a DB tx open across it.
 	// Best-effort: a provider error logs a warning and leaves emb_vector NULL.
+	//
+	// aihub#361: the text goes through MemoryEmbedInput, which is also what
+	// cmd/aihub-embed-backfill and cmd/aihub-embed-verify call. This line used
+	// to pass req.Content bare while the backfill capped it at 6000 runes, so
+	// an over-long memory either failed to embed here and stayed NULL forever,
+	// or carried a full-text vector that a later backfill silently replaced
+	// with a prefix vector under an identical emb_model. See embed_input.go.
 	var embVecLit *string // nil → SQL NULL
 	var embModel *string
 	var embDims *int
 	if embeddableType(req.Type) {
-		if vec, embErr := embProvider.Embed(ctx, req.Content); embErr != nil {
+		if vec, embErr := embProvider.Embed(ctx, MemoryEmbedInput(req.Content)); embErr != nil {
 			fmt.Fprintf(os.Stderr, "remember: embed failed for type=%s: %v\n", req.Type, embErr)
 		} else if len(vec) > 0 {
 			lit := vecToPGLiteral(vec)

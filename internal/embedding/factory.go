@@ -25,6 +25,19 @@ import (
 //	                      bound — the escape hatch for bulk tooling that is not
 //	                      serving an HTTP request (aihub#316)
 //
+// One more EMBEDDING_* variable is read outside this constructor, because it
+// governs the text handed to a provider rather than the provider itself:
+//
+//	EMBEDDING_INPUT_MAX_RUNES
+//	                    — rune budget applied to memory/work-item text before
+//	                      embedding; unset or unparseable keeps
+//	                      DefaultInputMaxRunes (input_budget.go). Unlike
+//	                      EMBEDDING_TIMEOUT, "0" does NOT disable it — see
+//	                      InputMaxRunes for why that asymmetry is deliberate.
+//	                      Consumed by domain.MemoryEmbedInput /
+//	                      domain.WorkItemEmbedInput, so it moves every writer
+//	                      at once (aihub#361).
+//
 // The openai and ollama providers are returned budget-wrapped (budget.go). The
 // wiring lives here rather than at the call site in cmd/aihub/main.go because
 // FromEnv is the single construction point: a test of FromEnv then proves the

@@ -47,8 +47,10 @@ const (
 // 🔴 What this probe CANNOT tell you, stated here because the field it feeds is
 // easy to over-read: Provider.Ping embeds the 4-character string "ping". A
 // backend that is up but slow answers that in milliseconds while timing out a
-// real embed — production sends up to wiEmbedInputMax (6000) runes for a work
-// item, and memory.go's Remember sends req.Content with no truncation at all.
+// real embed — production sends up to embedInputMaxRunes (embed_input.go) for
+// both a work item and a memory. (Until aihub#361 memory.go's Remember sent
+// req.Content with no truncation at all, so it could also fail on LENGTH
+// alone; it now goes through MemoryEmbedInput like every other writer.)
 // In that state OK is true and every write silently lands with a NULL vector.
 // Worse for updates: refreshWorkItemEmbeddingBestEffort returns early when the
 // embed fails (wi_embedding.go), so the row KEEPS ITS OLD VECTOR for the new

@@ -100,10 +100,19 @@ func CreateDependency(ctx context.Context, pool *pgxpool.Pool, req *CreateDepend
 	// The edge, the event and the derived status are one transaction (aihub#357).
 	// They used to be two unrelated pool.Exec calls, the second with its error
 	// discarded, so a wi could end up carrying a 'blocks' edge while still
-	// reading status='queued' — a partial write that looks like a whole one,
-	// which is the failure mode aihub#357 was filed about. The event has to be
-	// inside the same boundary for the same reason: a recorded dependency whose
-	// creation left no trace is exactly as unreadable as no dependency at all.
+	// reading status='queued' — a partial write that looks like a whole one.
+	//
+	// ⚠️ That half-write is NOT what aihub#357 reported; it was found while
+	// fixing it, and this comment used to claim otherwise. What the work item
+	// reported was "blocked_by creates no dependency edge at all", which
+	// measurement disproved (see internal/domain/create_wi_blocked_by_db_test.go
+	// for the numbers). Two comments in one commit cannot both be right about
+	// that, and the wrong one is the kind of thing later readers reason from.
+	//
+	// The transaction is still the correct shape, on its own merits: the event
+	// has to be inside the same boundary as the row, because a recorded
+	// dependency whose creation left no trace is exactly as unreadable as no
+	// dependency — and unreadability IS what aihub#357 was filed about.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return NewErr(ErrInternalError, "failed to begin transaction")

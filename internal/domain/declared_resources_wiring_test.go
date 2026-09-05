@@ -79,7 +79,7 @@ func TestCreateWorkItem_RejectsUnknownTypeBeforeTouchingDB(t *testing.T) {
 		Goal:              "probe",
 		DeclaredResources: json.RawMessage(`[{"type":"file_scope","value":"aihub:internal/a.go"}]`),
 	}
-	wi, err := CreateWorkItem(context.Background(), nil, req, "u_probe", "probe")
+	wi, err := CreateWorkItem(context.Background(), nil, req, "u_probe", "probe", nil, "")
 	if err == nil {
 		t.Fatalf("CreateWorkItem accepted a mistyped declared_resources; wi=%+v", wi)
 	}
@@ -105,7 +105,7 @@ func TestCreateWorkItem_ValidTypeIsNotRejectedByValidation(t *testing.T) {
 		Goal:              "probe",
 		DeclaredResources: json.RawMessage(`[{"type":"path","uri":"file:internal/a.go","intent":"write"}]`),
 	}
-	if _, err := CreateWorkItem(context.Background(), nil, req, "u_probe", "probe"); err != nil && err.HTTPStatus == 400 {
+	if _, err := CreateWorkItem(context.Background(), nil, req, "u_probe", "probe", nil, ""); err != nil && err.HTTPStatus == 400 {
 		t.Errorf("a legal declared_resources entry was rejected: %s", err.Message)
 	}
 }

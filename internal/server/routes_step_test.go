@@ -88,7 +88,7 @@ func seedStepTestWI(t *testing.T, pool *pgxpool.Pool, project, userID string) *d
 		Project: project,
 		Goal:    "seed wi for " + t.Name(),
 		Source:  "human",
-	}, userID, userID)
+	}, userID, userID, nil, "")
 	require.Nil(t, aerr)
 	return wi
 }

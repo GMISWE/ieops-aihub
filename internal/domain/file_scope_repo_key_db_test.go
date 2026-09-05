@@ -94,7 +94,7 @@ func seedWIWithResources(t *testing.T, pool *pgxpool.Pool, proj, uid, goal strin
 		Project: proj, Goal: goal, Scenario: "coding", WIType: &wiType,
 		DeclaredResources: declared, Source: "human",
 		ForceCreate: true, ForceReason: "aihub#261 regression fixture",
-	}, uid, "tester")
+	}, uid, "tester", nil, "")
 	if aerr != nil {
 		t.Fatalf("CreateWorkItem(%s): %v", goal, aerr)
 	}

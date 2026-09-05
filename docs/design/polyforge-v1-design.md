@@ -836,7 +836,12 @@ CREATE TABLE agent_events (
     event_type     TEXT NOT NULL,
     -- lifecycle: work_item_filed, attempt_started, attempt_completed,
     --            attempt_superseded, force_takeover, admin_force_takeover,
-    --            wi_unblocked, stop_step_partial_failure
+    --            dependency_created, wi_unblocked, stop_step_partial_failure
+    --            (dependency_created: aihub#357. Emitted on the BLOCKED wi by
+    --             both writers of wi_dependencies — CreateWorkItem's blocked_by
+    --             and CreateDependency — with payload
+    --             {blocking_wi_id, kind, via}. Paired with wi_unblocked, which
+    --             is the other end of the same relationship's life.)
     -- locks: lock_acquired, lock_released
     -- coding: commit, push, pr_opened, push_blocked_base_moved
     -- step: step_started, step_completed, step_failed, step_heartbeat,

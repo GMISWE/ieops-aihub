@@ -57,7 +57,7 @@ func TestResumeOwnLocks_NoSelfConflict(t *testing.T) {
 		Source:            "human",
 		ForceCreate:       true,
 		ForceReason:       "regression test, force past dedup",
-	}, uid, "tester")
+	}, uid, "tester", nil, "")
 	if aerr != nil {
 		t.Fatalf("CreateWorkItem: %v", aerr)
 	}
@@ -137,14 +137,14 @@ func TestResumeOwnLocks_DifferentWIStillConflicts(t *testing.T) {
 	wiA, aerr := CreateWorkItem(ctx, pool, &CreateWorkItemRequest{
 		Project: proj, Goal: "wi A holds the lock", Scenario: "coding",
 		WIType: &wiType, DeclaredResources: declared, Source: "human", ForceCreate: true, ForceReason: "regression test, force past dedup",
-	}, uid, "tester")
+	}, uid, "tester", nil, "")
 	if aerr != nil {
 		t.Fatalf("CreateWorkItem A: %v", aerr)
 	}
 	wiB, aerr := CreateWorkItem(ctx, pool, &CreateWorkItemRequest{
 		Project: proj, Goal: "wi B wants the same lock", Scenario: "coding",
 		WIType: &wiType, DeclaredResources: declared, Source: "human", ForceCreate: true, ForceReason: "regression test, force past dedup",
-	}, uid, "tester")
+	}, uid, "tester", nil, "")
 	if aerr != nil {
 		t.Fatalf("CreateWorkItem B: %v", aerr)
 	}

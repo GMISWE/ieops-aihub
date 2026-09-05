@@ -223,7 +223,10 @@ func handleCreateWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		wi, aihubErr := domain.CreateWorkItem(ctx, pool, &req, u.UserID, u.DisplayName)
+		// Roles travel with the call: blocked_by may name work items in other
+		// projects, and resolveBlockedByRef scopes that to what this caller can
+		// actually see (aihub#357 H1).
+		wi, aihubErr := domain.CreateWorkItem(ctx, pool, &req, u.UserID, u.DisplayName, u.ProjectRoles, u.Role)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
 		}

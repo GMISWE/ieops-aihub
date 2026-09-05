@@ -122,7 +122,7 @@ func TestBlockedByIsMachineReadable(t *testing.T) {
 		Goal:      "index the quarterly telemetry archive into cold storage",
 		Source:    "human",
 		BlockedBy: []string{b0.ID, b1.ID},
-	}, u, u)
+	}, u, u, nil, "")
 	require.Nil(t, aerr, "creating the blocked wi must succeed; got %+v", aerr)
 	require.Equal(t, "blocked", blocked.Status,
 		"a wi created with a non-empty blocked_by must come back status=blocked")
@@ -206,4 +206,5 @@ func TestBlockedByIsMachineReadable(t *testing.T) {
 		assert.Len(t, after, len(before),
 			"a duplicate create added no row, so it must add no event either; got %+v", after)
 	})
+
 }

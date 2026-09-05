@@ -60,7 +60,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 
@@ -89,14 +88,8 @@ type depSlugStack struct {
 
 func newDepSlugStack(t *testing.T) *depSlugStack {
 	t.Helper()
-	dbURL := os.Getenv("AIHUB_TEST_DB")
-	if dbURL == "" {
-		t.Skip("set AIHUB_TEST_DB to run this integration test")
-	}
+	pool := serverTestPool(t)
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dbURL)
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
 
 	uid := "u_" + testname.Sanitize(t.Name())
 	project := "p_" + testname.Sanitize(t.Name())
@@ -111,21 +104,7 @@ func newDepSlugStack(t *testing.T) *depSlugStack {
 		`INSERT INTO projects(name,owner_user_id) VALUES($1,$2) ON CONFLICT (name) DO NOTHING`, project, uid)
 	require.NoError(t, err)
 
-	// The project name is derived from t.Name(), so it is the same string on
-	// every run: clear the previous run's work items or their slugs and seq
-	// numbers decide this run's fixture. Order satisfies the FKs that do not
-	// cascade from work_items (agent_events, wi_step_completions, run_attempts);
-	// wi_dependencies and wi_step_state cascade and are left to the database.
-	for _, stmt := range []string{
-		`DELETE FROM wi_step_completions WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1)`,
-		`DELETE FROM agent_events WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1)`,
-		`UPDATE work_items SET current_attempt_id=NULL WHERE project=$1`,
-		`DELETE FROM run_attempts WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1)`,
-		`DELETE FROM work_items WHERE project=$1`,
-	} {
-		_, err = pool.Exec(ctx, stmt, project)
-		require.NoError(t, err, "reset failed on %q", stmt)
-	}
+	resetProjectWorkItems(t, pool, project)
 
 	ts := httptest.NewServer(NewRouter(pool, []byte("dependency-slug-test-cookie-secret")))
 	t.Cleanup(ts.Close)
@@ -143,7 +122,7 @@ func (s *depSlugStack) seedWI(t *testing.T, goal string, blockedBy ...string) *d
 		Goal:      goal,
 		Source:    "human",
 		BlockedBy: blockedBy,
-	}, s.uid, s.uid)
+	}, s.uid, s.uid, nil, "")
 	require.Nil(t, aerr, "seeding %q failed: %+v", goal, aerr)
 	require.NotEmpty(t, wi.Slug, "the fixture needs a slug to exercise slug resolution")
 	return wi
@@ -275,6 +254,52 @@ func TestDependencyEndpointsResolveSlugs(t *testing.T) {
 
 		deps := s.listDeps(t, spare.ID)
 		assert.Empty(t, deps.BlockedBy, "the edge must actually be gone, not merely reported gone")
+	})
+
+	// Accepting both reference forms invites naming ONE blocker twice, once each
+	// way, and that must not be an internal error. wi_dependencies' primary key
+	// is (blocked_wi_id, blocking_wi_id, kind), so an unguarded second INSERT is
+	// a 23505 unique violation surfaced verbatim — measured on branch head
+	// 0096962:
+	//
+	//	500 INTERNAL_ERROR "... duplicate key value violates unique constraint
+	//	                    \"wi_dependencies_pkey\" (SQLSTATE 23505)"
+	//
+	// the same "raw Postgres constraint name inside a 500" shape this work item
+	// claims to have removed from the not-found path. Removing one instance of a
+	// class while leaving behind a likelier one is worse than never claiming the
+	// class.
+	//
+	// 🔴 Asserts DEDUPLICATION, not mere tolerance. Bare `ON CONFLICT DO NOTHING`
+	// would stop the 500 and still emit two dependency_created events for one
+	// blocker; a test that only checked the status code would call that fixed.
+	t.Run("one_blocker_named_by_both_id_and_slug_is_one_edge_and_one_event", func(t *testing.T) {
+		dup := s.seedWI(t, "replace the hand-rolled retry loop in the webhook dispatcher")
+
+		status, raw := s.req(t, http.MethodPost, "/v1/work_items", fmt.Sprintf(
+			`{"project":%q,"goal":"publish weekly capacity headroom to the planning channel","blocked_by":[%q,%q]}`,
+			s.project, dup.ID, dup.Slug))
+		require.Equal(t, http.StatusCreated, status,
+			"naming one blocker by id AND by slug must collapse to one blocker, not surface as a "+
+				"duplicate-key 500: %s", raw)
+
+		var created struct {
+			ID string `json:"id"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &created))
+
+		var edges, events int
+		require.NoError(t, s.pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM wi_dependencies WHERE blocked_wi_id=$1 AND blocking_wi_id=$2`,
+			created.ID, dup.ID).Scan(&edges))
+		assert.Equal(t, 1, edges, "two references to one blocker must collapse to one edge")
+
+		require.NoError(t, s.pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM agent_events WHERE work_item_id=$1 AND event_type='dependency_created'`,
+			created.ID).Scan(&events))
+		assert.Equal(t, 1, events,
+			"one edge must produce exactly one dependency_created event, or the timeline reports the "+
+				"same blocker twice")
 	})
 
 	// The fourth instance, and one aihub#357 names in its own impact list:

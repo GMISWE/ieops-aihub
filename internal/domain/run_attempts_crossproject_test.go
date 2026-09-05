@@ -46,7 +46,7 @@ func TestCrossProjectSamePath_NoConflict(t *testing.T) {
 			Project: proj, Goal: goal, Scenario: "coding", WIType: &wiType,
 			DeclaredResources: declared, Source: "human",
 			ForceCreate: true, ForceReason: "aihub#222 cross-project regression",
-		}, uid, "tester")
+		}, uid, "tester", nil, "")
 		if aerr != nil {
 			t.Fatalf("CreateWorkItem(%s): %v", proj, aerr)
 		}

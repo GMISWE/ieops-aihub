@@ -40,7 +40,7 @@ func TestPredictConflicts_FileScopeProjectScoped(t *testing.T) {
 	holder, aerr := CreateWorkItem(ctx, pool, &CreateWorkItemRequest{
 		Project: projHolder, Goal: "holds the file lock", Scenario: "coding", WIType: &wiType,
 		DeclaredResources: declared, Source: "human", ForceCreate: true, ForceReason: "aihub#222 predict regression",
-	}, uid, "tester")
+	}, uid, "tester", nil, "")
 	if aerr != nil {
 		t.Fatalf("CreateWorkItem holder: %v", aerr)
 	}
@@ -93,7 +93,7 @@ func TestPredictConflicts_FileScopeProjectScoped(t *testing.T) {
 	otherWI, aerr := CreateWorkItem(ctx, pool, &CreateWorkItemRequest{
 		Project: projOther, Goal: "different project, same path", Scenario: "coding", WIType: &wiType,
 		DeclaredResources: declared, Source: "human", ForceCreate: true, ForceReason: "aihub#222 predict regression",
-	}, uid, "tester")
+	}, uid, "tester", nil, "")
 	if aerr != nil {
 		t.Fatalf("CreateWorkItem otherWI: %v", aerr)
 	}

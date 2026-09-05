@@ -75,7 +75,7 @@ func seedWIs(t *testing.T, pool *pgxpool.Pool, project, userID string, n int) []
 			Project: project,
 			Goal:    goals[i],
 			Source:  "human",
-		}, userID, userID)
+		}, userID, userID, nil, "")
 		require.Nil(t, aerr)
 		out[i] = wi
 	}

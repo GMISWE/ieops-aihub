@@ -100,7 +100,7 @@ func TestEmbeddingBudget_HangingProviderLeavesRoomForFallback(t *testing.T) {
 		Project: proj, Goal: "aihub#316 budget probe fixture work item", Scenario: "coding",
 		WIType: &wiType, Source: "human",
 		ForceCreate: true, ForceReason: "aihub#316 integration fixture",
-	}, uid, uid); aerr != nil {
+	}, uid, uid, nil, ""); aerr != nil {
 		t.Fatalf("seed work item: %v", aerr)
 	}
 
@@ -141,7 +141,7 @@ func TestEmbeddingBudget_HangingProviderLeavesRoomForFallback(t *testing.T) {
 				Project: proj, Goal: "aihub#316 created while the embedding backend hangs",
 				Scenario: "coding", WIType: &wiType, Source: "human",
 				ForceCreate: true, ForceReason: "aihub#316 hanging-provider positive arm",
-			}, uid, uid)
+			}, uid, uid, nil, "")
 			if aerr != nil {
 				t.Fatalf("CreateWorkItem: %v — pool.Begin ran with no budget left", aerr)
 			}
@@ -189,7 +189,7 @@ func TestEmbeddingBudget_HangingProviderLeavesRoomForFallback(t *testing.T) {
 				Project: proj, Goal: "aihub#316 negative control", Scenario: "coding",
 				WIType: &wiType, Source: "human",
 				ForceCreate: true, ForceReason: "aihub#316 hanging-provider negative control",
-			}, uid, uid)
+			}, uid, uid, nil, "")
 			if aerr == nil {
 				t.Fatal("CreateWorkItem succeeded with an unbounded hanging provider — the positive arm proves nothing")
 			}
@@ -226,7 +226,7 @@ func TestEmbeddingBudget_HangingProviderLeavesRoomForFallback(t *testing.T) {
 			Project: proj, Goal: "aihub#316 cancelled-request attribution", Scenario: "coding",
 			WIType: &wiType, Source: "human",
 			ForceCreate: true, ForceReason: "aihub#316 cancellation attribution probe",
-		}, uid, uid)
+		}, uid, uid, nil, "")
 		if aerr == nil {
 			t.Fatal("CreateWorkItem succeeded on an already-cancelled context")
 		}
@@ -281,7 +281,7 @@ func TestEmbeddingBudget_HangingProviderLeavesRoomForFallback(t *testing.T) {
 			Project: proj, Goal: "aihub#316 pool exhaustion attribution", Scenario: "coding",
 			WIType: &wiType, Source: "human",
 			ForceCreate: true, ForceReason: "aihub#316 pool exhaustion attribution probe",
-		}, uid, uid)
+		}, uid, uid, nil, "")
 		if aerr == nil {
 			t.Fatal("CreateWorkItem succeeded against a pool whose only connection is held")
 		}

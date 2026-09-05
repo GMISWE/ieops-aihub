@@ -1,0 +1,88 @@
+{
+ "_meta": {
+  "run_date": "2026-09-05",
+  "server": "http://10.146.0.34:8080",
+  "emb_model": "Qwen/Qwen3-Embedding-0.6B",
+  "memory_candidates_at_prod_min_strength": 150,
+  "memory_candidates_at_min_strength_0.001": 161,
+  "wi_ranked_candidates": 367,
+  "instrument_A_B": "pf_recall(project=aihub, query=..., type=[experience.*,rule.*,fact.*], top_k=10, fields=brief), production min_strength=0.3 -- pure pgvector path (memory.go:1832 router; no non-embeddable type named => no text complement)",
+  "instrument_C": "pf_list_work_items(project=aihub, query=..., limit=10) -- pure cosine, ORDER BY emb_vector <=> qvec",
+  "rank_meaning": "rank of the FIRST ground-truth item in the returned list; 0 = not in top 10"
+ },
+ "familyA": [
+  {"qid":"A361","qlen":266,"gt_n":3,"gt_flen":[1570,1134,1074],"rank":3,"hit_id":"mem_aEqjUNQn","hit_flen":1074},
+  {"qid":"A355","qlen":392,"gt_n":2,"gt_flen":[4682,3941],"rank":0},
+  {"qid":"A303","qlen":177,"gt_n":2,"gt_flen":[1878,1926],"rank":10,"hit_id":"mem_0NOLQfYo","hit_flen":1878},
+  {"qid":"A294","qlen":242,"gt_n":4,"gt_flen":[1137,848,862,1520],"rank":3,"hit_id":"mem_OiZ1l2jG","hit_flen":848},
+  {"qid":"A286","qlen":147,"gt_n":1,"gt_flen":[2601],"rank":0},
+  {"qid":"A269","qlen":175,"gt_n":5,"gt_flen":[2112,1873,1849,742,1655],"rank":0},
+  {"qid":"A262","qlen":83,"gt_n":2,"gt_flen":[1634,4410],"rank":7,"hit_id":"mem_kJ1R0jiV","hit_flen":4410},
+  {"qid":"A250","qlen":114,"gt_n":1,"gt_flen":[5233],"rank":0},
+  {"qid":"A245","qlen":116,"gt_n":3,"gt_flen":[1812,1614,1178],"rank":9,"hit_id":"mem_aMME68tW","hit_flen":1178},
+  {"qid":"A242","qlen":107,"gt_n":6,"gt_flen":[1443,1796,1816,1731,2601,1618],"rank":0},
+  {"qid":"A239","qlen":86,"gt_n":2,"gt_flen":[2681,2814],"rank":0},
+  {"qid":"A236","qlen":92,"gt_n":1,"gt_flen":[2545],"rank":0},
+  {"qid":"A231","qlen":109,"gt_n":2,"gt_flen":[2636,2560],"rank":0},
+  {"qid":"A224","qlen":199,"gt_n":1,"gt_flen":[2782],"rank":0},
+  {"qid":"A213","qlen":118,"gt_n":1,"gt_flen":[1676],"rank":8,"hit_id":"mem_nzy7BHuX","hit_flen":1676},
+  {"qid":"A202","qlen":123,"gt_n":1,"gt_flen":[3293],"rank":0},
+  {"qid":"A184","qlen":111,"gt_n":1,"gt_flen":[3446],"rank":0},
+  {"qid":"A131","qlen":103,"gt_n":3,"gt_flen":[2783,5479,4342],"rank":0}
+ ],
+ "familyB": [
+  {"qid":"B1-L","target":"mem_aEqjUNQn","tgt_flen":1074,"lang":"zh","shape":"long","qlen":34,"rank":0},
+  {"qid":"B1-S","target":"mem_aEqjUNQn","tgt_flen":1074,"lang":"zh","shape":"short","qlen":6,"rank":0},
+  {"qid":"B1-V","target":"mem_aEqjUNQn","tgt_flen":1074,"lang":"zh","shape":"vague","qlen":49,"rank":0},
+  {"qid":"B2-L","target":"mem_59mH9zUr","tgt_flen":1770,"lang":"zh","shape":"long","qlen":33,"rank":0},
+  {"qid":"B2-S","target":"mem_59mH9zUr","tgt_flen":1770,"lang":"zh","shape":"short","qlen":7,"rank":0},
+  {"qid":"B2-V","target":"mem_59mH9zUr","tgt_flen":1770,"lang":"zh","shape":"vague","qlen":35,"rank":0},
+  {"qid":"B3-L","target":"mem_kJ1R0jiV","tgt_flen":4410,"lang":"zh","shape":"long","qlen":29,"rank":0},
+  {"qid":"B3-S","target":"mem_kJ1R0jiV","tgt_flen":4410,"lang":"zh","shape":"short","qlen":9,"rank":3},
+  {"qid":"B3-V","target":"mem_kJ1R0jiV","tgt_flen":4410,"lang":"zh","shape":"vague","qlen":38,"rank":0},
+  {"qid":"B4-L","target":"mem_6rxQov7o","tgt_flen":742,"lang":"en","shape":"long","qlen":105,"rank":0},
+  {"qid":"B4-S","target":"mem_6rxQov7o","tgt_flen":742,"lang":"en","shape":"short","qlen":24,"rank":0},
+  {"qid":"B4-V","target":"mem_6rxQov7o","tgt_flen":742,"lang":"en","shape":"vague","qlen":123,"rank":0},
+  {"qid":"B5-L","target":"mem_HgrfUExT","tgt_flen":2416,"lang":"en","shape":"long","qlen":110,"rank":3},
+  {"qid":"B5-S","target":"mem_HgrfUExT","tgt_flen":2416,"lang":"en","shape":"short","qlen":18,"rank":0},
+  {"qid":"B5-V","target":"mem_HgrfUExT","tgt_flen":2416,"lang":"en","shape":"vague","qlen":121,"rank":0},
+  {"qid":"B6-L","target":"mem_OXMaGmjL","tgt_flen":4682,"lang":"en","shape":"long","qlen":117,"rank":0},
+  {"qid":"B6-S","target":"mem_OXMaGmjL","tgt_flen":4682,"lang":"en","shape":"short","qlen":19,"rank":0},
+  {"qid":"B6-V","target":"mem_OXMaGmjL","tgt_flen":4682,"lang":"en","shape":"vague","qlen":132,"rank":0}
+ ],
+ "familyC": [
+  {"qid":"C-366","target":"wi_7N9Z1ToR","lang":"zh","qlen":21,"rank":0},
+  {"qid":"C-341","target":"wi_LRFfV9XR","lang":"zh","qlen":26,"rank":0},
+  {"qid":"C-320","target":"wi_fdV8Ngmy","lang":"en","qlen":74,"rank":0},
+  {"qid":"C-298","target":"wi_jXs9VhoG","lang":"en","qlen":63,"rank":0},
+  {"qid":"C-276","target":"wi_135MspYc","lang":"en","qlen":79,"rank":0},
+  {"qid":"C-254","target":"wi_AvmeWtSU","lang":"zh","qlen":25,"rank":0}
+ ],
+ "controls": [
+  {"qid":"CTRL-1","shape":"gibberish","returned":10,"sim_min":0.3688,"sim_max":0.3961},
+  {"qid":"CTRL-2","shape":"offtopic-zh","returned":10,"sim_min":0.4041,"sim_max":0.4667}
+ ],
+ "real_query_similarity_bands_for_comparison": {
+  "B4-S_real_en_short": [0.3658, 0.4346],
+  "B5-L_real_en_long": [0.3592, 0.4186],
+  "B1-S_real_zh_short": [0.3723, 0.5120],
+  "B2-S_real_zh_short": [0.3790, 0.4166]
+ },
+ "retrieved_by_the_wrong_query": {
+  "_claim": "Every GT item that a query about it MISSED was observed inside the top-10 of some OTHER, unrelated query in this same run. Proves the item is indexed and reachable; its rank is not a function of the query's topic.",
+  "mem_ebytq6ql": {"missed_by":"A361 (its own wi's goal)","retrieved_by":[["B3-L inline-svg query",4],["B4-L PR-attribution query",5]]},
+  "mem_OXMaGmjL": {"missed_by":"A355, B6-L, B6-S, B6-V","retrieved_by":[["B5-S 'already_held empty'",5]]},
+  "mem_DlG8Cv7W": {"missed_by":"A250 (d2 context.Background query)","retrieved_by":[["B5-S 'already_held empty'",8]]},
+  "mem_2kXCCDrx": {"missed_by":"A224 (closed_at sort query)","retrieved_by":[["A231 d2-viewer query",4],["A131 annotation-refresh query",10]]},
+  "mem_S6DpSVo0": {"missed_by":"A286","retrieved_by":[["B4-V",3],["B6-V",2]]},
+  "mem_0oHRQo2A": {"missed_by":"A269 (pf_recall whitelist query)","retrieved_by":[["B6-L lock query",4],["B4-V",5],["B5-V",9]]},
+  "mem_zZ3xWv4g": {"missed_by":"A202","retrieved_by":[["B5-S",3],["B6-V",5],["B4-V",7]]},
+  "mem_yh83MUF6": {"missed_by":"A184","retrieved_by":[["B5-V",7],["B6-L",7]]},
+  "mem_bjzhCcmY": {"missed_by":"A236","retrieved_by":[["B5-S",1],["A355",5],["A231",8],["B6-V",8]]},
+  "mem_59mH9zUr": {"missed_by":"B2-L, B2-S, B2-V","retrieved_by":[["B6-S 'lock leak on cancel'",2],["A224",8]]},
+  "mem_aEqjUNQn": {"missed_by":"B1-L, B1-S, B1-V","retrieved_by":[["A294",1],["A236",1],["A361",3],["A242",4],["CTRL-2 beef-stew query",5]]},
+  "mem_6rxQov7o": {"missed_by":"B4-L, B4-S, B4-V","retrieved_by":[["A250 d2-timeout query",4]]},
+  "mem_tAWUmjfN": {"missed_by":"A131","retrieved_by":[["B4-V",4],["B5-S",4],["B6-V",4]]},
+  "mem_7DBHb6Wr": {"missed_by":"A242","retrieved_by":[["B4-V",6],["B5-S",9],["CTRL-1 gibberish query",9]]}
+ }
+}

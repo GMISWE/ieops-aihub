@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -1800,14 +1801,83 @@ func normalizeRecallTopK(requested int) int {
 	return requested
 }
 
-// Recall bounds the caller's page size, routes the request, and DISCLOSES the
-// bound if it fired (aihub#314).
+// resolveRecallWorkItemRef maps a work_item_id filter — an id or a slug — onto
+// the canonical work_items.id that memories.work_item_id actually holds
+// (aihub#363).
+//
+// 🔴 There is deliberately NO error branch and NO visibility scope here, and
+// both omissions are the point.
+//
+// No error branch: on no such work item this hands back the caller's own
+// reference. memories.work_item_id FK-references work_items(id), so a reference
+// that named no row cannot equal any stored value, and the filter matches
+// nothing — which is exactly the 200-with-an-empty-page an unknown canonical id
+// already produced before this function existed. Returning NOT_FOUND instead
+// would have made "this work item exists" observable through an endpoint where
+// it previously was not, and `<project>#<seq>` is a two-token namespace anyone
+// can walk. That is the enumerable oracle aihub#357's review found on
+// blocked_by, arriving by the other door. One outcome, structurally, for absent
+// and for invisible.
+//
+// No visibility scope, in contrast to resolveBlockedByRef (work_items.go),
+// because the two resolutions are used for opposite things and the difference
+// is not stylistic. There, the resolved id becomes a WRITE into the named work
+// item's project and the per-entry response is the answer, so the scope has to
+// live in that lookup or nowhere. Here the resolved id can only ever NARROW a
+// page whose scope was already fixed and enforced upstream: handleRecall
+// requires `project` and checks viewer access on it, and recallText's predicate
+// pins every row to that project plus the private/admin visibility rules. A
+// reference to a work item in another project therefore selects rows this
+// caller could already read without any work_item_id filter at all — resolving
+// it grants nothing the canonical id did not already grant, which is the
+// property the acceptance test states in both directions
+// (recall_work_item_slug_db_test.go).
+//
+// Scoping it to req.Project instead would be the strictly worse mistake it
+// looks like an improvement: a memory whose project differs from its work
+// item's is writable today (Remember validates neither against the other), and
+// such a row would silently stop matching its own canonical id — a fresh
+// instance of the silent-empty class this work item exists to close.
+func resolveRecallWorkItemRef(ctx context.Context, pool *pgxpool.Pool, ref string) (string, error) {
+	var id string
+	err := pool.QueryRow(ctx, `SELECT id FROM work_items WHERE id = $1 OR slug = $1`, ref).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ref, nil
+		}
+		// A database failure is NOT "no such work item": swallowing it here
+		// would turn a transient outage into the same silent empty page.
+		return "", err
+	}
+	return id, nil
+}
+
+// Recall resolves the work_item_id filter, bounds the caller's page size, routes
+// the request, and DISCLOSES the bound if it fired (aihub#314).
 //
 // 🔴 The disclosure is attached HERE, around the router, rather than at
 // recallRouted's four return points — for the same reason handleRecall attaches
 // unmatched_types around this call rather than inside it: four exits are four
 // chances to forget one, and the one that gets forgotten is silent.
+//
+// 🔴 The work_item_id resolution is attached here for the same reason, and it is
+// the whole of aihub#363. Three call sites build a RecallRequest — handleRecall,
+// the /ui/memories page and the wi detail page's artifact links — and every one
+// of them may hold a slug, because a slug is what every human, skill and MCP
+// caller types. Resolving at this single entry is what keeps a fourth builder
+// from reintroducing the defect by omission. Downstream comparisons then run
+// against the RESOLVED id, never the caller's raw parameter; that ordering, not
+// a special case at the point of comparison, is the shape this class of bug
+// (aihub#127 -> aihub#343 -> aihub#357 -> this) is fixed in.
 func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*RecallResponse, error) {
+	if req.WorkItemID != nil && *req.WorkItemID != "" {
+		resolved, rerr := resolveRecallWorkItemRef(ctx, pool, *req.WorkItemID)
+		if rerr != nil {
+			return nil, NewErr(ErrInternalError,
+				fmt.Sprintf("failed to resolve work_item_id filter: %v", rerr))
+		}
+		req.WorkItemID = &resolved
+	}
 	adjusted := appendIntAdjustment(nil, "top_k", req.TopK, normalizeRecallTopK(req.TopK))
 	resp, err := recallRouted(ctx, pool, req)
 	if err != nil || resp == nil {
@@ -1829,6 +1899,13 @@ func recallRouted(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (
 	// aihub#192: route to vector path when embedding is active, a query is present,
 	// and there is no work_item_id filter (wi-scoped recalls are deterministic, not
 	// semantic — skip the vector path to avoid pulling unrelated memories).
+	//
+	// ⚠️ The `req.WorkItemID == nil` term is load-bearing beyond routing:
+	// RecallWithVector's query carries no work_item_id predicate at all, so
+	// relaxing this condition would not make wi-scoped semantic recall work — it
+	// would return the whole project and silently DROP the filter, which is the
+	// same silent-wrong-answer shape aihub#363 fixed one line's walk from here.
+	// Give that path its own predicate first.
 	if !isNoopProvider(embProvider) && req.Query != "" && req.WorkItemID == nil {
 		// aihub#270: the vector path's WHERE carries `emb_vector IS NOT NULL`, so it can
 		// only ever return rows whose type is embeddable. Splitting the caller's filter
@@ -2045,6 +2122,13 @@ func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, non
 		idx = nextIdx
 	}
 
+	// The value bound here is the one Recall resolved (aihub#363), never the
+	// caller's raw parameter: memories.work_item_id FK-references
+	// work_items(id), so a slug reaching this comparison matches nothing and
+	// this endpoint answers 200 with an empty list — the same answer a work item
+	// with no memories gives, which is why the defect survived unnoticed. Any
+	// new path that reaches recallText without going through Recall must resolve
+	// first.
 	if req.WorkItemID != nil {
 		where += fmt.Sprintf(" AND work_item_id = $%d", idx)
 		args = append(args, *req.WorkItemID)

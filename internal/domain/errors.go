@@ -32,19 +32,30 @@ const (
 	ErrNotImplemented ErrCode = "NOT_IMPLEMENTED"
 
 	// HTTP 409
-	ErrConflictEpochMismatch        ErrCode = "CONFLICT_EPOCH_MISMATCH"
-	ErrAttemptPaused                ErrCode = "ATTEMPT_PAUSED"
-	ErrConflictStepInProgress       ErrCode = "CONFLICT_STEP_IN_PROGRESS"
-	ErrConflictStepAttemptMismatch  ErrCode = "CONFLICT_STEP_ATTEMPT_MISMATCH"
-	ErrConflictCASFailed            ErrCode = "CONFLICT_CAS_FAILED"
-	ErrConflictWIAlreadyClaimed     ErrCode = "CONFLICT_WI_ALREADY_CLAIMED"
-	ErrConflictHardBlock            ErrCode = "CONFLICT_HARD_BLOCK"
-	ErrConflictDuplicate            ErrCode = "CONFLICT_DUPLICATE"
-	ErrConflictCandidates           ErrCode = "CONFLICT_CANDIDATES"
-	ErrConflictSimilarMemory        ErrCode = "CONFLICT_SIMILAR_MEMORY"
-	ErrConflictDependencyCycle      ErrCode = "CONFLICT_DEPENDENCY_CYCLE"
-	ErrConflictLockTaken            ErrCode = "CONFLICT_LOCK_TAKEN"
-	ErrConflictDualWIAgent          ErrCode = "CONFLICT_DUAL_WI_AGENT"
+	ErrConflictEpochMismatch       ErrCode = "CONFLICT_EPOCH_MISMATCH"
+	ErrAttemptPaused               ErrCode = "ATTEMPT_PAUSED"
+	ErrConflictStepInProgress      ErrCode = "CONFLICT_STEP_IN_PROGRESS"
+	ErrConflictStepAttemptMismatch ErrCode = "CONFLICT_STEP_ATTEMPT_MISMATCH"
+	ErrConflictCASFailed           ErrCode = "CONFLICT_CAS_FAILED"
+	ErrConflictWIAlreadyClaimed    ErrCode = "CONFLICT_WI_ALREADY_CLAIMED"
+	ErrConflictHardBlock           ErrCode = "CONFLICT_HARD_BLOCK"
+	ErrConflictDuplicate           ErrCode = "CONFLICT_DUPLICATE"
+	ErrConflictCandidates          ErrCode = "CONFLICT_CANDIDATES"
+	ErrConflictSimilarMemory       ErrCode = "CONFLICT_SIMILAR_MEMORY"
+	ErrConflictDependencyCycle     ErrCode = "CONFLICT_DEPENDENCY_CYCLE"
+	ErrConflictLockTaken           ErrCode = "CONFLICT_LOCK_TAKEN"
+	ErrConflictDualWIAgent         ErrCode = "CONFLICT_DUAL_WI_AGENT"
+	// ErrRequiresHumanSessionMismatch has HAD NO EMITTER since aihub#359, and never really had
+	// one: its only call site was an `else if *wi.RequiresHumanSession != resolvedRHS` in
+	// FnClaimWorkItem that compared the work item row against a value just assigned from that
+	// same row, so the condition was `x != x` and the 409 was unreachable. The branch is gone;
+	// the code is kept only so historical responses and clients that switch on it still decode.
+	//
+	// The design doc still describes this 409 as a live safeguard — §8.4's claim flow, §17's
+	// error table, and §27 KL3, which names it as the mitigation that forces a mis-classified
+	// critical_bug to be corrected. That mitigation does not exist and never fired. Do not build
+	// on it. Re-emitting this code needs a second, INDEPENDENT source for the expected value;
+	// the per-wi_type defaults live in the scenario repo, which only the client can read.
 	ErrRequiresHumanSessionMismatch ErrCode = "REQUIRES_HUMAN_SESSION_MISMATCH"
 	ErrConflictVersionMismatch      ErrCode = "CONFLICT_VERSION_MISMATCH"
 	ErrConflictTerminalState        ErrCode = "CONFLICT_TERMINAL_STATE"

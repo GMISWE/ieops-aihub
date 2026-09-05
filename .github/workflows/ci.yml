@@ -2733,6 +2733,81 @@ jobs:
             || { echo "::error::only $n PASS lines from using-polyforge-manifest.test.sh, floor is 22 — checks have gone missing"; exit 1; }
           echo "using-polyforge manifest gate: $n checks passed"
 
+      # aihub#365: the THIRD hop. aihub#302 gates "plugin contents changed =>
+      # version must be bumped" and polyforge-scenario#9 added the release step
+      # that was missing from the release flow entirely — so "change merged" and
+      # "released" are both watched, and "actually in effect" was watched by
+      # nothing at all.
+      #
+      # The install cache keys on <cache>/<marketplace>/<plugin>/<version>, so
+      # versions coexist and a session binds to one when it starts. Measured
+      # 2026-09-05: installed_plugins.json recorded 1.1.23 while the live session
+      # was executing 1.1.22's skills, with live PIDs under BOTH versions'
+      # .in_use. Nothing said so, which is the same silent-failure shape as
+      # aihub#285 — the payload gate above exists for that one.
+      #
+      # Hermetic, like the two above: HOME and CLAUDE_PROJECT_DIR are redirected
+      # into mktemp trees, so the suite never reads or writes the runner's real
+      # plugin cache. No docker, no network, no database.
+      #
+      # Unlike those two this suite has NO skip path — it treats a missing
+      # python3 as a hard failure, because the hook no-ops without python3 and
+      # every assertion would then pass vacuously. The `^SKIP:` check below is
+      # kept anyway so that ADDING an escape hatch later cannot quietly turn this
+      # step into a green no-op.
+      #
+      # Sections 10-12 are mutation controls: they remove the banner, point the
+      # version read at the wrong manifest, and drop the cache-family scoping,
+      # and pass only when the corresponding positive arm goes dark. Each asserts
+      # the mutated file really differs first — "MUTATION DID NOT APPLY" is a
+      # FAIL, not a skip, because a replacement matching nothing yields a green
+      # run that means nothing. (That guard earned its keep in this very change:
+      # inserting VERSION_BANNER into the hook's ctx line silently invalidated
+      # launcher-visibility.test.sh's nc/hook-banner mutation, and the guard is
+      # what turned that into a red build instead of a vacuous pass.)
+      - name: aihub#365 plugin version drift gate
+        run: |
+          set -o pipefail
+          bash plugins/polyforge/tests/pf-session-start-version.test.sh 2>&1 | tee version_gate.log
+          for want in "PASS: drift -> SessionStart puts the version warning in front of the model" \
+                      "PASS: drift -> banner names the RUNNING version" \
+                      "PASS: drift -> banner names the RECORDED version" \
+                      "PASS: drift -> systemMessage carries the full prose" \
+                      "PASS: drift -> systemMessage names BOTH absolute paths" \
+                      "PASS: drift -> banner sits in the PREAMBLE" \
+                      "PASS: reverse -> no drift banner" \
+                      "PASS: checkout -> no drift banner" \
+                      "PASS: no-manifest -> no drift banner" \
+                      "PASS: corrupt-manifest -> no drift banner" \
+                      "PASS: two-scopes -> no drift banner" \
+                      "PASS: stale-root-manifest -> running version read from .claude-plugin/plugin.json" \
+                      "PASS: stale-root-manifest -> the stale root manifest value never reaches the model" \
+                      "PASS: budget -> the warning costs" \
+                      "PASS: budget -> a session with no drift pays exactly zero" \
+                      "PASS: both-banners -> systemMessage carries BOTH messages" \
+                      "PASS: both-banners -> worst-case payload is" \
+                      "PASS: long-versions -> the remedy sentence survives the ceiling" \
+                      "PASS: long-versions -> worst-case banner is" \
+                      "PASS: degrade-path -> mutation applied" \
+                      "PASS: degrade-path -> the version warning survives being rebuilt" \
+                      "PASS: nc/banner -> mutation applied" \
+                      "PASS: nc/banner -> with the banner removed the model is told nothing" \
+                      "PASS: nc/root-manifest -> mutation applied" \
+                      "PASS: nc/root-manifest -> reading the root manifest really does report the stale 1.1.6" \
+                      "PASS: nc/family-scope -> mutation applied" \
+                      "PASS: nc/family-scope -> without the family scope a source checkout DOES cry wolf"; do
+            grep -qF -- "$want" version_gate.log \
+              || { echo "::error::pf-session-start-version.test.sh did not report '$want' — that check did not run"; exit 1; }
+          done
+          ! grep -q '^SKIP:' version_gate.log \
+            || { echo "::error::pf-session-start-version.test.sh SKIPped — it has no skip path, so this means the suite was replaced or python3 vanished from the runner"; exit 1; }
+          ! grep -q '^FAIL' version_gate.log \
+            || { echo "::error::pf-session-start-version.test.sh reported a FAIL"; exit 1; }
+          n=$(grep -c '^PASS: ' version_gate.log || true)
+          [ "${n:-0}" -ge 54 ] \
+            || { echo "::error::only $n PASS lines from pf-session-start-version.test.sh, floor is 54 — checks have gone missing"; exit 1; }
+          echo "plugin version drift gate: $n checks passed"
+
       # aihub#272 closes half of the aihub#254 gap: pf-commit-guard.test.sh has
       # existed since the guard did and has never run in CI, so every assertion in
       # it was advisory — it turned red only when somebody remembered to invoke

@@ -378,9 +378,14 @@ fi
 
 echo
 echo "== 6. negative control: hook stops assembling the banner =="
+# COUPLED TO THE HOOK'S ctx ASSEMBLY LINE. This mutation deletes STATUS_BANNER and nothing
+# else, so it has to quote that line as it currently reads — aihub#365 inserted
+# VERSION_BANNER into it, and until this literal was updated to match, the replacement
+# matched nothing. That is caught rather than silent only because `mutate` asserts the file
+# really changed; anyone adding a third banner must update this literal too.
 mutate "nc/hook-banner" "hooks/pf-session-start" \
-  'ctx = PREAMBLE + STATUS_BANNER + LEDE' \
-  'ctx = PREAMBLE + LEDE'
+  'ctx = PREAMBLE + STATUS_BANNER + VERSION_BANNER + LEDE' \
+  'ctx = PREAMBLE + VERSION_BANNER + LEDE'
 C2="$MUT_DIR"
 if [ -n "$C2" ]; then
   W7=$(build_world "$PLUGIN_SRC" '[binary]\nchannel = "zzznope"\n' ok fail yes none no)

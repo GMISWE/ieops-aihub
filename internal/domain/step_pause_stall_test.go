@@ -56,7 +56,7 @@ func seedWI(t *testing.T, pool *pgxpool.Pool, project, userID string) *WorkItem 
 		Project: project,
 		Goal:    "seed wi for " + t.Name(),
 		Source:  "human",
-	}, userID, userID)
+	}, userID, userID, nil, "")
 	require.Nil(t, aerr)
 	return wi
 }
@@ -161,7 +161,7 @@ func seedBlockedWI(t *testing.T, pool *pgxpool.Pool, project, userID, goal strin
 	t.Helper()
 	wi, aerr := CreateWorkItem(context.Background(), pool, &CreateWorkItemRequest{
 		Project: project, Goal: goal, Source: "human",
-	}, userID, userID)
+	}, userID, userID, nil, "")
 	require.Nil(t, aerr)
 	mustExec(t, pool, `UPDATE work_items SET status='blocked' WHERE id='`+wi.ID+`'`)
 	return wi

@@ -191,10 +191,83 @@ func newWorkItemID() string {
 	return NewID("wi")
 }
 
+// resolveBlockedByRef turns one `blocked_by` entry — an id or a slug — into a
+// canonical work_items.id, and is the security boundary for that parameter
+// (aihub#357 H1).
+//
+// 🔴 The visibility scope is IN THE SQL, deliberately, and must stay there. The
+// property this has to hold is not "refuse the caller", it is that a work item
+// the caller cannot see is INDISTINGUISHABLE from one that does not exist: same
+// status, same code, same message. Expressed as a WHERE clause there is exactly
+// one outcome for both — no row — so no later branch can grow a second answer.
+// Written as `resolve, then check, then return a different error` it would take
+// one refactor to leak again, and the leak would be invisible in review.
+//
+// Why it matters here specifically: before aihub#357 `blocked_by` took only
+// canonical ids, which are unguessable. Accepting slugs makes the identifier
+// `<project>#<seq>`, a two-token namespace anyone can walk, so any per-entry
+// answer that varies with existence enumerates every project on the server.
+// Measured on the pre-fix tree with a caller holding no role on project B:
+// `blocked_by:["<B>#2"]` answered 201 and wrote a real edge into B, while
+// `blocked_by:["<B>#9999"]` answered 404 — a clean one-bit oracle for a caller
+// who is 403'd on every honest read of B.
+//
+// Scope, matching CreateDependency's policy: the work item's own project (the
+// caller must already hold writer on it to be creating anything), plus every
+// project the caller holds any role in, and everything for an admin — whose
+// ProjectRoles map is empty by design, hence the separate flag (aihub#227).
+//
+// ⚠️ This DIVERGES from CreateDependency, which answers 403 and names the
+// project for the cross-project case. That is an existence leak of the same
+// kind, and it is left alone on purpose: it is reachable only with a canonical
+// id, so it is not enumerable, and changing an authorization response shape is
+// not this work item's business. Do not "align" the two by copying the 403 back
+// here — that would reinstate the oracle.
+func resolveBlockedByRef(ctx context.Context, tx pgx.Tx, ref, ownProject string,
+	callerProjectRoles map[string]string, callerRole string) (string, *AihubError) {
+
+	visible := make([]string, 0, len(callerProjectRoles))
+	for p, role := range callerProjectRoles {
+		if role != "" {
+			visible = append(visible, p)
+		}
+	}
+
+	// Resolved on `tx` rather than through GetWorkItem's pool: taking a second
+	// pool connection while holding one is how a small MaxConns deadlocks.
+	var id string
+	err := tx.QueryRow(ctx, `
+		SELECT id FROM work_items
+		WHERE (id = $1 OR slug = $1)
+		  AND (project = $2 OR $3 OR project = ANY($4))`,
+		ref, ownProject, callerRole == "admin", visible,
+	).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The single answer for "no such work item" AND "not yours to see".
+			// Echoing the caller's own reference back is not a leak; anything
+			// derived from the row would be.
+			return "", NewErr(ErrNotFound,
+				fmt.Sprintf("blocked_by references work item %q, which does not exist", ref))
+		}
+		return "", dbErrCause(err, fmt.Sprintf("failed to resolve blocked_by entry %s", ref))
+	}
+	return id, nil
+}
+
 // CreateWorkItem inserts a new work item atomically.
 // Applies classification_rules from scenario_phase_configs, runs dedup, and
 // inserts wi_dependencies for blocked_by entries.
-func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItemRequest, callerUserID, callerDisplay string) (*WorkItem, *AihubError) {
+//
+// callerProjectRoles / callerRole scope which work items `blocked_by` may name;
+// see resolveBlockedByRef, where they are the security boundary rather than a
+// convenience. They are real parameters and not fields on the request struct on
+// purpose: the request is bound from the wire, so a field could be supplied by
+// the caller, and the compiler cannot notice a caller that forgets to overwrite
+// it. Passing nil and "" means "no project beyond req.Project is visible",
+// which is the safe reading and what every non-HTTP caller wants.
+func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItemRequest, callerUserID, callerDisplay string,
+	callerProjectRoles map[string]string, callerRole string) (*WorkItem, *AihubError) {
 	// Validate goal
 	if req.Goal == "" {
 		return nil, NewErr(ErrBadRequest, "goal is required")
@@ -366,8 +439,47 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		return nil, dbErr(err, "failed to emit work_item_filed event")
 	}
 
-	// Insert blocked_by dependencies
-	for _, blockingID := range req.BlockedBy {
+	// Insert blocked_by dependencies, one 'blocks' edge and one
+	// dependency_created event per entry (aihub#357).
+	//
+	// The event is what makes the blocking relationship machine-readable: before
+	// it, the only trace a blocked_by left on the timeline was the
+	// work_item_filed above, so "what is blocking this" lived nowhere but the
+	// prose in wi.content. It is written inside this transaction and its failure
+	// is propagated, exactly like the work_item_filed insert two statements up —
+	// an edge whose creation left no trace is as unreadable as no edge.
+	//
+	// 🔴 Deduplicated by RESOLVED id, not by the string the caller wrote. Since
+	// an entry may be an id or a slug, `[wi_x, <wi_x's slug>]` names one blocker
+	// twice, and wi_dependencies' primary key is
+	// (blocked_wi_id, blocking_wi_id, kind) — so an unguarded second INSERT is a
+	// 23505 surfaced verbatim as `500 ... duplicate key value violates unique
+	// constraint "wi_dependencies_pkey"`. Deduplicating rather than adding
+	// `ON CONFLICT DO NOTHING`: the latter would silence the 500 and still emit
+	// two dependency_created events for one edge, reporting a blocker twice on
+	// the timeline this work item exists to make trustworthy.
+	//
+	// No ON CONFLICT is needed on top of it. wiID was generated moments ago in
+	// this transaction, so no wi_dependencies row can already reference it and
+	// the only reachable duplicate is the in-request one handled here.
+	seen := make(map[string]bool, len(req.BlockedBy))
+	for _, blockingRef := range req.BlockedBy {
+		blockingID, aihubErr := resolveBlockedByRef(ctx, tx, blockingRef, req.Project, callerProjectRoles, callerRole)
+		if aihubErr != nil {
+			return nil, aihubErr
+		}
+		if blockingID == wiID {
+			// Unreachable today (the new id cannot be named by the caller) but
+			// asserted rather than assumed: wi_dependencies has a
+			// blocked_wi_id != blocking_wi_id CHECK, and tripping it here would
+			// surface as an INTERNAL_ERROR instead of a bad request.
+			return nil, NewErr(ErrBadRequest, "a work item cannot block itself")
+		}
+		if seen[blockingID] {
+			continue
+		}
+		seen[blockingID] = true
+
 		_, err = tx.Exec(ctx, `
 			INSERT INTO wi_dependencies (blocked_wi_id, blocking_wi_id, kind, created_by)
 			VALUES ($1, $2, 'blocks', $3)`,
@@ -375,6 +487,11 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		)
 		if err != nil {
 			return nil, dbErrCause(err, fmt.Sprintf("failed to create dependency for blocking_wi %s", blockingID))
+		}
+
+		if err = emitDependencyCreatedEvent(ctx, tx, wiID, blockingID, "blocks",
+			req.Project, callerUserID, callerDisplay, "create_work_item.blocked_by"); err != nil {
+			return nil, dbErrCause(err, fmt.Sprintf("failed to record dependency_created for blocking_wi %s", blockingID))
 		}
 	}
 

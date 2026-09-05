@@ -154,7 +154,7 @@ func seedFusedArm(t *testing.T, pool *pgxpool.Pool, arm string) (*domain.WorkIte
 		Project: proj,
 		Goal:    "seed wi for fused arm " + arm,
 		Source:  "human",
-	}, uid, uid)
+	}, uid, uid, nil, "")
 	require.Nil(t, aerr)
 
 	return wi, seedStepTestAttempt(t, pool, wi.ID, uid), fusedTestUser(uid, proj)

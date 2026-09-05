@@ -97,7 +97,7 @@ func seedClaimableWI(t *testing.T, pool *pgxpool.Pool, project, userID, goal, de
 	// goal-similarity dedup in CreateWorkItem would reject the later ones.
 	req.ForceCreate = true
 	req.ForceReason = "DB test fixture for " + t.Name()
-	wi, aerr := CreateWorkItem(context.Background(), pool, req, userID, userID)
+	wi, aerr := CreateWorkItem(context.Background(), pool, req, userID, userID, nil, "")
 	require.Nil(t, aerr, "seed create failed: %+v", aerr)
 	return wi
 }

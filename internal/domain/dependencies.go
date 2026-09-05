@@ -44,7 +44,13 @@ type DependenciesResponse struct {
 	BlockedBy []DependencyListEntry `json:"blocked_by"`
 }
 
-// CreateDependency inserts a new wi_dependency row after cycle detection.
+// CreateDependency inserts a new wi_dependency row after cycle detection, and
+// — in the same transaction — records a dependency_created event and derives
+// status='blocked' on the blocked work item (aihub#357).
+//
+// Callers must pass CANONICAL work item ids in req. A slug is rejected as
+// NOT_FOUND by the existence checks below, which is why handleCreateDependency
+// overwrites both ends with the resolved ids before calling in.
 func CreateDependency(ctx context.Context, pool *pgxpool.Pool, req *CreateDependencyRequest, callerUserID string, callerProjectRoles map[string]string, callerRole string) *AihubError {
 	if req.BlockedWIID == "" || req.BlockingWIID == "" {
 		return NewErr(ErrBadRequest, "blocked_wi_id and blocking_wi_id are required")
@@ -91,24 +97,110 @@ func CreateDependency(ctx context.Context, pool *pgxpool.Pool, req *CreateDepend
 		}
 	}
 
-	_, err := pool.Exec(ctx, `
+	// The edge, the event and the derived status are one transaction (aihub#357).
+	// They used to be two unrelated pool.Exec calls, the second with its error
+	// discarded, so a wi could end up carrying a 'blocks' edge while still
+	// reading status='queued' — a partial write that looks like a whole one.
+	//
+	// ⚠️ That half-write is NOT what aihub#357 reported; it was found while
+	// fixing it, and this comment used to claim otherwise. What the work item
+	// reported was "blocked_by creates no dependency edge at all", which
+	// measurement disproved (see internal/domain/create_wi_blocked_by_db_test.go
+	// for the numbers). Two comments in one commit cannot both be right about
+	// that, and the wrong one is the kind of thing later readers reason from.
+	//
+	// The transaction is still the correct shape, on its own merits: the event
+	// has to be inside the same boundary as the row, because a recorded
+	// dependency whose creation left no trace is exactly as unreadable as no
+	// dependency — and unreadability IS what aihub#357 was filed about.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return NewErr(ErrInternalError, "failed to begin transaction")
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO wi_dependencies (blocked_wi_id, blocking_wi_id, kind, created_by, note)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (blocked_wi_id, blocking_wi_id, kind) DO NOTHING`,
 		req.BlockedWIID, req.BlockingWIID, req.Kind, callerUserID, req.Note,
 	)
 	if err != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to create dependency: %v", err))
+		return dbErrCause(err, "failed to create dependency")
+	}
+
+	// Gated on the row actually being new. ON CONFLICT DO NOTHING makes a repeat
+	// call a no-op on the table, and it must be a no-op on the timeline too:
+	// emitting unconditionally would turn every retry into a second recorded
+	// blocker that no edge backs.
+	if tag.RowsAffected() == 1 {
+		if err := emitDependencyCreatedEvent(ctx, tx, req.BlockedWIID, req.BlockingWIID,
+			req.Kind, blockedProject, callerUserID, "", "create_dependency"); err != nil {
+			return dbErrCause(err, "failed to record dependency_created event")
+		}
 	}
 
 	// If kind=blocks and blocked_wi is queued, set it to blocked
 	if req.Kind == "blocks" {
-		_, _ = pool.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			UPDATE work_items SET status='blocked'
-			WHERE id=$1 AND status='queued'`, req.BlockedWIID)
+			WHERE id=$1 AND status='queued'`, req.BlockedWIID); err != nil {
+			return dbErrCause(err, "failed to derive blocked status")
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		if aerr := retryConflictErr(err, "failed to commit dependency creation"); aerr != nil { // aihub#334
+			return aerr
+		}
+		return NewErr(ErrInternalError, "failed to commit dependency creation")
 	}
 
 	return nil
+}
+
+// emitDependencyCreatedEvent records ONE dependency_created event on the
+// BLOCKED work item's timeline, so "what is blocking this" is answerable from
+// the event stream alone rather than only from prose in wi.content (aihub#357).
+//
+// It lands on the blocked wi, not the blocker, because that is the timeline
+// somebody reads when they ask why an item is not moving. The blocker's side of
+// the same edge is already reachable through ListDependencies' `blocking` list.
+//
+// 🔴 Deliberately NOT best-effort, unlike emitWIUnblockedEvent above, and the
+// asymmetry is the point. That event annotates a state change that happened
+// anyway, so losing it costs an annotation. THIS event is the machine-readable
+// record the edge exists for; dropping it silently reproduces the exact
+// condition aihub#357 was filed about — an operation that looks like it
+// succeeded and left nothing behind that a machine can read. Callers propagate
+// the error and let their transaction roll back with it.
+//
+// via names the writer, because the two paths differ in what a reader may
+// assume: "create_work_item.blocked_by" was declared as part of the blocked
+// item's own creation, "create_dependency" arrived afterwards.
+func emitDependencyCreatedEvent(ctx context.Context, tx pgx.Tx,
+	blockedWIID, blockingWIID, kind, project, callerUserID, callerDisplay, via string) error {
+	payload, err := json.Marshal(map[string]any{
+		"blocking_wi_id": blockingWIID,
+		"kind":           kind,
+		"via":            via,
+	})
+	if err != nil {
+		return err
+	}
+	// actor_display is a nullable snapshot column; CreateDependency is not given
+	// one, so store NULL rather than an empty string that would render as a
+	// blank author chip in the timeline.
+	var display *string
+	if callerDisplay != "" {
+		display = &callerDisplay
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
+		VALUES ($1, $2, $3, $4, 'dependency_created', $5, $6)`,
+		NewID("evt"), blockedWIID, callerUserID, display, payload, project,
+	)
+	return err
 }
 
 // detectCycle checks for a directed cycle using WITH RECURSIVE DFS.

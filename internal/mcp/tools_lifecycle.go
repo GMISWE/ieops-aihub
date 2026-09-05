@@ -1692,12 +1692,25 @@ func workItemFieldProps() map[string]any {
 		"parent_work_item_id":    prop("string", "Parent work item ID"),
 		"source":                 prop("string", "Source reference"),
 		"attrs":                  prop("object", "Additional attributes"),
-		"blocked_by":             prop("array", "List of blocking work item IDs"),
+		"blocked_by":             prop("array", blockedByPropDescription),
 		"content":                prop("string", contentPropDescription),
 		"force_create":           prop("boolean", "Force create bypassing duplicate check"),
 		"force_reason":           prop("string", "Reason for force create"),
 	}
 }
+
+// blockedByPropDescription is the published description of `blocked_by`.
+//
+// It states what the parameter DOES, not merely what it is a list of, because
+// aihub#357 was filed on the belief that it only flipped `status` — the
+// consequence of an unrelated read-side defect, but a belief the old one-line
+// description ("List of blocking work item IDs") did nothing to correct. A
+// schema that describes the argument's type and stays silent about its effect
+// leaves every caller to find out by measuring.
+const blockedByPropDescription = "Work items that block this one; each entry may be an id or a slug. " +
+	"Each creates a real 'blocks' dependency edge and records a dependency_created event on the new wi's " +
+	"timeline, and a non-empty list makes the new wi status=blocked. Removing the last unfinished blocker " +
+	"requeues it. An entry naming no work item is rejected and the wi is NOT created."
 
 // contentPropDescription is the published description of the `content`
 // parameter, written once and shared by pf_create_work_item,

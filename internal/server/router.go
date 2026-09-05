@@ -223,7 +223,10 @@ func handleCreateWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		wi, aihubErr := domain.CreateWorkItem(ctx, pool, &req, u.UserID, u.DisplayName)
+		// Roles travel with the call: blocked_by may name work items in other
+		// projects, and resolveBlockedByRef scopes that to what this caller can
+		// actually see (aihub#357 H1).
+		wi, aihubErr := domain.CreateWorkItem(ctx, pool, &req, u.UserID, u.DisplayName, u.ProjectRoles, u.Role)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
@@ -868,6 +871,17 @@ func handleCreateDependency(pool *pgxpool.Pool) echo.HandlerFunc {
 			}
 		}
 
+		// 🔴 Overwrite both ends with the RESOLVED canonical ids before handing
+		// the request down (aihub#357). Either end may have arrived as a slug —
+		// it is what humans and every polyforge skill type — and both are stored
+		// in columns that FK-reference work_items(id). Passing the raw values on
+		// made CreateDependency's own existence check answer 404 "blocked work
+		// item <slug> not found" for a work item this handler had just resolved
+		// two lines earlier. Same class as aihub#127/#343; see
+		// handleListDependencies below for the instance that failed silently.
+		req.BlockedWIID = blockedWI.ID
+		req.BlockingWIID = blockingWI.ID
+
 		if aihubErr := domain.CreateDependency(ctx, pool, &req, u.UserID, u.ProjectRoles, u.Role); aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
@@ -898,7 +912,25 @@ func handleListDependencies(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
-		resp, aihubErr := domain.ListDependencies(ctx, pool, wiID, u.ProjectRoles, u.Role)
+		// 🔴 wi.ID, not the caller's parameter (aihub#357). This is the read side
+		// of aihub#127, arriving one endpoint after aihub#343 fixed the same
+		// thing on GET /v1/events — and it is the instance that made aihub#357
+		// look like a missing-write bug.
+		//
+		// ListDependencies compares this value to wi_dependencies.blocked_wi_id
+		// / .blocking_wi_id, both of which FK-reference work_items(id) and so
+		// only ever hold a canonical `wi_...`. A READ has no constraint to trip:
+		// `WHERE blocked_wi_id = 'ieops#1000'` matches nothing and this handler
+		// answers 200 with two empty lists, which is indistinguishable from a
+		// work item that genuinely has no dependencies. Measured on the unfixed
+		// tree, both arms on the same work item, its edges intact in the table:
+		//
+		//	GET .../<slug>/dependencies -> {"blocking":[],"blocked_by":[]}
+		//	GET .../<wi_id>/dependencies -> the blocker
+		//
+		// The wi that reported it concluded from the first arm that
+		// pf_create_work_item's blocked_by creates no edges at all.
+		resp, aihubErr := domain.ListDependencies(ctx, pool, wi.ID, u.ProjectRoles, u.Role)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
@@ -925,8 +957,24 @@ func handleDeleteDependency(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
+		// The blocking end is resolved too, purely so the DELETE below can be
+		// keyed on canonical ids (aihub#357). No access check hangs off it: the
+		// gate is writer on the BLOCKED item's project, per the model note above
+		// handleCreateDependency, and resolving an id is not a permission.
+		// wi_dependencies rows cascade from work_items, so a blocking id that
+		// resolves to nothing cannot have a live edge either — the 404 this
+		// returns is the same verdict, reached one step earlier.
+		blockingWI, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("blocking_id"))
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+
+		// 🔴 Resolved ids, not the raw path segments. With a slug the DELETE
+		// matched no row and the caller was told "dependency not found" about a
+		// dependency that exists — the write-side twin of the silent empty read
+		// in handleListDependencies (aihub#127/#343's class).
 		if aihubErr := domain.DeleteDependency(ctx, pool,
-			c.Param("blocked_id"), c.Param("blocking_id"), c.Param("kind")); aihubErr != nil {
+			blockedWI.ID, blockingWI.ID, c.Param("kind")); aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})

@@ -32,18 +32,39 @@ package domain
 // one of the two functions below, so a future change to the budget or to the
 // composition moves all of them together or none of them.
 //
-// The direction of the fix was forced: the cap cannot be removed from the
+// The DIRECTION of the fix was forced: the cap cannot be removed from the
 // backfill, because it exists to stay under the provider's context length
 // ("input length exceeds the context length"). So the live path gains the cap.
+//
+// The VALUE was not forced — see embedInputMaxRunes below. Saying "we had no
+// choice" about both would be the same species of overclaim this change exists
+// to remove from the code's comments.
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/GMISWE/ieops-aihub/internal/embedding"
+)
 
 // embedInputMaxRunes caps the text handed to the embedding provider.
 //
 // Runes, not bytes: a byte-sliced cap would split a multi-byte rune and feed
-// the provider invalid UTF-8. The value is the one the backfill has always
-// used; the leading runes carry the gist.
-const embedInputMaxRunes = 6000
+// the provider invalid UTF-8.
+//
+// 🔴 The VALUE is inherited, not derived. It was picked for the backfill (which
+// must survive rows over 300 KB) and aihub#361 propagated it to the live path so
+// both writers embed identical bytes. The fix forced "there must be some cap";
+// it did not force this number, and nothing in internal/embedding holds a
+// provider context length to check it against. Read
+// embedding.DefaultInputMaxRunes for the full statement of what is and is not
+// known here.
+//
+// Resolved once at package init from EMBEDDING_INPUT_MAX_RUNES so the server,
+// cmd/aihub-embed-backfill and cmd/aihub-embed-verify all read the same
+// environment and cannot be pointed at different budgets. Deliberately NOT an
+// exported setter: a setter is a thing a caller can forget to call, and one
+// caller forgetting is precisely the drift this file exists to end.
+var embedInputMaxRunes = embedding.InputMaxRunes()
 
 // MemoryEmbedInput builds the exact text a memories row is embedded from.
 //

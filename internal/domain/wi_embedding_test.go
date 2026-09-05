@@ -42,12 +42,28 @@ func TestWorkItemEmbedInput_TruncatesAtRuneBudget(t *testing.T) {
 // TestMemoryEmbedInput_TruncatesAtRuneBudget is the memory-side half that did
 // not exist before aihub#361, because the memory write path had no budget to
 // test. Same rune-not-byte requirement.
-func TestMemoryEmbedInput_TruncatesAtRuneBudget(t *testing.T) {
-	short := "a short memory"
-	if got := MemoryEmbedInput(short); got != short {
-		t.Fatalf("under-budget content must pass through verbatim, got %q", got)
+// TestMemoryEmbedInputPassesUnderBudgetContentThrough pins the identity that
+// cmd/aihub-embed-verify's truncation check depends on: for content under the
+// budget, MemoryEmbedInput returns its input unchanged, so `embInput != content`
+// is a sound test for "the builder dropped something".
+//
+// Split out of TestMemoryEmbedInput_TruncatesAtRuneBudget and given a name that
+// says what it pins, because verify's comment cited the wrong test for it —
+// TestMemoryEmbedInputDoesNotTrim, which pins only that whitespace survives.
+// This commit exists to delete comments that assert something other than what
+// they point at; leaving one of its own would be the same defect.
+func TestMemoryEmbedInputPassesUnderBudgetContentThrough(t *testing.T) {
+	for _, s := range []string{"a short memory", "", "字字字", strings.Repeat("x", embedInputMaxRunes)} {
+		if got := MemoryEmbedInput(s); got != s {
+			t.Fatalf("under-budget content must pass through verbatim: %q -> %q. "+
+				"cmd/aihub-embed-verify decides whether a row was truncated by comparing the "+
+				"builder's output against its input, so any other transformation here would make "+
+				"it report every row as truncated.", s, got)
+		}
 	}
+}
 
+func TestMemoryEmbedInput_TruncatesAtRuneBudget(t *testing.T) {
 	long := strings.Repeat("字", embedInputMaxRunes+500)
 	got := MemoryEmbedInput(long)
 	if n := len([]rune(got)); n != embedInputMaxRunes {

@@ -75,8 +75,15 @@ const cosineOKThreshold = 0.98
 //
 // This is equality, not a length comparison, so it stays correct if the builder
 // ever grows a second transformation. It relies on MemoryEmbedInput being the
-// identity for under-budget content, which internal/domain's
-// TestMemoryEmbedInputDoesNotTrim pins.
+// identity for under-budget content, which is pinned by internal/domain's
+// TestMemoryEmbedInputPassesUnderBudgetContentThrough.
+//
+// That citation was wrong in the first cut of this change: it named
+// TestMemoryEmbedInputDoesNotTrim, which pins only that surrounding whitespace
+// survives — a strictly weaker property that would still hold under a builder
+// that mangled the middle of the string and made every row here read as
+// truncated. Miscited support for a correct claim is what aihub#361 is about;
+// check the test actually asserts what you say it does before pointing at it.
 func truncatedForEmbedding(content, embInput string) bool {
 	return embInput != content
 }

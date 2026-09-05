@@ -1,8 +1,10 @@
 package domain
 
 import (
+	"bytes"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -47,9 +49,17 @@ import (
 // A check scoped to the four known writers goes green the moment a fifth writer
 // is added somewhere else — which is exactly how this defect got in: the verify
 // command grew its own third copy of the cap long after the first two existed.
-// The census below classifies EVERY `.Embed(` call in non-test code as writer,
+// The census below classifies every provider call in non-test code as writer,
 // reader, provider or probe, and an unclassified one is a violation. Adding a
 // writer therefore forces a decision instead of silently forking the rule.
+//
+// 🔴 That paragraph used to say "classifies EVERY `.Embed(` call", and it was
+// false: the exemption was keyed on the FILENAME and short-circuited every call
+// in a listed file, so a fifth writer appended to internal/domain/memory_vector.go
+// passed the whole suite. The claim is now true because the unit of exemption is
+// a call site (see embedReadSite) — but the lesson is the one this wi is about:
+// a comment asserting a property is a claim to be falsified, not documentation.
+// If you change the analyser, re-read this header and make it true again.
 //
 // The builder names below are string LITERALS, not references to the production
 // identifiers. A gate that names the thing it checks by importing it agrees
@@ -81,18 +91,61 @@ var embedWriteSites = map[string][]string{
 	"cmd/aihub-embed-verify/main.go": {memoryEmbedBuilder},
 }
 
-// embedReadSites are the `.Embed(` calls that are legitimately NOT subject to
-// the writer rule, each with the reason. Being on this list is a claim someone
-// made on purpose; an unlisted call site fails the census.
-var embedReadSites = map[string]string{
-	"internal/domain/memory_vector.go": "recall QUERY side: embeds the caller's search string, not a stored row. " +
-		"A query is short by construction and is never persisted, so it shares no vector-parity obligation.",
-	"internal/domain/wi_vector.go": "work-item recall QUERY side, same reasoning as memory_vector.go.",
-	"internal/embedding/openai.go": "the provider implementation itself — EmbedBatch/Ping calling its own Embed. " +
-		"Below the layer where input composition is decided.",
-	"internal/embedding/ollama.go":             "provider implementation, same as openai.go.",
-	"internal/embedding/budget.go":             "the concurrency-budget decorator delegating to the wrapped provider.",
-	"internal/citest/embedprobe/embedprobe.go": "CI probe: embeds fixed literals to check the backend is reachable.",
+// embedReadSite exempts specific CALL SITES in a file — never the file.
+//
+// 🔴 The first cut of this gate keyed the exemption on the filename alone and
+// short-circuited the whole file on a hit. A reviewer broke it in one edit:
+// appending a complete fifth writer to internal/domain/memory_vector.go — which
+// is `package domain`, with vecToPGLiteral and the pool already in scope, so it
+// is exactly where a "refresh one row's vector" helper would land — embedded raw
+// content, wrote the vector to the database, and the entire suite stayed green.
+// That also falsified this file's own claim to classify EVERY call: it did not,
+// it classified every FILE. And a 40-character sentence bought unlimited future
+// calls in that file, which is the textbook shape of an escape hatch cheaper
+// than compliance.
+//
+// So the unit of exemption is the text argument as it appears in the source, and
+// the match is an exact multiset: a call whose argument is not on the list, a
+// second copy of a listed call, or a listed call that has disappeared are all
+// violations. A rename in provider code will trip this. That is the intended
+// price — it is one line to update, it is paid in this file next to the ban it
+// suspends, and it doubles as the anti-rot check that the list still describes
+// something real.
+type embedReadSite struct {
+	// reason is why these calls do not persist a vector.
+	reason string
+	// args is the exact source text of the text argument at every exempt call
+	// site in the file, one entry per call site.
+	args []string
+}
+
+var embedReadSites = map[string]embedReadSite{
+	"internal/domain/memory_vector.go": {
+		reason: "recall QUERY side: embeds the caller's search string, not a stored row. " +
+			"A query is short by construction and is never persisted, so it shares no vector-parity obligation.",
+		args: []string{"req.Query"},
+	},
+	"internal/domain/wi_vector.go": {
+		reason: "work-item recall QUERY side, same reasoning as memory_vector.go.",
+		args:   []string{"*f.Query"},
+	},
+	"internal/embedding/openai.go": {
+		reason: "the provider implementation itself — EmbedBatch/Ping calling its own Embed. " +
+			"Below the layer where input composition is decided.",
+		args: []string{"t", `"ping"`},
+	},
+	"internal/embedding/ollama.go": {
+		reason: "provider implementation, same as openai.go.",
+		args:   []string{"t", `"ping"`},
+	},
+	"internal/embedding/budget.go": {
+		reason: "the concurrency-budget decorator delegating to the wrapped provider.",
+		args:   []string{"text", "texts"},
+	},
+	"internal/citest/embedprobe/embedprobe.go": {
+		reason: "CI probe: embeds fixed literals to check the backend is reachable.",
+		args:   []string{"t"},
+	},
 }
 
 // embedProviderMethods are the embedding.Provider methods that take text and
@@ -135,6 +188,20 @@ const minGoFilesWalked = 60
 // fails because the callee name is not a permitted builder, which is the same
 // hole that defeated the first cut of the aihub#359 gate.
 //
+// 🔴 In BOTH forms the builder's own arguments must be bare identifiers or
+// selectors. The first cut checked only the callee's NAME and never looked
+// inside the call, so this passed:
+//
+//	Embed(ctx, MemoryEmbedInput(req.Content[:min(len(req.Content), 4000)]))
+//
+// A second, disagreeing truncation — a BYTE slice, so it also splits runes —
+// moved one parenthesis inward and the gate saw a sanctioned builder call. The
+// inline-truncation ban did not catch it either: `req.Content[:n]` is a
+// SliceExpr over a SelectorExpr, not a []rune conversion. "Wrapping the builder
+// is the same defect as re-implementing it" was true when it was written and
+// the code only enforced it from the outside; wrapping the builder's INPUT is
+// the same defect from the inside.
+//
 // A parse failure is a violation, never a silent pass.
 func analyseEmbedCallsites(rel, src string) (violations []string, embedCalls int) {
 	fset := token.NewFileSet()
@@ -149,7 +216,18 @@ func analyseEmbedCallsites(rel, src string) (violations []string, embedCalls int
 	}
 
 	allowed, isWriter := embedWriteSites[rel]
-	_, isReader := embedReadSites[rel]
+	readSite, isReader := embedReadSites[rel]
+
+	// Overlap is not a merge, it is an ambiguity, and the first cut resolved it
+	// silently in favour of the reader by short-circuiting first — so listing a
+	// write site in both tables disabled every check on it with no test
+	// objecting. Refuse instead.
+	if isWriter && isReader {
+		return []string{rel + ": appears in BOTH embedWriteSites and embedReadSites. One of the " +
+			"two is wrong and the analyser will not guess: pick the table that describes what " +
+			"the file's calls actually do. (TestEmbedWriteAndReadSitesAreDisjoint states the " +
+			"same rule over the tables themselves, so this branch is a backstop, not the gate.)"}, 0
+	}
 
 	type sited struct {
 		call   *ast.CallExpr
@@ -169,20 +247,40 @@ func analyseEmbedCallsites(rel, src string) (violations []string, embedCalls int
 		return true
 	})
 	embedCalls = len(calls)
+
+	if isReader {
+		// Per CALL SITE, not per file: compare the text arguments actually
+		// present against the exact multiset the exemption claims. A new call,
+		// a duplicated call and a vanished call are all violations.
+		got := make([]string, 0, len(calls))
+		for _, c := range calls {
+			got = append(got, exprText(c.call.Args[1]))
+		}
+		want := slices.Clone(readSite.args)
+		sort.Strings(got)
+		sort.Strings(want)
+		if !slices.Equal(got, want) {
+			return []string{rel + ": the exempted embedding calls in this file are " +
+				formatArgList(got) + ", but embedReadSites exempts exactly " + formatArgList(want) +
+				". The exemption is per call site, not per file — a file on that list is NOT a " +
+				"free pass for whatever is added to it next. If a call was renamed, update the " +
+				"list; if a call was ADDED, decide first whether it persists a vector, because " +
+				"if it does it belongs in embedWriteSites and must go through a builder."}, embedCalls
+		}
+		return nil, embedCalls
+	}
+
 	if embedCalls == 0 {
 		return nil, 0
 	}
 
-	if !isWriter && !isReader {
+	if !isWriter {
 		return []string{rel + ": calls the embedding provider but is neither in embedWriteSites " +
 			"nor in embedReadSites. Every embedding call in this repo must be classified: if it " +
 			"persists a vector, add it to embedWriteSites with the builder it may use; if it " +
 			"embeds a query or is provider/probe code, add it to embedReadSites with the " +
 			"reason. Leaving it unclassified is how the write path and the backfill forked " +
 			"their truncation rules in the first place (aihub#361)."}, embedCalls
-	}
-	if isReader {
-		return nil, embedCalls
 	}
 
 	for _, c := range calls {
@@ -209,7 +307,9 @@ func analyseEmbedCallsites(rel, src string) (violations []string, embedCalls int
 					"file may use ("+strings.Join(allowed, ", ")+"). Wrapping the builder is the "+
 					"same defect as re-implementing it: the bytes embedded stop being the bytes "+
 					"every other writer embeds.")
+				break
 			}
+			violations = append(violations, checkBuilderArgs(rel, name, a)...)
 		case *ast.Ident:
 			violations = append(violations, checkLocalSource(rel, f, c.call, a, allowed)...)
 		default:
@@ -263,12 +363,13 @@ func checkLocalSource(rel string, f *ast.File, call *ast.CallExpr, id *ast.Ident
 				"value with an inline `if len([]rune(x)) > 6000` — a second copy of the rule, " +
 				"which is what drifted."}
 		}
-		if name := calleeName(src); !slices.Contains(allowed, name) {
+		name := calleeName(src)
+		if !slices.Contains(allowed, name) {
 			return []string{rel + ": " + id.Name + " is assigned from " + describeCallee(name) +
 				", not from one of " + strings.Join(allowed, ", ") + ". A wrapper around the " +
 				"builder re-opens the divergence while every unit test of the builder stays green."}
 		}
-		return nil
+		return checkBuilderArgs(rel, name, src)
 	}
 
 	return []string{rel + ": " + id.Name + " is handed to the provider but is never assigned in " +
@@ -301,6 +402,64 @@ func assignmentsTo(blk *ast.BlockStmt, name string) []ast.Expr {
 		return true
 	})
 	return rhs
+}
+
+// checkBuilderArgs requires every argument of a sanctioned builder call to be a
+// bare identifier or selector — `content`, `req.Content`, `it.content`.
+//
+// This is the inside half of "the builder decides the text". Naming the builder
+// is worth nothing if the caller may hand it something it has already cut down:
+//
+//	MemoryEmbedInput(req.Content[:min(len(req.Content), 4000)])
+//
+// is a second truncation rule, disagreeing with the first, in a call the
+// name-only check waved through — and a BYTE slice at that, so it splits runes
+// the builder was careful not to split. Nothing about that expression is
+// detectable from the callee name, and the []rune ban misses it because it is a
+// SliceExpr over a SelectorExpr rather than a rune conversion.
+//
+// Bare-or-nothing rather than a blocklist of bad shapes: a blocklist has to
+// anticipate `x[:n]`, `strings.Cut`, `truncate(x)`, `x[a:b]`, a func literal…
+// and the census only has to miss one. A writer that genuinely needs to compute
+// its input can hoist the computation to a local and be told, correctly, that
+// the local is not a builder call — which is the conversation this gate exists
+// to force.
+func checkBuilderArgs(rel, builder string, call *ast.CallExpr) []string {
+	var out []string
+	for i, a := range call.Args {
+		switch a.(type) {
+		case *ast.Ident, *ast.SelectorExpr:
+			continue
+		}
+		out = append(out, rel+": argument "+strconv.Itoa(i+1)+" of "+builder+"(...) is `"+
+			exprText(a)+"`, which is not a bare identifier or field selector. The builder must "+
+			"receive the WHOLE value; pre-processing it at the call site is the same divergence "+
+			"as re-implementing the builder, just moved one parenthesis inward. A slice like "+
+			"`x[:4000]` is worse than it looks — it cuts BYTES, so it splits the runes the "+
+			"builder truncates carefully (aihub#361).")
+	}
+	return out
+}
+
+// exprText renders an expression back to source. go/printer rather than
+// reassembling from an ast.Inspect walk: Inspect visits a node before its
+// children, so a BinaryExpr would emit its operator ahead of its left operand
+// and any text comparison keyed on `a[:b]` would silently stop matching.
+func exprText(e ast.Expr) string {
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, token.NewFileSet(), e); err != nil {
+		// Not "" — an unprintable expression must not compare equal to an
+		// exemption entry, or it would exempt itself.
+		return "<unprintable expression>"
+	}
+	return buf.String()
+}
+
+func formatArgList(args []string) string {
+	if len(args) == 0 {
+		return "(none)"
+	}
+	return "[" + strings.Join(args, ", ") + "]"
 }
 
 // calleeName returns the bare function name of a call: `f(x)` -> "f",
@@ -543,6 +702,77 @@ func main() {
 }
 `
 
+// embedFixtureArgSliced is the F1 mutant a reviewer built and RAN against the
+// first cut of this gate, where it came back green. The builder is called by
+// its right name; the divergence moved inside the parentheses.
+const embedFixtureArgSliced = `package domain
+func Remember(ctx C, req R) {
+	if embeddableType(req.Type) {
+		if vec, err := embProvider.Embed(ctx, MemoryEmbedInput(req.Content[:min(len(req.Content), 4000)])); err != nil {
+			_ = vec
+		}
+	}
+}
+`
+
+// embedFixtureArgSlicedViaLocal is the same mutant through form (b), so fixing
+// only the inline branch cannot look like a fix.
+const embedFixtureArgSlicedViaLocal = `package main
+func main() {
+	for _, it := range todo {
+		embInput := domain.MemoryEmbedInput(it.content[:4000])
+		vec, embErr := prov.Embed(ctx, embInput)
+		_, _ = vec, embErr
+	}
+}
+`
+
+// embedFixtureArgPreTruncated is the same defect wearing a function instead of
+// a slice — the shape a blocklist of slice expressions would miss.
+const embedFixtureArgPreTruncated = `package domain
+func Remember(ctx C, req R) {
+	if vec, err := embProvider.Embed(ctx, MemoryEmbedInput(shorten(req.Content))); err != nil {
+		_ = vec
+	}
+}
+`
+
+// embedFixtureFifthWriterInReadFile is the F2 mutant: a complete writer appended
+// to a file that is on the read-site allowlist. It embeds raw content and stores
+// the vector. Under the first cut — which short-circuited the whole file on a
+// filename hit — the entire suite stayed green with this in the tree.
+const embedFixtureFifthWriterInReadFile = `package domain
+func RecallWithVector(ctx C, pool P, req R) {
+	qvec, err := embProvider.Embed(ctx, req.Query)
+	_, _ = qvec, err
+}
+func refreshMemoryEmbeddingRaw(ctx C, pool P, memID, content string) {
+	vec, err := embProvider.Embed(ctx, content)
+	if err != nil {
+		return
+	}
+	_, _ = pool.Exec(ctx, "UPDATE memories SET emb_vector = $1::vector WHERE id = $2", vecToPGLiteral(vec), memID)
+}
+`
+
+// embedFixtureReadSiteVanished is the anti-rot direction: the exemption still
+// names an argument that no longer exists. An exemption covering nothing is a
+// pre-approved hole waiting for the filename to be reused.
+const embedFixtureReadSiteVanished = `package domain
+func RecallWithVector(ctx C, req R) {
+	_ = req
+}
+`
+
+// embedFixtureReadSiteExact is the read-site good case: exactly the calls the
+// exemption claims, no more and no fewer.
+const embedFixtureReadSiteExact = `package domain
+func RecallWithVector(ctx C, req R) {
+	qvec, err := embProvider.Embed(ctx, req.Query)
+	_, _ = qvec, err
+}
+`
+
 // embedFixtureConditionalOverwrite hides the overwrite in a nested if. The
 // scope that supplies the value is the loop body, and the count within it
 // includes nested blocks, so this must still be rejected.
@@ -564,18 +794,30 @@ func main() {
 // repo. This is the whole anti-vacuity story: a clean census is evidence only
 // if the analyser can be shown to separate the two classes.
 func TestEmbedWriterAnalyserIsCalibrated(t *testing.T) {
-	bad := []struct{ name, rel, src string }{
-		{"pre-fix live path: raw content, no builder", "internal/domain/memory.go", embedFixtureBareContent},
-		{"pre-fix backfill: its own inline truncation", "cmd/aihub-embed-backfill/main.go", embedFixtureInlineTruncation},
-		{"builder result wrapped on the way to the provider", "cmd/aihub-embed-backfill/main.go", embedFixtureWrapped},
-		{"local assigned from the builder, then overwritten", "cmd/aihub-embed-backfill/main.go", embedFixtureReassigned},
-		{"memory row embedded with the work-item composer", "internal/domain/memory.go", embedFixtureWrongBuilder},
-		{"an Embed call in a file nobody classified", "internal/domain/somewhere_new.go", embedFixtureCleanInline},
-		{"overwrite hidden in a nested if", "cmd/aihub-embed-backfill/main.go", embedFixtureConditionalOverwrite},
+	bad := []struct {
+		name, rel, src string
+		wantZeroCalls  bool
+	}{
+		{name: "pre-fix live path: raw content, no builder", rel: "internal/domain/memory.go", src: embedFixtureBareContent},
+		{name: "pre-fix backfill: its own inline truncation", rel: "cmd/aihub-embed-backfill/main.go", src: embedFixtureInlineTruncation},
+		{name: "builder result wrapped on the way to the provider", rel: "cmd/aihub-embed-backfill/main.go", src: embedFixtureWrapped},
+		{name: "local assigned from the builder, then overwritten", rel: "cmd/aihub-embed-backfill/main.go", src: embedFixtureReassigned},
+		{name: "memory row embedded with the work-item composer", rel: "internal/domain/memory.go", src: embedFixtureWrongBuilder},
+		{name: "an Embed call in a file nobody classified", rel: "internal/domain/somewhere_new.go", src: embedFixtureCleanInline},
+		{name: "overwrite hidden in a nested if", rel: "cmd/aihub-embed-backfill/main.go", src: embedFixtureConditionalOverwrite},
+		// F1: the divergence moved inside the builder's parentheses.
+		{name: "builder argument byte-sliced inline", rel: "internal/domain/memory.go", src: embedFixtureArgSliced},
+		{name: "builder argument byte-sliced via a local", rel: "cmd/aihub-embed-backfill/main.go", src: embedFixtureArgSlicedViaLocal},
+		{name: "builder argument pre-truncated by another function", rel: "internal/domain/memory.go", src: embedFixtureArgPreTruncated},
+		// F2: a fifth writer appended to an exempted file. `wantZeroCalls` marks
+		// the one fixture whose whole point is that the calls are GONE, so the
+		// matcher-still-matches guard below must not fire on it.
+		{name: "fifth writer appended to a read-site file", rel: "internal/domain/memory_vector.go", src: embedFixtureFifthWriterInReadFile},
+		{name: "read-site exemption that no longer covers anything", rel: "internal/domain/memory_vector.go", src: embedFixtureReadSiteVanished, wantZeroCalls: true},
 	}
 	for _, c := range bad {
 		got, n := analyseEmbedCallsites(c.rel, c.src)
-		if n == 0 {
+		if n == 0 && !c.wantZeroCalls {
 			t.Errorf("analyser found no .Embed call at all in the fixture %q; it is matching the "+
 				"wrong shape and would report every real file clean", c.name)
 			continue
@@ -592,6 +834,9 @@ func TestEmbedWriterAnalyserIsCalibrated(t *testing.T) {
 		{"builder result passed through one local", "cmd/aihub-embed-backfill/main.go", embedFixtureCleanLocal},
 		{"two independent loops, one local name each", "cmd/aihub-embed-backfill/main.go", embedFixtureTwoLoops},
 		{"builder call hoisted above the embedding loop", "cmd/aihub-embed-backfill/main.go", embedFixtureHoisted},
+		// The read-site half of the good set: the exemption matches exactly, so
+		// a per-call-site check that could never pass is caught too.
+		{"read-site file whose calls match the exemption", "internal/domain/memory_vector.go", embedFixtureReadSiteExact},
 	}
 	for _, c := range good {
 		if got, _ := analyseEmbedCallsites(c.rel, c.src); len(got) != 0 {
@@ -707,34 +952,50 @@ func TestEveryEmbedWriteIsSourcedFromTheSharedBuilder(t *testing.T) {
 
 // TestEmbedReadSiteExemptionsAreEarned keeps the escape hatch expensive.
 //
-// embedReadSites is the only way to make the census ignore an embedding call,
-// so it is exactly where a future writer would hide — one line, no argument
-// required. Two things make that line cost something. First, the reason must be
-// a real sentence, written in this file, next to the ban it suspends. Second,
-// the entry must still describe reality: a path that no longer exists, or that
-// no longer calls the provider, is an exemption doing nothing except waiting to
-// exempt something else if the filename is ever reused.
+// embedReadSites is the only way to make the census ignore an embedding call, so
+// it is exactly where a future writer would hide. The census itself now enforces
+// the important half — the exemption covers named call sites, and both a new
+// call and a vanished one are violations there. What is left for this test is
+// the part the census cannot see: that each entry is an argument someone made,
+// not a filename someone typed, and that it names a file that exists.
 func TestEmbedReadSiteExemptionsAreEarned(t *testing.T) {
 	const minReasonLen = 40
 
 	root := filepath.Join("..", "..")
-	for rel, reason := range embedReadSites {
-		if len(reason) < minReasonLen {
+	for rel, site := range embedReadSites {
+		if len(site.reason) < minReasonLen {
 			t.Errorf("the embedReadSites entry for %s has a %d-character reason (minimum %d). "+
 				"Exempting a call from the parity census is a claim that it does not persist a "+
-				"vector; state it in a sentence a reviewer can disagree with.", rel, len(reason), minReasonLen)
+				"vector; state it in a sentence a reviewer can disagree with.", rel, len(site.reason), minReasonLen)
 		}
-		b, err := os.ReadFile(filepath.Join(root, rel))
-		if err != nil {
-			t.Errorf("the embedReadSites entry for %s names a file that cannot be read: %v. "+
+		if len(site.args) == 0 {
+			t.Errorf("the embedReadSites entry for %s exempts no call sites. An entry with an "+
+				"empty args list is the file-granular exemption this table was rewritten to "+
+				"remove: it would read as 'this file is fine' rather than 'these calls are fine'.", rel)
+		}
+		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
+			t.Errorf("the embedReadSites entry for %s names a file that does not exist: %v. "+
 				"Delete the stale exemption — leaving it means the census silently forgives "+
 				"whatever takes that path next.", rel, err)
-			continue
 		}
-		if _, n := analyseEmbedCallsites("unclassified-probe.go", string(b)); n == 0 {
-			t.Errorf("%s is exempted from the parity census but no longer calls the embedding "+
-				"provider. An exemption that covers nothing is not harmless: it is a pre-approved "+
-				"hole waiting for the next edit to that file.", rel)
+	}
+}
+
+// TestEmbedWriteAndReadSitesAreDisjoint bans a file from appearing in both
+// tables.
+//
+// Before this existed, the analyser checked the read table first and returned
+// early, so listing a write site in both disabled every writer check on it —
+// silently, with the writer entry sitting right there looking like coverage.
+// The analyser now refuses the overlap too; this test is the cheaper, earlier
+// signal, and it fires even for a file that currently has no calls at all.
+func TestEmbedWriteAndReadSitesAreDisjoint(t *testing.T) {
+	for rel := range embedWriteSites {
+		if _, both := embedReadSites[rel]; both {
+			t.Errorf("%s is in embedWriteSites AND embedReadSites. Those are contradictory "+
+				"claims — one says its calls must go through a builder, the other says they need "+
+				"not be looked at. An overlap does not merge the two, it silently picks one, and "+
+				"the one it used to pick was the exemption.", rel)
 		}
 	}
 }

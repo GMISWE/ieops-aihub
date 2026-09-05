@@ -118,13 +118,28 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 	// relative paths in different projects (e.g. a fork repo and its parent) do not
 	// collide. Prefer the wi's own project (authoritative); fall back to req.Project
 	// for a create-preview issued before the wi exists.
+	//
+	// The same lookup also resolves the CANONICAL id (aihub#357). work_item_id
+	// arrives as an id or a slug — this query already said so — but will_unlock
+	// below compares it to wi_dependencies.blocking_wi_id, a column that
+	// FK-references work_items(id) and never holds a slug. So half this function
+	// accepted a slug and the other half silently answered `"will_unlock": []`
+	// for it, which is also what a work item that unblocks nothing returns.
+	// Resolving once, here, is what keeps the two halves from disagreeing again.
 	effectiveProject := req.Project
+	canonicalWIID := ""
 	if req.WorkItemID != nil && *req.WorkItemID != "" {
-		var p string
+		canonicalWIID = *req.WorkItemID
+		var id, p string
 		if lookupErr := pool.QueryRow(ctx,
-			`SELECT project FROM work_items WHERE id=$1 OR slug=$1`, *req.WorkItemID,
-		).Scan(&p); lookupErr == nil && p != "" {
-			effectiveProject = p
+			`SELECT id, project FROM work_items WHERE id=$1 OR slug=$1`, *req.WorkItemID,
+		).Scan(&id, &p); lookupErr == nil {
+			if p != "" {
+				effectiveProject = p
+			}
+			if id != "" {
+				canonicalWIID = id
+			}
 		}
 	}
 
@@ -329,8 +344,9 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		}
 	}
 
-	// Compute will_unlock: work items that would be unblocked if this wi completes
-	if req.WorkItemID != nil && *req.WorkItemID != "" {
+	// Compute will_unlock: work items that would be unblocked if this wi completes.
+	// Keyed on canonicalWIID, never on the caller's raw reference (aihub#357).
+	if canonicalWIID != "" {
 		rows, err := pool.Query(ctx, `
 			SELECT DISTINCT wi.id, wi.slug, wi.goal
 			FROM wi_dependencies dep
@@ -346,7 +362,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			      AND dep2.blocking_wi_id != $1
 			      AND blocker.status NOT IN ('wrapped','cancelled','failed')
 			  )`,
-			*req.WorkItemID,
+			canonicalWIID,
 		)
 		if err == nil {
 			for rows.Next() {

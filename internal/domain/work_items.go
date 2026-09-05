@@ -366,8 +366,40 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		return nil, dbErr(err, "failed to emit work_item_filed event")
 	}
 
-	// Insert blocked_by dependencies
-	for _, blockingID := range req.BlockedBy {
+	// Insert blocked_by dependencies, one 'blocks' edge and one
+	// dependency_created event per entry (aihub#357).
+	//
+	// The event is what makes the blocking relationship machine-readable: before
+	// it, the only trace a blocked_by left on the timeline was the
+	// work_item_filed above, so "what is blocking this" lived nowhere but the
+	// prose in wi.content. It is written inside this transaction and its failure
+	// is propagated, exactly like the work_item_filed insert two statements up —
+	// an edge whose creation left no trace is as unreadable as no edge.
+	for _, blockingRef := range req.BlockedBy {
+		// Accept a slug the way every other work-item reference in this API
+		// does, instead of handing the raw string to a column that FK-references
+		// work_items(id): that produced a 500 carrying a raw Postgres constraint
+		// name for what is an ordinary "no such work item" (aihub#127's class).
+		// Resolved on `tx` rather than through GetWorkItem's pool so this cannot
+		// take a second connection while holding one.
+		var blockingID string
+		if err = tx.QueryRow(ctx,
+			`SELECT id FROM work_items WHERE id = $1 OR slug = $1`, blockingRef,
+		).Scan(&blockingID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, NewErr(ErrNotFound,
+					fmt.Sprintf("blocked_by references work item %q, which does not exist", blockingRef))
+			}
+			return nil, dbErrCause(err, fmt.Sprintf("failed to resolve blocked_by entry %s", blockingRef))
+		}
+		if blockingID == wiID {
+			// Unreachable today (the new id cannot be named by the caller) but
+			// asserted rather than assumed: wi_dependencies has a
+			// blocked_wi_id != blocking_wi_id CHECK, and tripping it here would
+			// surface as an INTERNAL_ERROR instead of a bad request.
+			return nil, NewErr(ErrBadRequest, "a work item cannot block itself")
+		}
+
 		_, err = tx.Exec(ctx, `
 			INSERT INTO wi_dependencies (blocked_wi_id, blocking_wi_id, kind, created_by)
 			VALUES ($1, $2, 'blocks', $3)`,
@@ -375,6 +407,11 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		)
 		if err != nil {
 			return nil, dbErrCause(err, fmt.Sprintf("failed to create dependency for blocking_wi %s", blockingID))
+		}
+
+		if err = emitDependencyCreatedEvent(ctx, tx, wiID, blockingID, "blocks",
+			req.Project, callerUserID, callerDisplay, "create_work_item.blocked_by"); err != nil {
+			return nil, dbErrCause(err, fmt.Sprintf("failed to record dependency_created for blocking_wi %s", blockingID))
 		}
 	}
 

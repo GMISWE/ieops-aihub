@@ -964,6 +964,54 @@ jobs:
           ! grep -q -- '--- SKIP' dep_direction.log \
             || { echo "::error::TestListDependencies_Direction SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#357, both halves of "a dependency edge nobody can read".
+      #
+      # The domain half guards the RECORD: creating an edge must leave a
+      # dependency_created event on the blocked wi, from either writer, and a
+      # duplicate create must add neither a row nor an event. Its first subtest
+      # is a CONTROL that passed before the fix — aihub#357 was filed as "no edge
+      # is created at all", which measurement disproved, and that arm is what
+      # keeps a red event assertion from being read as a broken fixture.
+      #
+      # The server half guards the READ, over the four places a work item can be
+      # named by slug and was then compared against a column of canonical ids:
+      # the three dependency handlers plus PredictConflicts' will_unlock. Each
+      # resolved id-or-slug for something (an access check, a project lookup) and
+      # then queried with the caller's raw parameter. The list endpoint answered
+      # 200 with two empty lists for a wi whose edges were sitting in the table,
+      # which is what made aihub#357 look like a missing write. A domain test
+      # cannot see the handler three — domain.ListDependencies is correct for
+      # every id it is handed — so these run through the real router.
+      #
+      # Subtests rather than nine functions, per aihub#334: this gate ratchets
+      # on function count. The per-arm coverage claim is the greps below.
+      - name: aihub#357 dependency machine-readability + slug-resolution DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestBlockedByIsMachineReadable$' -count=1 -v 2>&1 | tee dep_events.log
+          go test ./internal/server/ -run '^TestDependencyEndpointsResolveSlugs$' -count=1 -v 2>&1 | tee dep_slug.log
+          for want in 'TestBlockedByIsMachineReadable/control_blocked_by_writes_one_edge_per_blocker' \
+                      'TestBlockedByIsMachineReadable/blocked_by_emits_one_dependency_created_event_per_blocker' \
+                      'TestBlockedByIsMachineReadable/create_dependency_emits_the_same_event' \
+                      'TestBlockedByIsMachineReadable/recreating_an_existing_edge_emits_no_second_event'; do
+            grep -q -- "--- PASS: $want" dep_events.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); an aihub#357 arm is unguarded and a dependency can be created with no machine-readable record of it"; exit 1; }
+          done
+          for want in 'TestDependencyEndpointsResolveSlugs/list_by_slug_returns_the_same_edges_as_by_id' \
+                      'TestDependencyEndpointsResolveSlugs/list_by_slug_reports_the_blocking_end_too' \
+                      'TestDependencyEndpointsResolveSlugs/create_by_slug_creates_a_readable_edge' \
+                      'TestDependencyEndpointsResolveSlugs/delete_by_slug_removes_the_edge_created_by_slug' \
+                      'TestDependencyEndpointsResolveSlugs/predict_conflicts_will_unlock_by_slug_matches_by_id'; do
+            grep -q -- "--- PASS: $want" dep_slug.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); a dependency endpoint can answer a slug with an empty list instead of the edges it holds"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' dep_events.log \
+            || { echo "::error::an aihub#357 internal/domain test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+          ! grep -q -- '--- SKIP' dep_slug.log \
+            || { echo "::error::an aihub#357 internal/server test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#237: the launcher's update check is shell, so `go test` cannot see
       # it — a silent-pin regression there would ship green. This suite is
       # hermetic (no docker, no network: it stubs gh/curl/binary and drives

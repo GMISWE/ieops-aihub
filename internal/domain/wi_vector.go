@@ -98,7 +98,7 @@ package domain
 //     model is therefore taken from the SOURCE ROW's emb_model, never from
 //     embProvider.
 //  3. It is immune to the write-path/backfill input drift described at
-//     wiEmbedInput (both sides of the cosine are stored vectors).
+//     WorkItemEmbedInput (both sides of the cosine are stored vectors).
 //
 // 🔴 There is deliberately NO ILIKE fallback on the similar_to path. Falling
 // through would text-search for the literal string "aihub#276", which is a

@@ -96,13 +96,11 @@ func main() {
 	fmt.Printf("backfill: %d memories to embed with model=%q dims=%d\n", len(todo), model, dims)
 	var ok, fail int
 	for i, it := range todo {
-		// opt3: truncate over-long content before embedding — the model/ollama context
-		// caps input; giant memories (some >300KB) otherwise fail with "input length
-		// exceeds the context length". Embedding the leading 6000 runes captures the gist.
-		embInput := it.content
-		if rr := []rune(embInput); len(rr) > 6000 {
-			embInput = string(rr[:6000])
-		}
+		// opt3 / aihub#361: the truncation this loop used to spell out inline lives in
+		// domain.MemoryEmbedInput, which the live write path (domain.Remember) now calls
+		// too. Same function, same bytes — a backfill can no longer replace a live vector
+		// with a vector of different text under an identical emb_model.
+		embInput := domain.MemoryEmbedInput(it.content)
 		vec, embErr := prov.Embed(ctx, embInput)
 		if embErr != nil || len(vec) == 0 {
 			fail++
@@ -149,13 +147,10 @@ func main() {
 	fmt.Printf("backfill: %d work_items to embed with model=%q dims=%d\n", len(wtodo), model, dims)
 	var wok, wfail int
 	for i, r := range wtodo {
-		embInput := r.goal
-		if r.content != "" {
-			embInput += "\n\n" + r.content
-		}
-		if rr := []rune(embInput); len(rr) > 6000 {
-			embInput = string(rr[:6000])
-		}
+		// aihub#361: same shared builder as domain.embedWorkItemBestEffort. The inline
+		// version here differed from the live one in two ways nobody meant — no
+		// TrimSpace, and an unconditional separator even for an empty goal.
+		embInput := domain.WorkItemEmbedInput(r.goal, r.content)
 		vec, embErr := prov.Embed(ctx, embInput)
 		if embErr != nil || len(vec) == 0 {
 			wfail++

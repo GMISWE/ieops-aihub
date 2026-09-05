@@ -10,32 +10,15 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// wiEmbedInputMax caps the text sent to the embedding provider — the same
-// 6000-rune budget as the memory backfill (opt3 P1.5): over-long input fails
-// the provider with "input length exceeds the context length"; the leading
-// runes carry the gist.
-const wiEmbedInputMax = 6000
-
-// wiEmbedInput builds the text a work item is embedded from: goal first (the
-// densest signal), then content, truncated to wiEmbedInputMax runes.
-func wiEmbedInput(goal, content string) string {
-	s := strings.TrimSpace(goal)
-	if c := strings.TrimSpace(content); c != "" {
-		if s != "" {
-			s += "\n\n"
-		}
-		s += c
-	}
-	if rr := []rune(s); len(rr) > wiEmbedInputMax {
-		s = string(rr[:wiEmbedInputMax])
-	}
-	return s
-}
+// aihub#361: the wi embed text used to be built by a local wiEmbedInput here,
+// with cmd/aihub-embed-backfill spelling out its own near-copy (same 6000-rune
+// budget, but no TrimSpace and an unconditional "\n\n" separator). Both writers
+// now call WorkItemEmbedInput in embed_input.go, so the composition and the
+// budget cannot drift apart again.
 
 // embedWorkItemBestEffort returns the pgvector literal / model / dims for the
 // given wi text, or (nil, nil, nil) when embedding is disabled, the input is
@@ -44,7 +27,7 @@ func embedWorkItemBestEffort(ctx context.Context, goal, content string) (vecLit,
 	if isNoopProvider(embProvider) {
 		return nil, nil, nil
 	}
-	in := wiEmbedInput(goal, content)
+	in := WorkItemEmbedInput(goal, content)
 	if in == "" {
 		return nil, nil, nil
 	}

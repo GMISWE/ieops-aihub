@@ -42,6 +42,7 @@ import (
 	"strings"
 
 	"github.com/GMISWE/ieops-aihub/internal/db"
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 	"github.com/GMISWE/ieops-aihub/internal/embedding"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -53,14 +54,32 @@ import (
 // not really vectors of the same text.
 const cosineOKThreshold = 0.98
 
-// embedInputMax mirrors cmd/aihub-embed-backfill's truncation cap. The live
-// write path (domain.Remember) embeds content with NO truncation, but for any
-// row whose content is under this cap — the common case — the two paths embed
-// identical text, so applying the same cap here reproduces whichever path
-// actually wrote the row without needing to know which one it was. A row over
-// the cap is flagged in the output because the comparison is then only
-// representative of the backfill path.
-const embedInputMax = 6000
+// The text to re-embed comes from domain.MemoryEmbedInput — the same function
+// the live write path (domain.Remember) and cmd/aihub-embed-backfill call, so
+// this probe reproduces whichever of them wrote the row without needing to know
+// which one it was.
+//
+// Before aihub#361 this file carried its own `const embedInputMax = 6000`
+// mirroring the backfill, and the comment here recorded — correctly, at the
+// time — that the live path truncated nothing. That made the probe only
+// representative of the backfill path for any row over the cap, which is
+// precisely the population where the two writers disagreed. Both writers now
+// share the builder, so a row over the cap is no longer a special case for the
+// comparison; it is still reported below, because the operator should know the
+// vector under test covers a prefix of the content.
+
+// truncatedForEmbedding reports whether the builder dropped any of content on
+// the way to embInput. Derived by comparing the builder's output against its
+// input rather than by re-declaring the budget here: a second copy of that
+// number is exactly what aihub#361 was.
+//
+// This is equality, not a length comparison, so it stays correct if the builder
+// ever grows a second transformation. It relies on MemoryEmbedInput being the
+// identity for under-budget content, which internal/domain's
+// TestMemoryEmbedInputDoesNotTrim pins.
+func truncatedForEmbedding(content, embInput string) bool {
+	return embInput != content
+}
 
 func main() {
 	idFlag := flag.String("id", "", "comma-separated memory id(s) to verify; if empty, sample rows instead")
@@ -125,12 +144,9 @@ func main() {
 			continue
 		}
 
-		runes := []rune(content)
-		truncated := len(runes) > embedInputMax
-		embInput := content
-		if truncated {
-			embInput = string(runes[:embedInputMax])
-		}
+		embInput := domain.MemoryEmbedInput(content)
+		truncated := truncatedForEmbedding(content, embInput)
+		contentRunes, embInputRunes := len([]rune(content)), len([]rune(embInput))
 
 		freshVec, embErr := prov.Embed(ctx, embInput)
 		if embErr != nil || len(freshVec) == 0 {
@@ -139,7 +155,7 @@ func main() {
 			continue
 		}
 
-		fmt.Printf("id=%s project=%s type=%s content_len=%d_runes%s\n", id, memProject, memType, len(runes), truncNote(truncated))
+		fmt.Printf("id=%s project=%s type=%s content_len=%d_runes%s\n", id, memProject, memType, contentRunes, truncNote(truncated, embInputRunes))
 		fmt.Printf("  stored : emb_model=%q emb_dims=%d\n", storedModel, storedDims)
 		fmt.Printf("  current: emb_model=%q emb_dims=%d\n", curModel, curDims)
 		if storedModel != curModel {
@@ -164,14 +180,15 @@ func main() {
 		verdict := "OK — stored vector matches its row's content"
 		switch {
 		case cosine < cosineOKThreshold && truncated:
-			// A truncated row's stored vector may have been written by the live
-			// Remember path, which embeds full untruncated content — while this
-			// probe, to stay comparable across both write paths, re-embeds only
-			// the first embedInputMax runes (see embedInputMax's doc comment). A
-			// low cosine in that situation is the EXPECTED shape for a perfectly
-			// legitimate row, not evidence of drift, so it must not be reported
-			// as a root-cause finding.
-			verdict = fmt.Sprintf("INCONCLUSIVE — cosine is below threshold, but this row's content exceeds the %d-rune truncation cap applied by this probe; if the row was embedded via the live Remember path (untruncated), a low cosine here is an EXPECTED artifact of comparing truncated-fresh against untruncated-stored, not evidence of drift — this result does NOT indicate the aihub#311 root cause and should be disregarded", embedInputMax)
+			// Still inconclusive, but for a narrower reason than before
+			// aihub#361. Both writers now go through domain.MemoryEmbedInput,
+			// so a row written from now on is comparable whichever path wrote
+			// it. A row written by the live Remember path BEFORE that fix
+			// carries a full-text vector, and this probe re-embeds only the
+			// prefix — a low cosine there is the expected shape of a perfectly
+			// legitimate old row, not evidence of drift, and must not be
+			// reported as a root-cause finding.
+			verdict = fmt.Sprintf("INCONCLUSIVE — cosine is below threshold, but this row's content exceeds the %d-rune embedding budget; a row embedded by the pre-aihub#361 live Remember path carries an UNTRUNCATED vector, so a low cosine here is an expected artifact of comparing prefix-fresh against full-text-stored, not evidence of drift — this result does NOT indicate the aihub#311 root cause and should be disregarded", embInputRunes)
 			inconclusive++
 		case cosine < cosineOKThreshold:
 			verdict = "MISMATCH — stored vector does NOT correspond to this row's content (this is the aihub#311 root cause if it reproduces)"
@@ -229,9 +246,9 @@ func resolveTargets(ctx context.Context, pool *pgxpool.Pool, idFlag, project str
 	return ids, nil
 }
 
-func truncNote(truncated bool) string {
+func truncNote(truncated bool, embInputRunes int) string {
 	if truncated {
-		return fmt.Sprintf(" (truncated to %d runes for embedding, matching cmd/aihub-embed-backfill)", embedInputMax)
+		return fmt.Sprintf(" (truncated to %d runes for embedding by domain.MemoryEmbedInput, the same builder both writers use)", embInputRunes)
 	}
 	return ""
 }

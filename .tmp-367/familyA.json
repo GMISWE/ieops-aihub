@@ -1,0 +1,300 @@
+[
+ {
+  "qid": "A361",
+  "family": "A",
+  "wi": "wi_QB9GIoZX",
+  "seq": 361,
+  "query": "memory 嵌入的两个写入者截断规则不一致：线上写入 embProvider.Embed(ctx, req.Content) 裸传无上限（internal/domain/memory.go:975），而 backfill 截到 6000 runes（cmd/aihub-embed-backfill/main.go:103-104）⇒ 同一索引里混着「全文向量」与「前 6000 runes 向量」而 emb_model 戳完全相同；超长内容在写入时嵌入失败被留为 NULL，永久对向量召回不可见。wi 侧两个写入者都截，不受影响",
+  "qlen": 266,
+  "gt": [
+   "mem_ebytq6ql",
+   "mem_toFRYxEH",
+   "mem_aEqjUNQn"
+  ],
+  "gt_flen": [
+   1570,
+   1134,
+   1074
+  ]
+ },
+ {
+  "qid": "A355",
+  "family": "A",
+  "wi": "wi_Hs7xIwfK",
+  "seq": 355,
+  "query": "CancelWorkItem 一把锁都不释放 —— pause 后再 cancel，该 attempt 的 git_branch / deploy_env / worktree / tcp_port 全部永久搁浅；且 wi 一旦进入 cancelled 就没有活的 attempt 可 pause / complete / 接管，无恢复路径。aihub#264（收窄声明时释放锁）与 aihub#345（already_held 漏报）都不经过 cancel 这条路，两条均已于 2026-09-03 wrapped。⚠️ 本条原 goal 描述的正是那两条已修缺陷：它立于 09-04，误把 09-01 遗留的锁残渣读成活缺陷（#264 明写 prevention not cleanup）—— 原 goal 作废，实际交付见 content 与分支 commit 1c6df11。",
+  "qlen": 392,
+  "gt": [
+   "mem_OXMaGmjL",
+   "mem_oAwrgxRv"
+  ],
+  "gt_flen": [
+   4682,
+   3941
+  ]
+ },
+ {
+  "qid": "A303",
+  "family": "A",
+  "wi": "wi_jGl5lsB7",
+  "seq": 303,
+  "query": "72 个 DB 门控测试里 28 个不被任何 CI step 的 -run 覆盖 ⇒ 永远 SKIP、对 CI 完全不可见；顺带修 TestResumeOwnLocks_* —— 787 个 DB 测试里唯一两个非幂等的（testProject 只清 memories 不清 resource_locks/run_attempts/work_items）",
+  "qlen": 177,
+  "gt": [
+   "mem_0NOLQfYo",
+   "mem_1lG3cWE4"
+  ],
+  "gt_flen": [
+   1878,
+   1926
+  ]
+ },
+ {
+  "qid": "A294",
+  "family": "A",
+  "wi": "wi_1bXtWhQO",
+  "seq": 294,
+  "query": "Iron Rules / NL Routing / Memory 约定各有两份，分别走两条投递通道：`.polyforge/usage.md`（经 CLAUDE.md import，无上限，**到得了模型**，但 writeUsageMd 有存在性守卫 ⇒ 永不更新）和 using-polyforge 的 fragment（**有人维护，但起始位置 2,451 > 可见窗口 1,945 ⇒ 三个月来从未到达**）。两份内容已经不一致：IR1 的 worktree 路径格式一对一错",
+  "qlen": 242,
+  "gt": [
+   "mem_GGK1QkoL",
+   "mem_OiZ1l2jG",
+   "mem_RfDyeq6I",
+   "mem_NSjlvNEb"
+  ],
+  "gt_flen": [
+   1137,
+   848,
+   862,
+   1520
+  ]
+ },
+ {
+  "qid": "A286",
+  "family": "A",
+  "wi": "wi_pzozdN0Q",
+  "seq": 286,
+  "query": "pf_commit → pf_push → pf_pr 是三个独立的 MCP 往返，三个响应都是几百字节的确认、模型不用中间结果做决策 —— 93 天全量去重实测 812 个可消除轮次 = 290M token = 1.018% 计费输入（原 24h 抽样估的 0.63%/0.74% 低估了）",
+  "qlen": 147,
+  "gt": [
+   "mem_S6DpSVo0"
+  ],
+  "gt_flen": [
+   2601
+  ]
+ },
+ {
+  "qid": "A269",
+  "family": "A",
+  "wi": "wi_6RaWFwOE",
+  "seq": 269,
+  "query": "polyforge MCP 的 pf_recall 字段白名单漏了 content_truncated / content_full_len：HTTP 直连两个字段都在，经 MCP 转给 agent 后消失 ⇒ agent 拿到 800 字残文却不知道它是残的、也拿不到「按 id 取全文」的指针，PR#245 声明的逃生门从 MCP 侧结构上不可达",
+  "qlen": 175,
+  "gt": [
+   "mem_PHwFqxs3",
+   "mem_akV4zVvo",
+   "mem_0oHRQo2A",
+   "mem_6rxQov7o",
+   "mem_ghhWF8Ib"
+  ],
+  "gt_flen": [
+   2112,
+   1873,
+   1849,
+   742,
+   1655
+  ]
+ },
+ {
+  "qid": "A262",
+  "family": "A",
+  "wi": "wi_EhgpyXbd",
+  "seq": 262,
+  "query": "fix(render): 裸内联 <svg> 被 CommonMark 空行规则切断，图整张失效只剩空灰框 —— 渲染器侧根治 + 修 2 条已发布 artifact",
+  "qlen": 83,
+  "gt": [
+   "mem_nzhYjtTQ",
+   "mem_kJ1R0jiV"
+  ],
+  "gt_flen": [
+   1634,
+   4410
+  ]
+ },
+ {
+  "qid": "A250",
+  "family": "A",
+  "wi": "wi_p6IZADAE",
+  "seq": 250,
+  "query": "fix(render): 请求时 d2 编译传 context.Background() 无超时，goja 卡死即永久挂住请求 goroutine —— 加 compile deadline + 补 http.Server 超时",
+  "qlen": 114,
+  "gt": [
+   "mem_DlG8Cv7W"
+  ],
+  "gt_flen": [
+   5233
+  ]
+ },
+ {
+  "qid": "A245",
+  "family": "A",
+  "wi": "wi_R4cEWeGK",
+  "seq": 245,
+  "query": "feature(security+render): 工件查看器接入 sandboxed iframe — 需写父页面侧批注桥接 + viewer.css/diagram.js 跨帧重做（aihub#240 D3 的 P1 剩余部分）",
+  "qlen": 116,
+  "gt": [
+   "mem_QqDa2tEc",
+   "mem_4ARVgHnh",
+   "mem_aMME68tW"
+  ],
+  "gt_flen": [
+   1812,
+   1614,
+   1178
+  ]
+ },
+ {
+  "qid": "A242",
+  "family": "A",
+  "wi": "wi_JtZzxvFU",
+  "seq": 242,
+  "query": "移除全部依赖后 wi 永久卡在 blocked：pf_remove_dependency 不重算 status，导致 claim 和 cancel 两个出口同时被堵死，writer 角色无法把该 wi 推到任何终态",
+  "qlen": 107,
+  "gt": [
+   "mem_is2O4IFV",
+   "mem_UgAqyoQQ",
+   "mem_7DBHb6Wr",
+   "mem_QzUdhm9F",
+   "mem_NeGOy62W",
+   "mem_p3shJXgC"
+  ],
+  "gt_flen": [
+   1443,
+   1796,
+   1816,
+   1731,
+   2601,
+   1618
+  ]
+ },
+ {
+  "qid": "A239",
+  "family": "A",
+  "wi": "wi_atmOZeLg",
+  "seq": 239,
+  "query": "memory 参考时间一致性收尾：pf_save_artifact supersede 不携带激活三元组；recall cursor 缺少 id 次键导致同参考时间跨页丢行",
+  "qlen": 86,
+  "gt": [
+   "mem_Tz1dkZcQ",
+   "mem_wt3Fay1Z"
+  ],
+  "gt_flen": [
+   2681,
+   2814
+  ]
+ },
+ {
+  "qid": "A236",
+  "family": "A",
+  "wi": "wi_RVfgEGWu",
+  "seq": 236,
+  "query": "Mine/记忆列表偶现看不到 active 的 memory,MCP recall 与 artifact view 均正常(例 mem_7sHjIJkp / mem_mfuPOw2V)",
+  "qlen": 92,
+  "gt": [
+   "mem_bjzhCcmY"
+  ],
+  "gt_flen": [
+   2545
+  ]
+ },
+ {
+  "qid": "A231",
+  "family": "A",
+  "wi": "wi_Qm1ZmXLP",
+  "seq": 231,
+  "query": "d2 图只在 artifact viewer(methodology.spec/plan)编译成 SVG,fact./experience./rule. 等 memory 详情页不编译,架构文档里的 d2 图退化成源码",
+  "qlen": 109,
+  "gt": [
+   "mem_XZmLCdT6",
+   "mem_VhXq0vly"
+  ],
+  "gt_flen": [
+   2636,
+   2560
+  ]
+ },
+ {
+  "qid": "A224",
+  "family": "A",
+  "wi": "wi_xy5imuV7",
+  "seq": 224,
+  "query": "aihub: GET /v1/work_items 支持 closed_at 排序 —— 加 sort/order 查询参数(或对终结态默认 closed_at DESC),供 tether Work 视图 done/recent 按关闭时间倒序 + 截断时不漏最近关闭的旧 wi。现 domain.ListWorkItems 硬编码 ORDER BY created_at DESC 无排序参数。",
+  "qlen": 199,
+  "gt": [
+   "mem_2kXCCDrx"
+  ],
+  "gt_flen": [
+   2782
+  ]
+ },
+ {
+  "qid": "A213",
+  "family": "A",
+  "wi": "wi_GCd0tIFp",
+  "seq": 213,
+  "query": "polyforge 插件新增 GitHub Copilot CLI 作为第三个受支持 harness(现有 Claude Code + Codex):MCP 注册 + bootstrap 注入改道 + 平台适配文档。本次仅到 spec。",
+  "qlen": 118,
+  "gt": [
+   "mem_nzy7BHuX"
+  ],
+  "gt_flen": [
+   1676
+  ]
+ },
+ {
+  "qid": "A202",
+  "family": "A",
+  "wi": "wi_yS7HJito",
+  "seq": 202,
+  "query": "Fix pf-superpowers-bridge PostToolUse hook: E2BIG on large-file edits (payload rides in an env var, exceeds MAX_ARG_STRLEN)",
+  "qlen": 123,
+  "gt": [
+   "mem_zZ3xWv4g"
+  ],
+  "gt_flen": [
+   3293
+  ]
+ },
+ {
+  "qid": "A184",
+  "family": "A",
+  "wi": "wi_3jaW7ZRj",
+  "seq": 184,
+  "query": "chore(scenario): polyforge-coding lint 落地收尾 — 清理 #177 过期 baseline 条目 + 三模板 await_ci 按仓覆盖补 contract-lint gate 说明",
+  "qlen": 111,
+  "gt": [
+   "mem_yh83MUF6"
+  ],
+  "gt_flen": [
+   3446
+  ]
+ },
+ {
+  "qid": "A131",
+  "family": "A",
+  "wi": "wi_gsIFBsT5",
+  "seq": 131,
+  "query": "批注提交/回复/resolve 无刷新就地更新：fetch 提交 + 批注层就地重渲染，告别整页刷新（方案 spec 阶段定：PJAX-lite 复用 form 端点 vs handler 返回 JSON）",
+  "qlen": 103,
+  "gt": [
+   "mem_tAWUmjfN",
+   "mem_Hb6AZzFi",
+   "mem_ODXYuGry"
+  ],
+  "gt_flen": [
+   2783,
+   5479,
+   4342
+  ]
+ }
+]

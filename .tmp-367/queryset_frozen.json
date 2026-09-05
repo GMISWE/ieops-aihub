@@ -1,0 +1,40 @@
+{
+ "_note": "FROZEN BEFORE ANY SEMANTIC QUERY WAS RUN. Family A ground truth comes from the memories.work_item_id column (a DB fact, fetched via the deterministic pf_recall text path). Family B/C queries were written from the TARGET'S FIRST LINE ONLY -- the full bodies were deliberately not read first, to avoid lifting verbatim phrasing.",
+ "familyB": [
+  {"qid":"B1-L","target":"mem_aEqjUNQn","lang":"zh","shape":"long","query":"静态检查按函数为作用域判断变量遮蔽，会把已经修好的代码误报成有问题吗？"},
+  {"qid":"B1-S","target":"mem_aEqjUNQn","lang":"zh","shape":"short","query":"AST 闸误报"},
+  {"qid":"B1-V","target":"mem_aEqjUNQn","lang":"zh","shape":"vague","query":"我记得有人踩过一个坑：自动检查工具把没问题的代码报成有问题，好像跟同一个地方出现两次同名的东西有关"},
+
+  {"qid":"B2-L","target":"mem_59mH9zUr","lang":"zh","shape":"long","query":"在 dahe-prod 这台机器上用真实浏览器做验证，启动浏览器需要注意什么配置？"},
+  {"qid":"B2-S","target":"mem_59mH9zUr","lang":"zh","shape":"short","query":"浏览器启动失败"},
+  {"qid":"B2-V","target":"mem_59mH9zUr","lang":"zh","shape":"vague","query":"我记得之前在某台机器上跑页面截图，直接调用起不来，后来加了个什么路径才行"},
+
+  {"qid":"B3-L","target":"mem_kJ1R0jiV","lang":"zh","shape":"long","query":"markdown 里直接内联 svg 为什么会渲染失败？和空行有关系吗？"},
+  {"qid":"B3-S","target":"mem_kJ1R0jiV","lang":"zh","shape":"short","query":"内联 svg 渲染失败"},
+  {"qid":"B3-V","target":"mem_kJ1R0jiV","lang":"zh","shape":"vague","query":"我记得图在页面上显示不出来只剩个空框，跟解析规则有关，后来修性能又修出了新问题"},
+
+  {"qid":"B4-L","target":"mem_6rxQov7o","lang":"en","shape":"long","query":"Can a pull request description include an AI co-author or attribution line, or will the tooling reject it?"},
+  {"qid":"B4-S","target":"mem_6rxQov7o","lang":"en","shape":"short","query":"AI attribution trailer PR"},
+  {"qid":"B4-V","target":"mem_6rxQov7o","lang":"en","shape":"vague","query":"I vaguely remember something about the automation refusing a pull request because of a line at the bottom of the description"},
+
+  {"qid":"B5-L","target":"mem_HgrfUExT","lang":"en","shape":"long","query":"If acquire_locks comes back with an empty already_held list, does that prove the work item is holding no locks?"},
+  {"qid":"B5-S","target":"mem_HgrfUExT","lang":"en","shape":"short","query":"already_held empty"},
+  {"qid":"B5-V","target":"mem_HgrfUExT","lang":"en","shape":"vague","query":"I think there was a warning about trusting an empty response from one of the lock tools as evidence that nothing is locked"},
+
+  {"qid":"B6-L","target":"mem_OXMaGmjL","lang":"en","shape":"long","query":"Which code paths actually release the locks an attempt holds, and which ones leak them by only changing the work item?"},
+  {"qid":"B6-S","target":"mem_OXMaGmjL","lang":"en","shape":"short","query":"lock leak on cancel"},
+  {"qid":"B6-V","target":"mem_OXMaGmjL","lang":"en","shape":"vague","query":"I remember locks sometimes being left behind after a work item is closed, and the reason had to do with which record the code updated"}
+ ],
+ "controls": [
+  {"qid":"CTRL-1","target":null,"lang":"none","shape":"gibberish","query":"b74e0c19aa62f5d38e10cc47"},
+  {"qid":"CTRL-2","target":null,"lang":"zh","shape":"offtopic","query":"怎么用高压锅炖牛肉才软烂"}
+ ],
+ "familyC": [
+  {"qid":"C-366","target":"wi_7N9Z1ToR","seq":366,"lang":"zh","query":"认领 wi 的时候锁没覆盖到实际要改的文件"},
+  {"qid":"C-341","target":"wi_LRFfV9XR","seq":341,"lang":"zh","query":"Makefile 里的部署目标已经过时了，指向不存在的主机和目录"},
+  {"qid":"C-320","target":"wi_fdV8Ngmy","seq":320,"lang":"en","query":"the CI coverage ratchet gets silently mis-merged across concurrent branches"},
+  {"qid":"C-298","target":"wi_jXs9VhoG","seq":298,"lang":"en","query":"older wrapped work items are invisible in the web UI done section"},
+  {"qid":"C-276","target":"wi_135MspYc","seq":276,"lang":"en","query":"semantic search on work items returns a full page for any input including garbage"},
+  {"qid":"C-254","target":"wi_AvmeWtSU","seq":254,"lang":"zh","query":"会话启动变慢，怀疑是启动时同步拉取所有仓库导致的"}
+ ]
+}

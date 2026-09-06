@@ -86,6 +86,28 @@ func TestProjectVisibility_InvisibleIsByteIdenticalToAbsent(t *testing.T) {
 			absentStatus, absentBody := tc.absent(t)
 			invisibleStatus, invisibleBody := tc.invisible(t)
 
+			// 🔴 Did either arm reach a handler? A mistyped URL gives BOTH of
+			// them echo's route-miss, which is byte-identical and passes every
+			// assertion below while testing nothing. This suite has hit that
+			// twice — /ui/wi/:id/events (real: .../events/partial) here, and
+			// /v1/dependencies?work_item_id= in the DB file.
+			//
+			// Keyed on echo's literal default rather than on the absence of
+			// notVisibleMessage, because two endpoints in this table
+			// (the watch toggle and the events partial) answer 404 with an
+			// EMPTY body by design, and "lacks the message" would flag those.
+			// The DB file's assertNotARouteMiss can use the stronger rule
+			// because every arm there is a JSON /v1 endpoint.
+			for _, arm := range []struct {
+				which, body string
+			}{{"absent", absentBody}, {"invisible", invisibleBody}} {
+				if strings.Contains(arm.body, `"message":"Not Found"`) {
+					t.Fatalf("the %s arm got echo's route-miss body, so this case's URL is "+
+						"not registered and the equality below would compare two "+
+						"route-misses: %s", arm.which, arm.body)
+				}
+			}
+
 			if invisibleStatus != absentStatus {
 				t.Errorf("status differs: absent=%d invisible=%d — one bit is all an "+
 					"enumerator needs", absentStatus, invisibleStatus)

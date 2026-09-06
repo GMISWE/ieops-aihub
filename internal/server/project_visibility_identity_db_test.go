@@ -17,13 +17,38 @@ package server
 // to equal it — same status, same body. Not "both are 4xx". A shared status with
 // a per-endpoint message is still one distinguishable bit.
 //
-// 🔴 THE POSITIVE CONTROLS ARE NOT OPTIONAL. Every negative assertion in this
-// file is satisfied by a server that refuses everybody, so "all refusals are
-// identical" cannot by itself distinguish a fix from an outage. The arms at the
-// end assert that a member still reads their own project's work item, step,
-// events, memory and dependencies; that an admin is unchanged; and that a member
-// with an insufficient ROLE still gets an explanatory 403 rather than the shared
-// 404. Delete those and the rest of the file starts proving nothing.
+// 🔴 THE POSITIVE CONTROLS ARE NOT OPTIONAL, AND THEY DO TWO JOBS.
+//
+// The obvious one: every negative assertion here is satisfied by a server that
+// refuses everybody, so "all refusals are identical" cannot by itself tell a fix
+// from an outage. The arms at the end assert that a member still reads their own
+// project's work item, step, events, memory and dependencies; that an admin is
+// unchanged; and that a member with an insufficient ROLE still gets an
+// explanatory 403 rather than the shared 404.
+//
+// The second job is the one that was learned the hard way, and it is why there
+// must be one `positive_member_reads_own_<X>` for EVERY `identity_<X>` pair:
+//
+//	🔴 THE POSITIVE ARM IS ALSO THE PROOF THAT THE URL EXISTS.
+//
+// An identity pair compares two responses to each other. If the URL is wrong,
+// BOTH arms get echo's route-miss — same status, same body — and the pair passes
+// while testing nothing at all. Measured: identity_dependencies was written
+// against `/v1/dependencies?work_item_id=`, which is not a registered route (the
+// real one is `/v1/work_items/:id/dependencies`), and it reported PASS in CI
+// while proving nothing about the dependency endpoint. What exposed it was
+// positive_member_reads_own_dependencies going red, because a positive arm
+// asserts 200 and a route-miss cannot fake that.
+//
+// So a positive arm is load-bearing twice over, and an identity pair without one
+// is not a weaker test — it is a test that can be green for a reason unrelated
+// to its subject. That is the same requirement, from the same cause, as the
+// t.Fatal in project_visibility_identity_test.go's runner: a case with no
+// in-process visible arm must name where the coverage lives instead. Both exist
+// so that "no third arm" is impossible to reach by accident.
+//
+// belt AND braces: assertNotARouteMiss below catches the same failure directly,
+// at the reference arm, for any pair whose positive control is ever weakened.
 //
 //	AIHUB_TEST_DB=postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable \
 //	go test ./internal/server/ -run TestProjectVisibilityIdentityOverHTTP -v -count=1
@@ -86,6 +111,43 @@ func (s *visStack) seedMemoryAsAdmin(t *testing.T, project, content string) stri
 	return id
 }
 
+// assertNotARouteMiss fails when a response is echo's default for an
+// unregistered path rather than anything this server's handlers produced.
+//
+// An equality assertion between two responses is only as good as the responses
+// reaching a handler. A mistyped URL yields `404 {"message":"Not Found"}` from
+// echo itself for BOTH arms of a pair, so the pair is byte-identical and green
+// while proving nothing — the failure mode this test suite has now hit twice,
+// once per file:
+//
+//	/ui/wi/:id/events            (real: /ui/wi/:id/events/partial)
+//	/v1/dependencies?work_item_id=  (real: /v1/work_items/:id/dependencies)
+//
+// The first was caught by an anti-vacuity arm, the second by a positive control
+// going red in CI. This makes it a direct assertion instead of relying on a
+// neighbouring arm to notice, so it also protects a pair whose positive control
+// is later weakened or removed.
+//
+// Keyed on the shared not-visible wording being ABSENT rather than on the exact
+// echo body: any 404 from a real denial in this suite carries notVisibleMessage,
+// so "a 404 that does not carry it" is the signal, and that stays true if echo
+// ever changes its default text.
+func assertNotARouteMiss(t *testing.T, url string, status int, body string) {
+	t.Helper()
+	if status != http.StatusNotFound {
+		return // reached a handler; whatever it answered is the handler's answer
+	}
+	if strings.Contains(body, notVisibleMessage) {
+		return // a real denial from this server
+	}
+	t.Fatalf("GET %s answered 404 without the shared not-visible wording: %s\n\n"+
+		"That is almost certainly echo's route-miss default, i.e. this URL is not "+
+		"registered. Check it against the v1.GET/POST registrations in router.go, "+
+		"routes_memory.go, routes_step.go and routes_artifacts.go. An identity pair "+
+		"on an unrouted URL compares two route-misses to each other and passes while "+
+		"testing nothing.", url, body)
+}
+
 func TestProjectVisibilityIdentityOverHTTP(t *testing.T) {
 	s := newVisStack(t)
 
@@ -135,8 +197,8 @@ func TestProjectVisibilityIdentityOverHTTP(t *testing.T) {
 		},
 		{
 			name:      "identity_dependencies",
-			absent:    "/v1/dependencies?work_item_id=wi_thisidwasnevermintedanywhere",
-			invisible: "/v1/dependencies?work_item_id=" + secretID,
+			absent:    "/v1/work_items/wi_thisidwasnevermintedanywhere/dependencies",
+			invisible: "/v1/work_items/" + secretID + "/dependencies",
 		},
 		{
 			name:      "identity_memory",
@@ -147,6 +209,13 @@ func TestProjectVisibilityIdentityOverHTTP(t *testing.T) {
 		t.Run(arm.name, func(t *testing.T) {
 			absentStatus, absentBody := s.get(t, s.outsiderKey, arm.absent)
 			invisibleStatus, invisibleBody := s.get(t, s.outsiderKey, arm.invisible)
+
+			// 🔴 Before comparing them to each other, check that either one
+			// reached a handler at all. Two responses from a URL that is not
+			// routed are trivially identical, and the pair then passes without
+			// touching its subject — measured, see the header note.
+			assertNotARouteMiss(t, arm.absent, absentStatus, absentBody)
+			assertNotARouteMiss(t, arm.invisible, invisibleStatus, invisibleBody)
 
 			assert.Equal(t, absentStatus, invisibleStatus,
 				"status differs (absent=%d invisible=%d): one bit enumerates %s",
@@ -173,7 +242,7 @@ func TestProjectVisibilityIdentityOverHTTP(t *testing.T) {
 		edgeWI, _ := body["id"].(string)
 		require.NotEmpty(t, edgeWI)
 
-		depStatus, depBody := s.get(t, s.outsiderKey, "/v1/dependencies?work_item_id="+edgeWI)
+		depStatus, depBody := s.get(t, s.outsiderKey, "/v1/work_items/"+edgeWI+"/dependencies")
 		require.Equal(t, http.StatusOK, depStatus, "body %s", depBody)
 
 		var deps struct {
@@ -215,7 +284,7 @@ func TestProjectVisibilityIdentityOverHTTP(t *testing.T) {
 		require.Equal(t, http.StatusOK, status, "body %s", body)
 	})
 	t.Run("positive_member_reads_own_dependencies", func(t *testing.T) {
-		status, body := s.get(t, s.outsiderKey, "/v1/dependencies?work_item_id="+ownID)
+		status, body := s.get(t, s.outsiderKey, "/v1/work_items/"+ownID+"/dependencies")
 		require.Equal(t, http.StatusOK, status, "body %s", body)
 	})
 	t.Run("positive_member_reads_own_memory", func(t *testing.T) {

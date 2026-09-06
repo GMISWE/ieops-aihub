@@ -235,6 +235,7 @@ func RegisterStepRoutes(v1 *echo.Group, pool *pgxpool.Pool) {
 	v1.PATCH("/work_items/:id/renew", handleRenewLease(pool))
 	v1.POST("/work_items/:id/pause", handlePauseAttempt(pool))
 	v1.POST("/work_items/:id/acquire_locks", handleAcquireLocks(pool))
+	v1.POST("/work_items/:id/commit_locks", handleReconcileCommitLocks(pool))
 	// Phase 2 stubs
 	v1.POST("/releases/alpha", handleCutAlpha())
 	v1.POST("/releases/promote", handlePromote())
@@ -734,6 +735,35 @@ func handleAcquireLocks(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 
 		resp, aihubErr := domain.FnAcquireLocks(c.Request().Context(), pool, wi.ID, &req)
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		return c.JSON(http.StatusOK, resp)
+	}
+}
+
+// handleReconcileCommitLocks backs the commit-time lock gate (aihub#366).
+//
+// The access level is "writer", matching handleAcquireLocks: this call can take
+// locks, so it is not a read even on the request that ends up taking none.
+func handleReconcileCommitLocks(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		wiID := c.Param("id")
+		var req domain.ReconcileCommitLocksRequest
+		if err := c.Bind(&req); err != nil {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, err.Error()))
+		}
+
+		wi, err := domain.GetWorkItem(c.Request().Context(), pool, wiID)
+		if err != nil {
+			return writeError(c, domain.NewErr(domain.ErrNotFound, "work item not found"))
+		}
+		if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
+			return err
+		}
+
+		resp, aihubErr := domain.FnReconcileCommitLocks(c.Request().Context(), pool, wi.ID, &req)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
 		}

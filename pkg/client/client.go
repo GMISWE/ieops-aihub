@@ -256,6 +256,19 @@ func (c *Client) AcquireLocks(ctx context.Context, wiID string, body any) (map[s
 	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/acquire_locks", body, &out)
 }
 
+// ReconcileCommitLocks calls POST /v1/work_items/:wiID/commit_locks — the
+// commit-time gate (aihub#366). body carries the attempt credentials, the repo,
+// and the paths the pending commit contains.
+//
+// Unlike AcquireLocks it derives nothing from declared_resources: the server
+// compares the paths against the file_scope locks the attempt actually holds,
+// acquires the difference, and answers 409 CONFLICT_LOCK_TAKEN — with the
+// holders in `details` — when the difference belongs to somebody else.
+func (c *Client) ReconcileCommitLocks(ctx context.Context, wiID string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/commit_locks", body, &out)
+}
+
 // ─── Events ────────────────────────────────────────────────────────────────
 
 // EmitEvent calls POST /v1/events.

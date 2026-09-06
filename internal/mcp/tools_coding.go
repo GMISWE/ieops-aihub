@@ -31,6 +31,114 @@ func (s *Server) emitCodingEvent(ctx context.Context, wiID, eventType string, pa
 	_, _ = s.client.EmitEvent(ctx, body)
 }
 
+// commitLockGate is the client half of the commit-time lock gate (aihub#366):
+// it hands the paths a pending commit contains to the server, which compares
+// them against the file_scope locks THIS attempt actually holds, acquires the
+// difference, and refuses when the difference belongs to somebody else.
+//
+// It is stateful because the outcome has to reach the tool response. A gate that
+// silently widened the attempt's lock set would be a second version of the
+// defect this closes — an action whose real effect is not visible where it is
+// invoked — so what it took is reported back alongside the commit sha.
+type commitLockGate struct {
+	s    *Server
+	wiID string
+	repo string
+
+	ran      bool
+	acquired []string
+	checked  int
+}
+
+func (s *Server) newCommitLockGate(wiID, repo string) *commitLockGate {
+	return &commitLockGate{s: s, wiID: wiID, repo: repo}
+}
+
+// run is the coding.CommitGate implementation.
+//
+// 🔴 FAIL-CLOSED IN EVERY BRANCH, and that is a deliberate trade rather than an
+// oversight. "The gate could not run" and "the gate ran and found nothing" are
+// different facts, and collapsing the first into the second is the shape that
+// makes a gate look present while being absent. The escape hatch is real but
+// expensive — committing by hand with git also loses the commit event, and
+// pf_push / pf_ship / pf_wrap still need the state file — so bypassing costs
+// more than retrying, which is the property that keeps people inside the gate.
+//
+// ⚠️ AN EARLIER VERSION OF THIS PASSED WHEN THE STATE FILE WAS MISSING, on the
+// stated grounds that it would otherwise break pf_commit in a worktree whose
+// work item has been wrapped. That reason was FALSE, and the test that now
+// stands in its place is what disproved it: both callers resolve the worktree
+// through coding.WorktreePath, which reads the same state file and fails first,
+// so pf_commit has never worked without one. The branch was therefore not a
+// concession to a real case — it was a way to switch the gate off by deleting a
+// file, guarding nothing. Deleting the state file now costs the whole tool,
+// which is where a bypass has to cost more than compliance.
+func (g *commitLockGate) run(ctx context.Context, paths []string) error {
+	sf, err := config.ResolveStateFile(g.wiID)
+	if err != nil {
+		return fmt.Errorf("the commit-time lock check could not read this work item's attempt "+
+			"credentials, so nothing was committed: %w", err)
+	}
+
+	res, err := g.s.client.ReconcileCommitLocks(ctx, sf.WIID, map[string]any{
+		"attempt_id":     sf.AttemptID,
+		"claim_epoch":    sf.ClaimEpoch,
+		"session_secret": sf.SessionSecret,
+		"repo":           g.repo,
+		"paths":          paths,
+	})
+	if err != nil {
+		if isAihubCode(err, "CONFLICT_LOCK_TAKEN") {
+			return fmt.Errorf("commit refused: %w", err)
+		}
+		return fmt.Errorf("the commit-time lock check could not be completed, so nothing was committed "+
+			"(fail-closed on purpose: \"could not check\" is not \"checked and clear\"; the files are still "+
+			"staged, so retrying costs nothing): %w", err)
+	}
+
+	g.ran = true
+	g.checked = len(paths)
+	g.acquired = jsonStrSlice(res["acquired_paths"])
+	return nil
+}
+
+// report writes the gate's outcome into a tool response.
+func (g *commitLockGate) report(out map[string]any) map[string]any {
+	switch {
+	case !g.ran:
+		// runCommitGate never reached it: nothing was staged, so no commit was
+		// created and there was no change set to protect.
+		out["lock_gate"] = "not_run"
+		out["lock_gate_detail"] = "no staged changes, so no files needed locking"
+	case len(g.acquired) > 0:
+		out["lock_gate"] = "acquired"
+		out["locks_acquired_for"] = g.acquired
+		out["lock_gate_detail"] = fmt.Sprintf(
+			"%d of %d changed file(s) were outside this attempt's lock set and are now locked by it until the attempt ends",
+			len(g.acquired), g.checked)
+	default:
+		out["lock_gate"] = "covered"
+		out["lock_gate_detail"] = fmt.Sprintf(
+			"all %d changed file(s) were already covered; no lock was taken", g.checked)
+	}
+	return out
+}
+
+// jsonStrSlice pulls a []string out of a decoded JSON field.
+func jsonStrSlice(v any) []string {
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, e := range raw {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func (s *Server) registerCodingTools() {
 	// pf_diff
 	s.mcp.AddTool(&sdkmcp.Tool{
@@ -72,8 +180,16 @@ func (s *Server) registerCodingTools() {
 
 	// pf_commit
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_commit",
-		Description: "Commit staged changes in the work item's worktree and emit a commit event on the wi timeline.",
+		Name: "pf_commit",
+		Description: "Commit staged changes in the work item's worktree and emit a commit event on the wi timeline. " +
+			"⚠️ THIS CALL CAN ACQUIRE LOCKS — a heavier semantic than \"commit\" normally carries, so read this before using it. " +
+			"Before committing it lists the files the commit would contain and compares them against the file_scope locks THIS ATTEMPT ACTUALLY HOLDS " +
+			"(the live lock set, NOT declared_resources — the two routinely disagree). " +
+			"Any changed file no held lock covers is locked for this attempt automatically and stays locked until the attempt ends, so committing WIDENS your lock set. " +
+			"If another live attempt already holds one of those files the commit is REFUSED with CONFLICT_LOCK_TAKEN: nothing is committed, the files stay staged, and the error names every blocked path plus its holder — actor, work item and attempt. " +
+			"When every changed file is already covered, no lock is taken and nothing is written. " +
+			"The response says which happened in `lock_gate`: covered | acquired (with locks_acquired_for) | not_run (nothing was staged, so no commit was made). " +
+			"There is no pass-through: a lock check that cannot reach the server fails the commit rather than allowing it.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
 			"work_item_id":   prop("string", "Work item ID"),
@@ -106,7 +222,8 @@ func (s *Server) registerCodingTools() {
 
 		paths := strSliceArg(args, "paths")
 
-		sha, err := coding.GitCommit(ctx, worktreePath, message, paths)
+		gate := s.newCommitLockGate(wiID, repo)
+		sha, err := coding.GitCommitGated(ctx, worktreePath, message, paths, gate.run)
 		if err != nil {
 			return errResult(err)
 		}
@@ -116,11 +233,11 @@ func (s *Server) registerCodingTools() {
 			"message": message,
 			"files":   paths,
 		})
-		return jsonResult(map[string]any{
+		return jsonResult(gate.report(map[string]any{
 			"sha":   sha,
 			"repo":  repo,
 			"files": paths,
-		})
+		}))
 	})
 
 	// pf_push
@@ -247,7 +364,14 @@ func (s *Server) registerCodingTools() {
 			"On failure the response is a JSON object, not an error string: \"stage\" says which of " +
 			"commit/push/pr failed and \"side_effects\" lists what already happened (typically a " +
 			"local commit that was never pushed). Reach for pf_commit / pf_push / pf_pr separately " +
-			"only when you need to inspect state between the steps.",
+			"only when you need to inspect state between the steps. " +
+			"⚠️ AND ITS COMMIT STAGE ACQUIRES LOCKS, exactly as pf_commit's does: every file the commit " +
+			"contains that this attempt does not already hold a file_scope lock for is locked for it " +
+			"automatically and stays locked until the attempt ends. A file held by another live attempt " +
+			"stops the whole call at stage=\"commit\" with CONFLICT_LOCK_TAKEN — nothing committed, nothing " +
+			"pushed, no PR — and the error names every blocked path and its holder. `lock_gate` in the " +
+			"response reports covered | acquired | not_run, and there is no pass-through: a check that " +
+			"cannot reach the server fails the ship rather than allowing it.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
 			"work_item_id":   prop("string", "Work item ID"),
@@ -290,8 +414,9 @@ func (s *Server) registerCodingTools() {
 		}
 
 		paths := strSliceArg(args, "paths")
+		gate := s.newCommitLockGate(wiID, repo)
 		res, shipErr := coding.Ship(ctx, sf, repo, strArg(args, "workspace_root"),
-			message, paths, prTitle, prBody, strArg(args, "pr_base"))
+			message, paths, prTitle, prBody, strArg(args, "pr_base"), gate.run)
 
 		// Emit the events the individual tools would have emitted for the stages
 		// that actually ran, so shipping in one call leaves the same wi timeline
@@ -321,7 +446,7 @@ func (s *Server) registerCodingTools() {
 		// jsonResult, not errResult, even on failure: errResult carries a bare
 		// string, and the structured side-effect report IS the deliverable of
 		// this tool's failure path.
-		return jsonResult(shipPayload(repo, res, shipErr))
+		return jsonResult(gate.report(shipPayload(repo, res, shipErr)))
 	})
 
 	// pf_wrap

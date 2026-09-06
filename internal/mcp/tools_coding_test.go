@@ -245,6 +245,41 @@ func TestShipToolSchemaWarnsAboutTheForcePush(t *testing.T) {
 	}
 }
 
+// TestCommitToolsDeclareThatTheyAcquireLocks is aihub#366's stated cost, made
+// into a gate.
+//
+// The owner accepted one price for the commit-time lock check: "commit becomes
+// an operation that ACQUIRES LOCKS — a heavier semantic than it has today, and
+// it must be stated in the tool description, not left implicit." A behaviour
+// this heavy that reaches no caller-visible text is precisely the failure the
+// change exists to prevent, one level up: an action that quietly changed what it
+// does. The description is the ONLY place an agent can learn it, because an
+// agent has no changelog and reads no docs directory.
+//
+// Substrings rather than prose matching, and each one is a distinct promise:
+// that locks are acquired, that a conflict REFUSES the call, that the refusal
+// names the holder, and that the outcome is reported in the response.
+func TestCommitToolsDeclareThatTheyAcquireLocks(t *testing.T) {
+	ctx := context.Background()
+
+	for _, name := range []string{"pf_commit", "pf_ship"} {
+		t.Run(name, func(t *testing.T) {
+			desc := registeredTool(t, ctx, name).Description
+			for _, want := range []string{
+				"ACQUIRE",             // it takes locks
+				"CONFLICT_LOCK_TAKEN", // and refuses on a real conflict
+				"holder",              // naming who has it
+				"lock_gate",           // and reporting the outcome in the response
+			} {
+				if !strings.Contains(desc, want) {
+					t.Errorf("%s's description never mentions %q, so a caller cannot learn "+
+						"from the tool itself that committing now takes locks: %s", name, want, desc)
+				}
+			}
+		})
+	}
+}
+
 // TestStrSliceArg characterizes the `paths` decoding that pf_commit and pf_ship
 // now share.
 func TestStrSliceArg(t *testing.T) {

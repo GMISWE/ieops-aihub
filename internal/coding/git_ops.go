@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -88,6 +89,117 @@ func gitCommitStaged(ctx context.Context, worktreePath, message string) (string,
 	return strings.TrimSpace(string(shaOut)), nil
 }
 
+// emptyTreeOID is git's fixed hash of the empty tree. Diffing the index against
+// it is the only way to list a first commit's contents: on an unborn HEAD every
+// form of `git diff --cached` that names HEAD fails outright, and treating that
+// failure as "nothing staged" would turn the commit gate into a no-op for
+// exactly one commit per repository.
+const emptyTreeOID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+// GitStagedPaths returns the repo-relative paths the pending commit would
+// contain: the INDEX diffed against HEAD, read after staging and before
+// committing.
+//
+// 🔴 THE DIFF RANGE IS THE ENTIRE GATE, so it is argued here rather than
+// chosen. Three ranges were available and two of them silently answer "nothing
+// changed" in the cases that matter most:
+//
+//   - `git diff --name-only` (WORKTREE vs INDEX) — the default range, and the
+//     trap. Every caller here runs `git add` first, so by the time this is asked
+//     the worktree and the index are identical and the answer is the empty list.
+//     A gate built on it is not weak, it is absent, and it is absent while
+//     looking exactly like a gate that passed.
+//   - `git diff HEAD --name-only` (WORKTREE vs HEAD) — plausible, and blind to
+//     untracked files, because a file git has never seen is in neither tree it
+//     compares. A brand-new file is the single commonest shape of "I touched
+//     something I never declared", so the one range that reads naturally is the
+//     one that misses the motivating case.
+//   - `origin/HEAD...HEAD` (BRANCH vs BASE) — the full blast radius of the
+//     branch, and genuinely correct as a set. Rejected for three reasons: it
+//     needs a remote-tracking ref a freshly created worktree may not have; it
+//     changes under a rebase, so the same work reports different paths at
+//     different times; and it re-checks files that were already locked when an
+//     earlier commit on this branch went through. Per-commit is cumulative
+//     anyway — every file that ever enters a commit passes through the index at
+//     the moment it is committed — so the branch-wide range buys no coverage the
+//     per-commit range does not already have by the end of the branch.
+//
+// ⇒ INDEX vs HEAD. It is exactly the set of files the commit about to be made
+// will contain: not a superset that would lock files the author only touched
+// and reverted, and not a subset that would let one through.
+//
+// Two flags carry the variant forms, and neither is decoration:
+//
+//   - `--no-renames`. Rename detection is on by default (diff.renames since git
+//     2.9), and under it `--name-only` prints ONE line for a rename — the
+//     destination. The source path then never appears, yet the commit deletes
+//     it, which is a change to a file another work item may be holding. Turning
+//     detection off makes a rename what the gate needs it to be: a delete of the
+//     old path plus an add of the new one, both listed, both locked.
+//   - `-z`. Paths are NUL-separated, so core.quotePath cannot dress a non-ASCII
+//     or space-containing path in quotes and escapes. A quoted path would be
+//     compared against the lock table under a name no lock will ever have,
+//     turning a covered file into a phantom missing one.
+//
+// Deletions (D), type changes (T, file <-> symlink) and submodule pointer bumps
+// need no special handling and get none: each is one entry naming the path, and
+// the path is what the lock keys on.
+func GitStagedPaths(ctx context.Context, worktreePath string) ([]string, error) {
+	base := "HEAD"
+	if err := exec.CommandContext(ctx, "git", "-C", worktreePath,
+		"rev-parse", "--verify", "--quiet", "HEAD").Run(); err != nil {
+		base = emptyTreeOID
+	}
+
+	out, err := exec.CommandContext(ctx, "git", "-C", worktreePath,
+		"diff", "--cached", "--name-only", "--no-renames", "-z", base).Output()
+	if err != nil {
+		return nil, fmt.Errorf("git diff --cached --name-only: %w", err)
+	}
+
+	seen := make(map[string]bool)
+	var paths []string
+	for _, p := range strings.Split(string(out), "\x00") {
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+// CommitGate is consulted after staging and before committing, with the paths
+// the pending commit would contain (GitStagedPaths). Returning an error aborts
+// the commit; the index is left staged.
+//
+// It is a function rather than a concrete call so that package coding keeps
+// talking only to git. The one implementation today reconciles the attempt's
+// file_scope locks against those paths over HTTP, which is knowledge this
+// package has no business holding — and a nil gate is a first-class value, used
+// by every caller that has no work item behind it.
+type CommitGate func(ctx context.Context, paths []string) error
+
+// runCommitGate resolves the pending commit's paths and hands them to gate.
+//
+// The empty-index short-circuit is not an optimisation. Nothing staged means no
+// commit will be created (gitCommitStaged errors, Ship skips), so there is no
+// change to protect and no reason to spend a round-trip discovering that.
+func runCommitGate(ctx context.Context, worktreePath string, gate CommitGate) error {
+	if gate == nil {
+		return nil
+	}
+	paths, err := GitStagedPaths(ctx, worktreePath)
+	if err != nil {
+		return err
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	return gate(ctx, paths)
+}
+
 // GitCommit runs `git -C path commit -m message`. If paths is non-empty,
 // it stages only those paths first.
 //
@@ -96,7 +208,25 @@ func gitCommitStaged(ctx context.Context, worktreePath, message string) (string,
 // Ship deliberately does NOT go through here; it needs the "nothing staged" case
 // to be a fact it can branch on rather than an error.
 func GitCommit(ctx context.Context, worktreePath, message string, paths []string) (string, error) {
+	return GitCommitGated(ctx, worktreePath, message, paths, nil)
+}
+
+// GitCommitGated is GitCommit with a CommitGate consulted between the staging
+// and the commit (aihub#366).
+//
+// The gate runs AFTER `git add` deliberately, and the cost is stated rather than
+// hidden: a refused commit leaves the index populated. Reading the index is the
+// only exact answer to "what will this commit contain" — reconstructing it from
+// `git status` would have to re-implement pathspec expansion, .gitignore and
+// directory recursion, and a gate that computes a slightly different set from
+// the one being committed is a gate with a gap. The staged index is also not a
+// new state: pf_commit has always left it that way when `git commit` itself
+// failed, and Ship already reports it as ShipResult.StagedUncommitted.
+func GitCommitGated(ctx context.Context, worktreePath, message string, paths []string, gate CommitGate) (string, error) {
 	if err := GitStage(ctx, worktreePath, paths); err != nil {
+		return "", err
+	}
+	if err := runCommitGate(ctx, worktreePath, gate); err != nil {
 		return "", err
 	}
 	return gitCommitStaged(ctx, worktreePath, message)

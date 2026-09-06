@@ -77,6 +77,28 @@ frontmatter，没这个文件就退到 `<wi_type>.md`，两个都没有则取 `t
   `attempt_id` / `claim_epoch` / `session_secret` / `worktrees` 这些字段。
   它是凭据文件：别手改，也别往聊天或日志里贴。
 
+### ⚠️ commit 现在会替你**取锁**（`aihub#366`）
+
+`pf_commit` 和 `pf_ship` 的 commit 那一步，行为比字面上重：**提交之前它会把这次提交包含的文件
+列出来，跟「本 attempt 当前实际持有的 `file_scope` 锁」比一遍**，没被覆盖的那些**自动补上锁**，
+补到的锁一直持有到 attempt 结束。所以 **commit 会扩大你的持锁面**。
+
+为什么要有这道闸：`declared_resources` 是**发现问题时**填的，描述「问题在哪」；锁要覆盖的是
+「**修法会碰到哪**」。实测（2026-09-05/06 连着四条 wi）claim 时拿到 2 / 2 / 0 / 0 把锁，
+实际改了 5 / 9 / 20 / 4 个文件 —— 其中一次是**改到一半才发现自己碰了**第四个文件。
+
+- **别人没占** → 静默补锁通过，返回值里 `lock_gate: "acquired"` 加 `locks_acquired_for`。
+- **别人真的占着** → **commit 被拒**（`CONFLICT_LOCK_TAKEN`），一个文件都不提交，改动仍在暂存区，
+  错误里给出**每一个**被挡的路径和**持有者**（actor / wi / attempt）。等对方结束，或者用
+  `pf_commit(paths=[...])` 把那些文件排除在这次提交之外。**不要用 force takeover 硬闯** ——
+  对方占着锁正是因为它在改那个文件。
+- **全都已覆盖** → 不取任何锁、不写任何东西，返回 `lock_gate: "covered"`。
+- 补上的锁**不会**写进 `declared_resources`。这是故意的：`aihub#264` 会在每次
+  `declared_resources` 被整表替换时释放差集，而 `/pf-plan` 第 5 步正是整表替换 —— 写进去反而会让
+  下一次 plan 把锁**释放掉**。审计记录走 `pf_read_events` 的 `lock_acquired`，`cause=commit_gate`。
+- **没有放行通道**：闸连不上服务端时 commit 直接失败，而不是当作检查通过。删 state 文件也不行 ——
+  worktree 本来就是靠同一份 state 文件解析的，删了整个 `pf_commit` 都跑不了。
+
 ---
 
 ## 4. 收工：`/pf-stop`

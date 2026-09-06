@@ -21,6 +21,18 @@ import (
 // mem_xxx, u_xxx) unchanged, so id-based callers see no behavior change.
 func seg(s string) string { return url.PathEscape(s) }
 
+// DetailsRenderLimit is the byte cap formatDetails applies to the compacted
+// `details` JSON.
+//
+// Exported so that a PRODUCER of `details` can hold itself to the budget its
+// consumer actually enforces, instead of copying the number and drifting.
+// internal/domain.CommitLockRefusalAdvice is the first such producer: its
+// refusal advice is useless if it arrives cut in half, and the test that pins
+// that has to know where the cut falls. Go marshals map keys alphabetically, so
+// what a given key's budget is depends on where its name sorts — a producer
+// cannot work that out from the total alone, but it can from this number.
+const DetailsRenderLimit = 500
+
 // formatDetails renders the server error `details` object as a compact
 // " details=<json>" suffix for the error string, so the conflict metadata the
 // server already computes (lock holder, dedup candidates, superseded_by, …)
@@ -36,9 +48,8 @@ func formatDetails(raw json.RawMessage) string {
 		return ""
 	}
 	s := buf.String()
-	const max = 500
-	if len(s) > max {
-		s = s[:max] + "...(truncated)"
+	if len(s) > DetailsRenderLimit {
+		s = s[:DetailsRenderLimit] + "...(truncated)"
 	}
 	return " details=" + s
 }
@@ -254,6 +265,19 @@ func (c *Client) PauseAttempt(ctx context.Context, wiID string, body any) (map[s
 func (c *Client) AcquireLocks(ctx context.Context, wiID string, body any) (map[string]any, error) {
 	var out map[string]any
 	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/acquire_locks", body, &out)
+}
+
+// ReconcileCommitLocks calls POST /v1/work_items/:wiID/commit_locks — the
+// commit-time gate (aihub#366). body carries the attempt credentials, the repo,
+// and the paths the pending commit contains.
+//
+// Unlike AcquireLocks it derives nothing from declared_resources: the server
+// compares the paths against the file_scope locks the attempt actually holds,
+// acquires the difference, and answers 409 CONFLICT_LOCK_TAKEN — with the
+// holders in `details` — when the difference belongs to somebody else.
+func (c *Client) ReconcileCommitLocks(ctx context.Context, wiID string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/commit_locks", body, &out)
 }
 
 // ─── Events ────────────────────────────────────────────────────────────────

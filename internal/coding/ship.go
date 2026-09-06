@@ -50,6 +50,11 @@ type ShipResult struct {
 //     failed push finds itself in, and treating it as an error there would stop
 //     the retry before it reached the stage that actually failed. This is the
 //     idempotency guarantee — a retried Ship never duplicates a commit.
+//     Between staging and committing, `gate` is consulted with the paths the
+//     pending commit contains (aihub#366). A refused gate stops the chain at
+//     StageCommit with nothing pushed and StagedUncommitted true — the index is
+//     populated and no commit was made from it, which is precisely what that
+//     field reports.
 //  3. Push + open/reuse the PR, via the same pushAndOpenPR that backs Wrap. Its
 //     PR-coverage rules (aihub#203/#207/#226) are exactly what Ship wants: a
 //     second Ship on an open PR pushes onto it instead of failing with
@@ -60,7 +65,7 @@ type ShipResult struct {
 //
 // Returns a non-nil *ShipResult in every case; see the type doc.
 func Ship(ctx context.Context, sf *config.StateFile, repo, workspaceRoot, message string,
-	paths []string, prTitle, prBody, prBase string) (*ShipResult, error) {
+	paths []string, prTitle, prBody, prBase string, gate CommitGate) (*ShipResult, error) {
 	res := &ShipResult{Stage: StageCommit}
 
 	worktreePath, err := WorktreePath(sf.WIID, repo, workspaceRoot)
@@ -81,6 +86,13 @@ func Ship(ctx context.Context, sf *config.StateFile, repo, workspaceRoot, messag
 	}
 	if staged {
 		res.StagedUncommitted = true
+		// The gate is inside the `staged` branch on purpose. An idempotent retry
+		// after a failed push stages nothing, makes no commit, and therefore
+		// changes no file — running the gate there would spend a round-trip, and
+		// on a repeat could report a conflict for a commit that already exists.
+		if err := runCommitGate(ctx, worktreePath, gate); err != nil {
+			return res, err
+		}
 		sha, err := gitCommitStaged(ctx, worktreePath, message)
 		if err != nil {
 			return res, err

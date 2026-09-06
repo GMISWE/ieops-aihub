@@ -77,6 +77,73 @@ frontmatter，没这个文件就退到 `<wi_type>.md`，两个都没有则取 `t
   `attempt_id` / `claim_epoch` / `session_secret` / `worktrees` 这些字段。
   它是凭据文件：别手改，也别往聊天或日志里贴。
 
+### ⚠️ commit 现在会替你**取锁**（`aihub#366`）
+
+`pf_commit` 和 `pf_ship` 的 commit 那一步，行为比字面上重：**提交之前它会把这次提交包含的文件
+列出来，跟「本 attempt 当前实际持有的 `file_scope` 锁」比一遍**，没被覆盖的那些**自动补上锁**，
+补到的锁一直持有到 attempt 结束。所以 **commit 会扩大你的持锁面**。
+
+为什么要有这道闸：`declared_resources` 是**发现问题时**填的，描述「问题在哪」；锁要覆盖的是
+「**修法会碰到哪**」。实测（2026-09-05/06 连着四条 wi）claim 时拿到 2 / 2 / 0 / 0 把锁，
+实际改了 5 / 9 / 20 / 4 个文件 —— 其中一次是**改到一半才发现自己碰了**第四个文件。
+
+- **别人没占** → 静默补锁通过，返回值里 `lock_gate: "acquired"` 加 `locks_acquired_for`。
+- **别人真的占着** → **commit 被拒**（`CONFLICT_LOCK_TAKEN`），一个文件都不提交，改动仍在暂存区，
+  错误里给出**每一个**被挡的路径和**持有者**（actor / wi / attempt）。**不要用 force takeover 硬闯**
+  —— 对方占着锁正是因为它在改那个文件。两条出路：等对方结束，或者把那些文件从这次提交里摘出去。
+
+  🔴 **摘出去是两步，第二步不是可选的：**
+
+  ```bash
+  # 1) 从暂存区撤出（工作区改动保留）
+  git -C <worktree> restore --staged <被挡的路径…>
+  # 2) 重试时把 paths 缩到剩下的文件
+  #    pf_commit(..., paths=["<你自己的路径…>"])
+  ```
+
+  **两步都做才有用，任何一步单做都无效**，方向还相反：
+
+  - 只做第 1 步、然后**原样重试** —— 不带 `paths` 的重试会跑 `git add -A`，把你刚撤出去的文件
+    原封不动加回暂存区。
+  - 只做第 2 步、不先撤暂存区 —— `paths` 只决定往暂存区里**加**什么，从不做 reset，而被拒之前
+    那轮 `git add` 已经把暂存区填满了。
+
+  两种都栽在同一件事上：闸读的是**暂存区 vs HEAD**，不是你这次传了什么。实测（走真实 MCP 工具
+  打到 fake server，服务端在 `paths` 含 `contested.txt` 时才拒）：
+
+  ```
+  被拒后的暂存区                                    [contested.txt mine.txt]
+  git restore --staged contested.txt 之后            [mine.txt]
+  接着「原样」重试      两次发出的 paths  [contested.txt mine.txt] [contested.txt mine.txt]
+                                          → 又一个 409，HEAD 没动
+  接着「带 paths=」重试 两次发出的 paths  [contested.txt mine.txt] [mine.txt]
+                                          → lock_gate: acquired，HEAD 前进
+  ```
+
+  一步到位的替代写法是 `git stash push -- <被挡的路径…>`：它把文件从**工作区**也拿走，所以之后
+  **原样重试**就能过（同一套实测：暂存区变成 `[mine.txt]`，原样重试发出 `[mine.txt]`，`acquired`）。
+  代价是那些改动进了 stash，事后得 `git stash pop` 拿回来。
+- **全都已覆盖** → 不取任何锁、不写任何东西，返回 `lock_gate: "covered"`。
+- 补上的锁**不会**写进 `declared_resources`。这是故意的：`aihub#264` 会在每次
+  `declared_resources` 被整表替换时释放差集，而 `/pf-plan` 第 5 步正是整表替换 —— 写进去反而会让
+  下一次 plan 把锁**释放掉**。审计记录走 `pf_read_events` 的 `lock_acquired`，`cause=commit_gate`。
+- **没有放行通道**：闸连不上服务端时 commit 直接失败，而不是当作检查通过。删 state 文件也不行 ——
+  worktree 本来就是靠同一份 state 文件解析的，删了整个 `pf_commit` 都跑不了。
+- **`lock_gate` 一共五个值，但它们对应六件事**，别混着读：
+  - `covered` / `acquired` —— 提交成了。
+  - `not_run` —— 闸**跑到了**，但暂存区跟 HEAD 一样，没有变更需要保护。`pf_ship` 走到这里就是
+    「没东西要提交」；`pf_commit` 只有一种路径会到：**merge 提交**（内容来自 `MERGE_HEAD` 而不是
+    暂存区），那次响应里 `sha` 照样有值 —— 所以别把这个值读成「没提交」。
+  - `refused` —— 查了，别人占着，一个文件都没提交。
+  - `could_not_run` —— **没查成**，两种原因共用这一个值（`lock_gate_detail` 里区分）：
+    ① 查了但没查完（连不上、5xx、state 文件读不出来）；
+    ② **commit 那一步在闸之前就挂了** —— `git add` 撞上别的 git 进程留下的 `.git/index.lock`、
+    `git diff --cached` 读不到 HEAD 之类。②**不知道暂存区里剩了什么**，所以那件事只能从
+    `side_effects` 读，不要从 `lock_gate_detail` 读。
+
+  `pf_ship` 失败时返回的是 JSON，这两个字段都在里面；`pf_commit` 失败时返回的是纯错误串，
+  **没有** `lock_gate` 字段。
+
 ---
 
 ## 4. 收工：`/pf-stop`

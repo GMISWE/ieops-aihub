@@ -176,13 +176,20 @@ const (
 // stays answerable with a single type filter, while "why" stays available to
 // anyone who reads the payload.
 const (
-	lockCauseClaim               = "claim"
-	lockCauseClaimTakeover       = "claim_takeover"
-	lockCauseAttemptTerminal     = "attempt_terminal"
-	lockCauseAttemptPaused       = "attempt_paused"
-	lockCauseForceTakeover       = "force_takeover"
-	lockCauseAcquireLocks        = "acquire_locks"
-	lockCauseOrphanReclaim       = "orphan_reclaim"
+	lockCauseClaim           = "claim"
+	lockCauseClaimTakeover   = "claim_takeover"
+	lockCauseAttemptTerminal = "attempt_terminal"
+	lockCauseAttemptPaused   = "attempt_paused"
+	lockCauseForceTakeover   = "force_takeover"
+	lockCauseAcquireLocks    = "acquire_locks"
+	lockCauseOrphanReclaim   = "orphan_reclaim"
+	// lockCauseCommitGate is an acquisition made by the commit-time gate
+	// (aihub#366) — a path the pending commit changes that no declaration ever
+	// named. It is its own cause rather than acquire_locks because the two answer
+	// different questions in an audit: acquire_locks means somebody re-derived
+	// the declaration, commit_gate means the change set outran it, and the second
+	// is the one worth counting.
+	lockCauseCommitGate          = "commit_gate"
 	lockCauseDeclarationNarrowed = "declaration_narrowed"
 	lockCauseOrphanSweep         = "orphan_sweep"
 	// lockCauseWICancelled is the release CancelWorkItem performs. It is its own

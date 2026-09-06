@@ -24,12 +24,23 @@ import (
 
 // runShip wires up a state file and calls Ship for repo "aihub", returning both
 // the result and the error — the point of Ship is that BOTH are meaningful.
+//
+// The nil gate is the pre-aihub#366 behaviour and is what every test in this
+// file wants: none of them is about the commit-time lock check. The gated arm
+// lives in commit_gate_test.go.
 func runShip(t *testing.T, r *testRepo, wiID, message string, paths []string) (*ShipResult, error) {
+	t.Helper()
+	return runShipGated(t, r, wiID, message, paths, nil)
+}
+
+// runShipGated is runShip with a CommitGate.
+func runShipGated(t *testing.T, r *testRepo, wiID, message string, paths []string,
+	gate CommitGate) (*ShipResult, error) {
 	t.Helper()
 	wsRoot := filepath.Dir(r.wt)
 	sf := writeWrapStateFile(t, wsRoot, wiID, "aihub", r.wt)
 	return Ship(context.Background(), sf, "aihub", wsRoot, message, paths,
-		"a title", "a body", "")
+		"a title", "a body", "", gate)
 }
 
 // write puts an uncommitted file in the worktree.
@@ -369,7 +380,7 @@ func TestShip_NeverReturnsANilResult(t *testing.T) {
 			sf := writeWrapStateFile(t, wsRoot, "wi_ShipNilGuard", "aihub", r.wt)
 
 			res, err := Ship(context.Background(), sf, tc.repo, wsRoot,
-				"feat: x", tc.paths, "t", "b", "")
+				"feat: x", tc.paths, "t", "b", "", nil)
 			if err == nil {
 				t.Fatal("expected this case to fail; it did not, so the invariant is untested here")
 			}

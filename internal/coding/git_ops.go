@@ -109,11 +109,20 @@ const emptyTreeOID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 //     the worktree and the index are identical and the answer is the empty list.
 //     A gate built on it is not weak, it is absent, and it is absent while
 //     looking exactly like a gate that passed.
-//   - `git diff HEAD --name-only` (WORKTREE vs HEAD) — plausible, and blind to
-//     untracked files, because a file git has never seen is in neither tree it
-//     compares. A brand-new file is the single commonest shape of "I touched
-//     something I never declared", so the one range that reads naturally is the
-//     one that misses the motivating case.
+//   - `git diff HEAD --name-only` (WORKTREE vs HEAD) — plausible, and it
+//     OVER-reports. An earlier version of this comment rejected it for being
+//     "blind to untracked files", which is true of git in general and FALSE of
+//     this call: every caller stages first (see the bullet above), so a
+//     brand-new file is tracked by the time either range is asked, and both list
+//     it. Measured — under this range the "added file" subtest of
+//     TestGitStagedPaths_CoversEveryChangeShape still passes. The real defect
+//     runs the other way. Comparing the WORKTREE also lists files that are dirty
+//     but were never staged, which the pending commit does not contain: with
+//     tracked.txt modified-but-unstaged and other.txt staged, INDEX vs HEAD
+//     answers [other.txt] and this range answers [other.txt tracked.txt]. Each
+//     extra path is a lock this gate would demand — and take from whoever else
+//     wanted it — over a file the commit does not touch.
+//     TestGitStagedPaths_WorktreeVsHEADWouldOverReport runs the two side by side.
 //   - `origin/HEAD...HEAD` (BRANCH vs BASE) — the full blast radius of the
 //     branch, and genuinely correct as a set. Rejected for three reasons: it
 //     needs a remote-tracking ref a freshly created worktree may not have; it

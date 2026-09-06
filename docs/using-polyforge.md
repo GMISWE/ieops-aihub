@@ -89,15 +89,28 @@ frontmatter，没这个文件就退到 `<wi_type>.md`，两个都没有则取 `t
 
 - **别人没占** → 静默补锁通过，返回值里 `lock_gate: "acquired"` 加 `locks_acquired_for`。
 - **别人真的占着** → **commit 被拒**（`CONFLICT_LOCK_TAKEN`），一个文件都不提交，改动仍在暂存区，
-  错误里给出**每一个**被挡的路径和**持有者**（actor / wi / attempt）。等对方结束，或者用
-  `pf_commit(paths=[...])` 把那些文件排除在这次提交之外。**不要用 force takeover 硬闯** ——
-  对方占着锁正是因为它在改那个文件。
+  错误里给出**每一个**被挡的路径和**持有者**（actor / wi / attempt）。**不要用 force takeover 硬闯**
+  —— 对方占着锁正是因为它在改那个文件。两条出路：等对方结束，或者把那些文件**从暂存区撤出来**再重试：
+
+  ```bash
+  git -C <worktree> restore --staged <被挡的路径…>   # 工作区改动保留，只退出暂存区
+  ```
+
+  🔴 **别指望 `pf_commit(paths=[...])` 能把它们排除掉 —— 它做不到。** `paths` 只决定往暂存区里
+  **加**什么，从不做 reset；而这次被拒之前的那轮 `git add` 已经把暂存区填满了，闸读的又是
+  **暂存区 vs HEAD**。所以缩小 `paths` 之后重试，发到服务端的文件集**一模一样**，换来同一个 409。
+  实测（走真实 MCP 工具打到 fake server）：两次调用、两次 409、两次 `paths` 逐字节相同。
 - **全都已覆盖** → 不取任何锁、不写任何东西，返回 `lock_gate: "covered"`。
 - 补上的锁**不会**写进 `declared_resources`。这是故意的：`aihub#264` 会在每次
   `declared_resources` 被整表替换时释放差集，而 `/pf-plan` 第 5 步正是整表替换 —— 写进去反而会让
   下一次 plan 把锁**释放掉**。审计记录走 `pf_read_events` 的 `lock_acquired`，`cause=commit_gate`。
 - **没有放行通道**：闸连不上服务端时 commit 直接失败，而不是当作检查通过。删 state 文件也不行 ——
   worktree 本来就是靠同一份 state 文件解析的，删了整个 `pf_commit` 都跑不了。
+- **`lock_gate` 一共五个值，其中三个是「没提交成」的三种不同原因**，别混着读：
+  `covered` / `acquired` 是提交成了；`not_run` = 暂存区本来就是空的，压根没有变更需要保护；
+  `refused` = 查了，别人占着，一个文件都没提交；`could_not_run` = **没查成**（连不上、5xx、
+  state 文件读不出来），同样一个文件都没提交。`pf_ship` 失败时返回的是 JSON，这个字段就在里面；
+  `pf_commit` 失败时返回的是纯错误串，**没有** `lock_gate` 字段。
 
 ---
 

@@ -280,6 +280,92 @@ func TestCommitToolsDeclareThatTheyAcquireLocks(t *testing.T) {
 	}
 }
 
+// TestCommitLockGateReport_TellsTheThreeNotCommittedFactsApart pins the whole of
+// report()'s classification in one table, including the two outcomes no wire
+// test reaches cheaply.
+//
+// The defect it replaces: the switch keyed on a single !ran flag, which is true
+// for "the gate was never invoked", "the gate could not run" and "the gate ran
+// and refused" alike — so all three answered "no staged changes, so no files
+// needed locking". Two of the three had files staged at the moment they said it,
+// and in a pf_ship response that sentence sits next to an `error` naming
+// CONFLICT_LOCK_TAKEN and a `side_effects` entry saying the files WERE staged.
+// The gate's own doc comment forbids this conflation one layer down; this table
+// is what stops it recurring one layer up.
+//
+// Both success values are in the table as positive controls: a "fix" that
+// reported every outcome as a distinct kind of failure would satisfy the three
+// failure rows on its own.
+func TestCommitLockGateReport_TellsTheThreeNotCommittedFactsApart(t *testing.T) {
+	conflictErr := errors.New("commit refused: CONFLICT_LOCK_TAKEN: this commit changes 1 file(s) locked by another attempt")
+	checkErr := errors.New("the commit-time lock check could not be completed, so nothing was committed: 502 Bad Gateway")
+
+	cases := []struct {
+		name string
+		gate *commitLockGate
+		want string
+		why  string
+	}{
+		{
+			name: "never invoked",
+			gate: &commitLockGate{},
+			want: "not_run",
+			why:  "nothing was staged, so runCommitGate short-circuited and there was no change set to protect",
+		},
+		{
+			name: "invoked, refused by another attempt's lock",
+			gate: &commitLockGate{invoked: true, checked: 3, err: conflictErr},
+			want: "refused",
+			why:  "the gate ran, and what it found was somebody else's lock — the caller waits",
+		},
+		{
+			name: "invoked, the check itself failed",
+			gate: &commitLockGate{invoked: true, checked: 3, err: checkErr},
+			want: "could_not_run",
+			why: "nothing is known about those files, which is not the same fact as knowing " +
+				"they are clear — and unlike a refusal, the caller just retries",
+		},
+		{
+			name: "ran, locks acquired",
+			gate: &commitLockGate{invoked: true, ran: true, checked: 3, acquired: []string{"a.go"}},
+			want: "acquired",
+			why:  "positive control: a widened lock set has to stay visible where it was widened",
+		},
+		{
+			name: "ran, everything already covered",
+			gate: &commitLockGate{invoked: true, ran: true, checked: 3},
+			want: "covered",
+			why:  "positive control: the quiet success must not be dressed up as a failure",
+		},
+	}
+
+	seen := map[string]bool{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := tc.gate.report(map[string]any{})
+			got, _ := out["lock_gate"].(string)
+			if got != tc.want {
+				t.Fatalf("lock_gate = %q, want %q — %s", got, tc.want, tc.why)
+			}
+			detail, _ := out["lock_gate_detail"].(string)
+			if detail == "" {
+				t.Fatal("lock_gate_detail is empty; the bare value does not say what to do next")
+			}
+			// "nothing was staged" is true of exactly one of these five rows.
+			// Anywhere else it contradicts the response it is sitting in.
+			if tc.want != "not_run" && strings.Contains(detail, "no staged changes") {
+				t.Errorf("lock_gate_detail = %q, but %d file(s) were staged", detail, tc.gate.checked)
+			}
+			// Five facts, five names. An enum that reuses a name for two of them is
+			// the original defect wearing a longer switch.
+			if seen[got] {
+				t.Errorf("lock_gate=%q is already used by an earlier case", got)
+			}
+			seen[got] = true
+		})
+	}
+}
+
 // TestStrSliceArg characterizes the `paths` decoding that pf_commit and pf_ship
 // now share.
 func TestStrSliceArg(t *testing.T) {

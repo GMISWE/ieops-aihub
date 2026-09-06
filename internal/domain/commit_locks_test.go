@@ -212,3 +212,50 @@ func TestCommitLockConflictErr_NamesEveryHolder(t *testing.T) {
 		t.Errorf("blocked_paths = %v, want both paths", got.BlockedPaths)
 	}
 }
+
+// TestCommitLockConflictErr_AdviceNamesAnEscapeThatWorks pins the remedy, and it
+// is a regression test for advice that was measured NOT to work.
+//
+// The refusal used to say "drop them from this commit with pf_commit(paths=...)".
+// That narrows nothing. The refusal is raised AFTER coding.GitStage has run,
+// GitStage only ever ADDS to the index, and GitStagedPaths reads INDEX vs HEAD —
+// so a narrowed retry hands the server the identical set and earns the identical
+// 409. Measured end to end through the real MCP tool by
+// TestCommitGateWire_NarrowingPathsDoesNotNarrowTheStagedSet.
+//
+// Combined with this same string's "Do NOT force a takeover", the old wording
+// left the author with NO move that works — the one thing an advice field must
+// never do, because it costs a retry to arrive back where it started. So the
+// working command is asserted present and the broken one asserted absent; the
+// second half is what goes red if somebody helpfully puts it back.
+func TestCommitLockConflictErr_AdviceNamesAnEscapeThatWorks(t *testing.T) {
+	aerr := commitLockConflictErr([]commitLockConflict{
+		{Path: "a.go", ResourceKey: "p:r:a.go", AttemptID: "att_1", ActorDisplay: "someone", WorkItemSlug: "aihub#1"},
+	})
+	details, ok := aerr.Details.(map[string]any)
+	if !ok {
+		t.Fatalf("details is %T, want map[string]any", aerr.Details)
+	}
+	advice, _ := details["advice"].(string)
+	if advice == "" {
+		t.Fatal("details.advice is empty, so the refusal tells the author nothing to do")
+	}
+
+	if !strings.Contains(advice, "git restore --staged") {
+		t.Errorf("advice %q never names `git restore --staged`, the only thing that actually "+
+			"takes a blocked file back out of the pending commit", advice)
+	}
+	// The broken remedy, in both shapes it has been written down in.
+	for _, banned := range []string{"pf_commit(paths=", "drop them from this commit"} {
+		if strings.Contains(advice, banned) {
+			t.Errorf("advice %q is back to recommending %q. Narrowing paths unstages nothing: "+
+				"GitStage only adds, so the retry sends the same set and gets the same 409",
+				advice, banned)
+		}
+	}
+	// The half that was already right has to survive the rewrite of the half that
+	// was not — a takeover here evicts an attempt that is editing the file.
+	if !strings.Contains(advice, "takeover") {
+		t.Errorf("advice %q dropped the force-takeover warning", advice)
+	}
+}

@@ -419,6 +419,24 @@ func anyMatches(probe lockConflictProbe, held []string) bool {
 // `conflicts` is the full list; `conflict_with` repeats the first entry in the
 // shape FnClaimWorkItem and FnAcquireLocks already use, so a caller that keys on
 // the established field keeps working rather than silently reading nothing.
+//
+// 🔴 THE ADVICE NAMES `git restore --staged`, NOT `pf_commit(paths=[...])`, and
+// that is a correction rather than a preference. An earlier version told the
+// author to drop the blocked files by narrowing `paths`, which CANNOT work:
+// coding.GitStage only ever ADDS to the index, and the refusal it is answering
+// has already left the index fully populated by the `git add` that preceded the
+// gate. GitStagedPaths then reads INDEX vs HEAD, so a narrowed retry sends the
+// IDENTICAL set and earns the identical 409. Measured end to end through the MCP
+// tool against a fake server: two calls, two 409s, byte-identical `paths` on the
+// wire — pinned by TestCommitGateWire_NarrowingPathsDoesNotNarrowTheStagedSet.
+// Paired with "Do NOT force a takeover" in the same string, the old wording left
+// an author with no move that works at all, which is worse than saying nothing:
+// it spends a retry to arrive back where it started.
+//
+// Keep this string short. It rides to the caller inside `details`, which
+// pkg/client.formatDetails truncates at 500 bytes, and Go marshals map keys
+// alphabetically — so every byte spent here is a byte taken off the END of the
+// object, where `conflicts` (the per-path holder list) lives.
 func commitLockConflictErr(conflicts []commitLockConflict) *AihubError {
 	paths := make([]string, 0, len(conflicts))
 	for _, c := range conflicts {
@@ -437,9 +455,9 @@ func commitLockConflictErr(conflicts []commitLockConflict) *AihubError {
 				"work_item_slug": first.WorkItemSlug,
 			},
 			"blocked_paths": paths,
-			"advice": "Those files belong to another live attempt. Wait for it to finish, " +
-				"or drop them from this commit with pf_commit(paths=[...]). Do NOT force a takeover " +
-				"to get past this: the other attempt is holding the lock because it is editing the file.",
+			"advice": "Those files belong to another live attempt. Wait for it to finish, or " +
+				"unstage them with `git restore --staged <paths>` and retry; paths=[...] will NOT " +
+				"drop them, staging only adds. Do NOT force a takeover: the holder is editing the file.",
 		})
 }
 

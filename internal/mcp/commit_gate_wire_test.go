@@ -85,6 +85,38 @@ func gateHEAD(t *testing.T, wt string) string {
 
 const commitLocksPath = "/v1/work_items/" + gateWIID + "/commit_locks"
 
+// gatePathsSent returns the `paths` array of every gate request made so far, in
+// order — one entry per call.
+func gatePathsSent(t *testing.T, f *fakeAihub) [][]string {
+	t.Helper()
+	var out [][]string
+	for _, c := range f.recorded() {
+		if c.Path != commitLocksPath {
+			continue
+		}
+		raw, ok := c.Body["paths"].([]any)
+		if !ok {
+			t.Fatalf("gate request carried paths=%v (%T), want an array", c.Body["paths"], c.Body["paths"])
+		}
+		var one []string
+		for _, p := range raw {
+			one = append(one, p.(string))
+		}
+		out = append(out, one)
+	}
+	return out
+}
+
+// gateIndex returns what the worktree's index holds against HEAD.
+func gateIndex(t *testing.T, wt string) []string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", wt, "diff", "--cached", "--name-only", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("git diff --cached: %v", err)
+	}
+	return strings.Fields(string(out))
+}
+
 // TestCommitGateWire_SendsTheStagedPathsAndTheCredentials pins what goes over
 // the wire.
 //
@@ -231,6 +263,90 @@ func TestCommitGateWire_ConflictRefusesTheCommit(t *testing.T) {
 	}
 }
 
+// TestCommitGateWire_NarrowingPathsDoesNotNarrowTheStagedSet is the measurement
+// underneath the refusal's advice, kept as a test so the advice cannot drift
+// back to a move that does not work.
+//
+// The obvious reaction to CONFLICT_LOCK_TAKEN is to retry with
+// pf_commit(paths=[<the ones that are mine>]) — and the refusal used to say
+// exactly that. It cannot work, and it fails in the silent direction: staging
+// succeeds, the gate re-runs, and the server is handed the SAME set. Three facts
+// compose into that. coding.GitStage only ever ADDS (`git add -- <paths>`); the
+// first call's `git add -A` already put everything in the index and a refusal
+// leaves it there; and GitStagedPaths reads INDEX vs HEAD, so the width of the
+// change set lives in the index, which `paths` never resets.
+//
+// The assertion is therefore that call 2 sent byte-identical paths to call 1.
+// 🔴 If this ever goes red because pf_commit learned to reset the index, that is
+// a real widening of a shared tool's contract and an owner decision — and the
+// advice in domain.commitLockConflictErr becomes revisitable at the same moment.
+// TestCommitLockConflictErr_AdviceNamesAnEscapeThatWorks is the other end of the
+// pair; the two are meant to be changed together or not at all.
+func TestCommitGateWire_NarrowingPathsDoesNotNarrowTheStagedSet(t *testing.T) {
+	f := newFakeAihub(t)
+	wsRoot, wt := gateRepo(t)
+	before := gateHEAD(t, wt)
+
+	f.on(commitLocksPath, func(map[string]any) (int, any) {
+		return http.StatusConflict, map[string]any{
+			"code":    "CONFLICT_LOCK_TAKEN",
+			"message": "this commit changes 1 file(s) locked by another attempt",
+			"details": map[string]any{
+				"blocked_paths": []string{"contested.txt"},
+				"conflicts": []map[string]any{{
+					"path": "contested.txt", "attempt_id": "ra_theirs",
+					"actor_display": "someone-else", "work_item_slug": "aihub#999",
+				}},
+			},
+		}
+	})
+
+	gateWrite(t, wt, "contested.txt", "somebody else owns this")
+	gateWrite(t, wt, "mine.txt", "this one is mine")
+
+	// Step 1 — the ordinary refused commit.
+	if _, isErr := callTool(t, f, "pf_commit", map[string]any{
+		"workspace_root": wsRoot, "work_item_id": gateWIID,
+		"repo": "aihub", "message": "feat: both files",
+	}); !isErr {
+		t.Fatal("the first pf_commit was not refused; this test's premise is a refusal")
+	}
+
+	// The refusal left the index fully populated. That is the whole mechanism,
+	// so it is asserted rather than assumed.
+	if idx := gateIndex(t, wt); len(idx) != 2 {
+		t.Fatalf("index after the refusal = %v, want both files. If a refusal now cleans "+
+			"up after itself the rest of this test is measuring nothing", idx)
+	}
+
+	// Step 2 — the "obvious" narrowed retry.
+	out, isErr := callTool(t, f, "pf_commit", map[string]any{
+		"workspace_root": wsRoot, "work_item_id": gateWIID,
+		"repo": "aihub", "message": "feat: just mine",
+		"paths": []any{"mine.txt"},
+	})
+	if !isErr {
+		t.Fatalf("the narrowed retry COMMITTED. paths= now drops files from the pending "+
+			"commit, so the refusal's advice can be rewritten — read this test's doc "+
+			"comment before doing so: %v", out)
+	}
+
+	sent := gatePathsSent(t, f)
+	if len(sent) != 2 {
+		t.Fatalf("the gate ran %d time(s), want 2 (once per call): %v", len(sent), sent)
+	}
+	if strings.Join(sent[0], "\x00") != strings.Join(sent[1], "\x00") {
+		t.Fatalf("call 1 sent %v and the narrowed call 2 sent %v. They differ, so paths= DOES "+
+			"narrow what the gate sees — see this test's doc comment", sent[0], sent[1])
+	}
+	if len(sent[1]) != 2 {
+		t.Fatalf("the narrowed retry sent %v; the premise is that it sends both files", sent[1])
+	}
+	if got := gateHEAD(t, wt); got != before {
+		t.Errorf("HEAD moved to %s; neither call was supposed to commit", got)
+	}
+}
+
 // TestCommitGateWire_UnreachableServerFailsClosed pins the deliberate trade.
 //
 // "The gate could not run" is not "the gate found nothing", and folding the
@@ -318,6 +434,16 @@ func TestCommitGateWire_DeletingTheStateFileIsNotABypass(t *testing.T) {
 // land as stage="commit" with committed=false and no push — not as a bare error
 // string that leaves the caller unable to tell whether a commit is sitting in
 // the worktree.
+//
+// 🔴 AND THE OBJECT HAS TO AGREE WITH ITSELF. An earlier version of this test
+// asserted stage/committed/pushed/code and never looked at `lock_gate`, so the
+// field was free to be wrong and was: report() keyed on a single !ran flag that
+// is true for all three failure facts, and printed "no staged changes, so no
+// files needed locking" next to an `error` naming CONFLICT_LOCK_TAKEN and a
+// `side_effects` entry saying files WERE staged. A caller reading fields in a
+// different order gets a different answer out of one response. So lock_gate is
+// asserted here, and asserted for the specific value — "not not_run" would pass
+// on a version that called every failure could_not_run.
 func TestCommitGateWire_ShipRefusalReportsNothingHappened(t *testing.T) {
 	f := newFakeAihub(t)
 	wsRoot, wt := gateRepo(t)
@@ -357,5 +483,56 @@ func TestCommitGateWire_ShipRefusalReportsNothingHappened(t *testing.T) {
 	raw, _ := json.Marshal(out)
 	if !strings.Contains(string(raw), "CONFLICT_LOCK_TAKEN") {
 		t.Errorf("the ship response does not carry the conflict code: %s", raw)
+	}
+
+	if out["lock_gate"] != "refused" {
+		t.Errorf("lock_gate = %v, want \"refused\". The gate DID run and it DID refuse; "+
+			"any other value contradicts the error and the side effects in this same object: %s",
+			out["lock_gate"], raw)
+	}
+	detail, _ := out["lock_gate_detail"].(string)
+	if strings.Contains(detail, "no staged changes") {
+		t.Errorf("lock_gate_detail = %q, but side_effects in the same response says the files "+
+			"WERE staged. One response, two answers", detail)
+	}
+}
+
+// TestCommitGateWire_ShipCheckThatCouldNotRunIsNotReportedAsARefusal is the
+// third of the three facts !g.ran used to collapse into one.
+//
+// "Another attempt holds this file" and "I could not find out" lead to opposite
+// next moves — wait for a human/the other attempt, versus retry in ten seconds —
+// so a response that cannot tell them apart is worse than one that says nothing.
+// Both stop the ship identically, which is exactly why nothing else in the
+// object distinguishes them.
+func TestCommitGateWire_ShipCheckThatCouldNotRunIsNotReportedAsARefusal(t *testing.T) {
+	f := newFakeAihub(t)
+	wsRoot, wt := gateRepo(t)
+	before := gateHEAD(t, wt)
+
+	f.on(commitLocksPath, func(map[string]any) (int, any) {
+		return http.StatusBadGateway, map[string]any{"code": "UPSTREAM", "message": "boom"}
+	})
+	gateWrite(t, wt, "unchecked.txt", "x")
+
+	out, isErr := callTool(t, f, "pf_ship", map[string]any{
+		"workspace_root": wsRoot, "work_item_id": gateWIID,
+		"repo": "aihub", "message": "feat: unchecked",
+		"pr_title": "t", "pr_body": "b",
+	})
+	if isErr {
+		t.Fatalf("pf_ship returned a bare error; its failure contract is a JSON object: %v", out)
+	}
+	if got := gateHEAD(t, wt); got != before {
+		t.Fatalf("HEAD moved to %s although the check never completed", got)
+	}
+	if out["lock_gate"] != "could_not_run" {
+		t.Errorf("lock_gate = %v, want \"could_not_run\": the check failed, it did not find "+
+			"a conflict and it did not find nothing to do", out["lock_gate"])
+	}
+	detail, _ := out["lock_gate_detail"].(string)
+	if strings.Contains(detail, "no staged changes") {
+		t.Errorf("lock_gate_detail = %q claims nothing was staged; one file was, and it is "+
+			"still sitting in the index", detail)
 	}
 }

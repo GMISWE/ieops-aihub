@@ -52,27 +52,34 @@ func contains(hay []string, want string) bool {
 // TestGitStagedPaths_CoversEveryChangeShape walks the forms a change can take.
 //
 // The list is not "a few cases": every entry is a shape that a plausible
-// implementation of this function gets wrong, and three of them are wrong in
-// the DEFAULT git configuration rather than in some corner:
+// implementation of this function gets wrong, and two of them are wrong in the
+// DEFAULT git configuration rather than in some corner:
 //
-//	added      invisible to `git diff HEAD` (an untracked file is in neither tree)
 //	renamed    with rename detection on — the default — `--name-only` prints ONE
 //	           line, the destination, and the deleted SOURCE never appears
 //	non-ASCII  core.quotePath is on by default, so without -z the path comes back
 //	           C-quoted and would be compared against the lock table under a name
 //	           no lock can have
 //
-// The other four (modified, deleted, symlink, submodule pointer) are here to
-// pin that nothing special was done for the three above at their expense.
+// ⚠️ THE "added file" SUBTEST IS NOT ONE OF THEM, and this comment used to say
+// it was — that a brand-new file is invisible to `git diff HEAD`. Git is blind
+// to UNTRACKED files; nothing here is untracked by the time it is asked, because
+// stagedPaths runs `git add` first. Measured: swap GitStagedPaths to
+// worktree-vs-HEAD and this subtest still passes. The range that loses
+// information loses it in the opposite direction, and
+// TestGitStagedPaths_WorktreeVsHEADWouldOverReport is what catches it.
+//
+// The remaining shapes (added, modified, deleted, symlink, submodule pointer,
+// nested) are here to pin that nothing special was done for the two above at
+// their expense.
 func TestGitStagedPaths_CoversEveryChangeShape(t *testing.T) {
 	t.Run("added file", func(t *testing.T) {
 		r := newTestRepo(t)
 		write(t, r, "brand-new.txt", "new")
 		got := stagedPaths(t, r)
 		if !contains(got, "brand-new.txt") {
-			t.Fatalf("staged paths %q omit the new file; `git diff HEAD --name-only` "+
-				"would answer the same way, and a new file is the commonest shape of "+
-				"an undeclared change", got)
+			t.Fatalf("staged paths %q omit the new file, which the pending commit contains "+
+				"— and a new file is the commonest shape of an undeclared change", got)
 		}
 	})
 
@@ -214,6 +221,58 @@ func TestGitStagedPaths_TheDefaultDiffRangeWouldBeEmpty(t *testing.T) {
 	if !contains(got, "staged-and-invisible.txt") {
 		t.Fatalf("GitStagedPaths returned %q. It is reading a range that goes empty once "+
 			"the files are staged, which makes the whole lock gate a no-op", got)
+	}
+}
+
+// TestGitStagedPaths_WorktreeVsHEADWouldOverReport is the negative control for
+// the OTHER rejected range, and it exists because the reason first written down
+// for rejecting that range was wrong.
+//
+// `git diff HEAD --name-only` was dismissed as "blind to untracked files". Git
+// is; this call is not, because every caller stages first — so under that range
+// the "added file" subtest above still passes and nothing in this file ever went
+// red for it. What the range actually does is OVER-report: it compares the
+// WORKTREE, so it also lists files that are dirty there and were never staged.
+// Those are not in the pending commit, and each one is a lock this gate would
+// demand — and take from whoever else wanted it — over a file the commit does
+// not touch. Over-reporting is the quieter failure of the two, which is exactly
+// why it needs the test: nothing goes unprotected, so nothing looks broken.
+//
+// One repository holds both shapes at once and both ranges are run against it.
+func TestGitStagedPaths_WorktreeVsHEADWouldOverReport(t *testing.T) {
+	r := newTestRepo(t)
+	r.commit(t, "tracked.txt", "v1")
+
+	write(t, r, "tracked.txt", "v2") // dirty in the worktree, deliberately NOT staged
+	write(t, r, "staged.txt", "this one is in the commit")
+	// `add --` the one file, not `add -A`: staging both is precisely the state
+	// this test needs to avoid.
+	r.git(t, "add", "--", "staged.txt")
+
+	got, err := GitStagedPaths(context.Background(), r.wt)
+	if err != nil {
+		t.Fatalf("GitStagedPaths: %v", err)
+	}
+	if !contains(got, "staged.txt") {
+		t.Fatalf("staged paths %q omit the file the pending commit actually contains", got)
+	}
+	if contains(got, "tracked.txt") {
+		t.Fatalf("staged paths %q include tracked.txt, which is dirty in the worktree but not "+
+			"staged. The commit will not contain it, so locking it takes a file away from "+
+			"another attempt for nothing — this is the range's real defect", got)
+	}
+
+	// The rejected range, side by side, so the argument in GitStagedPaths' doc
+	// comment is a measurement rather than a claim.
+	out, err := exec.Command("git", "-C", r.wt, "diff", "HEAD", "--name-only").Output()
+	if err != nil {
+		t.Fatalf("git diff HEAD --name-only: %v", err)
+	}
+	rejected := strings.Fields(string(out))
+	if !contains(rejected, "staged.txt") || !contains(rejected, "tracked.txt") {
+		t.Fatalf("worktree-vs-HEAD returned %q. This test's premise is that it returns BOTH — "+
+			"if git's behaviour changed, the rejection argued in GitStagedPaths' doc comment "+
+			"needs rewriting, not this assertion deleting", rejected)
 	}
 }
 

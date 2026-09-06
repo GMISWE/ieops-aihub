@@ -45,7 +45,15 @@ type commitLockGate struct {
 	wiID string
 	repo string
 
+	// invoked records that run() was reached at all — i.e. something was staged,
+	// so the commit had a change set to protect. ran records that the server
+	// answered and that change set was actually reconciled. They are two fields
+	// rather than one because the gap between them is a whole class of outcome:
+	// invoked-but-not-ran is "checked nothing, committed nothing", and report()
+	// has to be able to say so. err is why.
+	invoked  bool
 	ran      bool
+	err      error
 	acquired []string
 	checked  int
 }
@@ -74,10 +82,15 @@ func (s *Server) newCommitLockGate(wiID, repo string) *commitLockGate {
 // file, guarding nothing. Deleting the state file now costs the whole tool,
 // which is where a bypass has to cost more than compliance.
 func (g *commitLockGate) run(ctx context.Context, paths []string) error {
+	// Recorded before anything can fail, so that "the gate was asked about N
+	// files" survives every failure below and report() never has to guess.
+	g.invoked = true
+	g.checked = len(paths)
+
 	sf, err := config.ResolveStateFile(g.wiID)
 	if err != nil {
-		return fmt.Errorf("the commit-time lock check could not read this work item's attempt "+
-			"credentials, so nothing was committed: %w", err)
+		return g.fail(fmt.Errorf("the commit-time lock check could not read this work item's attempt "+
+			"credentials, so nothing was committed: %w", err))
 	}
 
 	res, err := g.s.client.ReconcileCommitLocks(ctx, sf.WIID, map[string]any{
@@ -89,27 +102,61 @@ func (g *commitLockGate) run(ctx context.Context, paths []string) error {
 	})
 	if err != nil {
 		if isAihubCode(err, "CONFLICT_LOCK_TAKEN") {
-			return fmt.Errorf("commit refused: %w", err)
+			return g.fail(fmt.Errorf("commit refused: %w", err))
 		}
-		return fmt.Errorf("the commit-time lock check could not be completed, so nothing was committed "+
+		return g.fail(fmt.Errorf("the commit-time lock check could not be completed, so nothing was committed "+
 			"(fail-closed on purpose: \"could not check\" is not \"checked and clear\"; the files are still "+
-			"staged, so retrying costs nothing): %w", err)
+			"staged, so retrying costs nothing): %w", err))
 	}
 
 	g.ran = true
-	g.checked = len(paths)
 	g.acquired = jsonStrSlice(res["acquired_paths"])
 	return nil
 }
 
+// fail records why the gate did not complete and hands the error straight back,
+// so the value the caller sees and the value report() classifies are the same
+// one. Two independently constructed strings would be free to disagree about
+// what happened, which is the defect this whole file is about.
+func (g *commitLockGate) fail(err error) error {
+	g.err = err
+	return err
+}
+
 // report writes the gate's outcome into a tool response.
+//
+// 🔴 THE FAILURE SIDE HAS THREE OUTCOMES, NOT ONE. An earlier version keyed the
+// whole switch on !g.ran, which is true for all three — the gate was never
+// invoked, the gate could not run, and the gate ran and refused — and printed
+// "no staged changes, so no files needed locking" for each. On a pf_ship whose
+// commit was refused over a contested file that produced a self-contradicting
+// object: an `error` naming CONFLICT_LOCK_TAKEN and a `side_effects` entry
+// saying files were staged, sitting next to a `lock_gate_detail` denying there
+// was anything staged at all. That is precisely the conflation run()'s own doc
+// comment above forbids — "the gate could not run" is not "the gate ran and
+// found nothing" — reproduced one layer up, in the reporting rather than in the
+// gate. pf_commit hides it (it answers a refusal with errResult and never calls
+// report), so pf_ship's structured failure object is where it surfaces, and
+// that object is the entire deliverable of pf_ship's failure path.
 func (g *commitLockGate) report(out map[string]any) map[string]any {
 	switch {
-	case !g.ran:
+	case !g.invoked:
 		// runCommitGate never reached it: nothing was staged, so no commit was
 		// created and there was no change set to protect.
 		out["lock_gate"] = "not_run"
 		out["lock_gate_detail"] = "no staged changes, so no files needed locking"
+	case isAihubCode(g.err, "CONFLICT_LOCK_TAKEN"):
+		out["lock_gate"] = "refused"
+		out["lock_gate_detail"] = fmt.Sprintf(
+			"%d changed file(s) were checked and at least one is held by another live attempt, so "+
+				"nothing was committed; `error` names every blocked path, its holder and what to do",
+			g.checked)
+	case !g.ran:
+		out["lock_gate"] = "could_not_run"
+		out["lock_gate_detail"] = fmt.Sprintf(
+			"the lock check over %d changed file(s) did not complete, so nothing was committed "+
+				"(fail-closed: \"could not check\" is not \"checked and clear\"); the files are still "+
+				"staged, so retrying costs nothing", g.checked)
 	case len(g.acquired) > 0:
 		out["lock_gate"] = "acquired"
 		out["locks_acquired_for"] = g.acquired
@@ -188,7 +235,7 @@ func (s *Server) registerCodingTools() {
 			"Any changed file no held lock covers is locked for this attempt automatically and stays locked until the attempt ends, so committing WIDENS your lock set. " +
 			"If another live attempt already holds one of those files the commit is REFUSED with CONFLICT_LOCK_TAKEN: nothing is committed, the files stay staged, and the error names every blocked path plus its holder — actor, work item and attempt. " +
 			"When every changed file is already covered, no lock is taken and nothing is written. " +
-			"The response says which happened in `lock_gate`: covered | acquired (with locks_acquired_for) | not_run (nothing was staged, so no commit was made). " +
+			"On SUCCESS the response says which happened in `lock_gate`: covered | acquired (with locks_acquired_for) | not_run (nothing was staged, so no commit was made). A refusal or a failed check comes back as a plain error string with no `lock_gate` field at all. " +
 			"There is no pass-through: a lock check that cannot reach the server fails the commit rather than allowing it.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
@@ -370,8 +417,10 @@ func (s *Server) registerCodingTools() {
 			"automatically and stays locked until the attempt ends. A file held by another live attempt " +
 			"stops the whole call at stage=\"commit\" with CONFLICT_LOCK_TAKEN — nothing committed, nothing " +
 			"pushed, no PR — and the error names every blocked path and its holder. `lock_gate` in the " +
-			"response reports covered | acquired | not_run, and there is no pass-through: a check that " +
-			"cannot reach the server fails the ship rather than allowing it.",
+			"response reports which of five things happened — covered | acquired | not_run (nothing was " +
+			"staged) | refused (another live attempt holds one of the files) | could_not_run (the check " +
+			"itself failed) — and there is no pass-through: a check that cannot reach the server fails " +
+			"the ship rather than allowing it.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
 			"work_item_id":   prop("string", "Work item ID"),

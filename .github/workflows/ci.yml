@@ -1028,6 +1028,59 @@ jobs:
           ! grep -q -- '--- SKIP' dep_vis.log \
             || { echo "::error::an aihub#357 visibility test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#363 — the same class as the step above, one endpoint further on.
+      # pf_recall's `work_item_id` filter was compared raw against
+      # memories.work_item_id, which FK-references work_items(id), so a slug
+      # matched nothing and the endpoint answered 200 with an empty list: the
+      # same page a work item with no memories returns. pf-work's SKILL.md asks
+      # for exactly this call on every claim path to pick up the previous
+      # agent's handover notes, and hands out a slug, so an agent taking over
+      # got zero context and no signal that anything was missing.
+      #
+      # The greps are split into three groups because they fail for three
+      # different reasons, and a single "an arm did not run" message would say
+      # none of them:
+      #
+      #   resolution — the defect itself; red on the unfixed tree.
+      #   containment — the fix must not become a WIDER answer. These three are
+      #     the same shape as the visibility arms above: "absent" and "you
+      #     cannot see it" must be one response, byte for byte, and the
+      #     reference response is the one an unknown canonical id already gave
+      #     BEFORE the change, so no new signal is introduced. Two of them pass
+      #     on the unfixed tree and are kept precisely so that closing the
+      #     oracle cannot be satisfied by refusing to resolve anything.
+      #   placement — every other arm goes through handleRecall, so all of them
+      #     stay green if the resolution is done in that handler; the other two
+      #     builders of a RecallRequest (/ui/memories and the wi detail page's
+      #     artifact links) would still answer a slug with nothing. Only the
+      #     domain-entry arm can tell those two fixes apart, and a mutation that
+      #     moved the resolution into the handler reddened it and nothing else.
+      - name: aihub#363 recall work_item_id slug-resolution DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestRecallResolvesWorkItemIdOrSlug$' -count=1 -v 2>&1 | tee recall_wi_slug.log
+          for want in 'TestRecallResolvesWorkItemIdOrSlug/control_by_canonical_id_returns_the_memories_of_that_work_item' \
+                      'TestRecallResolvesWorkItemIdOrSlug/by_slug_returns_the_same_page_as_by_id' \
+                      'TestRecallResolvesWorkItemIdOrSlug/a_slug_still_filters_to_that_one_work_item' \
+                      'TestRecallResolvesWorkItemIdOrSlug/a_cross-project_canonical_id_still_reaches_the_memory_it_always_did' \
+                      'TestRecallResolvesWorkItemIdOrSlug/the_slug_of_that_work_item_reaches_the_same_memory_as_its_id'; do
+            grep -q -- "--- PASS: $want" recall_wi_slug.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); pf_recall can answer a work_item_id slug with an empty page instead of that work item's memories, which is what every claim path reads its handover notes with"; exit 1; }
+          done
+          for want in 'TestRecallResolvesWorkItemIdOrSlug/a_nonexistent_canonical_id_is_still_an_empty_page' \
+                      'TestRecallResolvesWorkItemIdOrSlug/a_nonexistent_slug_answers_exactly_what_a_nonexistent_id_does' \
+                      'TestRecallResolvesWorkItemIdOrSlug/an_invisible_slug_answers_exactly_what_a_nonexistent_one_does' \
+                      'TestRecallResolvesWorkItemIdOrSlug/the_caller_really_cannot_read_the_other_project'; do
+            grep -q -- "--- PASS: $want" recall_wi_slug.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); resolving a work_item_id slug has widened what recall answers — an existence answer that varies makes the guessable <project>#<seq> an oracle, or the fixture no longer has an invisible project to probe for"; exit 1; }
+          done
+          grep -q -- '--- PASS: TestRecallResolvesWorkItemIdOrSlug/the_shared_domain_entry_resolves_the_slug_itself' recall_wi_slug.log \
+            || { echo "::error::the domain-entry arm did not run; without it a resolution that lives in handleRecall passes every other arm while /ui/memories and the wi detail page still answer a slug with nothing"; exit 1; }
+          ! grep -q -- '--- SKIP' recall_wi_slug.log \
+            || { echo "::error::the aihub#363 recall slug test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#237: the launcher's update check is shell, so `go test` cannot see
       # it — a silent-pin regression there would ship green. This suite is
       # hermetic (no docker, no network: it stubs gh/curl/binary and drives

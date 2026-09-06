@@ -333,6 +333,15 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 		if vis := c.QueryParam("visibility"); vis != "" {
 			req.Visibility = vis
 		}
+		// Carried raw on purpose: domain.Recall resolves this id-or-slug to the
+		// canonical work_items.id before anything compares it to a column
+		// (aihub#363). Resolving it a second time here would put the same rule
+		// in two places, and this is not the only builder of a RecallRequest —
+		// the /ui/memories page and the wi detail page build their own, so the
+		// resolution has to live at the single domain entry all three share.
+		// Do NOT add a not-found check around it: an unknown work_item_id has
+		// always answered 200 with an empty page, and turning that into a 404
+		// would make existence observable through a guessable <project>#<seq>.
 		if wiID := c.QueryParam("work_item_id"); wiID != "" {
 			req.WorkItemID = &wiID
 		}

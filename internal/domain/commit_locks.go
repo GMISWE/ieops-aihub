@@ -420,23 +420,8 @@ func anyMatches(probe lockConflictProbe, held []string) bool {
 // shape FnClaimWorkItem and FnAcquireLocks already use, so a caller that keys on
 // the established field keeps working rather than silently reading nothing.
 //
-// 🔴 THE ADVICE NAMES `git restore --staged`, NOT `pf_commit(paths=[...])`, and
-// that is a correction rather than a preference. An earlier version told the
-// author to drop the blocked files by narrowing `paths`, which CANNOT work:
-// coding.GitStage only ever ADDS to the index, and the refusal it is answering
-// has already left the index fully populated by the `git add` that preceded the
-// gate. GitStagedPaths then reads INDEX vs HEAD, so a narrowed retry sends the
-// IDENTICAL set and earns the identical 409. Measured end to end through the MCP
-// tool against a fake server: two calls, two 409s, byte-identical `paths` on the
-// wire — pinned by TestCommitGateWire_NarrowingPathsDoesNotNarrowTheStagedSet.
-// Paired with "Do NOT force a takeover" in the same string, the old wording left
-// an author with no move that works at all, which is worse than saying nothing:
-// it spends a retry to arrive back where it started.
-//
-// Keep this string short. It rides to the caller inside `details`, which
-// pkg/client.formatDetails truncates at 500 bytes, and Go marshals map keys
-// alphabetically — so every byte spent here is a byte taken off the END of the
-// object, where `conflicts` (the per-path holder list) lives.
+// The remedy it ships lives in CommitLockRefusalAdvice, which carries its own
+// argument and its own measurements.
 func commitLockConflictErr(conflicts []commitLockConflict) *AihubError {
 	paths := make([]string, 0, len(conflicts))
 	for _, c := range conflicts {
@@ -455,11 +440,67 @@ func commitLockConflictErr(conflicts []commitLockConflict) *AihubError {
 				"work_item_slug": first.WorkItemSlug,
 			},
 			"blocked_paths": paths,
-			"advice": "Those files belong to another live attempt. Wait for it to finish, or " +
-				"unstage them with `git restore --staged <paths>` and retry; paths=[...] will NOT " +
-				"drop them, staging only adds. Do NOT force a takeover: the holder is editing the file.",
+			"advice":        CommitLockRefusalAdvice,
 		})
 }
+
+// CommitLockRefusalAdvice is the remedy a CONFLICT_LOCK_TAKEN refusal ships in
+// `details.advice`.
+//
+// 🔴 THE REMEDY IS TWO STEPS AND BOTH ARE WRITTEN DOWN, because step 1 alone
+// does not work and two earlier versions of this string each stopped after one
+// of them. `pf_commit(paths=[...])` alone narrows nothing — coding.GitStage only
+// ever ADDS, and the refusal has already left the index fully populated. But
+// `git restore --staged` alone does not finish the job either: the retry it
+// sends you to make re-runs GitStage, which with no `paths` is `git add -A`
+// (internal/coding/git_ops.go:39-52) and re-stages the file you just removed.
+// GitStagedPaths reads INDEX vs HEAD, so the identical set goes back over the
+// wire. Measured through the real pf_commit tool against a fake server that
+// refuses iff `paths` contains contested.txt:
+//
+//	index after the refusal                            [contested.txt mine.txt]
+//	index after `git restore --staged contested.txt`   [mine.txt]
+//	then a PLAIN retry    paths sent [contested.txt mine.txt]  409 again, HEAD unmoved
+//	then a paths=[] retry paths sent [mine.txt]                acquired,  HEAD moved
+//
+// So the two steps are not alternatives, and neither is a preference: step 2 is
+// load-bearing and saying only step 1 costs the author a retry to arrive back
+// where they started.
+//
+// ⚠️ THE NUMBERED "(1) … (2) …" SHAPE IS PART OF THE CONTRACT, not styling.
+// TestCommitGateWire_RefusalAdviceIsExecutableAndWorks parses THIS constant into
+// its numbered steps, executes each one against a real refused worktree through
+// the real pf_commit tool, and requires the commit to land — with the plain
+// un-narrowed retry as its red control. That is the only kind of assertion that
+// can catch this defect class: the substring assertions that used to guard this
+// string stayed green against a rewrite that mentioned `git restore --staged`
+// and then recommended the broken remedy anyway, and against one that forbade
+// it outright. Prose that merely CONTAINS the right words is not a remedy. A
+// rewrite that drops the numbering fails that test rather than silently
+// escaping it.
+//
+// Byte budget — measured, and it is not the one an earlier version enforced.
+// pkg/client.formatDetails truncates the compacted `details` at
+// client.DetailsRenderLimit with keys sorted alphabetically. `advice` sorts
+// FIRST, so the envelope total is not the constraint: with realistic values the
+// envelope is 606 bytes at n=1 conflict even with a 237-byte advice, already
+// past the cap, and the cut lands inside `conflicts` — the only key carrying
+// per-path holders, and one that is therefore ALREADY lost at n=1 no matter how
+// short this string is. `blocked_paths` and `conflict_with` are the other two
+// keys the cut can reach, and neither carries a value the untruncated Message
+// just above does not already state — the paths, and the first holder's actor /
+// work item / attempt. So bytes spent here buy back nothing a caller can
+// otherwise see, and the 237-byte
+// discipline bought nothing while being exactly what kept the remedy
+// incomplete. The REAL limit is 489 bytes: past that the cut lands inside this
+// string and ships half a remedy, which is worse than a short one.
+// TestCommitLockConflictErr_AdviceSurvivesTheRenderLimit is that gate.
+const CommitLockRefusalAdvice = "Those files belong to another live attempt. Do NOT force a takeover — " +
+	"the holder is editing them. Either wait for it to finish, or take them out of this commit, " +
+	"which takes TWO steps: a plain retry re-runs `git add -A` and re-stages exactly what step 1 " +
+	"removed, earning the same refusal. " +
+	"(1) `git restore --staged <blocked paths>` " +
+	"(2) retry with paths=[the files that are left]."
 
 func displayOrUnknown(s string) string {
 	if s == "" {

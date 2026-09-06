@@ -20,10 +20,13 @@ package domain
 // see the work item for why its CI wiring is blocked.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 // coveredBy is the production coverage test, as FnReconcileCommitLocks runs it.
@@ -213,22 +216,29 @@ func TestCommitLockConflictErr_NamesEveryHolder(t *testing.T) {
 	}
 }
 
-// TestCommitLockConflictErr_AdviceNamesAnEscapeThatWorks pins the remedy, and it
-// is a regression test for advice that was measured NOT to work.
+// TestCommitLockConflictErr_ShipsTheRemedy checks the two things about the
+// advice that CAN be checked from here, and deliberately does not pretend to
+// check the third.
 //
-// The refusal used to say "drop them from this commit with pf_commit(paths=...)".
-// That narrows nothing. The refusal is raised AFTER coding.GitStage has run,
-// GitStage only ever ADDS to the index, and GitStagedPaths reads INDEX vs HEAD —
-// so a narrowed retry hands the server the identical set and earns the identical
-// 409. Measured end to end through the real MCP tool by
-// TestCommitGateWire_NarrowingPathsDoesNotNarrowTheStagedSet.
+// 🔴 WHAT THIS TEST DOES NOT DO IS THE POINT. Its predecessor asserted that the
+// advice CONTAINED "git restore --staged" and did NOT contain the broken
+// remedy, and called that "pins the remedy". It does not. Two rewrites were
+// injected against it and both passed:
 //
-// Combined with this same string's "Do NOT force a takeover", the old wording
-// left the author with NO move that works — the one thing an advice field must
-// never do, because it costs a retry to arrive back where it started. So the
-// working command is asserted present and the broken one asserted absent; the
-// second half is what goes red if somebody helpfully puts it back.
-func TestCommitLockConflictErr_AdviceNamesAnEscapeThatWorks(t *testing.T) {
+//	"You could unstage them with `git restore --staged <paths>`, but the quick
+//	 way is to narrow the retry: paths=[the ones that are yours]."   → green
+//	"Do NOT run `git restore --staged <paths>` — it loses your work. Narrow the
+//	 retry instead with paths=[yours]."                              → green
+//
+// The first recommends a remedy that does not work while naming the one that
+// does; the second forbids the working one outright. A substring assertion
+// cannot tell any of the three apart, because what distinguishes them is which
+// sequence a reader ends up performing — a behaviour, not a spelling. So the
+// question "does the remedy work?" is answered by executing it, in
+// TestCommitGateWire_RefusalAdviceIsExecutableAndWorks, and what is left here is
+// only what that test cannot see: that the envelope actually carries the
+// string, and that a prohibition (which has no executable form) survives.
+func TestCommitLockConflictErr_ShipsTheRemedy(t *testing.T) {
 	aerr := commitLockConflictErr([]commitLockConflict{
 		{Path: "a.go", ResourceKey: "p:r:a.go", AttemptID: "att_1", ActorDisplay: "someone", WorkItemSlug: "aihub#1"},
 	})
@@ -237,25 +247,77 @@ func TestCommitLockConflictErr_AdviceNamesAnEscapeThatWorks(t *testing.T) {
 		t.Fatalf("details is %T, want map[string]any", aerr.Details)
 	}
 	advice, _ := details["advice"].(string)
-	if advice == "" {
-		t.Fatal("details.advice is empty, so the refusal tells the author nothing to do")
+	if advice != CommitLockRefusalAdvice {
+		t.Errorf("details.advice = %q, want CommitLockRefusalAdvice. The executable test in "+
+			"internal/mcp runs THAT constant, so a refusal shipping anything else is shipping "+
+			"a remedy nothing has executed", advice)
 	}
 
-	if !strings.Contains(advice, "git restore --staged") {
-		t.Errorf("advice %q never names `git restore --staged`, the only thing that actually "+
-			"takes a blocked file back out of the pending commit", advice)
-	}
-	// The broken remedy, in both shapes it has been written down in.
-	for _, banned := range []string{"pf_commit(paths=", "drop them from this commit"} {
-		if strings.Contains(advice, banned) {
-			t.Errorf("advice %q is back to recommending %q. Narrowing paths unstages nothing: "+
-				"GitStage only adds, so the retry sends the same set and gets the same 409",
-				advice, banned)
-		}
-	}
-	// The half that was already right has to survive the rewrite of the half that
-	// was not — a takeover here evicts an attempt that is editing the file.
+	// A prohibition has no executable form — there is no sequence to run that
+	// demonstrates "do not do this" — so it is asserted textually here, which is
+	// the one place a substring assertion is the right instrument. A takeover
+	// evicts an attempt that is actively editing the file.
 	if !strings.Contains(advice, "takeover") {
 		t.Errorf("advice %q dropped the force-takeover warning", advice)
+	}
+}
+
+// TestCommitLockConflictErr_AdviceSurvivesTheRenderLimit is the byte budget, and
+// it is a different budget from the one an earlier version of this file
+// enforced.
+//
+// That version held the advice to 237 bytes so as not to push `conflicts` off
+// the end of pkg/client.formatDetails' cap. Measured, that bought nothing: with
+// realistic values the compacted envelope is already 606 bytes at ONE conflict,
+// so `conflicts` is truncated away regardless, and the other two keys the cut
+// can reach — `blocked_paths` and `conflict_with` — carry nothing the
+// untruncated Message does not already state. What the budget must actually
+// protect is this string itself: it sorts FIRST alphabetically, so it is the one
+// key that is never pushed off the end and always cut in half instead. Half a
+// two-step remedy is worse than no remedy, because it reads complete.
+//
+// Two assertions rather than one, because the arithmetic and the artefact can
+// disagree: the first computes the budget from client.DetailsRenderLimit, the
+// second cuts the REAL assembled envelope and looks for the whole string in
+// what is left. A padding mutant that pushes the advice to 708 bytes trips both,
+// which is what shows the threshold is real rather than always-satisfied.
+func TestCommitLockConflictErr_AdviceSurvivesTheRenderLimit(t *testing.T) {
+	// `{"advice":"` is what precedes the value once Go sorts the keys.
+	const advicePrefix = len(`{"advice":"`)
+	budget := client.DetailsRenderLimit - advicePrefix
+
+	escaped, err := json.Marshal(CommitLockRefusalAdvice)
+	if err != nil {
+		t.Fatalf("marshal advice: %v", err)
+	}
+	// Minus the surrounding quotes: what actually occupies the envelope.
+	got := len(escaped) - 2
+	if got > budget {
+		t.Errorf("the advice is %d escaped bytes and the budget is %d, so formatDetails cuts it "+
+			"mid-sentence and the caller is handed half a remedy. Shorten it, or change "+
+			"client.DetailsRenderLimit and this test together", got, budget)
+	}
+	t.Logf("advice = %d escaped bytes of a %d-byte budget (cap %d, prefix %d)",
+		got, budget, client.DetailsRenderLimit, advicePrefix)
+
+	// And it must survive in the assembled envelope, not just in isolation.
+	raw, err := json.Marshal(commitLockConflictErr([]commitLockConflict{{
+		Path: "internal/domain/commit_locks.go", ResourceKey: "aihub:aihub:internal/domain/commit_locks.go",
+		AttemptID: "ra_q0f0brdY", ActorDisplay: "dahe", WorkItemSlug: "aihub#366",
+	}}).Details)
+	if err != nil {
+		t.Fatalf("marshal details: %v", err)
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	cut := compact.String()
+	if len(cut) > client.DetailsRenderLimit {
+		cut = cut[:client.DetailsRenderLimit]
+	}
+	if !strings.Contains(cut, string(escaped[1:len(escaped)-1])) {
+		t.Errorf("the advice does not survive the %d-byte cut of the real envelope (%d bytes):\n%s",
+			client.DetailsRenderLimit, compact.Len(), cut)
 	}
 }

@@ -280,9 +280,9 @@ func TestCommitToolsDeclareThatTheyAcquireLocks(t *testing.T) {
 	}
 }
 
-// TestCommitLockGateReport_TellsTheThreeNotCommittedFactsApart pins the whole of
-// report()'s classification in one table, including the two outcomes no wire
-// test reaches cheaply.
+// TestCommitLockGateReport_TellsTheNotCommittedFactsApart pins the whole of
+// report()'s classification in one table, including the outcomes no wire test
+// reaches cheaply.
 //
 // The defect it replaces: the switch keyed on a single !ran flag, which is true
 // for "the gate was never invoked", "the gate could not run" and "the gate ran
@@ -290,59 +290,92 @@ func TestCommitToolsDeclareThatTheyAcquireLocks(t *testing.T) {
 // needed locking". Two of the three had files staged at the moment they said it,
 // and in a pf_ship response that sentence sits next to an `error` naming
 // CONFLICT_LOCK_TAKEN and a `side_effects` entry saying the files WERE staged.
-// The gate's own doc comment forbids this conflation one layer down; this table
-// is what stops it recurring one layer up.
+//
+// 🔴 AND THE FIRST FIX FOR THAT SHIPPED THE SAME DEFECT AGAIN, which is the
+// reason for the sixth row and for the rewritten invariant at the bottom. That
+// version split the failure side three ways on invoked / err / ran — all three
+// of which live INSIDE run(), so every failure upstream of the gate still landed
+// on `!invoked` and still answered "no staged changes". An earlier version of
+// this very comment then claimed "Five facts, five names", and the uniqueness
+// check below enforced it. There are six facts. Counting them from the switch's
+// own branches is what made the sixth invisible: the enumeration and the thing
+// enumerated came from the same place, so nothing could disagree.
+//
+// So the invariant is no longer "one name per row". Two rows now legitimately
+// share `could_not_run` — nothing was checked and nothing was committed is the
+// same instruction to the caller in both — and what must stay distinct is the
+// DETAIL, because that is the field a human reads to find out which happened.
 //
 // Both success values are in the table as positive controls: a "fix" that
-// reported every outcome as a distinct kind of failure would satisfy the three
+// reported every outcome as a distinct kind of failure would satisfy the
 // failure rows on its own.
-func TestCommitLockGateReport_TellsTheThreeNotCommittedFactsApart(t *testing.T) {
+func TestCommitLockGateReport_TellsTheNotCommittedFactsApart(t *testing.T) {
 	conflictErr := errors.New("commit refused: CONFLICT_LOCK_TAKEN: this commit changes 1 file(s) locked by another attempt")
 	checkErr := errors.New("the commit-time lock check could not be completed, so nothing was committed: 502 Bad Gateway")
+	stageErr := errors.New("git add -A: exit status 128\nfatal: Unable to create '.git/index.lock': File exists.")
 
 	cases := []struct {
-		name string
-		gate *commitLockGate
-		want string
-		why  string
+		name      string
+		gate      *commitLockGate
+		stageErr  error
+		want      string
+		wantStage string // a phrase the detail must contain
+		why       string
 	}{
 		{
-			name: "never invoked",
-			gate: &commitLockGate{},
-			want: "not_run",
-			why:  "nothing was staged, so runCommitGate short-circuited and there was no change set to protect",
+			name:      "never reached: the commit stage failed upstream of the gate",
+			gate:      &commitLockGate{},
+			stageErr:  stageErr,
+			want:      "could_not_run",
+			wantStage: "before the lock check was reached",
+			why: "GitStage / GitHasStagedChanges / GitStagedPaths all fail before runCommitGate " +
+				"calls the gate, so invoked, err and ran are ALL zero — and the gate has no idea " +
+				"what is in the index. Claiming nothing was staged here is a positive falsehood, " +
+				"and it is the one this row exists to catch",
 		},
 		{
-			name: "invoked, refused by another attempt's lock",
-			gate: &commitLockGate{invoked: true, checked: 3, err: conflictErr},
-			want: "refused",
-			why:  "the gate ran, and what it found was somebody else's lock — the caller waits",
+			name:      "never invoked: nothing was staged",
+			gate:      &commitLockGate{},
+			want:      "not_run",
+			wantStage: "no staged changes",
+			why: "the commit stage COMPLETED and the index matched HEAD, so runCommitGate " +
+				"short-circuited and there was genuinely no change set to protect",
 		},
 		{
-			name: "invoked, the check itself failed",
-			gate: &commitLockGate{invoked: true, checked: 3, err: checkErr},
-			want: "could_not_run",
+			name:      "invoked, refused by another attempt's lock",
+			gate:      &commitLockGate{invoked: true, checked: 3, err: conflictErr},
+			want:      "refused",
+			wantStage: "held by another live attempt",
+			why:       "the gate ran, and what it found was somebody else's lock — the caller waits",
+		},
+		{
+			name:      "invoked, the check itself failed",
+			gate:      &commitLockGate{invoked: true, checked: 3, err: checkErr},
+			want:      "could_not_run",
+			wantStage: "did not complete",
 			why: "nothing is known about those files, which is not the same fact as knowing " +
 				"they are clear — and unlike a refusal, the caller just retries",
 		},
 		{
-			name: "ran, locks acquired",
-			gate: &commitLockGate{invoked: true, ran: true, checked: 3, acquired: []string{"a.go"}},
-			want: "acquired",
-			why:  "positive control: a widened lock set has to stay visible where it was widened",
+			name:      "ran, locks acquired",
+			gate:      &commitLockGate{invoked: true, ran: true, checked: 3, acquired: []string{"a.go"}},
+			want:      "acquired",
+			wantStage: "now locked by it",
+			why:       "positive control: a widened lock set has to stay visible where it was widened",
 		},
 		{
-			name: "ran, everything already covered",
-			gate: &commitLockGate{invoked: true, ran: true, checked: 3},
-			want: "covered",
-			why:  "positive control: the quiet success must not be dressed up as a failure",
+			name:      "ran, everything already covered",
+			gate:      &commitLockGate{invoked: true, ran: true, checked: 3},
+			want:      "covered",
+			wantStage: "already covered",
+			why:       "positive control: the quiet success must not be dressed up as a failure",
 		},
 	}
 
-	seen := map[string]bool{}
+	details := map[string]string{}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := tc.gate.report(map[string]any{})
+			out := tc.gate.report(map[string]any{}, tc.stageErr)
 			got, _ := out["lock_gate"].(string)
 			if got != tc.want {
 				t.Fatalf("lock_gate = %q, want %q — %s", got, tc.want, tc.why)
@@ -351,17 +384,23 @@ func TestCommitLockGateReport_TellsTheThreeNotCommittedFactsApart(t *testing.T) 
 			if detail == "" {
 				t.Fatal("lock_gate_detail is empty; the bare value does not say what to do next")
 			}
-			// "nothing was staged" is true of exactly one of these five rows.
-			// Anywhere else it contradicts the response it is sitting in.
+			if !strings.Contains(detail, tc.wantStage) {
+				t.Errorf("lock_gate_detail = %q, want it to say %q — %s", detail, tc.wantStage, tc.why)
+			}
+			// "no staged changes" is a claim about the index, and it is only
+			// knowable on the one row where the commit stage got far enough to
+			// look. Anywhere else it contradicts the response it sits in.
 			if tc.want != "not_run" && strings.Contains(detail, "no staged changes") {
-				t.Errorf("lock_gate_detail = %q, but %d file(s) were staged", detail, tc.gate.checked)
+				t.Errorf("lock_gate_detail = %q asserts an empty index, but this row either had "+
+					"%d file(s) staged or never found out — %s", detail, tc.gate.checked, tc.why)
 			}
-			// Five facts, five names. An enum that reuses a name for two of them is
-			// the original defect wearing a longer switch.
-			if seen[got] {
-				t.Errorf("lock_gate=%q is already used by an earlier case", got)
+			// Six facts, six DETAILS. Names may repeat where the caller's next
+			// move is the same; the sentence they read must not.
+			if prev, dup := details[detail]; dup {
+				t.Errorf("this row is indistinguishable from %q: both say %q. A reader cannot "+
+					"tell which of the two happened", prev, detail)
 			}
-			seen[got] = true
+			details[detail] = tc.name
 		})
 	}
 }

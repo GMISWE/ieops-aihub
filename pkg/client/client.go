@@ -21,6 +21,18 @@ import (
 // mem_xxx, u_xxx) unchanged, so id-based callers see no behavior change.
 func seg(s string) string { return url.PathEscape(s) }
 
+// DetailsRenderLimit is the byte cap formatDetails applies to the compacted
+// `details` JSON.
+//
+// Exported so that a PRODUCER of `details` can hold itself to the budget its
+// consumer actually enforces, instead of copying the number and drifting.
+// internal/domain.CommitLockRefusalAdvice is the first such producer: its
+// refusal advice is useless if it arrives cut in half, and the test that pins
+// that has to know where the cut falls. Go marshals map keys alphabetically, so
+// what a given key's budget is depends on where its name sorts — a producer
+// cannot work that out from the total alone, but it can from this number.
+const DetailsRenderLimit = 500
+
 // formatDetails renders the server error `details` object as a compact
 // " details=<json>" suffix for the error string, so the conflict metadata the
 // server already computes (lock holder, dedup candidates, superseded_by, …)
@@ -36,9 +48,8 @@ func formatDetails(raw json.RawMessage) string {
 		return ""
 	}
 	s := buf.String()
-	const max = 500
-	if len(s) > max {
-		s = s[:max] + "...(truncated)"
+	if len(s) > DetailsRenderLimit {
+		s = s[:DetailsRenderLimit] + "...(truncated)"
 	}
 	return " details=" + s
 }

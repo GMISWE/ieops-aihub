@@ -125,24 +125,57 @@ func (g *commitLockGate) fail(err error) error {
 
 // report writes the gate's outcome into a tool response.
 //
-// 🔴 THE FAILURE SIDE HAS THREE OUTCOMES, NOT ONE. An earlier version keyed the
-// whole switch on !g.ran, which is true for all three — the gate was never
-// invoked, the gate could not run, and the gate ran and refused — and printed
-// "no staged changes, so no files needed locking" for each. On a pf_ship whose
-// commit was refused over a contested file that produced a self-contradicting
-// object: an `error` naming CONFLICT_LOCK_TAKEN and a `side_effects` entry
-// saying files were staged, sitting next to a `lock_gate_detail` denying there
-// was anything staged at all. That is precisely the conflation run()'s own doc
-// comment above forbids — "the gate could not run" is not "the gate ran and
-// found nothing" — reproduced one layer up, in the reporting rather than in the
-// gate. pf_commit hides it (it answers a refusal with errResult and never calls
-// report), so pf_ship's structured failure object is where it surfaces, and
-// that object is the entire deliverable of pf_ship's failure path.
-func (g *commitLockGate) report(out map[string]any) map[string]any {
+// `stageCommitErr` is the error that ended the COMMIT STAGE, or nil if that
+// stage finished — see commitStageErr. It is a parameter rather than a field
+// because it is the one fact about the outcome that does not live inside the
+// gate: everything upstream of run() fails without the gate ever hearing about
+// it.
+//
+// 🔴 THE FAILURE SIDE HAS FOUR OUTCOMES, NOT ONE AND NOT THREE. An earlier
+// version keyed the whole switch on !g.ran, which is true for three of them —
+// the gate was never invoked, the gate could not run, and the gate ran and
+// refused — and printed "no staged changes, so no files needed locking" for
+// each. On a pf_ship whose commit was refused over a contested file that
+// produced a self-contradicting object: an `error` naming CONFLICT_LOCK_TAKEN
+// and a `side_effects` entry saying files were staged, sitting next to a
+// `lock_gate_detail` denying there was anything staged at all.
+//
+// 🔴 SPLITTING IT THREE WAYS REPRODUCED THE SAME DEFECT, because invoked / err /
+// ran ALL live inside run(), and the whole class of failure UPSTREAM of the gate
+// leaves every one of them at its zero value. runCommitGate returns GitStage's
+// or GitStagedPaths' error before the gate is ever called (coding/ship.go:76-96
+// with coding/git_ops.go:198-208), so the gate is not "not run because nothing
+// needed protecting" — it was never reached, and has no idea what was staged.
+// Measured, on the real pf_ship, with HEAD's tree object removed:
+//
+//	lock_gate        not_run
+//	lock_gate_detail no staged changes, so no files needed locking
+//	error            git diff --cached --quiet: exit status 128 / bad tree object HEAD
+//	side_effects     changes were staged into the index but no commit was created
+//
+// — the same response body, field for field, that the three-way split was
+// written to remove, and this time the denial is a positive falsehood rather
+// than a conflation. A `.git/index.lock` left by a concurrent git process, which
+// is the realistic trigger, gives the same thing against a `git add -A` error.
+// So the fourth branch keys on something the gate CANNOT know about itself.
+//
+// pf_commit answers a refusal with errResult and never calls report, so
+// pf_ship's structured failure object is where all of this surfaces, and that
+// object is the entire deliverable of pf_ship's failure path.
+func (g *commitLockGate) report(out map[string]any, stageCommitErr error) map[string]any {
 	switch {
+	case !g.invoked && stageCommitErr != nil:
+		// The commit stage died before runCommitGate reached the gate. Nothing
+		// was checked and nothing was committed — but this branch must not say
+		// anything about the index, because whether `git add` got that far is
+		// exactly what failed. `side_effects` reports that; this field does not.
+		out["lock_gate"] = "could_not_run"
+		out["lock_gate_detail"] = "the commit stage failed before the lock check was reached, so " +
+			"nothing was checked and nothing was committed; `error` says what failed and " +
+			"`side_effects` says whether anything was left in the index"
 	case !g.invoked:
-		// runCommitGate never reached it: nothing was staged, so no commit was
-		// created and there was no change set to protect.
+		// runCommitGate reached the short-circuit: the index matched HEAD, so
+		// there was no change set to protect.
 		out["lock_gate"] = "not_run"
 		out["lock_gate_detail"] = "no staged changes, so no files needed locking"
 	case isAihubCode(g.err, "CONFLICT_LOCK_TAKEN"):
@@ -169,6 +202,22 @@ func (g *commitLockGate) report(out map[string]any) map[string]any {
 			"all %d changed file(s) were already covered; no lock was taken", g.checked)
 	}
 	return out
+}
+
+// commitStageErr narrows a pf_ship failure to the ones that ended the chain at
+// the COMMIT stage, which is the only place the lock gate could have been
+// reached and was not.
+//
+// The narrowing is the whole point. A ship that staged nothing, made no commit
+// and then failed at the push also leaves the gate un-invoked — and there
+// "not_run" is the true answer: there was genuinely no change set to protect.
+// Reporting could_not_run for that would swap one falsehood for another, which
+// is how a fix for an over-claim becomes an over-claim in the other direction.
+func commitStageErr(res *coding.ShipResult, err error) error {
+	if err == nil || res == nil || res.Stage != coding.StageCommit {
+		return nil
+	}
+	return err
 }
 
 // jsonStrSlice pulls a []string out of a decoded JSON field.
@@ -235,7 +284,7 @@ func (s *Server) registerCodingTools() {
 			"Any changed file no held lock covers is locked for this attempt automatically and stays locked until the attempt ends, so committing WIDENS your lock set. " +
 			"If another live attempt already holds one of those files the commit is REFUSED with CONFLICT_LOCK_TAKEN: nothing is committed, the files stay staged, and the error names every blocked path plus its holder — actor, work item and attempt. " +
 			"When every changed file is already covered, no lock is taken and nothing is written. " +
-			"On SUCCESS the response says which happened in `lock_gate`: covered | acquired (with locks_acquired_for) | not_run (nothing was staged, so no commit was made). A refusal or a failed check comes back as a plain error string with no `lock_gate` field at all. " +
+			"On SUCCESS the response says which happened in `lock_gate`: covered | acquired (with locks_acquired_for) | not_run (the index matched HEAD, so there was no change set to lock — reachable here only for a merge commit, which is made from MERGE_HEAD rather than from staged changes; `sha` in the same response is still the commit that was created). A refusal or a failed check comes back as a plain error string with no `lock_gate` field at all. " +
 			"There is no pass-through: a lock check that cannot reach the server fails the commit rather than allowing it.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
@@ -280,11 +329,13 @@ func (s *Server) registerCodingTools() {
 			"message": message,
 			"files":   paths,
 		})
+		// nil: this line is only reached when GitCommitGated returned no error,
+		// so the commit stage did not fail and there is nothing to narrow.
 		return jsonResult(gate.report(map[string]any{
 			"sha":   sha,
 			"repo":  repo,
 			"files": paths,
-		}))
+		}, nil))
 	})
 
 	// pf_push
@@ -417,10 +468,13 @@ func (s *Server) registerCodingTools() {
 			"automatically and stays locked until the attempt ends. A file held by another live attempt " +
 			"stops the whole call at stage=\"commit\" with CONFLICT_LOCK_TAKEN — nothing committed, nothing " +
 			"pushed, no PR — and the error names every blocked path and its holder. `lock_gate` in the " +
-			"response reports which of five things happened — covered | acquired | not_run (nothing was " +
-			"staged) | refused (another live attempt holds one of the files) | could_not_run (the check " +
-			"itself failed) — and there is no pass-through: a check that cannot reach the server fails " +
-			"the ship rather than allowing it.",
+			"response reports which of five things happened — covered | acquired | not_run (the commit " +
+			"stage finished and nothing was staged, so no commit was needed and there was nothing to " +
+			"lock) | refused (another live attempt holds one of the files) | could_not_run (nothing was " +
+			"checked: either the check itself failed, or the commit stage died before reaching it — " +
+			"`lock_gate_detail` says which, and `side_effects` rather than `lock_gate` says what was " +
+			"left in the index) — and there is no pass-through: a check that cannot reach the server " +
+			"fails the ship rather than allowing it.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
 			"work_item_id":   prop("string", "Work item ID"),
@@ -495,7 +549,7 @@ func (s *Server) registerCodingTools() {
 		// jsonResult, not errResult, even on failure: errResult carries a bare
 		// string, and the structured side-effect report IS the deliverable of
 		// this tool's failure path.
-		return jsonResult(gate.report(shipPayload(repo, res, shipErr)))
+		return jsonResult(gate.report(shipPayload(repo, res, shipErr), commitStageErr(res, shipErr)))
 	})
 
 	// pf_wrap

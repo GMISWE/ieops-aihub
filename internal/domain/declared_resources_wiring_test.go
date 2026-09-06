@@ -150,15 +150,21 @@ func TestClaimValidatesRequestedLocksAndReportsUnrecognized(t *testing.T) {
 // derives ("deploy_env", ""), the empty resource_key fails validation, and the
 // claim returns 400 — an existing work item becomes unclaimable, the exact
 // outcome this change exists to prevent.
+//
+// aihub#356 moved the derivation loop out of FnClaimWorkItem into
+// deriveClaimLocks so it could be tested without a pool, so the second anchor is
+// now the CALL. That is not only a re-spelling: the call is what this guard has
+// to find anyway, and its absence is now the single edit that would stop every
+// lock being derived, which is what the t.Fatal below says.
 func TestRequestedLocksValidatedBeforeServerSideDerivation(t *testing.T) {
 	body := bodyOf(t, sourceOf(t, "run_attempts.go"), "FnClaimWorkItem")
 	validateAt := strings.Index(body, "ValidateRequestedLocks(req.RequestedLocks)")
-	deriveAt := strings.Index(body, "if len(req.RequestedLocks) == 0 && len(wi.DeclaredResources) > 0 {")
+	deriveAt := strings.Index(body, "deriveClaimLocks(req, wi.DeclaredResources, wi.Project)")
 	if validateAt < 0 {
 		t.Fatal("ValidateRequestedLocks call not found in FnClaimWorkItem")
 	}
 	if deriveAt < 0 {
-		t.Fatal("server-side derivation block not found — update this guard")
+		t.Fatal("FnClaimWorkItem does not call deriveClaimLocks — the claim derives NO locks from declared_resources at all (aihub#238, aihub#356)")
 	}
 	if validateAt > deriveAt {
 		t.Error("ValidateRequestedLocks runs AFTER server-side lock derivation; a stored resource with no uri derives an empty resource_key and 400s the claim, making existing work items unclaimable (aihub#238)")
@@ -169,10 +175,29 @@ func TestRequestedLocksValidatedBeforeServerSideDerivation(t *testing.T) {
 // resourceToLock({Type:"service"}, p) returns ("deploy_env", "") — a well-typed
 // lock with a meaningless key that would collide with every other empty-key row
 // of the same type.
+//
+// This was a source scan while the loop was inline in FnClaimWorkItem and only
+// reachable through a *pgxpool.Pool. aihub#356 extracted deriveClaimLocks, so it
+// is now the behavioural assertion this file's own header says to prefer: a
+// source scan is satisfied by the text being present anywhere in the body, and
+// this is satisfied only by the row not being derived.
 func TestDerivationSkipsEmptyLockKey(t *testing.T) {
-	body := bodyOf(t, sourceOf(t, "run_attempts.go"), "FnClaimWorkItem")
-	if !strings.Contains(body, `if lockType == "" || lockKey == "" {`) {
-		t.Error(`the derivation loop does not skip an empty lockKey — a stored {"type":"service"} with no uri would insert resource_key="" (aihub#238)`)
+	req := &ClaimRequest{}
+	locks, probes := deriveClaimLocks(req,
+		json.RawMessage(`[{"type":"service"},{"type":"repo","uri":"repo:aihub","task_branch":"polyforge/x"}]`),
+		"aihub")
+	for _, l := range locks {
+		if l.ResourceKey == "" {
+			t.Errorf(`the derivation does not skip an empty lockKey — a stored {"type":"service"} with no uri inserts resource_type=%q resource_key="" (aihub#238)`, l.ResourceType)
+		}
+	}
+	// The skip must not be a blanket refusal: the well-formed entry alongside it
+	// still has to derive, or "skips empty keys" is satisfied by deriving nothing.
+	if len(locks) != 1 || locks[0].ResourceKey != "aihub/polyforge/x" {
+		t.Fatalf("locks = %+v, want exactly the one well-formed git_branch entry", locks)
+	}
+	if len(probes) != len(locks) {
+		t.Errorf("probes (%d) and locks (%d) went out of step — lockProbes[i] no longer pairs with RequestedLocks[i] (aihub#261)", len(probes), len(locks))
 	}
 }
 

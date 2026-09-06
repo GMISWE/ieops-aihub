@@ -241,12 +241,19 @@ func branchAFreshClaimCreates(t *testing.T, wiID, slug, goal, declared, idemKey 
 // the substitution has to be confined to repos this claim really puts a worktree
 // on.
 //
-// A declared repo the workspace has no clone for gets no worktree, so nothing is
-// on any branch there and declared_resources is the only statement anybody has
-// made about it. Reporting a branch for it would key the lock on a name as
-// fictional as the one aihub#356 is removing — and worse, it would stop the lock
-// colliding with a task_branch a human deliberately declared. That is the shape
-// in which "fix the key" degenerates into "the lock no longer protects anything".
+// A declared repo the workspace config does not list gets no prediction, so
+// nothing is on any branch there and declared_resources is the only statement
+// anybody has made about it. Reporting a branch for it would key the lock on a
+// name as fictional as the one aihub#356 is removing — and worse, it would stop
+// the lock colliding with a task_branch a human deliberately declared. That is
+// the shape in which "fix the key" degenerates into "the lock no longer protects
+// anything".
+//
+// ⚠️ THE CONTAINMENT IS ON THE PREDICTION, NOT ON THE WORKTREE, and this test
+// asserts only the first. "No prediction" implies no worktree; the converse is
+// false, and TestClaimReportsAKeyedBranchNoWorktreeConfirms below owns the gap
+// between them — a repo predicted for whose `worktree add` fails IS re-keyed,
+// which is why that case has to be reported rather than merely documented.
 func TestClaimLeavesTheDeclarationInForceWithNoWorktree(t *testing.T) {
 	const (
 		wiID     = "wi_01JBRANCHLOCK003"
@@ -270,5 +277,112 @@ func TestClaimLeavesTheDeclarationInForceWithNoWorktree(t *testing.T) {
 	// or this control could be satisfied by a fix that does nothing at all.
 	if keyed := keyedBranch(t, f, wiID, "aihub", declared); keyed != actual {
 		t.Errorf("the repo that does have a worktree was keyed on %q rather than its actual branch %q", keyed, actual)
+	}
+}
+
+// problemsFrom returns the worktree_problems strings on a claim response.
+func problemsFrom(t *testing.T, result map[string]any) []string {
+	t.Helper()
+	raw, ok := result["worktree_problems"]
+	if !ok {
+		return nil
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("worktree_problems is %T, want a list: %v", raw, raw)
+	}
+	var out []string
+	for _, it := range items {
+		s, _ := it.(string)
+		out = append(out, s)
+	}
+	return out
+}
+
+// TestClaimReportsAKeyedBranchNoWorktreeConfirms is the aihub#356 review's
+// finding 2, and it is the ONE case where this change does not degrade to
+// pre-aihub#356 behaviour.
+//
+// Everywhere else, a claim that cannot predict a branch reports nothing and the
+// declaration stands. Here the prediction was made — .repo/<repo> is a directory
+// so the guard passes — and the `worktree add` afterwards FAILED. The lock is
+// therefore keyed on a branch nothing is on, the declared task_branch has been
+// overridden, and the check that exists to notice exactly this used to range
+// over the worktrees that succeeded, so it could not see the repo that did not.
+//
+// ⚠️ THE ORDERING IS WHY THIS CANNOT BE FIXED BY PREDICTING MORE CAREFULLY. The
+// key must be chosen before the claim so a real collision can still refuse it
+// (claimTaskBranches); the worktree only exists after. So the honest remedy is
+// to TELL the caller, which is what this asserts.
+//
+// MUTANT: in keyedBranchProblems, range over `worktrees` instead of over
+// `taskBranches` (the pre-review shape). This goes red where it reads
+// worktree_problems back — measured as `worktree_problems = []` — while every
+// other test in this file stays green, because on a healthy claim the two sets
+// are identical.
+func TestClaimReportsAKeyedBranchNoWorktreeConfirms(t *testing.T) {
+	const (
+		wiID     = "wi_01JBRANCHLOCK004"
+		slug     = "aihub#356"
+		goal     = "tell the caller when a keyed branch has no worktree behind it"
+		declared = "polyforge/hand-declared-branch"
+	)
+
+	w := newClaimWorkspace(t)
+	// The reviewer's measured probe. .repo/aihub stays a DIRECTORY, so
+	// claimBranchForRepo's os.Stat guard passes and a branch is predicted and
+	// keyed — but it is no longer a git repository, so `worktree add` fails.
+	// This is the shape of a stale or half-deleted clone.
+	if err := os.RemoveAll(filepath.Join(w.src, ".git")); err != nil {
+		t.Fatalf("break the clone: %v", err)
+	}
+
+	f := newFakeAihub(t)
+	registerClaimFixture(f, wiID, slug, goal, declared)
+
+	result, isErr := callTool(t, f, "pf_claim_work_item", map[string]any{
+		"work_item_id": wiID, "idempotency_key": "idem-branchlock-noworktree",
+	})
+	// The claim itself must still succeed. A broken clone is not a reason to
+	// refuse a claim, and turning this into an error would be a far worse
+	// regression than the missing warning. Green on both trees.
+	if isErr {
+		t.Fatalf("pf_claim_work_item failed on a repo with a broken clone: %v", result)
+	}
+	if ok, _ := result["ok"].(bool); !ok {
+		t.Fatalf("claim response is not ok:true: %v", result)
+	}
+
+	// ── the two fixture guards, without which this test cannot discriminate ──
+	if _, err := os.Stat(filepath.Join(w.root, "pf.aihub-356", "aihub")); err == nil {
+		t.Fatalf("fixture: the claim created a worktree after all, so the case under test — " +
+			"a branch keyed with no worktree behind it — was never reached")
+	}
+	keyed := keyedBranch(t, f, wiID, "aihub", declared)
+	if keyed == declared {
+		t.Fatalf("fixture: the claim reported no branch for aihub, so the declared %q is still in "+
+			"force and there is nothing to warn about", declared)
+	}
+
+	// ── the assertion ───────────────────────────────────────────────────────
+	problems := problemsFrom(t, result)
+	found := ""
+	for _, p := range problems {
+		if strings.HasPrefix(p, "aihub:") && strings.Contains(p, keyed) {
+			found = p
+		}
+	}
+	if found == "" {
+		t.Fatalf("the claim keyed aihub's git_branch lock on %q, created no worktree for aihub, and "+
+			"said nothing about it. That lock names a branch nobody is on AND has overridden the "+
+			"declared %q, so a hand-made branch is no longer the one protected — and the only place "+
+			"this is observable reported nothing. worktree_problems = %q",
+			keyed, declared, problems)
+	}
+	// The warning has to say the worktree is MISSING, not merely that two names
+	// disagree: the remedy is different, and "came out on" would be a lie here.
+	if !strings.Contains(found, "NO worktree") {
+		t.Errorf("the warning does not say the worktree is missing, so the reader is pointed at the "+
+			"wrong remedy: %q", found)
 	}
 }

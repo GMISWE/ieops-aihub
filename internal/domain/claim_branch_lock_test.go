@@ -7,12 +7,27 @@ package domain
 // ─── Why this is in-package and needs no database ───────────────────────────
 //
 // The rule is a pure transform of a declared resource, so it is testable
-// without a claim, a transaction or a work item. What a DB test would add on
-// top is only that FnClaimWorkItem still calls the transform — and that is
-// already load-bearing for every existing claim/lock DB suite: the same loop
-// derives EVERY lock a claim takes, so a claim that stopped running it would
-// acquire nothing at all and take aihub#342's, aihub#261's and aihub#329's
-// suites down with it.
+// without a claim, a transaction or a work item.
+//
+// ⚠️ THE TRANSFORM AND THE CALL SITE ARE TWO ASSERTIONS, and an earlier version
+// of this comment argued the second one away. It said a DB test would add
+// nothing because the same loop derives EVERY lock a claim takes, so a claim
+// that stopped applying the substitution would acquire nothing at all and take
+// aihub#342's, aihub#261's and aihub#329's suites down with it. That is FALSE,
+// and the review of aihub#356 measured it: deleting the substitution does not
+// stop the loop deriving locks — the very next line still runs derivedLockProbe
+// — it only reverts the key to the declared name, which is the state those
+// suites were written against, so they stay green BY CONSTRUCTION. The reviewer
+// deleted the line, ran the full suite including the DB suites, and everything
+// passed. An untested line carrying a written argument not to test it is worse
+// than an untested line.
+//
+// TestDeriveClaimLocks below is the fix. Every OTHER test in this file calls
+// EffectiveDeclaredResource itself (through lockFor, or inline) and therefore
+// tests only the transform; that one calls deriveClaimLocks, which is the
+// function FnClaimWorkItem hands its stored declared_resources to, so the
+// substitution has to be applied THERE for it to pass. deriveClaimLocks exists
+// as a separate function for exactly this reason — see its doc comment.
 //
 // ─── What each case is for ─────────────────────────────────────────────────
 //
@@ -21,7 +36,7 @@ package domain
 // the literal wire name "task_branches" rather than on the Go field, so a
 // rename on either side goes red here even though the two never share a symbol.
 //
-// Run: go test ./internal/domain/ -run 'TestClaim.*TaskBranch|TestGitBranchLock' -v
+// Run: go test ./internal/domain/ -run 'TestClaimLockKey|TestGitBranchLock|TestClaimRequestBindsTaskBranches|TestDeriveClaimLocks' -v
 
 import (
 	"encoding/json"
@@ -47,9 +62,12 @@ func lockFor(t *testing.T, overrides map[string]string, res DeclaredResourceItem
 // fix: the git_branch key is the branch the claim reports, and the declared
 // task_branch is only the fallback.
 //
-// MUTANT: delete the `d = req.EffectiveDeclaredResource(d)` line from
-// FnClaimWorkItem's derivation loop, or make EffectiveDeclaredResource return
-// res unchanged. The first two cases go red with the ieops#996 key.
+// MUTANT: make EffectiveDeclaredResource return res unchanged. The first two
+// cases go red with the ieops#996 key.
+//
+// ⚠️ Deleting `d = req.EffectiveDeclaredResource(d)` from deriveClaimLocks does
+// NOT redden this test, because lockFor applies the transform itself. That is
+// the hole TestDeriveClaimLocks closes; do not read this test as covering it.
 func TestClaimLockKeyFollowsTheActualTaskBranch(t *testing.T) {
 	const project = "ieops"
 
@@ -82,8 +100,15 @@ func TestClaimLockKeyFollowsTheActualTaskBranch(t *testing.T) {
 
 	t.Run("no report leaves the declaration in force", func(t *testing.T) {
 		// The honest degradation, and the reason this is not a precondition: a
-		// claim that materialises no worktree for a repo has put nothing on any
-		// branch there, so the declaration is the only statement anyone made.
+		// claim that PREDICTS no branch for a repo has said nothing about it, so
+		// the declaration is the only statement anyone made.
+		//
+		// ⚠️ Not "materialises no worktree". Those are different sets, and the
+		// difference is the one case aihub#356 does not degrade cleanly: a claim
+		// whose prediction succeeded and whose `worktree add` then failed DOES
+		// report a branch, and the declaration is overridden. See
+		// EffectiveDeclaredResource, and
+		// TestClaimReportsAKeyedBranchNoWorktreeConfirms in internal/mcp.
 		for name, overrides := range map[string]map[string]string{
 			"nil map":            nil,
 			"empty map":          {},
@@ -178,10 +203,20 @@ func TestClaimLockKeyOverrideTouchesNothingElse(t *testing.T) {
 // TestGitBranchLockStillBlocksTwoAttemptsOnOneBranch is the POSITIVE control:
 // re-keying the lock must not stop it locking.
 //
-// It asserts through lockConflictProbe.Matches, which is the repo's own Go
-// mirror of the SQL predicate the claim path runs (lockConflictWhereClause), so
-// what is checked is the collision test itself and not a restatement of string
-// equality.
+// It asserts through lockConflictProbe.Matches, the repo's own Go mirror of the
+// SQL predicate the claim path runs (lockConflictWhereClause).
+//
+// ⚠️ BUT ITS DISCRIMINATING POWER IS THE STRING COMPARISON, and an earlier
+// version of this comment claimed the opposite ("what is checked is the
+// collision test itself and not a restatement of string equality"). That is
+// deductively false for git_branch: derivedLockProbe returns exactProbe(lockKey)
+// (conflicts.go), and Matches on a probe whose Keys is exactly {lockKey} and
+// whose LikePattern is empty reduces to incomingKey == heldKey — which the
+// t.Fatalf three lines above has already established. The Matches assertion is
+// still worth keeping (it reddens on a mutant, and it is the line that would
+// notice if git_branch ever grew a non-trivial probe), but do not read it as
+// covering the collision machinery. The file_scope arm of that machinery is
+// where the non-trivial probes live, and aihub#261's suite owns it.
 func TestGitBranchLockStillBlocksTwoAttemptsOnOneBranch(t *testing.T) {
 	const branch = "polyforge/ieops-996-proxy-pin-bump"
 
@@ -258,6 +293,138 @@ func TestClaimRequestBindsTaskBranchesFromTheWire(t *testing.T) {
 		}
 		if old.TaskBranches != nil {
 			t.Errorf("TaskBranches = %#v, want nil — an older client must not be read as reporting branches", old.TaskBranches)
+		}
+	})
+}
+
+// pickLock returns the key and the paired probe deriveClaimLocks produced for
+// the one lock of the given type, failing if the two slices have gone out of
+// step or if there is not exactly one such lock.
+func pickLock(t *testing.T, locks []ResourceLockReq, probes []lockConflictProbe, lockType string) (string, lockConflictProbe) {
+	t.Helper()
+	if len(locks) != len(probes) {
+		t.Fatalf("locks (%d) and probes (%d) are out of step — lockProbes[i] no longer pairs with RequestedLocks[i] (aihub#261)",
+			len(locks), len(probes))
+	}
+	found := -1
+	for i, l := range locks {
+		if l.ResourceType != lockType {
+			continue
+		}
+		if found >= 0 {
+			t.Fatalf("two %s locks derived: %q and %q", lockType, locks[found].ResourceKey, l.ResourceKey)
+		}
+		found = i
+	}
+	if found < 0 {
+		t.Fatalf("no %s lock derived; got %+v", lockType, locks)
+	}
+	return locks[found].ResourceKey, probes[found]
+}
+
+// TestDeriveClaimLocks is the CALL SITE, and it is the only test in this file
+// that reddens when the substitution is deleted from the claim path.
+//
+// ⚠️ READ THIS BEFORE ADDING A CASE TO ANY OTHER TEST HERE. Every one of them
+// runs EffectiveDeclaredResource ITSELF — lockFor does it, and
+// TestGitBranchLockStillBlocks... does it inline — so all of them assert the
+// TRANSFORM and none of them asserts that the claim applies it. The review of
+// aihub#356 deleted `d = req.EffectiveDeclaredResource(d)` from the claim path
+// and the entire suite, DB suites included, stayed green: the key simply
+// reverted to the declared name, which is the pre-aihub#356 state every one of
+// those suites was written against.
+//
+// So this test takes the STORED WIRE PAYLOAD, hands it to the same function
+// FnClaimWorkItem hands it to, and reads the key off the far end. Nothing here
+// touches EffectiveDeclaredResource by name; if the claim path stops applying
+// it, there is nowhere else for the substitution to come from.
+//
+// MUTANT: delete `d = req.EffectiveDeclaredResource(d)` from deriveClaimLocks.
+// The first subtest goes red naming the ieops#996 key; the three controls below
+// it stay green, so a "fix" that simply disabled the feature cannot pass.
+func TestDeriveClaimLocks(t *testing.T) {
+	const project = "ieops"
+	// The measured ieops#996 pair, written as the wire JSON a claim really
+	// reads rather than as Go structs — unmarshalDeclaredResources sits between
+	// the two, and aihub#261's defect was precisely a hand-written struct in
+	// this position that dropped a field.
+	const stored = `[
+		{"type":"repo","uri":"repo:ieops-ctlchain","task_branch":"polyforge/pin-bump-token","intent":"write"},
+		{"type":"path","uri":"file:internal/cache/x.go","repo":"ieops-ctlchain","intent":"write"}
+	]`
+	const checkedOut = "polyforge/ieops-996-proxy-pin-bump-pin-bump-token-checkout"
+	const declaredKey = "ieops-ctlchain/polyforge/pin-bump-token"
+	const realKey = "ieops-ctlchain/" + checkedOut
+
+	t.Run("the claim keys git_branch on the branch the client reports", func(t *testing.T) {
+		req := &ClaimRequest{TaskBranches: map[string]string{"ieops-ctlchain": checkedOut}}
+		locks, probes := deriveClaimLocks(req, json.RawMessage(stored), project)
+
+		key, probe := pickLock(t, locks, probes, "git_branch")
+		if key == declaredKey {
+			t.Fatalf("the claim inserted %q — the declared task_branch, which is the ieops#996 key. "+
+				"The branch it is really checking out is %q, so this lock protects a branch nobody is on",
+				declaredKey, checkedOut)
+		}
+		if key != realKey {
+			t.Fatalf("the claim inserted git_branch %q, want %q", key, realKey)
+		}
+		// The probe is what a LATER claim is tested against, and it is built in
+		// the same call. A key that moved while its probe did not is a lock that
+		// inserts under one name and collides under another — which enforces
+		// nothing at all, while every assertion about the key alone stays green.
+		if !probe.Matches(realKey) {
+			t.Errorf("the probe paired with %q does not match it, so a second claim on that branch is let through", realKey)
+		}
+		if probe.Matches(declaredKey) {
+			t.Errorf("the probe still matches the declared key %q — the substitution reached the key but not the probe", declaredKey)
+		}
+	})
+
+	// ── controls: all three stay green under the mutant above ────────────────
+	//
+	// "the gate went red" is also satisfied by disabling the feature, so these
+	// pin the two things a disabling fix would break.
+
+	t.Run("a repo the client reports nothing for keeps its declared key", func(t *testing.T) {
+		req := &ClaimRequest{TaskBranches: map[string]string{"some-other-repo": "polyforge/elsewhere"}}
+		locks, probes := deriveClaimLocks(req, json.RawMessage(stored), project)
+		key, _ := pickLock(t, locks, probes, "git_branch")
+		if key != declaredKey {
+			t.Errorf("key = %q, want the declared %q — with nothing checked out for that repo the "+
+				"declaration is the only statement anyone has made about it", key, declaredKey)
+		}
+	})
+
+	t.Run("the file_scope lock alongside it is untouched", func(t *testing.T) {
+		req := &ClaimRequest{TaskBranches: map[string]string{"ieops-ctlchain": checkedOut}}
+		locks, probes := deriveClaimLocks(req, json.RawMessage(stored), project)
+		if len(locks) != 2 {
+			t.Fatalf("derived %d locks from two declared entries: %+v", len(locks), locks)
+		}
+		key, probe := pickLock(t, locks, probes, "file_scope")
+		if want := "ieops:ieops-ctlchain:internal/cache/x.go"; key != want {
+			t.Errorf("file_scope key = %q, want %q — aihub#356 re-keyed a lock it has no business touching", key, want)
+		}
+		if !probe.Matches(key) {
+			t.Errorf("the file_scope probe no longer matches its own key %q", key)
+		}
+	})
+
+	t.Run("a client-supplied requested_locks slice is still trusted verbatim", func(t *testing.T) {
+		// The raw-API path. An override is present for the repo the declaration
+		// names, so a substitution that leaked past the "verbatim or derived,
+		// never both" rule would show up as a third lock or a moved key.
+		req := &ClaimRequest{
+			TaskBranches:   map[string]string{"ieops-ctlchain": checkedOut},
+			RequestedLocks: []ResourceLockReq{{ResourceType: "git_branch", ResourceKey: declaredKey}},
+		}
+		locks, probes := deriveClaimLocks(req, json.RawMessage(stored), project)
+		if len(locks) != 1 || locks[0].ResourceKey != declaredKey {
+			t.Fatalf("locks = %+v, want exactly the one the client asked for (%q)", locks, declaredKey)
+		}
+		if len(probes) != 1 || !probes[0].Matches(declaredKey) || probes[0].Matches(realKey) {
+			t.Errorf("a client-supplied lock got something other than plain key equality: %+v", probes)
 		}
 	})
 }

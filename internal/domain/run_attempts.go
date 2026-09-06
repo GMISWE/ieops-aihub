@@ -88,10 +88,27 @@ type ClaimRequest struct {
 // recomputing the name here — the server cannot see which refs the clone holds.
 //
 // An absent or empty entry leaves the declaration in force. That is the honest
-// degradation rather than a gap: a claim that materialises no worktree for a
-// repo (no workspace on this machine, the repo missing from .polyforge.yaml, a
-// `worktree add` that failed) puts nothing on any branch there, and the
-// declaration is then the only statement anyone has made about it.
+// degradation rather than a gap: a claim that PREDICTS no branch for a repo (no
+// workspace on this machine, the repo missing from .polyforge.yaml, no clone
+// under .repo/, an existing worktree directory git refuses to call one) has said
+// nothing about it, and the declaration is then the only statement anyone has
+// made.
+//
+// ⚠️ "PREDICTED A BRANCH" IS NOT "PUT A WORKTREE ON ONE", and the gap between
+// them is the single case where aihub#356 does NOT degrade to pre-fix
+// behaviour. The client predicts before the claim — it has to, or a genuine
+// branch collision could no longer refuse the claim — and creates the worktree
+// after. When the prediction is made and the `worktree add` then FAILS, this
+// substitution still happens: the key names a branch nothing is on, and it has
+// overridden a task_branch someone may have declared by hand precisely to
+// protect it. The claim still succeeds, and nothing on this side of the wire can
+// see it; the CLIENT detects it afterwards and returns it to the caller in
+// worktree_problems (keyedBranchProblems, internal/mcp/tools_lifecycle.go).
+//
+// ⚠️ DO NOT WRITE HERE THAT A FAILED `worktree add` LEAVES THE DECLARATION IN
+// FORCE. It does not. That sentence was in this comment until aihub#356's review
+// measured the opposite, and a reader who trusts it will hand-declare a
+// task_branch believing a stale clone protects it.
 //
 // ⚠️ WHAT THIS DOES NOT REACH. Both are known and deliberate, not oversights —
 // read them before assuming the whole system now agrees on one branch name:
@@ -104,12 +121,20 @@ type ClaimRequest struct {
 //     Takeover through the CLAIM path (force_takeover=true in a claim body) runs
 //     this method and is unaffected.
 //   - PredictConflicts rule 1 compares exact keys built from the declaration, so
-//     its git_branch arm now systematically fails to match a real lock. It was
-//     never a useful signal: it fired iff two work items happened to declare the
-//     same task_branch STRING, which says nothing about whether they would work
-//     on one branch. Rule 2 is the arm that carries the real signal — it matches
-//     `resource_key LIKE '<repo>/%'`, i.e. any attempt on the same repo whatever
-//     the branch — and this change does not touch it.
+//     its git_branch arm now systematically fails to match a real lock. ⚠️ DO NOT
+//     read that as "it was never a useful signal", which is what this comment
+//     used to say. Before this change rule 1 and the claim AGREED, because both
+//     derived the key from the declaration, so rule 1 predicted exactly what the
+//     claim would do. What it is now is a FALSE NEGATIVE, and on precisely the
+//     conflict this change newly makes reachable: pf_predict_conflicts derives no
+//     branch names and has no task_branches to read, so two work items that will
+//     resolve to ONE real branch pass rule 1, come back soft_block from rule 2,
+//     and the second then takes a hard 409 at claim that the prediction said
+//     would not happen. Rule 2 is the arm still carrying a real signal — it
+//     matches `resource_key LIKE '<repo>/%'`, i.e. any attempt on the same repo
+//     whatever the branch — and this change does not touch it. Closing rule 1
+//     needs the PREDICTING client to report its branches the way the claiming one
+//     now does; that is a separate change and is not in aihub#356's scope.
 func (req *ClaimRequest) EffectiveDeclaredResource(res DeclaredResourceItem) DeclaredResourceItem {
 	if res.Type != "repo" || len(req.TaskBranches) == 0 {
 		return res
@@ -215,6 +240,72 @@ func classificationResolvedEventPayload(requiresHumanSession bool) []byte {
 		"source":                 classificationSourceServerDefault,
 	})
 	return b
+}
+
+// deriveClaimLocks returns the locks a claim carrying req will insert, paired
+// index-for-index with the probe that decides whether each one collides.
+//
+// It is the WHOLE of the claim's lock derivation: the client-supplied slice is
+// trusted verbatim with a plain equality probe, and only an empty one is
+// replaced by entries derived from the stored declared_resources. Returning the
+// slice rather than appending to req.RequestedLocks in place keeps that
+// "verbatim or derived, never both" rule visible in one expression.
+//
+// ⚠️ IT IS A SEPARATE FUNCTION SO THAT THE DERIVATION CAN BE TESTED, and that is
+// not a stylistic preference. Every transform below — EffectiveDeclaredResource,
+// derivedLockProbe, the empty-key skip — has unit tests, but while this loop
+// lived inside FnClaimWorkItem the only way to reach the loop ITSELF was through
+// a *pgxpool.Pool, and an AIHUB_TEST_DB-gated test runs in neither CI nor a
+// default local run. So a line could be deleted from here and every test in the
+// repo would stay green; aihub#356 review found exactly that, on the
+// EffectiveDeclaredResource call. Anything added to this function needs a case
+// in TestDeriveClaimLocks, which needs no database.
+//
+// FnClaimWorkItem calling it is separately pinned by
+// TestRequestedLocksValidatedBeforeServerSideDerivation.
+func deriveClaimLocks(req *ClaimRequest, declaredResources json.RawMessage, project string) ([]ResourceLockReq, []lockConflictProbe) {
+	locks := req.RequestedLocks
+	probes := make([]lockConflictProbe, 0, len(locks))
+	for _, l := range locks {
+		probes = append(probes, exactProbe(l.ResourceKey))
+	}
+	if len(locks) > 0 || len(declaredResources) == 0 {
+		return locks, probes
+	}
+	// aihub#261: unmarshalDeclaredResources replaces the local anonymous
+	// struct this site used to declare. That struct's hand-written field list
+	// was the failure mode aihub#342 called the quietest form of this class —
+	// a field missing from the list never reaches the mapper and reads as a
+	// zero value — and the `repo` field added here is exactly such a field.
+	for _, d := range unmarshalDeclaredResources(declaredResources) {
+		// aihub#356: the git_branch key follows the branch the claiming
+		// client is really about to check out, not declared_resources[].
+		// task_branch. Applied to the item rather than to the derived key so
+		// the probe below is built from the same value as the key — a key and
+		// a probe that disagree is a lock that inserts on one name and
+		// collides on another.
+		d = req.EffectiveDeclaredResource(d)
+		// derivedLockProbe, not resourceToLock (aihub#342): an intent=read
+		// declaration takes no write lock. This line is the reported
+		// instance — claim took a file_scope lock for a read-only path
+		// and then 409'd the next claimer, while pf_predict_conflicts
+		// reported the identical input as `info`, so the pre-claim gate
+		// had no predictive value at all.
+		lockType, lockKey, probe := derivedLockProbe(d, project)
+		// aihub#238: an empty key is possible from bad stored data (a
+		// `service`/`path` entry with no uri). Never insert it — the row is
+		// meaningless as a lock and would collide with every other empty-key
+		// row of the same type. Skipping keeps the wi claimable; the entry is
+		// reported via unrecognizedResources below rather than dropped silently.
+		if lockType == "" || lockKey == "" {
+			continue
+		}
+		locks = append(locks, ResourceLockReq{
+			ResourceType: lockType, ResourceKey: lockKey,
+		})
+		probes = append(probes, probe)
+	}
+	return locks, probes
 }
 
 // FnClaimWorkItem implements the atomic claim transaction per §7 / §8.4 of the design doc.
@@ -445,45 +536,8 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	// EXISTING keys that block that lock (aihub#261). A client-supplied lock is
 	// trusted verbatim, so its probe is plain key equality — the pre-aihub#261
 	// behaviour, unchanged.
-	lockProbes := make([]lockConflictProbe, 0, len(req.RequestedLocks))
-	for _, l := range req.RequestedLocks {
-		lockProbes = append(lockProbes, exactProbe(l.ResourceKey))
-	}
-	if len(req.RequestedLocks) == 0 && len(wi.DeclaredResources) > 0 {
-		// aihub#261: unmarshalDeclaredResources replaces the local anonymous
-		// struct this site used to declare. That struct's hand-written field list
-		// was the failure mode aihub#342 called the quietest form of this class —
-		// a field missing from the list never reaches the mapper and reads as a
-		// zero value — and the `repo` field added here is exactly such a field.
-		for _, d := range unmarshalDeclaredResources(wi.DeclaredResources) {
-			// aihub#356: the git_branch key follows the branch the claiming
-			// client is really about to check out, not declared_resources[].
-			// task_branch. Applied to the item rather than to the derived key so
-			// the probe below is built from the same value as the key — a key and
-			// a probe that disagree is a lock that inserts on one name and
-			// collides on another.
-			d = req.EffectiveDeclaredResource(d)
-			// derivedLockProbe, not resourceToLock (aihub#342): an intent=read
-			// declaration takes no write lock. This line is the reported
-			// instance — claim took a file_scope lock for a read-only path
-			// and then 409'd the next claimer, while pf_predict_conflicts
-			// reported the identical input as `info`, so the pre-claim gate
-			// had no predictive value at all.
-			lockType, lockKey, probe := derivedLockProbe(d, wi.Project)
-			// aihub#238: an empty key is possible from bad stored data (a
-			// `service`/`path` entry with no uri). Never insert it — the row is
-			// meaningless as a lock and would collide with every other empty-key
-			// row of the same type. Skipping keeps the wi claimable; the entry is
-			// reported via unrecognizedResources below rather than dropped silently.
-			if lockType == "" || lockKey == "" {
-				continue
-			}
-			req.RequestedLocks = append(req.RequestedLocks, ResourceLockReq{
-				ResourceType: lockType, ResourceKey: lockKey,
-			})
-			lockProbes = append(lockProbes, probe)
-		}
-	}
+	locks, lockProbes := deriveClaimLocks(req, wi.DeclaredResources, wi.Project)
+	req.RequestedLocks = locks
 
 	// aihub#238: this path reads ALREADY-STORED declared_resources, so it cannot
 	// reject a mistyped entry without making historical work items unclaimable

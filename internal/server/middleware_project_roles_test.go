@@ -163,13 +163,36 @@ func TestDirtyMemberStillAuthorizes(t *testing.T) {
 
 	// Negative control: the gate still denies someone who is genuinely not a
 	// member, so the assertion above is not passing because the gate is open.
+	//
+	// 🔴 Expected status changed 403 -> 404 on 2026-09-06 (aihub#377). This is a
+	// CONTRACT CHANGE, not a red test being tuned green. The two look identical in
+	// a diff, so here is what to check it against — the invariant's first clause,
+	// verbatim from the work item:
+	//
+	//	"在某个 project 里的用户，能看到该 project 的一切（memory、work item、
+	//	 artifact、event、step、依赖）；不在的，对该 project 的一切必须拿到与
+	//	「不存在」逐字节相同的响应。"
+	//
+	//	("A user who is in a project can see everything about that project —
+	//	 memories, work items, artifacts, events, steps, dependencies. A user who
+	//	 is not must get a response byte-identical to the one for something that
+	//	 does not exist.")
+	//
+	// u_stranger is not a member of "aihub", so the response must be the same one
+	// a nonexistent project gets. The control keeps all of its discriminating
+	// power: were the gate open, u_stranger would be AUTHORIZED and the err == nil
+	// check above would fire first.
 	rec2 := httptest.NewRecorder()
 	c2 := e.NewContext(httptest.NewRequest(http.MethodPost, "/v1/work_items", nil), rec2)
 	if err := checkProjectAccess(c2, build("u_stranger"), "aihub", "writer"); err == nil {
 		t.Fatalf("non-member was authorized; the positive case above proves nothing")
 	}
-	if rec2.Code != http.StatusForbidden {
-		t.Fatalf("non-member status: got %d, want 403", rec2.Code)
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("non-member status: got %d, want 404 (aihub#377: a non-member is told "+
+			"what someone asking about nothing is told)", rec2.Code)
+	}
+	if body := rec2.Body.String(); strings.Contains(body, "aihub") {
+		t.Errorf("the denial must not name the project; got %s", body)
 	}
 }
 

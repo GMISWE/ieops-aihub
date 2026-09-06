@@ -113,9 +113,12 @@ func TestV1ReplyCommit_NonWriter(t *testing.T) {
 
 	// userWithProjects("testproject") has no access to "otherproject"
 	c, rec := newV1ReplyRequest(t, "mem_v1", "cm_v1", map[string]any{"body": "hi"}, userWithProjects("testproject"))
-	if err := handleV1ReplyCommit(nil)(c); err == nil && rec.Code != http.StatusForbidden {
-		t.Errorf("should return 403 for non-writer; code=%d body=%s", rec.Code, rec.Body.String())
-	}
+	// 🔴 aihub#377: was `if err := h(c); err == nil && rec.Code != http.StatusForbidden`,
+	// which could never fire — checkProjectAccess returns non-nil, so the status
+	// comparison was dead code and 403/404/200/500 all passed. assertNotVisibleDenial
+	// checks the real denial AND proves its own predicate can still reject a wrong one.
+	err := handleV1ReplyCommit(nil)(c)
+	assertNotVisibleDenial(t, err, rec, "otherproject")
 	if called {
 		t.Errorf("domain must not be called on auth failure")
 	}

@@ -248,7 +248,7 @@ func handleGetStep(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		wi, err := domain.GetWorkItem(c.Request().Context(), pool, wiID)
 		if err != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "work item not found"))
+			return writeError(c, hideNotFound(err))
 		}
 		if err := checkProjectAccess(c, u, wi.Project, "viewer"); err != nil {
 			return err
@@ -351,7 +351,7 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		wi, err := domain.GetWorkItem(c.Request().Context(), pool, wiID)
 		if err != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "work item not found"))
+			return writeError(c, hideNotFound(err))
 		}
 		if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
 			return err
@@ -702,7 +702,7 @@ func handlePauseAttempt(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		wi, err := domain.GetWorkItem(c.Request().Context(), pool, wiID)
 		if err != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "work item not found"))
+			return writeError(c, hideNotFound(err))
 		}
 		if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
 			return err
@@ -728,7 +728,7 @@ func handleAcquireLocks(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		wi, err := domain.GetWorkItem(c.Request().Context(), pool, wiID)
 		if err != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "work item not found"))
+			return writeError(c, hideNotFound(err))
 		}
 		if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
 			return err
@@ -757,7 +757,7 @@ func handleReconcileCommitLocks(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		wi, err := domain.GetWorkItem(c.Request().Context(), pool, wiID)
 		if err != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "work item not found"))
+			return writeError(c, hideNotFound(err))
 		}
 		if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
 			return err

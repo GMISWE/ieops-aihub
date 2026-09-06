@@ -109,9 +109,8 @@ func listWorkItemsSchema() json.RawMessage {
 	idsProp := prop("array", "Filter to these work item IDs or slugs (array of strings; "+
 		"a comma-separated string is also accepted). Makes `project` optional — an id "+
 		"already names one work item, and the query is bounded to the projects you can see. "+
-		"Note the asymmetry with `project`: an inaccessible project= is a 403, whereas ids "+
-		"you cannot see are silently omitted, so a short result means \"not visible to you\" "+
-		"as well as \"does not exist\".")
+		"An inaccessible project= answers 404 and ids you cannot see are silently omitted; "+
+		"neither says whether the thing exists (aihub#377).")
 	idsProp["items"] = map[string]any{"type": "string"}
 	return objectSchema(map[string]any{
 		"project": prop("string", "Project name. Optional when `ids` or `similar_to` is given "+

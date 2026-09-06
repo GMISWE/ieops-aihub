@@ -32,12 +32,27 @@ package server
 // message template. A fix that answered 403 for the invisible case would keep
 // the oracle intact while looking like a security fix.
 //
-// ⚠️ This deliberately DIVERGES from `CreateDependency`, which answers 403 for
-// the cross-project case and names the project in the message
-// (internal/domain/dependencies.go). That is itself an existence leak, but it is
-// reachable only with a canonical id, which is not guessable, and changing it is
-// outside this work item. The divergence is intentional; the same note sits on
-// resolveBlockedByRef in internal/domain/work_items.go.
+// ✅ The divergence this paragraph used to describe is GONE (aihub#377). It read:
+//
+//	⚠️ This deliberately DIVERGES from `CreateDependency`, which answers 403 for
+//	the cross-project case and names the project in the message
+//	(internal/domain/dependencies.go). That is itself an existence leak, but it is
+//	reachable only with a canonical id, which is not guessable, and changing it is
+//	outside this work item.
+//
+// Both endpoints now answer the shared 404. Two notes for whoever reads the old
+// text in the history:
+//
+//   - Its factual claim was WRONG, not just narrow. "Reachable only with a
+//     canonical id, which is not guessable" — but handleCreateDependency resolves
+//     its ends through domain.GetWorkItem, whose clause is `id = $1 OR slug = $1`.
+//     A slug worked there exactly as it works here, so the leak it excused as
+//     unenumerable was enumerable by the same <project>#<seq> walk this file
+//     exists to close. The deferral was reasonable; the reason given for it was
+//     never measured.
+//   - The scoping conclusion still stands: this test still asserts
+//     INDISTINGUISHABILITY, and a fix that answered 403 for the invisible case
+//     would still keep the oracle while looking like a security fix.
 //
 // The three positive arms are not decoration. A fix that simply refused every
 // cross-project blocked_by would satisfy every negative assertion above while

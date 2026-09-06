@@ -217,12 +217,31 @@ func newWorkItemID() string {
 // project the caller holds any role in, and everything for an admin — whose
 // ProjectRoles map is empty by design, hence the separate flag (aihub#227).
 //
-// ⚠️ This DIVERGES from CreateDependency, which answers 403 and names the
-// project for the cross-project case. That is an existence leak of the same
-// kind, and it is left alone on purpose: it is reachable only with a canonical
-// id, so it is not enumerable, and changing an authorization response shape is
-// not this work item's business. Do not "align" the two by copying the 403 back
-// here — that would reinstate the oracle.
+// ✅ The two are now ALIGNED, at 404 (aihub#377). This paragraph used to read:
+//
+//	⚠️ This DIVERGES from CreateDependency, which answers 403 and names the
+//	project for the cross-project case. That is an existence leak of the same
+//	kind, and it is left alone on purpose: it is reachable only with a canonical
+//	id, so it is not enumerable, and changing an authorization response shape is
+//	not this work item's business. Do not "align" the two by copying the 403 back
+//	here — that would reinstate the oracle.
+//
+// Two things about that text, kept because both are instructive:
+//
+//   - Its closing instruction was correct and is still in force. Alignment went
+//     the other way: handleCreateDependency now answers the shared 404
+//     (errNotVisible) instead of 403. Copying a 403 back HERE would still
+//     reinstate the oracle. Do not.
+//   - Its stated reason for deferring was FALSE, not merely narrow. "Reachable
+//     only with a canonical id, so it is not enumerable" — but the deferred path
+//     resolves through GetWorkItem, whose WHERE clause is `id = $1 OR slug = $1`,
+//     so a slug worked there exactly as it works here. The leak this comment
+//     called unenumerable was enumerable the whole time, by the same
+//     <project>#<seq> walk. A deferral argument is a claim like any other and
+//     wants the same measurement as the fix it defers.
+//
+// "Changing an authorization response shape is not this work item's business" was
+// fair — it was aihub#377's business.
 func resolveBlockedByRef(ctx context.Context, tx pgx.Tx, ref, ownProject string,
 	callerProjectRoles map[string]string, callerRole string) (string, *AihubError) {
 
@@ -886,6 +905,55 @@ func GetWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string) (*Wor
 		wi.Labels = []string{}
 	}
 	return &wi, nil
+}
+
+// VisibleWorkItemRef is what ResolveVisibleWorkItemRef hands back: the canonical
+// id and the project, and nothing else. Deliberately not a *WorkItem — a caller
+// that only needs to learn "which project does this belong to" must not be handed
+// goal/content/attrs it never asked for and may not be entitled to.
+type VisibleWorkItemRef struct {
+	ID      string
+	Project string
+}
+
+// ResolveVisibleWorkItemRef resolves an id-or-slug to its canonical id and project,
+// SCOPED IN THE QUERY to the projects the caller may see (aihub#376/#377).
+//
+// This is for the handlers that need a work item's project in order to know which
+// project to authorize against — the ones that cannot check access first because
+// the project is what they are computing. GetWorkItem cannot serve them safely:
+// its signature carries no caller, by design, so it answers about every project.
+//
+// 🔴 The scope is in the WHERE clause, not in a check after the row comes back.
+// Resolve-then-reject is the same oracle wearing a different hat: whatever the
+// second step returns, the first step already proved the row exists. aihub#357's
+// executor ran precisely that as a mutation and left the phrase in the test name.
+//
+// A work item outside the scope is reported exactly as one that does not exist —
+// one ErrNotFound, one message, echoing only the caller's own reference back.
+// Echoing the reference is not a leak; anything derived from the row would be.
+//
+// Shape is resolveBlockedByRef's (above), which has run this pattern since #357;
+// the difference is that this one takes a pool and has no "own project" to add,
+// because the absence of a known project is the situation it exists for. isAdmin
+// is a separate flag rather than a role in the slice because an admin's
+// ProjectRoles map is empty by design (aihub#227).
+func ResolveVisibleWorkItemRef(ctx context.Context, pool *pgxpool.Pool, ref string,
+	visible []string, isAdmin bool) (*VisibleWorkItemRef, *AihubError) {
+
+	var out VisibleWorkItemRef
+	err := pool.QueryRow(ctx, `
+		SELECT id, project FROM work_items
+		WHERE (id = $1 OR slug = $1)
+		  AND ($2 OR project = ANY($3))`,
+		ref, isAdmin, visible,
+	).Scan(&out.ID, &out.Project)
+	if err != nil {
+		return nil, pgxErr(err,
+			fmt.Sprintf("work item %q not found", ref),
+			"failed to resolve work item")
+	}
+	return &out, nil
 }
 
 // ListWorkItemsFilter holds optional filters for ListWorkItems.

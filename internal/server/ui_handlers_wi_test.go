@@ -793,9 +793,34 @@ func TestUIWIEventsPartial_NoLayout(t *testing.T) {
 	}
 }
 
-// TestUIWIDetail_403_NoProjectAccess asserts a user without access to the wi's
-// project sees an access-denied body, not the wi content.
-func TestUIWIDetail_403_NoProjectAccess(t *testing.T) {
+// TestUIWIDetail_NoProjectAccessIsIndistinguishableFromMissing asserts that a
+// user without access to the wi's project gets the SAME response a nonexistent
+// work item gets — and, as always, none of the wi's content.
+//
+// 🔴 Renamed from TestUIWIDetail_403_NoProjectAccess, and the rename is the
+// point of this comment. The old name said 403 while, as of aihub#377, the
+// assertion says 404. A test whose name states one contract and whose body
+// checks another is precisely the rot this work item spent its whole run digging
+// out of neighbouring comments — including one that described an existence
+// oracle it had half-closed, and one that justified deferring a leak with a
+// reason that was already false. Do not leave a stale name for the next reader
+// to trust.
+//
+// 🔴 Expected status changed 200 -> 404 on 2026-09-06. CONTRACT CHANGE, not a
+// red test tuned green — the two are indistinguishable in a diff, so here is the
+// check. This handler used to answer a denied caller with HTTP 200 and an
+// in-page "no access to project p_other" message, while a work item that does
+// not exist answered 404. Different status, different body: one bit, and work
+// item slugs are <project>#<seq> counting from 1, so a browser session could
+// enumerate other projects. Both cases now render the same body at 404.
+//
+// 🔴 It keeps all of its discriminating power. If the caller COULD see p_other,
+// this handler would answer 200 with the full work item — Title, Status, and
+// "secret goal you cannot see" in the body. So asserting 404 AND the absence of
+// the goal still goes red the moment authorization stops working; neither
+// assertion can be satisfied by a build that leaks. And the goal-absence check
+// below is the one assertion that had to hold before this change and after it.
+func TestUIWIDetail_NoProjectAccessIsIndistinguishableFromMissing(t *testing.T) {
 	now := time.Now()
 	withFakeGetWI(t, func(_ context.Context, _ *pgxpool.Pool, _ string) (*domain.WorkItem, *domain.AihubError) {
 		return &domain.WorkItem{
@@ -814,15 +839,24 @@ func TestUIWIDetail_403_NoProjectAccess(t *testing.T) {
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got %d, want 200 (in-page error)", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status: got %d, want 404 — a non-member must get what a nonexistent "+
+			"work item gets (aihub#377). A visible wi would answer 200 here, so this "+
+			"assertion cannot be satisfied by a build that leaks.", rec.Code)
 	}
 	body := rec.Body.String()
+
+	// THE assertion, unchanged across the contract change: no content, ever.
 	if strings.Contains(body, "secret goal you cannot see") {
 		t.Errorf("body leaked goal of inaccessible wi")
 	}
-	if !strings.Contains(body, "no access") {
-		t.Errorf("body should explain no-access; got: %s", body)
+	// Nor the slug, which names the project and is half the enumeration signal.
+	if strings.Contains(body, "p_other") {
+		t.Errorf("body named the inaccessible project; got: %s", body)
+	}
+	if !strings.Contains(body, notVisibleMessage) {
+		t.Errorf("body should carry the shared not-visible wording verbatim, so it cannot "+
+			"be told apart from the missing-wi page; got: %s", body)
 	}
 }
 

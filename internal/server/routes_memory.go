@@ -74,12 +74,32 @@ func handleRemember(pool *pgxpool.Pool) echo.HandlerFunc {
 		req.LastActivatedBy = nil
 		req.ActivationCount = 0
 		// If project is not provided but work_item_id is, back-fill project from the work item.
+		//
+		// 🔴 Resolved through ResolveVisibleWorkItemRef, not GetWorkItem (aihub#376,
+		// superseded into aihub#377). This path runs precisely BECAUSE req.Project is
+		// empty, so there is no scope to check access against yet — which is why
+		// aihub#371's fix (narrow the resolution to req.Project) structurally could
+		// not cover it, and why it must carry its own bound instead.
+		//
+		// What it was: GetWorkItem ran unscoped and its failure answered 400
+		// `project is required (work_item_id lookup failed)`, while a work item that
+		// DID exist in a project the caller cannot see back-filled that project and
+		// was rejected by checkProjectAccess below with a 403. Two different answers,
+		// so a caller with writer on any one project could walk `<project>#<seq>` from
+		// 1 upwards and read off which numbers exist in every other project — never
+		// seeing a single field of any of them.
+		//
+		// Now an invisible work item is not resolvable, so it takes the same early
+		// exit as one that never existed, and the 400 below is unchanged for both. A
+		// caller who does hold access back-fills exactly as before; an admin, whose
+		// ProjectRoles is empty by design, is scoped by the flag rather than the slice.
 		if req.Project == "" && req.WorkItemID != nil && *req.WorkItemID != "" {
-			wi, wiErr := domain.GetWorkItem(ctx, pool, *req.WorkItemID)
+			ref, wiErr := domain.ResolveVisibleWorkItemRef(ctx, pool, *req.WorkItemID,
+				visibleProjects(u), u != nil && u.Role == "admin")
 			if wiErr != nil {
 				return writeError(c, domain.NewErr(domain.ErrBadRequest, "project is required (work_item_id lookup failed)"))
 			}
-			req.Project = wi.Project
+			req.Project = ref.Project
 		}
 		if req.Project == "" {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "project is required"))
@@ -486,10 +506,26 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 // hasProjectAccess reports whether u has at least minRole on project, WITHOUT
 // writing a response — it mirrors checkProjectAccess's access decision exactly
 // (same ProjectScope/admin/ProjectRoles/roleLevel rules) but leaves the caller
-// free to choose the status code. handleGetMemory needs this because it must
-// answer a denied caller with 404, not checkProjectAccess's 403, so the
-// endpoint never confirms or denies that a memory exists to someone who can't
-// see it (aihub#249).
+// free to choose the status code.
+//
+// ⚠️ Its reason for existing is NOT "checkProjectAccess answers 403" any more.
+// It used to be — this comment said handleGetMemory needed a 404 rather than
+// checkProjectAccess's 403 (aihub#249) — and aihub#377 made checkProjectAccess
+// answer the shared 404 too, so that sentence would now send a reader looking
+// for a difference that is gone.
+//
+// The live distinction is side effects, not status: checkProjectAccess COMMITS a
+// response to the echo context, this one only returns a bool. That matters
+// wherever a denial must not end the request — silently falling back to an older
+// artifact version (routes_artifacts.go, aihub#248), computing a set of visible
+// projects (visibleProjects in middleware.go), or answering with a page rather
+// than a JSON error. A committed 4xx in any of those places is a second write on
+// a response that already went out.
+//
+// So: need to stop the request? checkProjectAccess. Need to make a decision?
+// this. And note they are two of the three copies of one rule — see
+// checkProjectAccessSoft's comment in ui_handlers_wi.go for what the third one
+// cost, and project_visibility_gate_test.go for the census that now finds them.
 func hasProjectAccess(u *UserContext, project, minRole string) bool {
 	if u == nil {
 		return false
@@ -539,11 +575,20 @@ func handleGetMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		if aerr != nil {
 			// domain.GetMemoryByID already returns ErrNotFound for a missing or
 			// redacted row (its own 404), and ErrInternalError otherwise —
-			// writeError maps each to its proper status without us guessing here.
-			return writeError(c, aerr)
+			// hideNotFound rewrites only the former, so a real failure keeps its
+			// status instead of being reported as a deletion.
+			return writeError(c, hideNotFound(aerr))
 		}
 
-		notFound := domain.NewErr(domain.ErrNotFound, "memory not found")
+		// aihub#377: the shared constructor, so this endpoint's answer is the same
+		// bytes as every other endpoint's. It was already the right SHAPE — one
+		// value returned from every denial branch, which is what this whole work
+		// item generalises — but its own wording, `memory not found`, differed from
+		// the wording the rest of the server now uses. A per-endpoint sentence is a
+		// per-endpoint fingerprint: a caller who knows this endpoint says one thing
+		// and the wi endpoints say another can still tell which kind of object an
+		// id belonged to.
+		notFound := errNotVisible()
 		if !hasProjectAccess(u, mem.Project, "viewer") {
 			return writeError(c, notFound)
 		}
@@ -579,7 +624,7 @@ func handleActivateMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		// A memory's project is immutable, so a pre-check has no TOCTOU concern.
 		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
 		if loadErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+			return writeError(c, errNotVisible())
 		}
 		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
 			return err
@@ -614,7 +659,7 @@ func handleRedactMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		// pre-check has no TOCTOU concern.
 		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
 		if loadErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+			return writeError(c, errNotVisible())
 		}
 		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
 			return err
@@ -668,7 +713,7 @@ func handleResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		// is safe with no TOCTOU concern.
 		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
 		if loadErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+			return writeError(c, errNotVisible())
 		}
 		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
 			return err
@@ -708,7 +753,7 @@ func handleV1ReplyCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
 		if loadErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+			return writeError(c, errNotVisible())
 		}
 		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
 			return err
@@ -743,7 +788,7 @@ func handleEmitEvent(pool *pgxpool.Pool) echo.HandlerFunc {
 		if req.WorkItemID != "" {
 			wi, aihubErr := domain.GetWorkItem(ctx, pool, req.WorkItemID)
 			if aihubErr != nil {
-				return domainErr(c, aihubErr)
+				return writeError(c, hideNotFound(aihubErr))
 			}
 			if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
 				return err
@@ -771,7 +816,7 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 			// C1: require viewer access to this wi's project
 			wi, aihubErr := domain.GetWorkItem(ctx, pool, wiID)
 			if aihubErr != nil {
-				return domainErr(c, aihubErr)
+				return writeError(c, hideNotFound(aihubErr))
 			}
 			if err := checkProjectAccess(c, u, wi.Project, "viewer"); err != nil {
 				return err
@@ -923,7 +968,7 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			SELECT project, type, status, work_item_id, attrs, base_strength, activation_count
 			FROM memories WHERE id=$1`, memID,
 		).Scan(&memProject, &memType, &memStatus, &memWorkItemID, &memAttrsRaw, &memBaseStrength, &memActivationCount); err != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+			return writeError(c, errNotVisible())
 		}
 		if memStatus == "redacted" {
 			return writeError(c, domain.NewErr(domain.ErrForbidden,
@@ -1054,7 +1099,7 @@ func handleUpdateMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		// which memory record actually gets superseded.
 		head, aerr := domain.GetLatestByID(ctx, pool, memID)
 		if aerr != nil {
-			return writeError(c, aerr)
+			return writeError(c, hideNotFound(aerr))
 		}
 		if head.Status == "redacted" {
 			return writeError(c, domain.NewErr(domain.ErrForbidden,

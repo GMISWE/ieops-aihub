@@ -202,17 +202,28 @@ func taintedIdents(body ast.Node) map[string]bool {
 	return tainted
 }
 
-// calleeName renders `pkg.Func` for a qualified call, or "" for anything else.
+// calleeName renders a call's callee as written: `pkg.Func` for a qualified
+// call, `Func` for an unqualified one, "" for anything more complex.
+//
+// Shared by this gate and aihub#377's (project_visibility_gate_test.go), which
+// needs the unqualified case because the loaders and access predicates it
+// censuses are package-local: `loadMemoryFn`, `checkProjectAccessSoft`.
+//
+// Returning bare identifiers cannot affect THIS gate: every key in parseCalls,
+// and in the maps consulted alongside it, is qualified (`strconv.Atoi`,
+// `time.Parse`, …), and a bare name never equals one of those. Verified by
+// reading parseCalls rather than assumed — a widened helper that quietly makes
+// another gate match more is how one fix weakens a neighbour.
 func calleeName(call *ast.CallExpr) string {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return ""
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		return fn.Name
+	case *ast.SelectorExpr:
+		if pkg, ok := fn.X.(*ast.Ident); ok {
+			return pkg.Name + "." + fn.Sel.Name
+		}
 	}
-	pkg, ok := sel.X.(*ast.Ident)
-	if !ok {
-		return ""
-	}
-	return pkg.Name + "." + sel.Sel.Name
+	return ""
 }
 
 // TestQueryParamsGoThroughTheSharedHelpers is the class gate.

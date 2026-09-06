@@ -1,7 +1,17 @@
 {{define "content"}}
-{{if .AccessDenied}}
-<div class="empty" style="max-width:none">{{.Err}}</div>
-{{else if not .WI}}
+{{/* aihub#377: the {{if .AccessDenied}} branch that used to be first is GONE, and
+     .AccessDenied is gone from wiDetailPageData with it. Do not add either back.
+
+     It rendered a different body (just .Err, naming the project) from the
+     not-found branch below, and renderTemplate hard-codes HTTP 200, so a work
+     item in a project you cannot see answered 200 + "no access to project B"
+     while a nonexistent one answered 404 + "not found" — one bit that made
+     <project>#<seq> enumerable from a browser session.
+
+     Both cases now take the branch below with WI nil and the same .Err, at 404.
+     Project membership is the visibility boundary; a non-member is told exactly
+     what someone asking about nothing is told. */}}
+{{if not .WI}}
 <div class="empty" style="max-width:none">
   <div class="et">Work item not found</div>
   {{or .Err "This work item does not exist or you cannot see it."}}
@@ -227,8 +237,14 @@
 {{define "dep_row"}}
 <div class="dep">
   {{if .Hidden}}
-    <span class="badge b-type">hidden</span>
-    <span class="txt">cross-project</span>
+    {{/* aihub#377 invariant 2: the reference is THIS work item's own data, so it
+         is shown — slug included — together with the fact that you cannot open
+         it. It was previously a bare "hidden / cross-project" badge with the
+         slug dropped, which left the owner unable to read their own dependency
+         graph. Plain text, not a link: there is nothing here you may follow. */}}
+    <span class="badge b-type">no access</span>
+    {{if .Slug}}<span class="id mono">{{.Slug}}</span>{{end}}
+    <span class="txt">not a member of this project</span>
   {{else}}
     {{if .Status}}<span class="badge b-{{.Status}}">{{if or (eq .Status "running") (eq .Status "queued")}}<span class="dot"></span>{{end}}{{.Status}}</span>{{end}}
     <a class="id link" href="{{wiref .Slug}}">{{.Slug}}</a>

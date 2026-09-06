@@ -266,11 +266,16 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			data.AccessDenied = true
 			return renderTemplate(c, tmpl, "layout", data)
 		}
-		if u.Role != "admin" {
-			if _, ok := u.ProjectRoles[project]; !ok {
-				data.AccessDenied = true
-				return renderTemplate(c, tmpl, "layout", data)
-			}
+		// Through hasProjectAccess rather than an inline ProjectRoles lookup
+		// (aihub#377). The inline form was a fourth copy of the membership rule
+		// and, being spelled differently, it was invisible to a census that
+		// searched for the helpers by name — which is exactly how this wi's own
+		// first inventory missed three violations. It also read membership as
+		// "the key is present", admitting a legacy role string that reaches no
+		// known level; hasProjectAccess compares through roleLevel.
+		if !hasProjectAccess(u, project, "viewer") {
+			data.AccessDenied = true
+			return renderTemplate(c, tmpl, "layout", data)
 		}
 
 		// Build RecallRequest. domain.Recall natively supports the "prefix.*"
@@ -401,7 +406,7 @@ func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 
 		mem, aihubErr := loadMemoryFn(ctx, pool, memID)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 
 		// Project + visibility gates.
@@ -657,7 +662,7 @@ func handleUICommitMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		// access check before CommitMemory's own redacted guard fires.
 		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
 		if loadErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+			return writeError(c, errNotVisible())
 		}
 
 		// C1: require writer access before mutating.
@@ -698,7 +703,7 @@ func handleUIEditCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
 		if loadErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+			return writeError(c, errNotVisible())
 		}
 		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
 			return err
@@ -731,7 +736,7 @@ func handleUIDeleteCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
 		if loadErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+			return writeError(c, errNotVisible())
 		}
 		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
 			return err
@@ -768,7 +773,7 @@ func handleUIReplyCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
 		if loadErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+			return writeError(c, errNotVisible())
 		}
 		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
 			return err
@@ -801,7 +806,7 @@ func handleUIResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
 		if loadErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "memory not found"))
+			return writeError(c, errNotVisible())
 		}
 		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
 			return err

@@ -32,12 +32,27 @@ package server
 // message template. A fix that answered 403 for the invisible case would keep
 // the oracle intact while looking like a security fix.
 //
-// ⚠️ This deliberately DIVERGES from `CreateDependency`, which answers 403 for
-// the cross-project case and names the project in the message
-// (internal/domain/dependencies.go). That is itself an existence leak, but it is
-// reachable only with a canonical id, which is not guessable, and changing it is
-// outside this work item. The divergence is intentional; the same note sits on
-// resolveBlockedByRef in internal/domain/work_items.go.
+// ✅ The divergence this paragraph used to describe is GONE (aihub#377). It read:
+//
+//	⚠️ This deliberately DIVERGES from `CreateDependency`, which answers 403 for
+//	the cross-project case and names the project in the message
+//	(internal/domain/dependencies.go). That is itself an existence leak, but it is
+//	reachable only with a canonical id, which is not guessable, and changing it is
+//	outside this work item.
+//
+// Both endpoints now answer the shared 404. Two notes for whoever reads the old
+// text in the history:
+//
+//   - Its factual claim was WRONG, not just narrow. "Reachable only with a
+//     canonical id, which is not guessable" — but handleCreateDependency resolves
+//     its ends through domain.GetWorkItem, whose clause is `id = $1 OR slug = $1`.
+//     A slug worked there exactly as it works here, so the leak it excused as
+//     unenumerable was enumerable by the same <project>#<seq> walk this file
+//     exists to close. The deferral was reasonable; the reason given for it was
+//     never measured.
+//   - The scoping conclusion still stands: this test still asserts
+//     INDISTINGUISHABILITY, and a fix that answered 403 for the invisible case
+//     would still keep the oracle while looking like a security fix.
 //
 // The three positive arms are not decoration. A fix that simply refused every
 // cross-project blocked_by would satisfy every negative assertion above while
@@ -243,15 +258,48 @@ func TestBlockedBySlugCannotProbeInvisibleProjects(t *testing.T) {
 	// Fixture check: the outsider really is blind to B by every honest route.
 	// Without this the negative arms could pass because the fixture forgot to
 	// withhold access, which would make the whole test vacuous.
-	t.Run("fixture_outsider_is_403_on_every_honest_read_of_B", func(t *testing.T) {
+	//
+	// 🔴 Expected status changed 403 -> 404 on 2026-09-06 (aihub#377), and the
+	// subtest was renamed with it: the old name said `_403_` while the assertion
+	// said 404, and a test whose name states one contract and whose body checks
+	// another is the rot this repo keeps digging out of its own comments.
+	//
+	// CONTRACT CHANGE, not a red test tuned green. The two are indistinguishable
+	// in a diff, so the check is aihub#377's first invariant, verbatim:
+	//
+	//	在某个 project 里的用户，能看到该 project 的一切（memory、work item、
+	//	artifact、event、step、依赖）；不在的，对该 project 的一切必须拿到与
+	//	「不存在」逐字节相同的响应。
+	//
+	//	(A user who is in a project can see everything about it. A user who is
+	//	not must get a response byte-identical to the one for something that
+	//	does not exist.)
+	//
+	// The outsider holds no role on projB, so a refusal that says "forbidden"
+	// confirms projB exists — the disclosure this whole file exists to close.
+	//
+	// 🔴 STILL DISCRIMINATING. If the outsider could in fact read projB this arm
+	// answers 200 with the entire work item, including the goal, so it goes red
+	// exactly as before. The rename and the restatus removed nothing: 404 is now
+	// the POSITIVE evidence that projB is hidden, where it used to be 403.
+	//
+	// ⚠️ The name is also a CI contract: ci.yml greps
+	// `TestBlockedBySlugCannotProbeInvisibleProjects/<subtest>` per arm. Renaming
+	// here without updating that list makes the step report "did not run", which
+	// reads as missing coverage rather than a rename. Both moved together.
+	t.Run("fixture_outsider_cannot_read_B_by_any_honest_route", func(t *testing.T) {
 		r, err := http.NewRequest(http.MethodGet, s.url+"/v1/work_items/"+secretID, nil)
 		require.NoError(t, err)
 		r.Header.Set("Authorization", "Bearer "+s.outsiderKey)
 		resp, err := http.DefaultClient.Do(r)
 		require.NoError(t, err)
 		defer resp.Body.Close() //nolint:errcheck
-		require.Equal(t, http.StatusForbidden, resp.StatusCode,
-			"fixture is broken: the outsider can read B directly, so nothing below is about a hidden project")
+		require.Equal(t, http.StatusNotFound, resp.StatusCode,
+			"fixture is broken: got %d, want 404. The outsider must be unable to read B "+
+				"and must be told only that it is not there. A 200 means the fixture "+
+				"granted access and nothing below is about a hidden project; a 403 means "+
+				"the refusal still confirms B exists, which is the oracle aihub#377 closed",
+			resp.StatusCode)
 	})
 
 	// ── THE ORACLE. Red on branch head 0096962. ───────────────────────────────

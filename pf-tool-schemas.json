@@ -1,0 +1,1246 @@
+{
+  "generated_from": "965df70ebac6dda5b160e9c1f258813777b3c4af",
+  "tools": {
+    "pf_acquire_locks": {
+      "description": "Acquire file_scope locks for the current running attempt from the work item's declared_resources (reconcile mid-attempt; blocks on conflict, never steals). `acquired` is what THIS call took; `already_held` is every other lock the attempt holds, of every type, read from the lock table — including locks with no live declaration behind them: git_branch and deploy_env locks, locks taken from a client-supplied requested_locks, and file_scope locks predating aihub#264. The two are disjoint and together are the attempt's full lock set. Since aihub#264, removing a path from declared_resources DOES release its file_scope lock, at the moment of the update; git_branch and deploy_env locks are not released that way and are held until the attempt ends.",
+      "params": {
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_activate_memory": {
+      "description": "Activate a memory (increments activation count, updates stability)",
+      "params": {
+        "memory_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_adopt_artifact": {
+      "description": "Mark an artifact as adopted (wrapper around pf_emit_event artifact_action)",
+      "params": {
+        "artifact_type": {
+          "type": "string",
+          "required": false
+        },
+        "memory_id": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_batch_create_work_items": {
+      "description": "Create SEVERAL work items in one call. Use this when filing more than one wi at once (follow-ups discovered mid-execution, a backlog split into pieces) instead of calling pf_create_work_item repeatedly — each extra call costs a whole round-trip for a confirmation the next one does not read. Items are created INDEPENDENTLY and one failure does not stop the rest: the response reports `created` and `failed` separately, each failure carrying the item's `index` so a retry can resend exactly the ones that did not land. Duplicate detection still runs per item, so a 409 DUPLICATE/CANDIDATES on one item is a normal, per-item outcome. For a single wi use pf_create_work_item.",
+      "params": {
+        "items": {
+          "type": "array",
+          "required": true
+        },
+        "project": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_cancel_work_item": {
+      "description": "Cancel a work item, and release every resource lock still held on its behalf. Legal from queued, paused or blocked; a RUNNING work item is refused with 409 CONFLICT_WI_ALREADY_CLAIMED (force_takeover first, then cancel) and an already-terminal one with 409 CONFLICT_TERMINAL_STATE. The lock release matters for a PAUSED work item: pausing keeps the git_branch / deploy_env / worktree / tcp_port locks so a resume can go on holding the branch, and before aihub#355 cancelling left them held forever — the work item was terminal, so no claim, force_takeover or complete_attempt could ever release them, and the orphan sweep skips a paused attempt's rows by design. Every release emits a lock_released event with cause=wi_cancelled, so pf_read_events can confirm it. 🔴 RETRYABLE: the status check is now re-run inside the transaction against a locked row, so a cancel racing a claim can return 409 CONFLICT_WI_ALREADY_CLAIMED (correctly — the previous 200 was a lie, and it released a live attempt's locks), and a lost concurrency race returns 409 CONFLICT_SERIALIZATION_FAILURE with retryable=true. Both mean retry or re-read, not \"the server is broken\".",
+      "params": {
+        "reason": {
+          "type": "string",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_claim_work_item": {
+      "description": "Claim a work item — creates a new run_attempt with typed locks. Writes state file with credentials.",
+      "params": {
+        "force_takeover": {
+          "type": "boolean",
+          "required": false
+        },
+        "idempotency_key": {
+          "type": "string",
+          "required": true
+        },
+        "mode": {
+          "type": "string",
+          "required": false
+        },
+        "requested_locks": {
+          "type": "array",
+          "required": false
+        },
+        "scenario_ref": {
+          "type": "string",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_close_artifact": {
+      "description": "Mark an artifact as closed (wrapper around pf_emit_event artifact_action)",
+      "params": {
+        "artifact_type": {
+          "type": "string",
+          "required": false
+        },
+        "memory_id": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_commit": {
+      "description": "Commit staged changes in the work item's worktree and emit a commit event on the wi timeline. ⚠️ THIS CALL CAN ACQUIRE LOCKS — a heavier semantic than \"commit\" normally carries, so read this before using it. Before committing it lists the files the commit would contain and compares them against the file_scope locks THIS ATTEMPT ACTUALLY HOLDS (the live lock set, NOT declared_resources — the two routinely disagree). Any changed file no held lock covers is locked for this attempt automatically and stays locked until the attempt ends, so committing WIDENS your lock set. If another live attempt already holds one of those files the commit is REFUSED with CONFLICT_LOCK_TAKEN: nothing is committed, the files stay staged, and the error names every blocked path plus its holder — actor, work item and attempt. When every changed file is already covered, no lock is taken and nothing is written. On SUCCESS the response says which happened in `lock_gate`: covered | acquired (with locks_acquired_for) | not_run (the index matched HEAD, so there was no change set to lock — reachable here only for a merge commit, which is made from MERGE_HEAD rather than from staged changes; `sha` in the same response is still the commit that was created). A refusal or a failed check comes back as a plain error string with no `lock_gate` field at all. There is no pass-through: a lock check that cannot reach the server fails the commit rather than allowing it.",
+      "params": {
+        "message": {
+          "type": "string",
+          "required": true
+        },
+        "paths": {
+          "type": "array",
+          "required": false
+        },
+        "repo": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        },
+        "workspace_root": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_complete_attempt": {
+      "description": "Complete the current run attempt (wrapped|failed|paused). Deletes state file for terminal statuses. Pass `note` to record the closing note in the same call instead of emitting it with a separate pf_emit_event beforehand — which is the only order that works, since this call deletes the credentials pf_emit_event needs. The response's note_emitted says whether it landed.",
+      "params": {
+        "force_terminate_step": {
+          "type": "boolean",
+          "required": false
+        },
+        "note": {
+          "type": "string",
+          "required": false
+        },
+        "status": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_create_api_key": {
+      "description": "Create an API key for a user (admin only). Returns the plain key once — store it securely.",
+      "params": {
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "project_scope": {
+          "type": "string",
+          "required": false
+        },
+        "user_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_create_dependency": {
+      "description": "Create a dependency between two work items. Authorized by project role (writer on the blocked item's project, viewer on the blocking item's if they differ); no run-attempt credential is involved.",
+      "params": {
+        "blocked_wi_id": {
+          "type": "string",
+          "required": true
+        },
+        "blocking_wi_id": {
+          "type": "string",
+          "required": true
+        },
+        "kind": {
+          "type": "string",
+          "required": true
+        },
+        "note": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_create_project": {
+      "description": "Create a new project",
+      "params": {
+        "description": {
+          "type": "string",
+          "required": false
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "repos": {
+          "type": "array",
+          "required": false
+        },
+        "scenario": {
+          "type": "string",
+          "required": false
+        },
+        "visible": {
+          "type": "boolean",
+          "required": false
+        }
+      }
+    },
+    "pf_create_user": {
+      "description": "Create a new user (admin only)",
+      "params": {
+        "author_aliases": {
+          "type": "array",
+          "required": false
+        },
+        "display_name": {
+          "type": "string",
+          "required": true
+        },
+        "email": {
+          "type": "string",
+          "required": false
+        },
+        "role": {
+          "type": "string",
+          "required": false
+        },
+        "user_type": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_create_work_item": {
+      "description": "Create a work item in the specified project. To create more than one, use pf_batch_create_work_items — repeated calls here cost one round-trip each.",
+      "params": {
+        "attrs": {
+          "type": "object",
+          "required": false
+        },
+        "blocked_by": {
+          "type": "array",
+          "required": false
+        },
+        "content": {
+          "type": "string",
+          "required": false
+        },
+        "declared_resources": {
+          "type": "array",
+          "required": false
+        },
+        "force_create": {
+          "type": "boolean",
+          "required": false
+        },
+        "force_reason": {
+          "type": "string",
+          "required": false
+        },
+        "goal": {
+          "type": "string",
+          "required": true
+        },
+        "labels": {
+          "type": "array",
+          "required": false
+        },
+        "milestone": {
+          "type": "string",
+          "required": false
+        },
+        "parent_work_item_id": {
+          "type": "string",
+          "required": false
+        },
+        "priority": {
+          "type": "string",
+          "required": false
+        },
+        "project": {
+          "type": "string",
+          "required": true
+        },
+        "requires_human_session": {
+          "type": "boolean",
+          "required": false
+        },
+        "scenario": {
+          "type": "string",
+          "required": false
+        },
+        "source": {
+          "type": "string",
+          "required": false
+        },
+        "wi_type": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_cut_alpha": {
+      "description": "Cut the next alpha release for a project. Admin/release-manager only.",
+      "params": {
+        "base_tag": {
+          "type": "string",
+          "required": false
+        },
+        "project": {
+          "type": "string",
+          "required": true
+        },
+        "repos": {
+          "type": "array",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        },
+        "workspace_root": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_diff": {
+      "description": "Show git diff for the work item's worktree",
+      "params": {
+        "repo": {
+          "type": "string",
+          "required": true
+        },
+        "vs_base": {
+          "type": "boolean",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        },
+        "workspace_root": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_emit_event": {
+      "description": "Emit an event on a work item. Mutating — credentials injected from state file.",
+      "params": {
+        "admin": {
+          "type": "boolean",
+          "required": false
+        },
+        "event_type": {
+          "type": "string",
+          "required": true
+        },
+        "payload": {
+          "type": "object",
+          "required": true
+        },
+        "pinned": {
+          "type": "boolean",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_force_takeover": {
+      "description": "Force-take ownership of a work item from another agent",
+      "params": {
+        "reason": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_get_memory": {
+      "description": "Fetch one memory by id with its FULL, untruncated content — the follow-up read for a pf_recall item whose content_truncated is true.",
+      "params": {
+        "memory_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_get_ready_queue": {
+      "description": "Get the LCRS (6-section) ready queue for a project. For Orchestrator use.",
+      "params": {
+        "max": {
+          "type": "string",
+          "required": false
+        },
+        "non_conflicting": {
+          "type": "boolean",
+          "required": false
+        },
+        "project": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_get_step": {
+      "description": "Read the AUTHORITATIVE step record for a work item, and the only one. Returns current_step / current_step_status / version, plus completed_steps: the step history, oldest first, retries included, each entry carrying step_id, status and that step's artifact_summary. A resuming agent should call this FIRST and treat every step_id in completed_steps as done. Never take step progress from a file in the worktree; nothing writes one. completed_steps is [] when nothing has completed, and absent only on a server older than aihub#265 — not the same answer. Takes a slug or a canonical id and echoes the canonical one in work_item_id; pass THAT to pf_recall / pf_read_events, which return nothing for a slug. No step graph here — that is the scenario template.",
+      "params": {
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_get_work_item": {
+      "description": "Get a work item by ID or slug. Pass brief=true to omit the (potentially large) content field.",
+      "params": {
+        "brief": {
+          "type": "boolean",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_ignore_artifact": {
+      "description": "Mark an artifact as ignored (wrapper around pf_emit_event artifact_action)",
+      "params": {
+        "artifact_type": {
+          "type": "string",
+          "required": false
+        },
+        "memory_id": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_list_dependencies": {
+      "description": "List dependencies (blocking + blocked_by) for a work item. Cross-project items are folded if caller lacks viewer+ permission.",
+      "params": {
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_list_projects": {
+      "description": "List all projects visible to the caller (public + member + owned). Each project includes members_version, the compare-and-set token to pass back to pf_update_project when changing members.",
+      "params": {}
+    },
+    "pf_list_users": {
+      "description": "List all users (admin only)",
+      "params": {}
+    },
+    "pf_list_work_items": {
+      "description": "List work items with optional filters. Item keys whose value is null are omitted: an absent key means null.",
+      "params": {
+        "cursor": {
+          "type": "string",
+          "required": false
+        },
+        "ids": {
+          "type": "array",
+          "required": false
+        },
+        "include_step_state": {
+          "type": "boolean",
+          "required": false
+        },
+        "kind": {
+          "type": "string",
+          "required": false
+        },
+        "label": {
+          "type": "string",
+          "required": false
+        },
+        "limit": {
+          "type": "string",
+          "required": false
+        },
+        "milestone": {
+          "type": "string",
+          "required": false
+        },
+        "min_similarity": {
+          "type": "string",
+          "required": false
+        },
+        "order": {
+          "type": "string",
+          "required": false,
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        },
+        "priority": {
+          "type": "string",
+          "required": false
+        },
+        "project": {
+          "type": "string",
+          "required": false
+        },
+        "query": {
+          "type": "string",
+          "required": false
+        },
+        "ready_only": {
+          "type": "boolean",
+          "required": false
+        },
+        "scenario": {
+          "type": "string",
+          "required": false
+        },
+        "similar_to": {
+          "type": "string",
+          "required": false
+        },
+        "since": {
+          "type": "string",
+          "required": false
+        },
+        "sort": {
+          "type": "string",
+          "required": false,
+          "enum": [
+            "closed_at",
+            "created_at"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "required": false
+        },
+        "status": {
+          "type": "string",
+          "required": false
+        },
+        "user_id": {
+          "type": "string",
+          "required": false
+        },
+        "wi_type": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_pause_attempt": {
+      "description": "Pause the current attempt (releases file_scope locks acquired mid-attempt; git_branch/deploy_env locks are retained for resume; status → paused). State file is preserved for resume.",
+      "params": {
+        "pause_reason": {
+          "type": "string",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_pr": {
+      "description": "Create a GitHub PR for the work item's task branch and emit a pr_opened event on the wi timeline.",
+      "params": {
+        "base": {
+          "type": "string",
+          "required": false
+        },
+        "body": {
+          "type": "string",
+          "required": true
+        },
+        "head": {
+          "type": "string",
+          "required": false
+        },
+        "repo": {
+          "type": "string",
+          "required": true
+        },
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        },
+        "workspace_root": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_predict_conflicts": {
+      "description": "Predict resource lock conflicts for a set of declared_resources. Also returns will_unlock (which blocked wi would be unblocked).",
+      "params": {
+        "declared_resources": {
+          "type": "array",
+          "required": true
+        },
+        "dry_run": {
+          "type": "boolean",
+          "required": false
+        },
+        "project": {
+          "type": "string",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_promote": {
+      "description": "Promote an alpha release to stable. Admin/release-manager only.",
+      "params": {
+        "new_stable_tag": {
+          "type": "string",
+          "required": true
+        },
+        "project": {
+          "type": "string",
+          "required": true
+        },
+        "source_alpha_tag": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        },
+        "workspace_root": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_push": {
+      "description": "Push the current branch to origin with --force-with-lease and emit a push event on the wi timeline. Refuses to push to main/master/dev/tot.",
+      "params": {
+        "repo": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        },
+        "workspace_root": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_read_events": {
+      "description": "Read events for a work item or project. work_item_id or project must be provided. NOTE: lock_acquired / lock_released / wi_resources_updated exist only from the deploy that shipped aihub#343 (2026-09-03 at the earliest; no backfill) — their absence before then is not evidence that no lock or declaration changed.",
+      "params": {
+        "limit": {
+          "type": "string",
+          "required": false
+        },
+        "pinned_first": {
+          "type": "boolean",
+          "required": false
+        },
+        "project": {
+          "type": "string",
+          "required": false
+        },
+        "since": {
+          "type": "string",
+          "required": false
+        },
+        "types": {
+          "type": "array",
+          "required": false
+        },
+        "user_id": {
+          "type": "string",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_recall": {
+      "description": "Recall memories from aihub with optional semantic search. type is an ARRAY of type names, e.g. [\"experience.*\",\"rule.work\"] — one filter per entry; a '|' inside an entry is NOT a separator and is rejected. An entry ending in .* is a prefix wildcard. Any entry matching no memory comes back in unmatched_types, which distinguishes a wrong type name from a project that genuinely holds no such memory. An item with content_truncated=true holds only a prefix of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest.",
+      "params": {
+        "fields": {
+          "type": "string",
+          "required": false,
+          "enum": [
+            "brief"
+          ]
+        },
+        "include_archived": {
+          "type": "boolean",
+          "required": false
+        },
+        "min_strength": {
+          "type": "number",
+          "required": false
+        },
+        "project": {
+          "type": "string",
+          "required": true
+        },
+        "query": {
+          "type": "string",
+          "required": false
+        },
+        "recency_weight": {
+          "type": "number",
+          "required": false
+        },
+        "similarity_threshold": {
+          "type": "number",
+          "required": false
+        },
+        "top_k": {
+          "type": "string",
+          "required": false
+        },
+        "type": {
+          "type": "array",
+          "required": false
+        },
+        "visibility": {
+          "type": "string",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_redact_memory": {
+      "description": "Redact (soft-delete) a memory",
+      "params": {
+        "memory_id": {
+          "type": "string",
+          "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_reinforce_memory": {
+      "description": "Reinforce a memory with additional context (mutating — credentials from state file)",
+      "params": {
+        "additional_context": {
+          "type": "string",
+          "required": true
+        },
+        "memory_id": {
+          "type": "string",
+          "required": true
+        },
+        "strength_delta": {
+          "type": "number",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_remember": {
+      "description": "Store a memory in aihub. type must use full name (e.g. experience.debug). Rejects methodology.* types — write spec/plan/review/execute/retro/wrap_summary via pf_save_artifact.",
+      "params": {
+        "attrs": {
+          "type": "object",
+          "required": false
+        },
+        "base_strength": {
+          "type": "number",
+          "required": false
+        },
+        "content": {
+          "type": "string",
+          "required": true
+        },
+        "context_snippet": {
+          "type": "string",
+          "required": false
+        },
+        "dedup_mode": {
+          "type": "string",
+          "required": false
+        },
+        "expires_at": {
+          "type": "string",
+          "required": false
+        },
+        "project": {
+          "type": "string",
+          "required": true
+        },
+        "related_memory_ids": {
+          "type": "array",
+          "required": false
+        },
+        "supersedes_memory_id": {
+          "type": "string",
+          "required": false
+        },
+        "type": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "experience.approach",
+            "experience.code",
+            "experience.debug",
+            "experience.pitfall",
+            "fact.architecture",
+            "fact.constraint",
+            "fact.note",
+            "fact.reference",
+            "rule.coding",
+            "rule.convention",
+            "rule.process",
+            "rule.scheduling",
+            "rule.work"
+          ]
+        },
+        "visibility": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_remove_dependency": {
+      "description": "Remove a dependency between two work items. Authorized by project writer on the blocked item's project; no run-attempt credential is involved.",
+      "params": {
+        "blocked_wi_id": {
+          "type": "string",
+          "required": true
+        },
+        "blocking_wi_id": {
+          "type": "string",
+          "required": true
+        },
+        "kind": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_resolve_commit": {
+      "description": "Resolve a spec/plan commit annotation with an AI reply (marks status=resolved, emits memory_commit_resolved).",
+      "params": {
+        "commit_id": {
+          "type": "string",
+          "required": true
+        },
+        "memory_id": {
+          "type": "string",
+          "required": true
+        },
+        "reply": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_revoke_api_key": {
+      "description": "Revoke an API key (admin only)",
+      "params": {
+        "key_id": {
+          "type": "string",
+          "required": true
+        },
+        "user_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_rotate_identifier": {
+      "description": "Rotate the project identifier (bcrypt token). Returns plain once — store it securely. Owner/admin only.",
+      "params": {
+        "name": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_save_artifact": {
+      "description": "Save a methodology artifact (methodology.spec|plan|review|execute|retro|wrap_summary). Credentials injected from state file.",
+      "params": {
+        "content": {
+          "type": "string",
+          "required": false
+        },
+        "html": {
+          "type": "string",
+          "required": false
+        },
+        "path": {
+          "type": "string",
+          "required": false
+        },
+        "structured_payload": {
+          "type": "object",
+          "required": false
+        },
+        "supersedes_memory_id": {
+          "type": "string",
+          "required": false
+        },
+        "type": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "methodology.execute",
+            "methodology.plan",
+            "methodology.retro",
+            "methodology.review",
+            "methodology.spec",
+            "methodology.wrap_summary"
+          ]
+        },
+        "visibility": {
+          "type": "string",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_ship": {
+      "description": "FUSED AND IT PUSHES TO ORIGIN: commit + push + open PR in one call. The push is the same lease-protected FORCE-PUSH as pf_push (--force-with-lease) and it refuses main/master/dev/tot. Use this instead of pf_commit + pf_push + pf_pr, which cost three round-trips for three confirmations no decision depends on. Idempotent: a retry commits only if something is staged and skips the push when a PR already covers HEAD, so retrying after a failure never duplicates a commit; if an open PR already exists on the branch it is pushed to and reused rather than duplicated. On failure the response is a JSON object, not an error string: \"stage\" says which of commit/push/pr failed and \"side_effects\" lists what already happened (typically a local commit that was never pushed). Reach for pf_commit / pf_push / pf_pr separately only when you need to inspect state between the steps. ⚠️ AND ITS COMMIT STAGE ACQUIRES LOCKS, exactly as pf_commit's does: every file the commit contains that this attempt does not already hold a file_scope lock for is locked for it automatically and stays locked until the attempt ends. A file held by another live attempt stops the whole call at stage=\"commit\" with CONFLICT_LOCK_TAKEN — nothing committed, nothing pushed, no PR — and the error names every blocked path and its holder. `lock_gate` in the response reports which of five things happened — covered | acquired | not_run (the commit stage finished and nothing was staged, so no commit was needed and there was nothing to lock) | refused (another live attempt holds one of the files) | could_not_run (nothing was checked: either the check itself failed, or the commit stage died before reaching it — `lock_gate_detail` says which, and `side_effects` rather than `lock_gate` says what was left in the index) — and there is no pass-through: a check that cannot reach the server fails the ship rather than allowing it.",
+      "params": {
+        "message": {
+          "type": "string",
+          "required": true
+        },
+        "paths": {
+          "type": "array",
+          "required": false
+        },
+        "pr_base": {
+          "type": "string",
+          "required": false
+        },
+        "pr_body": {
+          "type": "string",
+          "required": true
+        },
+        "pr_title": {
+          "type": "string",
+          "required": true
+        },
+        "repo": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        },
+        "workspace_root": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_update_memory": {
+      "description": "Update a memory (creates a new version and advances the latest_id cursor). Credentials injected from state file.",
+      "params": {
+        "base_strength": {
+          "type": "number",
+          "required": false
+        },
+        "content": {
+          "type": "string",
+          "required": false
+        },
+        "memory_id": {
+          "type": "string",
+          "required": true
+        },
+        "tags": {
+          "type": "array",
+          "required": false
+        },
+        "visibility": {
+          "type": "string",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_update_project": {
+      "description": "Update a project (owner or admin only)",
+      "params": {
+        "description": {
+          "type": "string",
+          "required": false
+        },
+        "expected_removals": {
+          "type": "array",
+          "required": false
+        },
+        "members": {
+          "type": "array",
+          "required": false
+        },
+        "members_version": {
+          "type": "integer",
+          "required": false
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "repos": {
+          "type": "array",
+          "required": false
+        },
+        "scenario": {
+          "type": "string",
+          "required": false
+        },
+        "visible": {
+          "type": "boolean",
+          "required": false
+        }
+      }
+    },
+    "pf_update_step": {
+      "description": "Update the current step status. Credentials injected from state file. Server auto-emits step_started/step_completed/step_failed events. When completing a step that has a successor, pass next_step to complete-and-start in ONE call instead of following up with a separate status=\"in_progress\" call — the two transitions then share a transaction and emit both events. There is no version/CAS argument: concurrency is guarded server-side by the idle-step predicate, so no pf_get_step is needed before this call.",
+      "params": {
+        "artifact_summary": {
+          "type": "string",
+          "required": false
+        },
+        "error_type": {
+          "type": "string",
+          "required": false
+        },
+        "escalated": {
+          "type": "boolean",
+          "required": false
+        },
+        "heartbeat": {
+          "type": "boolean",
+          "required": false
+        },
+        "next_step": {
+          "type": "string",
+          "required": false
+        },
+        "next_step_attempt_id": {
+          "type": "string",
+          "required": false
+        },
+        "status": {
+          "type": "string",
+          "required": true
+        },
+        "step_attempt_id": {
+          "type": "string",
+          "required": false
+        },
+        "step_id": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_update_user": {
+      "description": "Update a user's display name or role (admin only)",
+      "params": {
+        "display_name": {
+          "type": "string",
+          "required": false
+        },
+        "id": {
+          "type": "string",
+          "required": true
+        },
+        "role": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    "pf_update_work_item": {
+      "description": "Update a work item (goal, wi_type, priority, labels, etc.)",
+      "params": {
+        "attrs": {
+          "type": "object",
+          "required": false
+        },
+        "attrs_patch": {
+          "type": "object",
+          "required": false
+        },
+        "attrs_unset": {
+          "type": "array",
+          "required": false
+        },
+        "brief": {
+          "type": "boolean",
+          "required": false
+        },
+        "content": {
+          "type": "string",
+          "required": false
+        },
+        "declared_resources": {
+          "type": "array",
+          "required": false
+        },
+        "goal": {
+          "type": "string",
+          "required": false
+        },
+        "goal_change_reason": {
+          "type": "string",
+          "required": false
+        },
+        "kind": {
+          "type": "string",
+          "required": false
+        },
+        "labels": {
+          "type": "array",
+          "required": false
+        },
+        "milestone": {
+          "type": "string",
+          "required": false
+        },
+        "priority": {
+          "type": "string",
+          "required": false
+        },
+        "reclassify_reason": {
+          "type": "string",
+          "required": false
+        },
+        "requires_human_session": {
+          "type": "boolean",
+          "required": false
+        },
+        "resources_version": {
+          "type": "integer",
+          "required": false
+        },
+        "wi_type": {
+          "type": "string",
+          "required": false
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    "pf_whoami": {
+      "description": "Return caller identity, project roles, and accessible projects from aihub",
+      "params": {}
+    },
+    "pf_wrap": {
+      "description": "Wrap a work item: push + PR + complete_attempt(wrapped) + delete state file. Idempotent only when a PR on the branch already covers local HEAD; local commits no PR covers are pushed, and a new PR is opened if the existing one is merged/closed. The response's pr_action says which happened. Pass `note` to record the closing note in the same call rather than emitting it with a separate pf_emit_event beforehand.",
+      "params": {
+        "note": {
+          "type": "string",
+          "required": false
+        },
+        "pr_body": {
+          "type": "string",
+          "required": false
+        },
+        "pr_title": {
+          "type": "string",
+          "required": false
+        },
+        "repo": {
+          "type": "string",
+          "required": true
+        },
+        "work_item_id": {
+          "type": "string",
+          "required": true
+        },
+        "workspace_root": {
+          "type": "string",
+          "required": false
+        }
+      }
+    }
+  }
+}

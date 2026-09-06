@@ -1081,6 +1081,73 @@ jobs:
           ! grep -q -- '--- SKIP' recall_wi_slug.log \
             || { echo "::error::the aihub#363 recall slug test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#371 — the write side of the same column the step above reads.
+      # domain.Remember resolved work_item_id through a bare GetWorkItem, which
+      # finds any work item on the server and compares its project against
+      # nothing, while handleRemember authorized on req.Project alone. So
+      # project=A plus work_item_id=<a work item in B> was stored verbatim, and
+      # recall ANDs the work_item filter onto the project scope — making the row
+      # invisible to pf_recall(project=wi.project, work_item_id=wi_id), which is
+      # the call every pf-work claim path uses to pick up handover notes. Not a
+      # leak: write-only data.
+      #
+      # The greps are split into three groups because they fail for three
+      # different reasons, and one "an arm did not run" message would say none
+      # of them:
+      #
+      #   consistency — the defect itself; red on the unfixed tree, where each
+      #     of these answered 201 and wrote the mismatched row.
+      #   preserved — the positive controls, green on BOTH trees. They are what
+      #     stops the group above from being satisfied by refusing work_item_id
+      #     outright, which would pass every negative arm and break every
+      #     caller. The back-fill arm is the sharpest: handleRemember derives
+      #     project FROM the work item when project is omitted, and callers
+      #     depend on it.
+      #   containment — closing a write hole must not open a read one. Before
+      #     the fix a caller with no role on B could tell B#7 (201) from B#9999
+      #     (404); afterwards both are one 404 differing only in the caller's
+      #     own echoed reference. Same shape as the aihub#357 blocked_by arms,
+      #     and the reason the scope is a predicate inside the resolving query
+      #     rather than a check on its result.
+      #   placement — every other arm goes through handleRemember, so all of
+      #     them stay green if the gate is written into that handler while
+      #     domain.Remember's other callers keep writing the mismatch. The
+      #     domain-entry arm is the only one that can tell those two fixes
+      #     apart, and it is also where the pf_save_artifact half is stated:
+      #     both MCP memory tools post to this one endpoint and land on this one
+      #     function.
+      - name: aihub#371 remember project/work_item_id consistency DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestRememberRejectsCrossProjectWorkItem$' -count=1 -v 2>&1 | tee remember_wi_scope.log
+          for want in 'TestRememberRejectsCrossProjectWorkItem/a_cross-project_work_item_is_refused_by_slug' \
+                      'TestRememberRejectsCrossProjectWorkItem/a_cross-project_work_item_is_refused_by_canonical_id' \
+                      'TestRememberRejectsCrossProjectWorkItem/an_admin_is_refused_the_same_cross-project_mount' \
+                      'TestRememberRejectsCrossProjectWorkItem/a_supersede_cannot_carry_a_cross-project_work_item_either'; do
+            grep -q -- "--- PASS: $want" remember_wi_scope.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); a memory can again be stored against a work item in another project, which makes it unreachable by the pf_recall every claim path uses to read handover notes"; exit 1; }
+          done
+          for want in 'TestRememberRejectsCrossProjectWorkItem/the_fixture_really_spans_two_projects' \
+                      'TestRememberRejectsCrossProjectWorkItem/the_caller_really_cannot_read_the_other_project' \
+                      'TestRememberRejectsCrossProjectWorkItem/a_same-project_work_item_still_attaches_by_canonical_id' \
+                      'TestRememberRejectsCrossProjectWorkItem/a_same-project_work_item_still_attaches_by_slug' \
+                      'TestRememberRejectsCrossProjectWorkItem/omitting_project_still_back-fills_it_from_the_work_item' \
+                      'TestRememberRejectsCrossProjectWorkItem/an_admin_can_still_attach_within_one_project'; do
+            grep -q -- "--- PASS: $want" remember_wi_scope.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); either attaching a memory to a work item has stopped working altogether — which passes every negative arm above and is not a fix — or the two-project fixture no longer states what those arms need"; exit 1; }
+          done
+          for want in 'TestRememberRejectsCrossProjectWorkItem/a_nonexistent_work_item_is_refused_too' \
+                      'TestRememberRejectsCrossProjectWorkItem/an_invisible_work_item_answers_exactly_what_a_nonexistent_one_does'; do
+            grep -q -- "--- PASS: $want" remember_wi_scope.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); refusing the cross-project write has become a NEW existence answer — a work item you may not see must be indistinguishable from one that does not exist, or the guessable <project>#<seq> namespace is an oracle"; exit 1; }
+          done
+          grep -q -- '--- PASS: TestRememberRejectsCrossProjectWorkItem/the_shared_domain_entry_refuses_it_with_no_handler_in_front' remember_wi_scope.log \
+            || { echo "::error::the domain-entry arm did not run; without it a gate written into handleRemember passes every other arm while UpdateMemory and any future caller of domain.Remember still write the mismatch"; exit 1; }
+          ! grep -q -- '--- SKIP' remember_wi_scope.log \
+            || { echo "::error::the aihub#371 remember scope test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#237: the launcher's update check is shell, so `go test` cannot see
       # it — a silent-pin regression there would ship green. This suite is
       # hermetic (no docker, no network: it stubs gh/curl/binary and drives

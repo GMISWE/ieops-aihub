@@ -680,7 +680,8 @@ func derivedFileScopeLocks(raw json.RawMessage, project string) (byKey map[strin
 // derivedLock instead (aihub#342).
 //
 // ⚠️ FOR A REPO ENTRY, res.TaskBranch IS NOT NECESSARILY WHAT THE WORK ITEM
-// DECLARED. FnClaimWorkItem runs each item through
+// DECLARED. On the claim path the direct caller is deriveClaimLocks (extracted
+// from FnClaimWorkItem by aihub#356), and it runs each item through
 // ClaimRequest.EffectiveDeclaredResource first, which substitutes the branch the
 // claiming client is actually checking out (aihub#356). Read that method before
 // concluding from this line that the key comes from declared_resources: the two

@@ -1828,7 +1828,7 @@ func declaredResourcesProp(description string) map[string]any {
 			"repo": prop("string",
 				`Repo the uri is relative to (path/document/section entries only), e.g. "ieops-core". Optional but recommended in a multi-repo project: without it the lock key cannot tell one repo's go.mod/Makefile/README.md from another's, so unrelated work items block each other. Omitted means "unspecified repo", which still conflicts with every repo's copy of that path. Defaults to the repo named by this payload's own {"type":"repo"} entry when it names exactly one.`),
 			"base_branch": prop("string", "Base branch (repo entries only)"),
-			"task_branch": prop("string", "Task branch (repo entries only). Only a FALLBACK for lock-key derivation since aihub#356: a claim keys the git_branch lock on the branch it predicts it will check out (polyforge/<project>-<seq>-<goal>, or whatever branch already exists), and this value survives only for a repo the claim predicts NO branch for — no clone on this machine, or the repo absent from .polyforge.yaml. ⚠️ Predicting is not creating: if the prediction is made and the worktree then fails to materialise, the predicted name still wins over this one, and the claim reports that in worktree_problems. So do not rely on this to protect a hand-made branch in a repo the workspace has a clone of. Defaults to main."),
+			"task_branch": prop("string", "Task branch (repo entries only). Only a FALLBACK for lock-key derivation since aihub#356: a claim keys the git_branch lock on the branch it predicts it will check out (polyforge/<project>-<seq>-<goal>, or whatever branch already exists), and this value survives only for a repo the claim predicts NO branch for. ⚠️ That set is larger than it looks and the following is NOT exhaustive: no clone of the repo on this machine; the repo missing from the workspace .polyforge.yaml project; a worktree directory that already exists and that git refuses to verify, which makes the claim skip that repo and predict nothing for it; or the prediction step failing as a whole (work item unreadable, no workspace root, project unknown), in which case every declaration stands. Separately, pf_force_takeover sends no task_branches at all, so it never overrides this value for any repo. ⚠️ Predicting is not creating: if the prediction is made and the worktree then fails to materialise, the predicted name still wins over this one, and the claim reports that in worktree_problems. So do not rely on this to protect a hand-made branch in a repo the workspace has a clone of. Defaults to main."),
 		},
 		"required": []string{"type", "uri"},
 	}
@@ -2412,20 +2412,41 @@ func (s *Server) claimTaskBranches(ctx context.Context, wiID string) map[string]
 // Called unconditionally, outside every guard on the worktree block, because
 // each of those guards is itself a path on which a branch may have been keyed
 // and no worktree created.
+//
+// PRECONDITION: every value in taskBranches is non-empty. Its only caller passes
+// what claimTaskBranches built, and that stores a repo only under `if branch !=
+// ""`, so a "" here would mean no branch was keyed and every message below would
+// name an empty branch. This used to carry a `if want == "" { continue }` guard
+// for that case; it was unreachable and is gone. A future second caller that
+// cannot promise this must filter before calling, not re-add the skip here.
 func keyedBranchProblems(taskBranches, worktrees map[string]string) []string {
 	repos := make([]string, 0, len(taskBranches))
 	for repo := range taskBranches {
 		repos = append(repos, repo)
 	}
 	// Map order would reshuffle the response between two identical claims.
+	//
+	// ⚠️ NOTHING PINS THIS. aihub#356 review mutant M5 deleted this line and the
+	// `sort` import with it (its only use in the package's non-test files), and
+	// the whole repo stayed clean — measured:
+	//
+	//	$ go build ./...            -> exit 0
+	//	$ go vet ./...              -> exit 0
+	//	$ go test ./... -count=1    -> exit 0
+	//	$ golangci-lint run ./...   -> 0 issues
+	//
+	// The only observable difference is the ORDER of an already-rare warning
+	// list, and nothing constructs two problems in one call: the sole test that
+	// reaches this function does so through the claim handler, and
+	// newClaimWorkspace's .polyforge.yaml declares exactly ONE repo, so the list
+	// it produces is never longer than 1. Stated as a known gap rather than
+	// papered over: a fixture with two repos, both keyed and both failing to get
+	// a worktree, is what would make this ordering real.
 	sort.Strings(repos)
 
 	var problems []string
 	for _, repo := range repos {
 		want := taskBranches[repo]
-		if want == "" {
-			continue // no branch was predicted for this repo, so none was keyed
-		}
 		wt, ok := worktrees[repo]
 		if !ok {
 			problems = append(problems, fmt.Sprintf(

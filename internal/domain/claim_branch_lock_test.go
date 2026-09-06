@@ -339,9 +339,27 @@ func pickLock(t *testing.T, locks []ResourceLockReq, probes []lockConflictProbe,
 // touches EffectiveDeclaredResource by name; if the claim path stops applying
 // it, there is nowhere else for the substitution to come from.
 //
+// Every subtest reads the derived locks off `req.RequestedLocks` AFTER the call
+// rather than off a return value, and that is deliberate. deriveClaimLocks used
+// to return the slice and leave FnClaimWorkItem to assign it on the following
+// line; aihub#356 review mutant M3 deleted that one assignment, left the call
+// itself in place, and the claim derived no locks at all with build, vet, the
+// whole test suite and golangci-lint still green. The write-back into req is now
+// the function's contract, so asserting through req is what pins it — a future
+// change that reverts to returning the slice cannot compile against these.
+//
 // MUTANT: delete `d = req.EffectiveDeclaredResource(d)` from deriveClaimLocks.
 // The first subtest goes red naming the ieops#996 key; the three controls below
 // it stay green, so a "fix" that simply disabled the feature cannot pass.
+//
+// MUTANT (M3, the write-back): delete `req.RequestedLocks = locks` from the end
+// of deriveClaimLocks. Measured: the first THREE subtests go red on the derived
+// locks being absent (and TestDerivationSkipsEmptyLockKey with them), which is
+// the coverage that did not exist when M3 was found. The fourth,
+// "a client-supplied requested_locks slice is still trusted verbatim", stays
+// GREEN and must — that path leaves through the early return, before the
+// write-back, so the mutant genuinely cannot change it. It is a control here,
+// not a gap.
 func TestDeriveClaimLocks(t *testing.T) {
 	const project = "ieops"
 	// The measured ieops#996 pair, written as the wire JSON a claim really
@@ -358,7 +376,8 @@ func TestDeriveClaimLocks(t *testing.T) {
 
 	t.Run("the claim keys git_branch on the branch the client reports", func(t *testing.T) {
 		req := &ClaimRequest{TaskBranches: map[string]string{"ieops-ctlchain": checkedOut}}
-		locks, probes := deriveClaimLocks(req, json.RawMessage(stored), project)
+		probes := deriveClaimLocks(req, json.RawMessage(stored), project)
+		locks := req.RequestedLocks
 
 		key, probe := pickLock(t, locks, probes, "git_branch")
 		if key == declaredKey {
@@ -388,7 +407,8 @@ func TestDeriveClaimLocks(t *testing.T) {
 
 	t.Run("a repo the client reports nothing for keeps its declared key", func(t *testing.T) {
 		req := &ClaimRequest{TaskBranches: map[string]string{"some-other-repo": "polyforge/elsewhere"}}
-		locks, probes := deriveClaimLocks(req, json.RawMessage(stored), project)
+		probes := deriveClaimLocks(req, json.RawMessage(stored), project)
+		locks := req.RequestedLocks
 		key, _ := pickLock(t, locks, probes, "git_branch")
 		if key != declaredKey {
 			t.Errorf("key = %q, want the declared %q — with nothing checked out for that repo the "+
@@ -398,7 +418,8 @@ func TestDeriveClaimLocks(t *testing.T) {
 
 	t.Run("the file_scope lock alongside it is untouched", func(t *testing.T) {
 		req := &ClaimRequest{TaskBranches: map[string]string{"ieops-ctlchain": checkedOut}}
-		locks, probes := deriveClaimLocks(req, json.RawMessage(stored), project)
+		probes := deriveClaimLocks(req, json.RawMessage(stored), project)
+		locks := req.RequestedLocks
 		if len(locks) != 2 {
 			t.Fatalf("derived %d locks from two declared entries: %+v", len(locks), locks)
 		}
@@ -419,7 +440,8 @@ func TestDeriveClaimLocks(t *testing.T) {
 			TaskBranches:   map[string]string{"ieops-ctlchain": checkedOut},
 			RequestedLocks: []ResourceLockReq{{ResourceType: "git_branch", ResourceKey: declaredKey}},
 		}
-		locks, probes := deriveClaimLocks(req, json.RawMessage(stored), project)
+		probes := deriveClaimLocks(req, json.RawMessage(stored), project)
+		locks := req.RequestedLocks
 		if len(locks) != 1 || locks[0].ResourceKey != declaredKey {
 			t.Fatalf("locks = %+v, want exactly the one the client asked for (%q)", locks, declaredKey)
 		}

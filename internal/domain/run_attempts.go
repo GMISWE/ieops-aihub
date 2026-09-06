@@ -242,35 +242,95 @@ func classificationResolvedEventPayload(requiresHumanSession bool) []byte {
 	return b
 }
 
-// deriveClaimLocks returns the locks a claim carrying req will insert, paired
-// index-for-index with the probe that decides whether each one collides.
+// deriveClaimLocks writes the locks a claim carrying req will insert into
+// req.RequestedLocks, and returns the probe that decides whether each one
+// collides, paired index-for-index with that slice.
 //
 // It is the WHOLE of the claim's lock derivation: the client-supplied slice is
 // trusted verbatim with a plain equality probe, and only an empty one is
-// replaced by entries derived from the stored declared_resources. Returning the
-// slice rather than appending to req.RequestedLocks in place keeps that
-// "verbatim or derived, never both" rule visible in one expression.
+// replaced by entries derived from the stored declared_resources.
+//
+// ⚠️ IT WRITES BACK INTO req INSTEAD OF RETURNING THE SLICE, and that is a
+// correctness property rather than a style choice. It used to return the locks
+// and leave the caller to run `req.RequestedLocks = locks` on the next line.
+// aihub#356 review mutant M3 deleted only that assignment — keeping the call
+// text itself intact — and the claim then derived NO locks at all: no
+// git_branch, no file_scope. Measured on 71bade2 with the assignment removed:
+//
+//	$ go build ./...            -> exit 0
+//	$ go vet ./...              -> exit 0
+//	$ go test ./... -count=1    -> exit 0
+//	$ golangci-lint run ./...   -> 0 issues
+//
+// The reason nothing caught it is that the only guard on the call site,
+// TestRequestedLocksValidatedBeforeServerSideDerivation, scans FnClaimWorkItem's
+// SOURCE for the call text, and a call whose result is discarded is still a
+// call. Writing into req removes the class rather than the instance: there is no
+// second line left to lose, and the probes returned here are referenced further
+// down FnClaimWorkItem, so dropping the call is a compile error and not a silent
+// no-op. Do not "clean this up" back into returning the slice.
 //
 // ⚠️ IT IS A SEPARATE FUNCTION SO THAT THE DERIVATION CAN BE TESTED, and that is
-// not a stylistic preference. Every transform below — EffectiveDeclaredResource,
-// derivedLockProbe, the empty-key skip — has unit tests, but while this loop
-// lived inside FnClaimWorkItem the only way to reach the loop ITSELF was through
-// a *pgxpool.Pool, and an AIHUB_TEST_DB-gated test runs in neither CI nor a
-// default local run. So a line could be deleted from here and every test in the
-// repo would stay green; aihub#356 review found exactly that, on the
-// EffectiveDeclaredResource call. Anything added to this function needs a case
-// in TestDeriveClaimLocks, which needs no database.
+// not a stylistic preference either. Every transform below —
+// EffectiveDeclaredResource, derivedLockProbe, the empty-key skip — has unit
+// tests, but while this loop lived inside FnClaimWorkItem the only way to reach
+// the loop ITSELF was through a *pgxpool.Pool, so a line could be deleted from
+// here and every test in the DB-FREE unit step would stay green; aihub#356
+// review found exactly that, on the EffectiveDeclaredResource call. Anything
+// added to this function needs a case in TestDeriveClaimLocks, which needs no
+// database.
+//
+// ⚠️ THAT LAST CLAIM IS ABOUT THE DB-FREE STEP ONLY. An earlier revision of this
+// comment justified the extraction with "an AIHUB_TEST_DB-gated test runs in
+// neither CI nor a default local run". That is false, and inverted — this repo
+// guarantees the opposite. Measured here:
+//
+//	$ grep -cE '^[[:space:]]*AIHUB_TEST_DB:' .github/workflows/ci.yml
+//	40
+//	$ grep -cvE '^[[:space:]]*(#|$)' internal/citest/dbtestcov/gated_tests.txt
+//	198
+//
+// (198 is the ENTRY count, and it is what the dbtestcov gate itself reports.
+// `wc -l` on that file says 221 — 23 of those lines are its comment header, so
+// do not quote the line count as an entry count.)
+//
+// ci.yml:15-27 starts a live pgvector/pgvector:pg18 service for the whole job,
+// 40 `AIHUB_TEST_DB:` assignments point steps at it (the gate's own run reports
+// 55 `go test` invocations under them), and the "aihub#303 DB-test coverage
+// gate" at ci.yml:614 exists precisely to FAIL when a DB-gated function is named
+// by no step's -run. Adding a DB test here would have cost one gated_tests.txt
+// entry and one -run step — this repo's normal process, already carried out for
+// all 198 of them. That is a cost, not a barrier, and it does not support "no
+// test could reach it".
+//
+// The real reason a DB test would have bought nothing is that no DB-gated suite
+// in the repo sets task_branches, so every one of them exercises only the
+// fallback where EffectiveDeclaredResource returns its argument unchanged:
+//
+//	$ grep -rln AIHUB_TEST_DB --include='*_test.go' . | wc -l
+//	69
+//	$ grep -rln AIHUB_TEST_DB --include='*_test.go' . \
+//	    | xargs grep -nE 'TaskBranches|task_branches'
+//	(no output — zero hits across all 69 gated files)
+//
+// So the substitution case had to be written from scratch either way, and
+// TestDeriveClaimLocks runs in the DB-free unit step — strictly MORE coverage
+// than a DB-only step would have given it, not less.
 //
 // FnClaimWorkItem calling it is separately pinned by
-// TestRequestedLocksValidatedBeforeServerSideDerivation.
-func deriveClaimLocks(req *ClaimRequest, declaredResources json.RawMessage, project string) ([]ResourceLockReq, []lockConflictProbe) {
+// TestRequestedLocksValidatedBeforeServerSideDerivation — but that guard reads
+// source text, so see the write-back ⚠️ above for what it cannot see.
+func deriveClaimLocks(req *ClaimRequest, declaredResources json.RawMessage, project string) []lockConflictProbe {
 	locks := req.RequestedLocks
 	probes := make([]lockConflictProbe, 0, len(locks))
 	for _, l := range locks {
 		probes = append(probes, exactProbe(l.ResourceKey))
 	}
 	if len(locks) > 0 || len(declaredResources) == 0 {
-		return locks, probes
+		// Nothing was derived, so req.RequestedLocks already IS locks and needs
+		// no write-back: either the client supplied it verbatim or it is empty
+		// and stays empty.
+		return probes
 	}
 	// aihub#261: unmarshalDeclaredResources replaces the local anonymous
 	// struct this site used to declare. That struct's hand-written field list
@@ -305,7 +365,12 @@ func deriveClaimLocks(req *ClaimRequest, declaredResources json.RawMessage, proj
 		})
 		probes = append(probes, probe)
 	}
-	return locks, probes
+	// The write-back the ⚠️ above is about, and the only one: the early return
+	// covers the no-derivation cases. No aliasing hazard — control only reaches
+	// this loop when len(locks)==0, so every append below grows a fresh backing
+	// array rather than writing into one the caller still holds.
+	req.RequestedLocks = locks
+	return probes
 }
 
 // FnClaimWorkItem implements the atomic claim transaction per §7 / §8.4 of the design doc.
@@ -536,8 +601,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	// EXISTING keys that block that lock (aihub#261). A client-supplied lock is
 	// trusted verbatim, so its probe is plain key equality — the pre-aihub#261
 	// behaviour, unchanged.
-	locks, lockProbes := deriveClaimLocks(req, wi.DeclaredResources, wi.Project)
-	req.RequestedLocks = locks
+	lockProbes := deriveClaimLocks(req, wi.DeclaredResources, wi.Project)
 
 	// aihub#238: this path reads ALREADY-STORED declared_resources, so it cannot
 	// reject a mistyped entry without making historical work items unclaimable

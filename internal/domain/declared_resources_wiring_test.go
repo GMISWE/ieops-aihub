@@ -153,18 +153,34 @@ func TestClaimValidatesRequestedLocksAndReportsUnrecognized(t *testing.T) {
 //
 // aihub#356 moved the derivation loop out of FnClaimWorkItem into
 // deriveClaimLocks so it could be tested without a pool, so the second anchor is
-// now the CALL. That is not only a re-spelling: the call is what this guard has
-// to find anyway, and its absence is now the single edit that would stop every
-// lock being derived, which is what the t.Fatal below says.
+// now the CALL.
+//
+// ⚠️ THIS GUARD MEASURES SOURCE TEXT, NOT BEHAVIOUR, and neither its name nor
+// its failure messages may promise more than that. Both limits are measured, not
+// supposed:
+//
+//   - It cannot see a call whose RESULT is dropped. Review mutant M3 deleted the
+//     caller's `req.RequestedLocks = locks` line while leaving the call text
+//     intact; no lock was derived at all and this guard stayed green. That hole
+//     is closed in the code, not here — deriveClaimLocks now writes into req, so
+//     there is no assignment left to delete (see its ⚠️ in run_attempts.go).
+//   - It goes RED on refactors that change nothing. Review mutant M7 hoisted
+//     wi.DeclaredResources and wi.Project into two locals and passed those. The
+//     derivation stayed completely correct and this guard failed, because the
+//     literal argument spelling moved.
+//
+// So the messages below report what was scanned for and leave the diagnosis to
+// the reader. An earlier version asserted "the claim derives NO locks from
+// declared_resources at all", which under M7 was simply untrue.
 func TestRequestedLocksValidatedBeforeServerSideDerivation(t *testing.T) {
 	body := bodyOf(t, sourceOf(t, "run_attempts.go"), "FnClaimWorkItem")
 	validateAt := strings.Index(body, "ValidateRequestedLocks(req.RequestedLocks)")
 	deriveAt := strings.Index(body, "deriveClaimLocks(req, wi.DeclaredResources, wi.Project)")
 	if validateAt < 0 {
-		t.Fatal("ValidateRequestedLocks call not found in FnClaimWorkItem")
+		t.Fatal("the literal text `ValidateRequestedLocks(req.RequestedLocks)` is not present in FnClaimWorkItem's body. Either the validation was removed, or it was re-spelled and this anchor needs updating — check which before assuming a defect")
 	}
 	if deriveAt < 0 {
-		t.Fatal("FnClaimWorkItem does not call deriveClaimLocks — the claim derives NO locks from declared_resources at all (aihub#238, aihub#356)")
+		t.Fatal("the literal call text `deriveClaimLocks(req, wi.DeclaredResources, wi.Project)` is not present in FnClaimWorkItem's body. That is a SOURCE-TEXT miss, not a behavioural finding: it is equally produced by removing the derivation and by a behaviour-preserving refactor that hoists the arguments into locals. Check which, then either restore the derivation or re-anchor this guard (aihub#238, aihub#356)")
 	}
 	if validateAt > deriveAt {
 		t.Error("ValidateRequestedLocks runs AFTER server-side lock derivation; a stored resource with no uri derives an empty resource_key and 400s the claim, making existing work items unclaimable (aihub#238)")
@@ -181,11 +197,29 @@ func TestRequestedLocksValidatedBeforeServerSideDerivation(t *testing.T) {
 // is now the behavioural assertion this file's own header says to prefer: a
 // source scan is satisfied by the text being present anywhere in the body, and
 // this is satisfied only by the row not being derived.
+//
+// ⚠️ That conversion was worth making, but it had a side effect worth stating:
+// it removed the SECOND source scan over FnClaimWorkItem's body, so the CALL to
+// deriveClaimLocks is now anchored by exactly one guard,
+// TestRequestedLocksValidatedBeforeServerSideDerivation. Measured on this tree
+// (the count is the claim, not the line number — and the second grep drops `//`
+// lines, because otherwise this very comment matches the pattern and the answer
+// comes back 2):
+//
+//	$ grep -rn 'body, "deriveClaimLocks' --include='*_test.go' . \
+//	    | grep -vc ':[0-9]*://'
+//	1
+//
+// Three tests still call bodyOf(..., "FnClaimWorkItem"), but the other two
+// anchor on ValidateRequestedLocks / UnrecognizedDeclaredResources and on the
+// ABSENCE of ValidateDeclaredResources(wi.DeclaredResources) — none of them on
+// this call. So if that one anchor is re-spelled, nothing else notices.
 func TestDerivationSkipsEmptyLockKey(t *testing.T) {
 	req := &ClaimRequest{}
-	locks, probes := deriveClaimLocks(req,
+	probes := deriveClaimLocks(req,
 		json.RawMessage(`[{"type":"service"},{"type":"repo","uri":"repo:aihub","task_branch":"polyforge/x"}]`),
 		"aihub")
+	locks := req.RequestedLocks
 	for _, l := range locks {
 		if l.ResourceKey == "" {
 			t.Errorf(`the derivation does not skip an empty lockKey — a stored {"type":"service"} with no uri inserts resource_type=%q resource_key="" (aihub#238)`, l.ResourceType)

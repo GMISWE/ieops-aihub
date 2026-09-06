@@ -678,6 +678,16 @@ func derivedFileScopeLocks(raw json.RawMessage, project string) (byKey map[strin
 // "does this resource take a lock". It deliberately ignores Intent. If you are
 // about to insert a resource_locks row or check one for a conflict, call
 // derivedLock instead (aihub#342).
+//
+// ⚠️ FOR A REPO ENTRY, res.TaskBranch IS NOT NECESSARILY WHAT THE WORK ITEM
+// DECLARED. FnClaimWorkItem runs each item through
+// ClaimRequest.EffectiveDeclaredResource first, which substitutes the branch the
+// claiming client is actually checking out (aihub#356). Read that method before
+// concluding from this line that the key comes from declared_resources: the two
+// agree only when the claim attaches to a branch whose name the declaration
+// happened to guess. Nothing here needs to change for that — the substitution
+// deliberately happens on the INPUT so this mapper stays the single place the
+// "<repo>/<branch>" format is spelled.
 func resourceToLock(res DeclaredResourceItem, project string) (lockType, lockKey string) {
 	switch res.Type {
 	case "repo":

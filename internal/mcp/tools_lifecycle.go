@@ -819,6 +819,16 @@ func (s *Server) registerLifecycleTools() {
 			body["scenario_ref"] = sr
 		}
 
+		// aihub#356: tell the server which branch each declared repo's worktree is
+		// about to be on, so its git_branch lock is keyed on that instead of on
+		// declared_resources[].task_branch — a value nothing downstream reads. It
+		// goes IN the claim body rather than in a follow-up call so a genuine
+		// branch collision can still refuse this claim; see claimTaskBranches.
+		taskBranches := s.claimTaskBranches(ctx, wiID)
+		if len(taskBranches) > 0 {
+			body["task_branches"] = taskBranches
+		}
+
 		result, err := s.client.ClaimWorkItem(ctx, wiID, body)
 		if err != nil {
 			// Don't delete the partial state file — let the user retry
@@ -1010,6 +1020,36 @@ func (s *Server) registerLifecycleTools() {
 							}
 							worktrees[repo.Name] = wtPath
 							writeWorktreeExcludes(wtPath)
+						}
+
+						// aihub#356: the git_branch lock was keyed on a prediction made
+						// a few milliseconds ago, and THIS is the only place its
+						// outcome can be observed. A disagreement means the lock is
+						// once again naming a branch nobody is on — the same defect
+						// through a path the prediction did not foresee — and the
+						// reason it went unnoticed for months is that nothing ever
+						// compared the two. Reported on the response rather than to
+						// stderr for the reason aihub#328 gives: an MCP server's
+						// stderr goes to a log the calling agent never reads.
+						//
+						// A warning, not an error: the claim has committed, the
+						// worktree is usable, and the only thing wrong is which name
+						// the lock holds.
+						for repoName, wt := range worktrees {
+							want := taskBranches[repoName]
+							if want == "" {
+								continue // no branch was predicted, so none was keyed
+							}
+							got := worktreeCurrentBranch(wt)
+							if got == "" || got == want {
+								continue
+							}
+							worktreeProblems = append(worktreeProblems, fmt.Sprintf(
+								"%s: this claim keyed its git_branch lock on %q, but the worktree came out on %q — "+
+									"so that lock is protecting a branch nobody is working on and will not stop a second "+
+									"agent taking %q. Nothing is corrupt and the worktree is usable; to re-key it, "+
+									"pf_pause_attempt and claim again now that the branch exists.",
+								repoName, want, got, got))
 						}
 
 						if len(worktrees) > 0 {
@@ -1811,7 +1851,7 @@ func declaredResourcesProp(description string) map[string]any {
 			"repo": prop("string",
 				`Repo the uri is relative to (path/document/section entries only), e.g. "ieops-core". Optional but recommended in a multi-repo project: without it the lock key cannot tell one repo's go.mod/Makefile/README.md from another's, so unrelated work items block each other. Omitted means "unspecified repo", which still conflicts with every repo's copy of that path. Defaults to the repo named by this payload's own {"type":"repo"} entry when it names exactly one.`),
 			"base_branch": prop("string", "Base branch (repo entries only)"),
-			"task_branch": prop("string", "Task branch (repo entries only); defaults to main for lock-key derivation"),
+			"task_branch": prop("string", "Task branch (repo entries only). Only a FALLBACK for lock-key derivation since aihub#356: a claim keys the git_branch lock on the branch it really checks out (polyforge/<project>-<seq>-<goal>, or whatever branch already exists), and this value is used only for a repo the claim puts no worktree on. Defaults to main."),
 		},
 		"required": []string{"type", "uri"},
 	}
@@ -2166,6 +2206,202 @@ func resolveClaimBranch(srcPath string, n claimBranchNames) string {
 		return m
 	}
 	return gitUniqueBranchMatch(srcPath, remoteRefs, n.Stem+"-*")
+}
+
+// ---------------------------------------------------------------------------
+// Keying the git_branch lock on the branch work really happens on (aihub#356)
+// ---------------------------------------------------------------------------
+//
+// The server derives a git_branch lock from every {"type":"repo"} entry in
+// declared_resources, keyed "<repo>/<task_branch>". But nothing puts the claim's
+// real branch in task_branch: this file computes the name at claim time and
+// stores it nowhere, and resolveClaimBranch may attach to a DIFFERENT existing
+// branch entirely. Measured on ieops#996 — key
+// ieops-ctlchain/polyforge/pin-bump-token, worktree on
+// polyforge/ieops-996-proxy-pin-bump-... — so the lock guarded a name no attempt
+// ever checked out, and two agents on one branch could not collide on it.
+//
+// The three functions below answer "which branch will this claim really leave
+// checked out", and the handler sends the answer with the claim as
+// task_branches. See domain.ClaimRequest.EffectiveDeclaredResource for what the
+// server does with it and why the client is the authority.
+
+// worktreeCurrentBranch reports the branch checked out at wtPath, or "" when
+// there is no answer — wtPath is not a worktree, or its HEAD is detached, which
+// --abbrev-ref renders as the literal "HEAD" rather than as an error.
+//
+// Deliberately the SAME question pf_ship / pf_pr / pf_push / pf_wrap already ask
+// (internal/coding.GitCurrentBranch), because the point of aihub#356 is that the
+// lock key and those four tools read one fact instead of two.
+func worktreeCurrentBranch(wtPath string) string {
+	cmd := exec.Command("git", "-C", wtPath, "rev-parse", "--abbrev-ref", "HEAD")
+	// .Output() and the scrubbed environment for the reasons spelled out on
+	// verifyClaimWorktree: this parses stdout, git writes diagnostics to stderr
+	// while exiting 0, and GIT_DIR / GIT_WORK_TREE beat -C.
+	cmd.Env = envWithout(os.Environ(), "GIT_DIR", "GIT_WORK_TREE")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	if b := strings.TrimSpace(string(out)); b != "HEAD" {
+		return b
+	}
+	return ""
+}
+
+// claimBranchForRepo predicts the branch this claim will leave checked out in
+// one repo's worktree, or "" when it will leave none.
+//
+// It mirrors the claim handler's own three outcomes, in the handler's order,
+// because a prediction that disagrees with what the handler then does would key
+// the lock on a second fictional name instead of the declared one:
+//
+//  1. the worktree directory already exists and verifies — the handler REUSES
+//     it without resolving anything, so its current HEAD is the answer;
+//  2. it exists and does not verify — the handler skips that repo, so this claim
+//     puts nothing on any branch there;
+//  3. it does not exist — addClaimWorktree attaches to whatever
+//     resolveClaimBranch finds, and creates n.Branch when nothing matches.
+//
+// ⚠️ Case 3 is why this cannot be "recompute the name and use that". When the
+// goal has been edited since the branch was made, or the branch was created
+// under the pre-aihub#322 scheme, resolveClaimBranch attaches to the OLD name
+// while newClaimBranchNames computes a new one — and it is the old one, the one
+// git will really check out, that the lock has to name.
+func claimBranchForRepo(srcPath, wtPath string, n claimBranchNames) string {
+	if n.Branch == "" {
+		return "" // the handler treats this as "skip worktree creation"
+	}
+	if _, err := os.Stat(wtPath); err == nil {
+		if verifyClaimWorktree(wtPath) != nil {
+			return ""
+		}
+		return worktreeCurrentBranch(wtPath)
+	}
+	if fi, err := os.Stat(srcPath); err != nil || !fi.IsDir() {
+		return "" // no clone to add a worktree to; addClaimWorktree will fail
+	}
+	if existing := resolveClaimBranch(srcPath, n); existing != "" {
+		return existing
+	}
+	return n.Branch
+}
+
+// declaredRepoNames returns the repo names a work item's declared_resources
+// carry in {"type":"repo"} entries — the only entries that take a git_branch
+// lock, so the only ones an override can affect.
+//
+// The prefix is trimmed exactly as domain.resourceToLock trims it, INCLUDING
+// the case where there is no "repo:" prefix to trim. The two must agree on what
+// the repo is called or the override lands under a key the server never looks
+// up, which is a silent no-op rather than an error.
+//
+// Read off the wire JSON rather than through domain.DeclaredResourceItem: this
+// process can be talking to an older or newer server, and an entry shape it does
+// not recognise must degrade to "no override for that repo".
+func declaredRepoNames(raw any) map[string]bool {
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, it := range items {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := m["type"].(string); t != "repo" {
+			continue
+		}
+		uri, _ := m["uri"].(string)
+		if name := strings.TrimPrefix(uri, "repo:"); name != "" {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// claimTaskBranches answers, for every repo the work item declares, which branch
+// the claim about to be made will really work on.
+//
+// ⚠️ IT RUNS BEFORE THE CLAIM, and that ordering is the whole design rather than
+// an accident. The lock is taken inside the claim transaction, and a real
+// git_branch collision has to be able to REFUSE the claim with 409
+// CONFLICT_LOCK_TAKEN. Re-keying the lock afterwards, once the worktrees exist,
+// would move that refusal to a point where the attempt is already live and there
+// is nothing left to refuse — trading a mis-keyed lock for an unenforceable one.
+//
+// The cost is one extra GET per claim, because the branch name needs the work
+// item's project, seq and goal and a claim otherwise learns those from its own
+// response. That is small beside what this same handler already spends: a
+// network `git fetch` bounded at 90 seconds, per repo.
+//
+// EVERY failure returns nil, meaning "say nothing, let the declaration stand" —
+// which is exactly the pre-aihub#356 behaviour. This refines a lock key; it is
+// not a precondition for claiming. Failing a claim because a branch name could
+// not be predicted would trade a mis-keyed lock for an unclaimable work item.
+func (s *Server) claimTaskBranches(ctx context.Context, wiID string) map[string]string {
+	wi, err := s.client.GetWorkItem(ctx, wiID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "polyforge: task-branch lock keys for %s: %v\n", wiID, err)
+		return nil
+	}
+	repos := declaredRepoNames(wi["declared_resources"])
+	if len(repos) == 0 {
+		return nil // nothing here takes a git_branch lock
+	}
+
+	project, _ := wi["project"].(string)
+	slug, _ := wi["slug"].(string)
+	goal, _ := wi["goal"].(string)
+	canonicalWIID, _ := wi["id"].(string)
+	seq := ""
+	if idx := strings.LastIndex(slug, "#"); idx >= 0 {
+		seq = slug[idx+1:]
+	}
+	ulid8 := claimBranchULID8(canonicalWIID)
+	// The same guards the worktree loop below applies before it creates
+	// anything. Predicting a branch for a claim that will create no worktree at
+	// all would key the lock on a name as fictional as the declared one.
+	if project == "" || seq == "" || ulid8 == "" {
+		return nil
+	}
+
+	wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
+	if wsRoot == "" {
+		wsRoot = config.FindWorkspaceRoot()
+	}
+	if wsRoot == "" {
+		return nil
+	}
+	cfg := resolveWorkspaceConfig(wsRoot, s.cfg)
+	if cfg == nil {
+		return nil
+	}
+	proj, ok := cfg.Projects[project]
+	if !ok {
+		return nil
+	}
+
+	names := newClaimBranchNames(project, seq, goal, ulid8)
+	wtDir := fmt.Sprintf("pf.%s-%s", project, seq)
+	out := map[string]string{}
+	for _, repo := range proj.Repos {
+		if !repos[repo.Name] {
+			continue
+		}
+		branch := claimBranchForRepo(
+			filepath.Join(wsRoot, ".repo", repo.Name),
+			filepath.Join(wsRoot, wtDir, repo.Name),
+			names)
+		if branch != "" {
+			out[repo.Name] = branch
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // attachWorktree puts an EXISTING branch into wtPath.

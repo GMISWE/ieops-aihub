@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -53,6 +54,70 @@ type ClaimRequest struct {
 	Mode           string            `json:"mode"` // "fresh" | "resume"
 	ForceOver      bool              `json:"force_takeover"`
 	ScenarioRef    *string           `json:"scenario_ref,omitempty"` // git SHA of local scenario clone at claim time
+	// TaskBranches maps a repo name to the branch the claiming client is about
+	// to check out in that repo's worktree. It exists so the git_branch lock is
+	// keyed on the branch work will really happen on. (aihub#356)
+	//
+	// See EffectiveDeclaredResource for why the client is the authority here and
+	// what happens when it says nothing.
+	TaskBranches map[string]string `json:"task_branches,omitempty"`
+}
+
+// EffectiveDeclaredResource returns res as THIS claim will map it to a lock:
+// for a repo entry whose repo the client has reported a branch for, the
+// declared task_branch is replaced by that branch. Everything else is returned
+// untouched, so only the git_branch key can move. (aihub#356)
+//
+// ⚠️ WHY THE CLIENT IS THE AUTHORITY, when declared_resources is otherwise the
+// contract. The branch a claim works on is not the declared task_branch and
+// never was: pf_claim_work_item derives polyforge/<project>-<seq>-<kebab goal>
+// at claim time, or attaches to whatever branch already exists in the clone,
+// and that name is stored nowhere — not in the state file, not on the work
+// item. Every downstream tool already agrees: pf_ship, pf_pr, pf_push and
+// pf_wrap all read `git rev-parse --abbrev-ref HEAD` out of the worktree. The
+// lock was the last reader of the declaration, so it protected a branch name
+// nobody used. Measured on ieops#996: key ieops-ctlchain/polyforge/pin-bump-token
+// against a worktree sitting on polyforge/ieops-996-proxy-pin-bump-....
+//
+// ⚠️ ONLY WHEN THE CLAIM CREATES A BRANCH does the mismatch appear; ieops#994 is
+// the control, where the branch already existed and the two names agreed. So a
+// fix keyed on "what this claim would compute today" is NOT enough: when the
+// claim attaches to a branch an earlier claim made under an older goal, the
+// computed name and the checked-out name differ, and it is the checked-out one
+// that has to win. That is why this takes a value from the client instead of
+// recomputing the name here — the server cannot see which refs the clone holds.
+//
+// An absent or empty entry leaves the declaration in force. That is the honest
+// degradation rather than a gap: a claim that materialises no worktree for a
+// repo (no workspace on this machine, the repo missing from .polyforge.yaml, a
+// `worktree add` that failed) puts nothing on any branch there, and the
+// declaration is then the only statement anyone has made about it.
+//
+// ⚠️ WHAT THIS DOES NOT REACH. Both are known and deliberate, not oversights —
+// read them before assuming the whole system now agrees on one branch name:
+//
+//   - FnForceTakeover re-derives every lock from declared_resources with no
+//     override available, so a pf_force_takeover REVERTS a repo's git_branch key
+//     to the declared name. It creates no worktree of its own and the branch fact
+//     lives in a state file that may belong to another machine entirely, so
+//     which worktree would be authoritative there is a separate decision.
+//     Takeover through the CLAIM path (force_takeover=true in a claim body) runs
+//     this method and is unaffected.
+//   - PredictConflicts rule 1 compares exact keys built from the declaration, so
+//     its git_branch arm now systematically fails to match a real lock. It was
+//     never a useful signal: it fired iff two work items happened to declare the
+//     same task_branch STRING, which says nothing about whether they would work
+//     on one branch. Rule 2 is the arm that carries the real signal — it matches
+//     `resource_key LIKE '<repo>/%'`, i.e. any attempt on the same repo whatever
+//     the branch — and this change does not touch it.
+func (req *ClaimRequest) EffectiveDeclaredResource(res DeclaredResourceItem) DeclaredResourceItem {
+	if res.Type != "repo" || len(req.TaskBranches) == 0 {
+		return res
+	}
+	if b := req.TaskBranches[strings.TrimPrefix(res.URI, "repo:")]; b != "" {
+		res.TaskBranch = b
+	}
+	return res
 }
 
 // SessionInfo carries machine_id and session_secret.
@@ -391,6 +456,13 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		// a field missing from the list never reaches the mapper and reads as a
 		// zero value — and the `repo` field added here is exactly such a field.
 		for _, d := range unmarshalDeclaredResources(wi.DeclaredResources) {
+			// aihub#356: the git_branch key follows the branch the claiming
+			// client is really about to check out, not declared_resources[].
+			// task_branch. Applied to the item rather than to the derived key so
+			// the probe below is built from the same value as the key — a key and
+			// a probe that disagree is a lock that inserts on one name and
+			// collides on another.
+			d = req.EffectiveDeclaredResource(d)
 			// derivedLockProbe, not resourceToLock (aihub#342): an intent=read
 			// declaration takes no write lock. This line is the reported
 			// instance — claim took a file_scope lock for a read-only path

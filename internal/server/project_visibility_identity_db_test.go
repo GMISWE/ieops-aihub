@@ -235,6 +235,21 @@ func TestProjectVisibilityIdentityOverHTTP(t *testing.T) {
 	// ROLE is insufficient keeps an explanatory 403 — the invariant's first clause
 	// is that a user who IS in a project can see everything about it, so hiding
 	// the project from its own members is not a fix.
+	//
+	// 🔴 CLASSIFICATION, because this is the ONLY StatusForbidden left in any
+	// *_db_test.go in this package and the next reader will find it while
+	// sweeping for ones aihub#377 missed. IT IS NOT A MISSED ONE. Five stale 403
+	// expectations were moved to 404 in that change
+	// (blocked_by_visibility / recall_work_item_slug / remember_work_item_scope /
+	// routes_memory_redact_idor / ui_handlers_wi_watching); this one is
+	// deliberately 403 and must stay 403.
+	//
+	// The distinction is membership, not endpoint: viewerKey HOLDS viewer on
+	// projB. A non-member gets the shared 404; a member short of the needed role
+	// gets a 403 that names the role. Turning this into 404 would hide a project
+	// from its own members — which the invariant's first clause forbids — and
+	// would delete the only control that separates "denials are now uniform"
+	// from "authorization is broken and everything is denied".
 	t.Run("positive_insufficient_role_still_explains", func(t *testing.T) {
 		// viewerKey holds viewer on projB; writing a memory needs writer.
 		status, body := s.postJSON(t, s.viewerKey, "/v1/memories", fmt.Sprintf(

@@ -364,10 +364,29 @@ func TestRecallResolvesWorkItemIdOrSlug(t *testing.T) {
 	// ── 7. The fixture control for arm 6. Without it, arm 6 passes just as well
 	//        against a caller who can read projB perfectly well and simply has
 	//        no memories there.
+	//
+	// 🔴 Expected status changed 403 -> 404 on 2026-09-06 (aihub#377). CONTRACT
+	// CHANGE, not a red test tuned green. The invariant, verbatim:
+	//
+	//	在某个 project 里的用户，能看到该 project 的一切（memory、work item、
+	//	artifact、event、step、依赖）；不在的，对该 project 的一切必须拿到与
+	//	「不存在」逐字节相同的响应。
+	//
+	//	(A user who is in a project can see everything about it. A user who is
+	//	not must get a response byte-identical to the one for something that
+	//	does not exist.)
+	//
+	// 🔴 STILL DISCRIMINATING as a fixture control. If the reader could read
+	// projB, `recall(projB, "")` answers 200 with a page — so this arm goes red
+	// on a broken fixture exactly as it did before. 404 is now the positive
+	// evidence of "no role here"; it used to be 403.
 	t.Run("the caller really cannot read the other project", func(t *testing.T) {
 		status, body := s.recall(t, s.projB, "")
-		assert.Equal(t, http.StatusForbidden, status,
-			"fixture is broken: the reader is supposed to have NO role on %s (body %s)", s.projB, body)
+		assert.Equal(t, http.StatusNotFound, status,
+			"fixture is broken: got %d, want 404 — the reader is supposed to have NO role "+
+				"on %s. A 200 means the fixture granted access and arm 6 proves nothing; "+
+				"a 403 means the refusal still confirms the project exists (body %s)",
+			status, s.projB, body)
 	})
 
 	// ── 8/9. Resolution is not an authorization decision, in both directions.

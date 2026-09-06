@@ -1012,7 +1012,7 @@ jobs:
           # The visibility arms. The three positive ones are NOT optional: they
           # pass before the fix too, and they are what stops "close the oracle"
           # from being satisfied by refusing every cross-project blocked_by.
-          for want in 'TestBlockedBySlugCannotProbeInvisibleProjects/fixture_outsider_is_403_on_every_honest_read_of_B' \
+          for want in 'TestBlockedBySlugCannotProbeInvisibleProjects/fixture_outsider_cannot_read_B_by_any_honest_route' \
                       'TestBlockedBySlugCannotProbeInvisibleProjects/probing_an_invisible_project_by_slug_is_not_a_create' \
                       'TestBlockedBySlugCannotProbeInvisibleProjects/an_invisible_hit_is_indistinguishable_from_a_genuine_miss' \
                       'TestBlockedBySlugCannotProbeInvisibleProjects/a_viewer_on_the_other_project_may_still_block_on_it' \

@@ -607,6 +607,19 @@ type RememberRequest struct {
 	LastActivatedAt *time.Time `json:"-"`
 	LastActivatedBy *string    `json:"-"`
 	ActivationCount int        `json:"-"`
+	// workItemIDPreResolved suppresses Remember's resolve-and-scope step
+	// (aihub#371) for the one caller whose WorkItemID did not come from a
+	// caller at all. See UpdateMemory, which is the only thing that sets it.
+	//
+	// Unexported on purpose, and that is load-bearing twice over. echo's binder
+	// cannot reach it — neither encoding/json nor encoding/xml can set an
+	// unexported field — which is a stronger guarantee than the `json:"-"`
+	// above, whose insufficiency against the XML binder is what aihub#236 was.
+	// And internal/server, the only package that binds this struct from the
+	// wire, cannot set it either: the compiler refuses. That makes "the wire
+	// can never suppress this gate" a property of the language rather than of a
+	// tag somebody has to keep right.
+	workItemIDPreResolved bool
 }
 
 // RecallRequest is the query for GET /v1/memories.
@@ -807,6 +820,69 @@ func validateSupersedeScope(memType, reqProject, reqWI, tgtProject, tgtWI string
 	return nil
 }
 
+// resolveRememberWorkItemRef maps a caller-supplied work_item_id — an id or a
+// slug — onto the canonical work_items.id that memories.work_item_id holds, and
+// is the consistency gate on that parameter (aihub#371).
+//
+// 🔴 The project predicate lives IN THE SQL and must stay there. Written as
+// "resolve, then compare wi.Project with req.Project, then 403" it would be the
+// same oracle wearing a different hat: a caller 403'd on every honest read of
+// project B could still tell B#7 (403) from B#9999 (404), and `<project>#<seq>`
+// is a two-token namespace anyone can walk. As a WHERE clause there is exactly
+// one outcome — no row — for "no such work item" and for "not in this project",
+// so no later branch can grow a second answer. aihub#357 settled this shape for
+// blocked_by (resolveBlockedByRef, work_items.go) after running the
+// resolve-then-403 variant as a mutant and watching it redden the negative arm.
+//
+// What the scope is FOR here is not visibility, although it closes that too. It
+// is the row-level invariant that a memory's project matches the project of the
+// work item it hangs off. recallText ANDs the work_item_id filter onto the
+// project scope, so a row stored as (project=A, work_item_id=<B's work item>)
+// is invisible to the only query that ever asks for it — including the
+// pf_recall(project=wi.project, work_item_id=wi_id) that pf-work runs on every
+// claim path to pick up the previous agent's handover notes. That row is not a
+// leak. It is write-only data, and before this gate nothing anywhere refused to
+// create it: EmitEvent derives project FROM the work item and the aihub#210
+// supersede check compares projects, but work_item_id had neither.
+//
+// 🔴 No widening for an admin, in deliberate contrast to resolveBlockedByRef,
+// which ORs in `callerRole == "admin"` plus every project the caller holds a
+// role in. There the question is "may this caller see it", and an admin may.
+// Here the question is "will this row ever be readable again", and the answer
+// does not vary with who wrote it: an admin creating a cross-project mount
+// creates the identical unrecallable row. Widening for admin would exempt
+// precisely the account most likely to be running a bulk import.
+//
+// ⚠️ Undetermined, deliberately: whether any EXISTING rows violate this, and
+// whether anyone was relying on cross-project mounting on purpose. Answering
+// that needs `SELECT count(*) FROM memories m JOIN work_items w ON w.id =
+// m.work_item_id WHERE m.project <> w.project` against a populated database,
+// which was not available where this was written. This gate is therefore scoped
+// to NEW writes only; existing rows are untouched and un-migrated, and
+// UpdateMemory deliberately still accepts them (see workItemIDPreResolved).
+func resolveRememberWorkItemRef(ctx context.Context, q Querier, ref, project string) (string, *AihubError) {
+	var id string
+	err := q.QueryRow(ctx, `
+		SELECT id FROM work_items
+		WHERE (id = $1 OR slug = $1)
+		  AND project = $2`,
+		ref, project,
+	).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The single answer for "no such work item" AND "not in this
+			// project". Echoing the caller's own reference back is not a leak;
+			// anything derived from the row would be — which is why this
+			// message names neither the project the work item is really in nor
+			// the fact that it exists at all.
+			return "", NewErr(ErrNotFound,
+				fmt.Sprintf("work_item_id references work item %q, which does not exist in project %q", ref, project))
+		}
+		return "", dbErrCause(err, fmt.Sprintf("failed to resolve work_item_id %s", ref))
+	}
+	return id, nil
+}
+
 // Remember creates a new memory per §7 / §4.3.
 // Returns (memory, isNew, error). isNew=false if dedup hit in suggest mode.
 // Strict mode returns ErrConflictSimilarMemory on high-similarity match.
@@ -848,13 +924,33 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	// Resolve work_item_id (may be a slug like "aihub#1") to the canonical
 	// work_items.id before the memories / agent_events inserts below, both of which
 	// FK-reference work_items(id). Passing a raw slug violates the FK. (aihub#127)
-	if req.WorkItemID != nil && *req.WorkItemID != "" {
-		wi, werr := GetWorkItem(ctx, pool, *req.WorkItemID)
+	//
+	// aihub#371: and require it to name a work item in req.Project. This used to
+	// be a bare GetWorkItem, which resolved any work item on the server and
+	// compared its project against nothing, so project=A + work_item_id=<B's
+	// work item> was written verbatim. The scope is inside the resolving query
+	// rather than a check on its result; resolveRememberWorkItemRef says why.
+	//
+	// This is the single choke point for that rule, which is the reason it is
+	// here and not in handleRemember: every writer of a memory arrives at this
+	// one function. Both MCP memory tools do (internal/mcp/tools_memory.go,
+	// s.client.Remember at :32 and :234), and so does UpdateMemory below.
+	//
+	// Only one of those can actually produce the mismatch, and the asymmetry is
+	// measured rather than assumed: pf_remember requires `project` from the
+	// caller (validatePfRememberArgs, tools_memory.go:459), so it can disagree
+	// with the work item, whereas pf_save_artifact sends no project field at all
+	// (buildSaveArtifactBody, :672-694) and therefore always takes
+	// handleRemember's back-fill branch, where project is DERIVED from the work
+	// item and the two agree by construction. The gate still belongs here rather
+	// than in the handler: that immunity is a property of one caller's argument
+	// list today, not of the invariant.
+	if req.WorkItemID != nil && *req.WorkItemID != "" && !req.workItemIDPreResolved {
+		resolved, werr := resolveRememberWorkItemRef(ctx, pool, *req.WorkItemID, req.Project)
 		if werr != nil {
 			return nil, false, werr
 		}
-		canonical := wi.ID
-		req.WorkItemID = &canonical
+		req.WorkItemID = &resolved
 	}
 
 	// C5 (aihub#210): validate supersede scope before any lineage work — the
@@ -1835,9 +1931,22 @@ func normalizeRecallTopK(requested int) int {
 //
 // Scoping it to req.Project instead would be the strictly worse mistake it
 // looks like an improvement: a memory whose project differs from its work
-// item's is writable today (Remember validates neither against the other), and
-// such a row would silently stop matching its own canonical id — a fresh
-// instance of the silent-empty class this work item exists to close.
+// item's would silently stop matching its own canonical id — a fresh instance
+// of the silent-empty class this work item exists to close.
+//
+// ⚠️ aihub#371 changed the premise of that last paragraph WITHOUT changing its
+// conclusion, and the difference is worth stating so the next reader does not
+// "finish the job" by adding the scope. As originally written it said such a
+// row "is writable today (Remember validates neither against the other)". That
+// is no longer true: resolveRememberWorkItemRef now refuses to create one. But
+// the read side must still not scope, for two reasons that outlive the write
+// gate. Rows written BEFORE that gate are untouched — aihub#371 deliberately
+// migrated nothing, and how many exist was never measured — so the mismatched
+// row remains a real shape this function has to answer for. And UpdateMemory
+// still re-remembers such a row unchanged (workItemIDPreResolved), so one can
+// still legitimately acquire a new id after the gate landed. A scope here would
+// hide exactly the rows an operator needs to find in order to decide what to do
+// about them.
 func resolveRecallWorkItemRef(ctx context.Context, pool *pgxpool.Pool, ref string) (string, error) {
 	var id string
 	err := pool.QueryRow(ctx, `SELECT id FROM work_items WHERE id = $1 OR slug = $1`, ref).Scan(&id)
@@ -2440,16 +2549,34 @@ func UpdateMemory(ctx context.Context, pool *pgxpool.Pool, id string, req *Updat
 		return nil, aerr
 	}
 	rr := &RememberRequest{
-		Project:         head.Project,
-		Type:            head.Type,
-		WorkItemID:      head.WorkItemID,
-		Visibility:      head.Visibility,
-		Tags:            head.Tags,
-		Content:         head.Content,
-		DedupMode:       "off", // updating a memory is an explicit edit, not a fresh dedup-checked remember
-		CallerUserID:    req.CallerUserID,
-		CallerDisplay:   req.CallerDisplay,
-		SupersedesMemID: &head.ID,
+		Project:    head.Project,
+		Type:       head.Type,
+		WorkItemID: head.WorkItemID,
+		// aihub#371: this WorkItemID is the head ROW's stored value, not a
+		// reference someone supplied. It is already canonical — memories
+		// .work_item_id FK-references work_items(id), so it cannot be anything
+		// else — and there is nothing left to resolve.
+		//
+		// Re-scoping it to head.Project here would change behaviour for EXISTING
+		// data rather than for new writes: a row already stored as (project=A,
+		// work item in B) would stop being editable as well as being
+		// unrecallable. What to do with those rows is a disposition decision
+		// aihub#371 explicitly leaves to the owner, and quietly making them
+		// read-only would be taking it.
+		//
+		// It opens no new mis-mount, and that is checked rather than assumed:
+		// UpdateMemoryRequest (declared just above) carries neither a project
+		// nor a work_item_id field, so this path cannot move a memory to another
+		// work item or another project. It can only carry forward the pair the
+		// row already holds.
+		workItemIDPreResolved: true,
+		Visibility:            head.Visibility,
+		Tags:                  head.Tags,
+		Content:               head.Content,
+		DedupMode:             "off", // updating a memory is an explicit edit, not a fresh dedup-checked remember
+		CallerUserID:          req.CallerUserID,
+		CallerDisplay:         req.CallerDisplay,
+		SupersedesMemID:       &head.ID,
 		// aihub#236: a new version inherits the lineage's activation history —
 		// without it each edit reset the head to activation_count=0 /
 		// last_activated_at=NULL, stranding the history on the archived row.

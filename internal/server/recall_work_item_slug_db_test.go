@@ -171,9 +171,10 @@ func (s *recallSlugStack) seedWI(t *testing.T, project, goal string) *domain.Wor
 	return wi
 }
 
-// seedMemory attaches one memory to a work item, through domain.Remember rather
-// than an INSERT, so the row is written by the same code that writes production
-// rows — including its own id-or-slug resolution of this very column.
+// seedMemory attaches one memory to a work item IN ITS OWN PROJECT, through
+// domain.Remember rather than an INSERT, so the row is written by the same code
+// that writes production rows — including its own id-or-slug resolution of this
+// very column.
 func (s *recallSlugStack) seedMemory(t *testing.T, project, wiID, content string) string {
 	t.Helper()
 	m, _, err := domain.Remember(context.Background(), s.pool, &domain.RememberRequest{
@@ -188,6 +189,49 @@ func (s *recallSlugStack) seedMemory(t *testing.T, project, wiID, content string
 	})
 	require.NoError(t, err, "seeding memory %q", content)
 	return m.ID
+}
+
+// seedLegacyCrossProjectMemory writes a memory whose project differs from its
+// work item's, by direct INSERT.
+//
+// 🔴 It has to bypass domain.Remember, and the reason is the point of arms 8/9
+// rather than an inconvenience. When this suite was written, Remember validated
+// project and work_item_id against each other in neither direction, so
+// seedMemory could produce this row and did. aihub#371 closed that: the
+// resolving query is now scoped to the request's project, and this row can no
+// longer be CREATED through any caller-facing path.
+//
+// The rows themselves did not go away. aihub#371 deliberately migrated nothing
+// — how many exist was never measured, and their disposition is the owner's
+// call — and UpdateMemory still re-remembers such a row unchanged, so one can
+// still acquire a new id after that gate landed. So the shape stays real, and
+// the read side still has to answer for it correctly, which is exactly what
+// arms 8/9 assert. Writing it as an INSERT states what it now is: legacy data,
+// not something the write path will hand you.
+//
+// If this ever needs to become reachable through Remember again, that is a
+// decision about aihub#371's gate and belongs there — do not "fix" it here by
+// widening the fixture's project.
+func (s *recallSlugStack) seedLegacyCrossProjectMemory(t *testing.T, project, wiID, content string) string {
+	t.Helper()
+	id := "mem_" + testname.Sanitize(t.Name()+"legacy")
+	_, err := s.pool.Exec(context.Background(), `
+		INSERT INTO memories (id, project, type, content, visibility, work_item_id,
+		                      author_user_id, author_display, latest_id)
+		VALUES ($1,$2,'experience.pitfall',$3,'project',$4,$5,$5,$1)`,
+		id, project, content, wiID, s.bUID)
+	require.NoError(t, err, "seeding legacy cross-project memory %q", content)
+
+	// The fixture is only worth anything if the row really is mismatched;
+	// a silently-corrected INSERT would make arms 8/9 vacuous.
+	var memProject, wiProject string
+	require.NoError(t, s.pool.QueryRow(context.Background(), `
+		SELECT m.project, w.project FROM memories m
+		  JOIN work_items w ON w.id = m.work_item_id
+		 WHERE m.id = $1`, id).Scan(&memProject, &wiProject))
+	require.NotEqual(t, wiProject, memProject,
+		"the legacy fixture is supposed to be a project mismatch; it is not, so arms 8/9 prove nothing")
+	return id
 }
 
 // recallPage is the decoded GET /v1/memories body, narrowed to what these arms
@@ -253,7 +297,10 @@ func TestRecallResolvesWorkItemIdOrSlug(t *testing.T) {
 	memA1b := s.seedMemory(t, s.projA, wiA1.ID, "certificate rotation needs the proxy reloaded, not restarted")
 	memA2 := s.seedMemory(t, s.projA, wiA2.ID, "thumbnail backfill must skip rows whose source blob is gone")
 	memB1 := s.seedMemory(t, s.projB, wiB1.ID, "flag archival is irreversible once the audit window closes")
-	memAonB2 := s.seedMemory(t, s.projA, wiB2.ID, "the tenant sharding key is chosen in project A's config")
+	// projA's memory hanging off projB's work item. Since aihub#371 this can no
+	// longer be written through domain.Remember, so it is seeded as what it now
+	// is — a legacy row — and the helper asserts the mismatch really survived.
+	memAonB2 := s.seedLegacyCrossProjectMemory(t, s.projA, wiB2.ID, "the tenant sharding key is chosen in project A's config")
 
 	require.NotEmpty(t, memB1, "fixture: the invisible project needs a memory to probe for")
 

@@ -28,6 +28,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
@@ -679,6 +681,151 @@ func TestValidateTerminalStepArgs(t *testing.T) {
 			}
 			if !strings.Contains(aerr.Message, tc.status) {
 				t.Errorf("the refusal must name the status it applies to (so the caller can tell it apart from the in_progress path); got %q", aerr.Message)
+			}
+		})
+	}
+}
+
+// TestValidateStepIdentity is the DB-free half of aihub#398 step 1: the
+// predicate that refuses a terminal transition naming a step other than the one
+// wi_step_state has open.
+//
+// The combinations that matter are not the obvious ones. Equal-vs-different is
+// one line; the cases that could plausibly be got wrong, and that a table is the
+// only cheap way to hold, are:
+//
+//   - the two exemptions (heartbeat, in_progress) and the reason each exists,
+//   - a nil STORED step, which is a different refusal from a mismatch and needs
+//     a different message: nothing is open, so there is no other step to name,
+//   - a nil REQUEST step, which derefStr turns into "" and which therefore
+//     MATCHES a stored "" — an edge kept as-is and asserted rather than
+//     silently normalised away,
+//   - exact byte comparison. " implement" and "Implement" are different stored
+//     steps, because startStep stores whatever it was sent and
+//     insertStepCompletion files whatever it was sent. Trimming or case-folding
+//     here would accept a request whose row then lands under the other spelling,
+//     which is the disagreement the predicate exists to stop.
+//
+// The last assertion is about the error CODE and is the one worth reading
+// twice: it forbids any code containing a substring the MCP layer's
+// classifyStepUpdateErr routes on. See validateStepIdentity's own comment —
+// picking the descriptive-sounding CONFLICT_STEP_ATTEMPT_MISMATCH would make
+// naming the wrong step delete the caller's state file.
+//
+// Run: go test ./internal/server/ -run TestValidateStepIdentity (no database needed)
+func TestValidateStepIdentity(t *testing.T) {
+	implement, verify := "implement", "verify"
+	leading, capitalised, blank := " implement", "Implement", ""
+	cases := []struct {
+		name         string
+		status       string
+		heartbeat    bool
+		reqStep      *string
+		storedStep   *string
+		wantRejected bool
+	}{
+		{"completed naming the open step", "completed", false, &implement, &implement, false},
+		{"failed naming the open step", "failed", false, &implement, &implement, false},
+		{"completed naming another step", "completed", false, &verify, &implement, true},
+		{"failed naming another step", "failed", false, &verify, &implement, true},
+		// The corruption's own shape: the graph moved on and a stale actor
+		// completes the step it thinks it is on.
+		{"completed naming a step already left behind", "completed", false, &implement, &verify, true},
+		// No wi_step_state row, or current_step IS NULL. There is nothing to
+		// contradict, so this PASSES — and it must, because "no step open" is
+		// "no prior in_progress", the population the STATE predicate was
+		// deferred over. Three landed tests complete a step they never started.
+		// The corruption in this case (the row used to be filed under the empty
+		// string) is closed at the call site instead: handleUpdateStep files the
+		// row from req.Step. Refusing here would have been step 2, early.
+		{"completed with nothing open", "completed", false, &implement, nil, false},
+		{"failed with nothing open", "failed", false, &implement, nil, false},
+		{"completed with no step_id and nothing open", "completed", false, nil, nil, false},
+		// step is *string on the request and a direct HTTP caller can omit it.
+		{"completed with no step_id at all", "completed", false, nil, &implement, true},
+		// Both empty is the documented edge: it MATCHES. A row filed under ""
+		// is junk, but requiring a non-empty step_id is a different predicate
+		// and not this one's business to smuggle in.
+		{"completed with no step_id against a stored empty step", "completed", false, nil, &blank, false},
+		// Exact bytes. Both of these are rejections, and both would be accepted
+		// by any normalising comparison.
+		{"completed with a leading space", "completed", false, &leading, &implement, true},
+		{"completed with different case", "completed", false, &capitalised, &implement, true},
+		// in_progress files no history row and is guarded by the idle predicate
+		// instead; starting a step whose name differs from the last one IS how a
+		// graph advances, so this must never be caught here.
+		{"in_progress naming another step", "in_progress", false, &verify, &implement, false},
+		{"in_progress with nothing open", "in_progress", false, &implement, nil, false},
+		// A heartbeat is selected by its flag, may carry status="completed", and
+		// returns before any write.
+		{"heartbeat carrying completed for another step", "completed", true, &verify, &implement, false},
+		{"heartbeat carrying failed with nothing open", "failed", true, &verify, nil, false},
+		// An unknown status belongs to the switch's default 400, not here.
+		{"unknown status naming another step", "banana", false, &verify, &implement, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			aerr := validateStepIdentity(tc.status, tc.heartbeat, tc.reqStep, tc.storedStep)
+			if !tc.wantRejected {
+				if aerr != nil {
+					t.Fatalf("validateStepIdentity(%q, heartbeat=%v, req=%v, stored=%v) rejected a legal request: %s",
+						tc.status, tc.heartbeat, tc.reqStep, tc.storedStep, aerr.Message)
+				}
+				return
+			}
+			if aerr == nil {
+				t.Fatalf("validateStepIdentity(%q, heartbeat=%v, req=%v, stored=%v) accepted a terminal transition "+
+					"that names a step other than the open one; the history row is filed under the STORED value, so "+
+					"the wrong step would be recorded as finished and current_step then overwritten",
+					tc.status, tc.heartbeat, tc.reqStep, tc.storedStep)
+			}
+			if aerr.Code != domain.ErrConflictCASFailed {
+				t.Errorf("code = %q, want %q", aerr.Code, domain.ErrConflictCASFailed)
+			}
+			// Both values, or the caller cannot tell what to do next. When
+			// nothing is open there is no second value to name, so that arm is
+			// asserted on its own wording instead.
+			require.NotNil(t, tc.storedStep,
+				"with nothing open this predicate never refuses, so a rejected case here would mean the "+
+					"deferred state predicate has leaked in")
+			if derefStr(tc.reqStep) == "" {
+				// A request that named no step has no second value to quote, and
+				// the recovery is different: it cannot be told to start "".
+				if !strings.Contains(aerr.Message, "identifies no step") {
+					t.Errorf("a refusal of a request with no step_id must say so rather than quote an empty "+
+						"step name; got %q", aerr.Message)
+				}
+				if !strings.Contains(aerr.Message, "resend with step_id") {
+					t.Errorf(`the recovery for a missing step_id must be "send one", never "start \"\" first"; `+
+						"got %q", aerr.Message)
+				}
+			} else {
+				for _, want := range []string{fmt.Sprintf("%q", derefStr(tc.reqStep)), fmt.Sprintf("%q", *tc.storedStep)} {
+					if !strings.Contains(aerr.Message, want) {
+						t.Errorf("the refusal must name BOTH the requested and the stored step; %s is missing from %q",
+							want, aerr.Message)
+					}
+				}
+				if !strings.Contains(aerr.Message, "in_progress") {
+					t.Errorf("the refusal must tell the caller how to proceed; got %q", aerr.Message)
+				}
+			}
+			if !strings.Contains(aerr.Message, "Nothing was committed") {
+				t.Errorf("the refusal must say nothing was committed — a caller that assumes otherwise resends and "+
+					"double-files; got %q", aerr.Message)
+			}
+			// 🔴 The code travels to the client inside the error STRING
+			// ("aihub <status> <CODE>: <message>", pkg/client), and
+			// classifyStepUpdateErr routes on substrings of it. A code matching
+			// one of these would make "you named the wrong step" delete the
+			// local state file and demand a re-claim.
+			for _, trigger := range []string{"ATTEMPT_MISMATCH", "ATTEMPT_PAUSED", "CONFLICT_EPOCH_MISMATCH"} {
+				if strings.Contains(string(aerr.Code), trigger) {
+					t.Errorf("code %q contains %q, which internal/mcp's classifyStepUpdateErr routes on: naming the "+
+						"wrong step would delete the caller's state file and force a re-claim. Pick a code that "+
+						"shares no substring with those, or teach classifyStepUpdateErr to match the full code.",
+						aerr.Code, trigger)
+				}
 			}
 		})
 	}

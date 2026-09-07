@@ -536,3 +536,158 @@ func TestGetStepCompletedStepsDistinguishesEmptyFromAbsent(t *testing.T) {
 			"response that does not carry summaries become the same thing")
 	}
 }
+
+// updateStepSchemaBudget is a CEILING, in bytes, on the wire size of everything
+// pf_update_step publishes: Description + InputSchema.
+//
+// Both sit in the prefix of EVERY request, so a sentence added to either is a
+// standing per-request charge, not a one-off. This tool is the reason the
+// listWorkItemsSchemaBudget precedent exists in the first place, and aihub#398
+// is exactly the edit that needed a ceiling: it had to make three false
+// statements true, which is the one kind of rewrite guaranteed to grow the text.
+//
+// Measured on this tree, 2026-09-07:
+//
+//	before aihub#398   Description   993 B  InputSchema 1766 B  total 2759 B
+//	after  aihub#398   Description 1149 B  InputSchema 2068 B  total 3217 B
+//
+// +458 B, about 115 tokens on every request. That is the price of the
+// correction and it was trimmed twice before being accepted (a first draft came
+// to +581 B).
+//
+// Headroom, not equality, for the reason listWorkItemsSchemaBudget gives: an
+// exact pin fails on every wording tweak and gets reflexively re-baselined,
+// which turns a ratchet into a rubber stamp.
+//
+// 🔴 If this fails, do not just raise the number. Ask first whether the sentence
+// belongs in docs/mcp-tools.md, which is not resident and therefore free.
+const updateStepSchemaBudget = 3600
+
+// TestUpdateStepSchemaStaysWithinItsWireBudget measures the published tool, not
+// the source literals — the client sees the rendered JSON, and that is what the
+// request prefix carries.
+func TestUpdateStepSchemaStaysWithinItsWireBudget(t *testing.T) {
+	tool := publishedTool(t, "pf_update_step")
+	raw, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatalf("marshal InputSchema: %v", err)
+	}
+	got := len(tool.Description) + len(raw)
+	t.Logf("pf_update_step wire size: Description %d B + InputSchema %d B = %d B of a %d B budget",
+		len(tool.Description), len(raw), got, updateStepSchemaBudget)
+	if got > updateStepSchemaBudget {
+		t.Errorf("pf_update_step publishes %d B (Description %d + InputSchema %d), over the %d B budget by %d B "+
+			"(~%d tokens on EVERY request). Move the prose to docs/mcp-tools.md, or raise "+
+			"updateStepSchemaBudget deliberately and say why.",
+			got, len(tool.Description), len(raw), updateStepSchemaBudget,
+			got-updateStepSchemaBudget, (got-updateStepSchemaBudget)/4)
+	}
+	// The floors are not decoration: without them the ceiling passes for the
+	// worst possible reason — a Description or a props map that stopped
+	// rendering. There are TWO of them, per component, and that is a correction
+	// rather than thoroughness: a single floor on the SUM was the first draft,
+	// and it could not have fired for the case its own comment claimed. The
+	// InputSchema alone is 2,068 B, so a completely emptied Description still
+	// clears any sum-floor low enough not to be a re-baseline magnet. Measured
+	// on the mutant, 2026-09-07: gutting the Description's first line left
+	// 3,147 B and the sum-floor of 2,000 B passed. A guard whose comment
+	// describes a case it structurally cannot reach is the failure it exists to
+	// prevent.
+	if len(tool.Description) < 600 {
+		t.Errorf("pf_update_step's Description is only %d B — it is not rendering, and the ceiling above "+
+			"would pass vacuously", len(tool.Description))
+	}
+	if len(raw) < 1200 {
+		t.Errorf("pf_update_step's InputSchema is only %d B — the props map is not rendering, and the ceiling "+
+			"above would pass vacuously", len(raw))
+	}
+}
+
+// TestUpdateStepSchemaDoesNotPromiseALease is the wording half of aihub#398.
+//
+// A schema sentence is not decoration: it is what the caller acts on. "Send a
+// heartbeat ping to keep the lease alive" told every agent that a liveness ping
+// was load-bearing for ownership. There has been no lease since migration 0004
+// removed run_attempts.expires_at — a claim is permanent ownership and
+// pf_renew_lease answers 410 — so the sentence described a mechanism that does
+// not exist, in the schema of the tool whose OTHER false sentence ("concurrency
+// is guarded server-side by the idle-step predicate") is the reason this work
+// item exists.
+//
+// This test is deliberately a negative assertion about a word, which is the
+// weak kind, so it is paired with the positive one below: the parameter must
+// still say what a heartbeat DOES. A negative-only check would pass on an empty
+// description.
+//
+// Scope is every string pf_update_step publishes, not just the heartbeat
+// parameter, because that is where the claim had already spread: the same false
+// "refreshes the lease" wording had drifted into the MCP layer's
+// validateNextStepArgs error text while the server-side twin said
+// step_started_at.
+func TestUpdateStepSchemaDoesNotPromiseALease(t *testing.T) {
+	tool := publishedTool(t, "pf_update_step")
+	raw, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatalf("marshal InputSchema: %v", err)
+	}
+	for _, published := range []struct{ what, text string }{
+		{"Description", tool.Description},
+		{"InputSchema", string(raw)},
+	} {
+		if strings.Contains(published.text, "lease alive") || strings.Contains(published.text, "the lease") {
+			t.Errorf("pf_update_step's %s claims a lease again: %s.\n"+
+				"There is no lease — migration 0004 removed run_attempts.expires_at (\"After claim, ownership "+
+				"is permanent; no expires_at\") and pf_renew_lease answers 410. A heartbeat resets "+
+				"step_started_at and nothing else; saying otherwise tells an agent its ownership depends on "+
+				"pinging.", published.what, published.text)
+		}
+	}
+
+	// The positive half. Without it, deleting the heartbeat description entirely
+	// would satisfy the negative check above.
+	heartbeat := schemaProps(t, tool)["heartbeat"].Description
+	for _, want := range []string{"step_started_at", "DISCARDS"} {
+		if !strings.Contains(heartbeat, want) {
+			t.Errorf("pf_update_step's heartbeat description does not mention %q — got %q.\n"+
+				"It has to say what the ping actually does (resets step_started_at) and that the branch "+
+				"returns early discarding step_id/status, or a caller sends status=\"completed\" with "+
+				"heartbeat=true and is answered heartbeat_ok having completed nothing.", want, heartbeat)
+		}
+	}
+}
+
+// TestUpdateStepSchemaNamesBothPredicatesAndTheGapBetweenThem is the other
+// wording half, and the reason it asserts on THREE things rather than one.
+//
+// The sentence being replaced was wrong by omission, not by error: "concurrency
+// is guarded server-side by the idle-step predicate" is a true statement about
+// idle→in_progress that a caller reads as a statement about the endpoint. So a
+// replacement that named only the new predicate would reproduce the defect from
+// the other side, and one that named both while staying silent about the state
+// check would still over-promise — an idle step whose name matches CAN be
+// completed twice, and that is aihub#398 step 2's subject, not a detail.
+//
+// Hence: the idle predicate, the identity requirement, and the admission that
+// state is unguarded all have to be present.
+func TestUpdateStepSchemaNamesBothPredicatesAndTheGapBetweenThem(t *testing.T) {
+	desc := publishedTool(t, "pf_update_step").Description
+	for _, c := range []struct{ want, why string }{
+		{"idle predicate",
+			"in_progress is still guarded by the idle predicate and the description has to keep saying so"},
+		{"must name the step",
+			"a terminal transition now has to name the step the server has open; a caller who does not know " +
+				"that reads the 409 as a server bug"},
+		{"Neither checks step STATE",
+			"the state predicate is NOT implemented, and a description that lists two guards without saying " +
+				"what is still unguarded is the same over-promise aihub#398 was filed about"},
+	} {
+		if !strings.Contains(desc, c.want) {
+			t.Errorf("pf_update_step's Description no longer contains %q — %s.\nGot: %s", c.want, c.why, desc)
+		}
+	}
+	if strings.Contains(desc, "guarded server-side by the idle-step predicate") {
+		t.Errorf("pf_update_step's Description is back to claiming the idle-step predicate guards this " +
+			"endpoint's concurrency. It guards idle→in_progress only; the terminal transitions are guarded " +
+			"by the step-identity predicate and not at all by state (aihub#398).")
+	}
+}

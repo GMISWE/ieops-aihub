@@ -75,14 +75,50 @@ func (s *Server) registerStepTools() {
 	//   - `next_step` is NEW: complete a step and start its successor in one
 	//     call, because the in_progress call that always followed a completed one
 	//     read nothing out of its response.
+	//
+	// aihub#398 corrected three things this schema asserted and the server did
+	// not do. They are wording, not behaviour, and each was false in a way that
+	// changed what a caller would send:
+	//
+	//   - "concurrency is guarded server-side by the idle-step predicate" named
+	//     ONE predicate and implied it covered the endpoint. It guards only
+	//     idle→in_progress. The terminal transitions had no predicate at all, so
+	//     the sentence a caller reads as "the server will stop me getting this
+	//     wrong" was the reason nobody noticed they could complete a step the
+	//     server did not have open. It now names both predicates AND says what
+	//     is still unguarded — the state check — because the failure mode here
+	//     is a description that over-promises, and a half-fixed description
+	//     repeats it.
+	//   - "keep the lease alive" on `heartbeat`. There is no lease: a claim is
+	//     permanent ownership, pf_renew_lease answers 410, and run_attempts lost
+	//     expires_at in migration 0004 ("After claim, ownership is permanent; no
+	//     expires_at"). The parenthetical was the only true part. The same false
+	//     claim had also drifted into validateNextStepArgs' error text below,
+	//     where the server-side twin already said step_started_at — fixed there
+	//     too. The heartbeat's argument-discarding is now stated as well: the
+	//     branch returns early with a credentials-only body, so status and
+	//     step_id go nowhere, and a caller who believes otherwise sends
+	//     status="completed" with heartbeat=true and gets heartbeat_ok.
+	//   - error_type / escalated read only on the failed branch. Sent with
+	//     completed they are neither stored nor refused, which is the aihub#290
+	//     silent-drop shape. Documented rather than changed: rejecting them is a
+	//     behaviour change and was explicitly out of scope.
+	//
+	// Every sentence added here is resident in the prefix of every request, so
+	// the whole rewrite was measured, not estimated: 2,759 B -> 3,217 B of
+	// Description + InputSchema (+458 B, ~115 tokens/request), and
+	// TestUpdateStepSchemaStaysWithinItsWireBudget is the ceiling that keeps the
+	// next edit honest.
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name: "pf_update_step",
 		Description: "Update the current step status. Credentials injected from state file. " +
 			"Server auto-emits step_started/step_completed/step_failed events. " +
 			"When completing a step that has a successor, pass next_step to complete-and-start in ONE call " +
 			"instead of following up with a separate status=\"in_progress\" call — the two transitions then " +
-			"share a transaction and emit both events. There is no version/CAS argument: concurrency is " +
-			"guarded server-side by the idle-step predicate, so no pf_get_step is needed before this call. " +
+			"share a transaction and emit both events. There is no version/CAS argument and no pf_get_step is " +
+			"needed first: in_progress is guarded by the idle predicate, and completed/failed must name the step " +
+			"the server has open (a mismatch is 409 naming both). Neither checks step STATE: an idle step with a " +
+			"matching name can still be completed twice. " +
 			"A 200 on completed/failed means BOTH records landed: the step-history row pf_get_step's " +
 			"completed_steps is read from AND the step_completed/step_failed event. A transition that cannot " +
 			"deliver both is REFUSED with nothing committed — 400 for a missing or blank step_attempt_id, " +
@@ -91,8 +127,9 @@ func (s *Server) registerStepTools() {
 			"(aihub#390, aihub#399).",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID"),
-			"step_id":      prop("string", "Step ID to update"),
-			"status":       prop("string", "in_progress|completed|failed"),
+			"step_id": prop("string", "Step ID to update. On completed/failed it must equal the server's "+
+				"current_step; the history row is keyed on that value, not this one."),
+			"status": prop("string", "in_progress|completed|failed"),
 			"step_attempt_id": prop("string", "Step attempt ID of the step being completed/failed. REQUIRED for "+
 				"completed/failed and enforced server-side since aihub#399: the step-history row that "+
 				"pf_get_step's completed_steps is read from is keyed on it, so a terminal transition without one "+
@@ -100,12 +137,13 @@ func (s *Server) registerStepTools() {
 				"history. A blank string is refused too. Reusing an id that already has a history row is 409. "+
 				"Optional on in_progress, which files no history row."),
 			"artifact_summary": prop("string", "Brief summary of artifacts produced — at most 4096 characters. Longer values are rejected (413) rather than recorded, because the step history row that pf_get_step's completed_steps reads has that cap (aihub#390)."),
-			"error_type":       prop("string", "Error type (for failed status)"),
-			"escalated":        prop("boolean", "Whether to escalate the failure"),
+			"error_type":       prop("string", "Error type, for status=\"failed\"; ignored (not refused) on completed."),
+			"escalated":        prop("boolean", "Escalate a failure for human triage; like error_type, read only on failed."),
 			"next_step": prop("string", "Step ID to START in the same call, after the one named by step_id completes. "+
 				"Only valid with status=\"completed\"; sending it with any other status is an error, not a no-op."),
 			"next_step_attempt_id": prop("string", "Step attempt ID for the step being STARTED via next_step (distinct from step_attempt_id, which belongs to the step being completed)"),
-			"heartbeat":            prop("boolean", "Send a heartbeat ping to keep the lease alive (resets step_started_at)"),
+			"heartbeat": prop("boolean", "Liveness ping: resets step_started_at, nothing else — there is no lease. "+
+				"Returns early and DISCARDS step_id/status, so it completes no step even with status=\"completed\"."),
 		}, []string{"work_item_id", "step_id", "status"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -246,7 +284,7 @@ func checkNextStepHonoured(nextStep, nextStepAttemptID string, result map[string
 func validateNextStepArgs(nextStep, nextStepAttemptID, status string, heartbeat bool) error {
 	if nextStep != "" {
 		if heartbeat {
-			return fmt.Errorf("next_step cannot be combined with heartbeat=true: a heartbeat only refreshes the lease and completes no step, so the successor would never start")
+			return fmt.Errorf("next_step cannot be combined with heartbeat=true: a heartbeat only refreshes step_started_at and completes no step, so the successor would never start")
 		}
 		if status != "completed" {
 			return fmt.Errorf(`next_step is only valid with status="completed"; got status=%q`, status)

@@ -456,6 +456,43 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 		var currentStep *string
 		tx.QueryRow(c.Request().Context(), `SELECT current_step FROM wi_step_state WHERE work_item_id=$1`, wiID).Scan(&currentStep) //nolint:errcheck
 
+		// aihub#398, step 1 of two: a terminal transition must name the step the
+		// server currently has open. The row filed below is keyed on
+		// derefStr(currentStep) — the value just read — so before this check a
+		// completed/failed request naming any other step recorded the WRONG step
+		// as finished and then overwrote current_step with the caller's value.
+		//
+		// It must sit here, and not one line either side:
+		//
+		//   - AFTER the currentStep read, because the read is the value it
+		//     compares AND the value insertStepCompletion files the row under.
+		//     Sharing one read is what makes the guarantee hold without locking
+		//     the row: whatever the predicate accepted is, by construction, what
+		//     gets written. A second read could disagree with the first.
+		//   - BEFORE the switch, so completed and failed cannot drift, and so it
+		//     precedes the completed branch's mandatory-record gate — a request
+		//     about the wrong step should be told that, not told which artifact
+		//     the wrong step is missing.
+		//   - AFTER the heartbeat return above, for the same reason
+		//     validateTerminalStepArgs and aihub#390's cap check are: a heartbeat
+		//     is selected by its own flag and may legitimately carry
+		//     status="completed" while completing no step.
+		//
+		// What it deliberately does NOT check is current_step_status. Requiring
+		// 'in_progress' is a SEPARATE predicate and a separate work item: measured
+		// over 21 days of transcripts, ~17% of completed calls (118/698, an upper
+		// bound — cross-session resumes are counted) have no prior in_progress for
+		// that (wi, step) in the same transcript, so requiring it today would
+		// refuse real pf-execute flows. The consequence is stated rather than
+		// hidden: an idle step whose name still matches can be completed twice
+		// with two different step_attempt_ids, and both rows are filed. That is
+		// what the state predicate closes, and
+		// TestHandleUpdateStep_DoubleCompleteIsCaughtByWhicheverGuardApplies pins
+		// it so the boundary is a measured fact rather than a comment.
+		if aerr := validateStepIdentity(req.Status, req.Heartbeat, req.Step, currentStep); aerr != nil {
+			return writeError(c, aerr)
+		}
+
 		switch req.Status {
 		case "in_progress":
 			// H-Medium: guard idle→in_progress only; reject if already in_progress
@@ -501,8 +538,19 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			// blank id, so the guard is not moved here — it is gone, because a
 			// leftover `!= nil` would be dead code able to hide the same defect
 			// again if that check were ever relaxed.
+			// stepID comes from req.Step, NOT from the currentStep read above
+			// (aihub#398). validateStepIdentity has already refused every request
+			// where the two could differ AND a step was open, so in the normal
+			// case this is the same value — but where NO step was open the old
+			// source was derefStr(nil), i.e. the row was filed under the empty
+			// string. Reading the caller's own value makes "the history row names
+			// the step the caller said it finished" true by construction rather
+			// than true because a predicate happened to run first, which is the
+			// same reason aihub#399 deleted its `!= nil` guard instead of moving
+			// it: a guarantee that depends on a check placed elsewhere breaks
+			// silently when that check is relaxed.
 			if aerr := insertStepCompletion(c.Request().Context(), tx, wiID, req.AttemptID, derefStr(req.StepAttemptID),
-				derefStr(currentStep), "completed", req.ArtifactSummary, nil, false); aerr != nil {
+				derefStr(req.Step), "completed", req.ArtifactSummary, nil, false); aerr != nil {
 				return writeError(c, aerr)
 			}
 			events = append(events, stepEvent{
@@ -549,8 +597,9 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				return writeError(c, domain.NewErr(domain.ErrInternalError, execErr.Error()))
 			}
 			// Unconditional since aihub#399 — see the completed branch above.
+			// req.Step, not currentStep — see the completed branch above (aihub#398).
 			if aerr := insertStepCompletion(c.Request().Context(), tx, wiID, req.AttemptID, derefStr(req.StepAttemptID),
-				derefStr(currentStep), "failed", req.ArtifactSummary, req.ErrorType, req.Escalated); aerr != nil {
+				derefStr(req.Step), "failed", req.ArtifactSummary, req.ErrorType, req.Escalated); aerr != nil {
 				return writeError(c, aerr)
 			}
 			events = append(events, stepEvent{eventType: "step_failed", step: derefStr(req.Step)})
@@ -749,6 +798,128 @@ func validateTerminalStepArgs(status string, stepAttemptID *string, heartbeat bo
 	return nil
 }
 
+// validateStepIdentity refuses a completed/failed transition that names a step
+// other than the one wi_step_state currently has open (aihub#398, step 1 of
+// two).
+//
+// The defect it closes is a history corruption, not a race. handleUpdateStep
+// USED TO file the wi_step_completions row under the STORED current_step rather
+// than under req.Step — and the tense is load-bearing, because this change fixes
+// that too (see the call site), so a comment left in the present tense would
+// describe code that no longer exists. A completion naming a different step
+// recorded the stored step as finished, emitted a step_completed event naming
+// the CALLER's step, and then set current_step to the caller's value: three
+// records disagreeing, and a 200. pf_get_step's completed_steps — which
+// aihub#265 tells a resuming agent to treat as the full done-set — then reported
+// a step that never finished while omitting the one that did, so a resumer
+// skipped real work and redid finished work in the same walk.
+//
+// With the row keyed on req.Step, the misfiling is gone whether or not this
+// predicate runs. What is left for it to prevent is the rest of that list:
+// recording a step as finished while a DIFFERENT one is what actually ran, and
+// overwriting current_step so the running step's own outcome is never recorded.
+//
+// This is reachable without any malformed input. The interactive loop's own
+// documented "skip" path (the polyforge plugin's
+// pf-execute/references/engine-native-details.md) tells the agent to skip a step
+// by calling NO pf_update_step at all, leaving the skipped step as current_step,
+// and asserts that "the next step you actually complete reports itself and
+// advances from there". That is exactly the shape above, and the assertion is
+// false: the next completion is filed under the skipped step. After this change
+// it is a 409 instead, which is why the message spells out the recovery.
+//
+// Why the comparison is sound without locking the row. The value compared here
+// and the value the row is filed under are the SAME read, in the same
+// transaction, so a concurrent transition between the read and the UPDATE cannot
+// separate them: whatever this accepted is what gets written. A stale read can
+// still let the UPDATE overwrite a newer state — but that is a state question,
+// and the state predicate is the other work item. Adding `FOR UPDATE` here would
+// buy that protection and change the in_progress path from "refuse immediately"
+// to "block, then refuse", which is a concurrency change this work item is not
+// making.
+//
+// Exact byte comparison, deliberately: no trimming, no case folding. startStep
+// stores the step name verbatim and insertStepCompletion files it verbatim, so
+// " implement" really is a different stored step from "implement", and
+// normalising here would make the predicate accept a request whose row then gets
+// filed under the other name — the very disagreement it exists to prevent.
+//
+// Heartbeats and in_progress are exempt for the reasons given at the call site.
+//
+// 🔴 On the error code. The obvious candidate is CONFLICT_STEP_ATTEMPT_MISMATCH,
+// which is declared, 409-mapped, and named for this endpoint in
+// docs/design/polyforge-v1-design.md — and using it would be a bug. The MCP
+// layer's classifyStepUpdateErr matches the SERVER'S CODE by substring, because
+// pkg/client renders errors as "aihub <status> <CODE>: <message>", and its
+// mismatch arm tests for "ATTEMPT_MISMATCH" — a substring of that code. Naming
+// the wrong step would therefore delete the caller's local state file and demand
+// a re-claim. CONFLICT_CAS_FAILED contains none of those triggers and is already
+// what the sibling idle predicate on this endpoint returns.
+//
+// Pure and DB-free so TestValidateStepIdentity can hold every combination
+// without a database; the caller supplies the stored value.
+func validateStepIdentity(status string, heartbeat bool, reqStep, storedStep *string) *domain.AihubError {
+	if heartbeat || (status != "completed" && status != "failed") {
+		return nil
+	}
+	want := derefStr(reqStep)
+
+	// An absent step_id and an explicit "" are the same fact to this predicate:
+	// neither identifies a step. They are distinguished only in the WORDING, and
+	// only because the recovery differs — "start \"\" first" is not advice. The
+	// comparison itself does not special-case them, so a stored "" still matches
+	// a request that sent nothing (see TestValidateStepIdentity); refusing an
+	// empty step_id outright is a different predicate and not smuggled in here.
+	named := `status="` + status + `" names step ` + fmt.Sprintf("%q", want)
+	howToRecover := "start " + fmt.Sprintf("%q", want) + ` with status="in_progress" first — note that a start ` +
+		"is refused while another step is in_progress, so the open step has to reach a terminal status either way"
+	if want == "" {
+		named = `status="` + status + `" identifies no step (step_id absent or empty)`
+		howToRecover = "resend with step_id naming the step that finished"
+	}
+
+	// 🔴 No stored step means there is NOTHING to contradict, so this passes.
+	//
+	// That is the opposite of the first implementation, and the reason is the
+	// scope line between this work item and the state predicate. A terminal
+	// transition on a work item with no wi_step_state row is a work item with no
+	// prior in_progress — verbatim the population the state predicate was
+	// deferred over (~17% of measured completed calls), so refusing it here
+	// would ship half of step 2 while claiming to ship step 1. Measured, not
+	// argued: refusing it turned three landed tests red
+	// (TestHandleUpdateStep_ArtifactSummary, _EscalatedStall,
+	// _MandatoryRecordGate), each of which completes a step it never started —
+	// evidence that the shape is live in this codebase and not hypothetical.
+	//
+	// Nothing is given up by passing, because the row is no longer filed from
+	// this value: handleUpdateStep files it under req.Step (see the call site),
+	// so "no step open" now records the step the caller named instead of the
+	// empty string it used to record. The corruption is closed by where the
+	// row's name COMES FROM; this predicate's remaining job is narrower and
+	// exact — stop a caller ending a step that is not the open one.
+	if storedStep == nil {
+		return nil
+	}
+	if want == *storedStep {
+		return nil
+	}
+	// What this says has to be what the request would do to the code AS IT IS,
+	// not what the old code did. "the row would be keyed on the server's value"
+	// was true of the handler this change replaced and is no longer a
+	// consequence of anything — the row is keyed on req.Step now — so claiming
+	// it here would be a refusal explaining itself with a stale reason, which is
+	// exactly how a correct verdict comes to rest on a rotten premise. The harm
+	// that remains is the state half.
+	return domain.NewErr(domain.ErrConflictCASFailed, named+
+		", but this work item's current_step is "+fmt.Sprintf("%q", *storedStep)+
+		". Ending a step other than the open one would record "+fmt.Sprintf("%q", want)+
+		" as finished while "+fmt.Sprintf("%q", *storedStep)+" is what actually ran, and would overwrite "+
+		"current_step — so "+fmt.Sprintf("%q", *storedStep)+"'s own outcome would never be recorded and "+
+		"pf_get_step's completed_steps would disagree with what ran, which is what makes a resuming agent skip "+
+		"real work. Nothing was committed. Either finish "+fmt.Sprintf("%q", *storedStep)+
+		" (the step that is actually open), or "+howToRecover)
+}
+
 // stepEvent is one agent_events row a step transition owes the timeline.
 type stepEvent struct {
 	eventType       string
@@ -764,14 +935,14 @@ type stepEvent struct {
 // runAttemptID is sent as SQL NULL when empty, and that is a fix rather than a
 // tidy-up. agent_events.run_attempt_id is a nullable FK to run_attempts
 // (migration 0006 keeps it nullable for events that belong to no attempt),
-// while '' names no attempt — so the handler, which passes a non-pointer
+// while ” names no attempt — so the handler, which passes a non-pointer
 // string, made EVERY step transition PATCHed without an attempt_id violate
 // agent_events_run_attempt_id_fkey. Under the old savepoint that violation was
 // swallowed and the event vanished; with errors now reaching the caller it
 // would instead turn a shape that answered 200 into a 400. Neither is right:
 // "this event belongs to no attempt" is a fact the column can hold, so it is
 // recorded. Measured on PostgreSQL 18.6 with this repo's migrations:
-// run_attempt_id='' -> 23503, run_attempt_id=NULL -> accepted.
+// run_attempt_id=” -> 23503, run_attempt_id=NULL -> accepted.
 //
 // The error mapping:
 //

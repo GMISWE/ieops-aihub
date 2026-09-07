@@ -277,3 +277,147 @@ func TestBuildWorkItemUpdate_AttrsMergeComposesWithDeclaredResourcesCAS(t *testi
 		t.Fatalf("expected 5 args (resources, patch, unset, id, version), got %d: %v", len(u.Args), u.Args)
 	}
 }
+
+// TestAttrsPatchShapeErr_NamesWhatArrived is the aihub#420 gate.
+//
+// The defect it pins is not that a bad attrs_patch is rejected — it always was —
+// but that the rejection named only the EXPECTATION. Five materially different
+// caller mistakes produced one byte-identical sentence, so the message could not
+// tell a caller which of the five they had made. The costly one is the
+// JSON-encoded string: a client that serialises a large object argument as a
+// string sends something its author correctly calls an object, is told it "must
+// be a JSON object", and concludes the real constraint must be size. aihub#420
+// was filed on exactly that inference, against a cap that does not exist.
+//
+// RED on the tree before this change: every want below is absent from the old
+// message, which is the constant "attrs_patch must be a JSON object".
+func TestAttrsPatchShapeErr_NamesWhatArrived(t *testing.T) {
+	cases := []struct {
+		name     string
+		patch    string
+		wantKind string
+		wantIn   []string
+	}{
+		{
+			name:     "array",
+			patch:    `[1,2]`,
+			wantKind: "a JSON array",
+			wantIn:   []string{"got a JSON array of 5 bytes"},
+		},
+		{
+			name:     "number",
+			patch:    `7`,
+			wantKind: "a JSON number",
+			wantIn:   []string{"got a JSON number of 1 bytes"},
+		},
+		{
+			name:     "boolean",
+			patch:    `true`,
+			wantKind: "a JSON boolean",
+			wantIn:   []string{"got a JSON boolean of 4 bytes"},
+		},
+		{
+			name:     "plain string that is not an encoded object",
+			patch:    `"nope"`,
+			wantKind: "a JSON string",
+			wantIn:   []string{"got a JSON string of 6 bytes"},
+		},
+		{
+			// The case that produced aihub#420. The caller's data is fine; their
+			// serialisation is not, and only this line can tell them so.
+			name:     "string that decodes to an object",
+			patch:    `"{\"a\":1}"`,
+			wantKind: "a JSON string",
+			wantIn: []string{
+				"got a JSON string of 11 bytes",
+				"that string decodes to a JSON object",
+				"not a JSON-encoded string of it",
+			},
+		},
+		{
+			// Starts like an object but does not parse. Reported as malformed
+			// rather than as "a JSON object", which would be self-contradictory
+			// in a message explaining that an object was required.
+			name:     "malformed",
+			patch:    `{"a":`,
+			wantKind: "malformed JSON",
+			wantIn:   []string{"got malformed JSON of 5 bytes"},
+		},
+	}
+
+	seen := map[string]string{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var req UpdateWorkItemRequest
+			// json.Unmarshal cannot carry the malformed fixture through a full
+			// request body, so the raw field is set directly — c.Bind would have
+			// rejected the envelope first, but AttrsPatch is json.RawMessage and
+			// the guard is what is under test here.
+			req.AttrsPatch = json.RawMessage(tc.patch)
+			aerr := validateAttrsPatch(&req)
+			if aerr == nil {
+				t.Fatalf("%s must be rejected", tc.patch)
+			}
+			if aerr.HTTPStatus != 400 {
+				t.Errorf("a malformed caller payload must be a 400, got %d", aerr.HTTPStatus)
+			}
+			for _, want := range tc.wantIn {
+				if !strings.Contains(aerr.Message, want) {
+					t.Errorf("message must name what arrived.\n  want substring: %q\n  got message:    %q", want, aerr.Message)
+				}
+			}
+			// The clause that stops the phantom cap being rediscovered. Measured
+			// 2026-09-07: 199,983 bytes accepted over HTTP, 8,016 bytes accepted
+			// through the MCP tool path. See attrsPatchShapeErr's comment.
+			if !strings.Contains(aerr.Message, "attrs_patch has no length cap") {
+				t.Errorf("every shape rejection must rule size out explicitly; got: %q", aerr.Message)
+			}
+
+			details, ok := aerr.Details.(map[string]any)
+			if !ok {
+				t.Fatalf("details must be machine-readable so a caller need not parse prose; got %T", aerr.Details)
+			}
+			if details["field"] != "attrs_patch" {
+				t.Errorf("details.field = %v, want attrs_patch", details["field"])
+			}
+			if details["got"] != tc.wantKind {
+				t.Errorf("details.got = %v, want %v", details["got"], tc.wantKind)
+			}
+			if details["bytes"] != len(tc.patch) {
+				t.Errorf("details.bytes = %v, want %d", details["bytes"], len(tc.patch))
+			}
+
+			// The defect in one assertion: the five kinds used to be
+			// indistinguishable. If any two messages collide again, the
+			// information this change adds has been lost even if every
+			// substring above still matches.
+			if prev, dup := seen[aerr.Message]; dup {
+				t.Errorf("message is not distinguishable from the %s case: %q", prev, aerr.Message)
+			}
+			seen[aerr.Message] = tc.name
+		})
+	}
+}
+
+// TestValidateAttrsPatch_NoSizeCap pins the measurement that falsified
+// aihub#420's premise: there is no length limit on attrs_patch anywhere in the
+// request path. Measured 2026-09-07 against the live server at 3,983 / 7,483 /
+// 15,983 / 64,983 / 199,983 bytes, every one HTTP 200, plus 8,016 bytes through
+// the full MCP tool path.
+//
+// It is a guard against the fix for this work item being "helpfully" completed
+// later by someone adding the cap the message promises does not exist. The
+// message and the behaviour would then disagree, and only this test would say so.
+func TestValidateAttrsPatch_NoSizeCap(t *testing.T) {
+	for _, n := range []int{4 << 10, 8 << 10, 200 << 10} {
+		body, err := json.Marshal(map[string]string{"k": strings.Repeat("x", n)})
+		if err != nil {
+			t.Fatalf("building the fixture failed: %v", err)
+		}
+		var req UpdateWorkItemRequest
+		req.AttrsPatch = body
+		if aerr := validateAttrsPatch(&req); aerr != nil {
+			t.Errorf("a %d-byte attrs_patch object must be accepted; attrs_patch has no size cap, got: %v", len(body), aerr)
+		}
+	}
+}

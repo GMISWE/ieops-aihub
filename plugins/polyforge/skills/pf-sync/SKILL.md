@@ -81,7 +81,13 @@ and tracks the sync request as a follow-up work item.
 When implemented, `pf-sync pull` will:
 1. Authenticate with Jira/GitHub via stored credentials
 2. `pf_sync_pull(project, source="jira"|"github", filter="open")` → list of imported wi's
-3. For each imported wi: `pf_create_work_item(source="jira_import"|"github_import", ...)`
+3. For each imported wi: `pf_create_work_item(source="sync_jira"|"sync_github", ...)`
+   — `source` is a CLOSED vocabulary (`human`, `auto_execute`, `auto_debug`, `auto_review`,
+   `sync_jira`, `sync_github`, `admin`), published as a JSON-Schema enum since aihub#396.
+   This line said `jira_import`/`github_import`, which are in no vocabulary: before the enum
+   existed the value crossed all four hops and died on the `work_items_source_check`
+   constraint as a 500, so phase 2 would have shipped a broken importer and found out in
+   production. Do not invent a source value; use one of the seven.
 4. Show summary of imported wi's
 
 `pf-sync push` will:

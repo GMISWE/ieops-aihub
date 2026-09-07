@@ -254,6 +254,26 @@ func newWorkItemID() string {
 // fair — it was aihub#377's business.
 func resolveBlockedByRef(ctx context.Context, tx pgx.Tx, ref, ownProject string,
 	callerProjectRoles map[string]string, callerRole string) (string, *AihubError) {
+	return resolveVisibleRefOnTx(ctx, tx, "blocked_by", ref, ownProject, callerProjectRoles, callerRole)
+}
+
+// resolveVisibleRefOnTx is the shared body of the above and of
+// parent_work_item_id's resolution (aihub#396), which is a REFERENCE FIELD ON THE
+// SAME ROW with the same identifier namespace and therefore the same oracle.
+//
+// ⚠️ Shared deliberately, and not merely to avoid two copies of a query. The
+// property being protected is the one the header above spends thirty lines on:
+// scope lives in the WHERE clause, and a hidden work item is reported exactly
+// like an absent one. A second hand-written copy of that query is how a field
+// gets slug resolution and loses the property — which is what aihub#357 shipped.
+// Whatever `field` is passed, both fields now answer through one statement, so
+// they cannot come apart.
+//
+// `field` is a caller-supplied parameter NAME chosen at the call site, never a
+// value read from the database, and it appears only in the message. So it adds
+// nothing derived from the row and cannot widen what the error discloses.
+func resolveVisibleRefOnTx(ctx context.Context, tx pgx.Tx, field, ref, ownProject string,
+	callerProjectRoles map[string]string, callerRole string) (string, *AihubError) {
 
 	visible := make([]string, 0, len(callerProjectRoles))
 	for p, role := range callerProjectRoles {
@@ -263,7 +283,9 @@ func resolveBlockedByRef(ctx context.Context, tx pgx.Tx, ref, ownProject string,
 	}
 
 	// Resolved on `tx` rather than through GetWorkItem's pool: taking a second
-	// pool connection while holding one is how a small MaxConns deadlocks.
+	// pool connection while holding one is how a small MaxConns deadlocks. This
+	// is also why ResolveVisibleWorkItemRef — same query, same property — is not
+	// reused here: its signature takes a pool.
 	var id string
 	err := tx.QueryRow(ctx, `
 		SELECT id FROM work_items
@@ -277,9 +299,9 @@ func resolveBlockedByRef(ctx context.Context, tx pgx.Tx, ref, ownProject string,
 			// Echoing the caller's own reference back is not a leak; anything
 			// derived from the row would be.
 			return "", NewErr(ErrNotFound,
-				fmt.Sprintf("blocked_by references work item %q, which does not exist", ref))
+				fmt.Sprintf("%s references work item %q, which does not exist", field, ref))
 		}
-		return "", dbErrCause(err, fmt.Sprintf("failed to resolve blocked_by entry %s", ref))
+		return "", dbErrCause(err, fmt.Sprintf("failed to resolve %s entry %s", field, ref))
 	}
 	return id, nil
 }
@@ -332,6 +354,27 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	// in the UI as "resources declared", and acquired no lock — the wi looked
 	// guarded and was not.
 	if aihubErr := ValidateDeclaredResources(req.DeclaredResources); aihubErr != nil {
+		return nil, aihubErr
+	}
+	// aihub#396: the vocabularies and limits the DB CHECKs enforce, checked here
+	// so a caller mistake is a 400 naming the field instead of a 500 carrying a
+	// SQLSTATE. See internal/domain/work_item_fields.go for the policy and for
+	// why "the constraint already catches it" is not an answer.
+	//
+	// Placed AFTER the defaults above (so an omitted field is not read as an
+	// illegal one) and BEFORE the embedding call below, which is a network
+	// round-trip: rejecting a doomed request should not first spend an embedding
+	// on it.
+	if aihubErr := validateWorkItemPriority(req.Priority); aihubErr != nil {
+		return nil, aihubErr
+	}
+	if aihubErr := validateWorkItemSource(req.Source); aihubErr != nil {
+		return nil, aihubErr
+	}
+	if aihubErr := validateWorkItemLabels(req.Labels); aihubErr != nil {
+		return nil, aihubErr
+	}
+	if aihubErr := validateWorkItemContent(req.Content); aihubErr != nil {
 		return nil, aihubErr
 	}
 	if len(req.Attrs) == 0 {
@@ -408,6 +451,40 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		return nil, NewErr(ErrBadRequest, "force_reason is required and must be at least 10 characters when force_create=true")
 	}
 
+	// aihub#396: resolve parent_work_item_id, which used to travel straight into
+	// the INSERT. The column is `TEXT REFERENCES work_items(id)`, so a slug — or
+	// an id that does not exist — was a 23503 foreign-key violation surfacing as
+	// 500 INTERNAL_ERROR. Its immediate neighbour `blocked_by` has accepted an id
+	// OR a slug, scoped to what the caller can see, with a 404 on a miss, since
+	// aihub#357; the two are reference fields on the same row and there was no
+	// reason for them to disagree.
+	//
+	// Through the SAME resolver as blocked_by, not a copy of it: slug resolution
+	// makes the identifier the walkable `<project>#<seq>` namespace, so any
+	// per-entry answer that varies with existence enumerates every project on the
+	// server. resolveVisibleRefOnTx keeps the scope in the WHERE clause and gives
+	// one answer for "absent" and "not yours".
+	//
+	// ⚠️ A blank value is folded to ABSENT rather than skipped. Skipping it would
+	// pass "" (or "   ") through to a column that is a foreign key, which is a
+	// 23503 and therefore the very 500 this block removes — an easy hole to leave
+	// behind when adding a `!= ""` guard, because the guard reads as "nothing to
+	// do here".
+	parentID := req.ParentWorkItemID
+	if parentID != nil {
+		trimmed := strings.TrimSpace(*parentID)
+		if trimmed == "" {
+			parentID = nil
+		} else {
+			resolved, aihubErr := resolveVisibleRefOnTx(ctx, tx, "parent_work_item_id",
+				trimmed, req.Project, callerProjectRoles, callerRole)
+			if aihubErr != nil {
+				return nil, aihubErr
+			}
+			parentID = &resolved
+		}
+	}
+
 	// Get next seq from projects table (UPDATE must be last write in tx to minimize row lock duration)
 	// This is deferred to after the INSERT; we do it here to fail fast on FK violation.
 	var seq int64
@@ -444,7 +521,7 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		)`,
 		wiID, seq, req.Project, req.Scenario, req.Goal, req.Source, wiType, req.Priority,
 		requiresHumanSession, req.Milestone, req.Labels, req.DeclaredResources,
-		callerUserID, callerDisplay, req.ParentWorkItemID, req.Attrs, req.Content,
+		callerUserID, callerDisplay, parentID, req.Attrs, req.Content,
 		embModel, embDims, embVecLit,
 	)
 	if err != nil {
@@ -772,7 +849,7 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 	if len(labels) == 0 {
 		// No labels: only filter by goal similarity (done in Go) + resource overlap (if any)
 		rows, err = tx.Query(ctx, `
-			SELECT id, slug, goal, labels, declared_resources
+			SELECT id, slug, goal, labels, declared_resources, status
 			FROM work_items
 			WHERE project = $1
 			  AND status IN ('queued','running','paused','blocked')
@@ -781,7 +858,7 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 		)
 	} else {
 		rows, err = tx.Query(ctx, `
-			SELECT id, slug, goal, labels, declared_resources
+			SELECT id, slug, goal, labels, declared_resources, status
 			FROM work_items
 			WHERE project = $1
 			  AND status IN ('queued','running','paused','blocked')
@@ -801,6 +878,7 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 		Goal       string
 		Labels     []string
 		Resources  json.RawMessage
+		Status     string
 		Similarity float64
 	}
 
@@ -808,7 +886,7 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 	for rows.Next() {
 		var c candidate
 		var labelsRaw []string
-		if scanErr := rows.Scan(&c.ID, &c.Slug, &c.Goal, &labelsRaw, &c.Resources); scanErr != nil {
+		if scanErr := rows.Scan(&c.ID, &c.Slug, &c.Goal, &labelsRaw, &c.Resources, &c.Status); scanErr != nil {
 			continue
 		}
 		c.Labels = labelsRaw
@@ -835,8 +913,25 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 		if score >= 0.90 {
 			return NewErrDetails(ErrConflictDuplicate,
 				fmt.Sprintf("work item %q is %.0f%% similar to existing %s", req.Goal, score*100, c.Slug),
+				// aihub#396 (folded from aihub#397): the real status, read off the
+				// matched row.
+				//
+				// ⚠️ Bounded by the candidate query above, which selects only
+				// queued/running/paused/blocked — so this key can never report
+				// wrapped, failed or cancelled. That is not a limitation of the fix:
+				// a closed work item is not a duplicate to collide with, so it is
+				// never a candidate. Do not read "the real status" as "any of the
+				// seven".
+				//
+				// The old value was the literal string "active", which is not a
+				// member of the work_items.status CHECK at all
+				// (queued/running/paused/blocked/wrapped/failed/cancelled) — so a
+				// caller deciding what to do about the duplicate (claim it? it is
+				// already running. requeue it? it is paused.) was handed a value it
+				// could not compare with anything, on the one response whose entire
+				// purpose is to describe the row it collided with.
 				map[string]any{"existing": map[string]any{
-					"id": c.ID, "slug": c.Slug, "goal": c.Goal, "status": "active",
+					"id": c.ID, "slug": c.Slug, "goal": c.Goal, "status": c.Status,
 				}},
 			)
 		}
@@ -2255,6 +2350,33 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 		if vErr := ValidateDeclaredResources(req.DeclaredResources); vErr != nil {
 			return nil, vErr
 		}
+	}
+
+	// aihub#396: the same vocabularies and limits CreateWorkItem checks, on the
+	// fields this request struct actually binds.
+	//
+	// ⚠️ Only three of the five, and that is a property of the struct rather than
+	// a gap: UpdateWorkItemRequest has no `source` and no `parent_work_item_id`
+	// json tag, so neither is reachable through this path at all. Adding either
+	// field here means adding its check too — TestUpdateWorkItemRequestBindsOnly
+	// TheFieldsThisPathValidates fails if one appears without one.
+	//
+	// Each is guarded by its own supplied-ness test, because on an update
+	// "absent" and "empty" are different requests: a nil Priority means the
+	// caller did not mention priority, and validating "" there would reject every
+	// update that only touches attrs.
+	if req.Priority != nil {
+		if vErr := validateWorkItemPriority(*req.Priority); vErr != nil {
+			return nil, vErr
+		}
+	}
+	if req.Labels != nil {
+		if vErr := validateWorkItemLabels(req.Labels); vErr != nil {
+			return nil, vErr
+		}
+	}
+	if vErr := validateWorkItemContent(req.Content); vErr != nil {
+		return nil, vErr
 	}
 
 	// aihub#288: fold null-filled optionals away, then reject contradictory or

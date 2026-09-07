@@ -131,7 +131,6 @@ func TestSlimRecallResult_StillDropsBookkeeping(t *testing.T) {
 		"author_display":     "xiaokang.w",
 		"base_strength":      float64(0.9),
 		"stability_days":     float64(10.5),
-		"status":             "active",
 		"visibility":         "project",
 		"project":            "ieops",
 		"updated_at":         "2026-08-27T05:02:27Z",
@@ -154,9 +153,22 @@ func TestSlimRecallResult_StillDropsBookkeeping(t *testing.T) {
 		item[k] = v
 	}
 
+	// aihub#418: `status` used to be in the `dropped` map above and is now
+	// FORWARDED, so it is asserted here in the other direction rather than just
+	// deleted from the list. The reason it moved: the recall predicate is
+	// status IN ('active','archived') when the request sets include_archived
+	// (internal/domain/memory.go), so that caller receives a mixed result set and
+	// `status` is the answer to the question it just asked. "Recall only returns
+	// live rows" — the reason this test encoded — is true only of the default.
+	item["status"] = "archived"
+
 	out := slimRecallResult(map[string]any{"items": []any{item}})
 
 	got := out["items"].([]any)[0].(map[string]any)
+	if got["status"] != "archived" {
+		t.Errorf("status = %#v, want it forwarded: a caller that asked for archived rows cannot "+
+			"otherwise tell which of the returned items are archived", got["status"])
+	}
 	for k := range dropped {
 		if v, ok := got[k]; ok {
 			t.Errorf("bookkeeping field %q leaked through the whitelist (=%v); the "+
@@ -257,17 +269,35 @@ func TestSlimRecallResult_CarriesUnmatchedTypes(t *testing.T) {
 // ...and it must stay absent when the server said nothing, so the healthy call
 // shapes pay no tokens for it. A slimmer that materialised an empty list here would
 // spend budget on every recall to report "no problem".
-func TestSlimRecallResult_OmitsAbsentUnmatchedTypes(t *testing.T) {
-	for name, result := range map[string]map[string]any{
-		"key absent": {"items": []any{}, "total": float64(3)},
-		"key nil":    {"items": []any{}, "total": float64(3), "unmatched_types": nil},
-	} {
-		t.Run(name, func(t *testing.T) {
-			out := slimRecallResult(result)
-			if _, ok := out["unmatched_types"]; ok {
-				t.Errorf("unmatched_types materialised when the server reported none: %+v", out)
-			}
-		})
+// ⚠️ aihub#418 split this test in two, because the two cases it used to treat
+// alike are not the same fact. An ABSENT key must stay absent — this projection
+// may not invent a claim the server did not make. An explicit NULL is a value the
+// server chose to send, and forwarding it is now correct rather than wasteful:
+// "null" and "absent" are distinguishable states, and collapsing them is a
+// decision belonging to whoever reads the field, not to a projection. Same shape
+// as list_wi_slim.go, whose TestSlimListWorkItems_KeepsNullRequiresHumanSession
+// keeps a null for exactly this reason — a tri-state field read as a boolean is
+// how aihub#388's routing bug worked.
+//
+// In practice the server omits these fields (omitempty), so the null arm
+// describes a shape only a future or misbehaving server produces; it is asserted
+// so that the answer is deliberate instead of incidental.
+func TestSlimRecallResult_DoesNotInventUnmatchedTypes(t *testing.T) {
+	out := slimRecallResult(map[string]any{"items": []any{}, "total": float64(3)})
+	if _, ok := out["unmatched_types"]; ok {
+		t.Errorf("unmatched_types materialised when the server reported none: %+v", out)
+	}
+}
+
+func TestSlimRecallResult_ForwardsAnExplicitNullUnmatchedTypes(t *testing.T) {
+	out := slimRecallResult(map[string]any{"items": []any{}, "total": float64(3), "unmatched_types": nil})
+	v, ok := out["unmatched_types"]
+	if !ok {
+		t.Errorf("an explicit null was dropped: absent and null are different statements, and "+
+			"which one the server made is not this projection's to erase: %+v", out)
+	}
+	if ok && v != nil {
+		t.Errorf("unmatched_types = %#v, want the null the server sent", v)
 	}
 }
 
@@ -346,5 +376,65 @@ func TestRecallResult_SurvivesIntoCallToolResult(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRecallItemNarrowedKeys_IsNotAnInertDeclaration makes the production
+// recallItemNarrowedKeys map load-bearing.
+//
+// aihub#418 review finding on itself. That map is documentation — no production
+// code reads it — and an unread declaration that describes behaviour is the
+// shape this whole chain of work items keeps finding: a comment asserting a
+// guarantee the code does not provide. It states that exactly two keys survive
+// with a narrower value, so this test holds it to that claim behaviourally: for
+// every key it names, a probe carrying that key must come back PRESENT (not
+// dropped) and CHANGED (not forwarded whole), and no other key may behave that
+// way.
+//
+// In-package (package mcp) on purpose: the census in recall_projection_test.go
+// is package mcp_test and deliberately states its own independent spec, so it
+// cannot be the thing that pins the production map. This can.
+func TestRecallItemNarrowedKeys_IsNotAnInertDeclaration(t *testing.T) {
+	if len(recallItemNarrowedKeys) == 0 {
+		t.Fatal("recallItemNarrowedKeys is empty, so this test would assert nothing")
+	}
+	probes := map[string]any{
+		"attrs": map[string]any{
+			"structured_payload": map[string]any{"k": "v"},
+			"internal_only":      "must not survive",
+		},
+		"commits": []any{map[string]any{
+			"id": "c1", "body": "insight", "author_display": "who", "created_at": "2026-01-01T00:00:00Z",
+		}},
+	}
+	for key := range recallItemNarrowedKeys {
+		probe, ok := probes[key]
+		if !ok {
+			t.Errorf("recallItemNarrowedKeys names %q but this test has no probe for it — either the "+
+				"map grew a key and nothing verifies its narrowing, or the entry is stale", key)
+			continue
+		}
+		item := map[string]any{"id": "mem_n", "type": "fact.note", "content": "x", key: probe}
+		out := slimRecallResult(map[string]any{"items": []any{item}})
+		got := out["items"].([]any)[0].(map[string]any)
+
+		v, present := got[key]
+		if !present {
+			t.Errorf("%q is declared NARROWED but was dropped entirely — the declaration and the "+
+				"code disagree, and the declaration is the one nothing was checking", key)
+			continue
+		}
+		if reflect.DeepEqual(v, probe) {
+			t.Errorf("%q is declared NARROWED but was forwarded unchanged (%#v); either the narrowing "+
+				"stopped happening or this key belongs in recallItemWithheldKeys", key, v)
+		}
+	}
+	// The other direction: a forwarded key must NOT be silently narrowed, or
+	// "narrowed" would be an unbounded category and this test a formality.
+	item := map[string]any{"id": "mem_n", "type": "fact.note", "content": "verbatim body"}
+	out := slimRecallResult(map[string]any{"items": []any{item}})
+	if got := out["items"].([]any)[0].(map[string]any)["content"]; got != "verbatim body" {
+		t.Errorf("content = %#v, want it verbatim: full mode narrows exactly the declared keys and "+
+			"content is not one of them (zero information loss is the whole claim of full mode)", got)
 	}
 }

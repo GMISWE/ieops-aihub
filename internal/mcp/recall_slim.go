@@ -8,10 +8,179 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// slimRecallResult projects a pf_recall response to the fields an LLM actually
-// uses, dropping bookkeeping columns and heavy blobs (commits, attrs internals)
-// the model never reads. content is kept verbatim (zero info loss). opt3 Phase 1;
-// see ieops-docs/polyforge-aihub-improvement/25-optimization3-phase1.md.
+// ─── Recall RESPONSE projection (aihub#418: keep-list -> delete-list) ───────
+//
+// THE PATTERN THIS FILE USED TO BE THE LAST INSTANCE OF. Both projections here
+// were keep-lists: a per-item whitelist of 11 field names, and a top level that
+// rebuilt the response as map[string]any{"items": …} and then conditionally
+// copied five named keys. Under that shape the cheapest outcome of the server
+// adding a field is that the model never sees it — and this file recorded three
+// separate occasions when exactly that happened, each fixed by adding one more
+// conditional-copy line rather than by changing the shape:
+//
+//	total             aihub#249  a caller could not tell "that's everything"
+//	                             from "keep paging"
+//	content_truncated aihub#269  the model reasoned on a snippet believing it
+//	 + content_full_len          was the whole memory
+//	unmatched_types   aihub#289  "your type filter matched nothing" became
+//	                             indistinguishable from "no such memory"
+//
+// aihub#281 built list_wi_slim.go the other way round and said in its header
+// "so it cannot become the fourth instance"; aihub#388 converted the claim
+// response and folded this one. This is that fold, paid off.
+//
+// ─── The rule, and the three boundaries ─────────────────────────────────────
+//
+// 1. TOP LEVEL — delete-list, and nothing is deleted. The response map is
+//    mutated in place: `items` is replaced with the projected items and every
+//    other key is forwarded because nobody copies it. next_cursor, total,
+//    unmatched_types, unmatched_types_error and request_adjusted are no longer
+//    mentioned by name anywhere in this file, which is the point — the three
+//    incidents above are now unreachable at this level rather than individually
+//    patched.
+//
+// 2. ITEM, FULL MODE — delete-list. recallItemWithheldKeys below names every
+//    dropped field WITH a reason; anything else the server sends arrives. The
+//    reasons are the payload: a delete-list whose entries carry none degrades
+//    into a keep-list written backwards, because the next reader cannot tell a
+//    deliberate exclusion from a leftover.
+//
+// 3. ITEM, BRIEF MODE — deliberately still a keep-list, and this is the
+//    boundary the work item asked to have stated precisely rather than blurred.
+//    briefRecallItem builds from briefFields, so a field added tomorrow does NOT
+//    appear in brief output. That is not the defect above, it is the mode's
+//    purpose: brief is 25.4% of full BECAUSE it forwards nothing by default, and
+//    a delete-list there would re-admit every new bookkeeping column into the
+//    projection whose entire job is to remove them. What makes it safe is a
+//    different property, and it is a contract rather than a hope: brief is lossy
+//    BY DECLARATION and carries its own escape hatch — `id` to re-read with, and
+//    content_truncated + content_full_len to say that there is more. Anything
+//    brief drops is retrievable with one pf_get_memory call, which is exactly
+//    what the swallowed fields above were NOT.
+//
+//    Note also what brief does to `content`: it REPLACES the value with a
+//    first-line summary. That is content transformation, not key dropping, and
+//    the distinction matters because the key is still there — a caller reading
+//    `content` gets a shorter true thing, not a missing thing, and the truncation
+//    pair tells it so.
+//
+// ⇒ RESIDUAL, stated rather than left to be discovered: `attrs` and `commits`
+//    are NARROWED, not dropped, and their interiors are still keep-lists —
+//    attrs down to structured_payload, commits down to body/by/replies. A new
+//    SUBFIELD inside either will not arrive. They are nested blobs whose bulk is
+//    bookkeeping, so forwarding them wholesale would give back most of what this
+//    projection saves; the trade is deliberate, it is narrower than the one this
+//    change removes, and recallItemNarrowedKeys records it so it is countable
+//    instead of invisible.
+//
+// ─── Canonical measurement (aihub#313) ──────────────────────────────────────
+//
+// Every ratio in this file comes from ONE sample, so that no two comments quote
+// the same statistic from different runs: one live no-top_k pf_recall against
+// prod aihub, 2026-09-01, counted with the real tokenizer
+// (POST /v1/messages/count_tokens, fixed overhead 7 subtracted).
+//
+//	20 items, full  = 6,966 tok (349/item) — content 60.4%, related 15.9%,
+//	                  tags 0.3%, bookkeeping + JSON glue 23.4%
+//	20 items, brief = 1,766 tok = 25.4% of full (cut 74.6%), still 20 items
+//
+// Brief keeps only what the model needs to decide whether a memory is worth
+// reading and the `id` to read it with. This is a projection, NOT a filter: the
+// item COUNT is unchanged, because recall breadth is the value of recall —
+// narrowing top_k would trade away the thing worth keeping.
+//
+// 25.4% slightly misses the wi's <=25% target, and the 0.6pp is a deliberate
+// purchase: see briefRoundDigits. Rounding to 3dp instead reaches 24.8% and can
+// flip pf-retro's `similarity > 0.85` branch, which is a correctness bug traded
+// for half a percentage point.
+
+// recallItemWithheldKeys names the per-item keys the FULL projection removes,
+// and why. Grouped by the reason they share, because 19 individually-worded
+// entries would obscure that there are really four decisions here.
+//
+// 🔴 A key absent from this map is FORWARDED. That is the inversion aihub#418
+// bought: adding a field to domain.Memory now costs nothing to expose and one
+// line here to hide, where before it cost one line to expose and nothing to
+// lose. Every entry is quantified by TestRecallResultCarriesEveryMemoryField,
+// which reflects over the struct, so a field added tomorrow is covered that day.
+var recallItemWithheldKeys = map[string]string{
+	// ── Volume. rendered_html is the single largest field a memory can carry:
+	//    a complete standalone HTML document on methodology.* artifacts. The
+	//    model cannot use markup, and one such field can exceed the whole rest
+	//    of the response.
+	"rendered_html": "a full standalone HTML document on methodology.* artifacts — the largest " +
+		"field a memory can carry, and unusable by a model. /ui and the artifact HTML viewer " +
+		"serve it; pf_get_memory returns the markdown source.",
+	"backlinks": "the reverse edge of `related`, which IS forwarded. Both directions is double the " +
+		"pointer volume for one graph, and the model can only act on a pointer by spending a " +
+		"pf_get_memory call either way.",
+
+	// ── Decay bookkeeping. effective_strength IS forwarded and is the only
+	//    number any skill acts on (four of them gate display on >= 0.3). These
+	//    are the inputs it is computed FROM, so forwarding them pays for the
+	//    model to re-derive a value it already has.
+	"base_strength":     "an input to effective_strength, which is forwarded; nothing reads the input.",
+	"stability_days":    "same — a decay parameter, not a fact about the memory's content.",
+	"activation_count":  "same — reinforcement bookkeeping behind effective_strength.",
+	"last_activated_at": "activation bookkeeping; recency judgements use created_at, which is forwarded.",
+	"last_activated_by": "who last activated it. Provenance of a read, not content, and not actionable.",
+	"is_immortal":       "a decay exemption flag, i.e. another effective_strength input.",
+	"expires_at": "lifecycle bookkeeping; an expired memory is not returned at all, so a " +
+		"forwarded value could only ever say \"not yet\".",
+
+	// ── Identity the caller already fixed or cannot act on. project comes from
+	//    the request; author/visibility/status are governance, not content.
+	"project": "the caller supplied it in the request — echoing it back per item pays for a " +
+		"value the caller already holds.",
+	"author_user_id": "an opaque internal id the model cannot resolve or act on.",
+	"author_display": "provenance rather than content; pf_get_memory carries it for the one memory " +
+		"a caller actually opens.",
+	"visibility": "an access-control fact already enforced server-side — anything the caller " +
+		"cannot see is not in this list at all, so the field can only ever confirm the obvious.",
+	"latest_id": "supersession bookkeeping. Recall already resolves to the head version, so " +
+		"this points at the row the caller is holding.",
+	// ⚠️ `status` is NOT in this list, and the first draft of this change had it
+	// here with the reason "recall returns live rows, so this is always active".
+	// That reason is false in a reachable case: the recall predicate is
+	// `status IN ('active')` by default but `IN ('active','archived')` when the
+	// request sets include_archived (internal/domain/memory.go), so a caller who
+	// explicitly asked for archived rows gets a mixed result set — and dropping
+	// `status` would remove precisely the answer to the question that caller just
+	// asked. That is the aihub#249 harm, not a token saving. It costs about 6
+	// tokens an item (~1.7% of the canonical 20-item full response) and nothing
+	// at all in brief mode, where it is not in briefFields.
+	"source_artifact_id": "an internal provenance pointer to the artifact a memory was extracted " +
+		"from; not resolvable by the model.",
+	"updated_at": "row-mutation bookkeeping. created_at is the one a recency judgement uses and is " +
+		"forwarded; updated_at moves on a reinforce and would read as recency it does not mean.",
+
+	// ── Embedding internals. Pure infrastructure.
+	"emb_model": "which embedding model produced the vector — an infrastructure fact with no " +
+		"bearing on what the memory says.",
+	"emb_dims": "the vector's dimensionality; same.",
+}
+
+// recallItemNarrowedKeys documents the two keys that are NARROWED in place
+// rather than forwarded or dropped, and is the honest record of this
+// projection's remaining keep-list surface.
+//
+// It is a map with reasons for the same purpose as the delete-list above, and it
+// is asserted: TestRecallResultNarrowsAttrsAndCommits pins both the value that
+// survives and the fact that the interior is still a whitelist, so the residual
+// is measured rather than described.
+var recallItemNarrowedKeys = map[string]string{
+	"attrs": "kept ONLY as {structured_payload}. The rest of attrs is per-type internal " +
+		"bookkeeping; structured_payload is the half a caller wrote deliberately (spec " +
+		"acceptance criteria, review findings). Residual: a new key inside attrs does not arrive.",
+	"commits": "kept as the human INSIGHT only — body, author_display as `by`, and reply bodies — " +
+		"with ids, author_user_id, timestamps, anchors and thread structure stripped. Residual: a " +
+		"new key inside a commit does not arrive.",
+}
+
+// slimRecallResult projects a pf_recall response to what a model can act on:
+// bookkeeping columns and heavy blobs are removed, `content` is kept verbatim
+// (zero information loss). opt3 Phase 1; see
+// ieops-docs/polyforge-aihub-improvement/25-optimization3-phase1.md.
 func slimRecallResult(result map[string]any) map[string]any {
 	return slimRecallResultMode(result, false)
 }
@@ -22,25 +191,10 @@ func slimRecallResult(result map[string]any) map[string]any {
 // is additive, and the tests that lock `total`, the truncation pair and
 // unmatched_types must not silently start describing the new shape.
 //
-// aihub#313. CANONICAL MEASUREMENT for every ratio in this file, so that no two
-// comments quote the same statistic from different samples: one live no-top_k
-// pf_recall against prod aihub, 2026-09-01, counted with the real tokenizer
-// (POST /v1/messages/count_tokens, fixed overhead 7 subtracted).
-//
-//	20 items, full  = 6,966 tok (349/item) — content 60.4%, related 15.9%,
-//	                  tags 0.3%, bookkeeping + JSON glue 23.4%
-//	20 items, brief = 1,766 tok = 25.4% of full (cut 74.6%), still 20 items
-//
-// Brief drops the body past its first line plus `related` and `tags`, keeping only
-// what the model needs to decide whether a memory is worth reading and the `id` to
-// read it with. This is a projection, NOT a filter: the item COUNT is unchanged,
-// because recall breadth is the value of recall — narrowing top_k would trade away
-// the thing worth keeping.
-//
-// 25.4% slightly misses the wi's <=25% target, and the 0.6pp is a deliberate
-// purchase: see briefRoundDigits. Rounding to 3dp instead reaches 24.8% and can
-// flip pf-retro's `similarity > 0.85` branch, which is a correctness bug traded for
-// half a percentage point.
+// IT MUTATES `result` AND RETURNS THE SAME MAP. That is the aihub#249 lesson
+// applied structurally instead of remembered: a rebuilt map drops every key
+// nobody thought to copy, which is how `total` vanished. Nothing is copied at
+// the top level, so nothing can be forgotten there.
 func slimRecallResultMode(result map[string]any, brief bool) map[string]any {
 	if result == nil {
 		return result
@@ -49,26 +203,6 @@ func slimRecallResultMode(result map[string]any, brief bool) map[string]any {
 	if !ok {
 		return result
 	}
-	// INVARIANT: this whitelist is opt-in, so a field added to the REST response
-	// downstream is dropped here by default until it is listed. That has now bitten
-	// twice — `total` (aihub#249) and the truncation pair below (aihub#269). When you
-	// add a field to RecallResponse or domain.Memory, decide here whether the model
-	// needs it; do NOT widen it wholesale, the dropped bookkeeping columns are the
-	// bulk of the opt3 Phase 1 token saving (locked by
-	// TestSlimRecallResult_StillDropsBookkeeping; attrs and commits are rewritten
-	// rather than dropped, locked by TestSlimRecallResult_RewritesAttrsAndCommits).
-	keep := map[string]bool{
-		"id": true, "type": true, "content": true, "effective_strength": true,
-		"similarity": true, "work_item_id": true, "tags": true, "related": true,
-		"created_at": true,
-		// aihub#269: content is truncated to 800 runes by handleRecall (PR #245), which
-		// flags the cut with these two. Without them the model reasons on a snippet
-		// believing it is the whole memory, and has no full length to tell it a
-		// pf_get_memory follow-up is warranted — the escape hatch PR #245 declared,
-		// which aihub#269 also gave a tool. Both are `omitempty`, so untruncated
-		// items pay nothing.
-		"content_truncated": true, "content_full_len": true,
-	}
 	slim := make([]any, 0, len(items))
 	for _, it := range items {
 		m, ok := it.(map[string]any)
@@ -76,112 +210,84 @@ func slimRecallResultMode(result map[string]any, brief bool) map[string]any {
 			slim = append(slim, it)
 			continue
 		}
-		out := make(map[string]any, len(keep)+1)
-		for k, v := range m {
-			if keep[k] {
-				out[k] = v
-			}
+		// The item is projected IN PLACE for the same reason the top level is.
+		for k := range recallItemWithheldKeys {
+			delete(m, k)
 		}
-		if attrs, ok := m["attrs"].(map[string]any); ok {
-			if sp, ok := attrs["structured_payload"]; ok {
-				out["attrs"] = map[string]any{"structured_payload": sp}
-			}
-		}
-		// commits: keep the human INSIGHT (comment + reply bodies, and who said it) but
-		// strip bookkeeping (ids, author_user_id, timestamps, anchors, thread structure).
-		// Empty commits stay omitted (zero cost). Flagged useful in report review 2026-07-29.
-		if commits, ok := m["commits"].([]any); ok && len(commits) > 0 {
-			notes := make([]any, 0, len(commits))
-			for _, c := range commits {
-				cm, ok := c.(map[string]any)
-				if !ok {
-					continue
-				}
-				note := map[string]any{}
-				if b, ok := cm["body"]; ok {
-					note["body"] = b
-				}
-				if a, ok := cm["author_display"]; ok {
-					note["by"] = a
-				}
-				if reps, ok := cm["replies"].([]any); ok && len(reps) > 0 {
-					rb := make([]any, 0, len(reps))
-					for _, r := range reps {
-						if rm, ok := r.(map[string]any); ok {
-							if b, ok := rm["body"]; ok {
-								rb = append(rb, b)
-							}
-						}
-					}
-					if len(rb) > 0 {
-						note["replies"] = rb
-					}
-				}
-				if len(note) > 0 {
-					notes = append(notes, note)
-				}
-			}
-			if len(notes) > 0 {
-				out["commits"] = notes
-			}
-		}
+		narrowRecallAttrs(m)
+		narrowRecallCommits(m)
 		if brief {
-			out = briefRecallItem(out)
+			m = briefRecallItem(m)
 		}
-		slim = append(slim, out)
+		slim = append(slim, m)
 	}
-	res := map[string]any{"items": slim}
-	if nc, ok := result["next_cursor"]; ok && nc != nil {
-		res["next_cursor"] = nc
+	result["items"] = slim
+	return result
+}
+
+// narrowRecallAttrs reduces attrs to {structured_payload}, or removes it when
+// there is no structured_payload to keep. See recallItemNarrowedKeys.
+func narrowRecallAttrs(m map[string]any) {
+	attrs, ok := m["attrs"].(map[string]any)
+	if !ok {
+		// Not an object (absent, null, or some other shape): nothing to narrow,
+		// and forwarding an un-narrowed attrs is what this exists to prevent.
+		delete(m, "attrs")
+		return
 	}
-	// aihub#249: total (count of memories matching the request's filters,
-	// independent of pagination) must survive slimming — otherwise pf_recall
-	// callers have no way to distinguish "that's everything" from "keep
-	// paging", the exact gap this wi exists to close. Same conditional-copy
-	// pattern as next_cursor above.
-	if total, ok := result["total"]; ok && total != nil {
-		res["total"] = total
+	sp, ok := attrs["structured_payload"]
+	if !ok {
+		delete(m, "attrs")
+		return
 	}
-	// aihub#289: unmatched_types names the `type` entries that matched no row. It
-	// exists solely to be READ BY THE MODEL — dropping it here would reinstate the
-	// silence the field was added to end, on the one caller that matters most. The
-	// server omits it when there is nothing to report, so healthy recalls pay
-	// nothing. Third instance of this whitelist swallowing a new field (total,
-	// aihub#249; the truncation pair, aihub#269); see the INVARIANT note above.
-	if um, ok := result["unmatched_types"]; ok && um != nil {
-		res["unmatched_types"] = um
+	m["attrs"] = map[string]any{"structured_payload": sp}
+}
+
+// narrowRecallCommits reduces each commit to the human insight — body, who said
+// it, and reply bodies — and removes the key when nothing insightful survives.
+// Empty commits stay absent (zero cost). Flagged useful in report review
+// 2026-07-29. See recallItemNarrowedKeys.
+func narrowRecallCommits(m map[string]any) {
+	commits, ok := m["commits"].([]any)
+	if !ok || len(commits) == 0 {
+		delete(m, "commits")
+		return
 	}
-	// ...and its failure half. Forwarding the list but not the error would put the
-	// silence straight back: the model would read "no unmatched_types" as "your type
-	// filter is fine" in exactly the case where nothing was actually checked.
-	if ue, ok := result["unmatched_types_error"]; ok && ue != nil {
-		res["unmatched_types_error"] = ue
+	notes := make([]any, 0, len(commits))
+	for _, c := range commits {
+		cm, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		note := map[string]any{}
+		if b, ok := cm["body"]; ok {
+			note["body"] = b
+		}
+		if a, ok := cm["author_display"]; ok {
+			note["by"] = a
+		}
+		if reps, ok := cm["replies"].([]any); ok && len(reps) > 0 {
+			rb := make([]any, 0, len(reps))
+			for _, r := range reps {
+				if rm, ok := r.(map[string]any); ok {
+					if b, ok := rm["body"]; ok {
+						rb = append(rb, b)
+					}
+				}
+			}
+			if len(rb) > 0 {
+				note["replies"] = rb
+			}
+		}
+		if len(note) > 0 {
+			notes = append(notes, note)
+		}
 	}
-	// aihub#314: request_adjusted lists the caller-supplied parameters the server
-	// rewrote or clamped — today `top_k`, capped at 200 by
-	// domain.normalizeRecallTopK. THIS COPY IS THE WHOLE POINT OF THE WORK ITEM,
-	// so read the INVARIANT note at the top of this function before deciding it
-	// looks redundant.
-	//
-	// The three fields above were each added to the REST response and then eaten
-	// here by default, because this whitelist is opt-in: `total` (aihub#249), the
-	// truncation pair (aihub#269), unmatched_types (aihub#289). The cost of
-	// telling a caller "I changed your request" was therefore an edit to THIS
-	// file, in another package, while saying nothing cost zero — so aihub#309,
-	// facing exactly that, deleted its clamp rather than disclose it and wrote
-	// down why (see the closing paragraph of domain.normalizeRecallTopK).
-	//
-	// One generic field ends that: it is whitelisted once and every future clamp
-	// APPENDS to it, so the next one costs nothing to disclose and there is no
-	// fourth instance to have. Absent when nothing was adjusted, so the healthy
-	// call pays zero tokens — same conditional-copy shape as total above, and
-	// deliberately `!= nil` rather than a length check, because an empty list
-	// reaching here is still the server's statement and not this file's to
-	// reinterpret.
-	if ra, ok := result["request_adjusted"]; ok && ra != nil {
-		res["request_adjusted"] = ra
+	if len(notes) == 0 {
+		delete(m, "commits")
+		return
 	}
-	return res
+	m["commits"] = notes
 }
 
 // briefContentMax bounds the summary a brief item carries, in runes.

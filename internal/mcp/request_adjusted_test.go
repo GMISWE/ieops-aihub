@@ -100,30 +100,52 @@ func TestSlimRecallResult_NoRequestAdjustedKeyDoesNotSynthesizeOne(t *testing.T)
 	}
 }
 
-// TestSlimRecallResult_StillDropsUnwhitelistedTopLevelKeys is the drop half of
-// the pair, at the top level where aihub#314's change lives.
+// TestSlimRecallResult_ForwardsUnknownTopLevelKeys is the same test with its
+// central assertion INVERTED by aihub#418, and the inversion is the work item.
 //
-// Without it, "make request_adjusted survive" has a trivially cheap wrong answer:
-// copy every top-level key. That passes the keep test, and it would put back the
-// bookkeeping this projection exists to remove the moment the REST response grows
-// a heavy top-level field — silently, which is the failure mode the whole work
-// item is about. The four keys below are the whole current whitelist plus one
-// invented key that must NOT ride along.
-func TestSlimRecallResult_StillDropsUnwhitelistedTopLevelKeys(t *testing.T) {
+// It used to be "the drop half of the pair": an unwhitelisted top-level key had to
+// vanish, on the argument that "make request_adjusted survive" otherwise has a
+// trivially cheap wrong answer — copy every top-level key — which "would put back
+// the bookkeeping this projection exists to remove the moment the REST response
+// grows a heavy top-level field, silently".
+//
+// That concern is real and is NOT discarded here. What changed is which of two
+// silent failures this projection is arranged to prevent, because only one of
+// them has ever actually happened:
+//
+//	dropping a field the model needs   3 times, in THIS file
+//	                                   (total aihub#249, the truncation pair
+//	                                   aihub#269, unmatched_types aihub#289)
+//	forwarding a heavy field nobody    0 times
+//	needs
+//
+// And the two are not symmetric in visibility, which is the deciding argument
+// rather than the count. A dropped field is invisible: the model reads a smaller
+// object and concludes the field does not exist. A forwarded heavy field is
+// visible in the response itself, and costs one line in
+// recallItemWithheldKeys — or, for the envelope, in a top-level delete-list that
+// does not exist yet precisely because nothing has needed withholding there.
+//
+// So `debug_query_plan` now arrives, and if a future server really does add
+// something heavy to the envelope, THAT is the change that writes the first
+// top-level delete-list entry.
+func TestSlimRecallResult_ForwardsUnknownTopLevelKeys(t *testing.T) {
 	result := recallWithAdjustment()
 	result["next_cursor"] = "2026-09-01T00:00:00Z"
 	result["unmatched_types"] = []any{"fact.nonesuch"}
-	result["debug_query_plan"] = "a top-level field a future server adds and the model never reads"
+	result["debug_query_plan"] = "a top-level field a future server adds"
 
 	out := slimRecallResult(result)
 
-	if _, present := out["debug_query_plan"]; present {
-		t.Errorf("an unwhitelisted top-level key survived — the whitelist has been widened "+
-			"wholesale, which is the edit that silently costs the whole projection: %+v", out)
+	if got, present := out["debug_query_plan"]; !present {
+		t.Errorf("an unknown top-level key was dropped (got %#v). Under a delete-list the "+
+			"envelope forwards by default; that is what makes a fourth aihub#249 impossible "+
+			"rather than merely unlikely: %+v", got, out)
 	}
 	for _, k := range []string{"items", "total", "next_cursor", "unmatched_types", "request_adjusted"} {
 		if _, present := out[k]; !present {
-			t.Errorf("%s was dropped; it is on the whitelist", k)
+			t.Errorf("%s was dropped, and it is one of the five the three historical incidents "+
+				"were each fixed by hand-copying", k)
 		}
 	}
 }

@@ -91,29 +91,6 @@ func TestNewBase62_Unique(t *testing.T) {
 	}
 }
 
-func TestFormatIDOrSlug(t *testing.T) {
-	tests := []struct {
-		in       string
-		wantCol  string
-		wantVal  string
-	}{
-		{"wi_abc12345", "id", "wi_abc12345"},
-		{"my-slug", "slug", "my-slug"},
-		{"", "slug", ""},
-		// Other prefixes are not IDs by this function's contract.
-		{"mem_abc12345", "slug", "mem_abc12345"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.in, func(t *testing.T) {
-			gotCol, gotVal := FormatIDOrSlug(tt.in)
-			if gotCol != tt.wantCol || gotVal != tt.wantVal {
-				t.Errorf("FormatIDOrSlug(%q) = (%q,%q), want (%q,%q)",
-					tt.in, gotCol, gotVal, tt.wantCol, tt.wantVal)
-			}
-		})
-	}
-}
-
 func TestHashSecretInternal(t *testing.T) {
 	got := hashSecretInternal("hello")
 	if len(got) != 64 {

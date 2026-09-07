@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"math/big"
-	"strings"
 )
 
 const base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -48,11 +47,16 @@ func hashSecretInternal(secret string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// FormatIDOrSlug checks whether the input looks like an ID or a slug,
-// returns the appropriate WHERE clause condition and value.
-func FormatIDOrSlug(idOrSlug string) (column string, value string) {
-	if strings.HasPrefix(idOrSlug, "wi_") {
-		return "id", idOrSlug
-	}
-	return "slug", idOrSlug
-}
+// FormatIDOrSlug is deliberately absent (aihub#402).
+//
+// It returned ("id"|"slug", value) by testing a `wi_` prefix — the single-column
+// dispatch this repo no longer uses anywhere. It could not be repaired into the
+// `id = $1 OR slug = $1` union because its whole signature is the choice of ONE
+// column, and it had zero production callers: the only references were its own
+// test and a comment in internal/cli/doctor.go that misattributed GetWorkItem's
+// behaviour to it. So it was removed rather than fixed.
+//
+// Do not reintroduce it. The rule is one SQL predicate, `id = $1 OR slug = $1`,
+// scoped to the caller's visible projects where the caller has any; a helper
+// that returns a column name cannot express it, and
+// TestNoWorkItemPrefixDispatch fails on a new one.

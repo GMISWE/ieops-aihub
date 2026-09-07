@@ -53,6 +53,21 @@ func NewRouter(pool *pgxpool.Pool, uiCookieSecret []byte) *echo.Echo {
 
 	// Work items
 	v1.POST("/work_items", handleCreateWorkItem(pool))
+	// aihub#402: registered before `:id`, so the literal "ready" can never reach
+	// handleGetWorkItem. That shadowing is accepted rather than fixed, and the
+	// reason is that it shadows nothing reachable: a work item is addressed by
+	// its canonical id (`wi_` + 8 base62 chars) or by its slug, and slug is a
+	// GENERATED column `project || '#' || seq` (migration 0002). Every slug
+	// therefore contains '#', so no work item can have the slug "ready" and no
+	// id can spell it either. Only a caller probing the literal string reaches
+	// this route by accident, and it answers
+	// `400 BAD_REQUEST: project query parameter is required` rather than
+	// anything about a work item.
+	//
+	// ⚠️ What WOULD make this a real shadow is a future route whose literal
+	// segment is a legal slug or id. Adding one means either moving it after
+	// `:id` or teaching the handler to fall through — the ordering comment below
+	// is not a substitute for checking that.
 	v1.GET("/work_items/ready", handleGetReadyQueue(pool)) // must come before :id
 	v1.GET("/work_items", handleListWorkItems(pool))
 	v1.GET("/work_items/:id", handleGetWorkItem(pool))

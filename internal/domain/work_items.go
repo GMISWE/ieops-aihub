@@ -2038,7 +2038,7 @@ func validateAttrsPatch(req *UpdateWorkItemRequest) *AihubError {
 	if req.AttrsPatch != nil {
 		var probe map[string]json.RawMessage
 		if err := json.Unmarshal(req.AttrsPatch, &probe); err != nil || probe == nil {
-			return NewErr(ErrBadRequest, "attrs_patch must be a JSON object")
+			return attrsPatchShapeErr(req.AttrsPatch)
 		}
 	}
 	if req.Attrs != nil && (req.AttrsPatch != nil || req.AttrsUnset != nil) {
@@ -2046,6 +2046,85 @@ func validateAttrsPatch(req *UpdateWorkItemRequest) *AihubError {
 			"attrs cannot be combined with attrs_patch/attrs_unset: attrs REPLACES the whole object, attrs_patch/attrs_unset amend it — send one or the other")
 	}
 	return nil
+}
+
+// attrsPatchKind names the JSON type that actually arrived, for the rejection
+// message. It parses rather than switching on the first byte, so a value that
+// merely STARTS like an object (`{"a":`) is reported as malformed JSON instead
+// of being mislabelled an object the check has just refused.
+func attrsPatchKind(raw json.RawMessage) string {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "malformed JSON"
+	}
+	switch v.(type) {
+	case map[string]any:
+		return "a JSON object"
+	case []any:
+		return "a JSON array"
+	case string:
+		return "a JSON string"
+	case bool:
+		return "a JSON boolean"
+	case float64:
+		return "a JSON number"
+	case nil:
+		// Unreachable in practice: normalizeAttrsPatch folds a literal null to
+		// "not supplied" before this runs. Named anyway so a future caller of
+		// this helper cannot get "unknown" for a type JSON does have.
+		return "a JSON null"
+	}
+	return "an unrecognised JSON value"
+}
+
+// attrsPatchShapeErr builds the 400 for an attrs_patch that is not an object.
+//
+// aihub#420. The message used to be the bare sentence "attrs_patch must be a
+// JSON object" — it named the expectation and never the observation, so FIVE
+// materially different caller mistakes (array, string, number, boolean,
+// malformed) produced one indistinguishable line. One of those five reads to
+// the caller as a server bug about something else entirely: a client that
+// serialises a large object argument as a JSON-encoded STRING sends a payload
+// its author correctly describes as an object, reads "must be a JSON object",
+// looks at their object, and concludes the real constraint is size. That is not
+// hypothetical — it is how aihub#420 came to be filed, against a limit that does
+// not exist.
+//
+// So the message names the type and the byte length received, and details
+// carries both machine-readably, following vocabularyErr's split: the message
+// because it is the only part some clients surface, details because an
+// automated caller should not have to parse prose to retry correctly.
+//
+// The closing clause is stated on EVERY kind rather than only on the large or
+// string-shaped ones, because a threshold for "large enough that the caller
+// might blame size" is not defensible and the clause is true unconditionally.
+// It is measured, not assumed (aihub#420, 2026-09-07): PATCH accepted an
+// attrs_patch of 199,983 bytes, and 8,016 bytes travelled the full MCP tool
+// path, both HTTP 200. Nothing between the router and the jsonb column caps
+// this field — the one body cap in the request path, the idempotency
+// middleware's 4 MiB fingerprint limit, only disables response caching and
+// explicitly restores the body rather than failing the request.
+func attrsPatchShapeErr(raw json.RawMessage) *AihubError {
+	kind := attrsPatchKind(raw)
+	msg := fmt.Sprintf("attrs_patch must be a JSON object; got %s of %d bytes", kind, len(raw))
+	// The single highest-signal case: the bytes ARE the object the caller meant,
+	// wrapped in quotes by their client. Say so, so the caller looks at their
+	// serialisation instead of at their data.
+	if kind == "a JSON string" {
+		var inner string
+		if json.Unmarshal(raw, &inner) == nil {
+			var innerProbe map[string]json.RawMessage
+			if json.Unmarshal([]byte(inner), &innerProbe) == nil && innerProbe != nil {
+				msg += ", and that string decodes to a JSON object — send the object itself, not a JSON-encoded string of it"
+			}
+		}
+	}
+	msg += ". Size is never the reason for this rejection: attrs_patch has no length cap"
+	return NewErrDetails(ErrBadRequest, msg, map[string]any{
+		"field": "attrs_patch",
+		"got":   kind,
+		"bytes": len(raw),
+	})
 }
 
 // casVersionUnknown is the placeholder reported when the current

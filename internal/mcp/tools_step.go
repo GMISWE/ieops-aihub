@@ -8,6 +8,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 func (s *Server) registerStepTools() {
@@ -374,14 +375,41 @@ func updateStepBody(args map[string]any, attemptID string, claimEpoch int64, ses
 //     (superseded / wrong attempt), so delete the file and ask for a re-claim.
 //   - anything else: pass the error through untouched, keep the file.
 //
-// The ATTEMPT_PAUSED case is checked first; its code shares no substring with
-// the mismatch codes, so ordering only affects clarity, not correctness.
+// 🔴 IT COMPARES THE SERVER'S CODE FIELD, NOT THE RENDERED TEXT (aihub#414).
+// This used to be strings.Contains over err.Error(), which is
+// "aihub <status> <CODE>: <message><details>" — one string holding both the
+// code and every observed value the server echoed. validateStepIdentity
+// interpolates the requested and stored step names into its message four
+// times, so a step NAMED "ATTEMPT_MISMATCH" turned any step-identity refusal
+// into the stale-credential arm and DELETED THE CALLER'S CREDENTIAL FILE. The
+// destructive arm was the one reachable by naming a step.
+//
+// That was not a hypothetical: aihub#398 hit it from the other side and routed
+// around it. Its endpoint wanted CONFLICT_STEP_ATTEMPT_MISMATCH — declared,
+// 409-mapped and named for that endpoint in the design doc — and could not use
+// it, because the string CONTAINS "ATTEMPT_MISMATCH" and this function would
+// have deleted the state file on it. A client-side parsing bug had become a
+// constraint on the server's error vocabulary. Exact comparison lifts it:
+// CONFLICT_STEP_ATTEMPT_MISMATCH now classifies as itself, i.e. falls to the
+// default arm and keeps the file, which is correct — a bad step_attempt_id is
+// not a stale credential.
+//
+// NO SUBSTRING FALLBACK, deliberately. An error that is not a *client.APIError
+// carries no code (a transport failure, a marshal failure), so it classifies as
+// nothing and takes the default arm. That is the safe direction: the only arm
+// with a side effect is the deleting one, and it now fires solely on a code the
+// server set. Losing classification would cost a resume hint; guessing it wrong
+// costs the credential file. The hop that makes this work — pkg/client returning
+// the typed error at all — is asserted separately, because if that regressed to
+// a plain error this function would silently stop classifying.
+//
+// The ATTEMPT_PAUSED case is checked first for clarity only; exact codes are
+// mutually exclusive, so ordering can no longer affect correctness either.
 func classifyStepUpdateErr(err error) (out error, deleteState bool) {
-	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "ATTEMPT_PAUSED"):
+	case client.IsCode(err, "ATTEMPT_PAUSED"):
 		return fmt.Errorf("attempt is paused — resume it first with `/pf-work <slug> --resume` before continuing (local state file kept)"), false
-	case strings.Contains(msg, "CONFLICT_EPOCH_MISMATCH") || strings.Contains(msg, "ATTEMPT_MISMATCH"):
+	case client.IsCode(err, "CONFLICT_EPOCH_MISMATCH"), client.IsCode(err, "ATTEMPT_MISMATCH"):
 		return fmt.Errorf("STALE_LOCAL_CREDENTIAL: state file deleted — please re-claim this work item"), true
 	default:
 		return err, false

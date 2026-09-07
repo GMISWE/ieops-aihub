@@ -1058,25 +1058,29 @@ func (s *Server) registerLifecycleTools() {
 		}
 		worktreeProblems = append(worktreeProblems, keyedBranchProblems(taskBranches, worktrees)...)
 
-		// Don't return session_secret to LLM (decision A)
-		// Return attempt_id and claim_epoch only
-		safeResult := map[string]any{
-			"attempt_id":  sf.AttemptID,
-			"claim_epoch": sf.ClaimEpoch,
-			"ok":          true,
-		}
-		// Pass through other non-secret fields.
+		// The claim response the model sees: everything the server sent, MINUS the
+		// keys claim_response_slim.go names and gives a reason for.
 		//
-		// aihub#238: `unrecognized_resources` MUST stay in this list. It is the only
-		// signal that a declared resource is holding no lock, and reporting at claim
-		// is the only remedy available on the stored-data path (rejecting there would
-		// make historical mistyped work items unclaimable). Dropped here, the whole
-		// remedy is inert and the caller sees exactly the pre-fix output.
-		for _, k := range []string{"expires_at", "acquired_locks", "current_attempt_epoch", "slug", "project", "unrecognized_resources"} {
-			if v, ok := result[k]; ok {
-				safeResult[k] = v
-			}
-		}
+		// ⚠️ It used to be the other way round — a fresh map plus a copy loop over
+		// six named keys — and that keep-list dropped `requires_human_session`,
+		// `wi_type`, `id` and `step_recovery_hint` in silence, the first being the
+		// field the post-claim routing rule branches on (aihub#388). It had also
+		// rotted the other way, faithfully copying `expires_at`, which v1.21
+		// removed and which the pf_force_takeover handler above says not to
+		// surface. aihub#238's note about `unrecognized_resources` needing to stay
+		// in that list is now structural rather than remembered: nothing is copied,
+		// so nothing can be forgotten. Do not reintroduce a copy loop here — see
+		// that file's header for the four instances of this pattern that preceded
+		// it, and TestClaimResultPassesThroughAFieldTheStructDoesNotHaveYet, which
+		// no keep-list can pass however complete it is today.
+		safeResult := slimClaimResult(result)
+		// Asserted by this handler rather than relayed: `ok` because reaching this
+		// line IS the success, and the other two from the state file just written,
+		// since they are what every later credential-checked pf_* call
+		// authenticates with.
+		safeResult["ok"] = true
+		safeResult["attempt_id"] = sf.AttemptID
+		safeResult["claim_epoch"] = sf.ClaimEpoch
 		addWorktrees(safeResult, sf.Worktrees)
 		// aihub#328: a rejected directory has to reach the caller, not just stderr.
 		// The claim itself succeeded, so this is a warning on an ok:true response

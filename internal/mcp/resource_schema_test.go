@@ -161,29 +161,63 @@ func TestRequestedLocksProp_EnumeratesLockTypesNotDeclaredTypes(t *testing.T) {
 
 // aihub#238 review finding 1 — the most severe defect found in review.
 //
-// pf_claim_work_item does not return the server's response; it rebuilds a
-// `safeResult` from an explicit passthrough whitelist so the session_secret never
-// reaches the model. `unrecognized_resources` must be on that list.
+// `unrecognized_resources` must reach the caller. Reporting at claim is the ONLY
+// remedy available on the stored-data path — rejecting there would make
+// historical mistyped work items unclaimable. Filtered out, the entire remedy is
+// inert and the caller sees `{attempt_id, claim_epoch, ok:true,
+// acquired_locks:[]}`, byte-identical to the pre-fix output that made a lockless
+// wi look guarded.
 //
-// Reporting at claim is the ONLY remedy available on the stored-data path —
-// rejecting there would make historical mistyped work items unclaimable. Filtered
-// out here, the entire remedy is inert and the caller sees `{attempt_id,
-// claim_epoch, ok:true, acquired_locks:[]}`, byte-identical to the pre-fix output
-// that made a lockless wi look guarded.
+// ─── Rewritten for aihub#388, and note WHY the old form had to go ───────────
+//
+// This used to regex `tools_lifecycle.go` for the claim handler's passthrough
+// WHITELIST literal and check that the key was inside it. aihub#388 replaced that
+// whitelist with a delete-list (claim_response_slim.go), because a keep-list had
+// silently dropped four other ClaimResponse fields — so the literal this guard
+// looked for no longer exists.
+//
+// 🔴 Credit where it is due: the old guard did NOT go quietly green when its
+// target vanished. Its `t.Fatal("could not locate the claim passthrough
+// whitelist — update this guard")` is the reason this rewrite happened at all,
+// and it is the behaviour every source-scanning tripwire should have — a
+// selector that matches nothing must FAIL, not pass.
+//
+// The invariant is now structural rather than textual: under a delete-list the
+// key reaches the caller unless somebody names it, so the check is whether it is
+// named. The anti-vacuity clause matters more than it looks: without it, EMPTYING
+// claimResponseWithheldKeys would satisfy "unrecognized_resources is not
+// withheld" while also leaking the session secret this projection exists to hold
+// back — a green guard over the worst possible state.
+//
+// The behavioural half of this contract, through the real registered tool, is
+// TestClaimResultCarriesEveryClaimResponseField in
+// claim_response_projection_test.go; `unrecognized_resources` is one of the
+// fields it censuses.
 func TestClaimPassesThroughUnrecognizedResources(t *testing.T) {
-	b, err := os.ReadFile("tools_lifecycle.go")
-	if err != nil {
-		t.Fatalf("read tools_lifecycle.go: %v", err)
+	if len(claimResponseWithheldKeys) == 0 {
+		t.Fatal("claimResponseWithheldKeys is empty — this guard would pass for every key, " +
+			"including session_secret, which is the one key that must never be forwarded")
 	}
-	src := regexp.MustCompile(`\s+`).ReplaceAllString(string(b), " ")
+	if _, ok := claimResponseWithheldKeys["session_secret"]; !ok {
+		t.Fatal("claimResponseWithheldKeys no longer names session_secret — the projection's " +
+			"whole reason for existing is gone, so a passing 'not withheld' check below proves nothing")
+	}
 
-	// Locate the passthrough list literal inside the claim handler.
-	m := regexp.MustCompile(`for _, k := range \[\]string\{([^}]*)\} \{ if v, ok := result\[k\]; ok \{`).FindStringSubmatch(src)
-	if m == nil {
-		t.Fatal("could not locate the claim passthrough whitelist — update this guard")
+	if reason, withheld := claimResponseWithheldKeys["unrecognized_resources"]; withheld {
+		t.Errorf("the claim projection withholds \"unrecognized_resources\" (reason given: %q), so the "+
+			"silent-no-lock warning never reaches the caller and the aihub#238 remedy is inert. "+
+			"That key is the ONLY signal that a declared resource is holding no lock.", reason)
 	}
-	if !strings.Contains(m[1], `"unrecognized_resources"`) {
-		t.Errorf("the claim passthrough whitelist omits \"unrecognized_resources\", so the silent-no-lock warning never reaches the caller (aihub#238). List is: %s", m[1])
+
+	// And on the projection itself, so the check is not purely about a map entry:
+	// a real value must survive.
+	got := slimClaimResult(map[string]any{
+		"attempt_id":             "ra_guard",
+		"unrecognized_resources": []any{"file:internal/mcp/mistyped.go"},
+	})
+	if _, ok := got["unrecognized_resources"]; !ok {
+		t.Errorf("slimClaimResult dropped \"unrecognized_resources\" even though it is not in the "+
+			"delete-list: %v", got)
 	}
 }
 

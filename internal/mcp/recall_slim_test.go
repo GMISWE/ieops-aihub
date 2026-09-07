@@ -134,7 +134,6 @@ func TestSlimRecallResult_StillDropsBookkeeping(t *testing.T) {
 		"visibility":         "project",
 		"project":            "ieops",
 		"updated_at":         "2026-08-27T05:02:27Z",
-		"latest_id":          "mem_newer",
 		"is_immortal":        false,
 		"activation_count":   float64(3),
 		"last_activated_at":  "2026-08-27T05:02:27Z",
@@ -162,12 +161,32 @@ func TestSlimRecallResult_StillDropsBookkeeping(t *testing.T) {
 	// live rows" — the reason this test encoded — is true only of the default.
 	item["status"] = "archived"
 
+	// aihub#429: `latest_id` made the same journey, for the same reason and one
+	// wi later. Its withheld reason was "recall already resolves to the head
+	// version, so this points at the row the caller is holding" — true of the
+	// default predicate, false of the include_archived one. A row is inserted
+	// with latest_id = its own id, a supersede archives the old head and then
+	// repoints every row whose latest_id was that head (the archived head
+	// included) at the new id, so for an ARCHIVED row latest_id is the forward
+	// edge to the current head — the one thing a caller following a version
+	// chain needs, and the only pointer to it in the response.
+	//
+	// The value below is deliberately NOT the item's own id: `mem_newer` against
+	// `mem_1` is what makes the assertion able to tell "the head pointer arrived"
+	// apart from "the id arrived twice".
+	item["latest_id"] = "mem_newer"
+
 	out := slimRecallResult(map[string]any{"items": []any{item}})
 
 	got := out["items"].([]any)[0].(map[string]any)
 	if got["status"] != "archived" {
 		t.Errorf("status = %#v, want it forwarded: a caller that asked for archived rows cannot "+
 			"otherwise tell which of the returned items are archived", got["status"])
+	}
+	if got["latest_id"] != "mem_newer" {
+		t.Errorf("latest_id = %#v, want %q forwarded: on an archived row this is the pointer to "+
+			"the current head, so withholding it leaves a caller holding a superseded body with no "+
+			"forward edge (aihub#429)", got["latest_id"], "mem_newer")
 	}
 	for k := range dropped {
 		if v, ok := got[k]; ok {

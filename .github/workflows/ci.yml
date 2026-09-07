@@ -1329,6 +1329,43 @@ jobs:
       # counted: the two negative arms are the regression, the control is what
       # separates "execution errors surface" from "every cursor is now rejected",
       # and a subtest that stops being scheduled must go red here, not vanish.
+      # aihub#392: the MCP layer minted a FRESH session_secret on every
+      # pf_claim_work_item call and persisted it, while the server's replay
+      # branch returns the EXISTING attempt and never touches
+      # session_secret_hash. So a retry with the same idempotency_key — the one
+      # thing an idempotency key exists for — left the state file holding a
+      # credential the server had never seen, and every later
+      # credential-checked call answered "invalid session_secret".
+      #
+      # Needs a real database because the defect IS the disagreement between a
+      # secret this process wrote to disk and a hash a Postgres row holds, and
+      # neither side is observable from the other. A fake aihub has no
+      # run_attempts table, so it can neither replay nor verify a credential:
+      # the assertion has to be "an authenticated call SUCCEEDS", which only a
+      # real server over a real database can answer.
+      #
+      # Three arms, and the two controls are not padding. Without
+      # WithoutReplayCanAuthenticate a red replay arm is equally consistent with
+      # "authenticated calls never work in this harness"; without
+      # WithANewKeyMintsAFreshSecret nothing catches the mirror-image failure of
+      # reusing a recorded secret for a DIFFERENT key, which would bind the
+      # state file to the wrong attempt on an ordinary re-claim.
+      - name: aihub#392 claim idempotency-replay credential DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/mcp/ -run '^TestE2EClaim(ReplayKeepsTheSecretTheServerAccepts|WithoutReplayCanAuthenticate|WithANewKeyMintsAFreshSecret)$' -count=1 -v 2>&1 | tee claim_replay_secret.log
+          grep -q -- '--- PASS: TestE2EClaimReplayKeepsTheSecretTheServerAccepts' claim_replay_secret.log \
+            || { echo "::error::TestE2EClaimReplayKeepsTheSecretTheServerAccepts did not run (expected '--- PASS: ...'); a replayed idempotency_key can again leave the client holding a session_secret the server rejects"; exit 1; }
+          for want in TestE2EClaimWithoutReplayCanAuthenticate \
+                      TestE2EClaimWithANewKeyMintsAFreshSecret; do
+            grep -q -- "--- PASS: $want" claim_replay_secret.log \
+              || { echo "::error::control arm $want did not run; without it the replay assertion above cannot distinguish 'the replay is fixed' from 'this harness never authenticates' / 'the fix over-reached onto fresh keys'"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' claim_replay_secret.log \
+            || { echo "::error::an aihub#392 claim-replay test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: aihub#382 list_work_items rows.Err() DB tests
         env:
           AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable

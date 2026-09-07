@@ -772,15 +772,27 @@ func (s *Server) registerLifecycleTools() {
 
 	// pf_claim_work_item
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_claim_work_item",
-		Description: "Claim a work item — creates a new run_attempt with typed locks. Writes state file with credentials.",
+		Name: "pf_claim_work_item",
+		Description: "Claim a work item — creates a new run_attempt with typed locks and writes the state " +
+			"file every later credential-checked pf_* call authenticates with. Retry-safe: resending the " +
+			"same idempotency_key returns the first call's attempt and keeps the session_secret it is " +
+			"bound to (aihub#392).",
 		InputSchema: objectSchema(map[string]any{
-			"work_item_id":    prop("string", "Work item ID or slug"),
-			"idempotency_key": prop("string", "Idempotency key for DB dedup"),
+			"work_item_id": prop("string", "Work item ID or slug"),
+			"idempotency_key": prop("string", "Idempotency key for DB dedup. Resending a key returns the "+
+				"EXISTING attempt, and this process reuses the session_secret it recorded for that key so "+
+				"the credential stays valid (aihub#392: it used to mint a new one, and every later call "+
+				"then answered 'invalid session_secret'). ⚠️ Only works where that record exists: "+
+				"replaying a key from another machine, or after the state file was deleted, is still left "+
+				"unauthenticated. Send a NEW key unless retrying a call whose response you never saw."),
 			"mode":            prop("string", "fresh|resume (default: fresh)"),
 			"requested_locks": requestedLocksProp("Resource locks to acquire"),
-			"force_takeover":  prop("boolean", "Force takeover if already claimed"),
-			"scenario_ref":    prop("string", "Git SHA of local scenario clone at claim time (optional)"),
+			"force_takeover": prop("boolean", "Force takeover if already claimed. ⚠️ It takes over the WORK "+
+				"ITEM, not other people's locks: a lock held by a running or paused attempt of a "+
+				"DIFFERENT work item still answers 409 CONFLICT_LOCK_TAKEN and does not change hands "+
+				"(aihub#393). It reclaims this work item's own locks, and rows whose owning attempt has "+
+				"ended. No flag displaces another work item's lock."),
+			"scenario_ref": prop("string", "Git SHA of local scenario clone at claim time (optional)"),
 		}, []string{"work_item_id", "idempotency_key"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -796,10 +808,42 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(fmt.Errorf("idempotency_key is required"))
 		}
 
-		// C6-2: Generate session_secret BEFORE calling aihub
-		sessionSecret, err := generateSessionSecret()
-		if err != nil {
-			return errResult(fmt.Errorf("generate session_secret: %w", err))
+		// C6-2: the session_secret is chosen BEFORE calling aihub, because the
+		// server binds the attempt to the secret THIS request carries.
+		//
+		// ⚠️ aihub#392: on a REPLAY of an idempotency_key it must be the secret
+		// already recorded for that key, not a fresh one. The server's replay
+		// branch returns the EXISTING attempt and never touches
+		// session_secret_hash (internal/domain/run_attempts.go — the only writers
+		// of that column are the two INSERTs), so minting here left the state file
+		// holding S2 while the row still stored hash(S1), and every later
+		// credential-checked call answered "invalid session_secret". The trigger is
+		// a retry of a timed-out claim, which is the one thing an idempotency key
+		// exists for.
+		//
+		// The invariant this restores is a property of THIS process, which is why
+		// it is fixed here and not in the replay branch: persist exactly the secret
+		// you sent. Reusing the recorded one makes that true on both server paths —
+		// the replay returns the attempt already bound to it, and if the server
+		// instead INSERTs (the row is gone) it binds the new attempt to the secret
+		// this request carried, which is the same value.
+		//
+		// Not fixed server-side on purpose. Re-registering the received secret in
+		// the replay branch would ROTATE the credential of a live attempt, so a
+		// replay by a second session on the same machine would silently 401 the
+		// original holder — trading a broken retry for a broken live session, which
+		// is worse than the bug. Residual, stated rather than hidden: a replay from
+		// a machine that has no state file for this key (or whose file was deleted)
+		// still cannot know the accepted secret, and is still left unauthenticated.
+		// Closing that needs the server to say "this was a replay"; see the
+		// idempotency_key description.
+		sessionSecret, reusedSecret := recordedClaimSecret(wiID, idemKey)
+		if !reusedSecret {
+			var secretErr error
+			sessionSecret, secretErr = generateSessionSecret()
+			if secretErr != nil {
+				return errResult(fmt.Errorf("generate session_secret: %w", secretErr))
+			}
 		}
 
 		// Write partial state file first (C6-2 protocol)
@@ -1180,8 +1224,12 @@ func (s *Server) registerLifecycleTools() {
 
 	// pf_force_takeover
 	s.mcp.AddTool(&sdkmcp.Tool{
-		Name:        "pf_force_takeover",
-		Description: "Force-take ownership of a work item from another agent",
+		Name: "pf_force_takeover",
+		Description: "Force-take ownership of a work item from another agent. ⚠️ It takes over the WORK " +
+			"ITEM, not other people's locks: a lock held by a running or paused attempt of a DIFFERENT " +
+			"work item still answers 409 CONFLICT_LOCK_TAKEN and does not change hands (aihub#393). It " +
+			"reclaims this work item's own locks, and rows whose owning attempt has ended. No flag " +
+			"displaces another work item's lock.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID or slug"),
 			"reason":       prop("string", "Reason for force takeover"),
@@ -1682,6 +1730,45 @@ func writeWorktreeExcludes(wtPath string) {
 	for _, p := range toAdd {
 		_, _ = f.WriteString(p + "\n")
 	}
+}
+
+// recordedClaimSecret returns the session_secret this workspace already recorded
+// for (wiID, idemKey), and whether it found one (aihub#392).
+//
+// ─── Why the idemKey equality is the whole gate ─────────────────────────────
+//
+// A claim under a NEW key is not a replay: the same-user branch treats it as an
+// implicit takeover and INSERTs a fresh attempt bound to the secret that request
+// carried. Reusing an older secret there would bind the state file to the wrong
+// attempt — the mirror image of the bug being fixed, introduced by over-applying
+// its fix. So the recorded secret is reused if and only if the key is the same
+// one it was recorded under.
+//
+// TestE2EClaimWithANewKeyMintsAFreshSecret is the control for exactly that, and
+// it is green on the unfixed tree too — it exists to stay green, not to turn.
+//
+// ⚠️ A PARTIAL stub counts, and that is the point rather than an edge case. The
+// C6-2 protocol writes the state file with the chosen secret BEFORE the request,
+// so the shape this fix is for — a claim whose response never arrived, retried
+// with the same key — is precisely the one where all that survives is a stub with
+// claimed=false and no attempt_id. config.ResolveStateFile returns it (it prefers
+// a claimed file and falls back to the stub), so both are covered.
+//
+// Cross-work-item reuse is not reachable: ResolveStateFile matches on the file
+// name or on Slug, both of which identify one work item, and the key must match
+// on top of that.
+func recordedClaimSecret(wiID, idemKey string) (string, bool) {
+	if wiID == "" || idemKey == "" {
+		return "", false
+	}
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil || sf == nil {
+		return "", false
+	}
+	if sf.IdemKey != idemKey || sf.SessionSecret == "" {
+		return "", false
+	}
+	return sf.SessionSecret, true
 }
 
 // generateSessionSecret generates a 64-hex random session secret.

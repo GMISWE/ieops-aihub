@@ -13,9 +13,14 @@ package mcp_test
 // Two of the three tests here are gates. The third is a tripwire and says so.
 
 import (
+	"encoding/json"
 	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 
 	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
@@ -103,5 +108,138 @@ func TestListWorkItemsUserIDDescriptionDisclosesReporterOnly(t *testing.T) {
 		if !strings.Contains(desc, want) {
 			t.Errorf("pf_list_work_items.user_id description no longer says %q — the predicate is wi.reporter_user_id = $N and callers must be told the set is reporter-only; got %q", want, got)
 		}
+	}
+}
+
+// ─── aihub#396: a closed vocabulary must be published as one ────────────────
+//
+// `priority` was published as the string "low|normal|high|urgent" — a
+// pipe-separated list inside a DESCRIPTION, four lines above a `propEnum` call
+// that would have made it a real enum. `source` was published as "Source
+// reference", which reads as free text and is a seven-value CHECK constraint.
+// Both cost the same thing: the go-sdk validates an `enum` before the handler
+// runs (mcp/tool.go, resolved.Validate) and cannot validate prose, so an
+// out-of-vocabulary value travelled all four hops and came back as
+// 500 INTERNAL_ERROR with a SQLSTATE in it.
+//
+// The published set is taken from domain — the package whose validator refuses
+// the value — so a caller is offered exactly what the server accepts. The
+// assertions below are on that IDENTITY, not on a hard-coded list of values: a
+// test naming 'low','normal','high','urgent' here would be a third copy of the
+// vocabulary and would pass while all three drifted together away from the
+// migration. (domain's own side of that chain is
+// TestWorkItemVocabulariesMatchTheMigrations, which parses the SQL.)
+
+// enumOfProp reads a published property's `enum` as a sorted list.
+func enumOfProp(t *testing.T, tool, param string) []string {
+	t.Helper()
+	props := schemaProps(t, publishedTool(t, tool))
+	if _, ok := props[param]; !ok {
+		t.Fatalf("%s does not publish %q at all", tool, param)
+	}
+	raw := rawPropOf(t, tool, param)
+	rawEnum, ok := raw["enum"].([]any)
+	if !ok {
+		desc, _ := raw["description"].(string)
+		t.Fatalf("%s publishes %q with NO enum (description: %q). The go-sdk validates an enum "+
+			"before the handler runs and cannot validate a pipe-separated list in prose, so an "+
+			"illegal value crosses every hop and dies at the DB CHECK as a 500 (aihub#396).",
+			tool, param, desc)
+	}
+	out := make([]string, 0, len(rawEnum))
+	for _, v := range rawEnum {
+		s, isStr := v.(string)
+		if !isStr {
+			t.Fatalf("%s.%s enum contains a non-string %#v", tool, param, v)
+		}
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// rawPropOf decodes one published property as a raw map, which schemaProps
+// cannot give (it projects to type+description).
+func rawPropOf(t *testing.T, tool, param string) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(publishedTool(t, tool).InputSchema)
+	if err != nil {
+		t.Fatalf("marshal InputSchema for %q: %v", tool, err)
+	}
+	var schema struct {
+		Properties map[string]map[string]any `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("decode InputSchema for %q: %v", tool, err)
+	}
+	p, ok := schema.Properties[param]
+	if !ok {
+		t.Fatalf("%s does not publish %q", tool, param)
+	}
+	return p
+}
+
+func TestWorkItemVocabulariesArePublishedAsEnums(t *testing.T) {
+	wantPriority := append([]string(nil), domain.WorkItemPriorityList()...)
+	sort.Strings(wantPriority)
+	wantSource := append([]string(nil), domain.WorkItemSourceList()...)
+	sort.Strings(wantSource)
+
+	// Anti-vacuity: an empty domain list would make every comparison below
+	// trivially satisfiable by an empty enum, which is the worst possible state
+	// (a published enum matching nothing rejects every call).
+	if len(wantPriority) == 0 || len(wantSource) == 0 {
+		t.Fatalf("domain publishes %d priorities and %d sources — one of the vocabularies is empty",
+			len(wantPriority), len(wantSource))
+	}
+
+	for _, tc := range []struct {
+		tool, param string
+		want        []string
+	}{
+		{"pf_create_work_item", "priority", wantPriority},
+		{"pf_create_work_item", "source", wantSource},
+		{"pf_update_work_item", "priority", wantPriority},
+	} {
+		t.Run(tc.tool+"."+tc.param, func(t *testing.T) {
+			got := enumOfProp(t, tc.tool, tc.param)
+			assert.Equal(t, tc.want, got,
+				"the published enum and the vocabulary domain enforces must be one set; a caller "+
+					"offered a value the server refuses is the same defect as a caller not being "+
+					"told about a value it accepts")
+		})
+	}
+
+	// pf_update_work_item binds no `source`, so it must not offer one — the
+	// reverse-drift half. Asserted here rather than assumed because publishing it
+	// would be a promise UpdateWorkItemRequest cannot keep, which is exactly what
+	// TestUpdateWorkItemPublishesOnlyParamsTheServerBinds above exists for.
+	t.Run("pf_update_work_item_publishes_no_source", func(t *testing.T) {
+		props := schemaProps(t, publishedTool(t, "pf_update_work_item"))
+		if _, published := props["source"]; published {
+			t.Error("pf_update_work_item publishes `source`, which domain.UpdateWorkItemRequest " +
+				"does not bind and UpdateWorkItem does not validate")
+		}
+	})
+}
+
+// TestLabelsCapIsPublished pins the other half of aihub#396's schema work: the
+// cap existed only as `cardinality(labels) <= 20` in a migration, so the 21st
+// label was a 500. The number is read from domain rather than written here, for
+// the same reason as the enums.
+func TestLabelsCapIsPublished(t *testing.T) {
+	cap := domain.MaxWorkItemLabels()
+	if cap <= 0 {
+		t.Fatalf("domain.MaxWorkItemLabels() is %d — the assertion below would be vacuous", cap)
+	}
+	want := strconv.Itoa(cap)
+	for _, tool := range []string{"pf_create_work_item", "pf_update_work_item"} {
+		t.Run(tool, func(t *testing.T) {
+			desc := schemaProps(t, publishedTool(t, tool))["labels"].Description
+			if !strings.Contains(desc, want) {
+				t.Errorf("%s does not tell callers the labels cap (%d). Got %q — so the 21st "+
+					"label is discovered as a 500 from the CHECK constraint.", tool, cap, desc)
+			}
+		})
 	}
 }

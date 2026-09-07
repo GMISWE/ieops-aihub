@@ -685,12 +685,12 @@ func (s *Server) registerLifecycleTools() {
 			"work_item_id":           prop("string", "Work item ID or slug"),
 			"goal":                   prop("string", "Updated goal (status must be queued or paused)"),
 			"goal_change_reason":     prop("string", "Reason for goal change (required with goal)"),
-			"priority":               prop("string", "Updated priority"),
+			"priority":               propEnum("string", "Updated priority", domain.WorkItemPriorityList()),
 			"milestone":              prop("string", "Updated milestone"),
 			"wi_type":                prop("string", "Updated wi_type"),
 			"requires_human_session": prop("boolean", "Updated requires_human_session"),
 			"reclassify_reason":      prop("string", "Reason for wi_type change (min 10 chars)"),
-			"labels":                 prop("array", "Updated labels"),
+			"labels":                 prop("array", fmt.Sprintf("Updated labels (max %d)", domain.MaxWorkItemLabels())),
 			"declared_resources":     declaredResourcesProp("Updated declared resources"),
 			// aihub#337, mirroring aihub#260 on pf_update_project's members_version:
 			// omitting it is still the behaviour, so it is still stated — but it is no
@@ -1854,21 +1854,30 @@ const maxBatchWorkItems = 50
 // silent-drop failure the batch tool exists downstream of.
 func workItemFieldProps() map[string]any {
 	return map[string]any{
-		"goal":                   prop("string", "Single-line goal ≤500 chars"),
-		"scenario":               prop("string", "Scenario (default: coding)"),
-		"priority":               prop("string", "low|normal|high|urgent"),
+		"goal":     prop("string", "Single-line goal ≤500 chars"),
+		"scenario": prop("string", "Scenario (default: coding)"),
+		// aihub#396: a real enum, not a pipe-separated string in a description.
+		// The values come from domain, which is where the check that refuses them
+		// lives, so the published set and the accepted set are one value. propEnum
+		// existed and was used four lines below for another field; this one was
+		// written as prose, and the SDK validates an enum before the handler runs
+		// while it cannot validate prose.
+		"priority":               propEnum("string", "Work item priority", domain.WorkItemPriorityList()),
 		"wi_type":                prop("string", "Work item type (fix_bug, feature, chore, etc.)"),
 		"requires_human_session": prop("boolean", "Whether this wi requires a human session"),
 		"milestone":              prop("string", "Milestone name"),
-		"labels":                 prop("array", "Labels"),
+		"labels":                 prop("array", fmt.Sprintf("Labels (max %d)", domain.MaxWorkItemLabels())),
 		"declared_resources":     declaredResourcesProp("Declared resource locks"),
 		"parent_work_item_id":    prop("string", "Parent work item ID"),
-		"source":                 prop("string", "Source reference"),
-		"attrs":                  prop("object", "Additional attributes"),
-		"blocked_by":             prop("array", blockedByPropDescription),
-		"content":                prop("string", contentPropDescription),
-		"force_create":           prop("boolean", "Force create bypassing duplicate check"),
-		"force_reason":           prop("string", "Reason for force create"),
+		// aihub#396: "Source reference" read as free text, and it is a closed
+		// vocabulary — sending "jira" instead of "sync_jira" was a 500. Published
+		// as an enum from the same list the validator uses.
+		"source":       propEnum("string", "How this work item was filed", domain.WorkItemSourceList()),
+		"attrs":        prop("object", "Additional attributes"),
+		"blocked_by":   prop("array", blockedByPropDescription),
+		"content":      prop("string", contentPropDescription),
+		"force_create": prop("boolean", "Force create bypassing duplicate check"),
+		"force_reason": prop("string", "Reason for force create"),
 	}
 }
 

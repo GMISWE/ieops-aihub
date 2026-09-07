@@ -2001,6 +2001,54 @@ jobs:
           ! grep -q -- '--- SKIP' step_identity.log \
             || { echo "::error::an aihub#398 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#396. THE point of running this against a real database: the checks
+      # it asserts run before any query, so a nil-pool unit test could prove the
+      # 400 — but not that the answer USED to be a 500. On the pre-fix tree these
+      # arms return, verbatim,
+      #
+      #   500 INTERNAL_ERROR failed to insert work_item: ERROR: new row for
+      #   relation "work_items" violates check constraint
+      #   "work_items_priority_check" (SQLSTATE 23514)
+      #
+      # (and the 23503 foreign-key version for parent_work_item_id). Without a
+      # database the pre-fix failure would be a nil-pool panic, i.e. an artefact
+      # of the fixture rather than the defect. The pure-unit half — the Go
+      # vocabularies against the migration CHECKs, and the class gate requiring
+      # every CHECK-constrained column to have a validator — runs on the "Unit
+      # tests" step above and needs nothing here.
+      #
+      # Same -v + grep guard as every step in this block: `go test` exits 0 when
+      # every selected test SKIPs, and this one skips whenever AIHUB_TEST_DB is
+      # empty. The greps are per SUBTEST, not just the function, because the
+      # function is one t.Run table plus the parent_work_item_id and duplicate
+      # arms — a function-level PASS would not notice eleven of the twelve
+      # disappearing.
+      - name: aihub#396 work-item field validation DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestWorkItemFieldValidationAnswersFourHundredNamingTheField$' -count=1 -v 2>&1 | tee wi_field_validation.log
+          for want in TestWorkItemFieldValidationAnswersFourHundredNamingTheField \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/create_priority_outside_the_vocabulary \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/create_source_outside_the_vocabulary \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/create_labels_over_the_cap \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/create_content_over_the_character_limit \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/update_priority_outside_the_vocabulary \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/update_labels_over_the_cap \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/update_content_over_the_character_limit \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/control_every_legal_priority_and_source_is_accepted \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/parent_accepts_a_slug \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/blank_parent_is_treated_as_absent \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/parent_that_does_not_exist_is_404 \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/parent_in_an_invisible_project_is_the_same_404 \
+                      TestWorkItemFieldValidationAnswersFourHundredNamingTheField/duplicate_409_reports_the_real_status; do
+            grep -q -- "--- PASS: $want" wi_field_validation.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#396 field-validation coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' wi_field_validation.log \
+            || { echo "::error::an aihub#396 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: aihub#239 recall cursor tie + supersede carry DB tests
         env:
           AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable

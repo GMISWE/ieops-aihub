@@ -466,7 +466,24 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		if limitPresent {
 			filter.Limit = limit
 		}
-		if cursor := c.QueryParam("cursor"); cursor != "" {
+		// The cursor is forwarded as the STRING the caller sent, because the
+		// domain casts it with `$n::timestamptz` and re-formatting it here would
+		// be a second conversion upstream of the one that counts. It is validated
+		// first, though (aihub#382): next_cursor is always RFC3339Nano, so a value
+		// that does not parse is one this server never emitted — the caller's
+		// mistake, and Rule 1 says 400 naming it. Before this the cast failed at
+		// execute time and, with rows.Err() unchecked in listWorkItemsPage, came
+		// back as 200 {"items":[]}. The domain now returns that error itself; this
+		// only turns the caller's own typo into a 400 they can act on rather than
+		// a 500. It does NOT replace the domain check — an execution failure that
+		// has nothing to do with the cursor still has to surface, and only
+		// rows.Err() sees those (list_work_items_rows_err_db_test.go).
+		_, cursorPresent, cursorErr := queryRFC3339(c, "cursor")
+		if cursorErr != nil {
+			return writeError(c, cursorErr)
+		}
+		if cursorPresent {
+			cursor := c.QueryParam("cursor")
 			filter.Cursor = &cursor
 		}
 		// aihub#273: semantic search. Similarity ordering has no stable

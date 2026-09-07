@@ -1590,6 +1590,17 @@ func listWorkItemsPage(ctx context.Context, pool *pgxpool.Pool, project string, 
 		}
 		items = append(items, &wi)
 	}
+	// pgx defers an error the server reports while EXECUTING the statement to
+	// rows.Err(); Query above only surfaces failures met while sending it. A
+	// cursor that does not cast at `$n::timestamptz`, a statement_timeout, a
+	// raise inside a function — each ends the loop after zero rows, and without
+	// this check they were returned as 200 {"items":[]}: an empty page the
+	// caller cannot tell from "nothing matched" (aihub#382). checkDedup and
+	// listWorkItemsByVector already ask; attachStepState only logs, on purpose,
+	// because it decorates the page rather than being it.
+	if err := rows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read work_items rows")
+	}
 
 	result := &ListWorkItemsResult{}
 	if len(items) > f.Limit {

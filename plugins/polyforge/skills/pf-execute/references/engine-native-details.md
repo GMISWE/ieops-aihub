@@ -227,11 +227,13 @@ for i, (step_id, content) in enumerate(sections):
     wait for user input:
       "continue" / "done" / "ok"  -> fall through to the completed report below, then move to the
                                      next step
-      "skip"                      -> note it in your own output; **do NOT report this step**;
-                                     continue to the next step WITHOUT calling pf_update_step at
-                                     all. The skipped step stays in_progress and stays the
-                                     server's current_step; the next step you actually complete
-                                     reports itself and advances from there.
+      "skip"                      -> COMPLETE it, with a summary that says it was skipped:
+                                     pf_update_step(step_id, status="completed",
+                                       step_attempt_id=sa_id,
+                                       artifact_summary="skipped — <the user's reason>",
+                                       next_step=..., next_step_attempt_id=...)
+                                     i.e. the same complete-and-advance call as the
+                                     "continue" path, differing only in the summary text.
       "fail"                      -> pf_update_step(step_id, status="failed", step_attempt_id=sa_id);
                                      pf_complete_attempt(failed, note="failed reason: <user description>");
                                      break (stop the whole loop)
@@ -257,6 +259,42 @@ for i, (step_id, content) in enumerate(sections):
 # all steps done -> wrap + worktree cleanup (_common/lifecycle.md ## Once per wi, whose full
 # sequence is §0 "Wrap & cleanup" of _common/references/lifecycle-details.md)
 ```
+
+## 1b. `skip` completes the step — it does not leave it open (aihub#413)
+
+This branch used to say the opposite: "continue to the next step WITHOUT calling pf_update_step
+at all. The skipped step stays in_progress and stays the server's current_step; the next step you
+actually complete reports itself and advances from there." That last clause was already the weak
+part of it, and **aihub#398 made it false outright.**
+
+`validateStepIdentity` (internal/server/routes_step.go) now refuses a terminal transition whose
+`step_id` is not the step the server has open:
+
+    status="completed" names step "test", but this work item's current_step is "review_fix"
+    -> 409 CONFLICT_CAS_FAILED, nothing committed
+
+So after an uncalled skip, the very next step you complete is the one that fails — and it fails
+naming a step the user thought was behind them. The old text promised precisely the thing that now
+errors.
+
+**Completing the skipped step is not a workaround, it is what the record needs anyway.** Three
+independent reasons, so this is not a single-purpose accommodation:
+
+1. `current_step` stays in sync, which is the whole subject of the identity predicate.
+2. It files a step-history row, so `pf_get_step`'s `completed_steps[]` shows the skip. An
+   uncalled skip is invisible there, and a resuming agent reads `completed_steps[]` as the
+   authority — so it would either redo the step or, worse, treat the still-open step as its own
+   in-progress work.
+3. The scenario templates already ask for exactly this wording — and they live in the SCENARIO
+   repo (`GMISWE/polyforge-coding`), not here, so look for them there rather than in this tree.
+   Both `chore.aihub.md` and `fix_bug.aihub.md` tell the `review_fix` step to write
+   `artifact_summary` = `skipped — no findings` when `code_review` found nothing. The old engine
+   text therefore contradicted the step graphs it was executing, not just the server.
+
+⚠️ `status="failed"` is NOT the way to skip. It is refused with `next_step` (so the loop cannot
+advance in one call), and it terminates the attempt through the review-FAIL path in §0c. "The user
+chose not to do this" and "this step failed" are different facts and the timeline should not
+conflate them.
 
 ## 2. Compatibility — server binary older than aihub#290
 

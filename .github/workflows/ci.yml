@@ -1012,7 +1012,7 @@ jobs:
           # The visibility arms. The three positive ones are NOT optional: they
           # pass before the fix too, and they are what stops "close the oracle"
           # from being satisfied by refusing every cross-project blocked_by.
-          for want in 'TestBlockedBySlugCannotProbeInvisibleProjects/fixture_outsider_is_403_on_every_honest_read_of_B' \
+          for want in 'TestBlockedBySlugCannotProbeInvisibleProjects/fixture_outsider_cannot_read_B_by_any_honest_route' \
                       'TestBlockedBySlugCannotProbeInvisibleProjects/probing_an_invisible_project_by_slug_is_not_a_create' \
                       'TestBlockedBySlugCannotProbeInvisibleProjects/an_invisible_hit_is_indistinguishable_from_a_genuine_miss' \
                       'TestBlockedBySlugCannotProbeInvisibleProjects/a_viewer_on_the_other_project_may_still_block_on_it' \
@@ -1147,6 +1147,67 @@ jobs:
             || { echo "::error::the domain-entry arm did not run; without it a gate written into handleRemember passes every other arm while UpdateMemory and any future caller of domain.Remember still write the mismatch"; exit 1; }
           ! grep -q -- '--- SKIP' remember_wi_scope.log \
             || { echo "::error::the aihub#371 remember scope test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#377: project membership is the only visibility boundary.
+      #
+      # Scoped with -run rather than by setting AIHUB_TEST_DB on the "Unit tests"
+      # step, for the same reason as every DB step above: internal/server holds
+      # other gated suites this change did not verify.
+      #
+      # The three grep groups below are three different failures, and collapsing
+      # them into one would lose the distinction that decides how to react:
+      #
+      #   identity_*  — a work item, step, event, dependency or memory you may
+      #                 not see answered DIFFERENTLY from one that does not
+      #                 exist. That single bit makes <project>#<seq> — a
+      #                 namespace counting from 1 — walkable across projects.
+      #   positive_*  — a member stopped being able to read their OWN project,
+      #                 or an admin did. "Every refusal is identical" is
+      #                 trivially satisfied by refusing everybody, so these are
+      #                 what tell a fix from an outage. A red here means the
+      #                 change over-blocked, NOT that the leak is worse.
+      #   invariant2  — the edge from a visible work item into an invisible one
+      #                 stopped carrying the far end's slug. That reference is
+      #                 the OWNER'S OWN DATA and hiding it makes them unable to
+      #                 read their own dependency graph; what stops it being an
+      #                 enumerator is the write-side scoping (aihub#357), not
+      #                 silence on read.
+      #
+      # positive_insufficient_role_still_explains is called out separately
+      # because it is the one arm that goes red if someone "finishes the job" by
+      # turning the member-role 403 into a 404 as well.
+      - name: aihub#377 project-visibility byte-identity DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestProjectVisibilityIdentityOverHTTP$' -count=1 -v 2>&1 | tee project_visibility.log
+          for want in 'TestProjectVisibilityIdentityOverHTTP/identity_work_item_by_canonical_id' \
+                      'TestProjectVisibilityIdentityOverHTTP/identity_work_item_by_slug' \
+                      'TestProjectVisibilityIdentityOverHTTP/identity_step' \
+                      'TestProjectVisibilityIdentityOverHTTP/identity_events' \
+                      'TestProjectVisibilityIdentityOverHTTP/identity_dependencies' \
+                      'TestProjectVisibilityIdentityOverHTTP/identity_memory'; do
+            grep -q -- "--- PASS: $want" project_visibility.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); an object in a project the caller cannot see is again distinguishable from one that does not exist, which makes <project>#<seq> enumerable"; exit 1; }
+          done
+          for want in 'TestProjectVisibilityIdentityOverHTTP/fixture_outsider_has_no_access_to_projB' \
+                      'TestProjectVisibilityIdentityOverHTTP/positive_member_reads_own_work_item' \
+                      'TestProjectVisibilityIdentityOverHTTP/positive_member_reads_own_work_item_by_slug' \
+                      'TestProjectVisibilityIdentityOverHTTP/positive_member_reads_own_step' \
+                      'TestProjectVisibilityIdentityOverHTTP/positive_member_reads_own_events' \
+                      'TestProjectVisibilityIdentityOverHTTP/positive_member_reads_own_dependencies' \
+                      'TestProjectVisibilityIdentityOverHTTP/positive_member_reads_own_memory' \
+                      'TestProjectVisibilityIdentityOverHTTP/positive_admin_unchanged'; do
+            grep -q -- "--- PASS: $want" project_visibility.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); either the change over-blocked and members can no longer read their own project, or the two-project fixture no longer states what the identity arms need"; exit 1; }
+          done
+          grep -q -- '--- PASS: TestProjectVisibilityIdentityOverHTTP/positive_insufficient_role_still_explains' project_visibility.log \
+            || { echo "::error::the insufficient-role arm did not run; it is the ONLY control that distinguishes 'every denial is now uniform' from 'authorization is broken and everything is denied' — a member short of a role must keep an explanatory 403"; exit 1; }
+          grep -q -- '--- PASS: TestProjectVisibilityIdentityOverHTTP/invariant2_edge_shows_slug_and_no_access' project_visibility.log \
+            || { echo "::error::the invariant-2 arm did not run; a work item's own blocked_by reference must still show the far end's slug with accessible=false, or the owner cannot read their own dependency graph"; exit 1; }
+          ! grep -q -- '--- SKIP' project_visibility.log \
+            || { echo "::error::the aihub#377 byte-identity test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#237: the launcher's update check is shell, so `go test` cannot see
       # it — a silent-pin regression there would ship green. This suite is

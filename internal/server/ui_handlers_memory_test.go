@@ -645,9 +645,12 @@ func TestUICommitMemory_NonWriter(t *testing.T) {
 
 	// userWithProjects only has "testproject", not "otherproject"
 	c, rec := newCommitRequest(t, "mem_abc", "annotation", userWithProjects("testproject"))
-	if err := handleUICommitMemory(nil)(c); err == nil && rec.Code != http.StatusForbidden {
-		t.Errorf("should return 403 for non-writer; code=%d body=%s", rec.Code, rec.Body.String())
-	}
+	// 🔴 aihub#377: was `if err := h(c); err == nil && rec.Code != http.StatusForbidden`,
+	// which could never fire — checkProjectAccess returns non-nil, so the status
+	// comparison was dead code and 403/404/200/500 all passed. assertNotVisibleDenial
+	// checks the real denial AND proves its own predicate can still reject a wrong one.
+	err := handleUICommitMemory(nil)(c)
+	assertNotVisibleDenial(t, err, rec, "otherproject")
 }
 
 // writerUser returns a UserContext with writer-level access to the given project.
@@ -936,9 +939,12 @@ func TestUIReplyCommit_NonWriter(t *testing.T) {
 	defer cleanupReply()
 
 	c, rec := newReplyRequest(t, "mem_abc", "cm_001", "a reply", userWithProjects("testproject"))
-	if err := handleUIReplyCommit(nil)(c); err == nil && rec.Code != http.StatusForbidden {
-		t.Errorf("should return 403 for non-writer; code=%d body=%s", rec.Code, rec.Body.String())
-	}
+	// 🔴 aihub#377: was `if err := h(c); err == nil && rec.Code != http.StatusForbidden`,
+	// which could never fire — checkProjectAccess returns non-nil, so the status
+	// comparison was dead code and 403/404/200/500 all passed. assertNotVisibleDenial
+	// checks the real denial AND proves its own predicate can still reject a wrong one.
+	err := handleUIReplyCommit(nil)(c)
+	assertNotVisibleDenial(t, err, rec, "otherproject")
 	if len(*calls) != 0 {
 		t.Errorf("doReplyCommitFn must not be called on auth failure; got %d calls", len(*calls))
 	}

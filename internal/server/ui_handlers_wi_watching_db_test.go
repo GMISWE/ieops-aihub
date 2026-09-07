@@ -354,9 +354,30 @@ func TestWatchToggle_RefusesAnUnreadableWorkItem(t *testing.T) {
 		`DELETE FROM wi_watches WHERE user_id=$1 AND work_item_id=$2`, f.userID, f.watchedHiddenID)
 	require.NoError(t, err)
 
+	// 🔴 Expected status changed 403 -> 404 on 2026-09-06 (aihub#377). CONTRACT
+	// CHANGE, not a red test tuned green. The invariant, verbatim:
+	//
+	//	在某个 project 里的用户，能看到该 project 的一切（memory、work item、
+	//	artifact、event、step、依赖）；不在的，对该 project 的一切必须拿到与
+	//	「不存在」逐字节相同的响应。
+	//
+	//	(A user who is in a project can see everything about it. A user who is
+	//	not must get a response byte-identical to the one for something that
+	//	does not exist.)
+	//
+	// This endpoint answers with an EMPTY body, so the status code is the entire
+	// response and 404-vs-403 was a one-bit existence oracle needing no parsing.
+	// handleUIWIWatchToggle's own doc comment had already identified the shape and
+	// closed 404-vs-200 — while shipping 404-vs-403 in the same function.
+	//
+	// 🔴 STILL DISCRIMINATING, and the row assertion below is untouched: if the
+	// write were not refused this call answers 200 with the re-rendered button and
+	// `found` becomes true, which goes red independently of the status.
 	code := watchRequest(t, pool, http.MethodPost, f.watchedHiddenID, uc)
-	require.Equal(t, http.StatusForbidden, code,
-		"watching a work item in a project the caller has no role on must be refused")
+	require.Equal(t, http.StatusNotFound, code,
+		"got %d, want 404 — watching a work item in a project the caller has no role on "+
+			"must be refused with what a nonexistent work item gets. A 200 means the write "+
+			"went through; a 403 means the refusal still confirms the work item exists", code)
 
 	var found bool
 	require.NoError(t, pool.QueryRow(context.Background(),

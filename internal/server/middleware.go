@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -258,6 +259,78 @@ var roleLevel = map[string]int{
 	"maintainer": 3,
 }
 
+// notVisibleMessage is THE wording for "you may not see this", whatever the
+// reason, and it deliberately does not say which reason (aihub#377, invariant 1).
+//
+// One constant, not a local per handler. The owner rejected a "smarter" design
+// that answered 403 when the caller had named the project themselves and 404
+// when it was derived from an object they pointed at, and the reason he gave is
+// the reason this is a constant too: leave no branch and no branch can drift.
+// A second copy of this sentence is a second thing to keep in step, and the
+// endpoints that must agree byte-for-byte are spread over five files.
+const notVisibleMessage = "not found, or you do not have access — " +
+	"contact the project owner or an administrator to check your invitation"
+
+// errNotVisible builds the one response every "not yours to see" path returns:
+// a 404 carrying notVisibleMessage.
+//
+// Callers must use it for BOTH halves of the pair — the "no such object" branch
+// and the "object exists but you are not a member" branch. Returning it from
+// only one of the two leaves the responses distinguishable, which is the whole
+// defect: identical status with a different message body is still an oracle.
+func errNotVisible() *domain.AihubError {
+	return domain.NewErr(domain.ErrNotFound, notVisibleMessage)
+}
+
+// hideNotFound is the other half of the pair: it turns a loader's "no such row"
+// into errNotVisible() and leaves every other error exactly as it was.
+//
+// 🔴 The pass-through is not laziness, it is the point. Collapsing the whole
+// error to a 404 would also swallow a dropped connection or a statement timeout,
+// and an endpoint that answers "not found" during an outage is a second lie —
+// one that sends readers hunting for deleted data. Only ErrNotFound is a
+// visibility verdict; ErrInternalError is an availability fact and stays a 500.
+//
+// Handlers pair it with checkProjectAccess: the loader's error goes through
+// here, the membership verdict comes from there, and both arrive as the same
+// bytes. Using it on one branch and not the other is the defect, not the fix.
+func hideNotFound(aerr *domain.AihubError) *domain.AihubError {
+	if aerr != nil && aerr.Code == domain.ErrNotFound {
+		return errNotVisible()
+	}
+	return aerr
+}
+
+// visibleProjects is every project this caller may read, as a sorted slice.
+//
+// It exists for the handlers that must resolve a reference BEFORE they know which
+// project to check — the shape aihub#376 was filed for. Those cannot call
+// checkProjectAccess first (there is no project yet), so they bound the query
+// instead, and this is the bound.
+//
+// Derived from hasProjectAccess rather than by walking ProjectRoles directly, so
+// the set can never disagree with the per-project decision: ProjectScope
+// confinement and the roleLevel comparison are both applied by that one predicate.
+// Sorted because a map iterates in random order and this becomes a SQL bind arg.
+//
+// An admin gets nil, not "every project" — ProjectRoles is empty for admins by
+// design (middleware.go's BearerAuth skips the membership query), so callers must
+// pass the admin flag separately and let the query skip the clause. Returning nil
+// here for an admin would otherwise read as "no projects".
+func visibleProjects(u *UserContext) []string {
+	if u == nil {
+		return nil
+	}
+	out := make([]string, 0, len(u.ProjectRoles))
+	for p := range u.ProjectRoles {
+		if hasProjectAccess(u, p, "viewer") {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // checkProjectAccess verifies the caller has at least minRole on the given project.
 // Admin users bypass all project checks.
 //
@@ -265,15 +338,23 @@ var roleLevel = map[string]int{
 // that callers' "if err != nil { return err }" guard reliably stops execution before
 // any subsequent database write. (Previously writeError returned nil on a successful
 // JSON write, causing the caller to continue into the DB even after a 403 was sent.)
+//
+// aihub#377 changed WHICH denial this gives. Project membership is the visibility
+// boundary, so a caller who is not a member gets errNotVisible() — a 404 that is
+// byte-identical to the one a nonexistent object gets. This function is where that
+// happens for all of its call sites at once, and that is the point: before this,
+// the leaky helper was one line and the safe one (hasProjectAccess + a hand-built
+// 404) was five, so the leaky one was used 41 times against 4. Making the one-line
+// call the correct call is the only thing that stops the ratio growing back.
 func checkProjectAccess(c echo.Context, u *UserContext, project, minRole string) error {
 	if u == nil {
+		// Authentication, not visibility: there is no project in the answer to leak.
 		ae := domain.NewErr(domain.ErrUnauthorized, "not authenticated")
 		writeError(c, ae) //nolint:errcheck // response committed; return ae below
 		return ae
 	}
 	if u.ProjectScope != nil && *u.ProjectScope != project {
-		ae := domain.NewErr(domain.ErrForbidden,
-			fmt.Sprintf("no access to project %q", project))
+		ae := errNotVisible()
 		writeError(c, ae) //nolint:errcheck
 		return ae
 	}
@@ -281,17 +362,38 @@ func checkProjectAccess(c echo.Context, u *UserContext, project, minRole string)
 		return nil
 	}
 	if project == "" {
+		// Malformed request, not a visibility verdict — no project was named, so
+		// nothing can be disclosed about one. Stays a 400.
 		ae := domain.NewErr(domain.ErrBadRequest, "project is required")
 		writeError(c, ae) //nolint:errcheck
 		return ae
 	}
 	userRole, ok := u.ProjectRoles[project]
-	if !ok || userRole == "" {
-		ae := domain.NewErr(domain.ErrForbidden,
-			fmt.Sprintf("no access to project %q", project))
+	// Compared through roleLevel rather than tested for non-emptiness, matching
+	// handleListWorkItems' ids= branch (router.go): roleLevel maps an unrecognised
+	// string to 0, and migration 0013_backfill_projects.sql copied arbitrary legacy
+	// role values in. A role that does not reach viewer is not a membership, so it
+	// must not be told the project exists either.
+	if !ok || userRole == "" || roleLevel[userRole] < roleLevel["viewer"] {
+		ae := errNotVisible()
 		writeError(c, ae) //nolint:errcheck
 		return ae
 	}
+	// 🔴 This branch DELIBERATELY keeps its 403 and its explanatory message. Do not
+	// "finish the job" by folding it into errNotVisible().
+	//
+	// aihub#377's invariant has a positive half that is easy to read past: "a user
+	// who IS in a project can see everything about that project". The caller here
+	// is a member — they are merely short of the role this endpoint needs. Turning
+	// that into a 404 would hide the project from its own members, which is not
+	// closing the leak, it is switching the feature off.
+	//
+	// It is also this change's ONLY built-in positive control. "Every denial is a
+	// 404" can be satisfied by breaking authorization entirely, and this is the one
+	// branch that goes red when someone does. TestCreateWorkItem_ViewerGets403BeforeDBWrite
+	// and TestRemember_ViewerGets403BeforeDBWrite (router_auth_test.go) pin it, and
+	// TestProjectVisibility_InsufficientRoleStillExplains (project_visibility_gate_test.go)
+	// states the reasoning next to the gate that would otherwise invite removing it.
 	if roleLevel[userRole] < roleLevel[minRole] {
 		ae := domain.NewErr(domain.ErrForbidden,
 			fmt.Sprintf("project %q requires %s role, you have %s", project, minRole, userRole))

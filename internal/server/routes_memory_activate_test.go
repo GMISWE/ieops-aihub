@@ -92,9 +92,12 @@ func TestV1Activate_NonMember(t *testing.T) {
 
 	// userWithProjects("testproject") has no role on "otherproject".
 	c, rec := newV1ActivateRequest(t, "mem_v1", userWithProjects("testproject"))
-	if err := handleActivateMemory(nil)(c); err == nil && rec.Code != http.StatusForbidden {
-		t.Errorf("should return 403 for non-member; code=%d body=%s", rec.Code, rec.Body.String())
-	}
+	// 🔴 aihub#377: was `if err := h(c); err == nil && rec.Code != http.StatusForbidden`,
+	// which could never fire — checkProjectAccess returns non-nil, so the status
+	// comparison was dead code and 403/404/200/500 all passed. assertNotVisibleDenial
+	// checks the real denial AND proves its own predicate can still reject a wrong one.
+	err := handleActivateMemory(nil)(c)
+	assertNotVisibleDenial(t, err, rec, "otherproject")
 	if *called {
 		t.Errorf("domain.Activate must NOT be called on auth failure (IDOR guard)")
 	}

@@ -209,12 +209,12 @@ type wiListPageData struct {
 	Theme             string
 	User              *UserContext
 	Project           string
-	ProjectLabel      string          // human label for the project switcher button ("All projects" / "<name>")
-	ProjectsAvailable []string        // sorted project names for the switcher
-	ProjectCounts     map[string]int  // per-project active-wi count for the switcher
-	TotalCount        int             // sum of ProjectCounts (the "All projects" count)
-	AllMode           bool            // true when viewing across all accessible projects
-	Status            string          // legacy single-status (kept for the hidden field / back-compat)
+	ProjectLabel      string         // human label for the project switcher button ("All projects" / "<name>")
+	ProjectsAvailable []string       // sorted project names for the switcher
+	ProjectCounts     map[string]int // per-project active-wi count for the switcher
+	TotalCount        int            // sum of ProjectCounts (the "All projects" count)
+	AllMode           bool           // true when viewing across all accessible projects
+	Status            string         // legacy single-status (kept for the hidden field / back-compat)
 	Kind              string
 	Reporter          string
 	Owner             string
@@ -326,7 +326,12 @@ type wiDetailPageData struct {
 	Artifacts      []artifactLink
 	Watch          watchToggle // aihub#143 watch/unwatch control
 	Err            string
-	AccessDenied   bool
+	// 🔴 No AccessDenied field, on purpose (aihub#377). It used to select a
+	// separate template branch that rendered a different body at HTTP 200, which
+	// made "in a project you cannot see" distinguishable from "does not exist".
+	// A denied caller now takes the WI==nil path with the same Err and a 404, so
+	// there is no second shape to keep in step. Re-adding the field is how the
+	// oracle comes back; see the comment at the top of wi_detail.html.tmpl.
 }
 
 // watchToggle is the view-model for the aihub#143 watch control, shared by the
@@ -563,6 +568,14 @@ func wiDetailTemplate() *template.Template {
 // would still let anyone with a session write a row naming any work item id in
 // the database, i.e. confirm which ids exist (404 vs 200) and accumulate state
 // on other teams' items. Authorize the write on its own terms.
+//
+// 🔴 And then read the paragraph above as a cautionary tale, because it is one.
+// It correctly identified an existence oracle, closed 404-vs-200, and shipped
+// 404-vs-403 in the same function — the identical defect, one status code over.
+// aihub#377 closed that. Knowing about a trap does not stop you walking into it
+// in another form: a defence is built along the route you happened to imagine,
+// and this one enumerated work item ids from a browser session for as long as
+// the comment above sat here describing why it could not.
 func handleUIWIWatchToggle(pool *pgxpool.Pool, tmpl *template.Template, watch bool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -581,8 +594,12 @@ func handleUIWIWatchToggle(pool *pgxpool.Pool, tmpl *template.Template, watch bo
 		if aerr != nil {
 			return c.NoContent(http.StatusNotFound)
 		}
+		// 404, not 403 (aihub#377). With an empty body the status code IS the whole
+		// response, so 404-vs-403 here was a one-bit existence oracle needing no
+		// parsing at all. Project membership is the visibility boundary: a
+		// non-member gets what a nonexistent id gets.
 		if err := checkProjectAccessSoft(u, wi.Project); err != nil {
-			return c.NoContent(http.StatusForbidden)
+			return c.NoContent(http.StatusNotFound)
 		}
 
 		var werr *domain.AihubError
@@ -1129,12 +1146,33 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 
 		wi, aerr := getWorkItemFn(ctx, pool, idOrSlug)
 		if aerr != nil {
-			data.Err = aerr.Message
+			// notVisibleMessage, not aerr.Message: the two exits below must be one
+			// response, and aerr.Message quotes the caller's reference back inside
+			// a sentence the other exit cannot produce.
+			data.Err = notVisibleMessage
 			// Use 404 on missing wi so curl callers can detect it; the layout
 			// chrome still renders so the user has the top nav. renderTemplate
 			// hard-codes 200 via c.HTMLBlob, so we write the body manually.
 			return renderHTMLStatus(c, tmpl, "layout", data, http.StatusNotFound)
 		}
+
+		// 🔴 The access check sits HERE, immediately after the load and before a
+		// single field of `wi` reaches `data` (aihub#377). It used to run ~30 lines
+		// down, after Title/WI/WIType/Content/Milestone/AttemptID/HumanMode had all
+		// been populated from the row — so the denied response was assembled out of
+		// the very record being withheld, and differed from the not-found response
+		// in both status and body. Only the template's AccessDenied short-circuit
+		// kept the content itself off the page, i.e. the containment was one
+		// template edit deep.
+		//
+		// Returning the identical exit as above is the criterion, not "returns an
+		// error": same status, same bytes. Anything read out of `wi` before this
+		// point is something the two exits cannot agree on.
+		if err := checkProjectAccessSoft(u, wi.Project); err != nil {
+			data.Err = notVisibleMessage
+			return renderHTMLStatus(c, tmpl, "layout", data, http.StatusNotFound)
+		}
+
 		data.Title = "wi " + wi.Slug
 		data.WI = wi
 		if wi.WIType != nil {
@@ -1155,14 +1193,6 @@ func handleUIWIDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 			} else {
 				data.HumanMode = "Auto"
 			}
-		}
-
-		// Project access check — must come AFTER GetWorkItem because we don't
-		// know the project until we've read the row.
-		if err := checkProjectAccessSoft(u, wi.Project); err != nil {
-			data.Err = err.Error()
-			data.AccessDenied = true
-			return renderTemplate(c, tmpl, "layout", data)
 		}
 
 		// Cross-project visibility roles, computed ONCE and shared (read-only)
@@ -1365,8 +1395,12 @@ func handleUIWIEventsPartial(pool *pgxpool.Pool, tmpl *template.Template) echo.H
 		if aerr != nil {
 			return c.NoContent(http.StatusNotFound)
 		}
+		// 404, not 403 (aihub#377). With an empty body the status code IS the whole
+		// response, so 404-vs-403 here was a one-bit existence oracle needing no
+		// parsing at all. Project membership is the visibility boundary: a
+		// non-member gets what a nonexistent id gets.
 		if err := checkProjectAccessSoft(u, wi.Project); err != nil {
-			return c.NoContent(http.StatusForbidden)
+			return c.NoContent(http.StatusNotFound)
 		}
 
 		f := &domain.ListEventsFilter{
@@ -1480,8 +1514,7 @@ func reverseVersionRefs(v []domain.MemoryVersionRef) []domain.MemoryVersionRef {
 }
 
 // toDepView flattens DependenciesResponse into the template-friendly depView.
-// The Slug pointer is dereffed to a plain string, and the cross-project
-// "hidden" sentinel that ListDependencies sets (ID="hidden", Slug=nil) is
+// The Slug pointer is dereffed to a plain string, and inaccessibility is
 // surfaced as a boolean for the template.
 func toDepView(d *domain.DependenciesResponse) *depView {
 	if d == nil {
@@ -1503,11 +1536,33 @@ func toDepView(d *domain.DependenciesResponse) *depView {
 	return v
 }
 
+// depEntryFrom projects one dependency row into the template's view model.
+//
+// 🔴 An inaccessible far end KEEPS ITS SLUG (aihub#377, invariant 2). The
+// reference is the owner's own data — somebody in THIS work item's project wrote
+// it into THIS work item's record — so hiding it leaves the owner unable to read
+// their own dependency graph, which is the reason the invariant exists. What is
+// withheld is the canonical id (and the link: there is nothing the caller may
+// open). `Hidden` now means "you may not open this", not "you may not know it is
+// referenced".
+//
+// This used to drop the slug and key on the `ID == "hidden"` sentinel, so the
+// page showed a bare "hidden / cross-project" badge. That made the /v1 half of
+// invariant 2 a no-op on the surface the invariant is actually about — the
+// shape this repo calls "a fix that never reaches the user's eyes".
+//
+// Keyed on e.Accessible, the same field /v1 serves, rather than re-deriving the
+// verdict or sniffing a sentinel string: one source, so the API and the page
+// cannot disagree about who may see what.
 func depEntryFrom(e domain.DependencyListEntry) depEntry {
-	if e.Slug == nil || e.ID == "hidden" {
-		return depEntry{Kind: e.Kind, Hidden: true}
+	slug := ""
+	if e.Slug != nil {
+		slug = *e.Slug
 	}
-	return depEntry{ID: e.ID, Slug: *e.Slug, Kind: e.Kind}
+	if !e.Accessible {
+		return depEntry{Slug: slug, Kind: e.Kind, Hidden: true}
+	}
+	return depEntry{ID: e.ID, Slug: slug, Kind: e.Kind}
 }
 
 // wiRefToDepEntry projects a domain.WIRef (parent/children navigation) into the
@@ -1810,12 +1865,27 @@ func renderHTMLStatus(c echo.Context, tmpl *template.Template, name string, data
 // real helper writes a JSON error to the response on denial, which would
 // break the HTML render path. This variant just returns an error string and
 // lets the caller decide how to render.
+//
+// 🔴 It is a THIRD copy of one access rule (checkProjectAccess in middleware.go
+// and hasProjectAccess in routes_memory.go are the other two), and copies of
+// this rule have a documented habit of being missed. aihub#377's own executor
+// censused the repo by grepping the name `checkProjectAccess`, found 41 call
+// sites, and reported a complete inventory — which silently omitted this
+// function's four call sites and hid three real violations in /ui. See
+// project_visibility_gate_test.go's R0 for what that cost and how the gate now
+// finds a copy regardless of what it is called.
+//
+// Denial wording is notVisibleMessage, identical to checkProjectAccess's, so a
+// /ui page cannot become the softer oracle its JSON twin no longer is. The role
+// split is the same too: no membership -> not visible; membership without the
+// needed role is NOT this function's business (it takes no minRole) and is left
+// to the caller.
 func checkProjectAccessSoft(u *UserContext, project string) error {
 	if u == nil {
 		return errSoft("not authenticated")
 	}
 	if u.ProjectScope != nil && *u.ProjectScope != project {
-		return errSoft("no access to project " + project)
+		return errSoft(notVisibleMessage)
 	}
 	if u.Role == "admin" {
 		return nil
@@ -1824,8 +1894,11 @@ func checkProjectAccessSoft(u *UserContext, project string) error {
 		return errSoft("project is required")
 	}
 	role, ok := u.ProjectRoles[project]
-	if !ok || role == "" {
-		return errSoft("no access to project " + project)
+	// Through roleLevel, matching checkProjectAccess: a legacy role string that
+	// reaches no known level is not a membership (migration 0013 backfilled
+	// arbitrary values), and must not learn the project exists.
+	if !ok || role == "" || roleLevel[role] < roleLevel["viewer"] {
+		return errSoft(notVisibleMessage)
 	}
 	return nil
 }

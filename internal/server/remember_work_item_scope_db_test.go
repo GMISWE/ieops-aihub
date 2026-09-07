@@ -257,10 +257,27 @@ func TestRememberRejectsCrossProjectWorkItem(t *testing.T) {
 			"the cross-project arms are vacuous unless this work item is really in the other project")
 	})
 
+	// 🔴 Expected status changed 403 -> 404 on 2026-09-06 (aihub#377). CONTRACT
+	// CHANGE, not a red test tuned green. The invariant, verbatim:
+	//
+	//	在某个 project 里的用户，能看到该 project 的一切（memory、work item、
+	//	artifact、event、step、依赖）；不在的，对该 project 的一切必须拿到与
+	//	「不存在」逐字节相同的响应。
+	//
+	//	(A user who is in a project can see everything about it. A user who is
+	//	not must get a response byte-identical to the one for something that
+	//	does not exist.)
+	//
+	// 🔴 STILL DISCRIMINATING. If the writer could write projB this arm answers
+	// 201 Created, so a fixture that forgot to withhold access still goes red.
+	// The change is which refusal counts as correct, not whether a refusal is
+	// required.
 	t.Run("the caller really cannot read the other project", func(t *testing.T) {
 		status, body := s.remember(t, s.key, memoryBody(s.projB, "a memory the writer may not write", nil))
-		assert.Equal(t, http.StatusForbidden, status,
-			"fixture is broken: the writer is supposed to have NO role on %s (body %s)", s.projB, body)
+		assert.Equal(t, http.StatusNotFound, status,
+			"fixture is broken: got %d, want 404 — the writer is supposed to have NO role "+
+				"on %s. A 201 means the fixture granted access; a 403 means the refusal "+
+				"still confirms the project exists (body %s)", status, s.projB, body)
 	})
 
 	// ── 1/2. The positive controls, both spellings. Green before AND after the

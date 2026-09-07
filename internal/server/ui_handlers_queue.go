@@ -126,18 +126,16 @@ func handleUIQueuePartial(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 			return renderTemplate(c, tmpl, "queue_section.html.tmpl", data)
 		}
 
-		if !allMode && uiScopeBlocks(u, project) {
+		// One membership test through hasProjectAccess instead of uiScopeBlocks +
+		// an inline ProjectRoles lookup (aihub#377). Two spellings of one rule is
+		// two things to keep in step, and the inline one was invisible to a census
+		// that searched for the access helpers by name. The wording is
+		// notVisibleMessage so this page cannot report a project's existence in a
+		// sentence its JSON counterpart no longer does.
+		if !allMode && !hasProjectAccess(u, project, "viewer") {
 			data.AccessDenied = true
-			data.Err = "no access to project " + project
+			data.Err = notVisibleMessage
 			return renderTemplate(c, tmpl, "queue_section.html.tmpl", data)
-		}
-
-		if !allMode && u != nil && u.Role != "admin" {
-			if _, ok := u.ProjectRoles[project]; !ok {
-				data.AccessDenied = true
-				data.Err = "no access to project " + project
-				return renderTemplate(c, tmpl, "queue_section.html.tmpl", data)
-			}
 		}
 
 		// Mirror the list page's personal-dashboard defaults: Mine view scopes

@@ -330,9 +330,14 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 				// copied arbitrary users.project_roles values in, mapping only
 				// maintainer→writer — so such rows may exist. Going through the
 				// same lookup removes the class without needing to know.
+				// aihub#377: errNotVisible(), and note it no longer names the
+				// project. The old message quoted *u.ProjectScope back, so a key
+				// scoped to a project its holder is not a member of reported that
+				// project's name — the one thing a non-member must not learn.
+				// The branch below (`no accessible projects`) keeps its 403
+				// precisely because it names nothing.
 				if u.Role != "admin" && roleLevel[u.ProjectRoles[*u.ProjectScope]] < roleLevel["viewer"] {
-					return writeError(c, domain.NewErr(domain.ErrForbidden,
-						fmt.Sprintf("no access to project %q", *u.ProjectScope)))
+					return writeError(c, errNotVisible())
 				}
 				filter.AccessibleProjects = []string{*u.ProjectScope}
 			case u.Role == "admin":
@@ -544,7 +549,7 @@ func handleGetWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		wi, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 
 		// C1: Require viewer access to the work item's project
@@ -571,7 +576,7 @@ func handleUpdateWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 		// C1: Load wi to get project, then check writer access
 		existing, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 		if err := checkProjectAccess(c, u, existing.Project, "writer"); err != nil {
 			return err
@@ -595,7 +600,7 @@ func handleCancelWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 		// C1: Load wi to get project; reporter needs writer, others need maintainer.
 		wi, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 		minRole := "writer"
 		if wi.ReporterUserID != u.UserID {
@@ -628,7 +633,7 @@ func handleClaimWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 		// C1: Load wi to get project; require writer access; also enforce force_takeover permissions.
 		wi, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 		if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
 			return err
@@ -672,7 +677,7 @@ func handleCompleteAttempt(pool *pgxpool.Pool) echo.HandlerFunc {
 		// AttemptCredential (session_secret) provides additional per-attempt gating inside domain.
 		wi, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 		if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
 			return err
@@ -701,7 +706,7 @@ func handleForceTakeover(pool *pgxpool.Pool) echo.HandlerFunc {
 		// C5: Load wi; same-user self-takeover needs Writer; cross-user needs Maintainer.
 		wi, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 		minRole := "maintainer"
 		if wi.CurrentAttemptID != nil {
@@ -853,21 +858,33 @@ func handleCreateDependency(pool *pgxpool.Pool) echo.HandlerFunc {
 		// C1: Load blocked wi → require writer on its project (caller "owns" it).
 		blockedWI, aihubErr := domain.GetWorkItem(ctx, pool, req.BlockedWIID)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 		if err := checkProjectAccess(c, u, blockedWI.Project, "writer"); err != nil {
 			return err
 		}
 
 		// For cross-project dependencies, also require viewer on the blocking wi's project.
+		//
+		// 🔴 Both denials are now the SAME response (aihub#377). Until then this was
+		// the leak resolveBlockedByRef's doc comment described and deliberately did
+		// not fix — "changing an authorization response shape is not this work item's
+		// business" (aihub#357). It is this one's. A blocking id naming nothing
+		// answered 404 `work item "B#7" not found`; one naming a real work item in a
+		// project the caller cannot see answered 403 `no visibility to blocking work
+		// item's project`. One bit, and slugs are `<project>#<seq>` with seq counting
+		// from 1, so it enumerated the other project.
+		//
+		// The bespoke 403 is gone rather than reworded: checkProjectAccess has already
+		// written its response by the time it returns, so building a second error here
+		// only produced a duplicate write. Returning its error is what stops the handler.
 		blockingWI, aihubErr := domain.GetWorkItem(ctx, pool, req.BlockingWIID)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 		if blockingWI.Project != blockedWI.Project {
 			if err := checkProjectAccess(c, u, blockingWI.Project, "viewer"); err != nil {
-				return writeError(c, domain.NewErr(domain.ErrForbidden,
-					"no visibility to blocking work item's project"))
+				return err
 			}
 		}
 
@@ -906,7 +923,7 @@ func handleListDependencies(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		wi, aihubErr := domain.GetWorkItem(ctx, pool, wiID)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 		if err := checkProjectAccess(c, u, wi.Project, "viewer"); err != nil {
 			return err
@@ -951,7 +968,7 @@ func handleDeleteDependency(pool *pgxpool.Pool) echo.HandlerFunc {
 		// C1: Require writer access — load blocked wi to get project
 		blockedWI, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("blocked_id"))
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 		if err := checkProjectAccess(c, u, blockedWI.Project, "writer"); err != nil {
 			return err
@@ -964,8 +981,25 @@ func handleDeleteDependency(pool *pgxpool.Pool) echo.HandlerFunc {
 		// wi_dependencies rows cascade from work_items, so a blocking id that
 		// resolves to nothing cannot have a live edge either — the 404 this
 		// returns is the same verdict, reached one step earlier.
+		//
+		// 🔴 "The same verdict" is now literally the same RESPONSE (aihub#377).
+		// That sentence was already true of the meaning and false of the bytes:
+		// an unresolvable blocking id answered `work item "B#7" not found` while
+		// a resolvable one with no edge answered `dependency not found`, and this
+		// end has no access check at all (see the model note above
+		// handleCreateDependency — the gate is writer on the BLOCKED item), so any
+		// writer anywhere could tell an existing work item from an absent one.
+		// Same status, different body, still an oracle.
+		//
+		// Answering `dependency not found` for the unresolvable case keeps the
+		// message that is useful to the authorized caller this endpoint is for,
+		// and makes the two indistinguishable. A non-ErrNotFound failure still
+		// passes through: an outage is not a verdict.
 		blockingWI, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("blocking_id"))
 		if aihubErr != nil {
+			if aihubErr.Code == domain.ErrNotFound {
+				return writeError(c, domain.NewErr(domain.ErrNotFound, "dependency not found"))
+			}
 			return writeError(c, aihubErr)
 		}
 

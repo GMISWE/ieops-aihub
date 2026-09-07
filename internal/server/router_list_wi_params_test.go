@@ -303,12 +303,48 @@ func TestListWorkItems_IdsWithoutProjectDeniedWhenScopedToANonMemberProject(t *t
 	// A nil pool proves the rejection happens before any query: reaching the DB
 	// would panic.
 	rec := listWIRequestAs(t, nil, "ids=wi_abc", uc)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("a caller scoped to a project they have no role in must get 403, got %d (body: %s)",
+	// 🔴 403 -> 404 on 2026-09-06 (aihub#377): CONTRACT CHANGE, not a tuned
+	// expectation. A caller scoped to a project they are not a member of must get
+	// the same answer as a caller asking about a project that does not exist.
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("a caller scoped to a project they have no role in must get 404, got %d (body: %s)",
 			rec.Code, rec.Body.String())
 	}
-	if body := rec.Body.String(); !strings.Contains(body, scope) {
-		t.Errorf("the 403 should name the project; got %s", body)
+
+	// 🔴 THIS ASSERTION WAS INVERTED, and it is the only one in aihub#377 that got
+	// STRICTER rather than merely restatused. It used to read:
+	//
+	//	if body := rec.Body.String(); !strings.Contains(body, scope) {
+	//		t.Errorf("the 403 should name the project; got %s", body)
+	//	}
+	//
+	// Naming the project WAS the point — and it was the leak. A non-member learns
+	// the project's name from the refusal, which is exactly the existence
+	// disclosure the invariant forbids. So the requirement flipped: the body must
+	// NOT contain it.
+	body := rec.Body.String()
+	if strings.Contains(body, scope) {
+		t.Errorf("the denial names project %q, which is the disclosure aihub#377 closed; got %s",
+			scope, body)
+	}
+
+	// Negative control for the inverted assertion above. A "does not contain"
+	// check goes silently vacuous if the thing it inspects stops being the thing
+	// it thinks it is — an empty body, a renamed field, a scope value that never
+	// appears anywhere. So prove the predicate still has teeth by running it
+	// against a body that DOES leak.
+	//
+	// Without this, the pair "assert absent" + "nothing produces it any more"
+	// passes forever while proving nothing. aihub#377's own inventory was built
+	// by grepping for one token and missed a quarter of its population; a
+	// negative assertion with no negative control is the same failure in one line.
+	if leak := `{"code":"NOT_FOUND","message":"no access to project ` + scope + `"}`; !strings.Contains(leak, scope) {
+		t.Fatal("the leak-detection predicate cannot detect a leak: strings.Contains " +
+			"did not match a body built to contain the scope, so the assertion above is vacuous")
+	}
+	if scope == "" {
+		t.Fatal("scope is empty, so `strings.Contains(body, scope)` is trivially true " +
+			"and the assertion above proves nothing")
 	}
 }
 
@@ -331,12 +367,20 @@ func TestListWorkItems_IdsWithoutProjectRejectsUnknownRoleStrings(t *testing.T) 
 	}
 
 	// Same via the scoped branch.
+	//
+	// 🔴 403 -> 404 here and NOT above, and the split is deliberate (aihub#377).
+	// The unscoped arm above lands on `no accessible projects; pass project=
+	// explicitly`, which names no project and therefore discloses nothing — it
+	// keeps its 403. This arm lands on the scoped branch, whose old message quoted
+	// the project name back, so it becomes the shared 404. The rule is not "every
+	// refusal is a 404"; it is "no refusal may tell a non-member that a project
+	// exists".
 	scope := "legacyproject"
 	uc2 := viewerUser()
 	uc2.ProjectScope = &scope
 	uc2.ProjectRoles = map[string]string{scope: "some_legacy_role"}
-	if rec := listWIRequestAs(t, nil, "ids=wi_abc", uc2); rec.Code != http.StatusForbidden {
-		t.Fatalf("scoped caller with an unrecognised role must get 403; got %d", rec.Code)
+	if rec := listWIRequestAs(t, nil, "ids=wi_abc", uc2); rec.Code != http.StatusNotFound {
+		t.Fatalf("scoped caller with an unrecognised role must get 404; got %d", rec.Code)
 	}
 
 	// Control: a real role still works, so the check is not just refusing everyone.

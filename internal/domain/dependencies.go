@@ -31,11 +31,22 @@ type CreateDependencyRequest struct {
 
 // DependencyListEntry is the response format for a dependency list entry.
 type DependencyListEntry struct {
-	ID      string  `json:"id"`
-	Slug    *string `json:"slug,omitempty"`
+	ID string `json:"id"`
+	// Slug is ALWAYS sent, including for an end the caller may not open
+	// (aihub#377, invariant 2). It carries no `omitempty` on purpose: with one,
+	// "you may not see this work item" and "this work item has no slug" arrive as
+	// the same absent field, and a caller cannot act on the difference.
+	Slug    *string `json:"slug"`
 	Project string  `json:"project"`
 	Kind    string  `json:"kind"`
 	Note    *string `json:"note,omitempty"`
+	// Accessible reports whether the caller may open this end of the edge.
+	//
+	// It is an explicit boolean rather than something to infer from id ==
+	// "hidden": a sentinel string is a fact about this struct's history, not an
+	// API, and every consumer that wants to render "no access" has to know the
+	// magic value to check for.
+	Accessible bool `json:"accessible"`
 }
 
 // DependenciesResponse is the response for GET /v1/dependencies.
@@ -449,6 +460,27 @@ func DeleteDependency(ctx context.Context, pool *pgxpool.Pool, blockedWIID, bloc
 
 // ListDependencies returns blocking and blocked_by dependencies for a work item.
 // Respects cross-project visibility rules.
+//
+// 🔴 An edge belongs to the side that declared it (aihub#377, invariant 2). Every
+// row is returned, WITH the far end's slug, plus accessible=false when the caller
+// may not open it. That is a deliberate, sanctioned disclosure and the one place
+// this server tells you a work item exists in a project you are not in: somebody
+// in YOUR project wrote that reference into YOUR work item's record, so hiding it
+// makes the owner unable to read their own dependency graph.
+//
+// What keeps it from being an enumerator is the WRITE side, not silence here: a
+// reference can only be created if it resolves within the author's own visibility
+// (resolveBlockedByRef for blocked_by at creation, and handleCreateDependency's
+// scoped check for the standalone endpoint — work_items.go and router.go). So the
+// set of far-end slugs reachable through this function is exactly the set someone
+// entitled to see them already chose to record. Invariant 2 governs reads,
+// invariant 3 governs writes; drop either and the pair stops holding.
+//
+// Before this change the row came back with the slug STRIPPED and id replaced by
+// the sentinel string "hidden" — while still reporting the far end's `project`.
+// So it disclosed the project name (the part it was trying to protect) and
+// withheld the slug (the part invariant 2 asks for), with nothing telling the
+// caller which of the two had happened.
 func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, callerProjectRoles map[string]string, callerRole string) (*DependenciesResponse, *AihubError) {
 	resp := &DependenciesResponse{
 		Blocking:  []DependencyListEntry{},
@@ -472,9 +504,14 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		if err := blockingRows.Scan(&entry.ID, &slug, &entry.Project, &entry.Kind, &entry.Note); err != nil {
 			continue
 		}
-		if callerRole == "admin" || callerProjectRoles[entry.Project] != "" {
-			entry.Slug = &slug
-		} else {
+		// Slug unconditionally; only ID is withheld. Membership is compared through
+		// roleLevel rather than tested for non-emptiness, matching
+		// checkProjectAccess: a legacy role string that reaches no known level
+		// (migration 0013 backfilled arbitrary values) is not a membership.
+		entry.Slug = &slug
+		entry.Accessible = callerRole == "admin" ||
+			roleLevel(callerProjectRoles[entry.Project]) >= roleLevel("viewer")
+		if !entry.Accessible {
 			entry.ID = "hidden"
 		}
 		resp.Blocking = append(resp.Blocking, entry)
@@ -498,9 +535,14 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		if err := blockedByRows.Scan(&entry.ID, &slug, &entry.Project, &entry.Kind, &entry.Note); err != nil {
 			continue
 		}
-		if callerRole == "admin" || callerProjectRoles[entry.Project] != "" {
-			entry.Slug = &slug
-		} else {
+		// Slug unconditionally; only ID is withheld. Membership is compared through
+		// roleLevel rather than tested for non-emptiness, matching
+		// checkProjectAccess: a legacy role string that reaches no known level
+		// (migration 0013 backfilled arbitrary values) is not a membership.
+		entry.Slug = &slug
+		entry.Accessible = callerRole == "admin" ||
+			roleLevel(callerProjectRoles[entry.Project]) >= roleLevel("viewer")
+		if !entry.Accessible {
 			entry.ID = "hidden"
 		}
 		resp.BlockedBy = append(resp.BlockedBy, entry)

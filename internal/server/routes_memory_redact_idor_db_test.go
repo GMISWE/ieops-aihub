@@ -103,9 +103,31 @@ func TestRedactMemory_AuthorWithoutProjectAccessIsRefused(t *testing.T) {
 	rec, err := callRedact(t, pool, memID, `{"reason":"I still want this gone"}`, evicted)
 
 	require.Error(t, err, "an evicted author must be refused")
-	require.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+
+	// 🔴 Expected status changed 403 -> 404 on 2026-09-06 (aihub#377). CONTRACT
+	// CHANGE, not a red test tuned green. The invariant, verbatim:
+	//
+	//	在某个 project 里的用户，能看到该 project 的一切（memory、work item、
+	//	artifact、event、step、依赖）；不在的，对该 project 的一切必须拿到与
+	//	「不存在」逐字节相同的响应。
+	//
+	//	(A user who is in a project can see everything about it. A user who is
+	//	not must get a response byte-identical to the one for something that
+	//	does not exist.)
+	//
+	// The evicted author holds no role on the project any more — the arm above
+	// asserts exactly that with hasProjectAccess — so they are a non-member and
+	// get what a non-member gets. Being the memory's AUTHOR is not a membership;
+	// that is the whole point of this test (aihub#175: the project gate is the
+	// one that expires, and the author check is not a substitute for it).
+	//
+	// 🔴 STILL DISCRIMINATING, and note the assertion below is untouched: THE
+	// criterion was never the status code. If the eviction were not enforced the
+	// redaction would succeed, memStatus would be "redacted", and that line goes
+	// red no matter what this one says.
+	require.Equal(t, http.StatusNotFound, rec.Code, "body=%s", rec.Body.String())
 	require.Equal(t, "active", memStatus(t, pool, memID),
-		"THE criterion: the memory must be untouched, not merely answered 403")
+		"THE criterion: the memory must be untouched, not merely refused")
 
 	var nEvents int
 	require.NoError(t, pool.QueryRow(context.Background(),

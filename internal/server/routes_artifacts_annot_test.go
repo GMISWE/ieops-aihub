@@ -426,9 +426,12 @@ func TestArtifactReplyCommit_NonWriter(t *testing.T) {
 
 	form := url.Values{"body": {"a reply"}}
 	c, rec := newArtifactFormRequest(t, "mem_spec_1", "cm_a", "reply", form, userWithProjects("testproject"))
-	if err := handleUIArtifactReplyCommit(nil)(c); err == nil && rec.Code != http.StatusForbidden {
-		t.Errorf("should return 403 for non-writer; code=%d", rec.Code)
-	}
+	// 🔴 aihub#377: was `if err := h(c); err == nil && rec.Code != http.StatusForbidden`,
+	// which could never fire — checkProjectAccess returns non-nil, so the status
+	// comparison was dead code and 403/404/200/500 all passed. assertNotVisibleDenial
+	// checks the real denial AND proves its own predicate can still reject a wrong one.
+	err := handleUIArtifactReplyCommit(nil)(c)
+	assertNotVisibleDenial(t, err, rec, "otherproject")
 	if len(*calls) != 0 {
 		t.Errorf("doReplyCommitFn must not be called on auth failure")
 	}
@@ -490,9 +493,12 @@ func TestArtifactResolveCommit_NonWriter(t *testing.T) {
 
 	form := url.Values{"reply": {"done"}}
 	c, rec := newArtifactFormRequest(t, "mem_spec_2", "cm_b", "resolve", form, userWithProjects("testproject"))
-	if err := handleUIArtifactResolveCommit(nil)(c); err == nil && rec.Code != http.StatusForbidden {
-		t.Errorf("should return 403 for non-writer; code=%d", rec.Code)
-	}
+	// 🔴 aihub#377: was `if err := h(c); err == nil && rec.Code != http.StatusForbidden`,
+	// which could never fire — checkProjectAccess returns non-nil, so the status
+	// comparison was dead code and 403/404/200/500 all passed. assertNotVisibleDenial
+	// checks the real denial AND proves its own predicate can still reject a wrong one.
+	err := handleUIArtifactResolveCommit(nil)(c)
+	assertNotVisibleDenial(t, err, rec, "otherproject")
 	if len(*calls) != 0 {
 		t.Errorf("doResolveCommitFn must not be called on auth failure")
 	}

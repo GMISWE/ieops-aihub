@@ -206,7 +206,7 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		mem, aihubErr := loadMemoryFn(ctx, pool, memID)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 
 		// Project-level access (viewer minimum) + per-memory visibility check.
@@ -1209,7 +1209,7 @@ func handleShareArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		mem, aihubErr := loadMemoryFn(ctx, pool, c.Param("id"))
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 		if err := checkProjectAccess(c, u, mem.Project, "writer"); err != nil {
 			return err
@@ -1286,7 +1286,7 @@ func handleUnshareArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		mem, aihubErr := loadMemoryFn(ctx, pool, c.Param("id"))
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			return writeError(c, hideNotFound(aihubErr))
 		}
 		if err := checkProjectAccess(c, u, mem.Project, "writer"); err != nil {
 			return err
@@ -1908,7 +1908,7 @@ func handleUIArtifactReplyCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
 		if loadErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "artifact not found"))
+			return writeError(c, errNotVisible())
 		}
 		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
 			return err
@@ -1941,7 +1941,7 @@ func handleUIArtifactResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
 		if loadErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "artifact not found"))
+			return writeError(c, errNotVisible())
 		}
 		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
 			return err
@@ -1990,7 +1990,7 @@ func handleUIArtifactCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		// Load (project, status) to check access before CommitMemory's own guard.
 		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
 		if loadErr != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "artifact not found"))
+			return writeError(c, errNotVisible())
 		}
 		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
 			return err

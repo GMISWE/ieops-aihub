@@ -82,12 +82,23 @@ func (s *Server) registerStepTools() {
 			"When completing a step that has a successor, pass next_step to complete-and-start in ONE call " +
 			"instead of following up with a separate status=\"in_progress\" call — the two transitions then " +
 			"share a transaction and emit both events. There is no version/CAS argument: concurrency is " +
-			"guarded server-side by the idle-step predicate, so no pf_get_step is needed before this call.",
+			"guarded server-side by the idle-step predicate, so no pf_get_step is needed before this call. " +
+			"A 200 on completed/failed means BOTH records landed: the step-history row pf_get_step's " +
+			"completed_steps is read from AND the step_completed/step_failed event. A transition that cannot " +
+			"deliver both is REFUSED with nothing committed — 400 for a missing or blank step_attempt_id, " +
+			"409 for a step_attempt_id that already has a history row (do not resend), 413 for an " +
+			"artifact_summary over 4096 characters — never a 200 that silently records only one of the two " +
+			"(aihub#390, aihub#399).",
 		InputSchema: objectSchema(map[string]any{
-			"work_item_id":     prop("string", "Work item ID"),
-			"step_id":          prop("string", "Step ID to update"),
-			"status":           prop("string", "in_progress|completed|failed"),
-			"step_attempt_id":  prop("string", "Step attempt ID of the step being completed/failed (required for completed/failed)"),
+			"work_item_id": prop("string", "Work item ID"),
+			"step_id":      prop("string", "Step ID to update"),
+			"status":       prop("string", "in_progress|completed|failed"),
+			"step_attempt_id": prop("string", "Step attempt ID of the step being completed/failed. REQUIRED for "+
+				"completed/failed and enforced server-side since aihub#399: the step-history row that "+
+				"pf_get_step's completed_steps is read from is keyed on it, so a terminal transition without one "+
+				"is refused 400 with nothing committed rather than answered 200 with the step missing from the "+
+				"history. A blank string is refused too. Reusing an id that already has a history row is 409. "+
+				"Optional on in_progress, which files no history row."),
 			"artifact_summary": prop("string", "Brief summary of artifacts produced — at most 4096 characters. Longer values are rejected (413) rather than recorded, because the step history row that pf_get_step's completed_steps reads has that cap (aihub#390)."),
 			"error_type":       prop("string", "Error type (for failed status)"),
 			"escalated":        prop("boolean", "Whether to escalate the failure"),
@@ -145,6 +156,21 @@ func (s *Server) registerStepTools() {
 		}
 		if strArg(args, "status") == "" {
 			return errResult(fmt.Errorf("status is required"))
+		}
+		// aihub#399, hop 1. The schema has published step_attempt_id as "required
+		// for completed/failed" since aihub#265 and nothing enforced it at either
+		// end, which is how the field became optional in practice: updateStepBody
+		// below forwards the key only when non-empty, so omitting the argument
+		// sends no key, and the server used to answer 200 while filing no history
+		// row. The server is the authority now; this check exists so the caller
+		// error costs no round-trip — the same relationship validateNextStepArgs
+		// has with its server-side namesake.
+		//
+		// It must sit AFTER the heartbeat branch above, which returns early with a
+		// credentials-only body and may legitimately carry status="completed"
+		// while completing no step.
+		if err := validateTerminalStepArgs(strArg(args, "status"), strArg(args, "step_attempt_id")); err != nil {
+			return errResult(err)
 		}
 
 		body := updateStepBody(args, sf.AttemptID, sf.ClaimEpoch, sf.SessionSecret)
@@ -231,6 +257,33 @@ func validateNextStepArgs(nextStep, nextStepAttemptID, status string, heartbeat 
 		return fmt.Errorf("next_step_attempt_id was sent without next_step; it names the attempt of the step being STARTED, so with no next_step nothing reads it (use step_attempt_id for the step being completed)")
 	}
 	return nil
+}
+
+// validateTerminalStepArgs mirrors the server's check of the same name
+// (internal/server/routes_step.go), which is the authority; this copy exists so
+// a terminal transition that cannot be recorded fails before it costs a
+// round-trip.
+//
+// The two differ in one way that is deliberate rather than drift: this side
+// takes a plain string, because strArg cannot distinguish an absent argument
+// from an explicit "" — and it does not need to. Both are refused, the server
+// distinguishes them in its message, and updateStepBody forwards the key only
+// when non-empty, so "" would reach the server as an absent field anyway.
+//
+// It is not called on the heartbeat path (see the call site).
+func validateTerminalStepArgs(status, stepAttemptID string) error {
+	if status != "completed" && status != "failed" {
+		return nil
+	}
+	if strings.TrimSpace(stepAttemptID) != "" {
+		return nil
+	}
+	return fmt.Errorf(
+		"step_attempt_id is required with status=%q: the step-history row that pf_get_step's completed_steps is "+
+			"read from is keyed on it, so the server refuses this transition (400) rather than recording it in the "+
+			"timeline and nowhere else. Pass the same step_attempt_id you generated when starting the step — if that "+
+			"step was started by a fused pf_update_step(next_step=...), it is the next_step_attempt_id from that call",
+		status)
 }
 
 // updateStepBody renders pf_update_step's arguments into the PATCH

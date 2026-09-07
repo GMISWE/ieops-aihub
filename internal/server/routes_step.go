@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -431,6 +432,15 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			}
 		}
 
+		// aihub#399: step_attempt_id is REQUIRED on a terminal transition, and is
+		// now enforced rather than merely published. Sits here, beside the cap
+		// check and after the heartbeat return, for the same reason that one does:
+		// a heartbeat is selected by its flag and may legitimately carry
+		// status="completed" while completing no step.
+		if aerr := validateTerminalStepArgs(req.Status, req.StepAttemptID, req.Heartbeat); aerr != nil {
+			return writeError(c, aerr)
+		}
+
 		// All step transitions run in a single transaction for atomicity
 		tx, txErr := pool.Begin(c.Request().Context())
 		if txErr != nil {
@@ -483,11 +493,17 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				WHERE work_item_id = $1`, wiID, req.Step); execErr != nil {
 				return writeError(c, domain.NewErr(domain.ErrInternalError, execErr.Error()))
 			}
-			if req.StepAttemptID != nil {
-				if aerr := insertStepCompletion(c.Request().Context(), tx, wiID, req.AttemptID, *req.StepAttemptID,
-					derefStr(currentStep), "completed", req.ArtifactSummary, nil, false); aerr != nil {
-					return writeError(c, aerr)
-				}
+			// Unconditional since aihub#399. The `if req.StepAttemptID != nil`
+			// this replaces was the whole defect: it turned "no step_attempt_id"
+			// into "file no history row", silently, on a request that still
+			// bumped version, still emitted step_completed and still answered
+			// 200. validateTerminalStepArgs above has already refused a nil or
+			// blank id, so the guard is not moved here — it is gone, because a
+			// leftover `!= nil` would be dead code able to hide the same defect
+			// again if that check were ever relaxed.
+			if aerr := insertStepCompletion(c.Request().Context(), tx, wiID, req.AttemptID, derefStr(req.StepAttemptID),
+				derefStr(currentStep), "completed", req.ArtifactSummary, nil, false); aerr != nil {
+				return writeError(c, aerr)
 			}
 			events = append(events, stepEvent{
 				eventType:       "step_completed",
@@ -532,11 +548,10 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				WHERE work_item_id = $1`, wiID); execErr != nil {
 				return writeError(c, domain.NewErr(domain.ErrInternalError, execErr.Error()))
 			}
-			if req.StepAttemptID != nil {
-				if aerr := insertStepCompletion(c.Request().Context(), tx, wiID, req.AttemptID, *req.StepAttemptID,
-					derefStr(currentStep), "failed", req.ArtifactSummary, req.ErrorType, req.Escalated); aerr != nil {
-					return writeError(c, aerr)
-				}
+			// Unconditional since aihub#399 — see the completed branch above.
+			if aerr := insertStepCompletion(c.Request().Context(), tx, wiID, req.AttemptID, derefStr(req.StepAttemptID),
+				derefStr(currentStep), "failed", req.ArtifactSummary, req.ErrorType, req.Escalated); aerr != nil {
+				return writeError(c, aerr)
 			}
 			events = append(events, stepEvent{eventType: "step_failed", step: derefStr(req.Step)})
 
@@ -583,32 +598,37 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "status must be in_progress|completed|failed"))
 		}
 
-		// Emit step events inside transaction — best-effort; SAVEPOINT ensures a
-		// failed insert (e.g. FK violation on run_attempt_id) does not abort the
-		// main transaction. JSON payload uses json.Marshal of a map to avoid
-		// manual-escaping bugs (fmt.Sprintf(%q) is fine for a single string but
-		// does not compose safely once a second field is added). Each event gets
-		// its OWN savepoint, so one bad insert cannot take the other down with it.
-		if u != nil {
-			for _, ev := range events {
-				evtPayloadMap := map[string]any{"step": ev.step}
-				if ev.eventType == "step_completed" && ev.artifactSummary != nil {
-					evtPayloadMap["artifact_summary"] = *ev.artifactSummary
-				}
-				evtPayload, _ := json.Marshal(evtPayloadMap)
-
-				tx.Exec(c.Request().Context(), `SAVEPOINT bp`) //nolint:errcheck
-				if _, bpErr := tx.Exec(c.Request().Context(), `
-					INSERT INTO agent_events
-					    (id, work_item_id, run_attempt_id, actor_user_id, api_key_id, event_type, payload, project)
-					VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb,
-					    (SELECT project FROM work_items WHERE id=$2))`,
-					domain.NewID("evt"), wiID, req.AttemptID, u.UserID, u.APIKeyID, ev.eventType,
-					evtPayload); bpErr != nil {
-					tx.Exec(c.Request().Context(), `ROLLBACK TO SAVEPOINT bp`) //nolint:errcheck
-				} else {
-					tx.Exec(c.Request().Context(), `RELEASE SAVEPOINT bp`) //nolint:errcheck
-				}
+		// Emit the step events inside the transaction, and NOT best-effort
+		// (aihub#399). This loop used to wrap each INSERT in its own
+		// `SAVEPOINT bp` and discard the error on ROLLBACK, on the same theory
+		// aihub#390 removed from the history row: that the state change was the
+		// primary write and the record of it a courtesy. It is the mirror image
+		// of that defect. aihub#390 made completed_steps strict and recorded in
+		// its own notes that the events side could still fail silently — so the
+		// invariant "completed_steps equals the attempt's step_completed /
+		// step_failed events" stayed breakable from the other direction: history
+		// row written, timeline entry swallowed, 200 answered, and pf_read_events
+		// then under-reporting what pf_get_step claims.
+		//
+		// So a 200 now means BOTH records landed, and a transition that cannot
+		// write its event is refused with nothing committed. The accepted cost is
+		// the symmetric one: an agent_events problem that used to pass unnoticed
+		// now fails step transitions. That is the same trade as the history row,
+		// and it is bounded — 0031 added the DEFAULT partition precisely so that
+		// routing can no longer be the thing that fails.
+		//
+		// u cannot be nil here: checkProjectAccess above answers 401 for an
+		// unauthenticated request, so this branch is unreachable and has NO gate
+		// — it is stated as an assertion, not claimed to be tested. It is a
+		// refusal rather than a skip because "emit no timeline at all" is exactly
+		// the outcome this change exists to remove.
+		if u == nil {
+			return writeError(c, domain.NewErr(domain.ErrInternalError,
+				"no authenticated actor to attribute the step timeline to; nothing was committed"))
+		}
+		for _, ev := range events {
+			if aerr := insertStepEvent(c.Request().Context(), tx, wiID, req.AttemptID, u, ev); aerr != nil {
+				return writeError(c, aerr)
 			}
 		}
 
@@ -670,11 +690,151 @@ func validateNextStepArgs(nextStep, nextStepAttemptID, status string, heartbeat 
 	return nil
 }
 
+// validateTerminalStepArgs enforces what the pf_update_step schema has claimed
+// since aihub#265 and the server never checked: a completed or failed
+// transition must carry a step_attempt_id.
+//
+// It is the (a) half of aihub#399 (filed twice — aihub#403 is the same finding
+// from aihub#390's session). The history INSERT used to be reached only
+// `if req.StepAttemptID != nil`, so omitting the field did not fail the
+// request, it removed the record: wi_step_state advanced, version bumped, the
+// step_completed / step_failed event was emitted with the full summary, the
+// call answered 200 — and pf_get_step's completed_steps, which the tool tells a
+// resuming agent to treat as the full done-set, was one step short with
+// completed_steps_truncated=false. A resumer then redoes a finished step. The
+// MCP layer made this reachable without any malformed input:
+// internal/mcp/tools_step.go's updateStepBody forwards the key only when
+// non-empty, so an agent that simply omits the argument sends no key at all.
+//
+// Blank is rejected as well as absent, and it is the WORSE of the two: "" is
+// non-nil, so it used to reach the INSERT and file a row keyed on the empty
+// string. wi_step_completions.step_attempt_id is NOT NULL with a GLOBAL unique
+// index (idx_wsc_attempt), so the first blank id was accepted and the SECOND
+// one — from an unrelated work item, in an unrelated attempt — came back 409
+// "already has a step-history row" naming an id its caller never chose.
+// Whitespace-only is treated as blank for the same reason; it is not an id
+// either.
+//
+// Heartbeats are exempt, and that exemption is the subtle part rather than a
+// convenience: `heartbeat` is selected by its own flag, not by the status, so a
+// heartbeat may legitimately carry status="completed", and it returns early
+// having completed no step and written no history row. Requiring an id there
+// would reject a valid liveness ping. handleUpdateStep therefore calls this
+// AFTER the heartbeat return — the same position, for the same reason, as
+// aihub#390's artifact_summary cap check.
+//
+// in_progress is exempt because it files no history row at all; a bare start is
+// how pf-execute's loop opens a step graph.
+//
+// Pure and DB-free so TestValidateTerminalStepArgs can hold every combination
+// without a database.
+func validateTerminalStepArgs(status string, stepAttemptID *string, heartbeat bool) *domain.AihubError {
+	if heartbeat || (status != "completed" && status != "failed") {
+		return nil
+	}
+	const why = ": the step-history row that pf_get_step's completed_steps is read from is keyed on it, so the " +
+		"transition could only be recorded in the timeline and never in the history — which is the silent " +
+		"disagreement that made a resuming agent redo a finished step. Nothing was committed; resend with the " +
+		"step_attempt_id used to start the step"
+	if stepAttemptID == nil {
+		return domain.NewErr(domain.ErrBadRequest,
+			`status="`+status+`" requires step_attempt_id and none was sent`+why)
+	}
+	if strings.TrimSpace(*stepAttemptID) == "" {
+		return domain.NewErr(domain.ErrBadRequest,
+			`status="`+status+`" requires step_attempt_id and a blank one is not an id`+why+
+				" (a blank id is not merely useless: it is filed under the empty string, and the global unique "+
+				"index then answers 409 on the next such request about an id nobody chose)")
+	}
+	return nil
+}
+
 // stepEvent is one agent_events row a step transition owes the timeline.
 type stepEvent struct {
 	eventType       string
 	step            string
 	artifactSummary *string
+}
+
+// insertStepEvent appends one step_started / step_completed / step_failed row to
+// agent_events inside the caller's transaction. Its errors are the request's
+// errors — see the call site in handleUpdateStep for why this stopped being
+// best-effort (aihub#399).
+//
+// runAttemptID is sent as SQL NULL when empty, and that is a fix rather than a
+// tidy-up. agent_events.run_attempt_id is a nullable FK to run_attempts
+// (migration 0006 keeps it nullable for events that belong to no attempt),
+// while '' names no attempt — so the handler, which passes a non-pointer
+// string, made EVERY step transition PATCHed without an attempt_id violate
+// agent_events_run_attempt_id_fkey. Under the old savepoint that violation was
+// swallowed and the event vanished; with errors now reaching the caller it
+// would instead turn a shape that answered 200 into a 400. Neither is right:
+// "this event belongs to no attempt" is a fact the column can hold, so it is
+// recorded. Measured on PostgreSQL 18.6 with this repo's migrations:
+// run_attempt_id='' -> 23503, run_attempt_id=NULL -> accepted.
+//
+// The error mapping:
+//
+//   - 23503 is the run_attempt_id foreign key with a NON-empty attempt_id, i.e.
+//     the caller named an attempt that does not exist. The credential check in
+//     handleUpdateStep is skipped when session_secret is empty, so nothing
+//     before this notices. 400, naming the field — the same answer
+//     insertStepCompletion gives the same FK.
+//   - 22P05 is the measured one: `step` is copied into the JSON verbatim and
+//     the jsonb cast rejects a NUL byte ("unsupported Unicode escape sequence
+//     ... cannot be converted to text"). That is the caller's own string, so
+//     400. Note the completed branch escapes this by accident — its own
+//     `UPDATE ... current_step = $2` fails first — which is why the failed
+//     branch is where the gate exercises it. 22021 is listed alongside it as
+//     the same class raised by a text column rather than by the cast; it is
+//     NOT measured here and no input is known to reach it through this
+//     statement, since every text parameter comes from a resolved row or the
+//     authenticated user.
+//   - anything else is 500. work_item_id was resolved from a real row and
+//     actor_user_id comes from the authenticated user, so nothing else here is
+//     caller-driven.
+func insertStepEvent(ctx context.Context, tx pgx.Tx, wiID, runAttemptID string, u *UserContext, ev stepEvent) *domain.AihubError {
+	// json.Marshal of a map rather than manual escaping: fmt.Sprintf(%q) is fine
+	// for a single string but does not compose safely once a second field is
+	// added.
+	payloadMap := map[string]any{"step": ev.step}
+	if ev.eventType == "step_completed" && ev.artifactSummary != nil {
+		payloadMap["artifact_summary"] = *ev.artifactSummary
+	}
+	payload, mErr := json.Marshal(payloadMap)
+	if mErr != nil {
+		return domain.NewErr(domain.ErrInternalError, "marshal "+ev.eventType+" payload")
+	}
+
+	var runAttempt any
+	if runAttemptID != "" {
+		runAttempt = runAttemptID
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO agent_events
+		    (id, work_item_id, run_attempt_id, actor_user_id, api_key_id, event_type, payload, project)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb,
+		    (SELECT project FROM work_items WHERE id=$2))`,
+		domain.NewID("evt"), wiID, runAttempt, u.UserID, u.APIKeyID, ev.eventType, payload)
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23503":
+			return domain.NewErr(domain.ErrBadRequest, fmt.Sprintf(
+				"attempt_id %q does not name an existing run attempt, so the %s event cannot be filed against it; "+
+					"the step timeline is part of what a 200 promises — nothing was committed",
+				runAttemptID, ev.eventType))
+		case "22P05", "22021":
+			return domain.NewErr(domain.ErrBadRequest, fmt.Sprintf(
+				"the %s event could not be recorded: step %q carries a character the event payload cannot store "+
+					"(SQLSTATE %s) — nothing was committed",
+				ev.eventType, ev.step, pgErr.Code))
+		}
+	}
+	return domain.NewErr(domain.ErrInternalError, "record "+ev.eventType+" event")
 }
 
 // insertStepCompletion appends the wi_step_completions row for a step that just

@@ -27,6 +27,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
 func step(id string) CompletedStep { return CompletedStep{StepID: id} }
@@ -609,4 +611,75 @@ func TestArtifactSummaryCapMatchesTheMigration(t *testing.T) {
 			maxArtifactSummaryChars)
 	}
 	t.Logf("artifact_summary cap declared by: %s; maxArtifactSummaryChars = %d", strings.Join(found, ", "), maxArtifactSummaryChars)
+}
+
+// TestValidateTerminalStepArgs is the DB-free half of aihub#399's (a) fix: the
+// requirement itself, held against every combination of status / heartbeat /
+// step_attempt_id shape, so it runs on every PR with no service container.
+//
+// What it does NOT cover is that handleUpdateStep actually calls it and refuses
+// the request — deleting the call site keeps this test green. That is the
+// wiring hop, and it is asserted end-to-end by
+// TestHandleUpdateStep_TerminalWithoutStepAttemptIDIsRefused in
+// routes_step_outcome_records_db_test.go, which needs a database because the
+// finding is a disagreement between two tables.
+func TestValidateTerminalStepArgs(t *testing.T) {
+	sa := "sa_01JQ"
+	blank := ""
+	spaces := "   "
+	cases := []struct {
+		name          string
+		status        string
+		stepAttemptID *string
+		heartbeat     bool
+		wantRejected  bool
+	}{
+		{"completed with an id", "completed", &sa, false, false},
+		{"failed with an id", "failed", &sa, false, false},
+		{"completed with no id", "completed", nil, false, true},
+		{"failed with no id", "failed", nil, false, true},
+		{"completed with a blank id", "completed", &blank, false, true},
+		{"failed with a blank id", "failed", &blank, false, true},
+		{"completed with a whitespace-only id", "completed", &spaces, false, true},
+		// in_progress files no history row, so a bare start — how pf-execute's
+		// loop opens a step graph — must stay legal.
+		{"in_progress with no id", "in_progress", nil, false, false},
+		{"in_progress with an id", "in_progress", &sa, false, false},
+		// A heartbeat is selected by its flag and may carry status="completed"
+		// while completing nothing; it returns before any history write, so
+		// requiring an id there would reject a valid liveness ping.
+		{"heartbeat carrying completed, no id", "completed", nil, true, false},
+		{"heartbeat carrying failed, blank id", "failed", &blank, true, false},
+		// An unknown status is the default branch's 400, not this check's.
+		{"unknown status with no id", "banana", nil, false, false},
+		{"empty status with no id", "", nil, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			aerr := validateTerminalStepArgs(tc.status, tc.stepAttemptID, tc.heartbeat)
+			if !tc.wantRejected {
+				if aerr != nil {
+					t.Fatalf("validateTerminalStepArgs(%q, %v, heartbeat=%v) rejected a legal request: %s",
+						tc.status, tc.stepAttemptID, tc.heartbeat, aerr.Message)
+				}
+				return
+			}
+			if aerr == nil {
+				t.Fatalf("validateTerminalStepArgs(%q, %v, heartbeat=%v) accepted a terminal transition with no "+
+					"usable step_attempt_id; the history row completed_steps is read from is keyed on it, so the "+
+					"transition would be recorded in the timeline and nowhere else",
+					tc.status, tc.stepAttemptID, tc.heartbeat)
+			}
+			if aerr.Code != domain.ErrBadRequest {
+				t.Errorf("code = %q, want %q: the caller omitted a required field, which is their error, not a conflict or a server fault",
+					aerr.Code, domain.ErrBadRequest)
+			}
+			if !strings.Contains(aerr.Message, "step_attempt_id") {
+				t.Errorf("the refusal must name the field the schema calls required; got %q", aerr.Message)
+			}
+			if !strings.Contains(aerr.Message, tc.status) {
+				t.Errorf("the refusal must name the status it applies to (so the caller can tell it apart from the in_progress path); got %q", aerr.Message)
+			}
+		})
+	}
 }

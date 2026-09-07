@@ -1,12 +1,5 @@
 [
   {
-    "gate": "KEEP_LIST_PROJECTION",
-    "tool": "pf_force_takeover",
-    "subject": "some_field_added_after_this_gate_was_written",
-    "wi": "aihub#422",
-    "note": "the handler builds safeResult as a hand-listed 5-key map (prior_attempt_id, prior_actor_display, new_attempt_id, new_claim_epoch, ok). aihub#388's defect in the handler NEXT DOOR: #388 quoted this very handler's 'no expires_at; do not surface that field' comment while fixing the claim projection and left this one a keep-list."
-  },
-  {
     "gate": "PARAM_NOT_FORWARDED",
     "tool": "pf_cut_alpha",
     "subject": "work_item_id",

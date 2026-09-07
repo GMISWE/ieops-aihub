@@ -1191,7 +1191,7 @@ func (s *Server) registerLifecycleTools() {
 		// `wi_type`, `id` and `step_recovery_hint` in silence, the first being the
 		// field the post-claim routing rule branches on (aihub#388). It had also
 		// rotted the other way, faithfully copying `expires_at`, which v1.21
-		// removed and which the pf_force_takeover handler above says not to
+		// removed and which the pf_force_takeover handler below says not to
 		// surface. aihub#238's note about `unrecognized_resources` needing to stay
 		// in that list is now structural rather than remembered: nothing is copied,
 		// so nothing can be forgotten. Do not reintroduce a copy loop here — see
@@ -1439,15 +1439,37 @@ func (s *Server) registerLifecycleTools() {
 				err, prior, sf.AttemptID, sf.ClaimEpoch, stateWriteFilesystemAdvice))
 		}
 
-		// Return result without session_secret.
-		// v1.21 ownership-only: no expires_at; do not surface that field.
-		safeResult := map[string]any{
-			"prior_attempt_id":    result["prior_attempt_id"],
-			"prior_actor_display": result["prior_actor_display"],
-			"new_attempt_id":      sf.AttemptID,
-			"new_claim_epoch":     sf.ClaimEpoch,
-			"ok":                  result["ok"],
-		}
+		// The takeover response the model sees: everything the server sent, MINUS
+		// the keys force_takeover_response_slim.go names and gives a reason for.
+		//
+		// ⚠️ It used to be the other way round — a fresh map holding five named keys
+		// — and that keep-list dropped `id`, `slug` and `project` in silence
+		// (aihub#422). Those are the three aihub#149 added to
+		// domain.ForceTakeoverResponse so that a SLUG-addressed takeover could still
+		// key its state file canonically; this handler reads all three itself, above,
+		// and then told the model none of them — so the answer withheld the identity
+		// this very call had just established, and the only surviving copy was in a
+		// state file the model does not read. Do not reintroduce a copy loop here —
+		// see that file's header for the five instances of this pattern that
+		// preceded it, and
+		// TestForceTakeoverResultPassesThroughAFieldTheStructDoesNotHaveYet, which no
+		// keep-list can pass however complete it is today.
+		//
+		// v1.21 ownership-only: `expires_at` is not a field of ForceTakeoverResponse
+		// and this handler never surfaced one. Under a delete-list that needs no
+		// entry: a key the response does not carry cannot be forwarded, and naming it
+		// here would be the same rot that left `expires_at` in the old CLAIM
+		// keep-list — a projection faithfully maintaining a field that does not exist.
+		safeResult := slimForceTakeoverResult(result)
+		// Asserted by this handler rather than relayed: these two come from the state
+		// file just written, and they are what every later credential-checked pf_*
+		// call authenticates with. Relaying the server's values instead would report
+		// a credential this machine does not hold whenever the two disagree — an
+		// epoch the type switch above cannot parse leaves sf.ClaimEpoch at 0 while
+		// the wire still says something else. `ok` stays relayed: on this route the
+		// server's own OK field is the only statement of success.
+		safeResult["new_attempt_id"] = sf.AttemptID
+		safeResult["new_claim_epoch"] = sf.ClaimEpoch
 		return jsonResult(safeResult)
 	})
 

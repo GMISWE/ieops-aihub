@@ -53,11 +53,21 @@ var recallLocalOnlyParams = map[string]string{
 // recallUnpublishedForwardedParams are forwarded but deliberately not published.
 // The reverse direction of the same drift, and harmless only when it is
 // intentional — so it is written down rather than tolerated by omission.
+//
+// ⚠️ `cursor` was here until aihub#425, with the reason "paging is driven by
+// next_cursor from a previous response, not composed by the model; publishing it
+// would invite an invented cursor." It was moved into recallWireProbes below,
+// per the instruction TestRecallUnpublishedForwardedParamsAreDocumented gives
+// when a name becomes published. What overrode the reason was a measurement:
+// next_cursor is returned TO THE MODEL in a pf_recall result, so the model was
+// already holding cursors it had no published way to spend — the note assumed
+// the model would have to invent one.
 var recallUnpublishedForwardedParams = map[string]string{
-	"cursor": "paging is driven by next_cursor from a previous response, not composed " +
-		"by the model; publishing it would invite an invented cursor.",
 	"recall_algo": "a plugin-build opt-in (POLYFORGE_RECALL_ALGO) into the opt3 L1 " +
-		"lexical-relevance path, deliberately kept out of the model-visible contract.",
+		"lexical-relevance path, deliberately kept out of the model-visible contract. " +
+		"aihub#425 kept this decision and recorded it in the G4 allowlist " +
+		"(serverNamesNoToolCanReach) rather than reversing it: unlike cursor, no response " +
+		"field advertises it, so nobody is handed a value they cannot use.",
 }
 
 // recallWireProbes is hop 2 stated as VALUES: for each published param, the JSON
@@ -126,6 +136,14 @@ var recallWireProbes = map[string][]struct {
 		{shape: "experience.*,rule.work", want: "experience.*,rule.work"},
 		{shape: []any{}, want: ""},
 		{shape: float64(3), want: ""},
+	},
+	// aihub#425: published as of that work item; before it, the value already
+	// reached the wire and only the name was missing. "" for the empty spelling,
+	// because an absent cursor must be ABSENT rather than sent empty — see
+	// TestUnsuppliedCursorIsNotSentAsEmpty.
+	"cursor": {
+		{shape: "TS|mem_abc", want: "TS|mem_abc"},
+		{shape: "", want: ""},
 	},
 	// Local-only: published, deliberately absent from the wire.
 	"fields": {

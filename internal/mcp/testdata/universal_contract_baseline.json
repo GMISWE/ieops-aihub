@@ -15,34 +15,6 @@
   },
   {
     "gate": "BOUND_FIELD_UNPUBLISHED",
-    "tool": "pf_recall",
-    "subject": "handleRecall.cursor",
-    "wi": "aihub#425",
-    "note": "one line short of working in BOTH directions: tools_memory.go's recallStringParams forwards `cursor` when it is in args, and pf_recall's InputSchema never declares it, so the SDK drops it before the forwarding code is reached. No MCP caller can page past the first page."
-  },
-  {
-    "gate": "BOUND_FIELD_UNPUBLISHED",
-    "tool": "pf_recall",
-    "subject": "handleRecall.recall_algo",
-    "wi": "aihub#425",
-    "note": "a server-side recall-algorithm switch no tool exposes."
-  },
-  {
-    "gate": "BOUND_FIELD_UNPUBLISHED",
-    "tool": "pf_read_events",
-    "subject": "handleListEvents.cursor",
-    "wi": "aihub#425",
-    "note": "same shape as handleRecall.cursor on the events list: pf_read_events publishes limit, pinned_first, project, since, types, user_id and work_item_id, no cursor."
-  },
-  {
-    "gate": "BOUND_FIELD_UNPUBLISHED",
-    "tool": "pf_remember",
-    "subject": "handleRemember.tags",
-    "wi": "aihub#425",
-    "note": "the server binds memory tags; pf_remember publishes attrs, base_strength, content, context_snippet, dedup_mode, expires_at, project, related_memory_ids, supersedes_memory_id, type, visibility and work_item_id — no tags. If the /ui writer supplies them this becomes a serverNamesNoToolCanReach entry rather than a fix; that is what aihub#425 has to check first."
-  },
-  {
-    "gate": "BOUND_FIELD_UNPUBLISHED",
     "tool": "pf_update_user",
     "subject": "handleUpdateUser.author_aliases",
     "wi": "aihub#426",

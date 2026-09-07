@@ -116,6 +116,12 @@ var memoryToolWire = map[string]toolWire{
 			"related_memory_ids":   {shape: []any{"mem_a", "mem_b"}, landing: landBody, at: "related_memory_ids"},
 			"context_snippet":      {shape: "surrounding text", landing: landBody, at: "context_snippet"},
 			"supersedes_memory_id": {shape: "mem_old", landing: landBody, at: "supersedes_memory_id"},
+			// aihub#425: published as of that work item. The value already reached
+			// the body before it — pf_remember forwards its whole args map — so
+			// only the name was missing, and the effect was that the sole
+			// PUBLISHED way to tag a memory was to create it and then call
+			// pf_update_memory, which does publish tags.
+			"tags": {shape: []any{"alpha", "beta"}, landing: landBody, at: "tags"},
 		},
 	},
 	"pf_get_memory": {

@@ -159,6 +159,17 @@ func (s *Server) registerEventTools() {
 			"types": prop("array", "Filter by event types (whitelist). Lock churn is "+
 				"lock_acquired/lock_released, declaration changes wi_resources_updated. A claim emits one "+
 				"lock_acquired PER declared path, so unfiltered these can fill a page (default limit 50)."),
+			// aihub#425. Unlike pf_recall's cursor, this one was NOT merely
+			// unpublished — it was never put on the wire either, so this tool
+			// needed both halves. handleListEvents has always bound it and
+			// ListEvents has always returned next_cursor, so before this change a
+			// caller holding a next_cursor had no way to spend it and the second
+			// page of any event stream was unreachable from MCP. That is the
+			// aihub#259 shape (a parameter that never leaves this process), and
+			// the reason it is worse than a missing feature is the same: the
+			// answer looks complete.
+			"cursor": prop("string", "Opaque page token — pass a previous response's next_cursor "+
+				"to continue after the last event it returned."),
 			"since":        prop("string", "Since timestamp (RFC3339)"),
 			"limit":        prop("string", "Max events to return"),
 			"pinned_first": prop("boolean", "Return pinned events first"),
@@ -199,6 +210,7 @@ func (s *Server) registerEventTools() {
 		// string, which is the aihub#280 lesson — a caller sending the scalar form
 		// of an array-typed param must not be silently dropped either.
 		setIfNonempty(params, "types", csvArg(args, "types"))
+		setIfNonempty(params, "cursor", strArg(args, "cursor"))
 		setIfNonempty(params, "since", strArg(args, "since"))
 		setIfNonempty(params, "limit", strArg(args, "limit"))
 		if boolArg(args, "pinned_first") {

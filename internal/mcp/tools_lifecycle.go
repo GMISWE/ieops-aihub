@@ -1958,9 +1958,29 @@ func declaredResourcesProp(description string) map[string]any {
 	p["items"] = map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"type": propEnum("string", "Declared resource type (NOT a lock type)", domain.DeclaredResourceTypeList()),
+			// aihub#395 part 3. `external_ref` is the one declared type that
+			// derives NO lock — resourceToLock returns ("","") for it — and it is
+			// also exempt from the no-uri warning, so it is the only entry that can
+			// be declared, accepted, and produce no signal of any kind. Under a
+			// field whose own description says "Declared resource locks", that reads
+			// as a lock. Say what it is instead of leaving the caller to measure it.
+			"type": propEnum("string", "Declared resource type (NOT a lock type). ⚠️ external_ref takes "+
+				"NO lock and no warning — an annotation only; every other type derives a lock.",
+				domain.DeclaredResourceTypeList()),
+			// aihub#395 part 4. Generated from domain.declaredResourceURISchemes,
+			// which is the table ValidateDeclaredResources enforces — so the
+			// sentence a caller reads and the rule the server applies are one
+			// value. It used to be prose here and enforced nowhere, and a wrong
+			// scheme was a 200 that keyed the lock off the unstripped uri.
+			// Kept deliberately terse: this string is always-resident in every
+			// session that lists any of the four tools publishing this prop, so the
+			// REASON a wrong scheme is dangerous (TrimPrefix is a no-op on a prefix
+			// that is not there, so the lock lands on a nonsense key) lives in the
+			// comment above and in ValidateDeclaredResources, not here. What the
+			// caller needs at the call site is the rule and its consequence.
 			"uri": prop("string",
-				`Resource URI. Scheme by type: "file:<repo-relative-path>" for path/document/section, "repo:<repo-name>" for repo, "service:<name>" for service, a plain URL for external_ref.`),
+				"Resource URI; the scheme is validated per type (wrong scheme = 400 naming the entry): "+
+					domain.DeclaredResourceURISchemeDoc()+"."),
 			// Deliberately NOT an enum. The server does not validate `intent` at all;
 			// only two values change behaviour ("read" suppresses the write lock and
 			// downgrades path conflicts to info; "refactor" on a repo entry triggers
@@ -1969,7 +1989,12 @@ func declaredResourcesProp(description string) map[string]any {
 			// server does not keep — the exact failure this wi is about — so describe
 			// the semantics instead and let unknown values through as inert. (aihub#238)
 			"intent": prop("string",
-				`Access intent. Not validated by the server; only two values carry behaviour: "read" (takes no write lock, and path overlaps report as info instead of soft_block) and "refactor" (on a repo entry, flags other refactors of the same repo). "write" is the conventional default; other values are accepted but inert.`),
+				`Access intent. Not validated by the server; only two values carry behaviour: "read" and `+
+					`"refactor" (on a repo entry, flags other refactors of the same repo). "write" is the `+
+					`conventional default; other values are accepted but inert. ⚠️ "read" is honoured on `+
+					`path/document/section ONLY — no write lock, and a path overlap reports info instead `+
+					`of soft_block. A repo entry still takes git_branch and a service entry deploy_env `+
+					`whatever the intent says, so "read" on those two is inert, not permissive.`),
 			// aihub#261. The uri of a path/document/section entry is REPO-relative,
 			// and until this field existed nothing in the payload said which repo —
 			// so in a multi-repo project every repo's go.mod / Makefile / README.md
@@ -1983,7 +2008,22 @@ func declaredResourcesProp(description string) map[string]any {
 			// "means no repo" would expect isolation the server does not give.
 			"repo": prop("string",
 				`Repo the uri is relative to (path/document/section entries only), e.g. "ieops-core". Optional but recommended in a multi-repo project: without it the lock key cannot tell one repo's go.mod/Makefile/README.md from another's, so unrelated work items block each other. Omitted means "unspecified repo", which still conflicts with every repo's copy of that path. Defaults to the repo named by this payload's own {"type":"repo"} entry when it names exactly one.`),
-			"base_branch": prop("string", "Base branch (repo entries only)"),
+			// aihub#395 part 2: `base_branch` is deliberately NOT published.
+			//
+			// It was `prop("string", "Base branch (repo entries only)")` and read by
+			// nothing. Measured on a8ad8c0, the complete set of non-test occurrences
+			// was the struct field (DeclaredResourceItem.BaseBranch) and the decoder
+			// that fills it (decodeDeclaredResources) — no lock key, conflict rule,
+			// query or worktree base. The worktree base is origin/main, hard-coded in
+			// addClaimWorktree, so a caller who set base_branch got a claim off
+			// origin/main with no error and no warning.
+			//
+			// Withdrawn from the schema rather than implemented, the same plan B as
+			// aihub#387 and aihub#394. The struct field and decoder STAY: stored
+			// declared_resources are JSON and a value already recorded on an existing
+			// work item must keep round-tripping. Deleting the field would silently
+			// drop it from every stored payload that carries one, which is a data
+			// loss to fix a documentation defect.
 			"task_branch": prop("string", "Task branch (repo entries only). Only a FALLBACK for lock-key derivation since aihub#356: a claim keys the git_branch lock on the branch it predicts it will check out (polyforge/<project>-<seq>-<goal>, or whatever branch already exists), and this value survives only for a repo the claim predicts NO branch for. ⚠️ That set is larger than it looks and the following is NOT exhaustive: no clone of the repo on this machine; the repo missing from the workspace .polyforge.yaml project; a worktree directory that already exists and that git refuses to verify, which makes the claim skip that repo and predict nothing for it; or the prediction step failing as a whole (work item unreadable, no workspace root, project unknown), in which case every declaration stands. Separately, pf_force_takeover sends no task_branches at all, so it never overrides this value for any repo. ⚠️ Predicting is not creating: if the prediction is made and the worktree then fails to materialise, the predicted name still wins over this one, and the claim reports that in worktree_problems. So do not rely on this to protect a hand-made branch in a repo the workspace has a clone of. Defaults to main."),
 		},
 		"required": []string{"type", "uri"},

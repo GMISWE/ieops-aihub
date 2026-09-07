@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
 // aihub#238 defect 3: the correct declared_resources shape was documented in
@@ -260,5 +262,157 @@ func TestNoResourceArrayIsRegisteredWithoutItemSchema(t *testing.T) {
 	if len(offenders) > 0 {
 		t.Errorf("these resource arrays are registered with a bare prop(\"array\") and so publish no entry shape (aihub#238): %v\n"+
 			"use declaredResourcesProp()/requestedLocksProp() instead", offenders)
+	}
+}
+
+// ─── aihub#395: the four declared_resources contract residues ───────────────
+
+// declaredResourcesItemsSchema renders the shared prop once so every assertion
+// below reads the SAME schema the four tools publish (declaredResourcesProp is
+// used by pf_create_work_item, pf_batch_create_work_items, pf_update_work_item
+// and pf_predict_conflicts). One definition is the point: a per-tool copy is how
+// two of these tools would end up describing different contracts.
+func declaredResourcesItemsSchema(t *testing.T) map[string]any {
+	t.Helper()
+	schema := objectSchema(map[string]any{
+		"declared_resources": declaredResourcesProp("Declared resource locks"),
+	}, nil)
+	return itemsSchemaFor(t, schema, "declared_resources")
+}
+
+func itemPropDescription(t *testing.T, items map[string]any, field string) (string, bool) {
+	t.Helper()
+	props, ok := items["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("items schema has no properties block: %v", items)
+	}
+	p, ok := props[field].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	desc, _ := p["description"].(string)
+	return desc, true
+}
+
+// TestDeclaredResourcesProp_DoesNotPublishBaseBranch is the aihub#395 part 2
+// gate, and it FAILS on the pre-fix tree.
+//
+// `base_branch` was published as "Base branch (repo entries only)" and read by
+// nothing: on a8ad8c0 the only non-test occurrences were the struct field and
+// the decoder that fills it. No lock key, conflict rule, query or worktree base
+// touched it — the worktree base is origin/main, hard-coded in addClaimWorktree
+// — so setting it produced a claim off origin/main with no error and no warning.
+//
+// ⚠️ The struct field and the decoder are deliberately still there, so a guard
+// written as "does domain bind it" would be green either way. What has to be
+// asserted is that no CALLER is invited to set it, which is a property of the
+// published schema and of nothing else.
+func TestDeclaredResourcesProp_DoesNotPublishBaseBranch(t *testing.T) {
+	items := declaredResourcesItemsSchema(t)
+	props, _ := items["properties"].(map[string]any)
+	if len(props) == 0 {
+		t.Fatal("items schema publishes no properties at all — every assertion here would be vacuous")
+	}
+	if _, published := props["base_branch"]; published {
+		desc, _ := itemPropDescription(t, items, "base_branch")
+		t.Errorf("declared_resources entries still publish `base_branch` (%q), and nothing reads "+
+			"it: no lock key, conflict rule, query or worktree base. A caller who sets it gets a "+
+			"claim off origin/main with no error at any hop — aihub#395 part 2. Withdraw it from "+
+			"the schema, or make something honour it.", desc)
+	}
+	// Anti-vacuity, and it is load-bearing: an items schema that lost its
+	// properties block would satisfy the assertion above while withdrawing the
+	// whole entry shape. `task_branch` is the neighbour that IS still read (it is
+	// the fallback lock-key source aihub#356 left in place), so its presence
+	// proves this test is looking at a populated schema.
+	if _, ok := props["task_branch"]; !ok {
+		t.Error("`task_branch` is not published either — this test can no longer tell " +
+			"\"base_branch was withdrawn\" from \"the entry shape is empty\"")
+	}
+}
+
+// TestDeclaredResourcesProp_QualifiesReadIntent is the aihub#395 part 1 gate.
+//
+// The description promised, unqualified, that intent:"read" "takes no write
+// lock". The server drops the lock only when `lockType == "file_scope" &&
+// res.Intent == "read"` (derivedLock), so a repo entry still takes git_branch
+// and a service entry still takes deploy_env. The decision was to make the
+// contract honest rather than widen the behaviour, so what is gated is the
+// description — and the assertion is on the QUALIFICATION, not on a phrase:
+// the text must name the types the exemption applies to.
+func TestDeclaredResourcesProp_QualifiesReadIntent(t *testing.T) {
+	items := declaredResourcesItemsSchema(t)
+	desc, ok := itemPropDescription(t, items, "intent")
+	if !ok {
+		t.Fatal("items schema does not describe `intent`")
+	}
+	for _, want := range []string{"path", "document", "section"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("the intent description does not name %q among the types where read is "+
+				"honoured — it reads as an unqualified promise, which is aihub#395 part 1: "+
+				"derivedLock drops the lock for file_scope only. Got: %q", want, desc)
+		}
+	}
+	for _, want := range []string{"repo", "service"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("the intent description does not say what read does on a %q entry (it still "+
+				"takes its lock). Got: %q", want, desc)
+		}
+	}
+}
+
+// TestDeclaredResourcesProp_SaysExternalRefTakesNoLock is the aihub#395 part 3
+// gate. external_ref is offered in the type enum of a field described as
+// "Declared resource locks", derives no lock, and is exempt from the no-uri
+// warning — the only entry that can be declared and produce no signal at all.
+func TestDeclaredResourcesProp_SaysExternalRefTakesNoLock(t *testing.T) {
+	items := declaredResourcesItemsSchema(t)
+	desc, ok := itemPropDescription(t, items, "type")
+	if !ok {
+		t.Fatal("items schema does not describe `type`")
+	}
+	if !strings.Contains(desc, "external_ref") {
+		t.Errorf("the type description does not mention external_ref at all, so nothing tells a "+
+			"caller that the one lockless type is lockless. Got: %q", desc)
+	}
+	if !strings.Contains(strings.ToLower(desc), "no lock") {
+		t.Errorf("the type description does not say external_ref takes NO lock. Got: %q", desc)
+	}
+	// ⚠️ The other half of this — that the claim is TRUE — cannot be asserted from
+	// here: resourceToLock is unexported and adding an exported test-only shim to
+	// production code to reach it would be a worse trade than the coverage is
+	// worth. It is pinned where the function lives, by
+	// TestValidateDeclaredResources_ExternalRefAcceptedThoughItTakesNoLock in
+	// internal/domain, which fails if external_ref ever starts deriving a lock.
+	// Stated rather than left implicit: if that test is ever deleted, this one
+	// alone would keep asserting a sentence nobody checks.
+}
+
+// TestDeclaredResourcesProp_PublishesTheEnforcedURISchemes is the aihub#395
+// part 4 gate on the PUBLISHED half.
+//
+// The schemes were prose here and enforced nowhere. Now the sentence is
+// generated from the same table ValidateDeclaredResources applies, so this
+// asserts the generation is actually wired — a hand-copied sentence that happens
+// to agree today is exactly what drifted.
+func TestDeclaredResourcesProp_PublishesTheEnforcedURISchemes(t *testing.T) {
+	items := declaredResourcesItemsSchema(t)
+	desc, ok := itemPropDescription(t, items, "uri")
+	if !ok {
+		t.Fatal("items schema does not describe `uri`")
+	}
+	generated := domain.DeclaredResourceURISchemeDoc()
+	if generated == "" {
+		t.Fatal("domain.DeclaredResourceURISchemeDoc() is empty — the assertion below would be vacuous")
+	}
+	if !strings.Contains(desc, generated) {
+		t.Errorf("the published uri description does not carry the generated scheme sentence, so "+
+			"it is a hand-written copy that can drift from the validator.\nwant substring: %q\ngot: %q",
+			generated, desc)
+	}
+	// A published contract that does not say it is enforced trains the reader to
+	// treat it as advice, which is how aihub#395 part 4 survived two prior wis.
+	if !strings.Contains(desc, "400") {
+		t.Errorf("the uri description does not say a wrong scheme is rejected. Got: %q", desc)
 	}
 }

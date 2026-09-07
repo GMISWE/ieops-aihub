@@ -9,7 +9,7 @@ import (
 
 func (s *Server) registerConflictTools() {
 	// pf_predict_conflicts
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_predict_conflicts",
 		Description: "Predict resource lock conflicts for a set of declared_resources. Also returns will_unlock (which blocked wi would be unblocked).",
 		InputSchema: objectSchema(map[string]any{

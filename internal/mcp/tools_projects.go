@@ -9,7 +9,7 @@ import (
 
 func (s *Server) registerProjectTools() {
 	// pf_list_projects
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_list_projects",
 		// aihub#260: each project carries members_version. It is the token
 		// pf_update_project's compare-and-set consumes, and this is where a
@@ -26,7 +26,7 @@ func (s *Server) registerProjectTools() {
 	})
 
 	// pf_create_project
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_create_project",
 		Description: "Create a new project",
 		InputSchema: objectSchema(map[string]any{
@@ -52,7 +52,7 @@ func (s *Server) registerProjectTools() {
 	})
 
 	// pf_update_project
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_update_project",
 		Description: "Update a project (owner or admin only)",
 		InputSchema: objectSchema(map[string]any{
@@ -123,7 +123,7 @@ func (s *Server) registerProjectTools() {
 	})
 
 	// pf_rotate_identifier
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_rotate_identifier",
 		Description: "Rotate the project identifier (bcrypt token). Returns plain once — store it securely. Owner/admin only.",
 		InputSchema: objectSchema(map[string]any{

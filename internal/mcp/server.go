@@ -92,6 +92,49 @@ func (s *Server) Connect(ctx context.Context, transport sdkmcp.Transport) (*sdkm
 	return s.mcp.Connect(ctx, transport, nil)
 }
 
+// addTool is the ONE registration path, and the only place a tool may be added.
+//
+// It exists so aihub#389's unknown-parameter disclosure is computed once against
+// each tool's own published schema instead of 50 times in 50 handlers — see
+// unknown_params.go for the defect and for why phase 1 reports rather than
+// rejects. Everything else about registration is unchanged: the tool and the
+// handler are passed straight through to the SDK.
+//
+// 🔴 DO NOT CALL s.mcp.AddTool DIRECTLY. A tool registered around this wrapper
+// silently loses the disclosure while every other tool keeps it, which is the
+// worst of the three possible states — the contract would hold for 50 tools and
+// not for the 51st, and nothing about the response would say which. Two things
+// make that fail loudly rather than quietly: TestEveryToolIsRegisteredThroughAddTool
+// scans this package for the bare call, and TestEveryRegisteredToolDisclosesUnknownParams
+// drives every tool the server actually publishes and asserts the disclosure
+// comes back, so a bypass is caught behaviourally even if the scan is fooled.
+//
+// The published names are computed at registration, not per call: the schema is
+// immutable after AddTool, and doing it per call would re-parse the same JSON on
+// every request.
+//
+// A schema this cannot parse is a programming error in a schema literal, not a
+// caller's problem. It is logged and the tool is still registered with an empty
+// published set — which discloses every argument as unknown, loudly and on the
+// first call, rather than silently disabling the check for that one tool.
+func (s *Server) addTool(t *sdkmcp.Tool, h sdkmcp.ToolHandler) {
+	published, err := publishedParamNames(t.InputSchema)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: polyforge: cannot read %s's InputSchema (%v);"+
+			" every argument to it will be reported as unpublished\n", t.Name, err)
+	}
+	name := t.Name
+	s.mcp.AddTool(t, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		// Computed BEFORE the handler runs, because a handler is free to mutate
+		// the arguments map it decodes (several default fields into it), and the
+		// diff must describe what the CALLER sent.
+		unknown := unknownParamNames(req.Params.Arguments, published)
+		res, herr := h(ctx, req)
+		discloseUnknownParams(name, unknown, res)
+		return res, herr
+	})
+}
+
 // registerAll registers all pf_ tools.
 //
 // Invariant: registration must work with nil dependencies (s.client/s.cfg are

@@ -79,10 +79,20 @@ parameters** — do not guess from the version string:
 🔴 **Never pass `next_step` to a tool that does not publish it.** It is silently dropped, and the
 next step then never starts — no error, no timeline event, just a wi that looks stalled.
 
-The reverse direction is harmless: an older plugin still passing `expected_version` to a newer
-binary is ignored, exactly as it always effectively was. (`pf_update_step` used to publish an
-`expected_version` the server never bound; it was dropped on arrival, so the `pf_get_step` that
-fetched it bought nothing — aihub#290. That is why `lifecycle.md` tells you not to make that call.)
+The reverse direction does not fail, but **it is no longer silent**: an older plugin still
+passing `expected_version` to a newer binary has it dropped as before — and since aihub#389 the
+response says so, in `request_adjusted` with `param: "unknown_params"`. (`pf_update_step` used to
+publish an `expected_version` the server never bound; it was dropped on arrival, so the
+`pf_get_step` that fetched it bought nothing — aihub#290. That is why `lifecycle.md` tells you not
+to make that call.)
+
+⚠️ **That disclosure applies to every `pf_*` tool, not just this one.** If a response comes back
+with a `request_adjusted` entry naming `unknown_params`, you sent a parameter the tool does not
+publish: it reached nothing and changed nothing, whatever the rest of the response says. Read the
+names it lists and stop sending them — do not retry the same call. This paragraph used to say the
+drop was simply "harmless", and while nothing breaks, a parameter you believe you passed and the
+server never saw is not harmless; `expected_version` was 202 such calls in 21 days, each one an
+agent believing it had compare-and-set protection it did not have.
 
 ⚠️ **The prohibition is narrow: it is on calling `pf_get_step` *before* `pf_update_step`, not on
 `pf_get_step` itself.** Call it whenever you actually need its answer — most often after a

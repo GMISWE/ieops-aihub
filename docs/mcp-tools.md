@@ -37,6 +37,31 @@ removed or renamed without touching this file turns the build red.
 The tools are registered in `internal/mcp/tools_*.go`; the grouping below
 follows those files.
 
+## An argument no tool publishes is reported, not rejected (aihub#389)
+
+Every tool goes through one registration wrapper (`(*Server).addTool`) that diffs
+the caller's top-level argument names against that tool's own published schema.
+Extras are **not** rejected and **not** silently dropped: they come back in the
+response under the existing `request_adjusted` convention, as an entry whose
+`param` is the literal `unknown_params` and whose `requested` lists the names.
+They are also logged to stderr.
+
+```json
+"request_adjusted":[{"param":"unknown_params","requested":["expected_version"],"applied":[]}]
+```
+
+Read that as *"these reached nothing and changed nothing"* — whatever the rest of
+the response says. It is appended to the list, so a `request_adjusted` the server
+itself produced (a clamped `limit`, say) is still there alongside it.
+
+Reporting rather than rejecting is deliberate and temporary. `additionalProperties:false`
+in `objectSchema` would make the SDK refuse these before the handler runs, and it
+is the intended end state — but measured over 21 days of transcripts, 301 of
+12,133 `pf_*` calls carried an unpublished argument, 202 of them
+`pf_update_step.expected_version` alone (18% of that tool's calls), so flipping it
+today would fail roughly one `pf_update_step` in five. The flip is a separate work
+item, gated on a re-measure below 0.1%.
+
 ## Work item lifecycle (13) - `internal/mcp/tools_lifecycle.go`
 
 | tool | purpose |

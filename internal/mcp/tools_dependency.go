@@ -40,7 +40,7 @@ import (
 
 func (s *Server) registerDependencyTools() {
 	// pf_create_dependency
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_create_dependency",
 		Description: "Create a dependency between two work items. Authorized by project role " +
 			"(writer on the blocked item's project, viewer on the blocking item's if they differ); " +
@@ -79,7 +79,7 @@ func (s *Server) registerDependencyTools() {
 	})
 
 	// pf_remove_dependency
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_remove_dependency",
 		Description: "Remove a dependency between two work items. Authorized by project writer " +
 			"on the blocked item's project; no run-attempt credential is involved.",
@@ -108,7 +108,7 @@ func (s *Server) registerDependencyTools() {
 	})
 
 	// pf_list_dependencies
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_list_dependencies",
 		Description: "List dependencies (blocking + blocked_by) for a work item. Cross-project items are folded if caller lacks viewer+ permission.",
 		InputSchema: objectSchema(map[string]any{

@@ -17,7 +17,7 @@ import (
 
 func (s *Server) registerMemoryTools() {
 	// pf_remember
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_remember",
 		Description: "Store a memory in aihub. type must use full name (e.g. experience.debug). Rejects methodology.* types — write spec/plan/review/execute/retro/wrap_summary via pf_save_artifact.",
 		InputSchema: rememberSchema(),
@@ -37,7 +37,7 @@ func (s *Server) registerMemoryTools() {
 	})
 
 	// pf_recall
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_recall",
 		Description: "Recall memories from aihub with optional semantic search. type is an ARRAY of type names, e.g. [\"experience.*\",\"rule.work\"] — one filter per entry; a '|' inside an entry is NOT a separator and is rejected. An entry ending in .* is a prefix wildcard. Any entry matching no memory comes back in unmatched_types, which distinguishes a wrong type name from a project that genuinely holds no such memory. An item with content_truncated=true holds only a prefix of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest.",
 		InputSchema: recallSchema(),
@@ -81,7 +81,7 @@ func (s *Server) registerMemoryTools() {
 	// flags it with content_truncated/content_full_len; without a by-id read those
 	// flags would tell the model its text is incomplete while giving it no way to
 	// complete it. This is the tool half of that escape hatch.
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_get_memory",
 		Description: "Fetch one memory by id with its FULL, untruncated content — the follow-up read for a pf_recall item whose content_truncated is true.",
 		InputSchema: getMemorySchema(),
@@ -104,7 +104,7 @@ func (s *Server) registerMemoryTools() {
 	})
 
 	// pf_activate_memory
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_activate_memory",
 		Description: "Activate a memory (increments activation count, updates stability)",
 		InputSchema: activateMemorySchema(),
@@ -125,7 +125,7 @@ func (s *Server) registerMemoryTools() {
 	})
 
 	// pf_reinforce_memory
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_reinforce_memory",
 		Description: "Reinforce a memory with additional context (mutating — credentials from state file)",
 		InputSchema: reinforceMemorySchema(),
@@ -154,7 +154,7 @@ func (s *Server) registerMemoryTools() {
 	})
 
 	// pf_update_memory (aihub#201)
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_update_memory",
 		Description: "Update a memory (creates a new version and advances the latest_id cursor). Credentials injected from state file.",
 		InputSchema: updateMemorySchema(),
@@ -183,7 +183,7 @@ func (s *Server) registerMemoryTools() {
 	})
 
 	// pf_redact_memory
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_redact_memory",
 		Description: "Redact (soft-delete) a memory",
 		InputSchema: redactMemorySchema(),
@@ -204,7 +204,7 @@ func (s *Server) registerMemoryTools() {
 	})
 
 	// pf_save_artifact
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_save_artifact",
 		Description: "Save a methodology artifact (methodology.spec|plan|review|execute|retro|wrap_summary). Credentials injected from state file.",
 		InputSchema: saveArtifactSchema(),
@@ -241,7 +241,7 @@ func (s *Server) registerMemoryTools() {
 	// pf_adopt_artifact
 	// B4: adopt/ignore/close are now pf_emit_event(type='artifact_action', payload={...})
 	// These are convenience wrappers around pf_emit_event.
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_adopt_artifact",
 		Description: "Mark an artifact as adopted (wrapper around pf_emit_event artifact_action)",
 		InputSchema: artifactActionSchema(),
@@ -250,7 +250,7 @@ func (s *Server) registerMemoryTools() {
 	})
 
 	// pf_close_artifact
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_close_artifact",
 		Description: "Mark an artifact as closed (wrapper around pf_emit_event artifact_action)",
 		InputSchema: artifactActionSchema(),
@@ -259,7 +259,7 @@ func (s *Server) registerMemoryTools() {
 	})
 
 	// pf_ignore_artifact
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_ignore_artifact",
 		Description: "Mark an artifact as ignored (wrapper around pf_emit_event artifact_action)",
 		InputSchema: artifactActionSchema(),
@@ -268,7 +268,7 @@ func (s *Server) registerMemoryTools() {
 	})
 
 	// pf_resolve_commit
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_resolve_commit",
 		Description: "Resolve a spec/plan commit annotation with an AI reply (marks status=resolved, emits memory_commit_resolved).",
 		InputSchema: resolveCommitSchema(),

@@ -131,8 +131,16 @@ func listWorkItemsSchema() json.RawMessage {
 		// see the note at that call site; making release wis real is aihub#176.
 		"scenario": prop("string", "Filter by scenario. In practice every work item is 'coding': "+
 			"the column is constrained to coding|writing|data and creation rejects all but coding."),
-		"label":   prop("string", "Filter by label"),
-		"user_id": prop("string", "Filter by user ID"),
+		"label": prop("string", "Filter by label"),
+		// aihub#383. hop 4 is `wi.reporter_user_id = $N` (domain.buildListWorkItemsWhere):
+		// REPORTER only. A work item has two more user relations — the attempt
+		// owner and its watchers — and neither is in that predicate, so "Filter by
+		// user ID" promised a superset and the excess came back as a silent empty
+		// page ("which wis are mine" returned the ones the caller had filed and none
+		// they were merely working on). Description only: widening the
+		// predicate changes every existing caller's result set and is not this wi.
+		// Wire cost 17 B -> 146 B, inside TestListWorkItemsSchemaStaysWithinItsWireBudget.
+		"user_id": prop("string", "Filter by REPORTER only: matches wi.reporter_user_id, i.e. the work items this user filed. Attempt owner and watchers are not covered (aihub#383)."),
 		"source":  prop("string", "Filter by source"),
 		"ready_only": prop("boolean", "Only return items that are ready to claim: queued, "+
 			"not requiring a human session, and with no unfinished blocking dependency. "+
@@ -661,10 +669,22 @@ func (s *Server) registerLifecycleTools() {
 		Name:        "pf_update_work_item",
 		Description: "Update a work item (goal, wi_type, priority, labels, etc.)",
 		InputSchema: objectSchema(map[string]any{
+			// No `kind` in this schema (aihub#383). It was published here and
+			// forwarded below, but domain.UpdateWorkItemRequest has no `kind` json
+			// tag and nothing on the server reads one, so the value died at c.Bind:
+			// 200, wi_type untouched, no signal. Measured live on a RUNNING wi — had
+			// it bound to wi_type, the status gate in domain.UpdateWorkItem would
+			// have rejected the call. Withdrawing the promise is the fix; wiring
+			// `kind` to wi_type instead would have opened a bypass around
+			// reclassify_reason. objectSchema sets no additionalProperties:false,
+			// so a caller that still sends `kind` is forwarded and ignored exactly
+			// as before: this stops ADVERTISING the parameter, it does not make
+			// sending it loud. pf_list_work_items' `kind` is a different parameter
+			// (a deprecated alias for its wi_type FILTER) and stays. Class gate:
+			// TestUpdateWorkItemPublishesOnlyParamsTheServerBinds.
 			"work_item_id":           prop("string", "Work item ID or slug"),
 			"goal":                   prop("string", "Updated goal (status must be queued or paused)"),
 			"goal_change_reason":     prop("string", "Reason for goal change (required with goal)"),
-			"kind":                   prop("string", "Updated kind"),
 			"priority":               prop("string", "Updated priority"),
 			"milestone":              prop("string", "Updated milestone"),
 			"wi_type":                prop("string", "Updated wi_type"),

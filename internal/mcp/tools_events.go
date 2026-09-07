@@ -73,7 +73,7 @@ func noteOutcomeSuffix(requested bool, err error) string {
 
 func (s *Server) registerEventTools() {
 	// pf_emit_event
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_emit_event",
 		Description: "Emit an event on a work item. Mutating — credentials injected from state file.",
 		InputSchema: objectSchema(map[string]any{
@@ -126,7 +126,7 @@ func (s *Server) registerEventTools() {
 	})
 
 	// pf_read_events
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_read_events",
 		// aihub#343: the cutover caveat is ON THE TOOL, not only in the docs
 		// (docs/design/polyforge-v1-design.md §19.0). The failure mode that work

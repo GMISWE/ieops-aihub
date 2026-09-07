@@ -237,7 +237,7 @@ func jsonStrSlice(v any) []string {
 
 func (s *Server) registerCodingTools() {
 	// pf_diff
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_diff",
 		Description: "Show git diff for the work item's worktree",
 		InputSchema: objectSchema(map[string]any{
@@ -275,7 +275,7 @@ func (s *Server) registerCodingTools() {
 	})
 
 	// pf_commit
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_commit",
 		Description: "Commit staged changes in the work item's worktree and emit a commit event on the wi timeline. " +
 			"⚠️ THIS CALL CAN ACQUIRE LOCKS — a heavier semantic than \"commit\" normally carries, so read this before using it. " +
@@ -339,7 +339,7 @@ func (s *Server) registerCodingTools() {
 	})
 
 	// pf_push
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_push",
 		Description: "Push the current branch to origin with --force-with-lease and emit a push event on the wi timeline. Refuses to push to main/master/dev/tot.",
 		InputSchema: objectSchema(map[string]any{
@@ -394,7 +394,7 @@ func (s *Server) registerCodingTools() {
 	})
 
 	// pf_pr
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_pr",
 		Description: "Create a GitHub PR for the work item's task branch and emit a pr_opened event on the wi timeline.",
 		InputSchema: objectSchema(map[string]any{
@@ -450,7 +450,7 @@ func (s *Server) registerCodingTools() {
 	// published schema would understate its own contract, which is aihub#238 and
 	// aihub#241 for the third time. A tool named "commit" that force-pushes to
 	// origin also hides exactly the property that most needs to stay visible.
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_ship",
 		Description: "FUSED AND IT PUSHES TO ORIGIN: commit + push + open PR in one call. " +
 			"The push is the same lease-protected FORCE-PUSH as pf_push (--force-with-lease) " +
@@ -553,7 +553,7 @@ func (s *Server) registerCodingTools() {
 	})
 
 	// pf_wrap
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_wrap",
 		Description: "Wrap a work item: push + PR + complete_attempt(wrapped) + delete state file. Idempotent only when a PR on the branch already covers local HEAD; local commits no PR covers are pushed, and a new PR is opened if the existing one is merged/closed. The response's pr_action says which happened. " +
 			"Pass `note` to record the closing note in the same call rather than emitting it with a separate pf_emit_event beforehand.",

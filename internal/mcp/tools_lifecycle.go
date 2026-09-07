@@ -235,7 +235,7 @@ func listWorkItemsSchema() json.RawMessage {
 
 func (s *Server) registerLifecycleTools() {
 	// pf_whoami
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_whoami",
 		Description: "Return caller identity, project roles, and accessible projects from aihub",
 		InputSchema: emptyObjectSchema(),
@@ -444,7 +444,7 @@ func (s *Server) registerLifecycleTools() {
 	})
 
 	// pf_create_work_item
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_create_work_item",
 		Description: "Create a work item in the specified project. To create more than one, use pf_batch_create_work_items — repeated calls here cost one round-trip each.",
 		InputSchema: createWorkItemSchema(),
@@ -490,7 +490,7 @@ func (s *Server) registerLifecycleTools() {
 	// tool's flat `required` list, and objectSchema() cannot express "required
 	// unless items is set". Overloading it would leave the published schema
 	// misdescribing its own contract — aihub#238 / #241 again.
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_batch_create_work_items",
 		Description: "Create SEVERAL work items in one call. Use this when filing more than one wi at once " +
 			"(follow-ups discovered mid-execution, a backlog split into pieces) instead of calling " +
@@ -585,7 +585,7 @@ func (s *Server) registerLifecycleTools() {
 	})
 
 	// pf_list_work_items
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_list_work_items",
 		// The second sentence is the only thing that tells the caller the response
 		// is projected (aihub#278), and it is nine words for two reasons.
@@ -636,7 +636,7 @@ func (s *Server) registerLifecycleTools() {
 	})
 
 	// pf_get_work_item
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_get_work_item",
 		Description: "Get a work item by ID or slug. Pass brief=true to omit the (potentially large) content field.",
 		InputSchema: objectSchema(map[string]any{
@@ -665,7 +665,7 @@ func (s *Server) registerLifecycleTools() {
 	})
 
 	// pf_update_work_item
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_update_work_item",
 		Description: "Update a work item (goal, wi_type, priority, labels, etc.)",
 		InputSchema: objectSchema(map[string]any{
@@ -771,7 +771,7 @@ func (s *Server) registerLifecycleTools() {
 	})
 
 	// pf_claim_work_item
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_claim_work_item",
 		Description: "Claim a work item — creates a new run_attempt with typed locks and writes the state " +
 			"file every later credential-checked pf_* call authenticates with. Retry-safe: resending the " +
@@ -1172,7 +1172,7 @@ func (s *Server) registerLifecycleTools() {
 	// so pf_emit_event AFTER it cannot authenticate, and every skill that emits a
 	// wrap note carries a warning saying so. Folding the note into this call
 	// removes both the round-trip and the ordering hazard.
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_complete_attempt",
 		Description: "Complete the current run attempt (wrapped|failed|paused). Deletes state file for terminal statuses. " +
 			"Pass `note` to record the closing note in the same call instead of emitting it with a separate " +
@@ -1250,7 +1250,7 @@ func (s *Server) registerLifecycleTools() {
 	})
 
 	// pf_force_takeover
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_force_takeover",
 		Description: "Force-take ownership of a work item from another agent. ⚠️ It takes over the WORK " +
 			"ITEM, not other people's locks: a lock held by a running or paused attempt of a DIFFERENT " +
@@ -1416,7 +1416,7 @@ func (s *Server) registerLifecycleTools() {
 	// TestReadyQueueEveryPublishedParamIsReadByTheHandler
 	// (ready_queue_param_wiring_test.go) fails on any param this schema publishes
 	// that handleGetReadyQueue does not read.
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_get_ready_queue",
 		Description: "Get the LCRS (6-section) ready queue for a project. For Orchestrator use.",
 		InputSchema: objectSchema(map[string]any{
@@ -1454,7 +1454,7 @@ func (s *Server) registerLifecycleTools() {
 	// return, so the description says so rather than leaving a caller to find
 	// out. Cancelling now RELEASES every resource lock held on the work item's
 	// behalf, and it now has two 409s where it used to answer 200 or 500.
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_cancel_work_item",
 		Description: "Cancel a work item, and release every resource lock still held on its behalf. " +
 			"Legal from queued, paused or blocked; a RUNNING work item is refused with 409 " +
@@ -1496,7 +1496,7 @@ func (s *Server) registerLifecycleTools() {
 	})
 
 	// pf_pause_attempt
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_pause_attempt",
 		Description: "Pause the current attempt (releases file_scope locks acquired mid-attempt; git_branch/deploy_env locks are retained for resume; status → paused). State file is preserved for resume.",
 		InputSchema: objectSchema(map[string]any{
@@ -1540,7 +1540,7 @@ func (s *Server) registerLifecycleTools() {
 	// "this attempt holds no locks" while the server went on enforcing locks it
 	// had not mentioned — and an execute agent published exactly that conclusion
 	// as a correction to a premise that had been right.
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_acquire_locks",
 		Description: "Acquire file_scope locks for the current running attempt from the work item's declared_resources (reconcile mid-attempt; blocks on conflict, never steals). " +
 			"`acquired` is what THIS call took; `already_held` is every other lock the attempt holds, of every type, read from the lock table — including locks with no live declaration behind them: git_branch and deploy_env locks, locks taken from a client-supplied requested_locks, and file_scope locks predating aihub#264. The two are disjoint and together are the attempt's full lock set. " +

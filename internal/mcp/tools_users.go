@@ -9,7 +9,7 @@ import (
 
 func (s *Server) registerUserTools() {
 	// pf_list_users
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_list_users",
 		Description: "List all users (admin only)",
 		InputSchema: emptyObjectSchema(),
@@ -22,7 +22,7 @@ func (s *Server) registerUserTools() {
 	})
 
 	// pf_create_user
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_create_user",
 		Description: "Create a new user (admin only)",
 		InputSchema: objectSchema(map[string]any{
@@ -48,7 +48,7 @@ func (s *Server) registerUserTools() {
 	})
 
 	// pf_update_user
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_update_user",
 		Description: "Update a user's display name or role (admin only)",
 		InputSchema: objectSchema(map[string]any{
@@ -79,7 +79,7 @@ func (s *Server) registerUserTools() {
 	})
 
 	// pf_create_api_key
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_create_api_key",
 		Description: "Create an API key for a user (admin only). Returns the plain key once — store it securely.",
 		InputSchema: objectSchema(map[string]any{
@@ -113,7 +113,7 @@ func (s *Server) registerUserTools() {
 	})
 
 	// pf_revoke_api_key
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_revoke_api_key",
 		Description: "Revoke an API key (admin only)",
 		InputSchema: objectSchema(map[string]any{

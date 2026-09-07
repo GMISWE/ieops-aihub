@@ -30,7 +30,7 @@ func (s *Server) registerStepTools() {
 	// "step graph" is deliberately gone rather than reworded: the graph lives in
 	// the scenario template, not in aihub, and naming it here is what made an
 	// agent believe one call would tell it what the remaining steps are.
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_get_step",
 		Description: "Read the AUTHORITATIVE step record for a work item, and the only one. Returns " +
 			"current_step / current_step_status / version, plus completed_steps: the step history, oldest " +
@@ -109,7 +109,7 @@ func (s *Server) registerStepTools() {
 	// Description + InputSchema (+458 B, ~115 tokens/request), and
 	// TestUpdateStepSchemaStaysWithinItsWireBudget is the ceiling that keeps the
 	// next edit honest.
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name: "pf_update_step",
 		Description: "Update the current step status. Credentials injected from state file. " +
 			"Server auto-emits step_started/step_completed/step_failed events. " +

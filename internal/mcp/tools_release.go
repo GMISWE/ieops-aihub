@@ -11,7 +11,7 @@ import (
 
 func (s *Server) registerReleaseTools() {
 	// pf_cut_alpha
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_cut_alpha",
 		Description: "Cut the next alpha release for a project. Admin/release-manager only.",
 		InputSchema: objectSchema(map[string]any{
@@ -59,7 +59,7 @@ func (s *Server) registerReleaseTools() {
 	})
 
 	// pf_promote
-	s.mcp.AddTool(&sdkmcp.Tool{
+	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_promote",
 		Description: "Promote an alpha release to stable. Admin/release-manager only.",
 		InputSchema: objectSchema(map[string]any{

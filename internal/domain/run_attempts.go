@@ -1637,6 +1637,42 @@ func probeForeignLockHolders(ctx context.Context, tx pgx.Tx, wiID string,
 				},
 			)
 		}
+		// aihub#410. ErrNoRows is the answer "nobody else holds this key", and it
+		// is the only error that means anything of the sort. Every other one has
+		// to be propagated, because this loop used to treat them all alike: the
+		// branch above was the whole error handling, so a failed probe was read
+		// as "no conflict" and the claim walked on.
+		//
+		// Two things went wrong at once, and the second is the one that shows.
+		// The probe went blind — safety survives that, because
+		// lockUpsertSQL's conditional ON CONFLICT DO UPDATE refuses the same
+		// displacement on its own (see resource_events.go) and is the backstop.
+		// What does not survive is the CLASSIFICATION. Both callers of this
+		// function run inside a transaction, and FnClaimWorkItem's is
+		// SERIALIZABLE, so 40001 is live here rather than latent. A 40001 aborts
+		// the transaction, which means every later statement in it fails with
+		// 25P02 — not class 40 — and the caller is told 500 INTERNAL_ERROR about
+		// a statement that was only ever the second victim. The retryable 409
+		// that retryConflictErr gives the neighbouring statements was lost at
+		// exactly the hop that had the SQLSTATE in its hand.
+		//
+		// This cannot cost a claim that would otherwise have worked, which is the
+		// obvious worry about turning a swallow into a return. Any statement error
+		// inside a Postgres transaction aborts it, so once this probe has failed
+		// the transaction is already unusable: walking on could never produce a
+		// successful claim, only a later statement failing with 25P02. Measured on
+		// the mutant in lock_probe_error_db_test.go — the pre-fix build reaches
+		// `failed to insert run_attempt` and dies there with 25P02. So this branch
+		// changes which error the caller sees, never whether there is one.
+		//
+		// dbErrCause, not dbErr: the driver's text names which probe failed, and
+		// a caller debugging a 500 here has nothing else to go on. The non-conflict
+		// outcome of this branch is a return rather than a `continue`, which is
+		// why this can be one call — see pgx_err.go on which form belongs where.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return dbErrCause(err, fmt.Sprintf("failed to probe lock holders for %s:%s",
+				l.ResourceType, l.ResourceKey))
+		}
 	}
 	return nil
 }

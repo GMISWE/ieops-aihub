@@ -69,7 +69,6 @@ func TestResumeOwnLocks_NoSelfConflict(t *testing.T) {
 				MachineID:     "m1",
 				SessionSecret: "s3cr3t-0123456789abcdef0123456789abcdef0123456789abcdef01234567",
 			},
-			Mode: "fresh",
 		}
 	}
 
@@ -154,7 +153,6 @@ func TestResumeOwnLocks_DifferentWIStillConflicts(t *testing.T) {
 		return &ClaimRequest{
 			IdempotencyKey: idemKey,
 			SessionInfo:    SessionInfo{MachineID: "m1", SessionSecret: sessSecret},
-			Mode:           "fresh",
 		}
 	}
 

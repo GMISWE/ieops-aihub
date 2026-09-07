@@ -78,7 +78,6 @@ func claimBlocks(t *testing.T, pool *pgxpool.Pool, wiID, userID, idemKey string)
 			MachineID:     "m_locktest",
 			SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
 		},
-		Mode: "fresh",
 	}, userID, "", "tester")
 	if aerr == nil {
 		return false, ""
@@ -398,7 +397,6 @@ func TestNarrowingDeclaredResourcesReleasesItsLocks(t *testing.T) {
 				{ResourceType: "file_scope", ResourceKey: declaredKey},
 				{ResourceType: "file_scope", ResourceKey: undeclaredKey},
 			},
-			Mode: "fresh",
 		}, u, "", "tester")
 		require.Nil(t, aerr, "claim with requested_locks failed: %+v", aerr)
 		require.ElementsMatch(t, []string{declaredKey, undeclaredKey},

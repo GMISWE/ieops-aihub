@@ -51,9 +51,16 @@ type ClaimRequest struct {
 	IdempotencyKey string            `json:"idempotency_key"`
 	SessionInfo    SessionInfo       `json:"session_info"`
 	RequestedLocks []ResourceLockReq `json:"requested_locks"`
-	Mode           string            `json:"mode"` // "fresh" | "resume"
-	ForceOver      bool              `json:"force_takeover"`
-	ScenarioRef    *string           `json:"scenario_ref,omitempty"` // git SHA of local scenario clone at claim time
+	// ⚠️ There is deliberately no `mode` here (aihub#424). It was bound and
+	// defaulted for months after aihub#394 withdrew it from pf_claim_work_item's
+	// schema, which left a field no MCP caller could set and whose every read was
+	// an audit value reporting the word back to whoever sent it. Re-adding it
+	// fails TestClaimRequestBindsNothingUnreachable, and the capability it seemed
+	// to offer does not need it: which branch a claim attaches to is decided by
+	// what exists in the clone (resolveClaimBranch), and step state lives in
+	// wi_step_state keyed by work item, so every re-claim already sees it.
+	ForceOver   bool    `json:"force_takeover"`
+	ScenarioRef *string `json:"scenario_ref,omitempty"` // git SHA of local scenario clone at claim time
 	// TaskBranches maps a repo name to the branch the claiming client is about
 	// to check out in that repo's worktree. It exists so the git_branch lock is
 	// keyed on the branch work will really happen on. (aihub#356)
@@ -385,9 +392,6 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	if req.SessionInfo.SessionSecret == "" {
 		return nil, NewErr(ErrBadRequest, "session_info.session_secret is required")
 	}
-	if req.Mode == "" {
-		req.Mode = "fresh"
-	}
 
 	// Hash the session_secret for storage
 	secretHash := HashSecret(req.SessionInfo.SessionSecret)
@@ -700,9 +704,14 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	// owner, and recording only the acquisition would leave a reader following
 	// the previous owner with an unmatched lock_acquired — reading as "still
 	// held" for a lock that changed hands.
+	//
+	// `is_resume` used to sit beside is_takeover here, computed as
+	// `req.Mode == "resume"`. It went with the field (aihub#424): after aihub#394
+	// no MCP caller could set `mode`, so the value was a constant false — an audit
+	// line asserting "this claim was not a resume" about every claim, including
+	// the resumes. is_takeover stays because it is derived from server state.
 	claimOp := newLockOp(lockCauseClaim, lockActor).withExtra(map[string]any{
 		"is_takeover": isTakeover,
-		"is_resume":   req.Mode == "resume",
 	})
 	acquiredLocks := make([]ResourceLock, 0, len(req.RequestedLocks))
 	for _, l := range req.RequestedLocks {
@@ -799,11 +808,14 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 
 	// Emit attempt_started event
 	evtID := NewID("evt")
+	// No `is_resume` — see the claimOp comment above. If a later change wants the
+	// distinction back on the timeline it has to be DERIVED here (the work item's
+	// status before this claim is the obvious source), not taken from a word the
+	// caller sends about itself.
 	evtPayload, _ := json.Marshal(map[string]any{
 		"machine_id":    req.SessionInfo.MachineID,
 		"actor_display": callerDisplay,
 		"is_takeover":   isTakeover,
-		"is_resume":     req.Mode == "resume",
 		"claim_epoch":   newEpoch,
 	})
 	_, _ = tx.Exec(ctx, `

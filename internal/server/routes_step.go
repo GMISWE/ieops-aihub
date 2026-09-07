@@ -217,18 +217,23 @@ const completedStepsQuery = `
 // which needs no client-supplied version. The parameter has been removed from the
 // MCP schema rather than implemented; if optimistic locking is ever wanted here,
 // it has to be added to THIS struct first or it will be dropped again.
+//
+// `outcome` (map[string]any) was the mirror image and is gone (aihub#424): bound
+// here, read by nothing in this package, and published by no tool — so it could
+// only ever be filled in by a caller that had no way to send it, and would have
+// been discarded if one had. Do not re-add it without a reader; aihub#419's G4
+// arm reports any field of this struct that no tool can reach.
 type UpdateStepRequest struct {
-	AttemptID       string         `json:"attempt_id"`
-	ClaimEpoch      int64          `json:"claim_epoch"`
-	SessionSecret   string         `json:"session_secret"`
-	Status          string         `json:"status"` // "in_progress" | "completed" | "failed"
-	Step            *string        `json:"step,omitempty"`
-	StepAttemptID   *string        `json:"step_attempt_id,omitempty"`
-	Outcome         map[string]any `json:"outcome,omitempty"`
-	Heartbeat       bool           `json:"heartbeat,omitempty"`
-	ArtifactSummary *string        `json:"artifact_summary,omitempty"`
-	ErrorType       *string        `json:"error_type,omitempty"`
-	Escalated       bool           `json:"escalated,omitempty"`
+	AttemptID       string  `json:"attempt_id"`
+	ClaimEpoch      int64   `json:"claim_epoch"`
+	SessionSecret   string  `json:"session_secret"`
+	Status          string  `json:"status"` // "in_progress" | "completed" | "failed"
+	Step            *string `json:"step,omitempty"`
+	StepAttemptID   *string `json:"step_attempt_id,omitempty"`
+	Heartbeat       bool    `json:"heartbeat,omitempty"`
+	ArtifactSummary *string `json:"artifact_summary,omitempty"`
+	ErrorType       *string `json:"error_type,omitempty"`
+	Escalated       bool    `json:"escalated,omitempty"`
 
 	// NextStep fuses "this step is done" and "the next one has started" into one
 	// request (aihub#290). A step-graph walk brackets every step with a completed

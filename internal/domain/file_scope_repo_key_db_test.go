@@ -106,7 +106,6 @@ func claimWI(t *testing.T, pool *pgxpool.Pool, uid, wiID, idem string) (*ClaimRe
 	return FnClaimWorkItem(context.Background(), pool, wiID, &ClaimRequest{
 		IdempotencyKey: idem,
 		SessionInfo:    SessionInfo{MachineID: "m-261", SessionSecret: testSecret},
-		Mode:           "fresh",
 	}, uid, "", "tester")
 }
 

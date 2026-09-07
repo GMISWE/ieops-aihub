@@ -15,41 +15,6 @@
   },
   {
     "gate": "BOUND_FIELD_UNPUBLISHED",
-    "tool": "pf_claim_work_item",
-    "subject": "handleClaimWorkItem.mode",
-    "wi": "aihub#424",
-    "note": "aihub#394 withdrew `mode` from the schema after proving it selected nothing, and domain.ClaimRequest still binds it. The blind spot worth naming: #394's gate quantifies over PUBLISHED parameters, so a field that stops being published leaves its field of view entirely — which is what this gate's reverse direction exists for."
-  },
-  {
-    "gate": "BOUND_FIELD_UNPUBLISHED",
-    "tool": "pf_complete_attempt",
-    "subject": "handleCompleteAttempt.pause_reason",
-    "wi": "aihub#424",
-    "note": "pf_complete_attempt publishes force_terminate_step, note, status and work_item_id. pf_pause_attempt publishes pause_reason but POSTs /pause, a different route, so on /complete the field is unreachable."
-  },
-  {
-    "gate": "BOUND_FIELD_UNPUBLISHED",
-    "tool": "pf_pause_attempt",
-    "subject": "handlePauseAttempt.status",
-    "wi": "aihub#424",
-    "note": "pf_pause_attempt publishes only pause_reason and work_item_id, so the pause route's `status` is unreachable from MCP."
-  },
-  {
-    "gate": "BOUND_FIELD_UNPUBLISHED",
-    "tool": "pf_pause_attempt",
-    "subject": "handlePauseAttempt.force_terminate_step",
-    "wi": "aihub#424",
-    "note": "same route, same cause: pf_complete_attempt publishes force_terminate_step, pf_pause_attempt does not."
-  },
-  {
-    "gate": "BOUND_FIELD_UNPUBLISHED",
-    "tool": "pf_update_step",
-    "subject": "handleUpdateStep.outcome",
-    "wi": "aihub#424",
-    "note": "the step route binds `outcome` and pf_update_step publishes ten parameters, none of them this one."
-  },
-  {
-    "gate": "BOUND_FIELD_UNPUBLISHED",
     "tool": "pf_recall",
     "subject": "handleRecall.cursor",
     "wi": "aihub#425",

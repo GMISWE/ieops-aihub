@@ -88,7 +88,7 @@ func (s *Server) registerStepTools() {
 			"step_id":          prop("string", "Step ID to update"),
 			"status":           prop("string", "in_progress|completed|failed"),
 			"step_attempt_id":  prop("string", "Step attempt ID of the step being completed/failed (required for completed/failed)"),
-			"artifact_summary": prop("string", "Brief summary of artifacts produced"),
+			"artifact_summary": prop("string", "Brief summary of artifacts produced — at most 4096 characters. Longer values are rejected (413) rather than recorded, because the step history row that pf_get_step's completed_steps reads has that cap (aihub#390)."),
 			"error_type":       prop("string", "Error type (for failed status)"),
 			"escalated":        prop("boolean", "Whether to escalate the failure"),
 			"next_step": prop("string", "Step ID to START in the same call, after the one named by step_id completes. "+

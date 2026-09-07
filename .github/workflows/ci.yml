@@ -611,6 +611,57 @@ jobs:
       #             The `194` this starts from is the value on origin/main
       #             c353059, which is also this branch's base, so unlike the two
       #             entries above it is continued rather than re-read.
+      #   202 -> 205 aihub#390 added 3 DB-gated functions, all in internal/server
+      #             (routes_step_history_row_db_test.go:
+      #             TestHandleUpdateStep_EveryRecordedStepOutcomeHasAHistoryRow,
+      #             TestHandleUpdateStep_ArtifactSummaryAtTheCapIsRecordedAndOverItIsRefused,
+      #             TestHandleUpdateStep_DuplicateStepAttemptIsAConflictNotASilentDrop).
+      #             Three FUNCTIONS, by the aihub#143 entry's reasoning: three
+      #             independent claims — the invariant (every step_completed /
+      #             step_failed event of an attempt has a wi_step_completions
+      #             row), the artifact_summary cap boundary (4096 recorded, 4097
+      #             refused with 413) and the table's other two constraints
+      #             (duplicate step_attempt_id -> 409, missing attempt_id ->
+      #             400) — not arms of one guard. They need only a database:
+      #             the CHECK, the GLOBAL unique index and the FK are exactly
+      #             what the handler used to swallow, and nothing short of the
+      #             real schema raises them. So the required set goes 199 -> 202
+      #             (the whole manifest, extra-env entries included, 202 -> 205)
+      #             and they share ONE step, "aihub#390 step-history row
+      #             invariant DB tests". The fourth aihub#390 test,
+      #             TestArtifactSummaryCapMatchesTheMigration, reads the
+      #             migration file and needs no database, so it runs in the
+      #             unit-test step and has no line here.
+      #
+      #             The `202` this starts from is READ OFF the manifest on
+      #             origin/main 81c2333 (this branch's base), not continued from
+      #             the 195 above: entries landed between 195 and 202 without a
+      #             line here, as the aihub#143 entry's note already says.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched, and in both
+      #             directions on the same inventory. Verbatim, with the three
+      #             tests written but copies of origin/main 81c2333's manifest
+      #             and workflow fed to the gate:
+      #               dbtestcov: gated-test manifest <pre-change copy>:
+      #                 202 entries, inventory measured 205
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 205
+      #                 (require only a DB: 202, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 199/202
+      #             and after the manifest lines and the step were added:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 205 entries,
+      #                 inventory measured 205
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 205
+      #                 (require only a DB: 202, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 202/202
+      #
+      #             The step's `run:` text was also executed as extracted from
+      #             this file, not retyped: with a database it exits 0 with the
+      #             three `--- PASS:` lines; with AIHUB_TEST_DB unset it exits 1
+      #             on the first "did not run" error while `go test` itself
+      #             prints `ok` over three `--- SKIP` lines — which is the case
+      #             the guard exists for.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -1540,6 +1591,46 @@ jobs:
           done
           ! grep -q -- '--- SKIP' step_history.log \
             || { echo "::error::an aihub#354 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#390: the wi_step_completions row is what pf_get_step's
+      # completed_steps is read from, and handleUpdateStep used to file it
+      # best-effort — the INSERT sat inside a SAVEPOINT whose rollback swallowed
+      # EVERY error, while the step_completed event, the version bump and the
+      # 200 all went ahead. Measured on aihub#383: 7 step_completed events,
+      # 6 completed_steps, completed_steps_truncated:false, because one
+      # artifact_summary was 4243 characters against the migration's
+      # `CHECK (length(artifact_summary) <= 4096)`. The GLOBAL unique index on
+      # step_attempt_id and the run_attempt_id foreign key were swallowed the
+      # same way.
+      #
+      # These three need a database for the reason the defect did: the CHECK,
+      # the unique index and the FK are the constraints the savepoint hid, so
+      # only the real schema exercises the handler's answers to them (413 / 409
+      # / 400, nothing committed) and the invariant itself — completed_steps
+      # equals the attempt's step_completed/step_failed events — which the
+      # first test asserts through handleGetStep after a seven-step walk that
+      # includes the 4243-character case. Each was run ALONE on the tree before
+      # the fix and FAILED on its intended assertion (the outputs are in
+      # aihub#390's record). TestArtifactSummaryCapMatchesTheMigration, the
+      # DB-free fourth test that pins the handler's constant to the migration,
+      # runs in the unit-test step and needs nothing here.
+      #
+      # Same -v + grep guard as the steps above: `go test` exits 0 when every
+      # selected test SKIPs, and these skip whenever AIHUB_TEST_DB is empty.
+      - name: aihub#390 step-history row invariant DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^(TestHandleUpdateStep_EveryRecordedStepOutcomeHasAHistoryRow|TestHandleUpdateStep_ArtifactSummaryAtTheCapIsRecordedAndOverItIsRefused|TestHandleUpdateStep_DuplicateStepAttemptIsAConflictNotASilentDrop)$' -count=1 -v 2>&1 | tee step_history_row.log
+          for want in TestHandleUpdateStep_EveryRecordedStepOutcomeHasAHistoryRow \
+                      TestHandleUpdateStep_ArtifactSummaryAtTheCapIsRecordedAndOverItIsRefused \
+                      TestHandleUpdateStep_DuplicateStepAttemptIsAConflictNotASilentDrop; do
+            grep -q -- "--- PASS: $want" step_history_row.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#390 step-history row coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' step_history_row.log \
+            || { echo "::error::an aihub#390 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       - name: aihub#239 recall cursor tie + supersede carry DB tests
         env:

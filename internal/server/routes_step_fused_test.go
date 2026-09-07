@@ -234,12 +234,14 @@ func TestHandleUpdateStep_FusedEqualsTwoCalls(t *testing.T) {
 
 	// Each arm gets its OWN step-attempt ids. Sharing them looks harmless and is
 	// not: wi_step_completions has a GLOBAL unique index on step_attempt_id
-	// (0005_step_state.sql), and the completion insert is deliberately wrapped in
-	// a savepoint that swallows the violation. Two arms sharing an id therefore
-	// produce ONE completion row between them, the second arm's silently
+	// (0005_step_state.sql). Until aihub#390 the completion insert was wrapped in
+	// a savepoint that swallowed the violation, so two arms sharing an id
+	// produced ONE completion row between them, the second arm's silently
 	// discarded — and a comparison that skipped that table would still pass,
 	// while asserting nothing about the very row this fusion could file under the
-	// wrong step.
+	// wrong step. Since aihub#390 the duplicate is a 409 with nothing committed
+	// (insertStepCompletion), which would fail the second arm's require below
+	// instead; the ids stay distinct either way.
 	saFused1, saFused2 := domain.NewID("sa"), domain.NewID("sa")
 	saSplit1, saSplit2 := domain.NewID("sa"), domain.NewID("sa")
 

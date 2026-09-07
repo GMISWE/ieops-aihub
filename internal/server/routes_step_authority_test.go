@@ -16,12 +16,15 @@ package server
 // holes, and they are why routes_step_dbgated_test.go exists — that file is the
 // behavioural half, gated on AIHUB_TEST_DB and named by its own CI step.
 //
-// Run: go test ./internal/server/ -run 'TestTruncateCompletedSteps|TestCompletedStepsQuery|TestScanTargets|TestColumnIdentifier' (no database needed)
+// Run: go test ./internal/server/ -run 'TestTruncateCompletedSteps|TestCompletedStepsQuery|TestScanTargets|TestColumnIdentifier|TestArtifactSummaryCap' (no database needed)
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -556,4 +559,54 @@ func TestScanTargetsCoversEveryField(t *testing.T) {
 			t.Errorf("scanTargets[%d] does not point at field %q", i, typ.Field(i).Name)
 		}
 	}
+}
+
+// TestArtifactSummaryCapMatchesTheMigration (aihub#390) pins
+// maxArtifactSummaryChars to the CHECK constraint in the migration that owns
+// it. The handler now refuses an over-cap artifact_summary BEFORE the INSERT
+// instead of letting the database refuse it and swallowing the refusal; that
+// only holds while the two numbers agree. If the constant drifts below the
+// migration's, summaries the table would accept are refused; if it drifts
+// above, the INSERT trips the CHECK again and the request is a 500 rather than
+// a silent 200 — better than before, but still not the 413 the caller is owed.
+//
+// Every migration file is scanned, not just 0005, so a later migration that
+// re-states the constraint with another number is seen. What this cannot see
+// is a constraint spelled differently from `CHECK (length(artifact_summary)
+// <= N)`; the DB-gated arms in routes_step_history_row_db_test.go hold the
+// live table to the same number.
+func TestArtifactSummaryCapMatchesTheMigration(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("..", "db", "migrations", "*.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no migration files found under ../db/migrations; the test is running from the wrong directory")
+	}
+	re := regexp.MustCompile(`CHECK \(length\(artifact_summary\) <= (\d+)\)`)
+	var found []string
+	for _, f := range files {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range re.FindAllStringSubmatch(string(src), -1) {
+			n, err := strconv.Atoi(m[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			found = append(found, fmt.Sprintf("%s: %d", filepath.Base(f), n))
+			if n != maxArtifactSummaryChars {
+				t.Errorf("%s caps wi_step_completions.artifact_summary at %d characters but maxArtifactSummaryChars is %d; "+
+					"the handler's pre-check and the table's CHECK must agree or the INSERT can fail after the pre-check passed",
+					filepath.Base(f), n, maxArtifactSummaryChars)
+			}
+		}
+	}
+	if len(found) == 0 {
+		t.Fatalf("no migration declares CHECK (length(artifact_summary) <= N); either the constraint was dropped or respelled — "+
+			"if dropped, maxArtifactSummaryChars (%d) is now a limit the database no longer enforces and this test must be rethought, not deleted",
+			maxArtifactSummaryChars)
+	}
+	t.Logf("artifact_summary cap declared by: %s; maxArtifactSummaryChars = %d", strings.Join(found, ", "), maxArtifactSummaryChars)
 }

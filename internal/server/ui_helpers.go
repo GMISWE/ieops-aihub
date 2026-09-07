@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -94,6 +95,10 @@ func fetchWIFacets(ctx context.Context, pool *pgxpool.Pool, projects []string) w
 				f.Reporters = append(f.Reporters, s)
 			}
 		}
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+		if err := rows.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "ui facets: reporter rows: %v\n", err)
+		}
 	}
 
 	if rows, err := pool.Query(ctx,
@@ -105,6 +110,10 @@ func fetchWIFacets(ctx context.Context, pool *pgxpool.Pool, projects []string) w
 			if rows.Scan(&s) == nil {
 				f.Owners = append(f.Owners, s)
 			}
+		}
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+		if err := rows.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "ui facets: owner rows: %v\n", err)
 		}
 	}
 
@@ -132,6 +141,10 @@ func fetchAttemptOwners(ctx context.Context, pool *pgxpool.Pool, attemptIDs []st
 		if rows.Scan(&id, &o.Display, &o.LastActiveAt) == nil {
 			out[id] = o
 		}
+	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "ui: attempt owner rows: %v\n", err)
 	}
 	return out
 }
@@ -296,6 +309,10 @@ func fetchProjectWICounts(ctx context.Context, pool *pgxpool.Pool, projects []st
 			counts[p] = n
 			total += n
 		}
+	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "ui: project wi count rows: %v\n", err)
 	}
 	return counts, total
 }

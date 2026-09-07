@@ -314,6 +314,10 @@ func ListChildren(ctx context.Context, pool *pgxpool.Pool, parentWiID string, ca
 		}
 		out = append(out, ref)
 	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := rows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read child work items rows")
+	}
 	return out, nil
 }
 
@@ -516,6 +520,10 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		}
 		resp.Blocking = append(resp.Blocking, entry)
 	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := blockingRows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read blocking dependencies rows")
+	}
 	blockingRows.Close()
 
 	// blocked_by: wi that block our wi (blocked_wi_id=wiID)
@@ -546,6 +554,10 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 			entry.ID = "hidden"
 		}
 		resp.BlockedBy = append(resp.BlockedBy, entry)
+	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := blockedByRows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read blocked_by dependencies rows")
 	}
 	blockedByRows.Close()
 

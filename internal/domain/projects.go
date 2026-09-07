@@ -581,6 +581,10 @@ func ListProjects(ctx context.Context, conn *pgxpool.Pool, caller *UserRecord) (
 		}
 		projects = append(projects, p)
 	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := rows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read projects rows")
+	}
 	projects = applyProjectScope(projects, caller.ProjectScope)
 	if projects == nil {
 		projects = []Project{}

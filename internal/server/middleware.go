@@ -211,6 +211,10 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 							uc.ProjectRoles[projName] = role
 						}
 					}
+					// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+					if err := prows.Err(); err != nil {
+						fmt.Fprintf(os.Stderr, "bearer auth: project membership rows: %v\n", err)
+					}
 					prows.Close()
 				}
 			}

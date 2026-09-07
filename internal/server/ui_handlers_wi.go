@@ -13,8 +13,10 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"html/template"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -1613,6 +1615,10 @@ func fetchDepMeta(ctx context.Context, pool *pgxpool.Pool, ids []string) map[str
 		if rows.Scan(&id, &m.Status, &m.OwnerActor) == nil {
 			out[id] = m
 		}
+	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "ui wi: dep meta rows: %v\n", err)
 	}
 	return out
 }

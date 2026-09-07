@@ -722,6 +722,84 @@ jobs:
       #             file (parsed out with yaml.safe_load and run with bash), not
       #             retyped: with a database it exits 0 with the three
       #             `--- PASS:` lines and no `--- SKIP`; with AIHUB_TEST_DB unset
+      #   215 -> 217 aihub#398 (step 1 of two) added 2 DB-gated functions, both
+      #             in internal/server (routes_step_identity_db_test.go:
+      #             TestHandleUpdateStep_TerminalStepIdMustMatchTheStoredCurrentStep,
+      #             TestHandleUpdateStep_DoubleCompleteIsCaughtByWhicheverGuardApplies).
+      #             Two FUNCTIONS, by the aihub#143 entry's reasoning: two
+      #             independent claims, and each has its own probe. The first is
+      #             the step-identity predicate together with the row's source,
+      #             and it needs BOTH halves — deleting the predicate's call
+      #             site reddens it, and so, separately, does reverting the
+      #             history row's step_id from req.Step to the stored
+      #             current_step, a probe that reddens ONLY its never-started
+      #             arm because that is the one place the two values differ. The
+      #             second is which guard catches which double-complete, and it
+      #             stays GREEN under the row-source probe: a retry with the
+      #             SAME step_attempt_id is aihub#399's duplicate index, a late
+      #             actor with a different id after the graph advanced is this
+      #             predicate, and a second completion of an idle step whose
+      #             name still matches is STILL ACCEPTED — asserted on purpose,
+      #             because it is the boundary with the state predicate (step 2,
+      #             its own work item) and an unasserted comment about a known
+      #             hole rots. They need only a database and share ONE step,
+      #             "aihub#398 step identity predicate DB tests".
+      #
+      #             ⚠️ This entry also RETIRED coverage, which is the part not to
+      #             skip when reading it. aihub#399's
+      #             TestHandleUpdateStep_TimelineEventIsRecordedOrTheRequestIsRefused
+      #             reached insertStepEvent's 22P05 by failing a NUL-named step
+      #             while another step was open — a mismatch, which this
+      #             predicate now refuses BEFORE the switch. That arm was
+      #             rewritten to assert the new refusal, and the route cannot be
+      #             reconstructed: the predicate requires the request's step to
+      #             equal the stored one, and wi_step_state.current_step is text,
+      #             so a NUL-named step cannot be stored in the first place. Its
+      #             own comment predicted precisely this ("validating `step` up
+      #             front ... would remove the only input-reachable way to make
+      #             that INSERT fail"). What still gates the events side is that
+      #             test's 23503 arm, on an in_progress start, where no history
+      #             row preempts the event INSERT — and a new sub-arm MEASURES
+      #             the preemption on the terminal path rather than asserting it
+      #             from the call order. The function count does not move, so
+      #             nothing in this ledger would have shown it.
+      #
+      #             The DB-free companions have no line here: server
+      #             TestValidateStepIdentity (which stays GREEN under the
+      #             deleted-call-site probe, and is why the two above are not
+      #             redundant with it) and the MCP wording/budget gates
+      #             TestUpdateStepSchemaDoesNotPromiseALease,
+      #             TestUpdateStepSchemaNamesBothPredicatesAndTheGapBetweenThem
+      #             and TestUpdateStepSchemaStaysWithinItsWireBudget.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, in both directions on the same inventory.
+      #             Verbatim, with the tests written but before the manifest
+      #             lines and the step were added:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 215 entries,
+      #                 inventory measured 217
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 217
+      #                 (require only a DB: 214, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 212/214
+      #             and after:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 217 entries,
+      #                 inventory measured 217
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 217
+      #                 (require only a DB: 214, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 214/214
+      #             The `215` is READ OFF the manifest on this branch's base
+      #             (origin/main d8124c7), not continued from the 211 above:
+      #             that running total was already behind the file, as the
+      #             aihub#399 entry records for its own starting figure.
+      #
+      #             The step's `run:` text was executed as EXTRACTED from this
+      #             file (yaml.safe_load, then bash), not retyped: with a
+      #             database it exits 0 with the two `--- PASS:` lines and no
+      #             `--- SKIP`; with AIHUB_TEST_DB unset it exits 1 on the first
+      #             "did not run" error while `go test` itself prints `ok` and
+      #             exits 0 over two `--- SKIP` lines.
       #             it exits 1 on the first "did not run" error while `go test`
       #             itself prints `ok` and exits 0 over three `--- SKIP` lines.
       - name: aihub#303 DB-test coverage gate
@@ -1866,6 +1944,62 @@ jobs:
           done
           ! grep -q -- '--- SKIP' step_outcome_records.log \
             || { echo "::error::an aihub#399 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#398 (step 1 of two): the step-IDENTITY predicate on a terminal
+      # transition — and the boundary with the STATE predicate, which is
+      # deliberately not in it.
+      #
+      # The defect these cover is a history corruption that answered 200.
+      # handleUpdateStep filed the wi_step_completions row under the STORED
+      # current_step, never under the request's step_id, and nothing required
+      # the two to agree — so a completed/failed transition naming any other
+      # step recorded the wrong step as finished, emitted an event naming the
+      # caller's step, and then overwrote current_step with the caller's value.
+      # pf_get_step's completed_steps is the done-set aihub#265 tells a
+      # resuming agent to trust, so the resumer skipped a step that never ran
+      # and redid the one that did. On a fused advance a stale actor also
+      # destroyed the in_progress successor.
+      #
+      # Two FUNCTIONS, by the aihub#143 entry's reasoning: two independent
+      # claims, and the probes separate them. The first is the predicate plus
+      # the row's source, and it needs both halves — deleting the predicate's
+      # call site reddens it, and so does reverting the row's step_id to the
+      # stored value (that probe reddens ONLY its never-started arm, which is
+      # the one place the two sources differ). The second is which guard
+      # catches which double-complete: a retry with the SAME step_attempt_id is
+      # still aihub#399's duplicate index, a late actor with a different id
+      # after the graph advanced is this predicate, and a second completion of
+      # an idle step whose name still matches is STILL ACCEPTED — that last arm
+      # asserts the residual on purpose, because it is the boundary with step 2
+      # and an unasserted comment about a known hole rots. When the state
+      # predicate lands, that arm goes red and says so in its failure message.
+      #
+      # They need a database because every claim is a disagreement BETWEEN
+      # records (history row vs event vs wi_step_state) that the handler used to
+      # answer 200 for; the DB-free companion (server TestValidateStepIdentity)
+      # checks the predicate function alone, stays GREEN under the
+      # deleted-call-site probe, and has no line in the manifest. The MCP-layer
+      # companions for the same work item's wording half
+      # (TestUpdateStepSchemaDoesNotPromiseALease,
+      # TestUpdateStepSchemaNamesBothPredicatesAndTheGapBetweenThem,
+      # TestUpdateStepSchemaStaysWithinItsWireBudget) need no database either
+      # and run in the unit-test step.
+      #
+      # Same -v + grep guard as the steps above: `go test` exits 0 when every
+      # selected test SKIPs, and these skip whenever AIHUB_TEST_DB is empty.
+      - name: aihub#398 step identity predicate DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^(TestHandleUpdateStep_TerminalStepIdMustMatchTheStoredCurrentStep|TestHandleUpdateStep_DoubleCompleteIsCaughtByWhicheverGuardApplies)$' -count=1 -v 2>&1 | tee step_identity.log
+          for want in TestHandleUpdateStep_TerminalStepIdMustMatchTheStoredCurrentStep \
+                      TestHandleUpdateStep_DoubleCompleteIsCaughtByWhicheverGuardApplies; do
+            grep -q -- "--- PASS: $want" step_identity.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#398 step-identity coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' step_identity.log \
+            || { echo "::error::an aihub#398 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       - name: aihub#239 recall cursor tie + supersede carry DB tests
         env:

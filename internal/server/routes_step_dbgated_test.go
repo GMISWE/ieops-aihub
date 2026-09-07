@@ -448,9 +448,17 @@ func TestHandleUpdateStep_EscalatedSurvivesToTheHistoryRead(t *testing.T) {
 	require.NoError(t, handleUpdateStep(pool)(c1))
 	require.Equal(t, http.StatusOK, rec1.Code, rec1.Body.String())
 
+	// `"step":"code"` names the step that is actually open, and it is REQUIRED
+	// since aihub#398: a terminal transition whose step_id does not equal the
+	// stored current_step is refused 409. This fixture used to omit it, which
+	// worked only because the history row took its step_id from the STORED value
+	// — the very coupling aihub#398 removed. No real client can omit it either
+	// (pf_update_step publishes step_id as required and the MCP layer checks it),
+	// so naming it here makes the fixture match the contract rather than exploit
+	// a gap in it.
 	failSA := domain.NewID("sa")
 	c2, rec2 := newStepUpdateRequest(t, wi.ID,
-		`{"status":"failed","attempt_id":"`+attemptID+`","step_attempt_id":"`+failSA+
+		`{"status":"failed","step":"code","attempt_id":"`+attemptID+`","step_attempt_id":"`+failSA+
 			`","error_type":"gate_failed","artifact_summary":"needs a human","escalated":true}`, uc)
 	require.NoError(t, handleUpdateStep(pool)(c2))
 	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
@@ -475,4 +483,10 @@ func TestHandleUpdateStep_EscalatedSurvivesToTheHistoryRead(t *testing.T) {
 			"step was handed to a human; body=%s", rec3.Body.String())
 	require.Equal(t, "gate_failed", derefStr(got.CompletedSteps[0].ErrorType))
 	require.Equal(t, "needs a human", derefStr(got.CompletedSteps[0].ArtifactSummary))
+	// Added with the step_id above (aihub#398): the escalated row has to be
+	// findable by the step it belongs to. Before that change this value came
+	// from wi_step_state rather than from the request, so a fixture that named
+	// no step still got "code" here and the two sources were indistinguishable.
+	require.Equal(t, "code", got.CompletedSteps[0].StepID,
+		"the escalated step must be recorded under the step the caller named")
 }

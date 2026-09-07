@@ -240,7 +240,46 @@ func TestHandleUpdateStep_TimelineEventIsRecordedOrTheRequestIsRefused(t *testin
 	att := seedStepTestAttempt(t, pool, wi.ID, uid)
 	uc := stepWriter(uid, project)
 
-	// --- 22P05: the event payload cannot hold the step name ----------------
+	// --- the terminal path: refused EARLIER since aihub#398 ----------------
+	//
+	// 🔴 This arm has changed hands, and the honest version of what it now
+	// covers is smaller than what it covered before. Read this before
+	// "repairing" it again.
+	//
+	// It used to reach insertStepEvent's 22P05 by failing step "ship\x00x"
+	// while "ship" was the open step: a NUL byte cannot go through
+	// payload::jsonb, the failed branch does not touch current_step, and the
+	// history row took its step_id from wi_step_state — so the row was written
+	// and only the event failed. That was the one input-reachable way to break
+	// the invariant from the EVENTS side on a terminal transition, and the
+	// comment further down predicted exactly what would take it away: "the
+	// obvious clean fix, validating `step` up front, would refuse the request
+	// before the event INSERT". aihub#398 is that fix, arriving as a
+	// step-IDENTITY predicate rather than as validation — a terminal step_id
+	// that is not the open step is now 409 before the switch is entered.
+	//
+	// And it cannot be reconstructed. The predicate requires the request's step
+	// to EQUAL the stored one, and the stored one cannot contain a NUL —
+	// wi_step_state.current_step is text, so starting a NUL-named step fails
+	// first. So on a terminal transition there is no longer any input that
+	// reaches insertStepEvent with an unwritable payload.
+	//
+	// What still gates the events side, and where:
+	//
+	//   - the 23503 arm below, on an in_progress start. in_progress files no
+	//     history row, so nothing preempts insertStepEvent there. That is now
+	//     the live gate for "an event that cannot be written fails the
+	//     request".
+	//   - on a terminal transition the completion INSERT preempts every shared
+	//     failure class, which the sub-arm below MEASURES rather than assumes:
+	//     the same bogus attempt_id that reaches insertStepEvent on a start is
+	//     answered by insertStepCompletion here.
+	//
+	// The invariant itself is unchanged and is still asserted: never a 200 with
+	// only one of the two records. Only the refusal's identity moved, from 400
+	// (event unwritable) to 409 (wrong step) — so this arm now pins the
+	// aihub#398 behaviour, and the sentence it used to prove lives on in the
+	// 23503 arm.
 	sa1 := domain.NewID("sa")
 	code, body := patchStep(t, pool, wi.ID, uc, map[string]any{
 		"attempt_id": att, "status": "in_progress", "step": "ship", "step_attempt_id": sa1,
@@ -252,18 +291,35 @@ func TestHandleUpdateStep_TimelineEventIsRecordedOrTheRequestIsRefused(t *testin
 		"attempt_id": att, "status": "failed", "step": "ship\x00x", "step_attempt_id": sa1,
 		"error_type": "ship_fail",
 	})
-	// Invariant first: on the unfixed tree this answers 200 with the history row
-	// written and no step_failed event, and THAT is the finding.
+	// Invariant first, unchanged: on the pre-aihub#390 tree this answered 200
+	// with the history row written and no step_failed event.
 	requireHistoryMatchesEvents(t, pool, wi.ID, att, uc)
-	require.Equal(t, http.StatusBadRequest, code,
-		"a terminal transition whose step_failed event cannot be written must be refused, not answered 200 "+
-			"with a history row and no timeline entry; body: %v", body)
-	assert.Equal(t, string(domain.ErrBadRequest), body["code"])
-	assert.Contains(t, body["message"], "step_failed", "the refusal must name the event that could not be recorded")
-	assert.Contains(t, body["message"], "nothing was committed")
+	require.Equal(t, http.StatusConflict, code,
+		"a terminal transition naming a step other than the open one must be refused, never answered 200 "+
+			"with a record of either kind; body: %v", body)
+	assert.Equal(t, string(domain.ErrConflictCASFailed), body["code"],
+		"since aihub#398 this input is refused by the step-identity predicate before the switch, so it no "+
+			"longer reaches the event INSERT — see this arm's comment for what still gates that")
+	assert.Contains(t, body["message"], "Nothing was committed")
 	requireNothingCommitted(t, pool, wi.ID, att, before, eventsBefore)
 	require.Equal(t, 0, historyRowsFor(t, pool, sa1),
-		"the history row must have rolled back with the failed event")
+		"nothing may be filed for a refused transition")
+
+	// The completion INSERT preempts insertStepEvent on a terminal transition.
+	// MEASURED, not asserted from reading the call order: the same attempt_id
+	// that makes the event INSERT fail on a start (the 23503 arm below) is
+	// answered here by insertStepCompletion, whose message names the step
+	// history. This is why the events side has no input-reachable gate left on
+	// the terminal path.
+	code, body = patchStep(t, pool, wi.ID, uc, map[string]any{
+		"attempt_id": "ra_does_not_exist", "status": "failed", "step": "ship", "step_attempt_id": domain.NewID("sa"),
+		"error_type": "ship_fail",
+	})
+	require.Equal(t, http.StatusBadRequest, code, "body: %v", body)
+	assert.Contains(t, body["message"], "step history",
+		"the refusal must come from the COMPLETION side, which is what preempts the event INSERT here")
+	require.Equal(t, "in_progress", readStepState(t, pool, wi.ID).Status,
+		"and it must commit nothing")
 
 	// The same step then fails with a storable name, and both records land.
 	code, body = patchStep(t, pool, wi.ID, uc, map[string]any{
@@ -294,6 +350,18 @@ func TestHandleUpdateStep_TimelineEventIsRecordedOrTheRequestIsRefused(t *testin
 	// that INSERT fail — destroying the gate above, which is the whole
 	// events-side half of this work item. That tension is real and is recorded
 	// rather than resolved silently.
+	//
+	// ⚠️ aihub#398 UPDATE. The prediction in the paragraph above came true, and
+	// the "Measured instead, 2026-09-07: answers 500 ... SQLSTATE 22021" above
+	// it is now FALSE — left in place because it is the record of what the
+	// unguarded branch did, not because it still describes this request. The
+	// step-identity predicate refuses `step:"tag\x00x"` against a stored "tag"
+	// with 409 CONFLICT_CAS_FAILED, before the branch's own UPDATE runs. The
+	// arm keeps passing without an edit for exactly the reason it was written
+	// loosely — it asserts the invariant and not the status — which is the
+	// whole argument for writing it that way. What that tidying WOULD have cost
+	// was paid anyway: see the first arm above for what is left of the
+	// events-side coverage.
 	histAll := historyRowsForWI(t, pool, wi.ID)
 	sa2 := domain.NewID("sa")
 	code, body = patchStep(t, pool, wi.ID, uc, map[string]any{

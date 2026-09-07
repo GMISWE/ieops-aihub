@@ -786,11 +786,30 @@ func (s *Server) registerLifecycleTools() {
 				"replaying a key from another machine, or after the state file was deleted, is still left "+
 				"unauthenticated. Send a NEW key unless retrying a call whose response you never saw."),
 			"requested_locks": requestedLocksProp("Resource locks to acquire"),
+			// aihub#410: "does not change hands" is enforced by a predicate, not by
+			// a serialized transaction, and the difference is publishable. The
+			// guarantee comes from lockUpsertSQL's conditional ON CONFLICT DO
+			// UPDATE plus probeForeignLockHolders — but FnForceTakeover opens its
+			// transaction with pool.Begin, i.e. READ COMMITTED, so a foreign lock
+			// row COMMITTED after that statement's snapshot can still be
+			// overwritten, and no owner_replaced event records it. The full
+			// measurement, and the reason the isolation level was deliberately not
+			// raised in aihub#393, are in internal/domain/resource_events.go above
+			// lockUpsertSQL.
+			//
+			// The qualifier is one clause — 51 B on the rendered schema, measured
+			// with an in-memory MCP client rather than dump-mcp-schemas, whose
+			// contract JSON carries no descriptions at all — rather than that
+			// paragraph, because this string is resident in the prefix of EVERY
+			// request: an agent needs to know the guarantee has an edge, not how
+			// Postgres SSI works. Naming the wi is what makes the detail findable
+			// for free.
 			"force_takeover": prop("boolean", "Force takeover if already claimed. ⚠️ It takes over the WORK "+
 				"ITEM, not other people's locks: a lock held by a running or paused attempt of a "+
 				"DIFFERENT work item still answers 409 CONFLICT_LOCK_TAKEN and does not change hands "+
 				"(aihub#393). It reclaims this work item's own locks, and rows whose owning attempt has "+
-				"ended. No flag displaces another work item's lock."),
+				"ended. No flag displaces another work item's lock, except in a narrow commit-window "+
+				"race (aihub#410)."),
 			"scenario_ref": prop("string", "Git SHA of local scenario clone at claim time (optional)"),
 		}, []string{"work_item_id", "idempotency_key"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
@@ -1287,11 +1306,16 @@ func (s *Server) registerLifecycleTools() {
 	// pf_force_takeover
 	s.addTool(&sdkmcp.Tool{
 		Name: "pf_force_takeover",
+		// aihub#410: same qualifier as the force_takeover prop on
+		// pf_claim_work_item, and it belongs on BOTH — these are two published
+		// statements of one guarantee, and a caller reads whichever tool they are
+		// about to call. See that site for why the exception is four words here
+		// and a paragraph in internal/domain/resource_events.go.
 		Description: "Force-take ownership of a work item from another agent. ⚠️ It takes over the WORK " +
 			"ITEM, not other people's locks: a lock held by a running or paused attempt of a DIFFERENT " +
 			"work item still answers 409 CONFLICT_LOCK_TAKEN and does not change hands (aihub#393). It " +
 			"reclaims this work item's own locks, and rows whose owning attempt has ended. No flag " +
-			"displaces another work item's lock.",
+			"displaces another work item's lock, except in a narrow commit-window race (aihub#410).",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID or slug"),
 			"reason":       prop("string", "Reason for force takeover"),

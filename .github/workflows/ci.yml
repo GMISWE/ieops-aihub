@@ -1503,6 +1503,50 @@ jobs:
           ! grep -q -- '--- SKIP' ft_lock_steal.log \
             || { echo "::error::an aihub#393 arm SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#410, the residue of the aihub#393 step above and placed next to it
+      # for that reason. That change gave FnClaimWorkItem and FnForceTakeover a
+      # shared cross-work-item lock probe; what it left behind was the probe's
+      # error handling. The whole of it was `if err == nil { conflict }`, so
+      # ErrNoRows and a genuine failure took the same silent path and the claim
+      # walked on believing nothing held the lock.
+      #
+      # Safety was never the casualty — lockUpsertSQL's conditional ON CONFLICT
+      # DO UPDATE is the backstop and holds. CLASSIFICATION was. FnClaimWorkItem's
+      # transaction is SERIALIZABLE, so 40001 is live on this path, and a 40001
+      # aborts the transaction: every later statement then fails with 25P02,
+      # which is not class 40, so the caller was told 500 INTERNAL_ERROR about a
+      # statement that was only the second victim. Measured on the mutant:
+      #
+      #   500 INTERNAL_ERROR  failed to insert run_attempt: ERROR: current
+      #                       transaction is aborted, commands ignored until end
+      #                       of transaction block (SQLSTATE 25P02)
+      #
+      # THE DB IS THE POINT, not scaffolding. The unit arms in
+      # lock_probe_error_test.go hand probeForeignLockHolders a stub pgx.Tx and
+      # run on the "Unit tests" step with no database — they assert what the
+      # function returns. This step asserts that the classification survives the
+      # trip out through FnClaimWorkItem to the caller, past the aborted
+      # transaction that used to overwrite it. Neither implies the other.
+      #
+      # The fixture renames resource_locks and puts a view over a 40001-raising
+      # set-returning function in its place, so the SQLSTATE is real and arrives
+      # on the real probe statement. It self-checks by running the actual
+      # foreignLockHolderSQL and requiring 40001 back, and restores the table in
+      # t.Cleanup — if that restore ever fails, later steps in this block fail on
+      # the fixture rather than on their own subject, which is the loud outcome.
+      - name: aihub#410 lock-probe error classification DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestClaimProbeFailureReachesTheCallerAsARetryable409$' -count=1 -v 2>&1 | tee lock_probe_err.log
+          for want in TestClaimProbeFailureReachesTheCallerAsARetryable409; do
+            grep -q -- "--- PASS: $want" lock_probe_err.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); a lock-probe failure can again reach the caller as an unclassified 500 instead of the retryable 409"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' lock_probe_err.log \
+            || { echo "::error::the aihub#410 arm SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#402: GetWorkItem chose ONE column by testing a `wi_` prefix — id if
       # present, slug otherwise — unlike every sibling resolver, which takes the
       # union `id = $1 OR slug = $1`. Project names are validated by

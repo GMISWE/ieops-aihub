@@ -969,15 +969,38 @@ func (s *Server) registerLifecycleTools() {
 			// the attempt is live, holds this work item's locks, and if a previous
 			// holder was displaced it is already gone.
 			//
-			// ⚠️ THE RECOVERY IS A **NEW** idempotency_key, NOT A REPLAY OF THIS
-			// ONE. Read off internal/domain/run_attempts.go, not assumed: a claim
-			// carrying an already-used key takes the idempotency branch, which
-			// returns the EXISTING attempt and never touches session_secret_hash —
-			// while this handler mints a fresh session_secret on every call, so the
-			// state file it writes would hold a secret the server has never seen and
-			// every later call 401s "invalid session_secret". With a new key the
-			// same-user branch treats it as an implicit takeover and issues a fresh
-			// attempt bound to the secret this call generated.
+			// ⚠️ THE RECOVERY IS A REPLAY OF **THIS SAME** idempotency_key. It was
+			// the opposite until aihub#347, and this comment said so for as long as
+			// that was true — do not "restore" it. Read off internal/domain/
+			// run_attempts.go (FnClaimWorkItem's idempotency branch) and
+			// recordedClaimSecret below, not assumed: a
+			// claim carrying an already-used key takes the idempotency branch,
+			// which returns the EXISTING attempt with its claim_epoch unchanged and
+			// never touches session_secret_hash. Since #347 this handler no longer
+			// mints a fresh secret on that path — recordedClaimSecret reads back the
+			// one the C6-2 pre-claim write persisted under this key, so the state
+			// file the replay writes holds exactly the secret the server already
+			// accepted. That makes the replay the cheap fix: no epoch bump, no
+			// superseded attempt, and nothing left to redo but the local write that
+			// failed here.
+			//
+			// A NEW key is the FALLBACK, and only for the case where that pre-claim
+			// record cannot be READ BACK — which is the predicate, not "still
+			// exists". Four ways it happens: it was deleted; the retry comes from
+			// another machine; the replay addresses the work item by a different id
+			// spelling than the stub is filed under (ResolveStateFile keys on the
+			// string the caller passed); or THIS VERY WRITE truncated it. That last
+			// one is not exotic: a claim addressed by the canonical id has
+			// passedID == canonicalID, so WriteClaimState writes the stub's own
+			// path, and os.WriteFile opens O_TRUNC before it writes — so a failure
+			// of the write rather than of the MkdirAll (ENOSPC, EIO) leaves a
+			// truncated file that no longer parses. Then recordedClaimSecret misses, a fresh
+			// secret is minted, the idempotency branch never registers it, and every
+			// later call 401s "invalid session_secret" — so with the record gone the
+			// same-user branch is the way out: it treats a new key as an implicit
+			// takeover and issues a fresh attempt bound to the secret this call
+			// generated. Correct, but it costs one epoch bump and one superseded
+			// attempt, which is why it is second.
 			//
 			// ⚠️ DO NOT say here that the session_secret "existed only in memory".
 			// That is true of pf_force_takeover and FALSE here: the C6-2 pre-claim
@@ -989,6 +1012,15 @@ func (s *Server) registerLifecycleTools() {
 			// the pre-claim stub carries claimed=false and no attempt_id, so
 			// ResolveStateFile skips it and no later call can authenticate as this
 			// attempt. Say that instead.
+			//
+			// ⚠️ "Skips" there means skips it as a MATCH, and the difference is what
+			// the recovery above rests on. ResolveStateFile's first two lookups both
+			// require a non-empty attempt_id, so neither of them returns the stub —
+			// but its last line falls through to a plain ReadStateFile and hands the
+			// stub back with a NIL error (internal/config/state.go). So the secret is
+			// readable while the binding is not, which is exactly why the same-key
+			// replay can re-authenticate: recordedClaimSecret reads it off this very
+			// stub. What is lost is the binding, not the file and not the secret.
 			attemptDesc := fmt.Sprintf("Attempt %s (epoch %d)", sf.AttemptID, sf.ClaimEpoch)
 			if sf.AttemptID == "" {
 				// An old server that did not echo attempt_id would otherwise render
@@ -999,8 +1031,11 @@ func (s *Server) registerLifecycleTools() {
 				" — ⚠️ NOT A NO-OP: the claim ALREADY SUCCEEDED on the server."+
 				" %s is running under your name and holds whatever locks this work item declares;"+
 				" only this machine's local record of it failed, and without that record nothing here can authenticate as the attempt."+
-				" RECOVERY: call pf_claim_work_item again with a NEW idempotency_key — replaying the same key returns this attempt without registering a new secret, leaving every later call unauthorized."+
-				" The re-claim is not destructive: you already own the attempt, so it costs one epoch bump and one superseded attempt."+
+				" RECOVERY: call pf_claim_work_item again and REPLAY THIS SAME idempotency_key, with the same work_item_id spelling you passed here."+
+				" This process persisted that key's session_secret before it called the server, so the replay reuses that exact secret and the server returns THIS attempt with its epoch unchanged (aihub#392):"+
+				" it costs no epoch bump and no superseded attempt, and the only thing it has to redo is the local write that just failed."+
+				" Send a NEW idempotency_key ONLY IF that record cannot be read back — deleted, truncated by the very write that just failed, or you are retrying from a different machine — since a replay that cannot read the recorded secret mints one the server never registered and every later call then answers \"invalid session_secret\"."+
+				" That fallback is not destructive either, but it does cost one epoch bump and one superseded attempt."+
 				" %s",
 				err, attemptDesc, stateWriteFilesystemAdvice))
 		}

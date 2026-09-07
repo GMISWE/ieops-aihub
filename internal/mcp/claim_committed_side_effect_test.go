@@ -194,19 +194,37 @@ func TestForceTakeoverErrorDisclosesTheEvictionItAlreadyPerformed(t *testing.T) 
 // inside the fake aihub's handler, i.e. after the partial write and before the
 // post-claim one.
 //
-// ⚠️ THE RECOVERY IS A NEW idempotency_key, NOT A REPLAY. Read off
-// internal/domain/run_attempts.go rather than assumed: a claim carrying an
-// already-used key takes the idempotency branch, which returns the EXISTING
-// attempt and never touches session_secret_hash, while this handler mints a
-// fresh session_secret on every call — so a replay would write a state file
-// holding a secret the server has never seen, and every later call would 401
-// "invalid session_secret". That is a second silent failure stacked on the
-// first, which is why the message has to be specific and why this test asserts
-// on it.
+// ⚠️ THE RECOVERY IS A REPLAY OF THE SAME idempotency_key, and this comment
+// asserted the exact opposite until aihub#408. Both readings were right in their
+// day, so the history matters more than the conclusion. Pre-aihub#347: the
+// handler minted a fresh session_secret on every call, the server's idempotency
+// branch returned the EXISTING attempt without touching session_secret_hash, so
+// a replay wrote a state file holding a secret the server had never seen and
+// every later call 401d "invalid session_secret" — a second silent failure
+// stacked on the first, and a new key was the only way out. Post-aihub#347
+// (merge 51108c9): recordedClaimSecret reads back the secret the C6-2 pre-claim
+// write persisted under that key, so the replay writes the secret the server
+// already accepted, returns the same attempt at the same epoch, and costs
+// neither an epoch bump nor a superseded attempt.
+//
+// The message kept the old advice for as long as it took someone to notice, and
+// THIS TEST is why that is worth a paragraph: the assertion below pinned the
+// stale wording in place, so the defect had a green gate sitting on top of it.
+// A test that asserts a contract can also be what preserves a false one — which
+// is why the assertions now check the ORDER and the CONDITION of the two
+// branches of advice, not merely that some idempotency_key sentence is present.
 //
 // MUTANT (the pre-aihub#323 build): restore
 //
 //	return errResult(fmt.Errorf("update state file: %w", err))
+//
+// SECOND MUTANT (the pre-aihub#408 build), which the four assertions at the end
+// of this test are the gate for: put the stale recovery sentence back, i.e.
+//
+//	" RECOVERY: call pf_claim_work_item again with a NEW idempotency_key — replaying the same key returns this attempt without registering a new secret, leaving every later call unauthorized."
+//
+// It still satisfies assertDisclosesCommittedSideEffect and the aihub#323
+// mutant's assertions in full; only the direction-of-advice checks catch it.
 func TestClaimErrorDisclosesTheClaimItAlreadyMade(t *testing.T) {
 	const wiID = "wi_01JCLAIMCOMMITTED"
 	const attempt = "ra_claim_committed"
@@ -255,8 +273,41 @@ func TestClaimErrorDisclosesTheClaimItAlreadyMade(t *testing.T) {
 	}
 
 	assertDisclosesCommittedSideEffect(t, msg, attempt)
-	if !strings.Contains(msg, "NEW idempotency_key") {
-		t.Errorf("error text does not say the retry needs a NEW idempotency_key. Replaying the same one returns this attempt from the idempotency branch without registering the fresh session_secret this handler generates, so every later call 401s; got %q", msg)
+
+	// ⚠️ THE DIRECTION OF THE ADVICE, AND ITS ORDER — not just its presence.
+	// Asserting only "RECOVERY:" plus "idempotency_key" is satisfied by either
+	// direction, and the two directions are opposites that cost different things:
+	// the same-key replay is free, the new key costs an epoch bump and a
+	// superseded attempt. An agent that reads the first recovery sentence and acts
+	// on it is the failure aihub#408 was filed for, so the cheap one has to come
+	// first and the expensive one has to be visibly conditional.
+	//
+	// ANTI-VACUITY: "REPLAY THIS SAME idempotency_key" appears nowhere in the
+	// pre-aihub#408 message, which said "call pf_claim_work_item again with a NEW
+	// idempotency_key" and then "replaying the same key ... leaving every later
+	// call unauthorized". Note the old text DID contain "replaying the same key",
+	// so an assertion on that phrase alone would have passed on the stale build
+	// while inverting the advice — measured, not imagined: it is why the asserted
+	// phrase is the imperative and not the gerund.
+	const primary = "REPLAY THIS SAME idempotency_key"
+	const fallback = "NEW idempotency_key"
+	iPrimary := strings.Index(msg, primary)
+	iFallback := strings.Index(msg, fallback)
+	if iPrimary < 0 {
+		t.Errorf("error text does not name a replay of the SAME idempotency_key as the recovery. Since aihub#347 recordedClaimSecret reuses the session_secret the C6-2 pre-claim write persisted under this key, so the replay writes the secret the server already accepted and returns the same attempt at the same epoch — advising anything more expensive sends the caller through a needless takeover (aihub#408); got %q", msg)
+	}
+	if iFallback < 0 {
+		t.Errorf("error text no longer mentions the NEW-idempotency_key fallback at all. It is still the only way out when the pre-claim record cannot be read back — deleted, truncated by the failing write itself (a canonical-id claim rewrites the stub's own path under O_TRUNC), a retry from another machine, or a different work_item_id spelling than the stub is filed under — and dropping it strands exactly that caller with no advice; got %q", msg)
+	}
+	if iPrimary >= 0 && iFallback >= 0 && iPrimary > iFallback {
+		t.Errorf("the NEW-idempotency_key fallback is stated BEFORE the same-key replay, so a caller who acts on the first recovery sentence pays an epoch bump and a superseded attempt to fix a failed local write that a free replay would have fixed; got %q", msg)
+	}
+	// The fallback must be CONDITIONAL. As a bare second sentence, "send a NEW
+	// idempotency_key" reads as another thing to do rather than as the
+	// record-is-gone case — which is how the pre-#347 advice would survive a
+	// rewrite that satisfied every assertion above.
+	if iFallback >= 0 && !strings.Contains(msg, "ONLY IF") {
+		t.Errorf("the NEW-idempotency_key sentence carries no explicit condition, so it reads as advice for the common case instead of for the lost-pre-claim-record case; got %q", msg)
 	}
 }
 

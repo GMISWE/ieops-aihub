@@ -1,0 +1,35 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-07T07:31:53.211Z",
+    "transcript_id": "40d1a65e93f0"
+  },
+  "request": {
+    "pause_reason": "Phase A/B/C 三段已合入两仓 main 并按内容核实；goal 第三句（处置 syncresourcetopo → 删整个 charts/agent）未做，已拆出为 ieops#1036，故不 wrap 成完成。暂停以放开 ieops-bizplane:internal/algorithm/* 的 file_scope 锁，让 ieops#1033 能认领同一批文件。",
+    "work_item_id": "ieops#1009"
+  },
+  "response": {
+    "body": {
+      "status": "paused"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 19
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_pause_attempt"
+}

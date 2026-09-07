@@ -1,0 +1,55 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.237",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-25T05:52:55.278Z",
+    "transcript_id": "8efabb84160f"
+  },
+  "request": {
+    "status": "wrapped",
+    "summary": "<redacted-text sha256=1e22f6d24850 len=5687>",
+    "work_item_id": "ieops#730"
+  },
+  "response": {
+    "body": {
+      "ok": true,
+      "worktrees": {
+        "ieops-bizplane": "<WORKSPACE>/pf.ieops-730/ieops-bizplane",
+        "ieops-clouds": "<WORKSPACE>/pf.ieops-730/ieops-clouds",
+        "ieops-core": "<WORKSPACE>/pf.ieops-730/ieops-core",
+        "ieops-ctlchain": "<WORKSPACE>/pf.ieops-730/ieops-ctlchain",
+        "ieops-datachain": "<WORKSPACE>/pf.ieops-730/ieops-datachain",
+        "ieops-doc": "<WORKSPACE>/pf.ieops-730/ieops-doc",
+        "ieops-env": "<WORKSPACE>/pf.ieops-730/ieops-env",
+        "ieops-karmada-all-in-one": "<WORKSPACE>/pf.ieops-730/ieops-karmada-all-in-one",
+        "ieops-kube": "<WORKSPACE>/pf.ieops-730/ieops-kube",
+        "ieops-nodeautoscaler": "<WORKSPACE>/pf.ieops-730/ieops-nodeautoscaler",
+        "ieops-reverst": "<WORKSPACE>/pf.ieops-730/ieops-reverst",
+        "ieops-titan": "<WORKSPACE>/pf.ieops-730/ieops-titan",
+        "ieops-utils": "<WORKSPACE>/pf.ieops-730/ieops-utils",
+        "ieops-v2": "<WORKSPACE>/pf.ieops-730/ieops-v2",
+        "proxy-server": "<WORKSPACE>/pf.ieops-730/proxy-server"
+      }
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 1099
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:summary=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_complete_attempt"
+}

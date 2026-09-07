@@ -1,0 +1,71 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.185",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-06-23T09:53:32.417Z",
+    "transcript_id": "a0a042eb8889"
+  },
+  "request": {},
+  "response": {
+    "body": {
+      "api_key_id": "k_bHXzcxcR",
+      "display_name": "xiaokang.w",
+      "email": "xiaokang.w@gmicloud.ai",
+      "project_roles": {},
+      "projects": [
+        {
+          "name": "aihub",
+          "relation": "owner",
+          "role": "owner"
+        },
+        {
+          "name": "aiterm",
+          "relation": "owner",
+          "role": "owner"
+        },
+        {
+          "name": "ieops",
+          "relation": "owner",
+          "role": "owner"
+        },
+        {
+          "name": "infra",
+          "relation": "owner",
+          "role": "owner"
+        },
+        {
+          "name": "marketplace",
+          "relation": "owner",
+          "role": "owner"
+        },
+        {
+          "name": "tether",
+          "relation": "owner",
+          "role": "owner"
+        }
+      ],
+      "role": "admin",
+      "server_version": "dev",
+      "user_id": "u_5dFjeaMZ",
+      "user_type": "human"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 759
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_whoami"
+}

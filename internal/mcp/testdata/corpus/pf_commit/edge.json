@@ -1,0 +1,55 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.237",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-21T03:10:42.051Z",
+    "transcript_id": "faded980fbbf"
+  },
+  "request": {
+    "message": "装上 CI + Dockerfile + 构建骨架（本仓在拆分后第一次有闸）\n\n基线：ieops-v2@9325fe9f（只读，git archive 取内容，零写入）。\n\n## 装了哪几道闸，每道的本地实测退码\n\n.github/workflows/go.yml（新写，v2 和 ctlchain tag 都没有够用的版本）\n  go build ./...                                             exit 0\n  go vet ./...                                               exit 0\n  go test ./... -count=1 -v                                  exit 0  556 PASS / 0 SKIP\n  三条判据一条都不能省：<truncated 8452 chars>",
+    "paths": [
+      ".github",
+      ".golangci.yml",
+      "Makefile",
+      "hack",
+      "deploy",
+      ".gitignore",
+      "README.md"
+    ],
+    "repo": "ieops-nodeautoscaler",
+    "work_item_id": "wi_Sy3coDki"
+  },
+  "response": {
+    "body": {
+      "files": [
+        ".github",
+        ".golangci.yml",
+        "Makefile",
+        "hack",
+        "deploy",
+        ".gitignore",
+        "README.md"
+      ],
+      "repo": "ieops-nodeautoscaler",
+      "sha": "54c3ca1e1d370112178abd8705b15ca462bc807e"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 168
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_commit"
+}

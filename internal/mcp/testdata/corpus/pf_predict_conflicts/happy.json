@@ -1,0 +1,85 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.246",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-30T21:48:13.352Z",
+    "transcript_id": "d297e63472ef"
+  },
+  "request": {
+    "declared_resources": [
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:plugins/polyforge/skills/using-polyforge/fragments/bootstrap.md"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:plugins/polyforge/skills/using-polyforge/fragments/iron-rules.md"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:plugins/polyforge/skills/using-polyforge/fragments/output-format.md"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:plugins/polyforge/skills/using-polyforge/fragments/nl-routing.md"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:plugins/polyforge/skills/using-polyforge/fragments/memory-first.md"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:plugins/polyforge/skills/using-polyforge/SKILL.md"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:plugins/polyforge/tests/using-polyforge-payload.test.sh"
+      }
+    ],
+    "dry_run": true,
+    "project": "aihub",
+    "work_item_id": "wi_arirA4tl"
+  },
+  "response": {
+    "body": {
+      "predictions": [
+        {
+          "description": "<redacted-text sha256=8a304869d836 len=43>",
+          "resource_key": "aihub:plugins/polyforge/skills/using-polyforge/SKILL.md",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        }
+      ],
+      "severity": "soft_block",
+      "will_unlock": []
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 255
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:description=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_predict_conflicts"
+}

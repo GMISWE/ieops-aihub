@@ -1,0 +1,56 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-06T05:14:15.953Z",
+    "transcript_id": "5903f466bea1"
+  },
+  "request": {
+    "content": "<redacted-text sha256=9f8fc633e807 len=17902>",
+    "memory_id": "mem_Lay8FqZH",
+    "work_item_id": "aihub#373"
+  },
+  "response": {
+    "body": {
+      "activation_count": 0,
+      "attrs": {},
+      "author_display": "xiaokang.w",
+      "author_user_id": "u_5dFjeaMZ",
+      "base_strength": 3,
+      "commits": [],
+      "content": "<redacted-text sha256=9f8fc633e807 len=17902>",
+      "created_at": "2026-09-06T05:14:16.11976Z",
+      "id": "mem_XEUfkZsJ",
+      "is_immortal": false,
+      "latest_id": "mem_XEUfkZsJ",
+      "project": "aihub",
+      "stability_days": 36500,
+      "status": "active",
+      "tags": [],
+      "type": "methodology.execute",
+      "updated_at": "2026-09-06T05:14:16.11976Z",
+      "visibility": "project",
+      "work_item_id": "wi_NHwfTgcA"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 18781
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_update_memory"
+}

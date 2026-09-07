@@ -1,0 +1,397 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-06T13:08:03.698Z",
+    "transcript_id": "40d1a65e93f0"
+  },
+  "request": {
+    "work_item_id": "wi_Del9u4H1"
+  },
+  "response": {
+    "body": {
+      "attrs": {
+        "CORRECTION_to_spec_v3_R9": "🔴 spec v3 与 attrs.refuted_4 里『karmada agent configmap 是实际部署的那份』是错的（本会话 2026-09-06 自己引入的错误，已实测推翻）。真相：`charts/agent/templates/configmap.yaml:57` 确实写着 enabled:true 且不受 values 控制，但整个 chart 被两道闸关掉：`configmap.yaml:1` 的 `{{- if .Values.enabled }}` 与 `Chart.yaml:30-32` 的 `condition: agent.enabled`，而 **11 个 live values 文件里 agent.enabled 全部为 false**（已逐文件 yaml.safe_load 求值，同文件内 ieops-v2-agent.enabled=true 作正对照）。唯一 true 的是 chart 默认 values.yaml，非 live 集群文件。⇒ **这条 cron 从未被下发到任何集群**。更深一层：带它的 charts/agent 对应的二进制是 `ieops-agent:v0.0.3-713-g951ac9e-dirty`，该 sha 在 .repo/ 下 48 个仓零命中（正对照：ieops-v2-agent 的 acd0251 在 ieops-v2 命中），且 ieops-v2 无 tag、ieops-ctlchain 只有 pre-resplit tag，都不可能 git describe 出 v0.0.3-713-g ⇒ 它是**拆仓前 v1 单体仓（不在本工作区）**的产物。真正在跑的 agent 是 charts/ieops-v2-agent（镜像 ieops-v2-agent:v0.0.0-260812-acd0251，来自 ieops-v2）。⇒ **R9 处置改为：删掉整个 charts/agent chart（含 Chart.yaml 依赖项与各 values 的 agent: 残块）**，而不是去 ieops-ctlchain 里找实现或只删 cron 段。⚠️ titan cron.go:96-102 的地雷仍成立（存在性检查在 enabled 检查之前，enabled:false 保护不了你），今天唯一的保护是 sync group 未注册。",
+        "M8_pruning_failure_scenario": "🔴 审查补的失败场景，Phase C 必须落闸：CRD YAML 有 4 份副本，真正下发集群的是 karmada charts/ieops-v2-crds/templates/vnodes.yaml。若 Phase B 把三个新字段接通而这份 chart 未同步，**apiserver 的 structural pruning 会静默剥掉 topologyCollected**——不报错、不告警，读回是 false，而 false 在本设计里的语义正是「从未采集」。即：一个纯粹的部署疏漏会伪装成「所有节点的所有卡都没采集到拓扑」，且这正是三态编码要区分的那个状态。⚠️ 没有任何自动化会发现这份副本过时（唯一的 diff-all-in-one-crds.sh 只 diff 不写，且源是 ieops-v2 而非 ieops-core）。",
+        "P1_decided_process_boundary": "gpu-topo 作为 bundle 组件**声明**但**默认不由 launcher 启动**（enabled 条件默认不满足），由 brslet 按 collector 节奏 exec.CommandContext 调用并解析 JSON。依据：supervise.go:399-438 三条互斥分支 —— critical:false + restartPolicy:never 的组件退出只记 WARN（:438），critical:true 则 StopAll 反序停掉全部并让 launcher 非零退出（:432-437）；manifest 声明是必须的（bundlepush verifyLayout main.go:466-478 双向校验：bin 存在但无组件声明也是错），但 enabled 不满足时 StartAll 会 skip（:220-223）。brslet 定位 gpu-topo 靠 filepath.Dir(os.Executable()) 同目录，因为 launcher 不传 bundleDir（cmd.Env = os.Environ() 原样继承，supervise.go:262）。无 oneshot 类型（restartPolicy 只允许 \"\"/never/always，readiness.Type 只有 process）。",
+        "P2_decided_type_shape": "不用嵌套结构（会造成新旧字段并存 = 两个关于 NUMA 的答案，正是 #1003 §9 否决 topo.karmada.io 的理由）。定稿：NumaNode *int32 `json:\"numaNode,omitempty\"` + NVLinkPeers []int32 `json:\"nvlinkPeers,omitempty\"` + 新增 TopologyCollected bool `json:\"topologyCollected,omitempty\"`。三态：collected=false⇒未上报；true+NumaNode==nil⇒采集了但 NVML Not Supported；true+NumaNode=&0⇒确认在 NUMA 0。**controller-gen v0.19.0实测**（已在 pf.ieops-1009/ieops-core 跑过并还原，dirty=0）：*int32 仅使 schema 多一行 format:int32；去掉 omitempty **不**改变 schema 也**不**进 required（required 由 // +optional 标记独立控制，gpus[].required 恒为 cc/family/gpuID/healthy/memoryTotalMB）⇒ 保留 omitempty 即可避开 null 与 nullable:true 风险，无需验证 apiserver 对 null 的行为。",
+        "P3_decided_bump_order": "ieops-bizplane 是那两个字段的**唯一真下游读方**（4 处：gpu_datasource.go:96,97 与 page_table.go:153,154），其余 4 个依赖仓（ctlchain/datachain/nodeautoscaler/env）对这两个标识符零命中，只需 bump pin 且可延后。顺序：core merge → bizplane（唯一必改代码，同批改其 config/crd/bases 副本 —— envtest suite_test.go:72 读它）→ **karmada charts/ieops-v2-crds/templates/vnodes.yaml 手工同步**→ 其余三仓纯 pin → ieops-env 最后（已落后 43 个 commit）。🔴 两个流程陷阱：(1) **无任何 workflow 自动 bump ieops-core 的 pin**（proxy-pin-bump.yml 名字像但无关，它 reconcile 的是 proxy 容器镜像三元组），5 个仓全手工 go get；(2) **CRD YAML 有 4 份副本，真正下发到集群的是 karmada chart 那份，而没有任何自动化会发现它过时**（唯一的 diff-all-in-one-crds.sh 只 diff 不写，且源是 ieops-v2 而非 ieops-core，v2 归档后它也消失）。另：codegen.yml 是漂移闸，改 vnode_types.go 不重生成即 CI 红。",
+        "blockers_found_2026-09-06": "spec 未覆盖的落地阻塞：(1) 🔴 nvml_stub_linux.go/nvml_stub.go 在包级声明裸 Init/Shutdown/DeviceGetCount/DeviceGetHandleByIndex/ErrorString/Device/Return/SUCCESS，tag 与 cgo 无关恒被编译，collector.go:58-94 直接调 ⇒ 新代码写裸 Init() 会编译通过但调到 stub（恒返回 0,SUCCESS）= 静默 0 个 GPU；(2) brslet 二进制有两个消费者两种 libc —— alpine.Dockerfile:35 musl（Makefile:106 ALPINE_SERVICES 含 brslet）与 launcher-base ubuntu22.04 glibc bundle ⇒ 开 cgo 后不能共用一份产物；(3) go.yml:305-311 与 :358+ 硬门禁 SKIP==0，cgo NVML 测试在无 GPU 的 ubuntu-latest 上必然 skip；(4) go.yml:686 CGO_ENABLED=0 go build ./... 与 :679/:689 交叉 vet；(5) brslet 容器无显式 NVIDIA_DRIVER_CAPABILITIES，k8s/gmi-ec provider 刻意不设 NVIDIA_VISIBLE_DEVICES ⇒ libnvidia-ml.so.1 未必被注入，正是 SIGSEGV 的触发条件；(6) ieops-v2 的 cgo 采集器从未进入任何镜像（hack/build.sh:57 亦 CGO_ENABLED=0，只在 local-run.sh:87 go run），不构成可参照的生产路径",
+        "core_gates_were_red_and_are_now_green": "🔴 两道 ieops-core 的 CI 闸因本次类型变更而红，已修（且我之前报的「core-gates.py exit=0」是假的——退出码被 `| sed` 管道吃掉了，`$?` 读到的是 sed 的）：\n\n**G6 golden 快照**：`docs/resplit/golden.txt` 冻结 20 个包的符号表。GPUSlotStatus 字段变化后未重生成 ⇒ 闸报「树里有、golden 里没——新符号未重生成快照（它现在零把守）」。修法：按闸自己的口径重生成（`go list -f {{.Dir}} ./...` → `go run hack/goldengen/main.go <pkgs>`，GOWORK=off）。1750→1751 行，**diff 恰好只有 GPUSlotStatus 那四行**，别处零变动。\n\n**APPEND（golden 只增不减）**：相对 base commit，每一行都不得消失。本次删了三行，需在 `docs/resplit/core-decisions.json` 的顶层 `removed_symbols` 里**逐行登记**（形状：`{pkg: {lines, why, evidence}}`）。已登记，并在 why 里说明三行的性质不同：\n  ① NumaNode int→*int32：真类型变更（NVML 取不到时返回的就是 0，且 C 层签名是 *uint32 无符号，无法用负值表达未知）\n  ② NVLinkPeers []int→[]int32：同一次对齐\n  ③ **Healthy 不是被删的字段**——golden 行格式把字段**序号**编进了行里（`|<ordinal>|<name>|`），新增的 TopologyCollected 插在 NumaNode 之前占了 4，Healthy 从 6 挪到 7，旧的 `|6|Healthy|` 行随之消失。⚙️ **凡在结构体中间插入字段，都会以这个形状连带「删掉」它后面每一个字段的行。**\n\n为何不把新字段追加到结构体末尾以避开这道闸：那样登记表能少一行，但三个拓扑字段会被 Healthy 隔开，而它们是一组必须一起读的三态编码。让闸多记一行、换源码里三个字段挨着，是划算的。\n\n结果：`core-gates.py . docs/resplit/core-manifest.json docs/resplit/core-decisions.json --no-v2 --base=<sha> --self-test` → **exit=0**，输出明确写「放行 3 行裁决登记过的移除，其余形态照旧判红」，33 条自检正对照全部抓到、零漏。登记机制自带反噬：登记了但那行仍在树里 ⇒ 判红。\n\n⚠️ 新增两个受影响文件：docs/resplit/golden.txt、docs/resplit/core-decisions.json（均已入 declared_resources）。",
+        "independent_review_2026-09-06_disposition": "独立审查返回 5 HIGH / 5 MEDIUM / 7 LOW。已修并验证的：\n\n🔴 M6（架构级，审查发现的最重要一条）：nvlink_collector_linux.go 为拿 JSON 契约类型而 import cmd/gpu-topo/app，而该包在 cgo 下选中 collect.go → import go-nvml ⇒ **brslet 的依赖图在 CGO_ENABLED=1 下含 2 个 nvml 包**，整个独立进程设计被一个 import 抵消。今天不炸只因 build.sh 给 brslet 传 0，但 go.yml:277 的 `go build ./...` 不设该变量、默认 cgo=1。修法：新建叶子包 pkg/gputopo（无 build tag、无 nvml），把 FabricKind/GPU/Report/RemoteKind/LinkObserva<truncated 2383 chars>",
+        "live_evidence_orphan_group_is_safe": "🟢 生产实活证据：`syncgpunode` 这个 group 在 values.prod.k3s-prod1-k3s-us-west1.yaml:487-490 以 enabled:true / 每5秒 下发着，而它在 ieops-ctlchain 与 ieops-v2 的 Go 代码里都是 **0 处命中**（正对照 syncvnode 分别 48 / 42 处），已在生产跑很久无事故 ⇒ titan cron.go:88 「遍历已注册 handler 而非 config」导致未注册 group 被静默跳过，这条路径有生产实证，不只是读码推断。",
+        "local_verifiability_limit": "本机 L4 单卡无 NVLink、单 NUMA 节点 ⇒ spec 20 个 Scenario 中依赖多卡/NVLink/NVSwitch/双NUMA 的（NVSwitch 全互联、直连 NVLink、多卡 peer 对称、双 NUMA 8 卡机、scoreTopology 三档）本机无法真机验证，只能单元测试造数据。本机可真机验证的是：PCIe-only 空 peer 列表、NUMA 取不到、NVML init 成功路径",
+        "measured_on_local_l4_2026-09-06": "本机 NVIDIA L4 单卡 / driver 590.48.01 / nvml 13.590.48.01，go-nvml v0.13.3-1 cgo 探针实测：(1) nvml.Init() 成功，无 SIGSEGV；(2) 🔴 GetNumaNodeId → value=0, ret=Not Supported ⇒ 取不到时返回值就是 0，与『真的在 NUMA 0』不可区分，且 C 层签名 nvmlDeviceGetNumaNodeId(device, Node *uint32) 是无符号，NVML 根本无法用负值表达未知 —— 第 7 项待决不是假想，本机即可复现；(3) 🔴 GetNvLinkRemoteDeviceType(0) → 0, ret=Not Supported，而 NVLINK_DEVICE_TYPE_GPU==0 ⇒ 不检查 Return code 会把『不支持 NVLink』误读为『对端是 GPU』；(4) GetNvLinkState → Not Supported（非 SUCCESS+DISABLED）⇒ PCIe-only 机器上必须把 Not Supported 当空而非错；(5) NVLINK_MAX_LINKS=36，每卡 36 次无效调用；(6) DeviceGetHandleByPciBusId round-trip 成功",
+        "phase_a_committed_and_pushed_2026-09-06": "Phase A 已 commit + push（未开 PR、未 merge、未部署）。\n\n分支（两仓同名）：polyforge/ieops-1009-gpu-nvlink-numa-vnode-status-gpus\n  ieops-core     7e8405f6958c4e300f70193cf79c4d446e30b10d   6 文件 +200/-7\n  ieops-ctlchain f03919a9c8d2508626ba2ff83f033ca3a306fefa  24 文件 +1684/-63\n\n推送已用 `git ls-remote` 逐 sha 核实与本地一致；两仓 main 未被触碰（core 13762ce / ctlchain 25e6040）。提交作者为 xiaokang.w，**零 AI 署名**。\n\n【推送前的完整闸门】\nieops-ctlchain: go test cgo=0 → 39 ok/0 FAIL/0 SKIP；cgo=1 → 773 PASS/0 FAIL/0 SKIP；-race → 0 data race；双构建、darwin+arm64 vet、golangci-lint v2.12.2 0 issues、gofmt+goimports（331 文件）无漂移、check-image-coverage、check-bundle-sources、ieops-v2 源码与模块图残留零、无二进制产物、镜像发布默认 opt-in。M6 双向判据：cgo=1 下 brslet nvml 包数=0、gpu-topo=2。\nieops-core: 20 ok/0 SKIP；core-gates.py exit=0（33 条自检正对照全抓到、零漏）；codegen 幂等；gofmt；lint 0 issues。\n\n⚠️ 我之前报的「全量闸门绿」曾两次不实：（1）`core-gates.py | sed` 让 $? 读到 sed 的退出码，G6 与 APPEND 两道闸一直是红的；（2）逐条对照 CI workflow 后发现漏跑六道（cgo 默认开启的 go test、goimports、ieops-v2 残留×2、二进制产物、镜像 opt-in、core 的 lint）。两次都是「检查本身坏了，但坏法看起来像通过」。现已全部补跑。\n\n【下一步】CI 监视中（绑 head SHA）。Phase B/C 未开始：\nPhase B = label.go:200 的 GPU0 同质化、per-GPU annotation 传输、sync_vnode 读侧、ctlchain bump ieops-core pin\nPhase C = bizplane pin bump + 4 处读点 + FilterGPUs/scoreTopology、karmada CRD 手工同步（⚠️ 否则 structural pruning 静默剥掉 topologyCollected）、退休 charts/agent",
+        "phase_a_merged_2026-09-06": "✅ Phase A 已合入两仓 main，合并后 main CI 全绿。**未部署**。\n\nPR：ieops-core #58 · ieops-ctlchain #89，均 squash-merge（两仓近期实践都是线性历史）。\nmain：ieops-core 13762ce → **c68d4a4**；ieops-ctlchain 04a4218 → **850adcf**。\n均按**内容**验证而非按 sha：main 上 vnode_types.go 含 TopologyCollected×4、golden.txt 含那一行、cmd/gpu-topo/app/collect.go 与 pkg/gputopo/contract.go 存在、hack/util.sh 含 REPO_TARGET_CGO、Makefile 含 gpu-topo bundle 组件、采集器含 topoRefr<truncated 1788 chars>",
+        "phase_b_scope_corrected_2026-09-06": "🔴 Phase B 实地勘查后，对 plan 的三处修正——它比 plan 写的小得多，且 plan 有一条是错的。\n\n**修正一：不需要 bump ieops-core pin。**实测 `grep -rn GPUSlotStatus --include='*.go'` 在 ieops-ctlchain 里**非测试命中 0 处**——`sync_vnode.go` 构造的是 `map[string]any`，从不碰那个类型。⇒ Phase B **完全在 ieops-ctlchain 内部，一个 PR**，不涉跨仓发布周期。\n\n**修正二：不要动 `pkg/node/business/provider/label.go:199`。**plan 说要「打破 label.go:200 的 GPU0 同质化」，这是错的。那段产出的是 `nvidia.com/gpu.product` / `.memory` / `.family` / `.compute.major|minor` 这套 **NFD/GPU-Operator 节点级标签**，schema 本来就是每节点一个值，取 `GPUs[0]` 是正确的。真正的问题是**节点标签这个载体装不下 per-GPU 图结构**，该做的是加一条并行的 annotation 通路，而不是去改一个正确的东西。\n\n**修正三：annotation 常量放 ctlchain，不放 core。**`v1alpha1.AnnotationComponentVersions` 之所以在 core，是因为它**有仓外读方**（实测：ieops-bizplane 2 处；datachain / nodeautoscaler / env 均 0）。而拓扑这条只在 ctlchain 内部流动（写：`pkg/node/business/provider.go`；读：`pkg/agent/crons/sync_vnode.go`），bizplane 读的是 `VNode.status.gpus[]` 而非节点 annotation。放 core 会平白造出一个发布+bump 周期。\n\n**现成模板（直接拄）**：`setComponentVersions`（`pkg/agent/crons/sync_vnode.go:472`）是一个完整的、一跳的现成先例——连 legacy 节点的 `delete(statusMap, ...)` 分支和畸形 JSON 的 warn 路径都齐了。写侧对应 `provider.go:1122-1128`。\n\n**Phase B 具体形状**：\n  写：`provider.go` ~1118（紧挨 `ieops.gmicloud.ai/gpu-allocations`:1116 与 component-versions:1124）——把 `metrics.StaticMetrics.GPUs[]` 的 `{gpuID, topologyCollected, numaNode, nvlinkPeers}` 投影成 JSON annotation\n  读：`sync_vnode.go` 新增 `setGPUTopology`，合进 `:436` 那个 `gpus` 数组（当前是 `parseGPUCount` + `LabelGPUProduct`/`LabelGPUMemory` 拼出的 N 份 GPU0 副本）\n  常量：需一个 `pkg/node/business` 与 `pkg/agent/crons` 都能 import 的位置（`pkg/types` 是候选，两边已都 import）\n  不动：`label.go`\n\n**三态编码在这里正好起作用**：旧节点没有这条 annotation ⇒ `TopologyCollected` 保持 false ⇒ 读回「未采集」，语义正确，**不需要版本协商**。体积不是问题（8 卡约 640 字节 vs k8s annotation 256KB 预算）。\n\n⚠️ **未验证**：`pkg/types` 是否真的被两边都 import（我只推断，未跑 `go list -deps`）。⇒ `go list -f '{{.Imports}}' ./pkg/node/business ./pkg/agent/crons | grep pkg/types`。",
+        "refuted_1_gonvml_version": "v0.12.0-1 缺 DeviceGetNumaNodeId。编译期正负对照：不含该 API 的探针编译成功；含之则 `d.GetNumaNodeId undefined (type nvml.Device has no field or method GetNumaNodeId)`。该 API 首见于 v0.12.4-1 ⇒ 必须 >= v0.12.4-1，不能与 ieops-v2 所钉的 v0.12.0-1 对齐。另：v0.12.0-1→v0.12.4+ 是源码不兼容重构（Device 由 struct 变 interface）；GetNvLinkRemoteDeviceType 的返回类型 IntNvLinkDeviceType 与 NVLINK_DEVICE_TYPE_* 常量五版本完全一致",
+        "refuted_2_not_split_loss_but_deliberate_deletion": "🔴 ieops-ctlchain 缺 cgo GPU 采集器不是拆仓遗漏。2026-08-29 commit 00a40f2（PR #62 = 1904487）显式删除，三条理由记录在案：(a) hack/build.sh:68 硬编码 CGO_ENABLED=0，该 collector 从未进入任何镜像；(b) cgo 默认开启导致每次 CI 都编译并运行它；(c) 在 nvidia-smi 正常、libnvidia-ml.so.1 已在 ldconfig 的宿主上，nvmlInit_v2 内 SIGSEGV（PC=0x0, signal arrived during cgo execution）打挂整个进程。hack/local-run.sh:358-371 明确写着 'ieops-v2 local-run.sh used BRSLET_CGO=1; do not copy it back from there' —— 本 wi 正是要推翻一条 8 天前刚做出且有论证的决定",
+        "refuted_3_nocgo_uses_nvidia_smi": "nvml_stub_linux.go 注释所称『using system calls』已证伪。gpu_collector_linux_nocgo.go:272 实际 exec `nvidia-smi -q -x` 并解析 XML（:62-148 结构体）。即现有生产 GPU 采集走的正是 spec 所否决的 nvidia-smi 路线",
+        "refuted_4_syncresourcetopo_location": "🔴 syncresourcetopo 不在 ieops-ctlchain（全仓+全 git 历史零命中，正对照 syncvnode 19 处）。实际位置：ieops-karmada-all-in-one/charts/agent/templates/configmap.yaml:57（sync group, enabled:true, 每 3 秒, detail='sync resources topo to console' —— 这是实际部署的那份）与 ieops-v2/config/node/config.yaml:45（enabled:false）。⇒ wi 声明的锁 ieops-ctlchain:config/agent/config.yaml 锁错了文件。当前不炸：ieops-ctlchain agent 只注册 syncmodelstatus/syncvnode/syncwebdav 三个 group，titan cron.go:88 遍历的是已注册 handler 而非 config，未注册 group 的 config key 永不被访问（连 Warn 都不打）。但 pkg/node/crons/sync.go:63 存在 Name()=='sync' 的孤儿 handler（零 import），一旦有人接线，cron.go:98 会让 agent 启动 fatal",
+        "refuted_5_carrier_is_three_hops": "『载体是 label 还是 annotation』是伪二选一。真实链路三跳：brslet crons/nfd.go:158 msgpack →(reverst BidiRequest ProtocalUpdateResource)→ vk-node provider.go:1091 updateNode →(Node label via provider/label.go:173 + annotation via provider.go:1112-1127)→ agent sync_vnode.go:436-453 读 label 构造 status.gpus[]。🔴 且 label.go:200 `gpu := metrics.StaticMetrics.GPUs[0]` —— status.gpus[] 是把 GPU0 复制 N 份的同质化假数组，per-GPU 信息在这一跳就已丢失。peer 图是 per-GPU 图结构，现有链路根本传不了。types.GPUStatic(pkg/types/metrics.go:116-136) 已有 NVLinkVersion/NVLinkLinks 但无 peer 图无 NUMA（全仓 numa 零命中，正对照 nvlink 25+）",
+        "round2_review_disposition_2026-09-06": "第二轮独立复审（专审「这批修复本身新造出了什么」）返回 3 HIGH / 4 MEDIUM / 3 LOW，全部已处置。\n\n🔴 H1（最严重，我自己造的，比原缺陷更坏）：我把**节流路径**修成「保留缓存」并配了 TestCollectStaticThrottledPathKeepsTheCachedTopology 钉死，却把**真正跑子进程的那条路径**留在开头无条件 `collected=false; topology={}`，四个失败分支全部 return nil 不恢复。而同一次改动里加的 10 分钟节流会把这个清空状态**原封保存 10 分钟** ⇒ 一次瞬时失败（子进程超时/被 OOM kill）的代价从 2 秒变成 600 秒，下游 bizplane filter.go:175 整节点拒绝调度——正是本 wi 要修的那个 fail-closed 事故。**两半修复合起来比任<truncated 2313 chars>",
+        "shadow_fork_issue_to_file": "⚠️ 应另立 wi：global-routing 与 ieops-v2 各有一份 fork 的 api/v1alpha1/vnode_types.go（:35,38 字段定义与 ieops-core 逐字节相同），两仓都不 require ieops-core ⇒ 本次改动后不会编译失败但会产生真实类型分歧；且 global-routing 自带同 group 同 kind 的 CRD，两条代码路径可能向同一个集群里的同一个 CRD 写不同形状的数据。",
+        "spec_v2_status": "🔴 五条前提已于 2026-09-06 被实测推翻，spec mem_fZR3Fpum 需修订为 v3；下列 refuted_* 条目为实测结论，优先于 spec 正文"
+      },
+      "closed_at": null,
+      "content": "<redacted-text sha256=b5b085cd4c72 len=3160>",
+      "created_at": "2026-09-05T15:24:40.108466Z",
+      "current_attempt_epoch": 3,
+      "current_attempt_id": "ra_qJuNslnh",
+      "declared_resources": [
+        {
+          "intent": "write",
+          "repo": "ieops-core",
+          "type": "path",
+          "uri": "file:api/v1alpha1/vnode_types.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-core",
+          "type": "path",
+          "uri": "file:api/v1alpha1/vnode_types_test.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-core",
+          "type": "path",
+          "uri": "file:api/v1alpha1/zz_generated.deepcopy.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-core",
+          "type": "path",
+          "uri": "file:config/crd/bases/ieops.gmicloud.ai_vnodes.yaml"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-core",
+          "type": "path",
+          "uri": "file:docs/resplit/golden.txt"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-core",
+          "type": "path",
+          "uri": "file:docs/resplit/core-decisions.json"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:cmd/gpu-topo/main.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:cmd/gpu-topo/app<HOME>.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:cmd/gpu-topo/app/collect.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:cmd/gpu-topo/app/collect_nocgo.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/gputopo/contract.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/gputopo/contract_test.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:hack/build.sh"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:hack/util.sh"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:hack/local-run.sh"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:hack/tools/bundlepush/external_test.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:Makefile"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:README.md"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:.golangci.yml"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:.github/workflows/go.yml"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:.github/workflows/images.yml"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:deploy/images/brslet-bundle/manifest.json"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/launcher/bundlecontract/shipped_manifest_test.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/brslet/collectors/collector.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/brslet/collectors/nvlink_collector_linux.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/brslet/collectors/nvlink_collector_other.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/brslet/collectors/nvlink_collector_linux_test.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/brslet/collectors/gpu_collector_linux_nocgo.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/brslet/collectors/gpu_collector_linux_nocgo_test.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/types/metrics.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/brslet/crons/nfd.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/node/business/provider.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/node/business/provider/label.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/agent/crons/sync_vnode.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:pkg/agent/crons/constants.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:go.mod"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-ctlchain",
+          "type": "path",
+          "uri": "file:go.sum"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-bizplane",
+          "type": "path",
+          "uri": "file:go.mod"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-bizplane",
+          "type": "path",
+          "uri": "file:go.sum"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-bizplane",
+          "type": "path",
+          "uri": "file:pkg/bff/business/gpu_datasource.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-bizplane",
+          "type": "path",
+          "uri": "file:pkg/controller/gputable/page_table.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-bizplane",
+          "type": "path",
+          "uri": "file:internal/algorithm/types.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-bizplane",
+          "type": "path",
+          "uri": "file:internal/algorithm/filter.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-bizplane",
+          "type": "path",
+          "uri": "file:internal/algorithm/filter_test.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-bizplane",
+          "type": "path",
+          "uri": "file:internal/algorithm/scorer.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-bizplane",
+          "type": "path",
+          "uri": "file:internal/algorithm/scorer_test.go"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-bizplane",
+          "type": "path",
+          "uri": "file:config/crd/bases/ieops.gmicloud.ai_vnodes.yaml"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-karmada-all-in-one",
+          "type": "path",
+          "uri": "file:charts/ieops-v2-crds/templates/vnodes.yaml"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-karmada-all-in-one",
+          "type": "path",
+          "uri": "file:Chart.yaml"
+        },
+        {
+          "intent": "write",
+          "repo": "ieops-karmada-all-in-one",
+          "type": "path",
+          "uri": "file:charts/agent/templates/configmap.yaml"
+        }
+      ],
+      "external_share_key": null,
+      "external_share_type": null,
+      "goal": "<redacted-text sha256=f738a85fc312 len=174>",
+      "id": "wi_Del9u4H1",
+      "labels": [
+        "ieops-ctlchain",
+        "ieops-bizplane",
+        "gpu-topology",
+        "nvlink",
+        "numa",
+        "fail-closed",
+        "cron",
+        "from-1003",
+        "fat-vnode-prereq"
+      ],
+      "milestone": null,
+      "parent_work_item_id": "wi_ccI2IMx6",
+      "priority": "high",
+      "project": "ieops",
+      "reporter_display": "xiaokang.w",
+      "reporter_user_id": "u_5dFjeaMZ",
+      "requires_human_session": true,
+      "resources_version": 9,
+      "scenario": "coding",
+      "seq": 1009,
+      "slug": "ieops#1009",
+      "source": "human",
+      "status": "running",
+      "updated_at": "2026-09-06T13:01:40.455647Z",
+      "wi_type": "feature"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 29858
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext",
+      "field:goal=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_get_work_item"
+}

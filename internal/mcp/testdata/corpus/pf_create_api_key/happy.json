@@ -1,0 +1,36 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.222",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-12T00:47:55.977Z",
+    "transcript_id": "8cdee72c947b"
+  },
+  "request": {
+    "name": "isaac.h default",
+    "user_id": "u_BDS0p1Nu"
+  },
+  "response": {
+    "body": {
+      "key_id": "kLfbTgJt2",
+      "raw_key": "pf_k1_OFKGyPKdZAfs5xczLfHinGWMohHI30WN"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 73
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_create_api_key"
+}

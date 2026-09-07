@@ -1,0 +1,33 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.246",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-01T02:54:51.802Z",
+    "transcript_id": "d297e63472ef"
+  },
+  "request": {
+    "pause_reason": "误接管，原样退回给 dahe.p。owner 授权接管时我只说了「可能是你另一个 session / 另一台机器 / 另一个 agent」，没说可能是同事的活；接管后才看到 prior_actor_display=dahe.p，立即上报，owner 决定退回。本次接管未 claim、未建工作树、未改任何文件，wi 内容与 declared_resources 一字未动。dahe 可直接重新 /pf-work aihub#311 接回（epoch 会到 3）。",
+    "work_item_id": "wi_zAAnriiC"
+  },
+  "response": {
+    "error_code": "CLIENT_UNCLASSIFIED",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 147,
+    "text": "read state file: state file not found for wi_zAAnriiC: open <WORKSPACE>/.polyforge/state/wi_zAAnriiC.json: no such file or directory"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_pause_attempt"
+}

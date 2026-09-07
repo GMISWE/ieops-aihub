@@ -1,0 +1,32 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.222",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-09T14:10:19.155Z",
+    "transcript_id": "3a71b93175ff"
+  },
+  "request": {
+    "work_item_id": "silgrid-14"
+  },
+  "response": {
+    "error_code": "NOT_FOUND",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 53,
+    "text": "aihub 404 NOT_FOUND: work item \"silgrid-14\" not found"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_list_dependencies"
+}

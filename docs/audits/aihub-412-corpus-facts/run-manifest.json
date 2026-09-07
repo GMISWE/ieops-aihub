@@ -1,0 +1,330 @@
+{
+  "calls": {
+    "paired_with_result": 14090,
+    "pairing_rate": "99.99%",
+    "timestamps_from_file_mtime_fallback": 0,
+    "tool_use_blocks": 14091,
+    "unpaired_tool_use": 1
+  },
+  "census": {
+    "called_not_published": [],
+    "never_called": [
+      "adopt_artifact",
+      "close_artifact",
+      "cut_alpha",
+      "ignore_artifact",
+      "promote",
+      "resolve_commit",
+      "rotate_identifier",
+      "update_user"
+    ],
+    "tools_observed": 42,
+    "tools_published": 50,
+    "total_calls": 14090,
+    "total_errors": 626
+  },
+  "corpus": {
+    "files_scanned": 2088,
+    "files_unreadable": 0,
+    "files_with_plugin_version_signal": 396,
+    "jsonl_lines": 656373,
+    "lines_not_object_shaped": 0,
+    "lines_parse_attempted": 32827,
+    "lines_parse_failed": 0,
+    "parse_failure_rate_of_attempted": "0.00%",
+    "plugin_versions_observed": [
+      "1.1.7",
+      "1.1.8",
+      "1.1.10",
+      "1.1.12",
+      "1.1.17",
+      "1.1.18",
+      "1.1.19",
+      "1.1.20",
+      "1.1.21",
+      "1.1.22",
+      "1.1.23"
+    ]
+  },
+  "error_taxonomy": {
+    "distinct_codes": 18,
+    "distinct_error_rows": 147,
+    "failed_calls": 626
+  },
+  "fixtures": {
+    "fixture_files": 111,
+    "fixture_tools": 42,
+    "per_tool": {
+      "pf_acquire_locks": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_activate_memory": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_batch_create_work_items": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_cancel_work_item": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_claim_work_item": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_commit": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_complete_attempt": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_create_api_key": [
+        "happy",
+        "edge"
+      ],
+      "pf_create_dependency": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_create_project": [
+        "happy"
+      ],
+      "pf_create_user": [
+        "happy",
+        "edge"
+      ],
+      "pf_create_work_item": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_diff": [
+        "happy",
+        "edge"
+      ],
+      "pf_emit_event": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_force_takeover": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_get_memory": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_get_ready_queue": [
+        "happy",
+        "edge"
+      ],
+      "pf_get_step": [
+        "happy",
+        "edge"
+      ],
+      "pf_get_work_item": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_list_dependencies": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_list_projects": [
+        "happy",
+        "edge"
+      ],
+      "pf_list_users": [
+        "happy",
+        "edge"
+      ],
+      "pf_list_work_items": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_pause_attempt": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_pr": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_predict_conflicts": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_push": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_read_events": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_recall": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_redact_memory": [
+        "happy"
+      ],
+      "pf_reinforce_memory": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_remember": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_remove_dependency": [
+        "happy",
+        "edge"
+      ],
+      "pf_revoke_api_key": [
+        "happy",
+        "edge"
+      ],
+      "pf_save_artifact": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_ship": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_update_memory": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_update_project": [
+        "happy",
+        "edge"
+      ],
+      "pf_update_step": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_update_work_item": [
+        "happy",
+        "error",
+        "edge"
+      ],
+      "pf_whoami": [
+        "happy",
+        "edge"
+      ],
+      "pf_wrap": [
+        "happy",
+        "error",
+        "edge"
+      ]
+    }
+  },
+  "generated_at": "2026-09-07T13:29:03Z",
+  "generator": "scripts/pf_corpus_extract.py",
+  "output_self_scan": {
+    "files_scanned": 159,
+    "leaks": 0,
+    "patterns": [
+      "hex64",
+      "sk-token",
+      "bearer",
+      "api_key-field",
+      "session_secret-field",
+      "absolute-home-path"
+    ]
+  },
+  "params": {
+    "observed_not_published": 32,
+    "observed_not_published_list": [
+      "pf_acquire_locks.resources",
+      "pf_activate_memory.id",
+      "pf_claim_work_item.mode",
+      "pf_complete_attempt.attrs_patch",
+      "pf_complete_attempt.outcome",
+      "pf_complete_attempt.summary",
+      "pf_create_dependency.work_item_id",
+      "pf_emit_event.summary",
+      "pf_get_memory.id",
+      "pf_get_ready_queue.limit",
+      "pf_get_ready_queue.non_conflicting",
+      "pf_get_work_item.include_step_state",
+      "pf_get_work_item.project",
+      "pf_get_work_item.seq",
+      "pf_list_projects.query",
+      "pf_list_work_items.brief",
+      "pf_list_work_items.fields",
+      "pf_list_work_items.labels",
+      "pf_list_work_items.nonexistent_param_380",
+      "pf_list_work_items.parent_work_item_id",
+      "pf_list_work_items.q",
+      "pf_list_work_items.work_item_id",
+      "pf_pr.draft",
+      "pf_reinforce_memory.context",
+      "pf_reinforce_memory.id",
+      "pf_remember.title",
+      "pf_remove_dependency.work_item_id",
+      "pf_update_step.artifact_id",
+      "pf_update_step.expected_version",
+      "pf_update_work_item.bogus_probe_383",
+      "pf_update_work_item.expected_resources_version",
+      "pf_update_work_item.kind"
+    ],
+    "published_not_observed": 21
+  },
+  "response_keys": {
+    "response_key_files": 42
+  },
+  "schema_contract_sha": "a8ad8c09f5bf5a6e928d9dfdbf62e04c5a80b1e8",
+  "sequences": {
+    "flow_counts": {
+      "attempt_paused_then_complete": 10,
+      "cancel": 157,
+      "cas_failure": 9,
+      "claim_without_terminal": 110,
+      "commit_guard_block": 56,
+      "error_retry": 249,
+      "force_takeover": 17,
+      "happy_full": 122,
+      "happy_path_completed": 189,
+      "lookup_only": 791,
+      "pause_resume": 18,
+      "state_file_missing": 133,
+      "terminal_without_claim": 258,
+      "unclassified": 1065
+    },
+    "groups": 2756
+  }
+}

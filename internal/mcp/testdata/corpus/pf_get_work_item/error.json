@@ -1,0 +1,33 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.246",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-28T14:44:56.839Z",
+    "transcript_id": "d297e63472ef"
+  },
+  "request": {
+    "brief": true,
+    "work_item_id": "ieops-865"
+  },
+  "response": {
+    "error_code": "NOT_FOUND",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 52,
+    "text": "aihub 404 NOT_FOUND: work item \"ieops-865\" not found"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_get_work_item"
+}

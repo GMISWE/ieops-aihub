@@ -1,0 +1,61 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.222",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-15T01:53:28.397Z",
+    "transcript_id": "256fa14e8a3d"
+  },
+  "request": {
+    "description": "<redacted-text sha256=93b55a3522b0 len=17>",
+    "name": "yingfang",
+    "repos": [
+      {
+        "github_owner_repo": "yingfang-ai/skypilot",
+        "name": "skypilot",
+        "url": "git@github.com:yingfang-ai/skypilot.git"
+      }
+    ],
+    "scenario": "git@github.com:yingfang-ai/polyforge-coding.git",
+    "visible": true
+  },
+  "response": {
+    "body": {
+      "created_at": "2026-08-15T01:53:28.464826Z",
+      "description": "<redacted-text sha256=93b55a3522b0 len=17>",
+      "members": [],
+      "name": "yingfang",
+      "owner_user_id": "u_5dFjeaMZ",
+      "repos": [
+        {
+          "github_owner_repo": "yingfang-ai/skypilot",
+          "name": "skypilot",
+          "url": "git@github.com:yingfang-ai/skypilot.git"
+        }
+      ],
+      "scenario": "git@github.com:yingfang-ai/polyforge-coding.git",
+      "updated_at": "2026-08-15T01:53:28.464826Z",
+      "visible": true,
+      "wi_seq": 0
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 389
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:description=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_create_project"
+}

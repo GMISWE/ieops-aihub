@@ -1,0 +1,48 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-02T15:20:16.477Z",
+    "transcript_id": "7f4337a035f7"
+  },
+  "request": {
+    "content": "<redacted-text sha256=e4201020ad1d len=61585>",
+    "supersedes_memory_id": "mem_Ddg9QsYR",
+    "type": "methodology.spec",
+    "work_item_id": "wi_6hRg6ho2"
+  },
+  "response": {
+    "body": {
+      "activation_count": 0,
+      "base_strength": 3,
+      "created_at": "2026-09-02T15:20:16.595858Z",
+      "id": "mem_PMS4IG1R",
+      "is_new": true,
+      "memory_id": "mem_PMS4IG1R",
+      "project": "yingfang",
+      "stability_days": 36500,
+      "type": "methodology.spec",
+      "visibility": "project"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 237
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_save_artifact"
+}

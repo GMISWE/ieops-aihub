@@ -1,0 +1,55 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.237",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-25T09:47:14.797Z",
+    "transcript_id": "bf0708688c6a"
+  },
+  "request": {
+    "event_type": "note",
+    "payload": {
+      "PREMISE_OVERTURNED_1": "🔴「六仓里没有同路径」对 ieops-core 是**结构性无效判据**。core 在拆分中整仓重新分类了路径:pkg/<x>/ → identity/ keyspace/ rule/ wire/,core@77c25241 的 140 个文件里 pkg/ 开头的是 **0** 个。34 个里 **29 个在 core 有对应物**,其中 **7 个逐字节相同**(authz/keys.go+test、brslet/probe/{from_k8s,from_k8s_test,spec}.go、vendorid/{vendorid,vendorid_test}.go)。core 自带两份符号级落位账本可复核:docs/resplit/core-manifest.json(36779B,每符号记 v2pkg/sym/rename/file/line)+ core-decisions.json(103804B,含 drop_symbols/move_symbols/recorded_not_done 25 条/premise_corrections 31 条)。⇒ wi 正文对 pkg/tunneltoken 提的三个候选解释里,成立的是第一个(core 那份在 identity/tunneltoken/),不是同名不同实现、也不是清单描述没发生的事。附带:CLAUDE.md 里 ieops-core 的模块清单(写 pkg/types、pkg/cache、pkg/gateway/contract、pkg/utils)**已全部过期**,建议更新,否则下一个人会重复本次全部工作。",
+      "PREMISE_OVERTURNED_2": "🔴 **归档的真阻塞不在这 34 个文件里**。global-routing@126e2501 的 go.mod 有一条活的 `require github.com/GMISWE/ieops-v2 v0.0.0-20260707075617-d5af40ef05d7`,**生产代码**(非测试)从 7 个 v2 包 import:pkg/cache/backend(13 处)、pkg/cache(2)、pkg/cache/staging(1)、pkg/utils(1,hf_fetcher.go:131 用 utils.SafeJoin)、pkg/routing/rankwire(测试)、pkg/sidecar/business(meter name 字符串)、test/utils(测试)。任何路径覆盖率测量都看不见这条。最便宜的一刀 = SafeJoin 那一处(ctlchain 和 bizplane 都有同路径的 pkg/utils/safepath.go)。⇒ 建议另立 wi(跨仓 + 属于 gr owner + 改构建拓扑,按 exec-playbook 判据 2 该立 wi 不该当场做)。",
+      "bucket2_zero_in_scope": "这 34 个文件里「该迁未迁」**0 条**。判错时会看到的不同值:某叶子仓的**生产** .go 里出现这些符号的**调用点**;实际叶子仓的全部命中都是**注释**(见下)。",
+      "bucket3_drops": "A) pkg/types/protoes/{storage.pb.go,storage_grpc.pb.go} —— 已由 ieops#626 裁决(建议 DROP),本次独立复核结论一致:v2 全树查 7 个 storage 符号,排除自身后命中 2 条**全是假阳性**(pkg/gateway/business/peer_ws_test.go:171,173 的 http.ReadRequest 标准库同名函数);正对照 bri 符号非零。第二条理由:从来没有 cmd/ 二进制 register 过这个 service(#626 的 git log -S 全分支只有 2026-03-07 619fb716 一个 scaffolding commit)。\nB) pkg/types/{topo.go,topo_test.go} —— v2 全树 types.(TopoNode|TopoEntropy|Hardware|NodeGpuInfo|NodeCpu|NodeMem|NodeGpu|NodeStatus*) 排除 pkg/types/ 后 **0 命中**;同包非限定引用只有它自己的测试。正对照 types.RetryBudgetSpec = 7 个文件。第二条理由:**已被 CRD 取代且有记录** —— ieops-doc:archive/todos/sprint-2-gpunode-and-failure.md:233-238 逐字段写了 types.TopoNode.Node → GPUNode.metadata.name 等映射。\nC) pkg/config/config.go 的残留 Config/GatewayConfig —— 用 **import 闭包**(完备证据,不是计数):v2 里 import ieops-v2/pkg/config 的文件恰好 11 个,逐个抽 config.* 符号,**并集只有 {ControlNamespace, ParseSubClusters, ClusterInfo}**(三者已迁 core rule/cluster/cluster.go,逐字相同)。第二条理由:六仓每仓都有自己的 config 结构,core 的 rule/cluster/doc.go 明确只把**寻址契约**提升为共享物 = 有意取舍。\nD) pkg/utils/{name.go,name_test.go} 的残留 ClusterPrefixedNodeName/maxClusterPrefixLen —— v2 里**有 3 个生产调用点**(nodeautoscaler 的 gmi/gmi-ec/novita provisioner),但六仓 **0 个调用点**,命中只有 **5 条全是注释**。第二条理由(最硬):**被 ieops#647 显式取代** —— 三个 provisioner 现在走 tunneltoken.DeriveElasticNodeName,novita/provisioner.go:264 的注释逐字写着「this pair used to be built here, with a local ClusterPrefixedNodeName whose 30-char ceiling was hand-synced against a 63 in another repo」。\nE) pkg/config/defaults.go(20 个常量,整文件)—— 同 C 的闭包论证:11 个 importer 的符号并集里一个 Default* 都没有。逐常量再验:18 个 0 命中;DefaultMaxRetries 的 39 条**全指向 pkg/gateway/routing/retrybudget.go:53 的另一个同名常量**(值 1,而 pkg/config 那个是 3),DefaultTTL 的 3 条是 nodeautoscaler 的**结构体字段**。第二条理由:文件头注释自称「controller/scheduler/nodeautoscaler 共用」,而三者各自都独立声明了同名默认值 ⇒ 它从写下那天起就没被 import 过。",
+      "bucket4_needs_human_call": "1) 这 34 个残余「怎么丢」:A 随仓归档 / B 归档前在 v2 里删掉 / C 只记档不动代码。**建议 C** —— B 不建议,因为 f5e7741a 是归档基准,删除会让基准与实际树不一致,而且 ClusterPrefixedNodeName 在 v2 里还有 3 个活调用点,删它要连带改 3 个 provisioner。能定论的事实:桶 3 的 5 个整文件在 global-routing@126e2501 有**逐字节相同**的副本(blob 逐个核过),内容不会因归档而物理丢失。\n2) global-routing 的活 module 依赖(见上)。A 归档前切到叶子仓 / B 先归档靠 module proxy 继续解析(gr 从此永久钉死在不再演进的模块上)/ C 把 gr 纳入拆分收口。",
+      "buckets": "已迁走 29 / 该迁未迁 0 / 可以丢 5 个整文件+3 处残留符号 / 需拍板 2。29+5=34,无未判定。",
+      "false_positive_hits_split": "「别数 grep -c 总数」这个坑本次咬了三次,都靠拆成 生产/测试/注释 拆开了:GatewayConfig 51 条全是 pkg/gateway/business/route.go:612 的**另一个同名类型**;DefaultMaxRetries 39 条全是**另一个同名常量**;ClusterPrefixedNodeName 7 条里 5 条是注释。另加一次标准库同名污染:http.ReadRequest 混进 storage 消息类型的命中。",
+      "gates": "ieops-doc **无 CI**(gh api repos/GMISWE/ieops-doc/actions/workflows → total_count=0;正对照 ieops-core=4 ⇒ 这个 0 是结构性的不是登记延迟;本地也无 .github/workflows)。⇒ **不要把它写成「CI 全绿」**。合并依据 = 本地闸:UTF-8 解码 OK / 499 行;11 张表 0 行列数不齐(检测器正对照 FIRES);代码围栏 6 个(偶数);凭据模式扫描 0 命中(正对照同一命令查 ieops 得 86);git status --porcelain 只有这一个新文件,**未改任何共享索引文件**。",
+      "hack_block_partial": "hack/ 四个子目录 14 个文件:**只做到消费者定位,没做内容级裁决**(fleet.sh 单文件 54876B),文档里显式标注。两条是**真正的桶 2**:① hack/bench/usage_extract_bench.md(3809B)被 **ieops-datachain:pkg/gateway/usagetap/tap_bench_test.go:20** 的活注释指向 ⇒ 建议 MOVE TO ieops-datachain;② hack/ruby-dev/{README.md,fleet.sh,images.env}(72068B)被 **ieops-core:keyspace/routecfg/doc.go:27** 引用 fleet.sh:592 当 redis key 契约的权威示例,另有 core 2 处 + **ieops-env 7 处**(dev-environment*/{dev-env,preflight}.sh 4 处 + hack/routecfg-inventory.yaml:38 自称「四份 hack 副本中的第四份」+ deploy-forward-workers.sh 2 处)⇒ 建议 MOVE TO ieops-env。两条 DROP:hack/phase0-test/(7 文件 48640B,patchelf+fakechroot rootfs 试验台,44 仓 0 命中,最后改动 2026-03-31;第二条理由:它验证的技术已落进 pkg/shim/runtime 且 pkg/shim 已整体迁到 ctlchain 31 文件,当前在用的 harness 是已在 env 的 hack/dev-environment*)、hack/billing-test/(3 文件 10227B,44 仓 0 命中,最后改动 2026-04-16;第二条理由:后继物已在 ieops-env 以更好形态存在 —— tools/benchmark/loadgen/mockserver/main.go + test/e2e/ai/scenarios/58-abort-billing.md)。正对照:同一条 grep 对 ruby-dev/bench 命中非零。",
+      "not_done": "未删除/移动/修改 ieops-v2 或任何叶子仓;未归档;未部署;未推镜像;未连 prod;未跑 63 个 e2e 场景;未改共享索引文件;wi 未 wrap。",
+      "output_location_deviation": "⚠️ wi 验收判据 4 写的落点是 ieops-env/docs/migration/(与 v2-hack-adjudication.md 同处)并从 env-port.md 链过去;本次按主 session 指示落在 **ieops-doc/archive/issues/ieops628-v2-pkg-adjudication.md**(该目录已有 v2-vk-e2e-chain-audit.md 这个审计先例)。**索引没加**(另有 ieops#610 / ieops#629 并行,避免三方冲突)。这处偏离需要主 session 拍板:是接受 ieops-doc 落点,还是补一份到 ieops-env。",
+      "pathspec_trap_recorded": "🔴 主 session 那个 899 vs 0 的坑,实测有**两个独立成因**,不止一个:① `*` 在 pathspec 里跨 `/`;② **`git ls-files` 根本不接受 tree-ish** —— `git ls-files \"$V2\" -- 'pkg/*.go'` 里的 SHA 被当成一个匹配不到东西的 pathspec 吞掉,899 来自**当前 checkout 的 index**(HEAD=5c3e5069)。铁证:去掉 SHA 后 `git ls-files -- 'pkg/*.go'` 同样是 899,逐字相同。正确写法 `git ls-tree -r --name-only \"$V2\" -- pkg | grep '\\.go$'` = **890**(正对照:不加 grep = 1103,非零)。899 − 890 = 9 = 那 6 个 commit 新增的 Go 文件数。",
+      "pinned_sha": "v2=f5e7741a6c2928edd9bbe91c421a40942b67af2f(归档基准,注意 v2 origin/main 已是 5c3e5069,领先 6 个 commit 且其中 5 个动了 pkg/ ⇒ v2 不是冻结态);core=77c25241;ctlchain=c5de7be0;datachain=32d98b11;bizplane=b90930bc;nodeautoscaler=9b146d29;env=56963921;global-routing=126e2501",
+      "pr": "https://github.com/GMISWE/ieops-doc/pull/23 — commit ecfd47e6bed5507943a34da4212e365207037ab9,branch polyforge/RIaLHfv1,base main,mergeable=MERGEABLE / mergeStateStatus=CLEAN。🔴 **尚未合并**:`gh pr merge --squash` 被 harness 的权限分类器拦下,按纪律停下报告而不是绕过。需要人来批准合并。",
+      "scope_remeasured": "wi 记 33,实测 34 个 Go 源文件。差异有单一成因:wi 的表把 storage.proto 混进「Go 文件」计数(pkg/types/**=10 里含它),并且整目录漏了 pkg/utils/{name.go,name_test.go}。总缺口 245 vs wi 的 243,差 2 = 正是漏掉的这两个文件。v2 tracked 总数 1829 与 wi 一致。",
+      "seventh_repo_finding": "🔴 **global-routing 是这次裁决绕不开的第七个坐标**,而它不在六仓之列。桶 3 的 5 个「哪都没有」的文件在 gr 里逐字节相同:storage.pb.go dbd4d6cb44、storage_grpc.pb.go b74c0f11f3、storage.proto 753950a7fd、topo.go eabab50ce1、topo_test.go ef2491114c、defaults.go c664b8e6b6 —— 全部 IDENTICAL;只有 pkg/utils/name.go DIFFERS(gr 那份早于 v2 加入 MakeNodeName)。但 gr 里那些副本**同样零消费者** ⇒「gr 有」不构成「该保留」。",
+      "title": "pkg/ 34 个 Go 文件裁决完毕(0 未判定);两处推翻 wi 前提;PR 已开待人合并"
+    },
+    "pinned": true,
+    "work_item_id": "wi_RIaLHfv1"
+  },
+  "response": {
+    "body": {
+      "event_id": "evt_78hlQiur"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 27
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_emit_event"
+}

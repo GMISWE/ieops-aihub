@@ -1,0 +1,457 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-07T01:58:17.149Z",
+    "transcript_id": "36848cf21322"
+  },
+  "request": {
+    "work_item_id": "wi_6hRg6ho2"
+  },
+  "response": {
+    "body": {
+      "acquired": [
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:.gitignore",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:README.md",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/__init__.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/api/__init__.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/api/invite.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/api/main.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/api/routes.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/api/schemas.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/index.html",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/package.json",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/src/App.tsx",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/src/__tests__/ac_client.test.ts",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/src/api/client.ts",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/src/canvas/Canvas.tsx",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/src/canvas/RoundNode.tsx",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/src/canvas/layout.ts",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/src/detail/DetailPanel.tsx",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/src/detail/ImageGrid.tsx",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/src/invite/InvitePage.tsx",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/src/main.tsx",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/src/session/buildTree.ts",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/src/session/useSession.ts",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/tailwind.config.js",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/tsconfig.json",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:app/web/vite.config.ts",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:constants.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/__init__.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/det/__init__.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/det/env.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/det/ledger.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/gpupool/__init__.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/gpupool/novita.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/gpupool/provider.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/gpupool/scheduler.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/gpupool/watchdog.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/gpupool/worker.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/obs/__init__.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/obs/alerting.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/obs/deadlines.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/obs/metrics.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/queue/__init__.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/queue/queue.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/queue/quota.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/queue/validator.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/registry/__init__.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/registry/schema.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/registry/seed_data.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/registry/store.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/store/__init__.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/store/api.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/store/db.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:core/store/schema.sql",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:pyproject.toml",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/AC19_manual_checklist.md",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/conftest.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/fakes/novita_fake.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_ac_backend.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_ac_client.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_api.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_deadlines.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_ledger.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_obs.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_provider.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_queue.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_quota.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_registry.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_scheduler.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_store.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang:yingfang:tests/test_worker.py",
+          "resource_type": "file_scope"
+        }
+      ],
+      "already_held": [
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_KK6EwlRV",
+          "resource_key": "yingfang/main",
+          "resource_type": "git_branch"
+        }
+      ]
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 9641
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_acquire_locks"
+}

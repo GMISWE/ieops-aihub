@@ -1,0 +1,73 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.237",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-21T05:59:22.242Z",
+    "transcript_id": "58c9181ccc1c"
+  },
+  "request": {
+    "brief": true,
+    "work_item_id": "tether#138"
+  },
+  "response": {
+    "body": {
+      "attrs": {},
+      "closed_at": null,
+      "created_at": "2026-08-21T05:31:33.813609Z",
+      "current_attempt_epoch": 1,
+      "current_attempt_id": "ra_uAATEQvU",
+      "declared_resources": [
+        {
+          "intent": "write",
+          "type": "path",
+          "uri": "file:wiki/specs/2026-08-21-agent-lifetime.md"
+        }
+      ],
+      "external_share_key": null,
+      "external_share_type": null,
+      "goal": "<redacted-text sha256=828d8d4d5e91 len=112>",
+      "id": "wi_LVkrvLSv",
+      "labels": [
+        "measurement",
+        "session-lifecycle",
+        "spec-2026-08-21-agent-lifetime",
+        "unblocks-N"
+      ],
+      "milestone": null,
+      "parent_work_item_id": null,
+      "priority": "high",
+      "project": "tether",
+      "reporter_display": "xiaokang.w",
+      "reporter_user_id": "u_5dFjeaMZ",
+      "requires_human_session": false,
+      "resources_version": 0,
+      "scenario": "coding",
+      "seq": 138,
+      "slug": "tether#138",
+      "source": "human",
+      "status": "running",
+      "updated_at": "2026-08-21T05:34:10.447378Z",
+      "wi_type": "chore"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 872
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:goal=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_get_work_item"
+}

@@ -1,0 +1,74 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-07T11:22:26.633Z",
+    "transcript_id": "ec07a564504a"
+  },
+  "request": {
+    "message": "fix(step): require step_attempt_id and record the step event, or refuse\n\nA 200 from PATCH /v1/work_items/:id/step with status=completed|failed now\nmeans BOTH records landed: the wi_step_completions row that pf_get_step's\ncompleted_steps is read from, AND the matching step_completed/step_failed\nevent. aihub#390 made the first strict and recorded in its own notes that\nthe second could still fail sil<truncated 3955 chars>",
+    "paths": [
+      "internal/server/routes_step.go",
+      "internal/server/routes_step_outcome_records_db_test.go",
+      "internal/server/routes_step_authority_test.go",
+      "internal/server/routes_step_test.go",
+      "internal/mcp/tools_step.go",
+      "internal/mcp/tools_step_test.go",
+      "internal/mcp/tools_fusion_test.go",
+      "internal/citest/dbtestcov/gated_tests.txt",
+      ".github/workflows/ci.yml"
+    ],
+    "pr_base": "main",
+    "pr_body": "Closes aihub#399. aihub#403 was cancelled as a duplicate and its content is folded in here.\n\n## What this changes\n\nA 200 from `PATCH /v1/work_items/:id/step` with `status=completed|failed` now implies **both** records exist: the `wi_step_completions` row that `pf_get_step`'s `completed_steps` is read from, **and** the matching `step_completed`/`step_failed` event. A request that cannot deliver bot<truncated 11642 chars>",
+    "pr_title": "fix(step): require step_attempt_id and record the step event, or refuse the request",
+    "repo": "aihub",
+    "work_item_id": "aihub#399",
+    "workspace_root": "<WORKSPACE>"
+  },
+  "response": {
+    "body": {
+      "branch": "polyforge/aihub-399-pf-update-step-step-attempt-id-is",
+      "commit_sha": "553d62c4099e8ba3289051b5c8b8dd7f441f34d1",
+      "committed": true,
+      "head_sha": "553d62c4099e8ba3289051b5c8b8dd7f441f34d1",
+      "lock_gate": "acquired",
+      "lock_gate_detail": "7 of 9 changed file(s) were outside this attempt's lock set and are now locked by it until the attempt ends",
+      "locks_acquired_for": [
+        ".github/workflows/ci.yml",
+        "internal/citest/dbtestcov/gated_tests.txt",
+        "internal/mcp/tools_fusion_test.go",
+        "internal/mcp/tools_step_test.go",
+        "internal/server/routes_step_authority_test.go",
+        "internal/server/routes_step_outcome_records_db_test.go",
+        "internal/server/routes_step_test.go"
+      ],
+      "ok": true,
+      "pr": {
+        "url": "https://github.com/GMISWE/ieops-aihub/pull/346"
+      },
+      "pr_action": "pushed_and_created_pr",
+      "pushed": true,
+      "pushed_sha": "553d62c4099e8ba3289051b5c8b8dd7f441f34d1",
+      "repo": "aihub",
+      "stage": "done"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 860
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_ship"
+}

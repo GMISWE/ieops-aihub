@@ -1,0 +1,208 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-07T02:45:49.929Z",
+    "transcript_id": "7fc7b636ebde"
+  },
+  "request": {
+    "fields": "brief",
+    "include_archived": true,
+    "min_strength": 0,
+    "project": "yingfang",
+    "top_k": "100",
+    "type": [
+      "methodology.plan"
+    ],
+    "work_item_id": "wi_6hRg6ho2"
+  },
+  "response": {
+    "body": {
+      "items": [
+        {
+          "content": "<redacted-text sha256=0accab96f6cb len=77>",
+          "content_full_len": 225859,
+          "content_truncated": true,
+          "created_at": "2026-09-05T00:39:48Z",
+          "effective_strength": 2.9998,
+          "id": "mem_PBhaFLhg",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=2e8bcb55b735 len=55>",
+          "content_full_len": 214407,
+          "content_truncated": true,
+          "created_at": "2026-09-04T11:59:23Z",
+          "effective_strength": 2.9998,
+          "id": "mem_cb7qFjVC",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=2e8bcb55b735 len=55>",
+          "content_full_len": 214186,
+          "content_truncated": true,
+          "created_at": "2026-09-04T11:58:02Z",
+          "effective_strength": 2.9998,
+          "id": "mem_hLi3QRJw",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=2e8bcb55b735 len=55>",
+          "content_full_len": 212825,
+          "content_truncated": true,
+          "created_at": "2026-09-04T11:54:40Z",
+          "effective_strength": 2.9998,
+          "id": "mem_RXuq9jSd",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=2e8bcb55b735 len=55>",
+          "content_full_len": 211947,
+          "content_truncated": true,
+          "created_at": "2026-09-04T11:51:51Z",
+          "effective_strength": 2.9998,
+          "id": "mem_3H6BpqoY",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=1c444ecbb2f6 len=50>",
+          "content_full_len": 190506,
+          "content_truncated": true,
+          "created_at": "2026-09-04T08:12:04Z",
+          "effective_strength": 2.9998,
+          "id": "mem_9Xn5Otq9",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=2471c78e7e04 len=36>",
+          "content_full_len": 184029,
+          "content_truncated": true,
+          "created_at": "2026-09-04T06:49:18Z",
+          "effective_strength": 2.9998,
+          "id": "mem_8OytdwSl",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=2359d554ef38 len=31>",
+          "content_full_len": 179304,
+          "content_truncated": true,
+          "created_at": "2026-09-03T18:09:05Z",
+          "effective_strength": 2.9997,
+          "id": "mem_p9AtkxIE",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=2359d554ef38 len=31>",
+          "content_full_len": 179076,
+          "content_truncated": true,
+          "created_at": "2026-09-03T18:05:12Z",
+          "effective_strength": 2.9997,
+          "id": "mem_7FknqYVZ",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=b7ba828cc84d len=25>",
+          "content_full_len": 172689,
+          "content_truncated": true,
+          "created_at": "2026-09-03T13:22:16Z",
+          "effective_strength": 2.9997,
+          "id": "mem_dhiWc8ZC",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=b5e72af32eb2 len=25>",
+          "content_full_len": 142905,
+          "content_truncated": true,
+          "created_at": "2026-09-03T11:07:23Z",
+          "effective_strength": 2.9997,
+          "id": "mem_VQWRQAGA",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=ce50ab1dcb86 len=25>",
+          "content_full_len": 109139,
+          "content_truncated": true,
+          "created_at": "2026-09-03T08:45:17Z",
+          "effective_strength": 2.9997,
+          "id": "mem_8BiU0KCz",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=300ce299b203 len=25>",
+          "content_full_len": 83716,
+          "content_truncated": true,
+          "created_at": "2026-09-03T07:31:25Z",
+          "effective_strength": 2.9997,
+          "id": "mem_5BLGyZu4",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=625f5ee3fe62 len=25>",
+          "content_full_len": 49662,
+          "content_truncated": true,
+          "created_at": "2026-09-03T05:15:41Z",
+          "effective_strength": 2.9997,
+          "id": "mem_MwZlaC4w",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=def8f86fdba2 len=29>",
+          "content_full_len": 11578,
+          "content_truncated": true,
+          "created_at": "2026-09-02T11:49:39Z",
+          "effective_strength": 2.9996,
+          "id": "mem_e8W1ZkQH",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=def8f86fdba2 len=29>",
+          "content_full_len": 10985,
+          "content_truncated": true,
+          "created_at": "2026-09-02T07:56:48Z",
+          "effective_strength": 2.9996,
+          "id": "mem_XTjQUEqd",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=54322790899c len=28>",
+          "content_full_len": 9249,
+          "content_truncated": true,
+          "created_at": "2026-09-02T03:08:45Z",
+          "effective_strength": 2.9996,
+          "id": "mem_kA775oZ6",
+          "type": "methodology.plan"
+        },
+        {
+          "content": "<redacted-text sha256=54322790899c len=28>",
+          "content_full_len": 8674,
+          "content_truncated": true,
+          "created_at": "2026-09-01T16:58:33Z",
+          "effective_strength": 2.9996,
+          "id": "mem_6Y8tJc1C",
+          "type": "methodology.plan"
+        }
+      ],
+      "total": 18
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 3866
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_recall"
+}

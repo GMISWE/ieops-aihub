@@ -1,0 +1,41 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.237",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-25T06:11:33.790Z",
+    "transcript_id": "bb3ba1a8c9cc"
+  },
+  "request": {
+    "base": "main",
+    "body": "<redacted-text sha256=5c4fcbd376a8 len=10024>",
+    "repo": "ieops-env",
+    "title": "Port the three MOVE-adjudicated hack scripts out of ieops-v2",
+    "work_item_id": "wi_lcnQLzq9",
+    "workspace_root": "<WORKSPACE>"
+  },
+  "response": {
+    "body": {
+      "url": "https://github.com/GMISWE/ieops-env/pull/33"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 53
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:body=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_pr"
+}

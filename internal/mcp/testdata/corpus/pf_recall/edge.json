@@ -1,0 +1,114 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.222",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-06T15:07:48.265Z",
+    "transcript_id": "a0a042eb8889"
+  },
+  "request": {
+    "include_archived": true,
+    "min_strength": 0,
+    "project": "ieops",
+    "query": "代码索引附录 appendix code index 符号到文件行号映射 gateway",
+    "top_k": "6",
+    "type": [
+      "fact.reference",
+      "fact.note",
+      "fact.architecture"
+    ]
+  },
+  "response": {
+    "body": {
+      "items": [
+        {
+          "content": "<redacted-text sha256=718e4c483a4d len=33765>",
+          "created_at": "2026-07-24T17:39:27.363398Z",
+          "effective_strength": 2.9357906922354577,
+          "id": "mem_m2HW7wVc",
+          "tags": [],
+          "type": "fact.reference"
+        },
+        {
+          "content": "<redacted-text sha256=5ee5e7cee371 len=1048>",
+          "created_at": "2026-07-16T08:53:38.164585Z",
+          "effective_strength": 2.9139406885338843,
+          "id": "mem_yFaB6D6i",
+          "related": [
+            {
+              "id": "mem_j45OEl5K",
+              "summary": "<redacted-text sha256=0da6edd478ac len=120>",
+              "type": "fact.architecture"
+            }
+          ],
+          "tags": [],
+          "type": "fact.architecture",
+          "work_item_id": "wi_F8yPTJLp"
+        },
+        {
+          "content": "<redacted-text sha256=01dd6a511cca len=2500>",
+          "created_at": "2026-07-17T07:44:14.451659Z",
+          "effective_strength": 2.912642901897027,
+          "id": "mem_EDoF92gg",
+          "tags": [],
+          "type": "fact.architecture"
+        },
+        {
+          "content": "<redacted-text sha256=cf23601b4fd7 len=3452>",
+          "created_at": "2026-07-10T03:08:51.412931Z",
+          "effective_strength": 2.835824341566175,
+          "id": "mem_j45OEl5K",
+          "related": [
+            {
+              "id": "mem_VvYXiSR7",
+              "summary": "<redacted-text sha256=86f869527dff len=120>",
+              "type": "experience.code"
+            }
+          ],
+          "tags": [],
+          "type": "fact.architecture",
+          "work_item_id": "wi_dmtq440R"
+        },
+        {
+          "content": "<redacted-text sha256=f33e6f9ce49f len=3045>",
+          "created_at": "2026-07-09T06:09:58.86451Z",
+          "effective_strength": 2.70902883809093,
+          "id": "mem_l5PHgi8m",
+          "tags": [],
+          "type": "fact.architecture",
+          "work_item_id": "wi_BUMgXZQ3"
+        },
+        {
+          "content": "<redacted-text sha256=d87579274ef4 len=2089>",
+          "created_at": "2026-07-08T15:59:05.421458Z",
+          "effective_strength": 2.6994449181079885,
+          "id": "mem_VGC2rUHX",
+          "tags": [],
+          "type": "fact.architecture",
+          "work_item_id": "wi_2NPUmeiW"
+        }
+      ],
+      "next_cursor": "2026-07-09T03:03:41.855193Z"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 48625
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext",
+      "field:summary=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_recall"
+}

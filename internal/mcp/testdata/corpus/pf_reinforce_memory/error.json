@@ -1,0 +1,34 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.204",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-07-10T13:39:34.018Z",
+    "transcript_id": "a0a042eb8889"
+  },
+  "request": {
+    "additional_context": "UPDATE (ieops#62, 2026-07-10, PR #382 squash 9edcf846): the bff/gateway over-selection described in point (1) is FIXED. upgrade_threshold is now a RATIO (upgrade_threshold_ratio 0.5 → ceil(0.5×N)=16 for the now-31-scenario suite, not the stale \"14\"). The coarse `gateway` service was split into disjoint subsystem ids gateway-routing (routing/+pkg/proxy/) / gateway-middleware / gateway-config. Effect: a pkg/bff/** change now selects the 12 bff scenarios (12<16 → trigger=match), NOT the full suite; a gateway subsystem change selects 6-8. Scheduler(18)/agent(17) still exceed 16 → follow-on subsystem split pending.",
+    "memory_id": "mem_M1Q5vh7j",
+    "work_item_id": "wi_mjwhbNcy"
+  },
+  "response": {
+    "error_code": "CLIENT_UNCLASSIFIED",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 147,
+    "text": "read state file: state file not found for wi_mjwhbNcy: open <WORKSPACE>/.polyforge/state/wi_mjwhbNcy.json: no such file or directory"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_reinforce_memory"
+}

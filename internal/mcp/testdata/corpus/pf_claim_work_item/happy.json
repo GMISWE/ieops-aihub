@@ -1,0 +1,89 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-03T06:53:03.313Z",
+    "transcript_id": "efb3dabde4bd"
+  },
+  "request": {
+    "idempotency_key": "01M1K0K5E9A9RTKKVQJP34H48E",
+    "mode": "fresh",
+    "requested_locks": [
+      {
+        "resource_key": "polyforge-scenario:common/commit_and_pr/SKILL.md",
+        "resource_type": "file_scope"
+      },
+      {
+        "resource_key": "polyforge-scenario:.ci/pf_contract_lint.py",
+        "resource_type": "file_scope"
+      },
+      {
+        "resource_key": "polyforge-scenario:.ci/pf_contract_lint_baseline.json",
+        "resource_type": "file_scope"
+      },
+      {
+        "resource_key": "polyforge-coding/polyforge/aihub-350-wrap-disposition",
+        "resource_type": "git_branch"
+      }
+    ],
+    "scenario_ref": "5de66d72a0d1f8198c7bea8feacfcefb427b75e2",
+    "work_item_id": "aihub#350"
+  },
+  "response": {
+    "body": {
+      "acquired_locks": [
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_U6OlFzF6",
+          "resource_key": "polyforge-scenario:common/commit_and_pr/SKILL.md",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_U6OlFzF6",
+          "resource_key": "polyforge-scenario:.ci/pf_contract_lint.py",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_U6OlFzF6",
+          "resource_key": "polyforge-scenario:.ci/pf_contract_lint_baseline.json",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 1,
+          "owner_attempt_id": "ra_U6OlFzF6",
+          "resource_key": "polyforge-coding/polyforge/aihub-350-wrap-disposition",
+          "resource_type": "git_branch"
+        }
+      ],
+      "attempt_id": "ra_U6OlFzF6",
+      "claim_epoch": 1,
+      "current_attempt_epoch": 1,
+      "ok": true,
+      "project": "aihub",
+      "slug": "aihub#350",
+      "worktrees": {
+        "aihub": "<WORKSPACE>/pf.aihub-350/aihub"
+      }
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 794
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_claim_work_item"
+}

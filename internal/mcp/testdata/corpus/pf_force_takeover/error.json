@@ -1,0 +1,35 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.237",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-24T08:45:25.775Z",
+    "transcript_id": "fe64d9311058"
+  },
+  "request": {
+    "reason": "<redacted-text sha256=c039fd81b6e6 len=179>",
+    "work_item_id": "ieops#51"
+  },
+  "response": {
+    "error_code": "BAD_REQUEST",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 86,
+    "text": "aihub 400 BAD_REQUEST: work item is not running (status=paused); cannot force_takeover"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:reason=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_force_takeover"
+}

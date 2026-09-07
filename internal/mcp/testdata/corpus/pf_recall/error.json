@@ -1,0 +1,36 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.246",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-31T14:26:37.687Z",
+    "transcript_id": "d297e63472ef"
+  },
+  "request": {
+    "project": "aihub",
+    "top_k": "3",
+    "type": [
+      "rule.work|fact.test"
+    ]
+  },
+  "response": {
+    "error_code": "BAD_REQUEST",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 310,
+    "text": "aihub 400 BAD_REQUEST: type value \"rule.work|fact.test\" contains '|', which is not a separator: `|` is not part of the memory type vocabulary, so this arrives as a single type name and matches nothing. Pass multiple types as separate entries instead — pf_recall(type=[\"a.b\",\"c.*\"]), or ?type=a.b,c.* over HTTP."
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_recall"
+}

@@ -1,0 +1,44 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-05T15:40:05.837Z",
+    "transcript_id": "99dfd0cb344d"
+  },
+  "request": {
+    "artifact_summary": "<redacted-text sha256=3b4c0acf4ec6 len=667>",
+    "next_step": "code_review",
+    "next_step_attempt_id": "01K4PF365CODEREVIEW0001",
+    "status": "completed",
+    "step_attempt_id": "01K4PF365CODECHANGE0001",
+    "step_id": "code_change",
+    "work_item_id": "aihub#365"
+  },
+  "response": {
+    "body": {
+      "next_step": "code_review",
+      "next_step_status": "in_progress",
+      "status": "completed"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 81
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:artifact_summary=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_update_step"
+}

@@ -1,0 +1,73 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-07T12:23:58.176Z",
+    "transcript_id": "4874285971c8"
+  },
+  "request": {
+    "note": "<redacted-text sha256=1a8dffc31e30 len=1439>",
+    "repo": "tether",
+    "work_item_id": "tether#190",
+    "workspace_root": "<WORKSPACE>"
+  },
+  "response": {
+    "body": {
+      "complete_result": {
+        "ok": true
+      },
+      "note_emitted": true,
+      "ok": true,
+      "pr": {
+        "baseRefName": "ui-rewrite",
+        "commits": [
+          {
+            "authoredDate": "2026-09-07T12:13:28Z",
+            "authors": [
+              {
+                "email": "xiaokang.w@gmicloud.ai",
+                "id": "U_kgDODANlKA",
+                "login": "xiaokangwang1992",
+                "name": "xiaokangwang1992"
+              }
+            ],
+            "committedDate": "2026-09-07T12:13:28Z",
+            "messageBody": "Each of #248-#251 left one comment asserting something measurably false — the\nsame defect class each of them spent dozens of lines eliminating in other\npeople's comments. The conclusions were all correct; only the reasons\noverclaimed. This corrects the reasons and attaches to each the command that\ndiscriminates it, so the next reader can refute the sentence instead of\ntrusting it.\n\n  - web/src/lib<truncated 3331 chars>",
+            "messageHeadline": "Narrow three comment claims to what a command can show (tether#190)",
+            "oid": "61d1eb45d2f51f76650da3848c32fed161c6d70e"
+          }
+        ],
+        "number": 252,
+        "state": "OPEN",
+        "url": "https://github.com/piaobeizu/tether/pull/252"
+      },
+      "pr_action": "reused_existing_pr",
+      "pushed": false,
+      "worktrees": {
+        "tether": "<WORKSPACE>/pf.tether-190/tether",
+        "tether-app": "<WORKSPACE>/pf.tether-190/tether-app",
+        "tether-doc": "<WORKSPACE>/pf.tether-190/tether-doc"
+      }
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 4613
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:note=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_wrap"
+}

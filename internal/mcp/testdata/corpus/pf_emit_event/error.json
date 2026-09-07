@@ -1,0 +1,60 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.246",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-29T03:43:19.134Z",
+    "transcript_id": "d297e63472ef"
+  },
+  "request": {
+    "event_type": "note",
+    "payload": {
+      "conclusion": "两边的浪费结构不同：recall 有一个砍不动的主体 blob（content），list_wi 没有。所以同一套白名单投影套到 list_wi 上，收益率约为 recall 侧的两倍（63.5% vs 31.6%），而且不需要配套截断机制。这是本 wi 相对 recall 侧先例的额外论据。",
+      "list_wi_side": {
+        "boilerplate_share": "约 74% 是管理态字段",
+        "content": "<redacted-text sha256=461fb8063eba len=17>",
+        "endpoint": "GET /v1/work_items?project=aihub&limit=10",
+        "goal_share": "25.9%",
+        "projection_ceiling": "63.5%（方案 A）",
+        "total": "12372 B ≈ 4124 tok"
+      },
+      "measured_on": "2026-08-29",
+      "method": "curl 直取生产 REST 响应 + 用 slimRecallResult 的白名单/改写规则在本地复算",
+      "recall_side": {
+        "after_projection": "9274 B ≈ 3091 tok",
+        "attribution_warning": "recall 侧感受到的省 token 主要来自截断而不是投影 —— 别把功劳记错，否则会以为投影这条路还有很多余量",
+        "before": "13565 B ≈ 4521 tok",
+        "ceiling_reason": "content 被白名单故意原样保留，占原始 43.4%、投影后 62.3%；投影只能砍 bookkeeping 长尾（20 个字段各 1–3%，没有大头）",
+        "endpoint": "GET /v1/memories?project=aihub&top_k=10",
+        "real_compressor": "handleRecall 的 800-rune content 截断省了约 9460 B，是投影的 2.2 倍（10 条里 7 条带 content_truncated，截后长度顶在 806–818 B）",
+        "saved": "4291 B = 31.6%"
+      },
+      "spinoff_finding": "recall 白名单里 `related` 占 990 B = 7.3%，比 attrs(973 B) 还大，却没有像 attrs/commits 那样被改写。值得单独评一下它是否被模型真正使用；如果不是，recall 侧还能再省 7 个点。不属于本 wi 范围。",
+      "topic": "为什么 list_wi 的投影收益率是 recall 的两倍（实测对拍）"
+    },
+    "pinned": true,
+    "work_item_id": "aihub#278"
+  },
+  "response": {
+    "error_code": "CLIENT_UNCLASSIFIED",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 170,
+    "text": "read state file (wi must be claimed first): state file not found for aihub#278: open <WORKSPACE>/.polyforge/state/aihub#278.json: no such file or directory"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_emit_event"
+}

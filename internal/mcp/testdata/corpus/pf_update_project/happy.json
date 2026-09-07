@@ -1,0 +1,95 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.246",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-30T05:44:38.114Z",
+    "transcript_id": "d297e63472ef"
+  },
+  "request": {
+    "description": "<redacted-text sha256=e9f7de8b33f2 len=302>",
+    "name": "marketplace",
+    "visible": false
+  },
+  "response": {
+    "body": {
+      "created_at": "2026-05-23T15:54:07.008471Z",
+      "description": "<redacted-text sha256=e9f7de8b33f2 len=302>",
+      "members": [
+        {
+          "role": "writer",
+          "user_id": "u_CX6BMioR"
+        },
+        {
+          "role": "writer",
+          "user_id": "u_1FwUhHGM"
+        },
+        {
+          "role": "viewer",
+          "user_id": "u_3GhFej7u"
+        }
+      ],
+      "name": "marketplace",
+      "owner_user_id": "u_5dFjeaMZ",
+      "repos": [
+        {
+          "change_scenarios": [
+            "add new plugin to the marketplace",
+            "bump plugin version and stamp catalog",
+            "update plugin skill/hook/agent content",
+            "validate marketplace structure before publish"
+          ],
+          "description": "<redacted-text sha256=8ac25952db52 len=69>",
+          "generated_at": "2026-05-27T09:30:00Z",
+          "generated_commit": "8a610ac0ba02098d9dacf61022ee69fcd3fe0795",
+          "github_owner_repo": "GMISWE/GMI-marketplace",
+          "main_modules": [
+            {
+              "path": "plugins",
+              "role": "individual plugin packages (one directory per plugin)"
+            },
+            {
+              "path": ".claude-plugin",
+              "role": "marketplace manifest and plugin catalog"
+            },
+            {
+              "path": "scripts",
+              "role": "packaging, validation, and stamping scripts"
+            }
+          ],
+          "name": "marketplace",
+          "positioning": "GMI internal Claude Code plugin marketplace — hosts and distributes polyforge, polyforge-coding, and other team skills/agents/hooks as installable plugins.",
+          "tech_stack": [
+            "JSON",
+            "YAML",
+            "Shell"
+          ],
+          "url": "git@github.com:GMISWE/GMI-marketplace.git"
+        }
+      ],
+      "scenario": "git@github.com:GMISWE/polyforge-coding.git",
+      "updated_at": "2026-08-30T05:44:38.248605Z",
+      "visible": false,
+      "wi_seq": 149
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 1631
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:description=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_update_project"
+}

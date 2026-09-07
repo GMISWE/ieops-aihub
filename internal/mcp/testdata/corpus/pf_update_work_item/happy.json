@@ -1,0 +1,99 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.222",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-06T13:56:51.375Z",
+    "transcript_id": "9c0bdc871994"
+  },
+  "request": {
+    "content": "<redacted-text sha256=ae9cd8e20493 len=2073>",
+    "declared_resources": [
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:apps/developer/src/features/developer/KeysScreen.tsx"
+      }
+    ],
+    "goal": "<redacted-text sha256=8eabe87c2842 len=136>",
+    "goal_change_reason": "<redacted-text sha256=da22d667e47c len=182>",
+    "labels": [
+      "studio",
+      "api-key",
+      "scope",
+      "honesty",
+      "decided",
+      "epic-15-child"
+    ],
+    "priority": "normal",
+    "reclassify_reason": "<redacted-text sha256=fa0bdc82cccc len=36>",
+    "wi_type": "chore",
+    "work_item_id": "silgrid#114"
+  },
+  "response": {
+    "body": {
+      "attrs": {},
+      "closed_at": null,
+      "content": "<redacted-text sha256=ae9cd8e20493 len=2073>",
+      "created_at": "2026-08-04T13:04:42.720133Z",
+      "current_attempt_epoch": 0,
+      "current_attempt_id": null,
+      "declared_resources": [
+        {
+          "intent": "write",
+          "type": "path",
+          "uri": "file:apps/developer/src/features/developer/KeysScreen.tsx"
+        }
+      ],
+      "external_share_key": null,
+      "external_share_type": null,
+      "goal": "<redacted-text sha256=8eabe87c2842 len=136>",
+      "id": "wi_45iLjXM5",
+      "labels": [
+        "studio",
+        "api-key",
+        "scope",
+        "honesty",
+        "decided",
+        "epic-15-child"
+      ],
+      "milestone": null,
+      "parent_work_item_id": "wi_6VYj3NIF",
+      "priority": "normal",
+      "project": "silgrid",
+      "reporter_display": "xiaokang.w",
+      "reporter_user_id": "u_5dFjeaMZ",
+      "requires_human_session": true,
+      "resources_version": 0,
+      "scenario": "coding",
+      "seq": 114,
+      "slug": "silgrid#114",
+      "source": "human",
+      "status": "queued",
+      "updated_at": "2026-08-06T13:56:51.437809Z",
+      "wi_type": "chore"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 3036
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext",
+      "field:goal=freetext",
+      "field:goal_change_reason=freetext",
+      "field:reclassify_reason=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_update_work_item"
+}

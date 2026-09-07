@@ -1,0 +1,34 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.246",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-01T10:07:48.025Z",
+    "transcript_id": "d297e63472ef"
+  },
+  "request": {
+    "idempotency_key": "01K4A316EMBEDBLASTRADIUS0001",
+    "mode": "fresh",
+    "work_item_id": "aihub#316"
+  },
+  "response": {
+    "error_code": "CONFLICT_LOCK_TAKEN",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 233,
+    "text": "claim work item: aihub 409 CONFLICT_LOCK_TAKEN: resource file_scope:aihub:internal/domain/memory_vector.go is already locked details={\"conflict_with\":{\"actor_display\":\"dahe.p\",\"attempt_id\":\"ra_kDrx6wrf\",\"work_item_slug\":\"aihub#311\"}}"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_claim_work_item"
+}

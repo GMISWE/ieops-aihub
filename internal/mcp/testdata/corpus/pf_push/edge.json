@@ -1,0 +1,34 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.237",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-23T17:18:35.002Z",
+    "transcript_id": "73d68dd3dcf2"
+  },
+  "request": {
+    "repo": "ieops-bizplane",
+    "work_item_id": "ieops#673",
+    "workspace_root": "<WORKSPACE>"
+  },
+  "response": {
+    "error_code": "CLIENT_UNCLASSIFIED",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 160,
+    "text": "read state file for wi ieops#673: state file not found for ieops#673: open <WORKSPACE>/.polyforge/state/ieops#673.json: no such file or directory"
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_push"
+}

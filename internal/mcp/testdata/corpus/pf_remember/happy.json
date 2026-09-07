@@ -1,0 +1,54 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.197",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-07-06T14:29:47.308Z",
+    "transcript_id": "a0a042eb8889"
+  },
+  "request": {
+    "content": "<redacted-text sha256=e77d6c256aa7 len=734>",
+    "context_snippet": "zsh does not word-split unquoted variables; sed -i over $FILES fails silently; use explicit args or ${=FILES}; Bash tool runs zsh",
+    "dedup_mode": "off",
+    "project": "ieops",
+    "related_memory_ids": [
+      "mem_cD0j68dI"
+    ],
+    "type": "experience.pitfall",
+    "visibility": "team",
+    "work_item_id": "wi_AGgey8Bd"
+  },
+  "response": {
+    "body": {
+      "activation_count": 0,
+      "base_strength": 3,
+      "created_at": "2026-07-06T14:29:47.374882Z",
+      "id": "mem_pPC5o718",
+      "is_new": true,
+      "memory_id": "mem_pPC5o718",
+      "project": "ieops",
+      "stability_days": 7,
+      "type": "experience.pitfall",
+      "visibility": "team"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 270
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_remember"
+}

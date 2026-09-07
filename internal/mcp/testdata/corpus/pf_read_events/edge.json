@@ -1,0 +1,1565 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.246",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-29T02:35:06.695Z",
+    "transcript_id": "d01d778cbd81"
+  },
+  "request": {
+    "limit": "100",
+    "work_item_id": "wi_rkEDKAri"
+  },
+  "response": {
+    "body": {
+      "events": [
+        {
+          "created_at": "2026-08-20T11:32:23.369659Z",
+          "event_type": "attempt_completed",
+          "id": "evt_eVrMX2ke",
+          "payload": {
+            "pause_reason": "阻塞在 ieops#577（datachain 重拆）上，已建 blocks 依赖。#530 要摘的 engine/pipeline decider 接缝(dispatch_engine.go / dispatch_pipeline.go / dispatch_seam.go / NewDecider / deciderFor / GPUViaPipeline)在 ieops-v2@origin/main 全部不存在(实测 ABSENT + rc=1，正对照 FrameworkRouter rc=0 同 pathspec 通过)，只存在于 reset 前的 datachain；而 datachain origin/main 现在是 0 个文件。⇒ 无法改到 v2 里做，也无法在空仓上做。\n\n片1 已交付并已合入(commit 1f5bc7a2 → PR ieops-datachain#46 → merged 2026-08-19T07:03:23Z as b760dbd4)，之后仓在 09:10:28Z 被 470065e 清空。片2(Tier 1 剩余 11 个文件)必须等 #577 重建后再做。\n\n已向 #577 交付内容级 delta：artifact mem_K3Ab08Ng + docs/ieops-577-carryforward-delta.md。核心风险：func deEngine 定义在被抢救的 cutover_liveverify_test.go:89，它的 4 个调用点因\"v2 有同名文件\"被归入可重取 ⇒ 重拆后编译绿、测试绿、那三个文件静默退回去测 engine。\n\n主动释放锁：ieops:pkg/gateway/routing 这把目录级锁对 #410/#566/#573 是两个 blocker 之一(另一个是 #549 持的 retry_loop.go 等 4 个文件级锁，且 #549 今天仍活跃)。",
+            "status": "paused"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "run_attempt_id": "ra_ln8kWNc1",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-08-20T11:30:59.403443Z",
+          "event_type": "note",
+          "id": "evt_nRaVGHlw",
+          "payload": {
+            "cannot_be_retargeted_at_v2": "实测 v2@origin/main：dispatch_engine.go / dispatch_pipeline.go / dispatch_seam.go 全 ABSENT；NewDecider rc=1、deciderFor rc=1、GPUViaPipeline rc=1。正对照 FrameworkRouter rc=0（同一 pathspec，grep 本身可用）。反对照 datachain@tag 的 NewDecider rc=0 / 5+ 文件。⇒ 接缝只存在于 datachain（由 #502/#528 在那儿造的）。",
+            "delta_handed_to_577": "artifact mem_K3Ab08Ng (methodology.review) + docs/ieops-577-carryforward-delta.md。522 个『v2 可重取』= 373 相同 + 42 gr可取 + 102 内容分叉 + 5 真无源未列。",
+            "headline": "本 wi 作为规格已悬空：目标仓 ieops-datachain 已被清空，且它要摸的 decider 接缝在 ieops-v2 里不存在 ⇒ 阻塞在 ieops#577 上。",
+            "next": "等 #577 把 datachain 重建出来（包含接缝 + 片1 的 4 个调用点）之后，才能做片2（Tier 1 剩下 11 个文件）。",
+            "slice1_status": "已交付并已合入。commit 1f5bc7a2 -> PR ieops-datachain#46 -> merged 2026-08-19T07:03:23Z as b760dbd4。6 文件 / +164 -12。",
+            "slice1_will_be_silently_reverted_by_the_resplit": "func deEngine 定义在 cutover_liveverify_test.go:89，该文件在 rescue 清单里；它的 4 个调用点不在（那 4 个文件 v2 有同名，被归入『v2 可重取』）。Go 不对未调用函数报错 ⇒ 编译绿、测试绿、那三个文件静默退回去测 engine，而助手还在 ⇒ 假的完成标记。",
+            "taken_over": "attempt ra_ln8kWNc1 (epoch 3), 前一个 ra_HYULAXTr 空转 29h 未 wrap/pause 而一直持锁",
+            "what_killed_it": "ieops-datachain 在 2026-08-19T09:10:28Z 被 commit 470065e 清空（片1 合入后 2 小时 7 分钟）。origin/main 现在 0 个文件；b760dbd4 上是 638 个，其中 pkg/gateway/routing/ 有 109 个。",
+            "wi_content_correction_from_slice1": "wi 正文写『19 个文件构造 FrameworkRouter，只有 4 个设 NewDecider』。片1 实测是 27 个，且分两层：Tier 0 有 13 个（~2755 行）route() 压根不走、到不了任何 decider，装 stub 是空操作；只有 Tier 1 的 14 个是真经 DecisionMiddleware 驱动的。片1 摸了其中 3 个 ⇒ 重拆后还剩 11 个。"
+          },
+          "pinned": true,
+          "project": "ieops",
+          "run_attempt_id": "ra_ln8kWNc1",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-08-20T11:29:43.223385Z",
+          "event_type": "memory_created",
+          "id": "evt_vw5qVZEl",
+          "payload": {
+            "memory_id": "mem_K3Ab08Ng",
+            "project": "ieops",
+            "type": "methodology.review",
+            "visibility": "project"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-08-20T11:19:28.559562Z",
+          "event_type": "attempt_started",
+          "id": "evt_aWiMP7Yl",
+          "payload": {
+            "actor_display": "xiaokang.w",
+            "claim_epoch": 3,
+            "is_resume": false,
+            "is_takeover": true,
+            "machine_id": "<machine>"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "run_attempt_id": "ra_ln8kWNc1",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-08-20T11:19:28.552707Z",
+          "event_type": "attempt_superseded",
+          "id": "evt_LaigUGjB",
+          "payload": {
+            "actor_user_id": "u_5dFjeaMZ",
+            "reason": "<redacted-text sha256=6e30800cbe87 len=39>",
+            "superseded_by_attempt_id": "ra_ln8kWNc1"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "actor_display": "",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-08-20T11:19:21.590196Z",
+          "event_type": "force_takeover",
+          "id": "evt_YawS86Ti",
+          "payload": {
+            "prior_actor": "xiaokang.w",
+            "prior_attempt_id": "ra_HYULAXTr",
+            "reason": "<redacted-text sha256=e259a1beae09 len=466>"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-08-19T06:50:06.545808Z",
+          "event_type": "pr_opened",
+          "id": "evt_ZEJEvX2o",
+          "payload": {
+            "repo": "ieops-datachain",
+            "title": "ieops#530 片1: deEngine 自校验助手 + 摘掉三个纯 driver 文件 + 补上 nil 闸的覆盖空洞",
+            "url": "https://github.com/GMISWE/ieops-datachain/pull/46"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "run_attempt_id": "ra_HYULAXTr",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-08-19T06:49:37.368372Z",
+          "event_type": "push",
+          "id": "evt_anuvCVDA",
+          "payload": {
+            "branch": "polyforge/530-deengine-tests",
+            "repo": "ieops-datachain"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "run_attempt_id": "ra_HYULAXTr",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-08-19T06:49:29.716317Z",
+          "event_type": "commit",
+          "id": "evt_MP41SIJc",
+          "payload": {
+            "files": null,
+            "message": "ieops#530 片1: deEngine 自校验助手 + 摘掉三个纯 driver 文件 + 补上 nil 闸的覆盖空洞\n\n## 先纠正 wi 的问题陈述\n\nwi 说「19 个测试文件构造 FrameworkRouter，只有 4 个设 NewDecider，其余\n全在测 engine」。实测是 27 个文件，但更要紧的是一个结构性分层：\n\n**Tier 0（13 个文件，约 2755 行）**：路由器只是直接方法调用的字段袋，\nroute() 都不走、**根本到不了任何 decider**。装 stub 是空操作——它们本来\n就已经解耦了。\n\n**Tier 1（14 个文件）**：才是真正经 DecisionMiddleware/route() 驱动的。\n\n「构造了 FrameworkRouter」不等于「在测 engine」。要处理的面比 wi 估的小\n得多。\n\n## deEngine：把「已摘掉引擎」做成被检查的性质\n\n装了 decider 却不检查，什么都不证明——deciderFor 会因为测试从没提到的\n理由回落到引擎：请求被判成 gpu（除非同时设 GPUViaPipeline，否则忽略\nNewDecider）、某个 nil 依赖让 route() 在选 decider 之前就 delegate、夹具\n压根没走到循环。三种从外面看一模一样：测试照样通过，而且照样在测引擎。\n\n所以 deEngine 用 t.Cleanup 断言 decider 确实被咨询过。引擎被删时，这样\n转换过的测试要么仍然通过、要么当初根本没转换成功，没有第三种结局。\n\n装**真 pipeline** 而不是手写 stub：pipeline 就是生产决策 vendor 流量用\n的东西，driver 测试跑在它上面才是在验上线的组合。\n\n## 已摘的三个文件（零断言改动）\n\nproxy_timeout / quota_gate / adapter_convert。含多端点 failover 的那条\n也过了。\n\n## 补上 nil 闸的覆盖空洞\n\nroute() 开头那个五项 nil 闸，(nil,false) 的语义是 delegate。本包有六个\n测试断言 delegate 发生，**没有一个走到这条分支**——它们全都五个依赖齐备，\n从 model-header 或 no-profile 分支 delegate。所以这一项承重且从未被测。\n\n这个组合对本 wi 尤其危险：14 个文件都必须接 Resolve，不是因为它们用引擎\n选择器，而是**这道闸没它就不路由**。摘引擎的人自然会把 Resolve 当成\n「引擎的字段、可以删了」——而删掉不会让任何测试变红，只会把那个测试从\n「路由」静默变成「delegate」，仍然返回 200。套件全绿而覆盖为零。\n\n新守卫逐项断言，并**先跑正对照**（齐备的路由器必须真的路由），否则每个\n用例都可能因为夹具在别的地方 delegate 而空过——那正是那六个既有测试从\n没碰到这条分支的原因。非空过校验：把 Resolve 那一项从闸里去掉 → CAUGHT。",
+            "repo": "ieops-datachain",
+            "sha": "1f5bc7a2d7015443ef40bc7b43b0ff8c303903c6"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "run_attempt_id": "ra_HYULAXTr",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-08-19T06:36:08.984698Z",
+          "event_type": "attempt_started",
+          "id": "evt_rmXs2LCm",
+          "payload": {
+            "actor_display": "xiaokang.w",
+            "claim_epoch": 1,
+            "is_resume": false,
+            "is_takeover": false,
+            "machine_id": "<machine>"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "run_attempt_id": "ra_HYULAXTr",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-08-19T06:36:08.981863Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_mt0lryZ5",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "chore"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:35:44.215503Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_plWKHMSP",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:34:44.01833Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_hiNsh5lt",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:33:44.181894Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_PBsPpdF7",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:32:44.039451Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_8GpSTJLi",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:31:46.520497Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_0dLpf4UE",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:30:44.209713Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_SK9Ws0Rb",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:29:44.093733Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_CHDgpO28",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:28:44.345892Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_loFUBxDr",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:27:44.069913Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_nOlK4frg",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:26:44.357031Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_8VoUlai8",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:25:44.298346Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_BXv52TL7",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:24:44.56285Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_C2kH41lb",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:23:45.069642Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_CJisib6v",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:22:45.328512Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_aqK16Y1N",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:21:45.361832Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_Q8weqUYR",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:20:45.630899Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_NUGEcMGa",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:19:45.026586Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_KALvKW29",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:18:45.020115Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_Mow5e3IL",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:17:44.813603Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_KjBzVBjN",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:16:44.906015Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_wfH3Hxnt",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:15:44.887391Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_jxVV2Aqs",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:14:44.942887Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_GSgSfWWA",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:13:45.166844Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_IEPOMMlD",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:12:44.856353Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_OX9lYM9f",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:11:44.231833Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_HAtmkSLH",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:10:44.181755Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_7R96TNPj",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:09:44.260413Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_vfAttPYB",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:08:44.047572Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_woUuBhnX",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:07:44.872271Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_2leoqvLa",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:06:44.271691Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_stRP1ke3",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:05:44.518845Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_2f7LSfZH",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:04:44.178728Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_qtYA9bTn",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:03:44.29323Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_m5Y1VCza",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:02:43.922913Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_vgSoN9lY",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:01:44.138251Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_XussJsEU",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T06:00:44.073913Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_T1TEBUMA",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:59:43.975123Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_TQK7z6HN",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:58:43.999901Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_4lzHi7oj",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:57:43.800898Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_vfKcB04s",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:56:43.822864Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_QocN6QkW",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:55:43.795089Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_fkVsHfkK",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:54:43.801458Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_XQtJ2rGo",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:53:44.02081Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_MmzEEtjL",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:52:44.352243Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_ZhnLxkYy",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:51:45.678001Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_iL95CgAp",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:50:45.237393Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_YlHJBzfi",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:49:45.198629Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_IyWzzKfD",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:48:46.529836Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_EbA09UUc",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:47:45.323023Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_LEZHqnYM",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:46:44.475264Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_8L0fVJ1L",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:45:45.431566Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_Fb9c580O",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:44:44.088323Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_WOKQNHId",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:43:44.132103Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_mEZ3E2qz",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:42:44.097Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_cZuWm5cA",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:41:44.236144Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_q8quQh6g",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:40:44.134863Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_VSlSEXr3",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:39:44.124274Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_dwq9QI38",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:38:44.493525Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_IVjsdoM9",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:37:44.331984Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_JfKFMz3L",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:36:44.651375Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_RvMuPoku",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:35:44.042406Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_DSFXp0Rh",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:34:44.275757Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_qPgQ4z9A",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:33:44.162803Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_UNjd8ZCZ",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:32:44.076857Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_reoQq2HU",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:31:44.795333Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_LD1w1kT6",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:30:47.132296Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_LLuPph7c",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:29:44.715017Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_wRHbOim1",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:28:44.343056Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_ctmtxxA1",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:27:44.250645Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_copT5Y9t",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:26:44.108603Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_kJLOkw1B",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:25:44.716313Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_zIb02xFX",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:24:44.219566Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_IJpNIVD4",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:23:44.842577Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_HjlYGmwh",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:22:45.182663Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_QdfdqcwO",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:21:44.953111Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_tLhWYuD4",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:20:45.724124Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_WJWVPnQW",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:19:44.537582Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_rkfUImJm",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:18:44.763592Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_oqdknapp",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:17:44.903337Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_VaIkVzQB",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:16:44.488415Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_jLnTzC5X",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:15:44.805644Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_j9cXdpV4",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:14:44.510572Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_XD1OgJ6s",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:13:44.910255Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_ckMUNSoa",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:12:45.091395Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_ubZb2Jo4",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:11:44.821678Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_Op3POrHx",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:10:45.000097Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_NG7CMMGj",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:09:44.648797Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_svTs5EYp",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:08:44.054393Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_9Hg1HUbg",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        },
+        {
+          "created_at": "2026-08-19T05:07:44.028506Z",
+          "event_type": "wi_classification_missing",
+          "id": "evt_jAq1Fc54",
+          "payload": {
+            "reason": "<redacted-text sha256=ef7b4804a63e len=63>",
+            "reporter_id": "u_5dFjeaMZ",
+            "wi_id": "wi_rkEDKAri",
+            "wi_slug": "ieops#530"
+          },
+          "pinned": false,
+          "project": "ieops",
+          "work_item_id": "wi_rkEDKAri",
+          "work_item_slug": "ieops#530"
+        }
+      ],
+      "next_cursor": "2026-08-19T05:07:44.028506Z"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 39661
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:machine_id=machine",
+      "field:reason=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_read_events"
+}

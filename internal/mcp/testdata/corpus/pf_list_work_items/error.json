@@ -1,0 +1,33 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-07T01:49:10.933Z",
+    "transcript_id": "40d1a65e93f0"
+  },
+  "request": {
+    "limit": "15",
+    "query": "接入 Slurm 集群资源，纳管 Slurm 与 Kubernetes 两种集群的算力"
+  },
+  "response": {
+    "error_code": "BAD_REQUEST",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 151,
+    "text": "aihub 400 BAD_REQUEST: project query parameter is required (or pass ids= to look up work items by id, or similar_to= to find work items similar to one)"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_list_work_items"
+}

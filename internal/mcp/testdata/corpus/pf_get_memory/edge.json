@@ -1,0 +1,87 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-04T13:28:38.881Z",
+    "transcript_id": "98c40da4de5e"
+  },
+  "request": {
+    "memory_id": "mem_9rYleNef"
+  },
+  "response": {
+    "body": {
+      "activation_count": 0,
+      "attrs": {
+        "structured_payload": {
+          "issues": [
+            {
+              "severity": "warning",
+              "text": "<redacted-text sha256=6412fd439da8 len=1016>"
+            },
+            {
+              "severity": "warning",
+              "text": "<redacted-text sha256=727d9f68a7aa len=515>"
+            },
+            {
+              "severity": "minor",
+              "text": "<redacted-text sha256=f4567bc2f588 len=374>"
+            },
+            {
+              "severity": "minor",
+              "text": "<redacted-text sha256=3e1c7c603999 len=394>"
+            },
+            {
+              "severity": "minor",
+              "text": "<redacted-text sha256=1958ce7ca4cf len=317>"
+            },
+            {
+              "severity": "minor",
+              "text": "<redacted-text sha256=fd489c59b415 len=679>"
+            }
+          ],
+          "level": "quick",
+          "result": "WARN"
+        }
+      },
+      "author_display": "xiaokang.w",
+      "author_user_id": "u_5dFjeaMZ",
+      "base_strength": 3,
+      "commits": [],
+      "content": "<redacted-text sha256=8967deb32318 len=14462>",
+      "created_at": "2026-09-04T13:28:11.574564Z",
+      "id": "mem_9rYleNef",
+      "is_immortal": false,
+      "latest_id": "mem_9rYleNef",
+      "project": "aihub",
+      "rendered_html": "<h1 id=\"code-review--aihub355-code-review-level-quick\">Code review — aihub#355 <code>code_review</code> (level: quick)</h1>\n<p><strong>Result: WARN</strong> — the fix is correct and unusually well-gated; I verified every load-bearing claim empirically rather than trusting the comments. No blocking issue. Two warning-level items and four minor ones.</p>\n<p>Reviewed: <code>git diff HEAD</code> (7 fi<truncated 18585 chars>",
+      "stability_days": 36500,
+      "status": "active",
+      "tags": [],
+      "type": "methodology.review",
+      "updated_at": "2026-09-04T13:28:11.58393Z",
+      "visibility": "project",
+      "work_item_id": "wi_Hs7xIwfK"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 45228
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext",
+      "field:text=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_get_memory"
+}

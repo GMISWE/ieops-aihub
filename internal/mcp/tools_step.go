@@ -183,7 +183,7 @@ func (s *Server) registerStepTools() {
 			if err != nil {
 				outErr, deleteState := classifyStepUpdateErr(err)
 				if deleteState {
-					_ = config.DeleteStateFile(wiID)
+					deleteStaleCredential(sf, wiID)
 				}
 				return errResult(outErr)
 			}
@@ -218,7 +218,7 @@ func (s *Server) registerStepTools() {
 		if err != nil {
 			outErr, deleteState := classifyStepUpdateErr(err)
 			if deleteState {
-				_ = config.DeleteStateFile(wiID)
+				deleteStaleCredential(sf, wiID)
 			}
 			return errResult(outErr)
 		}
@@ -365,6 +365,43 @@ func updateStepBody(args map[string]any, attemptID string, claimEpoch int64, ses
 		body["escalated"] = true
 	}
 	return body
+}
+
+// deleteStaleCredential removes the credential file classifyStepUpdateErr just
+// declared dead. It deletes by the RESOLVED state file's own key, and the key
+// the caller passed only when the two differ.
+//
+// Deleting by the caller's argument alone was aihub#427. The credential sent a
+// moment earlier came from config.ResolveStateFile(passedID), which for a SLUG
+// matches through its Slug scan and returns the CANONICAL <wi_id>.json — while
+// config.DeleteStateFile keys on whatever string it is handed. After a normal
+// claim there is no <slug>.json to remove, because config.WriteClaimState
+// deletes the pre-claim stub the moment the canonical file lands (aihub#141). So
+// a slug-addressed call removed nothing, answered "STALE_LOCAL_CREDENTIAL: state
+// file deleted", and left the caller to resolve to the same file and re-send the
+// same dead credential on the next attempt. Nothing terminated that loop.
+//
+// The second delete is not belt-and-braces. A stub CAN still be present — that
+// is the whole premise of aihub#141 — and a filename lookup reads it in
+// preference to the canonical file, so leaving it behind after announcing the
+// credential is gone recreates the empty-attempt_id 409 that aihub#141 exists to
+// prevent. Both keys, in that order, is the pattern pf_complete_attempt
+// (tools_lifecycle.go) and pf_wrap (tools_coding.go) already use, each citing
+// aihub#141; those two inline it. It is a function here because this file has
+// TWO stale-credential exits — the heartbeat branch and the ordinary one — and
+// they are far enough apart that fixing one and not the other is the natural
+// mistake. Reaching for config.DeleteStateFile directly at a third exit in this
+// file would reintroduce the bug; call this instead.
+//
+// Errors are ignored deliberately, exactly as at every other delete site: the
+// slug-keyed file is usually already gone (ENOENT is the expected answer, not a
+// fault), and the caller is being handed a credential failure it must re-claim
+// out of regardless. There is nothing a failure here would change about that.
+func deleteStaleCredential(sf *config.StateFile, passedID string) {
+	_ = config.DeleteStateFile(sf.WIID)
+	if passedID != sf.WIID {
+		_ = config.DeleteStateFile(passedID)
+	}
 }
 
 // classifyStepUpdateErr maps an UpdateStep error to the MCP-facing error and

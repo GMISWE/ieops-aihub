@@ -23,8 +23,21 @@
 // when the SOURCE says so, by either of two rules:
 //
 //  1. it is assigned in this function from a call to Query / QueryContext, or
-//  2. its declared type — parameter, local var, or struct field of the receiver
-//     — spells a Rows type (pgx.Rows, *sql.Rows, pgxmock.Rows, ...).
+//  2. its declared type — parameter, result, receiver, local var, or a struct
+//     field DECLARED IN THE SAME FILE — spells a Rows type (pgx.Rows,
+//     *sql.Rows, pgxmock.Rows, ...).
+//
+// 🔴 "in the same file" is a real limit, not a hedge, and it is stated because
+// this comment used to claim "struct field of the receiver" outright while
+// rowsValuesIn looked only at the signature and at local `var` declarations —
+// so `for s.rows.Next()` was invisible and invisible read as compliant
+// (aihub#409). The scanner does not type-check, so it cannot resolve a
+// receiver's field types across files; it recognises a field by NAME, taken
+// from struct types declared in the file being scanned. A rows field whose
+// struct is declared in another file of the same package is still invisible.
+// TestScannerSeesRowsHeldInAStructField pins the half that works and
+// TestScannerCannotSeeAStructFieldDeclaredElsewhere pins the half that does
+// not, so the two halves of this paragraph cannot drift apart from the code.
 //
 // 🔴 That scoping is load-bearing rather than tidy, and the reason is in this
 // repo: internal/render/postsanitize.go loops on `z.Next()`, an
@@ -166,6 +179,11 @@ func ScanSource(src []byte, reportAs string) ([]Loop, error) {
 		return nil, fmt.Errorf("parse %s: %w", reportAs, err)
 	}
 
+	// Collected over the WHOLE file before any function is scanned: a struct
+	// may be declared after the methods that loop over its fields, and a
+	// single-pass walk would miss exactly those.
+	rowsFields := rowsFieldNamesIn(file)
+
 	var out []Loop
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -176,13 +194,63 @@ func ScanSource(src []byte, reportAs string) ([]Loop, error) {
 		if fn.Recv != nil && len(fn.Recv.List) > 0 {
 			fnName = "(" + exprString(fn.Recv.List[0].Type) + ")." + fnName
 		}
-		out = append(out, scanFunc(fset, fn, fnName, reportAs)...)
+		out = append(out, scanFunc(fset, fn, fnName, reportAs, rowsFields)...)
 	}
 	return out, nil
 }
 
+// rowsFieldNamesIn returns the names of struct fields in this file whose
+// declared type spells a Rows type.
+//
+// By NAME rather than by (struct, field) pair, because the scanner is
+// syntactic: at `for s.rows.Next()` it knows the text `s.rows` and nothing
+// about what `s` is. Keying on the field name is what makes the recognition
+// possible at all, and it is why the doc comment says a field is recognised
+// when SOME struct in the file declares that name as a rows type.
+//
+// The looseness is bounded in the direction that matters. To produce a false
+// positive a file would have to declare a rows-typed field `x`, and separately
+// loop `for <anything>.x.Next()` on a DIFFERENT type that also has an `x` with
+// a Next() method. TestScannerIgnoresANonRowsIterator covers the shape that
+// actually occurs here (html.Tokenizer, a local variable), and a false positive
+// costs one allowlist line, while the false NEGATIVE this replaces cost silent
+// invisibility.
+func rowsFieldNamesIn(file *ast.File) map[string]bool {
+	out := map[string]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		st, ok := n.(*ast.StructType)
+		if !ok || st.Fields == nil {
+			return true
+		}
+		for _, f := range st.Fields.List {
+			if !typeIsRows(f.Type) {
+				continue
+			}
+			// Embedded fields have no Names; there is nothing to match on.
+			for _, nm := range f.Names {
+				out[nm.Name] = true
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// isRowsExpr reports whether the source text of a Next()/Err() receiver names
+// query rows: either a recognised plain value, or a selector whose final
+// element is a rows field name from this file.
+func isRowsExpr(expr string, names, fields map[string]bool) bool {
+	if names[expr] {
+		return true
+	}
+	if i := strings.LastIndex(expr, "."); i >= 0 {
+		return fields[expr[i+1:]]
+	}
+	return false
+}
+
 // scanFunc analyses one function body.
-func scanFunc(fset *token.FileSet, fn *ast.FuncDecl, fnName, reportAs string) []Loop {
+func scanFunc(fset *token.FileSet, fn *ast.FuncDecl, fnName, reportAs string, rowsFields map[string]bool) []Loop {
 	rowsNames := rowsValuesIn(fn)
 
 	// Every `for X.Next()` loop over a recognised rows value, in source order.
@@ -201,7 +269,7 @@ func scanFunc(fset *token.FileSet, fn *ast.FuncDecl, fnName, reportAs string) []
 			if node.Cond == nil {
 				return true
 			}
-			if rowsExpr, ok := zeroArgMethodCall(node.Cond, "Next"); ok && rowsNames[rowsExpr] {
+			if rowsExpr, ok := zeroArgMethodCall(node.Cond, "Next"); ok && isRowsExpr(rowsExpr, rowsNames, rowsFields) {
 				sites = append(sites, site{rows: rowsExpr, start: node.For, end: node.End()})
 			}
 		case *ast.CallExpr:

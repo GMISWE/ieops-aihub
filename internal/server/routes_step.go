@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 
@@ -111,6 +114,21 @@ const completedStepsLimit = 200
 // here, and pinned by TestTruncateCompletedSteps, because the arithmetic is
 // invisible from either side alone.
 const completedStepsFetch = completedStepsLimit + 1
+
+// maxArtifactSummaryChars is the cap wi_step_completions puts on
+// artifact_summary: `CHECK (length(artifact_summary) <= 4096)` in
+// internal/db/migrations/0005_step_state.sql. Postgres length() counts
+// characters, not bytes, so the check in handleUpdateStep counts runes.
+//
+// It is named here, in the handler, because of aihub#390. The handler used to
+// let the INSERT discover the cap and then swallowed the CHECK violation inside
+// a savepoint — so a 4,243-character summary bumped version, emitted a
+// step_completed event carrying the full text (agent_events has no such cap),
+// answered 200, and left completed_steps one step short with
+// completed_steps_truncated=false. TestArtifactSummaryCapMatchesTheMigration
+// pins this constant to the migration's number, so the two cannot drift apart
+// without a DB-free test going red.
+const maxArtifactSummaryChars = 4096
 
 // truncateCompletedSteps trims a history read to the response cap and reports
 // whether anything was dropped.
@@ -390,6 +408,29 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			return c.JSON(http.StatusOK, map[string]string{"status": "heartbeat_ok"})
 		}
 
+		// aihub#390: artifact_summary is persisted by the completed and failed
+		// branches into wi_step_completions, whose CHECK caps it at
+		// maxArtifactSummaryChars. Reject an oversize value HERE, before any
+		// write, naming the cap and the actual length — the alternative, letting
+		// the INSERT trip the CHECK inside the transaction, is how the same
+		// request used to answer 200 with the step missing from the history.
+		// Placed AFTER the heartbeat return above on purpose: a heartbeat may
+		// carry status="completed" (see validateNextStepArgs) and must stay
+		// untouched by this. in_progress ignores the field, so an oversize value
+		// there stays as ignored as it was. The check keys on the status and the
+		// field alone, NOT on step_attempt_id: a completed/failed request without
+		// one files no row today (aihub#403 owns that shape), and the cap is a
+		// property of the field on this transition either way, so it is applied
+		// uniformly rather than encoding "no step_attempt_id means no row" in a
+		// second place.
+		if (req.Status == "completed" || req.Status == "failed") && req.ArtifactSummary != nil {
+			if n := utf8.RuneCountInString(*req.ArtifactSummary); n > maxArtifactSummaryChars {
+				return writeError(c, domain.NewErr(domain.ErrPayloadTooLarge, fmt.Sprintf(
+					"artifact_summary is %d characters; the step history stores at most %d — shorten it and resend, nothing was recorded",
+					n, maxArtifactSummaryChars)))
+			}
+		}
+
 		// All step transitions run in a single transaction for atomicity
 		tx, txErr := pool.Begin(c.Request().Context())
 		if txErr != nil {
@@ -443,18 +484,9 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				return writeError(c, domain.NewErr(domain.ErrInternalError, execErr.Error()))
 			}
 			if req.StepAttemptID != nil {
-				// Completion-row insert is best-effort; primary state change above
-				// has already succeeded. SAVEPOINT isolates this insert so that a
-				// unique-constraint violation (e.g. duplicate step_attempt_id) does
-				// not abort the surrounding transaction.
-				tx.Exec(c.Request().Context(), `SAVEPOINT bp`) //nolint:errcheck
-				if _, bpErr := tx.Exec(c.Request().Context(), `
-					INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status, artifact_summary)
-					VALUES ($1, $2, $3, $4, $5, 'completed', $6)`,
-					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep), req.ArtifactSummary); bpErr != nil {
-					tx.Exec(c.Request().Context(), `ROLLBACK TO SAVEPOINT bp`) //nolint:errcheck
-				} else {
-					tx.Exec(c.Request().Context(), `RELEASE SAVEPOINT bp`) //nolint:errcheck
+				if aerr := insertStepCompletion(c.Request().Context(), tx, wiID, req.AttemptID, *req.StepAttemptID,
+					derefStr(currentStep), "completed", req.ArtifactSummary, nil, false); aerr != nil {
+					return writeError(c, aerr)
 				}
 			}
 			events = append(events, stepEvent{
@@ -501,17 +533,9 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				return writeError(c, domain.NewErr(domain.ErrInternalError, execErr.Error()))
 			}
 			if req.StepAttemptID != nil {
-				// Best-effort row; failure marker has already been written above.
-				// SAVEPOINT isolates this insert so that a unique-constraint violation
-				// does not abort the surrounding transaction.
-				tx.Exec(c.Request().Context(), `SAVEPOINT bp`) //nolint:errcheck
-				if _, bpErr := tx.Exec(c.Request().Context(), `
-					INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status, artifact_summary, error_type, escalated)
-					VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7, $8)`,
-					domain.NewID("sc"), wiID, req.AttemptID, *req.StepAttemptID, derefStr(currentStep), req.ArtifactSummary, req.ErrorType, req.Escalated); bpErr != nil {
-					tx.Exec(c.Request().Context(), `ROLLBACK TO SAVEPOINT bp`) //nolint:errcheck
-				} else {
-					tx.Exec(c.Request().Context(), `RELEASE SAVEPOINT bp`) //nolint:errcheck
+				if aerr := insertStepCompletion(c.Request().Context(), tx, wiID, req.AttemptID, *req.StepAttemptID,
+					derefStr(currentStep), "failed", req.ArtifactSummary, req.ErrorType, req.Escalated); aerr != nil {
+					return writeError(c, aerr)
 				}
 			}
 			events = append(events, stepEvent{eventType: "step_failed", step: derefStr(req.Step)})
@@ -651,6 +675,60 @@ type stepEvent struct {
 	eventType       string
 	step            string
 	artifactSummary *string
+}
+
+// insertStepCompletion appends the wi_step_completions row for a step that just
+// reached a terminal outcome, inside the caller's transaction. Its errors are
+// the request's errors: the row commits with the state change or neither does.
+//
+// It replaces two copies of a "best-effort" INSERT that ran inside a SAVEPOINT
+// whose ROLLBACK swallowed every error, on the theory that the wi_step_state
+// UPDATE was the primary write and the history row a courtesy. aihub#265
+// inverted that theory without touching this code: pf_get_step's
+// completed_steps is now THE record a resuming agent is told to trust, so a
+// swallowed INSERT produced a request that bumped version, emitted a
+// step_completed event carrying the summary, answered 200 — and left the step
+// out of the history with completed_steps_truncated=false. Measured on
+// aihub#383 (aihub#390): a 4,243-character artifact_summary tripped the
+// migration's CHECK (length <= 4096); 7 step_completed events, 6 history rows.
+//
+//   - 23505 (idx_wsc_attempt, the GLOBAL unique index on step_attempt_id) means
+//     this step attempt already has its row, i.e. the same completion was
+//     submitted twice. That is answered 409 with nothing committed, so a retry
+//     after a lost response is loud instead of a silent second no-op that
+//     advanced the state machine again.
+//   - 23503 is the run_attempt_id foreign key — work_item_id was resolved from
+//     a real row, so it is the only FK that can fail — and it fails when the
+//     request carried no attempt_id: the credential check above is skipped for
+//     an empty attempt_id, so nothing before this INSERT notices. That is the
+//     caller's request, answered 400 and naming the field.
+//   - anything else is 500 with a fixed message. The artifact_summary CHECK is
+//     pre-validated in handleUpdateStep, so reaching it here means the constant
+//     and the migration disagree — which TestArtifactSummaryCapMatchesTheMigration
+//     exists to catch first.
+func insertStepCompletion(ctx context.Context, tx pgx.Tx, wiID, runAttemptID, stepAttemptID, stepID, status string,
+	artifactSummary, errorType *string, escalated bool,
+) *domain.AihubError {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO wi_step_completions (id, work_item_id, run_attempt_id, step_attempt_id, step_id, status, artifact_summary, error_type, escalated)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		domain.NewID("sc"), wiID, runAttemptID, stepAttemptID, stepID, status, artifactSummary, errorType, escalated)
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23505":
+			return domain.NewErr(domain.ErrConflictDuplicate,
+				"step_attempt_id "+stepAttemptID+" already has a step-history row; this step attempt was recorded before — nothing was committed, do not resend")
+		case "23503":
+			return domain.NewErr(domain.ErrBadRequest,
+				"attempt_id "+fmt.Sprintf("%q", runAttemptID)+" does not name an existing run attempt; the step history records which attempt "+
+					"finished the step, so a completed/failed transition with a step_attempt_id needs the real attempt_id — nothing was committed")
+		}
+	}
+	return domain.NewErr(domain.ErrInternalError, "record step history")
 }
 
 // startStep performs the idle -> in_progress transition, reporting whether it

@@ -74,6 +74,22 @@ import (
 // include_archived, so that caller receives a mixed result set and `status` is
 // the answer to the question it just asked. Dropping it would be the aihub#249
 // harm wearing a token-saving costume.
+//
+// `latest_id` is deliberately absent too, since aihub#429, and it is worth saying
+// why the line that used to be here was WRONG rather than merely obsolete. It
+// read "supersession bookkeeping; recall already resolves to the head version" —
+// the same sentence shape as the `status` reason above, and false in the same
+// case. An archived row's latest_id does not point at the row the caller is
+// holding: internal/domain/memory.go inserts every row with latest_id = its own
+// id (:1279-1285), archives the old head on supersede (:1205), and then repoints
+// every row WHERE latest_id = oldHead — the archived head included — at the new
+// id (:1333-1336). So under include_archived it is the forward edge to the
+// current head, and the only one in the response.
+//
+// That this file's spec repeated the implementation's wording is itself the
+// finding: an independent spec that inherits the implementation's reasoning is
+// only independent about the FACT, not about the JUSTIFICATION. Both copies were
+// wrong and neither could redden the other.
 var recallItemKeysWithheldFromTheModel = map[string]string{
 	"rendered_html": "a full standalone HTML document on methodology.* artifacts — the largest single " +
 		"field a memory can carry, and unusable by a model.",
@@ -92,7 +108,6 @@ var recallItemKeysWithheldFromTheModel = map[string]string{
 	"author_user_id":     "an opaque internal id the model cannot resolve.",
 	"author_display":     "provenance rather than content.",
 	"visibility":         "access control already enforced server-side.",
-	"latest_id":          "supersession bookkeeping; recall already resolves to the head version.",
 	"source_artifact_id": "an internal provenance pointer the model cannot resolve.",
 	"updated_at":         "row-mutation bookkeeping; created_at is what a recency judgement uses.",
 
@@ -571,5 +586,169 @@ func TestRecallBriefModeIsADeclaredKeepList(t *testing.T) {
 	}
 	if body, _ := item["content"].(string); strings.Contains(body, "second line") {
 		t.Errorf("brief carried more than the headline: %q", body)
+	}
+}
+
+// ─── aihub#429: the include_archived result set ─────────────────────────────
+//
+// Both defects this section covers have the same shape, and it is the shape
+// aihub#418 already caught once for `status`: a per-field decision whose stated
+// reason is true of recall's DEFAULT predicate — status IN ('active') — and false
+// of the one a caller opts into with include_archived, status IN
+// ('active','archived'). A projection reasoned about on the default path alone
+// mislays exactly the fields the other path exists to deliver.
+//
+// So every arm below models the mixed result set that predicate returns: an
+// archived row whose latest_id points somewhere ELSE, which is the only shape in
+// which either field carries information. An arm built on an active row would
+// pass against the broken code, because on an active row latest_id is the item's
+// own id and status is the constant the caller already knew.
+
+// archivedRecallPayload is one archived row as the server returns it under
+// include_archived: superseded, so its status is "archived" and its latest_id is
+// the id of the row that replaced it.
+//
+// latest_id deliberately differs from id. Seeding it with the item's own id —
+// which is what an ACTIVE row carries — would make "the head pointer was
+// forwarded" and "the id was echoed" the same observation, and the assertion
+// would stop discriminating.
+func archivedRecallPayload() map[string]any {
+	return map[string]any{"items": []any{map[string]any{
+		"id":         "mem_superseded",
+		"type":       "rule.work",
+		"content":    "# The old wording\n\nA body that a newer version has replaced.",
+		"created_at": "2026-09-01T10:00:00.123456Z",
+		"status":     "archived",
+		"latest_id":  "mem_current_head",
+	}}}
+}
+
+// TestRecallForwardsLatestIDOnArchivedRows is the primary aihub#429 arm.
+//
+// latest_id used to be withheld as "supersession bookkeeping; recall already
+// resolves to the head version, so this points at the row the caller is
+// holding". For the archived rows include_archived returns, that sentence is
+// false at every clause: internal/domain/memory.go inserts each row with
+// latest_id = its own id (:1279-1285), archives the old head on supersede
+// (:1205), then repoints every row WHERE latest_id = oldHead — which matches the
+// archived head, precisely because its latest_id was its own id — at the new id
+// (:1333-1336).
+//
+// So the field is the forward edge to the current head, and the response carries
+// no other route to it. Withholding it left this caller holding a superseded body
+// with no way to reach the live one short of a pf_get_memory per item, spent
+// blind because nothing in the response said which items needed it.
+func TestRecallForwardsLatestIDOnArchivedRows(t *testing.T) {
+	item := firstRecallItem(t, recallAgainst(t, archivedRecallPayload(),
+		map[string]any{"include_archived": true}))
+
+	got, ok := item["latest_id"]
+	if !ok {
+		t.Fatalf("latest_id was withheld from an ARCHIVED row. On that row it is the pointer to "+
+			"the current head, not — as the old reason had it — \"the row the caller is holding\": "+
+			"the caller is holding mem_superseded and the head is mem_current_head. Nothing else in "+
+			"the response can get it there. (aihub#429) Item: %v", item)
+	}
+	if got != "mem_current_head" {
+		t.Errorf("latest_id = %#v, want %q", got, "mem_current_head")
+	}
+	// The companion field, so a regression that re-drops either is named
+	// precisely rather than diagnosed from one failure.
+	if item["status"] != "archived" {
+		t.Errorf("status = %#v, want \"archived\": without it the caller cannot tell which rows in "+
+			"a mixed result set the latest_id above even applies to", item["status"])
+	}
+}
+
+// TestRecallBriefLabelsArchivedRows closes the brief-mode half.
+//
+// brief is a declared keep-list built from briefFields, and `status` was not in
+// it, so include_archived + fields:"brief" produced a mixed result set with
+// nothing on any item saying which rows were archived — the aihub#418 harm
+// surviving in the mode aihub#418 did not look at.
+//
+// The fix is conditional rather than a new briefFields entry, and this arm is
+// only half of that contract: TestRecallBriefOmitsStatusOnActiveRows below is the
+// other half, and without it "forward status in brief" would be satisfied by
+// forwarding it always — the variant measured at ~6.8% of a brief response to
+// transmit a constant. Neither arm is sufficient alone.
+func TestRecallBriefLabelsArchivedRows(t *testing.T) {
+	item := firstRecallItem(t, recallAgainst(t, archivedRecallPayload(),
+		map[string]any{"include_archived": true, "fields": "brief"}))
+
+	if item["status"] != "archived" {
+		t.Errorf("brief dropped `status` from an archived row (%#v). A caller that set "+
+			"include_archived asked precisely which rows are archived, and brief answered with a "+
+			"result set it cannot classify at all. (aihub#429) Item: %v", item["status"], item)
+	}
+	// Brief must not have quietly become a delete-list on the way: the escape
+	// hatch and the id are what make the other dropped fields recoverable.
+	if item["id"] != "mem_superseded" {
+		t.Errorf("brief dropped `id` (%#v) — without it every dropped field, latest_id included, "+
+			"stops being one pf_get_memory away", item["id"])
+	}
+	if _, present := item["latest_id"]; present {
+		t.Errorf("brief forwarded latest_id (%#v). That is not the fix: brief is a declared "+
+			"keep-list and its contract is that anything it drops is retrievable via `id`. If this "+
+			"is now intended, change briefFields and say why", item["latest_id"])
+	}
+}
+
+// TestRecallBriefOmitsStatusOnActiveRows is the NEGATIVE control for the arm
+// above, and the reason the brief fix is conditional rather than a briefFields
+// entry.
+//
+// Without this, "brief must carry status" is satisfied most cheaply by carrying
+// it always — and always is what the measurement rejected. The recall predicate
+// is status IN ('active') unless the request opts in, so on every recall that
+// does not set include_archived the value is the constant "active" on every item.
+// Forwarding it there costs ~6 tokens an item, ~120 of the canonical 1,766-token
+// 20-item brief response (6.8%), taking brief from 25.4% of full to ~27.1% — in a
+// file that argues over 0.6pp at briefRoundDigits. This arm is what makes that
+// decision executable instead of a comment.
+func TestRecallBriefOmitsStatusOnActiveRows(t *testing.T) {
+	payload := map[string]any{"items": []any{map[string]any{
+		"id": "mem_live", "type": "rule.work", "status": "active",
+		"content": "# Still current\n\nA second line brief must not carry.",
+	}}}
+
+	item := firstRecallItem(t, recallAgainst(t, payload, map[string]any{"fields": "brief"}))
+
+	if v, present := item["status"]; present {
+		t.Errorf("brief forwarded status=%#v on an ACTIVE row. Under the default predicate that "+
+			"value is a constant the caller already knows, and paying for it on every item is the "+
+			"~6.8%% this fix was measured to avoid. Absence means active. (aihub#429)", v)
+	}
+	// Full mode is the contrast, and asserting it here keeps the two modes'
+	// answers in one place: full forwards status unconditionally (aihub#418), so
+	// a change that silenced BOTH modes cannot pass by looking like this one.
+	full := firstRecallItem(t, recallAgainst(t, payload, nil))
+	if full["status"] != "active" {
+		t.Errorf("FULL mode dropped status on an active row (%#v) — aihub#418 forwards it "+
+			"unconditionally there, and only brief mode is conditional", full["status"])
+	}
+}
+
+// TestRecallBriefForwardsUnknownStatus pins the direction the predicate fails in.
+//
+// briefStatusIsInformative tests `!= "active"` rather than `== "archived"`.
+// Recall cannot return a `redacted` row today — neither status set admits one —
+// so this arm is not covering a reachable case, it is covering the DISPOSITION: a
+// status this code has never heard of is exactly where saying nothing is worst,
+// and an `== "archived"` predicate would silently drop it. Written as a test
+// because a comment saying "we chose the safe direction" cannot fail when
+// somebody tightens the comparison.
+func TestRecallBriefForwardsUnknownStatus(t *testing.T) {
+	payload := map[string]any{"items": []any{map[string]any{
+		"id": "mem_odd", "type": "rule.work", "status": "quarantined",
+		"content": "# A status this code has never heard of",
+	}}}
+
+	item := firstRecallItem(t, recallAgainst(t, payload, map[string]any{"fields": "brief"}))
+
+	if item["status"] != "quarantined" {
+		t.Errorf("brief dropped an UNKNOWN status (%#v). The predicate must be `!= \"active\"`, "+
+			"not `== \"archived\"`: a value this projection cannot interpret is the one a caller "+
+			"most needs to see. (aihub#429)", item["status"])
 	}
 }

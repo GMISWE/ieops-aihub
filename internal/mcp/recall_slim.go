@@ -58,6 +58,14 @@ import (
 //    brief drops is retrievable with one pf_get_memory call, which is exactly
 //    what the swallowed fields above were NOT.
 //
+//    ONE FIELD IS CONDITIONAL rather than declared, and aihub#429 added it:
+//    `status` is forwarded when it is not "active". A pure keep-list left a
+//    caller that asked for archived rows unable to tell which rows those were,
+//    and adding `status` to briefFields outright would have spent ~6.8% of a
+//    brief response transmitting the constant "active" on every recall that did
+//    not ask. See briefStatusIsInformative for the measurement and for the two
+//    alternatives that were rejected.
+//
 //    Note also what brief does to `content`: it REPLACES the value with a
 //    first-line summary. That is content transformation, not key dropping, and
 //    the distinction matters because the key is still there — a caller reading
@@ -137,8 +145,6 @@ var recallItemWithheldKeys = map[string]string{
 		"a caller actually opens.",
 	"visibility": "an access-control fact already enforced server-side — anything the caller " +
 		"cannot see is not in this list at all, so the field can only ever confirm the obvious.",
-	"latest_id": "supersession bookkeeping. Recall already resolves to the head version, so " +
-		"this points at the row the caller is holding.",
 	// ⚠️ `status` is NOT in this list, and the first draft of this change had it
 	// here with the reason "recall returns live rows, so this is always active".
 	// That reason is false in a reachable case: the recall predicate is
@@ -147,8 +153,53 @@ var recallItemWithheldKeys = map[string]string{
 	// explicitly asked for archived rows gets a mixed result set — and dropping
 	// `status` would remove precisely the answer to the question that caller just
 	// asked. That is the aihub#249 harm, not a token saving. It costs about 6
-	// tokens an item (~1.7% of the canonical 20-item full response) and nothing
-	// at all in brief mode, where it is not in briefFields.
+	// tokens an item (~1.7% of the canonical 20-item full response).
+	//
+	// ⚠️ `latest_id` is NOT in this list either, and aihub#429 is why. It WAS
+	// here, withheld as "supersession bookkeeping. Recall already resolves to the
+	// head version, so this points at the row the caller is holding" — the SAME
+	// defect the paragraph above records for `status`, made a second time in the
+	// same commit: a per-drop reason that is true of the default predicate and
+	// false of the include_archived one. Three facts in internal/domain/memory.go
+	// settle it, and all three are load-bearing:
+	//
+	//	:1279-1285  a new row is inserted with latest_id = its OWN id (aihub#201's
+	//	            self-head trick), so a head's latest_id equals itself
+	//	:1205       a supersede ARCHIVES the old head
+	//	:1333-1336  and then repoints every row WHERE latest_id = oldHead at the
+	//	            new id — which matches the just-archived old head itself,
+	//	            precisely because its latest_id equalled its own id
+	//
+	// So for an archived row, latest_id is NOT "the row the caller is holding":
+	// it is the pointer to the current head, and it is the only field in the
+	// response that can get the caller there. Withholding it left a caller that
+	// asked for archived rows holding a superseded body with no forward edge —
+	// recoverable only by spending a pf_get_memory on every item to find out
+	// which ones even needed it.
+	//
+	// FORWARDED rather than re-worded, which was the other option the work item
+	// offered. Scoping the reason to the non-archived case would leave the field
+	// dropped for the one caller who needs it and merely be honest about doing
+	// so; the field is load-bearing for following a version chain, it is one
+	// short id, and under a delete-list forwarding costs a deleted line rather
+	// than an added one.
+	//
+	// WHAT IT COSTS, stated because every other entry here is quantified: about 9
+	// tokens an item, ~2.6% of the canonical 20-item full response — the same
+	// order as `status` above at 1.7%, and paid on every full recall, including
+	// the ones where every row is active and latest_id is therefore the row's own
+	// id (the aihub#201 self-head trick).
+	//
+	// AND NO, IT IS NOT MADE CONDITIONAL HERE the way brief mode makes `status`
+	// conditional, even though the "on an active row the value is redundant"
+	// argument reads identically. The two modes carry opposite burdens of proof
+	// and that is the whole point of boundaries 2 and 3 in the file header. FULL
+	// is a delete-list: forwarding is the default and hiding is what needs a
+	// reason, because three separate incidents (aihub#249, #269, #289) came from
+	// a field being silently absent. Adding a value-conditional rule here would
+	// re-introduce exactly the per-field cleverness aihub#418 removed, to save
+	// 2.6%. BRIEF is a keep-list with the burden the other way round, which is
+	// why the same argument wins there and loses here.
 	"source_artifact_id": "an internal provenance pointer to the artifact a memory was extracted " +
 		"from; not resolvable by the model.",
 	"updated_at": "row-mutation bookkeeping. created_at is the one a recency judgement uses and is " +
@@ -307,10 +358,18 @@ func narrowRecallCommits(m map[string]any) {
 // runes, paid for by cutting real headlines in half.
 const briefContentMax = 120
 
-// briefFields are the item fields brief mode keeps. Deliberately NOT the slim
-// whitelist minus content: `related` (15.9% of a real response) and `tags` are
-// dropped too, because a pointer the model cannot act on without a second read
-// is exactly the bulk this projection exists to remove.
+// briefFields are the item fields brief mode keeps UNCONDITIONALLY. Deliberately
+// NOT the slim whitelist minus content: `related` (15.9% of a real response) and
+// `tags` are dropped too, because a pointer the model cannot act on without a
+// second read is exactly the bulk this projection exists to remove.
+//
+// `status` is deliberately NOT here, and briefRecallItem forwards it
+// CONDITIONALLY instead — see briefStatusIsInformative for the whole argument.
+// The short version: unconditional would have cost ~6 tokens an item, i.e. ~120
+// of the canonical 1,766-token brief response (6.8%), taking brief from 25.4% of
+// full to ~27.1% — and this file already treats 0.6pp as worth arguing about (see
+// briefRoundDigits). Every one of those tokens would have spelled "active", the
+// only value the default predicate can return.
 //
 // `id` must stay in this list: it is the ONLY mechanism that carries the id into a
 // brief item, and criterion 2 of aihub#313 (full text stays retrievable per item)
@@ -371,6 +430,58 @@ func trimSubsecond(s string) string {
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
+// briefStatusIsInformative decides whether a recall item's `status` earns its
+// place in a brief response. "active" does not; anything else does.
+//
+// THE PROBLEM (aihub#429). Brief mode dropped `status` outright, so a caller that
+// set include_archived AND fields="brief" got back a mixed active/archived result
+// set with nothing on any item saying which was which — the exact harm aihub#418
+// rescued `status` from in full mode, surviving intact in the other mode.
+//
+// WHY NOT JUST ADD IT TO briefFields, which is the obvious fix and the one the
+// work item leaned toward. Because of what the value would BE. The recall
+// predicate is status IN ('active') unless the request sets include_archived
+// (internal/domain/memory.go:2198-2200), so on every recall that does not set
+// that flag — the overwhelming majority — `status` is the constant "active" on
+// every item. Unconditional forwarding therefore spends ~6 tokens an item, ~120
+// of the canonical 1,766-token 20-item brief response (6.8%), to transmit a value
+// that is already implied by the request. Brief exists to be 25.4% of full; that
+// would make it ~27.1%, and briefRoundDigits above shows this file weighing
+// 0.6pp. Spending 1.7pp on a constant is not a trade this projection makes.
+//
+// WHY NOT THREAD include_archived DOWN FROM THE REQUEST, the other candidate. It
+// would work — buildRecallParams already decides with boolArg(args,
+// "include_archived") and the same call could be passed through — but it buys
+// nothing over reading the value. A caller can set include_archived and still
+// match no archived rows, and that request would then pay the full 6.8% to label
+// twenty rows "active". Reading the datum yields a strict subset of what the flag
+// yields, and every byte in the difference is provably non-informative. It also
+// keeps briefRecallItem's signature, which eighteen existing call sites depend
+// on.
+//
+// THE RESIDUAL, stated rather than left to be found: absence now means "active".
+// That is already this mode's idiom — content_truncated appears only when the
+// body was cut, and briefRecallItem skips any briefFields entry the item lacks —
+// but it is a convention, and a convention nobody wrote down is how the next
+// reader gets surprised. It is written down here and asserted by the brief arms
+// of the aihub#429 tests.
+//
+// It is deliberately NOT added to pf_recall's `fields` description, and that is a
+// budget decision rather than an oversight. A tool description is RESIDENT: it is
+// injected on every request whether or not the tool is called, so the clause
+// would cost every request in the session, while the caller it helps is one that
+// sets include_archived AND fields="brief" — and that caller is already looking
+// at items labelled "archived" next to items that are not. Paying a per-request
+// tax to spell out an inference the labelled rows already make is the wrong side
+// of that trade. Revisit if brief+include_archived stops being rare.
+//
+// The test is `!= "active"` rather than `== "archived"` deliberately. Recall
+// cannot return a `redacted` row today (neither status set admits it), but a
+// status this function has never heard of is exactly the case where saying
+// nothing is worst, so the unknown one is forwarded. That is the delete-list
+// disposition applied to a value instead of a key.
+func briefStatusIsInformative(status string) bool { return status != "active" }
+
 // briefRecallItem projects one already-slimmed item down to a pointer: enough to
 // judge whether the memory is worth reading, plus the id to read it with via
 // pf_get_memory. aihub#313.
@@ -420,6 +531,10 @@ func briefRecallItem(m map[string]any) map[string]any {
 			}
 		}
 		b[k] = v
+	}
+	// aihub#429: `status`, forwarded only when it says something.
+	if s, ok := m["status"].(string); ok && briefStatusIsInformative(s) {
+		b["status"] = s
 	}
 	// Only synthesise a `content` key if the item actually had one. Emitting
 	// content:"" for a bodyless item would ADD tokens to the response this

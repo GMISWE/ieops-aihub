@@ -317,3 +317,159 @@ func TestUnrecognizedDeclaredResources_ExternalRefMissingURINotReported(t *testi
 		t.Errorf("external_ref takes no lock either way; should not be reported: %v", got)
 	}
 }
+
+// ─── aihub#395 part 4: the per-type uri scheme, as a MECHANISM ──────────────
+//
+// The scheme has been PUBLISHED per type since aihub#238 —
+//
+//	"file:<repo-relative-path>" for path/document/section
+//	"repo:<repo-name>"          for repo
+//	"service:<name>"            for service
+//	a plain URL                 for external_ref
+//
+// — and, until this change, validated nowhere. ValidateDeclaredResources checked
+// that `uri` was non-empty and stopped there, while resourceToLock derives the
+// lock key with strings.TrimPrefix, which is a NO-OP on a wrong prefix. So
+// `{"type":"repo","uri":"file:x"}` was accepted with a 200 and keyed its
+// git_branch lock as "file:x/main" — a lock nobody else will ever collide with,
+// on a work item whose author believes the repo is guarded. That is the same
+// silent-lockless shape aihub#238 was filed about, one level down: there the
+// TYPE was unrecognised, here the type is fine and the KEY is nonsense.
+//
+// ⚠️ Why the failure is invisible without a check. A wrong scheme does not
+// produce an error, an empty lock type, or an empty key — the three things any
+// existing guard looks at. It produces a well-formed lock on the wrong key, and
+// `acquired_locks` in the claim response lists it, so the caller's evidence says
+// the declaration worked.
+//
+// ─── Quantified over the type set, not over a list of names ────────────────
+//
+// declaredResourceURISchemeFixtures is keyed by declared type and the test below
+// asserts it covers DeclaredResourceTypeList() exactly, so a type added to the
+// vocabulary tomorrow fails here until somebody states its scheme — rather than
+// slipping through unvalidated, which is what "add the type, forget the rule"
+// looks like from the outside.
+
+// declaredResourceURISchemeFixtures gives, per declared type, a uri that is
+// correctly schemed and one that is not. The wrong ones deliberately borrow a
+// scheme that belongs to a DIFFERENT declared type, because that is the real
+// mistake: the vocabularies are adjacent and a caller reaches for the wrong one.
+var declaredResourceURISchemeFixtures = map[string]struct{ good, bad string }{
+	"repo":         {good: "repo:aihub", bad: "file:aihub"},
+	"path":         {good: "file:internal/a.go", bad: "repo:internal/a.go"},
+	"document":     {good: "file:docs/design.md", bad: "internal/a.go"},
+	"section":      {good: "file:docs/design.md#s23", bad: "service:docs/design.md#s23"},
+	"service":      {good: "service:tot", bad: "file:tot"},
+	"external_ref": {good: "https://example.com/issue/1", bad: "file:docs/x.md"},
+}
+
+// TestValidateDeclaredResources_ValidatesTheURISchemePerType is THE gate for
+// aihub#395 part 4. It FAILS on the pre-fix tree for every one of the six types,
+// because nothing looked at the scheme at all.
+func TestValidateDeclaredResources_ValidatesTheURISchemePerType(t *testing.T) {
+	types := DeclaredResourceTypeList()
+	if len(types) == 0 {
+		t.Fatal("DeclaredResourceTypeList() is empty — every case below would be vacuous")
+	}
+	// Coverage in both directions, so neither table can drift out from under the
+	// other: a new declared type with no fixture, and a fixture for a type that
+	// is no longer declarable, both fail here.
+	for _, typ := range types {
+		if _, ok := declaredResourceURISchemeFixtures[typ]; !ok {
+			t.Errorf("declared type %q has no uri-scheme fixture — a type added to the "+
+				"vocabulary without a scheme rule is a type whose uri is validated by nothing, "+
+				"which is aihub#395 part 4 reopening. Add it to "+
+				"declaredResourceURISchemeFixtures and give it a rule in "+
+				"declaredResourceURISchemes.", typ)
+		}
+	}
+	declarable := map[string]bool{}
+	for _, typ := range types {
+		declarable[typ] = true
+	}
+	for typ := range declaredResourceURISchemeFixtures {
+		if !declarable[typ] {
+			t.Errorf("declaredResourceURISchemeFixtures covers %q, which is no longer a declared "+
+				"type — stale fixture", typ)
+		}
+	}
+
+	for _, typ := range types {
+		fx, ok := declaredResourceURISchemeFixtures[typ]
+		if !ok {
+			continue
+		}
+		t.Run(typ, func(t *testing.T) {
+			good := json.RawMessage(`[{"type":"` + typ + `","uri":"` + fx.good + `"}]`)
+			if err := ValidateDeclaredResources(good); err != nil {
+				t.Errorf("rejected the CORRECTLY schemed uri %q for type %q: %s — a scheme check "+
+					"that refuses legal input is worse than none, because the fix for it is to "+
+					"delete the check", fx.good, typ, err.Message)
+			}
+
+			bad := json.RawMessage(`[{"type":"` + typ + `","uri":"` + fx.bad + `"}]`)
+			err := ValidateDeclaredResources(bad)
+			if err == nil {
+				t.Fatalf("accepted uri %q for type %q. The scheme is PUBLISHED for this type and "+
+					"resourceToLock derives the key with strings.TrimPrefix, a no-op on a wrong "+
+					"prefix — so this entry takes a well-formed lock on a nonsense key and the "+
+					"claim response reports it as acquired. Nothing else in the system will ever "+
+					"collide with it.", fx.bad, typ)
+			}
+			if err.HTTPStatus != 400 {
+				t.Errorf("HTTPStatus = %d, want 400", err.HTTPStatus)
+			}
+			// The rejection has to NAME the offending entry, or a caller with a
+			// twenty-entry payload learns only that one of them is wrong.
+			if !strings.Contains(err.Message, "declared_resources[0]") {
+				t.Errorf("message %q does not name the offending entry by index", err.Message)
+			}
+			if !strings.Contains(err.Message, fx.bad) {
+				t.Errorf("message %q does not quote the uri it rejected (%q)", err.Message, fx.bad)
+			}
+			details, ok := err.Details.(map[string]any)
+			if !ok {
+				t.Fatalf("details are %T, want map[string]any: %#v", err.Details, err.Details)
+			}
+			for _, want := range []string{"index", "got_type", "got_uri", "expected_scheme"} {
+				if _, present := details[want]; !present {
+					t.Errorf("details are missing %q: %#v", want, details)
+				}
+			}
+		})
+	}
+}
+
+// TestDeclaredResourceURISchemes_CoverEveryDeclarableType pins the production
+// table itself, independently of the fixtures above. The fixture table proves the
+// BEHAVIOUR for each type; this proves there is a RULE for each type, which is
+// what stops a new type from being added with no rule and no failing test.
+func TestDeclaredResourceURISchemes_CoverEveryDeclarableType(t *testing.T) {
+	for _, typ := range DeclaredResourceTypeList() {
+		if _, ok := declaredResourceURISchemes[typ]; !ok {
+			t.Errorf("declared type %q has no entry in declaredResourceURISchemes, so its uri "+
+				"scheme is unvalidated", typ)
+		}
+	}
+	for typ := range declaredResourceURISchemes {
+		if !declaredResourceTypes[typ] {
+			t.Errorf("declaredResourceURISchemes has a rule for %q, which is not a declared type",
+				typ)
+		}
+	}
+	// The published sentence is GENERATED from this table (the MCP layer calls
+	// DeclaredResourceURISchemeDoc), so the contract cannot drift from the
+	// validator. Assert the generator actually names every type, or the
+	// generation would be decorative.
+	doc := DeclaredResourceURISchemeDoc()
+	for _, typ := range DeclaredResourceTypeList() {
+		if !strings.Contains(doc, typ) {
+			t.Errorf("DeclaredResourceURISchemeDoc() does not mention type %q: %q", typ, doc)
+		}
+	}
+	for _, scheme := range declaredResourceURISchemes {
+		if scheme != "" && !strings.Contains(doc, scheme) {
+			t.Errorf("DeclaredResourceURISchemeDoc() does not mention scheme %q: %q", scheme, doc)
+		}
+	}
+}

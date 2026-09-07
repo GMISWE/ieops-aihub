@@ -245,3 +245,58 @@ func TestClaimDoesNotHardFailOnStoredDeclaredResources(t *testing.T) {
 		t.Error("FnClaimWorkItem hard-validates STORED declared_resources — this makes historical mistyped work items unclaimable; use UnrecognizedDeclaredResources and report instead (aihub#238)")
 	}
 }
+
+// ─── aihub#395 part 4: the scheme check runs on the caller-facing paths ─────
+//
+// ValidateDeclaredResources is one function, so "is it called" was already
+// pinned by the tests above. What those cannot show is that the check added by
+// aihub#395 sits on the same side of the first database access — a scheme check
+// placed after a query would be a 500 or a hang for a nil pool instead of a 400,
+// and the wi that filed this was found by exactly that kind of misplacement one
+// layer up. Both probes below pass a NIL pool: reaching the database at all is a
+// panic, so a passing run is evidence the rejection happened first.
+
+func TestCreateWorkItem_RejectsAWrongURISchemeBeforeTouchingDB(t *testing.T) {
+	req := &CreateWorkItemRequest{
+		Project: "aihub",
+		Goal:    "probe",
+		// Right type, wrong vocabulary for the uri. resourceToLock would strip
+		// nothing and key the git_branch lock as "file:aihub/main".
+		DeclaredResources: json.RawMessage(`[{"type":"repo","uri":"file:aihub","intent":"write"}]`),
+	}
+	wi, err := CreateWorkItem(context.Background(), nil, req, "u_probe", "probe", nil, "")
+	if err == nil {
+		t.Fatalf("CreateWorkItem accepted a wrongly schemed uri; wi=%+v", wi)
+	}
+	if err.HTTPStatus != 400 {
+		t.Errorf("HTTPStatus = %d, want 400", err.HTTPStatus)
+	}
+	if !strings.Contains(err.Message, "file:aihub") {
+		t.Errorf("error should quote the offending uri; got %q", err.Message)
+	}
+}
+
+// ⚠️ How this one goes RED, stated because it is not the usual way: with the
+// scheme check disabled, PredictConflicts walks on to its first query and
+// PANICS on the nil pool rather than returning nil and failing the assertion
+// below. That is still a red — non-zero exit, named in the output — but it
+// aborts the test binary, so the failure appears as a panic trace and not as a
+// `--- FAIL` line for this function. Do not read a mutation run that shows no
+// `--- FAIL` here as this test being insensitive. The same is true of its
+// neighbour TestPredictConflicts_RejectsUnknownTypeBeforeTouchingDB.
+func TestPredictConflicts_RejectsAWrongURISchemeBeforeTouchingDB(t *testing.T) {
+	req := &PredictConflictsRequest{
+		Project:           "aihub",
+		DeclaredResources: json.RawMessage(`[{"type":"service","uri":"file:tot","intent":"write"}]`),
+	}
+	res, err := PredictConflicts(context.Background(), nil, req, map[string]string{"aihub": "writer"})
+	if err == nil {
+		t.Fatalf("PredictConflicts answered on a wrongly schemed uri instead of refusing: %+v", res)
+	}
+	if err.HTTPStatus != 400 {
+		t.Errorf("HTTPStatus = %d, want 400", err.HTTPStatus)
+	}
+	if !strings.Contains(err.Message, "file:tot") {
+		t.Errorf("error should quote the offending uri; got %q", err.Message)
+	}
+}

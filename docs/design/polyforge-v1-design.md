@@ -1396,7 +1396,11 @@ PATCH  /v1/memories/{id}/redact
 
 ```
 GET    /v1/work_items/ready
-  query: project, max(default 10), non_conflicting
+  query: project, max(default 10)
+  -- ⚠️ non_conflicting: NEVER IMPLEMENTED. Published in pf_get_ready_queue's InputSchema
+  --   and forwarded as ?non_conflicting=true from 50bfc35, while handleGetReadyQueue read
+  --   project+max only; withdrawn from the schema by aihub#387 (owner decision: plan B,
+  --   2026-09-07). Whether the capability is wanted is aihub#186's call. See § 10.1.
   -- v1.20：六段视图（加 unclassified[]）
   → {
       -- items: queued + no blocker + requires_human_session=false → Orchestrator 自动派发
@@ -1752,7 +1756,9 @@ pf_cancel_work_item(id_or_slug, reason?)
 ### 5.7 Ready Queue（1 个）（Orchestrator 专用，补充 GAP-1）
 
 ```
-pf_get_ready_queue(project, max?, non_conflicting?)
+pf_get_ready_queue(project, max?)
+  -- ⚠️ non_conflicting was withdrawn from this signature by aihub#387: it was published
+  --   and forwarded but never read at any later hop. Do not plan on it (see § 10.1).
   -- 1:1 映射 GET /v1/work_items/ready，返回完整 LCRS 六段视图（v1.20）
   -- Layer 3 Orchestrator 使用此工具替代 HTTP curl
   → {
@@ -2564,7 +2570,10 @@ Layer 3 以**轮次（round）**为单位运行（决策2：v1 严格 round barr
 
 ```
 Round N（人工触发，v1 不做自动触发）：
-  1. pf_get_ready_queue(project, non_conflicting=true, max=5)
+  1. pf_get_ready_queue(project, max=5)
+     -- ⚠️ this round used to be written with non_conflicting=true, a parameter that was
+     --   never implemented and is no longer published (aihub#387). De-conflicting a
+     --   fan-out is currently the orchestrator's own job; see § 10.1 and aihub#186.
      → {items, running, stalled, paused, needs_human_session}
 
      -- items[]: requires_human_session=false → 直接 dispatch subagent（Session 1）
@@ -2706,7 +2715,14 @@ ORDER BY
 LIMIT $max;
 ```
 
-`non_conflicting=true`：server 端预跑 predict_conflicts，返回互不冲突的 N 个 wi，避免 fan-out 后 claim 失败浪费 token。
+🔴 `non_conflicting=true`（**从未实现，已于 aihub#387 从 schema 撤销**）：原设计是 server 端预跑
+predict_conflicts，返回互不冲突的 N 个 wi，避免 fan-out 后 claim 失败浪费 token。实际上这个参数
+只到 hop 2（MCP 发布 + 转发成 `?non_conflicting=true`），`handleGetReadyQueue` 只读 project 和
+max，`domain.GetReadyQueue` 签名里没有它 —— 传 true 拿到的是普通队列，且不报错、不警告。
+owner 决策（2026-09-07，方案 B）是撤销发布而不是补实现："非冲突" 的定义本身没定（按
+declared_resources 预测，还是按已持有的 resource_locks？），而本仓已实测 `pf_predict_conflicts`
+两个方向都不可信（认领后把自己的锁报成冲突；read intent 上假阴性），照它实现只会造出第二个
+不可信的判据。要不要这个能力由 aihub#186 决定 —— 该设计的第三条正是写在这个空开关上的。
 
 ### 10.2 Stalled Queue
 

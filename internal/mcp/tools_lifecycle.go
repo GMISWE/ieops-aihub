@@ -1314,6 +1314,29 @@ func (s *Server) registerLifecycleTools() {
 	})
 
 	// pf_get_ready_queue
+	//
+	// ⚠️ `non_conflicting` was published here, and forwarded as
+	// `?non_conflicting=true`, from the day this tool was added (`50bfc35`) until
+	// aihub#387 withdrew it. NOTHING ever read it: handleGetReadyQueue reads
+	// `project` and `max` only, and domain.GetReadyQueue(ctx, pool, project, max)
+	// has no such argument — measured 2026-09-07, `git grep non_conflicting --
+	// internal/server internal/domain pkg cmd` returned 0 hits. Passing it
+	// returned the ordinary ready queue with no error and no warning.
+	//
+	// It is GONE rather than implemented, by the owner's decision (plan B,
+	// 2026-09-07): "non-conflicting" has no agreed definition here — predicted
+	// from declared_resources, or read off the resource_locks actually held? —
+	// and this repo has measured pf_predict_conflicts to be untrustworthy in both
+	// directions (it reports an attempt's OWN locks as conflicts after a claim,
+	// and false-negatives on read intent), so building on it would have produced
+	// a second untrustworthy predicate. Whether the capability is wanted at all
+	// is aihub#186's call; that design was written on top of this switch while it
+	// did nothing, which is the cost that made this a bug and not a gap.
+	//
+	// 🔴 Do not re-add the parameter without a hop-3 reader to go with it:
+	// TestReadyQueueEveryPublishedParamIsReadByTheHandler
+	// (ready_queue_param_wiring_test.go) fails on any param this schema publishes
+	// that handleGetReadyQueue does not read.
 	s.mcp.AddTool(&sdkmcp.Tool{
 		Name:        "pf_get_ready_queue",
 		Description: "Get the LCRS (6-section) ready queue for a project. For Orchestrator use.",
@@ -1321,7 +1344,6 @@ func (s *Server) registerLifecycleTools() {
 			"project": prop("string", "Project name"),
 			"max": prop("string", "Max items in ready section (default 10). A JSON number is "+
 				"also accepted, and is what most callers send."),
-			"non_conflicting": prop("boolean", "Only return non-conflicting items"),
 		}, []string{"project"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -1340,9 +1362,6 @@ func (s *Server) registerLifecycleTools() {
 		// back to its own default of 10, with no error at any hop. Same defect and
 		// same fix as `limit` above (aihub#280 B6 / aihub#148).
 		setIfNonempty(params, "max", scalarArg(args, "max"))
-		if boolArg(args, "non_conflicting") {
-			params.Set("non_conflicting", "true")
-		}
 		result, err := s.client.GetReadyQueue(ctx, params)
 		if err != nil {
 			return errResult(err)

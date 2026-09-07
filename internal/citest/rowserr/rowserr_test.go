@@ -369,3 +369,142 @@ func TestMissingAllowlistIsEmptyNotAnError(t *testing.T) {
 		t.Errorf("expected an empty allowlist, got %v", allow)
 	}
 }
+
+// ─── aihub#409: rows held in a struct field ──────────────────────────────────
+//
+// The package doc's rule 2 used to claim "struct field of the receiver" while
+// rowsValuesIn looked only at the signature and at local `var` declarations. So
+// `for s.rows.Next()` matched nothing, and a scanner that reports violations
+// reads silence as compliance — the exact failure this package's own floor arm
+// exists to prevent, reached through the recogniser rather than through the
+// walk.
+//
+// 🔴 These fixtures are the ONLY evidence for this recogniser, and that is a
+// measured fact rather than an assumption: the repo contains 46 rows loops and
+// ZERO of them are selector-shaped (measured 2026-09-07, both before and after
+// the change — identical counts). So TestEveryRowsLoopChecksRowsErr and the
+// floor arm cannot distinguish this change from a no-op, and if these two arms
+// are ever deleted the recogniser goes back to being unverified while every
+// other test in this package stays green.
+
+// TestScannerSeesRowsHeldInAStructField is the positive arm: the detector MUST
+// fire. Red before the change (the loop was invisible, so the fixture reported
+// zero loops rather than one unchecked loop).
+func TestScannerSeesRowsHeldInAStructField(t *testing.T) {
+	const src = `package p
+
+type reader struct {
+	rows pgx.Rows
+	name string
+}
+
+func (r *reader) drain() error {
+	for r.rows.Next() {
+		_ = r.name
+	}
+	return nil
+}
+`
+	loops := scanOne(t, src)
+	if len(loops) != 1 {
+		t.Fatalf("expected exactly 1 loop over a rows STRUCT FIELD, found %d: %v\n"+
+			"    A loop the scanner cannot see is reported as compliant, which is the one "+
+			"outcome indistinguishable from a clean tree.", len(loops), loops)
+	}
+	if loops[0].Rows != "r.rows" {
+		t.Errorf("the report must name the expression a reader will find in the source; "+
+			"got %q, want %q", loops[0].Rows, "r.rows")
+	}
+	if loops[0].Checked {
+		t.Errorf("no r.rows.Err() appears after the loop, so it must be reported unchecked")
+	}
+}
+
+// TestScannerAcceptsACheckedStructFieldLoop is the other half. Without it the
+// arm above is satisfied by a recogniser that hardwires Checked=false, which
+// would flag every struct-field loop in the repo forever and get the gate
+// deleted rather than obeyed.
+func TestScannerAcceptsACheckedStructFieldLoop(t *testing.T) {
+	const src = `package p
+
+type reader struct {
+	rows pgx.Rows
+}
+
+func (r *reader) drain() error {
+	for r.rows.Next() {
+	}
+	return r.rows.Err()
+}
+`
+	loops := scanOne(t, src)
+	if len(loops) != 1 {
+		t.Fatalf("expected exactly 1 loop, found %d: %v", len(loops), loops)
+	}
+	if !loops[0].Checked {
+		t.Errorf("r.rows.Err() follows the loop, so it must be classified checked; " +
+			"got unchecked, which makes every correct struct-field loop a false positive")
+	}
+}
+
+// TestScannerCannotSeeAStructFieldDeclaredElsewhere pins the LIMIT the doc
+// comment now states, rather than leaving it as prose nothing checks.
+//
+// The scanner does not type-check, so it recognises a field by name taken from
+// struct types in the file it is reading. A rows field whose struct lives in
+// another file of the same package is invisible. That is a real hole, and the
+// reason it is asserted instead of quietly tolerated is that the previous
+// version of this package documented a coverage it did not have; a limit
+// nothing pins is free to be overstated again the next time this comment is
+// edited. If someone later resolves fields across the package, this test is
+// what tells them the doc paragraph above must change with it.
+func TestScannerCannotSeeAStructFieldDeclaredElsewhere(t *testing.T) {
+	const src = `package p
+
+func (r *reader) drain() error {
+	for r.rows.Next() {
+	}
+	return nil
+}
+`
+	if loops := scanOne(t, src); len(loops) != 0 {
+		t.Fatalf("the scanner reported %v for a field whose struct is not in this file. "+
+			"That is more coverage than it has — if this now works, the 'in the same file' "+
+			"limit in the package doc is wrong and must be rewritten.", loops)
+	}
+}
+
+// TestScannerIgnoresAStructFieldThatIsNotRows is the negative control for the
+// widened recogniser: an exempt target must SURVIVE it.
+//
+// The risk the widening introduces is a field-name collision — recognising by
+// name means any `X.rows.Next()` matches once some struct in the file declares
+// a rows-typed `rows`. This arm holds the other direction: a struct field whose
+// type is not a Rows type is not recognised just because it has a Next() method,
+// which is the html.Tokenizer shape TestScannerIgnoresANonRowsIterator covers
+// for local variables.
+//
+// The condition is a bare `for s.tok.Next()` on purpose. Written as
+// `for s.tok.Next() != html.ErrorToken` — the real html.Tokenizer idiom — the
+// condition is a BinaryExpr, which zeroArgMethodCall declines whatever the
+// field's type is, and the arm would pass without the type rule being consulted
+// at all: a negative control satisfied by the wrong mechanism.
+func TestScannerIgnoresAStructFieldThatIsNotRows(t *testing.T) {
+	const src = `package p
+
+type scanner struct {
+	tok *html.Tokenizer
+	buf []byte
+}
+
+func (s *scanner) run() {
+	for s.tok.Next() {
+		_ = s.buf
+	}
+}
+`
+	if loops := scanOne(t, src); len(loops) != 0 {
+		t.Fatalf("the scanner reported %v for an html.Tokenizer held in a struct field. "+
+			"A gate that flags every iterator in the repo is a gate somebody deletes.", loops)
+	}
+}

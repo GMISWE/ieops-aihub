@@ -1209,6 +1209,29 @@ jobs:
           ! grep -q -- '--- SKIP' project_visibility.log \
             || { echo "::error::the aihub#377 byte-identity test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#382: listWorkItemsPage's text path never checked rows.Err(), so an
+      # execute-time failure (cursor=garbage failing its `::timestamptz` cast,
+      # or anything else Postgres reports after the statement was accepted) was
+      # answered with 200 {"items":[]}. The arms are named one by one rather than
+      # counted: the two negative arms are the regression, the control is what
+      # separates "execution errors surface" from "every cursor is now rejected",
+      # and a subtest that stops being scheduled must go red here, not vanish.
+      - name: aihub#382 list_work_items rows.Err() DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestListWorkItemsSurfacesExecuteTimeErrors$' -count=1 -v 2>&1 | tee list_wi_rows_err.log
+          for want in 'TestListWorkItemsSurfacesExecuteTimeErrors/cursor_cast_failure_is_an_error' \
+                      'TestListWorkItemsSurfacesExecuteTimeErrors/forced_execution_error_is_not_an_empty_page'; do
+            grep -q -- "--- PASS: $want" list_wi_rows_err.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); an execute-time failure in GET /v1/work_items is again reported as an empty page"; exit 1; }
+          done
+          grep -q -- '--- PASS: TestListWorkItemsSurfacesExecuteTimeErrors/control_well_formed_cursor_lists_normally' list_wi_rows_err.log \
+            || { echo "::error::the control arm did not run; it is what separates 'execution errors surface' from 'every cursor is rejected'"; exit 1; }
+          ! grep -q -- '--- SKIP' list_wi_rows_err.log \
+            || { echo "::error::the aihub#382 rows.Err() test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#237: the launcher's update check is shell, so `go test` cannot see
       # it — a silent-pin regression there would ship green. This suite is
       # hermetic (no docker, no network: it stubs gh/curl/binary and drives

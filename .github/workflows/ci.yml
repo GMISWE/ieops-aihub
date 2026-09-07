@@ -1283,6 +1283,49 @@ jobs:
           ! grep -q -- '--- SKIP' list_wi_rows_err.log \
             || { echo "::error::the aihub#382 rows.Err() test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#393: a force takeover skipped the cross-work-item lock-conflict
+      # probe (FnClaimWorkItem was guarded by `&& !isTakeover`; FnForceTakeover
+      # had no probe at all and discarded the upsert's error), so
+      # acquireLockUpsert rewrote resource_locks rows owned by LIVE attempts of
+      # OTHER work items and returned success — the displaced agent was told
+      # nothing and kept editing files it no longer held.
+      #
+      # Two halves, and BOTH must run. The refusal arms are the regression; the
+      # control arms are what separates "foreign holders are refused" from
+      # "takeover no longer takes any lock", which is the direction a fix that
+      # over-widens the predicate breaks. Each control pins one dimension of
+      # that predicate: the own-lock and paused-git_branch arms pin "another
+      # WORK ITEM" (not merely "another live attempt"), and the orphan arm pins
+      # "running/paused" (not merely "an owner exists"). Measured 2026-09-07: a
+      # mutant dropping `AND ra.work_item_id <> $5` reddens only the
+      # paused-git_branch arm, and one dropping the status filter reddens only
+      # the orphan arm.
+      #
+      # Named one by one rather than counted, and never by package: a subtest
+      # that stops being scheduled has to go red here, not silently vanish —
+      # `go test -run` exits 0 when its selector matches nothing.
+      - name: aihub#393 force-takeover cross-wi lock steal DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestForceTakeoverLockSteal' -count=1 -v 2>&1 | tee ft_lock_steal.log
+          for want in 'TestForceTakeoverLockSteal_ClaimRefusesAForeignHolder/explicit_force_takeover_by_another_user' \
+                      'TestForceTakeoverLockSteal_ClaimRefusesAForeignHolder/same_user_reclaim_of_a_running_wi' \
+                      'TestForceTakeoverLockSteal_ForceTakeoverToolRefusesAForeignHolder'; do
+            grep -q -- "--- PASS: $want" ft_lock_steal.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); a force takeover can again displace a resource lock held by a live attempt of another work item"; exit 1; }
+          done
+          for want in 'TestForceTakeoverLockSteal_ControlsStillAllowTheLegitimateDisplacements/control_takeover_still_takes_the_targets_own_lock' \
+                      'TestForceTakeoverLockSteal_ControlsStillAllowTheLegitimateDisplacements/control_force_takeover_tool_still_takes_the_targets_own_lock' \
+                      'TestForceTakeoverLockSteal_ControlsStillAllowTheLegitimateDisplacements/control_orphan_row_of_a_dead_foreign_attempt_is_reclaimed' \
+                      'TestForceTakeoverLockSteal_ControlsStillAllowTheLegitimateDisplacements/control_resume_still_displaces_its_own_paused_attempts_git_branch_lock'; do
+            grep -q -- "--- PASS: $want" ft_lock_steal.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); without it the refusal arms above are also satisfied by a takeover that displaces nothing at all"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' ft_lock_steal.log \
+            || { echo "::error::an aihub#393 arm SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#237: the launcher's update check is shell, so `go test` cannot see
       # it — a silent-pin regression there would ship green. This suite is
       # hermetic (no docker, no network: it stubs gh/curl/binary and drives

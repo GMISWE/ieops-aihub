@@ -611,39 +611,19 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	// validation in work_items.go.
 	unrecognizedResources := UnrecognizedDeclaredResources(wi.DeclaredResources)
 
-	// Check lock conflicts (advisory — actual conflict resolution in claim)
-	if len(req.RequestedLocks) > 0 && !isTakeover {
-		var conflictAttemptID, conflictActorDisplay, conflictWISlug string
-		for i, l := range req.RequestedLocks {
-			// aihub#261: probe the set of keys that block this lock, not just the
-			// key it will insert. For an unqualified file_scope declaration those
-			// differ — it must still collide with every repo-qualified variant of
-			// the same path, or making keys finer would buy the fix a missed
-			// conflict, which is the one direction that is worse than the bug.
-			probe := lockProbes[i]
-			err = tx.QueryRow(ctx, `
-				SELECT rl.owner_attempt_id, ra.actor_display, wi2.slug
-				FROM resource_locks rl
-				JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
-				JOIN work_items wi2 ON wi2.id = ra.work_item_id
-				WHERE `+lockConflictWhereClause+`
-				  AND ra.status IN ('running', 'paused')
-				  AND ra.work_item_id != $4`,
-				l.ResourceType, probe.Keys, probe.LikePattern, wi.ID,
-			).Scan(&conflictAttemptID, &conflictActorDisplay, &conflictWISlug)
-			if err == nil {
-				return nil, NewErrDetails(ErrConflictLockTaken,
-					fmt.Sprintf("resource %s:%s is already locked", l.ResourceType, l.ResourceKey),
-					map[string]any{
-						"conflict_with": map[string]any{
-							"attempt_id":     conflictAttemptID,
-							"actor_display":  conflictActorDisplay,
-							"work_item_slug": conflictWISlug,
-						},
-					},
-				)
-			}
-		}
+	// Check lock conflicts against OTHER work items.
+	//
+	// aihub#393: this runs on a takeover too. It used to be guarded by
+	// `&& !isTakeover`, which bought nothing except silence: the probe already
+	// excludes this work item's own attempts (aihub#207, see
+	// probeForeignLockHolders), so skipping it did not help a takeover reclaim
+	// its own locks — it only stopped a foreign holder being reported, and the
+	// upsert loop below then rewrote that holder's row and returned success.
+	// A lock held by a live attempt of a DIFFERENT work item is a conflict
+	// whether or not this claim is a takeover; force_takeover takes over the
+	// WORK ITEM, not other people's locks.
+	if aihubErr := probeForeignLockHolders(ctx, tx, wi.ID, req.RequestedLocks, lockProbes); aihubErr != nil {
+		return nil, aihubErr
 	}
 
 	// aihub#343: one lock operation per claim, so the lock_acquired /
@@ -729,6 +709,13 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		got, upErr := acquireLockUpsert(ctx, tx, l.ResourceType, l.ResourceKey,
 			newAttemptID, newEpoch, wi.Project, wi.ID, claimOp)
 		if upErr != nil {
+			// aihub#393: the upsert declines to displace a live foreign holder.
+			// The probe above normally catches that first; this reaches the same
+			// 409 for anything the probe's key set does not cover, so the two
+			// cannot disagree about the outcome.
+			if aihubErr := lockTakenErrFor(upErr); aihubErr != nil {
+				return nil, aihubErr
+			}
 			return nil, dbErrCause(upErr, fmt.Sprintf("failed to acquire lock %s:%s", l.ResourceType, l.ResourceKey))
 		}
 		acquiredLocks = append(acquiredLocks, ResourceLock{
@@ -1281,6 +1268,38 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 
 	priorID := *wi.CurrentAttemptID
 
+	// aihub#393: refuse before mutating anything if one of the locks this
+	// takeover would re-derive is held by a live attempt of ANOTHER work item.
+	//
+	// This function had no conflict probe at all and discarded
+	// acquireLockUpsert's error, so it displaced foreign holders through a second
+	// entry point — the same defect as the claim path's `!isTakeover`, reachable
+	// by a different tool (pf_force_takeover).
+	//
+	// It has to come BEFORE the supersede/release below. Those run first in the
+	// original order, so a refusal discovered at the upsert loop would only be
+	// safe because the transaction rolls back; probing here means the refusal is
+	// not relying on that, and the caller gets the holder's identity.
+	//
+	// derivedLockProbe, not derivedLock, for the same reason as the claim path:
+	// since aihub#261 the key a declaration writes and the keys that block it are
+	// different sets. The locks are derived from the SAME declaredRes slice the
+	// re-insert loop below uses, so the two cannot check different paths.
+	declaredRes := unmarshalDeclaredResources(wi.DeclaredResources)
+	ftLocks := make([]ResourceLockReq, 0, len(declaredRes))
+	ftProbes := make([]lockConflictProbe, 0, len(declaredRes))
+	for _, res := range declaredRes {
+		lockType, lockKey, probe := derivedLockProbe(res, wi.Project)
+		if lockType == "" {
+			continue
+		}
+		ftLocks = append(ftLocks, ResourceLockReq{ResourceType: lockType, ResourceKey: lockKey})
+		ftProbes = append(ftProbes, probe)
+	}
+	if aihubErr := probeForeignLockHolders(ctx, tx, wi.ID, ftLocks, ftProbes); aihubErr != nil {
+		return nil, aihubErr
+	}
+
 	// Update step_state if in_progress (H-R7-4)
 	var stepStatus string
 	var stepAttempt *string
@@ -1376,21 +1395,30 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	// why: a field absent from a hand-written list never reaches the mapper. The
 	// `repo` field added by aihub#261 would have been the second instance of that
 	// bug in this same function, so the list is deleted rather than extended.
-	declaredRes := unmarshalDeclaredResources(wi.DeclaredResources)
 	// aihub#238: entries the mapper cannot understand yield no lock here either.
 	// Stored data, so this must not fail the takeover; the subsequent fresh claim
 	// reports them via ClaimResponse.unrecognized_resources.
 	//
-	// aihub#343: through acquireLockUpsert, one lock_acquired per row. The error
-	// stays discarded here as it always was, for the same reason as the delete
-	// above.
-	for _, res := range declaredRes {
-		lockType, lockKey := derivedLock(res, wi.Project)
-		if lockType == "" {
-			continue
-		}
-		acquireLockUpsert(ctx, tx, lockType, lockKey, newAttemptID, newEpoch, //nolint:errcheck
+	// aihub#343: through acquireLockUpsert, one lock_acquired per row.
+	//
+	// aihub#393: the error is no longer discarded WHOLESALE. A refusal to
+	// displace a live foreign holder is now reported as 409 CONFLICT_LOCK_TAKEN
+	// — swallowing it is what let this path steal locks, and a takeover that
+	// silently proceeds without the lock it was asked to take is a second way to
+	// leave the caller believing it holds something it does not. Every OTHER
+	// error stays discarded, as it always was: a force takeover is a recovery
+	// operation and failing it over a lock bookkeeping error would leave the work
+	// item stuck with an attempt nobody holds.
+	//
+	// ftLocks/ftProbes were derived above, from this same declaredRes.
+	for _, l := range ftLocks {
+		_, upErr := acquireLockUpsert(ctx, tx, l.ResourceType, l.ResourceKey, newAttemptID, newEpoch,
 			wi.Project, wi.ID, ftOp)
+		if upErr != nil {
+			if aihubErr := lockTakenErrFor(upErr); aihubErr != nil {
+				return nil, aihubErr
+			}
+		}
 	}
 
 	// Update work_item to running with new attempt
@@ -1557,6 +1585,86 @@ const acquireLocksCollisionSQL = `
 	JOIN work_items wi2 ON wi2.id = ra.work_item_id
 	WHERE ` + lockConflictWhereClause + `
 	  AND ra.status IN ('running', 'paused')`
+
+// foreignLockHolderSQL is acquireLocksCollisionSQL plus "and not this work
+// item": the cross-work-item conflict probe both entry points into a claim or a
+// takeover use. $4 is the work item doing the acquiring.
+//
+// Excluding the caller's own work item is aihub#207: a resume, and a takeover,
+// legitimately re-take locks their own earlier attempt still holds, and a probe
+// without this clause 409s them against themselves.
+const foreignLockHolderSQL = acquireLocksCollisionSQL + `
+	  AND ra.work_item_id != $4`
+
+// probeForeignLockHolders reports ErrConflictLockTaken if any lock in `locks` is
+// already held by a running-or-paused attempt of a work item other than wiID.
+//
+// locks[i] pairs with probes[i]: aihub#261 made the key a declaration WRITES and
+// the set of keys that BLOCK it two different things, so the probe — not the
+// key — is what the WHERE clause takes. A site that compared on the key alone
+// would stop seeing legacy unqualified holders.
+//
+// aihub#393: one function, called from FnClaimWorkItem and FnForceTakeover, so
+// "which paths does a takeover check" cannot be answered differently at the two
+// entry points. acquireLockUpsert refuses the same displacement on its own as a
+// backstop; this exists so the caller gets a 409 with a conflict_with payload
+// before anything has been mutated, rather than a rolled-back transaction.
+func probeForeignLockHolders(ctx context.Context, tx pgx.Tx, wiID string,
+	locks []ResourceLockReq, probes []lockConflictProbe) *AihubError {
+
+	for i, l := range locks {
+		if i >= len(probes) {
+			// Defensive: the two slices are built together by deriveClaimLocks /
+			// derivedLockProbe. A short probe slice would silently stop checking
+			// the tail, which is the one failure mode this whole function exists
+			// to prevent, so it is an error rather than a skip.
+			return NewErr(ErrInternalError, "lock probe list is shorter than the lock list")
+		}
+		probe := probes[i]
+		var conflictAttemptID, conflictActorDisplay, conflictWISlug string
+		err := tx.QueryRow(ctx, foreignLockHolderSQL,
+			l.ResourceType, probe.Keys, probe.LikePattern, wiID,
+		).Scan(&conflictAttemptID, &conflictActorDisplay, &conflictWISlug)
+		if err == nil {
+			return NewErrDetails(ErrConflictLockTaken,
+				fmt.Sprintf("resource %s:%s is already locked", l.ResourceType, l.ResourceKey),
+				map[string]any{
+					"conflict_with": map[string]any{
+						"attempt_id":     conflictAttemptID,
+						"actor_display":  conflictActorDisplay,
+						"work_item_slug": conflictWISlug,
+					},
+				},
+			)
+		}
+	}
+	return nil
+}
+
+// lockTakenErrFor maps acquireLockUpsert's refusal to the same 409 the probe
+// above produces, and returns nil for any other error so the caller can report
+// it as the database failure it is.
+//
+// The two are deliberately the same error code: whether the foreign holder was
+// noticed by the probe or by the upsert's own predicate is an implementation
+// detail, and a caller that had to tell them apart would be a caller that could
+// get it wrong.
+func lockTakenErrFor(err error) *AihubError {
+	var refusal *lockHeldByOtherWIError
+	if !errors.As(err, &refusal) {
+		return nil
+	}
+	return NewErrDetails(ErrConflictLockTaken,
+		fmt.Sprintf("resource %s:%s is already locked", refusal.ResourceType, refusal.ResourceKey),
+		map[string]any{
+			"conflict_with": map[string]any{
+				"attempt_id":     refusal.OwnerAttemptID,
+				"actor_display":  refusal.ActorDisplay,
+				"work_item_slug": refusal.WorkItemSlug,
+			},
+		},
+	)
+}
 
 // ─── AcquireLocks request / response ────────────────────────────────────────
 

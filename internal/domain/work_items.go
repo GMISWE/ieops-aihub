@@ -2722,6 +2722,10 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		}
 		result.Items = append(result.Items, item)
 	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := itemRows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read ready items rows")
+	}
 	itemRows.Close()
 
 	// running[]: status=running
@@ -2745,6 +2749,10 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		}
 		item.LastActiveAt = lat.Format(time.RFC3339)
 		result.Running = append(result.Running, item)
+	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := runRows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read running items rows")
 	}
 	runRows.Close()
 
@@ -2787,6 +2795,10 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 			item.StalledSince = stalledAt.Format(time.RFC3339)
 			result.Stalled = append(result.Stalled, item)
 		}
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+		if err := stalledRows.Err(); err != nil {
+			return nil, dbErrCause(err, "failed to read stalled items rows")
+		}
 		stalledRows.Close()
 	}
 
@@ -2815,6 +2827,10 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 				item.LastActorDisplay = *actorDisplay
 			}
 			result.Paused = append(result.Paused, item)
+		}
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+		if err := pausedRows.Err(); err != nil {
+			return nil, dbErrCause(err, "failed to read paused items rows")
 		}
 		pausedRows.Close()
 	}
@@ -2846,6 +2862,10 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 			item.CreatedAt = catStr
 			result.NeedsHumanSession = append(result.NeedsHumanSession, item)
 		}
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+		if err := humanRows.Err(); err != nil {
+			return nil, dbErrCause(err, "failed to read needs_human_session items rows")
+		}
 		humanRows.Close()
 	}
 
@@ -2873,6 +2893,10 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 			item.CreatedAt = catStr
 			result.Unclassified = append(result.Unclassified, item)
 		}
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+		if err := unclRows.Err(); err != nil {
+			return nil, dbErrCause(err, "failed to read unclassified items rows")
+		}
 		unclRows.Close()
 	}
 
@@ -2897,6 +2921,10 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 			}
 			item.LastActiveAt = lat.Format(time.RFC3339)
 			result.StaleRunning = append(result.StaleRunning, item)
+		}
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+		if err := staleRows.Err(); err != nil {
+			return nil, dbErrCause(err, "failed to read stale_running items rows")
 		}
 		staleRows.Close()
 	}

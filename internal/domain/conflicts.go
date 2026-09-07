@@ -3,6 +3,8 @@ package domain
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -221,6 +223,10 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 					result.Severity = SeveritySoftBlock
 				}
 			}
+			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+			if err := rows.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 2 git_branch rows: %v\n", err)
+			}
 			rows.Close()
 		}
 	}
@@ -270,6 +276,10 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 					}
 				}
 			}
+			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+			if err := rows.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 3 file_scope rows: %v\n", err)
+			}
 			rows.Close()
 		}
 	}
@@ -307,6 +317,10 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 					result.Severity = SeveritySoftBlock
 				}
 			}
+			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+			if err := rows.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 4 refactor rows: %v\n", err)
+			}
 			rows.Close()
 		}
 	}
@@ -340,6 +354,10 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 					WISlug:       wiSlug,
 				})
 			}
+			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+			if err := rows.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 5 external_ref rows: %v\n", err)
+			}
 			rows.Close()
 		}
 	}
@@ -371,6 +389,10 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 					continue
 				}
 				result.WillUnlock = append(result.WillUnlock, item)
+			}
+			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+			if err := rows.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "predict_conflicts: will_unlock rows: %v\n", err)
 			}
 			rows.Close()
 		}

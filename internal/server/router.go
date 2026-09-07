@@ -1146,6 +1146,10 @@ func handleListUsers(pool *pgxpool.Pool) echo.HandlerFunc {
 				"role":         role,
 			})
 		}
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+		if err := rows.Err(); err != nil {
+			return internalError(c, "failed to list users")
+		}
 		if items == nil {
 			items = []map[string]any{}
 		}

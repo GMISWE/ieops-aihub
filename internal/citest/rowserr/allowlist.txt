@@ -1,0 +1,26 @@
+# Loops exempted from TestEveryRowsLoopChecksRowsErr (aihub#386).
+#
+# One `<file>:<func>:<rows>` per line — the exact line the gate prints when it
+# fails. Deliberately no line numbers: an entry keyed on a line stops matching
+# as soon as anything above it moves, which turns a reviewed decision into a
+# silent expiry. See Loop.Key in rowserr.go.
+#
+# THIS FILE IS EMPTY, AND THAT IS THE INTENDED STEADY STATE. aihub#386 fixed all
+# 29 sites it found rather than exempting any, so there is no precedent here for
+# "this one is fine" — an entry you add is the first.
+#
+# Before adding one, note that the usual reason to want an exemption is not a
+# reason to have one. "This read is best-effort" does NOT need an entry: a
+# best-effort site still has to LOOK at rows.Err(), it just logs instead of
+# returning, and logging satisfies the gate. attachStepState in
+# internal/domain/work_items.go is that shape and is not listed here. What the
+# gate objects to is not propagating the error, it is never asking.
+#
+# So an entry is justified only when the loop genuinely cannot ask — for
+# example rows whose lifetime is handed to another function that does the
+# asking, which this scanner cannot follow across a call boundary. Say which,
+# in a comment beside the entry, and name the function that does ask.
+#
+# The gate also fails on an entry that matches no unchecked loop, so a stale
+# exemption cannot sit here quietly waiting to cover the next loop that lands in
+# that function.

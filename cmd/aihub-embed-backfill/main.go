@@ -142,6 +142,11 @@ func main() {
 		}
 		wtodo = append(wtodo, r)
 	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := wrows.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, "read work_items rows:", err)
+		os.Exit(1)
+	}
 	wrows.Close()
 
 	fmt.Printf("backfill: %d work_items to embed with model=%q dims=%d\n", len(wtodo), model, dims)

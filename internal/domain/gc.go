@@ -963,6 +963,11 @@ func RunNeedsHumanSessionAging(ctx context.Context, pool *pgxpool.Pool) GCResult
 		}
 		wis = append(wis, w)
 	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := rows.Err(); err != nil {
+		result.Error = fmt.Sprintf("needs_human_session candidate rows: %v", err)
+		return result
+	}
 	rows.Close()
 
 	affected := int64(0)
@@ -1056,6 +1061,11 @@ func RunUnclassifiedWIAlert(ctx context.Context, pool *pgxpool.Pool) GCResult {
 			continue
 		}
 		wis = append(wis, w)
+	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := rows.Err(); err != nil {
+		result.Error = fmt.Sprintf("unclassified wi candidate rows: %v", err)
+		return result
 	}
 	rows.Close()
 

@@ -1441,6 +1441,10 @@ func textDedupCheck(ctx context.Context, pool *pgxpool.Pool, project, memType, c
 			candidates = append(candidates, c)
 		}
 	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := rows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read dedup candidate rows")
+	}
 	rows.Close()
 
 	// Pick the single highest-similarity candidate above the low threshold,
@@ -3036,6 +3040,10 @@ func ListEvents(ctx context.Context, pool *pgxpool.Pool, f *ListEventsFilter) (*
 			continue
 		}
 		events = append(events, ev)
+	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := rows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read events rows")
 	}
 	rows.Close()
 

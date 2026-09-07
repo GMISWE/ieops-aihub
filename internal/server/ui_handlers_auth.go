@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"html/template"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -196,6 +198,10 @@ func loadUserByAPIKeyID(ctx context.Context, pool *pgxpool.Pool, apiKeyID string
 				if projectScope == nil || *projectScope == projName {
 					uc.ProjectRoles[projName] = role
 				}
+			}
+			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+			if err := prows.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "ui session: project membership rows: %v\n", err)
 			}
 			prows.Close()
 		}

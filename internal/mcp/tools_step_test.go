@@ -65,3 +65,51 @@ func TestClassifyStepUpdateErr(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateTerminalStepArgs_MCP is the hop-1 half of aihub#399: the
+// requirement itself, at the layer that publishes it.
+//
+// The schema has said step_attempt_id is "required for completed/failed" since
+// aihub#265, and until aihub#399 neither hop enforced it — which is how the
+// field became optional in practice. updateStepBody forwards the key only when
+// non-empty, so an agent that simply omits the argument sends no key at all and
+// the server used to answer 200 having filed no history row.
+func TestValidateTerminalStepArgs_MCP(t *testing.T) {
+	cases := []struct {
+		status, stepAttemptID string
+		wantRejected          bool
+	}{
+		{"completed", "sa_01JQ", false},
+		{"failed", "sa_01JQ", false},
+		{"completed", "", true},
+		{"failed", "", true},
+		{"completed", "   ", true},
+		// in_progress files no history row: a bare start is how pf-execute's loop
+		// opens a step graph and must stay legal.
+		{"in_progress", "", false},
+		{"in_progress", "sa_01JQ", false},
+		// An unrecognised status is the server's business, not this check's.
+		{"banana", "", false},
+		{"", "", false},
+	}
+	for _, tc := range cases {
+		err := validateTerminalStepArgs(tc.status, tc.stepAttemptID)
+		if tc.wantRejected {
+			if err == nil {
+				t.Errorf("validateTerminalStepArgs(%q, %q) accepted a terminal transition with no usable "+
+					"step_attempt_id", tc.status, tc.stepAttemptID)
+				continue
+			}
+			if !strings.Contains(err.Error(), "step_attempt_id") {
+				t.Errorf("the error must name the field; got %q", err.Error())
+			}
+			if !strings.Contains(err.Error(), tc.status) {
+				t.Errorf("the error must name the status it applies to; got %q", err.Error())
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("validateTerminalStepArgs(%q, %q) rejected a legal call: %v", tc.status, tc.stepAttemptID, err)
+		}
+	}
+}

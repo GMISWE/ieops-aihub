@@ -549,9 +549,14 @@ func TestFusedUpdateStepAcceptsAServerThatHonouredNextStep(t *testing.T) {
 		}
 	})
 
+	// step_attempt_id is sent because aihub#399 made it required on a terminal
+	// transition at BOTH hops; its sibling test above always sent one. Sending it
+	// here keeps this the control it is meant to be — the only difference from
+	// that test is what the fake server echoes back.
 	result, isErr := callTool(t, f, "pf_update_step", map[string]any{
 		"work_item_id": wiID, "step_id": "alpha", "status": "completed",
-		"next_step": "beta", "next_step_attempt_id": "sa_beta",
+		"step_attempt_id": "sa_alpha",
+		"next_step":       "beta", "next_step_attempt_id": "sa_beta",
 	})
 	if isErr {
 		t.Fatalf("a server that honoured next_step must not be flagged: %v", result)
@@ -728,5 +733,51 @@ func TestPlainHeartbeatStillWorks(t *testing.T) {
 	}
 	if got := calls[0].Body["heartbeat"]; got != true {
 		t.Errorf("heartbeat flag = %v, want true", got)
+	}
+}
+
+// TestUpdateStepRefusesATerminalCallWithNoStepAttemptIDBeforeTheRoundTrip is the
+// wiring hop for the check above, and it is a separate assertion because
+// deleting the call site keeps the table test green.
+//
+// "Before the round-trip" is the claim, not a nicety: the point of a hop-1 check
+// is that the caller error costs nothing, so the assertion is that the fake
+// server recorded NO request at all — not merely that the tool returned an
+// error, which it would also do if the server refused it.
+func TestUpdateStepRefusesATerminalCallWithNoStepAttemptIDBeforeTheRoundTrip(t *testing.T) {
+	const wiID = "wi_noattemptid"
+	seedStateFile(t, wiID)
+	f := newFakeAihub(t)
+
+	for _, status := range []string{"completed", "failed"} {
+		result, isErr := callTool(t, f, "pf_update_step", map[string]any{
+			"work_item_id": wiID, "step_id": "alpha", "status": status,
+		})
+		if !isErr {
+			t.Fatalf("status=%q with no step_attempt_id must be refused: %v", status, result)
+		}
+		raw, _ := result["_raw"].(string)
+		if !strings.Contains(raw, "step_attempt_id") {
+			t.Errorf("the refusal must name the field; got %q", raw)
+		}
+	}
+	if got := f.recorded(); len(got) != 0 {
+		t.Errorf("a caller error that the schema already documents must not cost a round-trip; the server was "+
+			"called %d time(s): %+v", len(got), got)
+	}
+
+	// The control: the same call with an id goes through. Without this the test
+	// above would be satisfied by a check that refuses every completion.
+	f.on("/v1/work_items/"+wiID+"/step", func(map[string]any) (int, any) {
+		return http.StatusOK, map[string]any{"status": "completed"}
+	})
+	result, isErr := callTool(t, f, "pf_update_step", map[string]any{
+		"work_item_id": wiID, "step_id": "alpha", "status": "completed", "step_attempt_id": "sa_alpha",
+	})
+	if isErr {
+		t.Fatalf("a completion WITH a step_attempt_id must reach the server: %v", result)
+	}
+	if got := len(f.recorded()); got != 1 {
+		t.Errorf("expected exactly one request, got %d", got)
 	}
 }

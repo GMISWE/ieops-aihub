@@ -297,13 +297,23 @@ func TestHandleUpdateStep_MandatoryRecordGate(t *testing.T) {
 		return wi, attemptID, uc, uid
 	}
 
+	// step_attempt_id is sent because aihub#399 made it REQUIRED on a terminal
+	// transition (validateTerminalStepArgs), and that check runs before the
+	// transaction and therefore before this test's gate. It is a fixture
+	// correction, not a weakening: every subtest still asserts exactly what it
+	// did — a spec/plan completion with no artifact is refused 400 naming the
+	// artifact type, and one with the artifact recorded is 200 — and the request
+	// now looks like a real one. A completion without a step_attempt_id used to
+	// file NO wi_step_completions row, so the two "succeeds" subtests were
+	// themselves instances of the defect aihub#399 closes.
 	complete := func(t *testing.T, wiID, attemptID string, uc *UserContext, step string) *httptest.ResponseRecorder {
 		t.Helper()
 		body, err := json.Marshal(map[string]any{
-			"attempt_id":  attemptID,
-			"claim_epoch": 0,
-			"status":      "completed",
-			"step":        step,
+			"attempt_id":      attemptID,
+			"claim_epoch":     0,
+			"status":          "completed",
+			"step":            step,
+			"step_attempt_id": domain.NewID("sa"),
 		})
 		require.NoError(t, err)
 		c, rec := newStepUpdateRequest(t, wiID, string(body), uc)

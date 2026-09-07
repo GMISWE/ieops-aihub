@@ -1,0 +1,32 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-06T00:35:02.547Z",
+    "transcript_id": "bbfad654e11d"
+  },
+  "request": {
+    "work_item_id": "wi_Mq77qMfg"
+  },
+  "response": {
+    "error_code": "CONFLICT_LOCK_TAKEN",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 218,
+    "text": "aihub 409 CONFLICT_LOCK_TAKEN: resource file_scope:aihub:aihub:.github/workflows/ci.yml is already locked details={\"conflict_with\":{\"actor_display\":\"xiaokang.w\",\"attempt_id\":\"ra_uh8yw1I6\",\"work_item_slug\":\"aihub#365\"}}"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_acquire_locks"
+}

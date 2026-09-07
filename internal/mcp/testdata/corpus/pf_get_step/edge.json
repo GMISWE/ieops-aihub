@@ -1,0 +1,133 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-07T09:06:59.872Z",
+    "transcript_id": "d17ac142d1d0"
+  },
+  "request": {
+    "work_item_id": "tether#174"
+  },
+  "response": {
+    "body": {
+      "completed_steps": [
+        {
+          "artifact_summary": "<redacted-text sha256=889b0655fe61 len=888>",
+          "completed_at": "2026-09-07T07:09:38.261316Z",
+          "error_type": null,
+          "escalated": false,
+          "run_attempt_id": "ra_PsarwnzJ",
+          "status": "completed",
+          "step_id": "spec"
+        },
+        {
+          "artifact_summary": "<redacted-text sha256=29a27d97c6fe len=860>",
+          "completed_at": "2026-09-07T07:10:41.126492Z",
+          "error_type": null,
+          "escalated": false,
+          "run_attempt_id": "ra_PsarwnzJ",
+          "status": "completed",
+          "step_id": "plan"
+        },
+        {
+          "artifact_summary": "<redacted-text sha256=45d53e1ed9c8 len=3033>",
+          "completed_at": "2026-09-07T07:14:56.984513Z",
+          "error_type": null,
+          "escalated": false,
+          "run_attempt_id": "ra_PsarwnzJ",
+          "status": "completed",
+          "step_id": "prepare_context"
+        },
+        {
+          "artifact_summary": "<redacted-text sha256=6084142f076c len=3084>",
+          "completed_at": "2026-09-07T07:30:50.375557Z",
+          "error_type": null,
+          "escalated": false,
+          "run_attempt_id": "ra_PsarwnzJ",
+          "status": "completed",
+          "step_id": "code_change"
+        },
+        {
+          "artifact_summary": "<redacted-text sha256=f2b50d8ab172 len=1661>",
+          "completed_at": "2026-09-07T07:57:26.747566Z",
+          "error_type": null,
+          "escalated": false,
+          "run_attempt_id": "ra_PsarwnzJ",
+          "status": "completed",
+          "step_id": "verify"
+        },
+        {
+          "artifact_summary": "<redacted-text sha256=68bf4ab20f75 len=1415>",
+          "completed_at": "2026-09-07T08:00:38.159131Z",
+          "error_type": null,
+          "escalated": false,
+          "run_attempt_id": "ra_PsarwnzJ",
+          "status": "completed",
+          "step_id": "code_review"
+        },
+        {
+          "artifact_summary": "<redacted-text sha256=b978d006a626 len=971>",
+          "completed_at": "2026-09-07T08:08:57.787447Z",
+          "error_type": null,
+          "escalated": false,
+          "run_attempt_id": "ra_PsarwnzJ",
+          "status": "completed",
+          "step_id": "review_fix"
+        },
+        {
+          "artifact_summary": "<redacted-text sha256=f7196b39f37c len=1961>",
+          "completed_at": "2026-09-07T08:12:59.487533Z",
+          "error_type": null,
+          "escalated": false,
+          "run_attempt_id": "ra_PsarwnzJ",
+          "status": "completed",
+          "step_id": "live_verify"
+        },
+        {
+          "artifact_summary": "<redacted-text sha256=9a4c2bee83f1 len=1716>",
+          "completed_at": "2026-09-07T08:15:21.897471Z",
+          "error_type": null,
+          "escalated": false,
+          "run_attempt_id": "ra_PsarwnzJ",
+          "status": "completed",
+          "step_id": "commit_and_pr"
+        },
+        {
+          "artifact_summary": "<redacted-text sha256=d3568ec13348 len=1705>",
+          "completed_at": "2026-09-07T08:21:44.337244Z",
+          "error_type": null,
+          "escalated": false,
+          "run_attempt_id": "ra_PsarwnzJ",
+          "status": "completed",
+          "step_id": "await_ci"
+        }
+      ],
+      "completed_steps_truncated": false,
+      "current_step": "await_ci",
+      "current_step_status": "idle",
+      "version": 20,
+      "wi_type": "feature",
+      "work_item_id": "wi_pxdHR5od"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 19451
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:artifact_summary=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_get_step"
+}

@@ -1,0 +1,201 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.246",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-01T09:19:04.306Z",
+    "transcript_id": "d297e63472ef"
+  },
+  "request": {},
+  "response": {
+    "body": {
+      "items": [
+        {
+          "display_name": "jacky.l",
+          "email": "jacky.l@gmicloud.ai",
+          "id": "u_W1RkycWH",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "zhijun.w",
+          "email": "zhijun.w@gmicloud.ai",
+          "id": "u_KUcyH3kq",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "william.c",
+          "email": "william.c@gmicloud.ai",
+          "id": "u_mP4x6Z2N",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "zen.d",
+          "email": "zen.d@gmicloud.ai",
+          "id": "u_uQKYWHtx",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "yuchen.z",
+          "email": "yuchen.z@gmicloud.ai",
+          "id": "u_AoQ5qRfX",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "isaac.h",
+          "email": "isaac.h@gmicloud.ai",
+          "id": "u_BDS0p1Nu",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "jason.z",
+          "email": "jason.z@gmicloud.ai",
+          "id": "u_94jv4aqA",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "dahe.p",
+          "email": "dahe.p@gmicloud.ai",
+          "id": "u_q40MByqn",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "rhc",
+          "email": "qdurenhongcai@gmail.com",
+          "id": "u_bZImJC9g",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "seven.chi",
+          "email": "seven.chi@gmicloud.ai",
+          "id": "u_CFJ0cfUt",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "ruby.x",
+          "email": "ruby.x@gmicloud.ai",
+          "id": "u_gIkicApj",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "alusi.s",
+          "email": "alusi.s@gmicloud.ai",
+          "id": "u_JlTgd60h",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "yanhong.l",
+          "email": "yanhong.l@gmicloud.ai",
+          "id": "u_GwbNGLPB",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "derek.g",
+          "email": "derek.g@gmicloud.ai",
+          "id": "u_ZLE9jKXZ",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "hui.z",
+          "email": "hui.z@gmicloud.ai",
+          "id": "u_mr75plLj",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "gyr",
+          "email": "guoyiru2013@yeah.net",
+          "id": "u_uq5e7fsL",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "forest.l",
+          "email": "forest.l@gmicloud.ai",
+          "id": "u_iwRCHL8s",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "yijie.h",
+          "email": "yijie.h@gmicloud.ai",
+          "id": "u_16ZrKsn6",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "monte",
+          "email": "monte.y@gmicloud.ai",
+          "id": "u_g1bnc0Lj",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "xqr",
+          "email": "anne.x@gmicloud.ai",
+          "id": "u_G57I3rLk",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "Test Viewer Carol",
+          "email": "test-viewer-carol@test.internal",
+          "id": "u_3GhFej7u",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "Test Writer Bob",
+          "email": "test-writer-bob@test.internal",
+          "id": "u_1FwUhHGM",
+          "role": "writer",
+          "user_type": "human"
+        },
+        {
+          "display_name": "Test Agent Alice",
+          "email": "machine-test-agent-alice@polyforge.internal",
+          "id": "u_CX6BMioR",
+          "role": "writer",
+          "user_type": "machine"
+        },
+        {
+          "display_name": "xiaokang.w",
+          "email": "xiaokang.w@gmicloud.ai",
+          "id": "u_5dFjeaMZ",
+          "role": "admin",
+          "user_type": "human"
+        }
+      ]
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 2751
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_list_users"
+}

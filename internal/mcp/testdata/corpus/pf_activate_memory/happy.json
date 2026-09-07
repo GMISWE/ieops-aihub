@@ -1,0 +1,36 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-06T10:29:23.573Z",
+    "transcript_id": "716052e1406b"
+  },
+  "request": {
+    "memory_id": "mem_i1lFdOph"
+  },
+  "response": {
+    "body": {
+      "activation_count": 1,
+      "effective_strength": 2.9999999999978995,
+      "new_stability_days": 54750
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 89
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_activate_memory"
+}

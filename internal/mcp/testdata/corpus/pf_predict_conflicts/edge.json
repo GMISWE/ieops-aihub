@@ -1,0 +1,358 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.237",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-20T15:24:46.319Z",
+    "transcript_id": "b68c213542da"
+  },
+  "request": {
+    "declared_resources": [
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:pkg/gateway"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:pkg/gworiginctl"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:pkg/proxy"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:pkg/sidecar"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:pkg/usage"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:pkg/boot"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:cmd/gateway"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:cmd/proxy"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:cmd/sidecar"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:cmd/gw-origin-ctl"
+      }
+    ],
+    "dry_run": true,
+    "project": "ieops"
+  },
+  "response": {
+    "body": {
+      "predictions": [
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/contract/registry_entry.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/middleware/llm_io_capture.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/middleware/llm_io_policy.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/middleware/llm_io_capture_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/middleware/stream_usage_capture_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/middleware/llm_io_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/contract/contract.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/contract/adapter_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/reconbridge/event.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/reconbridge/event_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/reconbridge/collector.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/reconbridge/collector_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/reconbridge/context.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/routing/retry_loop.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/routing/adapter_client.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/routing/adapter_client_estimate_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/engine.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/contract/adapter.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/routing/retry_loop_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/routing/retry_loop_reconbridge_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/routing/log_correlation_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/middleware/otel.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/middleware/otel_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/middleware/otel_reconbridge_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/business/center.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/business/center_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/business/center_reconbridge_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gateway/config/business.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gworiginctl/business/scoring/saturation.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gworiginctl/business/scoring/saturation_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gworiginctl/business/ranking_score_trace.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gworiginctl/business/ranking_score_trace_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gworiginctl/business/ranking_worker.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/gworiginctl/business/ranking_worker_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/usage/registry.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/usage/registry_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/usage/extractor.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        },
+        {
+          "description": "<redacted-text sha256=7ee0e8444073 len=43>",
+          "resource_key": "ieops:pkg/usage/extractor_test.go",
+          "resource_type": "file_scope",
+          "rule": 3,
+          "severity": "soft_block"
+        }
+      ],
+      "severity": "soft_block",
+      "will_unlock": []
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 7119
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:description=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_predict_conflicts"
+}

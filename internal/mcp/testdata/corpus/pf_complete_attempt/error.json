@@ -1,0 +1,36 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-05T15:11:22.355Z",
+    "transcript_id": "509409fe6a59"
+  },
+  "request": {
+    "note": "<redacted-text sha256=b385ceface66 len=1988>",
+    "status": "wrapped",
+    "work_item_id": "aihub#361"
+  },
+  "response": {
+    "error_code": "ATTEMPT_PAUSED",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 161,
+    "text": "aihub 409 ATTEMPT_PAUSED: attempt is paused; resume it before continuing (the closing note WAS already recorded; retrying this call will record it a second time)"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:note=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_complete_attempt"
+}

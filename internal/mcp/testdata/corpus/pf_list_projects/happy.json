@@ -1,0 +1,32 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-04T02:34:32.154Z",
+    "transcript_id": "9eec7b432b34"
+  },
+  "request": {
+    "query": "list projects with repos"
+  },
+  "response": {
+    "error_code": null,
+    "is_error": false,
+    "kind": "prose",
+    "raw_length_bytes": 2248,
+    "text": "<persisted-output>\nOutput too large (55KB). Full output saved to: <CLAUDE_HOME>/projects/-root-code-aicoding-gmi-ws/<uuid>/tool-results/toolu_017Vqw7cK8rqbWMUaxPd5Ysn.json\n\nPreview (first 2KB):\n[\n  {\n    \"type\": \"text\",\n    \"text\": \"{\\\"items\\\":[{\\\"created_at\\\":\\\"2026-05-23T15:54:07.007094Z\\\",\\\"description\\\":\\\"polyforge backend platform — work item lifecycle, memory system, and multi-agent collabor<truncated 1818 chars>"
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_list_projects"
+}

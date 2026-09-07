@@ -1,0 +1,35 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.237",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-26T00:40:27.945Z",
+    "transcript_id": "c570fdebfbe4"
+  },
+  "request": {
+    "pause_reason": "第二批子范围（nodeautoscaler / datachain）已完成并合并，utils pin 剩 bizplane 一个仓，titan pin 整半边还没动。\n\n**已合并**：`ieops-nodeautoscaler` PR#20 → squash `7e95729`；`ieops-datachain` PR#60 → squash `372053c`。两仓 pin 升至 `v0.0.0-20260825112219-981fb53412ff`，`merge-base --is-ancestor origin/main` 均 exit 0。24 条四方向 `--is-ancestor` 验证零例外。合并后 main 上 Format/Go/Lint/images 四个 workflow 全绿，两仓 `build-and-push` 均 success ⇒ 镜像已发布（不可变 t<truncated 2799 chars>",
+    "work_item_id": "wi_on1Z4F1K"
+  },
+  "response": {
+    "body": {
+      "status": "paused"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 19
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_pause_attempt"
+}

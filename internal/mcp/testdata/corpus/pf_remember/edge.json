@@ -1,0 +1,50 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.197",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-07-02T10:34:55.654Z",
+    "transcript_id": "6daa03a86f20"
+  },
+  "request": {
+    "content": "<redacted-text sha256=1a145f743f9d len=24343>",
+    "context_snippet": "Dynamo 学习系列 #1:请求路由与 KV-Aware 调度完整实现。含 KVIndexer↔KvEventPublisher 交互、完整请求生命周期、成本模型/softmax、事件 pipeline、side indexer、ActiveSequences、KVBM、命中率;§15 对 ieops 新 gateway(#51 kv_prefix §31.2)的借鉴取舍,含 §15.6 tokenize 绑模型(块哈希由 token id 决定)、§15.7 中心化 Dynamo 只借 KV 能力的证伪(register-one/all/serve-indexer 三方案)、§15.8 借算法用 Go 重写的性能与稳定性判断。",
+    "project": "infra",
+    "supersedes_memory_id": "mem_9YWYvU0j",
+    "type": "fact.architecture",
+    "visibility": "team"
+  },
+  "response": {
+    "body": {
+      "activation_count": 0,
+      "base_strength": 3,
+      "created_at": "2026-07-02T10:34:55.7045Z",
+      "id": "mem_SiHJrJj7",
+      "is_new": true,
+      "memory_id": "mem_SiHJrJj7",
+      "project": "infra",
+      "stability_days": 180,
+      "type": "fact.architecture",
+      "visibility": "team"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 269
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_remember"
+}

@@ -1,0 +1,45 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.222",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-12T01:06:01.192Z",
+    "transcript_id": "df01dfb4d271"
+  },
+  "request": {
+    "author_aliases": [
+      "william.c",
+      "william.c@gmicloud.ai"
+    ],
+    "display_name": "william.c",
+    "email": "william.c@gmicloud.ai",
+    "role": "writer",
+    "user_type": "human"
+  },
+  "response": {
+    "body": {
+      "display_name": "william.c",
+      "email": "william.c@gmicloud.ai",
+      "id": "u_mP4x6Z2N",
+      "role": "writer",
+      "user_type": "human"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 114
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_create_user"
+}

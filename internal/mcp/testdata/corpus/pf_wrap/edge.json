@@ -1,0 +1,118 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-07T09:21:08.815Z",
+    "transcript_id": "d17ac142d1d0"
+  },
+  "request": {
+    "note": "<redacted-text sha256=0e95dea9d4b6 len=11308>",
+    "repo": "tether",
+    "work_item_id": "tether#174",
+    "workspace_root": "<WORKSPACE>"
+  },
+  "response": {
+    "body": {
+      "complete_result": {
+        "ok": true
+      },
+      "note_emitted": true,
+      "ok": true,
+      "pr": {
+        "baseRefName": "ui-rewrite",
+        "commits": [
+          {
+            "authoredDate": "2026-09-07T07:52:28Z",
+            "authors": [
+              {
+                "email": "xiaokang.w@gmicloud.ai",
+                "id": "U_kgDODANlKA",
+                "login": "xiaokangwang1992",
+                "name": "xiaokangwang1992"
+              }
+            ],
+            "committedDate": "2026-09-07T07:52:28Z",
+            "messageBody": "Phase-1 foundation for the front-end rewrite (tether#173). Deletes the old SPA\nand leaves the smallest tree that still produces a web/dist, so that\n`GOWORK=off go build ./...` keeps passing on every commit of the UI branch while\nthe replacement is written. tether#173 decision 3 keeps the old UI running on\n`main` as the visual/behavioural control, which is why this lands on `ui-rewrite`\nand not on <truncated 6533 chars>",
+            "messageHeadline": "Replace the old SPA with a minimal buildable vite project (tether#174)",
+            "oid": "2d103e3545b9441dd65a075abe3e53da7fa25bd3"
+          },
+          {
+            "authoredDate": "2026-09-07T07:55:31Z",
+            "authors": [
+              {
+                "email": "xiaokang.w@gmicloud.ai",
+                "id": "U_kgDODANlKA",
+                "login": "xiaokangwang1992",
+                "name": "xiaokangwang1992"
+              }
+            ],
+            "committedDate": "2026-09-07T07:55:31Z",
+            "messageBody": "Both were found by running the probes, not by reading the diff, and both are the\nsame class as the defects the gates were added to close -- a fix that reproduces\nthe disease it treats. Kept as a separate commit because that is the finding.\n\n1. The codegen gate depended on step ORDER, and nothing said so. It compared\n   wire.gen.ts against the index in one step while `bash scripts/codegen.sh` ran\n <truncated 3424 chars>",
+            "messageHeadline": "Close two holes the mutation probes found in the new gates (tether#174)",
+            "oid": "68d90111aa0babde31106068075721330ba56dde"
+          },
+          {
+            "authoredDate": "2026-09-07T08:06:38Z",
+            "authors": [
+              {
+                "email": "xiaokang.w@gmicloud.ai",
+                "id": "U_kgDODANlKA",
+                "login": "xiaokangwang1992",
+                "name": "xiaokangwang1992"
+              }
+            ],
+            "committedDate": "2026-09-07T08:06:38Z",
+            "messageBody": "…tether#174)\n\nreview_fix for W1. The prohibition was real, measured and load-bearing, and it\nexisted only in commit messages and team memory: `grep -rn composite` over web/,\ndocs/, scripts/, Makefile and .github/ returned ZERO in-tree mentions.\n\nWhy that mattered more after this wi than before it. mem_WZxerHTL measured that a\nCOMPOSITE project makes tsbuildinfo load-bearing, so a `tsc -b --noEmit`<truncated 2670 chars>",
+            "messageHeadline": "Record the no-composite prohibition where it can actually be broken (…",
+            "oid": "2c07b4bf55d24b00da1c8957d48287053456f838"
+          },
+          {
+            "authoredDate": "2026-09-07T09:15:41Z",
+            "authors": [
+              {
+                "email": "xiaokang.w@gmicloud.ai",
+                "id": "U_kgDODANlKA",
+                "login": "xiaokangwang1992",
+                "name": "xiaokangwang1992"
+              }
+            ],
+            "committedDate": "2026-09-07T09:15:41Z",
+            "messageBody": "An independent clean-context review re-derived every load-bearing claim this\nwi wrote down and disproved two of them. Both were comments, both carried a\n\"measured\" label they had not earned, and a \"measured\" label is an exemption\ncoupon: the next reader has no reason to doubt it. Comment-only change; the\nparsed CI workflow is byte-identical and the diff contains zero non-comment\nlines.\n\nweb/tsconfig.app.json header: the claim that adding `composite: true` would\nsilently stop the build from emitting does not reproduce in this project. Both\nreferenced projects set `noEmit: true`, so no `tsc -b` invocation here is an\nemitter at all (a bare `tsc -b` exits 0 producing zero .js/.d.ts and no dist/);\ndist/ comes from `vite build`, whose emit does not depend on buildinfo state.\nAdding composite three ways and running CI's own step bodies leaves dist/ at its\nnormal 6 files every time. The prohibition is kept, with its honest reason: the\npremise doing the work is \"no tsc here emits\", nothing enforces that premise,\nand the poisoning adjacency is already wired in ci.yml — so banning composite\nkeeps a future change that makes tsc an emitter from having to re-derive this.\nThat last hop is labelled as not re-measured, because it cannot be measured\nwhile the premise still holds.\n\n.github/workflows/ci.yml, `Typecheck web`: \"the step below is the one that can\ngo red on a weakened typecheck\" is false. The coverage step runs `tsc -b\n--listFiles` itself and never invokes the script, so a `\"typecheck\": \"true\"`\nbody is structurally invisible to it — measured, that body leaves this step,\nthe coverage step and Build web all green, i.e. nothing goes red. The honest\nscope is that the script's existence is load-bearing (deleting the key exits\n254) and that type errors are gated by Build web, which predates this PR. The\nstep-order comment's \"a `tsc -b` that must emit\" is corrected the same way.",
+            "messageHeadline": "Downgrade two claims these gates could not support (tether#174)",
+            "oid": "ce61498ec6558c0969c56165bbc0966b63bc306e"
+          }
+        ],
+        "number": 247,
+        "state": "OPEN",
+        "url": "https://github.com/piaobeizu/tether/pull/247"
+      },
+      "pr_action": "reused_existing_pr",
+      "pushed": false,
+      "worktrees": {
+        "tether": "<WORKSPACE>/pf.tether-174/tether",
+        "tether-app": "<WORKSPACE>/pf.tether-174/tether-app",
+        "tether-doc": "<WORKSPACE>/pf.tether-174/tether-doc"
+      }
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 17926
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:note=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_wrap"
+}

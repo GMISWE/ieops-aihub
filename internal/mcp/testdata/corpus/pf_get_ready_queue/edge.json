@@ -1,0 +1,1228 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.237",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-27T07:52:12.065Z",
+    "transcript_id": "8efabb84160f"
+  },
+  "request": {
+    "max": "60",
+    "project": "ieops"
+  },
+  "response": {
+    "body": {
+      "items": [
+        {
+          "goal": "<redacted-text sha256=3ea35d22aefb len=121>",
+          "id": "wi_ACzzndEB",
+          "priority": "urgent",
+          "slug": "ieops#410",
+          "wi_type": "fix_bug"
+        },
+        {
+          "goal": "<redacted-text sha256=f42ab9ac46c9 len=89>",
+          "id": "wi_PDFxawvv",
+          "priority": "high",
+          "slug": "ieops#443",
+          "wi_type": "fix_bug"
+        },
+        {
+          "goal": "<redacted-text sha256=1c0c05502f57 len=243>",
+          "id": "wi_AxkwHShu",
+          "priority": "high",
+          "slug": "ieops#811",
+          "wi_type": "chore"
+        },
+        {
+          "goal": "<redacted-text sha256=5e64e7ef9eb4 len=135>",
+          "id": "wi_T1qRXKEq",
+          "priority": "high",
+          "slug": "ieops#816",
+          "wi_type": "chore"
+        },
+        {
+          "goal": "<redacted-text sha256=f4f925d26a6b len=157>",
+          "id": "wi_tVRAANEf",
+          "priority": "high",
+          "slug": "ieops#842",
+          "wi_type": "fix_bug"
+        },
+        {
+          "goal": "<redacted-text sha256=c0a5dc520307 len=88>",
+          "id": "wi_rzmRwqCn",
+          "priority": "normal",
+          "slug": "ieops#263",
+          "wi_type": "fix_bug"
+        },
+        {
+          "goal": "<redacted-text sha256=4a0f2b157fdc len=126>",
+          "id": "wi_KAYjldke",
+          "priority": "normal",
+          "slug": "ieops#623",
+          "wi_type": "chore"
+        },
+        {
+          "goal": "<redacted-text sha256=9e801118ef91 len=216>",
+          "id": "wi_XdgdSsSg",
+          "priority": "normal",
+          "slug": "ieops#773",
+          "wi_type": "chore"
+        },
+        {
+          "goal": "<redacted-text sha256=53a4273e67d2 len=141>",
+          "id": "wi_qoSzLm59",
+          "priority": "normal",
+          "slug": "ieops#779",
+          "wi_type": "fix_bug"
+        },
+        {
+          "goal": "<redacted-text sha256=92dc0f435a13 len=133>",
+          "id": "wi_KUYM73ps",
+          "priority": "normal",
+          "slug": "ieops#837",
+          "wi_type": "chore"
+        },
+        {
+          "goal": "<redacted-text sha256=d3c04b95b5d9 len=148>",
+          "id": "wi_ljFqHIYw",
+          "priority": "normal",
+          "slug": "ieops#839",
+          "wi_type": "chore"
+        },
+        {
+          "goal": "<redacted-text sha256=1f112869114c len=155>",
+          "id": "wi_3k2XUXuv",
+          "priority": "normal",
+          "slug": "ieops#840",
+          "wi_type": "chore"
+        },
+        {
+          "goal": "<redacted-text sha256=01067fcd15db len=158>",
+          "id": "wi_lYbCwLnM",
+          "priority": "normal",
+          "slug": "ieops#843",
+          "wi_type": "fix_bug"
+        },
+        {
+          "goal": "<redacted-text sha256=dec20a94a78c len=130>",
+          "id": "wi_37YjJnLE",
+          "priority": "normal",
+          "slug": "ieops#847",
+          "wi_type": "fix_bug"
+        },
+        {
+          "goal": "<redacted-text sha256=8049a345462d len=156>",
+          "id": "wi_qsV6RS55",
+          "priority": "normal",
+          "slug": "ieops#852",
+          "wi_type": "chore"
+        },
+        {
+          "goal": "<redacted-text sha256=2a8be8ae69cf len=110>",
+          "id": "wi_1HrhraGz",
+          "priority": "normal",
+          "slug": "ieops#853",
+          "wi_type": "chore"
+        },
+        {
+          "goal": "<redacted-text sha256=0fe09c3c587e len=96>",
+          "id": "wi_MzabuMHl",
+          "priority": "normal",
+          "slug": "ieops#854",
+          "wi_type": "fix_bug"
+        },
+        {
+          "goal": "<redacted-text sha256=425e727c6475 len=144>",
+          "id": "wi_21FPlqIZ",
+          "priority": "low",
+          "slug": "ieops#846",
+          "wi_type": "chore"
+        }
+      ],
+      "needs_human_session": [
+        {
+          "created_at": "2026-06-10T06:00:45Z",
+          "goal": "<redacted-text sha256=28ce1002cbab len=332>",
+          "id": "wi_lnaE70oq",
+          "priority": "urgent",
+          "slug": "ieops#83",
+          "wi_type": "critical_bug"
+        },
+        {
+          "created_at": "2026-06-10T06:00:58Z",
+          "goal": "<redacted-text sha256=baca58b64226 len=271>",
+          "id": "wi_QRu6tQqQ",
+          "priority": "urgent",
+          "slug": "ieops#84",
+          "wi_type": "critical_bug"
+        },
+        {
+          "created_at": "2026-08-22T12:28:11Z",
+          "goal": "<redacted-text sha256=2465e26366e2 len=115>",
+          "id": "wi_TGD8zeLT",
+          "priority": "urgent",
+          "slug": "ieops#613",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-06-01T14:45:21Z",
+          "goal": "<redacted-text sha256=756eaf183e56 len=262>",
+          "id": "wi_XkUuSyUm",
+          "priority": "high",
+          "slug": "ieops#12",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-07-27T09:01:03Z",
+          "goal": "<redacted-text sha256=d38dd0627eb7 len=170>",
+          "id": "wi_z2C7F1GK",
+          "priority": "high",
+          "slug": "ieops#376",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-08-04T01:39:33Z",
+          "goal": "<redacted-text sha256=9a5ac92b56c5 len=73>",
+          "id": "wi_hr3RqPW0",
+          "priority": "high",
+          "slug": "ieops#409",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-19T01:56:44Z",
+          "goal": "<redacted-text sha256=954223ac94f5 len=75>",
+          "id": "wi_C8IWFr9L",
+          "priority": "high",
+          "slug": "ieops#564",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-23T15:12:02Z",
+          "goal": "<redacted-text sha256=5608db53d4f0 len=124>",
+          "id": "wi_1Zv5MWDw",
+          "priority": "high",
+          "slug": "ieops#660",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-23T15:43:28Z",
+          "goal": "<redacted-text sha256=bf1bbd42f1df len=182>",
+          "id": "wi_vp61sEWQ",
+          "priority": "high",
+          "slug": "ieops#668",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-23T15:43:55Z",
+          "goal": "<redacted-text sha256=ae4affd9986c len=135>",
+          "id": "wi_bTC0Z2As",
+          "priority": "high",
+          "slug": "ieops#669",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-24T08:49:21Z",
+          "goal": "<redacted-text sha256=1eff20598b59 len=294>",
+          "id": "wi_za4NIiOA",
+          "priority": "high",
+          "slug": "ieops#690",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-24T12:55:00Z",
+          "goal": "<redacted-text sha256=ae6d0613ef9d len=259>",
+          "id": "wi_0k1ve1wT",
+          "priority": "high",
+          "slug": "ieops#694",
+          "wi_type": "critical_bug"
+        },
+        {
+          "created_at": "2026-08-25T06:43:50Z",
+          "goal": "<redacted-text sha256=413fdc2d2a9c len=185>",
+          "id": "wi_UVItXSkY",
+          "priority": "high",
+          "slug": "ieops#761",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-25T09:59:25Z",
+          "goal": "<redacted-text sha256=654c9c8ea57b len=183>",
+          "id": "wi_ypeRvgHp",
+          "priority": "high",
+          "slug": "ieops#766",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-26T07:34:12Z",
+          "goal": "<redacted-text sha256=50541ea89bd5 len=122>",
+          "id": "wi_vz1lRKfr",
+          "priority": "high",
+          "slug": "ieops#799",
+          "wi_type": "critical_bug"
+        },
+        {
+          "created_at": "2026-08-26T08:52:42Z",
+          "goal": "<redacted-text sha256=ffe777981c79 len=278>",
+          "id": "wi_MpyMeb8l",
+          "priority": "high",
+          "slug": "ieops#801",
+          "wi_type": "critical_bug"
+        },
+        {
+          "created_at": "2026-08-27T06:20:18Z",
+          "goal": "<redacted-text sha256=6b163be6cfa0 len=187>",
+          "id": "wi_MRHCCSoS",
+          "priority": "high",
+          "slug": "ieops#841",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-10T13:34:53Z",
+          "goal": "<redacted-text sha256=166748a3a231 len=60>",
+          "id": "wi_bk2eHogm",
+          "priority": "normal",
+          "slug": "ieops#234",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-07-22T13:57:34Z",
+          "goal": "<redacted-text sha256=535c720c022c len=142>",
+          "id": "wi_4TMmCtQE",
+          "priority": "normal",
+          "slug": "ieops#324",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-08-23T15:28:10Z",
+          "goal": "<redacted-text sha256=b4ca97a08a07 len=193>",
+          "id": "wi_53JHRiVe",
+          "priority": "normal",
+          "slug": "ieops#666",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-25T11:09:47Z",
+          "goal": "<redacted-text sha256=92e633f140ea len=282>",
+          "id": "wi_aOFWAKSn",
+          "priority": "normal",
+          "slug": "ieops#771",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-08-26T07:34:52Z",
+          "goal": "<redacted-text sha256=cbcfbc527772 len=196>",
+          "id": "wi_cQBONoHG",
+          "priority": "normal",
+          "slug": "ieops#800",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-26T14:51:35Z",
+          "goal": "<redacted-text sha256=d8a8a88eb925 len=199>",
+          "id": "wi_AhF7bhET",
+          "priority": "normal",
+          "slug": "ieops#815",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-27T06:12:23Z",
+          "goal": "<redacted-text sha256=9fc49cf1bd4f len=120>",
+          "id": "wi_7dCSUisO",
+          "priority": "normal",
+          "slug": "ieops#835",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-27T06:13:37Z",
+          "goal": "<redacted-text sha256=a996843aea8a len=117>",
+          "id": "wi_8HkygwlW",
+          "priority": "normal",
+          "slug": "ieops#836",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-27T06:18:04Z",
+          "goal": "<redacted-text sha256=10bfbde10518 len=174>",
+          "id": "wi_1HrRiCzm",
+          "priority": "normal",
+          "slug": "ieops#838",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-08-27T06:22:08Z",
+          "goal": "<redacted-text sha256=478430bfe532 len=112>",
+          "id": "wi_0h7Ec3uq",
+          "priority": "normal",
+          "slug": "ieops#844",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-27T06:32:25Z",
+          "goal": "<redacted-text sha256=f6dcf04370f9 len=192>",
+          "id": "wi_OjrcCEGA",
+          "priority": "normal",
+          "slug": "ieops#845",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-27T06:37:52Z",
+          "goal": "<redacted-text sha256=87a1bdc03a9a len=153>",
+          "id": "wi_gyZPXOkT",
+          "priority": "normal",
+          "slug": "ieops#848",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-27T06:52:12Z",
+          "goal": "<redacted-text sha256=eae02208ea4e len=168>",
+          "id": "wi_ZR04Qxtv",
+          "priority": "normal",
+          "slug": "ieops#849",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-27T06:52:38Z",
+          "goal": "<redacted-text sha256=4d3c37d2c723 len=106>",
+          "id": "wi_K6dleXBP",
+          "priority": "normal",
+          "slug": "ieops#850",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-27T06:53:07Z",
+          "goal": "<redacted-text sha256=e80f1c6c7d55 len=129>",
+          "id": "wi_58Q29M3c",
+          "priority": "normal",
+          "slug": "ieops#851",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-24T08:46:45Z",
+          "goal": "<redacted-text sha256=3989f168b458 len=224>",
+          "id": "wi_EDLMtu6O",
+          "priority": "low",
+          "slug": "ieops#685",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-26T14:08:49Z",
+          "goal": "<redacted-text sha256=a2c8e0626de8 len=204>",
+          "id": "wi_FJ1Kqg9Q",
+          "priority": "low",
+          "slug": "ieops#813",
+          "wi_type": "chore"
+        }
+      ],
+      "paused": [
+        {
+          "id": "wi_nZuIG0uU",
+          "last_actor_display": "xiaokang.w",
+          "paused_since": "2026-08-27T02:37:02Z",
+          "slug": "ieops#803"
+        },
+        {
+          "id": "wi_on1Z4F1K",
+          "last_actor_display": "xiaokang.w",
+          "pause_reason": "第二批子范围（nodeautoscaler / datachain）已完成并合并，utils pin 剩 bizplane 一个仓，titan pin 整半边还没动。\n\n**已合并**：`ieops-nodeautoscaler` PR#20 → squash `7e95729`；`ieops-datachain` PR#60 → squash `372053c`。两仓 pin 升至 `v0.0.0-20260825112219-981fb53412ff`，`merge-base --is-ancestor origin/main` 均 exit 0。24 条四方向 `--is-ancestor` 验证零例外。合并后 main 上 Format/Go/Lint/images 四个 workflow 全绿，两仓 `build-and-push` 均 success ⇒ 镜像已发布（不可变 t<truncated 2799 chars>",
+          "paused_since": "2026-08-26T00:40:27Z",
+          "slug": "ieops#747"
+        },
+        {
+          "id": "wi_nRLovaxI",
+          "last_actor_display": "xiaokang.w",
+          "pause_reason": "第一部分已完成并合入 ieops-bizplane PR #27,squash f018d60(主 session 复核:是 origin/main 祖先;5/5 CI 绿,含新增的 \"migrated surface still present\" job)。交回队列是因为**第二部分的落点在 ieops-env**,超出该 agent 的仓范围。\n\n已完成:重建了拆分保真性的自证机制。丢失的文件只来自 bizplane 自己 reset 前的历史(docs/migration/ 在 ieops-v2 里从未存在过,有正对照)；末次存在于 b2a4201(verify.sh 204 行 / manifest.json 78 文件),被 03561f4 删除。\n\n选了丙:v2 provenance 降级为\"记录的事实\"(基线 + 数字 + 如何在当年通过的那些 SHA 上手工重跑),而**执行**的闸是乙(当前树上的单调性)。理由是甲的中心断言**按设计就是假的且越来越假** —— 在旧范围上 18/96 body 不同、19 个 import 集不同、只有 58 个两半都过;全仓 37 个 body 不同。原样恢复 = 第一次跑就产生 37 条准确但不可行动的 finding。\n\n自测 20/20 且在每个 PR 上跑。用了**真实历史变异体**而不是合成的:main 上那两个 ieops#526 文件的实际内容 → 4 条 invariant 中 3 条被违反而 A、B 仍绿;一棵 03561f4 形状的空树 → 256 个记录路径中 253 个缺失。而最好的对照是免费的:把 main 的 #26/#28 合进来,闸**保持绿**并打印 \"NOTE: 1 in-scope file(s) added … Not an error\"。\n\n新 job 无 paths 过滤,且被加进 fmt.yml 的 MUST_BE_UNFILTERED(它逐个从磁盘读那些 workflow)⇒ **删掉它会让 Format check 失败,而不是让闸悄悄缺席。**\n\n🔴 顺带发现并修掉:ieops#526 有一半仍是回退状态 —— 03561f4 丢掉它,2ee5848 只重新落了 nodescalerequests 那一半,**storages 在 verbs=get 上停了 9 个已合并 PR / 6 天、零信号**。已重新落地(marker + role.yaml,约 17 行),机制**对着 controller-runtime v0.22.4 重新验证**而不是继承旧结论(旧注释引的是 v0.21.0,3 个行号里 2 个已漂)。\n\n🔴 跨仓后果已立 ieops#755:ieops-env/hack/rbac-inventory.yaml 里那条 acknowledged 的 W1 自己的理由写着\"fix 是 ieops-bizplane 里的一行改动\",现在它落地了 ⇒ rbac-union.py 的 A1 棘轮哨兵会在 error 级触发。本地 A/B 实测:3e00a63 → exit 0;其分支 → exit 1。⚠️ 主 session 复核补一句:env 的 Cross-repo RBAC drift 最后一次 CI 运行是 05:38 在 15bf76db 上且 SUCCESS,之后没被触发 ⇒ **CI 上还没红**,但因为它读六仓当前 HEAD,env 下一次触及 RBAC 路径的改动就会红。\n\n剩余(第二部分,落点 ieops-env):wi 的 333→0 push-time tree-delta 闸。\n\n诚实的限制(8 条写在 docs/migration/README.md):**直接推 main 可以绕过全部** —— 03561f4 就是这么落的,而 branches/main/protection 返回 404 Branch not protected,所以这里没有任何东西是 required(见 ieops#685);内容回退只在有人写了 invariant 的地方被抓;新增文件在 --regen 之前不被登记;dashboard/ 被排除;包在 /* */ 块注释里的 marker 仍满足锚定的 regex;一条 RBAC 后果(resourceNames → informer 403)**明确标为未验证**,因为 authorizer 包在本环境拿不到。",
+          "paused_since": "2026-08-25T07:05:48Z",
+          "slug": "ieops#620"
+        },
+        {
+          "id": "wi_ByzsYnVg",
+          "last_actor_display": "xiaokang.w",
+          "pause_reason": "状态订正后交回队列。本条四项只完成一项:库侧「未注册 suppressor 变响」已合入 ieops-utils 5960fa8;缺陷 1(四个 wrapper 补 Suppressors 透传)拆为 ieops#738;缺陷 2(max-length/msg-length)拆为 ieops#739(执行中);剩下唯一独有内容是第 2 项「干掉手工枚举字段这个根因形态」,至今无人认领。\n\n不继续做的理由:该项的落点取决于 ieops#747 的裁决(ieops-utils 的消费者钉在 2026-05-29,落后 88 天 ⇒ 若在 utils 侧实现则今天到不了下游,已合入的 5960fa8 同样零效果)。是升 pin 还是在四个消费仓本地各自绕,决定了这一项该落在哪个仓,需要 owner 先定。\n\n另:ieops#745 是同一个 wrapper 上的第三个洞(InitLog 不设 logger 级别 ⇒ node/brslet/agent 的 --log-level 半死)—— 同一处手抄代码两天里长出三个独立缺陷,正是「补字段止不住」的实证,已写进正文。",
+          "paused_since": "2026-08-25T05:03:07Z",
+          "slug": "ieops#655"
+        },
+        {
+          "id": "wi_2CvEA9Un",
+          "last_actor_display": "xiaokang.w",
+          "pause_reason": "主 session 误派:本 wi 的落点不在 ieops-ctlchain(该仓没有 deploy/images/brslet-base/、没有任何 entrypoint.sh、没有 cmd/proxy),唯一落点是 ieops-v2/deploy/images/brslet-base/entrypoint.sh —— 只读、归档闸控,且 attrs 里 assignee 已是 hui.z,正文也写明「动之前必须先与 hui 对齐」。\n\n执行 agent 未改任何文件(worktree 干净、0 commit),但做完了完整测量并已写进 wi 正文,三条推翻原判:\n1. 这条分支在生产路径上走不到 —— 五个 provisioner 全部注入 DISCOVERY_URL 短路进第一分支(`-e GATEWAY_ADDR` 命中 0,正对照 `-e DISCOVERY_URL` 命中 1),且 gmi/gmi-ec/k8s/novita 主动把 GATEWAY_ADDR 从 spec.Envs 里剥掉;\n2. crashloop 标签用错了 —— 失败时 PROXY_PID 置空后监控循环不再重启,是静默降级不是崩溃,建议去掉该标签;\n3. brslet-base 部署仍在用但已无 CI 构建(workflows 下 brslet 命中 0 个文件,同 pathspec 正对照 runs-on 命中 11)⇒ 改那个文件到不了任何在跑的节点。\n\nctlchain 侧的孪生已修且有 pkg/launcher/bundlecontract/shipped_manifest_test.go 三条断言守着。\n\n交回队列等 hui 裁决:倾向记录并关闭 / 并入 ieops#479。",
+          "paused_since": "2026-08-25T05:01:12Z",
+          "slug": "ieops#663"
+        },
+        {
+          "id": "wi_Yjgb9T1o",
+          "last_actor_display": "xiaokang.w",
+          "pause_reason": "ieops#680 wi 清账(人 2026-08-24 放行)。attempt ra_WChbSAP9 自 2026-07-17 起 38 天无进展,是心跳残留而非在跑的工作;declared_resources 为空故本次 pause 不释放任何锁。置 paused 仅为解开 aihub 的 goal 改写门(goal 只能在 queued/paused 上改),改完不 resume。",
+          "paused_since": "2026-08-24T08:45:08Z",
+          "slug": "ieops#261"
+        },
+        {
+          "id": "wi_N58lgFLG",
+          "last_actor_display": "xiaokang.w",
+          "pause_reason": "ieops#680 wi 清账(人 2026-08-24 放行)。attempt ra_4jkkf0K9 自 2026-06-24 起 61 天无进展,是心跳残留而非在跑的工作;declared_resources 为空故本次 pause 不释放任何锁。置 paused 仅为解开 aihub 的 goal 改写门(goal 只能在 queued/paused 上改),改完不 resume。",
+          "paused_since": "2026-08-24T08:45:07Z",
+          "slug": "ieops#51"
+        },
+        {
+          "id": "wi_7Pw2a54p",
+          "last_actor_display": "ruby.x",
+          "paused_since": "2026-08-24T06:44:29Z",
+          "slug": "ieops#591"
+        },
+        {
+          "id": "wi_Loq6JK3I",
+          "last_actor_display": "xiaokang.w",
+          "paused_since": "2026-08-22T08:02:27Z",
+          "slug": "ieops#598"
+        },
+        {
+          "id": "wi_rkEDKAri",
+          "last_actor_display": "xiaokang.w",
+          "pause_reason": "阻塞在 ieops#577（datachain 重拆）上，已建 blocks 依赖。#530 要摘的 engine/pipeline decider 接缝(dispatch_engine.go / dispatch_pipeline.go / dispatch_seam.go / NewDecider / deciderFor / GPUViaPipeline)在 ieops-v2@origin/main 全部不存在(实测 ABSENT + rc=1，正对照 FrameworkRouter rc=0 同 pathspec 通过)，只存在于 reset 前的 datachain；而 datachain origin/main 现在是 0 个文件。⇒ 无法改到 v2 里做，也无法在空仓上做。\n\n片1 已交付并已合入(commit 1f5bc7a2 → PR ieops-datachain#46 → merged 2026-08-19T07:03:23Z as b760dbd4)，之后仓在 09:10:28Z 被 470065e 清空。片2(Tier 1 剩余 11 个文件)必须等 #577 重建后再做。\n\n已向 #577 交付内容级 delta：artifact mem_K3Ab08Ng + docs/ieops-577-carryforward-delta.md。核心风险：func deEngine 定义在被抢救的 cutover_liveverify_test.go:89，它的 4 个调用点因\"v2 有同名文件\"被归入可重取 ⇒ 重拆后编译绿、测试绿、那三个文件静默退回去测 engine。\n\n主动释放锁：ieops:pkg/gateway/routing 这把目录级锁对 #410/#566/#573 是两个 blocker 之一(另一个是 #549 持的 retry_loop.go 等 4 个文件级锁，且 #549 今天仍活跃)。",
+          "paused_since": "2026-08-20T11:32:23Z",
+          "slug": "ieops#530"
+        },
+        {
+          "id": "wi_dylpAEZD",
+          "last_actor_display": "monte",
+          "pause_reason": "Work delivered: PR#564 open (supersedes #505), 6/7 checks green, Go `test` job still running at pause time. Deliberately NOT wrapped — ieops#411 was wrapped while its PR sat unmerged for 13 days, which is the whole reason this wi exists. Keep it paused until #564 merges, then wrap. Blocking question before merge: pricing ownership for cache_creation_input_tokens now reaching the OpenAI-family billing record (disclosed at the top of the PR body). Worktree kept at /data/comp/pf.ieops-546/ieops-v2 for review follow-ups. Follow-up ieops#547 filed and blocked on this.",
+          "paused_since": "2026-08-18T10:34:44Z",
+          "slug": "ieops#546"
+        },
+        {
+          "id": "wi_6z0EkHhq",
+          "last_actor_display": "xiaokang.w",
+          "paused_since": "2026-08-15T14:47:09Z",
+          "slug": "ieops#451"
+        },
+        {
+          "id": "wi_aIOR4Ghq",
+          "last_actor_display": "monte",
+          "pause_reason": "Usage reporter shipped via PR #436 (merged, ArgoCD-synced, pod healthy). Remaining blocker is outside the repo: ce-tot's ingress allowlist must accept 35.252.134.195, which Monte will chase with the ce-tot owner. Worker provisioning is Monte's own manual step, deliberately out of scope here.",
+          "paused_since": "2026-08-12T12:02:51Z",
+          "slug": "ieops#458"
+        },
+        {
+          "id": "wi_RdG46a4k",
+          "last_actor_display": "ruby.x",
+          "paused_since": "2026-08-06T08:13:04Z",
+          "slug": "ieops#419"
+        },
+        {
+          "id": "wi_hT2fxhpd",
+          "last_actor_display": "monte",
+          "pause_reason": "Release path/file_scope locks per user request",
+          "paused_since": "2026-07-23T12:00:54Z",
+          "slug": "ieops#229"
+        },
+        {
+          "id": "wi_0wWbgMLx",
+          "last_actor_display": "hui.z",
+          "paused_since": "2026-07-01T01:56:31Z",
+          "slug": "ieops#156"
+        }
+      ],
+      "running": [
+        {
+          "goal": "<redacted-text sha256=182a0fad4e9b len=230>",
+          "id": "wi_FkXQhfLD",
+          "last_active_at": "2026-08-27T07:51:09Z",
+          "owner_display": "monte",
+          "slug": "ieops#798"
+        },
+        {
+          "goal": "<redacted-text sha256=71283e9dab3a len=137>",
+          "id": "wi_1KkLcxIW",
+          "last_active_at": "2026-08-27T05:58:22Z",
+          "owner_display": "xiaokang.w",
+          "slug": "ieops#834"
+        },
+        {
+          "goal": "<redacted-text sha256=c078cd218184 len=164>",
+          "id": "wi_VTIcx840",
+          "last_active_at": "2026-08-27T04:22:03Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#832"
+        },
+        {
+          "goal": "<redacted-text sha256=7912bd2a9f81 len=166>",
+          "id": "wi_TYllxcv1",
+          "last_active_at": "2026-08-26T01:23:58Z",
+          "owner_display": "jason.z",
+          "slug": "ieops#400"
+        },
+        {
+          "goal": "<redacted-text sha256=d4d609cbeb59 len=147>",
+          "id": "wi_4WJdj5en",
+          "last_active_at": "2026-08-25T16:55:51Z",
+          "owner_display": "jason.z",
+          "slug": "ieops#758"
+        },
+        {
+          "goal": "<redacted-text sha256=cb52871fe08e len=120>",
+          "id": "wi_bUYeQLuQ",
+          "last_active_at": "2026-08-25T15:45:27Z",
+          "owner_display": "xiaokang.w",
+          "slug": "ieops#670"
+        },
+        {
+          "goal": "<redacted-text sha256=a15d8a45e259 len=200>",
+          "id": "wi_byxeGYKx",
+          "last_active_at": "2026-08-25T10:37:27Z",
+          "owner_display": "jason.z",
+          "slug": "ieops#762"
+        },
+        {
+          "goal": "<redacted-text sha256=fe584d6b021e len=197>",
+          "id": "wi_OyGyDOPS",
+          "last_active_at": "2026-08-24T14:15:36Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#676"
+        },
+        {
+          "goal": "<redacted-text sha256=e4e7aaf7da4d len=208>",
+          "id": "wi_t2jBPrAV",
+          "last_active_at": "2026-08-23T15:09:30Z",
+          "owner_display": "xiaokang.w",
+          "slug": "ieops#641"
+        },
+        {
+          "goal": "<redacted-text sha256=a09a3df2a917 len=215>",
+          "id": "wi_heV68EBr",
+          "last_active_at": "2026-08-20T07:46:09Z",
+          "owner_display": "monte",
+          "slug": "ieops#561"
+        },
+        {
+          "goal": "<redacted-text sha256=ca54253b63df len=265>",
+          "id": "wi_YwYvTJ88",
+          "last_active_at": "2026-08-19T06:28:34Z",
+          "owner_display": "xiaokang.w",
+          "slug": "ieops#568"
+        },
+        {
+          "goal": "<redacted-text sha256=20dc0221f8cb len=101>",
+          "id": "wi_Xfih9NCI",
+          "last_active_at": "2026-08-15T16:39:01Z",
+          "owner_display": "monte",
+          "slug": "ieops#508"
+        },
+        {
+          "goal": "<redacted-text sha256=6f0a5764ed63 len=86>",
+          "id": "wi_4f2uRDZv",
+          "last_active_at": "2026-08-06T07:27:05Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#428"
+        },
+        {
+          "goal": "<redacted-text sha256=d1b120662806 len=115>",
+          "id": "wi_X0slWOmO",
+          "last_active_at": "2026-08-02T09:47:28Z",
+          "owner_display": "ruby.x",
+          "slug": "ieops#257"
+        },
+        {
+          "goal": "<redacted-text sha256=8a24a8be7b23 len=124>",
+          "id": "wi_kJ1esLZ6",
+          "last_active_at": "2026-07-27T11:58:04Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#378"
+        },
+        {
+          "goal": "<redacted-text sha256=1793397ab29c len=145>",
+          "id": "wi_vNIiMEZa",
+          "last_active_at": "2026-07-26T15:25:00Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#364"
+        },
+        {
+          "goal": "<redacted-text sha256=bbce44003675 len=146>",
+          "id": "wi_r3A8JayR",
+          "last_active_at": "2026-07-24T07:56:19Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#342"
+        },
+        {
+          "goal": "<redacted-text sha256=5b53dbf2f65e len=132>",
+          "id": "wi_fsKus5ly",
+          "last_active_at": "2026-07-24T01:07:41Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#337"
+        },
+        {
+          "goal": "<redacted-text sha256=78017fd2ccbe len=95>",
+          "id": "wi_8ly7GmwI",
+          "last_active_at": "2026-07-23T09:38:43Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#331"
+        },
+        {
+          "goal": "<redacted-text sha256=d4c1425911da len=109>",
+          "id": "wi_KSBAXqGT",
+          "last_active_at": "2026-07-23T08:15:39Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#330"
+        },
+        {
+          "goal": "<redacted-text sha256=7da6c871d785 len=133>",
+          "id": "wi_Nb2ewDsf",
+          "last_active_at": "2026-07-23T07:21:15Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#329"
+        },
+        {
+          "goal": "<redacted-text sha256=297675725626 len=208>",
+          "id": "wi_wRblg4Si",
+          "last_active_at": "2026-07-22T07:03:44Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#303"
+        },
+        {
+          "goal": "<redacted-text sha256=425d162c26ac len=200>",
+          "id": "wi_8hnM4MAe",
+          "last_active_at": "2026-07-17T12:30:09Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#282"
+        },
+        {
+          "goal": "<redacted-text sha256=6ed465f94f5c len=133>",
+          "id": "wi_BwCsCKG6",
+          "last_active_at": "2026-07-01T03:25:31Z",
+          "owner_display": "monte",
+          "slug": "ieops#119"
+        }
+      ],
+      "stale_running": [
+        {
+          "goal": "<redacted-text sha256=6ed465f94f5c len=133>",
+          "id": "wi_BwCsCKG6",
+          "last_active_at": "2026-07-01T03:25:31Z",
+          "owner_display": "monte",
+          "slug": "ieops#119"
+        },
+        {
+          "goal": "<redacted-text sha256=425d162c26ac len=200>",
+          "id": "wi_8hnM4MAe",
+          "last_active_at": "2026-07-17T12:30:09Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#282"
+        },
+        {
+          "goal": "<redacted-text sha256=297675725626 len=208>",
+          "id": "wi_wRblg4Si",
+          "last_active_at": "2026-07-22T07:03:44Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#303"
+        },
+        {
+          "goal": "<redacted-text sha256=7da6c871d785 len=133>",
+          "id": "wi_Nb2ewDsf",
+          "last_active_at": "2026-07-23T07:21:15Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#329"
+        },
+        {
+          "goal": "<redacted-text sha256=d4c1425911da len=109>",
+          "id": "wi_KSBAXqGT",
+          "last_active_at": "2026-07-23T08:15:39Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#330"
+        },
+        {
+          "goal": "<redacted-text sha256=78017fd2ccbe len=95>",
+          "id": "wi_8ly7GmwI",
+          "last_active_at": "2026-07-23T09:38:43Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#331"
+        },
+        {
+          "goal": "<redacted-text sha256=5b53dbf2f65e len=132>",
+          "id": "wi_fsKus5ly",
+          "last_active_at": "2026-07-24T01:07:41Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#337"
+        },
+        {
+          "goal": "<redacted-text sha256=bbce44003675 len=146>",
+          "id": "wi_r3A8JayR",
+          "last_active_at": "2026-07-24T07:56:19Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#342"
+        },
+        {
+          "goal": "<redacted-text sha256=1793397ab29c len=145>",
+          "id": "wi_vNIiMEZa",
+          "last_active_at": "2026-07-26T15:25:00Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#364"
+        },
+        {
+          "goal": "<redacted-text sha256=8a24a8be7b23 len=124>",
+          "id": "wi_kJ1esLZ6",
+          "last_active_at": "2026-07-27T11:58:04Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#378"
+        },
+        {
+          "goal": "<redacted-text sha256=d1b120662806 len=115>",
+          "id": "wi_X0slWOmO",
+          "last_active_at": "2026-08-02T09:47:28Z",
+          "owner_display": "ruby.x",
+          "slug": "ieops#257"
+        },
+        {
+          "goal": "<redacted-text sha256=7912bd2a9f81 len=166>",
+          "id": "wi_TYllxcv1",
+          "last_active_at": "2026-08-26T01:23:58Z",
+          "owner_display": "jason.z",
+          "slug": "ieops#400"
+        },
+        {
+          "goal": "<redacted-text sha256=6f0a5764ed63 len=86>",
+          "id": "wi_4f2uRDZv",
+          "last_active_at": "2026-08-06T07:27:05Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#428"
+        },
+        {
+          "goal": "<redacted-text sha256=20dc0221f8cb len=101>",
+          "id": "wi_Xfih9NCI",
+          "last_active_at": "2026-08-15T16:39:01Z",
+          "owner_display": "monte",
+          "slug": "ieops#508"
+        },
+        {
+          "goal": "<redacted-text sha256=ca54253b63df len=265>",
+          "id": "wi_YwYvTJ88",
+          "last_active_at": "2026-08-19T06:28:34Z",
+          "owner_display": "xiaokang.w",
+          "slug": "ieops#568"
+        },
+        {
+          "goal": "<redacted-text sha256=a09a3df2a917 len=215>",
+          "id": "wi_heV68EBr",
+          "last_active_at": "2026-08-20T07:46:09Z",
+          "owner_display": "monte",
+          "slug": "ieops#561"
+        },
+        {
+          "goal": "<redacted-text sha256=e4e7aaf7da4d len=208>",
+          "id": "wi_t2jBPrAV",
+          "last_active_at": "2026-08-23T15:09:30Z",
+          "owner_display": "xiaokang.w",
+          "slug": "ieops#641"
+        },
+        {
+          "goal": "<redacted-text sha256=fe584d6b021e len=197>",
+          "id": "wi_OyGyDOPS",
+          "last_active_at": "2026-08-24T14:15:36Z",
+          "owner_display": "hui.z",
+          "slug": "ieops#676"
+        },
+        {
+          "goal": "<redacted-text sha256=d4d609cbeb59 len=147>",
+          "id": "wi_4WJdj5en",
+          "last_active_at": "2026-08-25T16:55:51Z",
+          "owner_display": "jason.z",
+          "slug": "ieops#758"
+        },
+        {
+          "goal": "<redacted-text sha256=a15d8a45e259 len=200>",
+          "id": "wi_byxeGYKx",
+          "last_active_at": "2026-08-25T10:37:27Z",
+          "owner_display": "jason.z",
+          "slug": "ieops#762"
+        },
+        {
+          "goal": "<redacted-text sha256=cb52871fe08e len=120>",
+          "id": "wi_bUYeQLuQ",
+          "last_active_at": "2026-08-25T15:45:27Z",
+          "owner_display": "xiaokang.w",
+          "slug": "ieops#670"
+        }
+      ],
+      "stalled": [],
+      "unclassified": [
+        {
+          "created_at": "2026-06-16T09:23:01Z",
+          "goal": "<redacted-text sha256=7aaa6b554b80 len=392>",
+          "id": "wi_GKrKcWGX",
+          "priority": "normal",
+          "slug": "ieops#122",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-07-02T08:18:37Z",
+          "goal": "<redacted-text sha256=b9ffce66063a len=272>",
+          "id": "wi_8P10xGLG",
+          "priority": "normal",
+          "slug": "ieops#163",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-07-08T04:22:45Z",
+          "goal": "<redacted-text sha256=04f8197118f8 len=48>",
+          "id": "wi_hiN3SXnx",
+          "priority": "normal",
+          "slug": "ieops#206",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-10T05:02:58Z",
+          "goal": "<redacted-text sha256=9da78293ca48 len=372>",
+          "id": "wi_G1PAtkiX",
+          "priority": "normal",
+          "slug": "ieops#231",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-13T06:27:59Z",
+          "goal": "<redacted-text sha256=60fe9d257337 len=62>",
+          "id": "wi_BaryuDdG",
+          "priority": "high",
+          "slug": "ieops#252",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-13T11:43:09Z",
+          "goal": "<redacted-text sha256=c252d1857c7d len=135>",
+          "id": "wi_4FrXVfxu",
+          "priority": "normal",
+          "slug": "ieops#254",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-14T12:14:13Z",
+          "goal": "<redacted-text sha256=856312556169 len=77>",
+          "id": "wi_mteRGrxr",
+          "priority": "high",
+          "slug": "ieops#264",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-16T07:31:14Z",
+          "goal": "<redacted-text sha256=a530fcea4b1a len=118>",
+          "id": "wi_mVvFT68X",
+          "priority": "high",
+          "slug": "ieops#274",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-17T11:33:22Z",
+          "goal": "<redacted-text sha256=fcd5b113eef9 len=224>",
+          "id": "wi_3SW0L3qn",
+          "priority": "normal",
+          "slug": "ieops#285",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-07-19T09:09:00Z",
+          "goal": "<redacted-text sha256=4f0ea0ca1d3f len=207>",
+          "id": "wi_YmEQUMCI",
+          "priority": "normal",
+          "slug": "ieops#294",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-07-21T03:46:50Z",
+          "goal": "<redacted-text sha256=1249ba1a30ca len=158>",
+          "id": "wi_Fk9sdQyP",
+          "priority": "low",
+          "slug": "ieops#300",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-07-22T06:59:57Z",
+          "goal": "<redacted-text sha256=3a058ae8128b len=182>",
+          "id": "wi_1rUQ3ThH",
+          "priority": "normal",
+          "slug": "ieops#316",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-22T12:18:24Z",
+          "goal": "<redacted-text sha256=d0a318e1c661 len=213>",
+          "id": "wi_0V7AQP6z",
+          "priority": "normal",
+          "slug": "ieops#320",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-07-22T13:48:31Z",
+          "goal": "<redacted-text sha256=aba4d905fff2 len=70>",
+          "id": "wi_QvFVCq2O",
+          "priority": "low",
+          "slug": "ieops#323",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-24T13:58:21Z",
+          "goal": "<redacted-text sha256=2f7d88b9d823 len=189>",
+          "id": "wi_bgwPSI3N",
+          "priority": "normal",
+          "slug": "ieops#351",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-25T04:52:22Z",
+          "goal": "<redacted-text sha256=ed41517164df len=266>",
+          "id": "wi_BI6gdSCg",
+          "priority": "high",
+          "slug": "ieops#352",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-25T15:47:54Z",
+          "goal": "<redacted-text sha256=74ee2f16a2d3 len=103>",
+          "id": "wi_BbVOjh8M",
+          "priority": "normal",
+          "slug": "ieops#357",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-07-26T19:58:59Z",
+          "goal": "<redacted-text sha256=5dbca309966d len=217>",
+          "id": "wi_y2ernreA",
+          "priority": "normal",
+          "slug": "ieops#368",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-07-27T03:32:02Z",
+          "goal": "<redacted-text sha256=99f34823186f len=178>",
+          "id": "wi_PdX5paHt",
+          "priority": "normal",
+          "slug": "ieops#372",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-28T04:00:09Z",
+          "goal": "<redacted-text sha256=bd456b397fc4 len=190>",
+          "id": "wi_CFSyXyhC",
+          "priority": "normal",
+          "slug": "ieops#382",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-29T11:08:57Z",
+          "goal": "<redacted-text sha256=1725d4ef06b3 len=173>",
+          "id": "wi_ALGNWijl",
+          "priority": "normal",
+          "slug": "ieops#394",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-04T11:45:13Z",
+          "goal": "<redacted-text sha256=e901cfc69663 len=177>",
+          "id": "wi_DEtZCyoe",
+          "priority": "normal",
+          "slug": "ieops#415",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-06T02:31:23Z",
+          "goal": "<redacted-text sha256=94365c0171ff len=72>",
+          "id": "wi_26sEtZkV",
+          "priority": "low",
+          "slug": "ieops#426",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-08-07T03:34:19Z",
+          "goal": "<redacted-text sha256=9fd9d3cf74c6 len=121>",
+          "id": "wi_7azAPsS1",
+          "priority": "normal",
+          "slug": "ieops#447",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-11T01:50:06Z",
+          "goal": "<redacted-text sha256=ff2f7f6b82e0 len=109>",
+          "id": "wi_QBTfYtzF",
+          "priority": "high",
+          "slug": "ieops#460",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-11T02:19:23Z",
+          "goal": "<redacted-text sha256=cb9f47dbc6bc len=140>",
+          "id": "wi_xlCqTxxE",
+          "priority": "high",
+          "slug": "ieops#462",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-11T02:19:33Z",
+          "goal": "<redacted-text sha256=b02ae910bf3f len=137>",
+          "id": "wi_070R1GCP",
+          "priority": "normal",
+          "slug": "ieops#463",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-11T02:19:40Z",
+          "goal": "<redacted-text sha256=1cf8f52ec029 len=159>",
+          "id": "wi_jq4jEcC4",
+          "priority": "normal",
+          "slug": "ieops#464",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-12T12:36:08Z",
+          "goal": "<redacted-text sha256=66b1fe269c8b len=57>",
+          "id": "wi_VNFIzb6v",
+          "priority": "low",
+          "slug": "ieops#470",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-08-13T02:30:00Z",
+          "goal": "<redacted-text sha256=050861f8c431 len=124>",
+          "id": "wi_WE9LsUiW",
+          "priority": "high",
+          "slug": "ieops#475",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-13T04:47:48Z",
+          "goal": "<redacted-text sha256=a96bad4921e3 len=115>",
+          "id": "wi_ZS1GExQk",
+          "priority": "high",
+          "slug": "ieops#478",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-08-13T04:48:08Z",
+          "goal": "<redacted-text sha256=a7f70a66c845 len=85>",
+          "id": "wi_pWTZ4wlT",
+          "priority": "high",
+          "slug": "ieops#479",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-13T10:17:32Z",
+          "goal": "<redacted-text sha256=92e01d8ec19e len=139>",
+          "id": "wi_DUIeFSAP",
+          "priority": "high",
+          "slug": "ieops#484",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-18T09:20:25Z",
+          "goal": "<redacted-text sha256=2b2ce76dae17 len=215>",
+          "id": "wi_gABS0caB",
+          "priority": "normal",
+          "slug": "ieops#541",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-19T14:15:24Z",
+          "goal": "<redacted-text sha256=983facc3b6c5 len=181>",
+          "id": "wi_Wc1G9BUo",
+          "priority": "normal",
+          "slug": "ieops#573",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-22T02:54:07Z",
+          "goal": "<redacted-text sha256=3304b1ab1588 len=83>",
+          "id": "wi_z9oGXXtR",
+          "priority": "normal",
+          "slug": "ieops#599",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-24T14:42:57Z",
+          "goal": "<redacted-text sha256=eb71e17b31bf len=169>",
+          "id": "wi_Pogd4BoI",
+          "priority": "high",
+          "slug": "ieops#697",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-25T03:19:45Z",
+          "goal": "<redacted-text sha256=114d9da747fd len=142>",
+          "id": "wi_G5Suizjf",
+          "priority": "normal",
+          "slug": "ieops#733",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-25T03:39:58Z",
+          "goal": "<redacted-text sha256=38deeef00021 len=136>",
+          "id": "wi_yavK30A7",
+          "priority": "high",
+          "slug": "ieops#735",
+          "wi_type": "chore"
+        },
+        {
+          "created_at": "2026-08-25T03:40:11Z",
+          "goal": "<redacted-text sha256=b3d5cf8d0f38 len=143>",
+          "id": "wi_o6p0YCOm",
+          "priority": "normal",
+          "slug": "ieops#736",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-25T04:33:06Z",
+          "goal": "<redacted-text sha256=032bd5521f64 len=150>",
+          "id": "wi_P3hE3lzx",
+          "priority": "normal",
+          "slug": "ieops#744",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-25T10:14:54Z",
+          "goal": "<redacted-text sha256=09a91b5af621 len=105>",
+          "id": "wi_62s5n4AV",
+          "priority": "normal",
+          "slug": "ieops#769",
+          "wi_type": "refactor"
+        },
+        {
+          "created_at": "2026-08-25T23:34:07Z",
+          "goal": "<redacted-text sha256=b3dc41aaeaa0 len=174>",
+          "id": "wi_xhcy6Pv9",
+          "priority": "high",
+          "slug": "ieops#786",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-26T02:41:38Z",
+          "goal": "<redacted-text sha256=22b99c6006c2 len=209>",
+          "id": "wi_ZDiZ3MT7",
+          "priority": "high",
+          "slug": "ieops#793",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-27T07:47:21Z",
+          "goal": "<redacted-text sha256=15272be1d533 len=94>",
+          "id": "wi_MwjJZmCU",
+          "priority": "normal",
+          "slug": "ieops#855",
+          "wi_type": "fix_bug"
+        }
+      ]
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 49881
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:goal=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_get_ready_queue"
+}

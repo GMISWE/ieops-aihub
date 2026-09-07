@@ -1,0 +1,120 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.237",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-20T14:06:10.728Z",
+    "transcript_id": "32e2bd8e0994"
+  },
+  "request": {
+    "max": "12",
+    "non_conflicting": true,
+    "project": "tether"
+  },
+  "response": {
+    "body": {
+      "items": [
+        {
+          "goal": "<redacted-text sha256=043855553b9c len=113>",
+          "id": "wi_5hBX5VR0",
+          "priority": "high",
+          "slug": "tether#118",
+          "wi_type": "fix_bug"
+        },
+        {
+          "goal": "<redacted-text sha256=0a8f9adbaf9d len=118>",
+          "id": "wi_S74GzCrr",
+          "priority": "high",
+          "slug": "tether#119",
+          "wi_type": "fix_bug"
+        },
+        {
+          "goal": "<redacted-text sha256=0f78e9f53fc7 len=150>",
+          "id": "wi_oRmyY1YS",
+          "priority": "high",
+          "slug": "tether#122",
+          "wi_type": "fix_bug"
+        },
+        {
+          "goal": "<redacted-text sha256=bdad4c533f75 len=146>",
+          "id": "wi_OoJ1vqer",
+          "priority": "normal",
+          "slug": "tether#120",
+          "wi_type": "fix_bug"
+        },
+        {
+          "goal": "<redacted-text sha256=ac4f73f46535 len=181>",
+          "id": "wi_Hq6eV8CO",
+          "priority": "normal",
+          "slug": "tether#123",
+          "wi_type": "chore"
+        }
+      ],
+      "needs_human_session": [
+        {
+          "created_at": "2026-08-20T14:00:51Z",
+          "goal": "<redacted-text sha256=30a5db8b5435 len=162>",
+          "id": "wi_l76IcKOx",
+          "priority": "urgent",
+          "slug": "tether#117",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-08-20T14:03:34Z",
+          "goal": "<redacted-text sha256=d4886b883d41 len=163>",
+          "id": "wi_JiuR7JIC",
+          "priority": "high",
+          "slug": "tether#121",
+          "wi_type": "fix_bug"
+        },
+        {
+          "created_at": "2026-07-07T02:57:22Z",
+          "goal": "<redacted-text sha256=847e216821f3 len=106>",
+          "id": "wi_IIseKOYL",
+          "priority": "normal",
+          "slug": "tether#9",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-07-07T02:57:27Z",
+          "goal": "<redacted-text sha256=5d1273a60b49 len=125>",
+          "id": "wi_sDzWQnGJ",
+          "priority": "normal",
+          "slug": "tether#10",
+          "wi_type": "feature"
+        },
+        {
+          "created_at": "2026-08-09T14:20:48Z",
+          "goal": "<redacted-text sha256=942ae1b0c9e4 len=118>",
+          "id": "wi_xKpZjGoE",
+          "priority": "normal",
+          "slug": "tether#87",
+          "wi_type": "chore"
+        }
+      ],
+      "paused": [],
+      "running": [],
+      "stalled": [],
+      "unclassified": []
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 2553
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:goal=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_get_ready_queue"
+}

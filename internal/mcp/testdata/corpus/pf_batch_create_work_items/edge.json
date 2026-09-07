@@ -1,0 +1,372 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-05T12:10:23.589Z",
+    "transcript_id": "509409fe6a59"
+  },
+  "request": {
+    "items": [
+      {
+        "content": "<redacted-text sha256=934d2bbf67b0 len=1812>",
+        "declared_resources": [
+          {
+            "intent": "write",
+            "repo": "aihub",
+            "type": "path",
+            "uri": "file:internal/server/router.go"
+          }
+        ],
+        "goal": "<redacted-text sha256=c781a4279df1 len=178>",
+        "labels": [
+          "polyforge",
+          "slug-resolution",
+          "gate",
+          "recurring-class"
+        ],
+        "priority": "high",
+        "requires_human_session": false,
+        "wi_type": "fix_bug"
+      },
+      {
+        "content": "<redacted-text sha256=cd6d6155dc68 len=1297>",
+        "declared_resources": [
+          {
+            "intent": "write",
+            "repo": "aihub",
+            "type": "path",
+            "uri": "file:internal/server/routes_memory.go"
+          },
+          {
+            "intent": "write",
+            "repo": "aihub",
+            "type": "path",
+            "uri": "file:internal/domain/memory.go"
+          }
+        ],
+        "goal": "<redacted-text sha256=96dd7c32338f len=122>",
+        "labels": [
+          "polyforge",
+          "memory",
+          "slug-resolution",
+          "recurring-class"
+        ],
+        "priority": "high",
+        "requires_human_session": false,
+        "wi_type": "fix_bug"
+      },
+      {
+        "content": "<redacted-text sha256=6284ce05cb52 len=1955>",
+        "goal": "<redacted-text sha256=d3ce178c5107 len=147>",
+        "labels": [
+          "memory",
+          "recall",
+          "embedding",
+          "retrieval-architecture",
+          "needs-owner-decision"
+        ],
+        "priority": "normal",
+        "requires_human_session": true,
+        "wi_type": "feature"
+      },
+      {
+        "content": "<redacted-text sha256=b572a2488199 len=1856>",
+        "goal": "<redacted-text sha256=064b654385f7 len=150>",
+        "labels": [
+          "polyforge",
+          "plugin",
+          "release",
+          "batch-with-338"
+        ],
+        "priority": "normal",
+        "requires_human_session": false,
+        "wi_type": "chore"
+      },
+      {
+        "content": "<redacted-text sha256=9f557e6b6078 len=1281>",
+        "goal": "<redacted-text sha256=6db0e01a86dc len=128>",
+        "labels": [
+          "polyforge",
+          "locks",
+          "gate",
+          "needs-owner-decision"
+        ],
+        "priority": "normal",
+        "requires_human_session": true,
+        "wi_type": "feature"
+      },
+      {
+        "content": "<redacted-text sha256=03abaadf9355 len=1263>",
+        "goal": "<redacted-text sha256=8ede8d945d71 len=90>",
+        "labels": [
+          "memory",
+          "recall",
+          "embedding",
+          "measurement",
+          "read-only"
+        ],
+        "priority": "normal",
+        "requires_human_session": false,
+        "wi_type": "chore"
+      }
+    ],
+    "project": "aihub"
+  },
+  "response": {
+    "body": {
+      "created": [
+        {
+          "attrs": {},
+          "closed_at": null,
+          "content_len": 3355,
+          "created_at": "2026-09-05T12:10:23.7102Z",
+          "current_attempt_epoch": 0,
+          "current_attempt_id": null,
+          "declared_resources": [
+            {
+              "intent": "write",
+              "repo": "aihub",
+              "type": "path",
+              "uri": "file:internal/server/router.go"
+            }
+          ],
+          "external_share_key": null,
+          "external_share_type": null,
+          "goal": "<redacted-text sha256=c781a4279df1 len=178>",
+          "id": "wi_zYaIMMEn",
+          "labels": [
+            "polyforge",
+            "slug-resolution",
+            "gate",
+            "recurring-class"
+          ],
+          "milestone": null,
+          "parent_work_item_id": null,
+          "priority": "high",
+          "project": "aihub",
+          "reporter_display": "xiaokang.w",
+          "reporter_user_id": "u_5dFjeaMZ",
+          "requires_human_session": false,
+          "resources_version": 0,
+          "scenario": "coding",
+          "seq": 362,
+          "slug": "aihub#362",
+          "source": "human",
+          "status": "queued",
+          "updated_at": "2026-09-05T12:10:23.7102Z",
+          "wi_type": "fix_bug"
+        },
+        {
+          "attrs": {},
+          "closed_at": null,
+          "content_len": 2342,
+          "created_at": "2026-09-05T12:10:23.745629Z",
+          "current_attempt_epoch": 0,
+          "current_attempt_id": null,
+          "declared_resources": [
+            {
+              "intent": "write",
+              "repo": "aihub",
+              "type": "path",
+              "uri": "file:internal/server/routes_memory.go"
+            },
+            {
+              "intent": "write",
+              "repo": "aihub",
+              "type": "path",
+              "uri": "file:internal/domain/memory.go"
+            }
+          ],
+          "external_share_key": null,
+          "external_share_type": null,
+          "goal": "<redacted-text sha256=96dd7c32338f len=122>",
+          "id": "wi_QQqYmv19",
+          "labels": [
+            "polyforge",
+            "memory",
+            "slug-resolution",
+            "recurring-class"
+          ],
+          "milestone": null,
+          "parent_work_item_id": null,
+          "priority": "high",
+          "project": "aihub",
+          "reporter_display": "xiaokang.w",
+          "reporter_user_id": "u_5dFjeaMZ",
+          "requires_human_session": false,
+          "resources_version": 0,
+          "scenario": "coding",
+          "seq": 363,
+          "slug": "aihub#363",
+          "source": "human",
+          "status": "queued",
+          "updated_at": "2026-09-05T12:10:23.745629Z",
+          "wi_type": "fix_bug"
+        },
+        {
+          "attrs": {},
+          "closed_at": null,
+          "content_len": 3741,
+          "created_at": "2026-09-05T12:10:23.799919Z",
+          "current_attempt_epoch": 0,
+          "current_attempt_id": null,
+          "declared_resources": [],
+          "external_share_key": null,
+          "external_share_type": null,
+          "goal": "<redacted-text sha256=d3ce178c5107 len=147>",
+          "id": "wi_piPxq9Nf",
+          "labels": [
+            "memory",
+            "recall",
+            "embedding",
+            "retrieval-architecture",
+            "needs-owner-decision"
+          ],
+          "milestone": null,
+          "parent_work_item_id": null,
+          "priority": "normal",
+          "project": "aihub",
+          "reporter_display": "xiaokang.w",
+          "reporter_user_id": "u_5dFjeaMZ",
+          "requires_human_session": true,
+          "resources_version": 0,
+          "scenario": "coding",
+          "seq": 364,
+          "slug": "aihub#364",
+          "source": "human",
+          "status": "queued",
+          "updated_at": "2026-09-05T12:10:23.799919Z",
+          "wi_type": "feature"
+        },
+        {
+          "attrs": {},
+          "closed_at": null,
+          "content_len": 3035,
+          "created_at": "2026-09-05T12:10:23.849159Z",
+          "current_attempt_epoch": 0,
+          "current_attempt_id": null,
+          "declared_resources": [],
+          "external_share_key": null,
+          "external_share_type": null,
+          "goal": "<redacted-text sha256=064b654385f7 len=150>",
+          "id": "wi_08SoBZ5Z",
+          "labels": [
+            "polyforge",
+            "plugin",
+            "release",
+            "batch-with-338"
+          ],
+          "milestone": null,
+          "parent_work_item_id": null,
+          "priority": "normal",
+          "project": "aihub",
+          "reporter_display": "xiaokang.w",
+          "reporter_user_id": "u_5dFjeaMZ",
+          "requires_human_session": false,
+          "resources_version": 0,
+          "scenario": "coding",
+          "seq": 365,
+          "slug": "aihub#365",
+          "source": "human",
+          "status": "queued",
+          "updated_at": "2026-09-05T12:10:23.849159Z",
+          "wi_type": "chore"
+        },
+        {
+          "attrs": {},
+          "closed_at": null,
+          "content_len": 2428,
+          "created_at": "2026-09-05T12:10:23.884765Z",
+          "current_attempt_epoch": 0,
+          "current_attempt_id": null,
+          "declared_resources": [],
+          "external_share_key": null,
+          "external_share_type": null,
+          "goal": "<redacted-text sha256=6db0e01a86dc len=128>",
+          "id": "wi_7N9Z1ToR",
+          "labels": [
+            "polyforge",
+            "locks",
+            "gate",
+            "needs-owner-decision"
+          ],
+          "milestone": null,
+          "parent_work_item_id": null,
+          "priority": "normal",
+          "project": "aihub",
+          "reporter_display": "xiaokang.w",
+          "reporter_user_id": "u_5dFjeaMZ",
+          "requires_human_session": true,
+          "resources_version": 0,
+          "scenario": "coding",
+          "seq": 366,
+          "slug": "aihub#366",
+          "source": "human",
+          "status": "queued",
+          "updated_at": "2026-09-05T12:10:23.884765Z",
+          "wi_type": "feature"
+        },
+        {
+          "attrs": {},
+          "closed_at": null,
+          "content_len": 2419,
+          "created_at": "2026-09-05T12:10:23.921126Z",
+          "current_attempt_epoch": 0,
+          "current_attempt_id": null,
+          "declared_resources": [],
+          "external_share_key": null,
+          "external_share_type": null,
+          "goal": "<redacted-text sha256=8ede8d945d71 len=90>",
+          "id": "wi_48coLbQ4",
+          "labels": [
+            "memory",
+            "recall",
+            "embedding",
+            "measurement",
+            "read-only"
+          ],
+          "milestone": null,
+          "parent_work_item_id": null,
+          "priority": "normal",
+          "project": "aihub",
+          "reporter_display": "xiaokang.w",
+          "reporter_user_id": "u_5dFjeaMZ",
+          "requires_human_session": false,
+          "resources_version": 0,
+          "scenario": "coding",
+          "seq": 367,
+          "slug": "aihub#367",
+          "source": "human",
+          "status": "queued",
+          "updated_at": "2026-09-05T12:10:23.921126Z",
+          "wi_type": "chore"
+        }
+      ],
+      "created_count": 6,
+      "failed": [],
+      "failed_count": 0,
+      "ok": true
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 5133
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext",
+      "field:goal=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_batch_create_work_items"
+}

@@ -1,0 +1,34 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-07T01:22:26.346Z",
+    "transcript_id": "2c00b9afe762"
+  },
+  "request": {
+    "context": "aihub#382 (2026-09-07) re-measured the class on aihub 8aab35b PER LOOP, not per file: for each `for <var>.Next()` in non-test .go under internal/ and cmd/, a loop is CHECKED only if `<var>.Err()` appears between it and the next top-level `func`. Result 16 checked / 30 UNCHECKED. A per-FILE count of `rows.Err()` mentions had suggested ~16 unchecked and looked balanced for work_items.go (3 loops, 2 mentions) while that file actually held 8 unchecked loops under other variable names (itemRows, runRows, stalledRows, pausedRows, humanRows, unclRows, staleRows in the ready-queue assembly, plus the list page). Classify per loop by variable name; the file-level proxy under-counts by ~2x. #382 fixed the list page (rows.Err() -> dbErrCause) and filed the remaining 29 as aihub#386 with the exact file:line list. Forcing mechanism that fails on the unfixed build without a bad input: pin search_path per pooled connection and shadow the table with a view over a plpgsql SETOF function that RAISEs (see #382's forced_execution_error_is_not_an_empty_page arm).",
+    "memory_id": "mem_BTTkzVUA",
+    "work_item_id": "wi_i4lrJgl7"
+  },
+  "response": {
+    "error_code": "BAD_REQUEST",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 53,
+    "text": "aihub 400 BAD_REQUEST: additional_context is required"
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_reinforce_memory"
+}

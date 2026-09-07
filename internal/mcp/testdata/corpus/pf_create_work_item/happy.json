@@ -1,0 +1,126 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.197",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-07-02T03:06:13.648Z",
+    "transcript_id": "a0a042eb8889"
+  },
+  "request": {
+    "blocked_by": [
+      "wi_XxzIGncV"
+    ],
+    "content": "<redacted-text sha256=5bb027aeac36 len=2123>",
+    "declared_resources": [
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:pkg/gateway/routing/tier.go"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:pkg/gateway/routing/candidate.go"
+      },
+      {
+        "intent": "write",
+        "type": "path",
+        "uri": "file:pkg/gateway/routing/pipeline.go"
+      }
+    ],
+    "force_create": true,
+    "force_reason": "Distinct follow-up carved out of ieops#152 (D6): the resource tier's DEFERRED part. Semantically similar to #152's goal (same tier/org domain) but a separate deliverable requiring a RouteInfo.Resource contract change that #152 explicitly excluded. No existing resource-tier wi (label 'resource' empty).",
+    "goal": "<redacted-text sha256=ec318d673804 len=290>",
+    "labels": [
+      "gateway",
+      "routing",
+      "tier",
+      "resource",
+      "org",
+      "contract",
+      "child-wi",
+      "ieops#51"
+    ],
+    "parent_work_item_id": "wi_N58lgFLG",
+    "priority": "normal",
+    "project": "ieops",
+    "requires_human_session": true,
+    "wi_type": "feature"
+  },
+  "response": {
+    "body": {
+      "attrs": {},
+      "closed_at": null,
+      "content": "<redacted-text sha256=5bb027aeac36 len=2123>",
+      "created_at": "2026-07-02T03:06:13.711584Z",
+      "current_attempt_epoch": 0,
+      "current_attempt_id": null,
+      "declared_resources": [
+        {
+          "intent": "write",
+          "type": "path",
+          "uri": "file:pkg/gateway/routing/tier.go"
+        },
+        {
+          "intent": "write",
+          "type": "path",
+          "uri": "file:pkg/gateway/routing/candidate.go"
+        },
+        {
+          "intent": "write",
+          "type": "path",
+          "uri": "file:pkg/gateway/routing/pipeline.go"
+        }
+      ],
+      "external_share_key": null,
+      "external_share_type": null,
+      "goal": "<redacted-text sha256=ec318d673804 len=290>",
+      "id": "wi_zRtO8qre",
+      "labels": [
+        "gateway",
+        "routing",
+        "tier",
+        "resource",
+        "org",
+        "contract",
+        "child-wi",
+        "ieops#51"
+      ],
+      "milestone": null,
+      "parent_work_item_id": "wi_N58lgFLG",
+      "priority": "normal",
+      "project": "ieops",
+      "reporter_display": "xiaokang.w",
+      "reporter_user_id": "u_5dFjeaMZ",
+      "requires_human_session": true,
+      "resources_version": 0,
+      "scenario": "coding",
+      "seq": 161,
+      "slug": "ieops#161",
+      "source": "human",
+      "status": "blocked",
+      "updated_at": "2026-07-02T03:06:13.718331Z",
+      "wi_type": "feature"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 3605
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext",
+      "field:goal=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_create_work_item"
+}

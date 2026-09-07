@@ -1,0 +1,35 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.222",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-06T07:24:30.689Z",
+    "transcript_id": "9c0bdc871994"
+  },
+  "request": {
+    "content": "<redacted-text sha256=3f0e268b6cca len=914>",
+    "memory_id": "mem_1wjUxv5G"
+  },
+  "response": {
+    "error_code": "CLIENT_UNCLASSIFIED",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 49,
+    "text": "work_item_id is required for credential injection"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_update_memory"
+}

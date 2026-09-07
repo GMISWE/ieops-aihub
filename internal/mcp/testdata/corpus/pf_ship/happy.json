@@ -1,0 +1,58 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-04T03:04:14.922Z",
+    "transcript_id": "b9c51364323d"
+  },
+  "request": {
+    "message": "feat(ui): update the annotation layer in place instead of reloading the page (aihub#131)\n\nAdding an annotation, replying or resolving on the /ui artifact viewer posted a\nform and took the handler's 303 as a full-page reload, losing scroll position and\nreading context. Those writes now go out via fetch and re-render only the\nannotation layer.\n\nPJAX-lite, so no new server route: the same endpoints a<truncated 2138 chars>",
+    "paths": [
+      "internal/render/annot.js",
+      "internal/server/routes_artifacts.go",
+      "internal/server/routes_artifacts_annot_test.go",
+      "internal/server/postsanitize_boundary_test.go"
+    ],
+    "pr_base": "main",
+    "pr_body": "Closes aihub#131.\n\nAnnotation add / reply / resolve on the `/ui` artifact viewer used a form POST and\na 303 full-page reload. They now update the annotation layer in place.\n\n## Approach — option ① PJAX-lite, zero new server routes\n\nOption ② (five POST handlers content-negotiating `Accept: application/json`) was\nrejected: it grows five handlers a second response shape for the same user-visible\noutc<truncated 4191 chars>",
+    "pr_title": "feat(ui): update the annotation layer in place instead of reloading the page (aihub#131)",
+    "repo": "aihub",
+    "work_item_id": "wi_gsIFBsT5",
+    "workspace_root": "<WORKSPACE>"
+  },
+  "response": {
+    "body": {
+      "branch": "polyforge/aihub-131-resolve-fetch-spec-pjax-lite-form-vs",
+      "commit_sha": "0f7d80948becfc331872e2f53bffafcbf9865fce",
+      "committed": true,
+      "head_sha": "0f7d80948becfc331872e2f53bffafcbf9865fce",
+      "ok": true,
+      "pr": {
+        "url": "https://github.com/GMISWE/ieops-aihub/pull/327"
+      },
+      "pr_action": "pushed_and_created_pr",
+      "pushed": true,
+      "pushed_sha": "0f7d80948becfc331872e2f53bffafcbf9865fce",
+      "repo": "aihub",
+      "stage": "done"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 404
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_ship"
+}

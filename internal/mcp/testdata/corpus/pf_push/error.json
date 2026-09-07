@@ -1,0 +1,33 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.197",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-07-02T03:13:22.562Z",
+    "transcript_id": "a0a042eb8889"
+  },
+  "request": {
+    "repo": "ieops-v2",
+    "work_item_id": "wi_XxzIGncV"
+  },
+  "response": {
+    "error_code": "CLIENT_UNCLASSIFIED",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 214,
+    "text": "git push: exit status 128\nssh: connect to host github.com port 22: Connection timed out\r\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists."
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_push"
+}

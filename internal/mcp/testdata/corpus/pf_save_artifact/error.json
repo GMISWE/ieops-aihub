@@ -1,0 +1,35 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-06T13:34:06.435Z",
+    "transcript_id": "589ab9747a73"
+  },
+  "request": {
+    "path": "<HOME>/.cache/pfjob-374/artifact.md",
+    "type": "methodology.execute",
+    "visibility": "project",
+    "work_item_id": "aihub#374"
+  },
+  "response": {
+    "error_code": "CLIENT_UNCLASSIFIED",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 58,
+    "text": "path escapes workspace: <HOME>/.cache/pfjob-374/artifact.md"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_save_artifact"
+}

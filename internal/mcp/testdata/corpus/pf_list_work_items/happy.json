@@ -1,0 +1,37 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-02T09:24:45.270Z",
+    "transcript_id": "d297e63472ef"
+  },
+  "request": {
+    "brief": true,
+    "limit": "60",
+    "order": "asc",
+    "project": "aihub",
+    "sort": "created_at",
+    "status": "queued"
+  },
+  "response": {
+    "error_code": null,
+    "is_error": false,
+    "kind": "prose",
+    "raw_length_bytes": 1526,
+    "text": "Error: result (55,192 characters across 1 line) exceeds maximum allowed tokens. Output has been saved to <CLAUDE_HOME>/projects/-root-code-aicoding-gmi-ws/<uuid>/tool-results/mcp-plugin_polyforge_polyforge-pf_list_work_items-1788341085988.txt.\nFormat: Plain text\nUse offset and limit parameters to read specific portions of the file, search within it for specific content, and jq to make structured queries.\nREQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n- You MUST read the content from the file at <CLAUDE_HOME>/projects/-root-code-aicoding-gmi-ws/<uuid>/tool-results/mcp-plugin_polyforge_polyforge-pf_list_work_items-1788341085988.txt in sequential chunks until 100% of the content has been read.\n- Note: this file's lines are too long for Read's offset/limit chunking. If a shell tool is available, slice by character range (e.g. python read()[A:B], dd, or cut -c) instead.\n- If you receive truncation warnings when reading the file, reduce the chunk size until you have read 100% of the content without truncation.\n- Before producing ANY summary or analysis, you MUST explicitly describe what portion of the content you have read. ***If you did not read the entire content, you MUST explicitly state this.***\n- If after a few attempts you cannot read the file (file not found, lines too long for Read's offset/limit, no shell access), STOP retrying. Summarize what you were able to read, explicitly state which portion you could not read and why, and proceed.\n"
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_list_work_items"
+}

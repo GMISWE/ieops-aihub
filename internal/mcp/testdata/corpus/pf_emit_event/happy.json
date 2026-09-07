@@ -1,0 +1,41 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-06T14:13:37.302Z",
+    "transcript_id": "40d1a65e93f0"
+  },
+  "request": {
+    "event_type": "note",
+    "payload": {
+      "text": "<redacted-text sha256=626d31ca6ccd len=1404>"
+    },
+    "pinned": true,
+    "work_item_id": "wi_Del9u4H1"
+  },
+  "response": {
+    "body": {
+      "event_id": "evt_774ytygL"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 27
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:text=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_emit_event"
+}

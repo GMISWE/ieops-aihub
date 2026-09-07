@@ -1,0 +1,38 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.246",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-30T21:09:07.226Z",
+    "transcript_id": "d297e63472ef"
+  },
+  "request": {
+    "message": "aihub#285: correct the stale worktree path format in IR1\n\nIR1's illustration said `pf.<shortid>/<repo>/`. internal/cli/doctor.go documents\nthat as the legacy layout; the live producers (internal/mcp/tools_lifecycle.go:440\nand internal/coding/scenario.go:48) both emit `pf.<project>-<seq>`, which is also\nwhat .polyforge/usage.md already states.\n\nBefore this branch, iron-rules.md sat past the hook payload's truncation cut, so\nthe stale string never reached a session. Promoting the fragment to the front of\nthe payload makes it visible, so it has to be right — otherwise a reader now sees\ntwo prominent, contradictory worktree paths in one context.\n\nrepo-routing.md carries the same stale string but is owned by another in-flight\nbranch, which has already corrected it there.\n\nPayload 9750 -> 9756 chars, still under the 9800 gate; the payload test suite\npasses end to end including its negative control.",
+    "paths": [
+      "plugins/polyforge/skills/using-polyforge/fragments/iron-rules.md"
+    ],
+    "repo": "aihub",
+    "work_item_id": "aihub#285",
+    "workspace_root": "<WORKSPACE>"
+  },
+  "response": {
+    "error_code": "CLIENT_UNCLASSIFIED",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 160,
+    "text": "read state file for wi aihub#285: state file not found for aihub#285: open <WORKSPACE>/.polyforge/state/aihub#285.json: no such file or directory"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_commit"
+}

@@ -1,0 +1,38 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.246",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-01T15:40:59.267Z",
+    "transcript_id": "d297e63472ef"
+  },
+  "request": {
+    "base": "main",
+    "body": "<redacted-text sha256=d9bb039e4aa9 len=5292>",
+    "repo": "aihub",
+    "title": "fix(mcp): resolve slug-addressed state across every credential tool (aihub#319)",
+    "work_item_id": "aihub#319"
+  },
+  "response": {
+    "error_code": "CLIENT_UNCLASSIFIED",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 160,
+    "text": "read state file for wi aihub#319: state file not found for aihub#319: open <WORKSPACE>/.polyforge/state/aihub#319.json: no such file or directory"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:body=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_pr"
+}

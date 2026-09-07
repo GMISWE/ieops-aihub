@@ -1,0 +1,1824 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.222",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-15T01:51:20.286Z",
+    "transcript_id": "256fa14e8a3d"
+  },
+  "request": {},
+  "response": {
+    "body": {
+      "items": [
+        {
+          "created_at": "2026-05-23T15:54:07.007094Z",
+          "description": "<redacted-text sha256=9666be0868c2 len=49>",
+          "members": [
+            {
+              "role": "maintainer",
+              "user_id": "u_5dFjeaMZ"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_CX6BMioR"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_1FwUhHGM"
+            },
+            {
+              "role": "viewer",
+              "user_id": "u_3GhFej7u"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_G57I3rLk"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_g1bnc0Lj"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_16ZrKsn6"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_iwRCHL8s"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_uq5e7fsL"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_mr75plLj"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_ZLE9jKXZ"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_bZImJC9g"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_q40MByqn"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_94jv4aqA"
+            }
+          ],
+          "name": "aihub",
+          "owner_user_id": "u_5dFjeaMZ",
+          "repos": [
+            {
+              "change_scenarios": [
+                "add new work item lifecycle endpoint or state transition",
+                "add or update DB migration",
+                "add or update MCP tool definition",
+                "extend Web UI views (work item list, queue, detail)",
+                "update memory recall/search logic"
+              ],
+              "description": "<redacted-text sha256=f1194f750d2f len=82>",
+              "generated_at": "2026-05-27T12:21:23Z",
+              "generated_commit": "8317e223cb548cd531d95909789fddaa8298fb52",
+              "github_owner_repo": "GMISWE/ieops-aihub",
+              "main_modules": [
+                {
+                  "path": "cmd/aihub",
+                  "role": "HTTP server entry point, DB init, graceful shutdown"
+                },
+                {
+                  "path": "internal/server",
+                  "role": "Echo router, middleware, HTTP handlers (API + Web UI)"
+                },
+                {
+                  "path": "internal/domain",
+                  "role": "Business logic: work items, memory, projects, dependencies"
+                },
+                {
+                  "path": "internal/db",
+                  "role": "PostgreSQL connection pool, query layer, migrations"
+                },
+                {
+                  "path": "internal/mcp",
+                  "role": "MCP server: work item lifecycle, memory, dependency tools"
+                },
+                {
+                  "path": "internal/auth",
+                  "role": "API-key hashing, AttemptCredential verification"
+                },
+                {
+                  "path": "internal/render",
+                  "role": "Markdown→HTML rendering (goldmark + chroma)"
+                },
+                {
+                  "path": "pkg/client",
+                  "role": "Go SDK client library for CLI and external consumers"
+                }
+              ],
+              "name": "aihub",
+              "positioning": "Go HTTP server + PostgreSQL backend for polyforge — provides work item lifecycle management, memory system, and MCP server integration",
+              "tech_stack": [
+                "Go 1.26.3",
+                "Echo",
+                "PostgreSQL",
+                "pgx/v5",
+                "MCP SDK",
+                "Goldmark",
+                "Chroma",
+                "HTMX"
+              ],
+              "url": "git@github.com:GMISWE/ieops-aihub.git"
+            },
+            {
+              "change_scenarios": [
+                "add new plugin to the marketplace",
+                "bump plugin version and stamp catalog",
+                "update plugin skill/hook/agent content",
+                "validate marketplace structure before publish"
+              ],
+              "description": "<redacted-text sha256=8ac25952db52 len=69>",
+              "generated_at": "2026-05-27T12:21:23Z",
+              "generated_commit": "f57e0a41732c14ee8184df0085cefb09e0706bcc",
+              "github_owner_repo": "GMISWE/GMI-marketplace",
+              "main_modules": [
+                {
+                  "path": "plugins",
+                  "role": "individual plugin packages (one directory per plugin)"
+                },
+                {
+                  "path": ".claude-plugin",
+                  "role": "marketplace manifest and plugin catalog"
+                },
+                {
+                  "path": "scripts",
+                  "role": "packaging, validation, and stamping scripts"
+                }
+              ],
+              "name": "marketplace",
+              "positioning": "GMI internal Claude Code plugin marketplace — hosts and distributes polyforge, polyforge-coding, and other team skills/agents/hooks as installable plugins",
+              "tech_stack": [
+                "JSON",
+                "YAML",
+                "Shell"
+              ],
+              "url": "git@github.com:GMISWE/GMI-marketplace.git"
+            }
+          ],
+          "scenario": "git@github.com:GMISWE/polyforge-coding.git",
+          "updated_at": "2026-08-12T10:16:01.897134Z",
+          "visible": true,
+          "wi_seq": 247
+        },
+        {
+          "created_at": "2026-05-30T13:36:37.205279Z",
+          "description": "<redacted-text sha256=dc42ccb87960 len=103>",
+          "members": [
+            {
+              "role": "maintainer",
+              "user_id": "u_uq5e7fsL"
+            }
+          ],
+          "name": "aiterm",
+          "owner_user_id": "u_uq5e7fsL",
+          "repos": [
+            {
+              "change_scenarios": [
+                "add terminal theme or customize color palette",
+                "extend key bar with new special-key sequences or sticky modifiers",
+                "fix scroll position / viewport staleness on network reconnect",
+                "add SSH feature (port forwarding, jump-host, key format)",
+                "fix terminal rendering or xterm compatibility issue",
+                "implement new AI provider plugin or improve command analysis"
+              ],
+              "generated_at": "2026-05-30T13:38:00Z",
+              "generated_commit": "2ad7f2b8c15552f1c0f22c188e15798efef37f0f",
+              "github_owner_repo": "dayko2019/aiterm",
+              "main_modules": [
+                {
+                  "path": "lib/ui",
+                  "role": "Terminal UI — screens, widgets, layouts (split/PiP), key bar editor, settings"
+                },
+                {
+                  "path": "lib/ssh",
+                  "role": "SSH/Mosh/PTY business logic — connections, session management, reconnect, key generation"
+                },
+                {
+                  "path": "lib/data",
+                  "role": "Persistence — SQLite database, secure storage, models, repositories, key bar config"
+                },
+                {
+                  "path": "lib/ai",
+                  "role": "AI assistant providers — command explanation, autocomplete, error analysis (OpenAI/Anthropic/Ollama)"
+                },
+                {
+                  "path": "rust/aiterm-server",
+                  "role": "QUIC server binary — remote terminal server deployed to SSH hosts"
+                },
+                {
+                  "path": "rust/aqt_protocol",
+                  "role": "AQT protocol — state synchronization and framing over QUIC"
+                },
+                {
+                  "path": "ios",
+                  "role": "iOS platform layer — native integrations, XCFramework build"
+                },
+                {
+                  "path": "android",
+                  "role": "Android platform layer — Gradle build, native integrations"
+                }
+              ],
+              "name": "aiterm",
+              "positioning": "Mobile SSH/Mosh terminal for iOS and Android — Flutter-based TTY with AI assistance, split layouts, and customizable key bar",
+              "tech_stack": [
+                "Dart",
+                "Flutter",
+                "Rust (QUIC server)",
+                "SQLite",
+                "xterm",
+                "dartssh2",
+                "Mosh SSP",
+                "FFI"
+              ],
+              "url": "git@github.com-dayko:dayko2019/aiterm.git"
+            }
+          ],
+          "scenario": null,
+          "updated_at": "2026-05-30T13:51:36.235843Z",
+          "visible": false,
+          "wi_seq": 1
+        },
+        {
+          "created_at": "2026-07-07T09:17:05.429326Z",
+          "description": "<redacted-text sha256=4157e2e1a995 len=74>",
+          "members": [
+            {
+              "role": "maintainer",
+              "user_id": "u_5dFjeaMZ"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_g1bnc0Lj"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_gIkicApj"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_94jv4aqA"
+            }
+          ],
+          "name": "global-routing",
+          "owner_user_id": "u_5dFjeaMZ",
+          "repos": [
+            {
+              "change_scenarios": [
+                "add or modify a CRD type / API version under api/v1alpha1",
+                "implement or tune the routing algorithm in internal/algorithm",
+                "add gateway/proxy/sidecar data-plane logic under cmd/ and pkg/",
+                "extend the Redis-backed cache layer in pkg/cache",
+                "add an E2E test scenario under test/e2e"
+              ],
+              "generated_at": "2026-07-07T10:31:14Z",
+              "generated_commit": "4159983ed0049dbe7ef92855bdf476b1adc27c9c",
+              "github_owner_repo": "GMISWE/global-routing",
+              "main_modules": [
+                {
+                  "path": "api/v1alpha1",
+                  "role": "CRD type definitions (v1alpha1 API group)"
+                },
+                {
+                  "path": "cmd/gateway",
+                  "role": "Gateway service entrypoint — request entry and route selection"
+                },
+                {
+                  "path": "cmd/proxy",
+                  "role": "Proxy service entrypoint — cross-region request forwarding"
+                },
+                {
+                  "path": "cmd/sidecar",
+                  "role": "Sidecar service entrypoint — per-node data-plane agent"
+                },
+                {
+                  "path": "internal/algorithm",
+                  "role": "Routing/scheduling algorithm implementation"
+                },
+                {
+                  "path": "pkg/cache",
+                  "role": "Redis-backed cache layer for routing state"
+                },
+                {
+                  "path": "pkg/gateway",
+                  "role": "Gateway core logic (route selection, request handling)"
+                },
+                {
+                  "path": "pkg/tunneltoken",
+                  "role": "Tunnel token issuance/verification for cross-node tunneling"
+                },
+                {
+                  "path": "config",
+                  "role": "Per-service configs (gateway/manager/bff/crd/agent), runtime JSON, TLS certs"
+                },
+                {
+                  "path": "test/e2e",
+                  "role": "Ginkgo E2E test suite"
+                }
+              ],
+              "name": "global-routing",
+              "positioning": "K8s-native global intelligent routing system — CRD-driven control plane with a gateway/proxy/sidecar data-plane split for cross-region inference request routing",
+              "tech_stack": [
+                "Go 1.26.3",
+                "Gin",
+                "controller-runtime",
+                "Kubernetes CRD",
+                "Redis (go-redis)",
+                "gRPC",
+                "OpenTelemetry",
+                "Cobra",
+                "Google Cloud Storage",
+                "Ginkgo"
+              ],
+              "url": "git@github.com:GMISWE/global-routing.git"
+            }
+          ],
+          "scenario": "git@github.com:GMISWE/polyforge-coding.git",
+          "updated_at": "2026-08-12T10:09:14.802389Z",
+          "visible": true,
+          "wi_seq": 145
+        },
+        {
+          "created_at": "2026-05-24T13:20:04.449413Z",
+          "description": "<redacted-text sha256=191bcc3b9d89 len=44>",
+          "members": [
+            {
+              "role": "writer",
+              "user_id": "u_G57I3rLk"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_g1bnc0Lj"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_16ZrKsn6"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_iwRCHL8s"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_mr75plLj"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_ZLE9jKXZ"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_GwbNGLPB"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_JlTgd60h"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_gIkicApj"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_CFJ0cfUt"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_q40MByqn"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_94jv4aqA"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_BDS0p1Nu"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_AoQ5qRfX"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_uQKYWHtx"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_mP4x6Z2N"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_KUcyH3kq"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_W1RkycWH"
+            }
+          ],
+          "name": "ieops",
+          "owner_user_id": "u_5dFjeaMZ",
+          "repos": [
+            {
+              "change_scenarios": [
+                "add or modify CRD type and phase state machine",
+                "implement or fix Reconciler logic",
+                "update scheduling or GPU allocation policy",
+                "modify BFF API endpoints for Dashboard",
+                "update Helm chart values or service images",
+                "add E2E test scenario"
+              ],
+              "description": "<redacted-text sha256=0ece93f8cde3 len=74>",
+              "generated_at": "2026-05-27T12:21:23Z",
+              "generated_commit": "1e8d1d66ea4b715d17cfc0002b22ba6fee42730b",
+              "github_owner_repo": "GMISWE/ieops-v2",
+              "main_modules": [
+                {
+                  "path": "api/v1alpha1",
+                  "role": "CRD type definitions (ModelDeployment, NodeScaleRequest, VNode, etc.)"
+                },
+                {
+                  "path": "cmd/controller",
+                  "role": "Control plane: MD validation, scheduling decision, autoscaling triggers"
+                },
+                {
+                  "path": "cmd/scheduler",
+                  "role": "Executes cross-cluster deployment/drain decisions"
+                },
+                {
+                  "path": "cmd/nodeautoscaler",
+                  "role": "NSR state machine, multi-Provider provisioning and reclamation"
+                },
+                {
+                  "path": "cmd/gateway",
+                  "role": "Data plane: inference request entry, route selection, cross-region forwarding"
+                },
+                {
+                  "path": "cmd/bff",
+                  "role": "BFF: HTTP API aggregation layer for Dashboard"
+                },
+                {
+                  "path": "cmd/agent",
+                  "role": "Sub-cluster state collection, CRD sync with control cluster"
+                },
+                {
+                  "path": "deploy/manifest/ieops",
+                  "role": "ArgoCD SoT: Helm chart + environment-specific values (dev/prod)"
+                },
+                {
+                  "path": "test/e2e",
+                  "role": "E2E test suite for deployment lifecycle, scheduling, autoscaling"
+                }
+              ],
+              "name": "ieops-v2",
+              "positioning": "K8s-native global GPU scheduling and inference platform built on CRD + controller-runtime with 10 independent service processes across control, data, and bridge layers",
+              "tech_stack": [
+                "Go 1.24.6+",
+                "Kubernetes",
+                "controller-runtime",
+                "kubebuilder",
+                "etcd",
+                "Prometheus",
+                "OpenTelemetry",
+                "Redis",
+                "VirtualKubelet"
+              ],
+              "url": "git@github.com:GMISWE/ieops-v2.git"
+            },
+            {
+              "change_scenarios": [
+                "upgrade ieops-v2 services across multi-region clusters",
+                "configure observability (OTel collector, VictoriaMetrics) per cluster",
+                "scale node capacity (Karpenter, node autoscaler, GPU allocation)",
+                "manage storage backends (JuiceFS CSI, WebDAV)",
+                "configure cluster-specific RBAC and CRDs"
+              ],
+              "description": "<redacted-text sha256=3edda7541aba len=45>",
+              "generated_at": "2026-05-27T12:21:23Z",
+              "generated_commit": "11530b70799f06011c1fc06a1ed023f53501f40a",
+              "github_owner_repo": "GMISWE/ieops-karmada-all-in-one",
+              "main_modules": [
+                {
+                  "path": "charts/base",
+                  "role": "Base cluster infrastructure and RBAC"
+                },
+                {
+                  "path": "charts/ieops-v2-controller",
+                  "role": "ieops-v2 control plane controller"
+                },
+                {
+                  "path": "charts/ieops-v2-scheduler",
+                  "role": "ieops-v2 custom scheduler"
+                },
+                {
+                  "path": "charts/ieops-v2-bff",
+                  "role": "Backend-for-frontend API service"
+                },
+                {
+                  "path": "charts/ieops-v2-agent",
+                  "role": "Node agent for cluster management"
+                },
+                {
+                  "path": "charts/gateway",
+                  "role": "Cluster gateway and traffic routing"
+                },
+                {
+                  "path": "charts/autoscaler",
+                  "role": "Node autoscaling and surge management"
+                },
+                {
+                  "path": "charts/storage",
+                  "role": "JuiceFS and persistent storage config"
+                }
+              ],
+              "name": "ieops-karmada-all-in-one",
+              "positioning": "Helm-based Karmada multi-cluster federation config deploying ieops-v2 control plane and infrastructure across K3s/RKE2 clusters",
+              "tech_stack": [
+                "Helm",
+                "Karmada",
+                "Kubernetes",
+                "VictoriaMetrics",
+                "OpenTelemetry",
+                "JuiceFS",
+                "NVIDIA GPU Operator",
+                "Karpenter",
+                "KubeRay"
+              ],
+              "url": "git@github.com:GMISWE/ieops-karmada-all-in-one.git"
+            },
+            {
+              "change_scenarios": [
+                "add or update architecture documentation",
+                "document new operations runbooks or postmortems",
+                "record architecture decisions (ADR)",
+                "update engineering workflow documentation"
+              ],
+              "description": "<redacted-text sha256=a588382a5b2f len=12>",
+              "generated_at": "2026-05-27T12:21:23Z",
+              "generated_commit": "12499834e0fdb96a71391cd8dc365ba398de1784",
+              "github_owner_repo": "GMISWE/ieops-doc",
+              "main_modules": [
+                {
+                  "path": "architecture",
+                  "role": "System architecture and design facts"
+                },
+                {
+                  "path": "reference",
+                  "role": "Engineering reference documentation (CRD, backend, API specs)"
+                },
+                {
+                  "path": "operations",
+                  "role": "Operations runbooks and postmortem analysis"
+                },
+                {
+                  "path": "workflow",
+                  "role": "Engineering workflows and dev processes"
+                },
+                {
+                  "path": "lessons",
+                  "role": "Captured lessons and retrospective insights"
+                },
+                {
+                  "path": "decisions",
+                  "role": "Current architecture decision records"
+                },
+                {
+                  "path": "archive",
+                  "role": "Historical decisions, plans, and completed work"
+                }
+              ],
+              "name": "ieops-doc",
+              "positioning": "Central documentation repository for ieops system — architecture, operations, engineering workflows, and decision records",
+              "tech_stack": [
+                "Markdown",
+                "YAML"
+              ],
+              "url": "git@github.com:GMISWE/ieops-doc.git"
+            },
+            {
+              "change_scenarios": [
+                "add new builtin module (cache, cron, storage, observability)",
+                "extend application lifecycle (events, supervision, graceful shutdown)",
+                "implement custom business module via Module interface",
+                "integrate observability (OpenTelemetry metrics/traces/logs)",
+                "add new HTTP endpoints via builtin/http"
+              ],
+              "description": "<redacted-text sha256=2e286e121cfe len=13>",
+              "generated_at": "2026-05-27T12:21:23Z",
+              "generated_commit": "39c33f235360cc1e612db2a767d86459ab2e5b54",
+              "github_owner_repo": "GMISWE/ieops-titan",
+              "main_modules": [
+                {
+                  "path": "app",
+                  "role": "Application facade: module collection and Build trigger"
+                },
+                {
+                  "path": "module",
+                  "role": "Module interface and contract for build-time assembly"
+                },
+                {
+                  "path": "kernel",
+                  "role": "Unified runtime driver (Run/Stop/Serve/events/snapshots)"
+                },
+                {
+                  "path": "builtin",
+                  "role": "Official builtins: auto/cache/cron/filesystem/http/otel/pool/storage"
+                },
+                {
+                  "path": "build",
+                  "role": "Component graph compilation and staging validation"
+                },
+                {
+                  "path": "config",
+                  "role": "Configuration structure definitions"
+                }
+              ],
+              "name": "ieops-titan",
+              "positioning": "Single-kernel Go application framework with DI-driven modular architecture and comprehensive HTTP/observability/storage builtins",
+              "tech_stack": [
+                "Go 1.25+",
+                "ieops-di",
+                "Gin",
+                "GORM",
+                "OpenTelemetry",
+                "Redis",
+                "PostgreSQL",
+                "MySQL",
+                "ClickHouse",
+                "gRPC",
+                "logrus"
+              ],
+              "url": "git@github.com:GMISWE/ieops-titan.git"
+            },
+            {
+              "change_scenarios": [
+                "add logging features or OTel instrumentation",
+                "extend DB client with new query patterns",
+                "add HTTP client methods or protocol support",
+                "add notification channels",
+                "performance optimization for logging or caching"
+              ],
+              "description": "<redacted-text sha256=b4e2e075ef18 len=13>",
+              "generated_at": "2026-05-27T12:21:23Z",
+              "generated_commit": "5387f27e84e4bc84a5ba21b481fd758e7e2e6b07",
+              "github_owner_repo": "GMISWE/ieops-utils",
+              "main_modules": [
+                {
+                  "path": "log",
+                  "role": "Structured logging with OTel trace/metrics and OTLP sink"
+                },
+                {
+                  "path": "database/mysql",
+                  "role": "MySQL client with query builder and transaction management"
+                },
+                {
+                  "path": "client",
+                  "role": "HTTP/QUIC/WebSocket/WebDAV clients with streaming support"
+                },
+                {
+                  "path": "otel",
+                  "role": "OTel SDK: trace propagation, log hooks, metrics aggregation"
+                },
+                {
+                  "path": "notice",
+                  "role": "Notification service (Slack webhooks, SMTP)"
+                },
+                {
+                  "path": "taskq",
+                  "role": "Task queue implementation"
+                },
+                {
+                  "path": "watcher",
+                  "role": "File and K8s resource watchers"
+                }
+              ],
+              "name": "ieops-utils",
+              "positioning": "High-performance Go utility library providing logging, DB clients, HTTP/WebSocket/WebDAV clients, notifications, and OpenTelemetry integration for the ieops platform",
+              "tech_stack": [
+                "Go",
+                "OpenTelemetry",
+                "logrus",
+                "MySQL",
+                "containerd",
+                "WebSocket",
+                "WebDAV"
+              ],
+              "url": "git@github.com:GMISWE/ieops-utils.git"
+            },
+            {
+              "change_scenarios": [
+                "add support for new K8s resource types",
+                "extend multi-cluster scheduling with Karmada ClusterPolicy",
+                "add informer watch patterns for real-time state sync",
+                "implement topology-aware scheduling and resource allocation"
+              ],
+              "description": "<redacted-text sha256=2229673cd143 len=27>",
+              "generated_at": "2026-05-27T12:21:23Z",
+              "generated_commit": "d1e9e388d15b89a9c54d385822cc8015cc4efd9c",
+              "github_owner_repo": "GMISWE/ieops-kube",
+              "main_modules": [
+                {
+                  "path": "kube.go",
+                  "role": "Core client factory, rest config, informer management"
+                },
+                {
+                  "path": "deployment.go",
+                  "role": "Deployment CRUD and watch operations"
+                },
+                {
+                  "path": "pod.go",
+                  "role": "Pod lifecycle operations and informer integration"
+                },
+                {
+                  "path": "node.go",
+                  "role": "Node resource querying and topology"
+                },
+                {
+                  "path": "clusterpolicy.go",
+                  "role": "Karmada ClusterPolicy multi-cluster operations"
+                },
+                {
+                  "path": "gvr.go",
+                  "role": "Generic Versioned Resource abstraction for custom resources"
+                }
+              ],
+              "name": "ieops-kube",
+              "positioning": "Kubernetes operations client library providing fluent wrappers for standard K8s resources and multi-cluster Karmada management",
+              "tech_stack": [
+                "Go 1.24.6",
+                "Kubernetes v0.33.2",
+                "client-go",
+                "Karmada v1.14.2",
+                "controller-runtime",
+                "logrus"
+              ],
+              "url": "git@github.com:GMISWE/ieops-kube.git"
+            },
+            {
+              "change_scenarios": [
+                "add support for new cloud provider or region",
+                "extend instance discovery or pricing search",
+                "integrate with GMI EC container API",
+                "update Pulumi IaC provisioning workflows",
+                "implement cross-cloud resource optimization"
+              ],
+              "description": "<redacted-text sha256=8decec45ec9b len=12>",
+              "generated_at": "2026-05-27T12:21:23Z",
+              "generated_commit": "2ae2ec5b05c1898a978e0478915ec80a10355137",
+              "github_owner_repo": "GMISWE/ieops-clouds",
+              "main_modules": [
+                {
+                  "path": "provider",
+                  "role": "Factory pattern for cloud provider abstractions (AWS/GCP/Azure/Novita/Hyperstack/GMI/GMI-EC/K8s)"
+                },
+                {
+                  "path": "service",
+                  "role": "Cloud service impls: instance discovery, pricing, availability, quotas"
+                },
+                {
+                  "path": "pulumi",
+                  "role": "IaC management via Pulumi Automation API"
+                },
+                {
+                  "path": "constants",
+                  "role": "Provider, region, instance type, GPU family constants"
+                },
+                {
+                  "path": "types",
+                  "role": "Shared structs for instance metadata, pricing, availability"
+                },
+                {
+                  "path": "validator",
+                  "role": "Cloud credential and parameter validators"
+                }
+              ],
+              "name": "ieops-clouds",
+              "positioning": "Multi-cloud integration library supporting AWS, GCP, Azure, and third-party providers with unified resource discovery, pricing, and IaC provisioning",
+              "tech_stack": [
+                "Go 1.24+",
+                "AWS SDK v2",
+                "Google Cloud API",
+                "Pulumi Automation API",
+                "Kubernetes client-go"
+              ],
+              "url": "git@github.com:GMISWE/ieops-clouds.git"
+            },
+            {
+              "change_scenarios": [
+                "add support for new LLM provider (backend adapter + schema converter)",
+                "modify routing strategy (traffic split, sticky sessions, ranking)",
+                "update token usage reporting or billing metrics",
+                "add rate limiting or quota enforcement rules",
+                "enhance observability (OTel instrumentation)"
+              ],
+              "description": "<redacted-text sha256=38769ffc3c04 len=42>",
+              "generated_at": "2026-05-27T12:21:23Z",
+              "generated_commit": "b8c804b71f49664df83ae001f2fe452590e34351",
+              "github_owner_repo": "GMISWE/proxy-server",
+              "main_modules": [
+                {
+                  "path": "llm_proxy_server_python/main.py",
+                  "role": "FastAPI entry point, config management, endpoint lifecycle"
+                },
+                {
+                  "path": "llm_proxy_server_python/llm_request_handler.py",
+                  "role": "Core orchestration: auth, routing, format conversion, retry, usage reporting"
+                },
+                {
+                  "path": "llm_proxy_server_python/backends",
+                  "role": "Backend pool: connection pooling, OpenAI/Claude/Gemini adapters"
+                },
+                {
+                  "path": "llm_proxy_server_python/routing",
+                  "role": "Endpoint selection: metrics ranking, traffic ratio, health monitoring, sticky routing"
+                },
+                {
+                  "path": "llm_proxy_server_python/schemas",
+                  "role": "Multi-format request/response schemas and bidirectional converters"
+                },
+                {
+                  "path": "llm_proxy_server_python/auth_rate_usage",
+                  "role": "Auth, rate limiting, quota tracking, token usage reporting"
+                }
+              ],
+              "name": "proxy-server",
+              "positioning": "FastAPI-based LLM API gateway providing multi-vendor routing, format conversion, and token usage reporting across OpenAI, Claude, and Gemini backends",
+              "tech_stack": [
+                "Python 3.x",
+                "FastAPI",
+                "Uvicorn",
+                "Pydantic",
+                "httpx/HTTP2",
+                "Redis",
+                "PostgreSQL",
+                "Google Cloud Storage",
+                "OpenTelemetry",
+                "pytest"
+              ],
+              "url": "git@github.com:GMISWE/proxy-server.git"
+            },
+            {
+              "github_owner_repo": "GMISWE/ieops-reverst",
+              "name": "ieops-reverst",
+              "url": "git@github.com:GMISWE/ieops-reverst.git"
+            },
+            {
+              "change_scenarios": [
+                "evolve a shared CRD type or wire-schema contract",
+                "add a shared utility or cache capability consumed by multiple planes",
+                "update the gateway config-plane contract carried in gateway/contract",
+                "regenerate deepcopy after CRD changes"
+              ],
+              "description": "<redacted-text sha256=f80628cfce45 len=62>",
+              "generated_at": "2026-07-19T00:00:00Z",
+              "generated_commit": "1a5ef9b364f377d9cfc0683810f45231ed4ed591",
+              "github_owner_repo": "GMISWE/ieops-core",
+              "main_modules": [
+                {
+                  "path": "api/v1alpha1",
+                  "role": "CRD type definitions + generated deepcopy (shared across all planes)"
+                },
+                {
+                  "path": "pkg/types",
+                  "role": "Shared domain types (+ protoes gRPC contracts)"
+                },
+                {
+                  "path": "pkg/cache",
+                  "role": "Cache library (backend/staging/sync/types) shared by ctlchain and datachain"
+                },
+                {
+                  "path": "pkg/gateway/contract",
+                  "role": "Gateway wire/redis config schema contract (route:reg, ep-router)"
+                },
+                {
+                  "path": "pkg/routing/rankwire",
+                  "role": "Ranking wire schema (ranking:*/outcomes:* redis keys)"
+                },
+                {
+                  "path": "pkg/utils",
+                  "role": "Common utilities"
+                }
+              ],
+              "name": "ieops-core",
+              "positioning": "Shared kernel library extracted from ieops-v2 for the repo split — CRD types (api/v1alpha1), common utils, cache, tunnel token, and gateway wire-schema contracts; the star-dependency base that datachain/ctlchain/ctlplane all depend on",
+              "tech_stack": [
+                "Go 1.26.3",
+                "Kubernetes",
+                "controller-runtime",
+                "kubebuilder",
+                "protobuf",
+                "Redis"
+              ],
+              "url": "git@github.com:GMISWE/ieops-core.git"
+            },
+            {
+              "change_scenarios": [
+                "add or fix node/VK agent behavior (heartbeat, registration, lifecycle)",
+                "extend brslet VirtualKubelet runtime or GPU collectors",
+                "modify shim OCI runtime integration",
+                "update sub-cluster agent crons/config sync"
+              ],
+              "description": "<redacted-text sha256=fa5f739a3948 len=73>",
+              "generated_at": "2026-07-19T00:00:00Z",
+              "generated_commit": "5444ff0da1cfb21e65d26eb4924241ebb070159a",
+              "github_owner_repo": "GMISWE/ieops-ctlchain",
+              "main_modules": [
+                {
+                  "path": "pkg/node",
+                  "role": "Node agent — registration, heartbeat, node lifecycle"
+                },
+                {
+                  "path": "pkg/brslet",
+                  "role": "VirtualKubelet provider (brslet) — runtime, collectors (GPU/NVML), tasks"
+                },
+                {
+                  "path": "pkg/shim",
+                  "role": "Shim service — OCI runtime integration"
+                },
+                {
+                  "path": "pkg/agent",
+                  "role": "Sub-cluster agent — crons, config sync"
+                },
+                {
+                  "path": "pkg/bri",
+                  "role": "Neutral contracts shared by brslet and node/VK"
+                },
+                {
+                  "path": "cmd",
+                  "role": "Service entrypoints: node, brslet, shim, agent, cache"
+                }
+              ],
+              "name": "ieops-ctlchain",
+              "positioning": "Node/VK execution plane extracted from ieops-v2 for the repo split — the per-node agents (node, brslet VirtualKubelet, shim, agent, bri contracts, cache service); depends only on ieops-core",
+              "tech_stack": [
+                "Go 1.26.3",
+                "Kubernetes",
+                "VirtualKubelet",
+                "containerd",
+                "NVML",
+                "gRPC",
+                "Redis"
+              ],
+              "url": "git@github.com:GMISWE/ieops-ctlchain.git"
+            },
+            {
+              "change_scenarios": [
+                "add support for a new cloud provider under pkg/nodeautoscaler/provider",
+                "tune scale-up/down strategy or CPU/GPU buffer policy in pkg/nodeautoscaler/strategy",
+                "modify the NSR state machine or saga compensation/rollback logic",
+                "adjust gateway-load-driven autoscaling thresholds and decisions",
+                "update node provisioning, warmup, or reclamation lifecycle"
+              ],
+              "generated_at": "2026-07-29T08:28:36Z",
+              "generated_commit": "ec7b6c611d4f49a025096b6cf5566fe2154de4f3",
+              "github_owner_repo": "GMISWE/ieops-nodeautoscaler",
+              "main_modules": [
+                {
+                  "path": "cmd/nodeautoscaler",
+                  "role": "Service entrypoint — nodeautoscaler binary (/bin/nodeautoscaler)"
+                },
+                {
+                  "path": "pkg/nodeautoscaler",
+                  "role": "NSR reconcile core — node provisioning, cleanup, warmup, cluster links, gateway-load autoscale decisions"
+                },
+                {
+                  "path": "pkg/nodeautoscaler/provider",
+                  "role": "Multi-cloud provider implementations (GCP, GMI, GMI-EC, Hyperstack, Novita, K8s, fake) + GPU matching"
+                },
+                {
+                  "path": "pkg/nodeautoscaler/saga",
+                  "role": "Saga orchestration with compensation for multi-step provisioning rollback"
+                },
+                {
+                  "path": "pkg/nodeautoscaler/strategy",
+                  "role": "Scale-decision strategies — CPU/GPU buffer policy, aggregation, machine types, state"
+                },
+                {
+                  "path": "deploy/images/nodeautoscaler.Dockerfile",
+                  "role": "Container image build for the nodeautoscaler service"
+                }
+              ],
+              "name": "ieops-nodeautoscaler",
+              "positioning": "NSR (NodeScaleRequest) state machine and multi-provider GPU node provisioning/reclamation service — split out of ieops-v2 for the repo split, depends only on ieops-core (star topology)",
+              "tech_stack": [
+                "Go 1.26.3",
+                "Kubernetes",
+                "client-go",
+                "Karmada",
+                "Prometheus",
+                "OpenTelemetry",
+                "logrus",
+                "ieops-core",
+                "ieops-clouds",
+                "ieops-kube",
+                "ieops-utils"
+              ],
+              "url": "git@github.com:GMISWE/ieops-nodeautoscaler.git"
+            }
+          ],
+          "scenario": "git@github.com:GMISWE/polyforge-coding.git",
+          "updated_at": "2026-08-14T13:38:07.358502Z",
+          "visible": true,
+          "wi_seq": 495
+        },
+        {
+          "created_at": "2026-05-28T14:44:26.196713Z",
+          "description": "<redacted-text sha256=f782b1c42017 len=41>",
+          "members": [
+            {
+              "role": "writer",
+              "user_id": "u_g1bnc0Lj"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_16ZrKsn6"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_iwRCHL8s"
+            }
+          ],
+          "name": "infra",
+          "owner_user_id": "u_5dFjeaMZ",
+          "repos": [
+            {
+              "change_scenarios": [
+                "add or update support for a new model architecture (vllm/models/ + model_executor registration)",
+                "implement or tune a new quantization scheme (csrc/quantization/ kernel + vllm/model_executor/layers/)",
+                "modify the serving API — add endpoints or extend OpenAI-compatible schema (vllm/entrypoints/)",
+                "improve scheduling policy — continuous batching, chunked prefill, speculative decoding (vllm/engine/ + vllm/v1/)",
+                "extend distributed inference — new parallelism strategy or KV cache transfer (vllm/distributed/)",
+                "add or optimize a CUDA/Triton attention or MoE kernel (csrc/ or vllm/model_executor/layers/)"
+              ],
+              "description": "<redacted-text sha256=c9c9f2deaabe len=68>",
+              "generated_at": "2026-05-28T15:22:00Z",
+              "generated_commit": "be4062fd6fe3a1c9e9ea7ee41b25c5e89a7a9a52",
+              "github_owner_repo": "vllm-project/vllm",
+              "main_modules": [
+                {
+                  "path": "vllm/engine",
+                  "role": "LLM engine core — request lifecycle, scheduling, async engine facade"
+                },
+                {
+                  "path": "vllm/model_executor",
+                  "role": "Model execution layer — kernel dispatch, model loader, layer implementations, LoRA"
+                },
+                {
+                  "path": "vllm/models",
+                  "role": "Supported model architectures (Llama, Qwen, DeepSeek, Mixtral, multimodal, etc.)"
+                },
+                {
+                  "path": "vllm/entrypoints",
+                  "role": "Public serving entrypoints — OpenAI-compatible HTTP server, Anthropic API, gRPC, CLI, offline LLM class"
+                },
+                {
+                  "path": "vllm/distributed",
+                  "role": "Distributed inference primitives — tensor/pipeline/expert parallelism, KV transfer, communicators"
+                },
+                {
+                  "path": "vllm/v1",
+                  "role": "Next-generation v1 engine rewrite with revised scheduler and execution model"
+                },
+                {
+                  "path": "vllm/config",
+                  "role": "Unified configuration objects for model, parallelism, quantization, scheduling, and serving"
+                },
+                {
+                  "path": "csrc",
+                  "role": "CUDA/C++ custom kernels — attention, cache ops, MoE, quantization, CUTLASS extensions"
+                },
+                {
+                  "path": "rust",
+                  "role": "Rust frontend components (tokenization, tool parsers) compiled via PyO3"
+                },
+                {
+                  "path": "tests",
+                  "role": "Test suite covering correctness, performance, multi-modal, distributed scenarios"
+                },
+                {
+                  "path": "benchmarks",
+                  "role": "Throughput and latency benchmarking scripts for serving and offline inference"
+                }
+              ],
+              "name": "vllm",
+              "positioning": "vLLM open-source high-throughput LLM inference and serving engine — PagedAttention, continuous batching, multi-hardware support, and OpenAI-compatible API surface",
+              "tech_stack": [
+                "Python",
+                "CUDA/C++",
+                "Rust",
+                "Triton",
+                "PyTorch",
+                "torch.compile",
+                "FlashAttention",
+                "CUTLASS",
+                "Ray",
+                "gRPC",
+                "Hugging Face Transformers"
+              ],
+              "url": "git@github.com:vllm-project/vllm.git"
+            },
+            {
+              "change_scenarios": [
+                "add or update support for a new model architecture (python/sglang/srt/models/ + model registry)",
+                "add or optimize a CUDA/Triton kernel (python/sglang/jit_kernel/ for JIT, sgl-kernel/csrc/ for AOT)",
+                "implement or tune a quantization scheme (FP4/FP8/GPTQ/AWQ) in python/sglang/srt/layers/ with sgl-kernel wiring",
+                "extend distributed parallelism or disaggregation (python/sglang/srt/distributed/ or python/sglang/srt/disaggregation/)",
+                "add or modify serving API endpoints or server arguments (python/sglang/srt/entrypoints/)",
+                "add hardware backend support (python/sglang/srt/platforms/ + docker/)"
+              ],
+              "description": "<redacted-text sha256=045105f55ec9 len=67>",
+              "generated_at": "2026-05-28T15:22:00Z",
+              "generated_commit": "e33bbbb467e45680f44869801ff2d087e6e354fa",
+              "github_owner_repo": "sgl-project/sglang",
+              "main_modules": [
+                {
+                  "path": "python/sglang/srt",
+                  "role": "Core serving runtime (SRT): scheduler, tokenizer manager, model executor, memory cache, constrained decoding, disaggregation, distributed parallelism, and all model backends"
+                },
+                {
+                  "path": "python/sglang/srt/managers",
+                  "role": "Key managers: Scheduler (batching/routing), TokenizerManager, DetokenizerManager forming the request pipeline"
+                },
+                {
+                  "path": "python/sglang/srt/models",
+                  "role": "Per-architecture model implementations (Llama, Qwen, DeepSeek, Gemma, Mistral, diffusion models, etc.)"
+                },
+                {
+                  "path": "python/sglang/srt/layers",
+                  "role": "Custom operator layers: attention backends, quantization (FP4/FP8/GPTQ/AWQ), LoRA, normalization, MoE expert routing"
+                },
+                {
+                  "path": "python/sglang/srt/speculative",
+                  "role": "Speculative decoding strategies and draft-model integration"
+                },
+                {
+                  "path": "python/sglang/lang",
+                  "role": "SGLang frontend DSL: IR, interpreter, tracer, and chat-template handling for structured prompt programming"
+                },
+                {
+                  "path": "python/sglang/srt/entrypoints",
+                  "role": "HTTP and OpenAI-compatible API entrypoints; server launch logic"
+                },
+                {
+                  "path": "sgl-kernel",
+                  "role": "AOT-compiled CUDA/C++ custom kernels (GEMM, attention, quantized ops) packaged as a separate wheel"
+                },
+                {
+                  "path": "python/sglang/jit_kernel",
+                  "role": "Lightweight JIT CUDA kernels compiled at runtime via Triton or CUDA"
+                },
+                {
+                  "path": "python/sglang/srt/distributed",
+                  "role": "Tensor/pipeline/expert/data parallelism primitives and collective communication utilities"
+                },
+                {
+                  "path": "python/sglang/srt/disaggregation",
+                  "role": "Prefill-decode disaggregation (PD) implementation for rack-scale deployments"
+                },
+                {
+                  "path": "benchmark",
+                  "role": "Benchmarking scripts for throughput, latency, and model-specific workloads"
+                },
+                {
+                  "path": "test",
+                  "role": "CI and unit test suite covering model correctness, serving endpoints, distributed scenarios, and quantization"
+                },
+                {
+                  "path": "docker",
+                  "role": "Dockerfiles for NVIDIA, AMD (ROCm), Intel, and Ascend NPU builds"
+                }
+              ],
+              "name": "sglang",
+              "positioning": "SGLang high-performance LLM and multimodal model serving framework — RadixAttention prefix caching, advanced parallelism, and structured output from single GPU to large clusters",
+              "tech_stack": [
+                "Python",
+                "CUDA/Triton",
+                "C++/CUDA (sgl-kernel AOT)",
+                "Rust",
+                "PyTorch",
+                "gRPC/protobuf",
+                "FlashInfer/FlashAttention",
+                "OpenAI-compatible HTTP API",
+                "Hugging Face Transformers"
+              ],
+              "url": "git@github.com:sgl-project/sglang.git"
+            },
+            {
+              "change_scenarios": [
+                "add support for a new model architecture by adding a model file under nanovllm/models/ and registering it in the loader",
+                "tune or extend the scheduler (chunked prefill policy, preemption strategy, batch size limits) in nanovllm/engine/scheduler.py",
+                "improve KV cache efficiency or add eviction policies in nanovllm/engine/block_manager.py",
+                "add or modify sampling strategies (beam search, top-k, repetition penalty) in nanovllm/layers/ and nanovllm/sampling_params.py",
+                "extend or debug tensor parallelism via nanovllm/layers/linear.py and nanovllm/engine/model_runner.py"
+              ],
+              "description": "<redacted-text sha256=f2d1ecab7532 len=70>",
+              "generated_at": "2026-05-28T15:22:00Z",
+              "generated_commit": "bb823b3e06983d71485a8e1f23715ebd87d98ef8",
+              "github_owner_repo": "GeeeekExplorer/nano-vllm",
+              "main_modules": [
+                {
+                  "path": "nanovllm/engine/llm_engine.py",
+                  "role": "Top-level inference engine: manages request lifecycle, coordinates scheduler, model runner, and KV cache"
+                },
+                {
+                  "path": "nanovllm/engine/scheduler.py",
+                  "role": "Continuous batching scheduler: selects sequences for prefill/decode each step, handles chunked prefill"
+                },
+                {
+                  "path": "nanovllm/engine/model_runner.py",
+                  "role": "Model execution core: prepares inputs, runs forward pass, manages CUDA graphs and torch.compile"
+                },
+                {
+                  "path": "nanovllm/engine/block_manager.py",
+                  "role": "Paged KV cache block allocator with prefix caching support"
+                },
+                {
+                  "path": "nanovllm/engine/sequence.py",
+                  "role": "Sequence and block-table data structures for in-flight requests"
+                },
+                {
+                  "path": "nanovllm/models/qwen3.py",
+                  "role": "Qwen3 model implementation using custom layer primitives"
+                },
+                {
+                  "path": "nanovllm/layers/attention.py",
+                  "role": "FlashAttention-based attention layer with paged KV cache integration"
+                },
+                {
+                  "path": "nanovllm/layers/linear.py",
+                  "role": "Column/Row parallel linear layers for tensor parallelism"
+                },
+                {
+                  "path": "nanovllm/config.py",
+                  "role": "ModelConfig and CacheConfig: model path, TP degree, block size, eager/graph mode flags"
+                },
+                {
+                  "path": "nanovllm/sampling_params.py",
+                  "role": "SamplingParams dataclass (temperature, top-p, max_tokens, etc.)"
+                }
+              ],
+              "name": "nano-vllm",
+              "positioning": "Lightweight vLLM-compatible LLM inference engine built from scratch in ~1,200 lines of Python — comparable throughput to vLLM with a readable codebase for learning and experimentation",
+              "tech_stack": [
+                "Python 3.10-3.12",
+                "PyTorch 2.4+",
+                "Triton 3.0+",
+                "FlashAttention",
+                "Hugging Face Transformers",
+                "xxhash",
+                "CUDA (CUDA graphs, torch.compile)",
+                "Tensor Parallelism"
+              ],
+              "url": "git@github.com:GeeeekExplorer/nano-vllm.git"
+            },
+            {
+              "change_scenarios": [
+                "add support for a new model architecture under python/minisgl/models/",
+                "integrate a new attention kernel backend in python/minisgl/attention/",
+                "modify radix cache eviction or prefix-matching logic in python/minisgl/kvcache/",
+                "extend the HTTP API server with new endpoints or streaming modes in python/minisgl/server/api_server.py",
+                "tune or debug the batch scheduler in python/minisgl/scheduler/scheduler.py"
+              ],
+              "description": "<redacted-text sha256=d9a179bdbfff len=77>",
+              "generated_at": "2026-05-28T15:22:00Z",
+              "generated_commit": "9a91cfafe754aa85daee49998176275667eb58f2",
+              "github_owner_repo": "sgl-project/mini-sglang",
+              "main_modules": [
+                {
+                  "path": "python/minisgl/server/api_server.py",
+                  "role": "OpenAI-compatible HTTP API server — handles /v1/chat/completions, streaming, and request routing"
+                },
+                {
+                  "path": "python/minisgl/engine/engine.py",
+                  "role": "Core inference engine — orchestrates prefill/decode pipeline, tensor parallelism, and request lifecycle"
+                },
+                {
+                  "path": "python/minisgl/scheduler/scheduler.py",
+                  "role": "Batch scheduler — manages request queuing, chunked prefill, overlap scheduling, and decode batching"
+                },
+                {
+                  "path": "python/minisgl/kvcache",
+                  "role": "Radix cache implementation — KV cache reuse for shared prefixes across requests"
+                },
+                {
+                  "path": "python/minisgl/attention",
+                  "role": "Attention backends — FlashAttention and FlashInfer kernel integration"
+                },
+                {
+                  "path": "python/minisgl/models",
+                  "role": "Model definitions — LLaMA, Mistral, Qwen3 and other supported dense/MoE architectures"
+                },
+                {
+                  "path": "benchmark",
+                  "role": "Throughput and latency benchmark scripts for comparing serving performance"
+                },
+                {
+                  "path": "tests",
+                  "role": "Test suite for correctness validation across serving scenarios"
+                }
+              ],
+              "name": "mini-sglang",
+              "positioning": "Compact ~5,000-line Python reference implementation of SGLang — a capable LLM serving system and readable educational codebase for researchers studying high-performance inference",
+              "tech_stack": [
+                "Python 3.10+",
+                "CUDA/NVIDIA GPU",
+                "FlashAttention",
+                "FlashInfer",
+                "Tensor Parallelism",
+                "OpenAI-compatible HTTP API",
+                "FastAPI/AIOHTTP",
+                "uv",
+                "Docker"
+              ],
+              "url": "git@github.com:sgl-project/mini-sglang.git"
+            },
+            {
+              "change_scenarios": [
+                "add or update an inference-engine backend integration (vLLM/SGLang/TensorRT-LLM)",
+                "tune KV-aware routing or disaggregated prefill/decode placement",
+                "extend the KV Block Manager (KVBM) cache-tier offload",
+                "add or update a model deployment recipe under recipes/",
+                "modify the Kubernetes operator, DynamoGraphDeployment CRD, or Helm charts",
+                "extend Python (PyO3) or C bindings to the Rust runtime"
+              ],
+              "generated_at": "2026-06-25T04:41:59Z",
+              "generated_commit": "a822423412a0f33722214a79fec89383187fb86e",
+              "github_owner_repo": "ai-dynamo/dynamo",
+              "main_modules": [
+                {
+                  "path": "lib/runtime",
+                  "role": "Rust distributed runtime — service discovery, messaging, and TCP data-plane streaming primitives"
+                },
+                {
+                  "path": "lib/llm",
+                  "role": "Rust LLM serving library — preprocessing, HTTP/gRPC frontends, KV block manager, routing, engine adapters"
+                },
+                {
+                  "path": "lib/kv-router",
+                  "role": "KV-aware request router — worker selection by load and KV-cache overlap"
+                },
+                {
+                  "path": "lib/kvbm-engine",
+                  "role": "KV Block Manager engine — multi-tier KV cache offload (GPU→CPU→SSD→remote)"
+                },
+                {
+                  "path": "lib/bindings",
+                  "role": "Language bindings — Python (PyO3) and C FFI exposing the Rust runtime to engines"
+                },
+                {
+                  "path": "components",
+                  "role": "Python backend components — frontend, workers, planner, and router runnables per inference engine"
+                },
+                {
+                  "path": "examples/backends",
+                  "role": "Reference backend integrations and deployment examples (vLLM/SGLang/TensorRT-LLM)"
+                },
+                {
+                  "path": "deploy/operator",
+                  "role": "Kubernetes operator — DynamoGraphDeployment CRDs and topology-aware gang scheduling"
+                },
+                {
+                  "path": "deploy/helm",
+                  "role": "Helm charts for cluster deployment"
+                },
+                {
+                  "path": "recipes",
+                  "role": "Tuned, model-specific deployment recipes (DeepSeek, Llama, Nemotron, GPT-OSS, etc.)"
+                },
+                {
+                  "path": "benchmarks",
+                  "role": "Throughput/latency load-generation and benchmarking harnesses"
+                }
+              ],
+              "name": "dynamo",
+              "positioning": "Open-source datacenter-scale inference orchestration stack — the coordination layer above SGLang/TensorRT-LLM/vLLM that turns multi-node GPU clusters into a unified disaggregated serving system (Rust core, Python extensibility)",
+              "tech_stack": [
+                "Rust",
+                "Tokio",
+                "Python",
+                "PyO3/maturin",
+                "vLLM",
+                "SGLang",
+                "TensorRT-LLM",
+                "NIXL",
+                "Kubernetes",
+                "Helm",
+                "etcd",
+                "NATS",
+                "CUDA"
+              ],
+              "url": "https://github.com/ai-dynamo/dynamo.git"
+            }
+          ],
+          "scenario": "git@github.com:GMISWE/polyforge-coding.git",
+          "updated_at": "2026-07-29T08:31:13.181041Z",
+          "visible": true,
+          "wi_seq": 0
+        },
+        {
+          "created_at": "2026-05-23T15:54:07.008471Z",
+          "description": "<redacted-text sha256=0e2587f70adb len=43>",
+          "members": [
+            {
+              "role": "writer",
+              "user_id": "u_CX6BMioR"
+            },
+            {
+              "role": "writer",
+              "user_id": "u_1FwUhHGM"
+            },
+            {
+              "role": "viewer",
+              "user_id": "u_3GhFej7u"
+            }
+          ],
+          "name": "marketplace",
+          "owner_user_id": "u_5dFjeaMZ",
+          "repos": [
+            {
+              "change_scenarios": [
+                "add new plugin to the marketplace",
+                "bump plugin version and stamp catalog",
+                "update plugin skill/hook/agent content",
+                "validate marketplace structure before publish"
+              ],
+              "description": "<redacted-text sha256=8ac25952db52 len=69>",
+              "generated_at": "2026-05-27T09:30:00Z",
+              "generated_commit": "8a610ac0ba02098d9dacf61022ee69fcd3fe0795",
+              "github_owner_repo": "GMISWE/GMI-marketplace",
+              "main_modules": [
+                {
+                  "path": "plugins",
+                  "role": "individual plugin packages (one directory per plugin)"
+                },
+                {
+                  "path": ".claude-plugin",
+                  "role": "marketplace manifest and plugin catalog"
+                },
+                {
+                  "path": "scripts",
+                  "role": "packaging, validation, and stamping scripts"
+                }
+              ],
+              "name": "marketplace",
+              "positioning": "GMI internal Claude Code plugin marketplace — hosts and distributes polyforge, polyforge-coding, and other team skills/agents/hooks as installable plugins.",
+              "tech_stack": [
+                "JSON",
+                "YAML",
+                "Shell"
+              ],
+              "url": "git@github.com:GMISWE/GMI-marketplace.git"
+            }
+          ],
+          "scenario": "git@github.com:GMISWE/polyforge-coding.git",
+          "updated_at": "2026-06-03T02:55:57.711016Z",
+          "visible": false,
+          "wi_seq": 149
+        },
+        {
+          "created_at": "2026-07-10T04:55:40.744348Z",
+          "description": "<redacted-text sha256=1bca4dfa82b7 len=125>",
+          "members": [],
+          "name": "polyforge-scenario",
+          "owner_user_id": "u_5dFjeaMZ",
+          "repos": [
+            {
+              "description": "<redacted-text sha256=3e31ed827c3d len=145>",
+              "github_owner_repo": "GMISWE/polyforge-coding",
+              "name": "polyforge-coding",
+              "url": "git@github.com:GMISWE/polyforge-coding.git"
+            }
+          ],
+          "scenario": "git@github.com:GMISWE/polyforge-coding.git",
+          "updated_at": "2026-07-11T14:39:01.689426Z",
+          "visible": true,
+          "wi_seq": 3
+        },
+        {
+          "created_at": "2026-07-04T08:19:38.268301Z",
+          "description": "<redacted-text sha256=f46aa7dfdb6a len=94>",
+          "members": [
+            {
+              "role": "writer",
+              "user_id": "u_g1bnc0Lj"
+            }
+          ],
+          "name": "silgrid",
+          "owner_user_id": "u_5dFjeaMZ",
+          "repos": [
+            {
+              "description": "<redacted-text sha256=63e6224da284 len=116>",
+              "github_owner_repo": "silgrid/data-plane",
+              "name": "data-plane",
+              "url": "git@github.com:silgrid/data-plane.git"
+            },
+            {
+              "description": "<redacted-text sha256=9f802d23280f len=87>",
+              "github_owner_repo": "silgrid/control-plane",
+              "name": "control-plane",
+              "url": "git@github.com:silgrid/control-plane.git"
+            },
+            {
+              "description": "<redacted-text sha256=e765c4f4af1d len=79>",
+              "github_owner_repo": "silgrid/biz-plane",
+              "name": "biz-plane",
+              "url": "git@github.com:silgrid/biz-plane.git"
+            },
+            {
+              "description": "<redacted-text sha256=2687ccdbb1d2 len=2>",
+              "github_owner_repo": "silgrid/doc",
+              "name": "doc",
+              "url": "git@github.com:silgrid/doc.git"
+            },
+            {
+              "description": "<redacted-text sha256=fb6c20906bca len=21>",
+              "github_owner_repo": "silgrid/titan-election",
+              "name": "titan-election",
+              "url": "git@github.com:silgrid/titan-election.git"
+            },
+            {
+              "description": "<redacted-text sha256=4325e1b12068 len=8>",
+              "github_owner_repo": "silgrid/kube",
+              "name": "kube",
+              "url": "git@github.com:silgrid/kube.git"
+            },
+            {
+              "description": "<redacted-text sha256=4b377e1d4217 len=10>",
+              "github_owner_repo": "silgrid/reverst",
+              "name": "reverst",
+              "url": "git@github.com:silgrid/reverst.git"
+            },
+            {
+              "description": "<redacted-text sha256=9d13646a5a01 len=4>",
+              "github_owner_repo": "silgrid/titan",
+              "name": "titan",
+              "url": "git@github.com:silgrid/titan.git"
+            },
+            {
+              "description": "<redacted-text sha256=1c3cc6fc8995 len=5>",
+              "github_owner_repo": "silgrid/utils",
+              "name": "utils",
+              "url": "git@github.com:silgrid/utils.git"
+            },
+            {
+              "description": "<redacted-text sha256=6487371fde4b len=15>",
+              "github_owner_repo": "silgrid/studio",
+              "name": "studio",
+              "url": "git@github.com:silgrid/studio.git"
+            },
+            {
+              "description": "<redacted-text sha256=91833b3897ae len=72>",
+              "github_owner_repo": "silgrid/launcher",
+              "name": "launcher",
+              "url": "git@github.com:silgrid/launcher.git"
+            },
+            {
+              "description": "<redacted-text sha256=a936532441e3 len=182>",
+              "github_owner_repo": "silgrid/common",
+              "name": "common",
+              "url": "git@github.com:silgrid/common.git"
+            },
+            {
+              "description": "<redacted-text sha256=f1807051cfa5 len=110>",
+              "github_owner_repo": "silgrid/datachain",
+              "name": "datachain",
+              "url": "git@github.com:silgrid/datachain.git"
+            },
+            {
+              "description": "<redacted-text sha256=84e69fd2839c len=105>",
+              "github_owner_repo": "silgrid/ctlchain",
+              "name": "ctlchain",
+              "url": "git@github.com:silgrid/ctlchain.git"
+            },
+            {
+              "description": "<redacted-text sha256=64442313106d len=159>",
+              "github_owner_repo": "silgrid/ctlplane",
+              "name": "ctlplane",
+              "url": "git@github.com:silgrid/ctlplane.git"
+            }
+          ],
+          "scenario": null,
+          "updated_at": "2026-08-14T08:24:15.436408Z",
+          "visible": false,
+          "wi_seq": 175
+        },
+        {
+          "created_at": "2026-05-27T12:59:14.172517Z",
+          "description": "<redacted-text sha256=2e30e04eac4e len=48>",
+          "members": [
+            {
+              "role": "writer",
+              "user_id": "u_uq5e7fsL"
+            }
+          ],
+          "name": "tether",
+          "owner_user_id": "u_5dFjeaMZ",
+          "repos": [
+            {
+              "change_scenarios": [
+                "add new chat streaming capability or modify Claude/OpenCode provider behavior",
+                "fix WebTransport handshake, UDP connectivity, or QUIC protocol issues",
+                "implement permission hook logic or adjust PreToolUse filtering",
+                "enhance React UI components, add new panes, or modify tab layouts",
+                "debug session lifecycle, task routing, or terminal (PTY) management",
+                "manage TLS certificate rotation, ACME integration, or auth middleware"
+              ],
+              "generated_at": "2026-05-28T01:53:40Z",
+              "generated_commit": "6eb03e33e73254fe300d7e4cfcd77b4d458f6f0e",
+              "github_owner_repo": "piaobeizu/tether",
+              "main_modules": [
+                {
+                  "path": "cmd/tether",
+                  "role": "Main CLI entrypoint — server, doctor, version commands"
+                },
+                {
+                  "path": "internal/server",
+                  "role": "HTTP/3 server, QUIC/WebTransport mux, TLS cert lifecycle, static asset serving"
+                },
+                {
+                  "path": "internal/agent",
+                  "role": "Claude API provider integration — stream-json chat, session history, token streaming for both Claude and OpenCode"
+                },
+                {
+                  "path": "internal/session",
+                  "role": "Session management and chat/shell task routing"
+                },
+                {
+                  "path": "internal/auth",
+                  "role": "JWT/OAuth2 authentication, API tokens, middleware"
+                },
+                {
+                  "path": "internal/permission",
+                  "role": "Permission hook manager — PreToolUse gate + binary compilation"
+                },
+                {
+                  "path": "internal/mcp",
+                  "role": "MCP protocol handling and integration"
+                },
+                {
+                  "path": "internal/workspace",
+                  "role": "Workspace state and file operations"
+                },
+                {
+                  "path": "web",
+                  "role": "React SPA frontend — chat bubbles, shell pane, three-tab UI, streaming indicators"
+                },
+                {
+                  "path": "internal/doctor",
+                  "role": "Preflight diagnostics — port binding, cert state, settings hooks validation"
+                }
+              ],
+              "name": "tether",
+              "positioning": "AI workspace daemon — single Go binary + React SPA over HTTP/3 (QUIC/WebTransport), driving Claude Code via streaming JSON (chat) and PTY (shell) with permission hooks.",
+              "tech_stack": [
+                "Go 1.25.0",
+                "HTTP/3 (QUIC + WebTransport)",
+                "React + TypeScript + Vite",
+                "MCP (Model Context Protocol)",
+                "PTY (pseudo-terminal)",
+                "JWT/OAuth2"
+              ],
+              "url": "git@github.com:piaobeizu/tether.git"
+            },
+            {
+              "change_scenarios": [
+                "reference legacy v1 UX behavior for v2 web implementation",
+                "migrate or retire Rust WebTransport command logic to v2 tether repo backend",
+                "extract device attachment patterns from v1 for v2 transport layer",
+                "archive or decommission native shell builds after v2 stable ships"
+              ],
+              "generated_at": "2026-05-28T01:53:40Z",
+              "generated_commit": "bf477af1aae6610ca0de415230ac4af7611b4205",
+              "github_owner_repo": "piaobeizu/tether-app",
+              "main_modules": [
+                {
+                  "path": "v0/src",
+                  "role": "React frontend with UI components, hooks, store, and transport layer"
+                },
+                {
+                  "path": "v0/src-tauri/src",
+                  "role": "Rust backend with WebTransport (wt/) and device attach (attach/) commands"
+                },
+                {
+                  "path": "v0/src-tauri/src/wt",
+                  "role": "WebTransport command implementation wrapping web-transport-quinn library"
+                },
+                {
+                  "path": "v0/src-tauri/src/attach",
+                  "role": "Device attachment logic for multi-target builds"
+                },
+                {
+                  "path": "v0/src/components",
+                  "role": "React component library (MobileMain, AppShell, etc.)"
+                },
+                {
+                  "path": "v0/scripts",
+                  "role": "Android build automation (android-build.sh, android-env.sh)"
+                },
+                {
+                  "path": "v0/src-tauri/capabilities",
+                  "role": "Tauri capability and permission definitions"
+                },
+                {
+                  "path": "v0/src-tauri/tests",
+                  "role": "Rust integration and unit tests"
+                }
+              ],
+              "name": "tether-app",
+              "positioning": "Archived Tauri 2 multi-target native app for tether (v1 deprecated by v2 web-first pivot)",
+              "tech_stack": [
+                "Tauri 2",
+                "React / TypeScript",
+                "Rust",
+                "Android / macOS / Linux / Windows",
+                "WebTransport (via web-transport-quinn)",
+                "Vite"
+              ],
+              "url": "git@github.com:piaobeizu/tether-app.git"
+            },
+            {
+              "change_scenarios": [
+                "update protocol specifications when new features or breaking changes are introduced",
+                "add deployment manifests and runbooks for new infrastructure or environment setups",
+                "record retrospectives and lessons learned after development phases",
+                "create architecture decision records for major design decisions"
+              ],
+              "generated_at": "2026-05-28T01:53:40Z",
+              "generated_commit": "98ae3a361e7c5c0fd575f50b51c2e1bd88b24f12",
+              "github_owner_repo": "piaobeizu/tether-doc",
+              "main_modules": [
+                {
+                  "path": "wiki/specs",
+                  "role": "Design specifications and architecture decisions for protocol versions, data formats, and integration flows"
+                },
+                {
+                  "path": "wiki/deployment",
+                  "role": "Deployment manifests, runbooks, and operational procedures for Tether infrastructure"
+                },
+                {
+                  "path": "wiki/lessons",
+                  "role": "Structured learnings and retrospectives extracted from development phases"
+                },
+                {
+                  "path": "decisions",
+                  "role": "Architecture decision records and design justifications"
+                },
+                {
+                  "path": "archive",
+                  "role": "Historical documentation and superseded design documents"
+                },
+                {
+                  "path": "wiki/upgrade-path.md",
+                  "role": "Version roadmap and upgrade path across Tether releases"
+                }
+              ],
+              "name": "tether-doc",
+              "positioning": "Design specifications, architecture decisions, deployment guides, and operational docs for the Tether protocol and implementation",
+              "tech_stack": [
+                "Markdown",
+                "JSON",
+                "Git"
+              ],
+              "url": "git@github.com:piaobeizu/tether-doc.git"
+            }
+          ],
+          "scenario": "git@github.com:GMISWE/polyforge-coding.git",
+          "updated_at": "2026-08-10T08:15:29.267241Z",
+          "visible": true,
+          "wi_seq": 90
+        }
+      ]
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 47910
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:description=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_list_projects"
+}

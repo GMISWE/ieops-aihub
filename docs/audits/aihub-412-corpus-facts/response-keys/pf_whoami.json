@@ -1,0 +1,20 @@
+{
+  "calls": 73,
+  "note": "Union over successful strict-JSON object results only. Prose (slim-render) results contribute no keys, so a tool whose results are all prose has an empty list -- that means 'not measurable this way', not 'returns nothing'.",
+  "observed_top_level_keys": [
+    "api_key_id",
+    "display_name",
+    "email",
+    "project_roles",
+    "projects",
+    "role",
+    "server_version",
+    "user_id",
+    "user_type"
+  ],
+  "purpose": "hop5 ratchet input: the union of top-level response keys any caller has ever been handed. A later projection may not drop a key on this list without a deliberate decision.",
+  "result_kinds": {
+    "json_object": 73
+  },
+  "tool": "pf_whoami"
+}

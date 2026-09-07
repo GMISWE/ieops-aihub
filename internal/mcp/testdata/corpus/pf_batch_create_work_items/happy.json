@@ -1,0 +1,189 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-06T15:50:40.251Z",
+    "transcript_id": "40d1a65e93f0"
+  },
+  "request": {
+    "items": [
+      {
+        "content": "<redacted-text sha256=e41f11731cd7 len=1642>",
+        "goal": "<redacted-text sha256=7cc77e4883b9 len=79>",
+        "labels": [
+          "ieops-ctlchain",
+          "brslet",
+          "gpu-topology",
+          "fail-closed",
+          "from-1009"
+        ],
+        "priority": "high",
+        "requires_human_session": true,
+        "wi_type": "fix_bug"
+      },
+      {
+        "content": "<redacted-text sha256=3fe0e81624dd len=1222>",
+        "goal": "<redacted-text sha256=74c7ddc0f422 len=74>",
+        "labels": [
+          "ieops-titan",
+          "ieops-ctlchain",
+          "agent",
+          "robustness",
+          "from-1009"
+        ],
+        "priority": "normal",
+        "requires_human_session": true,
+        "wi_type": "fix_bug"
+      },
+      {
+        "content": "<redacted-text sha256=370893a08a3e len=917>",
+        "goal": "<redacted-text sha256=cac21b9c8ad6 len=51>",
+        "labels": [
+          "ieops-ctlchain",
+          "gpu-topology",
+          "performance",
+          "from-1009"
+        ],
+        "priority": "low",
+        "requires_human_session": true,
+        "wi_type": "chore"
+      }
+    ],
+    "project": "ieops"
+  },
+  "response": {
+    "body": {
+      "created": [
+        {
+          "attrs": {},
+          "closed_at": null,
+          "content_len": 2802,
+          "created_at": "2026-09-06T15:50:40.336148Z",
+          "current_attempt_epoch": 0,
+          "current_attempt_id": null,
+          "declared_resources": [],
+          "external_share_key": null,
+          "external_share_type": null,
+          "goal": "<redacted-text sha256=7cc77e4883b9 len=79>",
+          "id": "wi_G7RwjDgK",
+          "labels": [
+            "ieops-ctlchain",
+            "brslet",
+            "gpu-topology",
+            "fail-closed",
+            "from-1009"
+          ],
+          "milestone": null,
+          "parent_work_item_id": null,
+          "priority": "high",
+          "project": "ieops",
+          "reporter_display": "xiaokang.w",
+          "reporter_user_id": "u_5dFjeaMZ",
+          "requires_human_session": true,
+          "resources_version": 0,
+          "scenario": "coding",
+          "seq": 1021,
+          "slug": "ieops#1021",
+          "source": "human",
+          "status": "queued",
+          "updated_at": "2026-09-06T15:50:40.336148Z",
+          "wi_type": "fix_bug"
+        },
+        {
+          "attrs": {},
+          "closed_at": null,
+          "content_len": 1915,
+          "created_at": "2026-09-06T15:50:40.371347Z",
+          "current_attempt_epoch": 0,
+          "current_attempt_id": null,
+          "declared_resources": [],
+          "external_share_key": null,
+          "external_share_type": null,
+          "goal": "<redacted-text sha256=74c7ddc0f422 len=74>",
+          "id": "wi_GXIpnplB",
+          "labels": [
+            "ieops-titan",
+            "ieops-ctlchain",
+            "agent",
+            "robustness",
+            "from-1009"
+          ],
+          "milestone": null,
+          "parent_work_item_id": null,
+          "priority": "normal",
+          "project": "ieops",
+          "reporter_display": "xiaokang.w",
+          "reporter_user_id": "u_5dFjeaMZ",
+          "requires_human_session": true,
+          "resources_version": 0,
+          "scenario": "coding",
+          "seq": 1022,
+          "slug": "ieops#1022",
+          "source": "human",
+          "status": "queued",
+          "updated_at": "2026-09-06T15:50:40.371347Z",
+          "wi_type": "fix_bug"
+        },
+        {
+          "attrs": {},
+          "closed_at": null,
+          "content_len": 1475,
+          "created_at": "2026-09-06T15:50:40.402765Z",
+          "current_attempt_epoch": 0,
+          "current_attempt_id": null,
+          "declared_resources": [],
+          "external_share_key": null,
+          "external_share_type": null,
+          "goal": "<redacted-text sha256=cac21b9c8ad6 len=51>",
+          "id": "wi_RrEQroX4",
+          "labels": [
+            "ieops-ctlchain",
+            "gpu-topology",
+            "performance",
+            "from-1009"
+          ],
+          "milestone": null,
+          "parent_work_item_id": null,
+          "priority": "low",
+          "project": "ieops",
+          "reporter_display": "xiaokang.w",
+          "reporter_user_id": "u_5dFjeaMZ",
+          "requires_human_session": true,
+          "resources_version": 0,
+          "scenario": "coding",
+          "seq": 1023,
+          "slug": "ieops#1023",
+          "source": "human",
+          "status": "queued",
+          "updated_at": "2026-09-06T15:50:40.402765Z",
+          "wi_type": "chore"
+        }
+      ],
+      "created_count": 3,
+      "failed": [],
+      "failed_count": 0,
+      "ok": true
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 2280
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext",
+      "field:goal=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_batch_create_work_items"
+}

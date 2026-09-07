@@ -1,0 +1,360 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-06T13:09:54.004Z",
+    "transcript_id": "40d1a65e93f0"
+  },
+  "request": {
+    "idempotency_key": "01JX1009PHASEB2026090601AAAAAAAA",
+    "mode": "fresh",
+    "work_item_id": "ieops#1009"
+  },
+  "response": {
+    "body": {
+      "acquired_locks": [
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-core:api/v1alpha1/vnode_types.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-core:api/v1alpha1/vnode_types_test.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-core:api/v1alpha1/zz_generated.deepcopy.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-core:config/crd/bases/ieops.gmicloud.ai_vnodes.yaml",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-core:docs/resplit/golden.txt",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-core:docs/resplit/core-decisions.json",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:cmd/gpu-topo/main.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:cmd/gpu-topo/app<HOME>.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:cmd/gpu-topo/app/collect.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:cmd/gpu-topo/app/collect_nocgo.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/gputopo/contract.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/gputopo/contract_test.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:hack/build.sh",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:hack/util.sh",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:hack/local-run.sh",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:hack/tools/bundlepush/external_test.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:Makefile",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:README.md",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:.golangci.yml",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:.github/workflows/go.yml",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:.github/workflows/images.yml",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:deploy/images/brslet-bundle/manifest.json",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/launcher/bundlecontract/shipped_manifest_test.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/brslet/collectors/collector.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/brslet/collectors/nvlink_collector_linux.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/brslet/collectors/nvlink_collector_other.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/brslet/collectors/nvlink_collector_linux_test.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/brslet/collectors/gpu_collector_linux_nocgo.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/brslet/collectors/gpu_collector_linux_nocgo_test.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/types/metrics.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/brslet/crons/nfd.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/node/business/provider.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/node/business/provider/label.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/agent/crons/sync_vnode.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:pkg/agent/crons/constants.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:go.mod",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-ctlchain:go.sum",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-bizplane:go.mod",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-bizplane:go.sum",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-bizplane:pkg/bff/business/gpu_datasource.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-bizplane:pkg/controller/gputable/page_table.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-bizplane:internal/algorithm/types.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-bizplane:internal/algorithm/filter.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-bizplane:internal/algorithm/filter_test.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-bizplane:internal/algorithm/scorer.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-bizplane:internal/algorithm/scorer_test.go",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-bizplane:config/crd/bases/ieops.gmicloud.ai_vnodes.yaml",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-karmada-all-in-one:charts/ieops-v2-crds/templates/vnodes.yaml",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-karmada-all-in-one:Chart.yaml",
+          "resource_type": "file_scope"
+        },
+        {
+          "claim_epoch": 5,
+          "owner_attempt_id": "ra_fXcZcaVj",
+          "resource_key": "ieops:ieops-karmada-all-in-one:charts/agent/templates/configmap.yaml",
+          "resource_type": "file_scope"
+        }
+      ],
+      "attempt_id": "ra_fXcZcaVj",
+      "claim_epoch": 5,
+      "current_attempt_epoch": 5,
+      "ok": true,
+      "project": "ieops",
+      "slug": "ieops#1009",
+      "worktrees": {
+        "ieops-bizplane": "<WORKSPACE>/pf.ieops-1009/ieops-bizplane",
+        "ieops-clouds": "<WORKSPACE>/pf.ieops-1009/ieops-clouds",
+        "ieops-core": "<WORKSPACE>/pf.ieops-1009/ieops-core",
+        "ieops-ctlchain": "<WORKSPACE>/pf.ieops-1009/ieops-ctlchain",
+        "ieops-datachain": "<WORKSPACE>/pf.ieops-1009/ieops-datachain",
+        "ieops-doc": "<WORKSPACE>/pf.ieops-1009/ieops-doc",
+        "ieops-env": "<WORKSPACE>/pf.ieops-1009/ieops-env",
+        "ieops-karmada-all-in-one": "<WORKSPACE>/pf.ieops-1009/ieops-karmada-all-in-one",
+        "ieops-kube": "<WORKSPACE>/pf.ieops-1009/ieops-kube",
+        "ieops-nodeautoscaler": "<WORKSPACE>/pf.ieops-1009/ieops-nodeautoscaler",
+        "ieops-reverst": "<WORKSPACE>/pf.ieops-1009/ieops-reverst",
+        "ieops-titan": "<WORKSPACE>/pf.ieops-1009/ieops-titan",
+        "ieops-utils": "<WORKSPACE>/pf.ieops-1009/ieops-utils",
+        "ieops-v2": "<WORKSPACE>/pf.ieops-1009/ieops-v2",
+        "proxy-server": "<WORKSPACE>/pf.ieops-1009/proxy-server"
+      }
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 8631
+  },
+  "role": "edge",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_claim_work_item"
+}

@@ -1,0 +1,37 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.237",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-08-21T05:59:32.317Z",
+    "transcript_id": "58c9181ccc1c"
+  },
+  "request": {
+    "work_item_id": "wi_LVkrvLSv"
+  },
+  "response": {
+    "body": {
+      "current_step_status": "idle",
+      "version": 0,
+      "wi_type": "chore",
+      "work_item_id": "wi_LVkrvLSv"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 89
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_get_step"
+}

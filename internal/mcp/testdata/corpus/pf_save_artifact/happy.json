@@ -1,0 +1,75 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-05T15:45:50.050Z",
+    "transcript_id": "606b68f0ab29"
+  },
+  "request": {
+    "path": "<WORKSPACE>/pf.aihub-367/aihub/.tmp-367/artifact.md",
+    "structured_payload": {
+      "corrections_applied": [
+        "scoped the retrieved-by-wrong-query claim from 'every' to 11 of 12",
+        "flagged that recall@5 is not an exact reproduction of production Memory-First (fact.* included)",
+        "removed the unsupported 'caused no observable disturbance' claim"
+      ],
+      "emb_model": "Qwen/Qwen3-Embedding-0.6B",
+      "frozen_queryset_commit": "ce13215",
+      "memory_corpus_all_types_embedded": 161,
+      "memory_corpus_candidates": 150,
+      "n_controls": 2,
+      "n_queries": 42,
+      "production_shape_chance_at_10": 0.141,
+      "production_shape_recall_at_1": 0,
+      "production_shape_recall_at_10": 0.333,
+      "production_shape_recall_at_5": 0.111,
+      "recall_at_1": 0,
+      "recall_at_10": 0.19,
+      "recall_at_10_ci95": [
+        0.1,
+        0.333
+      ],
+      "recall_at_5": 0.095,
+      "unembedded_rows": 0,
+      "verdict": "supports chunking but not sufficient alone; add lexical channel first, then re-check model, then chunk",
+      "wi_ranked_candidates": 367,
+      "wi_retrieval_recall_at_10": 0
+    },
+    "supersedes_memory_id": "mem_cYQI8ZH7",
+    "type": "methodology.execute",
+    "visibility": "project",
+    "work_item_id": "wi_48coLbQ4"
+  },
+  "response": {
+    "body": {
+      "activation_count": 0,
+      "base_strength": 3,
+      "created_at": "2026-09-05T15:45:50.119154Z",
+      "id": "mem_c3rUxdKi",
+      "is_new": true,
+      "memory_id": "mem_c3rUxdKi",
+      "project": "aihub",
+      "stability_days": 36500,
+      "type": "methodology.execute",
+      "visibility": "project"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 237
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_save_artifact"
+}

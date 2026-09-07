@@ -1,0 +1,67 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": true,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-06T00:59:15.719Z",
+    "transcript_id": "9d5abfe728cf"
+  },
+  "request": {
+    "content": "<redacted-text sha256=41b3265a6d83 len=2347>",
+    "declared_resources": [
+      {
+        "intent": "write",
+        "repo": "aihub",
+        "type": "path",
+        "uri": "file:internal/domain/commit_locks_db_test.go"
+      },
+      {
+        "intent": "write",
+        "repo": "aihub",
+        "type": "path",
+        "uri": "file:internal/citest/dbtestcov/gated_tests.txt"
+      },
+      {
+        "intent": "write",
+        "repo": "aihub",
+        "type": "path",
+        "uri": "file:.github/workflows/ci.yml"
+      }
+    ],
+    "goal": "<redacted-text sha256=7565804f827d len=144>",
+    "labels": [
+      "polyforge",
+      "locks",
+      "ci",
+      "blocked-on-lock"
+    ],
+    "priority": "normal",
+    "project": "aihub",
+    "requires_human_session": false,
+    "source": "agent",
+    "wi_type": "chore"
+  },
+  "response": {
+    "error_code": "INTERNAL_ERROR",
+    "is_error": true,
+    "kind": "prose",
+    "raw_length_bytes": 163,
+    "text": "aihub 500 INTERNAL_ERROR: failed to insert work_item: ERROR: new row for relation \"work_items\" violates check constraint \"work_items_source_check\" (SQLSTATE 23514)"
+  },
+  "role": "error",
+  "sanitization": {
+    "field_rules_applied": [
+      "field:content=freetext",
+      "field:goal=freetext"
+    ],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_create_work_item"
+}

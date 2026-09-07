@@ -1,0 +1,56 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-06T14:10:17.979Z",
+    "transcript_id": "40d1a65e93f0"
+  },
+  "request": {
+    "message": "ieops#1009: feature(topology): carry per-GPU NVLink and NUMA onto the VNode\n\nPhase B, the transport hop. Phase A made brslet collect a per-card peer graph\nand NUMA node through a gpu-topo child process, but nothing carried it further:\nstatus.gpus[] was still N copies of GPU 0, so the three fields ieops-core gained\nhad no writer at all.\n\nvk-node now projects the topology half of the static GPU list<truncated 2443 chars>",
+    "paths": [
+      "pkg/agent/crons/sync_vnode.go",
+      "pkg/agent/crons/sync_vnode_topology_test.go",
+      "pkg/gputopo/contract_test.go",
+      "pkg/gputopo/nodeannotation.go",
+      "pkg/node/business/provider.go",
+      "pkg/node/business/provider_gpu_topology_test.go",
+      "pkg/types/metrics_topology_wire_test.go"
+    ],
+    "repo": "ieops-ctlchain",
+    "work_item_id": "wi_Del9u4H1",
+    "workspace_root": "<WORKSPACE>"
+  },
+  "response": {
+    "body": {
+      "files": [
+        "pkg/agent/crons/sync_vnode.go",
+        "pkg/agent/crons/sync_vnode_topology_test.go",
+        "pkg/gputopo/contract_test.go",
+        "pkg/gputopo/nodeannotation.go",
+        "pkg/node/business/provider.go",
+        "pkg/node/business/provider_gpu_topology_test.go",
+        "pkg/types/metrics_topology_wire_test.go"
+      ],
+      "repo": "ieops-ctlchain",
+      "sha": "f50d5a4b2a6e052a5d53f1058f40db3270378580"
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 349
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_commit"
+}

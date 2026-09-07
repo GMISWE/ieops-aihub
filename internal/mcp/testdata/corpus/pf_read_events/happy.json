@@ -1,0 +1,850 @@
+{
+  "provenance": {
+    "claude_code_version": "2.1.258",
+    "is_subagent_transcript": false,
+    "note": "Captured from a real call. The transcript is identified by a hash of its path: the path itself names the home directory and the session cwd.",
+    "observed_at": "2026-09-04T15:18:41.848Z",
+    "transcript_id": "d297e63472ef"
+  },
+  "request": {
+    "limit": "200",
+    "project": "aihub",
+    "since": "2026-01-01T00:00:00Z",
+    "types": [
+      "wi_classification_resolved"
+    ]
+  },
+  "response": {
+    "body": {
+      "events": [
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-09-02T10:38:42.320035Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_rsc1SKQn",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "chore"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_EzyNxEOS",
+          "work_item_slug": "aihub#348"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-09-02T10:38:30.838763Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_Isf00cWS",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_giHzhIsM",
+          "work_item_slug": "aihub#347"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-09-02T10:31:22.686305Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_1qyhaWbA",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_xvr7LPt8",
+          "work_item_slug": "aihub#346"
+        },
+        {
+          "actor_display": "dahe.p",
+          "actor_user_id": "u_q40MByqn",
+          "created_at": "2026-08-31T03:49:31.811508Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_ImhkQl3F",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_jXs9VhoG",
+          "work_item_slug": "aihub#298"
+        },
+        {
+          "actor_display": "dahe.p",
+          "actor_user_id": "u_q40MByqn",
+          "created_at": "2026-08-28T07:54:00.406985Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_XWw0L5tI",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_7kzY99cB",
+          "work_item_slug": "aihub#273"
+        },
+        {
+          "actor_display": "dahe.p",
+          "actor_user_id": "u_q40MByqn",
+          "created_at": "2026-08-18T02:05:21.178776Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_M5YOYDH9",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_NyxxgLLw",
+          "work_item_slug": "aihub#251"
+        },
+        {
+          "actor_display": "dahe.p",
+          "actor_user_id": "u_q40MByqn",
+          "created_at": "2026-08-17T06:06:16.129685Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_LbynAUb8",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_ZeQwFPvB",
+          "work_item_slug": "aihub#249"
+        },
+        {
+          "actor_display": "dahe.p",
+          "actor_user_id": "u_q40MByqn",
+          "created_at": "2026-08-13T06:31:17.474268Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_oEZnDNFg",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_m6wfjR3U",
+          "work_item_slug": "aihub#226"
+        },
+        {
+          "actor_display": "dahe.p",
+          "actor_user_id": "u_q40MByqn",
+          "created_at": "2026-08-13T05:01:53.29735Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_ncKuMLJ8",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_1fKXISbN",
+          "work_item_slug": "aihub#228"
+        },
+        {
+          "actor_display": "dahe.p",
+          "actor_user_id": "u_q40MByqn",
+          "created_at": "2026-08-11T06:02:41.14634Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_nYI64obq",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_uQoYXnVm",
+          "work_item_slug": "aihub#233"
+        },
+        {
+          "actor_display": "dahe.p",
+          "actor_user_id": "u_q40MByqn",
+          "created_at": "2026-08-10T05:45:44.528699Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_mK257bm7",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_JtZzxvFU",
+          "work_item_slug": "aihub#242"
+        },
+        {
+          "actor_display": "dahe.p",
+          "actor_user_id": "u_q40MByqn",
+          "created_at": "2026-08-06T08:17:55.525943Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_AMxD927z",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_RVfgEGWu",
+          "work_item_slug": "aihub#236"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-07-09T02:47:26.969725Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_lariJNOm",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_f00C3fIq",
+          "work_item_slug": "aihub#223"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-07-08T03:20:51.532404Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_GcaWy7jr",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_hYXDGwfN",
+          "work_item_slug": "aihub#217"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-07-07T07:17:02.985253Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_co1EqbYS",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "chore"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_tCVetDak",
+          "work_item_slug": "aihub#212"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-07-07T03:24:16.171301Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_JD3bwJQf",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_ymODDXYc",
+          "work_item_slug": "aihub#211"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-07-06T15:01:49.460987Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_dfFkNa9Z",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_BJG6975L",
+          "work_item_slug": "aihub#210"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-07-06T14:20:29.720108Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_Np9MMCyR",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_8XiPOrLZ",
+          "work_item_slug": "aihub#209"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-07-06T10:44:17.696544Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_QCZWSvFX",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_nsqW1qhY",
+          "work_item_slug": "aihub#208"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-07-06T08:55:56.338329Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_QpcJzSXw",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_l4M9cFKM",
+          "work_item_slug": "aihub#207"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-07-06T07:50:29.896396Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_OWRG8B56",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_mqQJDisB",
+          "work_item_slug": "aihub#206"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-07-06T06:54:55.975338Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_H3VGuM68",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_eHoLOurp",
+          "work_item_slug": "aihub#205"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-07-06T05:50:34.34039Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_QKFTy5sw",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_6S80lfuh",
+          "work_item_slug": "aihub#204"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-25T08:32:37.055873Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_ryZ2VrMd",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_f9yofWi0",
+          "work_item_slug": "aihub#197"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-25T08:09:01.036164Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_h5rSWm3h",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "chore"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_bRpaXDyb",
+          "work_item_slug": "aihub#196"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-25T05:40:25.328529Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_VOrjyIRH",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "chore"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_MT99Dz0n",
+          "work_item_slug": "aihub#195"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-25T03:17:50.147422Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_6GpVYAv5",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "chore"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_gq79Gida",
+          "work_item_slug": "aihub#194"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-23T03:00:40.571339Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_tiSgLvvm",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_W8vOvRB1",
+          "work_item_slug": "aihub#192"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-17T02:04:55.568343Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_OH3qPH8u",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "chore"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_Vou0xYT2",
+          "work_item_slug": "aihub#191"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-16T07:59:37.871257Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_DzbsxwpS",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_CCfy82h3",
+          "work_item_slug": "aihub#190"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-06-10T10:20:33.532756Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_szQk0c0x",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_BDy9999r",
+          "work_item_slug": "aihub#60"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-10T08:35:32.189997Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_MsryWDjY",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "chore"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_zy0Rz19c",
+          "work_item_slug": "aihub#173"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-08T15:12:08.400882Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_DHFHcajt",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_WTK5Riwl",
+          "work_item_slug": "aihub#168"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-08T08:13:50.108346Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_vors5r3N",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_NZmxo3RJ",
+          "work_item_slug": "aihub#166"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-08T01:43:15.702023Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_6reHcVUL",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_lkD1wVMr",
+          "work_item_slug": "aihub#164"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-06-06T16:07:38.861408Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_MvpSOioC",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_WZfZlzkh",
+          "work_item_slug": "aihub#160"
+        },
+        {
+          "actor_display": "xiaokang.w",
+          "actor_user_id": "u_5dFjeaMZ",
+          "created_at": "2026-06-06T13:36:10.613078Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_DysBdtr2",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_rNd4o81T",
+          "work_item_slug": "aihub#159"
+        },
+        {
+          "actor_display": "xqr",
+          "actor_user_id": "u_G57I3rLk",
+          "created_at": "2026-06-05T04:46:05.207779Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_sXvByn50",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_QbenKZ9w",
+          "work_item_slug": "aihub#61"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-04T14:21:43.767909Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_tdwPpzKP",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_cPZTAv2R",
+          "work_item_slug": "aihub#138"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-04T13:23:19.437159Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_5GEVCjln",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_6D3WDfnL",
+          "work_item_slug": "aihub#140"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-04T12:27:53.477088Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_eiYh6UjK",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_Kz0JwOKw",
+          "work_item_slug": "aihub#137"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-04T09:09:28.534422Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_3LJzTkik",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_MGC8Pzal",
+          "work_item_slug": "aihub#141"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-04T03:24:12.377806Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_Y4Rse29D",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "chore"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_zECDVyAc",
+          "work_item_slug": "aihub#139"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-04T02:37:41.800637Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_un9zTvhN",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "chore"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_6TH6CWY1",
+          "work_item_slug": "aihub#136"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-03T09:33:27.219315Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_OHzyCiXA",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "chore"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_mV8h3tu1",
+          "work_item_slug": "aihub#134"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-03T07:21:31.166989Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_ghIl4TCr",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_55Yb0StN",
+          "work_item_slug": "aihub#128"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-03T03:34:29.109048Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_KjDxZz0D",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_7KOwBpOF",
+          "work_item_slug": "aihub#127"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-02T08:46:32.289739Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_b5VsNWYl",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_nf4zuooL",
+          "work_item_slug": "aihub#124"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-02T03:23:15.074531Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_b2AAXQKe",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_ORYSmkpu",
+          "work_item_slug": "aihub#120"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-02T03:17:51.743815Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_UOsfmybG",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_dSk8jk24",
+          "work_item_slug": "aihub#119"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-06-02T03:17:39.814072Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_ceDr9P0B",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_t3O2jQa6",
+          "work_item_slug": "aihub#117"
+        },
+        {
+          "actor_display": "xqr",
+          "actor_user_id": "u_G57I3rLk",
+          "created_at": "2026-05-28T09:33:25.035826Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_UyNE7Hfx",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_LtqGhFJz",
+          "work_item_slug": "aihub#87"
+        },
+        {
+          "actor_display": "monte",
+          "actor_user_id": "u_g1bnc0Lj",
+          "created_at": "2026-05-27T08:52:10.734514Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_f7M3XnZ1",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "feature"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_yebEzTj6",
+          "work_item_slug": "aihub#73"
+        },
+        {
+          "actor_display": "xqr",
+          "actor_user_id": "u_G57I3rLk",
+          "created_at": "2026-05-25T08:58:44.932014Z",
+          "event_type": "wi_classification_resolved",
+          "id": "evt_szjxfT2P",
+          "payload": {
+            "requires_human_session": true,
+            "wi_type": "fix_bug"
+          },
+          "pinned": false,
+          "project": "aihub",
+          "work_item_id": "wi_jyGSGlSe",
+          "work_item_slug": "aihub#44"
+        }
+      ]
+    },
+    "error_code": null,
+    "is_error": false,
+    "kind": "json_object",
+    "raw_length_bytes": 16915
+  },
+  "role": "happy",
+  "sanitization": {
+    "field_rules_applied": [],
+    "gate": "internal/mcp/corpus_fixture_sanitize_test.go re-scans this tree and fails on any secret shape.",
+    "textual_rules": [
+      "hex64",
+      "sk-*",
+      "bearer",
+      "uuid",
+      "machine paths"
+    ]
+  },
+  "tool": "pf_read_events"
+}

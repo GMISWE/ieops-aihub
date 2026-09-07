@@ -232,13 +232,23 @@ func newWorkItemID() string {
 //     the other way: handleCreateDependency now answers the shared 404
 //     (errNotVisible) instead of 403. Copying a 403 back HERE would still
 //     reinstate the oracle. Do not.
+//
 //   - Its stated reason for deferring was FALSE, not merely narrow. "Reachable
 //     only with a canonical id, so it is not enumerable" — but the deferred path
-//     resolves through GetWorkItem, whose WHERE clause is `id = $1 OR slug = $1`,
-//     so a slug worked there exactly as it works here. The leak this comment
-//     called unenumerable was enumerable the whole time, by the same
-//     <project>#<seq> walk. A deferral argument is a claim like any other and
-//     wants the same measurement as the fix it defers.
+//     resolves through GetWorkItem, which accepts a slug, so a slug worked there
+//     exactly as it works here. The leak this comment called unenumerable was
+//     enumerable the whole time, by the same <project>#<seq> walk. A deferral
+//     argument is a claim like any other and wants the same measurement as the
+//     fix it defers.
+//
+//     ⚠️ This bullet used to justify itself with "whose WHERE clause is
+//     `id = $1 OR slug = $1`", and that was not true when it was written
+//     (aihub#402): GetWorkItem dispatched on a `wi_` prefix and queried ONE
+//     column. The conclusion held anyway — the else branch matched on slug, so a
+//     slug did resolve — but the mechanism cited for it did not exist, which is
+//     the failure mode this very bullet is about, one paragraph up, in the same
+//     comment. aihub#402 made the clause true; the wording no longer leans on
+//     it, so the two cannot come apart again.
 //
 // "Changing an authorization response shape is not this work item's business" was
 // fair — it was aihub#377's business.
@@ -866,27 +876,30 @@ func GetWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string) (*Wor
 	var wi WorkItem
 	var labelsRaw []string
 
-	var q string
-	var arg string
-	if strings.HasPrefix(idOrSlug, "wi_") {
-		q = `SELECT id, seq, slug, project, scenario, goal, source, wi_type, priority,
-			       requires_human_session, milestone, labels, status,
-			       declared_resources, resources_version, external_share_type, external_share_key,
-			       reporter_user_id, reporter_display, current_attempt_id, current_attempt_epoch,
-			       parent_work_item_id, attrs, content, created_at, updated_at, closed_at
-			FROM work_items WHERE id = $1`
-		arg = idOrSlug
-	} else {
-		q = `SELECT id, seq, slug, project, scenario, goal, source, wi_type, priority,
-			       requires_human_session, milestone, labels, status,
-			       declared_resources, resources_version, external_share_type, external_share_key,
-			       reporter_user_id, reporter_display, current_attempt_id, current_attempt_epoch,
-			       parent_work_item_id, attrs, content, created_at, updated_at, closed_at
-			FROM work_items WHERE slug = $1`
-		arg = idOrSlug
-	}
+	// aihub#402: `id = $1 OR slug = $1`, the one id-or-slug rule this repo uses.
+	//
+	// This used to dispatch on a `wi_` prefix — id column if present, slug column
+	// otherwise — which is a DIFFERENT rule from every sibling resolver
+	// (resolveBlockedByRef, ResolveVisibleWorkItemRef, buildListWorkItemsWhere all
+	// take the union) and it silently lost a real class of input. Project names
+	// are validated by `^[a-z][a-z0-9_-]{0,39}$`, which does not reserve `wi_`,
+	// and slug is `project || '#' || seq` (migration 0002), so a project named
+	// `wi_lab` produces slugs `wi_lab#1` that the prefix branch looked for in the
+	// ID column and never found: a 404 for a work item that exists, from every
+	// caller of this function, while list / blocked_by / claim resolved it fine.
+	//
+	// The union cannot match two rows, which is why it is safe rather than merely
+	// broader: `id` is the PRIMARY KEY, `idx_wi_slug` is UNIQUE on slug, and a
+	// slug always contains '#' while an id is `wi_` + 8 base62 chars and never
+	// can — so for any input at most ONE of the two predicates is satisfiable.
+	const q = `SELECT id, seq, slug, project, scenario, goal, source, wi_type, priority,
+		       requires_human_session, milestone, labels, status,
+		       declared_resources, resources_version, external_share_type, external_share_key,
+		       reporter_user_id, reporter_display, current_attempt_id, current_attempt_epoch,
+		       parent_work_item_id, attrs, content, created_at, updated_at, closed_at
+		FROM work_items WHERE id = $1 OR slug = $1`
 
-	err := pool.QueryRow(ctx, q, arg).Scan(
+	err := pool.QueryRow(ctx, q, idOrSlug).Scan(
 		&wi.ID, &wi.Seq, &wi.Slug, &wi.Project, &wi.Scenario, &wi.Goal, &wi.Source,
 		&wi.WIType, &wi.Priority, &wi.RequiresHumanSession, &wi.Milestone, &labelsRaw,
 		&wi.Status, &wi.DeclaredResources, &wi.ResourcesVersion,

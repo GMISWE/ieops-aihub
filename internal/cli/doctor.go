@@ -879,7 +879,13 @@ func worktreeULID8(name string) string {
 // simply false: the tail in the directory name IS the work item id minus its
 // `wi_` prefix (the same value this file already indexes as `activeIDs[id[3:]]`),
 // and GET /v1/work_items/:id resolves the `wi_` spelling through
-// domain.FormatIDOrSlug. Verified live: wi_VGg1VR2x -> aihub#307, running.
+// domain.GetWorkItem, whose WHERE clause is `id = $1 OR slug = $1`.
+// Verified live: wi_VGg1VR2x -> aihub#307, running.
+//
+// It said "through domain.FormatIDOrSlug" until aihub#402. That function was
+// never on this path — it had no production callers at all — and it is now
+// deleted, so the pointer named a helper that neither did the work nor exists.
+// The resolution has always been GetWorkItem's own query.
 //
 // So a running `wi_aBcD1234` with worktree `pf.aBcD1234` used to be deletable on
 // any listing gap — the exact class of failure the per-item re-check exists for —

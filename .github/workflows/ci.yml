@@ -1425,6 +1425,43 @@ jobs:
           ! grep -q -- '--- SKIP' ft_lock_steal.log \
             || { echo "::error::an aihub#393 arm SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#402: GetWorkItem chose ONE column by testing a `wi_` prefix — id if
+      # present, slug otherwise — unlike every sibling resolver, which takes the
+      # union `id = $1 OR slug = $1`. Project names are validated by
+      # ^[a-z][a-z0-9_-]{0,39}$, which does not reserve `wi_`, and slug is
+      # project||'#'||seq, so a project named `wi_lab` produced slugs `wi_lab#1`
+      # that were looked up in the id column and never found: a 404 for a work
+      # item that exists, from every caller of GetWorkItem.
+      #
+      # The three control arms are not padding. The fix WIDENS the WHERE clause
+      # from one column to two, and the failure mode of a widening is matching
+      # what it must not — so `control_an_absent_ref_is_still_not_found` is what
+      # separates "resolves by id or slug" from "resolves anything at all".
+      # Measured 2026-09-07: a mutant replacing the clause with
+      # `$1::text IS NOT NULL` reddens exactly that arm and the main one, while
+      # the two positive controls stay green.
+      #
+      # The DB-free half of this policy (no `wi_` prefix dispatch anywhere in
+      # non-test Go source, plus a self-test proving that detector still fires)
+      # lives in internal/domain/work_item_ref_policy_test.go and runs in the
+      # "Unit tests" step above, so it needs no step here.
+      - name: aihub#402 work-item id-or-slug resolution DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestGetWorkItemResolvesIDOrSlug$' -count=1 -v 2>&1 | tee wi_ref_resolution.log
+          grep -q -- '--- PASS: TestGetWorkItemResolvesIDOrSlug/slug_of_a_wi_prefixed_project_resolves' wi_ref_resolution.log \
+            || { echo "::error::the aihub#402 regression arm did not run; a slug whose project is named wi_* is again looked up in the id column and 404s"; exit 1; }
+          for want in 'TestGetWorkItemResolvesIDOrSlug/control_canonical_id_still_resolves' \
+                      'TestGetWorkItemResolvesIDOrSlug/control_slug_of_an_ordinary_project_still_resolves' \
+                      'TestGetWorkItemResolvesIDOrSlug/control_an_absent_ref_is_still_not_found'; do
+            grep -q -- "--- PASS: $want" wi_ref_resolution.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); without the controls the regression arm is also satisfied by a resolver that matches every row"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' wi_ref_resolution.log \
+            || { echo "::error::an aihub#402 arm SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#237: the launcher's update check is shell, so `go test` cannot see
       # it — a silent-pin regression there would ship green. This suite is
       # hermetic (no docker, no network: it stubs gh/curl/binary and drives

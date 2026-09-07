@@ -272,3 +272,153 @@ Name only, per the wi's ≤40-row cap (34 used). None of these is a non-finding;
   `#389` phase 1 as "landed or landing" and `#396` as "in flight"; both are `status:queued`
   with `current_attempt_id:null`. The rows record the queued status, because a decision nobody
   is executing and a decision that has shipped are not the same input to the owner.
+
+---
+
+## 6. Adjudication (owner, 2026-09-07)
+
+**Authority.** The owner (xiaokang.w) adjudicated this table in-session on 2026-09-07 and
+delegated the write-up (「按照你的建议继续做」). Unless a row below says otherwise, the ruling
+**is** that row's own *Recommended ruling* cell, accepted as written. Four rows carry an
+**explicit owner position that overrides the recommendation** and are marked 🔴 below:
+**T1-3**, **T1-7**, and the de-locking group **T1-8 / T2-12 / T2-15** (plus **T2-4**), whose
+authority is `aihub#416`'s `attrs.owner_ruling_2026_09_07`.
+
+**🔴 Every accepted ruling is written back TWICE**, per this wi's
+`attrs.adjudication_writeback_requirement_2026_09_07` — an owner-directed, non-negotiable
+requirement added after the `#416` lease incident, where a v1.21 design decision was
+unrecallable by both `pf_recall` and wi semantic search and the main thread consequently
+re-proposed the thing that had been removed:
+
+1. **here**, as this section, and
+2. **as a `pf_remember` entry** — 13 memories, one per tier-1 row, plus 4 grouped tier-2
+   memories. Their ids are in §6.3. A ruling that exists only in a document nobody re-reads
+   is the same failure the requirement was written to stop.
+
+**Disposition vocabulary.**
+
+| tag | meaning |
+|---|---|
+| `rule-recorded` | the ruling is a policy statement; it lives in the memory named in §6.3 and needs no work item |
+| `wi-filed:aihub#N` | the ruling implies a behaviour change; filed silently, with this row's evidence carried verbatim into the wi body |
+| `superseded-by:aihub#416` | the question is dissolved rather than answered by the owner's de-locking ruling |
+| `already-landed:aihub#N` | the ruling was executed between this table being written and being adjudicated |
+
+⚠️ **The "Decided?" column of §1 and §2 has rotted since it was written, and that is the
+expected direction.** Seven wi's the rows describe as `queued` or `running` have since
+**wrapped**: `#389`, `#395`, `#396`, `#398`, `#399`, `#408`, `#410`. And `#418` — which did not
+exist when T1-5 was written — converted the last keep-list. The rows are left untouched because
+they are the record of *what was reviewed*; this section is the record of *what was decided*.
+
+### 6.1 Tier 1
+
+| row | ruling | disposition |
+|---|---|---|
+| **T1-1** | Ship `#389` phase 1 as decided; the phase-2 trigger becomes a checked-in gate plus a re-runnable measurement, not a number in a wi's attrs. | `wi-filed:aihub#431` |
+| **T1-2** | Rules 1 and 2 stand; widen the AST gate to hop 2 and give `ReadyQueue` the disclosure field — the gate is package-scoped while the policy is repo-scoped, so widen the gate, not the policy. | `wi-filed:aihub#432` |
+| **T1-3** | 🔴 **Owner:** publish **1-5** — the DB's scale — and validate it in Go at the `Remember` entry point, reusing the reinforce clamp's bounds. | `wi-filed:aihub#433` |
+| **T1-4** | Adopt `#396`'s policy row verbatim as repo policy and give it a gate that **enumerates DB CHECKs, not fields**; a per-field fix produces a fourth instance. | `wi-filed:aihub#434` |
+| **T1-5** | Delete-list is the only projection shape. The last keep-list was converted after this table was written. | `already-landed:aihub#418` |
+| **T1-6** | Validate `cursor` as RFC3339Nano at the handler and answer 400 — a 500 on a caller-supplied token sends the reader to the server logs. | `wi-filed:aihub#435` |
+| **T1-7** | 🔴 **Owner: ENABLE the header.** Make the in-tree client send `Idempotency-Key` on every POST/PATCH — enabling is cheaper than demoting the design, because all requests already flow through one client. Do **not** retire the middleware. | `wi-filed:aihub#436` |
+| **T1-8** | 🔴 **Owner:** dissolved. `git_branch` and `deploy_env` lock derivation retires outright, so "what should `read` mean for repo/service" no longer needs an answer. `file_scope` is unchanged. | `superseded-by:aihub#416` |
+| **T1-9** | Prose that contradicts hop 3 or 4 is a **bug at the same priority as the behaviour**, and "description-only" is **not** a cancellation reason. Legal dispositions are: withdraw the param, fix the code so the prose becomes true, or file it. The three cancelled wi's are revived below. | `rule-recorded` |
+| **T1-10** | One budget over the whole `tools/list` payload, with per-tool ceilings derived from it; the resident cost is a property of the payload, not of a tool. | `wi-filed:aihub#437` |
+| **T1-11** | Never pre-declare a ratchet file — let the commit-time lock gate take it — and write that rule into the two files' own headers, where an executor will read it. | `wi-filed:aihub#438` |
+| **T1-12** | Keep `request_adjusted` exactly as decided and close the one `ReadyQueue` exemption. The absent-key shape is acceptable only while the field asserts nothing; do not let absence grow a meaning. | `wi-filed:aihub#432` |
+| **T1-13** | Nothing to re-decide about C1 itself: add `md` to its extension set and state the citation form in the executor-facing docs. The filename-less single anchor stays with `aihub#406`; do not re-decide it. | `wi-filed:aihub#439` |
+
+### 6.2 Tier 2
+
+| row | ruling | disposition |
+|---|---|---|
+| **T2-1** | One editability matrix for the whole struct, one error code per rejection **kind** (409 state, 403 permission), and no field silently exempt. | `wi-filed:aihub#440` |
+| **T2-2** | Accept `#398` as scoped — identity predicate now, state predicate held behind a corpus re-measure. The sequencing **is** the decision; do not re-open. | `already-landed:aihub#398` |
+| **T2-3** | One status code for "invalid attempt credential" across all tools; retire `lost` or give it a writer; add the cancelled-attempt status the cancel path says it needs. | `wi-filed:aihub#441` |
+| **T2-4** | 🔴 **Owner: the word "lease" stays dead.** The wording fix landed with `#398`; what remains is the discarded heartbeat DB error — check it, or state in code that nothing depends on it. | `superseded-by:aihub#416` · `wi-filed:aihub#442` |
+| **T2-5** | Publish the event vocabulary as an enum on `pf_emit_event` and rename the `types` filter's description. Free text plus three partial whitelists means a typo is indistinguishable from a new kind of event. | `wi-filed:aihub#444` |
+| **T2-6** | Keep the leniency; stop calling the 13-value list an enum in a schema the SDK will not enforce; add the DB CHECK for the four prefixes — the DB is the only layer that can make an unrecallable row impossible. | `wi-filed:aihub#445` |
+| **T2-7** | Retire the three action tools, or give `artifact_action` a reader. Zero calls, zero readers, three schemas in every request's prefix. | `wi-filed:aihub#446` |
+| **T2-8** | Delete the domain `roleLevel` func; both packages read **one** ladder containing exactly the three legal member roles, and the test must pin `maintainer` instead of the rung the vocabulary cannot produce. | `wi-filed:aihub#443` |
+| **T2-9** | State the third state in the schema (omit means *unclassified, not dispatched*), and settle the one-shot live side effect with a **two-armed** reproduction, since one arm cannot distinguish "already fixed" from "never happened". | `wi-filed:aihub#447` |
+| **T2-10** | Unpublish both release tools until Phase 2, per `#387`'s Plan B — and close `aihub#423` explicitly, since unpublishing removes its premise and a duplicate left open is one that rots. | `wi-filed:aihub#448` |
+| **T2-11** | Settled policy, nothing to rule. Record the one caveat: "scoped to visible projects" has **two** implementation shapes, so a new resolver must be told which one it inherits. | `already-landed:aihub#402` · `rule-recorded` |
+| **T2-12** | 🔴 **Owner:** repo and service entries become **advisory** and derive no lock. The surviving half — the unmappable-entry report on the two lock paths that stay silent — rides on `#416`'s spec, which already names this row. | `superseded-by:aihub#416` |
+| **T2-13** | Nothing to rule. Record **why** the empty-`repo` key form must stay byte-identical, so nobody tidies the two shapes into one three-segment key and strands every live lock. | `rule-recorded` |
+| **T2-14** | Nothing to re-decide. The "plugin bump and server deploy are one change" hazard is an operational **precondition**, not a note in a wrapped wi's attrs. | `already-landed:aihub#399` · `wi-filed:aihub#438` |
+| **T2-15** | 🔴 **Owner:** the landed semantics are accepted; the fail-open probe was fixed and the race qualifier is filed, and `deploy_env` and `git_branch` lock derivation retires under the de-locking ruling, shrinking this row to `file_scope`. | `superseded-by:aihub#416` · `already-landed:aihub#410` |
+| **T2-16** | The chain needs no change of its own — it inverts for exactly one legal role, so rule T2-8 first. Record that the out-of-scope-reads-as-not-found rule applies to **admins too**, since that is the exemption a later "admins see everything" change would quietly remove. | `rule-recorded` |
+| **T2-17** | Delete `release-manager` from the prose; keep the two-vocabulary split but **name** it in the contract cards, since only the fictional value is visible to an LLM caller. | `wi-filed:aihub#448` |
+| **T2-18** | State on each `user_id`-shaped param which of the three identities — reporter, attempt owner, watcher — it filters. | `wi-filed:aihub#444` |
+| **T2-19** | Fix T1-3's published range first, then say on `min_strength` what scale it is on. A threshold and the value it thresholds must be published on the same scale. | `wi-filed:aihub#433` |
+| **T2-20** | Say "6 plus `stale_running`" (or drop `omitempty`), delete `unblocked_at`, and revive the cancelled `#401`. The `created_at` asymmetry is settled as designed — do not re-open it. | `wi-filed:aihub#449` |
+| **T2-21** | Revive the cancelled `#400`: its findings are measured, uncontested, and about the one call every resuming agent is told to make first. | `wi-filed:aihub#450` |
+| **T2-22** | Nothing to re-decide on the two real CAS fields. The model-invented third one is ruled by T1-1 — no prose edit can remove it. | `rule-recorded` |
+
+**Counts over the 35 rows.** `wi-filed` **25** · `already-landed` **5** · `superseded-by:aihub#416`
+**4** · `rule-recorded` **5** (four sole, one alongside `already-landed`). Rows carrying two tags
+are counted under each. **All 35 rulings** are additionally written back as memory, per the
+requirement above — the memory write-back is universal, not an alternative disposition.
+
+**Work items filed by this adjudication: `aihub#431` … `aihub#450`** (20). Each carries its
+row's evidence verbatim, so a finding stays reachable without knowing this document's name.
+
+### 6.3 Memory write-back index
+
+One memory per tier-1 row; tier 2 grouped by theme. All `project: aihub`, `visibility: team`,
+linked to this wi. None of them sends `base_strength` — T1-3 is the row about that trap.
+
+| scope | memory |
+|---|---|
+| T1-1 unknown params | `mem_CQu56DJx` |
+| T1-2 numerics | `mem_s0RuVBa5` |
+| T1-3 `base_strength` | `mem_ajzGuz78` |
+| T1-4 CHECK vs Go 400 | `mem_73NRHSXA` |
+| T1-5 projections | `mem_fbxBLQpE` |
+| T1-6 bad cursor | `mem_kZvkxheT` |
+| T1-7 idempotency | `mem_1Nmcni5D` |
+| T1-8 `intent:read` scope | `mem_Ri59guu8` |
+| T1-9 stale-prose disposition rule | `mem_NvW0HC8a` |
+| T1-10 schema wire budget | `mem_HPUHZk8q` |
+| T1-11 ratchet-file convention | `mem_ohPUa1E0` |
+| T1-12 `request_adjusted` | `mem_hktgOcNa` |
+| T1-13 docs citation form | `mem_LIEo65EV` |
+| tier 2 — identity, status, step model (T2-1, T2-2, T2-11, T2-14, T2-21, T2-22) | `mem_d6xeDHye` |
+| tier 2 — attempt, secret, locks (T2-3, T2-4, T2-12, T2-13, T2-15) | `mem_53nKHJES` |
+| tier 2 — memory, artifact, events (T2-5, T2-6, T2-7, T2-19) | `mem_U69MmisM` |
+| tier 2 — roles, visibility, rhs, ready queue (T2-8, T2-9, T2-10, T2-16, T2-17, T2-18, T2-20) | `mem_atx0WpqB` |
+
+The locks group deliberately **points at** the pre-existing concurrency-philosophy memory rather
+than restating it: that memory is the authority for v1.21's ownership-only model and for the
+2026-09-07 de-locking ruling together, and duplicating it is how two copies start to disagree.
+
+### 6.4 🔴 What this adjudication did NOT settle
+
+Listed, not decided. Each is a question the row's recommendation does not answer, and none of
+them is blocked on the owner reading this document.
+
+1. **T2-8's current impact, as opposed to its reachability.** Whether any live
+   `projects.members` row holds `role:"maintainer"` needs a DB read. Migration `0013` mapped
+   `maintainer` to `writer` on backfill, so such a row can only have arrived from a later
+   members write. The fix is right either way; the *urgency* is unmeasured. Carried into
+   `aihub#443`.
+2. **T2-9's live side effect has no mechanism.** One-shot, unreproduced, observed on a server
+   older than this document's baseline. It is carried with its scope attached rather than
+   dropped, and settling it needs two arms — live build and `origin/main` build — or the result
+   cannot tell "already fixed" from "never happened". Carried into `aihub#447`.
+3. **T2-7 cannot prove there is no consumer.** Zero calls in one 21-day window is evidence of
+   disuse; the /ui annotation flow uses the same adopt/close/ignore vocabulary and was not
+   checked. Retiring the tools needs that checked first, not assumed. Carried into `aihub#446`.
+4. **T2-6's migration is unsized.** Adding a CHECK to a populated table fails on any existing
+   off-prefix row, and the live distinct `type` set was never read. Carried into `aihub#445`.
+5. **T2-5 has no census.** How many distinct `event_type` strings are actually in flight needs
+   a DB read this wi could not make, so the cost of closing the vocabulary is unknown.
+6. **The de-locking group's open questions are `#416`'s, not this table's.** The generation
+   probe registry, where an invalidation is recorded, and what `pf_predict_conflicts` reports
+   for an advisory entry are all listed in that wi's `spec_must_answer` and are open by design.
+7. **T2-1 leaves one sub-question open in both directions.** "No field silently exempt" does not
+   say whether `attrs` staying writable on a terminal wi is the defect or the feature — existing
+   tooling depends on that write path. The wi states it rather than choosing.
+8. **Nothing here describes the live server.** §3.4 still holds: every merged wi in this chain
+   carries `not_deployed_yet`, and `origin/main` is ahead of production. An adjudicated ruling is
+   not a deployed one.

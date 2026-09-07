@@ -1,51 +1,79 @@
 package mcp
 
 import (
-	"errors"
 	"strings"
 	"testing"
+
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 // TestClassifyStepUpdateErr locks in the aihub#209 fix: a paused attempt must
 // NOT delete the local state file (so the user can resume), while a stale
 // epoch/attempt mismatch still does. Mirrors the wi's integration AC without a
 // live server — the delete decision is the whole risk.
+//
+// ⚠️ THE INPUTS ARE TYPED ERRORS, NOT STRINGS, SINCE aihub#414 — and that is
+// not a cosmetic port. This table used to feed errors.New("aihub 409 CODE: …")
+// because the classifier read the rendered text, and by doing so it PINNED that
+// mechanism: the case names below ("paused not treated as mismatch") show the
+// author was already worrying about substring collisions between codes, while
+// the collision that mattered was between a code and an observed VALUE — a step
+// named "ATTEMPT_MISMATCH" deleted the caller's credential file. A table of
+// hand-written strings could not express that case, so it never appeared.
+//
+// The aihub#209 contract asserted here is unchanged. The cases that could only
+// exist once classification moved to the code field — a hostile step name, a
+// token in the details blob, a longer code containing a shorter one — live in
+// error_code_classification_test.go rather than being bolted on here.
 func TestClassifyStepUpdateErr(t *testing.T) {
 	cases := []struct {
 		name       string
-		errStr     string
+		status     int
+		code       string
+		message    string
 		wantDelete bool
 		wantSubs   []string // substrings required in the returned error
 	}{
 		{
 			// AC: paused wi keeps state file + resume guidance.
 			name:       "paused keeps state file",
-			errStr:     "aihub 409 ATTEMPT_PAUSED: attempt is paused; resume it before continuing",
+			status:     409,
+			code:       "ATTEMPT_PAUSED",
+			message:    "attempt is paused; resume it before continuing",
 			wantDelete: false,
 			wantSubs:   []string{"paused", "resume", "--resume"},
 		},
 		{
 			name:       "epoch mismatch deletes",
-			errStr:     "aihub 409 CONFLICT_EPOCH_MISMATCH: claim_epoch mismatch",
+			status:     409,
+			code:       "CONFLICT_EPOCH_MISMATCH",
+			message:    "claim_epoch mismatch",
 			wantDelete: true,
 			wantSubs:   []string{"STALE_LOCAL_CREDENTIAL", "re-claim"},
 		},
 		{
 			name:       "attempt mismatch deletes",
-			errStr:     "aihub 403 ATTEMPT_MISMATCH: attempt status is \"superseded\"",
+			status:     403,
+			code:       "ATTEMPT_MISMATCH",
+			message:    `attempt status is "superseded"`,
 			wantDelete: true,
 			wantSubs:   []string{"STALE_LOCAL_CREDENTIAL"},
 		},
 		{
-			// Guard against a substring collision: ATTEMPT_PAUSED must not be
-			// swept up by the ATTEMPT_MISMATCH branch.
+			// Kept from the original table. It no longer guards a substring
+			// collision — exact codes cannot collide — but it still asserts the
+			// arm ordering is harmless, and it costs one line.
 			name:       "paused not treated as mismatch",
-			errStr:     "aihub 409 ATTEMPT_PAUSED: paused",
+			status:     409,
+			code:       "ATTEMPT_PAUSED",
+			message:    "paused",
 			wantDelete: false,
 		},
 		{
 			name:       "unrelated error passes through",
-			errStr:     "aihub 500 INTERNAL_ERROR: boom",
+			status:     500,
+			code:       "INTERNAL_ERROR",
+			message:    "boom",
 			wantDelete: false,
 			wantSubs:   []string{"INTERNAL_ERROR"}, // original error preserved
 		},
@@ -53,7 +81,8 @@ func TestClassifyStepUpdateErr(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out, del := classifyStepUpdateErr(errors.New(tc.errStr))
+			in := &client.APIError{StatusCode: tc.status, Code: tc.code, Message: tc.message}
+			out, del := classifyStepUpdateErr(in)
 			if del != tc.wantDelete {
 				t.Fatalf("deleteState = %v, want %v", del, tc.wantDelete)
 			}

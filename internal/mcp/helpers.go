@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 // marshalJSON marshals v to compact JSON bytes. Compact (not indented) is the
@@ -350,11 +352,24 @@ func parseArgs(raw json.RawMessage) (map[string]any, error) {
 	return m, nil
 }
 
-// isAihubCode checks whether the error message from the aihub client contains
-// the given error code (e.g. "PROJECT_NOT_FOUND").
+// isAihubCode reports whether err is an aihub API error whose code is EXACTLY
+// code (e.g. "PROJECT_NOT_FOUND").
+//
+// aihub#414: this used to be strings.Contains(err.Error(), code), and the
+// rendered error text is "aihub <status> <CODE>: <message><details>" — so the
+// code being looked for shared one string with a message and a details blob
+// full of observed values (paths, ids, names). Any such value containing a
+// code-shaped token flipped the answer, in either direction:
+//
+//   - false positive: a blocked path named CONFLICT_LOCK_TAKEN.md makes an
+//     unrelated failure classify as a lock conflict (tools_coding.go publishes
+//     that decision as lock_gate="refused");
+//   - false negative for a longer code that CONTAINS a shorter one, which is
+//     the same bug wearing the other sign.
+//
+// client.IsCode compares the field the server actually set, so no observed
+// value can reach the comparison. It unwraps, so the %w-wrapping call sites
+// (tools_coding.go's g.err) still classify.
 func isAihubCode(err error, code string) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), code)
+	return client.IsCode(err, code)
 }

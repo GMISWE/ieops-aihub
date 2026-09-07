@@ -846,15 +846,29 @@ func validateTerminalStepArgs(status string, stepAttemptID *string, heartbeat bo
 //
 // Heartbeats and in_progress are exempt for the reasons given at the call site.
 //
-// 🔴 On the error code. The obvious candidate is CONFLICT_STEP_ATTEMPT_MISMATCH,
-// which is declared, 409-mapped, and named for this endpoint in
-// docs/design/polyforge-v1-design.md — and using it would be a bug. The MCP
-// layer's classifyStepUpdateErr matches the SERVER'S CODE by substring, because
-// pkg/client renders errors as "aihub <status> <CODE>: <message>", and its
-// mismatch arm tests for "ATTEMPT_MISMATCH" — a substring of that code. Naming
-// the wrong step would therefore delete the caller's local state file and demand
-// a re-claim. CONFLICT_CAS_FAILED contains none of those triggers and is already
-// what the sibling idle predicate on this endpoint returns.
+// 🔴 On the error code, and on why the reason recorded here is no longer the
+// reason. CONFLICT_STEP_ATTEMPT_MISMATCH is declared, 409-mapped and named for
+// this endpoint in docs/design/polyforge-v1-design.md, and when aihub#398 wrote
+// this comment using it WOULD have been a bug: the MCP layer's
+// classifyStepUpdateErr matched the server's code by SUBSTRING of the rendered
+// "aihub <status> <CODE>: <message>", and its mismatch arm tested for
+// "ATTEMPT_MISMATCH" — a substring of that longer code — so naming the wrong
+// step would have deleted the caller's local state file. CONFLICT_CAS_FAILED
+// was chosen because it contains none of those triggers.
+//
+// aihub#414 fixed the parsing bug: that classifier now compares the code field
+// exactly, and pkg/client returns a typed *client.APIError instead of a
+// pre-rendered string. So the constraint this paragraph describes is GONE, and
+// nothing here is load-bearing against it any more. Do not cite it as a reason
+// to avoid a code.
+//
+// CONFLICT_CAS_FAILED nevertheless stays, on its own merits rather than by
+// inheritance: it is what the sibling idle predicate on this endpoint already
+// returns, so one endpoint answers one code for "your precondition about the
+// open step did not hold", and it is what the landed clients and tests of that
+// endpoint expect. Changing it is a contract change, and it needs its own work
+// item and its own gate — not a drive-by rename justified by a constraint that
+// no longer exists.
 //
 // Pure and DB-free so TestValidateStepIdentity can hold every combination
 // without a database; the caller supplies the stored value.

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,6 +53,48 @@ func formatDetails(raw json.RawMessage) string {
 		s = s[:DetailsRenderLimit] + "...(truncated)"
 	}
 	return " details=" + s
+}
+
+// APIError is a structured aihub error response: the fields the server
+// actually sent, kept apart instead of flattened into one string.
+//
+// WHY THIS TYPE EXISTS (aihub#414). do() used to return only
+// fmt.Errorf("aihub %d %s: %s%s", status, code, message, details), so the CODE
+// and the MESSAGE became one piece of text — and callers classified on it with
+// strings.Contains. Message and details carry observed values (step names, ids,
+// file paths), so any value containing a code-shaped token could flip a
+// downstream decision. The MCP layer's classifyStepUpdateErr deletes the
+// caller's local credential file on its mismatch arm, so a step named
+// "ATTEMPT_MISMATCH" was enough to destroy state (aihub#398 found this and
+// routed around it by picking a code with no dangerous substring, which is a
+// server-side error vocabulary constrained by a client-side parsing bug).
+//
+// 🔴 Error() IS BYTE-IDENTICAL to the string do() built before, on purpose. Any
+// caller still reading the text — logs, tests, an older consumer of pkg/client —
+// sees exactly what it saw. This change ADDS a structured path; it removes no
+// information and reformats nothing. Compare by Code and the data cannot reach
+// the comparison at all.
+type APIError struct {
+	StatusCode int
+	Code       string
+	Message    string
+	Details    json.RawMessage
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("aihub %d %s: %s%s", e.StatusCode, e.Code, e.Message, formatDetails(e.Details))
+}
+
+// IsCode reports whether err is an aihub APIError whose code is EXACTLY code.
+//
+// Exact, not a substring: that is the whole point of the type. It unwraps, so a
+// call site that wrapped the error with %w for context still classifies.
+func IsCode(err error, code string) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.Code == code
 }
 
 // Client is the aihub HTTP API client.
@@ -106,7 +149,14 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		}
 		json.NewDecoder(resp.Body).Decode(&errResp) //nolint:errcheck
 		if errResp.Code != "" {
-			return fmt.Errorf("aihub %d %s: %s%s", resp.StatusCode, errResp.Code, errResp.Message, formatDetails(errResp.Details))
+			// aihub#414: the structured error, not a rendered string. Its Error()
+			// reproduces the previous text exactly, so this is additive.
+			return &APIError{
+				StatusCode: resp.StatusCode,
+				Code:       errResp.Code,
+				Message:    errResp.Message,
+				Details:    errResp.Details,
+			}
 		}
 		return fmt.Errorf("aihub %d: unexpected error", resp.StatusCode)
 	}
@@ -151,7 +201,14 @@ func (c *Client) doRaw(ctx context.Context, method, path string) ([]byte, string
 		}
 		_ = json.Unmarshal(body, &errResp)
 		if errResp.Code != "" {
-			return nil, "", fmt.Errorf("aihub %d %s: %s%s", resp.StatusCode, errResp.Code, errResp.Message, formatDetails(errResp.Details))
+			// aihub#414: same envelope, same type — a caller must not have to know
+			// which of the two transports produced its error to classify it.
+			return nil, "", &APIError{
+				StatusCode: resp.StatusCode,
+				Code:       errResp.Code,
+				Message:    errResp.Message,
+				Details:    errResp.Details,
+			}
 		}
 		return nil, "", fmt.Errorf("aihub %d: unexpected error", resp.StatusCode)
 	}

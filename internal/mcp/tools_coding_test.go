@@ -13,12 +13,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/GMISWE/ieops-aihub/internal/coding"
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 // TestShipPayload_PushFailureReportsTheLocalCommit is the MCP half of the key
@@ -310,7 +312,24 @@ func TestCommitToolsDeclareThatTheyAcquireLocks(t *testing.T) {
 // reported every outcome as a distinct kind of failure would satisfy the
 // failure rows on its own.
 func TestCommitLockGateReport_TellsTheNotCommittedFactsApart(t *testing.T) {
-	conflictErr := errors.New("commit refused: CONFLICT_LOCK_TAKEN: this commit changes 1 file(s) locked by another attempt")
+	// aihub#414: a TYPED client error wrapped exactly as production wraps it —
+	// tools_coding.go does fmt.Errorf("commit refused: %w", err) around the
+	// error ReconcileCommitLocks returned. This used to be an errors.New whose
+	// TEXT contained "CONFLICT_LOCK_TAKEN", which passed only because the
+	// classifier was matching the rendered string; once it compares the code
+	// field, a fixture with no code field classifies as nothing and this row
+	// reported could_not_run. The repair makes the fixture MORE faithful, not
+	// less: the shape here is now the shape the caller actually receives.
+	//
+	// ⚠️ It is a fixture repair, not a gate. Under the pre-aihub#414
+	// isAihubCode this typed error still renders that token in its text, so this
+	// row passes on both builds and cannot be cited as evidence for the change.
+	// The discriminating arms live in error_code_classification_test.go.
+	conflictErr := fmt.Errorf("commit refused: %w", &client.APIError{
+		StatusCode: 409,
+		Code:       "CONFLICT_LOCK_TAKEN",
+		Message:    "this commit changes 1 file(s) locked by another attempt",
+	})
 	checkErr := errors.New("the commit-time lock check could not be completed, so nothing was committed: 502 Bad Gateway")
 	stageErr := errors.New("git add -A: exit status 128\nfatal: Unable to create '.git/index.lock': File exists.")
 

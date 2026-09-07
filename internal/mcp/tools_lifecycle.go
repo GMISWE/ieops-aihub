@@ -785,7 +785,6 @@ func (s *Server) registerLifecycleTools() {
 				"then answered 'invalid session_secret'). ⚠️ Only works where that record exists: "+
 				"replaying a key from another machine, or after the state file was deleted, is still left "+
 				"unauthenticated. Send a NEW key unless retrying a call whose response you never saw."),
-			"mode":            prop("string", "fresh|resume (default: fresh)"),
 			"requested_locks": requestedLocksProp("Resource locks to acquire"),
 			"force_takeover": prop("boolean", "Force takeover if already claimed. ⚠️ It takes over the WORK "+
 				"ITEM, not other people's locks: a lock held by a running or paused attempt of a "+
@@ -870,9 +869,31 @@ func (s *Server) registerLifecycleTools() {
 				"machine_id":     machineID,
 			},
 		}
-		if mode := strArg(args, "mode"); mode != "" {
-			body["mode"] = mode
-		}
+		// aihub#394: `mode` is deliberately NOT forwarded, and not published either.
+		//
+		// It was `fresh|resume (default: fresh)` from the first version of this
+		// tool, and every hop existed: published here, forwarded from here, bound
+		// by domain.ClaimRequest. What never existed is an effect. On 1ec3bdc the
+		// complete set of reads of the bound field was one self-default
+		// (`if req.Mode == "" { req.Mode = "fresh" }`) and two audit fields
+		// (`"is_resume": req.Mode == "resume"`) — so `resume` restored exactly what
+		// `fresh` restored, an out-of-vocabulary value was silently equal to
+		// `fresh`, and the only difference the argument made was to report itself
+		// back to the caller who sent it.
+		//
+		// Withdrawn rather than implemented (owner decision 2026-09-07, the same
+		// plan B as aihub#387's `non_conflicting`): the promise pf-work Mode C made
+		// for it — "restores step state from the previous attempt" — is TRUE
+		// WITHOUT it. Step state lives in wi_step_state keyed by work item, and the
+		// claim's upsert there keeps current_step whatever `mode` says, so every
+		// re-claim already sees it. There was nothing to build, only a parameter to
+		// stop pretending with.
+		//
+		// ⚠️ The server still binds and defaults ClaimRequest.Mode, so an older
+		// plugin that still sends `mode` is unaffected. Do not re-add it here to
+		// "keep the client symmetrical" — a parameter this process publishes is a
+		// parameter callers will use, and claim_param_contract_test.go now fails
+		// for any published parameter the claim path does not act on.
 		if v, ok := args["requested_locks"]; ok {
 			body["requested_locks"] = v
 		}
@@ -1026,9 +1047,15 @@ func (s *Server) registerLifecycleTools() {
 					// Directory name uses readable format: pf.<project>-<seq>
 					// (e.g. "pf.aihub-26") so developers can identify the wi at a glance.
 					wtDir := fmt.Sprintf("pf.%s-%s", sf.Project, seq)
-					// Deliberately NOT keyed on args["mode"] (aihub#322): which branch
-					// to attach to is decided by what exists in the clone, not by what
-					// the caller called the claim. See resolveClaimBranch.
+					// Which branch to attach to is decided by what exists in the clone,
+					// not by anything the caller passes. See resolveClaimBranch.
+					//
+					// aihub#322 established that by removing the last read of
+					// args["mode"] here; aihub#394 then withdrew that parameter
+					// altogether, so there is no longer an argument this could be
+					// keyed on even by mistake. Kept as a note because the invariant
+					// (the clone decides) is what matters, not the argument that used
+					// to threaten it.
 					branchNames := newClaimBranchNames(sf.Project, seq, wiGoal, ulid8)
 
 					if proj, ok := effectiveCfg.Projects[sf.Project]; ok {

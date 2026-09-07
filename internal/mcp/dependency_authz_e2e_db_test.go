@@ -318,7 +318,6 @@ func (s *depAuthzStack) claimAsHolder(t *testing.T, wiID string) string {
 	}
 	claimed, err := s.holder.ClaimWorkItem(context.Background(), wiID, map[string]any{
 		"idempotency_key": fmt.Sprintf("idem-dep-authz-%d", time.Now().UnixNano()),
-		"mode":            "fresh",
 		"session_info": map[string]any{
 			"machine_id":     "m_dep_authz_e2e",
 			"session_secret": hex.EncodeToString(secretBytes),

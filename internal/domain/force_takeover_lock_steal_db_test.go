@@ -82,7 +82,6 @@ func ftsClaim(t *testing.T, pool *pgxpool.Pool, uid, wiID, idem string, force bo
 	return FnClaimWorkItem(context.Background(), pool, wiID, &ClaimRequest{
 		IdempotencyKey: idem,
 		SessionInfo:    SessionInfo{MachineID: "m-393", SessionSecret: testSecret},
-		Mode:           "fresh",
 		ForceOver:      force,
 	}, uid, "", "tester")
 }

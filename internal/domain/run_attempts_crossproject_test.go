@@ -60,7 +60,6 @@ func TestCrossProjectSamePath_NoConflict(t *testing.T) {
 		return &ClaimRequest{
 			IdempotencyKey: idem,
 			SessionInfo:    SessionInfo{MachineID: "m1", SessionSecret: sessSecret},
-			Mode:           "fresh",
 		}
 	}
 

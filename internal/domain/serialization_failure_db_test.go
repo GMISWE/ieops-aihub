@@ -256,7 +256,6 @@ func TestSerializationFailureSurfacesAsRetryable409(t *testing.T) {
 					MachineID:     "m1",
 					SessionSecret: "s3cr3t-0123456789abcdef0123456789abcdef0123456789abcdef01234567",
 				},
-				Mode: "fresh",
 			}, u, "", "tester")
 			got <- aerr
 		}()

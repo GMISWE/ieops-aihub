@@ -123,7 +123,6 @@ func claimFresh(t *testing.T, pool *pgxpool.Pool, wiID, userID, idemKey string) 
 			MachineID:     "m_locktest",
 			SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
 		},
-		Mode: "fresh",
 	}, userID, "", "tester")
 	require.Nil(t, aerr, "claim failed: %+v", aerr)
 	return resp
@@ -334,7 +333,6 @@ func TestReadIntentTakesNoWriteLock(t *testing.T) {
 				MachineID:     "m_locktest",
 				SessionSecret: "reader-secret-0123456789abcdef0123456789abcdef0123456789abcd",
 			},
-			Mode: "fresh",
 		}, u, "", "tester")
 		require.Nil(t, claimErr,
 			"predict says this is not a lock conflict and claim disagreed: %+v — that gap is the whole "+

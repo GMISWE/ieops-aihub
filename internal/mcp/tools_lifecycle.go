@@ -1237,6 +1237,7 @@ func (s *Server) registerLifecycleTools() {
 			"status":               prop("string", "wrapped|failed|paused"),
 			"force_terminate_step": prop("boolean", "Force terminate in-progress step"),
 			"note":                 prop("string", "Closing note recorded as a `note` event before the attempt is completed (e.g. \"wrapped: <one sentence>\" / \"failed reason: <why>\"). Replaces a separate pf_emit_event call."),
+			"pause_reason":         prop("string", "Why the attempt is being paused. Read only when status=\"paused\", and recorded on the attempt row and in the attempt_completed event — unlike `note`, which becomes its own timeline event whatever the status."),
 		}, []string{"work_item_id", "status"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -1275,6 +1276,14 @@ func (s *Server) registerLifecycleTools() {
 		}
 		if boolArg(args, "force_terminate_step") {
 			body["force_terminate_step"] = true
+		}
+		// Sent only when the caller supplied one (aihub#424). FnCompleteAttempt
+		// writes req.PauseReason to run_attempts.pause_reason UNCONDITIONALLY —
+		// "nil for wrapped/failed", says the comment there — so an unguarded
+		// assignment would stamp an empty reason onto every wrap. The guard is what
+		// keeps "not paused" distinguishable from "paused, reason not given".
+		if reason := strArg(args, "pause_reason"); reason != "" {
+			body["pause_reason"] = reason
 		}
 
 		result, err := s.client.CompleteAttempt(ctx, wiID, body)

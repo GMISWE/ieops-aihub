@@ -1744,6 +1744,29 @@ var serverNamesNoToolCanReach = map[string]string{
 		"queryInt(c, \"top_k\") and falls back to queryInt(c, \"limit\"). The capability is " +
 		"reachable under the name pf_recall does publish, so this is compatibility surface " +
 		"rather than an unreachable knob.",
+
+	// ─── The two halves of the pause route's shared request struct (aihub#424) ──
+	//
+	// handlePauseAttempt binds domain.CompleteAttemptRequest, which /complete also
+	// binds, so this census sees every field of it on BOTH routes. Two of them
+	// cannot do anything here, and the reason is in the handler rather than in the
+	// struct — which is exactly the shape that has to be written down: publishing
+	// either one on pf_pause_attempt would advertise a switch that selects
+	// nothing, aihub#394's signature, and deleting either is impossible without
+	// splitting a struct /complete legitimately needs whole.
+	"handlePauseAttempt.status": "handlePauseAttempt OVERWRITES it — `req.Status = \"paused\"` " +
+		"is the statement right after c.Bind's error check and before any read — so no " +
+		"caller-supplied value can ever take " +
+		"effect on this route. The route IS the status; POST /pause is how a caller says " +
+		"\"paused\", and /complete is where status is a real choice (it publishes it, and 44 of " +
+		"605 observed calls send \"paused\" through it).",
+	"handlePauseAttempt.force_terminate_step": "inert on this route, provably rather than by " +
+		"convention: FnCompleteAttempt's only read of the field is `if req.Status == \"paused\" " +
+		"|| req.ForceTerminateStep`, and handlePauseAttempt has just forced Status to \"paused\", " +
+		"so the disjunction is already true whatever the caller sent. The capability it names — " +
+		"terminate an in-progress step instead of answering 409 — is what pausing does " +
+		"unconditionally. It stays published on pf_complete_attempt, where Status is the " +
+		"caller's and the flag therefore decides something.",
 }
 
 // TestContractEveryServerReadNameIsReachableFromSomeTool is G4.

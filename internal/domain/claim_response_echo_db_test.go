@@ -104,7 +104,6 @@ func TestServerFilledResponseFieldsAreEchoed(t *testing.T) {
 				MachineID:     "m_aihub329",
 				SessionSecret: "aihub329-secret-0123456789abcdef0123456789abcdef0123456789ab",
 			},
-			Mode: "fresh",
 		}, u, "", "tester")
 		require.Nil(t, aerr, "claim failed: %+v", aerr)
 		require.NotNil(t, resp)

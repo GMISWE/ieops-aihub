@@ -45,7 +45,7 @@ func TestPredictConflicts_FileScopeProjectScoped(t *testing.T) {
 		t.Fatalf("CreateWorkItem holder: %v", aerr)
 	}
 	claim, aerr := FnClaimWorkItem(ctx, pool, holder.ID,
-		&ClaimRequest{IdempotencyKey: "idem-holder", SessionInfo: SessionInfo{MachineID: "m1", SessionSecret: "s3cr3t-0123456789abcdef0123456789abcdef0123456789abcdef01234567"}, Mode: "fresh"},
+		&ClaimRequest{IdempotencyKey: "idem-holder", SessionInfo: SessionInfo{MachineID: "m1", SessionSecret: "s3cr3t-0123456789abcdef0123456789abcdef0123456789abcdef01234567"}},
 		uid, "", "tester")
 	if aerr != nil {
 		t.Fatalf("claim holder: %v", aerr)

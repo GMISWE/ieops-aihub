@@ -67,7 +67,7 @@ no marker → warn it is missing and return `WARN`, never an auto-fail.
 ## Execute (rhs=true, interactive mode)
 
 Same bracket and completion call; you present each step to the user instead of dispatching.
-📄 **`Read` the on-demand file §1 before running interactively** — `skip` in particular must call
-**no** `pf_update_step` at all, and getting that wrong desyncs the server's `current_step`.
+📄 **`Read` the on-demand file §1 before running interactively** — `skip` **completes the step
+with a `skipped ...` summary** (§1b); leaving it uncalled 409s the next completion.
 
 At startup report three-segment; §0d has the literal values.

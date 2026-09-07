@@ -340,18 +340,65 @@ const lockDeleteByKeySQL = `DELETE FROM resource_locks rl WHERE rl.resource_type
 // ⚠️ One case `prior` does NOT cover, stated rather than left to be discovered:
 // under READ COMMITTED, ON CONFLICT DO UPDATE will overwrite a row committed
 // AFTER the statement snapshot, which `prior` cannot see — so that displacement
-// would emit no owner_replaced release. Every caller here runs SERIALIZABLE
-// (FnClaimWorkItem, FnForceTakeover, FnAcquireLocks all use
-// pgx.TxOptions{IsoLevel: pgx.Serializable}), where such a conflict aborts
-// instead, so the gap is unreachable today. It becomes reachable the moment one
-// of them is moved to a weaker isolation level.
+// would emit no owner_replaced release, and the WHERE added below is evaluated
+// against a run_attempts snapshot that may already be stale.
 //
-// Reachability of the displacement, stated rather than dismissed: at claim the
-// conflict check rejects any key held by a running or paused attempt before this
-// runs, and FnForceTakeover deletes the prior attempt's rows first, so what is
-// overwritten is an un-swept orphan. That is still a real lock row belonging to
-// a real work item, and the sweep it is racing may not have run for up to a
-// minute.
+// ⚠️ NOT every caller runs SERIALIZABLE, contrary to what this comment used to
+// assert. Measured 2026-09-07 (aihub#393):
+//
+//	run_attempts.go:395   FnClaimWorkItem   BeginTx(IsoLevel: pgx.Serializable)
+//	run_attempts.go:1708  FnAcquireLocks    BeginTx(IsoLevel: pgx.Serializable)
+//	run_attempts.go:1263  FnForceTakeover   pool.Begin(ctx)   <- READ COMMITTED
+//
+// So on the FnForceTakeover path the gap above is reachable, not hypothetical:
+// two concurrent takeovers, or a takeover racing a claim, can each read a
+// run_attempts snapshot that does not yet show the other's lock row.
+//
+// This is left as-is rather than "fixed" in passing. Raising that transaction to
+// SERIALIZABLE is a behaviour change on a recovery path with no retry wrapper
+// around it — every other SERIALIZABLE site here pairs with retryConflictErr —
+// and it belongs in a change that can measure the retry consequences. What the
+// aihub#393 predicate buys on this path is therefore the single-threaded
+// guarantee, not a serialized one: it closes the case where a takeover
+// UNCONDITIONALLY displaced a live foreign holder, which is what happened on
+// every call, and narrows the remaining exposure to a commit-window race.
+//
+// WHAT MAY BE DISPLACED, and why the DO UPDATE carries a WHERE (aihub#393).
+//
+// An earlier revision of this comment asserted the bound instead of enforcing
+// it: "at claim the conflict check rejects any key held by a running or paused
+// attempt before this runs, and FnForceTakeover deletes the prior attempt's
+// rows first, so what is overwritten is an un-swept orphan." The first clause
+// was false. FnClaimWorkItem's conflict check was skipped on every takeover
+// (`&& !isTakeover`), and FnForceTakeover had no check at all, so this statement
+// really did rewrite rows owned by LIVE attempts of OTHER work items — silently,
+// since it returns success and the displaced agent is told nothing.
+//
+// The bound is now a predicate on the row rather than a claim about callers:
+//
+//	owner is running/paused AND belongs to ANOTHER work item -> no update
+//	anything else                                            -> update
+//
+// It lives here, at the only statement that can rewrite owner_attempt_id, so a
+// takeover path that does not exist yet inherits it. `$5` is the acquiring
+// attempt's work item.
+//
+// Both halves of the predicate are load-bearing, and each is a way for a
+// stricter version to break working behaviour:
+//
+//   - "another work item", not "another attempt". Resuming a paused work item
+//     displaces its OWN paused attempt's git_branch and deploy_env rows —
+//     acquireLocksReleasePausedSQL releases only file_scope, and a claim from
+//     status=paused sets no isTakeover and releases nothing, so the owner it
+//     overwrites is live. Measured 2026-09-07.
+//   - "running/paused", not "exists". An un-swept orphan row — owner wrapped,
+//     failed or superseded, the sweep in gc.go up to a minute away — is exactly
+//     the displacement this statement exists to perform. Refusing it would make
+//     a takeover unable to recover from a crashed holder.
+//
+// When the update is skipped, `ins` yields no row and the outer SELECT returns
+// none, so acquireLockUpsert sees pgx.ErrNoRows and turns it into a typed
+// refusal. Empty is therefore an ANSWER here, not a missing row.
 const lockUpsertSQL = `
 	WITH prior AS (
 		SELECT owner_attempt_id, claim_epoch
@@ -362,11 +409,30 @@ const lockUpsertSQL = `
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (resource_type, resource_key) DO UPDATE
 		  SET owner_attempt_id = $3, claim_epoch = $4, acquired_at = clock_timestamp()
+		  WHERE NOT EXISTS (
+			SELECT 1 FROM run_attempts ra
+			WHERE ra.id = resource_locks.owner_attempt_id
+			  AND ra.status IN ('running', 'paused')
+			  AND ra.work_item_id <> $5
+		  )
 		RETURNING resource_type, resource_key
 	)
 	SELECT i.resource_type, i.resource_key,
 	       COALESCE(p.owner_attempt_id, ''), COALESCE(p.claim_epoch, 0)
 	FROM ins i LEFT JOIN prior p ON TRUE`
+
+// lockHolderLookupSQL names the live holder of one lock key, for the refusal
+// message and the conflict_with payload. Read-only, so it is not one of the
+// audited mutating statements; it sits here because it is the second half of
+// lockUpsertSQL's refusal and the two predicates must stay identical.
+const lockHolderLookupSQL = `
+	SELECT rl.owner_attempt_id, ra.actor_display, COALESCE(wi.slug, '')
+	FROM resource_locks rl
+	JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
+	LEFT JOIN work_items wi ON wi.id = ra.work_item_id
+	WHERE rl.resource_type = $1 AND rl.resource_key = $2
+	  AND ra.status IN ('running', 'paused')
+	  AND ra.work_item_id <> $3`
 
 // acquireLocksInsertSQL takes a lock only if the key is free — it never steals.
 // A non-zero row count means we took a free key; no row means one already
@@ -556,17 +622,63 @@ func releaseLocks(ctx context.Context, tx pgx.Tx, stmt string, op lockOpCtx, arg
 	return released, nil
 }
 
+// lockHeldByOtherWIError is what acquireLockUpsert returns when lockUpsertSQL
+// declined to displace the existing owner because that owner is a live attempt
+// of a DIFFERENT work item (aihub#393).
+//
+// A distinct type rather than a sentinel because the caller has to turn it into
+// a 409 CONFLICT_LOCK_TAKEN carrying who holds the lock, which is the same
+// payload a normal claim's conflict probe produces. Every field may be empty
+// except ResourceType/ResourceKey: the holder lookup is best-effort, and a
+// refusal reported without a name is still a refusal, whereas swallowing it
+// would put the displacement back.
+type lockHeldByOtherWIError struct {
+	ResourceType   string
+	ResourceKey    string
+	OwnerAttemptID string
+	ActorDisplay   string
+	WorkItemSlug   string
+}
+
+func (e *lockHeldByOtherWIError) Error() string {
+	holder := e.WorkItemSlug
+	if holder == "" {
+		holder = "another work item"
+	}
+	return fmt.Sprintf("resource %s:%s is held by %s (attempt %s) and was not displaced",
+		e.ResourceType, e.ResourceKey, holder, e.OwnerAttemptID)
+}
+
+// lockRefusalFor builds the error above, naming the holder when it can.
+func lockRefusalFor(ctx context.Context, tx pgx.Tx, lockType, lockKey, workItemID string) *lockHeldByOtherWIError {
+	refusal := &lockHeldByOtherWIError{ResourceType: lockType, ResourceKey: lockKey}
+	// Best-effort: a failure here must not turn a refusal into a success, so the
+	// error is dropped and the refusal is returned with empty holder fields.
+	_ = tx.QueryRow(ctx, lockHolderLookupSQL, lockType, lockKey, workItemID).
+		Scan(&refusal.OwnerAttemptID, &refusal.ActorDisplay, &refusal.WorkItemSlug)
+	return refusal
+}
+
 // acquireLockUpsert takes a lock for an attempt, overwriting any existing row,
 // and emits EventLockAcquired — plus EventLockReleased for a displaced owner.
+//
+// It does NOT overwrite a row owned by a running-or-paused attempt of another
+// work item; that returns *lockHeldByOtherWIError and changes nothing. See
+// lockUpsertSQL for the predicate and why each half of it is needed.
 func acquireLockUpsert(ctx context.Context, tx pgx.Tx, lockType, lockKey, attemptID string,
 	epoch int64, project, workItemID string, op lockOpCtx) (lockRow, error) {
 
 	var got lockRow
 	var priorAttempt string
 	var priorEpoch int64
-	err := tx.QueryRow(ctx, lockUpsertSQL, lockType, lockKey, attemptID, epoch).
+	err := tx.QueryRow(ctx, lockUpsertSQL, lockType, lockKey, attemptID, epoch, workItemID).
 		Scan(&got.ResourceType, &got.ResourceKey, &priorAttempt, &priorEpoch)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// No row means the conditional DO UPDATE was skipped — an answer, not
+			// an absent row. See lockUpsertSQL.
+			return lockRow{}, lockRefusalFor(ctx, tx, lockType, lockKey, workItemID)
+		}
 		return lockRow{}, err
 	}
 	got.AttemptID = attemptID

@@ -3533,6 +3533,120 @@ jobs:
             || { echo "::error::only $n PASS lines from pf-commit-guard.test.sh, floor is 90 — checks have gone missing"; exit 1; }
           echo "commit-guard gate: $n checks passed"
 
+      # aihub#421 (layer 3 of the MCP stability programme): the top abnormal
+      # flows from the aihub#412 corpus inventory, turned into invariant tests.
+      # Three steps because they are three independent claims in two packages,
+      # and because the `-run` scoping rule every step above follows applies
+      # here too — these packages hold other AIHUB_TEST_DB-gated suites this
+      # change did not verify.
+      #
+      # What these cover that nothing did before. FnCompleteAttempt's credential
+      # rejection paths had NO test anywhere, and all four are now emitted by a
+      # named arm below:
+      #
+      #   ATTEMPT_PAUSED (run_attempts.go:1510)
+      #     -> TestPausedAttemptTerminal_CompleteOnAPausedAttemptChangesNothing
+      #   ATTEMPT_MISMATCH, an ended-but-still-current attempt (:1512)
+      #     -> TestPausedAttemptTerminal_AnEndedAttemptAnswersMismatchNotPaused
+      #   UNAUTHORIZED "invalid session_secret" (:1502)
+      #     -> TestE2ETerminalWithoutClaim_ATamperedSecretIsRefused
+      #   CONFLICT_EPOCH_MISMATCH + superseded_by (:1467, :1525)
+      #     -> TestE2ETerminalWithoutClaim_ASupersededAttemptIsRefusedWithWhoTookOver
+      #
+      # The ATTEMPT_MISMATCH arm exists because a review of the first draft found
+      # this comment claiming that code and no arm delivering it: the two arms
+      # holding a non-current attempt short-circuit at verifyAttemptCredential
+      # step 1, before status is ever examined. That is the failure mode this
+      # comment discipline exists to catch, so it is recorded rather than quietly
+      # corrected.
+      #
+      # Before this change those codes were referenced only by internal/mcp's
+      # client-side string classifier and — for three of the four — by
+      # internal/domain/errors_test.go's code->status table, which is a claim
+      # about the map rather than about any emitter. ErrAttemptPaused was not
+      # even in that table. A code that is mapped but never emitted is exactly
+      # the shape of ErrConflictStepAttemptMismatch, which sat 409-mapped with no
+      # emitter at all until aihub#398 documented it.
+      #
+      # ⚠️ The fourth corpus flow in that work item — `state_file_missing`, 133
+      # groups and the corpus's largest error family — is deliberately NOT here.
+      # It is a client-side refusal that happens before a byte leaves the
+      # process, so it needs no database, has no line in
+      # internal/citest/dbtestcov/gated_tests.txt, and runs in the "Unit tests"
+      # step above as internal/mcp's TestStateFileMissing_*. Adding a DB step
+      # for it would be a green no-op that made the manifest disagree with the
+      # measured inventory.
+      - name: aihub#421 paused-attempt terminal invariant DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestPausedAttemptTerminal' -count=1 -v 2>&1 | tee paused_terminal.log
+          for want in TestPausedAttemptTerminal_CompleteOnAPausedAttemptChangesNothing \
+                      TestPausedAttemptTerminal_ResumeThenCompleteSucceeds \
+                      TestPausedAttemptTerminal_ResumeDoesNotRevivateTheOldCredential \
+                      TestPausedAttemptTerminal_AnEndedAttemptAnswersMismatchNotPaused; do
+            grep -q -- "--- PASS: $want" paused_terminal.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#421 ATTEMPT_PAUSED invariant is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' paused_terminal.log \
+            || { echo "::error::an aihub#421 paused-attempt test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # The three cases here are additive to aihub#241's "declared_resources CAS
+      # DB tests" step above and deliberately assert nothing it already does.
+      # aihub#241 owns "stale is a 409 and never a 400" and "the counter does not
+      # advance"; these own the details payload a client retries FROM, the
+      # reread-and-retry loop closing, and — the one with no prior analogue — the
+      # losing write being discarded WHOLE rather than only as far as its version
+      # counter. That last one is a property of the STATEMENT SHAPE (one UPDATE
+      # carrying every patched column plus `AND resources_version = $n`), not of
+      # the CAS verdict, so splitting the patch across two statements would keep
+      # every aihub#241 assertion green while half of a rejected patch landed.
+      - name: aihub#421 declared_resources CAS retry-loop DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestDeclaredResourcesCASRetry' -count=1 -v 2>&1 | tee cas_retry_loop.log
+          for want in TestDeclaredResourcesCASRetry_ConflictReportsTheCurrentVersion \
+                      TestDeclaredResourcesCASRetry_RereadAndRetryClosesTheLoop \
+                      TestDeclaredResourcesCASRetry_LosingWriteIsDiscardedWholeNotJustItsVersion; do
+            grep -q -- "--- PASS: $want" cas_retry_loop.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#421 CAS retry-loop invariant is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' cas_retry_loop.log \
+            || { echo "::error::an aihub#421 CAS retry-loop test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # `terminal_without_claim` is the corpus's largest lifecycle class (258 of
+      # 2756 groups) and the finding is that NONE of the 626 recorded failures is
+      # one of them: every group succeeded, because the state file outlives the
+      # transcript. So the CONTROL arm here is the load-bearing one — a session
+      # that never claimed, holding only the state file an earlier claim left on
+      # disk, must be able to wrap. The two refusal arms (a tampered secret, a
+      # superseded attempt) cover paths production has never exercised, which is
+      # precisely why a test rather than a citation is the only thing that says
+      # what they do.
+      #
+      # These need git on the runner as well as a database: claimStack builds a
+      # real workspace with a .polyforge.yaml and a git clone, because a claim
+      # writes worktrees. That is the same requirement as the aihub#392 claim
+      # idempotency step above, which is why neither carries a `+VAR` marker in
+      # the manifest — the marker records extra ENV, and git is not env.
+      - name: aihub#421 terminal-without-claim credential E2E DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/mcp/ -run '^TestE2ETerminalWithoutClaim' -count=1 -v 2>&1 | tee terminal_without_claim.log
+          for want in TestE2ETerminalWithoutClaim_ADetachedSessionWithTheLiveCredentialWraps \
+                      TestE2ETerminalWithoutClaim_ATamperedSecretIsRefused \
+                      TestE2ETerminalWithoutClaim_ASupersededAttemptIsRefusedWithWhoTookOver; do
+            grep -q -- "--- PASS: $want" terminal_without_claim.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#421 terminal-credential invariant is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' terminal_without_claim.log \
+            || { echo "::error::an aihub#421 terminal-credential test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

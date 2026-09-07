@@ -1,13 +1,6 @@
 [
   {
     "gate": "KEEP_LIST_PROJECTION",
-    "tool": "pf_recall",
-    "subject": "some_field_added_after_this_gate_was_written",
-    "wi": "aihub#418",
-    "note": "recall_slim.go projects with a keep-list, so a field the server adds never reaches the model. Three recorded instances already (aihub#249 total, aihub#269 the truncation pair, aihub#289 unmatched_types). aihub#418 is converting it to a delete-list; when that lands this line must be DELETED, and the gate says so."
-  },
-  {
-    "gate": "KEEP_LIST_PROJECTION",
     "tool": "pf_force_takeover",
     "subject": "some_field_added_after_this_gate_was_written",
     "wi": "aihub#422",

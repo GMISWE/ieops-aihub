@@ -422,6 +422,15 @@ func TestBriefRecallItem_DoesNotAdvertiseWhitespaceAsMissingBody(t *testing.T) {
 // what slimRecallResult produced before this wi" means. preChangeSlimRecallResult
 // below is the function as it stood at 3abc042, vendored verbatim, so any drift in
 // the shared path now shows up as a byte diff.
+//
+// ⚠️ aihub#418 introduced EXACTLY ONE intended divergence, and this oracle found
+// it rather than being told about it: an unknown top-level key used to be dropped
+// and is now forwarded. That row therefore moved OUT of this table and into
+// TestSlimRecallResultMode_DivergesFromPreChangeOnlyOnUnknownKeys below, which
+// asserts the divergence in both directions instead of deleting the coverage. The
+// rows that remain are the assertion that the conversion is output-preserving for
+// every field either function has heard of — 32 item fields and 6 response fields,
+// all unchanged.
 func TestSlimRecallResultMode_MatchesPreChangeFullMode(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -431,7 +440,6 @@ func TestSlimRecallResultMode_MatchesPreChangeFullMode(t *testing.T) {
 		{"empty items", map[string]any{"items": []any{}, "total": float64(0)}},
 		{"non-map item", map[string]any{"items": []any{"not a map"}}},
 		{"empty item map", map[string]any{"items": []any{map[string]any{}}}},
-		{"unknown top-level field", map[string]any{"items": []any{}, "surprise": "kept?"}},
 		{"no items key", map[string]any{"total": float64(3)}},
 		{"cursor and diagnostics", map[string]any{
 			"items": []any{briefFixture()}, "total": float64(9), "next_cursor": "c1",
@@ -446,6 +454,45 @@ func TestSlimRecallResultMode_MatchesPreChangeFullMode(t *testing.T) {
 					want, got)
 			}
 		})
+	}
+}
+
+// TestSlimRecallResultMode_DivergesFromPreChangeOnlyOnUnknownKeys is aihub#418's
+// change, stated as a difference against the vendored pre-change function rather
+// than as a property of the new one alone.
+//
+// This is the one assertion a keep-list cannot satisfy however complete it is,
+// and it is the whole reason the conversion happened: `total` (aihub#249), the
+// truncation pair (aihub#269) and `unmatched_types` (aihub#289) were each an
+// unknown key on the day it was added, and each was dropped in silence until
+// somebody noticed and added a copy line. Asserting BOTH sides — that the old
+// shape ate it and the new shape forwards it — is what keeps this from reading as
+// a description of code that always worked.
+func TestSlimRecallResultMode_DivergesFromPreChangeOnlyOnUnknownKeys(t *testing.T) {
+	const future = "some_field_a_later_server_added"
+	in := map[string]any{"items": []any{}, future: "arrived"}
+
+	pre := preChangeSlimRecallResult(deepCopy(t, in))
+	if _, present := pre[future]; present {
+		t.Fatalf("the vendored pre-change function forwarded %q, so it is not the keep-list this "+
+			"test is contrasting against — the vendoring has drifted: %v", future, pre)
+	}
+
+	post := slimRecallResultMode(deepCopy(t, in), false)
+	if got, present := post[future]; !present || got != "arrived" {
+		t.Errorf("a top-level key the server added and this projection has never heard of did not "+
+			"reach the caller (got %#v, present=%v).\n"+
+			"That is the keep-list shape aihub#418 removed: exposure required an edit, so the "+
+			"cheapest outcome of adding a field was silence — three times in this file already "+
+			"(aihub#249/#269/#289). Result: %v", got, present, post)
+	}
+
+	// Same in brief mode: brief narrows ITEMS, and the response envelope is not an
+	// item. A caller that asks for brief must not thereby lose the diagnostics.
+	postBrief := slimRecallResultMode(deepCopy(t, in), true)
+	if got, present := postBrief[future]; !present || got != "arrived" {
+		t.Errorf("brief mode dropped the unknown top-level key %q (got %#v, present=%v) — brief "+
+			"projects items, not the envelope", future, got, present)
 	}
 }
 

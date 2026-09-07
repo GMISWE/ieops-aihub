@@ -1307,7 +1307,7 @@ func matchRoute(routes []serverRoute, method, path string) (serverRoute, bool) {
 			continue
 		}
 		got := strings.Split(strings.Trim(r.Pattern, "/"), "/")
-		if len(got) != len(want) && !(len(got) > 0 && strings.HasSuffix(r.Pattern, "*")) {
+		if len(got) != len(want) && (len(got) == 0 || !strings.HasSuffix(r.Pattern, "*")) {
 			continue
 		}
 		literals, ok := 0, true

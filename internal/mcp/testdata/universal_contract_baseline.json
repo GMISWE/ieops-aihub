@@ -1,0 +1,100 @@
+[
+  {
+    "gate": "KEEP_LIST_PROJECTION",
+    "tool": "pf_recall",
+    "subject": "some_field_added_after_this_gate_was_written",
+    "wi": "aihub#418",
+    "note": "recall_slim.go projects with a keep-list, so a field the server adds never reaches the model. Three recorded instances already (aihub#249 total, aihub#269 the truncation pair, aihub#289 unmatched_types). aihub#418 is converting it to a delete-list; when that lands this line must be DELETED, and the gate says so."
+  },
+  {
+    "gate": "KEEP_LIST_PROJECTION",
+    "tool": "pf_force_takeover",
+    "subject": "some_field_added_after_this_gate_was_written",
+    "wi": "aihub#422",
+    "note": "the handler builds safeResult as a hand-listed 5-key map (prior_attempt_id, prior_actor_display, new_attempt_id, new_claim_epoch, ok). aihub#388's defect in the handler NEXT DOOR: #388 quoted this very handler's 'no expires_at; do not surface that field' comment while fixing the claim projection and left this one a keep-list."
+  },
+  {
+    "gate": "PARAM_NOT_FORWARDED",
+    "tool": "pf_cut_alpha",
+    "subject": "work_item_id",
+    "wi": "aihub#423",
+    "note": "published and required, and it reaches the wire in no form: the recorded body carries attempt_id, claim_epoch, project, repos, session_secret and workspace_root only, and the URL is /v1/releases/alpha. Spent here to find the state file with the credentials."
+  },
+  {
+    "gate": "PARAM_NOT_FORWARDED",
+    "tool": "pf_promote",
+    "subject": "work_item_id",
+    "wi": "aihub#423",
+    "note": "identical to pf_cut_alpha's: the recorded body carries project, new_stable_tag, source_alpha_tag and workspace_root, never work_item_id. Same stub endpoint pair (handleCutAlpha/handlePromote take no pool)."
+  },
+  {
+    "gate": "BOUND_FIELD_UNPUBLISHED",
+    "tool": "pf_claim_work_item",
+    "subject": "handleClaimWorkItem.mode",
+    "wi": "aihub#424",
+    "note": "aihub#394 withdrew `mode` from the schema after proving it selected nothing, and domain.ClaimRequest still binds it. The blind spot worth naming: #394's gate quantifies over PUBLISHED parameters, so a field that stops being published leaves its field of view entirely — which is what this gate's reverse direction exists for."
+  },
+  {
+    "gate": "BOUND_FIELD_UNPUBLISHED",
+    "tool": "pf_complete_attempt",
+    "subject": "handleCompleteAttempt.pause_reason",
+    "wi": "aihub#424",
+    "note": "pf_complete_attempt publishes force_terminate_step, note, status and work_item_id. pf_pause_attempt publishes pause_reason but POSTs /pause, a different route, so on /complete the field is unreachable."
+  },
+  {
+    "gate": "BOUND_FIELD_UNPUBLISHED",
+    "tool": "pf_pause_attempt",
+    "subject": "handlePauseAttempt.status",
+    "wi": "aihub#424",
+    "note": "pf_pause_attempt publishes only pause_reason and work_item_id, so the pause route's `status` is unreachable from MCP."
+  },
+  {
+    "gate": "BOUND_FIELD_UNPUBLISHED",
+    "tool": "pf_pause_attempt",
+    "subject": "handlePauseAttempt.force_terminate_step",
+    "wi": "aihub#424",
+    "note": "same route, same cause: pf_complete_attempt publishes force_terminate_step, pf_pause_attempt does not."
+  },
+  {
+    "gate": "BOUND_FIELD_UNPUBLISHED",
+    "tool": "pf_update_step",
+    "subject": "handleUpdateStep.outcome",
+    "wi": "aihub#424",
+    "note": "the step route binds `outcome` and pf_update_step publishes ten parameters, none of them this one."
+  },
+  {
+    "gate": "BOUND_FIELD_UNPUBLISHED",
+    "tool": "pf_recall",
+    "subject": "handleRecall.cursor",
+    "wi": "aihub#425",
+    "note": "one line short of working in BOTH directions: tools_memory.go's recallStringParams forwards `cursor` when it is in args, and pf_recall's InputSchema never declares it, so the SDK drops it before the forwarding code is reached. No MCP caller can page past the first page."
+  },
+  {
+    "gate": "BOUND_FIELD_UNPUBLISHED",
+    "tool": "pf_recall",
+    "subject": "handleRecall.recall_algo",
+    "wi": "aihub#425",
+    "note": "a server-side recall-algorithm switch no tool exposes."
+  },
+  {
+    "gate": "BOUND_FIELD_UNPUBLISHED",
+    "tool": "pf_read_events",
+    "subject": "handleListEvents.cursor",
+    "wi": "aihub#425",
+    "note": "same shape as handleRecall.cursor on the events list: pf_read_events publishes limit, pinned_first, project, since, types, user_id and work_item_id, no cursor."
+  },
+  {
+    "gate": "BOUND_FIELD_UNPUBLISHED",
+    "tool": "pf_remember",
+    "subject": "handleRemember.tags",
+    "wi": "aihub#425",
+    "note": "the server binds memory tags; pf_remember publishes attrs, base_strength, content, context_snippet, dedup_mode, expires_at, project, related_memory_ids, supersedes_memory_id, type, visibility and work_item_id — no tags. If the /ui writer supplies them this becomes a serverNamesNoToolCanReach entry rather than a fix; that is what aihub#425 has to check first."
+  },
+  {
+    "gate": "BOUND_FIELD_UNPUBLISHED",
+    "tool": "pf_update_user",
+    "subject": "handleUpdateUser.author_aliases",
+    "wi": "aihub#426",
+    "note": "PATCH /v1/admin/users/:id binds author_aliases and pf_update_user publishes display_name, id and role. pf_create_user publishes it, so the value can be set once at creation and never corrected from MCP."
+  }
+]

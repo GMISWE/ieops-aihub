@@ -109,7 +109,6 @@ func claimedWorkItem(t *testing.T, s *e2eStack) string {
 
 	claimed, err := s.client.ClaimWorkItem(ctx, wiID, map[string]any{
 		"idempotency_key": fmt.Sprintf("idem-%d", time.Now().UnixNano()),
-		"mode":            "fresh",
 		"session_info": map[string]any{
 			"machine_id":     "m_reinforce_e2e",
 			"session_secret": secret,

@@ -144,7 +144,8 @@ Memory types to use:
 
 > **NOTE**: `pf_save_artifact` requires an active wi claim (state file present).
 > When running standalone retro on an already-wrapped wi, either:
-> (a) re-claim the wi first: `pf_claim_work_item(mode="resume")` — or
+> (a) re-claim the wi first: `pf_claim_work_item(work_item_id=<slug>, idempotency_key=<ULID>)`
+>     — a re-claim needs no resume flag, and since aihub#394 there is none to pass; or
 > (b) skip artifact saves if re-claim is impractical; `pf_remember` (Step 5) still works.
 
 ### Step 6: Save retro artifact

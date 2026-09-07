@@ -115,16 +115,26 @@ func claimResponse(wiID, slug, project, goal string) map[string]any {
 //
 // `mode` is deliberately absent from the arguments — that is the third of the
 // three shapes that send a non-resume claim (the others are an explicit
-// mode="fresh" and a force takeover), and the one that arrives as "" rather than
-// as any word a conditional would obviously be testing. A legacy branch holds
-// the work and the worktree directory does not exist, so the handler's os.Stat
-// reuse cannot fire and the branch lookup is genuinely reached.
+// an explicit mode="fresh" and a force takeover — and the one that arrives as ""
+// rather than as any word a conditional would obviously be testing. A legacy
+// branch holds the work and the worktree directory does not exist, so the
+// handler's os.Stat reuse cannot fire and the branch lookup is genuinely
+// reached.
 //
-// MUTANT: wrap the addClaimWorktree call in the claim handler in
-// `if strArg(args, "mode") == "resume" { ... }`. Every test in
-// claim_worktree_test.go stays green; this one goes red on both assertions —
-// there is no worktrees key in the response at all, and the prior agent's commit
-// is nowhere.
+// ⚠️ aihub#394 withdrew `mode` entirely, so "the shape that omits it" is now the
+// ONLY shape. That does not make this test redundant — what it pins is that the
+// worktree is built on a claim the caller said nothing extra about — but it does
+// retire the old MUTANT note here, which proposed
+// `if strArg(args, "mode") == "resume" { ... }` around addClaimWorktree. Nothing
+// publishes `mode` any more, so that mutant reads "" on every call and the arm it
+// guards is dead code: it would be red for every claim rather than for a resume,
+// which is a mutant that fails to isolate the behaviour under test.
+//
+// MUTANT: replace the branch-lookup result in resolveClaimBranch with the
+// freshly computed name, i.e. never attach to an existing branch. Every test in
+// claim_worktree_test.go stays green; this one goes red on the load-bearing
+// assertion — the prior agent's commit is nowhere, because the claim started a
+// new branch off origin/main instead of picking up the legacy one.
 func TestClaimHandlerCreatesTheWorktreeOnANonResumeClaim(t *testing.T) {
 	const wiID = "wi_01JWIRINGABCDEFGH"
 	const legacy = "polyforge/ABCDEFGH" // last 8 of the id, the pre-1.1.18 name
@@ -140,7 +150,7 @@ func TestClaimHandlerCreatesTheWorktreeOnANonResumeClaim(t *testing.T) {
 	result, isErr := callTool(t, f, "pf_claim_work_item", map[string]any{
 		"work_item_id":    wiID,
 		"idempotency_key": "idem-wiring-1",
-		// no "mode" — this is the shape that arrives as ""
+		// no extra arguments: since aihub#394 this is the only shape there is
 	})
 	if isErr {
 		t.Fatalf("pf_claim_work_item failed: %v", result)
@@ -198,7 +208,6 @@ func TestClaimHandlerNamesTheBranchAfterTheGoal(t *testing.T) {
 	result, isErr := callTool(t, f, "pf_claim_work_item", map[string]any{
 		"work_item_id":    wiID,
 		"idempotency_key": "idem-wiring-2",
-		"mode":            "fresh",
 	})
 	if isErr {
 		t.Fatalf("pf_claim_work_item failed: %v", result)

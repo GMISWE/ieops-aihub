@@ -202,8 +202,7 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
      ```
      pf_claim_work_item(
        work_item_id=<wi_id>,
-       idempotency_key=<client ULID>,
-       mode="fresh"
+       idempotency_key=<client ULID>
      )
      ```
      then recall wi-linked memories:
@@ -257,7 +256,7 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
 ### Mode B — Claim existing queued wi (`/pf-work <slug>`)
 
 1. `pf_predict_conflicts(work_item_id=<slug>, dry_run=true)` → conflict preview
-2. `pf_claim_work_item(work_item_id=<slug>, mode="fresh", ...)`
+2. `pf_claim_work_item(work_item_id=<slug>, ...)`
 3. After successful claim — recall wi-linked memories:
    ```python
    wi_memories = pf_recall(
@@ -285,12 +284,24 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
 1. ```
    pf_claim_work_item(
      work_item_id=<slug>,
-     mode="resume",
      idempotency_key=<client ULID>
      // Do NOT pass scenario_ref — COALESCE on server preserves the original pinned SHA
    )
    ```
-   Restores: prepared workspace + step state from the previous attempt.
+   **There is no resume flag, and resuming needs none.** Step state lives server-side in
+   `wi_step_state`, keyed by work item and not by attempt, so *every* claim of this wi sees
+   the same `current_step` and the same completed history — read it with `pf_get_step`, whose
+   `completed_steps[]` is the authoritative record. The prepared workspace comes back the same
+   way: the claim reuses the existing `pf.<project>-<seq>/<repo>/` worktree if it is still
+   there, and otherwise attaches to the branch that already holds the work (see §Which branch
+   a claim attaches to).
+
+   > ⚠️ This skill used to send `mode="resume"` here and promise that it "restores step state
+   > from the previous attempt". The parameter selected nothing — both values ran the identical
+   > server path — so the sentence credited a flag for something the work item's own state was
+   > doing. `mode` was withdrawn from the schema in aihub#394. Do not reintroduce it: the
+   > claim gate (`internal/mcp/claim_param_contract_test.go`) fails any published claim
+   > parameter the server's claim path does not act on.
 
    > ⚠️ If this wi was originally claimed on a different machine, the pinned
    > `scenario_ref` SHA may not exist in the local clone. pf-execute will auto-fetch
@@ -326,7 +337,7 @@ Permission rules:
 
 Steps:
 1. `pf_force_takeover(work_item_id=<slug>, reason=<user input>)`
-2. `pf_claim_work_item(mode="fresh", ...)` — fresh claim.
+2. `pf_claim_work_item(...)` — a normal claim; there is no mode to pass.
 4. After successful claim — recall wi-linked memories:
    ```python
    wi_memories = pf_recall(
@@ -455,11 +466,11 @@ lose. It is the accepted cost of a work item whose project or seq contains no
 `[a-z0-9]` at all; the earlier branch still exists under its own name and
 nothing is lost from it.
 
-⚠️ This applies on **every** claim — fresh, resume and force takeover alike. It
-is decided from what exists in the clone, never from the `mode` argument. Modes
-D (`takeover`) and B (`/pf-work <slug>` without `--resume`) both send
-`mode="fresh"` at a work item that already has a branch and commits, and `mode`
-is optional so it can be absent entirely.
+⚠️ This applies on **every** claim — a first claim, a resume and a force takeover
+alike. It is decided from what exists in the clone, and there is nothing a caller
+can pass to steer it. That was already true when `pf_claim_work_item` still took a
+`mode` argument (aihub#322 stopped keying the branch decision on it); aihub#394 then
+withdrew the argument itself, because selecting nothing was all it ever did.
 
 None of this is reached while the worktree directory
 `<workspace>/pf.<project>-<seq>/<repo>/` still exists — that is reused as-is,

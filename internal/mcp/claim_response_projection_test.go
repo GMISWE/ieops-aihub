@@ -211,7 +211,6 @@ func claimToolResult(t *testing.T, f *fakeAihub, wiID, idem string) (map[string]
 	return callTool(t, f, "pf_claim_work_item", map[string]any{
 		"work_item_id":    wiID,
 		"idempotency_key": idem,
-		"mode":            "fresh",
 	})
 }
 

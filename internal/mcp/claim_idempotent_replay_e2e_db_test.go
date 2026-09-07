@@ -147,7 +147,7 @@ func TestE2EClaimReplayKeepsTheSecretTheServerAccepts(t *testing.T) {
 
 	const key = "idem-aihub-392-replay"
 	_, first := s.call(t, "pf_claim_work_item", map[string]any{
-		"work_item_id": wiID, "idempotency_key": key, "mode": "fresh",
+		"work_item_id": wiID, "idempotency_key": key,
 	})
 	firstAttempt, _ := first["attempt_id"].(string)
 	if firstAttempt == "" {
@@ -157,7 +157,7 @@ func TestE2EClaimReplayKeepsTheSecretTheServerAccepts(t *testing.T) {
 
 	// The replay: byte-identical arguments, which is what a retried call is.
 	_, second := s.call(t, "pf_claim_work_item", map[string]any{
-		"work_item_id": wiID, "idempotency_key": key, "mode": "fresh",
+		"work_item_id": wiID, "idempotency_key": key,
 	})
 	secondAttempt, _ := second["attempt_id"].(string)
 
@@ -199,7 +199,7 @@ func TestE2EClaimWithoutReplayCanAuthenticate(t *testing.T) {
 	s, wiID := claimStack(t, "aihub#392 reference side: a single claim authenticates")
 
 	_, claimed := s.call(t, "pf_claim_work_item", map[string]any{
-		"work_item_id": wiID, "idempotency_key": "idem-aihub-392-single", "mode": "fresh",
+		"work_item_id": wiID, "idempotency_key": "idem-aihub-392-single",
 	})
 	if claimed["attempt_id"] == nil {
 		t.Fatalf("the claim returned no attempt_id: %v", claimed)
@@ -233,13 +233,13 @@ func TestE2EClaimWithANewKeyMintsAFreshSecret(t *testing.T) {
 	s, wiID := claimStack(t, "aihub#392 over-reach control: a new key must mint a new secret")
 
 	_, first := s.call(t, "pf_claim_work_item", map[string]any{
-		"work_item_id": wiID, "idempotency_key": "idem-aihub-392-key-a", "mode": "fresh",
+		"work_item_id": wiID, "idempotency_key": "idem-aihub-392-key-a",
 	})
 	firstAttempt, _ := first["attempt_id"].(string)
 	secretAfterFirst := persistedSecret(t, wiID)
 
 	text, isErr := tryCall(t, s, "pf_claim_work_item", map[string]any{
-		"work_item_id": wiID, "idempotency_key": "idem-aihub-392-key-b", "mode": "fresh",
+		"work_item_id": wiID, "idempotency_key": "idem-aihub-392-key-b",
 	})
 	if isErr {
 		// Not the point of this test, and not something it should paper over: if

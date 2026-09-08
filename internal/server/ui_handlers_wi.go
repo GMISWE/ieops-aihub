@@ -1981,9 +1981,12 @@ func checkProjectAccessSoft(u *UserContext, project string) error {
 		return errSoft("project is required")
 	}
 	role, ok := u.ProjectRoles[project]
-	// Through roleLevel, matching checkProjectAccess: a legacy role string that
-	// reaches no known level is not a membership (migration 0013 backfilled
-	// arbitrary values), and must not learn the project exists.
+	// Through roleLevel, matching checkProjectAccess: a role string that reaches no
+	// known level is not a membership, and must not learn the project exists.
+	// ProjectRoles holds whatever projects.members stores — roleForUserInMembers
+	// returns it verbatim, and behind domain.UpdateProject's validation that JSONB
+	// has no CHECK constraint of its own. See checkProjectAccess for the
+	// measurement (aihub#460).
 	if !ok || role == "" || roleLevel[role] < roleLevel["viewer"] {
 		return errSoft(notVisibleMessage)
 	}

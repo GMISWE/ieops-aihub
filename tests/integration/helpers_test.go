@@ -22,9 +22,9 @@ const (
 	defaultAihubURL = "http://localhost:8081"
 	// testAPIKey must be seeded in the test database with writer access to "aihub" project.
 	// See tests/integration/seed_test_data.sql for the seed data.
-	testAPIKey      = "test-api-key-writer"
-	testAdminKey    = "test-api-key-admin"
-	testProject     = "aihub"
+	testAPIKey   = "test-api-key-writer"
+	testAdminKey = "test-api-key-admin"
+	testProject  = "aihub"
 )
 
 // newTestClient creates a client pointed at the test aihub server.

@@ -1,0 +1,92 @@
+name: gofmt
+
+# aihub#479. The Lint job in ci.yml runs golangci-lint, and golangci-lint does
+# NOT check formatting here: this repo has no .golangci.yml, so `run` uses
+# v2.12.2's implicit default linter set — errcheck, govet, ineffassign,
+# staticcheck, unused — and that set contains no formatter. Measured on main at
+# 538c0d8: `golangci-lint run --timeout=5m` reported `0 issues.` on the same
+# tree where `gofmt -l .` named seven files. Team memory carried the opposite
+# belief, that `golangci-lint run` gates formatting by default. It does not, and
+# this job is the standing refutation.
+#
+# The GATE is the point, not the reformat. aihub#479 was filed against 2 unclean
+# files and executed against 7 — the other five drifted in while it sat in the
+# queue, under a green CI. Reformatting an ungated tree buys exactly one clean
+# day.
+#
+# ── Why a separate workflow and not `formatters:` in .golangci.yml ────────────
+# That is the obvious consolidation, and it was measured before being rejected.
+# Two independent defects, both reproduced on this repo's own drift:
+#
+#   1. It is blind to build-tagged files. golangci-lint loads PACKAGES; gofmt
+#      walks FILES. All 14 files under tests/integration/ carry
+#      `//go:build integration`, so `go list ./tests/...` matches no packages
+#      and golangci-lint answers "no go files to analyze: running `go mod tidy`
+#      may solve the problem". One of the seven unclean files on main was
+#      tests/integration/helpers_test.go, and a `formatters: [gofmt]` config did
+#      not report it.
+#   2. It silently truncates. `issues.max-same-issues` defaults to 3, and every
+#      formatter finding shares the one message "File is not properly
+#      formatted", so a tree with seven unclean files reported exactly three.
+#      Setting max-same-issues and max-issues-per-linter to 0 lifted it to six —
+#      the six loadable ones — which is how defect 1 was isolated from it.
+#
+# Defect 2 is configurable; defect 1 is not, being inherent to checking format
+# through a package loader. `gofmt -l .` over the working tree has neither. For
+# the record the config file itself is harmless — the enabled linter set was
+# measured byte-identical with and without it — so the reason to avoid it is
+# coverage, not blast radius.
+#
+# This is not a step inside ci.yml's Lint job for one reason only:
+# .github/workflows/ci.yml was held by another live attempt's file lock when
+# this landed. That job is the better home, and moving it there is a pure
+# relocation of the step below.
+#
+# ⚠️ The non-obvious way to trip this gate. Since Go 1.19 gofmt reformats DOC
+# comments, and the doc-comment printer applies TeX quote conventions: a pair of
+# backquotes becomes U+201C and a pair of apostrophes ('') becomes U+201D. So
+# spelling a SQL empty-string literal the natural way, as '', inside a doc
+# comment makes the file gofmt-dirty — and `gofmt -w` then SILENTLY REWRITES
+# WHAT THE SENTENCE SAYS, turning the literal into a closing quotation mark. Two
+# doc comments on main had exactly that; both were reworded to "the empty
+# string" rather than formatted, because the formatted form was wrong. If this
+# gate goes red on a comment, read the diff before accepting its fix. Non-doc
+# comments (inside a function body) and string and rune literals are left alone,
+# which is where every other '' in this repo lives.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  gofmt:
+    name: gofmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+          cache: true
+
+      # No `go mod download` and no build: gofmt parses source and resolves no
+      # imports, so this job needs neither the module cache nor the postgres
+      # service ci.yml's test job carries. It is seconds, not minutes.
+      #
+      # `gofmt -l .` walks the working tree, so it covers build-tagged files,
+      # every cmd/ and plugins/ tree, and anything a future package layout adds,
+      # without a paths: filter or a package list to keep in sync.
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt is not clean; run: gofmt -w \$(gofmt -l .)"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+          echo "gofmt: clean"

@@ -101,14 +101,14 @@ func enumerateMCPTools(ctx context.Context) ([]*sdkmcp.Tool, error) {
 
 // contractSchema is the top-level output structure.
 type contractSchema struct {
-	GeneratedFrom string                   `json:"generated_from"`
-	Tools         map[string]contractTool  `json:"tools"`
+	GeneratedFrom string                  `json:"generated_from"`
+	Tools         map[string]contractTool `json:"tools"`
 }
 
 // contractTool is one tool entry in the contract.
 type contractTool struct {
-	Description string                    `json:"description"`
-	Params      map[string]contractParam  `json:"params"`
+	Description string                   `json:"description"`
+	Params      map[string]contractParam `json:"params"`
 }
 
 // contractParam is one parameter entry.

@@ -421,11 +421,11 @@ func TestHandleUpdateStep_TimelineEventIsRecordedOrTheRequestIsRefused(t *testin
 // attempt-less transition newly 400 — a shape that answered 200 before.
 //
 // agent_events.run_attempt_id is nullable by design (0006: "global system
-// events"), and '' is not a run attempt id. The handler passed req.AttemptID —
-// a non-pointer string — straight through, so EVERY step transition PATCHed
-// without an attempt_id violated the FK and lost its event silently. Passing
-// SQL NULL records it instead: "this event belongs to no attempt" is a fact the
-// column can hold.
+// events"), and the empty string is not a run attempt id. The handler passed
+// req.AttemptID — a non-pointer string — straight through, so EVERY step
+// transition PATCHed without an attempt_id violated the FK and lost its event
+// silently. Passing SQL NULL records it instead: "this event belongs to no
+// attempt" is a fact the column can hold.
 func TestHandleUpdateStep_AttemptlessStepEventIsRecordedWithANullAttempt(t *testing.T) {
 	pool := setupStepTestDB(t)
 	uid, project := seedStepTestUserAndProject(t, pool)

@@ -450,14 +450,14 @@ func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 // 0.6pp. Spending 1.7pp on a constant is not a trade this projection makes.
 //
 // WHY NOT THREAD include_archived DOWN FROM THE REQUEST, the other candidate. It
-// would work — buildRecallParams already decides with boolArg(args,
-// "include_archived") and the same call could be passed through — but it buys
-// nothing over reading the value. A caller can set include_archived and still
-// match no archived rows, and that request would then pay the full 6.8% to label
-// twenty rows "active". Reading the datum yields a strict subset of what the flag
-// yields, and every byte in the difference is provably non-informative. It also
-// keeps briefRecallItem's signature, which eighteen existing call sites depend
-// on.
+// would work — buildRecallParams already decides the flag (with parseBoolArg
+// since aihub#464; with boolArg when this note was written) and the same read
+// could be passed through — but it buys nothing over reading the value. A caller
+// can set include_archived and still match no archived rows, and that request
+// would then pay the full 6.8% to label twenty rows "active". Reading the datum
+// yields a strict subset of what the flag yields, and every byte in the
+// difference is provably non-informative. It also keeps briefRecallItem's
+// signature, which eighteen existing call sites depend on.
 //
 // THE RESIDUAL, stated rather than left to be found: absence now means "active".
 // That is already this mode's idiom — content_truncated appears only when the

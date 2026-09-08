@@ -286,6 +286,100 @@ func TestWireQueryRecallRefusesUnreadableNumbers(t *testing.T) {
 	}
 }
 
+// TestWireQueryRecallRefusesUnreadableBooleans is aihub#464, and it is the test
+// above with one type changed — deliberately, because that is the shape of the
+// defect.
+//
+// aihub#432 closed the numeric escape in buildRecallParams and wrote the test
+// above for it. The boolean further down the SAME function kept reading through
+// boolArg, which discards parseBoolArg's `ok` and answers false. The
+// discriminating detail is what false MEANS here: `include_archived` defaults to
+// false, so a refused-then-defaulted value produced a request byte-identical to
+// one that never mentioned the parameter. Unlike similarity_threshold, whose
+// absence at least leaves the page unfiltered and visibly large, this one hands
+// back a perfectly ordinary active-only page — there is no artefact in the
+// response for a caller to notice.
+//
+// So both halves are asserted for the same reason they are above, and the second
+// is again the discriminating one: a refusal issued AFTER the call would have
+// already spent a read the caller's request could not have wanted.
+func TestWireQueryRecallRefusesUnreadableBooleans(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		shape any
+	}{
+		{"a typo one keystroke from yes", "yess"},
+		{"a number with no boolean reading", float64(2)},
+		{"an array is not a boolean in any spelling", []any{true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := newQueryRecorder(t)
+			res := callToolAgainstRecorderResult(t, q, "pf_recall", map[string]any{
+				"project": "aihub", "query": "gateway rate limiting", "include_archived": tc.shape,
+			})
+			if !res.IsError {
+				t.Fatalf("pf_recall(include_archived=%#v) succeeded. A value this hop cannot read "+
+					"must be refused naming the parameter: defaulting it to false sends the server "+
+					"a request identical to one that never asked for archived memories, so the "+
+					"caller gets the active-only page and nothing anywhere says why (aihub#464)",
+					tc.shape)
+			}
+			if text := toolResultText(t, res); !strings.Contains(text, "include_archived") {
+				t.Errorf("the refusal does not name the parameter: %q", text)
+			}
+			q.mu.Lock()
+			sent := len(q.queries)
+			q.mu.Unlock()
+			if sent != 0 {
+				t.Errorf("pf_recall(include_archived=%#v) was refused but still made %d HTTP "+
+					"request(s); a request that cannot succeed must not be sent", tc.shape, sent)
+			}
+		})
+	}
+}
+
+// TestWireQueryRecallCarriesIncludeArchived is the green half of aihub#464 at the
+// wire, and it carries a claim the rejection test cannot: that the FORWARDING
+// still works, in every spelling parseBoolArg accepts.
+//
+// The `false` arms are the ones worth having. `include_archived=false` must
+// reach the server as NO PARAMETER — the server reads absence as false, so
+// forwarding "false" would be redundant, and a hop that started sending it would
+// make "explicitly false" and "unset" the same bytes for a server that may one
+// day want to tell them apart. That arm is also the one a naive "reject
+// everything unreadable" fix breaks first, since it is the only readable shape
+// whose correct outcome is an absent param.
+func TestWireQueryRecallCarriesIncludeArchived(t *testing.T) {
+	for _, tc := range []struct {
+		shape any
+		want  string
+	}{
+		{true, "true"},
+		{"true", "true"},
+		{float64(1), "true"},
+		{false, ""},
+		{"false", ""},
+		{float64(0), ""},
+	} {
+		t.Run(fmt.Sprintf("include_archived=%#v", tc.shape), func(t *testing.T) {
+			q := newQueryRecorder(t)
+			callToolAgainstRecorder(t, q, "pf_recall", map[string]any{
+				"project": "aihub", "query": "gateway rate limiting", "include_archived": tc.shape,
+			})
+			got := q.last(t)
+			if got.Get("include_archived") != tc.want {
+				t.Errorf("pf_recall(include_archived=%#v) put include_archived=%q on the wire, "+
+					"want %q — full query: %v", tc.shape, got.Get("include_archived"), tc.want, got)
+			}
+			// The flag must not disturb the rest of the request; a boolean that
+			// also moved the query or the project would be a different bug.
+			if got.Get("project") != "aihub" || got.Get("query") != "gateway rate limiting" {
+				t.Errorf("include_archived changed the rest of the request: %v", got)
+			}
+		})
+	}
+}
+
 // TestWireQueryRecallStillAcceptsEveryReadableSpelling is the green control for
 // the test above, and it is not decoration: a refusal that also refused the
 // valid spellings would satisfy every assertion there while breaking the tool

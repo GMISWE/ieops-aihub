@@ -84,4 +84,5 @@ high error rate here is not by itself evidence of a defect.
 ## Open
 
 - **§6.4 item 6** — what the de-locking ruling does to the release path here is
-  `aihub#416`'s question, not this card's.
+  `aihub#416`'s question, not this card's. Still open (`paused`) at the last
+  re-check, 2026-09-08.

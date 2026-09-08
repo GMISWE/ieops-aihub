@@ -83,7 +83,9 @@ hop 0-1 on a tool with no parameters, or a `written` card with no hop-4 body ·
 **K6** a cited `.go` path or symbol that does not resolve, or a bare filename
 cited with no directory · **K7** disagreement with the corpus record · **K8**
 floors, so a broken walk cannot pass by finding nothing · **K9** a hop 0-1 table
-cell quoting text the tool does not publish.
+cell quoting text the tool does not publish · **K11** an `## Open` bullet
+asserting an unfalsifiable negative, or naming a work item with no date. The
+numbering jumps K9 to K11 because K10 is taken by the DB-gated arm below.
 
 **K10** lives elsewhere and does not run in that step:
 `internal/mcp/card_response_keys_live_e2e_db_test.go`, gated on `AIHUB_TEST_DB`
@@ -143,6 +145,50 @@ equally unreadable, so "a card diff a reviewer reads" meant "a reviewer notices 
 hash moved and independently decides to go re-read prose the diff does not show".
 K3 still fires on the same event and should: it says *something* changed. K9 says
 *what*, and it survives regeneration because the generator never touches prose.
+
+### K11 — `## Open` is a form rule, not a fact-checker
+
+`aihub#476` swept every card's `## Open` section against the tree it described and
+found **5 of 48 carrying a false assertion**, with the gate green through all
+five — the arms above compare a generated machine block against the live schema,
+and an Open section is prose no machine block covers. K11 (`aihub#483`) is the arm
+that reads it.
+
+It does **not** decide whether a bullet is true. It refuses the two forms in which
+a false bullet cannot be found out:
+
+- **An unfalsifiable negative** — `nobody has …`, `is unmeasured`,
+  `was not updated by …`. All three come from the five, and between them they
+  catch **5 of 5**. There is no date escape: timestamping a claim about what
+  anyone anywhere has ever measured still leaves a reader nothing to re-run. Say
+  who would hold the answer, or scope the negative to yourself the way
+  `pf_emit_event.md` does with *"needs a DB read this line could not make"*.
+- **A work-item citation with no date.** An Open bullet naming an `aihub#NNN` is
+  claiming something about that item's state — it is open, it decided X, it left Y
+  behind — and that state lives in the aihub database, which no arm here can read.
+  Undated, the claim is true the day it is written and silently wrong afterwards,
+  which is exactly how the five arose. The convention is a plain ISO date saying
+  when you last looked: *"still open (`paused`) at the last re-check, 2026-09-08"*,
+  *"wrapped 2026-09-07; re-checked 2026-09-08"*, or the inline form the role-ladder
+  cards use, *"a live-DB read dated 2026-09-08, which dates rather than pins"*.
+
+⚠️ **The date does not make the claim true**, and the arm cannot tell a considered
+as-of from one copied off the line above. What it removes is the undated absolute,
+which is the form all five took.
+
+Two things K11 is deliberately **not**. It does not read the aihub database, so a
+bullet whose cited work item has since wrapped stays green until a human re-reads
+it; doing better needs an `AIHUB_TEST_DB`-gated step and a `ci.yml` manifest entry,
+which `aihub#476` recommended against and `aihub#483` did not build. And its phrase
+list is short on purpose — `"<subject> was never read"` is the same family and is
+left out because on this tree it reds `pf_recall.md`'s *"the knob was never read"*,
+a true claim about what the code does, as often as it catches a real one.
+
+The date half has one exemption, `openCitationWaivers` in the gate, which names the
+card, the reason and the date and covers the **date rule only** — never the phrase
+ban. It is falsifiable in both directions: a waived card that stops having an
+undated citation is reported as a stale waiver, so the entry goes red the moment
+the gap it covers closes.
 
 ### K7 is copy-to-copy, K10 is the one that reaches a server
 

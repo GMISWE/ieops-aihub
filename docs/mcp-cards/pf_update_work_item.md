@@ -302,7 +302,8 @@ no body", never "the body was withheld".
   `attrs_unset`, and **none** carried any other field. So the record tier is
   load-bearing — post-wrap decision and merge records are written through it,
   including by the batch that shipped this change — while the working tier's new
-  refusal on a closed record breaks zero measured calls.
+  refusal on a closed record breaks zero measured calls. `aihub#440` wrapped
+  2026-09-08 and was re-checked the same day.
 - **`milestone` is the one unexercised cell.** It appears in none of the 738
   measured calls, so its new terminal-state refusal rests on the tier argument
   alone rather than on observed traffic.

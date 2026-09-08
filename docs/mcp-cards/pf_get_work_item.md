@@ -120,4 +120,5 @@ corpus record above spans 2,063 calls, the highest-volume tool in the census, at
 ## Open
 
 - Nothing this card can settle. The `aihub#385` audit's control gap is recorded
-  above so the "no defects" line is read at the strength it was given.
+  above so the "no defects" line is read at the strength it was given. That audit
+  wrapped 2026-09-07; re-checked 2026-09-08.

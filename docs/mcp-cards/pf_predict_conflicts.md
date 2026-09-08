@@ -98,6 +98,7 @@ worth recording.
 
 - **§6.4 item 6** — **what `pf_predict_conflicts` reports for an advisory entry is
   listed in `aihub#416`'s `spec_must_answer` and is open by design.** This card must
-  not be read as saying the current behaviour is the intended one.
+  not be read as saying the current behaviour is the intended one. `aihub#416` was
+  still open (`paused`) at the last re-check, 2026-09-08.
 - The two measured untrustworthy directions are recorded, not fixed. No adjudicated
   row commits to fixing them.

@@ -110,6 +110,7 @@ CLAIM keep-list.
 
 ## Open
 
-- **§6.4 item 6** — the de-locking group's open questions belong to `aihub#416`. The
-  commit-window race above is documented, not closed; the full analysis lives beside
-  the lock upsert statement in `internal/domain/resource_events.go`.
+- **§6.4 item 6** — the de-locking group's open questions belong to `aihub#416`,
+  still open (`paused`) at the last re-check, 2026-09-08. The commit-window race
+  above is documented, not closed; the full analysis lives beside the lock upsert
+  statement in `internal/domain/resource_events.go`.

@@ -264,3 +264,91 @@ func TestEventVocabulary_CoversEveryEmitter(t *testing.T) {
 			strings.Join(files, ", "), typ)
 	}
 }
+
+// TestMigrationReplay_RestoresTheConstraintToHead pins the repair for the
+// defect that reddened aihub#444's first CI run, DB-free.
+//
+// ─── What happened, since a green local run is what let it through ─────────
+//
+// `goose up` installed migration 0036's 22-name chk_evt_work_item_id on
+// agent_events and on all seven partitions. Eighty-four seconds later, a
+// different CI step ran TestBackfillLatestID, which replays migration 0026 to
+// exercise its latest_id backfill — and 0026's Up section ends with
+// DROP CONSTRAINT / ADD CONSTRAINT / VALIDATE carrying the 21-name list of its
+// own era. Every one of those eight rows flipped back, and the next step's
+// INSERT was refused with SQLSTATE 23514 inside a job whose migration log reads
+// "successfully migrated database to version: 36".
+//
+// Two diagnoses were offered and BOTH are wrong, which is why they are recorded
+// here rather than left to be re-proposed: it is not a partition-local copy the
+// parent DROP failed to cascade to (measured — all eight rows carry the new
+// list after 0036 and all eight lose it together), and it is not the runtime
+// partition template carrying a stale list (createPartitionSQL in gc.go is a
+// bare CREATE TABLE ... PARTITION OF, so a new partition inherits whatever the
+// parent has at that moment). The rewind is a TEST replaying history against a
+// shared database.
+//
+// ─── What is asserted ──────────────────────────────────────────────────────
+//
+// That supersedingMigrations finds the repair edge, and that it finds it by
+// reading the directory rather than by carrying a list. chk_evt_work_item_id is
+// redefined by SEVEN migrations, so a hand-maintained "0026 also needs 0036"
+// note would be wrong the next time any of the other six is replayed, and wrong
+// again on the day an 0037 touches it.
+func TestMigrationReplay_RestoresTheConstraintToHead(t *testing.T) {
+	// The exact pair from the CI failure: replaying 0026 must pull 0036 with it.
+	after0026 := supersedingMigrations(t, "0026_memories_latest_id.sql")
+	require.Contains(t, after0026, nullWorkItemMigration,
+		"replaying 0026 no longer re-applies %s, so a test that replays it leaves the whole database "+
+			"holding 0026's 21-name chk_evt_work_item_id and every later test in the run sees it",
+		nullWorkItemMigration)
+
+	// Every migration that redefines this constraint must reach head, not only
+	// the one that happened to break. Anti-vacuity too: if this found one file,
+	// the loop below would be proving almost nothing.
+	var redefiners []string
+	entries, err := os.ReadDir("../db/migrations")
+	require.NoError(t, err)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		for _, c := range constraintsAddedBy(migrationUpSection(t, e.Name())) {
+			if c == "chk_evt_work_item_id" {
+				redefiners = append(redefiners, e.Name())
+			}
+		}
+	}
+	require.Greater(t, len(redefiners), 4,
+		"only %d migration(s) redefine chk_evt_work_item_id — the scan broke, not the history",
+		len(redefiners))
+
+	head := redefiners[len(redefiners)-1]
+	require.Equal(t, nullWorkItemMigration, head,
+		"the LAST migration to redefine chk_evt_work_item_id is %s, but NullWorkItemEventTypes is "+
+			"mirrored against %s — the Go mirror is being checked against a superseded file", head,
+		nullWorkItemMigration)
+
+	for _, f := range redefiners[:len(redefiners)-1] {
+		require.Contains(t, supersedingMigrations(t, f), head,
+			"replaying %s would leave chk_evt_work_item_id at its own era's definition instead of "+
+				"%s's", f, head)
+	}
+
+	// The head itself must supersede nothing, or the mirror above is stale.
+	require.NotContains(t, supersedingMigrations(t, head), head)
+}
+
+// TestMigrationReplay_ScanIgnoresProse is the anti-vacuity half of the arm
+// above: an edge built out of a sentence would make supersedingMigrations
+// re-apply unrelated migrations, and the arm above cannot tell a real edge from
+// a prose one.
+func TestMigrationReplay_ScanIgnoresProse(t *testing.T) {
+	got := constraintsAddedBy(`
+-- This comment says ALTER TABLE t ADD CONSTRAINT prose_only CHECK (true).
+ALTER TABLE t ADD CONSTRAINT real_one CHECK (true);
+`)
+	require.Equal(t, []string{"real_one"}, got,
+		"constraintsAddedBy read a constraint name out of a comment; these migrations document their "+
+			"own DDL in prose, so that would wire replay edges between files that share nothing")
+}

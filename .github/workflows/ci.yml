@@ -4366,6 +4366,19 @@ jobs:
       # every Go-level assertion above would pass over a database still carrying
       # 0026's 21-name predicate — Go refuses first — and the first direct HTTP
       # caller would then hit the 23514 this work item exists to remove.
+      #
+      # 🔴 If this step ever goes red with "does not carry admin_gc_manual" while
+      # the migration log above says "successfully migrated database to version:
+      # 36", the migration is not the suspect — an EARLIER STEP IN THIS JOB
+      # replayed an older migration against the shared database and rewound the
+      # constraint. That is a real failure this branch shipped once: goose
+      # installed 0036's 22 names at 21:00:39, the "previously CI-invisible DB
+      # tests" step ran TestBackfillLatestID at 21:01:58 — which replays 0026,
+      # whose Up ends in DROP/ADD/VALIDATE with 21 names — and this step failed
+      # at 21:02:22. chk_evt_work_item_id is redefined by SEVEN migrations, so
+      # any of six replays does it. runMigration now re-applies the superseding
+      # migrations too (internal/domain/memory_latest_test.go), and
+      # TestMigrationReplay_RestoresTheConstraintToHead holds that DB-free.
       - name: aihub#444 event_type sets + migration 0036 DB tests
         env:
           AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable

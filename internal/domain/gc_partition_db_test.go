@@ -48,7 +48,29 @@ import (
 // whitelist. Foreign keys to users/work_items/run_attempts are omitted — the
 // sweep only ever inserts rows with a NULL work_item_id, so they are not
 // load-bearing here, and leaving them out is what lets this fixture stand alone.
-const agentEventsFixtureDDL = `
+//
+// 🔴 The CHECK's list is BUILT FROM NullWorkItemEventTypes (aihub#444) and used
+// to be seven names typed in by hand. By the time anyone looked it was fifteen
+// behind the schema it claims to mirror — it still carried 0021's era while the
+// column was on 0026's — and nothing could report that, because a fixture is
+// only ever compared with itself.
+//
+// It never corrupted anything: setupPartitionTestDB builds this in a private
+// schema with search_path pinned, so it cannot reach the real table. That is
+// exactly what makes it worth single-sourcing rather than deleting. A drifted
+// copy in an isolated schema does not break a test, it makes one PASS for a
+// reason that stopped being true — the sweep would keep inserting
+// partition_created against a whitelist nobody had checked in a year. The
+// aihub#444 rewind came from a DIFFERENT copy of this same list, one replayed
+// against the shared database, and the lesson generalises: every copy of a
+// vocabulary is a copy that can be stale, so the ones that must exist are
+// derived.
+func agentEventsFixtureDDL() string {
+	quoted := make([]string, 0, len(NullWorkItemEventTypes))
+	for _, t := range NullWorkItemEventTypes {
+		quoted = append(quoted, "'"+t+"'")
+	}
+	return `
 CREATE TABLE agent_events (
     id             TEXT NOT NULL,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
@@ -64,15 +86,14 @@ CREATE TABLE agent_events (
     pinned         BOOLEAN NOT NULL DEFAULT FALSE,
     CONSTRAINT chk_evt_work_item_id CHECK (
         work_item_id IS NOT NULL
-        OR event_type IN ('phase_config_updated', 'admin_redact', 'admin_unblock',
-                          'system_gc', 'system_force_takeover', 'memory_gc',
-                          'partition_created')
+        OR event_type IN (` + strings.Join(quoted, ", ") + `)
     )
 ) PARTITION BY RANGE (created_at);
 
 CREATE INDEX idx_evt_wi_time ON agent_events(work_item_id, created_at DESC);
 CREATE INDEX idx_evt_type_time ON agent_events(event_type, created_at DESC);
 `
+}
 
 // setupPartitionTestDB gives each subtest its own schema containing a fresh,
 // empty agent_events. search_path is pinned on every pooled connection, so the
@@ -116,7 +137,7 @@ func setupPartitionTestDB(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("connect with search_path: %v", err)
 	}
-	if _, err := pool.Exec(ctx, agentEventsFixtureDDL); err != nil {
+	if _, err := pool.Exec(ctx, agentEventsFixtureDDL()); err != nil {
 		pool.Close()
 		t.Fatalf("create fixture: %v", err)
 	}

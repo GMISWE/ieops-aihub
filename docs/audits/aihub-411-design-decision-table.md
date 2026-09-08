@@ -357,8 +357,13 @@ they are the record of *what was reviewed*; this section is the record of *what 
 
 **Counts over the 35 rows.** `wi-filed` **25** · `already-landed` **6** · `superseded-by:aihub#416`
 **4** · `rule-recorded` **5** (four sole, one alongside `already-landed`). Rows carrying two tags
-are counted under each. **All 35 rulings** are additionally written back as memory, per the
-requirement above — the memory write-back is universal, not an alternative disposition.
+are counted under each, and a tag a row records as RETRACTED still counts where the row keeps it —
+T1-10's struck-through `wi-filed` is inside the 25, beside the `already-landed` that replaced it.
+**All 35 rulings** are additionally written back as memory, per the requirement above — the memory
+write-back is universal, not an alternative disposition. These four counts, the row count, and the
+filed-wi range below are recounted from the rows on every docs PR by check C4 in
+`scripts/pf_docs_contract_check.py`; that gate exists because `aihub#488` edited a row and left the
+tally behind it with nothing going red (`aihub#489`). Keep the two halves in step, as T1-10 says.
 
 **Work items filed by this adjudication: `aihub#431` … `aihub#450`** (20). Each carries its
 row's evidence verbatim, so a finding stays reachable without knowing this document's name.

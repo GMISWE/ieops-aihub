@@ -116,7 +116,7 @@ item, gated on a re-measure below 0.1%.
 
 | tool | purpose |
 |---|---|
-| `pf_get_step` | Current step graph, status, progress, and previous steps. |
+| `pf_get_step` | The authoritative step record: `current_step` / `current_step_status` / `version`, plus `completed_steps` — the step history oldest first, retries included, each entry carrying its own `status`, so only a `completed` entry means that step is done. No step graph here: the graph is a scenario template, pinned per work item by `scenario_ref`. |
 | `pf_update_step` | Update the current step (`in_progress`/`completed`/`failed`, heartbeat, artifact summary). `next_step` completes one step and starts its successor in one call. No version/CAS argument - concurrency is guarded by the server's idle-step predicate, so no `pf_get_step` is needed first. |
 
 ## Dependencies (3) - `internal/mcp/tools_dependency.go`

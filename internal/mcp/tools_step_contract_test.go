@@ -299,6 +299,7 @@ func TestBatchCreateItemFieldsMatchSingleCreate(t *testing.T) {
 var getStepAdvertised = []struct{ Claim, JSONKey string }{
 	{"completed_steps", "completed_steps"},
 	{"artifact_summary", "completed_steps"}, // carried inside each entry
+	{"error_type", "completed_steps"},       // carried inside each entry; why a failed one failed
 	{"current_step_status", "current_step_status"},
 	{"current_step", "current_step"},
 	{"work_item_id", "work_item_id"},
@@ -314,11 +315,25 @@ var getStepAdvertised = []struct{ Claim, JSONKey string }{
 // distrust a progress file it finds in the worktree. The templates carry the
 // same warning, but a caller reaching pf_get_step directly never reads them.
 // A 989 -> 756 char trim of this description could have taken it out unnoticed.
+//
+// The status rule (aihub#450) is here for the same reason. `status` is a bound
+// key named elsewhere in the description, so every field-name assertion stays
+// GREEN against the sentence this replaced — "treat every step_id in
+// completed_steps as done" — which told the reader to ignore the one field that
+// answers the question. A guard that cannot tell those two texts apart is not
+// guarding the fix.
 var getStepRequiredPhrases = []struct{ Phrase, Why string }{
 	{"Never take step progress from a file in the worktree",
 		"the prohibition; the only warning a non-template caller ever sees"},
 	{"absent only on a server older than",
 		"absent vs [] is a different answer, and reading absent as empty is the original defect"},
+	{"count only entries whose status",
+		"completedStepsQuery has no status filter, by decision (the reasons are on the tool); a failed " +
+			"entry is not a finished step, and the pre-aihub#450 sentence said to treat every " +
+			"step_id in the list as done"},
+	{"pausing an attempt files its",
+		"fnForceTerminateStep's status=failed / error_type=force_terminate row names a step nobody " +
+			"completed, and this response is the only place a resuming agent can learn of it"},
 }
 
 // getStepAdvertisedMayBeAbsent records advertised keys that carry omitempty, and

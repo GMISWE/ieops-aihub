@@ -74,6 +74,13 @@ package domain
 // run_attempts read, which this shape does not reach. The qualifier stays on
 // that tool, and settling it needs its own work item.
 //
+// That work item was aihub#451, and it settled it the other way: commit the
+// foreign ATTEMPT row inside the window as well as its lock row — a claim in
+// flight, which writes both in one transaction — and FnForceTakeover really does
+// displace a live foreign holder, silently. See
+// force_takeover_commit_window_db_test.go. Read the probe above as "this shape
+// does not reach the gap", never as "nothing does".
+//
 //	AIHUB_TEST_DB=postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable \
 //	go test ./internal/domain/ -run 'TestClaimTakeoverCommitWindow' -count=1 -v
 

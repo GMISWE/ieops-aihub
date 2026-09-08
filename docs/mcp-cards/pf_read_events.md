@@ -4,7 +4,7 @@
 {
   "tool": "pf_read_events",
   "description_sha256": "c495ca6b4e50e46b49bc56d8e8eeb357784284e54b737ff696a6734c6f6d42ae",
-  "input_schema_sha256": "87772e20c52de2a15bedad5dc1130245febee41a691fba3527a2c51df6cbf250",
+  "input_schema_sha256": "bbd3846e6d7b3bb0b6d94865efbe2e90bb3f49cd3663c47ec5c1bbf0c5497aa4",
   "params": {
     "cursor": {
       "type": "string",
@@ -56,8 +56,8 @@ neither `work_item_id` nor `project`.
 |---|---|---|---|
 | `work_item_id` | string | no | one work item (or use `project`) |
 | `project` | string | no | one project (or use `work_item_id`) |
-| `user_id` | string | no | "Filter by user" |
-| `types` | array | no | event-type whitelist; a claim emits one `lock_acquired` PER declared path |
+| `user_id` | string | no | "Filter by ACTOR: matches agent_events.actor_user_id" |
+| `types` | array | no | "A FILTER, not a whitelist and not a validator" — a claim emits one `lock_acquired` PER declared path |
 | `cursor` | string | no | pass a previous response's `next_cursor` |
 | `since` | string | no | RFC3339 |
 | `limit` | string | no | max events (server default 50) |
@@ -103,8 +103,25 @@ Two parameters here have first-class defect histories:
   that FK-references `work_items(id)`, so a slug matches nothing and the call answers
   200 with an empty list — indistinguishable from a work item that genuinely has no
   events. `pf_get_step` echoes the canonical id and is the cheapest way to get one.
-- `types` is a whitelist, so an unrecognised value narrows to nothing rather than
-  erroring — which is only safe now that the parameter actually reaches the server.
+- **`types` is a FILTER, not a whitelist**, and `aihub#444` renamed it for that
+  reason (`aihub#411` §6.2 T2-5). It validates nothing: an unrecognised value becomes
+  `event_type IN ('typo')`, matches no row, and answers 200 with an empty list — so a
+  typo, a type that has never existed and an event that genuinely did not happen are
+  the same result. Measured over 2,244 transcripts: 48 calls passed `types` carrying
+  34 distinct values, and roughly half of them — `wi_cancelled`, `attempt_claimed`,
+  `wi_updated`, `wi_claimed`, `attempt_lost_lease`, `wi_wrapped`, `goal_changed`,
+  `wi_created`, `wi_note`, `correction`, `attempt_paused`, `wi_rhs_changed` among
+  them — name nothing any code path emits. That is `aihub#259`'s failure mode
+  surviving its own fix: the parameter now reaches the server and filters correctly
+  on a name that cannot exist. The vocabulary is published on
+  `pf_emit_event`'s `event_type` rather than repeated here, so the two tools share
+  one copy of it on the wire.
+- **`user_id` filters the ACTOR** — `internal/domain/memory.go` (`ListEvents`)
+  compares `e.actor_user_id`, the id stamped on the event by whoever emitted it. That
+  is a FOURTH identity, none of the three §6.2 T2-18 enumerates, which is why the
+  description names it rather than picking one of them. It also excludes every event
+  written with no actor at all — the GC sweeps, `wi_unblocked`, `attempt_completed` —
+  because `actor_user_id = $n` never matches NULL.
 - The stream is a **whitelisted semantic record**, not a wire log: the server keeps
   no per-request log, which is why `aihub#412` had to reconstruct the request/response
   chain from transcripts instead.
@@ -124,12 +141,15 @@ union of top-level keys real callers have been handed.
 
 ## Policy
 
-- **§6.2 T2-5** — the ruling names this filter's description directly: it is to be
-  renamed alongside publishing the event vocabulary as an enum on `pf_emit_event`,
-  because a `types` value that matches nothing and a typo look the same.
-- **§6.2 T2-18** — state on each `user_id`-shaped parameter which of the three
-  identities it filters. **This tool's `user_id` says "Filter by user" and does not.**
-  That is the row's live instance here.
+- **§6.2 T2-5 — LANDED** (`aihub#444`). This filter's description no longer calls
+  itself a whitelist and states the consequence a caller cannot see: an unmatched
+  name returns the same empty list as an event that did not happen. The vocabulary is
+  published on `pf_emit_event.event_type` — as an open list rather than an `enum`,
+  because an MCP enum is advisory and the server enforces no vocabulary at all.
+- **§6.2 T2-18 — LANDED** (`aihub#444`). `user_id` now names the identity it filters:
+  the ACTOR (`agent_events.actor_user_id`), explicitly not the reporter, not the
+  attempt owner and not a watcher. `pf_list_work_items.user_id` stays REPORTER
+  (`aihub#383`); the two now say different things because they do different things.
 - **§6.1 T1-6 — LANDED** (`aihub#435`). A caller-supplied `cursor` that will not
   parse is a 400 at the handler, not a 500 that sends the reader to the server
   logs. The check lives in `internal/server/queryparam.go` (`queryCursor`), which
@@ -139,5 +159,10 @@ union of top-level keys real callers have been handed.
 
 ## Open
 
-- **§6.2 T2-18 is unaddressed on this tool.** Which identity `user_id` filters is not
-  stated in the schema, and this card does not settle it by asserting one.
+- **`user_id` was passed zero times in the measured corpus** — 0 of 152
+  `pf_read_events` calls across 2,244 transcripts (measured 2026-09-08 for
+  `aihub#444`, the same sweep that found 34 distinct `types` values). The
+  description is now honest about which identity it filters; what that count
+  raises and this change did not settle is whether a filter on the emitter earns
+  its wire bytes at all. Deciding that needs a reason to keep it, not another
+  count of a parameter nobody sends.

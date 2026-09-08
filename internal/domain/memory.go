@@ -3297,30 +3297,14 @@ type EmitEventRequest struct {
 	Admin         bool            `json:"admin"`
 }
 
-// adminEventWhitelist contains event_types allowed for admin=true events.
-// Per §5.2 (pf_emit_event H10): the design lists attempt_superseded,
-// admin_force_takeover, admin_unblock, admin_redact as the admin-only set;
-// the server also emits these via the same path.
-var adminEventWhitelist = map[string]bool{
-	"admin_unblock":             true,
-	"admin_force_takeover":      true,
-	"admin_redact":              true,
-	"phase_config_updated":      true,
-	"wi_needs_attention":        true,
-	"wi_classification_missing": true,
-	"attempt_superseded":        true,
-}
-
-// adminOnlyEventTypes are event_types that ALWAYS require admin role, regardless of
-// whether req.Admin is set. This prevents event-type forgery (H6 fix): a non-admin
-// caller setting admin=false but using an admin event type would otherwise bypass the
-// req.Admin gate.
-var adminOnlyEventTypes = map[string]bool{
-	"admin_redact":         true,
-	"admin_unblock":        true,
-	"admin_force_takeover": true,
-	"admin_gc_manual":      true,
-}
+// The three sets that govern event_type — adminOnlyEventTypes (§5.2 H6),
+// adminEventWhitelist (§5.2 H10) and nullWorkItemEventSet (the Go mirror of
+// chk_evt_work_item_id) — now live together in event_types.go, alongside the
+// published vocabulary they used to be the only trace of. They were moved by
+// aihub#444 for one reason: two of them had drifted apart while sitting fifteen
+// lines from each other, so proximity is not what keeps them consistent. The
+// whitelist is now DERIVED from the admin-only set, and the mirror is checked
+// against the migration text by a test that needs no database.
 
 // EmitEvent inserts a new event into agent_events.
 func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
@@ -3341,9 +3325,15 @@ func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
 		if callerRole != "admin" {
 			return "", NewErr(ErrForbidden, "admin=true requires admin role")
 		}
+		// aihub#444: the whitelist is DERIVED from adminOnlyEventTypes
+		// (event_types.go), so this branch can no longer refuse a type the check
+		// above just let through. It used to: admin_gc_manual was admin-only and
+		// NOT whitelisted, which made setting an honest admin=true strictly more
+		// restrictive than omitting it.
 		if !adminEventWhitelist[req.EventType] {
 			return "", NewErr(ErrForbidden,
-				fmt.Sprintf("event_type %q is not in the admin whitelist", req.EventType))
+				fmt.Sprintf("event_type %q is not in the admin whitelist (%s)",
+					req.EventType, strings.Join(AdminEventWhitelist, ", ")))
 		}
 	}
 
@@ -3369,6 +3359,26 @@ func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
 	}
 	if len(req.Payload) == 0 {
 		req.Payload = json.RawMessage(`{}`)
+	}
+
+	// aihub#444 (aihub#411 §6.1 T1-4): chk_evt_work_item_id was enforced in the
+	// DATABASE ONLY, so this call used to run all the way to the INSERT, come back
+	// SQLSTATE 23514 and be wrapped as a 500 carrying the driver's constraint text
+	// — a caller error reported as a server fault. The set is mirrored in Go by
+	// NullWorkItemEventTypes, which a DB-free test holds equal to the migration.
+	//
+	// BELOW the payload pair on purpose, and it cost a test to find out: the
+	// aihub#465 contract (json_object_params_test.go) requires a stringified
+	// `payload` to be rejected in payload's own terms, and its fixtures carry no
+	// work item. Putting this guard above them changed which of two simultaneous
+	// caller errors is reported, which is a contract change nobody asked for. It
+	// also reads better here — the check now sits immediately above the block that
+	// consumes work_item_id, as its precondition.
+	if req.WorkItemID == "" && !nullWorkItemEventSet[req.EventType] {
+		return "", NewErr(ErrBadRequest, fmt.Sprintf(
+			"work_item_id is required for event_type %q: only these event types may be filed "+
+				"without a work item (agent_events.chk_evt_work_item_id): %s",
+			req.EventType, strings.Join(NullWorkItemEventTypes, ", ")))
 	}
 
 	var attemptIDArg *string

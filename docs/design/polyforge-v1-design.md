@@ -1644,10 +1644,32 @@ pf_emit_event(work_item_id, attempt_id, claim_epoch, session_secret,
   -- admin-only event_type 白名单：
   --   attempt_superseded, admin_force_takeover,
   --   admin_unblock, admin_redact（server 自动 emit 时也走此路径）
+  --   ⚠️ 勘误（aihub#444，2026-09-08）：这一行把**两个不同的集合**写成了一个，
+  --   而实现里它们从来就是两个，且曾经互相矛盾。实测（基准 f128b69）：
+  --     H6「永远需要 role=admin」= 4 个：admin_force_takeover / admin_gc_manual /
+  --       admin_redact / admin_unblock（本行漏了 admin_gc_manual，多了
+  --       attempt_superseded）
+  --     H10「admin=true 时允许」= 8 个：上面 4 个 ＋ attempt_superseded /
+  --       phase_config_updated / wi_classification_missing / wi_needs_attention
+  --   两者的关系是**包含**而不是相等：后者多出来的 4 个非 admin 也能发。
+  --   aihub#444 之前 admin_gc_manual 只在前者里，导致同一个 admin **带
+  --   admin:true 被 403、不带反而成功**（标志位倒挂，四格实测在
+  --   .github/workflows/ci.yml 的 aihub#444 步骤注释里）。现在 H10 集合由 H6 集合
+  --   **派生**（internal/domain/event_types.go），包含关系是构造出来的。
+  --   第三个集合（chk_evt_work_item_id，「允许不带 work_item_id」，22 个）与这两个
+  --   都不同，且**不是事件词表**；词表见 EventVocabulary（45 个），已发布到
+  --   pf_emit_event.event_type 的 description（不用 enum：MCP enum 只是建议性的）。
   → {event_id}
 
 pf_read_events(work_item_id?, project?, user_id?, types?, since?, limit?, pinned_first?)
   -- work_item_id 或 project 至少传一个
+  -- ⚠️ 勘误（aihub#444，2026-09-08）：types 是 **filter 不是 whitelist** —— 它不校验，
+  --   不认识的值只是匹配不到任何行，于是「打错字」「这个类型从来不存在」「事件确实
+  --   没发生」三种情况返回同一个空列表。实测 2,244 份 transcript：48 次调用传了
+  --   types，共 34 个不同取值，其中约一半（wi_cancelled / attempt_claimed /
+  --   wi_updated / wi_claimed / wi_wrapped / goal_changed / …）没有任何代码路径会发。
+  --   user_id 过滤的是 **actor**（agent_events.actor_user_id，事件的发出者），不是
+  --   reporter（那是 pf_list_work_items.user_id）、不是 attempt owner、也不是 watcher。
   → {events:[...]}
 
 pf_predict_conflicts(work_item_id?, declared_resources, dry_run?)

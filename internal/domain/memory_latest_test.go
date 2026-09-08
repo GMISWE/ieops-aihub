@@ -11,6 +11,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -155,9 +159,11 @@ func seedMemory(t *testing.T, pool *pgxpool.Pool, project, userID, id, supersede
 // runMigration applies a single goose-formatted migration file's Up section
 // against pool. It extracts the SQL between "-- +goose Up" and "-- +goose Down"
 // and executes it verbatim (multi-statement).
-func runMigration(t *testing.T, pool *pgxpool.Pool, filename string) {
+// migrationUpSection returns the Up section of a migration file, verbatim —
+// comments included, because that is what goose executes.
+func migrationUpSection(t *testing.T, filename string) string {
 	t.Helper()
-	raw, err := os.ReadFile("../db/migrations/" + filename)
+	raw, err := os.ReadFile(filepath.Join(migrationsDir, filename))
 	require.NoError(t, err)
 	sql := string(raw)
 	const upMarker = "-- +goose Up"
@@ -166,9 +172,117 @@ func runMigration(t *testing.T, pool *pgxpool.Pool, filename string) {
 	downStart := indexOf(sql, downMarker)
 	require.NotEqual(t, -1, upStart, "missing +goose Up marker in %s", filename)
 	require.NotEqual(t, -1, downStart, "missing +goose Down marker in %s", filename)
-	upSQL := sql[upStart:downStart]
-	_, err = pool.Exec(context.Background(), upSQL)
+	return sql[upStart:downStart]
+}
+
+// addConstraintRe captures the constraint names an Up section installs.
+var addConstraintRe = regexp.MustCompile(`(?i)ADD\s+CONSTRAINT\s+([a-z_][a-z0-9_]*)`)
+
+// constraintsAddedBy lists the constraints an Up section installs.
+//
+// Comment lines are dropped FIRST, and that is load-bearing rather than tidy:
+// these migrations document their own DDL in prose, so a scan that read
+// comments would build edges out of sentences and re-apply migrations that
+// touch nothing in common.
+func constraintsAddedBy(upSQL string) []string {
+	var code []string
+	for _, line := range strings.Split(upSQL, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		code = append(code, line)
+	}
+
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range addConstraintRe.FindAllStringSubmatch(strings.Join(code, "\n"), -1) {
+		name := strings.ToLower(m[1])
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// supersedingMigrations returns, in application order, every migration LATER
+// than filename whose Up section re-defines a constraint filename's Up also
+// installs.
+//
+// 🔴 aihub#444. This exists because replaying an old migration against a SHARED
+// database silently rewinds the schema, and the rewind outlives the test that
+// caused it. Measured, on CI and then reproduced locally: `goose up` installed
+// migration 0036's 22-name chk_evt_work_item_id on agent_events and all seven
+// partitions; the "aihub#303 previously CI-invisible DB tests" step then ran
+// TestBackfillLatestID, which replays 0026 — whose Up ends in
+// DROP CONSTRAINT / ADD CONSTRAINT / VALIDATE with the 21-name list of its own
+// era — and every one of those eight rows flipped back. Eighty-four seconds
+// later a different step's INSERT was refused by SQLSTATE 23514, in a job whose
+// migration log says "successfully migrated database to version: 36".
+//
+// The hazard is not specific to that pair. chk_evt_work_item_id alone is
+// redefined by SEVEN migrations (0009, 0016, 0021, 0022, 0025, 0026, 0036), so
+// replaying any of the first six rewinds it, and nothing said so.
+//
+// Re-applying the superseding Up sections is what makes a replay leave the
+// schema at HEAD for the objects the replay touched. It is derived from the
+// migration directory rather than from a list, so a future 0037 that touches
+// the same constraint is covered on the day it lands — which a hand-maintained
+// "after replaying 0026, also run 0036" line would not be.
+func supersedingMigrations(t *testing.T, filename string) []string {
+	t.Helper()
+	added := constraintsAddedBy(migrationUpSection(t, filename))
+	if len(added) == 0 {
+		return nil
+	}
+	wanted := map[string]bool{}
+	for _, c := range added {
+		wanted[c] = true
+	}
+
+	entries, err := os.ReadDir(migrationsDir)
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+
+	var out []string
+	for _, name := range names {
+		if name <= filename {
+			continue
+		}
+		for _, c := range constraintsAddedBy(migrationUpSection(t, name)) {
+			if wanted[c] {
+				out = append(out, name)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// runMigration applies a migration's Up section, and then re-applies any LATER
+// migration that owns a constraint this one installs. See supersedingMigrations
+// for why the second half is not optional.
+func runMigration(t *testing.T, pool *pgxpool.Pool, filename string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), migrationUpSection(t, filename))
 	require.NoError(t, err, "applying %s", filename)
+
+	for _, later := range supersedingMigrations(t, filename) {
+		_, err := pool.Exec(context.Background(), migrationUpSection(t, later))
+		require.NoError(t, err,
+			"re-applying %s after replaying %s: %s redefines a constraint %s installs, so without "+
+				"this the database is left at %s's version of it and every LATER test in the same "+
+				"run sees the old schema (aihub#444). If %s is not safe to re-apply, it needs an "+
+				"IF EXISTS / idempotent Up, not an exception here.",
+			later, filename, later, filename, filename, later)
+	}
 }
 
 func indexOf(s, sub string) int {

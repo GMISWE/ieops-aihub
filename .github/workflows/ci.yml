@@ -1078,6 +1078,96 @@ jobs:
       #             migrated with goose to 34) rather than only reasoned about:
       #             four `--- PASS:` lines, no `--- SKIP`, and with AIHUB_TEST_DB
       #             unset it exits 1 on the first "did not run".
+      #   241 -> 245 aihub#441 added 4 DB-gated functions, all in internal/domain
+      #             (attempt_status_vocabulary_dbgated_test.go:
+      #             TestAttemptStatusVocabulary_ACancelledAttemptAnswersMismatchNotPaused,
+      #             TestAttemptStatusVocabulary_CancelEndsTheLiveAttempt,
+      #             TestAttemptStatusVocabulary_OneCodeForOneInvalidSecret,
+      #             TestAttemptStatusVocabulary_TheCheckAcceptsCancelledAndRejectsLost),
+      #             covering the run_attempts status vocabulary and migration 0035.
+      #
+      #             🔴 BACK-FILLED here by aihub#444, and it is a MILDER case than
+      #             the aihub#442 back-fill above — mild enough that the difference
+      #             is the point. aihub#441 (5b7b343, PR #417) added its four
+      #             manifest lines AND a CI step naming all four, so the gate was
+      #             GREEN on main the whole time and nothing was silently skipping.
+      #             What it did not add is this LEDGER LINE, and the ledger is not
+      #             checked by anything: dbtestcov compares the manifest with the
+      #             inventory and the steps, and never reads these comments.
+      #
+      #             So this is the one half of the aihub#320 record that can rot
+      #             without turning anything red, which is exactly why the next
+      #             change through here writes it. Left alone, the next author
+      #             reads "237 -> 241" as the current floor, measures 245, and
+      #             cannot tell a missed registration from a missed comment.
+      #             aihub#444 hit that: its first draft of the entry below said
+      #             "241 -> 245" against a base that had already moved to 245.
+      #   245 -> 249 aihub#444 added 4 DB-gated functions, all in internal/domain
+      #             (event_types_db_test.go:
+      #             TestEmitEventAdminFlag_DeclaringItIsNeverWorseThanOmittingIt,
+      #             TestEmitEventAdminFlag_TheWhitelistStillRefusesSomething,
+      #             TestEmitEventNullWorkItem_IsA400NotA500,
+      #             TestMigration0036_AdmitsAdminGcManualWithNoWorkItem),
+      #             covering the event_type sets that aihub#411 §6.2 T2-5 ruled on.
+      #
+      #             Four functions and not one table-driven test, for the same
+      #             reason aihub#445 gave: the migration arm INSERTs rows the Go
+      #             path refuses and reads pg_constraint directly, while the three
+      #             behavioural arms go through EmitEvent and assume the migration
+      #             is already applied. Folding them together would make later
+      #             subtests depend on an earlier one's cleanup, and a CI step
+      #             could then name the function while a subtest quietly stopped
+      #             running.
+      #
+      #             The DB-free companions carry the set algebra and have no line
+      #             here: internal/domain/event_types_test.go parses
+      #             0036_agent_events_admin_gc_manual.sql and fails if its CHECK
+      #             and domain.NullWorkItemEventTypes stop naming the same set,
+      #             asserts AdminOnlyEventTypes is contained in
+      #             AdminEventWhitelist, and scans the tree for event_type
+      #             literals EventVocabulary does not publish — all in the default
+      #             `go test ./...`. What only a database can say is which STATUS
+      #             a caller receives: the work_item_id arm exists because the
+      #             same refusal used to arrive as a 500 carrying SQLSTATE 23514.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched, and in both
+      #             directions on the SAME inventory. RE-MEASURED after merging
+      #             aihub#441, which is why these are 245/249 and not the 241/245
+      #             this branch first recorded — aihub#441 landed while this one
+      #             was refused the lock on this file, and the numbers were taken
+      #             again rather than adjusted by arithmetic. Verbatim, with the
+      #             tests written but before the manifest lines and the step:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 245 entries,
+      #                 inventory measured 249
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 249
+      #                 (require only a DB: 246, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 78
+      #               dbtestcov: covered by a CI step: 242/246
+      #               ::error::dbtestcov: 4 … not in the manifest … 4 … executed
+      #                 by NO CI step
+      #             and after:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 249 entries,
+      #                 inventory measured 249
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 249
+      #                 (require only a DB: 246, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 79
+      #               dbtestcov: covered by a CI step: 246/246
+      #               dbtestcov: OK
+      #
+      #             The step's own `run:` text was executed as EXTRACTED from this
+      #             file against a real Postgres (pgvector/pgvector:pg16, dropped
+      #             and re-migrated with goose 0001 -> 0036 after the aihub#441
+      #             merge, so 0035 and 0036 applied IN ORDER rather than 0036
+      #             landing first and 0035 arriving as an out-of-order fill)
+      #             rather than only reasoned about: exit 0 with
+      #             all four named `--- PASS:` lines present (14 in total, the
+      #             other ten being subtests) and no `--- SKIP`, and with
+      #             AIHUB_TEST_DB unset it exits 1 on the first "did not run".
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -4235,6 +4325,75 @@ jobs:
           done
           ! grep -q -- '--- SKIP' memory_type_check.log \
             || { echo "::error::an aihub#445 memory-type test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#444 (aihub#411 decision table §6.2 T2-5): the three sets that govern
+      # agent_events.event_type, and the two refusals that were wrong.
+      #
+      # A real Postgres is the only place either claim can be tested, and in both
+      # cases what it adds is the STATUS CODE — which is the whole finding.
+      #
+      # The admin arm is the flag inversion. admin_gc_manual was in
+      # adminOnlyEventTypes and NOT in adminEventWhitelist, so an admin sending it
+      # with admin:true got 403 "not in the admin whitelist" while the SAME admin
+      # omitting the flag was accepted. Measured, before and after, all four cells:
+      #
+      #   role       admin flag   before                         after
+      #   admin      true         403 not in the whitelist       accepted
+      #   admin      (omitted)    accepted                       accepted
+      #   non-admin  true         403 requires admin role        403 requires admin role
+      #   non-admin  (omitted)    403 requires admin role        403 requires admin role
+      #
+      # The whitelist is now DERIVED from the admin-only set (event_types.go), so
+      # the containment holds by construction — but a derivation is one edit from
+      # being unrolled, which is why the assertion runs over EVERY admin-only type
+      # rather than over the one that broke. Its sibling arm is the anti-vacuity
+      # half: widening the whitelist to everything would satisfy the inversion test
+      # while deleting the section 5.2 H10 gate, so a plain `note` marked
+      # admin:true must still be refused.
+      #
+      # 🔴 The work_item_id arm is a 500 that should always have been a 400.
+      # chk_evt_work_item_id had NO Go mirror, so POST /v1/events with no
+      # work_item_id ran to the INSERT and came back
+      # "INTERNAL_ERROR: ... violates check constraint "chk_evt_work_item_id"
+      # (SQLSTATE 23514)" — measured verbatim by reverting the guard. That is
+      # aihub#433's failure mode and the inverse of the aihub#411 section 6.1 T1-4
+      # policy: the CHECK is the last line of defence, never the caller-facing one.
+      # The arm asserts the HTTP STATUS, not the words, because a 500 and a 400 can
+      # carry the same text; and it runs three accepted and three refused types, so
+      # neither "refuses everything" nor "refuses nothing" can pass it.
+      #
+      # The migration arm bypasses EmitEvent entirely and INSERTs directly, because
+      # every Go-level assertion above would pass over a database still carrying
+      # 0026's 21-name predicate — Go refuses first — and the first direct HTTP
+      # caller would then hit the 23514 this work item exists to remove.
+      #
+      # 🔴 If this step ever goes red with "does not carry admin_gc_manual" while
+      # the migration log above says "successfully migrated database to version:
+      # 36", the migration is not the suspect — an EARLIER STEP IN THIS JOB
+      # replayed an older migration against the shared database and rewound the
+      # constraint. That is a real failure this branch shipped once: goose
+      # installed 0036's 22 names at 21:00:39, the "previously CI-invisible DB
+      # tests" step ran TestBackfillLatestID at 21:01:58 — which replays 0026,
+      # whose Up ends in DROP/ADD/VALIDATE with 21 names — and this step failed
+      # at 21:02:22. chk_evt_work_item_id is redefined by SEVEN migrations, so
+      # any of six replays does it. runMigration now re-applies the superseding
+      # migrations too (internal/domain/memory_latest_test.go), and
+      # TestMigrationReplay_RestoresTheConstraintToHead holds that DB-free.
+      - name: aihub#444 event_type sets + migration 0036 DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^(TestEmitEventAdminFlag|TestEmitEventNullWorkItem|TestMigration0036)' -count=1 -v 2>&1 | tee event_types.log
+          for want in TestEmitEventAdminFlag_DeclaringItIsNeverWorseThanOmittingIt \
+                      TestEmitEventAdminFlag_TheWhitelistStillRefusesSomething \
+                      TestEmitEventNullWorkItem_IsA400NotA500 \
+                      TestMigration0036_AdmitsAdminGcManualWithNoWorkItem; do
+            grep -q -- "--- PASS: $want" event_types.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); an admin declaring an admin event can again be refused where one saying nothing succeeds, and a missing work_item_id can again answer 500 with the driver's constraint text (aihub#444)"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' event_types.log \
+            || { echo "::error::an aihub#444 event_type test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#482: the contract cards' `response_keys_observed` was pinned to a
       # checked-in copy of the aihub#412 corpus and to nothing else, so dropping a

@@ -126,7 +126,7 @@ func setupAlertSweepTestDB(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("connect with search_path: %v", err)
 	}
-	if _, err := pool.Exec(ctx, agentEventsFixtureDDL); err != nil {
+	if _, err := pool.Exec(ctx, agentEventsFixtureDDL()); err != nil {
 		pool.Close()
 		t.Fatalf("create agent_events fixture: %v", err)
 	}

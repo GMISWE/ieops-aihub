@@ -133,18 +133,28 @@ func newIdempotencyKey() string { return idempotencyKeyPrefix + rand.Text() }
 // free: a force_create=true retry after a 409 must not inherit the previous key,
 // and here it structurally cannot.
 //
-// What that buys, exactly. This package runs no retry loop of its own, so the
-// only thing that ever re-sends a request is net/http's transport retry of a
-// request that failed on a REUSED connection — and adding this header is what
-// enables it for POST/PATCH, because (as of Go 1.26) the unexported
-// (*http.Request).isReplayable admits a non-GET method precisely when the body
-// is rewindable and an Idempotency-Key (or X-Idempotency-Key) is present — if a
-// future Go drops that clause the retry simply stops happening, which costs this
-// package nothing it had before. That retry replays the same *http.Request:
-// same header value, same bytes via GetBody. So the server sees the same
-// fingerprint under the same key and either replays or executes once, and a
-// transport retry can never raise the 409 — that needs one key with two
-// different fingerprints, which nothing here can produce.
+// What that cost, and how it is paid (aihub#472). Setting this header is also
+// what told net/http it may re-send a mutating request: as of Go 1.26 the
+// unexported (*http.Request).isReplayable admits a non-GET method whenever the
+// body is nil, NoBody or rewindable AND an Idempotency-Key (or
+// X-Idempotency-Key) is present, and (*persistConn).shouldRetryRequest then
+// re-sends a request it has already written IN FULL if the reused connection
+// fails before the first response byte. Reproduced: the server ran the mutation
+// twice and the caller was handed err=nil. The server-side cache does not close
+// that — it stores a response only for a finished 2xx under 1 MiB in the same
+// process, and a restart is one of the likeliest producers of the very read
+// error that triggers the retry.
+//
+// So this package sends mutating requests on a transport that keeps no idle
+// connections (see mutatingClient). shouldRetryRequest returns false for
+// !pc.isReused() before it reaches any replay clause, so a request that never
+// rides a reused connection is never re-sent AFTER BEING WRITTEN, whatever this
+// header says. The
+// header therefore keeps its protocol meaning and its server-side replay
+// semantics for a CALLER that retries with the same key, while a silent
+// transport re-execution is unreachable. A transport retry also cannot raise
+// the 409 — not because the fingerprint would match, but because there is no
+// transport retry.
 //
 // A CALLER-level retry (an agent re-invoking pf_ship, pf_claim_work_item, …) is
 // a new call into this package and gets a new key. It is a different mechanism
@@ -153,27 +163,124 @@ func newIdempotencyKey() string { return idempotencyKeyPrefix + rand.Text() }
 // different guarantees and the design requires both (H-R3-8).
 func (c *Client) setStandardHeaders(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	if req.Method == http.MethodPost || req.Method == http.MethodPatch {
+	if isMutatingMethod(req.Method) {
 		req.Header.Set("Idempotency-Key", newIdempotencyKey())
 	}
 }
 
+// isMutatingMethod reports whether a method is one the design calls mutating —
+// the set that must carry an Idempotency-Key (§4.1, H-R3-8) and, since
+// aihub#472, the set that must not travel on a reusable connection.
+//
+// It exists so those two answers come from one predicate. If a header rule and
+// a connection rule for the same concept were written twice, a method could be
+// added to one and not the other, and the result — a mutation that carries the
+// header and still travels on a pooled connection — is precisely aihub#472 with
+// nothing to announce it. DELETE is the live illustration of the coupling: it
+// gets no header, so isReplayable does not admit it and the pooled transport is
+// safe for it; the day it gets one it must move clients in the same edit.
+func isMutatingMethod(method string) bool {
+	return method == http.MethodPost || method == http.MethodPatch
+}
+
+// requestTimeout bounds every outbound request, on both clients below.
+const requestTimeout = 30 * time.Second
+
 // Client is the aihub HTTP API client.
 type Client struct {
-	baseURL    string
-	apiKey     string
+	baseURL string
+	apiKey  string
+
+	// httpClient carries the safe methods and pools connections as usual.
 	httpClient *http.Client
+	// mutatingClient carries POST/PATCH and keeps no idle connections.
+	mutatingClient *http.Client
 }
 
 // New creates a new aihub client.
 func New(baseURL, apiKey string) *Client {
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		baseURL:        strings.TrimRight(baseURL, "/"),
+		apiKey:         apiKey,
+		httpClient:     &http.Client{Timeout: requestTimeout},
+		mutatingClient: &http.Client{Timeout: requestTimeout, Transport: nonPoolingTransport()},
 	}
+}
+
+// nonPoolingTransport returns a transport that uses each connection for exactly
+// one request.
+//
+// This is aihub#472's fix. net/http re-sends a request it has already written
+// in full — transportReadFromServerError, errServerClosedIdle — but only on a
+// connection it took from the idle pool: shouldRetryRequest returns false on
+// !pc.isReused() before it consults isReplayable at all. Taking mutating
+// requests out of the pool therefore makes a silent second execution structurally
+// unreachable, for every mutating request rather than for a subset.
+//
+// The narrower-looking fix, clearing req.GetBody on POST/PATCH so isReplayable
+// stops admitting them, was measured and rejected. Three reasons, in order of
+// weight:
+//
+//  1. It misses the no-body mutations entirely. NewRequestWithContext turns a
+//     zero-length *bytes.Reader into http.NoBody, so isReplayable's first
+//     disjunct is satisfied by `r.Body == NoBody` no matter what GetBody holds,
+//     and ActivateMemory, RotateProjectIdentifier and any doRaw POST stay exactly
+//     as double-executable as before. TestMutatingRequestIsNotRetriedByTransport
+//     carries that arm; under a GetBody-only fix it still reports two executions
+//     and err=nil.
+//  2. It removes a retry that was always safe. The nothingWrittenError clause
+//     is `req.outgoingLength() == 0 || req.GetBody != nil`; a bodied POST
+//     satisfied it through GetBody long before aihub#436, and nothing was
+//     written, so re-sending could not double-execute. Clearing GetBody
+//     surrenders it and lands BELOW the pre-#436 behaviour. Not pooling the
+//     connection loses nothing instead: the stale-idle-connection race that
+//     retry compensates for cannot happen on a connection that was just dialled.
+//  3. GetBody has other readers. HTTP/2 uses it to replay a stream the server
+//     answered REFUSED_STREAM or GOAWAY — provably not processed, so provably
+//     safe — and returns a hard error without it; Client.do uses it to follow a
+//     307/308 with the body intact, and silently stops following the redirect
+//     when it is nil. Neither is reachable against aihub today, and neither has
+//     anything to do with this bug.
+//
+// Scope, stated rather than implied: shouldRetryRequest is the HTTP/1 path, and
+// that is the only one aihub is reached over (an http:// base URL never
+// negotiates h2). Over HTTP/2 the decision belongs to http2shouldRetryRequest
+// instead, which never consults isReplayable and so was never affected by
+// aihub#436 in either direction; DisableKeepAlives makes those connections
+// single-use but does not change that function. Nothing here makes the h2 path
+// worse, and nothing here should be read as a proof about it.
+//
+// The price is one connection setup per mutating request. That is the honest
+// cost of the guarantee, and it is paid on calls that already carry a database
+// write behind a 30s timeout.
+func nonPoolingTransport() http.RoundTripper { return nonPoolingFrom(http.DefaultTransport) }
+
+// nonPoolingFrom is nonPoolingTransport with its one input made an argument, so
+// that the fallback below is reachable from a test. A branch whose whole job is
+// to hold the guarantee in the case nobody expects is the last one that should
+// be unexecuted.
+func nonPoolingFrom(base0 http.RoundTripper) http.RoundTripper {
+	base, ok := base0.(*http.Transport)
+	if !ok {
+		// A program that replaced http.DefaultTransport with something that is
+		// not an *http.Transport leaves nothing to clone. Build the guarantee
+		// from scratch rather than fall back to the shared default: what this
+		// transport must NOT do is the whole reason it exists.
+		return &http.Transport{Proxy: http.ProxyFromEnvironment, DisableKeepAlives: true}
+	}
+	tr := base.Clone() // keeps proxy, dial and TLS settings; drops the shared pool
+	tr.DisableKeepAlives = true
+	return tr
+}
+
+// clientFor returns the *http.Client that must carry a request with this
+// method. Both request builders go through it, so a third one cannot quietly
+// put a mutation back on a pooled connection.
+func (c *Client) clientFor(method string) *http.Client {
+	if isMutatingMethod(method) {
+		return c.mutatingClient
+	}
+	return c.httpClient
 }
 
 // do executes an HTTP request and decodes the JSON response into out (if non-nil).
@@ -196,7 +303,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.clientFor(method).Do(req)
 	if err != nil {
 		return fmt.Errorf("http %s %s: %w", method, path, err)
 	}
@@ -243,7 +350,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string) ([]byte, string
 	}
 	c.setStandardHeaders(req)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.clientFor(method).Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("http %s %s: %w", method, path, err)
 	}

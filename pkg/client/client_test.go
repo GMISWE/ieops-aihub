@@ -1,16 +1,21 @@
 package client
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestFormatDetails covers the aihub#209 fix: the server already computes a
@@ -327,3 +332,370 @@ func callsFunc(body *ast.BlockStmt, name string) bool {
 	})
 	return found
 }
+
+// ─── aihub#472 — a written mutating request must not be re-sent ──────────────
+
+// rstServer is a raw TCP HTTP/1.1 origin built for one job: read a request in
+// full and then kill the connection WITHOUT answering it. That is the exact
+// condition net/http's (*persistConn).shouldRetryRequest answers with a silent
+// re-send, and httptest.Server cannot produce it — it speaks through net/http's
+// own server, which has no way to consume a request and then reset.
+//
+// It counts arrivals per path and accepted connections, so a test can tell
+// "the server ran this mutation once" from "the server ran it twice", which is
+// the only observation that separates the bug from the fix. The client's own
+// error is the second half: under the bug it is nil.
+type rstServer struct {
+	ln net.Listener
+
+	mu      sync.Mutex
+	hits    map[string]int // path -> how many times a request for it arrived
+	resetOn map[string]int // path -> which arrival to answer with a TCP RST
+	conns   int            // accepted connections == how many times the client dialled
+}
+
+// newRSTServer starts a listener on loopback. resetOn maps a path to the
+// 1-based arrival number that gets reset; every other arrival is answered 200
+// with a `{}` body and the connection is kept open for reuse.
+func newRSTServer(t *testing.T, resetOn map[string]int) *rstServer {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	s := &rstServer{ln: ln, hits: map[string]int{}, resetOn: resetOn}
+	go s.accept()
+	t.Cleanup(func() { _ = ln.Close() })
+	return s
+}
+
+func (s *rstServer) accept() {
+	for {
+		conn, err := s.ln.Accept()
+		if err != nil {
+			return
+		}
+		s.mu.Lock()
+		s.conns++
+		s.mu.Unlock()
+		go s.serveConn(conn)
+	}
+}
+
+func (s *rstServer) serveConn(conn net.Conn) {
+	defer conn.Close() //nolint:errcheck
+	br := bufio.NewReader(conn)
+	for {
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		// Drain the body before deciding anything: the whole point of this
+		// harness is a request the client has finished WRITING. A reset issued
+		// mid-write would be nothingWrittenError, a different clause with a
+		// different (and legitimate) answer.
+		_, _ = io.Copy(io.Discard, req.Body)
+		_ = req.Body.Close()
+
+		s.mu.Lock()
+		s.hits[req.URL.Path]++
+		reset := s.resetOn[req.URL.Path] == s.hits[req.URL.Path]
+		s.mu.Unlock()
+
+		if reset {
+			// SO_LINGER 0 turns the deferred Close into an RST, so the client
+			// sees a non-EOF read failure on the first response byte —
+			// transportReadFromServerError — rather than a clean EOF.
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0)
+			}
+			return
+		}
+		if _, werr := io.WriteString(conn,
+			"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"); werr != nil {
+			return
+		}
+	}
+}
+
+func (s *rstServer) baseURL() string { return "http://" + s.ln.Addr().String() }
+
+func (s *rstServer) count(path string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.hits[path]
+}
+
+func (s *rstServer) connCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conns
+}
+
+// warmPool sends two GETs and requires that they shared ONE connection.
+//
+// This is the test's green control, and it is not optional. Every assertion
+// below is about what happens to a request that rides a REUSED connection:
+// net/http only ever retries on one (shouldRetryRequest returns false for
+// !pc.isReused()). If pooling were not happening here — a future global
+// DisableKeepAlives, a proxy env var, a transport swap — every test in this
+// group would pass while observing nothing at all. Failing here says "the
+// premise is gone", which is a different report from "the fix regressed".
+func warmPool(t *testing.T, c *Client, s *rstServer) {
+	t.Helper()
+	// Returning a connection to the idle pool is a hand-off to the transport's
+	// readLoop goroutine that happens after ReadAll sees EOF, so a GET issued
+	// immediately after another can lose the race and dial again. Rather than
+	// sleep a guessed interval, send GETs until one of them opens NO new
+	// connection: that observation IS the proof that pooling happened, and it
+	// converges in one round on an unloaded machine without going flaky on a
+	// loaded one.
+	for attempt := range 100 {
+		before := s.connCount()
+		if _, _, err := c.doRaw(t.Context(), http.MethodGet, "/v1/warm"); err != nil {
+			t.Fatalf("warm-up GET #%d: %v", attempt+1, err)
+		}
+		if attempt > 0 && s.connCount() == before {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("after 100 GETs the server had opened %d connections and no request ever reused "+
+		"one — this transport is not pooling, so nothing below is exercising the "+
+		"reused-connection retry it claims to", s.connCount())
+}
+
+// warmMutating sends one mutating request that IS answered, so that whatever
+// carries mutations has had a chance to put a connection in an idle pool before
+// the measured request goes out.
+//
+// Without this the tests below would only ever observe a process's FIRST
+// mutation, which is dialled fresh and can never be retried no matter what the
+// code does — a fix that merely moved mutations to a second POOLING transport
+// would look correct because that transport's pool happened to be empty, and
+// every mutation after the first would still be re-sendable in production. This
+// was measured: with it removed, flipping DisableKeepAlives back to false left
+// the whole group green.
+func warmMutating(t *testing.T, c *Client, s *rstServer) {
+	t.Helper()
+	if _, _, err := c.doRaw(t.Context(), http.MethodPost, "/v1/warm_post"); err != nil {
+		t.Fatalf("warm-up POST: %v", err)
+	}
+	// No convergence loop here, and it cannot be one: under the fix this client
+	// never reuses, so "wait until a request opens no new connection" would only
+	// ever time out. A fixed settle is the honest instrument — its only job is
+	// to give a REGRESSION (a mutating transport that pools again) time to put
+	// its connection back before the measured request goes looking for it.
+	time.Sleep(200 * time.Millisecond)
+	t.Logf("after warming both paths the server has accepted %d connection(s)", s.connCount())
+}
+
+// TestMutatingRequestIsNotRetriedByTransport is aihub#472's acceptance probe.
+//
+// aihub#436 put an Idempotency-Key on every POST/PATCH, which is what the
+// design requires (§4.1, H-R3-8). Its side effect was that (*Request).
+// isReplayable started admitting those methods, so the transport began
+// re-sending a mutation it had already written in full whenever the reused
+// connection died before the first response byte — and the caller saw err=nil
+// for two executions.
+//
+// Both arms below are here on purpose and they fail for different reasons:
+//
+//   - "body" is the common case, a POST carrying JSON.
+//   - "no body" is the case that refutes the obvious fix. Clearing req.GetBody
+//     does not make this one non-replayable, because http.NewRequestWithContext
+//     turns a zero-length *bytes.Reader into http.NoBody and isReplayable's
+//     first disjunct is then satisfied by `r.Body == NoBody` with GetBody out
+//     of the picture entirely. A fix that only clears GetBody leaves every
+//     no-body mutation — ActivateMemory, RotateProjectIdentifier, any doRaw
+//     POST — exactly as double-executable as before, and this arm is what says
+//     so out loud.
+func TestMutatingRequestIsNotRetriedByTransport(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		call func(context.Context, *Client) error
+	}{
+		{
+			name: "body",
+			path: "/v1/work_items",
+			call: func(ctx context.Context, c *Client) error {
+				_, err := c.CreateWorkItem(ctx, map[string]any{"goal": "g"})
+				return err
+			},
+		},
+		{
+			name: "no body",
+			path: "/v1/memories/mem_x/activate",
+			call: func(ctx context.Context, c *Client) error {
+				_, err := c.ActivateMemory(ctx, "mem_x")
+				return err
+			},
+		},
+		{
+			// DELETE is not in isMutatingMethod, so it keeps the pooled
+			// transport — and that is safe only because it carries no
+			// Idempotency-Key: isReplayable admits a non-GET method on the
+			// header alone. This arm holds those two facts together. Give
+			// DELETE the header without moving it to the mutating client and it
+			// goes red, which is the mistake worth catching.
+			name: "delete, no header, pooled transport",
+			path: "/v1/admin/users/u_x/keys/k_x",
+			call: func(ctx context.Context, c *Client) error {
+				_, err := c.RevokeAPIKey(ctx, "u_x", "k_x")
+				return err
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reset only the FIRST arrival. A retry therefore SUCCEEDS, which
+			// reproduces the reported symptom exactly: the caller is told
+			// nothing went wrong while the server ran the mutation twice.
+			s := newRSTServer(t, map[string]int{tc.path: 1})
+			c := New(s.baseURL(), "test-key")
+			warmPool(t, c, s)
+			warmMutating(t, c, s)
+
+			err := tc.call(t.Context(), c)
+
+			if got := s.count(tc.path); got != 1 {
+				t.Errorf("server executed %s %d times, want 1 — the transport re-sent a "+
+					"mutation it had already written in full (aihub#472)", tc.path, got)
+			}
+			if err == nil {
+				t.Errorf("client got err=nil for a connection that was reset before it " +
+					"answered; a mutation whose outcome is unknown must surface as an error, " +
+					"not as success")
+			}
+			t.Logf("%s: server arrivals=%d, connections=%d, client err=%v",
+				tc.path, s.count(tc.path), s.connCount(), err)
+		})
+	}
+}
+
+// TestSafeMethodIsStillRetriedByTransport is the other half of the fix, and the
+// reason it is not simply "turn the retry off".
+//
+// GET is replayable by METHOD — isReplayable admits it with or without an
+// Idempotency-Key, and re-sending it is what makes an idle connection the
+// server has quietly closed invisible to callers. aihub#472 must not pay for
+// mutating safety with that. If a future change disables connection reuse or
+// replayability wholesale rather than for mutations only, this goes red.
+func TestSafeMethodIsStillRetriedByTransport(t *testing.T) {
+	const path = "/v1/artifacts/mem_x/html"
+	s := newRSTServer(t, map[string]int{path: 1})
+	c := New(s.baseURL(), "test-key")
+	warmPool(t, c, s)
+
+	_, err := c.GetArtifactHTML(t.Context(), "mem_x")
+	if err != nil {
+		t.Errorf("GET surfaced %v; a safe method whose connection was reset must still be "+
+			"retried transparently", err)
+	}
+	if got := s.count(path); got != 2 {
+		t.Errorf("server saw %d GETs, want 2 (the original plus the transport's retry) — "+
+			"GET replayability was collateral damage of the aihub#472 fix", got)
+	}
+	t.Logf("GET %s: server arrivals=%d, connections=%d, client err=%v",
+		path, s.count(path), s.connCount(), err)
+}
+
+// TestEveryRequestSenderPicksItsClientByMethod is the standing gate for
+// aihub#472, and it is the half the two behavioural tests above cannot cover.
+//
+// They can only observe the request builders that exist today. The defect class
+// is a builder written LATER that reaches for c.httpClient directly: it would
+// send a correct Idempotency-Key, pass every header test in this file, and put
+// the mutation straight back on a pooled connection where the transport may
+// re-send it. Nothing behavioural would notice, exactly as nothing noticed when
+// aihub#436 opened the window in the first place.
+//
+// So this reads the SHAPE: a function that hands a request to an *http.Client
+// must have asked clientFor which client to use.
+func TestEveryRequestSenderPicksItsClientByMethod(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read ./pkg/client: %v", err)
+	}
+	fset := token.NewFileSet()
+	senders := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, perr := parser.ParseFile(fset, name, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", name, perr)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			if !callsFunc(fn.Body, "Do") {
+				continue
+			}
+			senders++
+			if !callsFunc(fn.Body, "clientFor") {
+				t.Errorf("%s:%d: %s sends a request without asking clientFor which client to "+
+					"use, so a POST/PATCH can go out on the pooled transport. net/http re-sends "+
+					"a fully written request on a REUSED connection when it dies before the first "+
+					"response byte, and the Idempotency-Key this package sets makes a mutation "+
+					"eligible for that (aihub#472) — the server executes it twice and the caller "+
+					"is told err=nil. Route the send through c.clientFor(method).Do(req).",
+					name, fset.Position(fn.Pos()).Line, fn.Name.Name)
+			}
+		}
+	}
+	// A structural test that matched nothing would pass forever. This package
+	// has always had at least do() and doRaw(); zero means the AST walk broke.
+	if senders < 2 {
+		t.Fatalf("found %d request sender(s) in ./pkg/client, want at least 2 (do and doRaw) — "+
+			"the AST walk is broken and this test is reporting success without having looked", senders)
+	}
+	t.Logf("checked %d request sender(s)", senders)
+}
+
+// TestNonPoolingFallbackStillDisablesKeepAlives covers the branch taken when a
+// program has replaced http.DefaultTransport with something that is not an
+// *http.Transport, so there is nothing to clone.
+//
+// It is the branch nobody will ever see in this repo and the one where getting
+// it wrong is silent: returning the shared default there would hand mutations
+// back to a pooling transport, and every behavioural test in this file would
+// still pass because they all run with the ordinary DefaultTransport in place.
+func TestNonPoolingFallbackStillDisablesKeepAlives(t *testing.T) {
+	notATransport := roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, nil })
+
+	got, ok := nonPoolingFrom(notATransport).(*http.Transport)
+	if !ok {
+		t.Fatalf("fallback returned %T, want an *http.Transport built from scratch", got)
+	}
+	if !got.DisableKeepAlives {
+		t.Error("the fallback transport pools connections, so a mutation sent through it can " +
+			"ride a reused connection and be re-sent by net/http (aihub#472)")
+	}
+	if got == http.DefaultTransport {
+		t.Error("the fallback returned the shared default transport itself")
+	}
+
+	// And the ordinary path, for the same property.
+	cloned, ok := nonPoolingFrom(http.DefaultTransport).(*http.Transport)
+	if !ok {
+		t.Fatalf("clone path returned %T, want *http.Transport", cloned)
+	}
+	if !cloned.DisableKeepAlives {
+		t.Error("the cloned transport pools connections")
+	}
+	if cloned == http.DefaultTransport {
+		t.Error("the clone path handed back http.DefaultTransport itself — setting " +
+			"DisableKeepAlives on it would disable pooling process-wide")
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

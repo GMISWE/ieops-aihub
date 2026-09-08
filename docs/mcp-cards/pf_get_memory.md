@@ -51,7 +51,7 @@ giving it no way to complete it.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
-| `memory_id` | string | yes | "Memory ID (the `id` of a `pf_recall` item)" |
+| `memory_id` | string | yes | "Memory ID (the `id` of a pf_recall item)" |
 
 The parenthetical is the contract: it names where the value comes from, which is the
 same reason `pf_update_work_item`'s `resources_version` names `pf_get_work_item`.

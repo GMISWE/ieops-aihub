@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -1070,7 +1071,45 @@ var _ = wiStrPtr
 // survive to the markup, and the page must not re-acquire a control that
 // implies completeness it does not have.
 
-// doneArchiveFake serves `total` terminal items from an "idx-N" cursor and
+// doneFakeBase is the newest synthetic archive row's created_at; row i is one
+// minute older than row i-1, so an index and a timestamp are interchangeable.
+var doneFakeBase = time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+// doneFakeCursor renders the cursor the DOMAIN would mint after serving rows up
+// to and including index i: listWorkItemsNextCursor emits that row's sort-column
+// value as RFC3339Nano, and buildListWorkItemsWhere then pages with a strict
+// `<`, so the next page starts one row later.
+//
+// 🔴 This fixture used to mint "idx-<n>", a shape no cursor this server issues
+// has ever had. That cost nothing while the handler forwarded the token
+// untouched, and became load-bearing the moment it started validating it
+// (aihub#466): a fixture in a shape the production minter cannot produce cannot
+// hold a line about page tokens, and would have made the correct fix look like a
+// regression.
+func doneFakeCursor(i int) string {
+	return doneFakeBase.Add(-time.Duration(i) * time.Minute).Format(time.RFC3339Nano)
+}
+
+// doneFakeStart inverts doneFakeCursor: the index of the first row STRICTLY
+// older than the cursor. An unparseable token starts at 0, matching both the
+// handler's "show the newest page" fallback and the escaping test, which hands
+// this fake a cursor it never minted.
+func doneFakeStart(cursor string) int {
+	ts, err := time.Parse(time.RFC3339, cursor)
+	if err != nil {
+		return 0
+	}
+	// A cursor NEWER than the newest row would index before the start of the
+	// archive. Real paging cannot produce one (the token is always a row's own
+	// sort value), but a hand-written fixture can, and a negative start would
+	// quietly synthesise rows with future timestamps rather than fail.
+	if start := int(doneFakeBase.Sub(ts)/time.Minute) + 1; start > 0 {
+		return start
+	}
+	return 0
+}
+
+// doneArchiveFake serves `total` terminal items from a timestamp cursor and
 // appends every filter it is called with to *seen, so a test can assert on what
 // the handler actually asked the domain layer for (not merely on what came
 // back). Rows are numbered newest-first: index i holds seq total-i.
@@ -1081,14 +1120,9 @@ func doneArchiveFake(total int, seen *[]domain.ListWorkItemsFilter) func(context
 		}
 		start := 0
 		if f.Cursor != nil {
-			// Cursors this fake mints are "idx-N"; anything else (e.g. a real
-			// RFC3339 timestamp used by the escaping test) starts at 0.
-			if n, err := strconvAtoiPrefix(*f.Cursor, "idx-"); err == nil {
-				start = n
-			}
+			start = doneFakeStart(*f.Cursor)
 		}
 		wiType := "fix_bug"
-		base := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 		items := []*domain.WorkItem{}
 		for i := start; i < start+f.Limit && i < total; i++ {
 			seq := int64(total - i)
@@ -1101,25 +1135,16 @@ func doneArchiveFake(total int, seen *[]domain.ListWorkItemsFilter) func(context
 				Status:    "wrapped",
 				WIType:    &wiType,
 				Labels:    []string{},
-				CreatedAt: base.Add(-time.Duration(i) * time.Minute),
+				CreatedAt: doneFakeBase.Add(-time.Duration(i) * time.Minute),
 			})
 		}
 		res := &domain.ListWorkItemsResult{Items: items}
 		if start+f.Limit < total {
-			c := "idx-" + strconv.Itoa(start+f.Limit)
+			c := doneFakeCursor(start + f.Limit - 1)
 			res.NextCursor = &c
 		}
 		return res, nil
 	}
-}
-
-// strconvAtoiPrefix parses "<prefix><int>", returning an error if the prefix is
-// absent so non-"idx-" cursors fall back to the first page.
-func strconvAtoiPrefix(s, prefix string) (int, error) {
-	if !strings.HasPrefix(s, prefix) {
-		return 0, strconv.ErrSyntax
-	}
-	return strconv.Atoi(strings.TrimPrefix(s, prefix))
 }
 
 // renderWIList runs the real list handler against the real template and returns
@@ -1160,23 +1185,35 @@ func TestDoneSegment_CursorReachesTheQuery(t *testing.T) {
 	withFakeListWI(t, doneArchiveFake(417, &seen))
 	withDoneCount(t, 417)
 
-	renderWIList(t, "/ui/wi?seg=done&project=p1&done_cursor=idx-50")
+	want := doneFakeCursor(49) // the cursor the domain mints after a 50-row page
+	renderWIList(t, "/ui/wi?seg=done&project=p1&done_cursor="+url.QueryEscape(want))
 
-	var doneFilter *domain.ListWorkItemsFilter
-	for i := range seen {
-		if len(seen[i].Status) > 0 && seen[i].Status[0] == "wrapped" {
-			doneFilter = &seen[i]
-		}
-	}
+	doneFilter := lastDoneFilter(seen)
 	if doneFilter == nil {
 		t.Fatal("no terminal-status query was issued for the done segment")
 	}
 	if doneFilter.Cursor == nil {
 		t.Fatal("done query carried no cursor: ?done_cursor= was dropped, so paging can never advance")
 	}
-	if *doneFilter.Cursor != "idx-50" {
-		t.Errorf("done cursor = %q, want %q", *doneFilter.Cursor, "idx-50")
+	// Byte-for-byte, for the reason aihub#435 pinned on the JSON endpoints: the
+	// domain casts this string at `$n::timestamptz`, so any re-formatting on the
+	// way in is a second conversion upstream of the one that counts.
+	if *doneFilter.Cursor != want {
+		t.Errorf("done cursor = %q, want %q", *doneFilter.Cursor, want)
 	}
+}
+
+// lastDoneFilter picks the terminal-status query out of the filters a render
+// issued — the Done segment's own, as opposed to the active-status ones the same
+// page runs for the count strip.
+func lastDoneFilter(seen []domain.ListWorkItemsFilter) *domain.ListWorkItemsFilter {
+	var out *domain.ListWorkItemsFilter
+	for i := range seen {
+		if len(seen[i].Status) > 0 && seen[i].Status[0] == "wrapped" {
+			out = &seen[i]
+		}
+	}
+	return out
 }
 
 // TestDoneSegment_PageSizeFollowsLimit pins that the page size is the request's
@@ -1227,7 +1264,7 @@ func TestDoneSegment_MoreRowsAreAdvertised(t *testing.T) {
 	}
 
 	// 400 of 417 consumed: the last page is a short one and terminates paging.
-	last := renderWIList(t, "/ui/wi?seg=done&project=p1&done_cursor=idx-400")
+	last := renderWIList(t, "/ui/wi?seg=done&project=p1&done_cursor="+url.QueryEscape(doneFakeCursor(399)))
 	if strings.Contains(last, "data-done-older") {
 		t.Error("final page still offers an 'older' control; paging does not terminate")
 	}
@@ -1324,4 +1361,292 @@ func firstMatchAround(s, needle string) string {
 		end = len(s)
 	}
 	return s[i:end]
+}
+
+// --- aihub#466: the silent-empty half of the aihub#435 cursor defect ---------
+//
+// `?done_cursor=` was read raw and handed to the domain, which casts it at
+// `$n::timestamptz` — the same cast that answered 500 on the three JSON
+// endpoints until aihub#435 put queryCursor in front of them. Here the failure
+// could not even reach the reader: fetchListRowsPaged's error was discarded by
+// the condition that tested it (`if ... derr == nil`, no else), so SegRows kept
+// its zero value and the page rendered its "Nothing here" empty state — beneath
+// a header count from fetchDoneCount, a separate real COUNT(*) that stays exact.
+// A non-zero archive total above zero rows, with nothing on the page saying why.
+//
+// The ruling is aihub#435's validator with /ui's answer: the SAME queryCursor
+// decides what a page token is (done_cursor IS a /v1/work_items cursor —
+// listWorkItemsNextCursor mints both), and the /ui exemption in queryparam.go
+// decides what to do about a bad one, which is the newest page PLUS a notice.
+// Never a silent substitution: that is Rule 1's forbidden move, and it is worse
+// here than for `limit`, because a page of archive rows looks exactly like the
+// page that was asked for.
+//
+// These tests are the pair that fails on each way of getting it wrong: the first
+// on swallowing the bad token, the second on rejecting good ones, the third on
+// the half the cursor check cannot cover.
+
+// doneBadCursors are tokens a caller can actually arrive with. `undefined` and
+// `null` are what a JS client sends for an unset paging variable; `idx-50` is
+// the shape doneArchiveFake itself used to mint, which is why the fixture had to
+// start minting real ones; the last is the psql spelling, a space for the T.
+var doneBadCursors = []string{
+	"undefined",
+	"null",
+	"idx-50",
+	"garbage-not-a-timestamp",
+	"0",
+	"2026-13-45T99:99:99Z",
+	"2026-01-02 03:04:05",
+}
+
+// TestDoneSegment_BadCursorRendersTheNewestPageAndSaysSo is the wi's own
+// symptom, from both sides at once.
+//
+// Four assertions per token, and the interesting ones are the last two: an
+// implementation that 400s the page would satisfy "no empty archive", and one
+// that silently serves page one would satisfy everything except the notice —
+// which is the whole difference between this answer and the one Rule 1 forbids.
+func TestDoneSegment_BadCursorRendersTheNewestPageAndSaysSo(t *testing.T) {
+	for _, bad := range doneBadCursors {
+		t.Run(bad, func(t *testing.T) {
+			var seen []domain.ListWorkItemsFilter
+			withFakeListWI(t, doneArchiveFake(417, &seen))
+			withDoneCount(t, 417)
+
+			html := renderWIList(t, "/ui/wi?seg=done&project=p1&limit=50&done_cursor="+url.QueryEscape(bad))
+
+			// 1. The token never reached the query. Not merely "the page did not
+			// 500": a cursor this server never minted must not be cast at all,
+			// which is the property aihub#435 asserts through `reached` on the
+			// JSON side.
+			df := lastDoneFilter(seen)
+			if df == nil {
+				t.Fatal("no terminal-status query was issued for the done segment")
+			}
+			if df.Cursor != nil {
+				t.Errorf("a cursor this server never minted reached the query as %q; it is cast at "+
+					"$n::timestamptz there, which is the 500 aihub#435 removed from the JSON endpoints", *df.Cursor)
+			}
+
+			// 2. The page is USABLE — the newest page, which is what a stale
+			// bookmark wants. An HTML surface cannot answer 400 (queryparam.go's
+			// /ui exemption), so failing the page is the wrong half to copy.
+			if n := strings.Count(html, "data-wi-row"); n != 50 {
+				t.Errorf("rendered %d rows, want the newest 50-row page", n)
+			}
+
+			// 3. It is not an empty archive. This is the defect verbatim.
+			if strings.Contains(html, "Nothing here") {
+				t.Error("the page renders the empty-state for a bad page token: a non-zero archive " +
+					"total above zero rows reads as an empty archive")
+			}
+
+			// 4. The reader is TOLD, and told enough to act: the parameter named
+			// and the value they sent quoted. Silence here is the same class of
+			// defect as substituting a default on /v1 — the caller's mistake
+			// becomes the server's silence and they never learn.
+			notice := elementText(html, "data-done-notice")
+			if notice == "" {
+				t.Fatal("no notice was rendered: the page fell back to the newest page in silence, " +
+					"which is the substitution Rule 1 forbids (queryparam.go)")
+			}
+			if !strings.Contains(notice, "done_cursor") {
+				t.Errorf("the notice does not name the parameter, so the reader cannot find it; got %q", notice)
+			}
+			if !strings.Contains(notice, htmlEscapeForNotice(bad)) {
+				t.Errorf("the notice does not quote the offending value %q; got %q", bad, notice)
+			}
+		})
+	}
+}
+
+// elementText returns the text content of the first element carrying attr.
+//
+// 🔴 Not tidiness — scoping is what gives the assertions above any force.
+// `strings.Contains(html, "0")` is true of every render of this page, and "the
+// markup mentions done_cursor" is true of any render that emits the archive
+// pager, so a whole-page assertion about the notice's CONTENT passes whether or
+// not a notice was produced. Two of the checks above were written that way
+// first; this is what they were rewritten against.
+func elementText(html, attr string) string {
+	i := strings.Index(html, attr)
+	if i < 0 {
+		return ""
+	}
+	open := strings.Index(html[i:], ">")
+	if open < 0 {
+		return ""
+	}
+	start := i + open + 1
+	end := strings.Index(html[start:], "</div>")
+	if end < 0 {
+		return html[start:]
+	}
+	return html[start : start+end]
+}
+
+// htmlEscapeForNotice renders a value the way html/template will inside element
+// text, so the assertion above matches the markup rather than the Go string.
+// Only the quoting the notice actually exercises is handled — a token arriving
+// with '<' or '&' would need more, and pinning that is what
+// TestDoneSegment_NoticeIsEscaped below is for.
+func htmlEscapeForNotice(s string) string {
+	return strings.ReplaceAll(s, `"`, "&#34;")
+}
+
+// TestDoneSegment_NoticeIsEscaped: the notice reflects caller text into the
+// page, so it has to be inert there. html/template does this automatically for
+// element content and the notice is rendered as `{{.DoneNotice}}`, but the whole
+// point of a reflected value is that the day someone reaches for a `safeHTML`
+// pipeline to "fix the quoting" it stops being automatic — so the property is
+// pinned rather than assumed.
+func TestDoneSegment_NoticeIsEscaped(t *testing.T) {
+	const payload = `<script>alert(1)</script>`
+	withFakeListWI(t, doneArchiveFake(417, nil))
+	withDoneCount(t, 417)
+
+	html := renderWIList(t, "/ui/wi?seg=done&project=p1&done_cursor="+url.QueryEscape(payload))
+
+	notice := elementText(html, "data-done-notice")
+	if strings.Contains(html, "<script>alert(1)</script>") {
+		t.Error("the notice emitted caller text as live markup")
+	}
+	if !strings.Contains(notice, "&lt;script&gt;") {
+		t.Errorf("the notice does not carry the escaped value at all; got %q", notice)
+	}
+}
+
+// TestDoneSegment_GoodCursorIsUntouched is the arm that fails if the fix
+// over-reaches, and it is the one that matters most: "reject every cursor"
+// satisfies the test above completely while breaking every "older →" click on
+// the page.
+//
+// Absent and empty are here too, for aihub#435's reason: `?done_cursor=` is how
+// this page's own "↑ 最新" link and a no-JS submit of the filter form spell "the
+// newest page", so treating it as malformed would raise a notice on ordinary
+// navigation.
+func TestDoneSegment_GoodCursorIsUntouched(t *testing.T) {
+	cases := []struct {
+		name       string
+		query      string
+		wantCursor string
+	}{
+		{"absent", "", ""},
+		{"empty", "&done_cursor=", ""},
+		{"whitespace", "&done_cursor=%20%20", ""},
+		{"minted", "&done_cursor=" + url.QueryEscape(doneFakeCursor(49)), doneFakeCursor(49)},
+		// A non-UTC offset: the '+' is the character the escaping test guards on
+		// the way OUT, and it must also survive validation on the way back IN.
+		{"offset", "&done_cursor=" + url.QueryEscape("2026-08-30T23:22:54.510849+08:00"),
+			"2026-08-30T23:22:54.510849+08:00"},
+		// Second-resolution, which is what RFC3339Nano emits for a whole second.
+		{"whole-second", "&done_cursor=" + url.QueryEscape("2026-08-30T23:11:00Z"), "2026-08-30T23:11:00Z"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen []domain.ListWorkItemsFilter
+			withFakeListWI(t, doneArchiveFake(417, &seen))
+			withDoneCount(t, 417)
+
+			html := renderWIList(t, "/ui/wi?seg=done&project=p1&limit=50"+tc.query)
+
+			if strings.Contains(html, "data-done-notice") {
+				t.Errorf("a cursor this server mints raised a notice; got %s",
+					firstMatchAround(html, "data-done-notice"))
+			}
+			if strings.Contains(html, "data-seg-err") {
+				t.Errorf("a cursor this server mints produced a segment error; got %s",
+					firstMatchAround(html, "data-seg-err"))
+			}
+
+			df := lastDoneFilter(seen)
+			if df == nil {
+				t.Fatal("no terminal-status query was issued for the done segment")
+			}
+			got := ""
+			if df.Cursor != nil {
+				got = *df.Cursor
+			}
+			if got != tc.wantCursor {
+				t.Errorf("done query cursor = %q, want %q — the token must reach the domain "+
+					"byte-for-byte, since the cast at $n::timestamptz is the conversion that counts", got, tc.wantCursor)
+			}
+		})
+	}
+}
+
+// TestDoneSegment_NoticeOnlyWhenDoneIsOnScreen: a bad done_cursor beside a
+// different ?seg= consumed nothing and fell back to nothing, so a notice saying
+// the page went back to the newest one would be a true-sounding sentence about
+// an event that did not happen.
+func TestDoneSegment_NoticeOnlyWhenDoneIsOnScreen(t *testing.T) {
+	withFakeListWI(t, doneArchiveFake(417, nil))
+	withDoneCount(t, 417)
+
+	other := renderWIList(t, "/ui/wi?seg=unclaimed&project=p1&done_cursor=undefined")
+	if strings.Contains(other, "data-done-notice") {
+		t.Error("a bad done_cursor raised the Done notice on a segment that never read it")
+	}
+
+	// Positive control, so the negative above cannot pass because the notice is
+	// broken everywhere.
+	done := renderWIList(t, "/ui/wi?seg=done&project=p1&done_cursor=undefined")
+	if !strings.Contains(done, "data-done-notice") {
+		t.Error("the notice is not rendered on the Done segment either — the check above is vacuous")
+	}
+}
+
+// TestDoneSegment_FetchFailureIsNotAnEmptyArchive covers the second half of the
+// wi's goal, the one the cursor check cannot reach.
+//
+// queryCursor refuses a token Postgres would refuse; a token it ACCEPTS can
+// still fail the query for reasons that have nothing to do with paging, and
+// before this every one of those rendered as an empty archive as well. So the
+// error is surfaced on the SEGMENT — not as data.Err, which replaces the whole
+// two-column layout and would take the sidebar and every other segment's count
+// down with it for the failure of one query.
+func TestDoneSegment_FetchFailureIsNotAnEmptyArchive(t *testing.T) {
+	// Only the TERMINAL-status query fails. Failing every list query would trip
+	// fetchListGroups first, which sets data.Err and returns before the segment
+	// branch runs — so the test would pass on a page that never exercised the
+	// code under test.
+	ok := doneArchiveFake(417, nil)
+	withFakeListWI(t, func(ctx context.Context, pool *pgxpool.Pool, project string, f domain.ListWorkItemsFilter) (*domain.ListWorkItemsResult, *domain.AihubError) {
+		if len(f.Status) > 0 && f.Status[0] == "wrapped" {
+			return nil, domain.NewErr(domain.ErrInternalError, "archive query exploded")
+		}
+		return ok(ctx, pool, project, f)
+	})
+	withDoneCount(t, 417)
+
+	html := renderWIList(t, "/ui/wi?seg=done&project=p1")
+
+	segErr := elementText(html, "data-seg-err")
+	if segErr == "" {
+		t.Fatal("a failed archive query renders no error state; its error is still being discarded")
+	}
+	if !strings.Contains(segErr, "archive query exploded") {
+		t.Errorf("the error state does not carry the reason, so the page says only that "+
+			"something is wrong; got %q", segErr)
+	}
+	if strings.Contains(html, "Nothing here") {
+		t.Error(`a failed query renders the empty state: "empty" and "failed to load" are different facts`)
+	}
+	if n := strings.Count(html, "data-wi-row"); n != 0 {
+		t.Errorf("a failed query rendered %d rows", n)
+	}
+
+	// The header count is what made the old behaviour a lie rather than merely
+	// an omission: it comes from a separate COUNT(*) and is still exact. It must
+	// stay — it is the evidence that the archive is not empty — and the error
+	// box beside it is what stops it reading as truncation.
+	if !strings.Contains(html, ">417<") {
+		t.Error("the archive total is gone; the page can no longer show that rows exist but did not load")
+	}
+
+	// The whole page must survive: this is a segment-level state, not a page one.
+	if !strings.Contains(html, "seg-nav") {
+		t.Error("the segment sidebar was taken down by one segment's query failure")
+	}
 }

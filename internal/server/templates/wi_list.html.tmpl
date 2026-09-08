@@ -97,8 +97,26 @@
         <button type="button" class="grp-sort" data-wi-sort title="按创建时间排序(点击切换最新/最旧在前)" aria-label="toggle sort order">↓</button>
         <span class="grp-n">{{index .SegCounts .SelectedSeg}}</span>
       </div>
+      {{/* Non-fatal advisory about this Done page (aihub#466): the rows below are
+           real, they are just not the page the URL named — a `?done_cursor=` this
+           server did not mint gets the newest page AND this sentence, never a
+           silent substitution. Styled off .pf-err with the warning tokens
+           inline, because it is an advisory and not a failure; ui.css is
+           untouched. */}}
+      {{if .DoneNotice}}
+      <div class="pf-err" data-done-notice
+           style="margin:0;border-radius:0;border-left:0;border-right:0;border-color:var(--warning);background:var(--warning-soft);color:var(--warning)">{{.DoneNotice}}</div>
+      {{end}}
       <div class="grp-rows" data-grp-rows>
-      {{if .SegRows}}
+      {{/* SegErr comes FIRST and is exclusive with both branches below it
+           (aihub#466). The Done segment's row query used to have its error
+           discarded, which left this block on its .SegRows-is-empty path and
+           printed "Nothing here" for a query that never answered — beside a
+           header count from a separate COUNT(*) that is still exact. "Empty" and
+           "failed to load" are different facts and must not share a rendering. */}}
+      {{if .SegErr}}
+      <div class="pf-err" data-seg-err style="margin:14px">{{.SegErr}}</div>
+      {{else if .SegRows}}
       {{range .SegRows}}
       <a class="row{{if .NeedsYou}} hot{{end}}" href="{{wiref (or .Slug .ID)}}"
          data-wi-row

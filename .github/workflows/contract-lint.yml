@@ -103,6 +103,13 @@ on:
       # were about: the defect just moves one file over and stays green.
       - 'docs/**'
       - 'scripts/pf_docs_contract_check.py'
+      # README.md is here for one reason (aihub#439): it holds the "How docs
+      # cite code" section that every C1 error message sends the author to, and
+      # the check asserts that section exists. Without this glob, a README-only
+      # PR could delete the rule's only human-readable home and stay green while
+      # the gate kept citing it — the same "an absent check reports green" hole
+      # the paragraph above is about, one file over again.
+      - 'README.md'
 
 jobs:
   contract-lint:

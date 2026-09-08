@@ -2556,6 +2556,309 @@ func sortedSetMembers(set map[string]bool) []string {
 	return out
 }
 
+// ── The work_items editability matrix (aihub#440 / aihub#411 T2-1) ───────────
+//
+// ONE matrix for every field UpdateWorkItem can write, and ONE error code per
+// rejection KIND. Before this, editability was per-field with three status sets
+// and three codes, and the two kinds were crossed in OPPOSITE directions:
+//
+//	goal    — wrong caller AND wrong state both answered 409 GOAL_CHANGE_NOT_ALLOWED
+//	wi_type — wrong caller AND wrong state both answered 403 WI_RECLASSIFY_FORBIDDEN
+//	content — wrong state answered 409 CONFLICT_TERMINAL_STATE, on a wider status set
+//	attrs, attrs_patch, attrs_unset, labels, priority, milestone,
+//	requires_human_session, declared_resources — no status guard at all
+//
+// So a wrong CALLER on goal was reported as a state conflict, and a wrong STATE
+// on wi_type was reported as a permission failure: the exact conflation
+// aihub#242 removed from the cancel path, mirrored, on the most-called tool in
+// the measured window (pf_update_work_item, 354 calls / 21 days per aihub#411
+// §0.1; 738 in this wi's own wider re-count).
+//
+// ⚠️ aihub#411's T2-1 row records goal's code as a **400**. That is where the
+// design doc files it (§17's HTTP 400 block), but codeToHTTPStatus has mapped it
+// to 409 since before that row's own base (1ec3bdc) — the row's cell is a doc
+// reading, not a measurement of the server. The defect fixed here is the KIND
+// being crossed, not the number.
+//
+// # The matrix
+//
+// Three status classes and three field tiers. A status class answers "who may
+// be acting on this record right now":
+//
+//	open   = queued, paused, blocked      — nobody is executing it
+//	live   = running                      — an attempt is mid-flight against it
+//	closed = wrapped, failed, cancelled   — the record is history
+//
+//	                                                   │ open │ live │ closed
+//	 ──────────────────────────────────────────────────┼──────┼──────┼────────
+//	 contract  goal, wi_type                           │  ✓*  │ 409A │  409T
+//	 working   content, labels, priority, milestone,   │  ✓   │  ✓   │  409T
+//	           requires_human_session,                 │      │      │
+//	           declared_resources                      │      │      │
+//	 record    attrs, attrs_patch, attrs_unset         │  ✓   │  ✓   │   ✓
+//
+//	✓*    additionally requires reporter | project maintainer | admin,
+//	      else 403 FORBIDDEN — checked AFTER the state, never instead of it.
+//	409A  CONFLICT_WI_ALREADY_CLAIMED   409T  CONFLICT_TERMINAL_STATE
+//
+// Every cell above is a subtest of TestUpdateGate (3 tiers × 7 statuses × 4
+// actors, no DB required), and the row set is pinned to the struct rather than
+// to this comment: TestEveryWritableUpdateFieldHasATier fails if a field
+// buildWorkItemUpdate can write is missing a tier, which is what "no field
+// silently exempt" has to mean to survive the next field being added.
+//
+// # Why these three codes and no field-specific ones
+//
+// The 409 names the STATE and the 403 names the CALLER, so a caller derives the
+// remedy from the code alone: 403 → get a different caller; 409 → change the
+// state and retry. That is cancelGate's shipped shape verbatim — it answers
+// CONFLICT_WI_ALREADY_CLAIMED for running, CONFLICT_TERMINAL_STATE for terminal
+// and ErrForbidden for a wrong caller — and pf_cancel_work_item's contract card
+// already reads the T2-1 ruling that way ("this tool's three 409s are three
+// distinct states, which is the shape that ruling asks for"). Carrying it across
+// means update's state codes ARE cancel's state codes, so one rule covers both
+// tools instead of one per field.
+//
+// The 403 half is not an invention of this change: design §4.3 already specified
+// "goal 更新失败 … 403 FORBIDDEN（非 reporter/maintainer）" and the code returned
+// 409 GOAL_CHANGE_NOT_ALLOWED there instead. This makes the server agree with the
+// row that was already written.
+//
+// GOAL_CHANGE_NOT_ALLOWED and WI_RECLASSIFY_FORBIDDEN are therefore no longer
+// produced anywhere. They are RETIRED rather than deleted — see errors.go for
+// why, and for the gate that stops them coming back.
+//
+// # Why `open` includes blocked (this widens two fields)
+//
+// cancelGate already admits blocked for the most destructive operation there is,
+// on the argument aihub#242 wrote down: a blocked wi has no live attempt to
+// invalidate, and its reporter must have an exit. Editing goal or wi_type on a
+// blocked wi invalidates nobody's work for exactly the same reason. Keeping
+// blocked out of the contract tier would have needed a THIRD state code meaning
+// "blocked is neither running nor terminal" — a code minted to describe a
+// restriction with no argument behind it.
+//
+// # Why the record tier stays writable on a CLOSED record
+//
+// This is the sub-question T2-1 left open in both directions ("whether attrs
+// staying writable on a terminal work item is the defect or the feature"). It is
+// the FEATURE, and the evidence is traffic rather than taste. Measured over the
+// 21-day transcript corpus (87 files, 738 pf_update_work_item calls, 715 whose
+// response carried a status):
+//
+//	closed-record calls           49  (48 wrapped + 1 cancelled)
+//	  … carrying attrs_patch      28
+//	  … carrying attrs            20
+//	  … carrying attrs_unset       1
+//	  … carrying ANY other field   0
+//
+// So the record tier is load-bearing — post-hoc decision and merge records are
+// written onto wrapped wis, including by the batch that shipped this change —
+// while the working tier's new refusal on a closed record breaks zero measured
+// calls. `milestone` never appears in any of the 738 calls at all, so its cell is
+// unexercised by real traffic and rests on the tier argument alone.
+//
+// # Mixing tiers in one patch
+//
+// The STRICTEST tier any supplied field belongs to governs the whole patch, and
+// the refusal names a field at that tier. So attrs_patch + labels against a
+// wrapped wi is refused whole rather than partially applied: a PATCH that wrote
+// some of its fields and refused others would need a response shape that says
+// which, and there is none. Measured: no closed-record call in the corpus mixes
+// tiers, so this rule costs nothing today.
+//
+// # What this gate deliberately does NOT do
+//
+// It is not re-run inside the transaction against a FOR UPDATE row, which
+// cancelGate is. The difference is the blast radius of losing the race: cancel
+// releases a possibly-live attempt's resource locks, while update writes only
+// this work item's own columns, so a claim committing underneath yields an edit
+// against a status that has since moved — stale, but not another attempt's locks
+// dropped. That race predates this change and is unchanged by it.
+type wiEditTier int
+
+// The tiers are ordered by strictness so that the strictest supplied field wins
+// with a plain `>` comparison. Do not reorder without re-reading
+// strictestSuppliedEditTier.
+const (
+	wiTierRecord wiEditTier = iota
+	wiTierWorking
+	wiTierContract
+)
+
+func (t wiEditTier) String() string {
+	switch t {
+	case wiTierRecord:
+		return "record"
+	case wiTierWorking:
+		return "working"
+	case wiTierContract:
+		return "contract"
+	}
+	return fmt.Sprintf("wiEditTier(%d)", int(t))
+}
+
+// wiStatusClass is the other axis of the matrix above.
+type wiStatusClass int
+
+const (
+	wiStatusOpen wiStatusClass = iota
+	wiStatusLive
+	wiStatusClosed
+	// wiStatusUnknown is not a class a legal status can have. It exists so that
+	// adding a status to the work_items.status CHECK without adding it here
+	// fails closed instead of silently landing in the most permissive class.
+	// TestEveryWorkItemStatusIsClassified makes it unreachable.
+	wiStatusUnknown
+)
+
+// wiStatusClassOf classifies one work_items.status value.
+func wiStatusClassOf(status string) wiStatusClass {
+	switch status {
+	case "queued", "paused", "blocked":
+		return wiStatusOpen
+	case "running":
+		return wiStatusLive
+	case "wrapped", "failed", "cancelled":
+		return wiStatusClosed
+	}
+	return wiStatusUnknown
+}
+
+// wiEditTierByField assigns a tier to every json field UpdateWorkItemRequest can
+// write a column from. It is keyed by json tag because that is the name the
+// caller used and therefore the name a refusal must say back.
+//
+// Kept in sync with buildWorkItemUpdate — that function is the definition of
+// "writable", and TestEveryWritableUpdateFieldHasATier compares the two.
+var wiEditTierByField = map[string]wiEditTier{
+	"goal":                   wiTierContract,
+	"wi_type":                wiTierContract,
+	"content":                wiTierWorking,
+	"labels":                 wiTierWorking,
+	"priority":               wiTierWorking,
+	"milestone":              wiTierWorking,
+	"requires_human_session": wiTierWorking,
+	"declared_resources":     wiTierWorking,
+	"attrs":                  wiTierRecord,
+	"attrs_patch":            wiTierRecord,
+	"attrs_unset":            wiTierRecord,
+}
+
+// wiEditRiderFields are the json fields UpdateWorkItemRequest binds that write no
+// column of their own: two mandatory reasons and a compare-and-set token. They
+// have no tier because sending one alone changes nothing, so gating it would
+// refuse a request that was going to be a no-op anyway.
+//
+// requires_human_session is NOT here even though the wi_type path treats it as a
+// rider: it writes its own column and 45 of the 49 calls that carried it in the
+// corpus carried no wi_type, so it is a field in its own right and is tiered as
+// one.
+var wiEditRiderFields = map[string]bool{
+	"goal_change_reason": true,
+	"reclassify_reason":  true,
+	"resources_version":  true,
+}
+
+// suppliedEditFields lists the tiered fields this patch actually supplies, in the
+// matrix's own order so that the field a refusal names is deterministic.
+//
+// ⚠️ Must be called AFTER normalizeDeclaredResources and normalizeAttrsPatch.
+// Those fold an explicit JSON `null` down to "not supplied", and a gate that ran
+// first would refuse a caller for a field it did not send.
+func suppliedEditFields(req *UpdateWorkItemRequest) []string {
+	var out []string
+	if req.Goal != nil {
+		out = append(out, "goal")
+	}
+	if req.WIType != nil {
+		out = append(out, "wi_type")
+	}
+	if req.Content != nil {
+		out = append(out, "content")
+	}
+	if req.Labels != nil {
+		out = append(out, "labels")
+	}
+	if req.Priority != nil {
+		out = append(out, "priority")
+	}
+	if req.Milestone != nil {
+		out = append(out, "milestone")
+	}
+	if req.RequiresHumanSession != nil {
+		out = append(out, "requires_human_session")
+	}
+	if req.DeclaredResources != nil {
+		out = append(out, "declared_resources")
+	}
+	if req.Attrs != nil {
+		out = append(out, "attrs")
+	}
+	if req.AttrsPatch != nil {
+		out = append(out, "attrs_patch")
+	}
+	if req.AttrsUnset != nil {
+		out = append(out, "attrs_unset")
+	}
+	return out
+}
+
+// strictestSuppliedEditTier returns the tier that governs this patch, a field at
+// that tier to name in a refusal, and whether the patch touches any tiered field
+// at all. A patch of riders only (or of nothing) reports supplied=false.
+func strictestSuppliedEditTier(req *UpdateWorkItemRequest) (wiEditTier, string, bool) {
+	tier, field, supplied := wiTierRecord, "", false
+	for _, f := range suppliedEditFields(req) {
+		t, ok := wiEditTierByField[f]
+		if !ok {
+			// Unreachable while TestEveryWritableUpdateFieldHasATier is green;
+			// treated as the strictest tier rather than skipped, because the
+			// failure mode of skipping is a field with no guard at all.
+			t = wiTierContract
+		}
+		if !supplied || t > tier {
+			tier, field, supplied = t, f, true
+		}
+	}
+	return tier, field, supplied
+}
+
+// updateGate is UpdateWorkItem's pure decision function, the same shape as
+// cancelGate: state is checked BEFORE permission, so a state rejection is never
+// reported as a permission failure. See wiEditTierByField for the matrix this
+// implements and for every argument behind it.
+func updateGate(status string, tier wiEditTier, field string, isReporter bool, callerRole, projectRole string) *AihubError {
+	if tier == wiTierRecord {
+		// The one deliberate exemption in the matrix, and the only one: the audit
+		// record of a work item stays writable for as long as the record exists.
+		return nil
+	}
+
+	switch wiStatusClassOf(status) {
+	case wiStatusLive:
+		if tier == wiTierContract {
+			return NewErr(ErrConflictWIAlreadyClaimed,
+				fmt.Sprintf("cannot update %s while work item is running; pause first", field))
+		}
+	case wiStatusClosed:
+		return NewErr(ErrConflictTerminalState,
+			fmt.Sprintf("cannot update %s when work item is in terminal state: %s; only attrs, attrs_patch and attrs_unset are writable on a terminal work item", field, status))
+	case wiStatusUnknown:
+		return NewErr(ErrConflictTerminalState,
+			fmt.Sprintf("cannot update %s: work item status %q is not in this server's editability matrix", field, status))
+	}
+
+	if tier == wiTierContract {
+		canEdit := callerRole == "admin" || projectRole == "maintainer" || isReporter
+		if !canEdit {
+			return NewErr(ErrForbidden,
+				fmt.Sprintf("insufficient permissions: only the reporter, a project maintainer, or an admin may update %s", field))
+		}
+	}
+	return nil
+}
+
 // UpdateWorkItem applies a patch to a work item.
 func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, callerUserID, callerRole string, callerProjectRoles map[string]string, req *UpdateWorkItemRequest) (*WorkItem, *AihubError) {
 	wi, aihubErr := GetWorkItem(ctx, pool, idOrSlug)
@@ -2609,20 +2912,25 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 		return nil, vErr
 	}
 
-	// Permission checks for goal change
-	if req.Goal != nil {
+	// aihub#440: ONE editability gate for every field this patch touches — state
+	// first, then permission, and the code names the KIND rather than the field.
+	// See wiEditTierByField for the matrix, the three codes and the measurements
+	// behind each cell. Placed AFTER the two normalizers above, because they fold
+	// an explicit JSON null down to "not supplied" and a gate that ran first would
+	// refuse a caller for a field it did not send.
+	if tier, field, supplied := strictestSuppliedEditTier(req); supplied {
 		isReporter := wi.ReporterUserID == callerUserID
 		projectRole := callerProjectRoles[wi.Project]
-		canChange := isReporter || projectRole == "maintainer" || callerRole == "admin"
-		if !canChange {
-			return nil, NewErr(ErrGoalChangeNotAllowed, "only reporter or maintainer can update goal")
+		if gateErr := updateGate(wi.Status, tier, field, isReporter, callerRole, projectRole); gateErr != nil {
+			return nil, gateErr
 		}
-		if wi.Status == "running" {
-			return nil, NewErr(ErrGoalChangeNotAllowed, "cannot update goal while work item is running; pause first")
-		}
-		if wi.Status != "queued" && wi.Status != "paused" {
-			return nil, NewErr(ErrGoalChangeNotAllowed, "goal can only be updated when status is queued or paused")
-		}
+	}
+
+	// What is left of the old goal block is about the SHAPE of the request, not
+	// about state or permission, so it stays a 400 and stays BEHIND the gate: a
+	// caller whose edit is refused on state should not first be told its reason
+	// string is too short for an edit it is not allowed to make.
+	if req.Goal != nil {
 		if req.GoalChangeReason == nil || len(*req.GoalChangeReason) < 10 {
 			return nil, NewErr(ErrBadRequest, "goal_change_reason is required (min 10 chars) when updating goal")
 		}
@@ -2631,17 +2939,9 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 		}
 	}
 
-	// Permission check for wi_type reclassification
+	// Same split as goal: the state and permission halves moved into updateGate
+	// above, and only the request-shape check is left here.
 	if req.WIType != nil {
-		isReporter := wi.ReporterUserID == callerUserID
-		projectRole := callerProjectRoles[wi.Project]
-		canReclassify := isReporter || projectRole == "maintainer" || callerRole == "admin"
-		if !canReclassify {
-			return nil, NewErr(ErrWIReclassifyForbidden, "only reporter, maintainer, or admin can reclassify wi_type")
-		}
-		if wi.Status != "queued" && wi.Status != "paused" {
-			return nil, NewErr(ErrWIReclassifyForbidden, "wi_type can only be updated when status is queued or paused")
-		}
 		if req.ReclassifyReason == nil || len(*req.ReclassifyReason) < 10 {
 			return nil, NewErr(ErrBadRequest, "reclassify_reason is required (min 10 chars) when updating wi_type")
 		}
@@ -2656,13 +2956,12 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	if req.Content != nil {
-		// Content may be updated in any non-terminal status
-		nonTerminal := wi.Status == "queued" || wi.Status == "paused" || wi.Status == "running" || wi.Status == "blocked"
-		if !nonTerminal {
-			return nil, NewErr(ErrConflictTerminalState, fmt.Sprintf("cannot update content when work item is in terminal state: %s", wi.Status))
-		}
-	}
+	// content's status guard used to live here, inside the transaction. It is now
+	// the working tier of the matrix and is decided by updateGate before the
+	// transaction opens. Nothing about isolation changed: this check read
+	// wi.Status, which is the SAME pre-transaction GetWorkItem snapshot the gate
+	// reads, so moving it earlier neither tightens nor loosens the race described
+	// at the end of wiEditTierByField's comment.
 
 	// aihub#264: read the declaration this update is about to replace, inside the
 	// transaction and FOR UPDATE, so the diff below is computed against the value

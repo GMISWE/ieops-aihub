@@ -1547,6 +1547,45 @@ jobs:
           ! grep -q -- '--- SKIP' lock_probe_err.log \
             || { echo "::error::the aihub#410 arm SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#430, the third step in this aihub#393 -> #410 -> #430 block and the
+      # one that settles what the other two only asserted. pf_claim_work_item's
+      # force_takeover description carried "…except in a narrow commit-window
+      # race (aihub#410)", inherited from a note written about pf_force_takeover.
+      # The two tools reach lockUpsertSQL at DIFFERENT isolation levels —
+      # FnClaimWorkItem opens SERIALIZABLE, FnForceTakeover opens pool.Begin —
+      # so one sentence cannot be true of both, and the claim tool's copy was
+      # deleted on the strength of this step.
+      #
+      # THE DB IS THE POINT, and more so here than anywhere else in this block:
+      # the subject is what Postgres does at the instant a blocked writer is
+      # released by the committing one. Nothing short of two real backends racing
+      # over one real row can produce it, and no source reading can settle it.
+      # Measured: 409 CONFLICT_SERIALIZATION_FAILURE (SQLSTATE 40001) with the
+      # row unchanged.
+      #
+      # BOTH arms are named. The window arm is the measurement; the orphan arm is
+      # the control that makes "the owner did not change" mean something — with a
+      # harness that cannot observe the column moving at all, the window arm
+      # passes for free. The test's own synchronisation is a pg_stat_activity
+      # poll that FAILS if the claim never blocks inside the upsert, so a run in
+      # which the two never overlapped is red rather than quietly green.
+      - name: aihub#430 claim-takeover commit-window DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestClaimTakeoverCommitWindowCannotDisplaceAForeignLock$' -count=1 -v 2>&1 | tee claim_commit_window.log
+          for want in 'TestClaimTakeoverCommitWindowCannotDisplaceAForeignLock/foreign_lock_committed_inside_the_takeover_window'; do
+            grep -q -- "--- PASS: $want" claim_commit_window.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the claim tool's force_takeover description now promises 'No flag displaces another work item's lock' with nothing measuring it"; exit 1; }
+          done
+          for want in 'TestClaimTakeoverCommitWindowCannotDisplaceAForeignLock/orphan_lock_committed_before_the_claim_is_displaced'; do
+            grep -q -- "--- PASS: $want" claim_commit_window.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); without the control arm, 'the lock did not change hands' is also satisfied by a harness that cannot see it change hands at all"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' claim_commit_window.log \
+            || { echo "::error::an aihub#430 arm SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#402: GetWorkItem chose ONE column by testing a `wi_` prefix — id if
       # present, slug otherwise — unlike every sibling resolver, which takes the
       # union `id = $1 OR slug = $1`. Project names are validated by

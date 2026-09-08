@@ -1559,13 +1559,27 @@ func (s *Server) registerLifecycleTools() {
 	// TestReadyQueueEveryPublishedParamIsReadByTheHandler
 	// (ready_queue_param_wiring_test.go) fails on any param this schema publishes
 	// that handleGetReadyQueue does not read.
+	//
+	// 🔴 The section COUNT in the description below is one of three copies of the
+	// same fact — the others are domain.ReadyQueue's field list and the Ready
+	// Queue block in docs/design/polyforge-v1-design.md — and all three said
+	// something different until aihub#449 (aihub#411 T2-20): this string said
+	// "6-section", the struct had seven keys with `omitempty` on the last, and the
+	// doc drew six plus three fields no code could produce. Adding a segment means
+	// editing all three in one change; TestReadyQueueSectionCountIsOneNumber
+	// (ready_queue_section_count_test.go) fails when this string and the struct
+	// disagree.
 	s.addTool(&sdkmcp.Tool{
-		Name:        "pf_get_ready_queue",
-		Description: "Get the LCRS (6-section) ready queue for a project. For Orchestrator use.",
+		Name: "pf_get_ready_queue",
+		Description: "Get the LCRS (7-section) ready queue for a project. Every section is " +
+			"always present; an empty one is an empty list, never a missing key. " +
+			"For Orchestrator use.",
 		InputSchema: objectSchema(map[string]any{
 			"project": prop("string", "Project name"),
-			"max": prop("string", "Max items in ready section (default 10). A JSON number is "+
-				"also accepted, and is what most callers send."),
+			"max": prop("string", "Max items in EACH queued section — items, "+
+				"needs_human_session and unclassified take it as their own LIMIT (default "+
+				"10); running, stalled, paused and stale_running are unbounded. A JSON "+
+				"number is also accepted, and is what most callers send."),
 		}, []string{"project"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)

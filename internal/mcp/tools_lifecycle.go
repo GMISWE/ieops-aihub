@@ -682,8 +682,14 @@ func (s *Server) registerLifecycleTools() {
 			// sending it loud. pf_list_work_items' `kind` is a different parameter
 			// (a deprecated alias for its wi_type FILTER) and stays. Class gate:
 			// TestUpdateWorkItemPublishesOnlyParamsTheServerBinds.
-			"work_item_id":           prop("string", "Work item ID or slug"),
-			"goal":                   prop("string", "Updated goal (status must be queued or paused)"),
+			"work_item_id": prop("string", "Work item ID or slug"),
+			// aihub#440: the status set widened to include `blocked` when the
+			// per-field guards became one editability matrix — a blocked wi has no
+			// live attempt, which is the same argument cancelGate already accepts
+			// for the far more destructive cancel. domain.wiEditTierByField holds
+			// the matrix. +10 bytes of always-resident schema, budgeted against the
+			// resources_version note below.
+			"goal":                   prop("string", "Updated goal (status must be queued, paused or blocked)"),
 			"goal_change_reason":     prop("string", "Reason for goal change (required with goal)"),
 			"priority":               propEnum("string", "Updated priority", domain.WorkItemPriorityList()),
 			"milestone":              prop("string", "Updated milestone"),

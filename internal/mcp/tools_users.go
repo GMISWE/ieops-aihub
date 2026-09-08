@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
 func (s *Server) registerUserTools() {
@@ -26,9 +28,33 @@ func (s *Server) registerUserTools() {
 		Name:        "pf_create_user",
 		Description: "Create a new user (admin only)",
 		InputSchema: objectSchema(map[string]any{
-			"display_name":   prop("string", "Human-readable display name"),
-			"user_type":      prop("string", "User type: human or machine (default: human)"),
-			"role":           prop("string", "Global role: writer or admin (default: writer)"),
+			"display_name": prop("string", "Human-readable display name"),
+			// aihub#463. user_type and role are two-value CHECK constraints on
+			// the users table published as prose — "User type: human or machine"
+			// — which is a sentence about a set rather than the set. The values
+			// come from domain, the package that now refuses anything outside
+			// them, so the published set and the accepted set are ONE value and
+			// cannot drift into agreeing only today.
+			//
+			// ⚠️ What this enum does and does not do, stated because aihub#396
+			// recorded the stronger claim: it constrains the CLIENT — an LLM
+			// reading tools/list, and any client that validates before sending —
+			// and NOT this process. The go-sdk's applySchema/resolved.Validate
+			// runs in toolForErr, on the generic AddTool[In, Out] path; polyforge
+			// registers through the untyped method (*mcp.Server).AddTool (see
+			// addTool in server.go) and Server.callTool hands that straight to
+			// the handler with no schema step. The hard refusal is
+			// domain.ValidateUserType / ValidateUserGlobalRole in
+			// handleCreateUser, which answers 400 with the legal values; this
+			// enum is how a caller learns them before spending a round trip.
+			"user_type": propEnum("string", "User type (default: human). A machine user's email is generated, not supplied.",
+				domain.UserTypeList()),
+			// "Global" distinguishes this from a project MEMBER role
+			// (viewer|writer|maintainer, set through pf_update_project) — two
+			// different vocabularies both spelled `role`, and neither contains
+			// the other (aihub#411 §6.2 T2-17).
+			"role": propEnum("string", "Global role across every project, NOT a project member role (default: writer)",
+				domain.UserGlobalRoleList()),
 			"email":          prop("string", "Email address (required for human users; auto-generated for machine users)"),
 			"author_aliases": prop("array", "Git author aliases for this user"),
 		}, []string{"display_name"}),

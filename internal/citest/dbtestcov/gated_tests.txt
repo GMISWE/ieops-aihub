@@ -36,8 +36,10 @@
 # (FnReconcileCommitLocks).
 #
 # Declaring costs more than it buys. A lock taken at claim is held until the
-# ATTEMPT ends, so declaring this path blocks every other work item that has to
-# add a line to it. Not declaring gives up no safety: a path a different live
+# ATTEMPT ends unless someone deliberately narrows declared_resources to drop it
+# (releaseUndeclaredFileScopeLocks, internal/domain/work_items.go), so by default
+# declaring this path blocks every other work item that has to add a line to it
+# for the whole attempt. Not declaring gives up no safety: a path a different live
 # attempt already holds is REFUSED at commit time with CONFLICT_LOCK_TAKEN
 # naming the holder, nothing is committed, and the files stay staged. Two work
 # items that appended in parallel this way (aihub#392, and aihub#399 with 3 new

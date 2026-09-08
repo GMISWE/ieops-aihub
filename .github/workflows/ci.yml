@@ -7,7 +7,8 @@
 # and — unless it needs more than a database — a step here that names it. Do NOT
 # put either path in a work item's declared_resources, and do not
 # pf_acquire_locks it up front: a lock taken at claim is held until the ATTEMPT
-# ends, so it blocks every other work item that has to touch the same ratchet.
+# ends unless someone deliberately narrows declared_resources to drop it, so by
+# default it blocks every other work item that has to touch the same ratchet.
 #
 # Let the commit-time lock gate take it instead. pf_commit and pf_ship send the
 # pending commit's paths; every path this attempt does not already hold gets a

@@ -329,10 +329,9 @@ var recallStringParams = []string{"project", "query", "visibility", "work_item_i
 
 // recallNumberParams are the pf_recall arguments published as JSON numbers.
 //
-// Zero means "not specified" for all three, which is why they are not in the
+// Zero means "not specified" for both, which is why they are not in the
 // scalarArg loop above: 0 is similarity_threshold's OFF value, and min_strength
-// / recency_weight both have server-side defaults that forwarding a literal 0
-// would overwrite.
+// has a server-side default that forwarding a literal 0 would overwrite.
 //
 // 🔴 similarity_threshold has NO default and must keep none. Measured on
 // project=ieops with limit=200: a pure-punctuation noise query scores 0.4712 at
@@ -340,7 +339,60 @@ var recallStringParams = []string{"project", "query", "visibility", "work_item_i
 // scores 0.4798 at its BEST — 0.0086 apart, and the wrong way round for six of
 // the noise query's hits. No global cutoff separates noise from signal, so the
 // job here is to make the knob reachable, never to turn it on.
-var recallNumberParams = []string{"similarity_threshold", "min_strength", "recency_weight"}
+//
+// ⚠️ `recency_weight` was the third entry here, and was published by recallSchema
+// and bound by handleRecall, from the day pf_recall was added until aihub#469
+// withdrew it. No read ever reached the ranking: on the tree as withdrawn, no
+// function in internal/domain that takes a RecallRequest touched the field, so
+// every value produced the same page as sending none, with no error and no
+// warning.
+//
+// Stated that way rather than as "nothing ever read it", which is false and
+// which this repo's own standard would catch: `Recall` did read it, as a
+// self-default (`if req.RecencyWeight <= 0 { req.RecencyWeight = 0.3 }`), from
+// `e3e0dfe` until `9064a35` deleted it on 2026-06-05 — a commit whose own
+// message calls it "the dead recency_weight default". aihub#424 counted exactly
+// that shape as a read when it audited `mode` ("one self-default and two audit
+// values"), so the accurate claim is the narrower one: from the first day to the
+// last, no read of this field could change a result.
+//
+// It is GONE rather than implemented, and the reason is not "nobody asked" —
+// implementing it was measured to be a REGRESSION. docs/design/polyforge-v1-design.md
+// §7.5 specified `sim*(1-w) + normalized_recency*w + normalized_strength*0.1` at
+// w=0.3, which is the same shape as the fused score aihub#311 removed from the
+// vector path as a defect (commit 7ad96be), with MORE non-similarity weight. The
+// 0.6B embedding model packs a result set's cosines into a band ~0.04 wide, so a
+// 0.3-weighted recency term spans several times the entire spread of the signal
+// it is being blended into: replayed on a real live top_k=20 result set, the
+// highest-cosine row fell from rank 1 to rank 10 and similarity inversions went
+// from 16/190 to 98/190.
+//
+// And there was nothing to gain, because recency was never missing. All three
+// orderings already carry it: the text default is `GREATEST(last_activated_at,
+// created_at) DESC, id DESC` — recency is the only ranking signal there, `id
+// DESC` being a deterministic tiebreaker rather than a second one — while the
+// lexical and
+// vector paths tie-break on an effective strength that contains
+// `exp(-days/stability)`. The knob offered to tune a dimension that was already
+// the dominant one.
+//
+// 🔴 Do not re-add it without a hop-4 reader to go with it:
+// TestRecallEveryPublishedParamIsReadByTheRankingCode
+// (recall_hop4_reader_gate_test.go) fails on a parameter this schema publishes
+// that no function in internal/domain reads, UNLESS that parameter is named in
+// one of the two maps at the top of that file — `recallParamsNotReadByDomain`
+// (consumed in this process) or `recallParamsKnownUnreadTrackedByWi` (a known
+// defect with an open work item). Both are populated today, so the gate is not
+// the unconditional rule this note would otherwise imply: `visibility` is
+// published, unread, and green by ratchet. Re-adding `recency_weight` with a
+// ratchet entry instead of a reader would therefore pass — which is why the
+// entries carry a wi number and are checked for staleness in both directions.
+// A third surface exists and is not an exemption list: `recallParamToField`
+// remaps a published name onto a differently-named field (it carries `type` ->
+// `Types`), so a wrong entry there could point an unread parameter at a field
+// that IS read. It is three lines and has one entry; audit it as part of the
+// gate, not as configuration.
+var recallNumberParams = []string{"similarity_threshold", "min_strength"}
 
 // recallSchema is pf_recall's published InputSchema — hop 1.
 func recallSchema() json.RawMessage {
@@ -406,7 +458,14 @@ func recallSchema() json.RawMessage {
 		// fixed together and gated together.
 		"min_strength":     prop("number", "Min effective strength — base_strength (1-5) after decay. Default 0.3 filters nothing"),
 		"include_archived": prop("boolean", "Include archived memories (default false)"),
-		"recency_weight":   prop("number", "Recency weight (default 0.3)"),
+		// ⚠️ No `recency_weight` here — withdrawn by aihub#469, see the note on
+		// recallNumberParams for the measurement. Its published description said
+		// "default 0.3" while the source comment said the default was
+		// deliberately not applied, so the one thing the string asserted was the
+		// thing that was least true. (That comment was never on the field: it sat
+		// at the head of recallText in internal/domain/memory.go, ~1,600 lines
+		// away, which is part of why the contradiction went unnoticed.)
+
 		// aihub#313. This string is charged on EVERY request of EVERY session,
 		// whether or not pf_recall is called — the standing cost that closed
 		// aihub#279 as net negative — so it is priced, not written to taste.
@@ -452,8 +511,23 @@ func recallSchema() json.RawMessage {
 // ambiguity: `similarity_threshold: 0` and no threshold at all remain the same
 // request here (see TestRecallThresholdHasNoDefault, which pins the off default
 // this preserves). Telling those two apart needs the presence flag threaded
-// through to the query string, which changes what recency_weight=0 and
-// min_strength=0 mean on the server — a contract change, not a bug fix.
+// through to the query string, which changes what min_strength=0 means on the
+// server — a contract change, not a bug fix.
+//
+// That ambiguity had a second victim worth recording. Of the 9 observed calls
+// that ever carried `recency_weight`, 4 sent a literal 0 in one human debugging
+// session that narrated the intent as "turn off recency weighting and retest" —
+// and this `v != 0` skip meant those requests reached the server carrying no
+// recency_weight at all, i.e. asking for exactly the default the caller was
+// trying to suppress. Because the knob was inert the control looked like it
+// worked; had it been implemented, that session's stated control would have been
+// silently inverted into its opposite.
+//
+// Note what this does NOT explain: the skip degrades only the value 0, so it is
+// not why the defect survived experiment generally. The other 5 observed calls
+// carried 0.4 or 0.9, were forwarded intact, and still changed nothing — that
+// half was invisible because the parameter had no reader at all, not because of
+// anything this function does.
 func buildRecallParams(args map[string]any) (url.Values, error) {
 	params := url.Values{}
 	for _, k := range recallStringParams {

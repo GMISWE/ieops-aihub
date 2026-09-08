@@ -1374,7 +1374,10 @@ GET    /v1/memories
   --   忽略）；两者都传时 top_k 优先。上限/默认值不变（默认 20，clamp 200）。
   similarity_threshold,
   min_strength(default 0.3, M7),  ← 改为 0.3（原 1.0 几乎过滤所有 memory）
-  include_archived(default false), recency_weight(default 0.3), cursor
+  include_archived(default false), cursor
+  -- aihub#469: recency_weight 已撤下。它曾在这里列出、被转发、被 handler 绑定，
+  --   但 internal/domain 里没有任何读点 ⇒ 传任何值都返回同一页。撤而不实现的
+  --   依据见 §7.5。
   → {items:[{
       id, type, content, visibility,
       author_display,                  -- 快照，如 "Wang Xiaokang"
@@ -1620,7 +1623,7 @@ pf_remember(project, type, content, visibility,
 pf_recall(project, query?, type?,   -- H2: type 为 string[]，支持通配符 experience.*
           visibility?, work_item_id?, top_k?,
           similarity_threshold?, min_strength?(default 0.3),
-          include_archived?(default false), recency_weight?(default 0.3))
+          include_archived?(default false))   -- recency_weight 已撤下，aihub#469，见 §7.5
   → {items:[{id,type,content,effective_strength,activation_count,...}]}
 
 pf_activate_memory(memory_id)
@@ -1971,19 +1974,120 @@ WHERE status='active'
 
 ### 7.5 Recall 排序算法
 
+🔴 **本节曾规定一个融合公式，那个公式从未实现，而且【不应】实现。**
+下面先写实现真相，再写被废弃的公式与依据 —— 顺序是刻意的：aihub#469 之前本节
+写的是公式、changelog L7 还声称「API 文档和实现对齐」，于是文档成了唯一权威，
+而它是错的。
+
+#### 实际排序（三条路径都已把 recency 计入：一条作主序，两条经 eff_strength 的时间衰减进入唯一 tiebreak）
+
 ```
--- L-R3-4: 修正量纲，全部归一化到 [0,1]
-normalized_strength = effective_strength(raw) / 5.0    -- 除以 base_strength_max
-normalized_recency  = exp(-days_since_activation / 30) -- 30d 半衰，∈ (0,1]
+memRefTimeSQL = GREATEST(last_activated_at, created_at)   -- 参考时间
+eff_strength  = base_strength * exp(-days_since_ref / stability_days)
+
+-- 1) 文本/标签路径（默认）  internal/domain/memory.go recallText
+ORDER BY memRefTimeSQL DESC, id DESC
+   ⇒ recency 是唯一的排序【信号】（`id DESC` 只是同一参考时刻内的确定性去歧，
+      也是 aihub#239 的游标 tiebreaker，不是排序依据）；
+      这条路径上根本没有 similarity 可供加权
+
+-- 2) 文本路径 recall_algo=lexical
+ORDER BY ts_rank(content_tsv, ...) DESC, tanh(eff_strength) DESC
+
+-- 3) 向量路径  internal/domain/memory_vector.go RecallWithVector
+ORDER BY round(cosine, 2) DESC, eff_strength DESC
+   ⇒ cosine 分桶到 0.01 为主键，eff_strength 只在桶【内】决胜
+
+min_strength 默认 0.3（raw 值，M7 修正，与 GC 归档阈值对齐）
+```
+
+`eff_strength` 自带 `exp(-days/stability)` 时间衰减 ⇒ **recency 在三条路径上都已
+参与排序，没有任何一条缺席它**。这是 `recency_weight` 被撤下（aihub#469）而非
+实现的第一条依据：它提供的是给一个已经占主导的维度加权。
+
+#### 被废弃的公式（L-R3-4，勿实现）
+
+```
+normalized_strength = effective_strength(raw) / 5.0
+normalized_recency  = exp(-days_since_activation / 30)
 
 final_score = semantic_similarity × (1 - recency_weight)
             + normalized_recency × recency_weight
-            + normalized_strength × 0.1
-
--- 所有分量均 ∈ [0,1]，量纲一致
-默认 recency_weight = 0.3
-min_strength 默认 0.3（raw 值，M7 修正，与 GC 归档阈值对齐）
+            + normalized_strength × 0.1        -- 默认 recency_weight = 0.3
 ```
+
+**为什么不实现：它就是 aihub#311 修掉的那个缺陷的形状，且非相似度权重更大。**
+aihub#311（commit `7ad96be`）把向量路径的融合分 `0.7*cosine + 0.3*tanh(strength)`
+换成「cosine 分桶为主键」，原因是 0.6B 嵌入模型把一个结果集里的 cosine 压进
+**约 0.04 宽**的带内 ⇒ 任何非平凡的第二项都能翻转这么小的差距。该 commit 明确
+排除了「调权重就行」这条路（`0.9/0.1` 也不够）。上面这个公式的非相似度权重合计
+0.4，比被删掉的 0.3 更大。
+
+实测（2026-09-08，对生产库一次真实 `top_k=20` 结果集离线重排）。
+
+🔴 **下面这张表是可执行的，不是散文**：数据与断言都在
+`internal/domain/recall_recency_replay_test.go`（`TestDesignDocFormulaWouldScrambleRealResults`），
+无需 DB、无需网络。这样安排是刻意的 —— 本 wi 修的缺陷就是「文档断言了没人能核的数」
+（changelog L7），如果在同一节里换一批同样不可核的新数，等于在记录缺陷的动作里
+重犯它。**改这张表就必须改那个测试，反之亦然。**
+
+正对照也在那个文件里（`TestReplayPositiveControl`）：按现实现的
+`round(cosine,2) DESC, eff_strength DESC` 重排，能**逐行**复现服务端真实返回顺序；
+并带一个反对照 —— 不分桶的 `cosine DESC` **不能**复现，否则这份数据就分辨不出
+「分桶」与「不分桶」，正对照本身就是空的。
+
+| w | 位次变动 | 全集最高 cosine 那行 | 相似度逆序对 |
+|---|---|---|---|
+| 现实现 | — | 第 1 | 16/190 |
+| 0.3（文档默认） | 19/20 | **跌到第 10** | **98/190** |
+| 0.4（scenario 模板写死的值） | 19/20 | 第 10 | 100/190 |
+| 0.9 | 20/20 | 第 9 | 102/190 |
+
+闭式判据：`Δsim < (w/(1-w)) × Δrecency`。w=0.3 时一个 **30 天**的年龄差可翻转
+**0.2709** 的 cosine 差 = 整个 0.04 带宽的 **6.8 倍**；要让 cosine 保持主导，
+w 必须 **< 0.06**，而文档默认是 0.3。
+
+第三条依据：aihub#367 那套召回评测集的基线说明**瓶颈不在排序**。
+
+该评测集共 **44** 条查询 = familyA 18 + familyB 18 + familyC 6 + **对照 2**；
+那 2 条对照是故意的无关查询（gibberish 与 offtopic），**在 `queryset_frozen.json`
+里 `target` 为 null，而在 `results.json` 里根本没有 `target`／`rank` 键** —— 是键
+缺席，不是取值为空，两者别混。它们结构上无从判分，所以判分基数是 **42**：44 与 42
+是两个不同的量，不是笔误。
+
+逐条 `rank` 重新统计（判读依据是文件自带的 `_meta.rank_meaning`：「rank of the
+FIRST ground-truth item in the returned list; 0 = not in top 10」，不是我假定的约定）：
+
+| | n | recall@1 | recall@5 | recall@10 |
+|---|---|---|---|---|
+| familyA | 18 | 0 | 2 | 6 |
+| familyB | 18 | 0 | 2 | 2 |
+| familyC | 6 | 0 | 0 | 0 |
+| **合计** | **42** | **0/42 = 0.0%** | 4/42 = 9.5% | **8/42 = 19.0%** |
+
+⇒ 81% 的查询里正确答案**根本不在 top-10**，重排序对它们无能为力；即使排序完美，
+天花板也只有 19%。当前瓶颈是**候选召回**，不是候选集内部的**排序**，而
+`recency_weight` 是排序旋钮 —— 作用在非瓶颈上。
+
+> 数据来源：分支 `polyforge/aihub-367-aihub-query-n` 的 `.tmp-367/results.json`
+> （`_meta.run_date=2026-09-05`，`server=http://10.146.0.34:8080`，
+> `emb_model=Qwen/Qwen3-Embedding-0.6B`，语料 150 条 memory / 367 条 wi）。
+> ⚠️ **该分支尚未合入 main**，所以在 main 上 grep 不到这些数字；上表是本次
+> 直接读那份 `results.json` 逐条重算的，不是转述它的结论段。
+
+⇒ 参数已从 `pf_recall` 的 InputSchema、转发表和 handler 绑定中一并移除。
+
+闸：`internal/mcp/recall_hop4_reader_gate_test.go`。两条臂：
+`TestRecallEveryPublishedParamIsReadByTheRankingCode` 按【已发布参数】量化，
+`TestRecallRequestBindsNothingUnreachable` 按【已绑定字段】量化（撤参数会把它
+移出前者的视野，这正是 aihub#394 撤 `mode` 后留给 aihub#424 收拾的那个洞）。
+
+⚠️ **它不是「任何已发布但无读点的参数都会报红」** —— 该文件顶部有两张表可以
+豁免：`recallParamsNotReadByDomain`（本进程自己消费，如 `fields`）与
+`recallParamsKnownUnreadTrackedByWi`（已知缺陷 + 未关闭的 wi）。两张表当下都
+非空：`visibility` 就是「已发布、无读点、闸却是绿的」，挂在 aihub#484 上。
+表项必须写 wi 号，并在两个方向上查陈旧（参数被撤 / 缺陷被修好都会让该项报红），
+所以它是棘轮而不是永久豁免 —— 但读这段的人不要把闸当成无条件规则。
 
 ### 7.6 Memory-First 原则（所有 skill 遵守）
 
@@ -3989,7 +4093,7 @@ review/代码审查          → /pf-review
 
 2. Memory-First：
    pf_recall(project, query=wi.goal, type="experience.*", top_k=5,
-             min_strength=1.5, recency_weight=0.4)
+             min_strength=1.5)
    pf_recall(project, query=wi.goal, type="rule.*", top_k=3)
    → 对有用的条目 pf_activate_memory(id)
 
@@ -4375,7 +4479,11 @@ v2 在 MCP server 层硬限制（通过 step_context 检测活跃的 step_attemp
 -- L5: wi_sequences SEQUENCE 显式 BIGINT
     CREATE SEQUENCE IF NOT EXISTS wi_seq_<project> AS BIGINT START 1;
 -- L6: users.author_aliases 用于 git commit author → user_id 匹配
--- L7: recency_weight default = 0.3（API 文档和实现对齐）
+-- L7: recency_weight 已撤下（aihub#469）。此行原文是「default = 0.3（API 文档和
+    实现对齐）」——【那句话是假的，而且是本缺陷最贵的一部分】：参数从未被任何
+    读点消费，changelog 却声称文档与实现已对齐，于是没人再去核。撤而不实现的
+    三条依据见 §7.5（recency 三条路径都已是主序或 tiebreak；文档那个公式实测会
+    复现 aihub#311；真瓶颈是候选召回不是排序）。
 -- L8: idempotency_key ULID 格式：^[0-9A-HJKMNP-TV-Z]{26}$
 -- L9: v1 命名见 §0
 -- L10: artifact_summary 4096 Unicode characters（PG length() 计字符数）

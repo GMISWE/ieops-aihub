@@ -139,18 +139,29 @@ var recallWireProbes = map[string][]struct {
 	// wi section C: the params nobody had checked. min_strength and
 	// recency_weight were the two the forwarding block already handled, and the
 	// numeric-string spelling is now accepted for them too.
+	//
+	// ⚠️ `recency_weight`'s probe block sat right here and asserted its values
+	// reached the wire — correctly, and that was the trap. Of its five arms, two
+	// passed because the value WAS forwarded (0.9 in both spellings), two because
+	// it was correctly NOT forwarded (the 0 and "" shapes), and the fifth because
+	// a malformed value was refused; not one of them could ask whether anything
+	// read it on arrival, which is the hop aihub#469 found empty. The probe went
+	// with the parameter; the hop it could not see is now gated by
+	// TestRecallEveryPublishedParamIsReadByTheRankingCode
+	// (recall_hop4_reader_gate_test.go).
 	"min_strength": {
 		{shape: float64(0.7), want: "0.7"},
 		{shape: "0.7", want: "0.7"},
 		{shape: float64(0), want: ""},
-		{shape: "0.3ish", rejected: true},
-	},
-	"recency_weight": {
-		{shape: float64(0.9), want: "0.9"},
-		{shape: "0.9", want: "0.9"},
-		{shape: float64(0), want: ""},
+		// The empty string is SKIPPED, not refused — parseNumArg reports
+		// present=false for an all-whitespace string, which is the same answer
+		// as "absent". This shape only ever appeared under recency_weight, so
+		// deleting that block took the repo's only assertion of it with it and
+		// left the numeric contract's treatment of "" unpinned: a future
+		// tightening of parseNumArg that turned `min_strength: ""` into a hard
+		// caller error would have gone green. Moved here rather than dropped.
 		{shape: "", want: ""},
-		{shape: "not a number", rejected: true},
+		{shape: "0.3ish", rejected: true},
 	},
 	"include_archived": {
 		{shape: true, want: "true"},

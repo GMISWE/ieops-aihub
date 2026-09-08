@@ -13,7 +13,7 @@
     "wi_type",
     "work_item_id"
   ],
-  "purpose": "hop5 ratchet input: the union of top-level response keys any caller has ever been handed. A later projection may not drop a key on this list without a deliberate decision.",
+  "purpose": "hop5 key inventory: the union of top-level response keys any caller was handed across this corpus. docs/mcp-cards/<tool>.md copies the list and K7 in internal/mcp/contract_cards_gate_test.go pins the copy to this record. Because it is a union over many calls with different arguments, it can name keys a single response does not carry -- it is NOT an equality claim about any one response. What IS enforced against a live server is the converse ratchet: for the tools it can drive, K10 in internal/mcp/card_response_keys_live_e2e_db_test.go (AIHUB_TEST_DB-gated) refuses any top-level key a live response carries that neither this list nor docs/mcp-cards/live-response-keys.json declares.",
   "result_kinds": {
     "json_object": 435
   },

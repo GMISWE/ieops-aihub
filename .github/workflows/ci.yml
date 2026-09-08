@@ -955,6 +955,45 @@ jobs:
       #             rather than only reasoned about: all three functions PASS
       #             with no `--- SKIP`, and with AIHUB_TEST_DB unset it exits 1
       #             on the first "did not run".
+      #   236 -> 237 aihub#482 added 1 DB-gated function, internal/mcp
+      #             TestE2ELiveResponseKeysAreDeclaredOnTheCards
+      #             (card_response_keys_live_e2e_db_test.go) — K10, the only
+      #             contract-card arm that reads a response off a live server
+      #             rather than comparing two checked-in files.
+      #
+      #             BOTH halves of the gate were exercised, in that order and on
+      #             the SAME inventory: with the test written but neither the
+      #             manifest line nor the step added, the manifest equality check
+      #             AND the coverage check failed together — which is the aihub#442
+      #             shape, and the reason that back-fill entry above exists.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched. Verbatim, before:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 236 entries,
+      #                 inventory measured 237
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 237
+      #                 (require only a DB: 234, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 75
+      #               dbtestcov: covered by a CI step: 233/234
+      #               ::error::dbtestcov: 1 … not in the manifest … 1 … executed
+      #                 by NO CI step
+      #             and after:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 237 entries,
+      #                 inventory measured 237
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 237
+      #                 (require only a DB: 234, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 76
+      #               dbtestcov: covered by a CI step: 234/234
+      #               dbtestcov: OK
+      #
+      #             The step's own `run:` text was executed against a real
+      #             Postgres (pgvector/pgvector:pg16, migrated to 33) rather than
+      #             only reasoned about: it PASSes with no `--- SKIP`, and with
+      #             AIHUB_TEST_DB unset it exits 1 on "did not run".
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -4056,6 +4095,35 @@ jobs:
           done
           ! grep -q -- '--- SKIP' terminal_without_claim.log \
             || { echo "::error::an aihub#421 terminal-credential test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#482: the contract cards' `response_keys_observed` was pinned to a
+      # checked-in copy of the aihub#412 corpus and to nothing else, so dropping a
+      # key from BOTH the card and the corpus record left the whole card gate green
+      # while the live tool still returned it — probed on pf_whoami's `role`, and
+      # re-probed on this tree with K10 in place (K7 green, K10 red).
+      #
+      # K10 is the arm that reaches a server: it drives 42 of the 48 published
+      # tools through a real Postgres, the real router, pkg/client and a real MCP
+      # session, and refuses any top-level key a live response carries that neither
+      # the card nor docs/mcp-cards/live-response-keys.json declares. The other nine
+      # arms run in the always-on "Unit tests" step and compare one checked-in file
+      # with another; only this one can tell the cards apart from the running
+      # system. It cannot be folded into that step, because that step deliberately
+      # runs with AIHUB_TEST_DB unset (see the "aihub#242 DB tests" note above).
+      #
+      # Needs only a database (real router in-process via httptest, real SDK
+      # client), so no extra service. Same -v + grep discipline as every DB step
+      # here: a suite in which everything SKIPped still exits 0.
+      - name: aihub#482 live response-key contract DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/mcp/ -run '^(TestE2ELiveResponseKeysAreDeclaredOnTheCards)$' -count=1 -v 2>&1 | tee live_response_keys.log
+          grep -q -- "--- PASS: TestE2ELiveResponseKeysAreDeclaredOnTheCards (" live_response_keys.log \
+            || { echo "::error::TestE2ELiveResponseKeysAreDeclaredOnTheCards did not run; the contract cards are pinned to a checked-in corpus copy again and no arm reaches a live response"; exit 1; }
+          ! grep -q -- '--- SKIP' live_response_keys.log \
+            || { echo "::error::TestE2ELiveResponseKeysAreDeclaredOnTheCards SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
   publish-schemas:
     name: Publish MCP Schemas

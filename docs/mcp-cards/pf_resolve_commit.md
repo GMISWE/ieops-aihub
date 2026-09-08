@@ -70,6 +70,12 @@ published here.
 `aihub#412` corpus holds no record for this tool, so nothing here is measured
 traffic. That is a statement about usage, not about correctness.
 
+The key is pinned anyway, just not here: `aihub#482`'s K10 in
+`internal/mcp/card_response_keys_live_e2e_db_test.go` drives this tool against a
+live server — seeding the annotation row directly, since annotations are made in
+the `/ui` viewer and no MCP tool reaches it — and holds the result to `ok`,
+declared in `docs/mcp-cards/live-response-keys.json`.
+
 ## Policy
 
 - **§6.2 T2-7** — the "does anything read this?" question the ruling asks about

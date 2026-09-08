@@ -85,6 +85,14 @@ package mcp_test
 //	K9 verbatim quote  a hop 0-1 table cell quoting text the tool does not
 //	                   publish — the arm that survives PF_CARDS_REGEN=1
 //
+// K10 is NOT in this file and does not run in the always-on step. It lives in
+// card_response_keys_live_e2e_db_test.go, is gated on AIHUB_TEST_DB, and is the
+// only arm that reaches a server: it drives 42 of the 48 published tools and
+// refuses any top-level key a live response carries that neither the card nor
+// docs/mcp-cards/live-response-keys.json declares. Every arm above compares one
+// checked-in file with another, so K10 is what makes the card set a claim about
+// the running system rather than about itself.
+//
 // ─── K6 is deliberately NOT delegated to the docs-contract script ──────────
 //
 // Measured on this tree rather than assumed: scripts/pf_docs_contract_check.py's
@@ -273,9 +281,10 @@ type cardBlock struct {
 	//
 	// ⚠️ And it is a claim about the COPY only. Both sides of K7 are checked-in
 	// files, so a key the live tool still returns can be dropped from the card and
-	// the corpus record in one change and the gate stays green — probed on
-	// pf_whoami's `role`. See docs/mcp-cards/README.md; a real hop-5 ratchet needs
-	// live responses and is aihub#482.
+	// the corpus record in one change and K7 stays green — probed on pf_whoami's
+	// `role`. What refuses that edit is K10 in card_response_keys_live_e2e_db_test.go
+	// (aihub#482), which reads the key back off a live server; re-running the same
+	// two-sided delete leaves this gate green and reddens that one.
 	ResponseKeysObserved []string `json:"response_keys_observed"`
 	Hop4Coverage         string   `json:"hop4_coverage"`
 }

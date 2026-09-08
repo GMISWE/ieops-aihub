@@ -63,8 +63,13 @@ Each card opens with a **generated** fenced `json` block and continues with
   and compared against it by the gate, so the copy cannot drift **from that
   record**. `null` means that corpus holds no record for the tool — which is a
   different fact from an empty list, and for the three artifact-action tools it is
-  itself evidence. Read the K7 caveat below before trusting the list against a
-  live response.
+  itself evidence. What holds the list against a **live** response is K10, in a
+  separate DB-gated file; read "K7 is copy-to-copy, K10 is the one that reaches a
+  server" below before trusting the list on its own.
+- **`docs/mcp-cards/live-response-keys.json`** is the other half of that
+  declaration: the keys a live response carries that a card cannot name, because
+  the corpus record it copies is generated and a key added after the corpus window
+  is not in it. Each entry carries the reason it is not in the corpus.
 
 ## The gate
 
@@ -79,6 +84,11 @@ hop 0-1 on a tool with no parameters, or a `written` card with no hop-4 body ·
 cited with no directory · **K7** disagreement with the corpus record · **K8**
 floors, so a broken walk cannot pass by finding nothing · **K9** a hop 0-1 table
 cell quoting text the tool does not publish.
+
+**K10** lives elsewhere and does not run in that step:
+`internal/mcp/card_response_keys_live_e2e_db_test.go`, gated on `AIHUB_TEST_DB`
+and run by ci.yml's `aihub#482 live response-key contract DB tests`. It is the
+only arm that reaches a server.
 
 Citations use semantic anchors — a backticked repo-relative Go path, optionally
 followed by a parenthesised backticked symbol — because
@@ -134,28 +144,43 @@ hash moved and independently decides to go re-read prose the diff does not show"
 K3 still fires on the same event and should: it says *something* changed. K9 says
 *what*, and it survives regeneration because the generator never touches prose.
 
-### K7 compares a copy to a copy — it does not reach a live response
+### K7 is copy-to-copy, K10 is the one that reaches a server
 
-`response_keys_observed` is checked against the checked-in
+`response_keys_observed` is checked by K7 against the checked-in
 `../audits/aihub-412-corpus-facts/response-keys/<tool>.json` and against nothing
 else. **Both sides are files in this repo.** Probed on `origin/main` = `6bd9d80`
 and reproduced on `0dca671`: dropping `role` from both `pf_whoami.md` and its
-corpus record leaves the gate green, while the live tool still returns `role`.
+corpus record leaves that gate green, while the live tool still returns `role`.
 
-Two arms bound that, and neither closes it: **K7 `CORPUS_NULL_MASKS_RECORD`**
+Two K7/K8 arms bound it and neither closes it: **`CORPUS_NULL_MASKS_RECORD`**
 rejects a `null` card value when a record exists (`null` and `[]` are a different
 fact, and until `aihub#473` the comparison could not tell them apart, because it
-compares lengths), and **K8 `FLOOR_CORPUS`** refuses the green you get by
-deleting the records and the card lists together.
+compares lengths), and **`FLOOR_CORPUS`** refuses the green you get by deleting
+the records and the card lists together.
 
-⚠️ The corpus records' own `purpose` field says they are *"hop5 ratchet input:
-... A later projection may not drop a key on this list without a deliberate
-decision"*. **No such ratchet exists.** `observed_top_level_keys` has exactly one
-consumer in this repo — the card gate — and the check above is what it does.
-`internal/mcp/universal_contract_gate_test.go`'s G3 covers server-field-to-struct
-projection, which is adjacent but is not this claim. Building the real thing needs
-all 48 tools called against a live server, i.e. an `AIHUB_TEST_DB`-gated CI step,
-and is tracked as `aihub#482`.
+**K10** (`aihub#482`) closes it, by driving the tools against a real Postgres,
+router, client and MCP session and reading the keys back. Re-run on this tree
+with the two-sided delete above applied: K7 green, K10 red naming
+`pf_whoami`.`role`.
+
+⚠️ **It is a ratchet in one direction only, and the direction is the opposite of
+the one the corpus records used to claim.** Their `purpose` field said "a later
+projection may not drop a key on this list", which is unenforceable: a record is
+a **union** over hundreds of calls, so it legitimately names keys a single
+response does not carry — measured, `pf_recall`'s `next_cursor`,
+`request_adjusted` and `unmatched_types`, `pf_claim_work_item`'s `worktrees`, and
+seven of `pf_get_memory`'s. Equality with a live response is therefore not a
+stricter test but a **wrong** one. What K10 enforces is the converse: **every
+top-level key a live response actually carries must be declared** — by the card,
+or by `live-response-keys.json` for keys the generated corpus cannot hold. The
+declared set may not shrink below what the server emits; growing it stays cheap.
+
+Of the 48 published tools, K10 drives **42**. The six it cannot are `pf_commit`,
+`pf_diff`, `pf_pr`, `pf_push`, `pf_ship` and `pf_wrap`, each needing a git
+worktree, a git remote or the `gh` CLI. They are named in `liveWalkOutOfReach`,
+and that list is checked both ways: a tool that stops being driven without being
+added to it fails the arm, and a listed tool that IS driven fails it as a stale
+exemption. So the walk cannot shrink except in a diff somebody signs.
 
 ## Working on a card
 

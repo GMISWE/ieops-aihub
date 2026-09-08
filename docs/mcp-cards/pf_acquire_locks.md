@@ -4,6 +4,7 @@
 {
   "tool": "pf_acquire_locks",
   "description_sha256": "929a4a1abe5aa9b2fc32c5a81e0cf14ee7885a7ebad64778bccc383e97736646",
+  "input_schema_sha256": "9ec2816b6ac4d1a38dbba45cadc97d1817b4a4491844acb11cc17cabe4a2fa77",
   "params": {
     "work_item_id": {
       "type": "string",

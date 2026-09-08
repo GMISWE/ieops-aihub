@@ -4,6 +4,7 @@
 {
   "tool": "pf_reinforce_memory",
   "description_sha256": "9954803dee8b3d7e57f17d935200e67175ab432db2335542cb4cbd19c0deb5b5",
+  "input_schema_sha256": "2bd5f7f5716af00a37f2178578c19a3d949c908f811491915a47b3d1de31f2bb",
   "params": {
     "additional_context": {
       "type": "string",
@@ -71,10 +72,13 @@ and the resolved state file into the body of `PATCH /v1/memories/<id>/reinforce`
 ## hop 4 — what it actually does
 
 - Appends the context to the memory's reinforcement list with `from_wi` provenance,
-  and adjusts strength by `strength_delta` within the server's clamp. That clamp's
-  bounds are the ones §6.1 T1-3 says `pf_remember`'s `base_strength` validation
-  should reuse — so this endpoint already encodes the correct scale while the create
-  path publishes a different one.
+  and adjusts strength by `strength_delta` within the server's clamp. Since
+  `aihub#433` that clamp reads `internal/domain/memory.go` (`MinBaseStrength`) and
+  (`MaxBaseStrength`) rather than two literals that happened to agree with them.
+- **Reinforce still CLAMPS where the create path REJECTS, and that asymmetry is
+  deliberate**: this call applies a delta to a stored value, so a sum outside the
+  range is arithmetic rather than a stated intent, while a caller-supplied
+  `base_strength` outside the range is a statement the server can refuse.
 - **Sending credentials without the work item they belong to is the one combination
   the gate rejects outright**, which is why the parameter is required rather than
   optional-with-a-default.
@@ -92,12 +96,14 @@ file), so the rate is not attributable to the defect alone.
 
 ## Policy
 
-- **§6.1 T1-3 (owner ruling)** — the reinforce clamp's bounds are named as the
-  authority for the range `pf_remember` should validate against. This tool is that
-  authority's location.
+- **§6.1 T1-3 (owner ruling) — LANDED** (`aihub#433`). The reinforce clamp's bounds
+  were named as the authority for the range `pf_remember` should validate against;
+  both now read the same exported constants, taken from the column's own DDL.
 - **§6.2 T2-3** — one status code for "invalid attempt credential" across all tools;
   this is one of the credentialed memory paths that classification has to cover.
 
 ## Open
 
-- Nothing this card can settle. The scale mismatch is `pf_remember`'s to fix.
+- **`aihub#459`** — the column is `SMALLINT` while Go and the schema say `number`, so
+  a fractional `strength_delta` that lands the sum between two integers still cannot be
+  stored as stated. Open, and shared with `pf_remember`.

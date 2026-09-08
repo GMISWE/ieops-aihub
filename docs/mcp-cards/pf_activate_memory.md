@@ -4,6 +4,7 @@
 {
   "tool": "pf_activate_memory",
   "description_sha256": "7ddb6698a556717375909158d8b5f948e2e8fb15f3fe9c4e58bb6befe51c6df0",
+  "input_schema_sha256": "b9432f0272d4db567a46d4add55a34ad39d12af6d789700a257d4d92ee66db67",
   "params": {
     "memory_id": {
       "type": "string",

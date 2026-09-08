@@ -4,6 +4,7 @@
 {
   "tool": "pf_predict_conflicts",
   "description_sha256": "65919e1709fa50824eb5ffbbb479145976ff0d174996a62a326acac34b685978",
+  "input_schema_sha256": "7112659a22277ed37b865fbcadef7f97ddbcdb5a5c9238efeab0354222d0c09f",
   "params": {
     "declared_resources": {
       "type": "array",

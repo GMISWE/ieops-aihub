@@ -4,6 +4,7 @@
 {
   "tool": "pf_create_dependency",
   "description_sha256": "1ad7c74d33d5532547250635a85b879f3b9345891d941582ed7f8aa4ed474a70",
+  "input_schema_sha256": "2b6ea1a4abb0e47acbeb9e505a981235633faf0a76843c3f874c4d98d444c42f",
   "params": {
     "blocked_wi_id": {
       "type": "string",

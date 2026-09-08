@@ -4,6 +4,7 @@
 {
   "tool": "pf_batch_create_work_items",
   "description_sha256": "7ffd5d5890da0ab75a79538d59e05366153977d30a99188993ec9fe8cde224e0",
+  "input_schema_sha256": "9645e1296de7010f4e298ac46c407a47c82f9d35f998eb20727abdc852e0437f",
   "params": {
     "items": {
       "type": "array",

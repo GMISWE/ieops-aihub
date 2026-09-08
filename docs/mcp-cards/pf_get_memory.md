@@ -4,6 +4,7 @@
 {
   "tool": "pf_get_memory",
   "description_sha256": "91a1d36ed1f79695bbde2f64b6c9146daaee338f4982b4c0fdcd76d781aa23c8",
+  "input_schema_sha256": "d8b070884ea6bfca420b507d729d4aa5a2a7ce9e98be09114524090d3360d1aa",
   "params": {
     "memory_id": {
       "type": "string",

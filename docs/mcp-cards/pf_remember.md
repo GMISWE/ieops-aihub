@@ -4,6 +4,7 @@
 {
   "tool": "pf_remember",
   "description_sha256": "bec195df7750ddb2b3b4714765c5ded5e0a03f968e184a781d347c9e3f553fc7",
+  "input_schema_sha256": "7d21b6ad970abe474d384aec2964c5373cc8cae80150d52f1e7d39faa63ff67d",
   "params": {
     "attrs": {
       "type": "object",
@@ -101,7 +102,7 @@ domain list so the published set and the accepted set are one value.
 | `content` | string | yes | memory content |
 | `visibility` | string | yes | `private\|project\|team\|admin` |
 | `work_item_id` | string | no | associated work item |
-| `base_strength` | number | no | **"Initial strength (0-1)"** |
+| `base_strength` | number | no | "Initial strength, 1-5 (default 3)" |
 | `attrs` | object | no | additional attributes |
 | `expires_at` | string | no | RFC3339 |
 | `dedup_mode` | string | no | deduplication mode |
@@ -110,10 +111,15 @@ domain list so the published set and the accepted set are one value.
 | `supersedes_memory_id` | string | no | memory this supersedes |
 | `tags` | array | no | stored with the memory; `fields="brief"` drops them |
 
-🔴 **`base_strength`'s published range is wrong.** The description says 0-1; the DB
-scale is **1-5**, and §6.1 T1-3 is the owner's ruling to publish 1-5 and validate it
-in Go at the entry point, reusing the reinforce clamp's bounds. A caller following
-the schema sends a value the storage layer treats as far weaker than intended.
+**`base_strength` published the wrong range until `aihub#433` (merged as `c069570`),
+and the cost was measured rather than argued.** It said "(0-1)" while
+`memories.base_strength` is CHECK-constrained to 1-5 and the Go default was 3.0 —
+three disjoint answers — and `Remember` validated the type but never the value, so a
+number taken straight from the published range reached the CHECK and came back 500
+with the driver's constraint text. The `aihub#412` corpus records **13 `pf_remember`
+calls carrying `base_strength`, every value inside the published range and outside the
+enforced one, against 13 `pf_remember` INTERNAL_ERRORs naming
+`memories_base_strength_check`.** That is §6.1 T1-3's owner ruling, now landed.
 
 `tags` reached the endpoint unpublished until `aihub#425`: this handler forwards its
 whole argument map, so the value was on the wire and reachable only by guessing a
@@ -156,9 +162,15 @@ use either.
 
 ## Policy
 
-- **§6.1 T1-3 (owner ruling)** — publish **1-5**, the DB's scale, and validate it in
-  Go at this entry point reusing the reinforce clamp's bounds. The `(0-1)` above is
-  the live defect that ruling names.
+- **§6.1 T1-3 (owner ruling) — LANDED** (`aihub#433`). Publish 1-5, the DB's scale,
+  and validate it in Go at this entry point. `internal/domain/memory.go`
+  (`MinBaseStrength`) / (`MaxBaseStrength`) / (`DefaultBaseStrength`) are taken from
+  the column's own DDL, and `internal/domain/memory.go` (`validateBaseStrength`)
+  rejects an out-of-range caller-stated value with a 400 that opens by naming the
+  field. The guard sits above the first query in `internal/domain/memory.go`
+  (`Remember`), so it covers `pf_remember`, `pf_save_artifact` and `pf_update_memory`
+  alike — `internal/domain/memory.go` (`UpdateMemory`) builds a `RememberRequest` and
+  goes through the same function.
 - **§6.2 T2-6** — keep the leniency, **stop calling the 13-value list an enum in a
   schema the SDK will not enforce**, and add the DB CHECK for the four prefixes.
 - **§6.2 T2-19** — `pf_recall`'s `min_strength` must be put on the same scale, after
@@ -169,5 +181,6 @@ use either.
 - **§6.4 item 4** — **T2-6's migration is unsized.** Adding a CHECK to a populated
   table fails on any existing off-prefix row, and the live distinct `type` set was
   never read. The ruling is accepted; the migration's cost is not known.
-- T1-3 is filed (`aihub#433`) and not landed, so the range published above is still
-  the wrong one at the time this card was written.
+- **`aihub#459` is open and is the residual of T1-3.** The column is `SMALLINT` while
+  both Go and the published schema say `number`, so an in-range FRACTIONAL value still
+  cannot be stored as stated. Deliberately out of scope of the range fix.

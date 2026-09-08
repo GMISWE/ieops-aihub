@@ -4,6 +4,7 @@
 {
   "tool": "pf_list_dependencies",
   "description_sha256": "c280606730c78659546249d247e29916ea764b794c68a45d4a9babed5e0864b8",
+  "input_schema_sha256": "0d138f8f344be0161281deb07d0ff88f782e6397ea2be18bb413fb2c4cfe88e4",
   "params": {
     "work_item_id": {
       "type": "string",

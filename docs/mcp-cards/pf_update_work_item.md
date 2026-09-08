@@ -4,6 +4,7 @@
 {
   "tool": "pf_update_work_item",
   "description_sha256": "29b3c7434085f3bd45cf9acebf95466a7fe1ae8757a6d86786d03886c6687c30",
+  "input_schema_sha256": "0300196485444292f9a9e0a482a4140cc7c998fde93784f65c368b88b165a8ff",
   "params": {
     "attrs": {
       "type": "object",

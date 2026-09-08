@@ -4,6 +4,7 @@
 {
   "tool": "pf_complete_attempt",
   "description_sha256": "ad8beae00b7025703d73a76489eefde89175938e61fe1dcb6be3ffa815cdb32a",
+  "input_schema_sha256": "59a74f8a27c1608c1fab4a023371d6c2bb95dcb1c484436b17a8c864c37334db",
   "params": {
     "force_terminate_step": {
       "type": "boolean",

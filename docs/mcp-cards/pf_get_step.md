@@ -4,6 +4,7 @@
 {
   "tool": "pf_get_step",
   "description_sha256": "9bb68684365a1050698910b8d356c29e77db93829b76422d141a77629252d501",
+  "input_schema_sha256": "0d138f8f344be0161281deb07d0ff88f782e6397ea2be18bb413fb2c4cfe88e4",
   "params": {
     "work_item_id": {
       "type": "string",

@@ -4,6 +4,7 @@
 {
   "tool": "pf_create_project",
   "description_sha256": "23fc9a29fd3772a5e5f7f76f79bdb7201a93cd16850980dee36223a34d879762",
+  "input_schema_sha256": "e768c3d52cad5d6a1654be73791e9634f374f67f29217260ed4e8060f544a18c",
   "params": {
     "description": {
       "type": "string",

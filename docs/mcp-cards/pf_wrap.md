@@ -4,6 +4,7 @@
 {
   "tool": "pf_wrap",
   "description_sha256": "c91449ce2191ca64c78ad54893cb89e7c72334f14e8ff1937397a8b4ea32b106",
+  "input_schema_sha256": "e04af2e40113b1bcc3a23efa3d5721cb71ec1b92543db76a81c36dcc6bfba1db",
   "params": {
     "note": {
       "type": "string",

@@ -4,6 +4,7 @@
 {
   "tool": "pf_cancel_work_item",
   "description_sha256": "22b5ffd38c1a47f1d8163d6c698ed89aaa90c30c25636a5c9335f0c94a8f3231",
+  "input_schema_sha256": "9cefaa19ce14188a6f2e77d6c54018f1f18be9cb6b435b93695c6b3f1834e1c8",
   "params": {
     "reason": {
       "type": "string",

@@ -4,6 +4,7 @@
 {
   "tool": "pf_remove_dependency",
   "description_sha256": "ae3ab1d207bbfc5ba3b44275554cc4c0df02336a63789bf8dd4cc2a63ee10a2d",
+  "input_schema_sha256": "fd8248e6f947f18b6d02e8546a1c3e8a4ad86b2f2380af51e62a6fd0b54f15a4",
   "params": {
     "blocked_wi_id": {
       "type": "string",

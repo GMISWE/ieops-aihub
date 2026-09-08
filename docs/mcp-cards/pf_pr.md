@@ -4,6 +4,7 @@
 {
   "tool": "pf_pr",
   "description_sha256": "d98bc7d681ce9b2a0ef85aa0ddd2f616dd23d0774314b4fc529098e084b988d5",
+  "input_schema_sha256": "43ced54eb8e2ed7a8090b2368e00a874792886c761df5155db3ab598a8f2ba73",
   "params": {
     "base": {
       "type": "string",

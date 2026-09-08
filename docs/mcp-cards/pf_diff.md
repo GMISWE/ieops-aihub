@@ -4,6 +4,7 @@
 {
   "tool": "pf_diff",
   "description_sha256": "68b8ca01da9df6d8b77d37685932f706fa0537731eb233f6ec241a180df32b54",
+  "input_schema_sha256": "7c248aa4ad5c48f0ecff2e62a1789471eb3e4828e2a78e1eb62596ace8afa60f",
   "params": {
     "repo": {
       "type": "string",

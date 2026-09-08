@@ -4,6 +4,7 @@
 {
   "tool": "pf_close_artifact",
   "description_sha256": "5334a130fadf0a81567ebcae0890054b8c27c310492faebfb4120841ddbec99a",
+  "input_schema_sha256": "d4de7d80cb7b02fe8a93e3de4b52d9cffec5a37df229456dbda1673c98aaeeb6",
   "params": {
     "artifact_type": {
       "type": "string",

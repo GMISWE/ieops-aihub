@@ -4,6 +4,7 @@
 {
   "tool": "pf_claim_work_item",
   "description_sha256": "8ad92ad01ec4a74804859e887970087ba2f3572539186dc40b3b44c97c1b0048",
+  "input_schema_sha256": "ab786059d010cc1b5040222e7deb72d9a314641e545cf3dfd63dedf3df60206f",
   "params": {
     "force_takeover": {
       "type": "boolean",

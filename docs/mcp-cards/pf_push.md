@@ -4,6 +4,7 @@
 {
   "tool": "pf_push",
   "description_sha256": "d5328e449ba0e0023b20062aac567545c614441a908da1bfe12798f4f4bc3ba8",
+  "input_schema_sha256": "0fe775364e2ef42df20532529ebac1a47967019cfcd0020bcad30b8908de893b",
   "params": {
     "repo": {
       "type": "string",

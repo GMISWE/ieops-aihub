@@ -4,6 +4,7 @@
 {
   "tool": "pf_update_memory",
   "description_sha256": "e373c1b2dd6fc7d2da8301632578d70f162feaa3cc682aaced84abaffddb0f1a",
+  "input_schema_sha256": "017f27ab3c7ea1799127c7266bc53ebf683d124094e5980757bb5d1f6a153697",
   "params": {
     "base_strength": {
       "type": "number",
@@ -94,9 +95,13 @@ Destination: `PATCH /v1/memories/<id>/update` via `pkg/client/client.go`
 - **Creates a new version rather than mutating in place**, and advances the cursor
   that points at the latest. So an update is append-only from the storage side and
   a reader holding an older id follows the chain forward.
-- `base_strength` here writes the same column `pf_remember` initialises, so it
-  inherits the same scale question — and this tool publishes no range at all, which
-  is the milder version of `pf_remember`'s wrong one.
+- `base_strength` here writes the same column `pf_remember` initialises, and since
+  `aihub#433` it is validated by the same guard: `internal/domain/memory.go`
+  (`UpdateMemory`) builds a `RememberRequest` and calls `internal/domain/memory.go`
+  (`Remember`), whose `internal/domain/memory.go` (`validateBaseStrength`) sits above
+  the first query. So an out-of-range value is a 400 here too — **even though this
+  tool's own description still publishes no range**, which is the one place the three
+  strength surfaces have not been made to agree.
 - `tags` is a **replacement**, like every other field here: the value sent becomes
   the list.
 
@@ -107,16 +112,20 @@ real callers have been handed.
 
 ## Policy
 
-- **§6.1 T1-3 / §6.2 T2-19** — the strength scale must be published consistently
-  across the tools that write and threshold it. This one publishes no scale, which is
-  silent rather than wrong, but a caller reading `pf_remember` first will carry the
-  wrong one here.
+- **§6.1 T1-3 / §6.2 T2-19 — LANDED for the other two surfaces** (`aihub#433`).
+  `pf_remember` now publishes 1-5 and `pf_recall`'s `min_strength` names the scale it
+  thresholds. This tool publishes no scale at all, which is silent rather than wrong —
+  but it is enforced by the same guard, so a caller who reads only this schema learns
+  the range from a 400.
 - **§6.2 T2-1** — one editability matrix for the whole struct and one error code per
   rejection kind; the "omit to keep current" convention is this tool's local version
   of that matrix.
 
 ## Open
 
+- This tool's `base_strength` description was not updated by `aihub#433` and still
+  states no range, while the value is enforced. Recorded rather than fixed — this wi
+  changes no schema byte.
 - Whether `base_strength` should be publishable on an update at all, given that
   activation and reinforcement also move strength, is not settled anywhere this card
   can cite.

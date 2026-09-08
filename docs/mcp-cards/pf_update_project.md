@@ -4,6 +4,7 @@
 {
   "tool": "pf_update_project",
   "description_sha256": "a845d2eb45c660514475b05f1474a46a6497653c592be2dee52cbaff6a21cd3f",
+  "input_schema_sha256": "63a4de5297d081116cd253208f02ff05f8ef8bafd085e26579f0d39a2cdb0259",
   "params": {
     "description": {
       "type": "string",

@@ -4,6 +4,7 @@
 {
   "tool": "pf_create_work_item",
   "description_sha256": "2978a1542ea8458bd057eea171e82bbd04eecdec320281d9b37b3ce3c14b9d69",
+  "input_schema_sha256": "b8ed2f451a7296239fb4b432b912229e705e5c261f68f6a1b6799e610f03152b",
   "params": {
     "attrs": {
       "type": "object",

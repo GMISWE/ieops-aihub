@@ -4,6 +4,7 @@
 {
   "tool": "pf_revoke_api_key",
   "description_sha256": "abd73839fdaf8f867c95b97d92d61d8c8c527f36da3748bc2bb059388585e358",
+  "input_schema_sha256": "b5abe0f8385e1ba72f24749483994ef3386683292d4b81bcd3668c173a714262",
   "params": {
     "key_id": {
       "type": "string",

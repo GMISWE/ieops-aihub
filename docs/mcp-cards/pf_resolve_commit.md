@@ -4,6 +4,7 @@
 {
   "tool": "pf_resolve_commit",
   "description_sha256": "871900ea3d9a6c052811c628cf28306450bde29f301c24b9d39961997c56582b",
+  "input_schema_sha256": "d2c60621b3317daed0a4464b8140087acfb6e6e0062fcd2c05529da13a867783",
   "params": {
     "commit_id": {
       "type": "string",

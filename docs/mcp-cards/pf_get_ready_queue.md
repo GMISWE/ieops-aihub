@@ -4,6 +4,7 @@
 {
   "tool": "pf_get_ready_queue",
   "description_sha256": "732dfc544de531cae069f2b65eed4c55d866bb57154926113faa82a5668ca6f6",
+  "input_schema_sha256": "8b4e1f590c87688c34098d4d5dd3d1e1f733c1876b7a67189e87c5220883d96f",
   "params": {
     "max": {
       "type": "string",

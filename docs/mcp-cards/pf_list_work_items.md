@@ -4,6 +4,7 @@
 {
   "tool": "pf_list_work_items",
   "description_sha256": "907e2546b613d754fe8d31d24223eded70811856dec589b33f42fd29d65d64f4",
+  "input_schema_sha256": "5ea984a67dd4a0af8d723b6859fdc45f6335557b8124c2412f38ceb7e8666d7d",
   "params": {
     "cursor": {
       "type": "string",

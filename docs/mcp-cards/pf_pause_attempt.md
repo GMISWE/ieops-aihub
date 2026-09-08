@@ -4,6 +4,7 @@
 {
   "tool": "pf_pause_attempt",
   "description_sha256": "97ab52c4996df4eec89ffcc91015a6cf6cc3bc758a3a5e4f1d32ccc8e38d6bed",
+  "input_schema_sha256": "b2a0b799191acc6ff59530c2dc1df8b535735fce5fe9b62b4d718a79380cc79e",
   "params": {
     "pause_reason": {
       "type": "string",

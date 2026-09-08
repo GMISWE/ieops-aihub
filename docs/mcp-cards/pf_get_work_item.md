@@ -4,6 +4,7 @@
 {
   "tool": "pf_get_work_item",
   "description_sha256": "a3eca5e5ae430ceaee59a38c6683c39ec849c623957546282e99f9eb27268d21",
+  "input_schema_sha256": "4d732bf5df271b72fd4e7474796cfc60c42f9aed6d1b6db7ce5beb0852a4da64",
   "params": {
     "brief": {
       "type": "boolean",

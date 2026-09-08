@@ -4,6 +4,7 @@
 {
   "tool": "pf_read_events",
   "description_sha256": "c495ca6b4e50e46b49bc56d8e8eeb357784284e54b737ff696a6734c6f6d42ae",
+  "input_schema_sha256": "87772e20c52de2a15bedad5dc1130245febee41a691fba3527a2c51df6cbf250",
   "params": {
     "cursor": {
       "type": "string",

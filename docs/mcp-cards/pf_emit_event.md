@@ -4,6 +4,7 @@
 {
   "tool": "pf_emit_event",
   "description_sha256": "4555d2a5b9c4ae07cebd69b13ffc2ed9d5a1b3841983b7debcb6a1d58be9b7a7",
+  "input_schema_sha256": "71fa1a5448f0f952673190e87076a6d741a24c14dc9a75aa17f859cbdcf76190",
   "params": {
     "admin": {
       "type": "boolean",

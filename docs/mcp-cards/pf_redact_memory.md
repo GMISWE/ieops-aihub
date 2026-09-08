@@ -4,6 +4,7 @@
 {
   "tool": "pf_redact_memory",
   "description_sha256": "9ddb21e3ef1f242a297befdcfc964838a6119b5a6458cf6fc26204234776e34f",
+  "input_schema_sha256": "b122f01fa303e488002154f845c0704fdfd911af073ff93f28daf130c52a4656",
   "params": {
     "memory_id": {
       "type": "string",

@@ -4,6 +4,7 @@
 {
   "tool": "pf_rotate_identifier",
   "description_sha256": "c03ebc4e8f0f29519857adfb15b1d6b17bf5402086fe4099cafb559a1c2c21a0",
+  "input_schema_sha256": "ebb939f2990b66ae8741abbcaefcd693d6794ac19a77fbc7ab9677a5cb963cb4",
   "params": {
     "name": {
       "type": "string",

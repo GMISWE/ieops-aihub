@@ -38,16 +38,28 @@ package mcp_test
 //
 // ⚠️ That instrument carries tool descriptions but NOT per-parameter
 // descriptions, which is why a card pins parameter NAME / TYPE / REQUIRED / ENUM
-// and pins the tool description only by hash. Copying 40 kB of descriptions into
-// docs/ would create a second copy of the schema's own prose whose only failure
-// mode is disagreeing with it; the hash costs one line and fails on exactly the
-// same event.
+// from it and pins prose only by hash. Copying 40 kB of descriptions into docs/
+// would create a second copy of the schema's own prose whose only failure mode is
+// disagreeing with it; a hash costs one line and fails on exactly the same event.
+//
+// 🔴 TWO hashes, and the second one exists because the first was measured
+// insufficient DURING THIS WORK. `description_sha256` covers the tool
+// description; `input_schema_sha256` covers the serialised InputSchema, which is
+// where every PARAMETER description lives. While this change was in review,
+// aihub#433 landed and rewrote pf_remember's base_strength description from
+// "(0-1)" to "1-5 (default 3)" and pf_recall's min_strength alongside it — a
+// contract change that falsified three cards outright — and with only the first
+// hash the gate stayed GREEN through it, because the contract JSON carries no
+// per-property descriptions to hash. The second hash is taken from the live SDK
+// session instead, which does. A gate that misses the drift it was built for is
+// worse than none, and this one missed it once.
 //
 // ─── The arms ──────────────────────────────────────────────────────────────
 //
 //	K1 coverage        a published tool with no card
 //	K2 orphan          a card naming a tool the registry does not publish
-//	K3 schema drift    a card's params or description hash disagreeing with live
+//	K3 schema drift    a card's params, description hash or InputSchema hash
+//	                   disagreeing with live
 //	K4 non-vacuity     a missing heading, a parameter never named in the prose,
 //	                   or a "written" card with no hop-4 body
 //	K5 stale exemption a "pending" card that HAS a hop-4 body, or more pending
@@ -171,8 +183,14 @@ type cardParam struct {
 
 // cardBlock is the generated, committed machine half of a contract card.
 type cardBlock struct {
-	Tool              string               `json:"tool"`
-	DescriptionSHA256 string               `json:"description_sha256"`
+	Tool              string `json:"tool"`
+	DescriptionSHA256 string `json:"description_sha256"`
+	// InputSchemaSHA256 covers the whole serialised InputSchema, i.e. every
+	// PARAMETER description as well as the structure below. See the file header:
+	// the contract JSON the other fields come from omits per-property
+	// descriptions, so without this a parameter's published meaning can change
+	// while every other arm stays green.
+	InputSchemaSHA256 string               `json:"input_schema_sha256"`
 	Params            map[string]cardParam `json:"params"`
 	// ResponseKeysObserved is nil when aihub#412's corpus holds no record for
 	// this tool, and that is a different fact from an empty list — a tool nobody
@@ -230,6 +248,35 @@ func liveContract(t *testing.T) map[string]liveTool {
 			"would be vacuous", len(out.Tools), floorTools)
 	}
 	return out.Tools
+}
+
+// liveInputSchemaHashes returns sha256 over each tool's SERIALISED InputSchema.
+//
+// A second instrument, and it has to be: cli.RunDumpMCPSchemas' contract JSON
+// carries no per-property descriptions, so it cannot see a parameter's published
+// meaning change. This reads the tools off a real SDK session — the same
+// newContractGate harness universal_contract_gate_test.go uses, not a third
+// registry reader — where InputSchema arrives whole.
+//
+// Marshalled rather than hashed in place because the SDK hands the schema over as
+// a decoded map: encoding/json sorts map keys, so the bytes are deterministic
+// across runs and the hash is stable for an unchanged schema.
+func liveInputSchemaHashes(t *testing.T) map[string]string {
+	t.Helper()
+	_, tools := newContractGate(t)
+	out := make(map[string]string, len(tools))
+	for _, tool := range tools {
+		b, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshal %s InputSchema: %v", tool.Name, err)
+		}
+		out[tool.Name] = descriptionSHA(string(b))
+	}
+	if len(out) < floorTools {
+		t.Fatalf("the session published %d tool(s), floor is %d — instrument failure",
+			len(out), floorTools)
+	}
+	return out
 }
 
 // ───────────────────────────── reading the cards ─────────────────────────────
@@ -352,6 +399,7 @@ func TestContractCardsCoverEveryPublishedTool(t *testing.T) {
 
 func TestContractCardsMatchTheLiveSchema(t *testing.T) {
 	tools := liveContract(t)
+	schemaHashes := liveInputSchemaHashes(t)
 	cards := readCards(t)
 
 	pinned := 0
@@ -371,6 +419,15 @@ func TestContractCardsMatchTheLiveSchema(t *testing.T) {
 				"hop 0-1 section against the new text — it may now be describing a promise "+
 				"the tool no longer makes — then regenerate with PF_CARDS_REGEN=1.",
 				c.path, short(c.block.DescriptionSHA256), short(want))
+		}
+		if wantSchema, ok := schemaHashes[name]; ok && c.block.InputSchemaSHA256 != wantSchema {
+			t.Errorf("K3 INPUT_SCHEMA_DRIFT: %s pins input_schema_sha256=%s but the live "+
+				"InputSchema hashes to %s. Something in the published schema changed that the "+
+				"contract JSON cannot see — almost always a PARAMETER DESCRIPTION, i.e. what a "+
+				"caller is actually told this argument means. RE-READ the card's hop 0-1 table "+
+				"against the new text before regenerating with PF_CARDS_REGEN=1; this arm exists "+
+				"because aihub#433 changed two such descriptions and every other arm stayed green.",
+				c.path, short(c.block.InputSchemaSHA256), short(wantSchema))
 		}
 		for pname, want := range lt.Params {
 			got, ok := c.block.Params[pname]
@@ -644,6 +701,7 @@ func TestGenerateContractCards(t *testing.T) {
 		t.Skip("set PF_CARDS_REGEN=1 to rewrite docs/mcp-cards machine blocks")
 	}
 	tools := liveContract(t)
+	schemaHashes := liveInputSchemaHashes(t)
 	dir := filepath.Join(cardsRepoRoot, cardsDirRel)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", dir, err)
@@ -660,6 +718,7 @@ func TestGenerateContractCards(t *testing.T) {
 		blk := cardBlock{
 			Tool:                 name,
 			DescriptionSHA256:    descriptionSHA(lt.Description),
+			InputSchemaSHA256:    schemaHashes[name],
 			Params:               lt.Params,
 			ResponseKeysObserved: corpusKeys(t, name),
 			Hop4Coverage:         "pending",

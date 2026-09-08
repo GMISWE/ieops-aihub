@@ -4,6 +4,7 @@
 {
   "tool": "pf_recall",
   "description_sha256": "52355ed415a03b181b816da58b68327c4e4c5ca44cfab692bdbeb2d8bbc00b0a",
+  "input_schema_sha256": "80256c4c95eb201603512f27056d2569cabb7422f00b2e7b55c588dd3db38b26",
   "params": {
     "cursor": {
       "type": "string",
@@ -84,7 +85,7 @@ defect.
 | `top_k` | string | no | default 20, ceiling 200; a JSON number is accepted |
 | `similarity_threshold` | number | no | cosine 0-1, vector half only, **OFF by default** |
 | `cursor` | string | no | TEXT-path paging only |
-| `min_strength` | number | no | default 0.3 |
+| `min_strength` | number | no | effective strength = `base_strength` (1-5) after decay; default 0.3 filters nothing |
 | `include_archived` | boolean | no | default false |
 | `recency_weight` | number | no | default 0.3 |
 | `fields` | enum | no | `brief` — first line only, drops `related`/`tags` |
@@ -184,15 +185,18 @@ other.
 - **§6.1 T1-2** — `top_k`'s ceiling is a clamp, and the ruling widens the numeric
   gate's scope to hop 2 rather than narrowing the policy; this file is one of the
   three instances that escaped the package-scoped gate.
-- **§6.2 T2-19** — `min_strength` must say what scale it is on, and `pf_remember`'s
-  `base_strength` range must be fixed first: a threshold and the value it thresholds
-  have to be published on the same scale.
+- **§6.2 T2-19 — LANDED** with T1-3 (`aihub#433`), and in that order for the reason
+  the ruling gave: a threshold and the value it thresholds must be published on the
+  same scale, so `pf_remember`'s range was fixed first. `min_strength` now says which
+  scale it is on — it thresholds `base_strength` (1-5) after decay, which makes the
+  0.3 default **below every legal value**, i.e. it filters nothing. The default is
+  unchanged; only the statement of what it means is new.
 
 ## Open
 
-- **§6.2 T2-19 is filed, not landed.** `min_strength` still publishes "default 0.3"
-  with no scale, while `base_strength` on `pf_remember` publishes "(0-1)" against a
-  DB scale of 1-5.
+- Both scale rulings have landed, but **the 0.3 default was deliberately left
+  alone**, so `min_strength` still defaults to a value that cannot exclude anything.
+  Whether that default should move is not settled by any adjudicated row.
 - The two narrowed keys are a stated residual, not a closed question: a new key
   inside `attrs` or inside a commit still does not reach the model, and no adjudicated
   row says whether that should change.

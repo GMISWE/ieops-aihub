@@ -4,6 +4,7 @@
 {
   "tool": "pf_ship",
   "description_sha256": "4872cf049830e50729a25ac0cb0da301eaf7116985cd2f7e3dfed62192061004",
+  "input_schema_sha256": "5133a04b1c0c49344a0ecc3bf3872bd72aaed84170905bb081ae4a8021bc698e",
   "params": {
     "message": {
       "type": "string",

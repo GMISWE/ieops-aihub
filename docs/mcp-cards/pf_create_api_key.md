@@ -4,6 +4,7 @@
 {
   "tool": "pf_create_api_key",
   "description_sha256": "ebca46117cb99f0b6e4b50bb047e56fe9d1fda2bd1bd7c65a090ccb95388277a",
+  "input_schema_sha256": "270eff7ee7f875b6a47bd696dd8a2b59512cccb0ce6e9d78f09a71eb62bb0b00",
   "params": {
     "name": {
       "type": "string",

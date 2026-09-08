@@ -4,6 +4,7 @@
 {
   "tool": "pf_update_user",
   "description_sha256": "3e110327081ad0220cea2e0391bd37a68435a2ceb455aadf9692419352f17e31",
+  "input_schema_sha256": "8bcf1a1d2abf64bef76b88da34dad657b0e2ef9335200407cedbbb1cb11e1da2",
   "params": {
     "author_aliases": {
       "type": "array",

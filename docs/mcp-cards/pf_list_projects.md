@@ -4,6 +4,7 @@
 {
   "tool": "pf_list_projects",
   "description_sha256": "56b304227a8bbdd0019414e7c0f00dc7f65d9871c01eabbbd2b8cc7070bc59f9",
+  "input_schema_sha256": "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
   "params": {},
   "response_keys_observed": [
     "items"

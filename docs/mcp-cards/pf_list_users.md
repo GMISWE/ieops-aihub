@@ -4,6 +4,7 @@
 {
   "tool": "pf_list_users",
   "description_sha256": "d8564a746756c623768dd2d6908a689083aa77434ffe236548bfaaacbf521f6e",
+  "input_schema_sha256": "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
   "params": {},
   "response_keys_observed": [
     "items"

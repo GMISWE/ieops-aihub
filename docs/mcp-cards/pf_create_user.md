@@ -4,6 +4,7 @@
 {
   "tool": "pf_create_user",
   "description_sha256": "2d565545d332fd2ab0e3371e540b6186b3cfef2157335371e0efa76758e521c6",
+  "input_schema_sha256": "6c532269e03eb77bf39aa48d638df82208b9a85571109df9edc1f5b6bd031e91",
   "params": {
     "author_aliases": {
       "type": "array",

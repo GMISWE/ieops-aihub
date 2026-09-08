@@ -4,6 +4,7 @@
 {
   "tool": "pf_whoami",
   "description_sha256": "0d9503a3c408ba30f8246a8f7823cd9c3198535e3c0925454ad18ce16dea1aa2",
+  "input_schema_sha256": "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
   "params": {},
   "response_keys_observed": [
     "api_key_id",

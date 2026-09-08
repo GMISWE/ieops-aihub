@@ -4,7 +4,7 @@
 {
   "tool": "pf_claim_work_item",
   "description_sha256": "8ad92ad01ec4a74804859e887970087ba2f3572539186dc40b3b44c97c1b0048",
-  "input_schema_sha256": "ab786059d010cc1b5040222e7deb72d9a314641e545cf3dfd63dedf3df60206f",
+  "input_schema_sha256": "87a9ba1141422c042e4762145752878c7d79485166bef069385b5a7e7e1def67",
   "params": {
     "force_takeover": {
       "type": "boolean",
@@ -52,7 +52,7 @@ what a stale document keeps describing.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `work_item_id` | string | yes | id or slug |
-| `idempotency_key` | string | yes | resending returns the EXISTING attempt and reuses its recorded secret |
+| `idempotency_key` | string | yes | a BODY param for DB dedup, **not** the HTTP `Idempotency-Key` header; resending returns the EXISTING attempt and reuses its recorded secret |
 | `requested_locks` | array | no | `{resource_type, resource_key}` — usually omit and let the server derive |
 | `force_takeover` | boolean | no | takes over the WORK ITEM, not another work item's locks |
 | `scenario_ref` | string | no | git SHA of the local scenario clone |
@@ -63,6 +63,18 @@ of reads was one self-default and two audit fields, so `resume` restored exactly
 what `fresh` restored and an out-of-vocabulary value was silently equal to `fresh`.
 It was withdrawn rather than implemented because the promise made for it —
 "restores step state from the previous attempt" — is true without it.
+
+**One word, two mechanisms — and only one of them is this parameter.** `aihub#436`
+made `pkg/client` (`setStandardHeaders`) mint an `Idempotency-Key` HTTP header on
+every POST/PATCH, which `internal/server/idempotency.go` (`IdempotencyMiddleware`)
+turns into a 24h replay of the cached HTTP response, keyed
+`<api_key_id>:<key>` and refused with 409 `IDEMPOTENCY_KEY_REUSED` if the same key
+arrives with a different `method+target+body`. **That header is not this
+parameter**, the client mints it per request, and a caller neither sees nor sets
+it. This parameter dedups in the DATABASE on `run_attempts.idempotency_key` and
+answers with the existing attempt. The design requires both (`H-R3-8`), and the
+description now says so, because the moment a client started sending the header
+"idempotency" stopped being unambiguous at this call site.
 
 ## hop 2-3 — what leaves this process, and what binds it
 

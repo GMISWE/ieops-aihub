@@ -856,6 +856,105 @@ jobs:
       #             base_strength=3.5 and the column holds 3" while the second
       #             stays green — which is what a positive control is supposed
       #             to do.
+      #   232 -> 233 aihub#451 added 1 DB-gated function, internal/domain
+      #             TestForceTakeoverCommitWindowDisplacesALiveForeignLock
+      #             (force_takeover_commit_window_db_test.go). ONE function with
+      #             three subtests rather than three functions: the two controls
+      #             are only meaningful against the measurement they sit beside —
+      #             one says the displacement needs the foreign ATTEMPT row
+      #             inside the window and not merely its lock row, the other
+      #             says the "no lock_released was emitted" assertion is not
+      #             vacuous — so splitting them would let a CI step name the
+      #             measurement and drop either control.
+      #
+      #             ⚠️ The COVERAGE half of this gate would have stayed green
+      #             without this entry: the step below already names the
+      #             function, so "covered by a CI step" reads 230/230 in both
+      #             directions. What the missing line fails is the manifest
+      #             EQUALITY check, and that is the whole point of aihub#320's
+      #             set-of-names design — a ratchet on an integer would have
+      #             absorbed this silently.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched, and in both
+      #             directions on the SAME inventory. Verbatim, with the test
+      #             written and its step added but before the manifest line:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 232 entries,
+      #                 inventory measured 233
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 233
+      #                 (require only a DB: 230, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 230/230
+      #               ::error::dbtestcov: 1 AIHUB_TEST_DB-gated test function(s)
+      #                 were measured but are not in the manifest
+      #             and after:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 233 entries,
+      #                 inventory measured 233
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 233
+      #                 (require only a DB: 230, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 230/230
+      #               dbtestcov: OK
+      #
+      #             The step's own `run:` text was executed against a real
+      #             Postgres (pgvector/pgvector:pg16, migrated with goose to 33)
+      #             rather than only reasoned about: all three subtests PASS with
+      #             no `--- SKIP`, and the name-gated greps were run as extracted
+      #             from this file.
+      #   233 -> 236 aihub#442 added 3 DB-gated functions, all in internal/server
+      #             (routes_step_heartbeat_db_test.go:
+      #             TestHandleUpdateStep_HeartbeatReportsWhetherItRefreshedAnything,
+      #             TestHandleUpdateStep_HeartbeatDBFailureIsReportedNotDiscarded,
+      #             TestHandleUpdateStep_HeartbeatDisclosesTheArgumentsItDrops).
+      #
+      #             🔴 This entry is a BACK-FILL, not a fresh addition, and that
+      #             is the thing worth recording. Those three functions reached
+      #             main with fee1ca6 (PR #396) carrying neither their manifest
+      #             lines nor a step, so this gate was red ON MAIN and on every
+      #             PR's merge ref until this line was written. It is registered
+      #             here, under aihub#451, only because that wi held the lock on
+      #             both files at the time — the coverage itself is aihub#442's.
+      #
+      #             BOTH halves of the gate were failing, which is the useful
+      #             detail: the manifest equality check (233 entries against an
+      #             inventory of 236) AND the coverage check (230/233, with the
+      #             three "executed by NO CI step, so they SKIP forever and CI
+      #             stays green"). The aihub#451 entry above failed only the
+      #             first, because its step already named its test. A change
+      #             that adds a test and forgets BOTH is the case this gate was
+      #             built for, and it worked — what failed is that the PR was
+      #             merged over a red Build & Test.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched, and in both
+      #             directions on the SAME inventory. Verbatim, before the three
+      #             manifest lines and the step were added:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 233 entries,
+      #                 inventory measured 236
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 236
+      #                 (require only a DB: 233, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 74
+      #               dbtestcov: covered by a CI step: 230/233
+      #               ::error::dbtestcov: 3 … not in the manifest … 3 … executed
+      #                 by NO CI step
+      #             and after:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 236 entries,
+      #                 inventory measured 236
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 236
+      #                 (require only a DB: 233, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 75
+      #               dbtestcov: covered by a CI step: 233/233
+      #               dbtestcov: OK
+      #
+      #             The step's own `run:` text was executed against a real
+      #             Postgres (pgvector/pgvector:pg16, migrated with goose to 33)
+      #             rather than only reasoned about: all three functions PASS
+      #             with no `--- SKIP`, and with AIHUB_TEST_DB unset it exits 1
+      #             on the first "did not run".
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -1691,6 +1790,57 @@ jobs:
           ! grep -q -- '--- SKIP' claim_commit_window.log \
             || { echo "::error::an aihub#430 arm SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#451, the fourth step in the aihub#393 -> #410 -> #430 -> #451 block
+      # and the one that settles what #430 deliberately left open. #430 deleted
+      # the commit-window qualifier from pf_claim_work_item and KEPT it on
+      # pf_force_takeover, while recording an unasserted probe: at READ COMMITTED
+      # — FnForceTakeover's level — its interleaving was refused too. Read
+      # quickly that says the surviving qualifier describes a gap nothing can
+      # reach. It does not: that probe committed only the LOCK ROW inside the
+      # window, so the DO UPDATE's WHERE re-ran against a snapshot that still
+      # contained the owner and refused. The gap resource_events.go documents is
+      # the `prior` CTE's blindness and a STALE run_attempts read.
+      #
+      # This step builds the shape that reaches it — a foreign claim IN FLIGHT,
+      # run_attempts row and resource_locks row committed together inside the
+      # window, which is what FnClaimWorkItem holds between its first insert and
+      # its commit — and measures a real displacement: the takeover succeeds, a
+      # live foreign holder loses its row, and nobody is told.
+      #
+      # THE DB IS THE POINT, for #430's reason and one more: the subject is that
+      # READ COMMITTED re-reads the conflicting ROW but not the other relations
+      # in the same statement. No source reading settles that, and no unit test
+      # can hand-build it.
+      #
+      # ⚠️ This step asserts that a defect is REACHABLE. If the window arm goes
+      # red because the gap was closed — FnForceTakeover raised to SERIALIZABLE,
+      # or the holder re-read inside the statement — the fix is to DELETE the
+      # "except in a narrow commit-window race (aihub#410)" clause from
+      # pf_force_takeover's description, docs/mcp-cards/pf_force_takeover.md and
+      # the resource_events.go comment in that same change, and delete the test.
+      # It is not to restore the race. Both control arms are named for the usual
+      # reason: without the refusal arm, "displaced" is also what a build with
+      # the aihub#393 predicate disabled reports, and without the event-trail arm
+      # the window arm's "no lock_released was emitted" passes in a harness where
+      # none ever is.
+      - name: aihub#451 force-takeover commit-window DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestForceTakeoverCommitWindowDisplacesALiveForeignLock$' -count=1 -v 2>&1 | tee ft_commit_window.log
+          for want in 'TestForceTakeoverCommitWindowDisplacesALiveForeignLock/foreign_attempt_and_its_lock_committed_inside_the_window'; do
+            grep -q -- "--- PASS: $want" ft_commit_window.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); pf_force_takeover's description still says 'except in a narrow commit-window race' with nothing measuring it"; exit 1; }
+          done
+          for want in 'TestForceTakeoverCommitWindowDisplacesALiveForeignLock/control_only_the_lock_row_committed_inside_the_window_is_refused' \
+                      'TestForceTakeoverCommitWindowDisplacesALiveForeignLock/control_a_prior_owner_the_cte_can_see_is_reported_as_replaced'; do
+            grep -q -- "--- PASS: $want" ft_commit_window.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); without the controls the window arm is also satisfied by a build whose aihub#393 predicate does nothing, and by an event query that matches nothing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' ft_commit_window.log \
+            || { echo "::error::an aihub#451 arm SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#402: GetWorkItem chose ONE column by testing a `wi_` prefix — id if
       # present, slug otherwise — unlike every sibling resolver, which takes the
       # union `id = $1 OR slug = $1`. Project names are validated by
@@ -2188,6 +2338,47 @@ jobs:
           done
           ! grep -q -- '--- SKIP' step_identity.log \
             || { echo "::error::an aihub#398 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#442, and this step is REMEDIAL: the tests it runs landed in
+      # main with fee1ca6 (PR #396) without their manifest lines and without a
+      # step, so the aihub#303 gate went red on main itself and on every PR's
+      # merge ref. Both halves of that gate were failing — 233 entries against
+      # an inventory of 236, and "3 gated test functions executed by NO CI step,
+      # so they SKIP forever and CI stays green", which is precisely the
+      # condition the gate exists to catch. It caught it. What was missing was
+      # this step and those three lines, added here (aihub#451) because that wi
+      # held the lock on both files.
+      #
+      # THE DB IS THE POINT for the first two, and in opposite directions. The
+      # heartbeat's UPDATE is keyed on work_item_id, so on a work item with no
+      # wi_step_state row it matches ZERO rows and returns NO error — a
+      # nil-pool unit test cannot tell that from a successful write, and the
+      # handler used to answer "heartbeat_ok" either way. FnClaimWorkItem's
+      # wi_step_state upsert is deliberately non-fatal, so that state is
+      # reachable in production, not contrived. The other arm needs a real
+      # failing write for the same reason: `_, _ = pool.Exec(...)` discarded it.
+      # Both are asserted from the DATABASE as well as from the response, since
+      # a response field echoing a constant would satisfy the response half on
+      # its own.
+      #
+      # All three in one -run: they are one file and one branch of
+      # handleUpdateStep, and the third (a heartbeat carrying a step_id or
+      # status it silently drops) is the aihub#290 "do not accept a parameter
+      # you do not act on" rule applied to the same request path.
+      - name: aihub#442 heartbeat write and dropped-argument DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestHandleUpdateStep_Heartbeat(DBFailureIsReportedNotDiscarded|DisclosesTheArgumentsItDrops|ReportsWhetherItRefreshedAnything)$' -count=1 -v 2>&1 | tee step_heartbeat.log
+          for want in TestHandleUpdateStep_HeartbeatReportsWhetherItRefreshedAnything \
+                      TestHandleUpdateStep_HeartbeatDBFailureIsReportedNotDiscarded \
+                      TestHandleUpdateStep_HeartbeatDisclosesTheArgumentsItDrops; do
+            grep -q -- "--- PASS: $want" step_heartbeat.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the heartbeat can again report a refresh it never made, discard a failed step_started_at write, or drop a step_id it was sent without saying so"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' step_heartbeat.log \
+            || { echo "::error::an aihub#442 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#396. THE point of running this against a real database: the checks
       # it asserts run before any query, so a nil-pool unit test could prove the

@@ -37,8 +37,22 @@ package mcp
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 	"testing"
 )
+
+// mustBuildRecallParams is hop 2 for the calls that are supposed to succeed. A
+// refusal here is a failure of the test's premise, not of the assertion after
+// it, so it stops the test rather than producing a confusing nil map.
+func mustBuildRecallParams(t *testing.T, args map[string]any) url.Values {
+	t.Helper()
+	got, err := buildRecallParams(args)
+	if err != nil {
+		t.Fatalf("buildRecallParams(%v) refused a request that must be accepted: %v", args, err)
+	}
+	return got
+}
 
 // recallLocalOnlyParams are published params that this process CONSUMES rather
 // than forwards. Each needs a reason, because "published but not forwarded" is
@@ -80,9 +94,17 @@ var recallUnpublishedForwardedParams = map[string]string{
 // MCP SDK's untyped AddTool — the form every aihub tool uses — checks the schema
 // shape at registration and then stores the handler with no per-call validator,
 // so a wrongly-typed argument arrives at the decoder unchanged.
+//
+// `rejected: true` is the third outcome, added by aihub#432: the argument
+// arrived, could not be read as the type the schema publishes, and the request
+// is REFUSED naming it. It is not the same as `want: ""` — that one says the
+// parameter is correctly not forwarded, and until aihub#432 the two were spelt
+// identically, which is how `similarity_threshold: "not a number"` sat in this
+// very table as expected behaviour while it silently disabled the filter.
 var recallWireProbes = map[string][]struct {
-	shape any
-	want  string
+	shape    any
+	want     string
+	rejected bool
 }{
 	"project":      {{shape: "aihub", want: "aihub"}},
 	"query":        {{shape: "token cost", want: "token cost"}},
@@ -98,7 +120,13 @@ var recallWireProbes = map[string][]struct {
 		{shape: float64(0.5), want: "0.5"},
 		{shape: float64(0), want: ""},
 		{shape: "0.99", want: "0.99"},
-		{shape: "not a number", want: ""},
+		{shape: "not a number", rejected: true},
+		// NaN parses and then compares false against every bound, so it would
+		// disable the filter from the inside — queryFloat refuses it server-side
+		// for the same reason.
+		{shape: "NaN", rejected: true},
+		// The published type is `number`; a boolean is not one in any spelling.
+		{shape: true, rejected: true},
 	},
 	// Published as a string; "max results: 10" is most naturally written as a
 	// JSON number, and strArg returned "" for one — so the page size was dropped
@@ -115,11 +143,14 @@ var recallWireProbes = map[string][]struct {
 		{shape: float64(0.7), want: "0.7"},
 		{shape: "0.7", want: "0.7"},
 		{shape: float64(0), want: ""},
+		{shape: "0.3ish", rejected: true},
 	},
 	"recency_weight": {
 		{shape: float64(0.9), want: "0.9"},
 		{shape: "0.9", want: "0.9"},
 		{shape: float64(0), want: ""},
+		{shape: "", want: ""},
+		{shape: "not a number", rejected: true},
 	},
 	"include_archived": {
 		{shape: true, want: "true"},
@@ -191,7 +222,7 @@ func TestRecallPublishedSchemaIsASubsetOfWhatIsForwarded(t *testing.T) {
 	for name := range published {
 		if reason, local := recallLocalOnlyParams[name]; local {
 			// The exemption must be true, not merely claimed.
-			got := buildRecallParams(map[string]any{"project": "aihub", name: recallWireProbes[name][0].shape})
+			got := mustBuildRecallParams(t, map[string]any{"project": "aihub", name: recallWireProbes[name][0].shape})
 			if got.Has(name) {
 				t.Errorf("%q is documented as local-only (%s) but WAS forwarded as %q",
 					name, reason, got.Get(name))
@@ -199,7 +230,7 @@ func TestRecallPublishedSchemaIsASubsetOfWhatIsForwarded(t *testing.T) {
 			continue
 		}
 		probe := firstForwardingProbe(t, name)
-		got := buildRecallParams(map[string]any{"project": "aihub", name: probe})
+		got := mustBuildRecallParams(t, map[string]any{"project": "aihub", name: probe})
 		if !got.Has(name) {
 			t.Errorf("pf_recall publishes %q and buildRecallParams drops it (%#v -> query %v). "+
 				"The schema states a contract the transport does not keep: the caller's argument "+
@@ -230,10 +261,27 @@ func TestRecallForwardsEveryPublishedParamByValue(t *testing.T) {
 	for name, probes := range recallWireProbes {
 		for _, probe := range probes {
 			t.Run(fmt.Sprintf("%s=%#v", name, probe.shape), func(t *testing.T) {
-				got := buildRecallParams(map[string]any{"project": "aihub", name: probe.shape})
+				if probe.rejected {
+					got, err := buildRecallParams(map[string]any{"project": "aihub", name: probe.shape})
+					if err == nil {
+						t.Fatalf("%s=%#v was accepted and forwarded as %q. An argument this hop "+
+							"cannot read must be REFUSED naming the parameter, never turned into "+
+							"the absence of one: 0 is similarity_threshold's OFF value, so the "+
+							"silent version returned an unfiltered page to a caller who had asked "+
+							"for a filter (aihub#411 T1-2, closed by aihub#432). Query: %v",
+							name, probe.shape, got.Get(name), got)
+					}
+					if !strings.Contains(err.Error(), name) {
+						t.Errorf("%s=%#v was refused with %q, which does not name the parameter — "+
+							"the message is the whole fix from the caller's side",
+							name, probe.shape, err)
+					}
+					return
+				}
+				got := mustBuildRecallParams(t, map[string]any{"project": "aihub", name: probe.shape})
 				if name == "project" {
 					// project is also the fixed argument; assert it alone.
-					got = buildRecallParams(map[string]any{name: probe.shape})
+					got = mustBuildRecallParams(t, map[string]any{name: probe.shape})
 				}
 				if v := got.Get(name); v != probe.want {
 					t.Errorf("%s=%#v forwarded as %q, want %q — this caller's argument is silently dropped",
@@ -259,7 +307,7 @@ func TestRecallThresholdHasNoDefault(t *testing.T) {
 		{"project": "aihub", "query": "token cost", "top_k": float64(50)},
 		{"project": "aihub", "similarity_threshold": float64(0)},
 	} {
-		got := buildRecallParams(args)
+		got := mustBuildRecallParams(t, args)
 		if got.Has("similarity_threshold") {
 			t.Errorf("args %v forwarded similarity_threshold=%q; the filter must be OFF unless the "+
 				"caller sets it (a global cutoff cannot separate noise from signal on this corpus)",
@@ -272,7 +320,7 @@ func TestRecallThresholdHasNoDefault(t *testing.T) {
 // not appear, or the server filters on a value nobody asked for.
 func TestRecallForwardsNothingTheCallerDidNotSend(t *testing.T) {
 	t.Setenv("POLYFORGE_RECALL_ALGO", "")
-	got := buildRecallParams(map[string]any{"project": "aihub", "query": "token cost"})
+	got := mustBuildRecallParams(t, map[string]any{"project": "aihub", "query": "token cost"})
 	want := map[string]string{"project": "aihub", "query": "token cost"}
 	if len(got) != len(want) {
 		t.Fatalf("query string has %d params, want %d: %v", len(got), len(want), got)
@@ -296,7 +344,7 @@ func TestRecallUnpublishedForwardedParamsAreDocumented(t *testing.T) {
 			t.Errorf("%q is now published; move it into recallWireProbes and drop the exemption", name)
 			continue
 		}
-		got := buildRecallParams(map[string]any{"project": "aihub", name: "probe-value"})
+		got := mustBuildRecallParams(t, map[string]any{"project": "aihub", name: "probe-value"})
 		if got.Get(name) != "probe-value" {
 			t.Errorf("%q is documented as forwarded-but-unpublished, yet it was not forwarded: query %v", name, got)
 		}
@@ -304,11 +352,39 @@ func TestRecallUnpublishedForwardedParamsAreDocumented(t *testing.T) {
 	// The env fallback is the only way recall_algo reaches the server for a
 	// plugin build that never passes it explicitly.
 	t.Setenv("POLYFORGE_RECALL_ALGO", "l1_lexical")
-	if got := buildRecallParams(map[string]any{"project": "aihub"}); got.Get("recall_algo") != "l1_lexical" {
+	if got := mustBuildRecallParams(t, map[string]any{"project": "aihub"}); got.Get("recall_algo") != "l1_lexical" {
 		t.Errorf("POLYFORGE_RECALL_ALGO did not reach the wire: query %v", got)
 	}
 	// An explicit argument must win over the environment.
-	if got := buildRecallParams(map[string]any{"project": "aihub", "recall_algo": "recency"}); got.Get("recall_algo") != "recency" {
+	if got := mustBuildRecallParams(t, map[string]any{"project": "aihub", "recall_algo": "recency"}); got.Get("recall_algo") != "recency" {
 		t.Errorf("explicit recall_algo must win over POLYFORGE_RECALL_ALGO: query %v", got)
+	}
+}
+
+// TestRecallEveryNumericParamHasARejectionProbe is the completeness half of
+// aihub#432, and it exists for the same reason
+// TestRecallEveryPublishedParamHasAWireProbe does: the escape it closes was one
+// parameter of three, and fixing the one that was named while leaving the other
+// two lenient would look identical in every other test here.
+//
+// Rule 1 is a property of the READER, so it now holds for every number this tool
+// forwards. A number added to recallNumberParams tomorrow is covered the day it
+// is added, or this fails.
+func TestRecallEveryNumericParamHasARejectionProbe(t *testing.T) {
+	if len(recallNumberParams) == 0 {
+		t.Fatal("recallNumberParams is empty — this assertion would be vacuous")
+	}
+	for _, name := range recallNumberParams {
+		rejects := 0
+		for _, p := range recallWireProbes[name] {
+			if p.rejected {
+				rejects++
+			}
+		}
+		if rejects == 0 {
+			t.Errorf("%q is forwarded as a number and has no rejected probe: nothing here would "+
+				"notice if it went back to answering 0 for text it cannot read, which is the "+
+				"defect aihub#432 closed (0 is a value the caller could have sent)", name)
+		}
 	}
 }

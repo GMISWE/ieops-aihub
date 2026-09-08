@@ -146,6 +146,17 @@ type ReadyQueue struct {
 	NeedsHumanSession []ReadyItem   `json:"needs_human_session"`
 	Unclassified      []ReadyItem   `json:"unclassified"`
 	StaleRunning      []RunningItem `json:"stale_running,omitempty"`
+	// RequestAdjusted names the caller-supplied parameters this endpoint changed
+	// on the way in — today only `max`, which newReadyQueue clamps to 200 when it
+	// arrives above the ceiling and replaces with 10 when it arrives non-positive.
+	//
+	// aihub#432 / aihub#411 T1-12: this field is why the clamp is no longer
+	// silent. It was request_adjusted's one self-declared exemption — the clamp
+	// existed, ReadyQueue had nowhere to report it, and `max=5000` and `max=200`
+	// returned byte-identical responses. Omitted when nothing was adjusted; see
+	// request_adjusted.go for why absence rather than an empty list, and for the
+	// one case this cannot report.
+	RequestAdjusted []RequestAdjustment `json:"request_adjusted,omitempty"`
 }
 
 // ReadyItem is a work item in the items/needs_human_session/unclassified segments.
@@ -2894,34 +2905,56 @@ func buildReadyQueueItemsQuery() string {
 		LIMIT $2`
 }
 
-// GetReadyQueue returns the six-segment LCRS view for a project.
-func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max int) (*ReadyQueue, *AihubError) {
-	// ⚠️ This clamp obeys half of queryparam.go's Rule 2 and not the other half:
-	// it clamps to the CEILING rather than back to the default (which is right,
-	// and is what aihub#267 made ListWorkItems do too), but it does NOT disclose.
-	// `max=5000` and `max=200` return byte-identical responses.
-	//
-	// Left open deliberately rather than overlooked. Disclosing means a
-	// `request_adjusted` field on ReadyQueue, which has none, and the six-segment
-	// response is consumed by pf_get_ready_queue and /ui. That is a wider change
-	// than aihub#255/#267/#340 asked for, and a half-done version — clamping
-	// louder without a field to say so — would be no better than this. Stated
-	// here so the next reader finds a known gap rather than an inconsistency
-	// they have to re-derive.
-	if max <= 0 {
-		max = 10
+// readyQueueDefaultMax is the page size for a caller who named none, and
+// readyQueueCeilingMax the largest this endpoint will serve. Named because
+// newReadyQueue has to report them and a report of a bare literal is unreadable.
+const (
+	readyQueueDefaultMax = 10
+	readyQueueCeilingMax = 200
+)
+
+// newReadyQueue builds the empty six-segment response, bounds the caller's page
+// size, and DISCLOSES the bound if it fired — all three in one place, so a
+// response cannot exist that was bounded without saying so.
+//
+// That coupling is the fix, not a tidy-up. Until aihub#432 the clamp was three
+// lines inside GetReadyQueue with a comment admitting it obeyed half of
+// queryparam.go's Rule 2: it clamped to the CEILING rather than back to the
+// default, which is right and is what aihub#267 made ListWorkItems do, but it
+// told nobody, so `max=5000` and `max=200` returned byte-identical responses.
+// The stated reason was that ReadyQueue had no `request_adjusted` field and a
+// half-done version would be no better — true when it was written, and the
+// field costs one struct member now that aihub#314 has made the shape generic.
+//
+// Returning the bounded value rather than mutating the caller's is what stops
+// the two halves drifting: the SQL pages with exactly the number this function
+// disclosed, because there is only one number.
+func newReadyQueue(requestedMax int) (*ReadyQueue, int) {
+	applied := requestedMax
+	if applied <= 0 {
+		// Neither malformed nor over a limit: "the caller named no page size",
+		// which takes the endpoint default (the aihub#249 contract). A value
+		// that ARRIVED non-positive is still an adjustment and is disclosed
+		// below; a zero is not, because zero and absent are the same int here.
+		applied = readyQueueDefaultMax
 	}
-	if max > 200 {
-		max = 200
+	if applied > readyQueueCeilingMax {
+		applied = readyQueueCeilingMax
 	}
-	result := &ReadyQueue{
+	return &ReadyQueue{
 		Items:             []ReadyItem{},
 		Running:           []RunningItem{},
 		Stalled:           []StalledItem{},
 		Paused:            []PausedItem{},
 		NeedsHumanSession: []ReadyItem{},
 		Unclassified:      []ReadyItem{},
-	}
+		RequestAdjusted:   appendIntAdjustment(nil, "max", requestedMax, applied),
+	}, applied
+}
+
+// GetReadyQueue returns the six-segment LCRS view for a project.
+func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max int) (*ReadyQueue, *AihubError) {
+	result, max := newReadyQueue(max)
 
 	// items[]: queued + no blocker + requires_human_session=false.
 	itemRows, err := pool.Query(ctx, buildReadyQueueItemsQuery(), project, max)

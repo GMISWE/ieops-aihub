@@ -19,9 +19,11 @@ package mcp_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 
@@ -42,6 +44,10 @@ type queryRecorder struct {
 	mu      sync.Mutex
 	queries []url.Values
 	server  *httptest.Server
+	// body overrides the fixed reply. Only respondWith sets it, and only a test
+	// that asserts something about the RESPONSE needs to — the assertions above
+	// are about the request, for which any valid payload does.
+	body map[string]any
 }
 
 func newQueryRecorder(t *testing.T) *queryRecorder {
@@ -50,12 +56,23 @@ func newQueryRecorder(t *testing.T) *queryRecorder {
 	q.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q.mu.Lock()
 		q.queries = append(q.queries, r.URL.Query())
+		reply := q.body
 		q.mu.Unlock()
+		if reply == nil {
+			reply = map[string]any{"items": []any{}, "total": 0, "ready": []any{}}
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "total": 0, "ready": []any{}})
+		_ = json.NewEncoder(w).Encode(reply)
 	}))
 	t.Cleanup(q.server.Close)
 	return q
+}
+
+// respondWith replaces the fixed reply for the rest of the test.
+func (q *queryRecorder) respondWith(body map[string]any) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.body = body
 }
 
 func (q *queryRecorder) last(t *testing.T) url.Values {
@@ -69,8 +86,33 @@ func (q *queryRecorder) last(t *testing.T) url.Values {
 }
 
 // callToolAgainstRecorder invokes one registered tool over a real in-memory MCP
-// session backed by the real aihub client.
+// session backed by the real aihub client, and fails the test if the tool
+// refuses the call.
 func callToolAgainstRecorder(t *testing.T, q *queryRecorder, tool string, args map[string]any) {
+	t.Helper()
+	res := callToolAgainstRecorderResult(t, q, tool, args)
+	if res.IsError {
+		t.Fatalf("call %s failed: %s", tool, toolResultText(t, res))
+	}
+}
+
+// toolResultText renders a tool result's first text block, which is where both
+// a payload and a refusal arrive.
+func toolResultText(t *testing.T, res *sdkmcp.CallToolResult) string {
+	t.Helper()
+	if len(res.Content) == 0 {
+		return ""
+	}
+	if text, ok := res.Content[0].(*sdkmcp.TextContent); ok {
+		return text.Text
+	}
+	return ""
+}
+
+// callToolAgainstRecorderResult is the same call, handing back the result
+// instead of asserting it succeeded — a refusal is the SUBJECT of aihub#432's
+// hop-2 tests, not a failure of their setup.
+func callToolAgainstRecorderResult(t *testing.T, q *queryRecorder, tool string, args map[string]any) *sdkmcp.CallToolResult {
 	t.Helper()
 	ctx := context.Background()
 
@@ -97,12 +139,7 @@ func callToolAgainstRecorder(t *testing.T, q *queryRecorder, tool string, args m
 	if err != nil {
 		t.Fatalf("call %s: %v", tool, err)
 	}
-	if res.IsError {
-		if text, ok := res.Content[0].(*sdkmcp.TextContent); ok {
-			t.Fatalf("call %s failed: %s", tool, text.Text)
-		}
-		t.Fatalf("call %s failed", tool)
-	}
+	return res
 }
 
 // TestWireQueryRecallCarriesSimilarityThreshold is aihub#148's hop-2 regression,
@@ -190,4 +227,166 @@ func TestWireQueryReadyQueueMaxAcceptsAJSONNumber(t *testing.T) {
 				shape, got.Get("max"), got)
 		}
 	}
+}
+
+// TestWireQueryRecallRefusesUnreadableNumbers is aihub#432's hop-2 regression,
+// measured where a caller experiences it: the tool result, and the absence of a
+// request.
+//
+// recall_params_wiring_test.go asserts buildRecallParams refuses. That is the
+// right unit and it is not sufficient, for the reason this file's header
+// already gives: the handler could stop calling it, or call it and ignore the
+// error, and every assertion there would stay green while the request went out
+// unfiltered exactly as before. So this drives the REAL registered tool and
+// asserts BOTH halves of the refusal — the caller is told, and the query never
+// leaves the process.
+//
+// The second half is the discriminating one. A test that only checked IsError
+// would pass on an implementation that refused AFTER making the call, which is
+// a different contract: `similarity_threshold` is a filter, and a request the
+// server has already answered has already spent the read it should not have.
+func TestWireQueryRecallRefusesUnreadableNumbers(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		param string
+		shape any
+	}{
+		{"text where a threshold belongs", "similarity_threshold", "notanumber"},
+		{"NaN disables the filter from the inside", "similarity_threshold", "NaN"},
+		{"a boolean is not a number in any spelling", "similarity_threshold", true},
+		{"the same reader guards min_strength", "min_strength", "high"},
+		{"and recency_weight", "recency_weight", "0.4ish"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := newQueryRecorder(t)
+			res := callToolAgainstRecorderResult(t, q, "pf_recall", map[string]any{
+				"project": "aihub", "query": "gateway rate limiting", tc.param: tc.shape,
+			})
+			if !res.IsError {
+				t.Fatalf("pf_recall(%s=%#v) succeeded. A value this hop cannot read must be refused "+
+					"naming the parameter: dropping it means the server sees no %s at all, and for "+
+					"similarity_threshold that is its OFF value — the caller asked for a filter and "+
+					"got an unfiltered page with nothing to notice (aihub#411 T1-2 / aihub#432)",
+					tc.param, tc.shape, tc.param)
+			}
+			if text := toolResultText(t, res); !strings.Contains(text, tc.param) {
+				t.Errorf("the refusal does not name the parameter: %q", text)
+			}
+			q.mu.Lock()
+			sent := len(q.queries)
+			q.mu.Unlock()
+			if sent != 0 {
+				t.Errorf("pf_recall(%s=%#v) was refused but still made %d HTTP request(s); a request "+
+					"that cannot succeed must not be sent", tc.param, tc.shape, sent)
+			}
+		})
+	}
+}
+
+// TestWireQueryRecallStillAcceptsEveryReadableSpelling is the green control for
+// the test above, and it is not decoration: a refusal that also refused the
+// valid spellings would satisfy every assertion there while breaking the tool
+// for every caller. `"0.99"` in particular is the quoted form aihub#148 added
+// support for, and it must survive a change that adds a rejection path.
+func TestWireQueryRecallStillAcceptsEveryReadableSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		param string
+		shape any
+		want  string
+	}{
+		{"similarity_threshold", float64(0.99), "0.99"},
+		{"similarity_threshold", "0.99", "0.99"},
+		{"min_strength", float64(1.5), "1.5"},
+		{"min_strength", "1.5", "1.5"},
+		{"recency_weight", float64(0.4), "0.4"},
+		{"recency_weight", "0.4", "0.4"},
+	} {
+		t.Run(fmt.Sprintf("%s=%#v", tc.param, tc.shape), func(t *testing.T) {
+			q := newQueryRecorder(t)
+			callToolAgainstRecorder(t, q, "pf_recall", map[string]any{
+				"project": "aihub", "query": "gateway rate limiting", tc.param: tc.shape,
+			})
+			if got := q.last(t).Get(tc.param); got != tc.want {
+				t.Errorf("pf_recall(%s=%#v) put %q on the wire, want %q", tc.param, tc.shape, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWireQueryReadyQueueDisclosureReachesTheModel is aihub#432's LAST hop, and
+// it is the one a server-side change is most likely to lose.
+//
+// internal/domain/request_adjusted.go's opening argument is that this process
+// eats response fields by default: pf_recall's projection is an opt-in
+// whitelist, and it has already swallowed three fields that existed server-side
+// — `total` (aihub#249), the truncation pair (aihub#269) and `unmatched_types`
+// (aihub#289). A `request_adjusted` that is correct in domain and never reaches
+// the model would reproduce exactly the silence it was added to remove, and
+// every test in internal/domain would stay green while it did.
+//
+// pf_get_ready_queue applies no projection today (jsonResult of the client's
+// map[string]any). This test is what makes that a checked property rather than
+// a fact of the current implementation.
+func TestWireQueryReadyQueueDisclosureReachesTheModel(t *testing.T) {
+	t.Run("a disclosure the server sent arrives intact", func(t *testing.T) {
+		q := newQueryRecorder(t)
+		q.respondWith(map[string]any{
+			"items": []any{}, "running": []any{}, "stalled": []any{},
+			"paused": []any{}, "needs_human_session": []any{}, "unclassified": []any{},
+			"request_adjusted": []any{
+				map[string]any{"param": "max", "requested": 5000, "applied": 200},
+			},
+		})
+		res := callToolAgainstRecorderResult(t, q, "pf_get_ready_queue", map[string]any{
+			"project": "aihub", "max": float64(5000),
+		})
+		if res.IsError {
+			t.Fatalf("pf_get_ready_queue failed: %s", toolResultText(t, res))
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(toolResultText(t, res)), &payload); err != nil {
+			t.Fatalf("tool result is not JSON: %v", err)
+		}
+		entries, present := payload["request_adjusted"]
+		if !present {
+			t.Fatalf("the server disclosed a clamped `max` and the model was not shown it: %v. "+
+				"A projection that drops this field turns aihub#432's disclosure back into the "+
+				"silence it replaced, with nothing in internal/domain able to notice.", payload)
+		}
+		list, ok := entries.([]any)
+		if !ok || len(list) != 1 {
+			t.Fatalf("request_adjusted arrived as %#v, want a one-entry list", entries)
+		}
+		entry, ok := list[0].(map[string]any)
+		if !ok || entry["param"] != "max" {
+			t.Errorf("request_adjusted entry = %#v, want one naming max", list[0])
+		}
+	})
+
+	t.Run("no disclosure stays no key", func(t *testing.T) {
+		// The other half of the convention: absence must survive the hop as
+		// absence. A projection that helpfully filled in an empty list would
+		// give the key a meaning it must not have (request_adjusted.go: an
+		// absent field asserts NOTHING, and that is what makes omitting it safe
+		// on a server that predates the field).
+		q := newQueryRecorder(t)
+		q.respondWith(map[string]any{
+			"items": []any{}, "running": []any{}, "stalled": []any{},
+			"paused": []any{}, "needs_human_session": []any{}, "unclassified": []any{},
+		})
+		res := callToolAgainstRecorderResult(t, q, "pf_get_ready_queue", map[string]any{
+			"project": "aihub", "max": float64(25),
+		})
+		if res.IsError {
+			t.Fatalf("pf_get_ready_queue failed: %s", toolResultText(t, res))
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(toolResultText(t, res)), &payload); err != nil {
+			t.Fatalf("tool result is not JSON: %v", err)
+		}
+		if raw, present := payload["request_adjusted"]; present {
+			t.Errorf("an unadjusted ready queue reached the model carrying request_adjusted=%#v; "+
+				"nothing may invent the key, because its absence is what says \"nothing to report\"", raw)
+		}
+	})
 }

@@ -192,17 +192,78 @@ func csvArg(args map[string]any, key string) string {
 	return ""
 }
 
-// numArg extracts a float64 argument (returns 0 if absent or wrong type).
-func numArg(args map[string]any, key string) float64 {
-	if v, ok := args[key]; ok {
-		switch n := v.(type) {
-		case float64:
-			return n
-		case int:
-			return float64(n)
-		}
+// parseNumArg decodes a numeric MCP argument, reporting whether it was present
+// and whether it was READABLE. It is hop 2's queryFloat, and it is here for the
+// same reason parseBoolArg is: the MCP SDK's untyped AddTool type-checks the
+// schema shape at registration and then stores the handler with no per-call
+// validation, so a param published as `number` arrives however the caller spelt
+// it — including as a string, which real callers send.
+//
+// 🔴 The `ok` result is the whole point, and what it replaces is aihub#411's
+// T1-2 escape (fixed in aihub#432). This function's predecessor returned a bare
+// float64, so `similarity_threshold: "notanumber"` came back as 0 — and 0 is
+// that parameter's OFF value, so the caller's filter was discarded, the request
+// went out unfiltered, and no hop said anything. That is exactly Rule 1's
+// original defect (internal/server/queryparam.go's measured table), one hop
+// upstream of where it was fixed: a malformed value must never become a value
+// the caller could have sent, because a default is byte-identical to "the caller
+// did not send this parameter".
+//
+// Refusing here rather than forwarding the raw text is deliberate. The server
+// would reject it too — handleRecall reads these three through queryFloat and
+// queryFloatInRange — but a request that cannot succeed should not cost a round
+// trip, and the caller gets the same sentence either way.
+//
+// NaN and ±Inf are refused for queryFloat's reason: they parse fine and compare
+// false against every bound, so they disable a filter from the inside.
+//
+// Returns:
+//
+//	present=false           → absent, JSON null, or an all-whitespace string
+//	present=true, ok=false  → sent, but not a finite number in any spelling
+//	present=true, ok=true   → value is usable
+func parseNumArg(args map[string]any, key string) (value float64, present, ok bool) {
+	v, exists := args[key]
+	if !exists || v == nil {
+		return 0, false, true
 	}
-	return 0
+	switch typed := v.(type) {
+	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) {
+			return 0, true, false
+		}
+		return typed, true, true
+	case int:
+		return float64(typed), true, true
+	case int64:
+		return float64(typed), true, true
+	case string:
+		raw := strings.TrimSpace(typed)
+		if raw == "" {
+			// An empty string is how a client spells "unset" when it must send
+			// the key; it is not a malformed number. Same reading as queryInt's
+			// all-whitespace case on the server side.
+			return 0, false, true
+		}
+		f, err := strconv.ParseFloat(raw, 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			return 0, true, false
+		}
+		return f, true, true
+	}
+	return 0, true, false
+}
+
+// describeArg renders an argument value for an error message the way the caller
+// spelt it on the wire: strings quoted, numbers and booleans bare, everything
+// else as its JSON. The message is the entire fix from the caller's side, so
+// showing `"12 "` rather than `12` is the difference between a caller who can
+// see the problem and one who cannot.
+func describeArg(v any) string {
+	if b, err := json.Marshal(v); err == nil {
+		return string(b)
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 // normalizeIntArg rewrites args[key] in place to a Go int so it serializes into

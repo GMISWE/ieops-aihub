@@ -4,7 +4,7 @@
 {
   "tool": "pf_reinforce_memory",
   "description_sha256": "9954803dee8b3d7e57f17d935200e67175ab432db2335542cb4cbd19c0deb5b5",
-  "input_schema_sha256": "2bd5f7f5716af00a37f2178578c19a3d949c908f811491915a47b3d1de31f2bb",
+  "input_schema_sha256": "0e74e0db750e8618bde3bf16d1dc1feaf4942b174c0ed0ab37d4884a1aaeac7f",
   "params": {
     "additional_context": {
       "type": "string",
@@ -42,11 +42,19 @@ whole story of `aihub#325`.
 | `memory_id` | string | yes | "Memory ID" |
 | `additional_context` | string | yes | additional context for the memory |
 | `work_item_id` | string | yes | "Work item ID (for credential injection)" |
-| `strength_delta` | number | no | strength delta |
+| `strength_delta` | number | no | a delta added to the stored strength, clamped to 1-5, **stored as a whole number** — a fractional result is truncated toward zero, so a delta under 1 in magnitude usually changes nothing, and the response reports what was stored |
 
 The parenthetical on `work_item_id` understates it. The server VERIFIES the attempt
 credentials against that work item and writes it into the reinforcement's
 provenance, so it is not merely the key that names a state file.
+
+`strength_delta`'s promise was the bare words "strength delta" until `aihub#475`.
+True, and useless: it named the units without naming the granularity, so nothing
+told a caller that `0.5` is a no-op — and the 200 body reported the untruncated
+arithmetic, so the call looked like it had worked. The text now states the
+granularity and points at the response. It deliberately stops short of saying a
+fractional delta is refused or rounded: it is neither today, and which it should
+become is `aihub#459`'s.
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -75,6 +83,12 @@ and the resolved state file into the body of `PATCH /v1/memories/<id>/reinforce`
   and adjusts strength by `strength_delta` within the server's clamp. Since
   `aihub#433` that clamp reads `internal/domain/memory.go` (`MinBaseStrength`) and
   (`MaxBaseStrength`) rather than two literals that happened to agree with them.
+- **The clamp is not the last thing that touches the value, and until `aihub#475`
+  the code said it was.** `memories.base_strength` is `SMALLINT`, so pgx encodes the
+  float64 through its int2 codec, which truncates toward zero and returns no error —
+  measured at the pinned version in both wire formats (`3.5`→`3`, `4.999`→`4`,
+  `0.9`→`0`, `-0.5`→`0`). It happens client-side, so Postgres never sees the
+  fraction and no server-side rounding rule applies.
 - **Reinforce still CLAMPS where the create path REJECTS, and that asymmetry is
   deliberate**: this call applies a delta to a stored value, so a sum outside the
   range is arithmetic rather than a stated intent, while a caller-supplied
@@ -106,4 +120,9 @@ file), so the rate is not attributable to the defect alone.
 
 - **`aihub#459`** — the column is `SMALLINT` while Go and the schema say `number`, so
   a fractional `strength_delta` that lands the sum between two integers still cannot be
-  stored as stated. Open, and shared with `pf_remember`.
+  stored as stated. Open, and shared with `pf_remember`. Its UNVERIFIED premise is now
+  settled by `aihub#475`: of its two candidates — "pgx refuses to encode" versus "the
+  value is coerced silently" — it is the second, and the direction is truncation toward
+  zero. What remains open is the disposition: refuse the value, round it, or widen the
+  column. `aihub#475` took none of those; it made the answer honest, which is correct
+  under all three.

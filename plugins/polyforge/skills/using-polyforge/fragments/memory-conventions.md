@@ -55,8 +55,8 @@ Be precise about which, because the modes are not interchangeable:
   `pf_save_artifact` rejects it too. **This row is valid nowhere.**
 - `experience.init` / `rule.init` / the `fact.<subtopic>` placeholder — **accepted by the
   server**, whose validation is a lenient four-prefix check (`experience.` / `fact.` /
-  `rule.` / `methodology.`), but off the curated enum, so the tool schema does not offer
-  them and contract-lint flags them. Usable, not blessed.
+  `rule.` / `methodology.`, now also the `memories.type` CHECK), but off the curated
+  list, so the tool schema suggests them nowhere. Usable, not blessed.
 
 The curated list is `experience.approach|code|debug|pitfall`,
 `fact.architecture|constraint|note|reference`,

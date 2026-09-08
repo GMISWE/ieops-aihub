@@ -980,6 +980,61 @@ jobs:
       #             rather than only reasoned about: all three functions PASS
       #             with no `--- SKIP`, and with AIHUB_TEST_DB unset it exits 1
       #             on the first "did not run".
+      #   236 -> 240 aihub#445 added 4 DB-gated functions, all in internal/domain
+      #             (memory_type_check_db_test.go:
+      #             TestMemoryTypeCheckDB_ColumnAndGoAgreeOnEveryType,
+      #             TestMemoryTypeCheckDB_OffListTypeStaysStorableEndToEnd,
+      #             TestMigration0034_SelfValidatesOnACleanTable,
+      #             TestMigration0034_StillAppliesWhenTheTableAlreadyHoldsAnOutlier),
+      #             covering the memories.type CHECK that aihub#411 §6.2 T2-6
+      #             ruled for.
+      #
+      #             Four functions and not one table-driven test, because two of
+      #             them mutate the schema they measure. The migration arms drop
+      #             the constraint and seed rows it forbids; the two behavioural
+      #             arms need it in place and assert so. Folding them together
+      #             would mean one function whose later subtests depend on an
+      #             earlier one's cleanup, and a CI step could then name the
+      #             function while a subtest quietly stopped running.
+      #
+      #             The DB-free companion carries the parse half and has no line
+      #             here: internal/domain/memory_type_check_test.go reads
+      #             0034_memories_type_check.sql and fails if its CHECK and
+      #             domain.MemoryTypePrefixes stop naming the same set, so the
+      #             equivalence is checked in the default `go test ./...` too.
+      #             What only a database can say is that starts_with AGREES with
+      #             strings.HasPrefix, case and leading space included.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched, and in both
+      #             directions on the SAME inventory. Verbatim, with the tests
+      #             written but before the manifest lines and the step:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 236 entries,
+      #                 inventory measured 240
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 240
+      #                 (require only a DB: 237, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 75
+      #               dbtestcov: covered by a CI step: 233/237
+      #               ::error::dbtestcov: 4 … not in the manifest … 4 … executed
+      #                 by NO CI step
+      #             and after:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 240 entries,
+      #                 inventory measured 240
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 240
+      #                 (require only a DB: 237, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 76
+      #               dbtestcov: covered by a CI step: 237/237
+      #               dbtestcov: OK
+      #
+      #             The step's own `run:` text was executed as EXTRACTED from
+      #             this file against a real Postgres (pgvector/pgvector:pg16,
+      #             migrated with goose to 34) rather than only reasoned about:
+      #             four `--- PASS:` lines, no `--- SKIP`, and with AIHUB_TEST_DB
+      #             unset it exits 1 on the first "did not run".
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -4081,6 +4136,61 @@ jobs:
           done
           ! grep -q -- '--- SKIP' terminal_without_claim.log \
             || { echo "::error::an aihub#421 terminal-credential test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+      # aihub#445 (aihub#411 decision table §6.2 T2-6): the CHECK that finally
+      # exists on memories.type, and the migration shape that let it be added to
+      # a table nobody has been able to survey.
+      #
+      # A real Postgres is the only place either claim can be tested. The
+      # equivalence one is about what STARTS_WITH does, not about what the
+      # migration text says — memory_type_check_test.go already parses the file
+      # and proves the two predicates NAME the same four prefixes, DB-free, in
+      # the always-on "Unit tests" step. That parse cannot tell you that
+      # starts_with agrees with strings.HasPrefix on " experience.debug" or on
+      # "Experience.debug", and getting that wrong in the strict direction is the
+      # aihub#433 failure mode rebuilt: Go answers 200, the column answers 23514,
+      # and the caller gets a 500 carrying the driver's constraint text.
+      #
+      # Four functions, and the two migration arms are the pair that matters.
+      # SelfValidatesOnACleanTable says NOT VALID is a floor and not a ceiling —
+      # on a table with nothing to object to, the migration's own census runs
+      # VALIDATE CONSTRAINT and existing rows end up covered too, so "added NOT
+      # VALID" cannot silently mean "validated nowhere".
+      # StillAppliesWhenTheTableAlreadyHoldsAnOutlier is the opposite case and
+      # the reason the design exists: it seeds an off-prefix row and a piped one,
+      # runs the migration, and requires it to SUCCEED, still refuse every new
+      # write, leave both rows untouched, and record them in the constraint's
+      # COMMENT. Production's distinct `type` set has never been read (§6.4 item
+      # 4), so a plain validated CHECK would have been a bet on data nobody has
+      # seen; this step is where that bet is not taken.
+      #
+      # 🔴 The COMMENT rather than a RAISE, and this step is what stops that from
+      # regressing: measured on goose v3.28.0, a `goose up` over a table holding
+      # four outlier rows logged `OK 0034_memories_type_check.sql` and discarded
+      # the WARNING entirely — its pgx driver installs no notice handler, and
+      # docs/deployment.md drives migrations with goose. A census that lived only
+      # in a log line would exist nowhere on the deploy that matters.
+      #
+      # The outlier arm mutates shared schema (it drops the constraint to seed
+      # rows the constraint forbids), so its cleanup is a t.Cleanup that deletes
+      # the seeds and re-runs the migration. That ordering is safe here because
+      # the clean-table arm is declared first and Go runs a package's tests in
+      # declaration order; it is also self-correcting, because the clean-table
+      # arm asserts an empty census as a precondition rather than assuming one.
+      - name: aihub#445 memory-type CHECK + migration 0034 DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^(TestMemoryTypeCheckDB|TestMigration0034)' -count=1 -v 2>&1 | tee memory_type_check.log
+          for want in TestMemoryTypeCheckDB_ColumnAndGoAgreeOnEveryType \
+                      TestMemoryTypeCheckDB_OffListTypeStaysStorableEndToEnd \
+                      TestMigration0034_SelfValidatesOnACleanTable \
+                      TestMigration0034_StillAppliesWhenTheTableAlreadyHoldsAnOutlier; do
+            grep -q -- "--- PASS: $want" memory_type_check.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); memories.type can again hold a row no type filter can name and no select list renders (aihub#445)"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' memory_type_check.log \
+            || { echo "::error::an aihub#445 memory-type test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
   publish-schemas:
     name: Publish MCP Schemas

@@ -3,8 +3,8 @@
 ```json
 {
   "tool": "pf_get_ready_queue",
-  "description_sha256": "732dfc544de531cae069f2b65eed4c55d866bb57154926113faa82a5668ca6f6",
-  "input_schema_sha256": "8b4e1f590c87688c34098d4d5dd3d1e1f733c1876b7a67189e87c5220883d96f",
+  "description_sha256": "ee016b0c85960c28e900f6134683d38c7cbed004139104d9595d80763fb6c48e",
+  "input_schema_sha256": "50cc9e20d3f3579b279c43ab35dacdf4fda68bb80946013fa2df79d8366302f3",
   "params": {
     "max": {
       "type": "string",
@@ -36,7 +36,7 @@ parameter that reached the wire and was read by nothing.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `project` | string | yes | "Project name" |
-| `max` | string | no | "Max items in ready section (default 10). A JSON number is also accepted" |
+| `max` | string | no | "Max items in EACH queued section — items, needs_human_session and unclassified take it as their own LIMIT (default 10)" |
 
 `non_conflicting` was published here and forwarded as `?non_conflicting=true` from
 the day the tool was added until `aihub#387` withdrew it. Nothing ever read it:
@@ -71,12 +71,19 @@ without a hop-3 reader to go with it.
 
 ## hop 4 — what it actually does
 
-Returns the six-section LCRS view for one project. The `items[]` section uses the
+Returns the seven-section LCRS view for one project. The `items[]` section uses the
 **same SQL predicate** as `pf_list_work_items`' `ready_only` — one shared constant —
 but **not the same page**: this defaults to 10 ordered by priority desc, that one to
 50 ordered by `created_at` desc. With more ready items than either limit the two
 return different subsets, which is stated on `ready_only`'s own description because
 the natural reading is that they agree.
+
+`max` is a PER-SECTION page size and reaches three of the seven sections: `items`,
+`needs_human_session` and `unclassified` each take it as their own `LIMIT`, while
+`running`, `stalled`, `paused` and `stale_running` take none. So it is not a budget
+over the response, and one section arriving full says nothing about the others. The
+description said "Max items in ready section" until `aihub#449` — measured wrong in
+`aihub#401`, which was cancelled before it could say so.
 
 `max` above 200 is clamped, and since `aihub#432` the response SAYS SO: `ReadyQueue`
 carries `request_adjusted`, and `newReadyQueue` in `internal/domain/work_items.go` is
@@ -100,13 +107,26 @@ an in-memory session and fails both if a disclosure the server sent is dropped a
 an absent one is invented. pf_recall's projection has already swallowed three
 server-side fields this way (`total`, the truncation pair, `unmatched_types`).
 
-🔴 **The published description says "LCRS (6-section)" and the struct has seven keys.**
-`internal/domain/work_items.go` (`ReadyQueue`) declares `items`, `running`, `stalled`,
-`paused`, `needs_human_session`, `unclassified` and `stale_running`, the last with
-`omitempty` — so a caller sees six until it is non-empty, and cannot tell an empty
-`stale_running` from a server that does not have one. The design document draws a
-third count: six keys, no `stale_running`, and three fields that cannot exist
-(`unblocked_at`, `expires_at` removed in v1.21, and `kind` deleted in v1.22).
+The section count is now ONE number in three places (`aihub#449` / `aihub#411` T2-20).
+`internal/domain/work_items.go` (`ReadyQueue`) marshals seven — `items`, `running`,
+`stalled`, `paused`, `needs_human_session`, `unclassified`, `stale_running` — the
+description says seven, and the Ready Queue block of
+`docs/design/polyforge-v1-design.md` draws seven. Before that wi the three said 7, 6
+and "6 plus four fields that cannot exist", and each was individually plausible,
+which is why nothing caught it. `internal/mcp/ready_queue_section_count_test.go`
+(`TestReadyQueueSectionCountIsOneNumber`) reads the struct and the live description
+and fails when they disagree; its second arm reads the design doc's block and fails
+both on a missing segment and on any of the four dead fields coming back.
+
+🔴 **That was a WIRE change, and the only one in `aihub#449`.** An empty queue used to
+serialise with no `stale_running` key at all and now carries `"stale_running": []`,
+because the field lost its `omitempty` and `newReadyQueue` initialises it like the
+other six. The other repairs cost nothing on the wire: deleting `ReadyItem`'s
+`UnblockedAt` leaves the bytes identical — it had no writer anywhere, so `omitempty`
+was already hiding it on every item — and `expires_at`, `kind` and `owner_user_type`
+existed only in the design doc's sketch. The first went with the ownership model in
+v1.21 and the second was deleted from `work_items` in v1.22; the third is a fourth
+dead field `aihub#411` T2-20 did not list, and `RunningItem` has never carried it.
 
 The corpus record above spans 155 calls with a 0.00%
 error rate. Four of those results were prose rather than strict JSON, which is why
@@ -123,23 +143,30 @@ corpus README warns about.
   policy to match the code.
 - **§6.1 T1-9** — `non_conflicting` was withdrawn rather than left as prose that
   contradicts hop 3, which is the disposition that rule requires.
-- **§6.2 T2-20** — say "**6 plus `stale_running`**" (or drop the `omitempty`), and
-  delete `unblocked_at`. Both are properties of THIS response and are measured on this
-  tree: `internal/domain/work_items.go` (`ReadyQueue`) declares six segments plus
-  `stale_running` with `omitempty`, so an absent `stale_running` cannot be told apart
-  from an older server; and `internal/domain/work_items.go` (`ReadyItem`) declares
-  `UnblockedAt`, which **no code in this repository ever writes** — a field that is
-  published and never populated. The `created_at` asymmetry between the segments is
-  settled as designed and is not to be re-opened.
+- **§6.2 T2-20** — LANDED as `aihub#449`. The ruling offered either wording ("6 plus
+  `stale_running`") or shape (drop the `omitempty`); the shape was taken, because the
+  rule this repo already wrote for absent keys decides it. `internal/domain/request_adjusted.go`
+  states it and `internal/domain/ready_queue_disclosure_test.go`
+  (`TestReadyQueueOmitsTheDisclosureKeyWhenNothingWasAdjusted`) pins it: an absent key
+  is acceptable only while the absence asserts NOTHING. An absent `request_adjusted`
+  asserts nothing, so it keeps its `omitempty`. An absent `stale_running` asserted "no
+  work item has been running untouched for 24h" — an ownership reminder — while also
+  meaning "this server predates the field", which is two meanings on one absence and
+  one of them actionable. Wording alone would have published "six sections and a
+  seventh you may or may not see" as the contract. `UnblockedAt` is deleted, not
+  written: **no code in this repository ever wrote it**, and `aihub#387` settled the
+  disposition for a no-writer field on this same tool. The `created_at` asymmetry
+  between the segments is settled as designed and is not to be re-opened.
 
 ## Open
 
-- The published `max` description still says only "default 10" and mentions neither
-  the ceiling nor the disclosure, where `limit`'s neighbouring description on
-  `pf_list_work_items` says both. `internal/mcp/tools_lifecycle.go` was held by
-  another work item when `aihub#432` landed, so the string was left alone; the
-  response now tells a caller what happened, which is the half that could not be
-  worked around.
-- `response_keys_observed` above is a corpus census taken before `aihub#432` and so
-  does not list `request_adjusted`. It records what callers HAVE seen, not what the
-  response can contain.
+- The published `max` description now states its SCOPE — three of the seven sections,
+  named — but still mentions neither the 200 ceiling nor the disclosure, where
+  `limit`'s neighbouring description on `pf_list_work_items` says both. That half is
+  `aihub#411` T1-2/T1-12's and was left to it deliberately rather than edited twice
+  into the same string by two work items. The response already tells a caller what
+  happened, which is the half that could not be worked around.
+- `response_keys_observed` above is a corpus census taken before `aihub#432` and
+  before `aihub#449`, so it neither lists `request_adjusted` nor implies that
+  `stale_running` is optional — the 155 calls it spans predate both. It records what
+  callers HAVE seen, not what the response can contain.

@@ -23,6 +23,7 @@
 > | 8 | `pf_update_step` 的 `expected_version` CAS（§ 步骤状态机、§ 附录 API） | 客户端先 `pf_get_step` 取 `version`，随 `update_step` 回传做 CAS，冲突返回 412 | **从未实现**：`server.UpdateStepRequest` 从来没有这个字段，Echo Bind 静默丢弃，没有任何 412 路径。真正的并发保护是 `in_progress` 转换上的 `WHERE current_step_status='idle'` 谓词。参数已于 **aihub#290** 从 MCP schema 和 CLI flag 中删除（而非补实现），连带去掉了只为取这个 version 而存在的 `pf_get_step` 往返；同时 `update_step` 新增 `next_step`（完成一步并启动下一步）、终态调用新增 `note` |
 > | 9 | 全文各处的 `pf_recall(type="a|b|c")` 示例（§ Memory-First、§ 附录 API 等，含 L1613 / L1990 / L3481 / L3659 / L3690） | `type` 用 `|` 分隔多个类型 | **管道语法从未被解析**：`type` 是列表，整串被当成一个类型名，exact 与 LIKE 都匹配不到 ⇒ 静默返回空集。**aihub#289** 起服务端对含 `|` 的 `type` 值直接返回 400，并新增 `unmatched_types` 响应字段。正确写法是数组：`type=["a.b","c.*"]`。本文档正文未逐条回改（按本表开头的约定「以代码为准」），因此 `internal/cli/skill_recall_type_test.go` 的复发闸把本文件列为**有据豁免**；现行指导以 `plugins/polyforge/skills/` 与 `docs/mcp-tools.md` 为准 |
 > | 10 | DDL `run_attempts` 表定义里的 `prepared_workspace` 列；§21.2 `pf-work` 模式 C（恢复）的「`prepared_workspace` + step_state 从上次 attempt 恢复」 | 该列记录已准备好的工作区（`{repo: abs_path}`），re-claim 时据此恢复 | **死列，从未被任何一代代码写过**（实测 2026-09-08，基准 `6cd8229`）：两处 `INSERT INTO run_attempts`（`run_attempts.go` (`FnClaimWorkItem`) 与 force-takeover 路径）的列清单显式且都不含它，零 `UPDATE`、零 `SELECT`；归档的 v0 Python writer 同样不写。列名在非测试 Go 代码里只出现一处——表镜像 `run_attempts.go` (`RunAttempt`) 的字段标签——而该类型自身零引用，故请求侧与响应侧都不在任何线上形状里；MCP tool schema、`docs/mcp-cards/`、`docs/mcp-tools.md` 一概不发布它。模式 C 的「恢复」实际由磁盘上被复用的 worktree 加按 wi 键的 `wi_step_state` 提供，与本列无关；它所依赖的 `mode` 参数已由 **aihub#394** 从 schema 撤下、**aihub#424** 从 `ClaimRequest` 删除。**aihub#487** 按 base_branch 先例保留 DDL 列与镜像字段（「从契约撤下」无目标——它从未被发布过），改为落一道复发闸 `prepared_workspace_dead_column_test.go` (`TestPreparedWorkspaceStaysADeadColumn`) |
+> | 11 | §4.3 与 §5.7 的 Ready Queue 响应体 | 六段视图；`items[]` 带 `unblocked_at`；`running[]` 带 `expires_at` 和 `owner_user_type`；`items[]`/`needs_human_session[]`/`unclassified[]` 三段都带 `kind` | **七段，且那四个字段一个都不存在**（实测 2026-09-08，基准 `538c0d8`）：`stale_running[]` 早在 aihub#36 就进了 `internal/domain/work_items.go` (`ReadyQueue`)，只是带 `omitempty`，所以调用方在它非空之前看不到；`unblocked_at` **全仓无写入方**（唯一一处出现就是字段声明本身）；`expires_at` 随 v1.21 的 ownership 模型删除；`kind` 是 v1.22 删掉的列；`owner_user_type` 是**审计时才发现的第四个**——`RunningItem` 从来没有过这个字段，全仓 Go 代码零命中（同名字段在 §17 的 409 错误体 `details.current_attempt` 里另有一处，不在本行射程内）。**aihub#449 已把正文回改**（这是本表少数「正文已改」的条目，故此行记录的是曾经的偏差而非现存偏差）：去掉 `omitempty` 使七段恒在（wire 变更：空的 `stale_running` 从缺键变成 `[]`）、从 (`ReadyItem`) 删除 `UnblockedAt`、并把段数的三处副本（本文档 / 结构体 / `pf_get_ready_queue` 的 description）用 `internal/mcp/ready_queue_section_count_test.go` 闸成一个数。`items[]` 不选 `created_at` 而另两段选，**是设计如此**，不在此列（aihub#401 取消时已复核） |
 
 ---
 
@@ -1410,24 +1411,42 @@ GET    /v1/work_items/ready
   --   and forwarded as ?non_conflicting=true from 50bfc35, while handleGetReadyQueue read
   --   project+max only; withdrawn from the schema by aihub#387 (owner decision: plan B,
   --   2026-09-07). Whether the capability is wanted is aihub#186's call. See § 10.1.
-  -- v1.20：六段视图（加 unclassified[]）
+  -- v1.20：六段视图（加 unclassified[]）；v1.20 后又加了 stale_running[]，见勘误 #11
+  -- ⚠️ 勘误 #11（aihub#449）：本段原先画六段、且画了四个不存在的字段（items[].unblocked_at /
+  --   running[].expires_at / running[].owner_user_type / 三段的 kind）。已按实现回改。
   → {
       -- items: queued + no blocker + requires_human_session=false → Orchestrator 自动派发
-      items: [{id, slug, kind, wi_type, priority, goal, unblocked_at}],
+      items: [{id, slug, wi_type, priority, goal}],
       -- running wi
-      running: [{id, slug, goal, owner_display, owner_user_type, expires_at, last_active_at}],
+      running: [{id, slug, goal, owner_display, last_active_at}],
       -- stalled（blocked + wi_stalled event）
       stalled: [{id, slug, stall_reason, stalled_since, last_actor_display,
                  stalled_at_step:{step_id,current,total}, error_type}],
       -- paused wi
       paused: [{id, slug, paused_since, last_actor_display, pause_reason}],
       -- needs_human_session: queued + no blocker + requires_human_session=true → Session 2/3
-      needs_human_session: [{id, slug, kind, wi_type, priority, goal, created_at}],
+      needs_human_session: [{id, slug, wi_type, priority, goal, created_at}],
       -- unclassified: queued + no blocker + requires_human_session IS NULL → 需补分类
       --   → 来自 v1.18 升级存量数据 或 AI 未提供 phase.yaml 的 create 调用
-      unclassified: [{id, slug, kind, wi_type, priority, goal, created_at}]
+      unclassified: [{id, slug, wi_type, priority, goal, created_at}],
+      -- stale_running: running 且 updated_at > 24h 的所有权提醒段（不强制释放），无 max 上限
+      stale_running: [{id, slug, goal, owner_display, last_active_at}],
+      -- request_adjusted: 只在服务端改过入参时出现（今天只有 max 的钳制），aihub#432
+      request_adjusted?: [{param, requested, applied}]
     }
 ```
+
+> ⚠️ **本段七段视图与四个死字段已由 aihub#449 回改（aihub#411 T2-20）。** 上面原先画的
+> `items[].unblocked_at` **从未有过写入方**（全仓仅结构体字段声明一处，已随本次一并从
+> `ReadyItem` 删除）；`running[].expires_at` 随 v1.21 的 ownership 模型一起去掉；三个 item
+> 段上的 `kind` 是 v1.22 删掉的列；`running[].owner_user_type` 是这次审计才发现的第四个，
+> `RunningItem` 从未有过它，全仓 Go 零命中。段数也从六改成七：`stale_running` 早在 aihub#36 就加进了
+> 响应，只是带着 `omitempty`，所以调用方在它非空之前看不到——`omitempty` 也已一并去掉，
+> 七段恒在，空段是空列表而不是缺键。`items[]` 不返回 `created_at` 而另两段返回，**是设计如此**，
+> 不是遗漏（aihub#401 取消时已复核）。三处计数（本段 / `internal/domain/work_items.go`
+> (`ReadyQueue`) / `pf_get_ready_queue` 的 description）由
+> `internal/mcp/ready_queue_section_count_test.go` (`TestReadyQueueSectionCountIsOneNumber`)
+> 与 (`TestReadyQueueDesignDocDrawsTheSameSegments`) 闸住，加段必须同一次改动改三处。
 
 #### Users & Auth (Admin)
 
@@ -1808,20 +1827,25 @@ pf_cancel_work_item(id_or_slug, reason?)
 pf_get_ready_queue(project, max?)
   -- ⚠️ non_conflicting was withdrawn from this signature by aihub#387: it was published
   --   and forwarded but never read at any later hop. Do not plan on it (see § 10.1).
-  -- 1:1 映射 GET /v1/work_items/ready，返回完整 LCRS 六段视图（v1.20）
+  -- 1:1 映射 GET /v1/work_items/ready，返回完整 LCRS 七段视图（§4.3 为准；见勘误 #11）
   -- Layer 3 Orchestrator 使用此工具替代 HTTP curl
+  -- max 是每段上限：只作用于 items / needs_human_session / unclassified 三段，
+  --   running / stalled / paused / stale_running 不设上限（aihub#449）
   → {
-      items:   [{id, slug, kind, wi_type, priority, goal, unblocked_at}],
+      items:   [{id, slug, wi_type, priority, goal}],
                 -- requires_human_session=false，Orchestrator 直接 dispatch（Session 1）
-      running: [{id, slug, goal, owner_display, owner_user_type,
-                 expires_at, last_active_at}],
+      running: [{id, slug, goal, owner_display, last_active_at}],
       stalled: [{id, slug, stall_reason, stalled_since, last_actor_display,
                  stalled_at_step:{step_id, current, total}, error_type}],
       paused:  [{id, slug, paused_since, last_actor_display, pause_reason}],
-      needs_human_session: [{id, slug, kind, wi_type, priority, goal, created_at}],
+      needs_human_session: [{id, slug, wi_type, priority, goal, created_at}],
                 -- requires_human_session=true，需要 Alice 主导的 Session 2/3
-      unclassified: [{id, slug, kind, wi_type, priority, goal, created_at}]
+      unclassified: [{id, slug, wi_type, priority, goal, created_at}],
                 -- requires_human_session=NULL，需补分类
+      stale_running: [{id, slug, goal, owner_display, last_active_at}],
+                -- running 且 updated_at > 24h 的提醒段，不强制释放
+      request_adjusted?: [{param, requested, applied}]
+                -- 仅在服务端改过入参时出现（aihub#432）
     }
 ```
 

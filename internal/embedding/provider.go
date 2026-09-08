@@ -28,6 +28,6 @@ func (n *NoopProvider) EmbedBatch(_ context.Context, texts []string) ([][]float3
 	return make([][]float32, len(texts)), nil
 }
 
-func (n *NoopProvider) ModelID() string             { return "" }
-func (n *NoopProvider) Dims() int                   { return 0 }
+func (n *NoopProvider) ModelID() string              { return "" }
+func (n *NoopProvider) Dims() int                    { return 0 }
 func (n *NoopProvider) Ping(_ context.Context) error { return nil }

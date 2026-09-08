@@ -256,12 +256,15 @@ func RequireProjectRole(minRole string) echo.MiddlewareFunc {
 	}
 }
 
-// roleLevel maps role string to integer for comparison.
-var roleLevel = map[string]int{
-	"viewer":     1,
-	"writer":     2,
-	"maintainer": 3,
-}
+// roleLevel maps role string to integer for comparison. It is domain.RoleLevel
+// itself — the same map value, not a copy — so this package and internal/domain
+// rank a role identically by construction.
+//
+// It used to be a second table declared here, and internal/domain had its own
+// disagreeing one: maintainer scored 3 here and 0 there, and every comment that
+// said the two gates went "through the same lookup" was wrong (aihub#443).
+// TestRoleLevelIsTheDomainLadder fails if this forks again.
+var roleLevel = domain.RoleLevel
 
 // notVisibleMessage is THE wording for "you may not see this", whatever the
 // reason, and it deliberately does not say which reason (aihub#377, invariant 1).

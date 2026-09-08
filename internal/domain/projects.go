@@ -373,7 +373,7 @@ func checkProjectAccess(ctx context.Context, conn *pgxpool.Pool, name string, ca
 				// only owner/admin can do owner-level ops
 				break
 			}
-			if roleLevel(m.Role) >= roleLevel(minRole) {
+			if RoleLevel[m.Role] >= RoleLevel[minRole] {
 				return &p.Project, nil
 			}
 			// member exists but insufficient role
@@ -404,17 +404,31 @@ func checkProjectAccess(ctx context.Context, conn *pgxpool.Pool, name string, ca
 		fmt.Sprintf("access denied to project %q", name))
 }
 
-// roleLevel converts a role name to an integer for comparison.
-func roleLevel(role string) int {
-	switch role {
-	case "viewer":
-		return 1
-	case "writer":
-		return 2
-	case "owner":
-		return 3
-	}
-	return 0
+// RoleLevel ranks the member roles, and it is the only such ladder in the repo.
+// internal/server/middleware.go's roleLevel is an alias of this same map value,
+// which is what makes that package's "matching checkProjectAccess" and "the same
+// lookup" comments (router.go, ui_handlers_wi.go) literally true rather than
+// merely intended; dependencies.go says the same thing from inside this package.
+//
+// It holds exactly the three roles UpdateProject accepts for a member, and no
+// more. "owner" is deliberately absent: projects.owner_user_id is a column, not
+// a member role, so no members entry can carry it, and checkProjectAccess
+// settles the owner at level 2 before any member role is ranked. A string
+// outside the map is level 0, which is how an unrecognised role stays a
+// non-membership.
+//
+// Before aihub#443 this was a second, disagreeing ladder that scored maintainer
+// 0 and gave rung 3 to "owner". A maintainer therefore failed the
+// minRole="viewer" comparison in checkProjectAccess and that branch returned
+// before the visible-to-viewer fallback could run, so a maintainer of a public
+// project was answered with less than an anonymous caller would have been.
+//
+// Treat it as read-only: internal/server shares this map value rather than
+// copying it, so a write here changes that package's answers too.
+var RoleLevel = map[string]int{
+	"viewer":     1,
+	"writer":     2,
+	"maintainer": 3,
 }
 
 // projectWithHash is an internal type that includes the identifier_hash field.

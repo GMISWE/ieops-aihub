@@ -856,6 +856,51 @@ jobs:
       #             base_strength=3.5 and the column holds 3" while the second
       #             stays green — which is what a positive control is supposed
       #             to do.
+      #   232 -> 233 aihub#451 added 1 DB-gated function, internal/domain
+      #             TestForceTakeoverCommitWindowDisplacesALiveForeignLock
+      #             (force_takeover_commit_window_db_test.go). ONE function with
+      #             three subtests rather than three functions: the two controls
+      #             are only meaningful against the measurement they sit beside —
+      #             one says the displacement needs the foreign ATTEMPT row
+      #             inside the window and not merely its lock row, the other
+      #             says the "no lock_released was emitted" assertion is not
+      #             vacuous — so splitting them would let a CI step name the
+      #             measurement and drop either control.
+      #
+      #             ⚠️ The COVERAGE half of this gate would have stayed green
+      #             without this entry: the step below already names the
+      #             function, so "covered by a CI step" reads 230/230 in both
+      #             directions. What the missing line fails is the manifest
+      #             EQUALITY check, and that is the whole point of aihub#320's
+      #             set-of-names design — a ratchet on an integer would have
+      #             absorbed this silently.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched, and in both
+      #             directions on the SAME inventory. Verbatim, with the test
+      #             written and its step added but before the manifest line:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 232 entries,
+      #                 inventory measured 233
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 233
+      #                 (require only a DB: 230, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 230/230
+      #               ::error::dbtestcov: 1 AIHUB_TEST_DB-gated test function(s)
+      #                 were measured but are not in the manifest
+      #             and after:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 233 entries,
+      #                 inventory measured 233
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 233
+      #                 (require only a DB: 230, need extra env: 3)
+      #               dbtestcov: covered by a CI step: 230/230
+      #               dbtestcov: OK
+      #
+      #             The step's own `run:` text was executed against a real
+      #             Postgres (pgvector/pgvector:pg16, migrated with goose to 33)
+      #             rather than only reasoned about: all three subtests PASS with
+      #             no `--- SKIP`, and the name-gated greps were run as extracted
+      #             from this file.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -1690,6 +1735,57 @@ jobs:
           done
           ! grep -q -- '--- SKIP' claim_commit_window.log \
             || { echo "::error::an aihub#430 arm SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#451, the fourth step in the aihub#393 -> #410 -> #430 -> #451 block
+      # and the one that settles what #430 deliberately left open. #430 deleted
+      # the commit-window qualifier from pf_claim_work_item and KEPT it on
+      # pf_force_takeover, while recording an unasserted probe: at READ COMMITTED
+      # — FnForceTakeover's level — its interleaving was refused too. Read
+      # quickly that says the surviving qualifier describes a gap nothing can
+      # reach. It does not: that probe committed only the LOCK ROW inside the
+      # window, so the DO UPDATE's WHERE re-ran against a snapshot that still
+      # contained the owner and refused. The gap resource_events.go documents is
+      # the `prior` CTE's blindness and a STALE run_attempts read.
+      #
+      # This step builds the shape that reaches it — a foreign claim IN FLIGHT,
+      # run_attempts row and resource_locks row committed together inside the
+      # window, which is what FnClaimWorkItem holds between its first insert and
+      # its commit — and measures a real displacement: the takeover succeeds, a
+      # live foreign holder loses its row, and nobody is told.
+      #
+      # THE DB IS THE POINT, for #430's reason and one more: the subject is that
+      # READ COMMITTED re-reads the conflicting ROW but not the other relations
+      # in the same statement. No source reading settles that, and no unit test
+      # can hand-build it.
+      #
+      # ⚠️ This step asserts that a defect is REACHABLE. If the window arm goes
+      # red because the gap was closed — FnForceTakeover raised to SERIALIZABLE,
+      # or the holder re-read inside the statement — the fix is to DELETE the
+      # "except in a narrow commit-window race (aihub#410)" clause from
+      # pf_force_takeover's description, docs/mcp-cards/pf_force_takeover.md and
+      # the resource_events.go comment in that same change, and delete the test.
+      # It is not to restore the race. Both control arms are named for the usual
+      # reason: without the refusal arm, "displaced" is also what a build with
+      # the aihub#393 predicate disabled reports, and without the event-trail arm
+      # the window arm's "no lock_released was emitted" passes in a harness where
+      # none ever is.
+      - name: aihub#451 force-takeover commit-window DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestForceTakeoverCommitWindowDisplacesALiveForeignLock$' -count=1 -v 2>&1 | tee ft_commit_window.log
+          for want in 'TestForceTakeoverCommitWindowDisplacesALiveForeignLock/foreign_attempt_and_its_lock_committed_inside_the_window'; do
+            grep -q -- "--- PASS: $want" ft_commit_window.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); pf_force_takeover's description still says 'except in a narrow commit-window race' with nothing measuring it"; exit 1; }
+          done
+          for want in 'TestForceTakeoverCommitWindowDisplacesALiveForeignLock/control_only_the_lock_row_committed_inside_the_window_is_refused' \
+                      'TestForceTakeoverCommitWindowDisplacesALiveForeignLock/control_a_prior_owner_the_cte_can_see_is_reported_as_replaced'; do
+            grep -q -- "--- PASS: $want" ft_commit_window.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); without the controls the window arm is also satisfied by a build whose aihub#393 predicate does nothing, and by an event query that matches nothing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' ft_commit_window.log \
+            || { echo "::error::an aihub#451 arm SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#402: GetWorkItem chose ONE column by testing a `wi_` prefix — id if
       # present, slug otherwise — unlike every sibling resolver, which takes the

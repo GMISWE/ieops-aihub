@@ -512,8 +512,10 @@ const ironRulesFragment = "skills/using-polyforge/fragments/iron-rules.md"
 // WHY THESE THREE ASSERTIONS AND NOT "the payload mentions IR1"
 //  1. VERBATIM against the file on disk, so a paraphrase or a drifted second copy fails. A
 //     marker check would pass on a copy that had drifted, which is the defect being avoided.
-//  2. In the HEADER, i.e. before the first fragment separator. parts[] is what the degrade loop
-//     drops to fit, and a rule that can be dropped to make room is not a rule.
+//  2. In the HEADER, measured as "ahead of the first parts[] fragment" — NOT as "after the
+//     first separator", which the header's own trailing separator would satisfy for free.
+//     parts[] is what the degrade loop drops to fit, and a rule that can be dropped to make
+//     room is not a rule.
 //  3. Both branches. A real user gets exactly one of them and which one is not the runner's
 //     choice; the native branch is the one with no budget to spare, so it is the one that would
 //     be "fixed" by dropping this.

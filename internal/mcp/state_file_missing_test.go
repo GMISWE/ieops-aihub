@@ -95,8 +95,13 @@ package mcp_test
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -415,86 +420,121 @@ func TestStateFileMissing_ClaimedStateFileMakesTheSameCallWork(t *testing.T) {
 // The invariant is deliberately NOT "every ResolveStateFile caller mints this
 // refusal". That statement is FALSE, and asserting it would have forced a wrong
 // change: see stateRefusalExemptSites below.
+//
+// ⚠️ aihub#454 REPLACED THE MECHANISM, and the one it replaced is worth naming
+// because its failure mode is the very thing this file spends the most words
+// warning about. Until this change the gate was a line scan for the literal
+// `Errorf("read state file` — the prefix the three OLD voices happened to
+// share. So it caught a REVERSION and nothing else. A newly added credentialed
+// tool inventing a fourth voice from scratch, say
+// `fmt.Errorf("could not load credentials: %w", err)`, tripped neither this gate
+// (wrong words) nor the inventory below (a tool that never used the helper
+// subtracts nothing from a count of helper calls). The gate's failure message
+// said "exactly one minting point"; what it actually measured was "yesterday's
+// wording is gone". A gate that only recognises yesterday's wording cannot stop
+// tomorrow's drift — this file said so, in the paragraph that used to sit above
+// stateRefusalCallSites, and then shipped the gate anyway.
+//
+// The fix is to assert the PROPERTY rather than the spelling, and the property
+// is REACHABILITY. Membership in this family was never about wording: it is "the
+// handler body calls config.ResolveStateFile", the aihub#428 brief's own
+// predicate. So the gate now parses every production file, finds each
+// config.ResolveStateFile call, and classifies what its failure path does with
+// the error. There are exactly three legal answers — route it through
+// config.StateFileMissingErr, mint nothing caller-facing at all, or be a listed
+// exemption. Anything else is a second minting point no matter which words it
+// chooses, including words nobody has thought of yet.
 func TestStateFileRefusalHasExactlyOneMintingPoint(t *testing.T) {
-	root := moduleRoot(t)
-	var offenders []string
+	sites := scanStateRefusalSites(t)
 
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", "vendor", "testdata":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		name := d.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			return nil
-		}
-		b, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return relErr
-		}
-		for i, line := range strings.Split(string(b), "\n") {
-			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+	byKind := map[stateRefusalKind]int{}
+	exemptSeen := map[string]bool{}
+	for _, s := range sites {
+		byKind[s.Kind]++
+		switch s.Kind {
+		case refusalViaHelper, refusalSilent:
+			// The two legal answers. A silent site is not a member of the
+			// family — see stateRefusalExemptSites for why converting one
+			// would be a regression rather than a completion.
+		case refusalHandRolled:
+			ex, exempt := stateRefusalExemptSites[s.Key()]
+			if !exempt {
+				t.Errorf(`%s:%d builds a state-file refusal by hand instead of calling config.StateFileMissingErr:
+    %s
+That is how this family came to speak with three different voices across twelve tools, only one of
+which told the reader what to do. Route it through the helper, or — if this site is asking a
+DIFFERENT question rather than the same one worded differently — add it to stateRefusalExemptSites
+with the reason. (aihub#428, gate widened by aihub#454)`, s.File, s.Line, s.Src)
 				continue
 			}
-			// The three pre-aihub#428 prefixes all began this way, and so would
-			// any fourth one written from the same instinct.
-			if strings.Contains(line, `Errorf("read state file`) {
-				offenders = append(offenders,
-					fmt.Sprintf("%s:%d: %s", filepath.ToSlash(rel), i+1, strings.TrimSpace(line)))
+			exemptSeen[s.Key()] = true
+			if ex.Kind != refusalHandRolled {
+				t.Errorf("%s:%d is exempt as %q but the detector reads it as %q; the exemption's reason "+
+					"describes a site that no longer exists", s.File, s.Line, ex.Kind, s.Kind)
 			}
+		default:
+			t.Errorf(`%s:%d: the detector does not understand this config.ResolveStateFile shape:
+    %s
+This is a FAILURE, not a pass. A scanner that cannot read a site is silent about it in exactly the
+same way it is silent about a clean one, and that indistinguishability is what made the previous
+version of this gate useless. Teach findStateRefusalSites the shape (and add a fixture for it) or
+rewrite the site into one of the recognised ones.`, s.File, s.Line, s.Src)
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk: %v", err)
 	}
 
-	if len(offenders) > 0 {
-		t.Errorf("%d site(s) build a state-file refusal by hand instead of calling "+
-			"config.StateFileMissingErr:\n  %s\n\nThat is how this family came to speak with three "+
-			"different voices across twelve tools, only one of which told the reader what to do. "+
-			"Route it through the helper (aihub#428).",
-			len(offenders), strings.Join(offenders, "\n  "))
+	// ── Anti-vacuity. Every assertion above is a negative, so a detector that
+	//    parsed nothing, or one whose classifier stopped matching, exits exactly
+	//    like a clean tree.
+	if len(sites) < 12 {
+		t.Fatalf("found only %d config.ResolveStateFile call site(s) in production — the walk or the "+
+			"detector is broken, not the tree, and every assertion above was vacuously satisfied", len(sites))
+	}
+	for kind, want := range map[stateRefusalKind]int{refusalViaHelper: 1, refusalSilent: 1, refusalHandRolled: 1} {
+		if byKind[kind] < want {
+			t.Errorf("no site classified %q. All three classifications are populated in this tree, so a "+
+				"zero means the classifier lost a branch rather than that the tree changed", kind)
+		}
+	}
+	for key, ex := range stateRefusalExemptSites {
+		if ex.Kind == refusalHandRolled && !exemptSeen[key] {
+			t.Errorf("exemption %q matched no hand-rolled site. Either the detector stopped finding that "+
+				"shape — in which case it would also stop finding new violations and this gate is dead — "+
+				"or the site is gone and this entry should go with it, which is the reviewable record "+
+				"that the exemption is no longer needed", key)
+		}
 	}
 }
 
 // stateRefusalCallSites is the production inventory of the family: which files
 // mint this refusal, and how many times each.
 //
-// ⚠️ THIS EXISTS BECAUSE THE SCAN ABOVE IS NOT ENOUGH, and the gap is worth
-// naming rather than leaving for someone to fall into. That scan matches the
-// literal text `Errorf("read state file`, i.e. the shape the three OLD prefixes
-// happened to share. It therefore catches a REVERSION — which is exactly what it
-// caught in this change's M1 mutant — but it would not notice a fourth voice
-// invented from scratch, say `fmt.Errorf("could not load credentials: %w", err)`.
-// A gate that only recognises yesterday's wording cannot stop tomorrow's drift.
+// ⚠️ THIS IS A DIFFERENT AXIS FROM THE GATE ABOVE, and the division of labour is
+// worth naming so neither is mistaken for the other's backup.
 //
-// This inventory closes that: it counts CALLS TO THE HELPER, so a site that stops
-// using it fails here no matter what it does instead.
+// The gate asserts that no SECOND minting point exists: every failure path is
+// the helper, nothing, or a listed exemption. What it cannot see is a site that
+// stops refusing altogether — converting `return errResult(...)` into a bare
+// `return` is "silent", which the gate calls legal, and for a best-effort lookup
+// it IS legal. Whether a given tool should refuse or should shrug is a decision
+// about that tool, not a property of the code, so it has to be written down.
+//
+// This inventory is where it is written down: it counts CALLS TO THE HELPER, so
+// a credentialed tool that quietly stops making one fails here even though the
+// gate stays green.
 //
 // Keeping the numbers current is the cost, and it is deliberate — the same
 // ratchet the repo uses elsewhere. Adding a credentialed tool means adding a
 // count here, which is one line and a moment's thought about whether the new tool
 // really is a member of this family.
 //
-// ✅ aihub#448 was the first exercise of that, and it went the way the previous
-// sentence hoped: this comment used to end by predicting that unpublishing
-// pf_cut_alpha and pf_promote would take out tools_release.go's WHOLE entry and
-// that the change must DELETE the row rather than edit it. That is exactly what
-// happened — the file no longer exists, so the row is gone rather than lowered to
-// zero. A zero would have been the wrong shape: it reads as "this file mints the
-// refusal nowhere", which invites re-adding a site, where absence reads as "this
-// file is not part of the family", which is the truth.
+// ✅ aihub#448 was the first exercise of that, and it went the way this comment
+// used to hope: it predicted that unpublishing pf_cut_alpha and pf_promote would
+// take out tools_release.go's WHOLE entry and that the change must DELETE the row
+// rather than edit it. That is exactly what happened — the file no longer exists,
+// so the row is gone rather than lowered to zero. A zero would have been the
+// wrong shape: it reads as "this file mints the refusal nowhere", which invites
+// re-adding a site, where absence reads as "this file is not part of the family",
+// which is the truth.
 var stateRefusalCallSites = map[string]int{
 	"internal/coding/scenario.go":     1,
 	"internal/mcp/tools_coding.go":    2,
@@ -579,34 +619,81 @@ func TestStateRefusalCallSitesAreAccountedFor(t *testing.T) {
 	}
 }
 
-// stateRefusalExemptSites are the ResolveStateFile call sites that must NOT be
-// converted, with the reason each is a different question rather than the same
-// question worded differently.
+// stateRefusalExemption is one sanctioned answer that is not the helper, with
+// the reason it is a different question rather than the same question worded
+// differently.
+type stateRefusalExemption struct {
+	// Kind is the verdict findStateRefusalSites must return for this site.
+	// Asserting it turns the reason below from prose into something the tree is
+	// checked against: an exemption saying "swallows the error and returns
+	// early" is FALSE the moment that site starts minting a message, and the
+	// entry then reads as cover for the thing it was never meant to cover.
+	Kind   stateRefusalKind
+	Reason string
+}
+
+// stateRefusalExemptSites are the config.ResolveStateFile call sites that must
+// NOT be converted.
 //
-// There are 18 ResolveStateFile call sites in production and only 14 are members
-// of this family. Writing that down is the point: "unify the wording" is exactly
-// the kind of instruction that gets over-applied, and the fourth entry below is
-// one an over-eager unification would visibly damage.
-var stateRefusalExemptSites = map[string]string{
-	"internal/mcp/tools_coding.go worktreePathFor": "best-effort lookup; swallows the error " +
-		"and returns early rather than refusing, so there is no caller-facing message at all.",
-	"internal/mcp/tools_coding.go commit lock gate": "discloses a SIDE EFFECT — \"so nothing was " +
-		"committed\" — which the generic refusal does not and must not claim. Replacing it would " +
-		"delete the one sentence telling the caller the index was left alone.",
-	"internal/mcp/tools_lifecycle.go prior-worktree read": "best-effort; a miss is normal and the " +
-		"error is deliberately ignored.",
-	"internal/mcp/tools_lifecycle.go worktree lookup": "returns (\"\", false); a bool, not a message.",
+// There are 16 such call sites in production and 12 are members of this family.
+// Writing that down is the point: "unify the wording" is exactly the kind of
+// instruction that gets over-applied, and the second entry below is one an
+// over-eager unification would visibly damage.
+//
+// ⚠️ Those two numbers read 18 and 14 until aihub#454 measured them. aihub#448
+// (#374, 2026-09-08) deleted tools_release.go, which held exactly two
+// config.ResolveStateFile calls, and both numbers moved by two while the sentence
+// did not — the same defect as the gate above, one layer down, and it survived
+// because nothing was checking the sentence. They are now derived from the
+// detector by TestStateRefusalExemptionsStillSayWhatTheyMean rather than
+// remembered.
+//
+// The key is `<file> <enclosing func>(<argument>)`, which is what
+// stateRefusalSite.Key reports. It deliberately carries no line number: an
+// exemption keyed on a line rots on the next edit made above it, and a rotted
+// exemption fails open.
+var stateRefusalExemptSites = map[string]stateRefusalExemption{
+	"internal/mcp/tools_coding.go (*Server).emitCodingEvent(wiID)": {
+		Kind: refusalSilent,
+		Reason: "best-effort lookup; swallows the error and returns early rather than refusing, so " +
+			"there is no caller-facing message at all.",
+	},
+	"internal/mcp/tools_coding.go (*commitLockGate).run(g.wiID)": {
+		Kind: refusalHandRolled,
+		Reason: "discloses a SIDE EFFECT — \"so nothing was committed\" — which the generic refusal " +
+			"does not and must not claim. Replacing it would delete the one sentence telling the " +
+			"caller the index was left alone.",
+	},
+	"internal/mcp/tools_lifecycle.go (*Server).registerLifecycleTools(canonicalWIID)": {
+		Kind: refusalSilent,
+		Reason: "prior-worktree read: best-effort; a miss is normal and the error is deliberately " +
+			"ignored in the condition itself.",
+	},
+	"internal/mcp/tools_lifecycle.go recordedClaimSecret(wiID)": {
+		Kind:   refusalSilent,
+		Reason: "worktree lookup; returns (\"\", false) — a bool, not a message.",
+	},
 }
 
 // TestStateRefusalExemptionsStillSayWhatTheyMean is the NEGATIVE control for the
 // gate above, and the reason the exemption set is a test rather than a comment.
 //
-// The gate only counts hand-rolled refusals, so it is satisfied by converting
+// The gate only rejects hand-rolled refusals, so it is satisfied by converting
 // EVERYTHING — including the commit lock gate, whose message exists to say that
 // nothing was committed. A caller who is told only "no local credential, claim it
 // first" has lost the answer to the question they actually have at that moment,
 // which is whether their commit landed. Over-unification is the failure mode this
 // wi could plausibly produce, and the gate alone cannot see it.
+//
+// ⚠️ aihub#454: the entries are now checked against the tree instead of only
+// being read, and that found the first thing a checked exemption finds. The key
+// `internal/mcp/tools_coding.go worktreePathFor` named a function that has never
+// existed in this repo: git shows the string was introduced by aihub#428 (#373)
+// in this file and appears nowhere else, so it matched nothing on the day it was
+// written. The site it describes is (*Server).emitCodingEvent. An exemption
+// pointing at nothing is worse than no exemption — it reads as a considered
+// decision about a site nobody can find, which is the shape of a decision that
+// was never actually made.
 func TestStateRefusalExemptionsStillSayWhatTheyMean(t *testing.T) {
 	if len(stateRefusalExemptSites) != 4 {
 		t.Fatalf("the exemption set has %d entries, expected 4 — if a call site was added or "+
@@ -617,11 +704,47 @@ func TestStateRefusalExemptionsStillSayWhatTheyMean(t *testing.T) {
 	// entries carry none is just a list of things somebody decided not to touch,
 	// and the next reader cannot tell a deliberate exemption from an oversight.
 	// Asserting them keeps a future edit from emptying one to silence a failure.
-	for site, reason := range stateRefusalExemptSites {
-		if len(strings.TrimSpace(reason)) < 40 {
+	for site, ex := range stateRefusalExemptSites {
+		if len(strings.TrimSpace(ex.Reason)) < 40 {
 			t.Errorf("exemption %q carries no real reason (%q). Say why this site is a DIFFERENT "+
-				"question rather than the same one worded differently", site, reason)
+				"question rather than the same one worded differently", site, ex.Reason)
 		}
+	}
+
+	// Each exemption must name a site that EXISTS and that the detector reads
+	// the way the reason describes. Without this the four entries are four
+	// claims about the tree with nothing checking any of them, which is how the
+	// worktreePathFor key survived.
+	sites := scanStateRefusalSites(t)
+	byKey := map[string]stateRefusalSite{}
+	for _, s := range sites {
+		byKey[s.Key()] = s
+	}
+	for key, ex := range stateRefusalExemptSites {
+		got, ok := byKey[key]
+		if !ok {
+			t.Errorf("exemption %q names a call site the detector cannot find. Either the site moved "+
+				"— in which case fix the key — or it is gone and the entry should go with it", key)
+			continue
+		}
+		if got.Kind != ex.Kind {
+			t.Errorf("exemption %q is documented as %q but the tree does %q at %s:%d:\n    %s\nThe reason "+
+				"on file describes behaviour this site no longer has", key, ex.Kind, got.Kind, got.File, got.Line, got.Src)
+		}
+	}
+
+	// The two counts the comment above quotes, derived rather than remembered.
+	members := 0
+	for _, s := range sites {
+		if s.Kind == refusalViaHelper {
+			members++
+		}
+	}
+	if len(sites) != 16 || members != 12 {
+		t.Errorf("stateRefusalExemptSites' comment says 16 call sites of which 12 are members; the tree "+
+			"has %d and %d. Update the sentence in the same change — the previous pair (18 and 14) went "+
+			"stale the moment aihub#448 deleted tools_release.go's two sites, and stayed that way "+
+			"because nothing checked it", len(sites), members)
 	}
 
 	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal/mcp/tools_coding.go"))
@@ -643,5 +766,610 @@ func TestStateRefusalExemptionsStillSayWhatTheyMean(t *testing.T) {
 	// assertion above cannot be satisfied by an unrelated sentence.
 	if !strings.Contains(src, "could not read this work item's attempt") {
 		t.Error("the commit-gate disclosure no longer names the credential read it is reporting on")
+	}
+}
+
+// ─── The detector, extracted (aihub#454) ─────────────────────────────────────
+
+// stateRefusalKind is what one config.ResolveStateFile call's failure path does
+// with the error it gets back.
+type stateRefusalKind string
+
+const (
+	// refusalViaHelper routes it through config.StateFileMissingErr, the single
+	// minting point. Wrapping the helper's result still counts — the sentence
+	// the caller needs survives a %w.
+	refusalViaHelper stateRefusalKind = "helper"
+
+	// refusalSilent mints nothing caller-facing: a bare return, a zero value, a
+	// bool. These are NOT members of the family and converting one would be a
+	// regression; see stateRefusalExemptSites.
+	refusalSilent stateRefusalKind = "silent"
+
+	// refusalHandRolled builds its own refusal — a second minting point, which
+	// is the thing the gate exists to stop, whatever words it uses.
+	refusalHandRolled stateRefusalKind = "hand-rolled"
+
+	// refusalUnrecognised means the DETECTOR could not read the shape. It fails
+	// the gate rather than passing it, because a scanner's silence about code it
+	// cannot parse is indistinguishable from its silence about clean code, and
+	// treating the two the same is how the literal scan this replaced stayed
+	// green through the hole it had.
+	refusalUnrecognised stateRefusalKind = "unrecognised"
+)
+
+// stateRefusalSite is one config.ResolveStateFile call and the verdict on it.
+type stateRefusalSite struct {
+	File string
+	Line int
+	Func string // enclosing function, receiver included
+	Arg  string // the argument source, which disambiguates sites sharing a function
+	Kind stateRefusalKind
+	Src  string // the offending or classifying expression, for the failure message
+}
+
+// Key is the identity stateRefusalExemptSites is keyed on: enough to name one
+// site among several in the same function, and deliberately free of line
+// numbers, which rot on the next edit above them.
+func (s stateRefusalSite) Key() string { return s.File + " " + s.Func + "(" + s.Arg + ")" }
+
+// stateRefusalErrorMinters are the calls that manufacture a caller-facing error.
+// The list is explicit rather than heuristic because a heuristic that guessed
+// would fail open, and this gate's whole subject is a gate that failed open.
+var stateRefusalErrorMinters = map[string]bool{
+	"fmt.Errorf":        true,
+	"fmt.Sprintf":       true,
+	"errors.New":        true,
+	"errors.Join":       true,
+	"domain.NewErr":     true,
+	"echo.NewHTTPError": true,
+}
+
+// errResult is internal/mcp's universal refusal channel (server.go). A branch
+// that hands it anything other than the helper's result is minting a refusal
+// even when it writes no words of its own — `errResult(err)` ships the raw
+// os.PathError, which is a fourth voice with nobody's name on it.
+const stateRefusalChannel = "errResult"
+
+// scanStateRefusalSites runs the detector over every production file in the
+// module and returns every site it found, sorted for stable output.
+func scanStateRefusalSites(t *testing.T) []stateRefusalSite {
+	t.Helper()
+	root := moduleRoot(t)
+	var all []stateRefusalSite
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "vendor", "testdata":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		b, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if !strings.Contains(string(b), "ResolveStateFile(") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		found, detErr := findStateRefusalSites(b, filepath.ToSlash(rel))
+		if detErr != nil {
+			return detErr
+		}
+		all = append(all, found...)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].File != all[j].File {
+			return all[i].File < all[j].File
+		}
+		return all[i].Line < all[j].Line
+	})
+	return all
+}
+
+// findStateRefusalSites is THE detector — the single copy, called by the repo
+// gate above and by the fixture self-tests below.
+//
+// 🔴 It is a free function taking source bytes, for the reason
+// error_code_classification_test.go states about its own detector: a self-test
+// that re-implements the walk measures a COPY, and the copy can keep passing
+// while the detector the gate actually runs goes blind. The only way to exercise
+// the previous version of this gate was to put a violation into a real
+// production file, so its hole could not be covered by a fixture at all.
+//
+// Recognised shapes, which are all the ones the tree uses:
+//
+//	sf, err := config.ResolveStateFile(x)   // followed by an `if` on err
+//	if err != nil { ... }
+//
+//	if v, e := config.ResolveStateFile(x); e == nil && ... { ... }  // error handled inline
+//
+// Anything else is reported as refusalUnrecognised on purpose.
+func findStateRefusalSites(src []byte, name string) ([]stateRefusalSite, error) {
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, name, src, 0)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", name, err)
+	}
+
+	text := func(n ast.Node) string {
+		if n == nil {
+			return ""
+		}
+		lo, hi := fset.Position(n.Pos()).Offset, fset.Position(n.End()).Offset
+		if lo < 0 || hi > len(src) || lo > hi {
+			return ""
+		}
+		return strings.Join(strings.Fields(string(src[lo:hi])), " ")
+	}
+
+	var out []stateRefusalSite
+	seen := map[token.Pos]bool{}
+	record := func(call *ast.CallExpr, kind stateRefusalKind, why string) {
+		seen[call.Pos()] = true
+		arg := ""
+		if len(call.Args) > 0 {
+			arg = text(call.Args[0])
+		}
+		out = append(out, stateRefusalSite{
+			File: name,
+			Line: fset.Position(call.Pos()).Line,
+			Func: enclosingFuncName(parsed, call.Pos()),
+			Arg:  arg,
+			Kind: kind,
+			Src:  why,
+		})
+	}
+
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		// Shape 2 — the error is consumed by the `if` condition itself, so the
+		// failure path is whatever the else branch does, which is normally
+		// nothing at all.
+		if ifs, ok := n.(*ast.IfStmt); ok && ifs.Init != nil {
+			if call := findResolveStateFileCall(ifs.Init); call != nil {
+				kind, why := classifyStateRefusalBranch(ifs.Else, text)
+				record(call, kind, why)
+			}
+		}
+		blk, ok := n.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		for i, st := range blk.List {
+			assign, ok := st.(*ast.AssignStmt)
+			if !ok {
+				continue
+			}
+			call := findResolveStateFileCall(assign)
+			if call == nil {
+				continue
+			}
+			// Shape 1 — the error is bound, then guarded by the next statement.
+			errName := boundErrName(assign)
+			if errName == "" {
+				record(call, refusalUnrecognised,
+					text(assign)+"  ← the error is discarded at the assignment, so there is no failure path to classify")
+				continue
+			}
+			if i+1 >= len(blk.List) {
+				record(call, refusalUnrecognised, text(assign)+"  ← nothing follows the assignment")
+				continue
+			}
+			ifs, ok := blk.List[i+1].(*ast.IfStmt)
+			if !ok || !mentionsIdent(ifs.Cond, errName) {
+				record(call, refusalUnrecognised,
+					text(assign)+"  ← the next statement does not test "+errName)
+				continue
+			}
+			kind, why := classifyStateRefusalBranch(ifs.Body, text)
+			record(call, kind, why)
+		}
+		return true
+	})
+
+	// A call the walk above never reached is not a clean call — it is a shape
+	// nobody taught the detector, and it has to say so.
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !isResolveStateFileCall(call) || seen[call.Pos()] {
+			return true
+		}
+		record(call, refusalUnrecognised, text(call)+"  ← not in a recognised assign-then-guard shape")
+		return true
+	})
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Line < out[j].Line })
+	return out, nil
+}
+
+// classifyStateRefusalBranch decides which of the three legal answers a failure
+// branch gives. A nil branch (no else) is silent by construction.
+//
+// The order matters: the helper wins over everything, because a branch that
+// wraps the helper's result in fmt.Errorf is still routing through the single
+// minting point and the caller still gets the sentence.
+func classifyStateRefusalBranch(branch ast.Node, text func(ast.Node) string) (stateRefusalKind, string) {
+	if branch == nil {
+		return refusalSilent, ""
+	}
+	var (
+		helper  ast.Node
+		handmad ast.Node
+	)
+	ast.Inspect(branch, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.CallExpr:
+			switch fn := v.Fun.(type) {
+			case *ast.SelectorExpr:
+				pkg, ok := fn.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				qualified := pkg.Name + "." + fn.Sel.Name
+				if qualified == "config.StateFileMissingErr" {
+					helper = v
+					return true
+				}
+				if stateRefusalErrorMinters[qualified] && handmad == nil {
+					handmad = v
+				}
+			case *ast.Ident:
+				// The package's refusal channel. Its ARGUMENT decides: passing
+				// the helper's result is the sanctioned path, passing anything
+				// else — including a bare err — is a second voice.
+				if fn.Name == stateRefusalChannel && handmad == nil && !containsStateFileHelper(v) {
+					handmad = v
+				}
+			}
+		case *ast.BasicLit:
+			// You cannot invent a refusal voice without writing a string.
+			// `return "", false` is not one: its only literal is empty.
+			if v.Kind == token.STRING && handmad == nil {
+				if unq, err := strconv.Unquote(v.Value); err == nil && strings.TrimSpace(unq) != "" {
+					handmad = v
+				}
+			}
+		}
+		return true
+	})
+	if helper != nil {
+		return refusalViaHelper, text(helper)
+	}
+	if handmad != nil {
+		return refusalHandRolled, text(handmad)
+	}
+	return refusalSilent, ""
+}
+
+// containsStateFileHelper reports whether the helper is called anywhere inside n.
+func containsStateFileHelper(n ast.Node) bool {
+	found := false
+	ast.Inspect(n, func(x ast.Node) bool {
+		call, ok := x.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if ok && pkg.Name == "config" && sel.Sel.Name == "StateFileMissingErr" {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
+// isResolveStateFileCall reports whether call is `config.ResolveStateFile(...)`.
+func isResolveStateFileCall(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "ResolveStateFile" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "config"
+}
+
+// findResolveStateFileCall returns the config.ResolveStateFile call inside n, if any.
+func findResolveStateFileCall(n ast.Node) *ast.CallExpr {
+	var out *ast.CallExpr
+	ast.Inspect(n, func(x ast.Node) bool {
+		if call, ok := x.(*ast.CallExpr); ok && isResolveStateFileCall(call) && out == nil {
+			out = call
+		}
+		return true
+	})
+	return out
+}
+
+// boundErrName returns the identifier the assignment binds the error to, or ""
+// when the error is dropped (`_`) or the shape is not an assignment at all.
+func boundErrName(assign *ast.AssignStmt) string {
+	if len(assign.Lhs) == 0 {
+		return ""
+	}
+	last, ok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)
+	if !ok || last.Name == "_" {
+		return ""
+	}
+	return last.Name
+}
+
+// mentionsIdent reports whether expr reads the identifier called name.
+func mentionsIdent(expr ast.Expr, name string) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && id.Name == name {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
+// enclosingFuncName renders the function containing pos, receiver included, so
+// two sites in different methods of the same file never collide.
+func enclosingFuncName(f *ast.File, pos token.Pos) string {
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || pos < fd.Pos() || pos >= fd.End() {
+			continue
+		}
+		if fd.Recv == nil || len(fd.Recv.List) == 0 {
+			return fd.Name.Name
+		}
+		recv := ""
+		switch rt := fd.Recv.List[0].Type.(type) {
+		case *ast.StarExpr:
+			if id, ok := rt.X.(*ast.Ident); ok {
+				recv = "(*" + id.Name + ")"
+			}
+		case *ast.Ident:
+			recv = rt.Name
+		}
+		return recv + "." + fd.Name.Name
+	}
+	return "<file scope>"
+}
+
+// ─── Fixtures: the shapes this gate exists to reject, and the ones it must not ──
+//
+// Every fixture goes through findStateRefusalSites — the same function the repo
+// gate runs — so a classifier that goes blind fails here rather than quietly
+// widening what the tree is allowed to do.
+
+// refusalFixtureNovelVoice is the exact hole aihub#454 was filed for: a new
+// credentialed tool inventing a fourth refusal from scratch. The old literal
+// scan was blind to it because it says nothing about reading a state file.
+const refusalFixtureNovelVoice = `package mcp
+func registerThing() {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil {
+		return errResult(fmt.Errorf("could not load credentials: %w", err))
+	}
+	_ = sf
+}
+`
+
+// refusalFixtureLegacyLiteral is the reversion the old scan DID catch. It must
+// keep failing, or widening the gate would have traded one hole for another.
+const refusalFixtureLegacyLiteral = `package mcp
+func registerThing() {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil {
+		return errResult(fmt.Errorf("read state file for wi %s: %w", wiID, err))
+	}
+	_ = sf
+}
+`
+
+// refusalFixtureBareErrResult is the voice with no words in it: the raw
+// os.PathError goes straight to the caller. A vocabulary rule cannot see this
+// one at all, which is why the channel's ARGUMENT is what gets classified.
+const refusalFixtureBareErrResult = `package mcp
+func registerThing() {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil {
+		return errResult(err)
+	}
+	_ = sf
+}
+`
+
+// refusalFixtureBareMinter is aihub#454's motivating scenario in its purest
+// form, and it is the shape a fixture is needed for rather than assumed: a new
+// credentialed helper that is not an MCP tool, so it never touches errResult and
+// mints its refusal directly. Only stateRefusalErrorMinters catches this one.
+const refusalFixtureBareMinter = `package mcp
+func loadCreds(wiID string) error {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil {
+		return fmt.Errorf("could not load credentials for %s: %w", wiID, err)
+	}
+	_ = sf
+	return nil
+}
+`
+
+// refusalFixtureCustomErrorType is why the classifier also looks at string
+// literals and not only at a list of constructors. Nothing here is a listed
+// minter and nothing goes through the refusal channel, yet the caller still gets
+// a sentence somebody wrote — which is the definition of a second voice. A list
+// of constructor names can always be stepped around; writing a refusal without
+// writing a string cannot.
+const refusalFixtureCustomErrorType = `package mcp
+func loadCreds(wiID string) error {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil {
+		return &credentialError{msg: "no local credential for this work item"}
+	}
+	_ = sf
+	return nil
+}
+`
+
+// refusalFixtureHelper is the sanctioned shape.
+const refusalFixtureHelper = `package mcp
+func registerThing() {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil {
+		return errResult(config.StateFileMissingErr(wiID, err))
+	}
+	_ = sf
+}
+`
+
+// refusalFixtureWrappedHelper wraps the helper's result. The caller still gets
+// the sentence, so this is compliant — asserting otherwise would forbid adding
+// context, which is not what the invariant says.
+const refusalFixtureWrappedHelper = `package mcp
+func registerThing() {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil {
+		return errResult(fmt.Errorf("ship: %w", config.StateFileMissingErr(wiID, err)))
+	}
+	_ = sf
+}
+`
+
+// refusalFixtureSilentBool is recordedClaimSecret's shape: an empty string
+// literal and a bool, no message. It must NOT be read as a hand-rolled refusal —
+// this is the false positive that would force a wrong change.
+const refusalFixtureSilentBool = `package mcp
+func lookup() (string, bool) {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil || sf == nil {
+		return "", false
+	}
+	return sf.SessionSecret, true
+}
+`
+
+// refusalFixtureSilentReturn is emitCodingEvent's shape.
+const refusalFixtureSilentReturn = `package mcp
+func emit() {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil {
+		return
+	}
+	_ = sf
+}
+`
+
+// refusalFixtureInlineCondition is the prior-worktree read: the error is
+// consumed by the condition and the failure path is the absent else.
+const refusalFixtureInlineCondition = `package mcp
+func register() {
+	if prior, priorErr := config.ResolveStateFile(canonicalWIID); priorErr == nil && len(prior.Worktrees) > 0 {
+		sf.Worktrees = prior.Worktrees
+	}
+}
+`
+
+// refusalFixtureDroppedError is the shape that must NOT be mistaken for clean:
+// the error is thrown away at the assignment, so there is no failure path and
+// the detector has nothing to classify. Reporting "no findings" here is how a
+// scanner goes blind without anyone noticing.
+const refusalFixtureDroppedError = `package mcp
+func register() {
+	sf, _ := config.ResolveStateFile(wiID)
+	_ = sf
+}
+`
+
+// refusalFixtureUnguarded binds the error and then never tests it.
+const refusalFixtureUnguarded = `package mcp
+func register() {
+	sf, err := config.ResolveStateFile(wiID)
+	_ = sf
+	_ = err
+}
+`
+
+// TestStateRefusalDetectorFiresOnFixtures is the discriminating-power proof: the
+// gate above is a pile of negatives, and a negative that can never go positive
+// asserts nothing. Each fixture pins one verdict the detector must reach, and
+// between them they cover both directions — a novel voice must fire, and the
+// four sanctioned shapes must not.
+func TestStateRefusalDetectorFiresOnFixtures(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want stateRefusalKind
+	}{
+		{"novel fourth voice", refusalFixtureNovelVoice, refusalHandRolled},
+		{"reverted legacy literal", refusalFixtureLegacyLiteral, refusalHandRolled},
+		{"bare err to the refusal channel", refusalFixtureBareErrResult, refusalHandRolled},
+		{"minted directly, no refusal channel", refusalFixtureBareMinter, refusalHandRolled},
+		{"custom error type, no listed constructor", refusalFixtureCustomErrorType, refusalHandRolled},
+		{"the helper", refusalFixtureHelper, refusalViaHelper},
+		{"the helper, wrapped", refusalFixtureWrappedHelper, refusalViaHelper},
+		{"silent bool", refusalFixtureSilentBool, refusalSilent},
+		{"silent return", refusalFixtureSilentReturn, refusalSilent},
+		{"error consumed by the condition", refusalFixtureInlineCondition, refusalSilent},
+		{"error dropped at the assignment", refusalFixtureDroppedError, refusalUnrecognised},
+		{"error bound but never tested", refusalFixtureUnguarded, refusalUnrecognised},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sites, err := findStateRefusalSites([]byte(tc.src), "fixture.go")
+			if err != nil {
+				t.Fatalf("an unparseable fixture proves nothing: %v", err)
+			}
+			if len(sites) != 1 {
+				t.Fatalf("expected exactly 1 site, got %d: %+v — a fixture the detector cannot even "+
+					"locate says nothing about how it classifies", len(sites), sites)
+			}
+			if sites[0].Kind != tc.want {
+				t.Errorf("classified %q, want %q (offending expression: %q)", sites[0].Kind, tc.want, sites[0].Src)
+			}
+		})
+	}
+}
+
+// TestStateRefusalDetectorReadsTheRealTreeTheWayTheExemptionsClaim is the other
+// half of the discriminating-power proof, and the half a fixture cannot give.
+//
+// Fixtures show the classifier can reach every verdict on source somebody wrote
+// to be classified. This shows it reaches the DOCUMENTED verdict on the source
+// that actually ships — including the one hand-rolled site, which is the only
+// place the gate's exemption path is exercised at all. Without it, a classifier
+// that called every real site "silent" would pass the whole file.
+func TestStateRefusalDetectorReadsTheRealTreeTheWayTheExemptionsClaim(t *testing.T) {
+	sites := scanStateRefusalSites(t)
+
+	handRolled := 0
+	for _, s := range sites {
+		if s.Kind == refusalHandRolled {
+			handRolled++
+		}
+		if s.Kind == refusalUnrecognised {
+			t.Errorf("%s:%d is unrecognised — see TestStateFileRefusalHasExactlyOneMintingPoint for "+
+				"why that is a failure rather than a pass:\n    %s", s.File, s.Line, s.Src)
+		}
+	}
+	if handRolled != 1 {
+		t.Errorf("the tree has %d hand-rolled site(s), expected exactly 1 (the commit lock gate). More "+
+			"means a second voice appeared; fewer means the exemption path in the gate above is never "+
+			"taken and is therefore untested", handRolled)
 	}
 }

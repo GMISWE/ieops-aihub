@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Gate docs/ against the executable authorities it describes (aihub#352).
 
-Three checks. Each one goes RED on a real drift, and each exists because the
+Four checks. Each one goes RED on a real drift, and each exists because the
 drift it catches is otherwise SILENT — nothing in this repo turns red today when
 a doc's copy of a code fact stops matching the code.
 
@@ -35,6 +35,17 @@ a doc's copy of a code fact stops matching the code.
       count-only check cannot see, because a count is a proxy and the
       deliverable is a classification.
 
+  C4  Section 6 of docs/audits/aihub-411-design-decision-table.md agrees with
+      its own rows. That section prints 35 ruling rows and then, some 30 lines
+      further down, four hand-maintained counts over them. aihub#488 appended
+      `already-landed:aihub#419` to the T1-10 row and left the tally's
+      `already-landed` at 5; nothing went red, and a clean-context reviewer
+      caught it by recounting by hand (aihub#489). C4 is that recount.
+
+      Like C3 it asserts SET equality and not just totals, and for the same
+      reason: the tally names four tags, so a tag carried by a row the
+      paragraph never mentions is a drift no sum can see.
+
 Usage:
     python3 scripts/pf_docs_contract_check.py --schemas /tmp/pf-tool-schemas.json
     python3 scripts/pf_docs_contract_check.py --self-test
@@ -54,6 +65,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCS = os.path.join(REPO_ROOT, "docs")
 MCP_TOOLS_MD = os.path.join(DOCS, "mcp-tools.md")
 SUPERPOWERS = os.path.join(DOCS, "superpowers")
+AUDIT_411_REL = "docs/audits/aihub-411-design-decision-table.md"
+AUDIT_411_MD = os.path.join(REPO_ROOT, AUDIT_411_REL)
 
 # ─── C1 ───────────────────────────────────────────────────────────────────────
 
@@ -358,6 +371,271 @@ def check_c3_tool_inventory(doc_text: str, schema_tools: set[str]) -> list[str]:
     return errors
 
 
+# ─── C4 ───────────────────────────────────────────────────────────────────────
+
+
+class InstrumentFailure(Exception):
+    """C4 could not run, which is NOT the same as C4 finding nothing wrong.
+
+    A recount over zero rows satisfies any tally, so the instrument has to prove
+    it found what it grades before its silence can mean anything. Raised rather
+    than appended to the error list so main() can exit 2 (instrument) instead of
+    1 (docs drift): the two need different fixes, and conflating them is how a
+    gate becomes a no-op that still prints OK.
+    """
+
+
+# §6 of the aihub#411 audit prints its ruling rows and then, further down, four
+# hand-maintained counts over them. The headings bound the row block; §6.3 is the
+# first heading after the tier-2 rows, so it is the end marker rather than a
+# start marker of anything C4 reads.
+#
+# The trailing space in each marker is load-bearing: without it `### 6.1` also
+# prefix-matches a future `### 6.10`, and the block would silently bound itself
+# on the wrong heading. Requiring the space turns a renumbering into a loud
+# instrument failure instead of a quietly-wrong recount.
+AUDIT_411_SECTION_OPEN = "## 6. "
+AUDIT_411_ROWS_START = "### 6.1 "
+AUDIT_411_ROWS_END = "### 6.3 "
+
+# THE ROW DISCRIMINANT. Every §6.1/§6.2 ruling row opens with a bold row id
+# (`| **T1-1** |`), and between §6.1 and §6.3 nothing else does — the disposition
+# vocabulary table opens its rows `| `tag` |` and sits ABOVE §6.1, so the bound
+# and the prefix have to fail together before a non-row is counted.
+AUDIT_411_ROW_PREFIX = "| **"
+
+# The disposition vocabulary table, which supplies C4's recogniser. Parsed rather
+# than hardcoded to buy one thing: a fifth tag defined here and used in a row but
+# left out of the tally then goes RED, instead of being invisible to a checker
+# that only knows four names. The `N` alternative is literal — the table writes
+# `wi-filed:aihub#N` as a template, while `superseded-by:aihub#416` names its one
+# real target.
+AUDIT_411_VOCAB_ROW = re.compile(r"^\|\s*`([a-z][a-z-]*)(?::aihub#(?:N|\d+))?`\s*\|")
+
+# The tally paragraph, from its own opening sentence to the blank line that ends
+# it. It is hard-wrapped, and `superseded-by:aihub#416` is separated from its
+# **4** by a newline, so it must be read as one joined blob and not line by line.
+AUDIT_411_TALLY = re.compile(
+    r"\*\*Counts over the (\d+) rows\.\*\*(.*?)(?:\n\n|\Z)", re.S
+)
+
+# A second copy of the row count, in the same paragraph.
+AUDIT_411_UNIVERSAL = re.compile(r"\*\*All (\d+) rulings\*\*")
+
+# A THIRD projection of the same rows: DISTINCT wi numbers rather than tag
+# occurrences. It drifts differently from the tally — the two disagree by exactly
+# the five wi's that two rows each name — so it needs its own assertion, not a
+# derivation from the `wi-filed` count.
+AUDIT_411_FILED_RANGE = re.compile(
+    r"\*\*Work items filed by this adjudication:\s*`aihub#(\d+)`\s*(?:…|\.\.\.)\s*"
+    r"`aihub#(\d+)`\*\*\s*\((\d+)\)"
+)
+
+# The tag whose `:aihub#N` suffixes the range claim above summarises.
+AUDIT_411_FILED_TAG = "wi-filed"
+
+
+def audit_411_tag_patterns(vocab: list[str]) -> tuple[re.Pattern, re.Pattern]:
+    """Return (row-cell token, tally tag-plus-count) patterns for `vocab`.
+
+    Restricted to the vocabulary §6 itself defines, deliberately: a generic
+    `[a-z-]+` inside backticks also matches `dump-mcp-schemas` and `tools/list`,
+    both of which are live in T1-10's disposition cell, so a wide recogniser
+    would inflate the recount with prose and report drift that is not there.
+    Longest name first so no tag can shadow another as a prefix.
+    """
+    names = "|".join(re.escape(tag) for tag in sorted(vocab, key=len, reverse=True))
+    token = re.compile(r"`(" + names + r")(?::aihub#(\d+))?`")
+    pair = re.compile(r"`(" + names + r")(?::aihub#\d+)?`\s*\*\*(\d+)\*\*")
+    return token, pair
+
+
+def check_c4_411_tally(text: str) -> list[str]:
+    """§6's counted claims must equal a recount of §6.1+§6.2's rows.
+
+    Counts OCCURRENCES, not rows. The paragraph states its own rule verbatim —
+    "Rows carrying two tags are counted under each" — so the per-tag sum exceeds
+    the row count by design: 40 over 35 rows as of aihub#488.
+
+    A tag a row records as RETRACTED still counts. T1-10 keeps its superseded
+    `wi-filed:aihub#437` struck through beside the `already-landed:aihub#419`
+    that replaced it, and the published 25 includes it — two independent hand
+    recounts agreed on 25. Skipping `~~...~~` is the other defensible rule and it
+    would make the recount 24, i.e. it would change a published number, which is
+    an editorial call and not a lint's to make. §6 states that rule next to its
+    counting rule so the document and this function cannot drift apart, and the
+    self-test pins it so flipping it is a visible decision rather than a diff
+    nobody reads.
+    """
+    lines = text.splitlines()
+
+    def first_line_starting(prefix: str) -> int | None:
+        return next(
+            (i for i, line in enumerate(lines) if line.startswith(prefix)), None
+        )
+
+    open_idx = first_line_starting(AUDIT_411_SECTION_OPEN)
+    start_idx = first_line_starting(AUDIT_411_ROWS_START)
+    end_idx = first_line_starting(AUDIT_411_ROWS_END)
+    if None in (open_idx, start_idx, end_idx) or not open_idx < start_idx < end_idx:
+        raise InstrumentFailure(
+            f"{AUDIT_411_REL}: could not locate §6's row block. Expected lines "
+            f"starting {AUDIT_411_SECTION_OPEN!r}, {AUDIT_411_ROWS_START!r} and "
+            f"{AUDIT_411_ROWS_END!r}, in that order. If §6 was renumbered, "
+            "retarget C4 — do not let a recount pass by finding nothing."
+        )
+
+    vocab = []
+    for line in lines[open_idx:start_idx]:
+        match = AUDIT_411_VOCAB_ROW.match(line)
+        if match:
+            vocab.append(match.group(1))
+    if not vocab:
+        raise InstrumentFailure(
+            f"{AUDIT_411_REL}: §6's disposition vocabulary table yielded no "
+            "tags, so C4 has nothing to recognise and would report every tally "
+            "as matching an empty recount. Restore the table, or retarget "
+            "AUDIT_411_VOCAB_ROW at wherever the vocabulary now lives."
+        )
+
+    rows = [
+        line
+        for line in lines[start_idx:end_idx]
+        if line.startswith(AUDIT_411_ROW_PREFIX)
+    ]
+    if not rows:
+        raise InstrumentFailure(
+            f"{AUDIT_411_REL}: found no §6.1/§6.2 ruling rows (lines starting "
+            f"{AUDIT_411_ROW_PREFIX!r}) between {AUDIT_411_ROWS_START!r} and "
+            f"{AUDIT_411_ROWS_END!r}. A recount over zero rows satisfies every "
+            "tally, so this is instrument failure, not a clean result."
+        )
+
+    token, pair = audit_411_tag_patterns(vocab)
+    counted: dict[str, int] = {}
+    filed: set[int] = set()
+    for row in rows:
+        cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+        if len(cells) != 3:
+            raise InstrumentFailure(
+                f"{AUDIT_411_REL}: §6 row {cells[0]!r} has {len(cells)} cells, "
+                "not the 3 of `| row | ruling | disposition |`. C4 reads the "
+                "third cell, so it cannot recount a table it can no longer parse."
+            )
+        for match in token.finditer(cells[2]):
+            counted[match.group(1)] = counted.get(match.group(1), 0) + 1
+            if match.group(1) == AUDIT_411_FILED_TAG and match.group(2):
+                filed.add(int(match.group(2)))
+
+    tally = AUDIT_411_TALLY.search(text)
+    if tally is None:
+        raise InstrumentFailure(
+            f"{AUDIT_411_REL}: could not find the tally paragraph — the one "
+            'opening "**Counts over the N rows.**". It is the claim C4 grades; '
+            "if it was reworded, reword AUDIT_411_TALLY with it rather than "
+            "leaving a check that grades nothing."
+        )
+    declared_rows = int(tally.group(1))
+    paragraph = " ".join(tally.group(2).split())
+
+    declared: dict[str, int] = {}
+    for match in pair.finditer(paragraph):
+        tag, number = match.group(1), int(match.group(2))
+        if tag in declared:
+            raise InstrumentFailure(
+                f"{AUDIT_411_REL}: the tally paragraph gives `{tag}` a count "
+                f"twice ({declared[tag]} and {number}). Which one is the claim "
+                "is then undecidable; state it once."
+            )
+        declared[tag] = number
+    if not declared:
+        raise InstrumentFailure(
+            f"{AUDIT_411_REL}: the tally paragraph names no `tag` **N** pair, "
+            "so there is no claim to grade. Restore the counts, or retire C4 "
+            "with them — an absent check reports green."
+        )
+
+    errors: list[str] = []
+
+    if declared_rows != len(rows):
+        errors.append(
+            f'{AUDIT_411_REL}: the tally says "Counts over the {declared_rows} '
+            f'rows" but §6.1+§6.2 hold {len(rows)}. They are one fact: fix the '
+            "number, or the rows."
+        )
+
+    universal = AUDIT_411_UNIVERSAL.search(paragraph)
+    if universal is None:
+        raise InstrumentFailure(
+            f'{AUDIT_411_REL}: the tally paragraph no longer claims "**All N '
+            'rulings**" are written back as memory. That is a second copy of '
+            "the row count and C4 grades it; restore the sentence, or drop the "
+            "assertion here deliberately."
+        )
+    if int(universal.group(1)) != len(rows):
+        errors.append(
+            f"{AUDIT_411_REL}: the tally claims **All {universal.group(1)} "
+            f"rulings** are written back as memory, but §6.1+§6.2 hold "
+            f"{len(rows)} rows. The write-back is universal, so the two numbers "
+            "are the same fact."
+        )
+
+    for tag in sorted(set(declared) | set(counted)):
+        if tag not in declared:
+            errors.append(
+                f"{AUDIT_411_REL}: §6's rows carry `{tag}` {counted[tag]} "
+                "time(s), but the tally paragraph never names it. A tag missing "
+                "from the tally is invisible to a total that still adds up."
+            )
+        elif tag not in counted:
+            errors.append(
+                f"{AUDIT_411_REL}: the tally claims `{tag}` **{declared[tag]}**, "
+                "but no §6 row carries that tag. Drop it from the tally, or "
+                "restore the row that used it."
+            )
+        elif declared[tag] != counted[tag]:
+            errors.append(
+                f"{AUDIT_411_REL}: the tally claims `{tag}` **{declared[tag]}**, "
+                f"but §6's rows carry it {counted[tag]} time(s). This counts "
+                "OCCURRENCES, per the paragraph's own rule that a row carrying "
+                "two tags is counted under each — so do not reconcile it by "
+                "counting rows."
+            )
+
+    filed_range = AUDIT_411_FILED_RANGE.search(text)
+    if filed_range is None:
+        raise InstrumentFailure(
+            f"{AUDIT_411_REL}: could not find the \"Work items filed by this "
+            'adjudication: `aihub#A` … `aihub#B`** (N)" claim. C4 grades it as a '
+            "third projection of the same rows; restore it, or drop the "
+            "assertion here deliberately."
+        )
+    low, high, total = (int(group) for group in filed_range.groups())
+    if not filed:
+        raise InstrumentFailure(
+            f"{AUDIT_411_REL}: no `{AUDIT_411_FILED_TAG}:aihub#N` token was "
+            "found in any §6 row, so the filed-wi range would be graded against "
+            "an empty set. Either the tag was renamed — retarget "
+            "AUDIT_411_FILED_TAG — or the row parse is broken."
+        )
+    if len(filed) != total:
+        errors.append(
+            f"{AUDIT_411_REL}: the tally claims ({total}) work items filed, but "
+            f"§6's rows name {len(filed)} distinct "
+            f"`{AUDIT_411_FILED_TAG}:aihub#N` targets. This is DISTINCT wi's, "
+            f"not occurrences — several wi's are named by two rows, which is "
+            "why it does not equal the tag count above."
+        )
+    if (min(filed), max(filed)) != (low, high):
+        errors.append(
+            f"{AUDIT_411_REL}: the tally claims the filed range `aihub#{low}` … "
+            f"`aihub#{high}`, but §6's rows span `aihub#{min(filed)}` … "
+            f"`aihub#{max(filed)}`."
+        )
+
+    return errors
+
+
 # ─── self-test ────────────────────────────────────────────────────────────────
 
 
@@ -408,6 +686,171 @@ def self_test() -> int:
         "C3 header total wrong",
         check_c3_tool_inventory(good.replace("**3 `pf_*`", "**4 `pf_*`"), schema),
         True,
+    )
+
+    # C4. A synthetic §6 with the same shapes the real one has: a two-tag row, a
+    # row whose disposition was retracted and struck through, a hard-wrapped
+    # tally with one tag/count pair split across the line break, and a
+    # vocabulary entry no row uses.
+    c4_doc = "\n".join(
+        [
+            "## 6. Adjudication",
+            "",
+            "| tag | meaning |",
+            "|---|---|",
+            "| `rule-recorded` | a policy statement |",
+            "| `wi-filed:aihub#N` | a behaviour change |",
+            "| `superseded-by:aihub#416` | dissolved, not answered |",
+            "| `already-landed:aihub#N` | executed before adjudication |",
+            "",
+            "### 6.1 Tier 1",
+            "",
+            "| row | ruling | disposition |",
+            "|---|---|---|",
+            "| **T1-1** | r | `wi-filed:aihub#431` |",
+            "| **T1-2** | r | `already-landed:aihub#432` · `rule-recorded` |",
+            "",
+            "### 6.2 Tier 2",
+            "",
+            "| row | ruling | disposition |",
+            "|---|---|---|",
+            "| **T2-1** | r | ~~`wi-filed:aihub#433`~~ → "
+            "**`already-landed:aihub#434`** |",
+            "",
+            "**Counts over the 3 rows.** `wi-filed` **2** · `already-landed`",
+            "**2** · `rule-recorded` **1**. Rows carrying two tags are counted under",
+            "each, and a tag a row records as retracted still counts where the row",
+            "keeps it. **All 3 rulings** are written back as memory.",
+            "",
+            "**Work items filed by this adjudication: `aihub#431` … `aihub#433`** (2).",
+            "",
+            "### 6.3 Memory write-back index",
+            "",
+        ]
+    )
+
+    def c4(label, doc, should_fire):
+        expect(label, check_c4_411_tally(doc), should_fire)
+
+    def c4_instrument(label, doc):
+        try:
+            check_c4_411_tally(doc)
+        except InstrumentFailure:
+            return
+        failures.append(
+            f"{label}: expected InstrumentFailure, got a completed run. A check "
+            "that cannot find §6 must fail loudly, not report clean."
+        )
+
+    c4("C4 clean", c4_doc, False)
+    # An unused vocabulary entry is not drift: `superseded-by` is defined in the
+    # fixture's vocabulary, carried by no row, and absent from the tally — and
+    # the clean case above passes anyway. Checked with an `if`, not an `assert`:
+    # `assert` is stripped under `python3 -O` and would void this silently.
+    if "| `superseded-by:aihub#416` |" not in c4_doc:
+        failures.append(
+            "C4 fixture no longer defines an UNUSED vocabulary tag, so the "
+            "clean case above stopped proving that one is not reported."
+        )
+
+    # THE aihub#488 DRIFT ITSELF, both directions: the number moves, or the row
+    # does. Either one alone must go red.
+    c4(
+        "C4 tally count edited away from the rows",
+        c4_doc.replace("\n**2** ·", "\n**3** ·"),
+        True,
+    )
+    c4(
+        "C4 a row's tag changed under a fixed tally",
+        c4_doc.replace("| `wi-filed:aihub#431` |", "| `rule-recorded` |"),
+        True,
+    )
+    c4(
+        "C4 a row loses its second tag",
+        c4_doc.replace("`already-landed:aihub#432` · `rule-recorded`",
+                       "`already-landed:aihub#432`"),
+        True,
+    )
+    c4(
+        "C4 a row gains a tag the tally never names",
+        c4_doc.replace("| `wi-filed:aihub#431` |",
+                       "| `wi-filed:aihub#431` · `superseded-by:aihub#416` |"),
+        True,
+    )
+    c4("C4 a row is deleted", c4_doc.replace(
+        "| **T1-2** | r | `already-landed:aihub#432` · `rule-recorded` |\n", ""), True)
+    # The retracted-tag rule, pinned. Un-striking T2-1's superseded disposition
+    # leaves the same two tokens, so this fires only because the struck one is
+    # COUNTED — flipping that rule has to be a visible decision, not a drift.
+    c4(
+        "C4 a struck-through tag still counts",
+        c4_doc.replace("~~`wi-filed:aihub#433`~~ → ", ""),
+        True,
+    )
+    c4(
+        "C4 the universal write-back count drifts",
+        c4_doc.replace("**All 3 rulings**", "**All 4 rulings**"),
+        True,
+    )
+    c4(
+        "C4 the filed-wi total drifts",
+        c4_doc.replace("`aihub#433`** (2)", "`aihub#433`** (3)"),
+        True,
+    )
+    c4(
+        "C4 the filed-wi range endpoint drifts",
+        c4_doc.replace("`aihub#431` …", "`aihub#430` …"),
+        True,
+    )
+
+    # Anti-vacuity. Every one of these would let a recount "pass" against
+    # nothing, which is the failure mode the paragraph C1's header warns about.
+    c4_instrument(
+        "C4 fails loudly when §6's row block cannot be located",
+        c4_doc.replace("### 6.1 Tier 1", "### 6.11 Tier 1"),
+    )
+    c4_instrument(
+        "C4 fails loudly when the row block is empty",
+        re.sub(r"^\| \*\*.*\n", "", c4_doc, flags=re.M),
+    )
+    c4_instrument(
+        "C4 fails loudly when the vocabulary table is gone",
+        c4_doc.replace("| `rule-recorded` | a policy statement |\n", "")
+        .replace("| `wi-filed:aihub#N` | a behaviour change |\n", "")
+        .replace("| `superseded-by:aihub#416` | dissolved, not answered |\n", "")
+        .replace("| `already-landed:aihub#N` | executed before adjudication |\n", ""),
+    )
+    c4_instrument(
+        "C4 fails loudly when the tally paragraph is reworded away",
+        c4_doc.replace("**Counts over the 3 rows.**", "**Tally.**"),
+    )
+    c4_instrument(
+        "C4 fails loudly when the tally states no tag/count pair",
+        c4_doc.replace("`wi-filed` **2** · `already-landed`\n**2** · "
+                       "`rule-recorded` **1**.", "as above."),
+    )
+    c4_instrument(
+        "C4 fails loudly when a row's cell count changes",
+        c4_doc.replace("| **T2-1** | r |", "| **T2-1** |"),
+    )
+    c4_instrument(
+        "C4 fails loudly when the tally counts one tag twice",
+        c4_doc.replace("`wi-filed` **2** ·", "`wi-filed` **2** · `wi-filed` **9** ·"),
+    )
+    c4_instrument(
+        "C4 fails loudly when the universal write-back claim is deleted",
+        c4_doc.replace("**All 3 rulings** are written back as memory.", ""),
+    )
+    c4_instrument(
+        "C4 fails loudly when the filed-wi claim is deleted",
+        c4_doc.replace(
+            "**Work items filed by this adjudication: `aihub#431` … "
+            "`aihub#433`** (2).\n", ""),
+    )
+    c4_instrument(
+        "C4 fails loudly when no row carries the filed tag it summarises",
+        c4_doc.replace("`wi-filed:aihub#431`", "`rule-recorded`")
+        .replace("~~`wi-filed:aihub#433`~~", "~~`rule-recorded`~~"),
     )
 
     # C1 and C2 are driven through the real check functions against a temporary
@@ -546,6 +989,25 @@ def self_test() -> int:
         check_citation_form_is_documented(),
         False,
     )
+    if not os.path.exists(AUDIT_411_MD):
+        failures.append(
+            f"{AUDIT_411_REL} is missing, so C4 has nothing to grade. Retarget "
+            "C4 or retire it; do not leave it pointing at a deleted file."
+        )
+    else:
+        with open(AUDIT_411_MD, encoding="utf-8") as fh:
+            audit_411_text = fh.read()
+        try:
+            expect(
+                "C4 passes on this repo's aihub#411 table",
+                check_c4_411_tally(audit_411_text),
+                False,
+            )
+        except InstrumentFailure as exc:
+            # Reported, not propagated: an uncaught raise here would exit with a
+            # traceback and Python's own code, hiding a real finding behind a
+            # crash. The main run reports the same condition as exit 2.
+            failures.append(f"C4 cannot read this repo's aihub#411 table: {exc}")
 
     if failures:
         for failure in failures:
@@ -619,6 +1081,14 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if not os.path.exists(AUDIT_411_MD):
+        print(
+            f"error: {AUDIT_411_MD} is missing, so C4 has no tally to recount. "
+            "If §6 moved, retarget C4; if the document was retired, remove C4 "
+            "with it rather than letting the check disappear silently.",
+            file=sys.stderr,
+        )
+        return 2
     # Instrument integrity, not a docs error: C1's messages route authors to a
     # README section, so a dangling pointer stops the run rather than shipping
     # advice nobody can follow.
@@ -626,6 +1096,18 @@ def main() -> int:
     if form_doc_errors:
         for error in form_doc_errors:
             print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    # Same distinction one step further: C4's PARSE is instrument-level, so a
+    # §6 it cannot read stops the run here rather than reporting a recount it
+    # never performed. Done before any error accumulates so the exit code is
+    # unambiguous — 2 means "the gate did not run", never "the gate ran clean".
+    with open(AUDIT_411_MD, encoding="utf-8") as fh:
+        audit_411_text = fh.read()
+    try:
+        c4_errors = check_c4_411_tally(audit_411_text)
+    except InstrumentFailure as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
     c2_files = superpowers_files + [MCP_TOOLS_MD]
@@ -638,6 +1120,7 @@ def main() -> int:
     # It deliberately does NOT cover docs/design/polyforge-v1-design.md, which
     # is a design document and legitimately names files that do not exist yet.
     errors += check_c2_referenced_go_files_exist(c2_files)
+    errors += c4_errors
 
     with open(args.schemas, encoding="utf-8") as fh:
         schema_tools = set(json.load(fh)["tools"])
@@ -652,7 +1135,8 @@ def main() -> int:
 
     print(
         f"OK: docs/ line-number citations closed; superpowers Go references "
-        f"resolve; mcp-tools.md matches all {len(schema_tools)} registered tools."
+        f"resolve; mcp-tools.md matches all {len(schema_tools)} registered "
+        f"tools; the aihub#411 §6 tally matches a recount of its rows."
     )
     return 0
 

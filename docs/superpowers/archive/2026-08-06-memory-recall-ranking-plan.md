@@ -74,10 +74,10 @@ concept: "reference time\n(defined ONCE)" {
 }
 
 sites: "four sites that must agree" {
-  s1: "ORDER BY  :1238\nwas NULLS LAST -> tiers"
-  s2: "min_strength WHERE  :1185\nwas COALESCE"
-  s3: "lexical 2nd sort  :1226\nwas COALESCE"
-  s4: "MemoryStrength  :243\nwas if-nil fallback"
+  s1: "ORDER BY in Recall\nwas NULLS LAST -> tiers"
+  s2: "min_strength WHERE in Recall\nwas COALESCE"
+  s3: "lexical 2nd sort in Recall\nwas COALESCE"
+  s4: "MemoryStrength\nwas if-nil fallback"
 }
 
 writes: "write paths" {

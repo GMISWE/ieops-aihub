@@ -1100,6 +1100,24 @@ func handleCreateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 			req.Role = "writer"
 		}
 
+		// aihub#463. Both columns carry a CHECK in 0001_initial.sql and neither
+		// was checked here, so an out-of-vocabulary value reached the INSERT and
+		// came back as `500 INTERNAL_ERROR "failed to create user"` — the message
+		// below discards the pgx error, so not even the SQLSTATE survived. A 500
+		// tells the caller to retry what can never succeed and carries none of
+		// the values to retry with.
+		//
+		// Placed AFTER the defaults, because "" means "unspecified" and both are
+		// optional; and BEFORE the machine-email branch, because an illegal
+		// user_type falls through it and would otherwise be reported as the
+		// unrelated "email is required for human users".
+		if aihubErr := domain.ValidateUserType(req.UserType); aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		if aihubErr := domain.ValidateUserGlobalRole(req.Role); aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+
 		// Machine users get auto-generated email
 		email := req.Email
 		if req.UserType == "machine" {

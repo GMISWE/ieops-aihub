@@ -650,7 +650,6 @@ type RecallRequest struct {
 	SimilarityThreshold float64  `json:"similarity_threshold,omitempty"`
 	MinStrength         float64  `json:"min_strength"`
 	IncludeArchived     bool     `json:"include_archived,omitempty"`
-	RecencyWeight       float64  `json:"recency_weight"`
 	RecallAlgo          string   `json:"recall_algo,omitempty"`
 	Cursor              string   `json:"cursor,omitempty"`
 	CallerUserID        string   `json:"-"`
@@ -931,8 +930,22 @@ func resolveRememberWorkItemRef(ctx context.Context, q Querier, ref, project str
 // handleReinforceMemory's clamp (internal/server/routes_memory.go), and the
 // published descriptions in internal/mcp/tools_memory.go, whose agreement with
 // these two constants is asserted by a test rather than assumed. Those three
-// are the whole set: the only statements that WRITE the column are Remember's
-// INSERT below and handleReinforceMemory's UPDATE.
+// are the whole set that states the RANGE, and the only statements that WRITE
+// the column are Remember's INSERT below and handleReinforceMemory's UPDATE.
+//
+// 🔴 aihub#475: "states the range" is not "decides the value", and this comment
+// used to elide the difference. A fourth thing decides the value, and it is the
+// only one that CHANGES it — the column is SMALLINT, so pgx encodes a float64
+// through its int2 codec, which TRUNCATES TOWARD ZERO and returns no error
+// (measured at the pinned version, both wire formats: 3.5→3, 4.999→4, 0.9→0,
+// -0.5→0; TestBaseStrengthIsTruncatedByThePgxInt2Codec pins it). It runs
+// client-side, so Postgres never sees the fraction and there is no server-side
+// rounding rule to appeal to. These constants therefore bound what may be
+// stored; they do not make an in-range value storable AS STATED. Both write
+// paths read the stored value back with RETURNING, which is what keeps their
+// responses from naming a value the column does not hold. What SHOULD happen to
+// a non-integral in-range value — refuse it, round it, or widen the column — is
+// aihub#459's, and is open.
 //
 // DefaultBaseStrength is what an omitted base_strength becomes, and it is the
 // column's own DEFAULT for the same reason: the value a caller gets by saying
@@ -954,6 +967,18 @@ const (
 // clamping would answer 200 while storing something the caller did not ask for.
 // The two agree on the range, which is what MinBaseStrength/MaxBaseStrength
 // are for; they differ on the remedy because the inputs differ.
+//
+// 🔴 aihub#475 — the reject-over-clamp argument in the paragraph above is sound
+// but this guard does not deliver all of it, and pretending otherwise is how
+// the gap stays invisible. A value INSIDE the range but not integral (4.5, say)
+// is admitted here and then truncated toward zero by pgx's int2 codec, so the
+// call answers 200 having stored something the caller did not ask for — the
+// exact outcome the paragraph rejects. What stops it becoming a silent lie is
+// Remember's `RETURNING ... base_strength`: the response reports 4, not 4.5.
+// That is honesty, not enforcement. Making 4.5 an error, rounding it, or making
+// it storable are the three options aihub#459 owns; this guard admits exactly
+// what it always admitted until that is decided, because narrowing it here
+// would be taking that decision by the back door.
 //
 // 400, not 500 (aihub#411 T1-6): a value the server can see is wrong is the
 // caller's error, and answering 500 sends the reader to a server log that does
@@ -2265,11 +2290,12 @@ func recallHybrid(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, v
 // to topK.
 //
 // Interleaving rather than concatenating is the point: the two halves are ranked by
-// incomparable keys (the vector half by 0.7*cosine + 0.3*tanh(strength), the text half by
-// reference time), so there is no honest way to sort them into one list — and any scheme
-// that appends one after the other reintroduces the aihub#270 starvation as soon as the
-// first half alone fills topK. Round-robin guarantees each half gets its share of the
-// budget while preserving the internal order of both.
+// incomparable keys (the vector half by cosine bucketed to 0.01, with effective strength
+// deciding only within a bucket; the text half by reference time, or by lexical rank when
+// recall_algo=lexical), so there is no honest way to sort them into one list — and any
+// scheme that appends one after the other reintroduces the aihub#270 starvation as soon
+// as the first half alone fills topK. Round-robin guarantees each half gets its share of
+// the budget while preserving the internal order of both.
 func mergeRecallHalves(vec, txt *RecallResponse, topK int) *RecallResponse {
 	merged := make([]MemoryWithStrength, 0, topK)
 	seen := make(map[string]bool, topK)
@@ -2326,12 +2352,6 @@ func mergeRecallHalves(vec, txt *RecallResponse, topK int) *RecallResponse {
 // summed Total both rely on is a property of the query rather than of a subtle argument
 // about the partition — and stays true if that partition is ever reworked.
 func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, nonEmbeddableOnly bool) (*RecallResponse, error) {
-	// NOTE: RecencyWeight is currently a reserved-but-unused knob. The text/tag
-	// recall path orders by memRefTimeSQL (see ORDER BY below) and does not blend
-	// a separate recency score. The default is intentionally not set here so the
-	// field stays an explicit no-op rather than a misleading "applied" value;
-	// implementing recency blending is tracked separately.
-
 	args := []any{req.Project}
 	idx := 2
 

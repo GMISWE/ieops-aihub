@@ -186,6 +186,11 @@ is why `buildListWorkItemsParams` is a named function with a by-value test over 
 - `ids` bounds the query to projects the caller can see. An inaccessible `project=`
   answers 404 while ids the caller cannot see are silently omitted, and **neither
   says whether the thing exists**.
+- `cursor` is refused with a 400 when it is not a token this endpoint issued
+  (`aihub#382`, moved onto the shared reader by `aihub#435`), and when it is, the
+  caller's own string is forwarded — trimmed, never re-serialised. The
+  `::timestamptz` cast belongs to the domain, and re-printing a parsed timestamp
+  here would be a second conversion upstream of the one that counts.
 
 ## hop 5 — what comes back
 
@@ -206,6 +211,9 @@ to read a work item with `pf_get_work_item` instead.
   proved on.
 - **§6.1 T1-2 / T1-12** — `limit` is the reference implementation of both numeric
   rules: 400 on unparseable, clamp-and-disclose on out of range.
+- **§6.1 T1-6 — LANDED.** This endpoint got there first (`aihub#382`); `aihub#435`
+  moved the check into `internal/server/queryparam.go` (`queryCursor`) and gave
+  `pf_recall` and `pf_read_events`, which had none, the same one.
 - **§6.1 T1-10** — the resident schema budget is a property of the whole
   `tools/list` payload; this tool carries the only per-tool ceiling that existed
   before that ruling, and the ruling is to derive per-tool ceilings from a payload

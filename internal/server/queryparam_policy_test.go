@@ -143,6 +143,30 @@ func TestPolicyRule1_MalformedParamsAreRejectedEverywhere(t *testing.T) {
 		// i.e. the whole unfiltered stream, for a caller who asked to narrow it.
 		{"events types names nothing", listEventsRequest, "project=p_qp_policy&types=,", "types"},
 		{"recall type names nothing", recallRequestNilPool, "project=p_qp_policy&type=,", "type"},
+
+		// ── `cursor`, all three surfaces (aihub#435) ────────────────────────
+		//
+		// 🔴 This param is why the table is worth keeping rather than three
+		// per-endpoint files. aihub#382 fixed /v1/work_items ALONE (2af4585), and
+		// the wi that followed named a single read point — while the identically
+		// named param on the other two endpoints still went raw into
+		// `$n::timestamptz` and answered 500 with the driver's text. A row per
+		// surface is what makes "fixed one of three" fail here instead of
+		// reading as done.
+		//
+		// It is also the param the Rule-1 AST gate structurally cannot reach: a
+		// cursor is never converted or compared, only handed to pgx, so
+		// queryparam_gate_test.go has nothing to follow. These rows and the
+		// census arm in cursor_validation_test.go are its substitute.
+		{"work_items cursor not a timestamp", listWIRec, "project=testproject&cursor=undefined", "undefined"},
+		{"recall cursor not a timestamp", recallRequestNilPool, "project=p_qp_policy&cursor=undefined", "undefined"},
+		{"events cursor not a timestamp", listEventsRequest, "project=p_qp_policy&cursor=undefined", "undefined"},
+		// Recall's cursor is `<RFC3339Nano>|<id>`, so the check has to look at
+		// the timestamp half. A row whose id half is fine and whose timestamp
+		// half is not proves the split happens — a validator that only tested
+		// the whole string would let this through.
+		{"recall cursor timestamp half garbage", recallRequestNilPool,
+			"project=p_qp_policy&cursor=" + urlEnc("nope|mem_abc123"), "nope|mem_abc123"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := tc.run(t, tc.query)
@@ -182,6 +206,16 @@ func TestPolicyRule1_LegalValuesStillWork(t *testing.T) {
 		{"limit legal", "project=testproject&limit=17", func(t *testing.T, f domain.ListWorkItemsFilter) {
 			require.Equal(t, 17, f.Limit)
 		}},
+		// The neighbour of the three cursor rejections above. Without it,
+		// "refuse every cursor" satisfies all four of them — and refusing every
+		// cursor breaks the second page of every list in the product, which is a
+		// worse outcome than the 500 being fixed.
+		{"cursor legal", "project=testproject&cursor=2026-01-02T03:04:05.123456789Z",
+			func(t *testing.T, f domain.ListWorkItemsFilter) {
+				require.NotNil(t, f.Cursor, "a well-formed cursor must reach the domain")
+				require.Equal(t, "2026-01-02T03:04:05.123456789Z", *f.Cursor,
+					"and reach it unchanged — the ::timestamptz cast is the domain's")
+			}},
 		// Forwarded rather than corrected here, so the bound and its disclosure
 		// stay in one place. The pre-fix handler turned this into 50 before the
 		// domain ever saw it, which is why `limit=-5` was reported as no

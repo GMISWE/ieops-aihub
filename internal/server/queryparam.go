@@ -234,6 +234,59 @@ func queryRFC3339(c echo.Context, name string) (value time.Time, present bool, a
 	return ts, true, nil
 }
 
+// queryCursor reads a pagination cursor — a page token this server MINTED.
+//
+// Rule 1, reached by a different road from the rest of this file. Every other
+// reader here refuses a value it cannot CONVERT; a cursor is never converted at
+// all. It is handed to pgx as a string and cast by Postgres at `$n::timestamptz`,
+// which is why the failure used to arrive as a 500 carrying the driver's text —
+// `invalid input syntax for type timestamp with time zone: "..."` — for a typo
+// only the caller could fix (aihub#435, §6.1 T1-6 of the aihub#411 adjudication).
+// That answer sends the reader to the server logs, which is the one place the
+// fix is not.
+//
+// The value is returned TRIMMED AND OTHERWISE UNCHANGED — parsed to decide
+// whether to refuse it, never re-serialised. The cast is the domain's, and
+// re-formatting here would be a second conversion upstream of the one that
+// counts, the class of defect the `limit` clamp in handleListWorkItems was
+// (aihub#309). For Recall it would be worse than a class defect: reprinting the
+// parsed timestamp drops the `|<id>` half outright.
+//
+// Trimming matches queryRFC3339 and queryBool above rather than being a private
+// rule for this reader, and it only widens what is accepted: an untrimmed token
+// would have failed the cast anyway. Its one visible consequence is that
+// `?cursor=%20` reads as no cursor, i.e. page one, where it used to be a 500.
+//
+// timestampPart extracts the sort-position component from a COMPOSITE token;
+// pass nil where the whole token is the timestamp. Recall's cursor is
+// `<RFC3339Nano>|<id>` (domain.RecallCursorTimestamp), because its ORDER BY has
+// a second key; /v1/work_items and /v1/events carry the bare timestamp. Getting
+// that distinction wrong in the strict direction is worse than the bug being
+// fixed: it 400s every cursor Recall has ever issued.
+//
+// 🔴 An EMPTY value is "no cursor", not a malformed one. `?cursor=` is how a
+// client spells the first page when its paging variable is unset, and rejecting
+// it would break reads that work today.
+func queryCursor(c echo.Context, name string, timestampPart func(string) string) (value string, present bool, aerr *domain.AihubError) {
+	raw := strings.TrimSpace(c.QueryParam(name))
+	if raw == "" {
+		return "", false, nil
+	}
+	ts := raw
+	if timestampPart != nil {
+		ts = timestampPart(raw)
+	}
+	if _, err := time.Parse(time.RFC3339, ts); err != nil {
+		msg := fmt.Sprintf("%s must be a page token from a previous response's next_cursor, "+
+			"whose leading component is an RFC3339 timestamp; got %q", name, raw)
+		if ts != raw {
+			msg += fmt.Sprintf(" (its timestamp component %q does not parse)", ts)
+		}
+		return "", false, domain.NewErr(domain.ErrBadRequest, msg)
+	}
+	return raw, true, nil
+}
+
 // queryCSV splits a comma-separated query param, trimming each entry and
 // dropping empties.
 //

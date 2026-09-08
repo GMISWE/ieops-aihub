@@ -331,10 +331,28 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
+		// 🔴 The cursor is VALIDATED, and validated on its timestamp half only.
+		//
+		// It used to be taken raw. domain.Recall casts it at `$n::timestamptz`,
+		// so `?cursor=undefined` came back 500 with the driver's text — a caller
+		// error reported as a server fault, which sends the reader to the logs
+		// rather than to their own client (aihub#435, aihub#411 §6.1 T1-6).
+		//
+		// Recall's cursor is COMPOSITE — `<RFC3339Nano>|<id>`, the id being the
+		// `id DESC` tiebreaker aihub#239 added — so the whole token is not a
+		// timestamp and must not be checked as one. domain.RecallCursorTimestamp
+		// is the same split the query builder uses; the id half stays opaque
+		// here, because this file does not own the id format and a second copy of
+		// it would start rejecting cursors the server still issues.
+		cursor, _, cursorErr := queryCursor(c, "cursor", domain.RecallCursorTimestamp)
+		if cursorErr != nil {
+			return writeError(c, cursorErr)
+		}
+
 		req := &domain.RecallRequest{
 			Project:      project,
 			Query:        c.QueryParam("query"),
-			Cursor:       c.QueryParam("cursor"),
+			Cursor:       cursor,
 			CallerUserID: u.UserID,
 			CallerRole:   u.Role,
 		}
@@ -481,7 +499,12 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 		// forced `TopK<=0 -> 5` default in 12934c5f was the right call and still
 		// holds — TopK still reaches Recall untouched at 0. What that contract never
 		// licensed was shrinking a page a caller asked for and spelled correctly.
-		resp, aihubErr := domain.Recall(ctx, pool, req)
+		// Through the package-level seam, not domain.Recall directly, so the
+		// cursor-rejection arms of cursor_validation_test.go can assert that a
+		// malformed cursor never reaches the query — with a nil pool the direct
+		// call panics instead of failing, which is a red the reader has to decode.
+		// Same seam the /ui handlers already use (ui_handlers_wi.go).
+		resp, aihubErr := recallFn(ctx, pool, req)
 		if aihubErr != nil {
 			return domainErr(c, aihubErr)
 		}
@@ -879,7 +902,20 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 			formatted := sinceTS.Format(time.RFC3339Nano)
 			f.Since = &formatted
 		}
-		if cursor := c.QueryParam("cursor"); cursor != "" {
+		// Validated for the same reason `since` two lines up is, and by the same
+		// reader every other list endpoint uses (aihub#435). This one's cursor IS
+		// the timestamp — ListEvents mints it as CreatedAt.Format(RFC3339Nano)
+		// and compares `e.created_at < $n::timestamptz` — so there is no
+		// composite half to split off, unlike Recall's.
+		//
+		// Forwarded as the caller's own string, not the parsed value: the cast is
+		// the domain's, and `since` above formats only because it stores a
+		// time.Time.
+		cursor, cursorPresent, cursorErr := queryCursor(c, "cursor", nil)
+		if cursorErr != nil {
+			return writeError(c, cursorErr)
+		}
+		if cursorPresent {
 			f.Cursor = &cursor
 		}
 		// ⚠️ Rule 1 only. Unlike the other three list endpoints, /v1/events has NO
@@ -913,7 +949,8 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 		f.PinnedFirst = pinnedFirst
 
-		resp, aihubErr := domain.ListEvents(ctx, pool, f)
+		// Seam, for the reason spelled out on the recallFn call above.
+		resp, aihubErr := listEventsFn(ctx, pool, f)
 		if aihubErr != nil {
 			return domainErr(c, aihubErr)
 		}

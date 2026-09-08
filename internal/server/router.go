@@ -493,12 +493,17 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		// a 500. It does NOT replace the domain check — an execution failure that
 		// has nothing to do with the cursor still has to surface, and only
 		// rows.Err() sees those (list_work_items_rows_err_db_test.go).
-		_, cursorPresent, cursorErr := queryRFC3339(c, "cursor")
+		//
+		// aihub#435 moved the check itself into queryCursor. Nothing about THIS
+		// endpoint changed; what changed is that /v1/memories and /v1/events —
+		// which had no check at all and answered 500 — now read the same
+		// parameter through the same reader. Two readings of one parameter name
+		// is how the next variant gets in.
+		cursor, cursorPresent, cursorErr := queryCursor(c, "cursor", nil)
 		if cursorErr != nil {
 			return writeError(c, cursorErr)
 		}
 		if cursorPresent {
-			cursor := c.QueryParam("cursor")
 			filter.Cursor = &cursor
 		}
 		// aihub#273: semantic search. Similarity ordering has no stable

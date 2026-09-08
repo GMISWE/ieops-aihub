@@ -437,8 +437,14 @@ func TestLenientQueryReadersAreUIOnly(t *testing.T) {
 //     the exemptions written first, and this one must not be blocked on them.
 //
 //   - `cursor`, the third escape in the same audit row. It never reaches a
-//     conversion at all, so no scope of THIS shape can see it; that half is
-//     filed as aihub#411's T1-6 wi and is deliberately untouched here.
+//     conversion at all — the value is handed to pgx and cast by Postgres at
+//     `$n::timestamptz` — so no scope of THIS shape has anything to follow.
+//     That half LANDED as aihub#435, and deliberately not by widening this
+//     gate, which still cannot see it. cursor_validation_test.go closes it with
+//     a different instrument: it counts cursor-shaped query-param read points in
+//     this package and requires each one to go through queryCursor or to be
+//     exempted by name with a written reason. A blind spot is closed by an
+//     instrument that can see into it, not by stretching the one that cannot.
 //
 // A limit stated is not a limit closed. What is closed is the numeric one, and
 // it is closed the same way in both packages.

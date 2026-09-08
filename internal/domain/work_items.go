@@ -167,7 +167,16 @@ type UpdateWorkItemRequest struct {
 	Content          *string         `json:"content"`
 }
 
-// ReadyQueue is the six-segment LCRS response for GET /v1/work_items/ready.
+// ReadyQueue is the SEVEN-segment LCRS response for GET /v1/work_items/ready.
+//
+// Seven, and the published tool description says seven, and so does the design
+// doc's response sketch. Until aihub#449 those three disagreed: the struct had
+// seven keys with `omitempty` on the last, so a caller saw six until something
+// was stale; the schema said "LCRS (6-section)"; and the design doc drew a
+// third shape, six keys plus three fields no code could produce. One count in
+// three places is the whole point of that wi (aihub#411 T2-20) — a segment
+// added here has to be added to both of the others in the same change, which
+// internal/mcp/ready_queue_section_count_test.go is what enforces.
 type ReadyQueue struct {
 	Items             []ReadyItem   `json:"items"`
 	Running           []RunningItem `json:"running"`
@@ -175,7 +184,29 @@ type ReadyQueue struct {
 	Paused            []PausedItem  `json:"paused"`
 	NeedsHumanSession []ReadyItem   `json:"needs_human_session"`
 	Unclassified      []ReadyItem   `json:"unclassified"`
-	StaleRunning      []RunningItem `json:"stale_running,omitempty"`
+
+	// StaleRunning lost its `omitempty` in aihub#449, and that is a WIRE change,
+	// not a comment fix: the key used to be ABSENT whenever nothing was stale and
+	// is now an empty list. newReadyQueue initialises it for the same reason the
+	// other six are initialised — a nil slice would marshal to `null`, a third
+	// spelling of "nothing" and worse than either of the two it replaces.
+	//
+	// The rule this now obeys is the one request_adjusted.go states and
+	// ready_queue_disclosure_test.go pins: an absent key is acceptable only while
+	// its absence asserts NOTHING. That holds for RequestAdjusted below — absent
+	// means "nothing about your request was changed", which an empty list says no
+	// better. It never held here. An absent stale_running asserted "no work item
+	// has been running untouched for 24h", an ownership reminder the Orchestrator
+	// is meant to act on, while ALSO meaning "this server predates the field":
+	// two meanings on one absence, one of them actionable.
+	//
+	// The cost was paid without a caller noticing because there was no caller:
+	// measured 2026-09-08, pkg/client (`GetReadyQueue`) hands back map[string]any,
+	// the MCP tool applies no projection, and the only other mention of the key in
+	// the tree is tests/scenarios/e2e/E2E-16-zombie-sweep.md, which asserts on a
+	// NON-empty one. The `omitempty` itself arrived with the field in aihub#36
+	// with no recorded reason — it was the tail field of an additive change.
+	StaleRunning []RunningItem `json:"stale_running"`
 	// RequestAdjusted names the caller-supplied parameters this endpoint changed
 	// on the way in — today only `max`, which newReadyQueue clamps to 200 when it
 	// arrives above the ceiling and replaces with 10 when it arrives non-positive.
@@ -190,14 +221,27 @@ type ReadyQueue struct {
 }
 
 // ReadyItem is a work item in the items/needs_human_session/unclassified segments.
+//
+// It carried an UnblockedAt until aihub#449 deleted it (aihub#411 T2-20). No
+// code in this repository ever wrote it — measured 2026-09-08, the whole tree
+// held exactly one mention of the name, the field declaration itself — so it was
+// published on every one of these items and populated on none. It is deleted
+// rather than implemented for the reason aihub#387 gave for `non_conflicting` on
+// this same tool: a to-be-built feature planned on top of a field with no writer
+// is how aihub#186's orchestrator design got written against a no-op.
+//
+// CreatedAt keeps its `omitempty` and is deliberately NOT selected for items[]:
+// that asymmetry is as designed (see the Ready Queue block in
+// docs/design/polyforge-v1-design.md) and was re-ratified when aihub#401 was
+// cancelled. It is not the same class as UnblockedAt — it has writers, two of
+// the three segments populate it, and it is absent where it was never asked for.
 type ReadyItem struct {
-	ID          string  `json:"id"`
-	Slug        string  `json:"slug"`
-	WIType      *string `json:"wi_type"`
-	Priority    string  `json:"priority"`
-	Goal        string  `json:"goal"`
-	UnblockedAt *string `json:"unblocked_at,omitempty"`
-	CreatedAt   string  `json:"created_at,omitempty"`
+	ID        string  `json:"id"`
+	Slug      string  `json:"slug"`
+	WIType    *string `json:"wi_type"`
+	Priority  string  `json:"priority"`
+	Goal      string  `json:"goal"`
+	CreatedAt string  `json:"created_at,omitempty"`
 }
 
 // RunningItem is a work item in the running segment.
@@ -1329,7 +1373,7 @@ type ListWorkItemsResult struct {
 // aihub#280: `ready_only` sat in the published MCP schema for a long time with
 // nothing on the server consuming it, which means the decision this constant
 // records had never actually been made. It is not a free choice, though — the
-// six-segment LCRS view already defines "ready" as the items[] segment: takeable
+// seven-segment LCRS view already defines "ready" as the items[] segment: takeable
 // right now, by an agent, with nobody having to unblock anything first. That is
 // exactly three conditions:
 //
@@ -3383,8 +3427,8 @@ const (
 	readyQueueCeilingMax = 200
 )
 
-// newReadyQueue builds the empty six-segment response, bounds the caller's page
-// size, and DISCLOSES the bound if it fired — all three in one place, so a
+// newReadyQueue builds the empty seven-segment response, bounds the caller's
+// page size, and DISCLOSES the bound if it fired — all three in one place, so a
 // response cannot exist that was bounded without saying so.
 //
 // That coupling is the fix, not a tidy-up. Until aihub#432 the clamp was three
@@ -3418,11 +3462,24 @@ func newReadyQueue(requestedMax int) (*ReadyQueue, int) {
 		Paused:            []PausedItem{},
 		NeedsHumanSession: []ReadyItem{},
 		Unclassified:      []ReadyItem{},
-		RequestAdjusted:   appendIntAdjustment(nil, "max", requestedMax, applied),
+		// The seventh segment is initialised like the other six as of aihub#449.
+		// It used to be left nil and marked `omitempty`; see the field's own
+		// comment on ReadyQueue for why an absent stale_running was the one
+		// absence in this response that asserted something.
+		StaleRunning:    []RunningItem{},
+		RequestAdjusted: appendIntAdjustment(nil, "max", requestedMax, applied),
 	}, applied
 }
 
-// GetReadyQueue returns the six-segment LCRS view for a project.
+// GetReadyQueue returns the seven-segment LCRS view for a project.
+//
+// `max` pages THREE of those seven — items[], needs_human_session[] and
+// unclassified[] each take it as their own LIMIT, so it is a per-section page
+// size and not a budget over the response. running[], stalled[], paused[] and
+// stale_running[] take no limit at all. The published description said "Max
+// items in ready section" until aihub#449; that was measured wrong in aihub#401
+// and is corrected in the schema rather than here, because the caller reads the
+// schema.
 func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max int) (*ReadyQueue, *AihubError) {
 	result, max := newReadyQueue(max)
 

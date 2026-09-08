@@ -1,0 +1,33 @@
+{
+  "what_this_is": "Per tool, the top-level keys a LIVE response carries that the tool's contract card does not name, each with the reason it is missing from aihub#412's corpus. A card's response_keys_observed is copied from a GENERATED corpus record (docs/audits/aihub-412-corpus-facts/response-keys/), so a key the server started emitting after the corpus was extracted cannot be added to the card without hand-editing a generated file. It is declared here instead. K10 in internal/mcp/card_response_keys_live_e2e_db_test.go checks this file by EQUALITY against (live keys minus card keys): an undeclared live key fails, an invented entry fails, an entry the card has since absorbed fails as redundant, and an entry for a key the server no longer emits fails as stale. Every entry is documentation debt against the card, and maxUndeclaredLiveKeys in that file is the ceiling on it.",
+  "how_to_regenerate": "AIHUB_TEST_DB=... PF_LIVE_KEYS_REGEN=1 go test ./internal/mcp/ -run TestE2ELiveResponseKeys — then replace the placeholder reason on every new entry by hand; the gate rejects the placeholder.",
+  "keys": {
+    "pf_claim_work_item": {
+      "id": "Restored by aihub#388 (PR #344, landed 2026-09-07), which rewrote the claim projection from a keep-list to a delete-list; the corpus's 788 claims were answered by the keep-list, which dropped this field in silence.",
+      "requires_human_session": "Same aihub#388 rewrite. This is the field the post-claim routing rule branches on, and the keep-list dropped it, so the corpus never saw it.",
+      "step_recovery_hint": "Same aihub#388 rewrite; omitempty, non-empty whenever there is a hint.",
+      "wi_type": "Same aihub#388 rewrite."
+    },
+    "pf_create_project": {
+      "members_version": "domain.Project gained this field with aihub#260's compare-and-set guard (PR #289, landed 2026-09-02). The corpus holds exactly one pf_create_project call, made 2026-08-15, before the field existed."
+    },
+    "pf_force_takeover": {
+      "id": "Restored by aihub#422 (PR #365, landed 2026-09-08), which replaced the five-key keep-list with a delete-list; the corpus's 18 takeovers all predate it, the last on 2026-09-06.",
+      "project": "Same aihub#422 rewrite.",
+      "slug": "Same aihub#422 rewrite."
+    },
+    "pf_resolve_commit": {
+      "ok": "Published and never called in the corpus window (annotations are answered through the /ui viewer), so no corpus record and a null card list."
+    },
+    "pf_rotate_identifier": {
+      "plain": "Published and never called in the corpus window, so no corpus record and a null card list.",
+      "prefix": "Published and never called in the corpus window, so no corpus record and a null card list."
+    },
+    "pf_update_project": {
+      "members_version": "Same aihub#260 field as pf_create_project above (PR #289, landed 2026-09-02). The corpus's 22 pf_update_project calls end on 2026-09-01, the day before."
+    },
+    "pf_update_user": {
+      "ok": "Published and never called in the corpus window, so no corpus record and a null card list."
+    }
+  }
+}

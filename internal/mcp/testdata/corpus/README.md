@@ -17,10 +17,14 @@ Layout: `pf_<tool>/<role>.json`, where role is one of
 
 Current tree: **111 files** across **42 tools** — the 42 with any real call. 29
 tools have all three roles; 11 have no observed failure; 2 have only a `happy`.
-The 8 published tools with zero calls (`pf_adopt_artifact`, `pf_close_artifact`,
-`pf_cut_alpha`, `pf_ignore_artifact`, `pf_promote`, `pf_resolve_commit`,
-`pf_rotate_identifier`, `pf_update_user`) have no directory: **a missing tool
-here means "never called in this corpus", not "broken".**
+The 8 tools published at capture time with zero calls (`pf_adopt_artifact`,
+`pf_close_artifact`, `pf_cut_alpha`, `pf_ignore_artifact`, `pf_promote`,
+`pf_resolve_commit`, `pf_rotate_identifier`, `pf_update_user`) have no directory:
+**a missing tool here means "never called in this corpus", not "broken".**
+Five of those eight have since been retired for exactly that disuse —
+`pf_cut_alpha` / `pf_promote` by `aihub#448`, `pf_adopt_artifact` /
+`pf_close_artifact` / `pf_ignore_artifact` by `aihub#446` — so this paragraph
+describes the corpus window, not today's published set.
 
 ## Provenance and version alignment
 

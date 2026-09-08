@@ -1,16 +1,1 @@
-[
-  {
-    "gate": "PARAM_NOT_FORWARDED",
-    "tool": "pf_cut_alpha",
-    "subject": "work_item_id",
-    "wi": "aihub#423",
-    "note": "published and required, and it reaches the wire in no form: the recorded body carries attempt_id, claim_epoch, project, repos, session_secret and workspace_root only, and the URL is /v1/releases/alpha. Spent here to find the state file with the credentials."
-  },
-  {
-    "gate": "PARAM_NOT_FORWARDED",
-    "tool": "pf_promote",
-    "subject": "work_item_id",
-    "wi": "aihub#423",
-    "note": "identical to pf_cut_alpha's: the recorded body carries project, new_stable_tag, source_alpha_tag and workspace_root, never work_item_id. Same stub endpoint pair (handleCutAlpha/handlePromote take no pool)."
-  }
-]
+[]

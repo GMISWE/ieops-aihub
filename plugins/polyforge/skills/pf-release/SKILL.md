@@ -7,6 +7,34 @@ description: >
 
 # pf-release — Release Management
 
+> 🔴 **INERT UNTIL PHASE 2 — the two tools this skill drives no longer exist.**
+>
+> `pf_cut_alpha` and `pf_promote` were **unpublished** by aihub#448 (aihub#411's
+> T2-10 ruling). Calling either now fails with "unknown tool" rather than the 405
+> `NOT_IMPLEMENTED` they used to answer, so **every `pf_cut_alpha(...)` /
+> `pf_promote(...)` block below is a Phase 2 design sketch, not a runnable step.**
+>
+> Why they went: they were fully wired at hops 1–2 — schema, required params,
+> credential injection, client call — while hop 3 was a 405 stub; zero calls in
+> 21 days; and `pf_cut_alpha` advertised an "Admin / release-manager only"
+> permission model built on a role that exists in no vocabulary. Per aihub#387's
+> Plan B, a published surface with nothing behind it costs schema bytes in every
+> request's prefix to advertise a 405. Measured: 50 → 48 tools, schema dump
+> 40,947 → 39,748 bytes (−2.93%).
+>
+> **If you were sent here to cut a release: stop and say so.** There is no
+> alpha/stable channel server-side. Release state does not exist to be read, and
+> the "0 rows" note further down is the same fact seen from the other end.
+>
+> This file is kept rather than deleted because the workflow it describes is the
+> Phase 2 design. Republishing the tools means restoring `internal/mcp/tools_release.go`
+> and its `registerReleaseTools()` call, the two `credSites()` rows in
+> `internal/mcp/state_resolve_wiring_test.go`, the `docs/mcp-tools.md` rows, and
+> this banner's removal — and ⚠️ **the signatures below already disagree with the
+> schemas that were removed** (they show `version` / `included_wi_ids` /
+> `source_release_wi_id`, where the real tools took `repos` / `base_tag` /
+> `source_alpha_tag`), so treat them as intent, not as a contract to restore.
+
 ## Usage
 
 **Purpose**: Cut an alpha release (tag + manifest of wrapped wi's since last release) or promote an existing alpha to stable.

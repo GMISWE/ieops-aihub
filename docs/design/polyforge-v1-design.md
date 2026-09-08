@@ -301,7 +301,7 @@ aihub/
 │   │   ├── tools_memory.go             # pf_remember/recall/activate/redact/save_artifact
 │   │   ├── tools_conflicts.go          # pf_predict_conflicts / pf_update_artifact
 │   │   ├── tools_step.go               # pf_get_step / pf_update_step
-│   │   ├── tools_release.go            # pf_cut_alpha / pf_promote
+│   │   │                              # (tools_release.go 已删除 — aihub#448，见 §5.6)
 │   │   └── tools_actors.go             # pf_manage_actors
 │   │
 │   ├── coding/
@@ -1424,21 +1424,34 @@ GET    /v1/work_items/ready
 
 ```
 POST   /v1/admin/users
-  body（人类用户）: {email, display_name, role?, project_roles?, author_aliases?}
-  body（machine 用户）: {display_name, user_type:"machine", project_roles}
+  body（人类用户）: {email, display_name, role?, author_aliases?}
+  body（machine 用户）: {display_name, user_type:"machine"}
   -- machine user 的 email 自动合成：machine-<display_name_slug>@polyforge.internal
-  → {id, email, display_name, user_type, role, project_roles}
+  → {id, email, display_name, user_type, role}
 
 GET    /v1/admin/users
   query: project?, role?, user_type?
-  → {items:[{id, display_name, user_type, role, project_roles}]}
+  → {items:[{id, display_name, user_type, role}]}
 
 PATCH  /v1/admin/users/{id}
-  body: {display_name?, role?, project_roles?, author_aliases?}
-  -- project_roles 整体替换（非 merge），需要完整传入
-  -- server 校验每个 value 必须是 "viewer"|"writer"|"maintainer"，否则 400 BAD_REQUEST
+  body: {display_name?, role?, author_aliases?}
   → {user}
+```
 
+> ⚠️ **`project_roles` 已从本节删除（aihub#411 T2-17）。** 上面三个 endpoint 早先都写着
+> `project_roles`，PATCH 还写着「server 校验每个 value 必须是 viewer|writer|maintainer」——
+> 但 `users.project_roles` 这一列已在 `internal/db/migrations/0014_drop_project_roles.sql`
+> 中删除，成员关系现在存在 `projects.members`，由 `pf_update_project` 维护（整体替换，非
+> merge）。一条针对不存在的列的校验规则，比没有规则更糟：它读起来像一份契约，而实现里
+> 没有任何东西能违反它，所以它永远不会变红。
+>
+> ⚠️ **「role」在本系统里指两个不同的词表，不要混用**（T2-17 的另一半）：
+> `users.role` ∈ {writer, admin}（`0001_initial.sql` 的 CHECK 约束），是全局身份；
+> 项目成员角色 ∈ {viewer, writer, maintainer}，存在 `projects.members`。两个列、两条阶梯。
+> 第三个曾被公开过的名字 `release-manager` 在任何词表里都不存在，已随 aihub#448
+> 一并删除。
+
+```
 POST   /v1/admin/users/{id}/keys
   body: {name, project_scope?, expires_at?}
   → {key_id, raw_key}   -- raw_key 仅返回一次，之后只存 hash
@@ -1732,7 +1745,20 @@ pf_list_dependencies(wi_id)
     }
 ```
 
-### 5.6 Release Tools（2 个）（H-R3-1 补充）
+### 5.6 Release Tools（2 个）（H-R3-1 补充）— **未发布，Phase 2 前不注册**
+
+> 🔴 **aihub#411 T2-10 裁决（aihub#448 执行）：这两个工具已从 MCP 工具表中撤下。**
+> 它们此前在 hop 1-2 上是完整接好的——schema、必填参数、state-file 凭据注入、client 调用
+> 都在——而 hop 3 返回 405 NOT_IMPLEMENTED；21 天内调用次数为 0；`pf_cut_alpha` 的描述还
+> 宣称「Admin / release-manager only」，而 release-manager 这个角色在任何词表里都不存在。
+> 按 aihub#387 的 Plan B：一个背后什么都没有的已发布接口，要在每个请求的前缀里花掉
+> schema 字节去广告一个 405。**实测：撤下后工具数 50 → 48，schema dump 40,947 → 39,748
+> 字节（-1,199，-2.93%）。**
+>
+> 已删除的只有 `internal/mcp/tools_release.go`（工具注册）。**保留**的是 Phase 2 的余量：
+> `pkg/client` 的 `CutAlpha`/`Promote`，以及 `internal/server` 里的两个 405 stub。
+> 下面的签名是 Phase 2 的设计，重新发布时按它接回来——并且必须同时补回
+> `internal/mcp/state_resolve_wiring_test.go` 的 credSites() 两行凭据注入覆盖。
 
 ```
 pf_cut_alpha(workspace_root, project, repos, base_tag?, attempt_id, claim_epoch, session_secret)

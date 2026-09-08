@@ -137,11 +137,20 @@ const wantStateFileRefusalPrefix = "STATE_FILE_MISSING: "
 // they are the ones the corpus recorded failing. Also in the bare-prefix group
 // and NOT covered here: pf_reinforce_memory (tools_memory.go:147),
 // pf_update_memory (:176), pf_save_artifact (:231),
-// pf_adopt/close/ignore_artifact (shared emitArtifactAction, :487),
-// pf_cut_alpha (tools_release.go:39) and pf_promote (:84). They share the
-// message verbatim because they share the wording, not because anything enforces
-// it — there is no shared helper, no flag and no list; the predicate is literally
-// "the handler body calls ResolveStateFile". That is what aihub#428 is for.
+// pf_adopt/close/ignore_artifact (shared emitArtifactAction, :487).
+//
+// ⚠️ Two members of that list are gone rather than merely uncovered: pf_cut_alpha
+// and pf_promote were unpublished by aihub#448 and tools_release.go was deleted,
+// so do not go looking for them. They are named here because a reader comparing
+// this paragraph against the aihub#412 corpus will find them in the corpus — it
+// records calls made while the tools still existed.
+//
+// The sentence that used to close this paragraph — "they share the message
+// verbatim because they share the wording, not because anything enforces it;
+// there is no shared helper, no flag and no list" — was true when it was written
+// and is now FIXED rather than merely stale: aihub#428 made
+// config.StateFileMissingErr the single minting point and added the two gates
+// below, so the wording is enforced and the list exists.
 //
 // The four worktree tools (pf_diff/pf_commit/pf_push/pf_pr) reach it indirectly
 // through coding.WorktreePath and carry the THIRD prefix,
@@ -476,16 +485,22 @@ func TestStateFileRefusalHasExactlyOneMintingPoint(t *testing.T) {
 // Keeping the numbers current is the cost, and it is deliberate — the same
 // ratchet the repo uses elsewhere. Adding a credentialed tool means adding a
 // count here, which is one line and a moment's thought about whether the new tool
-// really is a member of this family. Removing tools means lowering it: aihub#448
-// unpublishes pf_cut_alpha and pf_promote, which is tools_release.go's whole
-// entry, so that change must delete the row below rather than edit it.
+// really is a member of this family.
+//
+// ✅ aihub#448 was the first exercise of that, and it went the way the previous
+// sentence hoped: this comment used to end by predicting that unpublishing
+// pf_cut_alpha and pf_promote would take out tools_release.go's WHOLE entry and
+// that the change must DELETE the row rather than edit it. That is exactly what
+// happened — the file no longer exists, so the row is gone rather than lowered to
+// zero. A zero would have been the wrong shape: it reads as "this file mints the
+// refusal nowhere", which invites re-adding a site, where absence reads as "this
+// file is not part of the family", which is the truth.
 var stateRefusalCallSites = map[string]int{
 	"internal/coding/scenario.go":     1,
 	"internal/mcp/tools_coding.go":    2,
 	"internal/mcp/tools_events.go":    1,
 	"internal/mcp/tools_lifecycle.go": 3,
 	"internal/mcp/tools_memory.go":    4,
-	"internal/mcp/tools_release.go":   2,
 	"internal/mcp/tools_step.go":      1,
 }
 

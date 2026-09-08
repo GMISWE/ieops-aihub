@@ -107,10 +107,17 @@ query string for `pkg/client/client.go` (`Recall`) → `GET /v1/memories`, bound
 
 - `recallStringParams` — through `scalarArg`, because `top_k` is published as a
   string and "max results: 10" is naturally written as a number.
-- `recallNumberParams` — through `recallNumArg`, which tolerates the *string*
-  spelling of a number. Plain `numArg` returns 0 for `similarity_threshold: "0.99"`,
-  and 0 is this tool's "not specified", so a caller who quoted the value had the
-  filter silently discarded.
+- `recallNumberParams` — through `parseNumArg`, which tolerates the *string*
+  spelling of a number and REFUSES text it cannot read. The string half is
+  aihub#148 defect 2: a bare numeric read returns 0 for
+  `similarity_threshold: "0.99"`, and 0 is this tool's "not specified", so a caller
+  who quoted the value had the filter silently discarded. The refusal half is
+  `aihub#432`: until it, unparseable text ALSO came back as 0, so
+  `similarity_threshold: "notanumber"` disabled the filter and no hop said so. A
+  present-but-unreadable number is now refused by name before the request leaves
+  this process — Rule 1 (`internal/server/queryparam.go`) applied one hop upstream
+  of where it was written. A zero still means "not specified"; that ambiguity is
+  separate and unfixed.
 - `type` — a JSON array joined comma-separated; a bare string is also accepted.
 
 Two deliberate asymmetries:

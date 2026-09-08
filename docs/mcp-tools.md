@@ -37,6 +37,14 @@ removed or renamed without touching this file turns the build red.
 The tools are registered in `internal/mcp/tools_*.go`; the grouping below
 follows those files.
 
+**Per-tool depth lives in [`mcp-cards/`](mcp-cards/)** (aihub#458): one contract
+card per published tool, walking every parameter and response field across hops
+0-5 and citing the adjudicated policy that binds it. This page stays the index —
+what exists and where it is registered; a card answers what a parameter actually
+does. The cards are gated against the live registry by
+`internal/mcp/contract_cards_gate_test.go`, so a tool added, renamed or
+reschematised without its card turns the build red.
+
 ## An argument no tool publishes is reported, not rejected (aihub#389)
 
 Every tool goes through one registration wrapper (`(*Server).addTool`) that diffs

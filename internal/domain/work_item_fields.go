@@ -61,6 +61,19 @@ var workItemSources = map[string]bool{
 	"admin":        true,
 }
 
+// maxWorkItemGoalRunes mirrors the `length(goal) <= 500` half of the goal CHECK
+// in internal/db/migrations/0002_work_items.sql.
+//
+// aihub#434 gave the number a name. CreateWorkItem had checked it correctly and
+// in the right unit since long before aihub#396 — the literal 500 was simply
+// typed twice, once in the migration and once in the function, with nothing
+// holding them together. The other half of the same CHECK, `goal !~ E'[\n\r]'`,
+// is mirrored by the strings.ContainsAny(req.Goal, "\n\r") next to it; both
+// halves are asserted by db_check_policy_test.go.
+//
+// RUNES, for the reason spelled out under maxWorkItemContentRunes below.
+const maxWorkItemGoalRunes = 500
+
 // maxWorkItemLabels mirrors `cardinality(labels) <= 20` in
 // internal/db/migrations/0002_work_items.sql.
 const maxWorkItemLabels = 20

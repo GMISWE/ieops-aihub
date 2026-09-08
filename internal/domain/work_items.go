@@ -21,6 +21,28 @@ import (
 )
 
 // WorkItem mirrors the work_items table row.
+//
+// ⚠️ RequiresHumanSession is a THREE-state column — true, false and NULL — and
+// this is the authoritative note on it; the request structs below point here
+// rather than repeat it.
+//
+// NULL is not "unset pending a default". It is the state a create reaches by
+// OMITTING the field, and it has its own ready-queue segment: unclassified[] in
+// GetReadyQueue, which both items[] and readyOnlyPredicate exclude. So an
+// unclassified work item is never offered for unattended dispatch.
+//
+// It is not permanent either. FnClaimWorkItem resolves a NULL to
+// defaultRequiresHumanSession (true) on the FIRST claim and writes it back,
+// emitting wi_classification_resolved — see its C-R9-12 comment.
+//
+// 🔴 THAT WRITE IS THE ONE aihub#411 T2-9 RECORDED AS UNEXPLAINED, attributing
+// it to an attrs_patch-only pf_update_work_item call. aihub#447 settled it on
+// two server builds: the update writes nothing here (buildWorkItemUpdate gates
+// the column behind a non-nil check) and the claim writes it every time. What
+// made the misattribution cheap is that an update's REPLY carries this field
+// whether or not that call touched it, so a caller cannot tell a value it read
+// from a value it wrote. Do not read this field's presence in a response as
+// evidence that the responding call set it.
 type WorkItem struct {
 	ID                   string          `json:"id"`
 	Seq                  int64           `json:"seq"`
@@ -97,6 +119,9 @@ type WorkItemStepState struct {
 }
 
 // CreateWorkItemRequest is the parsed body for POST /v1/work_items.
+//
+// A nil RequiresHumanSession means "omitted", which stores NULL — the third
+// state, not a default of false. See WorkItem.RequiresHumanSession.
 type CreateWorkItemRequest struct {
 	Project              string          `json:"project"`
 	Goal                 string          `json:"goal"`
@@ -117,6 +142,11 @@ type CreateWorkItemRequest struct {
 }
 
 // UpdateWorkItemRequest is the parsed body for PATCH /v1/work_items/:id.
+//
+// A nil RequiresHumanSession means "leave the stored value alone", so this
+// request cannot put a work item BACK to NULL; an explicit JSON null binds to
+// nil and is the same no-op. Measured on two server builds by aihub#447, not
+// inferred from the type. See WorkItem.RequiresHumanSession.
 type UpdateWorkItemRequest struct {
 	Priority             *string         `json:"priority"`
 	Milestone            *string         `json:"milestone"`
@@ -1891,6 +1921,14 @@ func buildWorkItemUpdate(req *UpdateWorkItemRequest, wiID string) workItemUpdate
 		add("wi_type = $%d", *req.WIType)
 	}
 	if req.RequiresHumanSession != nil {
+		// Non-nil ONLY, so there is no way back to the NULL third state through
+		// this function: omitting the field and sending an explicit JSON null are
+		// the same no-op. That is the half of aihub#411 T2-9 this file answers —
+		// the row reported an attrs_patch-only update moving a NULL to true, and
+		// aihub#447 reproduced the sequence on a live-era build and on origin/main
+		// and found it does not happen here. FnClaimWorkItem writes it, on the
+		// first claim, from a server default. Do not "fix" that report by adding a
+		// write on this path.
 		add("requires_human_session = $%d", *req.RequiresHumanSession)
 	}
 	if req.Labels != nil {
@@ -3548,7 +3586,16 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		humanRows.Close()
 	}
 
-	// unclassified[]: queued + no blocker + requires_human_session IS NULL
+	// unclassified[]: queued + no blocker + requires_human_session IS NULL.
+	//
+	// The third state gets a segment of its own rather than being folded into
+	// either of the other two, because NULL means nobody has classified this wi —
+	// it does not mean false, and items[] must not hand it to an agent.
+	//
+	// Note how the segment DRAINS, because it is not only by classification: a wi
+	// also leaves it by being CLAIMED, since FnClaimWorkItem resolves a NULL to
+	// true and writes it back. So an entry here is waiting for whichever of the
+	// two comes first, and a wi that has ever been claimed cannot be in it.
 	unclRows, err := pool.Query(ctx, `
 		SELECT wi.id, wi.slug, wi.wi_type, wi.priority, wi.goal, wi.created_at
 		FROM work_items wi

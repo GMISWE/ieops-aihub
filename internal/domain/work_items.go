@@ -3317,7 +3317,7 @@ func cancelGate(status string, isReporter bool, callerRole, projectRole string) 
 // lock is half-released. Reordering cancel to match force_takeover instead
 // would only move the cycle onto the four paths in the majority.
 //
-// # The alternative that was NOT taken, and why
+// # The alternative that was NOT taken, and the half of it that later was
 //
 // Setting the attempt to a terminal run_attempts.status would have let the
 // EXISTING orphan sweep collect these locks with no new SQL and no new cause,
@@ -3325,15 +3325,42 @@ func cancelGate(status string, isReporter bool, callerRole, projectRole string) 
 // keeps an attempt marked 'paused'. It was not taken for two reasons: the sweep
 // runs on a 60s tick, so the branch would stay blocked for up to a minute after
 // the cancel that was supposed to free it, and none of the six legal
-// run_attempts statuses means "its work item was cancelled" — 'superseded'
+// run_attempts statuses meant "its work item was cancelled" — 'superseded'
 // names a successor that does not exist here, and reusing it would make
 // supersededByDetails offer a takeover story for a wi nobody took over.
-// The residue is inert: all three IN ('running','paused') predicates
-// (resource_events.go, run_attempts.go's claim and acquire-locks probes) reach
-// attempts only THROUGH resource_locks, so with the rows gone none of them can
-// produce a false conflict. Retiring the attempt is still the tidier shape and
-// is worth doing if a status for it is ever added; it is a separate change
-// because it alters run_attempts semantics, not the lock set.
+//
+// aihub#441 (aihub#411 T2-3 residue (b)) added that status, and this function
+// now writes it. Read the split precisely, because only one of the two reasons
+// above was answered:
+//
+//   - The SECOND reason is gone. 'cancelled' exists in the CHECK (migration
+//     0035) and is not 'superseded', so supersededByDetails — which keys on
+//     that exact literal — still returns nil and still tells no takeover story.
+//   - The FIRST reason stands, which is why releaseCancelledWILocksSQL below is
+//     NOT replaced by "flip the status and let the sweep have it". The status
+//     write and the lock release are both here, in one transaction, so the
+//     branch is free the instant the cancel commits rather than up to 60s
+//     later. The sweep is now a second line of defence for these rows instead
+//     of the only one: a 'cancelled' attempt no longer satisfies
+//     orphanLockSweepSQL's IN ('running','paused') retention predicate.
+//
+// What the status write is FOR is not the locks at all — those were already
+// released here since aihub#355. It is the credential path:
+// verifyAttemptCredential reads run_attempts.status, and while a cancelled work
+// item's attempt read 'paused' that function answered ATTEMPT_PAUSED, whose
+// contract is "keep your state file, resume this" (aihub#209). Resume is
+// impossible — FnClaimWorkItem refuses a terminal work item — so the one status
+// a client could observe was the one that gave it the wrong instruction. It now
+// reads 'cancelled' and answers ATTEMPT_MISMATCH: re-claim, and drop the
+// credential that can never work again.
+//
+// STATEMENT ORDER: the run_attempts UPDATE goes BEFORE releaseLocks, matching
+// FnCompleteAttempt (which sets status and then releases). That is deliberate
+// and not cosmetic — putting it after would make this the only transaction that
+// touches resource_locks before run_attempts, adding a lock-ordering edge to
+// the deadlock set analysed above for no gain. releaseCancelledWILocksSQL joins
+// run_attempts only on work_item_id and never reads status, so the earlier
+// write cannot change which rows it deletes.
 func CancelWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug, callerUserID, callerRole string, callerProjectRoles map[string]string) *AihubError {
 	wi, aihubErr := GetWorkItem(ctx, pool, idOrSlug)
 	if aihubErr != nil {
@@ -3368,6 +3395,36 @@ func CancelWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug, callerUse
 	if _, err := tx.Exec(ctx,
 		`UPDATE work_items SET status='cancelled' WHERE id=$1`, wi.ID); err != nil {
 		return dbErr(err, "failed to cancel work item")
+	}
+
+	// aihub#441: give the work item's live attempts the terminal status the
+	// cancel actually produced. See the "alternative that was NOT taken" section
+	// above for why this is here, why it precedes releaseLocks, and why
+	// 'superseded' could not be reused.
+	//
+	// The predicate is the RETENTION set, IN ('running','paused'), not just
+	// 'paused'. cancelGate rejects wi.status='running', so the common case here
+	// is a paused attempt — but wi.status and run_attempts.status are separate
+	// columns, and 'running' is reachable. cancelGate admits 'blocked', and the
+	// ESCALATED step failure puts a work item there without touching its attempt:
+	// routes_step.go's `if req.Escalated` sets work_items.status='blocked' on a
+	// wi whose attempt this very handler just credential-checked as 'running'.
+	// Cancelling that wi must end that attempt.
+	//
+	// Verified rather than assumed, because the obvious candidate is the wrong
+	// one: the dependency path (dependencies.go, CreateDependency) derives
+	// 'blocked' under `AND status='queued'`, so it can never produce this case,
+	// and CreateWorkItem's blocked_by branch runs before any attempt exists.
+	// routes_step.go is the only writer of the three that can.
+	//
+	// Matching the retention set covers it without inventing a transition: every
+	// attempt that could still be holding something is ended, and every attempt
+	// that already ended (wrapped/failed/superseded) keeps the status it earned
+	// rather than having its history rewritten by a later cancel.
+	if _, err := tx.Exec(ctx,
+		`UPDATE run_attempts SET status='cancelled', ended_at=clock_timestamp()
+		 WHERE work_item_id=$1 AND status IN ('running','paused')`, wi.ID); err != nil {
+		return dbErr(err, "failed to cancel work item's run attempts")
 	}
 
 	// aihub#343: through releaseLocks, so each lock the cancel drops carries a

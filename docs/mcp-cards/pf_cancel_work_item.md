@@ -61,6 +61,16 @@ is why it works on a work item this machine holds no state file for.
 - **The status check is re-run inside the transaction against a locked row.** A
   cancel racing a claim now returns 409 correctly; the previous 200 was a lie, and it
   released a live attempt's locks.
+- **It also ends the work item's live attempts**, setting `run_attempts.status` to
+  `cancelled` with an `ended_at`, in the same transaction and BEFORE the lock
+  release (`aihub#441`, `aihub#411` T2-3 residue (b)). The predicate is the
+  retention set `IN ('running','paused')`, so an attempt that already ended keeps
+  the terminal status it earned. What this buys is not the locks — those were
+  already released here since `aihub#355` — it is the credential answer: while a
+  cancelled work item's attempt read `paused`, every credentialed call answered 409
+  `ATTEMPT_PAUSED`, whose contract is "keep your state file, resume this", and
+  resume is impossible because `pf_claim_work_item` refuses a terminal work item.
+  It now answers 403 `ATTEMPT_MISMATCH`: re-claim, and drop the dead credential.
 
 ## hop 5 — what comes back
 
@@ -72,9 +82,12 @@ high error rate here is not by itself evidence of a defect.
 
 ## Policy
 
-- **§6.2 T2-3** — the ruling includes adding **the cancelled-attempt status the
-  cancel path says it needs**; today the attempt-status vocabulary has no value for
-  "ended because the work item was cancelled".
+- **§6.2 T2-3 — LANDED (`aihub#441`).** The ruling included adding **the
+  cancelled-attempt status the cancel path says it needs**, and migration `0035`
+  adds it: `run_attempts.status` gained `cancelled` and lost `lost` (a value with
+  zero writers since migration `0004`). `superseded` could not be reused —
+  `supersededByDetails` keys on that literal to attach a `superseded_by` payload,
+  and a cancelled work item has no successor attempt to name.
 - **§6.2 T2-1** — one editability matrix for the whole struct and one error code per
   rejection KIND: 409 for state, 403 for permission. This tool's three 409s are three
   distinct states, which is the shape that ruling asks for — and `aihub#440` carried

@@ -1587,13 +1587,52 @@ func verifyAttemptCredential(ctx context.Context, tx pgx.Tx, wi WorkItem, attemp
 	if err3 != nil {
 		return NewErr(ErrInternalError, "failed to decode computed hash")
 	}
+	// ATTEMPT_MISMATCH (403), not UNAUTHORIZED (401) — aihub#441, residue (c) of
+	// aihub#411's T2-3 row. This is the ONE line the residue was about: for the
+	// same wrong session_secret this verifier answered 401 UNAUTHORIZED while
+	// verifyAttemptCredentialSimple (memory.go, the pf_emit_event path) answered
+	// 403 ATTEMPT_MISMATCH, so a caller classifying by code saw two problems
+	// where there was one. Both now answer the same code and the same message.
+	//
+	// 403 rather than 401 is not a coin toss; three independent things pick it:
+	//
+	//   - aihub#242's principle, applied by aihub#440: 409 means wrong STATE,
+	//     403 means wrong CALLER. A secret that does not hash to the stored one
+	//     identifies the wrong caller. Nothing about the attempt's state is
+	//     wrong — that is checked below, and answers a 409.
+	//   - UNAUTHORIZED is the AUTHENTICATION layer's code everywhere else in the
+	//     tree: "missing Authorization header", "must use Bearer scheme",
+	//     "invalid or revoked API key", "not authenticated" (middleware.go,
+	//     router.go, routes_projects.go). This line was its only other producer,
+	//     so a 401 here told a caller "re-authenticate" when the correct
+	//     recovery is "re-claim" — two different fixes behind one code.
+	//   - internal/mcp already treats ATTEMPT_MISMATCH as exactly this:
+	//     classifyStepUpdateErr maps it to "STALE_LOCAL_CREDENTIAL: state file
+	//     deleted — please re-claim". A stored secret that no longer matches can
+	//     never succeed again, so deleting it and re-claiming is the only
+	//     recovery, and the 401 was the one credential failure that did NOT get
+	//     it. This is a deliberate behaviour change on pf_update_step: an
+	//     invalid secret now deletes the local state file where before the
+	//     client kept a credential it could only fail with.
+	//
+	// It does NOT widen to the paused case. ATTEMPT_PAUSED below stays a 409 and
+	// keeps the state file (aihub#209); that branch is reached only by a caller
+	// whose secret is VALID, so nothing here can shadow it.
 	if subtle.ConstantTimeCompare(storedHashBytes, hashBytes) != 1 {
-		return NewErr(ErrUnauthorized, "invalid session_secret")
+		return NewErr(ErrAttemptMismatch, "invalid session_secret")
 	}
 
 	// 5. Attempt must be running. A paused attempt gets a distinct code so the
 	// client keeps its state file and points the user at resume, instead of
 	// treating it as a stale-credential mismatch and deleting it (aihub#209).
+	//
+	// aihub#441 added a fourth status that reaches the generic branch:
+	// 'cancelled', written by CancelWorkItem. Before it existed, a cancelled work
+	// item left its attempt marked 'paused', so this function answered
+	// ATTEMPT_PAUSED — telling the client to resume a work item FnClaimWorkItem
+	// refuses as terminal. It now falls to ATTEMPT_MISMATCH, which is the truth:
+	// the credential is dead. The message names the status, so the operator reads
+	// `attempt status is "cancelled"` rather than a generic refusal.
 	if storedStatus != "running" {
 		if storedStatus == "paused" {
 			return NewErr(ErrAttemptPaused, "attempt is paused; resume it before continuing")

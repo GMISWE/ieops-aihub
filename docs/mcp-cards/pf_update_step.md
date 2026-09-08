@@ -133,6 +133,15 @@ local state file via `internal/config/state.go` (`ResolveStateFile`).
   into the stale-credential arm and DELETED the caller's credential file. There is
   deliberately no substring fallback: the only arm with a side effect is the
   deleting one.
+- **An invalid `session_secret` is 403 `ATTEMPT_MISMATCH`, and that DELETES the
+  local state file** (`aihub#441`, `aihub#411` T2-3 residue (c)). It answered 401
+  `UNAUTHORIZED` before, which fell through `classifyStepUpdateErr`'s `default` arm
+  and kept the file — so this tool is the one place in the batch where the code
+  change is also a client behaviour change. Keeping it was the wrong behaviour: a
+  stored secret that does not match the stored hash can never succeed again, so
+  every retry failed identically and the only recovery, re-claim, was never
+  suggested. `pf_complete_attempt` and `pf_wrap` delete the state file on SUCCESS
+  only, so nothing else in the batch changes what the client does with the file.
 
 ## hop 5 — what comes back
 

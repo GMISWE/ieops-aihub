@@ -192,11 +192,15 @@ const (
 	lockCauseCommitGate          = "commit_gate"
 	lockCauseDeclarationNarrowed = "declaration_narrowed"
 	lockCauseOrphanSweep         = "orphan_sweep"
-	// lockCauseWICancelled is the release CancelWorkItem performs. It is its own
-	// cause rather than reusing attempt_terminal because the ATTEMPT does not
-	// reach a terminal status here — only the work item does. A reader who saw
-	// attempt_terminal would go looking for a wrapped/failed attempt and find one
-	// still marked paused (see releaseCancelledWILocksSQL).
+	// lockCauseWICancelled is the release CancelWorkItem performs. It stays its
+	// own cause rather than folding into attempt_terminal, but the ORIGINAL
+	// reason for that no longer holds and is not worth pretending: since
+	// aihub#441 the attempt DOES reach a terminal status here — 'cancelled',
+	// written in the same transaction. What still distinguishes the two is which
+	// decision released the lock. attempt_terminal means the attempt's own owner
+	// ended it; wi_cancelled means somebody cancelled the work item out from
+	// under an attempt that had not finished. Both leave an ended attempt, so
+	// only the cause can tell a reader which happened.
 	lockCauseWICancelled = "wi_cancelled"
 	// lockCauseOwnerReplaced is the release side of an upsert that rewrote an
 	// existing row's owner. It has no call site of its own: see lockUpsertSQL.
@@ -524,9 +528,17 @@ const releaseUndeclaredLocksSQL = `
 // while its owner attempt is 'running' OR 'paused'", and every other way an
 // attempt stops holding locks moves the ATTEMPT: FnCompleteAttempt sets
 // wrapped/failed, the claim takeover and FnForceTakeover set 'superseded'.
-// CancelWorkItem moves the WORK ITEM and leaves run_attempts untouched — so a
-// paused attempt on a cancelled work item still satisfies the retention
-// predicate and the sweep deliberately skips it, forever.
+// CancelWorkItem used to move only the WORK ITEM — so a paused attempt on a
+// cancelled work item still satisfied the retention predicate and the sweep
+// skipped it, forever.
+//
+// ⚠️ That last sentence is now history, and the conclusion survives it anyway.
+// Since aihub#441 CancelWorkItem also sets the attempt to 'cancelled', which is
+// outside the retention set, so the sweep WOULD eventually collect these rows.
+// This statement is still required and still runs first, because "eventually"
+// is up to 60s (the GC tick): the whole point of releasing on cancel is that the
+// branch is free the moment the cancel commits, not a minute afterwards. The
+// sweep is the backstop for rows this statement somehow misses, not the plan.
 //
 // Measured on this repo (aihub#355): pause releases file_scope only and retains
 // git_branch / deploy_env / worktree / tcp_port for resume (see

@@ -31,11 +31,36 @@ const (
 	ErrInvalidMemoryType     ErrCode = "INVALID_MEMORY_TYPE"
 
 	// HTTP 401
-	ErrUnauthorized    ErrCode = "UNAUTHORIZED"
+	//
+	// ErrUnauthorized is the AUTHENTICATION layer's code and, since aihub#441,
+	// nothing else's. Its producers are the Bearer-token middleware and the
+	// handlers' "not authenticated" guards; the one exception — an invalid
+	// session_secret in verifyAttemptCredential — moved to ErrAttemptMismatch,
+	// because "your API key is bad" and "your attempt credential is bad" have
+	// different recoveries (re-authenticate vs re-claim) and must not share a
+	// code. Do not add an attempt-credential producer here.
+	ErrUnauthorized ErrCode = "UNAUTHORIZED"
+	// ErrStaleCredential is emitted for a stored hash that will not even decode,
+	// which is a server-side data defect rather than a caller's wrong secret.
+	// The client-side string of the same name is unrelated plumbing: internal/mcp
+	// synthesises it locally when it deletes a state file.
 	ErrStaleCredential ErrCode = "STALE_LOCAL_CREDENTIAL"
 
 	// HTTP 403
-	ErrForbidden       ErrCode = "FORBIDDEN"
+	ErrForbidden ErrCode = "FORBIDDEN"
+	// ErrAttemptMismatch is the single code for "this attempt credential is not
+	// usable by this caller" (aihub#441, aihub#411 T2-3 residue (c)). It covers
+	// an attempt_id that is not the work item's current attempt, a session_secret
+	// that does not match the stored hash, and an attempt whose row has ended
+	// (superseded / wrapped / failed / cancelled). All of them mean the same
+	// thing to a client — the credential is dead, re-claim — and internal/mcp's
+	// classifyStepUpdateErr already implements exactly that on this code.
+	//
+	// Two neighbours are deliberately NOT this code. ErrAttemptPaused is a 409
+	// because a paused attempt is resumable and the client must KEEP its state
+	// file (aihub#209). ErrConflictEpochMismatch is a 409 because a stale epoch
+	// is a state conflict that can carry a superseded_by payload naming who took
+	// over.
 	ErrAttemptMismatch ErrCode = "ATTEMPT_MISMATCH"
 	// ErrWIReclassifyForbidden is RETIRED (aihub#440), the mirror of
 	// ErrGoalChangeNotAllowed above: it answered both halves of the wi_type gate,

@@ -204,11 +204,21 @@ func TestE2ETerminalWithoutClaim_ADetachedSessionWithTheLiveCredentialWraps(t *t
 // test rather than a citation. Its absence from 14090 calls means the path has
 // never been exercised in production, so nothing but a test says what it does.
 //
-// 401 UNAUTHORIZED is the contract, and the status matters as much as the code:
-// pkg/client renders the error as "aihub <status> <CODE>: <message>", and
+// 403 ATTEMPT_MISMATCH is the contract, and the status matters as much as the
+// code: pkg/client renders the error as "aihub <status> <CODE>: <message>", and
 // internal/mcp's stale-credential classifier keys on the code text. A refusal
 // that came back as, say, 500 would be retried by callers that treat 5xx as
 // transient, forever.
+//
+// ⚠️ It was 401 UNAUTHORIZED until aihub#441 (aihub#411 T2-3 residue (c)), and
+// the change is the point of that work item rather than a detail of it. The
+// same wrong secret answered 401 here and 403 ATTEMPT_MISMATCH from
+// pf_emit_event, so a caller classifying by code saw two problems with one
+// cause. 403 won the tie because UNAUTHORIZED is the API-key authentication
+// layer's code everywhere else in the tree — "invalid or revoked API key",
+// "missing Authorization header" — and a 401 here told the caller to
+// re-authenticate when the recovery is to re-claim. See
+// internal/domain/errors.go (ErrAttemptMismatch) for the full argument.
 func TestE2ETerminalWithoutClaim_ATamperedSecretIsRefused(t *testing.T) {
 	s, wiID := claimStack(t, "refuse a terminal transition carrying the wrong session secret")
 	sf := claimThrough(t, s, wiID, "aihub421-tampered")
@@ -235,13 +245,22 @@ func TestE2ETerminalWithoutClaim_ATamperedSecretIsRefused(t *testing.T) {
 	}
 	// The whole rendering, not the pieces. pkg/client emits
 	// `aihub <status> <CODE>: <message>` (client.go:109), so matching the joined
-	// string is strictly tighter than matching "401" and "UNAUTHORIZED"
-	// separately — a bare "401" can be satisfied by digits inside an id or a
+	// string is strictly tighter than matching "403" and "ATTEMPT_MISMATCH"
+	// separately — a bare "403" can be satisfied by digits inside an id or a
 	// timestamp, which makes the status half no evidence at all.
-	if !strings.Contains(text, "aihub 401 UNAUTHORIZED") {
-		t.Errorf("error = %q\nwant it to name 401 UNAUTHORIZED. The code and the status are both part "+
+	if !strings.Contains(text, "aihub 403 ATTEMPT_MISMATCH") {
+		t.Errorf("error = %q\nwant it to name 403 ATTEMPT_MISMATCH. The code and the status are both part "+
 			"of the contract: pkg/client renders \"aihub <status> <CODE>: ...\" and callers classify on "+
 			"it, so a 5xx here would be retried indefinitely instead of prompting a re-claim", text)
+	}
+	// aihub#441's actual claim is UNIFORMITY, so pin the code that lost as well
+	// as the one that won. Asserting only the winner would stay green if some
+	// later change reintroduced 401 on a sibling path, which is the exact state
+	// the work item removed.
+	if strings.Contains(text, "UNAUTHORIZED") {
+		t.Errorf("error = %q\nstill carries UNAUTHORIZED. aihub#441 moved the invalid-secret refusal off "+
+			"the authentication layer's code precisely so that \"your API key is bad\" and \"your attempt "+
+			"credential is bad\" stop sharing one classification", text)
 	}
 	if !strings.Contains(text, "invalid session_secret") {
 		t.Errorf("error = %q, want it to say which credential failed — the operator's next action "+

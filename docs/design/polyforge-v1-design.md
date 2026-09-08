@@ -30,7 +30,7 @@
 
 ## Changelog
 
-- v1.24: 综合 Opus R9 Part A：C-R9-1 migration seed 默认数据；C-R9-2 CAS 冲突禁止自动 merge，强制手工确认；C-R9-3 scenario config 不存在→503；C-R9-4 classification_rules.set.wi_type 写入时校验；C-R9-5 zombie sweeper 改为 system force_takeover + lost 状态（释放 locks）；C-R9-6 wi.wi_type=NULL 时禁止 claim；C-R9-7 Wi Agent = 角色，两种载体明确区分；C-R9-10 fn_claim 时验证 wi_type 仍存在；H-R9-8 pf-add-type 先 server 后本地；H-R9-9 agent_events.work_item_id 改 NULLABLE；H-R9-11 paused 时 fn_complete_attempt 自动 force_terminate；H-R9-12 mode=resume 同 user 隐式 takeover；M-R9-20 GC sweep 7 SQL 语法修正；Part B 精简：memory_embeddings 合并进 memories（12→10 表）；wi_sequences 删除；pf_acquire_lock/pf_release_lock/pf_update_artifact/pf_reconcile_artifacts/pf_manage_actors 删除（38→32 工具）；execute-scenario 推 v2；pf-debug/pf-event/pf-review stub 内联（skill 18→12）；pf-add-type 合并到 NL 路由
+- v1.24: 综合 Opus R9 Part A：C-R9-1 migration seed 默认数据；C-R9-2 CAS 冲突禁止自动 merge，强制手工确认；C-R9-3 scenario config 不存在→503；C-R9-4 classification_rules.set.wi_type 写入时校验；C-R9-5 zombie sweeper 改为 system force_takeover + lost 状态（释放 locks）【已作废：aihub#441 退役了 'lost'。该 sweeper 从未实现，且在 v1.21 的 ownership-only 模型下不可实现——判定「持有者已死」只能靠 TTL，而 v1.21 删的正是它；详见 §2.3 DDL 勘误块】；C-R9-6 wi.wi_type=NULL 时禁止 claim；C-R9-7 Wi Agent = 角色，两种载体明确区分；C-R9-10 fn_claim 时验证 wi_type 仍存在；H-R9-8 pf-add-type 先 server 后本地；H-R9-9 agent_events.work_item_id 改 NULLABLE；H-R9-11 paused 时 fn_complete_attempt 自动 force_terminate；H-R9-12 mode=resume 同 user 隐式 takeover；M-R9-20 GC sweep 7 SQL 语法修正；Part B 精简：memory_embeddings 合并进 memories（12→10 表）；wi_sequences 删除；pf_acquire_lock/pf_release_lock/pf_update_artifact/pf_reconcile_artifacts/pf_manage_actors 删除（38→32 工具）；execute-scenario 推 v2；pf-debug/pf-event/pf-review stub 内联（skill 18→12）；pf-add-type 合并到 NL 路由
 - v1.23: 新增 scenario_phase_configs 表（scenario 级 SoT，替代 per-attempt phase_yaml_snapshot）；run_attempts 删 phase_yaml_snapshot、加 phase_config_version 审计字段；claim 不再上传 phase.yaml，server 直接查 scenario_phase_configs；新增 GET/PUT /v1/scenarios/{scenario}/phase_config HTTP API + pf_get_scenario_config/pf_update_scenario_config MCP 工具；wi_classification_rules 移入 scenario_phase_configs；/pf-add-type skill 新增；§27 KL4 跨 workspace 漂移已解决，移出 KL
 - v1.22: 删除 work_items.kind 字段——wi_type 单字段决定执行路径和 requires_human_session；phase.yaml wi_types 完全用户可定制（无固定枚举）；wi_classification_rules 匹配条件改为 priority + wi_type_prefix；pf_list_work_items kind 过滤改为 wi_type；WorkItem schema 移除 kind
 - v1.21: ownership 模型最终简化（删 expires_at，force_takeover 纯靠角色权限不看时间）；server-side wi_classification_rules 配置（aihub.yaml，create 时覆盖 client 判断，彻底解决 TOCTOU）；needs_human_session 通知改为 LCRS 内嵌告警（push 推 v2）
@@ -677,9 +677,22 @@ CREATE INDEX idx_wi_dep_blocking ON wi_dependencies(blocking_wi_id);
 CREATE TABLE run_attempts (
     id                   TEXT PRIMARY KEY,
     work_item_id         TEXT NOT NULL REFERENCES work_items(id),
+    -- ⚠️ 勘误（aihub#441，2026-09-08，aihub#411 T2-3 残留 (a)(b)）：本行已由
+    -- migration 0035 改写。'lost' 退役、'cancelled' 加入，实际 CHECK 为：
+    --   ('running','paused','wrapped','failed','superseded','cancelled')
+    -- 'lost' 从 0004 引入起零写入方（无 Go / 无 SQL / 无 trigger / 无 migration，
+    -- gc.go 里没有任何 sweep 写 run_attempts.status）。它唯一被规划过的写入方是
+    -- 本文档 Changelog v1.24 的 C-R9-5 zombie sweeper，而该 sweeper 不只是没建，
+    -- 是在取代它的 ownership 模型下建不出来：判定「持有者已死」只能靠
+    -- last_active_at 陈旧度，也就是 TTL，而 v1.21 删掉的正是这个机制（见下方
+    -- 「ownership-only 最终设计」注释、pf_renew_lease 的 410、以及只提醒不释放的
+    -- stale_running[]）。'cancelled' 则补上 CancelWorkItem 一直缺的那个词：在此
+    -- 之前被取消 wi 的 attempt 停在 'paused'，于是 verifyAttemptCredential 回
+    -- ATTEMPT_PAUSED（语义是「保留 state file，去 resume」），而 resume 必然被
+    -- 拒（wi 已终态）—— 唯一能被观测到的状态恰好给出了错误的指示。
     status               TEXT NOT NULL DEFAULT 'running'
                          CHECK (status IN ('running','paused','wrapped',
-                                           'failed','superseded','lost')),
+                                           'failed','superseded','cancelled')),
     -- claim_epoch 初始值规则（H9）：
     -- fn_claim_work_item() 内：
     --   new_attempt.claim_epoch = wi.current_attempt_epoch + 1
@@ -1023,14 +1036,27 @@ running → paused     （pf_complete_attempt(paused)）
 running → wrapped    （pf_complete_attempt(wrapped)，同时 DELETE resource_locks）
 running → failed     （pf_complete_attempt(failed)，同时 DELETE resource_locks）
 running → superseded （force_takeover：旧 attempt 被新 attempt 替换）
-running → lost       （force_takeover 时旧 attempt 被标为 superseded/lost）
 paused  → running    （re-claim：创建新 attempt，旧 paused row 永保 paused）
            -- C-R3-6: re-claim 不是同一 row 复活，而是新 INSERT run_attempts
            --         wi.current_attempt_id 指向新 attempt，旧 row 不变
--- terminal：wrapped / failed / superseded / lost
+running → cancelled  （pf_cancel_work_item：CancelWorkItem 在同一事务里把该 wi
+paused  → cancelled    仍在保留集 IN ('running','paused') 的 attempt 一并置为
+                       cancelled，并写 ended_at；aihub#441）
+-- terminal：wrapped / failed / superseded / cancelled
+
+-- ⚠️ 勘误（aihub#441，2026-09-08）：上面原先还有一行
+--   `running → lost （force_takeover 时旧 attempt 被标为 superseded/lost）`
+-- 它从未成立过——force_takeover 只写 'superseded'（run_attempts.go
+-- FnForceTakeover / FnClaimWorkItem），'lost' 全仓零写入方。该行连同 terminal
+-- 列表里的 'lost' 一并删除，并新增 cancelled 两条；理由见 §2.3 DDL 的勘误块。
+-- 注意本节现在描述的是六个状态里的五条边：wrapped / failed 见上面两行。
 
 -- C4: 只有 status='running' 的 attempt 才通过 AttemptCredential 校验（见 §22）
 -- paused attempt 调用 mutating 工具会被拒绝（除 re-claim 外）
+--   ↳ 拒绝码分两支（aihub#209 / aihub#441）：paused 回 409 ATTEMPT_PAUSED
+--     （客户端保留 state file，提示 resume）；其余非 running 状态
+--     （superseded / wrapped / failed / cancelled）与「session_secret 不匹配」
+--     统一回 403 ATTEMPT_MISMATCH（客户端删 state file，提示 re-claim）
 ```
 
 ### 3.3 wi_step_state（step 内部状态）
@@ -3253,12 +3279,32 @@ HTTP 400
 
 HTTP 401
   UNAUTHORIZED             Bearer token 无效或已撤销
-  STALE_LOCAL_CREDENTIAL   MCP server 侧本地凭证已失效（attempt 被 superseded/taken over）
-                           → MCP server 自动删除 state file，提示 re-claim
+                           【aihub#441 起：这是【认证层专用】码，只由 API key /
+                           Authorization header 校验产生。此前 attempt 凭证里
+                           「session_secret 不匹配」也回本码，已改判 403
+                           ATTEMPT_MISMATCH——两者的恢复动作不同（重新认证 vs
+                           re-claim），不能共用一个码。不要再新增 attempt 凭证
+                           类的产生点。】
+  STALE_LOCAL_CREDENTIAL   服务端侧：run_attempts.session_secret_hash 存的值连
+                           hex 都解不开（数据缺陷，非调用方之错）。
+                           同名字符串在客户端另有一处、与本码无关：internal/mcp
+                           删除 state file 时自行拼出「STALE_LOCAL_CREDENTIAL:
+                           state file deleted — please re-claim」
 
 HTTP 403
   FORBIDDEN                权限不足
-  ATTEMPT_MISMATCH         attempt_id 不属于当前 wi 的 current_attempt
+  ATTEMPT_MISMATCH         attempt 凭证不可用——【aihub#441 起为该语义的唯一码】，
+                           覆盖三种情形：(1) attempt_id 不是该 wi 的
+                           current_attempt；(2) session_secret 与存储 hash 不符；
+                           (3) attempt 行已结束（superseded / wrapped / failed /
+                           cancelled）。三者对客户端是同一件事：凭证已死，去
+                           re-claim；internal/mcp 的 classifyStepUpdateErr 正是
+                           这么处理本码的（删 state file）。
+                           ⚠️ 两个邻居【不是】本码：ATTEMPT_PAUSED 是 409，因为
+                           paused 可恢复、客户端必须【保留】state file
+                           （aihub#209）；CONFLICT_EPOCH_MISMATCH 是 409，因为
+                           epoch 陈旧是状态冲突，且可带 superseded_by 说明是谁
+                           接管的
 
 HTTP 404
   NOT_FOUND                wi / memory / attempt 不存在
@@ -3369,7 +3415,8 @@ interface DeclaredResource {
 interface RunAttempt {
   id: string
   work_item_id: string
-  status: "running"|"paused"|"wrapped"|"failed"|"superseded"|"lost"
+  // aihub#441: "lost" 退役、"cancelled" 加入（migration 0035）；见 §2.3 勘误块
+  status: "running"|"paused"|"wrapped"|"failed"|"superseded"|"cancelled"
   claim_epoch: number
   expires_at: string | null
   last_active_at: string

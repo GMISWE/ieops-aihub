@@ -174,6 +174,16 @@ except `work_item_id` and `brief` into the body of
 - **`attrs` vs `attrs_patch` is the difference between a merge and a wipe.**
   `attrs_patch` is shallow: a top-level key replaces that key's stored value
   outright rather than merging into it recursively, and `null` stores a JSON null.
+- **Both are shape-checked, and `attrs` only since `aihub#465`.** `attrs_patch`
+  had to be, because `jsonb || jsonb` silently does something else with an array;
+  `attrs` is a plain column assignment, so Postgres stored whatever JSON arrived
+  and answered 200 — including a JSON-encoded STRING of the object the caller
+  meant, which two live calls did. Both now reject any non-object with a 400
+  naming the type and the byte length, and for a string they report through
+  `details.string_decodes_to` whether the quoted text was valid JSON. Neither
+  coerces: 18 of the 19 stringified payloads in the corpus are malformed, so
+  decoding would rescue one and guess at the rest. A literal `null` keeps its
+  existing meaning in both fields.
 - **`goal` and `wi_type` are status-gated and reason-gated.** A goal change on a
   running work item is refused, which is also why a terminal work item accepts
   `attrs` writes and almost nothing else.

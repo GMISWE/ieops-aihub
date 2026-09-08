@@ -81,6 +81,30 @@ func seedWIWithAttrs(t *testing.T, pool *pgxpool.Pool, project, user, attrs stri
 	return seeded
 }
 
+// seedWIWithStoredAttrs writes attrs straight into the column, bypassing the
+// caller-facing validator, and returns the row as it now stands.
+//
+// It exists because aihub#465 made the REPLACE path reject a non-object `attrs`,
+// so the API can no longer CREATE the state
+// TestUpdateWorkItemAttrsPatch_SurvivesANonObjectStoredValue is about. That is
+// the guard working rather than a regression, and it does not make the test
+// obsolete: rows written BEFORE the guard existed still hold non-object attrs,
+// refusing to create new ones does not delete the old ones, and what the MERGE
+// does when it lands on such a row is unchanged and still the subject here.
+//
+// So the machinery moved and the subject did not. Every assertion in that test
+// is the one it had before; only the way the fixture row comes into existence
+// changed, which is exactly the split mem_X8JDSC96 prescribes — caller input is
+// rejected at the point of the mistake, already-stored data is still handled.
+func seedWIWithStoredAttrs(t *testing.T, pool *pgxpool.Pool, project, user, attrs string) *WorkItem {
+	t.Helper()
+	wi := seedWIs(t, pool, project, user, 1)[0]
+	mustExec(t, pool, `UPDATE work_items SET attrs = '`+attrs+`'::jsonb WHERE id = '`+wi.ID+`'`)
+	stored, aerr := GetWorkItem(context.Background(), pool, wi.ID)
+	require.Nil(t, aerr)
+	return stored
+}
+
 // TestUpdateWorkItemAttrsPatch_DoesNotDestroyOtherKeys is the aihub#288
 // reproduction: three keys already on the work item, an update that knows about
 // only two, and all five must survive.
@@ -284,9 +308,16 @@ func TestUpdateWorkItemAttrsPatch_WorksOnTerminalWorkItem(t *testing.T) {
 // code review found in the first cut of this change.
 //
 // The column is `JSONB NOT NULL DEFAULT '{}'` and every reader unmarshals it
-// into a map, but nothing enforces that it holds an object: `attrs` REPLACE
-// takes any JSON, and JSON null is not SQL NULL so it slips past NOT NULL. The
-// first half of this test proves that reachability rather than assuming it.
+// into a map, but nothing at the storage layer enforces that it holds an
+// object: JSON null is not SQL NULL, so it slips past NOT NULL, and until
+// aihub#465 the `attrs` REPLACE path took any JSON at all.
+//
+// aihub#465 closed that entry point — the REPLACE path now rejects a non-object
+// with a 400 — but it deliberately did NOT rewrite the column, so every row
+// written while the path was open still holds what it was given. Rows like that
+// are the subject here, which is why the fixture is now seeded by SQL: the
+// state is unreachable through the API and still present in the data. Both
+// halves are asserted below, one line apart.
 //
 // Merging onto such a row is not a harmless no-op. Without the jsonb_typeof
 // guard, `'null'::jsonb || '{"a":1}'::jsonb` is `[null, {"a":1}]` — silently an
@@ -300,12 +331,30 @@ func TestUpdateWorkItemAttrsPatch_SurvivesANonObjectStoredValue(t *testing.T) {
 
 	for _, stored := range []string{`null`, `[1,2]`, `"scalar"`} {
 		t.Run("stored="+stored, func(t *testing.T) {
-			// Reachability, proved not assumed: the REPLACE path stores this today.
-			seeded := seedWIWithAttrs(t, pool, project, u, stored)
+			// Seeded by SQL since aihub#465 — see seedWIWithStoredAttrs. The row
+			// really holds a non-object, asserted rather than assumed, because a
+			// fixture that quietly became an object would make everything below
+			// pass for the wrong reason.
+			seeded := seedWIWithStoredAttrs(t, pool, project, u, stored)
 			var typed any
 			require.NoError(t, json.Unmarshal(seeded.Attrs, &typed))
-			if _, isObject := typed.(map[string]any); isObject {
-				t.Skipf("attrs REPLACE no longer stores %s verbatim — this guard's premise has changed", stored)
+			_, isObject := typed.(map[string]any)
+			require.False(t, isObject, "the fixture must actually store %s, or this test proves nothing", stored)
+
+			// The other direction of the same fact, and the reason the seeding
+			// had to move: the REPLACE path now REFUSES to create this state.
+			// Asserted here, next to the tolerance it is paired with, so that
+			// loosening the guard or tightening the merge path is visible in one
+			// place. `null` is deliberately exempt — it was accepted before
+			// aihub#465 and still is, since folding it would have changed a
+			// meaning that guard was not asked to touch.
+			_, replaceErr := UpdateWorkItem(context.Background(), pool, seeded.ID, u, "admin", nil,
+				updateReqFromJSON(t, `{"attrs":`+stored+`}`))
+			if stored == `null` {
+				require.Nil(t, replaceErr, "a literal null attrs keeps the meaning it had before aihub#465")
+			} else {
+				require.NotNil(t, replaceErr, "aihub#465: the REPLACE path must refuse to store a non-object attrs")
+				assert.Equal(t, 400, replaceErr.HTTPStatus)
 			}
 
 			patched, aerr := UpdateWorkItem(context.Background(), pool, seeded.ID, u, "admin", nil,

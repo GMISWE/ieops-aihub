@@ -139,6 +139,11 @@ calls with no errors.
 
 ## Open
 
-- **§6.4 item 1** — the ladder fix has landed, but whether a live `maintainer` row
-  ever existed — and therefore whether the inconsistency ever bit — still needs a DB
-  read nobody has made.
+- **§6.4 item 1** — the ladder fix has landed and the DB read has been made:
+  `aihub#443`'s attrs record 4 live `projects.members` rows holding `maintainer`
+  (a live-DB read dated 2026-09-08 — it dates rather than pins, since a row count is
+  not a property of a commit), with the distinct role strings across all 10 projects
+  and 47 member rows exactly `viewer | writer | maintainer` — no legacy or arbitrary
+  value survives in `members` today. So this tool's writes are the provenance of every
+  `maintainer` row that exists, which is what makes the vocabulary it validates the
+  operative one rather than migration `0013`'s.

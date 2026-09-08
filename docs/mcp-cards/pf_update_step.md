@@ -137,9 +137,18 @@ local state file via `internal/config/state.go` (`ResolveStateFile`).
 ## hop 5 — what comes back
 
 Passed through by `jsonResult`; no projection. `heartbeat_ok` is what a heartbeat
-answers, which is why sending `status="completed"` with `heartbeat=true` completes
-nothing and still looks like a success. The corpus record above is the union over
-1,617 real calls at a 0.99% error rate.
+answers, and it still answers it when `status="completed"` rides along — that
+combination completes nothing. Since `aihub#442` the body stops looking like a
+plain success while it does so: every heartbeat carries
+`step_started_at_refreshed`, which is `false` when the work item has no
+`wi_step_state` row and the bump therefore matched nothing; a bump that actually
+FAILS is now a 500 naming the write instead of a discarded error; and a `step_id`
+or `status` that arrived alongside comes back in `request_adjusted` as requested
+but not applied, with `step_id`'s `applied` naming the step that really was
+refreshed. ⚠️ Only a DIRECT HTTP caller ever sees that last part — this tool's own
+heartbeat branch sends a credentials-only body, so from here the two fields never
+reach the server. The corpus record above is the union over 1,617 real calls at a
+0.99% error rate.
 
 ## Policy
 

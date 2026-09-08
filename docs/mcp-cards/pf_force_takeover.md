@@ -42,6 +42,14 @@ claim path and found it comes back as a retryable 409 with the row untouched,
 because that path opens SERIALIZABLE while this one opens READ COMMITTED. It is one
 statement about two different guarantees, so it must not be copied back.
 
+`aihub#451` then measured the exception itself on THIS path, in
+`internal/domain/force_takeover_commit_window_db_test.go`. A foreign work item whose
+claim is in flight — its `run_attempts` row and its lock row committed together,
+inside the takeover's window — is displaced: the takeover returns success, the
+displaced agent is told nothing, and no `lock_released` is recorded either. Commit
+only the lock row inside that window and the takeover is refused instead, which is
+what "narrow" means here. The clause is a measured statement, not a hedge.
+
 ## hop 2-3 — what leaves this process, and what binds it
 
 `internal/mcp/tools_lifecycle.go` (`registerLifecycleTools`) generates a fresh

@@ -70,6 +70,12 @@ enforces.
 window in which every other high-traffic tool logged hundreds of calls. That absence
 is not neutral — it is one of the three data points behind T2-7.
 
+The keys themselves are pinned anyway, just not here: `aihub#482`'s K10 in
+`internal/mcp/card_response_keys_live_e2e_db_test.go` drives this tool against a
+live server and holds the result to `event_id`, declared in
+`docs/mcp-cards/live-response-keys.json` because a generated corpus record with no
+traffic behind it cannot carry them.
+
 ## Policy
 
 - **§6.2 T2-7** — the ruling is to **retire the three action tools, or give

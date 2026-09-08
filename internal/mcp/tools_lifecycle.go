@@ -709,8 +709,8 @@ func (s *Server) registerLifecycleTools() {
 			// response. Measured: 325 -> 427 characters, +102, against the +90 the
 			// members_version rewrite spent. Budget any further edit against that.
 			"resources_version": prop("integer", "Compare-and-set guard for declared_resources: ALWAYS send the resources_version pf_get_work_item returned. The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version. Every write of declared_resources increments this counter. Leaving it out overwrites unconditionally: a concurrent writer's list is silently discarded, locks and all, and you still get a 200."),
-			"attrs":             prop("object", "REPLACES the whole attrs object: every key you do not resend is DELETED. Use it only when you intend to overwrite attrs wholesale (e.g. after reading the current value). To add or change keys without destroying the others, use attrs_patch. Cannot be combined with attrs_patch/attrs_unset."),
-			"attrs_patch":       prop("object", "Merge these keys into attrs, leaving every other key untouched (aihub#288). Shallow: a top-level key in the patch replaces that key's stored value outright, it is NOT merged into it recursively, and null STORES a JSON null rather than deleting. To delete keys use attrs_unset. Cannot be combined with attrs."),
+			"attrs":             prop("object", "REPLACES the whole attrs object: every key you do not resend is DELETED. Use it only when you intend to overwrite attrs wholesale (e.g. after reading the current value). To add or change keys without destroying the others, use attrs_patch. Cannot be combined with attrs_patch/attrs_unset."+jsonObjectPropNote),
+			"attrs_patch":       prop("object", "Merge these keys into attrs, leaving every other key untouched (aihub#288). Shallow: a top-level key in the patch replaces that key's stored value outright, it is NOT merged into it recursively, and null STORES a JSON null rather than deleting. To delete keys use attrs_unset. Cannot be combined with attrs."+jsonObjectPropNote),
 			"attrs_unset":       prop("array", "Top-level attrs keys to delete (array of strings). Applied AFTER attrs_patch, so a key in both ends up deleted. Cannot be combined with attrs."),
 			"content":           prop("string", contentPropDescription),
 			// aihub#281. The echo suppression above needs no flag because it only
@@ -1997,6 +1997,39 @@ func propEnum(typ, description string, enum []string) map[string]any {
 	return p
 }
 
+// jsonObjectPropNote is the hop-1 half of the aihub#465 shape guard, appended to
+// the description of every caller-supplied jsonb object parameter that has NO
+// length cap: `attrs` (pf_create_work_item, pf_batch_create_work_items,
+// pf_update_work_item, pf_remember), `attrs_patch` (pf_update_work_item) and
+// `structured_payload` (pf_save_artifact).
+//
+// aihub#486. The guard shipped enforced and unpublished, which is the mirror of
+// aihub#238's published-but-unenforced enum: the InputSchema said
+// `"type": "object"` and stopped there, so nothing told a caller what a
+// violation looks like or how to repair it — and hop 1 is the only thing an LLM
+// caller sees. The claim is not new, only newly stated: `internal/domain`'s
+// validateJSONObjectParam has rejected these with a 400 since aihub#465.
+//
+// The middle sentence is the one a caller cannot guess, and it is why this text
+// is worth its resident bytes: 18 of the 19 stringified values measured over the
+// transcript corpus were a model hand-writing escaped JSON that came out
+// malformed, not a client wrapping a good object. "Send an object" alone tells
+// those 18 nothing about what to change.
+//
+// The closing sentence is here because its absence is what filed aihub#420: a
+// caller who reads only "must be a JSON object", looks at the object they meant
+// to send, and concludes the real limit is size.
+//
+// ⚠️ `payload` does NOT take this string. It is the one guarded field with a
+// real size cap, so the closing sentence would be false there — see
+// emitEventPayloadPropDescription in internal/mcp/tools_events.go, and
+// jsonObjectParamSizeNote in internal/domain/work_items.go, which makes the same
+// split on the error-message side.
+const jsonObjectPropNote = " Must be a JSON object: a string (including a JSON-encoded string of the object you meant), " +
+	"an array, a number or a boolean is rejected with 400 naming the type received, and nothing is written. " +
+	"Do not hand-write the escaped JSON — send the object and let your client serialise it. " +
+	"Size is never the reason for that 400: this field has no length cap."
+
 // maxBatchWorkItems bounds pf_batch_create_work_items. Generous relative to the
 // measured behaviour it replaces — the adjacent-create runs this fuses were a
 // handful of follow-ups long, not dozens — while still keeping one MCP call from
@@ -2030,7 +2063,7 @@ func workItemFieldProps() map[string]any {
 		// vocabulary — sending "jira" instead of "sync_jira" was a 500. Published
 		// as an enum from the same list the validator uses.
 		"source":       propEnum("string", "How this work item was filed", domain.WorkItemSourceList()),
-		"attrs":        prop("object", "Additional attributes"),
+		"attrs":        prop("object", "Additional attributes."+jsonObjectPropNote),
 		"blocked_by":   prop("array", blockedByPropDescription),
 		"content":      prop("string", contentPropDescription),
 		"force_create": prop("boolean", "Force create bypassing duplicate check"),

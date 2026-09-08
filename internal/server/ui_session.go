@@ -28,9 +28,9 @@ const (
 
 // Errors returned by Verify so callers can distinguish failure modes for logs.
 var (
-	errSessionMalformed = errors.New("session: malformed token")
-	errSessionBadSig    = errors.New("session: invalid signature")
-	errSessionExpired   = errors.New("session: expired")
+	errSessionMalformed  = errors.New("session: malformed token")
+	errSessionBadSig     = errors.New("session: invalid signature")
+	errSessionExpired    = errors.New("session: expired")
 	errSessionBadPayload = errors.New("session: bad payload")
 )
 

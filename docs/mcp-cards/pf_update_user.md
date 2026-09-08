@@ -81,6 +81,11 @@ argument reaches the PATCH body.
 that makes it useful was unpublished for the whole corpus window, so its absence is
 evidence about the gap rather than about the tool.
 
+The key is pinned anyway, just not here: `aihub#482`'s K10 in
+`internal/mcp/card_response_keys_live_e2e_db_test.go` drives this tool against a
+live server and holds the result to `ok`, declared in
+`docs/mcp-cards/live-response-keys.json`.
+
 ## Policy
 
 - **§6.1 T1-9** — a bound-and-forwarded field with no published name is the mirror of

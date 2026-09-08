@@ -4150,6 +4150,34 @@ jobs:
           ! grep -q -- '--- SKIP' live_response_keys.log \
             || { echo "::error::TestE2ELiveResponseKeysAreDeclaredOnTheCards SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#441 (aihub#411 T2-3): the attempt-status vocabulary. Three arms
+      # assert what migration 0035 and CancelWorkItem changed, and every one of
+      # them carries the negative that separates the fix from a broken server —
+      # see the file header for the four controls and what each rules out.
+      #
+      # The first arm is the only DB-level assertion in this job that is ABOUT
+      # the schema rather than merely using it: it UPDATEs run_attempts.status
+      # directly and reads the SQLSTATE. That is deliberate. 'lost' had zero Go
+      # writers before 0035 too, so any Go-level "nothing writes 'lost'" test was
+      # already vacuously green on the unfixed tree; only the database can say
+      # whether the value is still legal, and only this step runs against one
+      # with 0035 applied.
+      - name: aihub#441 attempt-status vocabulary DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestAttemptStatusVocabulary' -count=1 -v 2>&1 | tee attempt_status_vocabulary.log
+          for want in TestAttemptStatusVocabulary_TheCheckAcceptsCancelledAndRejectsLost \
+                      TestAttemptStatusVocabulary_CancelEndsTheLiveAttempt \
+                      TestAttemptStatusVocabulary_ACancelledAttemptAnswersMismatchNotPaused \
+                      TestAttemptStatusVocabulary_OneCodeForOneInvalidSecret; do
+            grep -q -- "--- PASS: $want" attempt_status_vocabulary.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#441 attempt-status vocabulary invariants are not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' attempt_status_vocabulary.log \
+            || { echo "::error::an aihub#441 attempt-status vocabulary test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

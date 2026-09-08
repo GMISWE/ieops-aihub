@@ -863,8 +863,9 @@ func (s *Server) registerLifecycleTools() {
 		//
 		// Not fixed server-side on purpose. Re-registering the received secret in
 		// the replay branch would ROTATE the credential of a live attempt, so a
-		// replay by a second session on the same machine would silently 401 the
-		// original holder — trading a broken retry for a broken live session, which
+		// replay by a second session on the same machine would silently 403 the
+		// original holder (ATTEMPT_MISMATCH since aihub#441; 401 UNAUTHORIZED before
+		// it) — trading a broken retry for a broken live session, which
 		// is worse than the bug. Residual, stated rather than hidden: a replay from
 		// a machine that has no state file for this key (or whose file was deleted)
 		// still cannot know the accepted secret, and is still left unauthenticated.
@@ -1030,7 +1031,8 @@ func (s *Server) registerLifecycleTools() {
 			// of the write rather than of the MkdirAll (ENOSPC, EIO) leaves a
 			// truncated file that no longer parses. Then recordedClaimSecret misses, a fresh
 			// secret is minted, the idempotency branch never registers it, and every
-			// later call 401s "invalid session_secret" — so with the record gone the
+			// later call answers 403 ATTEMPT_MISMATCH "invalid session_secret" (401
+			// UNAUTHORIZED before aihub#441) — so with the record gone the
 			// same-user branch is the way out: it treats a new key as an implicit
 			// takeover and issues a fresh attempt bound to the secret this call
 			// generated. Correct, but it costs one epoch bump and one superseded

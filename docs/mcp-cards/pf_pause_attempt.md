@@ -68,10 +68,16 @@ callers have been handed.
 
 ## Policy
 
-- **§6.2 T2-3** — one status code for "invalid attempt credential" across all tools.
+- **§6.2 T2-3 — LANDED (`aihub#441`).** One status code for "invalid attempt
+  credential" across all tools, and it is **403 `ATTEMPT_MISMATCH`**. The invalid
+  `session_secret` refusal used to answer 401 `UNAUTHORIZED` from
+  `verifyAttemptCredential` (this tool's path, plus `pf_complete_attempt`,
+  `pf_wrap`, `pf_commit`, `pf_acquire_locks`, `pf_update_step`, `pf_save_artifact`)
+  and 403 `ATTEMPT_MISMATCH` from `pf_emit_event`, for the same wrong secret.
   `ATTEMPT_PAUSED` being distinct from that class is the property this tool depends
   on, and it is the reason the ruling says *one* code for the credential class rather
-  than one code for everything.
+  than one code for everything — it is unchanged, still 409, and still reached only
+  by a caller whose secret is VALID, so the unification cannot shadow it.
 - **§6.2 T2-15** — which lock types survive a pause is exactly the row the
   de-locking ruling shrinks to `file_scope`.
 

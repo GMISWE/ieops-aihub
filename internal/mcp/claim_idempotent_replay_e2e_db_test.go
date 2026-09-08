@@ -58,8 +58,9 @@ import (
 )
 
 // tryCall invokes a tool and reports whether it FAILED, instead of fataling on
-// failure the way e2eStack.call does. The whole point here is to observe an
-// UNAUTHORIZED rather than to die on it.
+// failure the way e2eStack.call does. The whole point here is to observe a
+// credential refusal (403 ATTEMPT_MISMATCH since aihub#441, 401 UNAUTHORIZED
+// before it) rather than to die on it.
 func tryCall(t *testing.T, s *e2eStack, tool string, args map[string]any) (string, bool) {
 	t.Helper()
 	res, err := s.session.CallTool(context.Background(), &sdkmcp.CallToolParams{Name: tool, Arguments: args})
@@ -141,7 +142,9 @@ func authenticatedCalls(wiID string) []struct {
 //
 // It FAILS on the unfixed tree: the replay overwrites the state file with a
 // secret the server has never seen, and both authenticated calls come back
-// UNAUTHORIZED "invalid session_secret".
+// 403 ATTEMPT_MISMATCH "invalid session_secret" (the code was 401 UNAUTHORIZED
+// until aihub#441 unified the invalid-credential class; the refusal is the same
+// one either way).
 func TestE2EClaimReplayKeepsTheSecretTheServerAccepts(t *testing.T) {
 	s, wiID := claimStack(t, "aihub#392 replaying an idempotency key must stay authenticable")
 

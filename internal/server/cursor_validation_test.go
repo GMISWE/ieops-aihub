@@ -35,7 +35,8 @@ package server
 // census arm at the bottom of this file is what closes it — not by widening
 // the conversion set, which cannot reach here, but by requiring every
 // cursor-shaped query param in package server to be either read through
-// queryCursor or listed with a reason.
+// queryCursor or listed with a reason. As of aihub#477 nothing is listed: the
+// one exemption that ever existed asserted a property that did not hold.
 //
 // ─── The trap this file exists to keep out ─────────────────────────────────
 //
@@ -322,12 +323,24 @@ const cursorReaderFunc = "queryCursor"
 // next edit above it and a rotted key fails open — the entry stops matching,
 // the site becomes "new", and the only thing the gate then proves is that
 // somebody renumbered it.
-var rawCursorReadExemptions = map[string]string{
-	"router.go|cursor": "the semantic-search branch tests NON-EMPTINESS only " +
-		"(`c.QueryParam(\"cursor\") != \"\"`) to reject cursor+query as a combination; " +
-		"it never reads the value, and the same handler validates it through " +
-		cursorReaderFunc + " a few lines above",
-}
+//
+// EMPTY, and that is the end state rather than a table nobody has filled in.
+// aihub#477 removed the last entry, which had exempted handleListWorkItems'
+// semantic-search guard on the grounds that the branch "tests NON-EMPTINESS
+// only ... it never reads the value". The load-bearing half of that reason was
+// false: it did read the value, and applied a DIFFERENT emptiness predicate to
+// it than the queryCursor call six lines above. queryCursor trims, so
+// `?cursor=%20` is page one; the untrimmed `!= ""` in the guard called the same
+// input a supplied cursor and answered 400 for a combination the request did
+// not contain. The fix reads the cursorPresent flag queryCursor already
+// returned, deleting the second read instead of making two reads agree — which
+// is why the entry could be deleted rather than reworded.
+//
+// The bar that leaves behind, for whoever adds the next one: this file cannot
+// check that an exemption's REASON is true, only that its SITE still exists. So
+// the reason has to survive being read literally, and "it never reads the
+// value" did not.
+var rawCursorReadExemptions = map[string]string{}
 
 // TestCursor_EveryCursorParamGoesThroughOneReader is the structural arm.
 //
@@ -347,8 +360,9 @@ func TestCursor_EveryCursorParamGoesThroughOneReader(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
 
-	var rawSites []string  // "file|param" for c.QueryParam("...cursor...")
-	var validated []string // "file|param" for queryCursor(c, "...")
+	var rawSites []string    // "file|param" for c.QueryParam("...cursor...")
+	var rawAnyParam []string // "file|param" for EVERY c.QueryParam("<literal>")
+	var validated []string   // "file|param" for queryCursor(c, "...")
 	filesWalked := 0
 
 	for _, e := range entries {
@@ -367,8 +381,11 @@ func TestCursor_EveryCursorParamGoesThroughOneReader(t *testing.T) {
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
 			if ok && sel.Sel.Name == "QueryParam" {
-				if p, ok := stringLit(call.Args[0]); ok && strings.Contains(p, "cursor") {
-					rawSites = append(rawSites, name+"|"+p)
+				if p, ok := stringLit(call.Args[0]); ok {
+					rawAnyParam = append(rawAnyParam, name+"|"+p)
+					if strings.Contains(p, "cursor") {
+						rawSites = append(rawSites, name+"|"+p)
+					}
 				}
 				return true
 			}
@@ -393,6 +410,31 @@ func TestCursor_EveryCursorParamGoesThroughOneReader(t *testing.T) {
 		"expected at least the three JSON list endpoints plus /ui/wi's done_cursor to read "+
 			"cursor through %s, found %v", cursorReaderFunc, validated)
 
+	// The SAME floor argument, for the other arm of the walk. rawSites is a
+	// filter over every c.QueryParam(<literal>) call, so if that match stops
+	// firing — the selector renamed, the literal hidden behind a const — then
+	// rawSites goes empty, the loop below iterates zero times, and this test
+	// reports green having checked nothing.
+	//
+	// Until aihub#477 the mirror loop at the bottom carried that proof for
+	// free: it required "router.go|cursor" to be FOUND, so a dead matcher was a
+	// red test. Emptying the exemption table is the right end state and it also
+	// removes the only thing that forced the matcher to hit anything at all —
+	// so the proof has to become explicit rather than a side effect.
+	//
+	// The number to catch is ZERO, not a census. 32 sites match today, and the
+	// floor sits far enough below that moving a whole route family out of the
+	// package would not trip it while a broken matcher still does.
+	require.GreaterOrEqual(t, len(rawAnyParam), 15,
+		"the walk matched %d raw c.QueryParam sites in package server; at that count the "+
+			"cursor filter below is measuring nothing, and a green here means the matcher "+
+			"stopped firing rather than that no raw cursor read exists", len(rawAnyParam))
+
+	// Both loops below iterate zero times today — no raw cursor read is left in
+	// package server, and no exemption claims one is. That is the state to
+	// hold, not a reason to delete them: they are what turns the NEXT raw
+	// cursor read into a red test, and the floor above is what keeps their
+	// emptiness meaningful.
 	sort.Strings(rawSites)
 	for _, site := range rawSites {
 		reason, exempt := rawCursorReadExemptions[site]

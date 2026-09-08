@@ -354,11 +354,40 @@ const lockDeleteByKeySQL = `DELETE FROM resource_locks rl WHERE rl.resource_type
 // two concurrent takeovers, or a takeover racing a claim, can each read a
 // run_attempts snapshot that does not yet show the other's lock row.
 //
+// ⚠️ "Reachable" is now MEASURED rather than argued, and the measurement also
+// says which interleaving reaches it — force_takeover_commit_window_db_test.go
+// (aihub#451). Committing only the LOCK ROW inside the window does NOT: the DO
+// UPDATE's WHERE re-runs against the row version it unblocked onto, sees that
+// owner live and foreign in a snapshot that contains it, and refuses with
+// CONFLICT_LOCK_TAKEN. That was aihub#430's probe, and reading it as "even READ
+// COMMITTED refuses this" is the mistake aihub#451 corrects. What reaches the
+// gap is a claim in flight — run_attempts row AND resource_locks row committed
+// together, inside the window — because then the subquery below is asked about
+// an owner its snapshot does not contain, answers NOT EXISTS, and rewrites the
+// row of a LIVE foreign holder. `prior` is blind to the same row for the same
+// reason, so the displaced owner gets no owner_replaced lock_released either:
+// the displacement is silent on both sides.
+//
 // This is left as-is rather than "fixed" in passing. Raising that transaction to
 // SERIALIZABLE is a behaviour change on a recovery path with no retry wrapper
 // around it — every other SERIALIZABLE site here pairs with retryConflictErr —
-// and it belongs in a change that can measure the retry consequences. What the
-// aihub#393 predicate buys on this path is therefore the single-threaded
+// and it belongs in a change that can measure the retry consequences. That is
+// now measured, not predicted (aihub#451, on the SERIALIZABLE mutant): the
+// displacement stops, and the caller is handed
+//
+//	500 INTERNAL_ERROR  failed to update work_item after force_takeover:
+//	                    current transaction is aborted (SQLSTATE 25P02)
+//
+// The 40001 arrives HERE, at acquireLockUpsert, and FnForceTakeover discards
+// every upsert error that is not the typed lock refusal — deliberately, so a
+// recovery operation is not failed over lock bookkeeping. So the transaction is
+// already aborted when the next statement runs, and 25P02 is not class 40, so
+// nothing classifies it. That is aihub#410's shape on the path aihub#410 did not
+// cover: raising the isolation level alone trades a silent displacement for an
+// unclassified 500, and closing this gap costs the retry wrapper AND that
+// discard, not just the BeginTx line.
+//
+// What the aihub#393 predicate buys on this path is therefore the single-threaded
 // guarantee, not a serialized one: it closes the case where a takeover
 // UNCONDITIONALLY displaced a live foreign holder, which is what happened on
 // every call, and narrows the remaining exposure to a commit-window race.

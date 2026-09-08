@@ -406,12 +406,117 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 
 		if req.Heartbeat {
-			// Heartbeat: best-effort timestamp bump, transient DB errors must not
-			// fail the heartbeat (caller will retry anyway).
-			_, _ = pool.Exec(c.Request().Context(), `
+			// aihub#442. The bump used to be `_, _ = pool.Exec(...)` — the only
+			// discarded error in this handler — under the rationale "transient DB
+			// errors must not fail the heartbeat (caller will retry anyway)". That
+			// rationale is circular: a caller retries what it is TOLD failed, and
+			// this was the one branch that told it nothing. The question the work
+			// item posed is "check the error, or state in the code that nothing
+			// depends on the write". Something does, so it is checked:
+			//
+			//   - step_recovery_hint, recomputed on every claim of an
+			//     already-claimed wi on BOTH paths (domain.FnClaimWorkItem and its
+			//     idempotent twin, internal/domain/run_attempts.go). It reports
+			//     `active_in_progress_conflict` when current_step_status is
+			//     'in_progress' AND step_started_at is younger than 15s, and
+			//     `crashed_in_progress` otherwise. A bump that fails in silence
+			//     therefore makes a LIVE agent read as crashed to whoever takes
+			//     the wi over.
+			//   - GET /v1/work_items/:id/step publishes step_started_at verbatim
+			//     (StepStartedAt above, and pf_get_step's card), where a stale
+			//     value is simply a wrong answer.
+			//
+			// Two limits on that, written down so the next reader does not overrate
+			// the write. _common/lifecycle.md teaches one heartbeat per ~5 min, so
+			// the 15s window is open for 15 of every 300 seconds and the hint reads
+			// `crashed_in_progress` most of the time no matter what this write
+			// does; and the 60s watchdog the design doc describes for the same
+			// column (`step_agent_unresponsive`, design §3.3 and §21.7) was never
+			// built — the event name occurs in no Go file. So this is a WEAK input
+			// to a real consumer, which is still not the same thing as an input to
+			// nothing.
+			//
+			// RETURNING answers all three questions in one round trip: did the
+			// statement fail, was there a row to bump at all, and which step got
+			// refreshed.
+			var bumpedStep *string
+			bumpErr := pool.QueryRow(c.Request().Context(), `
 				UPDATE wi_step_state SET step_started_at = clock_timestamp(), updated_at = clock_timestamp()
-				WHERE work_item_id = $1`, wiID)
-			return c.JSON(http.StatusOK, map[string]string{"status": "heartbeat_ok"})
+				WHERE work_item_id = $1
+				RETURNING current_step`, wiID).Scan(&bumpedStep)
+			if bumpErr != nil && !errors.Is(bumpErr, pgx.ErrNoRows) {
+				return writeError(c, domain.NewErr(domain.ErrInternalError, fmt.Sprintf(
+					"heartbeat could not refresh step_started_at: %v — nothing was recorded", bumpErr)))
+			}
+			// ErrNoRows is NOT that error: it means the wi has no wi_step_state row,
+			// so the statement ran fine and bumped nothing. It stays a 200 for two
+			// reasons — the caller cannot act on it (the row is created by claim,
+			// whose upsert failure is itself non-fatal by design, see the
+			// "Non-fatal but log" arm of FnClaimWorkItem), and a 4xx/5xx on this
+			// endpoint means "your request was not honoured because of something
+			// you can fix". But answering a bare "heartbeat_ok" for it is the same
+			// silence this work item exists to remove, so the outcome is stated in
+			// the body instead, and stated on EVERY heartbeat rather than only on
+			// the false one: a key that appears only when something is wrong turns
+			// its own absence into a claim that nothing is, which is a claim an
+			// older server would also be making.
+			resp := map[string]any{
+				"status":                    "heartbeat_ok",
+				"step_started_at_refreshed": bumpErr == nil,
+			}
+			// The other half of aihub#442: the branch returns HERE, so a step_id or
+			// status sent in the same request goes nowhere.
+			//
+			// It is disclosed rather than rejected, and that is a decision with
+			// evidence on both sides of it:
+			//
+			//   - rejecting it would break the taught producer. lifecycle.md says
+			//     "add heartbeat=true to an in_progress call every ~5 min", and the
+			//     measured corpus agrees: of 1,998 pf_update_step calls across
+			//     2,222 transcripts, 50 carry heartbeat=true, and 49 of those carry
+			//     status="in_progress" plus a step_id (the 50th carries neither).
+			//   - heartbeat + status="completed" answering 200 heartbeat_ok is
+			//     PINNED as intended, by three tests in this package that each send
+			//     that exact combination and assert it
+			//     (routes_step_outcome_records_db_test.go,
+			//     routes_step_identity_db_test.go and
+			//     routes_step_history_row_db_test.go), and by aihub#398's owner
+			//     decision, which chose to DOCUMENT the drop rather than change it.
+			//     mcp/tools_step_contract_test.go pins the SCHEMA SENTENCE that
+			//     describes the drop, which is a different guarantee — it would
+			//     survive a change of behaviour.
+			//
+			// So the remaining honest option is the one aihub#314 built for exactly
+			// this shape — request_adjusted, "what the server DID to a value it
+			// HELD": the caller sent it, the server applied nothing.
+			//
+			// ⚠️ This can only fire for a DIRECT HTTP caller. pf_update_step's own
+			// heartbeat branch sends a credentials-only body, so from an MCP caller
+			// step_id/status never arrive and there is nothing here to disclose —
+			// which is also why no matching disclosure was added at that hop: the
+			// only shape it could usefully report there, heartbeat plus a TERMINAL
+			// status, occurs ZERO times in the corpus above, and the schema sentence
+			// aihub#398 landed ("Returns early and DISCARDS step_id/status") already
+			// carries it to the caller that does hold the values.
+			var dropped []domain.RequestAdjustment
+			if req.Step != nil && *req.Step != "" {
+				// Applied is the step actually refreshed, not nil: the bump keys on
+				// work_item_id alone, so naming a step that is not the open one
+				// refreshes the open one regardless — which is worth telling the
+				// caller, and costs nothing now that RETURNING has the value.
+				dropped = append(dropped, domain.RequestAdjustment{
+					Param: "step_id", Requested: *req.Step, Applied: bumpedStep,
+				})
+			}
+			if req.Status != "" {
+				dropped = append(dropped, domain.RequestAdjustment{
+					Param: "status", Requested: req.Status, Applied: nil,
+				})
+			}
+			if len(dropped) > 0 {
+				resp["request_adjusted"] = dropped
+			}
+			return c.JSON(http.StatusOK, resp)
 		}
 
 		// aihub#390: artifact_summary is persisted by the completed and failed

@@ -55,8 +55,21 @@ ck_empty "$(run polyforge:pf-plan "$ws_on")"  "pf-plan, superpowers on -> no inj
 echo "== pf-execute =="
 o="$(run polyforge:pf-execute "$ws_off")"
 ck "$o" "parse_review_result" "execute native main loop injected"
-ck "$o" "default_model"       "execute native fragment defines default_model"
-ck "$o" "sonnet"              "execute native default_model = sonnet"
+# aihub#338 layer 3: the native loop picks a tier from the STEP KIND. Assert the two tier
+# constants and the predicate separately — a check for "sonnet" alone stayed green through the
+# whole aihub#358 period, when the selector existed but could never match.
+ck "$o" "DEFAULT_TIER"        "execute native fragment defines the default tier"
+ck "$o" "RAISED_TIER"         "execute native fragment defines the raised tier"
+ck "$o" "sonnet"              "execute native default tier = sonnet"
+ck "$o" "opus"                "execute native raised tier = opus"
+ck "$o" "sid.endswith("     "execute native selects the raised tier by step kind"
+# aihub#338 layer 2: IR1-IR3 ride this hook because a dispatched subagent never sees the
+# SessionStart payload. Verbatim coverage is gated in internal/cli/skill_router_payload_test.go;
+# these three are the cheap smoke check that the header carries them at all. Matched on the rule
+# TITLES, not on "IR1 - ...": the em dash is \u2014-escaped by json.dumps (see the header note).
+ck "$o" "Work-item-gated writes"          "execute payload carries IR1"
+ck "$o" "Analyze obstacles"               "execute payload carries IR2"
+ck "$o" "MCP unavailable"                 "execute payload carries IR3"
 o="$(run polyforge:pf-execute "$ws_on")"
 ck "$o" "subagent-driven-development"      "execute superpowers pointer"
 ck "$o" "finishing-a-development-branch"   "execute D6 boundary present"

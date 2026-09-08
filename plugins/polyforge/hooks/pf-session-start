@@ -32,7 +32,12 @@ SKILL_DIR="${PLUGIN_ROOT}/skills/using-polyforge"
 [ -f "${SKILL_DIR}/SKILL.md" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0  # python3 unavailable -> no-op, never block startup
 
-SKILL_DIR="$SKILL_DIR" PF_WS="$ws" python3 <<'PY'
+# PF_PLUGIN_ROOT is the plugin copy the harness ACTUALLY executed, derived from $0 rather
+# than from ${CLAUDE_PLUGIN_ROOT}: $0 is what ran, an env var is what something else says
+# ran. It is the only programmatically readable answer to "which plugin version is this
+# session bound to" (aihub#365) — the install cache keys on <cache>/<marketplace>/<plugin>/
+# <version>, so the version is in this path and versions coexist.
+SKILL_DIR="$SKILL_DIR" PF_WS="$ws" PF_PLUGIN_ROOT="$PLUGIN_ROOT" python3 <<'PY'
 import json, os, re, sys
 
 def read(p):
@@ -229,7 +234,142 @@ if binary_status:
     # above stays true no matter what is edited into the string.
     STATUS_BANNER = STATUS_BANNER[:STATUS_CTX_MAX]
 
-ctx = PREAMBLE + STATUS_BANNER + LEDE + "\n\n".join(t for _, t in parts) + TAIL
+# ---------------------------------------------------------------------------
+# PLUGIN VERSION DRIFT SELF-CHECK (aihub#365)
+# ---------------------------------------------------------------------------
+# "Published" is not "running". The install cache keys on
+# <cache>/<marketplace>/<plugin>/<version>, so versions COEXIST, and a session
+# binds to one at the moment it starts. Updating the plugin mid-session rewrites
+# ~/.claude/plugins/installed_plugins.json immediately but cannot move a session
+# that is already bound: measured 2026-09-05, installed_plugins.json recorded
+# 1.1.23 while the live session was executing 1.1.22's skills, and BOTH version
+# directories had live PIDs in their .in_use.
+#
+# aihub#302 gated "contents changed => version bumped" and polyforge-scenario#9
+# added the missing release step, so of the three hops — change merged, released,
+# in effect — the first two are gated and the third had nothing watching it. This
+# is that third hop.
+#
+# THE VERSION IS PROGRAMMATICALLY READABLE, which is what makes this checkable at
+# all: PF_PLUGIN_ROOT above comes from the hook's own $0, so it names the copy the
+# harness really executed. (The same derivation is why the router's injected
+# payload carries absolute 1.1.22 paths in a session installed_plugins.json calls
+# 1.1.23 — that mismatch is machine-generated, not a model's paraphrase.)
+#
+# CRITERION IS PATHS, NOT VERSION STRINGS. installPath and PF_PLUGIN_ROOT are the
+# same kind of value, so comparing them needs no parsing and cannot drift. We warn
+# only when the running root is a SIBLING of a recorded install — same
+# .../<plugin>/ parent, different version directory — which is exactly the shape
+# above. Anything else (a git checkout, a local/dev install) is a different install
+# mode that makes no claim to contradict, so it stays silent: this must not cry
+# wolf on every contributor running the tree from source.
+#
+# BUDGET (aihub#285/#291/#293/#296/#305): identical treatment to the binary-status
+# relay above — full prose in the top-level `systemMessage`, which costs the
+# additionalContext budget nothing; a FIXED, capped banner in ctx; placed in the
+# PREAMBLE, never appended (a banner past the truncation point delivers none of
+# itself); and emitted ONLY on mismatch, so a healthy session's payload is
+# byte-for-byte what it was before this change.
+INSTALLED_PLUGINS = os.path.join(home, ".claude", "plugins", "installed_plugins.json")
+# The two constants are tied together, and the tie is the point. The banner's fixed prose is
+# 476 characters and it interpolates two version strings, so the true worst case is
+# 476 + 2 * VERSION_STR_MAX = 540. VERSION_CTX_MAX must exceed THAT, not the 488 a typical
+# "1.1.22"/"1.1.23" pair produces: a ceiling set to the typical size would not fail loudly,
+# it would silently slice the tail off the banner — and the tail is the sentence naming the
+# remedy. A cap that mutilates the message it is capping is worse than no cap.
+VERSION_STR_MAX = 32    # per-value clamp, so the ceiling below is a real constant
+VERSION_CTX_MAX = 560   # > 476 + 2 * VERSION_STR_MAX; asserted in tests
+
+# NOT named PLUGIN_ROOT: `os.environ.get("PLUGIN_ROOT")` further down means something
+# entirely different (bare PLUGIN_ROOT is how Codex announces itself), and bash never
+# exports its own PLUGIN_ROOT, only PF_PLUGIN_ROOT. Two different meanings under one name
+# invites a "simplification" that would break both.
+RUNNING_ROOT = os.environ.get("PF_PLUGIN_ROOT", "")
+
+
+def clamp(v):
+    v = str(v)
+    return v if len(v) <= VERSION_STR_MAX else v[:VERSION_STR_MAX - 1] + "…"
+
+
+def running_version(root):
+    # Claude Code reads .claude-plugin/plugin.json. The plugin.json at the tree
+    # ROOT is the Copilot/Codex manifest and has shipped a STALE version before:
+    # cached 1.1.7 still says "1.1.6" there today. Never read that one — doing so
+    # would make this check invent drift on a machine that has none.
+    raw = read(os.path.join(root, ".claude-plugin", "plugin.json"))
+    if raw:
+        try:
+            v = json.loads(raw).get("version")
+            if isinstance(v, str) and v:
+                return v
+        except ValueError:
+            pass
+    return os.path.basename(root)  # the cache key IS the version the installer chose
+
+
+def version_drift():
+    """(plugin_key, running_ver, recorded_ver, running_root, recorded_path) or None."""
+    if not RUNNING_ROOT:
+        return None
+    run_root = os.path.normpath(RUNNING_ROOT)
+    try:
+        with open(INSTALLED_PLUGINS, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None  # absent/corrupt (Codex, Copilot, a fresh box) -> say nothing
+    plugins = data.get("plugins")
+    if not isinstance(plugins, dict):
+        return None
+    family = os.path.dirname(run_root)
+    sibling = None
+    for key, entries in plugins.items():
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            p = e.get("installPath")
+            if not isinstance(p, str) or not p:
+                continue
+            p = os.path.normpath(p)
+            if p == run_root:
+                return None  # a recorded install IS what is running; scope check
+                             # every entry before warning, so a plugin installed at
+                             # both user and project scope cannot self-report drift
+            if sibling is None and os.path.dirname(p) == family:
+                sibling = (key, e.get("version") or os.path.basename(p), p)
+    if sibling is None:
+        return None
+    key, recorded, path = sibling
+    return (key, running_version(run_root), recorded, run_root, path)
+
+
+VERSION_BANNER = ""
+version_status = ""
+drift = version_drift()
+if drift:
+    _key, _run_v, _rec_v, _run_root, _rec_path = drift
+    VERSION_BANNER = (
+        "⚠️ **THIS SESSION IS RUNNING AN OLDER POLYFORGE THAN THE ONE INSTALLED.** "
+        "Bound at session start: **%s**. `installed_plugins.json` records: **%s**. "
+        "Plugin files bind when a session starts and the install cache keeps every "
+        "version, so an update that landed after that moment has NOT reached you: the "
+        "skills, hooks and MCP binary you are running may be older than this "
+        "workspace expects. TELL THE USER, and say that `/reload-plugins` or a new "
+        "session is what picks the new one up.\n\n" % (clamp(_run_v), clamp(_rec_v))
+    )
+    # A ceiling that cannot be exceeded by accident (see STATUS_CTX_MAX above).
+    VERSION_BANNER = VERSION_BANNER[:VERSION_CTX_MAX]
+    # Paths go in systemMessage only: they are unbounded, and the two version
+    # strings are what a human acts on.
+    version_status = (
+        "polyforge version drift: this session is running %s (%s), but %s records "
+        "%s (%s) for %s. Run /reload-plugins or start a new session to pick it up."
+        % (_run_v, _run_root, INSTALLED_PLUGINS, _rec_v, _rec_path, _key)
+    )
+
+ctx = PREAMBLE + STATUS_BANNER + VERSION_BANNER + LEDE + "\n\n".join(t for _, t in parts) + TAIL
 
 # ---------------------------------------------------------------------------
 # RUNTIME LENGTH SELF-CHECK (aihub#293, deferred from aihub#285's 4th criterion)
@@ -288,9 +428,15 @@ if len(ctx) > MAX_CHARS:
     # already degraded — the same "the fix does not reach the people who have
     # the bug" shape the warning exists to close. It is bounded at 420 chars, so
     # it cannot meaningfully compete with the fragments for room.
+    #
+    # VERSION_BANNER rides along for the same reason (aihub#365), and the reason
+    # bites harder here: a session pinned to an OLD plugin is a prime way to be
+    # over budget in the first place (its manifest is whatever that older release
+    # shipped), so "degraded" and "stale version" correlate — dropping the warning
+    # in the rebuild would blind exactly the population it is for. Bounded at 520.
     kept, dropped = list(parts), []
     while True:
-        ctx = (PREAMBLE + STATUS_BANNER + banner(dropped) + degraded_lede
+        ctx = (PREAMBLE + STATUS_BANNER + VERSION_BANNER + banner(dropped) + degraded_lede
                + "\n\n".join(t for _, t in kept) + TAIL)
         if len(ctx) <= MAX_CHARS or not kept:
             break
@@ -340,8 +486,15 @@ else:
     # SessionStart does, so this is the channel that MIGHT reach the human
     # directly, while the banner in ctx is the one that provably reaches the
     # model that will tell them.
-    if binary_status:
-        out["systemMessage"] = binary_status
+    #
+    # aihub#365 joins the version-drift line to the same field rather than adding
+    # a second key: `systemMessage` is a string, so a second warning has nowhere
+    # else to go, and the two are independent (an old plugin and a stale binary
+    # have different causes and can occur together). Assigning instead of joining
+    # would let whichever ran second silently delete the other.
+    system_lines = [m for m in (binary_status, version_status) if m]
+    if system_lines:
+        out["systemMessage"] = "\n\n".join(system_lines)
 
 print(json.dumps(out))
 PY

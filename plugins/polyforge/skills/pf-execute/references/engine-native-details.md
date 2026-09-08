@@ -160,47 +160,64 @@ Step <step_id> paused the attempt for <slug> — a human needs to look at it.
 - Resume once it is resolved: /pf-work <slug>
 ```
 
-## 0f. There is no per-step model tier, and `level:` cannot become one (aihub#358)
+## 0f. The model tier is keyed on step KIND; `level:` cannot become one (aihub#358 / aihub#338)
 
-Every step in both loops dispatches with `default_model`. This section exists because the engine
-spent 2.5 months claiming otherwise.
+**The mapping, as the auto loop implements it.** Two tiers, selected from the step id alone:
 
-**What the text used to say.** `engine.native.md` compared `step_level(content)` against the
-literal `"opus"` to pick the model, and this file called that comparison a "special case".
-Three things were wrong with it at once:
+| step kind | predicate in `engine.native.md` | tier |
+|---|---|---|
+| review / design judgement | `sid.endswith("_review")`, or `sid` in `review` / `code_review` / `release_review` | `RAISED_TIER` = opus |
+| everything else | otherwise | `DEFAULT_TIER` = sonnet |
 
-1. `step_level` is defined nowhere — in any language, in any repo. It is pseudo-code a model
-   executes by reading it, so the comparison is only ever as real as the value it compares.
+Measured against polyforge-coding@09cc434 (17 templates, 102 step occurrences, 26 distinct step
+ids), that raises exactly **9 occurrences**: `code_review` ×8 (chore.aihub, chore.tether,
+critical_bug.ieops, feature.aihub, feature.tether, fix_bug.aihub, fix_bug.ieops, fix_bug.tether)
+and `release_review` ×1 (release.aihub). Note `review_fix` (×8) is NOT one of them — it applies a
+review's findings, which is ordinary editing work, and `endswith("_review")` does not match it.
+
+**Decided by the owner (2026-09-04): task-kind → tier.** The owner explicitly rejected keying it
+on `level:`, and explicitly asked for the policy `hooks/pf-skill-router` already ships on the
+superpowers branch — "sonnet for everything except review/architecture, which use opus" — rather
+than a second, divergent one. So the two branches now state the same rule.
+
+⚠️ **Two limits of this mapping, recorded rather than glossed.**
+1. The scenario repo produces no *architecture* step id today, so "architecture" in the owner's
+   policy has no site to land on and the raised set is the review steps. When such a step
+   appears, its id is what needs adding here — not a new key.
+2. `spec` and `plan` steps are design judgement and are NOT raised. That is deliberate and it is
+   a judgement call, not an oversight: the evidence behind raising review steps is two measured
+   catches by clean-context reviewers, while the same note records spec as "possible, undecided".
+   The per-review token multiplier is **UNMEASURED** — nobody has costed it.
+
+**Why `level:` cannot be the key.** This is the aihub#358 defect and it is still true: the engine
+spent 2.5 months claiming a tier it never applied.
+
+1. `step_level` was defined nowhere — in any language, in any repo. It is pseudo-code a model
+   executes by reading it, so a comparison is only ever as real as the value it compares.
 2. **The two `level:`s are different parameters that happen to share a key name.** The one the
    scenario repo emits is `common/review/SKILL.md`'s review-DEPTH argument, enumerated
    `quick|medium|deep|challenge` (that file's frontmatter and its `structured_payload` contract
-   both state it). The one the selector wanted was a model name. Measured at
+   both state it). The one the old selector wanted was a model name. Measured at
    polyforge-coding@6231732: **9** `level:` lines, every one of them the line immediately after
    `@include: common/review/SKILL.md`, values `quick`×4 / `deep`×5 — and not one occurrence of
-   `opus`, `sonnet` or `haiku` anywhere in that repo.
-3. So `{quick,medium,deep,challenge} ∩ {opus} = ∅` and the branch was unreachable: **every step
-   has always dispatched sonnet.** The tiering never fired once.
+   any model name anywhere in that repo.
+3. So the two sets were disjoint and the branch was unreachable: **every step dispatched the
+   default.** The tiering never fired once, silently, because a selector that never matches is
+   indistinguishable from one whose condition is simply never true.
 
-**Why the key name makes this unfixable in place.** Because the two parameters share `level:`,
-putting a model name in that field to select a model *simultaneously* hands that model name to
-`common/review` as a review depth its enumeration does not contain. "deep review" and "opus
-model" cannot both be requested through this one key. Mapping a depth to a model is therefore a
-change of contract, and it changes cost on every project at once — 5 step-graph entries carry
-`level: deep` (`release.aihub`, `critical_bug.ieops`, `fix_bug.tether`, `feature.aihub`,
-`feature.tether`) and 4 carry `level: quick`. That is the owner's call, not an implementation
-detail.
-
-**Note the superpowers branch is unaffected and already has a working policy.**
-`hooks/pf-skill-router` injects, for that branch only, "sonnet for everything except
-review/architecture, which use opus" — keyed on the KIND OF TASK, not on `level:`. Whatever
-replaces the native tier should match that policy rather than invent a second one.
+Putting a model name in that field to select a model would *simultaneously* hand that model name
+to `common/review` as a review depth its enumeration does not contain. "deep review" and "raised
+tier" can never both be requested through one key. Keying on the step id costs nothing there,
+which is the whole reason it is the key.
 
 **The gate.** `internal/cli/engine_native_contract_test.go`
 (`TestEngineNativeLevelVocabularyContract`) fails if either engine document ever names a
-`level:` value the scenario repo does not produce. It carries the scenario vocabulary as a
-pinned set because aihub's CI never checks out polyforge-coding, and reconciles that pinned set
-against the live repo whenever a checkout is reachable — so the pin cannot rot silently on any
-machine that has one.
+`level:` value the scenario repo does not produce, and separately asserts that both documents
+state how the tier IS chosen — silence is what let a reader assume a broken mechanism worked, so
+neither half is satisfied by saying nothing. It carries the scenario vocabulary as a pinned set
+because aihub's CI never checks out polyforge-coding, and reconciles that pinned set against the
+live repo whenever a checkout is reachable — so the pin cannot rot silently on any machine that
+has one.
 
 ## 1. Execute (rhs=true, interactive mode) — the loop in full
 

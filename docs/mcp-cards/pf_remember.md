@@ -153,6 +153,15 @@ assuming it. The risk on this tool is at hops 1 and 4.
   is refused rather than silently stored.
 - `dedup_mode` and `supersedes_memory_id` change what happens to an existing similar
   memory; neither is enumerated.
+- **`attrs` must be a JSON object, and only when the CALLER sent it** (`aihub#465`).
+  A JSON-encoded string of an object used to be stored verbatim under a 200; it is
+  now a 400 naming the type, the byte length and — through
+  `details.string_decodes_to` — whether the quoted text was itself valid JSON.
+  Nothing is coerced. The provenance qualifier is load-bearing rather than
+  decorative: `domain.UpdateMemory` re-enters this same write path carrying the
+  attrs it just READ from the lineage head, and that inherited value is exempt, or
+  editing a memory whose attrs is already a string would fail — which is the only
+  way such a row can be repaired.
 
 ## hop 5 — what comes back
 

@@ -186,6 +186,13 @@ so stored payloads keep round-tripping.
   parameter accepts a value no row can hold.
 - **`requires_human_session` decides which ready-queue section the wi lands in**, so
   it is the field that determines whether an agent is ever dispatched to it.
+- **`attrs` must be a JSON object** (`aihub#465`). It binds to a bare
+  `json.RawMessage` and is assigned straight into the jsonb column, so before that
+  work item a JSON-encoded STRING of an object was stored verbatim under a 200 and
+  every reader that expects an object got a string. The rejection is the same one
+  the PATCH path gives — type, byte length, and `details.string_decodes_to` saying
+  whether the quoted text was itself valid JSON — and nothing is coerced. An
+  omitted `attrs` is still defaulted to `{}`, and a literal `null` is unchanged.
 
 ## hop 5 — what comes back
 

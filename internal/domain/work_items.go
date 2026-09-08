@@ -388,6 +388,13 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	if aihubErr := validateWorkItemContent(req.Content); aihubErr != nil {
 		return nil, aihubErr
 	}
+	// aihub#465: the same shape guard the PATCH path applies. Above the default
+	// below, so an omitted attrs is still `{}` rather than a rejection, and
+	// above the embedding call further down for the reason the aihub#396 block
+	// just gave: a doomed request should not first spend a network round-trip.
+	if aihubErr := validateJSONObjectParam("attrs", req.Attrs); aihubErr != nil {
+		return nil, aihubErr
+	}
 	if len(req.Attrs) == 0 {
 		req.Attrs = json.RawMessage("{}")
 	}
@@ -2025,8 +2032,8 @@ func normalizeDeclaredResources(req *UpdateWorkItemRequest) {
 	}
 }
 
-// validateAttrsPatch rejects the two attrs payloads that must never reach
-// Postgres (aihub#288). Run normalizeAttrsPatch first.
+// validateAttrsPatch rejects the three attrs payloads that must never reach
+// Postgres (aihub#288, aihub#465). Run normalizeAttrsPatch first.
 //
 // Extracted as a pure function for the same reason isCASConflict was: the only
 // behavioural test of a check living inline in UpdateWorkItem would be DB-gated,
@@ -2040,7 +2047,16 @@ func normalizeDeclaredResources(req *UpdateWorkItemRequest) {
 //     must be a 400. Checked BEFORE the combination rule below so a bad patch is
 //     reported as a bad patch rather than as a conflict.
 //
-//  2. `attrs` together with `attrs_patch`/`attrs_unset`. They are contradictory
+//  2. An `attrs` that is not a JSON object (aihub#465). `attrs` is a plain
+//     column assignment rather than a `||` merge, so Postgres stores whatever
+//     JSON arrives — including a JSON *string* — and answers 200, leaving the
+//     column holding a string where every reader expects an object. Measured:
+//     two live `pf_update_work_item` calls did exactly that. Checked in the
+//     same place as the patch shape, and BEFORE the combination rule below,
+//     for the same reason: a bad `attrs` is reported as a bad `attrs` rather
+//     than as a conflict with `attrs_patch`.
+//
+//  3. `attrs` together with `attrs_patch`/`attrs_unset`. They are contradictory
 //     instructions for one column — REPLACE everything vs. keep everything and
 //     amend it. Applying both would make the result depend on clause order,
 //     which is exactly the kind of silent, order-dependent outcome this work
@@ -2049,8 +2065,11 @@ func validateAttrsPatch(req *UpdateWorkItemRequest) *AihubError {
 	if req.AttrsPatch != nil {
 		var probe map[string]json.RawMessage
 		if err := json.Unmarshal(req.AttrsPatch, &probe); err != nil || probe == nil {
-			return attrsPatchShapeErr(req.AttrsPatch)
+			return jsonObjectParamErr("attrs_patch", req.AttrsPatch)
 		}
+	}
+	if aihubErr := validateJSONObjectParam("attrs", req.Attrs); aihubErr != nil {
+		return aihubErr
 	}
 	if req.Attrs != nil && (req.AttrsPatch != nil || req.AttrsUnset != nil) {
 		return NewErr(ErrBadRequest,
@@ -2059,11 +2078,57 @@ func validateAttrsPatch(req *UpdateWorkItemRequest) *AihubError {
 	return nil
 }
 
-// attrsPatchKind names the JSON type that actually arrived, for the rejection
+// validateJSONObjectParam rejects a CALLER-SUPPLIED jsonb object parameter that
+// is not a JSON object (aihub#465).
+//
+// The four such parameters — `attrs`, `attrs_patch`, `payload` and
+// `structured_payload` — were all published as objects and all bound to a bare
+// json.RawMessage, so before this guard only `attrs_patch` checked its shape.
+// The other three answered 200 and stored whatever JSON arrived. The population
+// that actually arrives is not hypothetical: measured over 1,170 real
+// object-parameter calls in the transcript corpus (2026-09-08), 1,151 were
+// objects, 19 were JSON-encoded STRINGS of an object, and none was an array, a
+// number or a boolean. So the reject face is "must be a JSON object", which
+// matches attrs_patch, and widening it costs no measured caller anything.
+//
+// Two things this deliberately does NOT do:
+//
+//   - It does not coerce. Decoding the string and storing the result would
+//     rescue 1 of those 19 calls: 18 of them are malformed JSON, so the value
+//     recovered would be a guess at what the caller meant. A caller who is
+//     told gets it right on the retry; a caller who is silently "fixed" never
+//     learns, and the one time the guess is wrong the wrong data is stored
+//     under a 200.
+//
+//   - It does not touch a literal `null`, which keeps whatever meaning each
+//     field already gave it (folded to "not supplied" by normalizeAttrsPatch,
+//     stored as a JSON null by `attrs` and `payload`). Changing that is a
+//     separate decision from the shape guard and nothing in the measured
+//     population sends it.
+//
+// CALLER-SUPPLIED is the load-bearing word, and the split is by provenance, not
+// by field (mem_X8JDSC96): the same bytes read back OUT of a jsonb column must
+// never be rejected, or every path that re-remembers a stored row would start
+// failing on data written before this guard existed — punishing a caller for a
+// bug they did not cause. UpdateMemory is the one place in this repo that feeds
+// stored attrs back into a write, and it names that provenance explicitly.
+func validateJSONObjectParam(field string, raw json.RawMessage) *AihubError {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil || probe == nil {
+		return jsonObjectParamErr(field, raw)
+	}
+	return nil
+}
+
+// jsonValueKind names the JSON type that actually arrived, for the rejection
 // message. It parses rather than switching on the first byte, so a value that
 // merely STARTS like an object (`{"a":`) is reported as malformed JSON instead
 // of being mislabelled an object the check has just refused.
-func attrsPatchKind(raw json.RawMessage) string {
+func jsonValueKind(raw json.RawMessage) string {
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return "malformed JSON"
@@ -2080,15 +2145,45 @@ func attrsPatchKind(raw json.RawMessage) string {
 	case float64:
 		return "a JSON number"
 	case nil:
-		// Unreachable in practice: normalizeAttrsPatch folds a literal null to
-		// "not supplied" before this runs. Named anyway so a future caller of
+		// Unreachable for the OUTER value: normalizeAttrsPatch folds a literal
+		// null to "not supplied" before this runs, and validateJSONObjectParam
+		// folds it for the other three fields. Reachable for the value INSIDE a
+		// JSON-encoded string (`"null"`), and named anyway so a future caller of
 		// this helper cannot get "unknown" for a type JSON does have.
 		return "a JSON null"
 	}
 	return "an unrecognised JSON value"
 }
 
-// attrsPatchShapeErr builds the 400 for an attrs_patch that is not an object.
+// jsonObjectParamSizeNote is the size sentence each guarded jsonb object
+// parameter's rejection carries, keyed by the field name.
+//
+// A per-field table rather than one constant because the claim is not true of
+// every field: `payload` IS capped, at 65,536 bytes in EmitEvent, so the
+// unconditional "has no length cap" wording would have shipped a false
+// statement to every pf_emit_event caller (aihub#465). A field absent from this
+// table gets no size sentence at all rather than an invented one, and
+// TestJSONObjectParamSizeNoteCoversEveryGuardedField fails if a guarded field
+// has no entry — an empty note is a silent omission, which is the failure this
+// table exists to prevent.
+//
+// The three "no length cap" entries are measured, not assumed (aihub#420,
+// 2026-09-07): PATCH accepted an attrs_patch of 199,983 bytes and 8,016 bytes
+// travelled the full MCP tool path, both HTTP 200; `attrs` and
+// `structured_payload` reach the same column through the same handlers, and
+// code reading finds no length check on any of the three anywhere in the
+// request path.
+var jsonObjectParamSizeNote = map[string]string{
+	"attrs":              "attrs has no length cap",
+	"attrs_patch":        "attrs_patch has no length cap",
+	"structured_payload": "structured_payload has no length cap",
+	"payload":            "payload's own 64KB cap is checked first, and this value is under it",
+}
+
+// jsonObjectParamErr builds the 400 for a jsonb object parameter that is not an
+// object. One builder for all four fields (aihub#465) rather than a copy per
+// field: the caller mistake is identical and so is the repair, and a second
+// copy would be a second message to keep true.
 //
 // aihub#420. The message used to be the bare sentence "attrs_patch must be a
 // JSON object" — it named the expectation and never the observation, so FIVE
@@ -2108,34 +2203,72 @@ func attrsPatchKind(raw json.RawMessage) string {
 //
 // The closing clause is stated on EVERY kind rather than only on the large or
 // string-shaped ones, because a threshold for "large enough that the caller
-// might blame size" is not defensible and the clause is true unconditionally.
-// It is measured, not assumed (aihub#420, 2026-09-07): PATCH accepted an
-// attrs_patch of 199,983 bytes, and 8,016 bytes travelled the full MCP tool
-// path, both HTTP 200. Nothing between the router and the jsonb column caps
-// this field — the one body cap in the request path, the idempotency
-// middleware's 4 MiB fingerprint limit, only disables response caching and
-// explicitly restores the body rather than failing the request.
-func attrsPatchShapeErr(raw json.RawMessage) *AihubError {
-	kind := attrsPatchKind(raw)
-	msg := fmt.Sprintf("attrs_patch must be a JSON object; got %s of %d bytes", kind, len(raw))
-	// The single highest-signal case: the bytes ARE the object the caller meant,
-	// wrapped in quotes by their client. Say so, so the caller looks at their
-	// serialisation instead of at their data.
+// might blame size" is not defensible. Its wording is per-field, because for
+// one of the four fields it is not unconditionally true — see
+// jsonObjectParamSizeNote.
+//
+// aihub#465 adds the branch for the case that actually occurs. #420's
+// high-signal clause fires only when the inner string decodes to an object, and
+// measured over the transcript corpus that is 1 of 19 stringified payloads: the
+// other 18 are malformed JSON, one closing brace short or carrying a broken
+// \uXXXX escape, because a model hand-wrote the escaped text rather than a
+// client wrapping a real object in quotes. So the clause #420 wrote had reached
+// a caller exactly never, and the one payload it would have matched was a
+// `structured_payload`, which had no guard to reach it through. The malformed
+// branch therefore carries its own repair instruction plus the parse error, and
+// `details.string_decodes_to` states which of the two it was machine-readably —
+// a message that says only "must be a JSON object" to someone whose escaped
+// text is truncated tells them nothing they can act on.
+//
+// The malformed branch's guidance is gated on the inner text opening with `{`,
+// because the sentence claims to know what the caller was trying to do. That
+// gate is measured, not guessed: 19 of 19 real inner strings start with `{`
+// after trimming, so it costs nothing, while an ungated version would tell a
+// caller who genuinely meant the string "nope" that they mis-escaped some JSON.
+// Checking that the clause fires on the REAL population, rather than on the
+// population the author imagined, is the whole lesson of #420.
+func jsonObjectParamErr(field string, raw json.RawMessage) *AihubError {
+	kind := jsonValueKind(raw)
+	msg := fmt.Sprintf("%s must be a JSON object; got %s of %d bytes", field, kind, len(raw))
+	details := map[string]any{
+		"field": field,
+		"got":   kind,
+		"bytes": len(raw),
+	}
 	if kind == "a JSON string" {
 		var inner string
 		if json.Unmarshal(raw, &inner) == nil {
-			var innerProbe map[string]json.RawMessage
-			if json.Unmarshal([]byte(inner), &innerProbe) == nil && innerProbe != nil {
-				msg += ", and that string decodes to a JSON object — send the object itself, not a JSON-encoded string of it"
+			var probe any
+			switch perr := json.Unmarshal([]byte(inner), &probe); {
+			case perr != nil:
+				// The case that actually happens: hand-escaped JSON that came
+				// out broken. Name the parse error — it is the only part that
+				// says WHERE to look.
+				details["string_decodes_to"] = "malformed JSON"
+				details["string_decode_error"] = perr.Error()
+				if bytes.HasPrefix(bytes.TrimSpace([]byte(inner)), []byte("{")) {
+					msg += fmt.Sprintf(", and that string opens like a JSON object but does not parse (%v)"+
+						" — do not hand-write the escaped JSON; send the object itself and let your client escape it", perr)
+				}
+			default:
+				// The #420 case: the bytes ARE the object the caller meant,
+				// wrapped in quotes. Say so, so the caller looks at their
+				// serialisation instead of at their data.
+				innerKind := jsonValueKind(json.RawMessage(inner))
+				details["string_decodes_to"] = innerKind
+				if innerKind == "a JSON object" {
+					msg += ", and that string decodes to a JSON object — send the object itself, not a JSON-encoded string of it"
+				} else {
+					msg += fmt.Sprintf(", and that string decodes to %s, not an object"+
+						" — send the object itself, not a JSON-encoded string of it", innerKind)
+				}
 			}
 		}
 	}
-	msg += ". Size is never the reason for this rejection: attrs_patch has no length cap"
-	return NewErrDetails(ErrBadRequest, msg, map[string]any{
-		"field": "attrs_patch",
-		"got":   kind,
-		"bytes": len(raw),
-	})
+	if note := jsonObjectParamSizeNote[field]; note != "" {
+		msg += ". Size is never the reason for this rejection: " + note
+	}
+	return NewErrDetails(ErrBadRequest, msg, details)
 }
 
 // casVersionUnknown is the placeholder reported when the current

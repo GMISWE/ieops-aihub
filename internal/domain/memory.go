@@ -620,6 +620,23 @@ type RememberRequest struct {
 	// can never suppress this gate" a property of the language rather than of a
 	// tag somebody has to keep right.
 	workItemIDPreResolved bool
+	// attrsFromStoredRow marks Attrs as bytes read back OUT of the jsonb column
+	// rather than supplied by a caller, which suppresses the aihub#465 shape
+	// guard for that one field. Same unexported-on-purpose reasoning as
+	// workItemIDPreResolved above, and UpdateMemory is again the only setter.
+	//
+	// The split is by provenance, not by field (mem_X8JDSC96): caller input is
+	// hard-rejected so the mistake stops where it is made, while already-stored
+	// data is carried forward untouched. Without it, adding the guard to
+	// Remember would have made pf_update_memory start answering 400 for every
+	// memory whose attrs is ALREADY a string — rows written before the guard
+	// existed, by a bug their editor did not cause, and the only way to repair
+	// such a row is to edit it. A validation that brings its own repair path
+	// down with it is worse than the defect.
+	//
+	// It is not a general-purpose escape hatch: it exempts Attrs only, so a
+	// caller-supplied structured_payload on the same request is still checked.
+	attrsFromStoredRow bool
 }
 
 // RecallRequest is the query for GET /v1/memories.
@@ -960,6 +977,31 @@ func validateBaseStrength(bs *float64) *AihubError {
 		*bs, MinBaseStrength, MaxBaseStrength, DefaultBaseStrength))
 }
 
+// validateRememberJSONParams is Remember's aihub#465 shape guard over the two
+// jsonb object parameters a memory write carries.
+//
+// A pure function, and separate from Remember, for the reason mem_I98xpPgY
+// gives about validateAttrsPatch: a check written inline in a function that
+// needs a pool can only be exercised by the DB-gated suite, which SKIPs
+// everywhere except its own scoped CI step — so deleting it would leave
+// `go test ./...` entirely green. Extracted, both directions of the provenance
+// split are unit-testable without a database, which is what
+// TestRememberAttrsProvenanceSplit does.
+//
+// Attrs is exempted when it came from a stored row (see attrsFromStoredRow).
+// StructuredPayload never is: no caller in this repo re-feeds a stored
+// structured_payload into a write — UpdateMemory leaves the field unset and
+// carries the whole merged attrs object instead — so every value this field
+// ever holds came from the wire.
+func validateRememberJSONParams(req *RememberRequest) *AihubError {
+	if !req.attrsFromStoredRow {
+		if shapeErr := validateJSONObjectParam("attrs", req.Attrs); shapeErr != nil {
+			return shapeErr
+		}
+	}
+	return validateJSONObjectParam("structured_payload", req.StructuredPayload)
+}
+
 // Remember creates a new memory per §7 / §4.3.
 // Returns (memory, isNew, error). isNew=false if dedup hit in suggest mode.
 // Strict mode returns ErrConflictSimilarMemory on high-similarity match.
@@ -1000,6 +1042,16 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	// came back as a 500 with the driver's constraint text in it.
 	if bsErr := validateBaseStrength(req.BaseStrength); bsErr != nil {
 		return nil, false, bsErr
+	}
+
+	// aihub#465: in the same place and for the same reason — this is the one
+	// function every memory write reaches, and it has to stay above the first
+	// query. A stringified structured_payload used to be merged into
+	// attrs.structured_payload verbatim (see the G35 block below, which
+	// unmarshals into an `any`), so the column came back holding a string where
+	// routes_artifacts' reviewPayload expects an object, under an HTTP 200.
+	if shapeErr := validateRememberJSONParams(req); shapeErr != nil {
+		return nil, false, shapeErr
 	}
 
 	if req.DedupMode == "" {
@@ -2632,11 +2684,42 @@ type UpdateMemoryRequest struct {
 	CallerDisplay string
 }
 
+// resolveUpdateMemoryAttrs decides which attrs bytes the new version carries,
+// and reports whether they came from the stored row rather than from the caller
+// (aihub#465).
+//
+// A four-line function with its own test rather than an if/else inside
+// UpdateMemory, because the boolean it returns is the whole provenance split and
+// UpdateMemory cannot be called without a database. Inline, losing the `true`
+// would make pf_update_memory answer 400 for every memory whose attrs is
+// already a string — and `go test ./...` would stay green, which is the failure
+// mode mem_I98xpPgY describes.
+func resolveUpdateMemoryAttrs(callerAttrs, headAttrs json.RawMessage) (json.RawMessage, bool) {
+	if len(callerAttrs) > 0 {
+		return callerAttrs, false
+	}
+	return headAttrs, true
+}
+
 // UpdateMemory creates a NEW version superseding the lineage head resolved
 // from id (any id in the lineage), inheriting unchanged fields from that
 // head, and advances the latest_id cursor across the whole lineage (via
 // Remember's supersede-propagation logic). Returns the new head.
 func UpdateMemory(ctx context.Context, pool *pgxpool.Pool, id string, req *UpdateMemoryRequest) (*Memory, error) {
+	// aihub#465, the caller-supplied half of the provenance split. Above the
+	// read below so a bad shape costs no query, and stated here rather than left
+	// to Remember because the inherited half a few lines down is exempt and the
+	// two must be visibly different decisions.
+	//
+	// ⚠️ Unreachable through HTTP today: handleUpdateMemory builds this struct
+	// field by field and never sets Attrs (routes_memory.go), so req.Attrs is
+	// always empty and the else branch below is the only one production takes.
+	// Kept because the field is exported and the next caller to wire it through
+	// would otherwise inherit an unguarded path silently — the same shape of
+	// mistake this work item is fixing.
+	if shapeErr := validateJSONObjectParam("attrs", req.Attrs); shapeErr != nil {
+		return nil, shapeErr
+	}
 	head, aerr := GetLatestByID(ctx, pool, id)
 	if aerr != nil {
 		return nil, aerr
@@ -2699,11 +2782,7 @@ func UpdateMemory(ctx context.Context, pool *pgxpool.Pool, id string, req *Updat
 		bs := head.BaseStrength
 		rr.BaseStrength = &bs
 	}
-	if len(req.Attrs) > 0 {
-		rr.Attrs = req.Attrs
-	} else {
-		rr.Attrs = head.Attrs
-	}
+	rr.Attrs, rr.attrsFromStoredRow = resolveUpdateMemoryAttrs(req.Attrs, head.Attrs)
 	m, _, err := Remember(ctx, pool, rr)
 	return m, err
 }
@@ -3222,6 +3301,15 @@ func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
 		}
 	}
 
+	// aihub#465: payload is caller-supplied and goes straight into a jsonb
+	// column, so a JSON-encoded string of an object used to be stored verbatim
+	// under a 200 — measured twice live. Below the 64KB check above on purpose:
+	// that check is the one thing size CAN be rejected for, so it must answer
+	// first, and the rejection built here says so explicitly rather than
+	// repeating attrs_patch's "no length cap", which is false for this field.
+	if shapeErr := validateJSONObjectParam("payload", req.Payload); shapeErr != nil {
+		return "", shapeErr
+	}
 	if len(req.Payload) == 0 {
 		req.Payload = json.RawMessage(`{}`)
 	}

@@ -49,9 +49,9 @@ the finding this card exists to carry.
 
 `event_type` is published as a free string with three examples. There is no enum
 here and no CHECK behind it: `agent_events.event_type` is `TEXT NOT NULL` with no
-constraint, and the domain function validates only payload size (64 KB), an
-admin-only list, and — when `admin:true` — an admin whitelist. **Every other string
-is accepted.**
+constraint, and the domain function validates only payload size (64 KB), payload
+SHAPE since `aihub#465`, an admin-only list, and — when `admin:true` — an admin
+whitelist. **Every other string is accepted.**
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -74,6 +74,20 @@ here too, best-effort, via `internal/mcp/tools_coding.go` (`emitCodingEvent`).
 - The event is appended to the work item's timeline and is the **only durable record**
   of several things: a wrap that actually delivered something, a lock release with
   its cause, a note whose credentials are about to be deleted.
+- **`payload` must be a JSON object, and the 400 says so in `payload`'s own terms**
+  (`aihub#465`). It is published as an object and bound to a bare
+  `json.RawMessage`, so a JSON-encoded STRING of an object used to be inserted
+  verbatim under a 200 and the column came back holding a string — measured twice
+  live. The rejection names the type and the byte length, and reports through
+  `details.string_decodes_to` whether the quoted text was itself valid JSON: 18 of
+  19 real cases are hand-escaped JSON that came out malformed, not a client
+  wrapping a good object, so that branch carries the parse error and its own
+  repair instruction. Nothing is coerced — decoding the string would rescue 1 of
+  the 19 and guess at the other 18.
+- **This is the one guarded field where size CAN be the reason.** The 64 KB cap is
+  checked first, so the shape rejection's closing sentence says the cap was
+  checked and passed rather than repeating `attrs_patch`'s "no length cap", which
+  is false here.
 - **Three overlapping but different sets govern `event_type`, and membership in one
   does not imply membership in another**: `internal/domain/memory.go`
   (`adminOnlyEventTypes`), 4 entries, which require admin role whatever `admin` says;

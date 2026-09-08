@@ -368,7 +368,9 @@ func TestAttrsPatchShapeErr_NamesWhatArrived(t *testing.T) {
 			}
 			// The clause that stops the phantom cap being rediscovered. Measured
 			// 2026-09-07: 199,983 bytes accepted over HTTP, 8,016 bytes accepted
-			// through the MCP tool path. See attrsPatchShapeErr's comment.
+			// through the MCP tool path. See jsonObjectParamErr's comment
+			// (attrsPatchShapeErr until aihub#465 generalised it to all four
+			// jsonb object parameters).
 			if !strings.Contains(aerr.Message, "attrs_patch has no length cap") {
 				t.Errorf("every shape rejection must rule size out explicitly; got: %q", aerr.Message)
 			}

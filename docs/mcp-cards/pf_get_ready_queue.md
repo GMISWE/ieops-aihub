@@ -78,13 +78,27 @@ but **not the same page**: this defaults to 10 ordered by priority desc, that on
 return different subsets, which is stated on `ready_only`'s own description because
 the natural reading is that they agree.
 
-`max` above 200 is clamped. That clamp is the one self-declared exemption from the
-disclosure convention: the `ReadyQueue` struct carries no `request_adjusted` field
-at all, so `max=5000` and `max=200` return byte-identical responses.
+`max` above 200 is clamped, and since `aihub#432` the response SAYS SO: `ReadyQueue`
+carries `request_adjusted`, and `newReadyQueue` in `internal/domain/work_items.go` is
+the single site that both bounds the page size and appends the
+`{param: "max", requested, applied}` entry. Until then this was the one self-declared
+exemption from the disclosure convention — the struct had no field to report the
+clamp in, so `max=5000` and `max=200` returned byte-identical responses.
+
+A non-positive `max` takes the endpoint default of 10 and is disclosed the same way;
+`max=0` is not, because zero and absent are the same `int` by the time the domain
+function sees them (`handleGetReadyQueue` forwards `queryInt`'s value without its
+present flag). The key is ABSENT, not an empty list, when nothing was adjusted.
 
 ## hop 5 — what comes back
 
-`jsonResult`, no projection.
+`jsonResult`, no projection — which is what lets `request_adjusted` reach the model
+at all. That is now a checked property rather than a fact of the current
+implementation: `internal/mcp/recall_wire_query_test.go`
+(`TestWireQueryReadyQueueDisclosureReachesTheModel`) drives the registered tool over
+an in-memory session and fails both if a disclosure the server sent is dropped and if
+an absent one is invented. pf_recall's projection has already swallowed three
+server-side fields this way (`total`, the truncation pair, `unmatched_types`).
 
 🔴 **The published description says "LCRS (6-section)" and the struct has seven keys.**
 `internal/domain/work_items.go` (`ReadyQueue`) declares `items`, `running`, `stalled`,
@@ -103,10 +117,10 @@ corpus README warns about.
 ## Policy
 
 - **§6.1 T1-2 / T1-12** — the two numeric rules stand: unparseable is 400, out of
-  range is clamped AND disclosed via `request_adjusted`. **This tool is the named
-  counter-example** — it obeys half of rule 2. The ruling is to close the exemption
-  by giving `ReadyQueue` the disclosure field, filed as `aihub#432`, and explicitly
-  NOT to narrow the policy to match the code.
+  range is clamped AND disclosed via `request_adjusted`. This tool WAS the named
+  counter-example, obeying half of rule 2; `aihub#432` closed the exemption by giving
+  `ReadyQueue` the disclosure field, as the ruling directed, rather than narrowing the
+  policy to match the code.
 - **§6.1 T1-9** — `non_conflicting` was withdrawn rather than left as prose that
   contradicts hop 3, which is the disposition that rule requires.
 - **§6.2 T2-20** — say "**6 plus `stale_running`**" (or drop the `omitempty`), and
@@ -120,6 +134,12 @@ corpus README warns about.
 
 ## Open
 
-- The `request_adjusted` exemption above is a known open gap, not a settled design.
-  A caller cannot today distinguish "you asked for 5000 and got 200" from "you asked
-  for 200".
+- The published `max` description still says only "default 10" and mentions neither
+  the ceiling nor the disclosure, where `limit`'s neighbouring description on
+  `pf_list_work_items` says both. `internal/mcp/tools_lifecycle.go` was held by
+  another work item when `aihub#432` landed, so the string was left alone; the
+  response now tells a caller what happened, which is the half that could not be
+  worked around.
+- `response_keys_observed` above is a corpus census taken before `aihub#432` and so
+  does not list `request_adjusted`. It records what callers HAVE seen, not what the
+  response can contain.

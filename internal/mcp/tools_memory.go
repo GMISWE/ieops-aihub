@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -49,7 +48,15 @@ func (s *Server) registerMemoryTools() {
 		if strArg(args, "project") == "" {
 			return errResult(fmt.Errorf("project is required"))
 		}
-		result, err := s.client.Recall(ctx, buildRecallParams(args))
+		params, err := buildRecallParams(args)
+		if err != nil {
+			// Rule 1 at hop 2 (aihub#432): a value this process cannot read is
+			// the caller's mistake, named rather than defaulted. The refusal is
+			// this hop's 400 — the request never leaves the process, so there is
+			// no HTTP status to carry it.
+			return errResult(err)
+		}
+		result, err := s.client.Recall(ctx, params)
 		if err != nil {
 			return errResult(err)
 		}
@@ -430,37 +437,35 @@ func recallSchema() json.RawMessage {
 	}, []string{"project"})
 }
 
-// recallNumArg reads one of recallNumberParams, tolerating the JSON *string*
-// spelling of a number.
-//
-// numArg alone would return 0 for `similarity_threshold: "0.99"`, and 0 is this
-// tool's "not specified" — so a caller that quoted the value would have its
-// filter silently discarded. That is defect 2 of aihub#148 (a value dropped
-// because its wire shape disagrees with its declared type) pointed at the very
-// parameter defect 1 is about, and nothing at any hop would have said so.
-// Unparseable text still yields 0 rather than an error, matching what the whole
-// forwarding block does with a value it cannot read.
-func recallNumArg(args map[string]any, key string) float64 {
-	if s, ok := args[key].(string); ok {
-		f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-		if err != nil {
-			return 0
-		}
-		return f
-	}
-	return numArg(args, key)
-}
-
 // buildRecallParams renders pf_recall's MCP arguments into the query string for
 // GET /v1/memories — hop 2 of the four-hop contract.
-func buildRecallParams(args map[string]any) url.Values {
+//
+// Returns an error when a numeric argument ARRIVED and could not be read. That
+// is Rule 1 (internal/server/queryparam.go) applied at this hop, and aihub#432
+// is where it arrived: the numbers used to go through a local reader that
+// answered 0 for unparseable text, which is this tool's "not specified", so
+// `similarity_threshold: "notanumber"` produced an unfiltered page and no
+// complaint at any of the four hops. parseNumArg now separates "not sent" from
+// "not readable" and only the first of those may be silent.
+//
+// A zero still means "not specified", and that is a DIFFERENT and unfixed
+// ambiguity: `similarity_threshold: 0` and no threshold at all remain the same
+// request here (see TestRecallThresholdHasNoDefault, which pins the off default
+// this preserves). Telling those two apart needs the presence flag threaded
+// through to the query string, which changes what recency_weight=0 and
+// min_strength=0 mean on the server — a contract change, not a bug fix.
+func buildRecallParams(args map[string]any) (url.Values, error) {
 	params := url.Values{}
 	for _, k := range recallStringParams {
 		setIfNonempty(params, k, scalarArg(args, k))
 	}
 	// Numbers, formatted as %g. A zero is "not specified" — see recallNumberParams.
 	for _, k := range recallNumberParams {
-		if v := recallNumArg(args, k); v != 0 {
+		v, present, ok := parseNumArg(args, k)
+		if !ok {
+			return nil, fmt.Errorf("%s must be a finite number, got %s", k, describeArg(args[k]))
+		}
+		if present && v != 0 {
 			params.Set(k, fmt.Sprintf("%g", v))
 		}
 	}
@@ -492,7 +497,7 @@ func buildRecallParams(args map[string]any) url.Values {
 	} else if algo := os.Getenv("POLYFORGE_RECALL_ALGO"); algo != "" {
 		params.Set("recall_algo", algo)
 	}
-	return params
+	return params, nil
 }
 
 // validatePfRememberArgs enforces pf_remember's contract before the HTTP call:

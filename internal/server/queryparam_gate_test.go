@@ -391,3 +391,301 @@ func TestLenientQueryReadersAreUIOnly(t *testing.T) {
 	}
 	t.Logf("checked %d lenient-reader call sites", found)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//	aihub#432 — hop 2: the SAME policy, one package upstream
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Everything above walks package server and stops there, while the policy it
+// enforces is a property of the REPO. "Whose mistake is it?" does not stop being
+// the question because the value arrived in an MCP argument map instead of a
+// query string, and aihub#411's T1-2 audit found what that gap let through:
+// recallNumArg in internal/mcp read `similarity_threshold: "notanumber"`,
+// swallowed strconv's error and returned 0 — which is that parameter's OFF value
+// — so buildRecallParams dropped the parameter and the caller got an UNFILTERED
+// page with no error at any of the four hops. That is Rule 1's original defect
+// (the `?similarity_threshold=notanumber` row of the measured table in
+// queryparam.go), reproduced one hop upstream of its fix, in the one package
+// this gate could not see.
+//
+// The response is a second SCOPE, not a second policy. internal/mcp has its own
+// readers of caller-supplied argument text — strArg, scalarArg, numArg,
+// parseBoolArg, parseNumArg — and they all live in helpers.go, which makes that
+// file hop 2's queryparam.go. The invariant is then the same sentence with two
+// nouns changed:
+//
+//	no file in package mcp may turn an MCP tool argument into a non-string
+//	value except through the readers in helpers.go.
+//
+// ─── What this scope deliberately does NOT check, and why ───────────────────
+//
+//   - The COMPARISON half. `strArg(args, "fields") == "brief"` is a legitimate
+//     hop-2 decision (aihub#313: `fields` is consumed in this process and has no
+//     server hop to be dropped on), and there are more like it. Flagging those
+//     would need an exemption list longer than the rule, so the vocabulary half
+//     of the policy is left where it is enforceable — in package server, where
+//     every such comparison IS a handler deciding a wire vocabulary by hand.
+//
+//   - json.Unmarshal, strings.Split and time.Parse, all three of which ARE in
+//     the package-server set above. At hop 2 they are how a JSON array arrives
+//     (tools_lifecycle.go decodes `members` with json.Unmarshal by design) and
+//     how response bodies are taken apart; the numeric family below is the part
+//     that carries the "malformed value becomes a plausible default" failure.
+//     Widening this set is a real improvement and a separate change — it needs
+//     the exemptions written first, and this one must not be blocked on them.
+//
+//   - `cursor`, the third escape in the same audit row. It never reaches a
+//     conversion at all, so no scope of THIS shape can see it; that half is
+//     filed as aihub#411's T1-6 wi and is deliberately untouched here.
+//
+// A limit stated is not a limit closed. What is closed is the numeric one, and
+// it is closed the same way in both packages.
+
+// toolArgPolicyFile is hop 2's queryparam.go: the one file in package mcp
+// allowed to convert a caller-supplied argument into something else.
+const toolArgPolicyFile = "helpers.go"
+
+// mcpPackageDir is package mcp's source directory relative to this one. `go
+// test` runs each package with its own directory as the working directory, so
+// the relative path is stable; mcpSourceFiles fails loudly if it stops
+// resolving, because a broken walk is how a gate reports green forever.
+const mcpPackageDir = "../mcp"
+
+// toolArgParseCalls is the conversion set for hop 2 — the numeric/scalar family
+// only. See the note above for the three call families in parseCalls that are
+// deliberately absent from it.
+var toolArgParseCalls = map[string]bool{
+	"strconv.Atoi":         true,
+	"strconv.ParseFloat":   true,
+	"strconv.ParseInt":     true,
+	"strconv.ParseUint":    true,
+	"strconv.ParseBool":    true,
+	"strconv.ParseComplex": true,
+	"strconv.Unquote":      true,
+	"fmt.Sscan":            true,
+	"fmt.Sscanf":           true,
+	"fmt.Sscanln":          true,
+}
+
+// toolArgReaderFuncs are package mcp's own readers of caller-supplied argument
+// text. A value one of them returns is still the caller's, so it taints exactly
+// as a direct `args[key]` does — the same hole trimmedParam opened in the gate
+// above, closed here before it can be opened.
+var toolArgReaderFuncs = map[string]bool{
+	"strArg":       true,
+	"scalarArg":    true,
+	"numArg":       true,
+	"boolArg":      true,
+	"parseBoolArg": true,
+	"parseNumArg":  true,
+	"csvArg":       true,
+	"strSliceArg":  true,
+}
+
+// toolArgMapNames is the identifier package mcp binds the decoded argument map
+// to. Every registered tool handler opens with `args, err := parseArgs(...)` and
+// every helper takes `args map[string]any`; the other `map[string]any`
+// parameters in the package (`result`, `slim`, `m`, `body`) hold RESPONSES,
+// which are the server's bytes and not the caller's, and must not taint.
+//
+// Keying on the name is what an AST walk can decide without a type checker, and
+// it fails in the safe direction twice over: renaming the parameter is visible
+// in review, and the activity floor below goes red if the name ever stops
+// appearing.
+var toolArgMapNames = map[string]bool{"args": true}
+
+// mcpSourceFiles lists package mcp's non-test .go files, by path.
+func mcpSourceFiles(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(mcpPackageDir)
+	if err != nil {
+		t.Fatalf("read %s: %v — this gate walks a sibling package by relative path, and a "+
+			"path that no longer resolves makes every assertion below vacuous", mcpPackageDir, err)
+	}
+	var out []string
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		out = append(out, filepath.Join(mcpPackageDir, n))
+	}
+	if len(out) < 10 {
+		t.Fatalf("only found %d source files in package mcp — the walk is broken, not the package", len(out))
+	}
+	return out
+}
+
+// isToolArgRead reports whether e reads caller-supplied argument text: an index
+// into the argument map, one of this package's readers, or either of those
+// behind a type assertion (`args[key].(string)` is how the package spells most
+// of them).
+func isToolArgRead(e ast.Expr) bool {
+	switch v := e.(type) {
+	case *ast.IndexExpr:
+		if id, ok := v.X.(*ast.Ident); ok {
+			return toolArgMapNames[id.Name]
+		}
+	case *ast.TypeAssertExpr:
+		return isToolArgRead(v.X)
+	case *ast.CallExpr:
+		if id, ok := v.Fun.(*ast.Ident); ok {
+			return toolArgReaderFuncs[id.Name]
+		}
+	}
+	return false
+}
+
+// reachesToolArg reports whether n mentions a tainted identifier or performs an
+// argument read itself.
+func reachesToolArg(n ast.Node, tainted map[string]bool) bool {
+	found := false
+	ast.Inspect(n, func(m ast.Node) bool {
+		if id, ok := m.(*ast.Ident); ok && tainted[id.Name] {
+			found = true
+		}
+		if expr, ok := m.(ast.Expr); ok && isToolArgRead(expr) {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
+// toolArgTaint collects every identifier in body that holds caller-supplied
+// argument text.
+//
+// Run to a fixed point rather than in one pass, so a value moved through a
+// second local (`v := args[k]; s, _ := v.(string)`) stays tainted and so the
+// result does not depend on the order ast.Inspect happens to visit statements
+// in. That is strictly stronger than the intra-function single hop the gate
+// above uses, and it costs nothing here: these are small function bodies.
+func toolArgTaint(body ast.Node) map[string]bool {
+	tainted := map[string]bool{}
+	for round := 0; round < 5; round++ {
+		before := len(tainted)
+		ast.Inspect(body, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.AssignStmt:
+				for i, rhs := range v.Rhs {
+					if i >= len(v.Lhs) || !reachesToolArg(rhs, tainted) {
+						continue
+					}
+					if id, ok := v.Lhs[i].(*ast.Ident); ok && id.Name != "_" {
+						tainted[id.Name] = true
+					}
+				}
+				// A 2-value binding — `s, ok := args[k].(string)`, and the
+				// `switch typed := v.(type)` header, which is an AssignStmt too
+				// — has one RHS and two LHS names. The loop above pairs by
+				// index and so never sees the first name when the RHS count is
+				// the smaller of the two.
+				if len(v.Rhs) == 1 && len(v.Lhs) > 1 && reachesToolArg(v.Rhs[0], tainted) {
+					if id, ok := v.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
+						tainted[id.Name] = true
+					}
+				}
+			case *ast.ValueSpec:
+				for i, val := range v.Values {
+					if i < len(v.Names) && reachesToolArg(val, tainted) {
+						tainted[v.Names[i].Name] = true
+					}
+				}
+			}
+			return true
+		})
+		if len(tainted) == before {
+			break
+		}
+	}
+	return tainted
+}
+
+// TestToolArgumentsGoThroughTheSharedReaders is the class gate for hop 2.
+//
+// Same shape as the package-server gate: walk every function body in the
+// package, track the locals holding a caller-supplied argument, and fail on a
+// numeric conversion whose arguments reach one of them.
+func TestToolArgumentsGoThroughTheSharedReaders(t *testing.T) {
+	fset := token.NewFileSet()
+	conversions, taintedSites := 0, 0
+	reported := map[string]bool{}
+	for _, path := range mcpSourceFiles(t) {
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		policy := filepath.Base(path) == toolArgPolicyFile
+
+		var bodies []ast.Node
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.FuncDecl:
+				if v.Body != nil {
+					bodies = append(bodies, v.Body)
+				}
+			case *ast.FuncLit:
+				if v.Body != nil {
+					bodies = append(bodies, v.Body)
+				}
+			}
+			return true
+		})
+
+		for _, body := range bodies {
+			tainted := toolArgTaint(body)
+			taintedSites += len(tainted)
+			ast.Inspect(body, func(m ast.Node) bool {
+				call, ok := m.(*ast.CallExpr)
+				if !ok || !toolArgParseCalls[calleeName(call)] {
+					return true
+				}
+				// Counted in EVERY file including the policy file: after this
+				// gate is satisfied the only conversions left are the ones in
+				// helpers.go, so a count that skipped it would be 0 and could
+				// not tell "the policy holds" from "the walk found nothing".
+				conversions++
+				if policy {
+					return true
+				}
+				for _, arg := range call.Args {
+					if !reachesToolArg(arg, tainted) {
+						continue
+					}
+					pos := fset.Position(call.Pos()).String()
+					if reported[pos] {
+						return true
+					}
+					reported[pos] = true
+					t.Errorf("%s: %s converts an MCP tool argument outside %s.\n"+
+						"Hop 2 obeys the same policy as hop 3 (queryparam.go): a value the server "+
+						"cannot interpret is the CALLER's mistake and must be refused naming the "+
+						"parameter, never turned into a default. Returning 0 for unparseable text is "+
+						"how `similarity_threshold: \"notanumber\"` became an unfiltered page — 0 is "+
+						"that parameter's OFF value (aihub#411 T1-2, fixed in aihub#432). Read it "+
+						"through the readers in %s.",
+						fset.Position(call.Pos()), calleeName(call), toolArgPolicyFile, toolArgPolicyFile)
+					return true
+				}
+				return true
+			})
+		}
+	}
+	// Two floors, because this gate has two independent ways to pass without
+	// having looked at anything: a conversion set that matches nothing, and a
+	// taint model that taints nothing. Both are set well under the measured
+	// value so a refactor does not trip them and a broken walk does.
+	if conversions < 2 {
+		t.Errorf("only %d conversion calls found in package mcp — the conversion set matches "+
+			"nothing and this gate is passing vacuously", conversions)
+	}
+	if taintedSites < 40 {
+		t.Errorf("only %d tainted identifiers found across package mcp — the taint model has "+
+			"stopped recognising how tool arguments are read, and this gate is passing vacuously",
+			taintedSites)
+	}
+	t.Logf("inspected %d numeric conversions and %d tainted identifiers across package mcp",
+		conversions, taintedSites)
+}

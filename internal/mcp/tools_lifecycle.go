@@ -1246,7 +1246,7 @@ func (s *Server) registerLifecycleTools() {
 			"status":               prop("string", "wrapped|failed|paused"),
 			"force_terminate_step": prop("boolean", "Force terminate in-progress step"),
 			"note":                 prop("string", "Closing note recorded as a `note` event before the attempt is completed (e.g. \"wrapped: <one sentence>\" / \"failed reason: <why>\"). Replaces a separate pf_emit_event call."),
-			"pause_reason":         prop("string", "Why the attempt is being paused. Read only when status=\"paused\", and recorded on the attempt row and in the attempt_completed event — unlike `note`, which becomes its own timeline event whatever the status."),
+			"pause_reason":         prop("string", "Why the attempt is being paused. Read only when status=\"paused\" — sending one with any other status is refused, not ignored — and recorded on the attempt row and in the attempt_completed event, unlike `note`, which becomes its own timeline event whatever the status."),
 		}, []string{"work_item_id", "status"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -1260,6 +1260,29 @@ func (s *Server) registerLifecycleTools() {
 		status := strArg(args, "status")
 		if status == "" {
 			return errResult(fmt.Errorf("status is required"))
+		}
+		pauseReason := strArg(args, "pause_reason")
+		// aihub#452: refuse the combination the schema says is not read, and refuse
+		// it HERE — before the state file is resolved and, more importantly, before
+		// the note is emitted below. A refusal that fires after that point has
+		// already written a timeline event for a call it then rejects, which is a
+		// worse contract than the one being fixed.
+		//
+		// The alternative — dropping the field quietly — was rejected: it is the
+		// same defect wearing the opposite sign, a caller stating a reason and
+		// nothing anywhere recording it or saying why. Naming both fields is the
+		// point, since the caller cannot see which of the two the server objected
+		// to. `note` is offered because it is the field that does what the caller
+		// was reaching for.
+		//
+		// Narrow on purpose: only a NON-EMPTY reason on a non-paused status is
+		// refused. pause_reason remains optional on paused — the converse rule
+		// ("paused must carry a reason") would reject legitimate pauses, and this
+		// tool is the one every executor ends its run with.
+		if pauseReason != "" && status != "paused" {
+			return errResult(fmt.Errorf(
+				"pause_reason is read only when status=\"paused\", but status=%q was sent with one; "+
+					"drop pause_reason or use note, which is recorded on every status", status))
 		}
 
 		sf, err := config.ResolveStateFile(wiID)
@@ -1286,13 +1309,13 @@ func (s *Server) registerLifecycleTools() {
 		if boolArg(args, "force_terminate_step") {
 			body["force_terminate_step"] = true
 		}
-		// Sent only when the caller supplied one (aihub#424). FnCompleteAttempt
-		// writes req.PauseReason to run_attempts.pause_reason UNCONDITIONALLY —
-		// "nil for wrapped/failed", says the comment there — so an unguarded
-		// assignment would stamp an empty reason onto every wrap. The guard is what
-		// keeps "not paused" distinguishable from "paused, reason not given".
-		if reason := strArg(args, "pause_reason"); reason != "" {
-			body["pause_reason"] = reason
+		// Sent only when the caller supplied one (aihub#424), and by now only on
+		// status=paused (aihub#452 refused the rest above). The non-emptiness half
+		// still earns its keep on the paused path: FnCompleteAttempt writes whatever
+		// it is given, so an unguarded assignment would send "" and turn "paused,
+		// reason not given" into "paused for no stated reason".
+		if pauseReason != "" {
+			body["pause_reason"] = pauseReason
 		}
 
 		result, err := s.client.CompleteAttempt(ctx, wiID, body)

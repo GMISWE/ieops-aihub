@@ -613,16 +613,31 @@ var semanticValuesNotDistinctive = map[string]bool{
 // semanticValuesByTool overrides semanticValues for one tool, keyed
 // "<tool>.<param>".
 //
-// One entry, and it is load-bearing: `status` means different things to
-// pf_complete_attempt ("wrapped") and pf_update_step ("in_progress|completed|
-// failed"), and pf_update_step's handler only forwards next_step when status is
-// "completed" — its schema says so. Probed with the global "wrapped" the gate
-// reported next_step and next_step_attempt_id unforwarded, having measured the
-// path on which they correctly are not sent.
+// Two entries, and both are load-bearing for the same reason: `status` selects
+// which of a handler's branches runs, so the global value picks the branch the
+// gate then measures.
+//
+//   - pf_update_step's handler only forwards next_step when status is
+//     "completed" — its schema says so. Probed with the global "wrapped" the
+//     gate reported next_step and next_step_attempt_id unforwarded, having
+//     measured the path on which they correctly are not sent.
+//   - pf_complete_attempt is the same shape one status along (aihub#452). Its
+//     handler forwards pause_reason only on status="paused", and now REFUSES the
+//     combination outright on any other — the schema says that too. Under the
+//     global "wrapped" the gate reported pause_reason unforwarded, which is the
+//     correct behaviour on that path and a false G1 violation as a verdict about
+//     the parameter.
+//
+// The distinction this table keeps alive is between a parameter that reaches no
+// reader and one whose reader is on another branch. Reaching for
+// localConsumptionParams or the baseline instead would record the second as the
+// first, and G1 would then be green over a parameter it had never sent on the
+// only path that reads it.
 //
 // Checked non-stale by TestContractProbeTableIsNotStale.
 var semanticValuesByTool = map[string]string{
-	"pf_update_step.status": "completed",
+	"pf_update_step.status":      "completed",
+	"pf_complete_attempt.status": "paused",
 }
 
 // probeValue invents the value one parameter is probed with, and returns the
@@ -847,8 +862,18 @@ func controlValue(p contractParam) (any, bool, bool) {
 // (the probe workspace declares exactly one repo in one project, and a value
 // outside it changes which error the handler returns rather than which value it
 // forwards), so those fall back to key-presence and are counted in the log.
+//
+// A control value has to differ from the PROBE value for the tool it runs
+// against, including any semanticValuesByTool override — the verdict is decided
+// by comparing the two, so a collision reads exactly like "the handler writes
+// that key whatever the argument says". `status` was "paused" until aihub#452
+// gave pf_complete_attempt that same value as its probe. "failed" is legal on
+// all three tools that publish the parameter, which "paused" was not:
+// pf_update_step publishes `in_progress|completed|failed`, so the old control
+// value was outside its own enum and the comparison happened to work only
+// because the handler forwards the string unread.
 var semanticControlValues = map[string]string{
-	"status":     "paused",
+	"status":     "failed",
 	"event_type": "progress",
 	"visibility": "private",
 	"wi_type":    "feature",

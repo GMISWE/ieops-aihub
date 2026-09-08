@@ -402,14 +402,35 @@ func TestAttrsPatchShapeErr_NamesWhatArrived(t *testing.T) {
 }
 
 // TestValidateAttrsPatch_NoSizeCap pins the measurement that falsified
-// aihub#420's premise: there is no length limit on attrs_patch anywhere in the
-// request path. Measured 2026-09-07 against the live server at 3,983 / 7,483 /
-// 15,983 / 64,983 / 199,983 bytes, every one HTTP 200, plus 8,016 bytes through
-// the full MCP tool path.
+// aihub#420's premise: attrs_patch is not length-limited. Measured 2026-09-07
+// against the live server at 3,983 / 7,483 / 15,983 / 64,983 / 199,983 bytes,
+// every one HTTP 200, plus 8,016 bytes through the full MCP tool path.
 //
-// It is a guard against the fix for this work item being "helpfully" completed
-// later by someone adding the cap the message promises does not exist. The
-// message and the behaviour would then disagree, and only this test would say so.
+// It is a guard against the fix for that work item being "helpfully" completed
+// later by someone adding the cap the shipped message promises does not exist.
+// The message and the behaviour would then disagree, and only a test like this
+// one would say so.
+//
+// ⚠️ WHAT THIS ARM COVERS IS THE DOMAIN VALIDATOR AND NOTHING ELSE, and aihub#454
+// narrowed the wording to say so. It used to open with "there is no length limit
+// on attrs_patch anywhere in the request path" while calling exactly one
+// function, and its failure message repeated the claim. A cap added anywhere but
+// here would have left it green while making jsonObjectParamErr's shipped
+// "attrs_patch has no length cap" — which IS a statement about the whole path —
+// quietly false. A gate whose self-description is wider than its reach reports
+// the reach it describes, not the one it has.
+//
+// Widening the claim to match the code is not available from inside this
+// package: a request-path arm needs the transport. It lives in
+// internal/server/attrs_patch_no_size_cap_test.go, which pushes a 200KB
+// attrs_patch through the real router and checks the answer is the ordinary auth
+// refusal rather than a size refusal.
+//
+// Between the two, the covered layers are the domain validator and the transport
+// ahead of authentication. Two of the three places aihub#420's review named stay
+// UNCOVERED, and they are written down here rather than implied away: a length
+// check added in the MCP tool layer, and a CHECK constraint added on the column.
+// Either would falsify the shipped message with every test in this tree green.
 func TestValidateAttrsPatch_NoSizeCap(t *testing.T) {
 	for _, n := range []int{4 << 10, 8 << 10, 200 << 10} {
 		body, err := json.Marshal(map[string]string{"k": strings.Repeat("x", n)})
@@ -419,7 +440,10 @@ func TestValidateAttrsPatch_NoSizeCap(t *testing.T) {
 		var req UpdateWorkItemRequest
 		req.AttrsPatch = body
 		if aerr := validateAttrsPatch(&req); aerr != nil {
-			t.Errorf("a %d-byte attrs_patch object must be accepted; attrs_patch has no size cap, got: %v", len(body), aerr)
+			t.Errorf("validateAttrsPatch rejected a %d-byte attrs_patch object. THIS LAYER imposes no "+
+				"size cap — and if that changed deliberately, jsonObjectParamErr's shipped "+
+				"%q is now false and has to change in the same commit. Got: %v",
+				len(body), "attrs_patch has no length cap", aerr)
 		}
 	}
 }

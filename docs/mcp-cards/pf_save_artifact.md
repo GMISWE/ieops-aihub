@@ -121,6 +121,17 @@ only when non-empty.
   path cannot score relevance and topping the request up would spend half its budget on
   whichever artifact bodies happen to be newest.
 - `html` overrides the server's markdown auto-render for the artifact viewer.
+- **`structured_payload` must be a JSON object** (`aihub#465`). It is merged into
+  `attrs.structured_payload` by unmarshalling into an `any`, which succeeds for a
+  JSON string just as happily as for an object — so a stringified payload was
+  stored under that key as a string, answered 200, and then read back by
+  `internal/server/routes_artifacts.go` (`reviewPayload`), which expects an
+  object and finds nothing. Measured live twice. It is now a 400 naming the type
+  and the byte length, with `details.string_decodes_to` saying whether the quoted
+  text was valid JSON; nothing is coerced. Unlike `pf_remember`'s `attrs`, this
+  field has no stored-data exemption, because no path in the repo feeds a stored
+  `structured_payload` back into a write — `UpdateMemory` carries the whole merged
+  `attrs` object instead and leaves this field unset.
 
 ## hop 5 — what comes back
 

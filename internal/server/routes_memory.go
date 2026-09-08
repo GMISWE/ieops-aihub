@@ -931,7 +931,8 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 //   - stability_days recomputed via the Ebbinghaus formula
 //   - last_activated_at / last_activated_by updated
 //   - attrs.reinforcements gets a new entry {added_at, from_wi, context}
-//   - base_strength optionally adjusted by strength_delta (clamped to [1, 5])
+//   - base_strength optionally adjusted by strength_delta (clamped to
+//     [domain.MinBaseStrength, domain.MaxBaseStrength], i.e. the column's own CHECK)
 //
 // Returns {memory_id, activation_count, base_strength} per §5.2.
 func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
@@ -1008,12 +1009,17 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		newActivationCount := memActivationCount + 1
 		newBaseStrength := memBaseStrength
 		if req.StrengthDelta != nil {
+			// aihub#433: the bounds are domain's, not two literals that happened
+			// to match. This clamp and domain.validateBaseStrength are the only
+			// two things that decide what may reach memories.base_strength, and
+			// the whole of aihub#411 T1-3 was one column with more than one
+			// answer about its range.
 			newBaseStrength = memBaseStrength + *req.StrengthDelta
-			if newBaseStrength > 5 {
-				newBaseStrength = 5
+			if newBaseStrength > domain.MaxBaseStrength {
+				newBaseStrength = domain.MaxBaseStrength
 			}
-			if newBaseStrength < 1 {
-				newBaseStrength = 1
+			if newBaseStrength < domain.MinBaseStrength {
+				newBaseStrength = domain.MinBaseStrength
 			}
 		}
 

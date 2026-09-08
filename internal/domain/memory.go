@@ -1032,9 +1032,8 @@ func validateRememberJSONParams(req *RememberRequest) *AihubError {
 // Strict mode returns ErrConflictSimilarMemory on high-similarity match.
 func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*Memory, bool, error) {
 	// Validate type prefix
-	validPrefixes := []string{"experience.", "fact.", "rule.", "methodology."}
 	typeValid := false
-	for _, p := range validPrefixes {
+	for _, p := range MemoryTypePrefixes {
 		if strings.HasPrefix(req.Type, p) {
 			typeValid = true
 			break
@@ -1042,7 +1041,7 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	}
 	if !typeValid {
 		return nil, false, NewErr(ErrInvalidMemoryType,
-			fmt.Sprintf("type %q must be one of experience.*, fact.*, rule.*, methodology.*", req.Type))
+			fmt.Sprintf("type %q must be one of %s", req.Type, MemoryTypePrefixGloss()))
 	}
 	// aihub#289: reject '|' on the WRITE path too. The prefix check above accepts
 	// "experience.*|rule.*" — it starts with "experience." — so a memory could be stored
@@ -1661,6 +1660,44 @@ func tokenSet(s string) map[string]bool {
 }
 
 // ─── Type Enum ────────────────────────────────────────────────────────────────
+
+// MemoryTypePrefixes is the ENFORCED memory-type vocabulary: the four prefixes
+// Remember accepts. Of the four type lists in this file it is the only one that
+// refuses anything. MemoryTypeEnum, PfRememberTypeEnum and MethodologyTypeEnum
+// below are all curated SUGGESTIONS — measured, not assumed: nothing validates a
+// memory type against any of them, and aihub#445 withdrew the JSON-Schema `enum`
+// that presented PfRememberTypeEnum as a closed set. (MethodologyTypeEnum is
+// still published as one on pf_save_artifact; what that tool enforces is the
+// methodology. prefix plus the aihub#210 credential gate, never the six names.
+// aihub#411 §6.2 T2-6 named only the 13-value list, so that one is recorded in
+// docs/mcp-cards/pf_save_artifact.md rather than changed here.)
+//
+// The set this one describes is infinite by design (§6.2 T2-6 keeps the
+// leniency), so no list of concrete type names can ever equal it; that is
+// exactly why a 13-value enum could not be the contract.
+//
+// Exported for three consumers that must be judged against the same four
+// strings: Remember, which ranges over it; internal/db/migrations/
+// 0034_memories_type_check.sql, whose CHECK mirrors it term for term; and
+// internal/mcp's memoryTypeParamDesc, which publishes it (minus methodology.,
+// which pf_remember refuses one layer up).
+// memory_type_check_test.go parses that migration and fails if the two sets
+// diverge. Adding a prefix here without adding it there makes the DB STRICTER
+// than Go, which turns a 400 naming the field into a 500 carrying the driver's
+// constraint text — the aihub#433 failure mode, in a new place.
+var MemoryTypePrefixes = []string{"experience.", "fact.", "rule.", "methodology."}
+
+// MemoryTypePrefixGloss renders MemoryTypePrefixes the way a caller-facing
+// message names it: "experience.*, fact.*, rule.*, methodology.*". Derived
+// rather than typed out, because the rejection message is the one place a
+// caller learns the vocabulary and a stale copy there teaches the wrong set.
+func MemoryTypePrefixGloss() string {
+	globs := make([]string, 0, len(MemoryTypePrefixes))
+	for _, p := range MemoryTypePrefixes {
+		globs = append(globs, p+"*")
+	}
+	return strings.Join(globs, ", ")
+}
 
 // MemoryTypeEnum is the curated select list for memory types (aihub#70).
 // Canonical 16 + actively-used {rule.coding, rule.work, fact.note} = 19.

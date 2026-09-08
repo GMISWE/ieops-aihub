@@ -883,6 +883,65 @@ func resolveRememberWorkItemRef(ctx context.Context, q Querier, ref, project str
 	return id, nil
 }
 
+// MinBaseStrength and MaxBaseStrength are the only legal values of
+// memories.base_strength, and they are the DB's: migration 0006 declares the
+// column `SMALLINT NOT NULL DEFAULT 3 CHECK (base_strength BETWEEN 1 AND 5)`,
+// and nothing since alters it.
+//
+// They live here, exported, because before aihub#433 this one column had three
+// disjoint answers — the MCP schema published `(0-1)`, the CHECK enforced
+// `[1,5]`, and the Go default was 3.0, outside the published range — and the
+// only durable fix for that is to give every place that states the range one
+// value to state. Today that is validateBaseStrength below (the write path),
+// handleReinforceMemory's clamp (internal/server/routes_memory.go), and the
+// published descriptions in internal/mcp/tools_memory.go, whose agreement with
+// these two constants is asserted by a test rather than assumed. Those three
+// are the whole set: the only statements that WRITE the column are Remember's
+// INSERT below and handleReinforceMemory's UPDATE.
+//
+// DefaultBaseStrength is what an omitted base_strength becomes, and it is the
+// column's own DEFAULT for the same reason: the value a caller gets by saying
+// nothing must not depend on whether Go or Postgres supplied it.
+const (
+	MinBaseStrength     = 1.0
+	MaxBaseStrength     = 5.0
+	DefaultBaseStrength = 3.0
+)
+
+// validateBaseStrength rejects a caller-stated base_strength the column would
+// refuse. A nil value is legal: it means "unset", and Remember substitutes the
+// DEFAULT 3 below.
+//
+// It rejects rather than clamps, which is a deliberate difference from
+// handleReinforceMemory. That path clamps a caller-supplied DELTA applied to a
+// stored value, where the sum landing outside the range is arithmetic rather
+// than a stated intent; here the caller has named the value outright, so
+// clamping would answer 200 while storing something the caller did not ask for.
+// The two agree on the range, which is what MinBaseStrength/MaxBaseStrength
+// are for; they differ on the remedy because the inputs differ.
+//
+// 400, not 500 (aihub#411 T1-6): a value the server can see is wrong is the
+// caller's error, and answering 500 sends the reader to a server log that does
+// not hold the fix. This is not hypothetical. The aihub#412 corpus counts 13
+// pf_remember calls carrying base_strength — 0.9 nine times, 0.8 twice, 0.85
+// once, 0.1 once, every one of them inside the published range and outside the
+// enforced one — and, separately, 13 pf_remember INTERNAL_ERRORs whose message
+// is the driver's own "violates check constraint memories_base_strength_check".
+// Those are two tables of one audit, not one join, so the matching counts are
+// strong evidence that the calls and the failures are the same 13 and not proof
+// of it. The fix does not depend on which: every one of those values is outside
+// the range the column accepts.
+func validateBaseStrength(bs *float64) *AihubError {
+	if bs == nil || (*bs >= MinBaseStrength && *bs <= MaxBaseStrength) {
+		return nil
+	}
+	return NewErr(ErrBadRequest, fmt.Sprintf(
+		"base_strength %g is out of range: it must be between %g and %g. "+
+			"The memories.base_strength column is CHECK-constrained to that range, "+
+			"so a value outside it cannot be stored. Omit the field to take the default of %g.",
+		*bs, MinBaseStrength, MaxBaseStrength, DefaultBaseStrength))
+}
+
 // Remember creates a new memory per §7 / §4.3.
 // Returns (memory, isNew, error). isNew=false if dedup hit in suggest mode.
 // Strict mode returns ErrConflictSimilarMemory on high-similarity match.
@@ -912,6 +971,17 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 				"vocabulary. A memory has exactly ONE type; '|' is not a separator here, "+
 				"and a type stored with it could never be recalled by type. Pick one "+
 				"concrete type (e.g. experience.pitfall).", req.Type))
+	}
+
+	// aihub#433: alongside the type checks and for the same reason — this is the
+	// one function every memory write reaches (both MCP memory tools, and
+	// UpdateMemory below, which builds a RememberRequest from the lineage head),
+	// so a guard here holds for pf_remember, pf_save_artifact and
+	// pf_update_memory at once. It also has to stay ABOVE the first query: below
+	// it the value would already be on its way to the column, which is how it
+	// came back as a 500 with the driver's constraint text in it.
+	if bsErr := validateBaseStrength(req.BaseStrength); bsErr != nil {
+		return nil, false, bsErr
 	}
 
 	if req.DedupMode == "" {
@@ -1020,8 +1090,9 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		}
 	}
 
-	baseStrength := 3.0
+	baseStrength := float64(DefaultBaseStrength)
 	if req.BaseStrength != nil {
+		// Range-checked at the top of this function, above the first query.
 		baseStrength = *req.BaseStrength
 	}
 	immortal := isImmortalType(req.Type)

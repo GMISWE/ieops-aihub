@@ -354,6 +354,42 @@ func recallSchema() json.RawMessage {
 			"comparable across queries, so there is no safe global cutoff. A threshold that "+
 			"matches nothing returns an empty list rather than falling back to text search: "+
 			"empty is the intended answer when you set one."),
+		// aihub#425. `cursor` was ALREADY forwarded by buildRecallParams and already
+		// bound by handleRecall — measured on the real in-memory session against a
+		// recording server, it reaches the wire today. Nothing was one line short
+		// of working; the capability was reachable only by guessing a name no
+		// schema mentions.
+		//
+		// 🔴 This SUPERSEDES a deliberate decision, so the reason is recorded here
+		// rather than left implicit. recall_params_wiring_test.go's
+		// recallUnpublishedForwardedParams held cursor with: "paging is driven by
+		// next_cursor from a previous response, not composed by the model;
+		// publishing it would invite an invented cursor." The measurement that
+		// overrides it: next_cursor REACHES THE MODEL — a pf_recall result is
+		// handed back with `"next_cursor":"..."` in it (verified through a real
+		// session against a server returning one). So the model is not being kept
+		// away from cursors; it is handed one and given no published way to spend
+		// it. The invention risk the note names is real but is answered by the
+		// description below, which says where the value must come from.
+		//
+		// The paging caveat is IN the description because leaving it out builds
+		// the trap this repo keeps re-learning: recall's vector path, the hybrid
+		// merge and the lexical algorithm each set Cursor="" and return a nil
+		// next_cursor (internal/domain/memory.go, recallHybrid and the RecallAlgo
+		// branch), so a caller paging a semantic recall gets page one forever with
+		// nothing saying why.
+		//
+		// recall_algo is deliberately NOT published alongside it. Its exemption
+		// reason is about contract surface rather than a dead end — "a
+		// plugin-build opt-in (POLYFORGE_RECALL_ALGO) ... deliberately kept out of
+		// the model-visible contract" — and, unlike cursor, NOTHING in any
+		// response advertises it, so no caller is shown a value it cannot use.
+		// That decision stands; it is recorded in the G4 allowlist
+		// (serverNamesNoToolCanReach) instead of being reversed on the authority
+		// of a scanner.
+		"cursor": prop("string", "Opaque page token — pass a previous response's next_cursor. "+
+			"TEXT-path paging only: the semantic (vector) path and the hybrid merge "+
+			"return no next_cursor and ignore this."),
 		"min_strength":     prop("number", "Min memory strength (default 0.3)"),
 		"include_archived": prop("boolean", "Include archived memories (default false)"),
 		"recency_weight":   prop("number", "Recency weight (default 0.3)"),
@@ -543,6 +579,14 @@ func rememberSchema() json.RawMessage {
 		"related_memory_ids":   prop("array", "Related memory IDs"),
 		"context_snippet":      prop("string", "Context snippet for embedding"),
 		"supersedes_memory_id": prop("string", "Memory ID this supersedes"),
+		// aihub#425. Also already on the wire — pf_remember forwards its whole
+		// args map, so `tags` reached POST /v1/memories unpublished (measured).
+		// Until now the only PUBLISHED way to tag a memory was to create it and
+		// then call pf_update_memory, which does publish `tags`, so this closes a
+		// gap that cost a second round trip rather than one that lost the data.
+		// Checked, because the work item asked: no /ui writer supplies tags —
+		// the only non-test writer of the column is this endpoint.
+		"tags": prop("array", "Tags stored with the memory. pf_recall returns them, and fields=\"brief\" drops them."),
 	}, []string{"project", "type", "content", "visibility"})
 }
 

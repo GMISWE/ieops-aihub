@@ -77,6 +77,14 @@ var readEventsWireProbes = map[string]struct {
 	// "forwarded" apart from "fell back". "50" would be green either way.
 	"limit":        {shape: "7", want: "7"},
 	"pinned_first": {shape: true, want: "true"},
+	// aihub#425. The same defect as `types` above, found the same way and one
+	// step worse in its consequence: the server has always bound cursor and
+	// ListEvents has always returned next_cursor, so a caller holding one had no
+	// way to spend it and the second page of any event stream was unreachable
+	// from MCP — while the first page looked like the whole answer. The value is
+	// opaque (ListEvents builds it from the last event's created_at), so the
+	// probe only has to prove the caller's bytes arrive unaltered.
+	"cursor": {shape: "2026-09-07T12:00:00.123456789Z", want: "2026-09-07T12:00:00.123456789Z"},
 }
 
 // TestReadEventsWireQueryCarriesEveryPublishedProperty is the hop that was

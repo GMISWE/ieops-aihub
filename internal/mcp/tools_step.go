@@ -31,12 +31,45 @@ func (s *Server) registerStepTools() {
 	// "step graph" is deliberately gone rather than reworded: the graph lives in
 	// the scenario template, not in aihub, and naming it here is what made an
 	// agent believe one call would tell it what the remaining steps are.
+	//
+	// aihub#450 (reviving aihub#400) fixed the sentence that told a resuming
+	// agent to "treat every step_id in completed_steps as done". Every entry
+	// carries a status, its domain is exactly {completed, failed}
+	// (internal/db/migrations/0005_step_state.sql), and a failed row is NOT a
+	// finished step — so the sentence directed the reader to ignore the one field
+	// that answers the question it was asked. The reachable harm is not a
+	// self-reported failure, which the agent already knows about: it is the row
+	// fnForceTerminateStep (internal/domain/run_attempts.go) writes when an
+	// attempt is paused over an in_progress step, status='failed',
+	// error_type='force_terminate'. That row names a step NOBODY completed, and
+	// the response is the only place a resuming agent can learn of it — under the
+	// old sentence it read as "done" and the step was skipped.
+	//
+	// The QUERY was deliberately NOT changed. Filtering completedStepsQuery to
+	// status='completed' would make the sentence true by deleting the evidence:
+	//   - wi_step_completions is declared append-only and "records full step
+	//     history (including retries)" (0005), and this description promises
+	//     "retries included" — a retry is a failed row followed by a completed
+	//     one, so the filter removes exactly what that phrase sells;
+	//   - CompletedStep.Status would become a constant, and error_type/escalated
+	//     unreachable, on the only endpoint that reads that table;
+	//   - the force-terminate row would vanish, trading a misleading sentence for
+	//     a lossy response on the same call;
+	//   - TestHandleUpdateStep_EveryRecordedStepOutcomeHasAHistoryRow
+	//     (internal/server) requires completed_steps to equal the
+	//     step_completed/step_failed events of the attempt, failures included.
+	//     That invariant is the aihub#390 fix, not an accident of the query.
+	// The data was right and the prose was wrong, so only the prose moved.
+	// Cost: 760 -> 933 B of Description (+173 B, ~43 tokens), resident in
+	// every request's tool list.
 	s.addTool(&sdkmcp.Tool{
 		Name: "pf_get_step",
 		Description: "Read the AUTHORITATIVE step record for a work item, and the only one. Returns " +
 			"current_step / current_step_status / version, plus completed_steps: the step history, oldest " +
-			"first, retries included, each entry carrying step_id, status and that step's artifact_summary. " +
-			"A resuming agent should call this FIRST and treat every step_id in completed_steps as done. " +
+			"first, retries included, each entry carrying step_id, status, error_type and that step's " +
+			"artifact_summary. A resuming agent should call this FIRST and count only entries whose status " +
+			"is \"completed\" as done — a \"failed\" entry did NOT finish (pausing an attempt files its " +
+			"in-progress step that way too), so redo that step_id unless a later entry completes it. " +
 			"Never take step progress from a file in the worktree; nothing writes one. completed_steps is [] " +
 			"when nothing has completed, and absent only on a server older than aihub#265 — not the same " +
 			"answer. Takes a slug or a canonical id and echoes the canonical one in work_item_id; pass THAT " +

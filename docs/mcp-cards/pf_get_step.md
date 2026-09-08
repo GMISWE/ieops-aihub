@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_get_step",
-  "description_sha256": "9bb68684365a1050698910b8d356c29e77db93829b76422d141a77629252d501",
+  "description_sha256": "d126976f936ff5634b88bac923688f25842c25ef88cab717de73905f561845e6",
   "input_schema_sha256": "0d138f8f344be0161281deb07d0ff88f782e6397ea2be18bb413fb2c4cfe88e4",
   "params": {
     "work_item_id": {
@@ -29,10 +29,11 @@
 
 ## hop 0-1 — what the caller is told
 
-One parameter, and the description makes five promises: that this record is
+One parameter, and the description makes six promises: that this record is
 authoritative and unique, that `completed_steps` is the history oldest-first with
-retries included, that a resuming agent should call it FIRST, that a slug is
-accepted and the canonical id is echoed, and that there is no step graph here.
+retries included, that a resuming agent should call it FIRST, that only an entry
+whose `status` is `completed` means that step is done, that a slug is accepted and
+the canonical id is echoed, and that there is no step graph here.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
@@ -63,7 +64,7 @@ asserts in BOTH directions that every response field the description names is a
 bound JSON key on the struct, so the tool cannot go back to promising something the
 struct does not carry.
 
-Two behaviours a caller has to know and cannot see from the schema:
+Three behaviours a caller has to know and cannot see from the schema:
 
 - **`completed_steps` is the step-history table, not a derived view.** Rows are
   filed by `pf_update_step` on a terminal transition and keyed on
@@ -75,6 +76,19 @@ Two behaviours a caller has to know and cannot see from the schema:
   means nothing has completed. Absent means the server predates `aihub#265`. The
   description states this because a client that conflates them reports "no prior
   steps" for a work item that has six.
+- **A `failed` entry is not a finished step, and the query does not hide one.**
+  `completedStepsQuery` (`internal/server/routes_step.go`) reads
+  `wi_step_completions` by work item with NO status filter, and that table's
+  `status` domain is `{completed, failed}`
+  (`internal/db/migrations/0005_step_state.sql`). The entry a resuming agent
+  cannot otherwise know about is the one `fnForceTerminateStep`
+  (`internal/domain/run_attempts.go`) writes when an attempt is paused over an
+  `in_progress` step — `status='failed'`, `error_type='force_terminate'`, naming a
+  step nobody completed. Until `aihub#450` the description said to treat every
+  `step_id` in the list as done, which is that step skipped. The prose moved, not
+  the query: filtering it would delete the retry history the same sentence
+  promises and break the `aihub#390` invariant that `completed_steps` equals the
+  attempt's `step_completed`/`step_failed` events.
 
 The echoed `work_item_id` is the canonical id even when a slug was passed, and
 that is the value `pf_recall` and `pf_read_events` need — both return nothing for a
@@ -99,7 +113,9 @@ description; they are carried, not promised.
   endpoint returns, rather than by trimming the promise.
 - **§6.2 T2-21** — the `aihub#400` findings about this call were revived rather
   than left cancelled, on the grounds that it is "the one call every resuming agent
-  is told to make first".
+  is told to make first". Landed as `aihub#450`: the `docs/mcp-tools.md` row that
+  still promised a step graph, and the sentence that told the reader to ignore
+  `status`.
 
 ## Open
 

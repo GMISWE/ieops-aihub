@@ -105,7 +105,17 @@ corpus record above spans 2,063 calls, the highest-volume tool in the census, at
   a delete, which is why it needs no keep-list maintenance.
 - **§6.1 T1-1** — an argument no tool publishes is reported, not rejected: sending
   `expected_version` here comes back under `request_adjusted` with `param:
-  "unknown_params"`, and that disclosure is the only one the repo makes.
+  "unknown_params"`, and that is the only **unknown-argument** disclosure the repo
+  makes — not the only `request_adjusted` disclosure. The mechanism has four writers,
+  and the other three are clamp disclosures rather than unknown-argument ones:
+  `internal/domain/memory.go` (`Recall`) for `top_k`, `internal/domain/work_items.go`
+  (`ListWorkItems`) for `limit`, and `internal/domain/work_items.go` (`newReadyQueue`)
+  for `max` — carded on `pf_recall`, `pf_list_work_items` and `pf_get_ready_queue`
+  respectively. The unknown-argument writer is its own site,
+  `internal/mcp/unknown_params.go` (`unknownParamsField`), and the three clamps share
+  `internal/domain/request_adjusted.go` (`appendIntAdjustment`). So a caller reading
+  `request_adjusted` on any tool cannot infer it was sent an unknown argument; the
+  `param` value is what tells the two apart.
 
 ## Open
 

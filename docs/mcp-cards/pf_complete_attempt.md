@@ -87,9 +87,15 @@ bound by `internal/server/router.go` (`handleCompleteAttempt`).
 - **This is NOT exactly-once for the note.** A retry after a failed completion
   records it twice. That is documented rather than solved; an idempotency key on
   events is a bigger change.
-- **A step still `in_progress` makes the completion fail** unless
-  `force_terminate_step` is set — which is why the fused `pf_wrap`, which never sets
-  it, is the call that most often retries and duplicates its note.
+- **A step still `in_progress` fails the completion on `wrapped` and `failed`** unless
+  `force_terminate_step` is set — but **`paused` does not need the flag.** The H-R9-11
+  block in `internal/domain/run_attempts.go` (`FnCompleteAttempt`) force-terminates a
+  live step when `status="paused"` OR the flag is set, and refuses with
+  `ErrConflictStepInProgress` only otherwise, so the flag is load-bearing on the two
+  terminal statuses alone. `internal/mcp/tools_lifecycle.go` (`registerLifecycleTools`)
+  forwards it without a second gate of its own, so there is no other refusal to hit.
+  The terminal half is why the fused `pf_wrap`, which completes as `wrapped` and never
+  sets the flag, is the call that most often retries and duplicates its note.
 - **`pause_reason` is written on `paused` and on nothing else.** `internal/domain/run_attempts.go`
   (`FnCompleteAttempt`) refuses a non-empty reason on any other status next to the
   status check, before it opens a transaction, and normalises an empty one to `NULL`

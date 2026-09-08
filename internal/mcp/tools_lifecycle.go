@@ -694,7 +694,7 @@ func (s *Server) registerLifecycleTools() {
 			"priority":               propEnum("string", "Updated priority", domain.WorkItemPriorityList()),
 			"milestone":              prop("string", "Updated milestone"),
 			"wi_type":                prop("string", "Updated wi_type"),
-			"requires_human_session": prop("boolean", "Updated requires_human_session"),
+			"requires_human_session": prop("boolean", requiresHumanSessionUpdateDescription),
 			"reclassify_reason":      prop("string", "Reason for wi_type change (min 10 chars)"),
 			"labels":                 prop("array", fmt.Sprintf("Updated labels (max %d)", domain.MaxWorkItemLabels())),
 			"declared_resources":     declaredResourcesProp("Updated declared resources"),
@@ -2007,7 +2007,7 @@ func workItemFieldProps() map[string]any {
 		// while it cannot validate prose.
 		"priority":               propEnum("string", "Work item priority", domain.WorkItemPriorityList()),
 		"wi_type":                prop("string", "Work item type (fix_bug, feature, chore, etc.)"),
-		"requires_human_session": prop("boolean", "Whether this wi requires a human session"),
+		"requires_human_session": prop("boolean", requiresHumanSessionCreateDescription),
 		"milestone":              prop("string", "Milestone name"),
 		"labels":                 prop("array", fmt.Sprintf("Labels (max %d)", domain.MaxWorkItemLabels())),
 		"declared_resources":     declaredResourcesProp("Declared resource locks"),
@@ -2023,6 +2023,57 @@ func workItemFieldProps() map[string]any {
 		"force_reason": prop("string", "Reason for force create"),
 	}
 }
+
+// requiresHumanSessionCreateDescription is the published description of
+// `requires_human_session` on the two create paths.
+//
+// It names the THIRD state, which is the aihub#411 T2-9 ruling. The column is a
+// *bool — true / false / NULL — and NULL is not "unset pending a default": it is
+// its own ready-queue segment (`unclassified[]`, domain.GetReadyQueue), which
+// items[] and readyOnlyPredicate both exclude. Published as a bare boolean with
+// no mention of omission, the one state a caller reached BY DOING NOTHING was the
+// state the contract did not name. aihub#397 measured exactly that and was
+// cancelled as description-only, which the adjudication ruled is not a
+// cancellation reason.
+//
+// The claim-path sentence is contract, not background. aihub#411 itself was
+// created with requires_human_session: null, did not stay null, and the write was
+// attributed to an unrelated attrs_patch-only pf_update_work_item call. aihub#447
+// reproduced the whole sequence on two server builds and found the update writes
+// nothing here; the FIRST claim does, from a server default. A caller that cannot
+// see the claim-path write in any published text has no way to reach that
+// conclusion, which is how one line of silence bought an unexplained-behaviour
+// row in the audit.
+const requiresHumanSessionCreateDescription = "Whether a human has to be in the session for this wi. " +
+	"THREE states, not two: true, false, and OMITTED. Omitting it stores NULL, which is NOT a default of " +
+	"false — the wi goes to the ready queue's unclassified[] segment instead of items[], the segment that " +
+	"means \"takeable now by an agent\", and pf_list_work_items' ready_only filter does not return it. NULL is " +
+	"not permanent: the FIRST pf_claim_work_item on such a wi resolves it to true from a server default, " +
+	"writes that back and records a wi_classification_resolved event. Send false explicitly for a wi an " +
+	"agent may take unattended."
+
+// requiresHumanSessionUpdateDescription is the counterpart of the constant above
+// on pf_update_work_item, which can reach only TWO of the three states.
+//
+// Nil binds to "leave the column alone" (domain.buildWorkItemUpdate), so an
+// explicit null is the same no-op as omitting the field. That is measured rather
+// than read off the type: aihub#447 sent both against a scratch wi on a live-era
+// build and on origin/main, and the stored value did not move either time.
+//
+// The last sentence is the one worth the bytes. The value a caller finds in this
+// field is very often one the CLAIM wrote, and this tool's reply carries the
+// field whether or not the call touched it — which is exactly how aihub#411 T2-9
+// came to record an attrs_patch-only update as the writer of a NULL -> true
+// transition that FnClaimWorkItem had made a minute earlier.
+//
+// Declared here rather than inline so the map literal above keeps its alignment
+// groups; the neighbouring aihub#337 note explains why length is a real cost on
+// this tool in particular.
+const requiresHumanSessionUpdateDescription = "Set the human-session classification to true or false. " +
+	"It cannot reach the third state: there is no way back to NULL (unclassified) through this tool, because " +
+	"omitting this field and sending an explicit null BOTH mean \"leave the stored value alone\". A wi that was " +
+	"still NULL when it was first claimed is already true — the claim resolves NULL from a server default — so " +
+	"this field is how you CORRECT that value, not how you undo it."
 
 // blockedByPropDescription is the published description of `blocked_by`.
 //

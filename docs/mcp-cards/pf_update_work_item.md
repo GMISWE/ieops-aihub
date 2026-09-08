@@ -4,7 +4,7 @@
 {
   "tool": "pf_update_work_item",
   "description_sha256": "29b3c7434085f3bd45cf9acebf95466a7fe1ae8757a6d86786d03886c6687c30",
-  "input_schema_sha256": "1f5a59d2a8afd4c76fd2276d4264846d7ac31c7f4f00e69f7e669342b1010120",
+  "input_schema_sha256": "196dcf0f041327b6a44f1cc2be9842d83262f966b33172f591a53cb2c902c055",
   "params": {
     "attrs": {
       "type": "object",
@@ -124,7 +124,7 @@ that a caller gets wrong by default.
 | `priority` | enum | no | from the domain list |
 | `milestone` | string | no | updated milestone |
 | `wi_type` | string | no | updated type |
-| `requires_human_session` | boolean | no | updated flag |
+| `requires_human_session` | boolean | no | sets `true` or `false`; **cannot reach the third state** — no way back to `NULL` |
 | `reclassify_reason` | string | no | required with a `wi_type` change, min 10 chars |
 | `labels` | array | no | max from the domain constant |
 | `declared_resources` | array | no | the whole list, replaced |
@@ -141,6 +141,15 @@ untouched, no signal. It was measured live on a RUNNING work item — had it bou
 `wi_type`, the status gate would have rejected the call. Withdrawing the promise is
 the fix; wiring it to `wi_type` would have opened a bypass around
 `reclassify_reason`. `pf_list_work_items`' `kind` is a different parameter and stays.
+
+`requires_human_session` publishes only two of the column's three states, and says
+so. `domain.buildWorkItemUpdate` gates it behind a non-nil check, so omitting the
+field and sending an explicit `null` are the same no-op — this tool can correct a
+classification but not withdraw one. `aihub#447` measured both spellings against a
+scratch work item on a live-era build and on `origin/main`; the stored value did not
+move either time. That measurement is also what closes `§6.4` item 2 under **Open**
+below — the `null` to `true` transition once attributed to an `attrs_patch`-only call
+on this tool was written by the claim path.
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -261,19 +270,29 @@ no body", never "the body was withheld".
 
 ## Open
 
-- **§6.4 item 2 — OPEN, and this is the card it lands on.** T2-9's live side effect
-  was a `pf_update_work_item` call sending **only** `work_item_id` and `attrs_patch`
-  that moved `requires_human_session` from `null` to `true` and persisted it, with no
-  field of that name anywhere in the request. Both parameters involved are published
-  by this tool and documented at length above, so the README rule — a card touching a
-  `§6.4` item says so here — points at this card, and until now no card in the set
-  cited item 2 at all. It is one-shot and unreproduced, observed on a server older
-  than the audit's baseline, and `docs/audits/aihub-411-design-decision-table.md`
-  gives the settling recipe as the same `attrs_patch`-only update against a scratch
-  work item whose `requires_human_session` is NULL, on a server built from
-  `origin/main` — two arms, because one cannot tell "already fixed" from "never
-  happened". Carried into `aihub#447`, which owns it; no mechanism has been found in
-  this code, so nothing above claims one.
+- **§6.4 item 2 — CLOSED by `aihub#447`, and this is the card it lands on.** T2-9's
+  live side effect was a `pf_update_work_item` call sending **only** `work_item_id`
+  and `attrs_patch` that moved `requires_human_session` from `null` to `true` and
+  persisted it, with no field of that name anywhere in the request. Both parameters
+  involved are published by this tool and documented at length above, so the README
+  rule — a card touching a `§6.4` item says so here — points at this card. **It did
+  not reproduce, and the write has a different author.** The audit's recipe was run
+  on both arms it asks for: the same sequence (create with the field omitted,
+  `attrs_patch`-only update through the MCP layer, then claim) against a server built
+  from `origin/main` and against one built from a live-era commit, on a real
+  database. The update left the column `NULL` on both; the CLAIM set it `true` on
+  both, emitting `wi_classification_resolved` (`source: server_default`)
+  sub-millisecond before `attempt_started`. That is the same ordered pair
+  `aihub#411`'s own live timeline carries, one minute after it was filed and **51
+  minutes before** the update it was attributed to. So the mechanism is
+  `domain.FnClaimWorkItem`'s C-R9-12 fallback, which resolves an unclassified work
+  item from a server default on first claim; it is still live and unchanged, and
+  `domain.buildWorkItemUpdate`'s non-nil gate — untouched since 2026-08-11 and
+  identical on both arms — means "already fixed" was never an available reading
+  either. Nothing on this tool's path was broken, so nothing on it was changed. What
+  made the misattribution cheap is recorded above: this tool's reply carries
+  `requires_human_session` whether or not the call wrote it, so a caller cannot tell
+  a value it read from a value it wrote.
 - **§6.4 item 7 — CLOSED by `aihub#440`.** T2-1 left one sub-question open in
   **both** directions: whether `attrs` staying writable on a terminal work item is
   the defect or the feature. It is the **feature**, decided on traffic rather than

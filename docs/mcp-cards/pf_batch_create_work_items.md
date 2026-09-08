@@ -4,7 +4,7 @@
 {
   "tool": "pf_batch_create_work_items",
   "description_sha256": "7ffd5d5890da0ab75a79538d59e05366153977d30a99188993ec9fe8cde224e0",
-  "input_schema_sha256": "9645e1296de7010f4e298ac46c407a47c82f9d35f998eb20727abdc852e0437f",
+  "input_schema_sha256": "18d8a1df8a560c79eef21a2f1ace42d0f9a1687ce0d77411c5d22439a4776f3a",
   "params": {
     "items": {
       "type": "array",
@@ -41,6 +41,12 @@ The `items` entry schema is published — via
 `internal/mcp/tools_lifecycle.go` (`batchWorkItemsProp`) — rather than left as a bare
 array, following the `aihub#238` rule that an array whose element shape is
 undocumented is a contract the caller has to guess at.
+
+Because the entry schema IS `workItemFieldProps`, every per-item field carries that
+function's published description verbatim — including `requires_human_session`,
+whose three states (`true` / `false` / omitted-means-`NULL`) `aihub#447` added
+there. A batch item that omits it reaches the same `unclassified[]` segment as a
+single create that omits it; there is no batch-specific default.
 
 **Why a separate tool rather than an `items` array on `pf_create_work_item`:**
 `project` and `goal` sit in that tool's flat `required` list, and `objectSchema`

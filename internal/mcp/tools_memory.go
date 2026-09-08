@@ -698,11 +698,21 @@ func activateMemorySchema() json.RawMessage {
 }
 
 // reinforceMemorySchema is pf_reinforce_memory's published InputSchema — hop 1.
+//
+// aihub#475: strength_delta used to publish the bare words "Strength delta",
+// which is true and useless. The stored column is SMALLINT, so the sum is
+// truncated toward zero on the way in and a delta smaller than 1 in magnitude
+// normally stores nothing at all — a caller reading the old description had no
+// way to know that, and before the same work item the 200 body reported the
+// untruncated arithmetic, so the call looked like it had worked. The text below
+// states the granularity and points at the response, which is now the row's own
+// value. It deliberately does NOT say a fractional delta is rejected or rounded:
+// it is neither today, and which of those it should become is aihub#459's.
 func reinforceMemorySchema() json.RawMessage {
 	return objectSchema(map[string]any{
 		"memory_id":          prop("string", "Memory ID"),
 		"additional_context": prop("string", "Additional context for the memory"),
-		"strength_delta":     prop("number", "Strength delta"),
+		"strength_delta":     prop("number", "Strength delta added to the memory's stored strength, then clamped to 1-5. Stored as a whole number: a fractional result is truncated toward zero, so a delta under 1 in magnitude usually changes nothing. The response reports the value actually stored."),
 		"work_item_id":       prop("string", "Work item ID (for credential injection)"),
 	}, []string{"memory_id", "additional_context", "work_item_id"})
 }

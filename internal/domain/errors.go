@@ -7,8 +7,22 @@ type ErrCode string
 
 const (
 	// HTTP 400
-	ErrBadRequest            ErrCode = "BAD_REQUEST"
-	ErrGoalMultiline         ErrCode = "GOAL_MULTILINE"
+	ErrBadRequest    ErrCode = "BAD_REQUEST"
+	ErrGoalMultiline ErrCode = "GOAL_MULTILINE"
+	// ErrGoalChangeNotAllowed is RETIRED (aihub#440) and is no longer produced
+	// anywhere. It used to answer BOTH halves of the goal gate — a wrong caller
+	// and a wrong state — which is the conflation aihub#242 removed from the
+	// cancel path. The editability matrix in work_items.go (wiEditTierByField)
+	// replaced it with the codes that name the KIND: 409
+	// CONFLICT_WI_ALREADY_CLAIMED / CONFLICT_TERMINAL_STATE for a wrong state,
+	// 403 FORBIDDEN for a wrong caller.
+	//
+	// Kept declared and mapped rather than deleted, on purpose. It is published
+	// in design §17 and §4.3, it appears in the aihub#412 corpus record, and
+	// callers received it inside the measured window — so a stale client branching
+	// on the string still resolves, and every doc row that mentions it still points
+	// at a real constant. TestRetiredErrCodesAreNotProducedByTheUpdatePath is what
+	// stops it coming back; do not add a new producer.
 	ErrGoalChangeNotAllowed  ErrCode = "GOAL_CHANGE_NOT_ALLOWED"
 	ErrInvalidPhaseYAML      ErrCode = "INVALID_PHASE_YAML"
 	ErrInvalidStepTransition ErrCode = "INVALID_STEP_TRANSITION"
@@ -21,8 +35,14 @@ const (
 	ErrStaleCredential ErrCode = "STALE_LOCAL_CREDENTIAL"
 
 	// HTTP 403
-	ErrForbidden             ErrCode = "FORBIDDEN"
-	ErrAttemptMismatch       ErrCode = "ATTEMPT_MISMATCH"
+	ErrForbidden       ErrCode = "FORBIDDEN"
+	ErrAttemptMismatch ErrCode = "ATTEMPT_MISMATCH"
+	// ErrWIReclassifyForbidden is RETIRED (aihub#440), the mirror of
+	// ErrGoalChangeNotAllowed above: it answered both halves of the wi_type gate,
+	// so a wrong STATE came back as a permission failure. Wrong-caller refusals on
+	// wi_type are now plain 403 FORBIDDEN, the same code cancelGate uses, and
+	// wrong-state refusals are 409s. Retained for the same reasons; no new
+	// producers.
 	ErrWIReclassifyForbidden ErrCode = "WI_RECLASSIFY_FORBIDDEN"
 
 	// HTTP 404
@@ -163,7 +183,10 @@ func codeToHTTPStatus(code ErrCode) int {
 		ErrIdempotencyKeyReused,
 		// G6 / design §17: WI_TYPE_MISMATCH is 409 (conflict between wi_type and config)
 		ErrWITypeMismatch,
-		// G6 / design §4.3 line 1138: GOAL_CHANGE_NOT_ALLOWED is 409, not 400
+		// G6 / design §4.3: GOAL_CHANGE_NOT_ALLOWED is 409, not 400 — which is
+		// also why aihub#411's T2-1 row, which read the code off design §17's
+		// HTTP 400 block, records a 400 the server never sent. Retired by
+		// aihub#440 but still mapped; see its declaration for why.
 		ErrGoalChangeNotAllowed:
 		return 409
 	case ErrPreconditionFailed, ErrProjectMembersUndeclaredRemoval:

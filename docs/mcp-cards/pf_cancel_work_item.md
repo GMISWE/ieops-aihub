@@ -77,7 +77,9 @@ high error rate here is not by itself evidence of a defect.
   "ended because the work item was cancelled".
 - **§6.2 T2-1** — one editability matrix for the whole struct and one error code per
   rejection KIND: 409 for state, 403 for permission. This tool's three 409s are three
-  distinct states, which is the shape that ruling asks for.
+  distinct states, which is the shape that ruling asks for — and `aihub#440` carried
+  it across, so `pf_update_work_item` now refuses with **these** codes rather than
+  with two field-specific ones of its own. Nothing about this tool changed.
 
 ## Open
 

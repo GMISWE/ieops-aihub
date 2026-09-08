@@ -3,12 +3,14 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 
@@ -975,7 +977,11 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 //   - base_strength optionally adjusted by strength_delta (clamped to
 //     [domain.MinBaseStrength, domain.MaxBaseStrength], i.e. the column's own CHECK)
 //
-// Returns {memory_id, activation_count, base_strength} per §5.2.
+// Returns {memory_id, activation_count, base_strength} per §5.2, and since
+// aihub#475 those last two are the values the UPDATE's RETURNING handed back
+// rather than the ones Go computed. They can differ: base_strength is SMALLINT
+// and pgx truncates a fractional value toward zero on the way in, so a
+// strength_delta of 0.5 stores nothing and the response now says so.
 func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -1051,10 +1057,28 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		newBaseStrength := memBaseStrength
 		if req.StrengthDelta != nil {
 			// aihub#433: the bounds are domain's, not two literals that happened
-			// to match. This clamp and domain.validateBaseStrength are the only
-			// two things that decide what may reach memories.base_strength, and
-			// the whole of aihub#411 T1-3 was one column with more than one
-			// answer about its range.
+			// to match, and the whole of aihub#411 T1-3 was one column with more
+			// than one answer about its range.
+			//
+			// 🔴 aihub#475 CORRECTS what this comment used to claim. It said this
+			// clamp and domain.validateBaseStrength were "the only two things that
+			// decide what may reach memories.base_strength". There is a third, and
+			// it is the one that CHANGES the value: memories.base_strength is
+			// SMALLINT, so pgx encodes this float64 through the int2 codec, which
+			// TRUNCATES TOWARD ZERO and returns no error — measured at the pinned
+			// pgx version, in both wire formats (3.5→3, 4.999→4, 0.9→0, -0.5→0).
+			// It happens client-side, so Postgres never sees the fraction and no
+			// server-side rounding rule applies. domain.MinBaseStrength and
+			// domain.MaxBaseStrength therefore bound the value but do not make it
+			// storable AS STATED.
+			//
+			// The consequence this handler is responsible for is below, at the
+			// UPDATE: the value the response reports must be the one the column
+			// holds, never this arithmetic. Whether a non-integral value should be
+			// refused, rounded, or made storable by widening the column is
+			// aihub#459's call and is deliberately NOT taken here — the clamp is
+			// unchanged, and every value that reached the column before still
+			// reaches it, unchanged.
 			newBaseStrength = memBaseStrength + *req.StrengthDelta
 			if newBaseStrength > domain.MaxBaseStrength {
 				newBaseStrength = domain.MaxBaseStrength
@@ -1076,7 +1100,29 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 		newStability := baseStability * (1.0 + float64(newActivationCount)*0.5)
 
-		_, execErr := pool.Exec(ctx, `
+		// aihub#475: RETURNING, and everything below is built from what comes
+		// back — not from newBaseStrength / newActivationCount.
+		//
+		// The bug this closes: the 200 body and the memory_reinforced payload were
+		// both rendered from the Go arithmetic, while pgx truncated the value on
+		// its way into the SMALLINT column (see the clamp above). On a row stored
+		// at 3, `strength_delta: 0.5` stored 3 and answered 3.5 — and because the
+		// next call re-read 3, it answered 3.5 again, forever. Any |strength_delta|
+		// below 1 was a permanent no-op that reported progress on every call, with
+		// no signal a caller could see. Reading the row back is the only thing that
+		// makes the answer unable to disagree with the column, and it is correct
+		// whichever way aihub#459 disposes of non-integral values.
+		//
+		// activation_count is read back for the same reason rather than because it
+		// is coerced (it is not — INTEGER column, Go int). One statement, one
+		// source of truth for the response; a second rule for the second field is
+		// how the first one rotted. Note this does NOT make the read-modify-write
+		// atomic: two concurrent reinforces still each compute from the value they
+		// read. It makes the response honest about the row, not the row correct
+		// under concurrency.
+		var storedBaseStrength float64
+		var storedActivationCount int
+		execErr := pool.QueryRow(ctx, `
 			UPDATE memories
 			SET activation_count  = $1,
 			    base_strength     = $2,
@@ -1086,10 +1132,20 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			    last_activated_by = $5,
 			    status            = CASE WHEN status='archived' THEN 'active' ELSE status END,
 			    updated_at        = clock_timestamp()
-			WHERE id = $6`,
+			WHERE id = $6
+			RETURNING base_strength, activation_count`,
 			newActivationCount, newBaseStrength, newStability,
 			attrsJSON, u.UserID, memID,
-		)
+		).Scan(&storedBaseStrength, &storedActivationCount)
+		if errors.Is(execErr, pgx.ErrNoRows) {
+			// The row was SELECTed at the top of this handler, so no rows here
+			// means it went away in between — GC or a concurrent delete. Under the
+			// old Exec that was a silent 200 reporting a strength for a row that no
+			// longer exists. It takes the same answer as a memory that was never
+			// visible, which is what this endpoint already returns when the opening
+			// SELECT misses.
+			return writeError(c, errNotVisible())
+		}
 		if execErr != nil {
 			return writeError(c, domain.NewErr(domain.ErrInternalError,
 				fmt.Sprintf("failed to reinforce memory: %v", execErr)))
@@ -1098,8 +1154,8 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		// Emit memory_reinforced event (best effort).
 		payload, _ := json.Marshal(map[string]any{
 			"memory_id":        memID,
-			"activation_count": newActivationCount,
-			"base_strength":    newBaseStrength,
+			"activation_count": storedActivationCount,
+			"base_strength":    storedBaseStrength,
 		})
 		_, _ = pool.Exec(ctx, `
 			INSERT INTO agent_events (id, actor_user_id, actor_display, event_type, payload, project)
@@ -1109,8 +1165,8 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		return c.JSON(http.StatusOK, map[string]any{
 			"memory_id":        memID,
-			"activation_count": newActivationCount,
-			"base_strength":    newBaseStrength,
+			"activation_count": storedActivationCount,
+			"base_strength":    storedBaseStrength,
 		})
 	}
 }

@@ -648,7 +648,7 @@ after. The `sleep 0.1` is that number's resolution. Ctrl-C it after step 7.
 **6. Swap the container** — stop, rename, run.
 
 ```bash
-docker stop aihub                     # graceful SIGTERM; releases :8080
+docker stop aihub                     # graceful SIGTERM; releases port 8080
 docker rename aihub "$ANCHOR"         # the old container survives as the rollback anchor
 docker run -d --name aihub --network aihub-net -p 8080:8080 --restart unless-stopped \
   --env-file /root/aihub.env "$IMG:$SHA"

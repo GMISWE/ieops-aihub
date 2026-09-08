@@ -186,3 +186,40 @@ Claude Code with the polyforge plugin. Start with
 contract is in
 [`docs/design/polyforge-v1-design.md`](docs/design/polyforge-v1-design.md) (being
 updated - parts have drifted from the implementation).
+
+### How docs cite code
+
+**Cite the file plus the symbol. Never the line number.** Anything under `docs/`
+points at code like this:
+
+```
+`internal/domain/memory.go` (`UpdateMemory`)
+```
+
+Line numbers are forbidden and gated - `scripts/pf_docs_contract_check.py` check
+C1 fails the build on all three shapes, and Contract Lint runs it on every PR
+that touches `docs/**`:
+
+| forbidden | example | why |
+|---|---|---|
+| file plus line | `memory.go:1444`, `polyforge-v1-design.md:4620` | rots on the next edit with nothing going red |
+| code-formatted range | `` `:1195-1202` `` | does not even say which file |
+| filename-less anchor in prose | `at :2698-2709`, `` `queryFloat` :157 ``, `**:981**` | same, and it usually sits beside a symbol name that already says where to look |
+
+The symbol half is what survives a refactor; check C2 verifies the file half
+exists. If the thing you want to point at has no symbol name, name the nearest
+one and describe the part - "the `RECOVERY:` clause of its state-file-write
+error" beats a line number even when it is longer.
+
+Two notes for anyone **briefing** a documentation task, which is where this rule
+actually gets broken:
+
+- Do not ask for `file:line` citations. A brief that did turned Contract Lint red
+  on a docs-only PR with 156 C1 errors, and all 222 citations had to be converted
+  by hand (`aihub#411`, `aihub#404`).
+- The measurement behind the ban, taken on 2026-09-03: of the 23 real
+  line-number citations then in `docs/superpowers/`, **18 pointed at the wrong
+  line** and 3 more were off by one or two. A line number is not a cheaper
+  anchor, it is a wrong one.
+
+Ports are not citations - write `port 8080`, or code-format it (`` `:8080` ``).

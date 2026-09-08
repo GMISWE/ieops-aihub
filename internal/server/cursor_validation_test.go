@@ -14,12 +14,18 @@ package server
 //	GET /v1/memories     routes_memory.go RAW -> $n::timestamptz -> 500
 //	GET /v1/events       routes_memory.go RAW -> $n::timestamptz -> 500
 //	GET /ui/wi           ui_handlers_wi.go RAW, and its error is DISCARDED
+//	                                       (both halves fixed by aihub#466)
 //
-// The last one is a different defect on the same param name (`?done_cursor=`
-// feeds fetchListRowsPaged inside `if ... derr == nil`, so a bad token renders
-// an empty Done segment with no error at all) and is filed separately: an HTML
-// page cannot answer 400, so it needs its own ruling rather than this one
-// stretched to cover it.
+// The last one was a different defect on the same param name (`?done_cursor=`
+// fed fetchListRowsPaged inside `if ... derr == nil`, so a bad token rendered an
+// empty Done segment with no error at all) and was filed separately, because an
+// HTML page cannot answer 400 and needed its own ruling rather than this one
+// stretched to cover it. That ruling is aihub#466: the SAME reader decides what
+// a page token is — `done_cursor` is listWorkItemsNextCursor's output too, so it
+// cannot be legal on one surface and not the other — and the /ui exemption in
+// queryparam.go decides what to DO about a bad one, which is render the newest
+// page and SAY SO rather than 400 or fall back in silence. Its exemption entry
+// is gone from the table below and the /ui/wi row now reads like the first one.
 //
 // ─── Why the two 500s could not be seen by the Rule-1 gate ─────────────────
 //
@@ -321,11 +327,6 @@ var rawCursorReadExemptions = map[string]string{
 		"(`c.QueryParam(\"cursor\") != \"\"`) to reject cursor+query as a combination; " +
 		"it never reads the value, and the same handler validates it through " +
 		cursorReaderFunc + " a few lines above",
-	"ui_handlers_wi.go|done_cursor": "the /ui/wi Done segment. An HTML page cannot " +
-		"answer 400, and its failure mode is different anyway: fetchListRowsPaged's " +
-		"error is discarded (`if ... derr == nil`), so a bad token renders an empty " +
-		"segment rather than a 500. Filed as its own wi; deliberately not stretched " +
-		"to fit this ruling",
 }
 
 // TestCursor_EveryCursorParamGoesThroughOneReader is the structural arm.
@@ -388,9 +389,9 @@ func TestCursor_EveryCursorParamGoesThroughOneReader(t *testing.T) {
 		"the walk found %d source files in package server; at that count it is measuring "+
 			"nothing and a green here means the directory moved, not that the surfaces are clean",
 		filesWalked)
-	require.GreaterOrEqual(t, len(validated), 3,
-		"expected at least the three JSON list endpoints to read cursor through %s, found %v",
-		cursorReaderFunc, validated)
+	require.GreaterOrEqual(t, len(validated), 4,
+		"expected at least the three JSON list endpoints plus /ui/wi's done_cursor to read "+
+			"cursor through %s, found %v", cursorReaderFunc, validated)
 
 	sort.Strings(rawSites)
 	for _, site := range rawSites {

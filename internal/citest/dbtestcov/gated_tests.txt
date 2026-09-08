@@ -21,6 +21,44 @@
 #
 # Provenance lives in `git blame`, not in a prose changelog: the line and the
 # commit that added the test are the same diff.
+#
+# ── Operating rule: never PRE-DECLARE this file ──────────────────────────────
+# (aihub#438, from the aihub#411 decision table, row T1-11)
+#
+# This file and .github/workflows/ci.yml are the repo's two shared ratchets, and
+# both get edited by work items that are not otherwise about them: every change
+# that adds an AIHUB_TEST_DB-gated test needs a line here. Do NOT put either
+# path in a work item's declared_resources, and do not pf_acquire_locks it up
+# front.
+# Let the commit-time lock gate take it instead — pf_commit and pf_ship send the
+# pending commit's paths, and every path this attempt does not already hold gets
+# a file_scope lock acquired right there. See internal/domain/commit_locks.go
+# (FnReconcileCommitLocks).
+#
+# Declaring costs more than it buys. A lock taken at claim is held until the
+# ATTEMPT ends, so declaring this path blocks every other work item that has to
+# add a line to it. Not declaring gives up no safety: a path a different live
+# attempt already holds is REFUSED at commit time with CONFLICT_LOCK_TAKEN
+# naming the holder, nothing is committed, and the files stay staged. Two work
+# items that appended in parallel this way (aihub#392, and aihub#399 with 3 new
+# lines against 211) auto-merged with no conflict — which is what the sorted,
+# one-entry-per-line format above is for.
+#
+# Two corollaries, because the gate sits at COMMIT time and not at claim time:
+#
+#   * Commit through pf_commit/pf_ship. A bare `git commit` never reaches the
+#     gate, so no lock is taken and no refusal can happen (it also loses the
+#     commit event).
+#   * A merge commit is built from MERGE_HEAD rather than from a staged change
+#     set, so the gate reports `lock_gate: not_run`. aihub#392 stashed and left
+#     the commit to pf_ship precisely so the gate would RUN.
+#
+# Why the rule is written HERE rather than in a runbook: two executors had to
+# re-derive it in flight because it was written nowhere, and whoever forgets
+# this file is sent straight to it. On 2026-09-08 aihub#442 landed three
+# DB-gated heartbeat tests without their lines, and main's "aihub#303 DB-test
+# coverage gate" step went red — "232 entries, inventory measured 235" — until
+# the next commit added them (aihub#451).
 internal/domain TestAcquireLocksReportsEveryHeldLock
 internal/domain TestActivate_DoesNotReviveSupersededVersion
 internal/domain TestActivate_RedactedSuccessorDoesNotCountAsSupersession

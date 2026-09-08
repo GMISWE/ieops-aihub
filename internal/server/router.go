@@ -339,12 +339,16 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 				// Compared through roleLevel, not tested for non-emptiness:
 				// checkProjectAccess gates on roleLevel[role] >= roleLevel[min],
 				// and roleLevel maps an unrecognised string to 0. Testing for a
-				// non-empty role would therefore admit a legacy value that
-				// ?project= rejects. SetProjectMembers validates to the three
-				// known roles today, but migration 0013_backfill_projects.sql
-				// copied arbitrary users.project_roles values in, mapping only
-				// maintainer→writer — so such rows may exist. Going through the
-				// same lookup removes the class without needing to know.
+				// non-empty role would therefore admit an unrecognised value
+				// that ?project= rejects. ProjectRoles carries whatever string
+				// projects.members holds: roleForUserInMembers (middleware.go)
+				// returns it verbatim without checking it against a vocabulary.
+				// domain.UpdateProject validates to the three known roles, but it
+				// is the only thing that does — the members JSONB has no CHECK
+				// constraint, so a write that bypasses it can store anything, as
+				// measured in checkProjectAccess's comment (aihub#460). Going
+				// through the same lookup removes the class without needing to
+				// know.
 				// aihub#377: errNotVisible(), and note it no longer names the
 				// project. The old message quoted *u.ProjectScope back, so a key
 				// scoped to a project its holder is not a member of reported that

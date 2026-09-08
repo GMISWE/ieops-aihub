@@ -57,6 +57,11 @@ reader.
 `aihub#412` corpus holds no record for this tool in its window, which for a rotation
 operation is the expected shape rather than evidence of disuse.
 
+The keys are pinned anyway, just not here: `aihub#482`'s K10 in
+`internal/mcp/card_response_keys_live_e2e_db_test.go` drives this tool against a
+live server and holds the result to `plain` and `prefix`, declared in
+`docs/mcp-cards/live-response-keys.json`.
+
 🔴 Because the response carries a secret and is not projected, **the plaintext lands
 in whatever transcript the calling agent keeps.** That is a property of the tool
 surface, not of any caller, and it is worth a card line: a leaked credential's blast

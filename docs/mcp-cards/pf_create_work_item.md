@@ -4,7 +4,7 @@
 {
   "tool": "pf_create_work_item",
   "description_sha256": "2978a1542ea8458bd057eea171e82bbd04eecdec320281d9b37b3ce3c14b9d69",
-  "input_schema_sha256": "b3d83bcd27f80f9b79b64233ac3ce1b0ad372cab373308c7f633a43c2234afef",
+  "input_schema_sha256": "44d9c769709e718a5c72f5e9b6c3a4ce0917485d3108ae73a00cf5112da26a14",
   "params": {
     "attrs": {
       "type": "object",
@@ -141,7 +141,7 @@ exists downstream of.
 | `declared_resources` | array | no | `{type, uri, intent}` + optional `repo` |
 | `parent_work_item_id` | string | no | parent wi |
 | `source` | enum | no | how it was filed; a closed vocabulary |
-| `attrs` | object | no | additional attributes |
+| `attrs` | object | no | additional attributes; a non-object — including a JSON-encoded string of one — is a 400 |
 | `blocked_by` | array | no | creates real `blocks` edges and sets status=blocked |
 | `content` | string | no | markdown ≤20000 chars; **not echoed back** |
 | `force_create` | boolean | no | bypass the duplicate check |

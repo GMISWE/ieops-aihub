@@ -71,6 +71,28 @@ func noteOutcomeSuffix(requested bool, err error) string {
 	}
 }
 
+// emitEventPayloadPropDescription is pf_emit_event's `payload` description.
+//
+// aihub#486, and it is spelled out here instead of taking
+// jsonObjectPropNote because of the one clause that string ends with. `payload`
+// is the single guarded jsonb object parameter with a REAL size cap — 65,536
+// bytes, checked in internal/domain/memory.go (`EmitEvent`) ABOVE the shape
+// guard — so "size is never the reason" would be a false statement published to
+// every caller of this tool. internal/domain/work_items.go's
+// jsonObjectParamSizeNote makes exactly the same split on the error-message
+// side, and for the same reason.
+//
+// The rest matches the shared note deliberately: the mistake and its repair are
+// identical, and the repair sentence is the one a caller cannot guess — 18 of
+// the 19 stringified values in the measured corpus were hand-escaped JSON that
+// came out malformed rather than a client wrapping a good object.
+const emitEventPayloadPropDescription = "Event payload (arbitrary JSON object). " +
+	"Must be a JSON object: a string (including a JSON-encoded string of the object you meant), " +
+	"an array, a number or a boolean is rejected with 400 naming the type received, and no event is recorded. " +
+	"Do not hand-write the escaped JSON — send the object and let your client serialise it. " +
+	"Unlike the other jsonb object parameters, size CAN be the reason here: payload is capped at 64 KB " +
+	"and that cap is checked BEFORE the shape check."
+
 func (s *Server) registerEventTools() {
 	// pf_emit_event
 	s.addTool(&sdkmcp.Tool{
@@ -79,7 +101,7 @@ func (s *Server) registerEventTools() {
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID"),
 			"event_type":   prop("string", "Event type (e.g. note, wi_reclassified, step_started)"),
-			"payload":      prop("object", "Event payload (arbitrary JSON object)"),
+			"payload":      prop("object", emitEventPayloadPropDescription),
 			"pinned":       prop("boolean", "Pin this event (surfaces first in status/resume)"),
 			"admin":        prop("boolean", "Admin event (requires role=admin)"),
 		}, []string{"work_item_id", "event_type", "payload"}),

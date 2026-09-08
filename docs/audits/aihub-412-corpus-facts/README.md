@@ -20,7 +20,7 @@ detects a planted secret of every shape while leaving clean output alone.
 | `error-taxonomy.md` | every failure, normalized, at two levels of granularity |
 | `param-types-vs-schema.md` | per param: observed JSON types and values vs the published contract |
 | `sequence-inventory.md` | real lifecycle flows, classified, with anonymized example traces |
-| `response-keys/pf_*.json` | hop5 ratchet input: response keys callers have actually been handed |
+| `response-keys/pf_*.json` | hop5 key inventory: the union of response keys callers were handed, per tool |
 | `run-manifest.json` | the denominators every number below is measured against |
 
 Sanitized request/response fixtures live separately, next to the code that will

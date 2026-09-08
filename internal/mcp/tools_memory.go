@@ -390,7 +390,14 @@ func recallSchema() json.RawMessage {
 		"cursor": prop("string", "Opaque page token — pass a previous response's next_cursor. "+
 			"TEXT-path paging only: the semantic (vector) path and the hybrid merge "+
 			"return no next_cursor and ignore this."),
-		"min_strength":     prop("number", "Min memory strength (default 0.3)"),
+		// aihub#433 / aihub#411 T2-19. The default is unchanged and deliberately
+		// so; what was missing is the scale. min_strength is compared against
+		// base_strength after decay, and base_strength is CHECK-constrained to
+		// 1-5, so 0.3 is below every legal value — it filters nothing. That reads
+		// as a sensible mid-range cutoff only if you believe the range this tool
+		// used to publish for base_strength, which is why the two strings are
+		// fixed together and gated together.
+		"min_strength":     prop("number", "Min effective strength — base_strength (1-5) after decay. Default 0.3 filters nothing"),
 		"include_archived": prop("boolean", "Include archived memories (default false)"),
 		"recency_weight":   prop("number", "Recency weight (default 0.3)"),
 		// aihub#313. This string is charged on EVERY request of EVERY session,
@@ -565,6 +572,13 @@ func (s *Server) emitArtifactAction(ctx context.Context, req *sdkmcp.CallToolReq
 // pf_remember has no forwarding block to drift from: its handler passes the
 // argument map to pkg/client verbatim, so every published property is on the
 // wire by construction. The guard states that identity rather than assuming it.
+//
+// aihub#433 / aihub#411 T1-3: base_strength used to be published as "(0-1)", a
+// range the memories.base_strength CHECK refuses outright, so the 13 corpus
+// calls that believed it all came back 500. It now publishes the enforced range
+// and domain.Remember rejects a violation with a 400 naming the field.
+// tools_memory_test.go asserts this string against domain.MinBaseStrength /
+// domain.MaxBaseStrength so the two cannot drift apart again.
 func rememberSchema() json.RawMessage {
 	return objectSchema(map[string]any{
 		"project":              prop("string", "Project name"),
@@ -572,7 +586,7 @@ func rememberSchema() json.RawMessage {
 		"content":              prop("string", "Memory content"),
 		"visibility":           prop("string", "private|project|team|admin"),
 		"work_item_id":         prop("string", "Associated work item ID"),
-		"base_strength":        prop("number", "Initial strength (0-1)"),
+		"base_strength":        prop("number", "Initial strength, 1-5 (default 3)"),
 		"attrs":                prop("object", "Additional attributes"),
 		"expires_at":           prop("string", "Expiry timestamp (RFC3339)"),
 		"dedup_mode":           prop("string", "Deduplication mode"),
@@ -642,13 +656,19 @@ func buildReinforceMemoryBody(args map[string]any, sf *config.StateFile) map[str
 }
 
 // updateMemorySchema is pf_update_memory's published InputSchema.
+//
+// aihub#433: base_strength is the same column pf_remember writes and is caught by
+// the same guard — this tool's body reaches domain.UpdateMemory, which builds a
+// RememberRequest and calls Remember. It used to publish no range at all, which
+// is the quieter half of T1-3: silence about a constraint is not neutral when the
+// sibling tool is publishing a wrong one.
 func updateMemorySchema() json.RawMessage {
 	return objectSchema(map[string]any{
 		"memory_id":     prop("string", "Memory ID (any id in the lineage)"),
 		"content":       prop("string", "New content (omit to keep current)"),
 		"visibility":    prop("string", "New visibility (omit to keep current)"),
 		"tags":          prop("array", "New tags (omit to keep current)"),
-		"base_strength": prop("number", "New base strength (omit to keep current)"),
+		"base_strength": prop("number", "New base strength, 1-5 (omit to keep current)"),
 		"work_item_id":  prop("string", "Work item ID (for credential injection)"),
 	}, []string{"memory_id", "work_item_id"})
 }

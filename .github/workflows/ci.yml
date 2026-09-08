@@ -1,3 +1,28 @@
+# Operating rule for this file: never PRE-DECLARE it.
+# (aihub#438, from the aihub#411 decision table, row T1-11)
+#
+# .github/workflows/ci.yml and internal/citest/dbtestcov/gated_tests.txt are the
+# repo's two shared ratchets, and both get edited by work items that are not
+# otherwise about them: every new AIHUB_TEST_DB-gated test needs a line there,
+# and — unless it needs more than a database — a step here that names it. Do NOT
+# put either path in a work item's declared_resources, and do not
+# pf_acquire_locks it up front: a lock taken at claim is held until the ATTEMPT
+# ends unless someone deliberately narrows declared_resources to drop it, so by
+# default it blocks every other work item that has to touch the same ratchet.
+#
+# Let the commit-time lock gate take it instead. pf_commit and pf_ship send the
+# pending commit's paths; every path this attempt does not already hold gets a
+# file_scope lock acquired right there, and a path a different LIVE attempt
+# holds is refused with CONFLICT_LOCK_TAKEN naming the holder, with nothing
+# committed and the files left staged. See internal/domain/commit_locks.go
+# (FnReconcileCommitLocks). Not declaring therefore gives up no safety; it only
+# shortens the window.
+#
+# The corollaries of the gate sitting at COMMIT time — commit through
+# pf_commit/pf_ship, because a bare `git commit` never reaches the gate, and a
+# merge commit reports `lock_gate: not_run` — and the case that made this worth
+# writing down are in the header of internal/citest/dbtestcov/gated_tests.txt.
+
 name: CI
 
 on:

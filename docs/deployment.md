@@ -528,6 +528,43 @@ refused: during the 2026-09-02 deploy an automated command-safety policy blocked
 missing permission), while `docker stop` + `docker rename` went through
 unremarked.
 
+**A third precondition — not one of the four, and it does not run on this host:
+the `polyforge` binary bump and this deploy are ONE change, not two.** Server
+behaviour and the binary's client-side behaviour ship from the same commit, but
+they reach machines on different schedules: the server the instant step 6 swaps
+the container, the binary only at each client's next daily update check against
+`bins-dev`. Any release that makes the server **refuse what it used to accept**
+therefore opens a window in which every machine still on yesterday's binary is
+talking to the new server.
+
+aihub#399 is the worked example, and the reason this is written on the checklist
+rather than left in that work item's record. A terminal `pf_update_step`
+(`status=completed` or `failed`) that omits `step_attempt_id` used to answer
+`200` while silently filing no step-history row; since that release it answers
+`400` (`internal/server/routes_step.go`, `validateTerminalStepArgs`). The binary
+forwards that key only when it is non-empty (`internal/mcp/tools_step.go`,
+`updateStepBody`), so a caller that omits the argument sends no key at all — and
+a binary older than the release also lacks the local pre-flight added in the
+same commit, so its agent meets the refusal as a remote `400` mid-run instead of
+as an immediate error naming what to resend. Nothing is committed by the
+refusal, so the cost is a broken run, not corrupted state. There is no
+server-side mitigation to fall back on: synthesising the missing
+`step_attempt_id` is the "record garbage rather than refuse" trade aihub#390
+rejected on purpose.
+
+So, as part of this deploy and not as a follow-up:
+
+- **Before step 1**, read the release's `internal/server/` and `internal/mcp/`
+  changes for newly-refused inputs, the same way you read its migrations. A
+  release that only adds behaviour opens no window; one that adds a refusal
+  does, and the window is as long as the slowest client's update check.
+- **After step 7**, have the team force the binary refresh instead of waiting
+  the daily check out — `rm -f ~/.polyforge/.last_binary_check`, restart Claude
+  Code, then confirm `polyforge version` reports the commit you just deployed.
+  If the release also touched `plugins/polyforge/`, the skills half is a
+  separate update (`/plugin marketplace update`); both halves are described in
+  [Updating the plugin, skills, and binary](onboarding.md#updating-the-plugin-skills-and-binary).
+
 ```bash
 IMG=us-west1-docker.pkg.dev/devv-404803/public/aihub
 SHA=<target git sha on main>   # full 40-char SHA — the tag CI pushes. Wait for

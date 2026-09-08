@@ -20,22 +20,57 @@ import (
 
 // RunAttempt mirrors the run_attempts table.
 type RunAttempt struct {
-	ID                 string           `json:"id"`
-	WorkItemID         string           `json:"work_item_id"`
-	Status             string           `json:"status"`
-	ClaimEpoch         int64            `json:"claim_epoch"`
-	IdempotencyKey     string           `json:"idempotency_key"`
-	LastActiveAt       time.Time        `json:"last_active_at"`
-	ActorUserID        string           `json:"actor_user_id"`
-	APIKeyID           string           `json:"api_key_id"`
-	ActorDisplay       string           `json:"actor_display"`
-	MachineID          string           `json:"machine_id"`
-	SessionSecretHash  string           `json:"session_secret_hash"`
-	ParentAttemptID    *string          `json:"parent_attempt_id"`
-	PhaseConfigVersion *int             `json:"phase_config_version"` // kept as audit field; always NULL since scenario_phase_configs was removed (aihub#38)
-	PreparedWorkspace  *json.RawMessage `json:"prepared_workspace"`
-	StartedAt          time.Time        `json:"started_at"`
-	EndedAt            *time.Time       `json:"ended_at"`
+	ID                 string    `json:"id"`
+	WorkItemID         string    `json:"work_item_id"`
+	Status             string    `json:"status"`
+	ClaimEpoch         int64     `json:"claim_epoch"`
+	IdempotencyKey     string    `json:"idempotency_key"`
+	LastActiveAt       time.Time `json:"last_active_at"`
+	ActorUserID        string    `json:"actor_user_id"`
+	APIKeyID           string    `json:"api_key_id"`
+	ActorDisplay       string    `json:"actor_display"`
+	MachineID          string    `json:"machine_id"`
+	SessionSecretHash  string    `json:"session_secret_hash"`
+	ParentAttemptID    *string   `json:"parent_attempt_id"`
+	PhaseConfigVersion *int      `json:"phase_config_version"` // kept as audit field; always NULL since scenario_phase_configs was removed (aihub#38)
+	// ⚠️ `prepared_workspace` is a DEAD COLUMN, kept deliberately (aihub#487,
+	// from aihub#416 spec Q-6, owner-ruled 2026-09-08 in
+	// aihub#416.attrs.owner_ruling_2026_09_08_q2_q6). The same plan B as
+	// aihub#387 and aihub#394, each of which withdrew a dead parameter from a
+	// tool schema instead of implementing it. The closest match is aihub#395
+	// part 2: it withdrew `base_branch` from the published declared_resources
+	// schema and KEPT its struct field, which is the shape followed here. Only
+	// #395 part 2 did exactly that — #387's `non_conflicting` had no struct
+	// field, and #394's `ClaimRequest.Mode` was later deleted outright by
+	// aihub#424.
+	//
+	// Measured on 6cd8229, the complete set of non-test occurrences of the column
+	// name is this one line. Both `INSERT INTO run_attempts` column lists
+	// (FnClaimWorkItem and the force-takeover path) are explicit and omit it, no
+	// UPDATE sets it and no SELECT reads it. The archived v0 Python writer omits
+	// it from its own INSERT as well, so no generation of this codebase ever
+	// wrote it — though "every row is NULL" stays an inference from the code,
+	// not a read of the database.
+	// It is on no wire surface in either direction: no MCP
+	// tool InputSchema publishes it, no contract card mentions it, and
+	// ClaimRequest does not bind it — POSTing it to /v1/work_items/:id/claim
+	// answers 200 with the key dropped by encoding/json, which is the generic
+	// fate of ANY unknown key rather than anything specific to this field.
+	//
+	// So aihub#487 withdrew nothing: there was nothing published to withdraw, and
+	// the precedent's one-line schema deletion had no target. The wi's actual
+	// deliverable is the gate in prepared_workspace_dead_column_test.go, which
+	// asserts that write, bind and read surface stays empty.
+	//
+	// The field STAYS, per the precedent. It is the declared mirror of a live DDL
+	// column (0004_run_attempts.sql) and dropping the column is a migration this
+	// wi deliberately does not write. Two things a reviver should know: the tag
+	// has no omitempty, so marshalling this struct would emit
+	// `"prepared_workspace": null`; and RunAttempt as a whole currently has no
+	// readers in non-test code, so nothing marshals it today.
+	PreparedWorkspace *json.RawMessage `json:"prepared_workspace"`
+	StartedAt         time.Time        `json:"started_at"`
+	EndedAt           *time.Time       `json:"ended_at"`
 }
 
 // ResourceLock mirrors a resource_locks row.

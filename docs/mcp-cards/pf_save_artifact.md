@@ -141,9 +141,18 @@ rate, which is consistent with a credentialed write whose state file may be miss
 
 ## Policy
 
-- **§6.2 T2-6** — the type list here IS enforced (it is a `propEnum` the SDK checks
-  and a server-side branch), which is the contrast the ruling draws with
-  `pf_remember`'s 13-value list.
+- **§6.2 T2-6** — this card used to say the type list here IS enforced, "a `propEnum`
+  the SDK checks and a server-side branch", and drew that as the contrast with
+  `pf_remember`'s 13-value list. `aihub#445` measured both halves and neither holds.
+  The SDK checks nothing on this registration path (`aihub#463`, read on go-sdk
+  v1.6.0: polyforge registers through the untyped `(*mcp.Server).AddTool` method,
+  whose `callTool` invokes the handler with no schema step), and what the server
+  enforces is the `methodology.` PREFIX plus the credential gate — no client-side
+  validator and no server branch pins the SIX names, so `methodology.anything`
+  passes `internal/domain/memory.go` (`Remember`) and stores. The 6-value enum here
+  is therefore the same published-but-unenforced shape T2-6 withdrew from
+  `pf_remember`; the ruling names only the 13-value list, so this one is recorded
+  rather than changed.
 - **§6.1 T1-5** — no projection at all on this response.
 
 ## Open

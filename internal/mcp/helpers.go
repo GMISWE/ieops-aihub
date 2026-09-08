@@ -96,7 +96,18 @@ func parseBoolArg(args map[string]any, key string) (value, present, ok bool) {
 // touched; they simply become tolerant of the string and 0/1 spellings instead
 // of silently reading them as false. Callers that need to REJECT an unreadable
 // value (rather than default it) use parseBoolArg directly — see
-// buildListWorkItemsParams.
+// buildListWorkItemsParams and buildRecallParams.
+//
+// ⚠️ aihub#464: buildRecallParams belonged in that list by the sentence's own
+// logic — pf_recall's `include_archived` defaults to false, so defaulting an
+// unreadable value there is indistinguishable from not sending it — and it was
+// calling THIS function instead. `boolArg(args, "include_archived")` had been
+// there since 50bfc35, the commit that added pf_recall, and aihub#280 rewrote
+// this function underneath it without revisiting that caller.
+//
+// The list is the load-bearing part of the sentence; keep it current when a
+// caller switches reader, because "the ~50 others are deliberately lenient" is a
+// claim about callers nobody has audited, not about every caller.
 func boolArg(args map[string]any, key string) bool {
 	v, _, _ := parseBoolArg(args, key)
 	return v

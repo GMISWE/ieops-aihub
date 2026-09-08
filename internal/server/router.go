@@ -506,6 +506,21 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		if cursorPresent {
 			filter.Cursor = &cursor
 		}
+		// sort/order are read ONCE, here, into locals the combination guard and
+		// NormalizeListWorkItemsSort below both consume — the guard needs to
+		// know WHETHER the caller supplied them, the normalizer needs their
+		// VALUES, and aihub#477 is what a second, independent read of the same
+		// parameter name costs.
+		//
+		// Trimmed, because trimming is the emptiness predicate the reader they
+		// feed already applies: NormalizeListWorkItemsSort does
+		// TrimSpace+ToLower and then documents "" as "the caller did not ask"
+		// (ToLower cannot change emptiness, so TrimSpace alone is the same
+		// test). Read raw, `sort=%20` was a supplied sort to the guard and no
+		// sort at all to the normalizer, so `query=foo&sort=%20` came back 400
+		// naming a combination the request does not contain.
+		sortParam := trimmedParam(c, "sort")
+		orderParam := trimmedParam(c, "order")
 		// aihub#273: semantic search. Similarity ordering has no stable
 		// pagination key and overrides sort — reject the combinations loudly
 		// instead of silently ignoring a parameter (the aihub#267/#271 family).
@@ -521,8 +536,15 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 				"query and similar_to are mutually exclusive: query embeds the text you pass, "+
 					"similar_to reuses another work item's stored vector — pass exactly one"))
 		}
+		// aihub#477: each clause asks the parameter's OWN reader whether it was
+		// supplied — cursorPresent from queryCursor, and the two trimmed locals
+		// above — instead of re-reading the raw query string under a third
+		// emptiness rule. `?cursor=%20` is page one to queryCursor (its doc says
+		// so) and was a supplied cursor to this guard, so `query=foo&cursor=%20`
+		// used to be refused for combining with a cursor the handler had already
+		// discarded.
 		if q != "" || similarTo != "" {
-			if c.QueryParam("sort") != "" || c.QueryParam("order") != "" || c.QueryParam("cursor") != "" {
+			if sortParam != "" || orderParam != "" || cursorPresent {
 				return writeError(c, domain.NewErr(domain.ErrBadRequest,
 					"semantic search (query or similar_to) does not combine with sort, order, or cursor"))
 			}
@@ -559,8 +581,13 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		// (created_at desc); an unrecognised value is rejected rather than
 		// silently ignored. sort=closed_at returns only closed items, since a
 		// NULL close time has no position in that ordering.
-		sortBy, order, sortErr := domain.NormalizeListWorkItemsSort(
-			c.QueryParam("sort"), c.QueryParam("order"))
+		//
+		// The params themselves were read once, above the semantic guard that
+		// also needs them (aihub#477). Normalize keeps its own TrimSpace — it is
+		// exported and must still normalize for a caller that has not trimmed —
+		// and TrimSpace is idempotent, so handing it the trimmed locals changes
+		// nothing it decides.
+		sortBy, order, sortErr := domain.NormalizeListWorkItemsSort(sortParam, orderParam)
 		if sortErr != nil {
 			return writeError(c, sortErr)
 		}

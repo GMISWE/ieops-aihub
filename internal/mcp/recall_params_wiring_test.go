@@ -163,11 +163,31 @@ var recallWireProbes = map[string][]struct {
 		{shape: "", want: ""},
 		{shape: "0.3ish", rejected: true},
 	},
+	// aihub#464: the same Rule 1 escape aihub#432 closed for the three numbers
+	// above, on this function's one boolean. It read through boolArg, which
+	// discards parseBoolArg's `ok`, so `include_archived: "yess"` was answered
+	// false — and false is this parameter's default, so the request went out
+	// asking for exactly what a caller who never set it would get. The rejected
+	// arms are the discriminating ones: the `want: ""` arm below is what a
+	// correctly-not-forwarded `false` looks like, and until aihub#464 an
+	// unreadable value was spelt identically.
 	"include_archived": {
 		{shape: true, want: "true"},
 		{shape: false, want: ""},
 		{shape: "true", want: "true"},
 		{shape: float64(1), want: "true"},
+		{shape: "false", want: ""},
+		{shape: float64(0), want: ""},
+		// The wi's own example: a typo one keystroke from "yes", which
+		// strconv.ParseBool does not accept either.
+		{shape: "yess", rejected: true},
+		// A number that is neither 0 nor 1 has no boolean reading; 2 is not
+		// "more true".
+		{shape: float64(2), rejected: true},
+		// The published type is `boolean`; an array is not one in any spelling,
+		// and csvArg exists because real callers do send arrays against
+		// non-array params (aihub#280).
+		{shape: []any{true}, rejected: true},
 	},
 	// aihub#289's shape contract: an ARRAY of names, joined with commas. The
 	// single-string form still has to work — the server splits on ',' and
@@ -396,6 +416,56 @@ func TestRecallEveryNumericParamHasARejectionProbe(t *testing.T) {
 			t.Errorf("%q is forwarded as a number and has no rejected probe: nothing here would "+
 				"notice if it went back to answering 0 for text it cannot read, which is the "+
 				"defect aihub#432 closed (0 is a value the caller could have sent)", name)
+		}
+	}
+}
+
+// TestRecallEveryBooleanParamHasARejectionProbe is the same completeness half
+// for the booleans, and it exists because the numeric one above did not save
+// `include_archived`.
+//
+// That is the whole of aihub#464. aihub#432 closed the Rule 1 escape for this
+// function's three numbers and added the gate directly above — which ranges over
+// recallNumberParams, so the boolean further down the SAME function was outside
+// it by construction. It kept reading through boolArg, the wrapper
+// that discards parseBoolArg's `ok`, and answered false for `"yess"`. False is
+// include_archived's DEFAULT, so the request the server saw was
+// indistinguishable from one that never mentioned the parameter: the caller asked
+// for archived memories and got the active-only page, with nothing at any of the
+// four hops to notice — the same silence, one type over.
+//
+// A gate whose scope is the type of the parameter re-opens on the next type. This
+// one is the pair of the numeric gate, not a replacement for it, and a boolean
+// added to recallBoolParams tomorrow is covered the day it is added.
+func TestRecallEveryBooleanParamHasARejectionProbe(t *testing.T) {
+	if len(recallBoolParams) == 0 {
+		t.Fatal("recallBoolParams is empty — this assertion would be vacuous")
+	}
+	for _, name := range recallBoolParams {
+		rejects, forwards, omits := 0, 0, 0
+		for _, p := range recallWireProbes[name] {
+			switch {
+			case p.rejected:
+				rejects++
+			case p.want != "":
+				forwards++
+			default:
+				omits++
+			}
+		}
+		if rejects == 0 {
+			t.Errorf("%q is forwarded as a boolean and has no rejected probe: nothing here would "+
+				"notice if it went back to boolArg, which answers false for a value it cannot "+
+				"read — and false is this parameter's default, so the request is byte-identical "+
+				"to one that never set it (aihub#464)", name)
+		}
+		// Both readable outcomes must also be probed, or the rejection could be
+		// satisfied by refusing everything: a hop that rejected `true` as well
+		// would pass the arm above while breaking the tool for every caller.
+		if forwards == 0 || omits == 0 {
+			t.Errorf("%q has %d forwarding and %d omitting probes; it needs at least one of each "+
+				"(a true that reaches the wire, and a false that correctly does not) or the "+
+				"rejection probe alone cannot tell a fix from a hop that refuses everything", name, forwards, omits)
 		}
 	}
 }

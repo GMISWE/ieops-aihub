@@ -119,7 +119,7 @@ that a caller gets wrong by default.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `work_item_id` | string | yes | id or slug |
-| `goal` | string | no | only while status is queued, paused or blocked, and only for the reporter / a maintainer / an admin |
+| `goal` | string | no | single-line; only while status is queued, paused or blocked, and only for the reporter / a maintainer / an admin |
 | `goal_change_reason` | string | no | required with `goal` |
 | `priority` | enum | no | from the domain list |
 | `milestone` | string | no | updated milestone |
@@ -186,6 +186,15 @@ except `work_item_id` and `brief` into the body of
   existing meaning in both fields.
 - **`goal` and `wi_type` are status-gated, permission-gated and reason-gated** —
   by the matrix below rather than by a guard of their own.
+- **`goal` does carry one guard of its own: a newline refuses the write.**
+  `internal/domain/work_items.go` (`UpdateWorkItem`) rejects a `goal` containing `\n`
+  or `\r` with `ErrGoalMultiline`, and that check sits BEHIND the matrix for the same
+  reason `goal_change_reason`'s does — an edit refused on state is not first told its
+  goal is multiline. What this path does NOT check is length: `pf_create_work_item`
+  refuses a goal over 500 characters and this tool has no equivalent, so the same
+  string is accepted here and rejected there. Both facts are stated as found;
+  `aihub#474` owns whether the cap should apply on update, and this card does not
+  anticipate that call.
 
 ### The editability matrix (`aihub#440`)
 
@@ -236,6 +245,12 @@ no body", never "the body was withheld".
 
 - **§6.1 T1-9** — `kind`'s withdrawal is the rule applied: prose contradicting hop 3
   is a bug, and the legal dispositions are withdraw, fix, or file.
+- **§6.1 T1-9, second application** — the published `goal` description states the
+  status gate and is silent about the multiline refusal, while
+  `pf_create_work_item`'s states both its shape constraints. The disposition split:
+  the refusal that exists is documented here and on the hop 0-1 row above, and the
+  cap that does not exist is FILED (`aihub#474`) rather than written into prose as
+  though it were there.
 - **§6.2 T2-1** — one editability matrix for the whole struct, one error code per
   rejection KIND (409 state, 403 permission), and no field silently exempt.
   **Implemented** in `internal/domain/work_items.go` (`updateGate`); "no field
@@ -246,6 +261,19 @@ no body", never "the body was withheld".
 
 ## Open
 
+- **§6.4 item 2 — OPEN, and this is the card it lands on.** T2-9's live side effect
+  was a `pf_update_work_item` call sending **only** `work_item_id` and `attrs_patch`
+  that moved `requires_human_session` from `null` to `true` and persisted it, with no
+  field of that name anywhere in the request. Both parameters involved are published
+  by this tool and documented at length above, so the README rule — a card touching a
+  `§6.4` item says so here — points at this card, and until now no card in the set
+  cited item 2 at all. It is one-shot and unreproduced, observed on a server older
+  than the audit's baseline, and `docs/audits/aihub-411-design-decision-table.md`
+  gives the settling recipe as the same `attrs_patch`-only update against a scratch
+  work item whose `requires_human_session` is NULL, on a server built from
+  `origin/main` — two arms, because one cannot tell "already fixed" from "never
+  happened". Carried into `aihub#447`, which owns it; no mechanism has been found in
+  this code, so nothing above claims one.
 - **§6.4 item 7 — CLOSED by `aihub#440`.** T2-1 left one sub-question open in
   **both** directions: whether `attrs` staying writable on a terminal work item is
   the defect or the feature. It is the **feature**, decided on traffic rather than

@@ -197,9 +197,6 @@ var memoryToolWire = map[string]toolWire{
 			"html": {shape: "<p>rendered</p>", landing: landBody, at: "rendered_html"},
 		},
 	},
-	"pf_adopt_artifact":  artifactActionWire,
-	"pf_close_artifact":  artifactActionWire,
-	"pf_ignore_artifact": artifactActionWire,
 	"pf_resolve_commit": {
 		base: map[string]any{"memory_id": probeMemory, "commit_id": probeCommit, "reply": "ok"},
 		probes: map[string]wireProbe{
@@ -210,17 +207,12 @@ var memoryToolWire = map[string]toolWire{
 	},
 }
 
-// artifactActionWire is shared by adopt/close/ignore, which register the same
-// schema and the same builder.
-var artifactActionWire = toolWire{
-	base: map[string]any{"work_item_id": probeWI, "memory_id": probeMemory},
-	probes: map[string]wireProbe{
-		"work_item_id": {shape: probeWI, landing: landBody, at: "work_item_id"},
-		// Nested AND renamed.
-		"memory_id":     {shape: probeMemory, landing: landBody, at: "payload.artifact_key"},
-		"artifact_type": {shape: "methodology.spec", landing: landBody, at: "payload.artifact_type"},
-	},
-}
+// artifactActionWire USED TO BE HERE, shared by pf_adopt_artifact /
+// pf_close_artifact / pf_ignore_artifact. aihub#446 retired all three (aihub#411
+// T2-7: one event, artifact_action, with no reader anywhere in the tree), so the
+// probe is gone rather than merely unused — the "stale probe" arm in
+// TestMemoryToolsEveryPublishedPropertyHasAWireProbe fails a probe naming a tool
+// tools_memory.go does not register, which is what took it out here.
 
 // memoryToolsNotCoveredHere are tools registered by tools_memory.go that this
 // file deliberately does not probe. An entry is a claim that the contract is
@@ -379,7 +371,16 @@ func memoryToolNames(t *testing.T) []string {
 			names = append(names, m[1])
 		}
 	}
-	if len(names) < 10 {
+	// 🔴 This is a broken-harness floor, not a census, so it must sit FAR below
+	// the measurement — the same rule universal_contract_gate_test.go's floor
+	// block states for its own set. It was 10 against a measurement of 12 and
+	// duly failed on the first legitimate removal: aihub#446 retired
+	// pf_adopt/close/ignore_artifact and took the file to 9 real tools, at which
+	// point a floor meant to catch a dead regex was instead reporting a correct
+	// change as a broken one. Lowered to 5, near half of 9, and it stays there
+	// unless the file grows a lot; unpublishing dead tools is standing policy
+	// here (aihub#387/#394/#446/#448), so removals are expected.
+	if len(names) < 5 {
 		t.Fatalf("only %d tool names found in tools_memory.go (%v); the extraction regex has "+
 			"stopped matching and every completeness check below would pass vacuously", len(names), names)
 	}

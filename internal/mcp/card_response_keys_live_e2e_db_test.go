@@ -129,13 +129,13 @@ const liveKeysFileRel = "docs/mcp-cards/live-response-keys.json"
 // floorLiveTools bounds how many tools the walk actually observed a JSON object
 // result from. Same reason every floor in contract_cards_gate_test.go exists: a
 // walk that drove nothing would satisfy every per-tool arm below by having
-// nothing to quantify over. Measured 2026-09-08: 42 of the 48 published tools.
+// nothing to quantify over. Measured 2026-09-08: 39 of the 45 published tools.
 const floorLiveTools = 34
 
 // floorLiveKeyChecks bounds the (tool, key) pairs the walk confirmed declared —
 // on the card or, for the entries listed below, in the golden file. floorLiveTools
-// alone is satisfied by 42 tools that each answer `{}`; this is the arm that says
-// the responses had content. Measured 2026-09-08: 250.
+// alone is satisfied by 39 tools that each answer `{}`; this is the arm that says
+// the responses had content. Measured 2026-09-08: 247.
 const floorLiveKeyChecks = 190
 
 // maxUndeclaredLiveKeys is a CEILING ON DEBT, not a floor on a measurement, so
@@ -143,8 +143,10 @@ const floorLiveKeyChecks = 190
 // is a key a caller receives that the tool's card does not name; the card is
 // where a reader looks, so each one is a small documentation debt. Lowering it
 // happens for free when the corpus is re-extracted and the cards absorb the key;
-// raising it costs an edit here that somebody signs. Measured 2026-09-08: 16.
-const maxUndeclaredLiveKeys = 16
+// raising it costs an edit here that somebody signs. Retiring a tool lowers it the
+// same way: aihub#446 took it 16 -> 13 by removing pf_adopt/close/ignore_artifact,
+// whose one entry each was the whole of their response. Measured 2026-09-08: 13.
+const maxUndeclaredLiveKeys = 13
 
 // liveWalkOutOfReach names the published tools this walk cannot drive, with the
 // reason. It is asserted to be EXACTLY the set of undriven tools, so a tool that
@@ -582,9 +584,11 @@ func runLiveKeyWalk(t *testing.T, w *liveKeyWalk) {
 	})
 	artifactID, _ := artifact["id"].(string)
 	if artifactID != "" {
-		w.drive(t, "pf_adopt_artifact", map[string]any{"memory_id": artifactID, "work_item_id": wiID})
-		w.drive(t, "pf_close_artifact", map[string]any{"memory_id": artifactID, "work_item_id": wiID})
-		w.drive(t, "pf_ignore_artifact", map[string]any{"memory_id": artifactID, "work_item_id": wiID})
+		// pf_adopt_artifact / pf_close_artifact / pf_ignore_artifact were driven
+		// here until aihub#446 retired them (aihub#411 T2-7). Their three entries
+		// in live-response-keys.json went with them: the equality arm above refuses
+		// a golden entry for a tool the walk no longer observes, so the file and
+		// this block cannot drift apart in that direction.
 
 		// pf_resolve_commit answers a review annotation, and annotations are made
 		// through the /ui viewer, which no MCP tool reaches. The row is seeded

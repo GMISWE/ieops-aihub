@@ -140,15 +140,22 @@ const wantStateFileRefusalPrefix = "STATE_FILE_MISSING: "
 // Roughly a dozen tools call config.ResolveStateFile directly. The five below
 // are the lifecycle ones — the tools an agent calls while working, which is why
 // they are the ones the corpus recorded failing. Also in the bare-prefix group
-// and NOT covered here: pf_reinforce_memory (tools_memory.go:147),
-// pf_update_memory (:176), pf_save_artifact (:231),
-// pf_adopt/close/ignore_artifact (shared emitArtifactAction, :487).
+// and NOT covered here: pf_reinforce_memory, pf_update_memory and
+// pf_save_artifact, the three config.ResolveStateFile call sites in
+// tools_memory.go. They are named by tool rather than by line: this sentence
+// used to cite tools_memory.go:147/:176/:231 and every one of those numbers was
+// already five lines off the call it pointed at, while the fourth citation
+// (:487, for emitArtifactAction) was off by 163. A line number in a comment is
+// a claim nothing checks — TestStateRefusalCallSitesAreAccountedFor counts the
+// sites per file and is the arm that actually holds.
 //
-// ⚠️ Two members of that list are gone rather than merely uncovered: pf_cut_alpha
-// and pf_promote were unpublished by aihub#448 and tools_release.go was deleted,
-// so do not go looking for them. They are named here because a reader comparing
-// this paragraph against the aihub#412 corpus will find them in the corpus — it
-// records calls made while the tools still existed.
+// ⚠️ Five tools this paragraph used to name are gone rather than merely
+// uncovered: pf_cut_alpha and pf_promote were unpublished by aihub#448 and
+// tools_release.go was deleted, and pf_adopt/close/ignore_artifact were retired
+// by aihub#446 along with the emitArtifactAction helper their one shared call
+// site lived in. Do not go looking for any of them. They are named here because
+// a reader comparing this paragraph against the aihub#412 corpus will find them
+// in the corpus — it records calls made while the tools still existed.
 //
 // The sentence that used to close this paragraph — "they share the message
 // verbatim because they share the wording, not because anything enforces it;
@@ -540,7 +547,7 @@ var stateRefusalCallSites = map[string]int{
 	"internal/mcp/tools_coding.go":    2,
 	"internal/mcp/tools_events.go":    1,
 	"internal/mcp/tools_lifecycle.go": 3,
-	"internal/mcp/tools_memory.go":    4,
+	"internal/mcp/tools_memory.go":    3,
 	"internal/mcp/tools_step.go":      1,
 }
 
@@ -635,15 +642,17 @@ type stateRefusalExemption struct {
 // stateRefusalExemptSites are the config.ResolveStateFile call sites that must
 // NOT be converted.
 //
-// There are 16 such call sites in production and 12 are members of this family.
+// There are 15 such call sites in production and 11 are members of this family.
 // Writing that down is the point: "unify the wording" is exactly the kind of
 // instruction that gets over-applied, and the second entry below is one an
 // over-eager unification would visibly damage.
 //
-// ⚠️ Those two numbers read 18 and 14 until aihub#454 measured them. aihub#448
-// (#374, 2026-09-08) deleted tools_release.go, which held exactly two
-// config.ResolveStateFile calls, and both numbers moved by two while the sentence
-// did not — the same defect as the gate above, one layer down, and it survived
+// ⚠️ Those two numbers read 18 and 14 until aihub#454 measured them, then 16 and
+// 12 until aihub#446 retired pf_adopt/close/ignore_artifact — the three tools
+// shared ONE config.ResolveStateFile call (emitArtifactAction), so both numbers
+// moved by one, not three. aihub#448 (#374, 2026-09-08) had deleted
+// tools_release.go's two calls the same way, and back then the sentence did not
+// move at all — the same defect as the gate above, one layer down, surviving
 // because nothing was checking the sentence. They are now derived from the
 // detector by TestStateRefusalExemptionsStillSayWhatTheyMean rather than
 // remembered.
@@ -740,11 +749,12 @@ func TestStateRefusalExemptionsStillSayWhatTheyMean(t *testing.T) {
 			members++
 		}
 	}
-	if len(sites) != 16 || members != 12 {
-		t.Errorf("stateRefusalExemptSites' comment says 16 call sites of which 12 are members; the tree "+
-			"has %d and %d. Update the sentence in the same change — the previous pair (18 and 14) went "+
-			"stale the moment aihub#448 deleted tools_release.go's two sites, and stayed that way "+
-			"because nothing checked it", len(sites), members)
+	if len(sites) != 15 || members != 11 {
+		t.Errorf("stateRefusalExemptSites' comment says 15 call sites of which 11 are members; the tree "+
+			"has %d and %d. Update the sentence in the same change — the pair before this one (16 and "+
+			"12) held only until aihub#446 retired the three artifact-action tools, and the pair before "+
+			"that (18 and 14) went stale the moment aihub#448 deleted tools_release.go's two sites and "+
+			"stayed that way because nothing checked it", len(sites), members)
 	}
 
 	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal/mcp/tools_coding.go"))

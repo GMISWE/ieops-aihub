@@ -63,11 +63,14 @@ injects `attempt_id` / `claim_epoch` / `session_secret`, and calls
 `pinned` and `admin` are forwarded **only when true**, so "explicitly false" and
 "unset" are the same on the wire. `payload` is forwarded as given.
 
-Three other tools reach this same endpoint without publishing `event_type`:
-`pf_adopt_artifact`, `pf_close_artifact` and `pf_ignore_artifact` all send
-`event_type: "artifact_action"` from `internal/mcp/tools_memory.go`
-(`buildArtifactActionBody`). The coding tools emit `commit` / `push` / `pr_opened`
-here too, best-effort, via `internal/mcp/tools_coding.go` (`emitCodingEvent`).
+Three other tools used to reach this same endpoint without publishing
+`event_type` — `pf_adopt_artifact`, `pf_close_artifact` and `pf_ignore_artifact`
+each sent `event_type: "artifact_action"` from `internal/mcp/tools_memory.go`.
+`aihub#446` retired all three (`aihub#411` T2-7: nothing in the tree read the
+event), so `artifact_action` now has **no publisher of its own** — a caller that
+wants one sends it through this tool, which accepts the string like any other.
+The coding tools still emit `commit` / `push` / `pr_opened` here, best-effort,
+via `internal/mcp/tools_coding.go` (`emitCodingEvent`).
 
 ## hop 4 — what it actually does
 

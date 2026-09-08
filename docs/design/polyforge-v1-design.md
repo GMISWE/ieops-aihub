@@ -1616,6 +1616,20 @@ pf_predict_conflicts(work_item_id?, declared_resources, dry_run?)
 
 -- B4: pf_update_artifact 已删除
 -- adopt/ignore/close 语义改为 pf_emit_event(type='artifact_action', payload={artifact_type,artifact_key,action})
+--   ⚠️ 勘误（aihub#446，2026-09-08）：B4 保留下来的三个包装工具
+--   pf_adopt_artifact / pf_close_artifact / pf_ignore_artifact **已退役**。
+--   aihub#411 T2-7 实测：artifact_action 这个事件在活树里零读者（无 Go、无模板、
+--   无 /ui handler、无 plugin 消费它），三个工具在 21 天窗口内零调用（对照
+--   pf_save_artifact 93 次）。/ui 的审阅流程用的是另一套词表（commit 批注，
+--   status=open/resolved，POST /ui/artifacts/:id/commit/:commit_id/resolve），
+--   与 adopt/close/ignore 无关，已逐处核查。
+--   事件本身没有撤销：pf_emit_event 照旧接受 event_type='artifact_action'，
+--   历史事件保留在 agent_events 里、/ui 时间线照旧渲染。撤下的只是三个
+--   在每个 session 的 tools/list 常驻前缀里各占一份 schema、却没有任何可观测
+--   效果的工具。⚠️ 这是行为变更：老客户端调用它们不再得到 200，而是 MCP SDK
+--   （go-sdk v1.6.0）在分发前抛出的 JSON-RPC 错误 InvalidParams（-32602），
+--   message 逐字为 unknown tool "pf_adopt_artifact"（另两个同理）——不是 tool
+--   result 里的错误字符串，而是协议层错误。
 -- pf_reconcile_artifacts 也已删除（B5）
 
 pf_remember(project, type, content, visibility,

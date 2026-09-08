@@ -245,34 +245,25 @@ func (s *Server) registerMemoryTools() {
 		return jsonResult(result)
 	})
 
-	// pf_adopt_artifact
-	// B4: adopt/ignore/close are now pf_emit_event(type='artifact_action', payload={...})
-	// These are convenience wrappers around pf_emit_event.
-	s.addTool(&sdkmcp.Tool{
-		Name:        "pf_adopt_artifact",
-		Description: "Mark an artifact as adopted (wrapper around pf_emit_event artifact_action)",
-		InputSchema: artifactActionSchema(),
-	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
-		return s.emitArtifactAction(ctx, req, "adopt")
-	})
-
-	// pf_close_artifact
-	s.addTool(&sdkmcp.Tool{
-		Name:        "pf_close_artifact",
-		Description: "Mark an artifact as closed (wrapper around pf_emit_event artifact_action)",
-		InputSchema: artifactActionSchema(),
-	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
-		return s.emitArtifactAction(ctx, req, "close")
-	})
-
-	// pf_ignore_artifact
-	s.addTool(&sdkmcp.Tool{
-		Name:        "pf_ignore_artifact",
-		Description: "Mark an artifact as ignored (wrapper around pf_emit_event artifact_action)",
-		InputSchema: artifactActionSchema(),
-	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
-		return s.emitArtifactAction(ctx, req, "ignore")
-	})
+	// pf_adopt_artifact / pf_close_artifact / pf_ignore_artifact were published
+	// here until aihub#446 (aihub#411 T2-7). They were wrappers that emitted one
+	// event, artifact_action, with payload.action in {adopt, close, ignore}, and
+	// nothing in the tree read that event: no Go, template, /ui handler or plugin
+	// file. The /ui annotation flow — the one reviewer-facing artifact story that
+	// shares part of this vocabulary — runs on an entirely different one
+	// (commit annotations, status open/resolved, POST /ui/artifacts/:id/commit/
+	// :commit_id/resolve), so retiring these took nothing away from it. All three
+	// measured ZERO calls in the aihub#412 21-day window against pf_save_artifact's
+	// 93 — disuse rather than proof of no consumer, which is why the /ui sweep was
+	// a precondition of the removal rather than a formality. It is recorded in
+	// aihub#446 and in docs/design/polyforge-v1-design.md §5.2.
+	//
+	// Do NOT re-add them as wrappers. pf_emit_event still accepts
+	// event_type="artifact_action" verbatim, so the write path is unchanged and
+	// the historical events stay readable; what was removed is three schemas in
+	// every session's resident tools/list prefix for an API with no observable
+	// effect. If artifact state comes back, it wants a state column and a reader,
+	// not an alias for an unread event.
 
 	// pf_resolve_commit
 	s.addTool(&sdkmcp.Tool{
@@ -632,33 +623,6 @@ func validatePfRememberArgs(args map[string]any) error {
 	return nil
 }
 
-// emitArtifactAction is the shared implementation for adopt/close/ignore artifact wrappers.
-func (s *Server) emitArtifactAction(ctx context.Context, req *sdkmcp.CallToolRequest, action string) (*sdkmcp.CallToolResult, error) {
-	args, err := parseArgs(req.Params.Arguments)
-	if err != nil {
-		return errResult(err)
-	}
-	wiID := strArg(args, "work_item_id")
-	if wiID == "" {
-		return errResult(fmt.Errorf("work_item_id is required"))
-	}
-	memID := strArg(args, "memory_id")
-	if memID == "" {
-		return errResult(fmt.Errorf("memory_id is required"))
-	}
-
-	sf, err := config.ResolveStateFile(wiID)
-	if err != nil {
-		return errResult(config.StateFileMissingErr(wiID, err))
-	}
-
-	result, err := s.client.EmitEvent(ctx, buildArtifactActionBody(args, sf, action))
-	if err != nil {
-		return errResult(err)
-	}
-	return jsonResult(result)
-}
-
 // ─── The other memory tools' two hops, made assertable (aihub#325) ───────────
 //
 // aihub#148 split pf_recall's schema literal and its forwarding block into named
@@ -887,36 +851,6 @@ func buildSaveArtifactBody(args map[string]any, sf *config.StateFile, content st
 		body["rendered_html"] = v
 	}
 	return body
-}
-
-// artifactActionSchema is the InputSchema shared by pf_adopt_artifact,
-// pf_close_artifact and pf_ignore_artifact.
-func artifactActionSchema() json.RawMessage {
-	return objectSchema(map[string]any{
-		"work_item_id":  prop("string", "Work item ID"),
-		"memory_id":     prop("string", "Artifact memory ID"),
-		"artifact_type": prop("string", "Artifact type"),
-	}, []string{"work_item_id", "memory_id"})
-}
-
-// buildArtifactActionBody renders an adopt/close/ignore call into the body of
-// POST /v1/events.
-//
-// memory_id lands NESTED and RENAMED, as payload.artifact_key. Both are why the
-// guard walks JSON paths instead of comparing top-level key sets.
-func buildArtifactActionBody(args map[string]any, sf *config.StateFile, action string) map[string]any {
-	return map[string]any{
-		"work_item_id":   strArg(args, "work_item_id"),
-		"attempt_id":     sf.AttemptID,
-		"claim_epoch":    sf.ClaimEpoch,
-		"session_secret": sf.SessionSecret,
-		"event_type":     "artifact_action",
-		"payload": map[string]any{
-			"artifact_key":  strArg(args, "memory_id"),
-			"artifact_type": strArg(args, "artifact_type"),
-			"action":        action,
-		},
-	}
 }
 
 // resolveCommitSchema is pf_resolve_commit's published InputSchema.

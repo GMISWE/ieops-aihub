@@ -1,7 +1,7 @@
 # MCP tool reference
 
 The polyforge MCP server (the `polyforge` binary in MCP mode, see
-[`../README.md`](../README.md)) exposes **48 `pf_*` tools**. Every tool maps to
+[`../README.md`](../README.md)) exposes **45 `pf_*` tools**. Every tool maps to
 an HTTP endpoint through the Go SDK in one path:
 
 ```
@@ -88,7 +88,7 @@ item, gated on a re-measure below 0.1%.
 | `pf_pause_attempt` | Pause: release `file_scope` locks, retain `git_branch`/`deploy_env` for resume. |
 | `pf_acquire_locks` | Acquire declared `file_scope` locks mid-attempt (blocks on conflict, never steals). |
 
-## Memory and artifacts (12) - `internal/mcp/tools_memory.go`
+## Memory and artifacts (9) - `internal/mcp/tools_memory.go`
 
 | tool | purpose |
 |---|---|
@@ -100,10 +100,19 @@ item, gated on a re-measure below 0.1%.
 | `pf_update_memory` | Update a memory: create a new version superseding the current head and advance the `latest_id` cursor, so an id you already hold still resolves to the latest. |
 | `pf_redact_memory` | Soft-delete a memory. |
 | `pf_save_artifact` | Save a methodology artifact (`spec`/`plan`/`review`/`execute`/`retro`/`wrap_summary`), optionally with pre-rendered HTML. |
-| `pf_adopt_artifact` | Mark an artifact adopted. |
-| `pf_close_artifact` | Mark an artifact closed. |
-| `pf_ignore_artifact` | Mark an artifact ignored. |
 | `pf_resolve_commit` | Resolve a spec/plan annotation commit with a reply. |
+
+⚠️ **Retired, and this is a behaviour change** (`aihub#446`, `aihub#411` T2-7):
+`pf_adopt_artifact`, `pf_close_artifact` and `pf_ignore_artifact` are no longer
+published. They were wrappers that emitted one `artifact_action` event with
+`payload.action` in `{adopt, close, ignore}`, and nothing in the tree read that
+event — the `/ui` annotation flow, which shares part of the vocabulary, runs on
+`open`/`resolved` commit annotations instead (`POST
+/ui/artifacts/:id/commit/:commit_id/resolve`). A client that calls one of the
+three now gets a JSON-RPC `InvalidParams` (-32602) `unknown tool "..."` from the
+MCP SDK, before any handler runs — a protocol error, not a tool result. The
+event itself was NOT withdrawn: `pf_emit_event` still accepts
+`event_type: "artifact_action"`, and existing events stay on the timeline.
 
 ## Events (2) - `internal/mcp/tools_events.go`
 

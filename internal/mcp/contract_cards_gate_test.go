@@ -87,7 +87,7 @@ package mcp_test
 //
 // K10 is NOT in this file and does not run in the always-on step. It lives in
 // card_response_keys_live_e2e_db_test.go, is gated on AIHUB_TEST_DB, and is the
-// only arm that reaches a server: it drives 42 of the 48 published tools and
+// only arm that reaches a server: it drives 39 of the 45 published tools and
 // refuses any top-level key a live response carries that neither the card nor
 // docs/mcp-cards/live-response-keys.json declares. Every arm above compares one
 // checked-in file with another, so K10 is what makes the card set a claim about
@@ -165,28 +165,38 @@ const (
 const (
 	// floorCards is the card-side twin of floorTools, which this file reuses from
 	// universal_contract_gate_test.go rather than restating. Measured 2026-09-08:
-	// 48 cards for 48 published tools.
+	// 45 cards for 45 published tools.
+	//
+	// ⚠️ Re-derive these, do not adjust them by arithmetic. Each arm PRINTS the
+	// number it measured, so
+	//
+	//	GOWORK=off go test ./internal/mcp/ -run '^TestContractCard' -count=1 -v
+	//
+	// is the whole recipe. aihub#446 found two of the values below stale against
+	// the tree they were written on (floorCardParams said 232 where K3 measured
+	// 231, floorCardAnchors said 207 across 30 files where K6 measured 258 across
+	// 38), which is what re-deriving catches and copying forward does not.
 	floorCards = 40
 	// floorCardParams bounds the total parameter rows the cards pin. Measured
-	// 2026-09-08: 232 across the 48 tools.
+	// 2026-09-08: 222 across the 45 tools.
 	floorCardParams = 180
 	// floorCardAnchors bounds how many file+symbol citations the anchor arm
 	// actually resolved. Without it, a card set that cited nothing would pass K6
-	// by having nothing to check. Measured 2026-09-08: 207 across 30 files.
+	// by having nothing to check. Measured 2026-09-08: 240 across 38 files.
 	floorCardAnchors = 60
 	// floorCardSections bounds how many required sections K4 found and measured.
 	// The arm quantifies over sections, so a card set the walk could not split
-	// into sections would satisfy it by having none. Measured 2026-09-08: 288
-	// (48 cards x 6 sections).
+	// into sections would satisfy it by having none. Measured 2026-09-08: 270
+	// (45 cards x 6 sections).
 	floorCardSections = 200
 	// floorCardCorpus bounds how many cards K7 compared against a corpus record.
 	// Without it, deleting the corpus records AND the card lists together leaves
-	// K7 comparing nothing and reporting green. Measured 2026-09-08: 42 of 48
+	// K7 comparing nothing and reporting green. Measured 2026-09-08: 42 of 45
 	// cards have a record.
 	floorCardCorpus = 30
 	// floorCardQuotes bounds how many verbatim quotes K9 checked against the live
 	// schema. A card set that quoted nothing would pass that arm by quoting
-	// nothing. Measured 2026-09-08: 28 leading-quote hop 0-1 cells across 21 cards.
+	// nothing. Measured 2026-09-08: 22 leading-quote hop 0-1 cells across 18 cards.
 	floorCardQuotes = 12
 )
 

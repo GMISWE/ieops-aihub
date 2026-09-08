@@ -35,9 +35,31 @@ package mcp_test
 // per-request cost in front of them.
 //
 // ⚠️ This file is deliberately SEPARATE from universal_contract_gate_test.go so
-// it can be reverted on its own: T1-10 was leaned toward in the decision-table
-// discussion and never formally adjudicated, and a budget nobody has signed off
-// on should be one `git rm` away, not entangled with the contract gate.
+// it can be reverted on its own. That was written while T1-10 had only been
+// leaned toward in the decision-table discussion; it has since been ADJUDICATED
+// — owner, 2026-09-07, in docs/audits/aihub-411-design-decision-table.md §6.1,
+// whose T1-10 row rules exactly this shape: "one budget over the whole
+// tools/list payload, with per-tool ceilings derived from it". Keeping the file
+// separate is still convenient, but this is no longer "a budget nobody has
+// signed off on" and it is no longer one `git rm` away.
+//
+// 🔴 DO NOT FILE A WI FOR THIS — IT ALREADY EXISTS, AND SOMEONE ALREADY DID.
+// aihub#437 was filed off that same §6.1 row about six hours after aihub#419
+// wrapped, asking for precisely what this file delivers, and was cancelled some
+// three and a half hours later with no reason recorded anywhere — its attrs are
+// empty and pf_read_events returns a single work_item_filed event, with no
+// cancellation event at all.
+//
+// That silence has a named downstream cost. aihub#481 could not separate two
+// readings of it — the payload-budget class was deliberately rejected, or #437
+// was closed for an unrelated reason and the question survives — and recorded
+// that its class decision "must be re-confirmed with the owner before any
+// work", setting requires_human_session so a human would settle it. A cancelled
+// wi with an empty attrs bag cannot tell those two apart, and neither could the
+// next reader. The §6.1 row now carries an
+// already-landed reference back to this file, so the two directions point at
+// each other; if you move or rename this file, fix that row in the same diff or
+// you reopen the gap. (aihub#488)
 //
 // No database needed:
 //

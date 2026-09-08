@@ -405,7 +405,12 @@ func TestForceTakeoverNewAttempt(t *testing.T) {
 // - goal update allowed when wi is queued/paused
 // - goal update requires goal_change_reason
 // - goal update rejected (409) when wi is running
-// Covers Round 5 fix F (ErrGoalChangeNotAllowed → 409).
+//
+// Covered Round 5 fix F (ErrGoalChangeNotAllowed → 409). aihub#440 retired that
+// code: the running case is now 409 CONFLICT_WI_ALREADY_CLAIMED, the same code
+// pf_cancel_work_item answers for the same state. The HTTP status this test
+// actually asserts is unchanged, which is the point — only the code that names
+// the KIND moved.
 func TestGoalUpdateConstraints(t *testing.T) {
 	ctx := context.Background()
 	c := newTestClient(t)
@@ -450,9 +455,9 @@ func TestGoalUpdateConstraints(t *testing.T) {
 		"goal_change_reason": "test reason",
 	})
 	if errRunning == nil {
-		t.Error("goal update on running wi should fail with 409 GOAL_CHANGE_NOT_ALLOWED")
-	} else if !strings.Contains(errRunning.Error(), "409") && !strings.Contains(errRunning.Error(), "GOAL_CHANGE") {
-		t.Logf("NOTE: expected 409 GOAL_CHANGE_NOT_ALLOWED, got: %v", errRunning)
+		t.Error("goal update on running wi should fail with 409 CONFLICT_WI_ALREADY_CLAIMED")
+	} else if !strings.Contains(errRunning.Error(), "409") && !strings.Contains(errRunning.Error(), "ALREADY_CLAIMED") {
+		t.Logf("NOTE: expected 409 CONFLICT_WI_ALREADY_CLAIMED, got: %v", errRunning)
 	} else {
 		t.Logf("OK: goal update on running wi rejected with 409: %v", errRunning)
 	}

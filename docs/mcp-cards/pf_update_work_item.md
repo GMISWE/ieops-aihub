@@ -4,7 +4,7 @@
 {
   "tool": "pf_update_work_item",
   "description_sha256": "29b3c7434085f3bd45cf9acebf95466a7fe1ae8757a6d86786d03886c6687c30",
-  "input_schema_sha256": "0300196485444292f9a9e0a482a4140cc7c998fde93784f65c368b88b165a8ff",
+  "input_schema_sha256": "1f5a59d2a8afd4c76fd2276d4264846d7ac31c7f4f00e69f7e669342b1010120",
   "params": {
     "attrs": {
       "type": "object",
@@ -119,7 +119,7 @@ that a caller gets wrong by default.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `work_item_id` | string | yes | id or slug |
-| `goal` | string | no | only while status is queued or paused |
+| `goal` | string | no | only while status is queued, paused or blocked, and only for the reporter / a maintainer / an admin |
 | `goal_change_reason` | string | no | required with `goal` |
 | `priority` | enum | no | from the domain list |
 | `milestone` | string | no | updated milestone |
@@ -184,9 +184,41 @@ except `work_item_id` and `brief` into the body of
   coerces: 18 of the 19 stringified payloads in the corpus are malformed, so
   decoding would rescue one and guess at the rest. A literal `null` keeps its
   existing meaning in both fields.
-- **`goal` and `wi_type` are status-gated and reason-gated.** A goal change on a
-  running work item is refused, which is also why a terminal work item accepts
-  `attrs` writes and almost nothing else.
+- **`goal` and `wi_type` are status-gated, permission-gated and reason-gated** —
+  by the matrix below rather than by a guard of their own.
+
+### The editability matrix (`aihub#440`)
+
+`internal/domain/work_items.go` (`wiEditTierByField`) is the whole rule: **one**
+matrix for every field this tool can write, and **one error code per rejection
+KIND** — 409 means the work item is in the wrong state, 403 means you are the
+wrong caller.
+
+| tier | fields | `queued` · `paused` · `blocked` | `running` | `wrapped` · `failed` · `cancelled` |
+|---|---|---|---|---|
+| contract | `goal`, `wi_type` | reporter / project maintainer / admin only, else **403 `FORBIDDEN`** | **409 `CONFLICT_WI_ALREADY_CLAIMED`** — pause first | **409 `CONFLICT_TERMINAL_STATE`** |
+| working | `content`, `labels`, `priority`, `milestone`, `requires_human_session`, `declared_resources` | allowed | allowed | **409 `CONFLICT_TERMINAL_STATE`** |
+| record | `attrs`, `attrs_patch`, `attrs_unset` | allowed | allowed | **allowed** — the one exemption, and it is deliberate |
+
+- **The strictest tier a patch touches governs the whole patch.** `attrs_patch`
+  plus `labels` against a wrapped work item is refused whole, not applied in part:
+  a PATCH that wrote some fields and refused others would need a response shape
+  that says which, and there is none.
+- **`goal_change_reason`, `reclassify_reason` and `resources_version` carry no
+  tier** — they write no column of their own, so sending one alone is a no-op
+  rather than a refusal. The reason checks still run, and they run *after* the
+  matrix: an edit refused on state is not first told its reason string is short.
+- **Two codes were retired and are no longer produced anywhere:** 409
+  `GOAL_CHANGE_NOT_ALLOWED` and 403 `WI_RECLASSIFY_FORBIDDEN`. Each answered BOTH
+  halves of its own field's gate, so a wrong CALLER on `goal` came back as a state
+  conflict and a wrong STATE on `wi_type` came back as a permission failure — the
+  conflation `aihub#242` had already removed from `pf_cancel_work_item`. The three
+  codes in the table are that tool's own three, so one rule now covers both tools.
+  The constants stay declared and mapped (`internal/domain/errors.go`
+  (`ErrGoalChangeNotAllowed`)) so a stale client's branch still resolves.
+- **`blocked` is new for the contract tier.** `goal` and `wi_type` used to be
+  refused there; a blocked work item has no live attempt to invalidate, which is
+  the argument `aihub#242` already accepted for cancel.
 
 ## hop 5 — what comes back
 
@@ -206,11 +238,24 @@ no body", never "the body was withheld".
   is a bug, and the legal dispositions are withdraw, fix, or file.
 - **§6.2 T2-1** — one editability matrix for the whole struct, one error code per
   rejection KIND (409 state, 403 permission), and no field silently exempt.
+  **Implemented** in `internal/domain/work_items.go` (`updateGate`); "no field
+  silently exempt" is enforced structurally rather than by prose, by
+  `TestEveryWritableUpdateFieldHasATier` — a field added to
+  `UpdateWorkItemRequest` without a tier fails the build gate.
 - **§6.1 T1-5** — both content treatments are deletes.
 
 ## Open
 
-- **§6.4 item 7** — T2-1 leaves one sub-question open in **both** directions:
-  whether `attrs` staying writable on a terminal work item is the defect or the
-  feature. Existing tooling depends on that write path. The wi states it rather than
-  choosing, and so does this card.
+- **§6.4 item 7 — CLOSED by `aihub#440`.** T2-1 left one sub-question open in
+  **both** directions: whether `attrs` staying writable on a terminal work item is
+  the defect or the feature. It is the **feature**, decided on traffic rather than
+  taste. Measured over the 21-day transcript corpus (87 files, 738
+  `pf_update_work_item` calls, 715 whose response carried a status): of the 49
+  calls against a closed record, 28 carried `attrs_patch`, 20 `attrs`, 1
+  `attrs_unset`, and **none** carried any other field. So the record tier is
+  load-bearing — post-wrap decision and merge records are written through it,
+  including by the batch that shipped this change — while the working tier's new
+  refusal on a closed record breaks zero measured calls.
+- **`milestone` is the one unexercised cell.** It appears in none of the 738
+  measured calls, so its new terminal-state refusal rests on the tier argument
+  alone rather than on observed traffic.

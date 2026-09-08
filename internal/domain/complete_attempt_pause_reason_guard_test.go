@@ -148,8 +148,8 @@ func TestCompleteAttemptDoesNotRequirePauseReason(t *testing.T) {
 // to misplace and nothing to refuse. Widening the guard to "pause_reason present"
 // would fail every caller that sets the field to its zero value — and the empty
 // case is handled where it belongs, by the write normalising it to NULL rather
-// than '' so that "not paused" stays distinguishable from "paused, reason not
-// given".
+// than the empty string, so that "not paused" stays distinguishable from
+// "paused, reason not given".
 func TestCompleteAttemptAllowsEmptyPauseReasonOnTerminal(t *testing.T) {
 	v := runCompleteAttemptRequestChecks(t, &CompleteAttemptRequest{
 		Status:      "wrapped",

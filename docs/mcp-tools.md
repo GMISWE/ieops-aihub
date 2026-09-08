@@ -1,7 +1,7 @@
 # MCP tool reference
 
 The polyforge MCP server (the `polyforge` binary in MCP mode, see
-[`../README.md`](../README.md)) exposes **50 `pf_*` tools**. Every tool maps to
+[`../README.md`](../README.md)) exposes **48 `pf_*` tools**. Every tool maps to
 an HTTP endpoint through the Go SDK in one path:
 
 ```
@@ -147,15 +147,6 @@ worktree.
 | `pf_create_project` | Create a project (repos + scenario). |
 | `pf_update_project` | Update repos, members, description, scenario, visibility. |
 | `pf_rotate_identifier` | Rotate the project access identifier (returned once). |
-
-## Release (2) - `internal/mcp/tools_release.go`
-
-Admin / release-manager only.
-
-| tool | purpose |
-|---|---|
-| `pf_cut_alpha` | Cut the next alpha release (tag + manifest). |
-| `pf_promote` | Promote an alpha channel to stable. |
 
 ## Users and API keys (5) - `internal/mcp/tools_users.go`
 

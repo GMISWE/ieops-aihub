@@ -279,23 +279,26 @@ func credSites() []credSite {
 		// What replaced them is an assertion about the model rather than the
 		// plumbing: TestE2EDependencyMutationsNeedNoAttemptCredential in
 		// dependency_authz_e2e_db_test.go, against a real server.
-		{
-			site: "internal/mcp/tools_release.go pf_cut_alpha",
-			tool: "pf_cut_alpha",
-			args: map[string]any{
-				"project": "aihub", "repos": []any{"aihub"}, "work_item_id": resolveSlug,
-			},
-			wantPath: "/v1/releases/alpha",
-		},
-		{
-			site: "internal/mcp/tools_release.go pf_promote",
-			tool: "pf_promote",
-			args: map[string]any{
-				"source_alpha_tag": "v1.0.0-alpha.1", "new_stable_tag": "v1.0.0",
-				"project": "aihub", "work_item_id": resolveSlug,
-			},
-			wantPath: "/v1/releases/promote",
-		},
+		// pf_cut_alpha and pf_promote USED TO BE HERE, and their removal is
+		// aihub#448 rather than lost coverage — the same disclosure the aihub#324
+		// note above makes for the dependency rows, for the same reason: a row that
+		// simply vanishes is indistinguishable from a row somebody deleted to make
+		// a failure stop.
+		//
+		// They are gone because the TOOLS are gone. aihub#411's T2-10 adjudication
+		// unpublished both until Phase 2: they were fully wired at hops 1-2 —
+		// schema, required params, state-file credential injection, client call —
+		// and hop 3 answered 405 NOT_IMPLEMENTED, with zero calls recorded in 21
+		// days, while pf_cut_alpha's description advertised a "release-manager"
+		// role that exists in no vocabulary. internal/mcp/tools_release.go was
+		// deleted outright, so there is no longer a call site for these rows to
+		// cover.
+		//
+		// What is NOT gone: pkg/client's CutAlpha/Promote and the two 405 stubs in
+		// internal/server. The ruling is about the PUBLISHED surface, and those are
+		// the Phase 2 remainder. If the tools are ever republished, they must come
+		// back into this list — they are credential-injecting sites and were
+		// covered here for a reason.
 	}
 }
 

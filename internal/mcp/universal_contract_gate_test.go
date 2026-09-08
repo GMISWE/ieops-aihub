@@ -105,7 +105,14 @@ import (
 // what is measured today (the values in the comments) and far above zero, so it
 // fails on a broken harness rather than on ordinary growth.
 const (
-	floorTools       = 50  // measured 2026-09-07: 50
+	// floorTools was 50 against a measurement of 50 — the ONE floor in this
+	// block that did not follow the paragraph above. At floor == measured it
+	// fails on any REMOVAL, which is not "ordinary growth" and not a broken
+	// harness either; and since aihub#387/#394/#448 make unpublishing dead
+	// tools standing policy, removals are expected. Lowered to 40 rather than
+	// to 48 deliberately: 48 would restore floor == measured and reproduce the
+	// same defect on the next unpublish. 40 sits near half, like every sibling.
+	floorTools       = 40  // measured 2026-09-08: 48 (was 50 before aihub#448 unpublished the two release tools)
 	floorParams      = 200 // measured: 237 across those 50
 	floorRoutes      = 40  // measured: 80 route registrations in package server
 	floorToolsOnWire = 25  // measured: 46 of 50 tools make at least one HTTP call

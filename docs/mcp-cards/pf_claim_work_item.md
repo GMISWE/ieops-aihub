@@ -149,6 +149,7 @@ because those are what every later credential-checked call authenticates with.
 - **§6.4 item 6** — the de-locking group's open questions belong to `aihub#416`, not
   to this card: the generation probe registry, where an invalidation is recorded,
   and what `pf_predict_conflicts` reports for an advisory entry are open by design.
+  `aihub#416` was still open (`paused`) at the last re-check, 2026-09-08.
 - A replay from a machine with no state file for the key is still left
   unauthenticated. Closing it needs the server to say "this was a replay"; stated in
   the `idempotency_key` description rather than fixed.

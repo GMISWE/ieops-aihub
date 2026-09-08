@@ -84,4 +84,4 @@ which is consistent with a tool whose refusal is a normal outcome.
 
 - **§6.4 item 6** — under the de-locking ruling the "of every type" clause above
   will describe fewer types. What replaces it, and what an advisory entry reports, is
-  `aihub#416`'s call.
+  `aihub#416`'s call — still open (`paused`) at the last re-check, 2026-09-08.

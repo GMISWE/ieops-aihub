@@ -165,8 +165,10 @@ corpus README warns about.
   `limit`'s neighbouring description on `pf_list_work_items` says both. That half is
   `aihub#411` T1-2/T1-12's and was left to it deliberately rather than edited twice
   into the same string by two work items. The response already tells a caller what
-  happened, which is the half that could not be worked around.
+  happened, which is the half that could not be worked around. `aihub#411`, which
+  owns that half, wrapped 2026-09-07; re-checked 2026-09-08.
 - `response_keys_observed` above is a corpus census taken before `aihub#432` and
   before `aihub#449`, so it neither lists `request_adjusted` nor implies that
   `stale_running` is optional — the 155 calls it spans predate both. It records what
-  callers HAVE seen, not what the response can contain.
+  callers HAVE seen, not what the response can contain. Both cited work items had
+  wrapped by the 2026-09-08 re-check.

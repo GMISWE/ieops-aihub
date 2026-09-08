@@ -135,4 +135,4 @@ is the deliverable" looks like in the data.
 ## Open
 
 - **§6.4 item 6** — what the gate does with an advisory declaration is `aihub#416`'s
-  question.
+  question — still open (`paused`) at the last re-check, 2026-09-08.

@@ -73,7 +73,7 @@ distinct semantic from sending a zero value.
 | `content` | string | no | new content (omit to keep current) |
 | `visibility` | string | no | new visibility (omit to keep current) |
 | `tags` | array | no | new tags (omit to keep current) |
-| `base_strength` | number | no | new base strength (omit to keep current) |
+| `base_strength` | number | no | new base strength, 1-5 (omit to keep current) |
 
 "Any id in the lineage" is load-bearing: a memory is versioned, and updating creates
 a **new version** and advances the `latest_id` cursor, so the id a caller holds from
@@ -99,9 +99,12 @@ Destination: `PATCH /v1/memories/<id>/update` via `pkg/client/client.go`
   `aihub#433` it is validated by the same guard: `internal/domain/memory.go`
   (`UpdateMemory`) builds a `RememberRequest` and calls `internal/domain/memory.go`
   (`Remember`), whose `internal/domain/memory.go` (`validateBaseStrength`) sits above
-  the first query. So an out-of-range value is a 400 here too — **even though this
-  tool's own description still publishes no range**, which is the one place the three
-  strength surfaces have not been made to agree.
+  the first query. So an out-of-range value is a 400 here too, and this tool's own
+  description publishes that range as well — `aihub#433` changed all three strength
+  surfaces in one commit, and `internal/mcp/tools_memory_test.go`
+  (`TestPublishedBaseStrengthRangeIsTheEnforcedOne`) iterates `pf_remember` and
+  `pf_update_memory` alike, so a description here that went silent about the range
+  would turn that gate red.
 - `tags` is a **replacement**, like every other field here: the value sent becomes
   the list.
 
@@ -112,20 +115,21 @@ real callers have been handed.
 
 ## Policy
 
-- **§6.1 T1-3 / §6.2 T2-19 — LANDED for the other two surfaces** (`aihub#433`).
-  `pf_remember` now publishes 1-5 and `pf_recall`'s `min_strength` names the scale it
-  thresholds. This tool publishes no scale at all, which is silent rather than wrong —
-  but it is enforced by the same guard, so a caller who reads only this schema learns
-  the range from a 400.
+- **§6.1 T1-3 / §6.2 T2-19 — LANDED on all three strength surfaces** (`aihub#433`).
+  `pf_remember` publishes 1-5, `pf_recall`'s `min_strength` names the scale it
+  thresholds, and this tool publishes 1-5 too, so a caller who reads only this schema
+  learns the enforced range without having to provoke a 400. The agreement is held by
+  two gates rather than by these three strings happening to match:
+  `TestPublishedBaseStrengthRangeIsTheEnforcedOne` covers the two `base_strength`
+  surfaces and `TestRecallMinStrengthPublishesWhichScaleItIsOn` covers `min_strength`,
+  both in `internal/mcp/tools_memory_test.go`, and both build the range from
+  `domain.MinBaseStrength` / `domain.MaxBaseStrength` rather than typing it out.
 - **§6.2 T2-1** — one editability matrix for the whole struct and one error code per
   rejection kind; the "omit to keep current" convention is this tool's local version
   of that matrix.
 
 ## Open
 
-- This tool's `base_strength` description was not updated by `aihub#433` and still
-  states no range, while the value is enforced. Recorded rather than fixed — this wi
-  changes no schema byte.
 - Whether `base_strength` should be publishable on an update at all, given that
   activation and reinforcement also move strength, is not settled anywhere this card
   can cite.

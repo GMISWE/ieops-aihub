@@ -653,6 +653,70 @@ func validatePfRememberArgs(args map[string]any) error {
 // themselves. That is what lets the guard run with no workspace on disk, and it
 // keeps the credential read in exactly one place per handler.
 
+// memoryTypeParamDesc is pf_remember's `type` description, and the withdrawal of
+// its enum (aihub#445, from the aihub#411 decision table §6.2 T2-6).
+//
+// The 13-value propEnum this replaces was ADVISORY and read as MANDATORY. What
+// the server enforces is a PREFIX (internal/domain/memory.go,
+// MemoryTypePrefixes) plus a '|' ban, and since aihub#445 the memories.type
+// CHECK enforces that same predicate — so the accepted set is INFINITE and no
+// list of concrete names can ever equal it. Publishing 13 of them under the JSON
+// Schema `enum` key stated a closed contract twice over that nothing keeps:
+// the server accepts experience.whatever and stores it, and this process would
+// not have refused it either — polyforge registers through the untyped
+// (*mcp.Server).AddTool METHOD, whose callTool path invokes the handler with no
+// schema step (measured on go-sdk v1.6.0; the reading is written out in
+// internal/domain/user_fields.go).
+//
+// That is the aihub#238 rule applied a second time — a value the server does not
+// validate must not be published as a closed enum, as
+// TestDeclaredResourcesProp_DescribesURIAndIntent already requires of `intent`.
+// It is also the exact INVERSE of aihub#463, and both directions come from one
+// principle: the published set and the enforced set are one set. There the
+// vocabulary really was closed, so the repair was to make the server enforce it;
+// here the leniency is the decided behaviour, so the repair is to stop
+// publishing a closed set.
+//
+// The 13 names survive as a SUGGESTION rather than being dropped. They are the
+// aihub#70 curated list, and a caller left with no vocabulary at all invents type
+// names instead of reusing them — which is the failure this whole row is about,
+// arriving by the other road. They were already on the wire as an enum array, so
+// what is actually being bought is the framing: serialised, this property goes
+// from 374 bytes to 592, +218 resident per session (measured). That is the price
+// of a list that says what it is, and the alternative was 374 bytes of a list
+// that said the opposite.
+//
+// ⚠️ One thing IS given up, and it should be given up knowingly: the `enum` key
+// is what scripts/pf_contract_lint.py's ENUM_VIOLATION arm reads, so off-list
+// `type` values written into plugins/ are no longer flagged statically. Measured
+// at the time of the change: that arm was reporting nothing for pf_remember (0
+// violations, 0 baseline entries), and it could not have been right to keep — it
+// was flagging values the server accepts by decision. The check that replaces it
+// is the one that can be correct: memories_type_check, which refuses only what
+// Go refuses.
+//
+// Built from domain.MemoryTypePrefixes and domain.PfRememberTypeEnum so the
+// published text cannot drift from either. tools_memory_type_vocab_test.go
+// holds both halves: no `enum` key, and a description that states the enforced
+// rule and every suggested value.
+func memoryTypeParamDesc() string {
+	globs := make([]string, 0, len(domain.MemoryTypePrefixes))
+	for _, p := range domain.MemoryTypePrefixes {
+		// methodology.* is legal for the COLUMN and refused by this TOOL
+		// (validatePfRememberArgs), so the enforced set published here is the
+		// column's minus that one prefix.
+		if p == "methodology." {
+			continue
+		}
+		globs = append(globs, p+"*")
+	}
+	return "Memory type, full name (e.g. experience.debug). ENFORCED: must start with " +
+		strings.Join(globs, ", ") + ", and contain no '|' (a memory has exactly ONE type; " +
+		"a piped one can never be recalled by type). methodology.* is refused here — use " +
+		"pf_save_artifact. SUGGESTED, not a closed set — an off-list name with a legal prefix " +
+		"is accepted and stored: " + strings.Join(domain.PfRememberTypeEnum, ", ") + "."
+}
+
 // rememberSchema is pf_remember's published InputSchema.
 //
 // pf_remember has no forwarding block to drift from: its handler passes the
@@ -665,10 +729,13 @@ func validatePfRememberArgs(args map[string]any) error {
 // and domain.Remember rejects a violation with a 400 naming the field.
 // tools_memory_test.go asserts this string against domain.MinBaseStrength /
 // domain.MaxBaseStrength so the two cannot drift apart again.
+//
+// aihub#445 / aihub#411 T2-6: `type` is NOT an enum any more. See
+// memoryTypeParamDesc.
 func rememberSchema() json.RawMessage {
 	return objectSchema(map[string]any{
 		"project":              prop("string", "Project name"),
-		"type":                 propEnum("string", "Memory type (full name e.g. experience.debug). methodology.* is not accepted here — use pf_save_artifact.", domain.PfRememberTypeEnum),
+		"type":                 prop("string", memoryTypeParamDesc()),
 		"content":              prop("string", "Memory content"),
 		"visibility":           prop("string", "private|project|team|admin"),
 		"work_item_id":         prop("string", "Associated work item ID"),

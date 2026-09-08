@@ -125,4 +125,5 @@ file), so the rate is not attributable to the defect alone.
   value is coerced silently" — it is the second, and the direction is truncation toward
   zero. What remains open is the disposition: refuse the value, round it, or widen the
   column. `aihub#475` took none of those; it made the answer honest, which is correct
-  under all three.
+  under all three. Re-checked 2026-09-08: `aihub#459` is still `queued` and
+  `aihub#475` wrapped that day.

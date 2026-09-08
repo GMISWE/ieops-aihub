@@ -85,4 +85,5 @@ callers have been handed.
 
 - **§6.4 item 6** — after the de-locking ruling lands, "retained for resume" will
   describe a set with nothing in it. That is `aihub#416`'s to resolve, and this
-  description will need re-reading when it does.
+  description will need re-reading when it does. `aihub#416` was still open
+  (`paused`) at the last re-check, 2026-09-08.

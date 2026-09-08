@@ -70,17 +70,48 @@ func TestDumpMCPSchemas_Completeness(t *testing.T) {
 		}
 	}
 
-	// Verify pf_remember has a "type" param with a non-empty enum.
+	// Verify the dump carries enum values at all.
+	//
+	// The specimen used to be pf_remember.type and aihub#445 retired it: that
+	// enum listed 13 curated names while the server enforces a PREFIX, so it was
+	// withdrawn rather than corrected, and pf_remember.type now publishes no enum
+	// at all. What the assertion is FOR — proving the dump does not silently drop
+	// `enum` — is unchanged, so it only needs a different specimen.
+	//
+	// pf_create_user.role, not pf_save_artifact.type, and the difference is the
+	// point of aihub#445. role is a closed set the server actually refuses to go
+	// outside (aihub#463: domain.UserGlobalRoleList, validated by handleCreateUser
+	// with a 400, mirroring the users.role CHECK). pf_save_artifact.type is
+	// published as a 6-value enum that NOTHING enforces — no client-side check,
+	// and internal/domain/memory.go (Remember) accepts any methodology.* name —
+	// so it is the same published-but-unenforced shape this work item withdrew,
+	// and pinning a test to it would entrench it.
+	userTool, ok := schema.Tools["pf_create_user"]
+	if !ok {
+		t.Fatal("pf_create_user missing from schema")
+	}
+	roleParam, ok := userTool.Params["role"]
+	if !ok {
+		t.Fatal("pf_create_user.params.role missing")
+	}
+	if len(roleParam.Enum) == 0 {
+		t.Errorf("pf_create_user.params.role enum is empty, want non-empty")
+	}
+
+	// pf_remember.type must NOT carry one, for the same aihub#445 reason. Without
+	// this arm the swap above would be satisfied by a dump that had quietly kept
+	// publishing the withdrawn list.
 	rememberTool, ok := schema.Tools["pf_remember"]
 	if !ok {
 		t.Fatal("pf_remember missing from schema")
 	}
-	typeParam, ok := rememberTool.Params["type"]
+	rememberType, ok := rememberTool.Params["type"]
 	if !ok {
 		t.Fatal("pf_remember.params.type missing")
 	}
-	if len(typeParam.Enum) == 0 {
-		t.Errorf("pf_remember.params.type enum is empty, want non-empty")
+	if len(rememberType.Enum) != 0 {
+		t.Errorf("pf_remember.params.type publishes enum %v; the accepted set is a prefix rule, "+
+			"not a closed list, so no enum can state it (aihub#445)", rememberType.Enum)
 	}
 
 	// Verify that pf_claim_work_item requires work_item_id.

@@ -109,4 +109,5 @@ rate is dominated by the refusals this gate is supposed to produce.
 ## Open
 
 - **§6.4 item 6** — under the de-locking ruling the relationship between this
-  automatic widening and an advisory declaration is `aihub#416`'s to define.
+  automatic widening and an advisory declaration is `aihub#416`'s to define. Still
+  open (`paused`) at the last re-check, 2026-09-08.

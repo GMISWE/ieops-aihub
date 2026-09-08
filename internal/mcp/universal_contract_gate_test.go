@@ -12,11 +12,13 @@ package mcp_test
 //	unknown_params_test.go             (#389)  every tool, one mechanism
 //
 // Between them they found four contract defects in one week, each by hand, each
-// after the tool had shipped. The measured size of the surface they audit is 50
-// tools and 237 published parameters, so a per-tool audit is not a plan — and it
-// covers nothing added after the audit. This file keeps their mechanisms and
-// changes the QUANTIFIER: every tool the registry publishes, every parameter it
-// publishes, measured the day it is added.
+// after the tool had shipped. The measured size of the surface they audit is 45
+// tools and 222 published parameters, so a per-tool audit is not a plan — and it
+// covers nothing added after the audit. (Those two are the same measurement as
+// floorTools/floorParams below; re-derive them with the command stated there
+// rather than copying either number to the other place.) This file keeps their
+// mechanisms and changes the QUANTIFIER: every tool the registry publishes,
+// every parameter it publishes, measured the day it is added.
 //
 // It deliberately REUSES their derivations rather than restating them —
 // serverASTFiles, requestReaderFuncs (the fixpoint that derives package server's
@@ -37,8 +39,8 @@ package mcp_test
 //
 // 🔴 What this file does NOT measure, stated because the obvious reading is
 // wrong: #394's hop 4, "the bound field is ACTED ON". That census is
-// intra-function over one named domain function, and quantifying it over 50
-// tools needs a tool→domain-function map — a hand-written list, which is the
+// intra-function over one named domain function, and quantifying it over every
+// published tool needs a tool→domain-function map — a hand-written list, the
 // thing this file exists to replace. **A parameter can pass all four gates here
 // and still be inert.** claim_param_contract_test.go remains the instrument for
 // that question, and extending it to another tool is still worth doing.
@@ -56,8 +58,12 @@ package mcp_test
 // tools_fusion_test.go's: that one records path and body only, and pf_recall,
 // pf_list_work_items, pf_read_events and pf_get_ready_queue carry their entire
 // parameter set in the query. Against a body-only recorder every one of their
-// parameters would read as "not forwarded" — a gate reporting 60 false
-// violations gets switched off in a week.
+// parameters would read as "not forwarded" — a gate reporting 42 false
+// violations gets switched off in a week. That 42 is their published parameter
+// count, so it moves with the schema; re-derive it rather than trusting this
+// line (measured 2026-09-08 on f128b69):
+//
+//	polyforge dump-mcp-schemas | python3 -c 'import json,sys; d=json.load(sys.stdin)["tools"]; print(sum(len(d[n]["params"]) for n in ["pf_recall","pf_list_work_items","pf_read_events","pf_get_ready_queue"]))'
 //
 // ─── Baseline, and why a stale entry FAILS ─────────────────────────────────
 //
@@ -354,7 +360,7 @@ func (c contractRecordedCall) queryKeys() map[string]bool {
 
 // contractHarness is one MCP server, one client session and one recording fake,
 // reused across every probe of one tool. Reused rather than rebuilt per
-// parameter because 237 parameters × (server + session + httptest) is the
+// parameter because 222 parameters × (server + session + httptest) is the
 // difference between a gate that runs in CI and one that times out.
 type contractHarness struct {
 	fake     *contractFake

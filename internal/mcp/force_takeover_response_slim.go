@@ -55,13 +55,32 @@ package mcp
 //
 // aihub#419's G3 arm found what the reading missed, mechanically: it plants a key
 // no struct in this process knows about in the server's answer and asserts it
-// reaches the model. Measured on this branch (`go test ./internal/mcp/ -run
-// TestContractEveryToolResultPassesThroughAnUnknownServerField -v`): 42 of the 46
-// inspected tool results forwarded it before this change and 43 after. The other
-// three are pf_commit / pf_push / pf_ship, which compose their own result and are
-// listed as such in the gate — so with this change the KEEP_LIST_PROJECTION
-// baseline is empty, not merely one line shorter. The wi's own text said "41 of
-// 46"; the number was re-measured rather than copied.
+// reaches the model. That arm PRINTS its own counts, so re-derive them here
+// rather than carrying either number forward:
+//
+//	GOWORK=off go test ./internal/mcp/ -run '^TestContractEveryToolResultPassesThroughAnUnknownServerField$' -count=1 -v
+//
+// Measured 2026-09-08 on f128b69: `G3: 41 of 45 tool results inspected, 38
+// forwarded the unknown field`. The three that do not are pf_commit / pf_push /
+// pf_ship, which compose their own result and are listed as such in the gate — so
+// the KEEP_LIST_PROJECTION baseline is empty, not merely one line shorter. It
+// still is: testdata/universal_contract_baseline.json is `[]` on f128b69, so no
+// gate in that file carries a waiting exemption at all.
+//
+// ⚠️ Both halves of that ratio move with the TOOLSET, not with this file, and
+// the pair this paragraph used to carry — "42 of 46 before this change and 43
+// after" — shows how fast that rots. It landed with aihub#422 at 2026-09-07
+// 22:58Z and was wrong by 2026-09-08 01:10Z, two hours later, when aihub#448
+// unpublished the two release tools; aihub#446 then retired the three
+// artifact-action tools at 2026-09-08 19:26Z. Inspected went 46 → 44 → 41 inside
+// 21 hours with nothing going red (aihub#446's own re-derivation table records
+// the last step as "G3 inspected 44 -> 41", and the 44 is its recorded
+// pre-state). Only the GAP is stable, and it is stable for a stated reason: the
+// same three self-composing tools. So read the gap, not the ratio — and note the
+// "before this change" half is history that cannot be re-derived on today's tree
+// at all, which is why it is dated rather than updated. The aihub#422 wi's own
+// text said "41 of 46" and that was re-measured rather than copied; this
+// paragraph is the same rule applied to its successors.
 //
 // ─── The rule ───────────────────────────────────────────────────────────────
 //

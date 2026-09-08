@@ -24,6 +24,7 @@
 > | 9 | 全文各处的 `pf_recall(type="a|b|c")` 示例（§ Memory-First、§ 附录 API 等，含 L1613 / L1990 / L3481 / L3659 / L3690） | `type` 用 `|` 分隔多个类型 | **管道语法从未被解析**：`type` 是列表，整串被当成一个类型名，exact 与 LIKE 都匹配不到 ⇒ 静默返回空集。**aihub#289** 起服务端对含 `|` 的 `type` 值直接返回 400，并新增 `unmatched_types` 响应字段。正确写法是数组：`type=["a.b","c.*"]`。本文档正文未逐条回改（按本表开头的约定「以代码为准」），因此 `internal/cli/skill_recall_type_test.go` 的复发闸把本文件列为**有据豁免**；现行指导以 `plugins/polyforge/skills/` 与 `docs/mcp-tools.md` 为准 |
 > | 10 | DDL `run_attempts` 表定义里的 `prepared_workspace` 列；§21.2 `pf-work` 模式 C（恢复）的「`prepared_workspace` + step_state 从上次 attempt 恢复」 | 该列记录已准备好的工作区（`{repo: abs_path}`），re-claim 时据此恢复 | **死列，从未被任何一代代码写过**（实测 2026-09-08，基准 `6cd8229`）：两处 `INSERT INTO run_attempts`（`run_attempts.go` (`FnClaimWorkItem`) 与 force-takeover 路径）的列清单显式且都不含它，零 `UPDATE`、零 `SELECT`；归档的 v0 Python writer 同样不写。列名在非测试 Go 代码里只出现一处——表镜像 `run_attempts.go` (`RunAttempt`) 的字段标签——而该类型自身零引用，故请求侧与响应侧都不在任何线上形状里；MCP tool schema、`docs/mcp-cards/`、`docs/mcp-tools.md` 一概不发布它。模式 C 的「恢复」实际由磁盘上被复用的 worktree 加按 wi 键的 `wi_step_state` 提供，与本列无关；它所依赖的 `mode` 参数已由 **aihub#394** 从 schema 撤下、**aihub#424** 从 `ClaimRequest` 删除。**aihub#487** 按 base_branch 先例保留 DDL 列与镜像字段（「从契约撤下」无目标——它从未被发布过），改为落一道复发闸 `prepared_workspace_dead_column_test.go` (`TestPreparedWorkspaceStaysADeadColumn`) |
 > | 11 | §4.3 与 §5.7 的 Ready Queue 响应体 | 六段视图；`items[]` 带 `unblocked_at`；`running[]` 带 `expires_at` 和 `owner_user_type`；`items[]`/`needs_human_session[]`/`unclassified[]` 三段都带 `kind` | **七段，且那四个字段一个都不存在**（实测 2026-09-08，基准 `538c0d8`）：`stale_running[]` 早在 aihub#36 就进了 `internal/domain/work_items.go` (`ReadyQueue`)，只是带 `omitempty`，所以调用方在它非空之前看不到；`unblocked_at` **全仓无写入方**（唯一一处出现就是字段声明本身）；`expires_at` 随 v1.21 的 ownership 模型删除；`kind` 是 v1.22 删掉的列；`owner_user_type` 是**审计时才发现的第四个**——`RunningItem` 从来没有过这个字段，全仓 Go 代码零命中（同名字段在 §17 的 409 错误体 `details.current_attempt` 里另有一处，不在本行射程内）。**aihub#449 已把正文回改**（这是本表少数「正文已改」的条目，故此行记录的是曾经的偏差而非现存偏差）：去掉 `omitempty` 使七段恒在（wire 变更：空的 `stale_running` 从缺键变成 `[]`）、从 (`ReadyItem`) 删除 `UnblockedAt`、并把段数的三处副本（本文档 / 结构体 / `pf_get_ready_queue` 的 description）用 `internal/mcp/ready_queue_section_count_test.go` 闸成一个数。`items[]` 不选 `created_at` 而另两段选，**是设计如此**，不在此列（aihub#401 取消时已复核） |
+> | 12 | §19 事件 Payload Schema 的 `attempt_started` | payload 含 `is_resume: boolean` | **该键已不再写入**（实测 2026-09-08，基准 `f128b69`）：它由 `internal/domain/run_attempts.go` (`FnClaimWorkItem`) 算自 `req.Mode == "resume"`，随 `domain.ClaimRequest.Mode` 一起被 **aihub#424**（PR #369，commit `a631ad2`）删除——**aihub#394** 先把 `mode` 从 MCP schema 撤下，于是这个审计值恒为 false，等于对每一次 claim（**包括真正的 resume**）断言「这不是 resume」。取法：`git log -S'"is_resume"' -- internal/domain/run_attempts.go` 在该文件上只有三笔（`fac405c` / `761f0db` 写入、`a631ad2` 删除），今天该 payload 只剩四个键 `machine_id` / `actor_display` / `is_takeover` / `claim_epoch`。**正文已回改**（本表少数「正文已改」的条目之一，故此行记录的是曾经的偏差而非现存偏差）。⚠️ 但事件是**不可变记录**：`a631ad2` 之前落库的历史行仍带 `is_resume`（`internal/mcp/testdata/corpus/pf_read_events/` 里 2026-08-29 实录的那份就含 2026-08-20 的此类行），所以「读不到这个键」只对删除之后写入的行成立。删而不派生是刻意的：(`FnClaimWorkItem`) 的注释写明，将来若要把这个区分放回时间线，必须在服务端**派生**（claim 之前 wi 的 status 是显然的来源），不能取调用方自报的那个词 |
 
 ---
 
@@ -3688,8 +3689,11 @@ schema 也一直在，只是从来没有代码发过它们。
 { source: string; kind?: string }
 
 // attempt_started
+// ⚠️ 勘误 #12（aihub#453）：本段原先还画了 is_resume: boolean。该键随
+//   domain.ClaimRequest.Mode 由 aihub#424（PR #369）一并删除，正文已按实现回改；
+//   删除前落库的历史行仍然带着它，读取方不能假设它不存在。
 { machine_id: string; actor_display: string; is_takeover: boolean;
-  is_resume: boolean; claim_epoch: number }
+  claim_epoch: number }
 
 // attempt_completed
 { status: "wrapped"|"failed"|"paused"; duration_seconds: number }

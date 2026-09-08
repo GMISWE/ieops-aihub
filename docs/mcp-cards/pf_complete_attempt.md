@@ -4,7 +4,7 @@
 {
   "tool": "pf_complete_attempt",
   "description_sha256": "ad8beae00b7025703d73a76489eefde89175938e61fe1dcb6be3ffa815cdb32a",
-  "input_schema_sha256": "59a74f8a27c1608c1fab4a023371d6c2bb95dcb1c484436b17a8c864c37334db",
+  "input_schema_sha256": "d274f3f98e87afe21a88e4a3caf98d3e3fcba62cbced454a654b1b6cf2db3c18",
   "params": {
     "force_terminate_step": {
       "type": "boolean",
@@ -48,7 +48,7 @@ emitted afterwards cannot authenticate.
 | `status` | string | yes | `wrapped` \| `failed` \| `paused` |
 | `force_terminate_step` | boolean | no | force-terminate an in-progress step |
 | `note` | string | no | closing note recorded BEFORE the attempt is completed |
-| `pause_reason` | string | no | read only when `status="paused"` |
+| `pause_reason` | string | no | read only when `status="paused"`, and refused with any other status |
 
 `note` exists because the closing note and the terminal call were always two
 round-trips in a fixed order — 201 measured adjacent pairs, 0.325% of billed input —
@@ -64,10 +64,12 @@ bound by `internal/server/router.go` (`handleCompleteAttempt`).
 
 - **`status` and `force_terminate_step` are forwarded**; the three credentials come
   from the state file.
-- **`pause_reason` is forwarded only when non-empty.** The server writes it to the
-  attempt row **unconditionally**, so an unguarded assignment would stamp an empty
-  reason onto every wrap. The guard is what keeps "not paused" distinguishable from
-  "paused, reason not given".
+- **`pause_reason` is refused on any status but `paused`, and forwarded only when
+  non-empty.** The refusal (`aihub#452`) is raised before the state file is resolved
+  and before the note below is emitted, so a declined call writes nothing at all.
+  The non-emptiness half still earns its keep on the pause path: the server writes
+  whatever it is given, so an unguarded assignment would send `""` and turn "paused,
+  reason not given" into "paused for no stated reason".
 - **`note` never reaches this endpoint.** It becomes its own `note` event on the
   other call, which is the difference from `pause_reason`: one is a timeline event
   whatever the status, the other is a column read on one status.
@@ -88,6 +90,17 @@ bound by `internal/server/router.go` (`handleCompleteAttempt`).
 - **A step still `in_progress` makes the completion fail** unless
   `force_terminate_step` is set — which is why the fused `pf_wrap`, which never sets
   it, is the call that most often retries and duplicates its note.
+- **`pause_reason` is written on `paused` and on nothing else.** `internal/domain/run_attempts.go`
+  (`FnCompleteAttempt`) refuses a non-empty reason on any other status next to the
+  status check, before it opens a transaction, and normalises an empty one to `NULL`
+  rather than `''` at the write. Both the column and the `attempt_completed` payload
+  read the same normalised value, so the row and the event cannot disagree about
+  whether a reason was recorded. The capability of recording a reason on a wrapped or
+  failed attempt was decided against rather than narrowed by accident: the column's
+  only reader is `internal/domain/work_items.go` (`GetReadyQueue`), whose paused
+  segment filters `wi.status = 'paused'`, and `internal/db/migrations/0027_run_attempts_pause_reason.sql`
+  scopes the column to `complete_attempt(status=paused)`. `note` is the field that
+  records on every status, and the refusal names it.
 
 ## hop 5 — what comes back
 
@@ -103,6 +116,12 @@ itself. No slim function.
   path says it needs.
 - **§6.1 T1-9** — the `note` ordering is published on the tool rather than left in a
   skill, because the hazard is invisible from the schema alone.
+- **§6.1 T1-9, second application** — `pause_reason` shipped with "read only when
+  `status="paused"`" while both later hops read it on every status. Disposition 2
+  (fix the code so the prose becomes true) was taken over rewriting the sentence,
+  because the capability the sentence denied had no reader; `aihub#452`. The prose
+  gained the one thing a guard adds that "read only" does not say — that the
+  mismatch is refused rather than ignored.
 
 ## Open
 

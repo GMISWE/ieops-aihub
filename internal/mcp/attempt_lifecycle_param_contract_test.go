@@ -52,6 +52,7 @@ package mcp_test
 //	go test ./internal/mcp/ -run 'TestClaimRequestBinds|TestCompleteAttempt' -v
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -170,5 +171,128 @@ func TestCompleteAttemptOmitsPauseReasonWhenAbsent(t *testing.T) {
 		t.Errorf("pf_complete_attempt sent pause_reason=%#v on a wrap that supplied none — an "+
 			"unguarded assignment writes an empty reason to run_attempts.pause_reason for every "+
 			"terminal completion", v)
+	}
+}
+
+// completeAttemptRefusal drives the real pf_complete_attempt against a fake
+// aihub and hands back the refusal text together with every path the tool
+// touched. Unlike completeAttemptPauseReason above it does NOT require a
+// /complete request: a refusal is the subject of the aihub#452 arms below, and
+// what those arms need to see is that nothing was requested at all.
+func completeAttemptRefusal(t *testing.T, args map[string]any) (text string, isErr bool, paths []string) {
+	t.Helper()
+	const wiID = "wi_pause452"
+	seedStateFile(t, wiID)
+
+	f := newFakeAihub(t)
+	full := map[string]any{"work_item_id": wiID}
+	for k, v := range args {
+		full[k] = v
+	}
+	result, isErr := callTool(t, f, "pf_complete_attempt", full)
+	if raw, ok := result["_raw"].(string); ok {
+		return raw, isErr, f.paths()
+	}
+	b, _ := json.Marshal(result)
+	return string(b), isErr, f.paths()
+}
+
+// TestCompleteAttemptRefusesPauseReasonOnNonPausedStatus is the aihub#452 hop-2
+// gate, and it FAILS on the pre-fix tree: the handler's only condition on
+// pause_reason was non-emptiness, so `status:"failed"` plus a reason was
+// forwarded to /complete and written to the attempt row.
+//
+// The two assertions are separate properties and both are load-bearing. The
+// refusal is what the caller sees; the EMPTY path list is what makes it a
+// refusal rather than a late complaint about something already recorded. A
+// rejection placed after the note block would have emitted a /events request for
+// a call it then declined — the same class of defect as the one being fixed,
+// introduced by its own fix.
+func TestCompleteAttemptRefusesPauseReasonOnNonPausedStatus(t *testing.T) {
+	const wantPrefix = `pause_reason is read only when status="paused"`
+
+	for _, status := range []string{"wrapped", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			text, isErr, paths := completeAttemptRefusal(t, map[string]any{
+				"status":       status,
+				"pause_reason": "owner adjudication pending",
+				"note":         "wrapped: this note must not be emitted",
+			})
+			if !isErr {
+				t.Fatalf("pf_complete_attempt(status=%q, pause_reason=...) succeeded, result=%s, "+
+					"requests=%v.\nThe schema publishes pause_reason as read only when "+
+					"status=\"paused\"; forwarding it on a terminal status records a pause reason on a "+
+					"row whose only reader filters on wi.status='paused'.", status, text, paths)
+			}
+			if !strings.HasPrefix(text, wantPrefix) {
+				t.Errorf("refusal = %q, want it to start with %q", text, wantPrefix)
+			}
+			if !strings.Contains(text, status) {
+				t.Errorf("refusal = %q, want it to name the offending status %q: the caller sent two "+
+					"fields and cannot tell which one was objected to", text, status)
+			}
+			if len(paths) != 0 {
+				t.Errorf("pf_complete_attempt refused the call but still made requests: %v.\nA "+
+					"refusal has to happen before the note is emitted, or the tool has written a "+
+					"timeline event for a call it declined.", paths)
+			}
+		})
+	}
+}
+
+// TestCompleteAttemptStillPausesWithAReason is the green control between the
+// refusing arm above and the narrowness arms below: the combination the column
+// exists for must still reach /complete carrying the reason.
+func TestCompleteAttemptStillPausesWithAReason(t *testing.T) {
+	const reason = "waiting on the owner to adjudicate the design table"
+	body := completeAttemptPauseReason(t, map[string]any{
+		"status":       "paused",
+		"pause_reason": reason,
+	})
+	if body["pause_reason"] != reason {
+		t.Errorf("pause_reason = %#v, want %q — the aihub#452 guard must not cost the pause path "+
+			"the field aihub#424 added for it", body["pause_reason"], reason)
+	}
+}
+
+// TestCompleteAttemptDoesNotRequirePauseReasonOnPause is the narrowness arm for
+// the over-wide reading of the same sentence: "read only when status=paused"
+// does NOT mean "paused must carry a reason". This tool is the call every
+// executor in the workspace ends its run with, so a guard written as the
+// converse would refuse ordinary pauses.
+func TestCompleteAttemptDoesNotRequirePauseReasonOnPause(t *testing.T) {
+	for name, args := range map[string]map[string]any{
+		"absent": {"status": "paused"},
+		"empty":  {"status": "paused", "pause_reason": ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := completeAttemptPauseReason(t, args)
+			if body["status"] != "paused" {
+				t.Fatalf("status = %#v, want \"paused\"", body["status"])
+			}
+			if v, present := body["pause_reason"]; present {
+				t.Errorf("pf_complete_attempt sent pause_reason=%#v on a pause that supplied none "+
+					"(%s) — '' and nil must stay distinguishable on the column", v, name)
+			}
+		})
+	}
+}
+
+// TestCompleteAttemptWrapWithEmptyPauseReasonIsNotRefused is the other
+// narrowness arm, and it is the one that protects the wrap path this whole
+// workspace depends on. An empty reason states nothing, so there is nothing to
+// put in the wrong place: refusing it would make the guard's decision surface
+// wider than the ambiguity it exists to resolve, and would fail any caller that
+// sets the field to its zero value.
+func TestCompleteAttemptWrapWithEmptyPauseReasonIsNotRefused(t *testing.T) {
+	body := completeAttemptPauseReason(t, map[string]any{
+		"status":       "wrapped",
+		"pause_reason": "",
+	})
+	if body["status"] != "wrapped" {
+		t.Errorf("status = %#v, want \"wrapped\"", body["status"])
+	}
+	if v, present := body["pause_reason"]; present {
+		t.Errorf("pf_complete_attempt forwarded pause_reason=%#v on a wrap", v)
 	}
 }

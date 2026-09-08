@@ -894,6 +894,37 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 		return NewErr(ErrBadRequest, "status must be wrapped, failed, or paused")
 	}
 
+	// aihub#452: pause_reason is read on status=paused and nowhere else, so a
+	// reason supplied with any other status is refused rather than recorded.
+	//
+	// The capability being refused here is "record a reason on a wrapped or
+	// failed attempt", and it was decided against rather than narrowed by
+	// accident. Three measurements, all on this tree: the column's only reader
+	// is GetReadyQueue's paused[] segment, whose query filters
+	// `wi.status = 'paused'`; migration 0027 scopes the column to
+	// "complete_attempt(status=paused) ... so the ready-queue paused segment can
+	// surface why an attempt was paused"; and the MCP tool publishes `note` as
+	// the channel that records on every status. So the value written on a
+	// terminal completion had no reader at all, which makes accepting it a
+	// promise the store cannot keep.
+	//
+	// The refusal is deliberately NARROW, and both halves of that matter.
+	// (a) It fires only on a NON-EMPTY reason: an absent or empty one states
+	// nothing, so there is nothing to misplace and nothing to warn about —
+	// widening it there would reject requests that carry no ambiguity at all.
+	// (b) It is not the converse rule: pause_reason stays optional on paused,
+	// because "paused, reason not given" is a legitimate call and the whole
+	// point of keeping nil distinguishable from "".
+	//
+	// Refused BEFORE BeginTx, next to the status check, so the request is
+	// rejected on its own contents without a database round-trip — which is
+	// also what lets the gate for this exercise the real function with no DB.
+	if req.Status != "paused" && req.PauseReason != nil && *req.PauseReason != "" {
+		return NewErr(ErrBadRequest, fmt.Sprintf(
+			"pause_reason is read only when status=\"paused\", but status=%q was sent with one; "+
+				"drop pause_reason or use note, which is recorded on every status", req.Status))
+	}
+
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return NewErr(ErrInternalError, "failed to begin transaction")
@@ -942,12 +973,21 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 		}
 	}
 
-	// Set run_attempt status. pause_reason is only meaningful for status=paused
-	// but is written unconditionally from req (nil for wrapped/failed), matching
-	// the column's nullable, informational-only nature.
+	// Set run_attempt status. pause_reason is written only on status=paused
+	// (aihub#452). The guard above has already refused a non-empty reason on any
+	// other status, so what this normalisation still catches is the residue: an
+	// EMPTY-string pointer, which the guard deliberately lets through and which
+	// would otherwise land as '' rather than NULL — turning "this attempt was not
+	// paused" into "paused, reason not given" on every terminal completion that
+	// bothered to set the field. That distinction is the one the column exists to
+	// carry, so it is preserved here rather than left to the caller.
+	pauseReason := req.PauseReason
+	if req.Status != "paused" {
+		pauseReason = nil
+	}
 	_, err = tx.Exec(ctx, `
 		UPDATE run_attempts SET status=$1, ended_at=clock_timestamp(), pause_reason=$2 WHERE id=$3`,
-		req.Status, req.PauseReason, req.AttemptID,
+		req.Status, pauseReason, req.AttemptID,
 	)
 	if err != nil {
 		return dbErr(err, "failed to update run_attempt status")
@@ -1005,8 +1045,10 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	evtPayloadMap := map[string]any{
 		"status": req.Status,
 	}
-	if req.PauseReason != nil {
-		evtPayloadMap["pause_reason"] = *req.PauseReason
+	// Same source as the column write, so the event and the row can never
+	// disagree about whether a reason was recorded (aihub#452).
+	if pauseReason != nil {
+		evtPayloadMap["pause_reason"] = *pauseReason
 	}
 	evtPayload, _ := json.Marshal(evtPayloadMap)
 	_, _ = tx.Exec(ctx, `

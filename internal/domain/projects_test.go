@@ -2,6 +2,11 @@ package domain
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"slices"
+	"strconv"
 	"testing"
 )
 
@@ -167,15 +172,146 @@ func TestRoleLevel(t *testing.T) {
 	}{
 		{"viewer", 1},
 		{"writer", 2},
-		{"owner", 3},
+		{"maintainer", 3},
+		{"owner", 0},
 		{"", 0},
 		{"unknown", 0},
 	}
 	for _, tt := range tests {
-		if got := roleLevel(tt.role); got != tt.want {
-			t.Errorf("roleLevel(%q) = %d, want %d", tt.role, got, tt.want)
+		if got := RoleLevel[tt.role]; got != tt.want {
+			t.Errorf("RoleLevel[%q] = %d, want %d", tt.role, got, tt.want)
 		}
 	}
+}
+
+// TestRoleLevel_EveryLegalMemberRoleReachesViewer is the assertion the old table
+// could not make: it never named "maintainer" at all, so the ladder was free to
+// score it 0 and no test noticed (aihub#443).
+//
+// The predicate below is the one checkProjectAccess evaluates at minRole
+// "viewer" and the one ListDependencies evaluates per entry. A role that
+// UpdateProject accepts for a member but that does not clear it is a member who
+// is answered with less than an anonymous caller would be, which is how the
+// defect presented.
+func TestRoleLevel_EveryLegalMemberRoleReachesViewer(t *testing.T) {
+	for _, role := range validatedMemberRoles(t) {
+		if RoleLevel[role] < RoleLevel["viewer"] {
+			t.Errorf("RoleLevel[%q] = %d, below RoleLevel[\"viewer\"] = %d",
+				role, RoleLevel[role], RoleLevel["viewer"])
+		}
+	}
+}
+
+// TestRoleLevel_LadderIsExactlyTheValidatedVocabulary pins the other half. The
+// old ladder had a rung for "owner", which is projects.owner_user_id — a column,
+// not a member role — so it ranked a value no members entry can hold. Growing a
+// rung for something outside the vocabulary is what this catches; the test above
+// catches the vocabulary growing a role the ladder has no rung for.
+func TestRoleLevel_LadderIsExactlyTheValidatedVocabulary(t *testing.T) {
+	legal := validatedMemberRoles(t)
+	ladder := make([]string, 0, len(RoleLevel))
+	for role := range RoleLevel {
+		ladder = append(ladder, role)
+	}
+	slices.Sort(ladder)
+	if !slices.Equal(legal, ladder) {
+		t.Errorf("RoleLevel keys %v != the roles UpdateProject accepts for a member %v",
+			ladder, legal)
+	}
+}
+
+// validatedMemberRoles reads the member-role vocabulary out of UpdateProject's
+// own validation instead of restating it here.
+//
+// aihub#443 was one vocabulary with two rankings that drifted apart. A test that
+// kept a third hand-copied list beside them would be the same shape of mistake:
+// it would stay green in exactly the case that matters, a role added to the
+// validation that the ladder has no rung for, because the list and the ladder
+// would still agree with each other while both disagreed with the code that
+// decides what a member may be.
+//
+// The loop variable name is taken from the range statement rather than assumed,
+// so renaming it does not silently empty the result — and an empty result is a
+// hard failure below, because "the validation has moved" and "there are no legal
+// roles" are otherwise indistinguishable.
+func validatedMemberRoles(t *testing.T) []string {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "projects.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse projects.go: %v", err)
+	}
+
+	var roles []string
+	var found bool
+	ast.Inspect(file, func(n ast.Node) bool {
+		fd, ok := n.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != "UpdateProject" {
+			return true
+		}
+		found = true
+		ast.Inspect(fd, func(n ast.Node) bool {
+			rng, ok := n.(*ast.RangeStmt)
+			if !ok {
+				return true
+			}
+			// for _, <member> := range *req.Members
+			star, ok := rng.X.(*ast.StarExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := star.X.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Members" {
+				return true
+			}
+			member, ok := rng.Value.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			ast.Inspect(rng.Body, func(n ast.Node) bool {
+				cmp, ok := n.(*ast.BinaryExpr)
+				if !ok || cmp.Op != token.NEQ {
+					return true
+				}
+				field, ok := cmp.X.(*ast.SelectorExpr)
+				if !ok || field.Sel.Name != "Role" {
+					return true
+				}
+				recv, ok := field.X.(*ast.Ident)
+				if !ok || recv.Name != member.Name {
+					return true
+				}
+				lit, ok := cmp.Y.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					return true
+				}
+				role, uerr := strconv.Unquote(lit.Value)
+				if uerr != nil {
+					t.Fatalf("unquote role literal %s: %v", lit.Value, uerr)
+				}
+				if !slices.Contains(roles, role) {
+					roles = append(roles, role)
+				}
+				return true
+			})
+			return true
+		})
+		return false
+	})
+
+	if !found {
+		t.Fatal("no UpdateProject function in projects.go: this test locates the " +
+			"member-role validation by name and cannot report a vocabulary it did not read")
+	}
+	if len(roles) == 0 {
+		t.Fatal("found no `<member>.Role != \"...\"` comparisons inside UpdateProject's " +
+			"range over *req.Members: the member-role validation has moved or changed " +
+			"shape. An empty vocabulary here would make every ladder assertion vacuous, " +
+			"so this is a failure, not a pass — point the helper at the new validation.")
+	}
+	slices.Sort(roles)
+	return roles
 }
 
 // ─── Project struct JSON roundtrip ────────────────────────────────────────────

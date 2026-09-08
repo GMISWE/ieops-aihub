@@ -8,10 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
+
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
 // aihub#315 — the project_roles derivation in BearerAuth carried the same two
@@ -315,4 +318,42 @@ func countMembersParsing(fd *ast.FuncDecl) (shared, unmarshals int) {
 		return true
 	})
 	return shared, unmarshals
+}
+
+// TestRoleLevelIsTheDomainLadder is the gate aihub#443 was missing.
+//
+// This package and internal/domain each used to declare their own role ladder,
+// and they disagreed: maintainer scored 3 here and 0 there, and "owner" — which
+// is a projects column, never a member role — had a rung there and none here. A
+// maintainer therefore passed this package's checks and failed domain's, and
+// every comment in router.go, ui_handlers_wi.go and dependencies.go claiming the
+// two went "through the same lookup" was wrong while reading as reassurance.
+//
+// Contents are compared first because that is the property callers depend on,
+// and identity second because equal contents are what a re-forked copy looks
+// like on the day it is written. Sharing the map value is what keeps the two
+// from drifting apart afterwards.
+//
+// This is a fork detector, not a value oracle: it stays green when both packages
+// read the same WRONG ladder, which was measured — a mutation dropping the
+// maintainer rung from domain.RoleLevel left this test passing. What the levels
+// should be is asserted in internal/domain (TestRoleLevel and
+// TestRoleLevel_LadderIsExactlyTheValidatedVocabulary); green here means only
+// that there is one ladder, not that it is the right one.
+func TestRoleLevelIsTheDomainLadder(t *testing.T) {
+	if len(roleLevel) != len(domain.RoleLevel) {
+		t.Fatalf("roleLevel has %d entries, domain.RoleLevel has %d: %v vs %v",
+			len(roleLevel), len(domain.RoleLevel), roleLevel, domain.RoleLevel)
+	}
+	for role, level := range domain.RoleLevel {
+		if got, ok := roleLevel[role]; !ok || got != level {
+			t.Errorf("roleLevel[%q] = %d (present=%t), domain.RoleLevel[%q] = %d",
+				role, got, ok, role, level)
+		}
+	}
+	if reflect.ValueOf(roleLevel).Pointer() != reflect.ValueOf(domain.RoleLevel).Pointer() {
+		t.Errorf("roleLevel is a separate map that currently happens to agree with " +
+			"domain.RoleLevel; it must BE domain.RoleLevel, or the two will drift " +
+			"apart again the way they did before aihub#443")
+	}
 }

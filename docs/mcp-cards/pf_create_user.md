@@ -126,6 +126,8 @@ not set one rather than that the field is dropped.
   admin") and `handleUpdateUser` still validates nothing, so an illegal role on the
   PATCH path remains a 500 from the CHECK. `aihub#463` was scoped to the create
   path and did not touch it; the vocabulary it would use is already exported
-  (`internal/domain/user_fields.go`).
+  (`internal/domain/user_fields.go`). `aihub#463` wrapped 2026-09-08, so at that
+  re-check this residual was no longer carried by the work item that left it.
 - `email` is still conditionally required in prose, which a flat `required` list
-  cannot express. Unchanged by `aihub#463` and not a vocabulary question.
+  cannot express. Unchanged by `aihub#463`, which wrapped 2026-09-08, and not a
+  vocabulary question; re-checked the same day.

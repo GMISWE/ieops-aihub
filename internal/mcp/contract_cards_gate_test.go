@@ -84,6 +84,13 @@ package mcp_test
 //	                   anything
 //	K9 verbatim quote  a hop 0-1 table cell quoting text the tool does not
 //	                   publish — the arm that survives PF_CARDS_REGEN=1
+//	K11 open honesty   an `## Open` bullet asserting an unfalsifiable negative
+//	                   ("nobody has made", "is unmeasured", "was not updated by"),
+//	                   or naming an aihub#NNN with no date — the arm that reads
+//	                   the one section no other arm reads at all
+//
+// The list jumps K9 to K11 because K10 is taken; it is the DB-gated arm and lives
+// elsewhere, described next.
 //
 // K10 is NOT in this file and does not run in the always-on step. It lives in
 // card_response_keys_live_e2e_db_test.go, is gated on AIHUB_TEST_DB, and is the
@@ -198,6 +205,17 @@ const (
 	// schema. A card set that quoted nothing would pass that arm by quoting
 	// nothing. Measured 2026-09-08: 22 leading-quote hop 0-1 cells across 18 cards.
 	floorCardQuotes = 12
+	// floorOpenBullets bounds how many `## Open` bullets K11 read. The arm
+	// quantifies over bullets, so a card set whose Open sections were emptied down
+	// to K4's 16-character floor would satisfy it by asserting nothing. Measured
+	// 2026-09-08: 55 bullets across the 45 cards.
+	floorOpenBullets = 40
+	// floorOpenCitations bounds how many of those bullets named a work item, i.e.
+	// how many the date half of K11 actually checked. Without it, deleting every
+	// citation from every Open section leaves that half comparing nothing and
+	// reporting green — and deleting the citation is exactly the cheap way to
+	// comply with a rule about citations. Measured 2026-09-08: 22 citing bullets.
+	floorOpenCitations = 14
 )
 
 // maxPendingCards is a CEILING ON DEBT, not a floor on a measurement, so unlike
@@ -1158,6 +1176,308 @@ func TestContractCardQuotesAreVerbatim(t *testing.T) {
 	}
 	t.Logf("K9: %d verbatim hop 0-1 quotes checked against the live schema, %d exempted",
 		checked, historical)
+}
+
+// ─────────────────────────────────── K11 ─────────────────────────────────────
+//
+// K11 (aihub#483) reads the `## Open` section, which until now no arm read at all.
+// The number skips 10 because K10 is taken: it lives in
+// card_response_keys_live_e2e_db_test.go and is the DB-gated arm, so reusing the
+// number would make two different arms answer to one name in CI output.
+//
+// ─── The hole was measured, not anticipated ────────────────────────────────
+//
+// aihub#476 swept every card's `## Open` section against the tree it described.
+// **5 of 48 carried a FALSE assertion**; the other 43 were true or correctly
+// hedged. Every arm above was GREEN through all five, and not by accident: they
+// compare a generated machine block against the live schema, and an Open section
+// is prose no machine block covers. K4 requires the section to be non-empty and
+// K9 reads quotes out of hop 0-1 — nothing read a sentence here for truth.
+//
+// The five split into two shapes with DIFFERENT AUTHORITIES, and the obvious
+// detector sees only the first:
+//
+//   - SHAPE 1, one card (pf_update_memory): a negative about a PUBLISHED STRING —
+//     "was not updated by aihub#433 and still states no range" — where the schema
+//     did carry the range, and had since c069570. Authority is the schema, so this
+//     is checkable offline.
+//   - SHAPE 2, four cards (pf_list_dependencies, pf_list_projects,
+//     pf_update_project, pf_whoami): a negative about a MEASUREMENT — "needs a DB
+//     read nobody has made", "is unmeasured" — where the measurement existed, in
+//     the cited work item's own attrs. **Authority is the aihub database, not this
+//     repo.**
+//
+// ─── Why this arm is a phrase ban and not a fact-checker ───────────────────
+//
+// A shape-2 fact-checker has to read wi status and attrs AT GATE TIME, i.e. reach
+// a live aihub. Measured rather than assumed: contract-lint.yml sets AIHUB_TEST_DB
+// zero times, this file touches no DB or network, and ci.yml's always-on `Unit
+// tests` step deliberately does not set it — per its aihub#303 comment block the
+// real DB coverage is exactly the union of the `-run` regexes on the steps that DO,
+// with a manifest that reddens on an unlisted DB-gated test. So shape 2 done
+// properly costs a new AIHUB_TEST_DB-gated CI step plus a manifest entry.
+// aihub#476 recommended against paying that here and aihub#483 carried the
+// recommendation; **it is NOT built, and this comment is the record that it is
+// not.** Whoever wants it should note that a live read makes the gate's colour
+// depend on a database, which no other arm in this file does.
+//
+// What IS built is the cheap thing that covers BOTH shapes without prose parsing:
+// ban the FORM all five took. **All five were undated absolutes** — a claim about
+// the whole world, at no particular time, that no reader can re-check. The two
+// halves below are independent, and neither is a fact-checker: they refuse the
+// form in which a false claim is unfalsifiable, which is a strictly weaker and
+// strictly cheaper thing than refusing a false claim.
+//
+// ─── A measurement that corrects aihub#476's own proposal ──────────────────
+//
+// Its detector was scoped to "an Open bullet that CITES an aihub#NNN". Re-measured
+// against the five historical bullets in cf9f7e1's parent: **only 1 of the 5 cited
+// a work item in the bullet itself.** pf_list_dependencies, pf_list_projects,
+// pf_update_project and pf_whoami all cited `§6.4 item 1` and named no wi at all.
+// So the citation scope would have caught 1 of 5, and the DATE requirement — which
+// only fires on a citation — would have caught 0 of 5. The phrase ban is therefore
+// unscoped, and it catches 5 of 5. The date half is kept anyway, for the different
+// and smaller reason stated on it.
+var openUnfalsifiableNegatives = []struct {
+	name string
+	re   *regexp.Regexp
+	seen string
+}{
+	{
+		name: "nobody has <verb>",
+		// Present perfect specifically, because that is the universal negative: not
+		// "this line did not do it" but "no one, anywhere, ever has". Measured
+		// 2026-09-08: the cards use "nobody" 8 times across 6 sentences — "Nobody
+		// should tidy", "a step nobody completed", "a guard nobody can find … is a
+		// guard nobody passes" (two cards) and "nobody noticed" (two cards) — and not
+		// one is in this tense, so the narrow form costs no false red. The looser
+		// "nobody <verb>ed" would have reddened 3 of those 8, all true.
+		re:   regexp.MustCompile(`(?i)\bno(?:body|[ -]one)\s+has\b`),
+		seen: "3 of the 5: pf_list_dependencies, pf_update_project and pf_whoami all wrote \"needs a DB read nobody has made\"",
+	},
+	{
+		name: "is unmeasured",
+		// Adjacent to the copula only. pf_whoami's CORRECTED bullet says "the urgency
+		// is therefore no longer unmeasured", which is true and must stay green, so
+		// banning the bare word would red the very card this arm was built from.
+		re:   regexp.MustCompile(`(?i)\b(?:is|are|was|were|remains?|stays?|still)\s+unmeasured\b`),
+		seen: "2 of the 5: pf_list_projects wrote \"whether any live row holds `maintainer` is unmeasured\" and pf_whoami \"the urgency is unmeasured\"",
+	},
+	{
+		name: "was not updated by",
+		re:   regexp.MustCompile(`(?i)\b(?:was|were|is|are|has|have|had)\s+(?:been\s+)?not\s+(?:been\s+)?updated\s+by\b`),
+		seen: "1 of the 5, and the only SHAPE 1 instance: pf_update_memory wrote \"was not updated by `aihub#433` and still states no range\"",
+	},
+}
+
+// A family this list deliberately does NOT carry, named here rather than left as a
+// silent gap: "<subject> was never read / made / measured". It is the same
+// universal negative — docs/mcp-cards/pf_remember.md's `## Open` carries "the live
+// distinct `type` set was never read", which is shape 2 exactly. It is left out
+// because measured on this tree the pattern's precision is one in two:
+// docs/mcp-cards/pf_recall.md says "the knob was never read", a claim about what
+// the CODE does that is offline-checkable and true. A pattern that reds a true
+// sentence as often as a false one teaches the next author to route around the arm
+// instead of to write a checkable claim, which is the failure mode
+// maxHistoricalQuoteRows exists to prevent one level up. Separating the two needs
+// the subject, i.e. prose parsing, which is what this arm is built to avoid.
+
+// openWorkItemRef matches a work-item citation. Measured 2026-09-08: every `x#N`
+// form in the card set is `aihub#N` (58 distinct), so a wider pattern would buy
+// nothing and could match a PR or issue reference, which is a different claim.
+var openWorkItemRef = regexp.MustCompile(`\baihub#\d+\b`)
+
+// openISODate matches a real ISO calendar date. Month and day are range-checked so
+// the requirement cannot be satisfied by something date-SHAPED — a version, a
+// dotted identifier, a hash prefix — which an unchecked `\d\d-\d\d` would accept.
+var openISODate = regexp.MustCompile(`\b20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b`)
+
+// openCitationWaivers exempts a card from the DATE half only — never from the
+// phrase ban — and every entry states who holds the file and when it can go.
+//
+// 🔴 This is the K5/K9 shape: an exemption that is NAMED, carries its reason, and
+// is falsifiable in both directions. A waived card that turns out to have NO
+// undated citation is reported as a stale waiver, so the entry deletes itself by
+// going red the moment the gap it covers closes — which is a stronger property
+// than maxHistoricalQuoteRows has, and it is available here only because the
+// waiver names a card rather than counting rows.
+var openCitationWaivers = map[string]string{
+	"pf_remember": "aihub#445 holds docs/mcp-cards/pf_remember.md with a live attempt " +
+		"(status `running`, checked 2026-09-08) and that card's first Open bullet IS " +
+		"#445's subject — §6.4 item 4, the memory-type CHECK. Editing it from aihub#483 " +
+		"would take the file lock out from under a rebase in flight. Its one undated " +
+		"citation is `aihub#459`, which was still `queued` at that check, so the bullet " +
+		"is TRUE — only undated. Delete this entry once #445 lands; the arm will already " +
+		"be telling you to.",
+}
+
+// TestContractCardOpenSectionsAreFalsifiable is K11.
+//
+// It asserts nothing about whether an Open bullet is TRUE. It asserts that a bullet
+// is written in a form somebody could later find false: no universal negative about
+// what has been measured anywhere, and a date on any claim about a work item, whose
+// state lives in a database this gate cannot read.
+//
+// ⚠️ The date does not make the claim true, and the arm cannot tell a considered
+// as-of from one copied off the line above. What it removes is the UNDATED
+// ABSOLUTE, which is the form all five false bullets took: "needs a DB read nobody
+// has made" has no as-of, so a reader in six months cannot tell a claim that was
+// wrong when written from one that has merely aged. Compare the compliant form the
+// card set already uses — pf_emit_event's "needs a DB read this line could not
+// make", which scopes the negative to the author instead of the world, and
+// pf_list_dependencies' "a live-DB read dated 2026-09-08, which dates rather than
+// pins". Both survive this arm, and both say what to re-run.
+func TestContractCardOpenSectionsAreFalsifiable(t *testing.T) {
+	cards := readCards(t)
+
+	names := make([]string, 0, len(cards))
+	for name := range cards {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	bullets, cited, waived := 0, 0, 0
+	for _, name := range names {
+		c := cards[name]
+		openBody, ok := cardSectionBody(cardSections(c.prose), "## Open")
+		if !ok {
+			continue // K4 reports a missing section
+		}
+		reason, isWaived := openCitationWaivers[name]
+		undatedHere := 0
+
+		for _, bullet := range cardOpenBullets(openBody) {
+			bullets++
+			for _, p := range openUnfalsifiableNegatives {
+				hit := p.re.FindString(bullet)
+				if hit == "" {
+					continue
+				}
+				t.Errorf("K11 UNFALSIFIABLE_NEGATIVE: %s says %q in its `## Open` section:\n"+
+					"    %s\n"+
+					"That is the %q form, and it is what aihub#476 found FALSE on %s. A "+
+					"negative about what anyone has ever measured cannot be checked from this "+
+					"repo, so it reads as green forever whether or not it is true — and there "+
+					"is no date escape for it, because timestamping a claim about the whole "+
+					"world still leaves nothing to re-run. Say instead who would hold the "+
+					"answer and when you looked: \"not recorded in `aihub#NNN`'s attrs as of "+
+					"2026-09-08\", or scope it to yourself the way pf_emit_event does with "+
+					"\"a DB read this line could not make\".",
+					c.path, hit, truncateBullet(bullet), p.name, p.seen)
+			}
+
+			if !openWorkItemRef.MatchString(bullet) {
+				continue
+			}
+			cited++
+			if openISODate.MatchString(bullet) {
+				continue
+			}
+			undatedHere++
+			if isWaived {
+				waived++
+				continue
+			}
+			t.Errorf("K11 UNDATED_CITATION: %s has an `## Open` bullet naming %s and carrying "+
+				"no date:\n    %s\n"+
+				"An Open bullet that names a work item is making a claim about that work "+
+				"item's STATE — it is open, it decided X, it left Y behind — and that state "+
+				"lives in the aihub database, which no arm in this file can read. Undated, "+
+				"the claim is true on the day it is written and silently wrong afterwards, "+
+				"which is how 5 of 48 cards came to assert defects that were already fixed. "+
+				"Add the date you last checked the cited item, e.g. \"still open (`paused`) "+
+				"at the last re-check, 2026-09-08\" or \"wrapped 2026-09-07; re-checked "+
+				"2026-09-08\".",
+				c.path, strings.Join(openWorkItemRef.FindAllString(bullet, -1), ", "),
+				truncateBullet(bullet))
+		}
+
+		if isWaived && undatedHere == 0 {
+			t.Errorf("K11 STALE_WAIVER: openCitationWaivers exempts %s from the date "+
+				"requirement, and that card now has no undated citation. The exemption has "+
+				"outlived its gap, which is the K5 failure in another place — delete the "+
+				"entry. Its recorded reason was: %s", c.path, reason)
+		}
+	}
+
+	for name := range openCitationWaivers {
+		if _, ok := cards[name]; !ok {
+			t.Errorf("K11 WAIVER_ORPHAN: openCitationWaivers names %q, which is not a card "+
+				"under %s. A waiver for a file that does not exist exempts nothing and hides "+
+				"that the exemption was never removed.", name, cardsDirRel)
+		}
+	}
+
+	if bullets < floorOpenBullets {
+		t.Errorf("K11 FLOOR_OPEN_BULLETS: only %d `## Open` bullet(s) were read, floor is %d "+
+			"— a card set whose Open sections say nothing passes this arm by saying nothing, "+
+			"which is the same green as one that says something checkable",
+			bullets, floorOpenBullets)
+	}
+	if cited < floorOpenCitations {
+		t.Errorf("K11 FLOOR_OPEN_CITATIONS: only %d `## Open` bullet(s) named a work item, "+
+			"floor is %d — deleting the citation is the cheapest way to satisfy a rule about "+
+			"citations, and this is what makes that cost an edit to this file",
+			cited, floorOpenCitations)
+	}
+	t.Logf("K11: %d `## Open` bullets read across %d cards, %d naming a work item, %d "+
+		"undated citation(s) waived", bullets, len(cards), cited, waived)
+}
+
+// cardOpenBullets splits an `## Open` section body into its top-level `- ` items,
+// each returned as ONE LOGICAL LINE.
+//
+// Joined rather than kept as lines because a markdown line break is a rendering
+// artifact: "needs a DB read nobody has made" wraps differently in each of the
+// three cards that carried it, and a per-line scan would see the phrase in one and
+// miss it in another for no reason a reader could predict.
+//
+// Nothing in the section escapes the scan. Text that is not under any bullet joins
+// the nearest one instead of being skipped — a false claim moved out of a list is
+// the same false claim — and fenced content is joined too. The fence is tracked for
+// exactly one purpose, so that a `- ` inside a code sample does not start a new
+// bullet and split a claim in half; it is not an exemption. Measured 2026-09-08: no
+// card's Open section contains a fence, so this costs nothing today and closes the
+// route on the first one that does.
+func cardOpenBullets(body string) []string {
+	var out []string
+	var cur []string
+	inFence := false
+	flush := func() {
+		if len(cur) > 0 {
+			out = append(out, strings.Join(cur, " "))
+			cur = nil
+		}
+	}
+	for _, l := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(l)
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			inFence = !inFence
+		} else if !inFence && strings.HasPrefix(l, "- ") {
+			flush()
+		}
+		if trimmed != "" {
+			cur = append(cur, trimmed)
+		}
+	}
+	flush()
+	return out
+}
+
+// truncateBullet keeps a K11 failure message readable when the offending bullet is
+// one of the long ones — pf_update_work_item's run past 1,000 characters. The head
+// is enough to find the bullet in the file, which is what the message is for.
+func truncateBullet(b string) string {
+	const max = 160
+	// Sliced by RUNE, not by byte. Card prose is full of em dashes and § signs, so a
+	// byte slice at a fixed offset lands mid-rune often enough to matter, and the
+	// replacement character it produces would appear in the very message somebody is
+	// reading to find the sentence.
+	r := []rune(b)
+	if len(r) <= max {
+		return b
+	}
+	return string(r[:max]) + " […]"
 }
 
 // ──────────────────────────────── generator ──────────────────────────────────

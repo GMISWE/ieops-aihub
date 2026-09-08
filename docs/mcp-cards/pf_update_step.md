@@ -163,4 +163,4 @@ reach the server. The corpus record above is the union over 1,617 real calls at 
 - **§6.4 item 8** — nothing here describes the live server. `aihub#399`'s
   enforcement is on `origin/main`; production can trail a merge by days, so a
   caller seeing a 200 with no history row is seeing an older server, not a
-  regression.
+  regression. `aihub#399` wrapped 2026-09-07; re-checked 2026-09-08.

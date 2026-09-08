@@ -408,8 +408,8 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	if req.Goal == "" {
 		return nil, NewErr(ErrBadRequest, "goal is required")
 	}
-	if utf8.RuneCountInString(req.Goal) > 500 {
-		return nil, NewErr(ErrBadRequest, "goal exceeds 500 characters")
+	if utf8.RuneCountInString(req.Goal) > maxWorkItemGoalRunes {
+		return nil, NewErr(ErrBadRequest, fmt.Sprintf("goal exceeds %d characters", maxWorkItemGoalRunes))
 	}
 	if strings.ContainsAny(req.Goal, "\n\r") {
 		return nil, NewErr(ErrGoalMultiline, "goal must not contain newlines")

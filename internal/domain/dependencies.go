@@ -21,6 +21,35 @@ type Dependency struct {
 	Note         *string   `json:"note"`
 }
 
+// dependencyKinds mirrors the wi_dependencies_kind_check CHECK in
+// internal/db/migrations/0003_dependencies.sql.
+//
+// aihub#434 turned the three hand-written string comparisons this replaces into
+// one named set. The comparisons were correct; what they could not be is
+// CHECKED. db_check_policy_test.go parses the migration and holds this map equal
+// to the constraint, which a chain of `!=` in the middle of a function body
+// cannot be held to — and the whole point of the policy is that a vocabulary the
+// database enforces has exactly one Go copy that something verifies.
+var dependencyKinds = map[string]bool{
+	"blocks":     true,
+	"supersedes": true,
+	"related":    true,
+}
+
+// DependencyKindList returns the legal wi_dependencies.kind values, sorted.
+func DependencyKindList() []string { return sortedKeys(dependencyKinds) }
+
+// validateDependencyKind rejects a kind the column would refuse.
+//
+// The empty string never reaches here: CreateDependency defaults it to "blocks"
+// on the line above the call.
+func validateDependencyKind(kind string) *AihubError {
+	if dependencyKinds[kind] {
+		return nil
+	}
+	return vocabularyErr("kind", kind, DependencyKindList())
+}
+
 // CreateDependencyRequest is the body for POST /v1/dependencies.
 type CreateDependencyRequest struct {
 	BlockedWIID  string  `json:"blocked_wi_id"`
@@ -72,8 +101,8 @@ func CreateDependency(ctx context.Context, pool *pgxpool.Pool, req *CreateDepend
 	if req.Kind == "" {
 		req.Kind = "blocks"
 	}
-	if req.Kind != "blocks" && req.Kind != "supersedes" && req.Kind != "related" {
-		return NewErr(ErrBadRequest, "kind must be blocks, supersedes, or related")
+	if kindErr := validateDependencyKind(req.Kind); kindErr != nil {
+		return kindErr
 	}
 
 	// Existence check, NOT a permission check. This line used to be commented

@@ -1168,6 +1168,66 @@ jobs:
       #             all four named `--- PASS:` lines present (14 in total, the
       #             other ten being subtests) and no `--- SKIP`, and with
       #             AIHUB_TEST_DB unset it exits 1 on the first "did not run".
+      #   249 -> 251 aihub#434 added 2 DB-gated functions, both in internal/domain
+      #             (db_check_policy_db_test.go:
+      #             TestDBCheckRegistry_MatchesPgConstraint,
+      #             TestMemoryVisibilityAnswersFourHundredNamingTheField),
+      #             the DB-gated half of the schema-wide CHECK policy gate that
+      #             aihub#411 §6.1 T1-4 ruled on.
+      #
+      #             Two functions rather than one because they need different
+      #             things from the database and fail for unrelated reasons. The
+      #             first reads pg_constraint and asks whether the MIGRATION PARSE
+      #             is faithful — it seeds nothing and would still be meaningful
+      #             on an empty schema at head; the second seeds a user and a
+      #             project and drives Remember, then writes round Go straight at
+      #             the column to prove the CHECK is still the backstop. Folding
+      #             them would let a CI step name the function while the arm that
+      #             actually needs seeding quietly stopped running.
+      #
+      #             The DB-free companion carries the whole registry and has no
+      #             line here: internal/domain/db_check_policy_test.go enumerates
+      #             every CHECK the schema holds at HEAD by folding all 36 Up
+      #             sections, and fails if any of them is not recorded as either
+      #             mirrored in Go or allowlisted with a reason. What only a
+      #             database can say is (a) that the fold's reconstruction of
+      #             Postgres's own constraint naming is right — dbCheckSynthName
+      #             GUESSES `<table>_<column>_check`, and a wrong guess would leave
+      #             the DB-free gate complete and correct about a schema that does
+      #             not exist — and (b) which STATUS a caller receives, which is
+      #             the entire content of the policy.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched, and in both
+      #             directions on the SAME inventory. Verbatim, with the tests
+      #             written but before the manifest lines and the step:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 249 entries,
+      #                 inventory measured 251
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 251
+      #                 (require only a DB: 248, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 79
+      #               dbtestcov: covered by a CI step: 246/248
+      #               ::error::dbtestcov: 2 … not in the manifest … 2 … executed
+      #                 by NO CI step
+      #             and after:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 251 entries,
+      #                 inventory measured 251
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 251
+      #                 (require only a DB: 248, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 80
+      #               dbtestcov: covered by a CI step: 248/248
+      #               dbtestcov: OK
+      #
+      #             The step's own `run:` text was executed as EXTRACTED from this
+      #             file against a real Postgres (pgvector/pgvector:pg16, migrated
+      #             with goose 0001 -> 0036) rather than only reasoned about:
+      #             exit 0 with all six named `--- PASS:` lines present and no
+      #             `--- SKIP`, and with AIHUB_TEST_DB unset it exits 1 on the
+      #             first "did not run".
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -2640,6 +2700,36 @@ jobs:
           done
           ! grep -q -- '--- SKIP' wi_field_validation.log \
             || { echo "::error::an aihub#396 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#434 generalises the aihub#396 step above from one table to the whole
+      # schema. The DB-free half (db_check_policy_test.go) runs in "Unit tests"
+      # and needs no step; these two are the parts that cannot be reasoned out of
+      # the migration text.
+      #
+      # Placed AFTER the aihub#396 step and before anything that replays an old
+      # migration is not a requirement: TestDBCheckRegistry_MatchesPgConstraint
+      # compares constraint NAMES rather than definitions precisely so the
+      # aihub#444 rewind (a replayed migration DROPping and re-ADDing the same
+      # name with an older predicate) cannot move it. If this step ever fails
+      # with a `missing`/`phantom` list, the cause is the PARSE or the schema —
+      # not step ordering.
+      - name: aihub#434 schema-wide CHECK policy DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^(TestDBCheckRegistry_MatchesPgConstraint|TestMemoryVisibilityAnswersFourHundredNamingTheField)$' -count=1 -v 2>&1 | tee db_check_policy.log
+          for want in TestDBCheckRegistry_MatchesPgConstraint \
+                      TestMemoryVisibilityAnswersFourHundredNamingTheField \
+                      TestMemoryVisibilityAnswersFourHundredNamingTheField/an_off-vocabulary_visibility_is_a_400_naming_the_field \
+                      TestMemoryVisibilityAnswersFourHundredNamingTheField/every_legal_visibility_is_accepted \
+                      TestMemoryVisibilityAnswersFourHundredNamingTheField/an_unset_visibility_still_defaults_to_project \
+                      TestMemoryVisibilityAnswersFourHundredNamingTheField/the_column_would_still_have_refused_it; do
+            grep -q -- "--- PASS: $want" db_check_policy.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#434 CHECK-policy coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' db_check_policy.log \
+            || { echo "::error::an aihub#434 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       - name: aihub#239 recall cursor tie + supersede carry DB tests
         env:

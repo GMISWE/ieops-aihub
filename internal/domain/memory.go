@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -1068,6 +1069,14 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		return nil, false, bsErr
 	}
 
+	// aihub#434: same place, same reason — above the first query, on the one
+	// function every memory write reaches. Remember defaults "" to "project"
+	// forty lines below, so an unset visibility is not this check's business;
+	// a value the caller CHOSE is.
+	if visErr := validateMemoryVisibility(req.Visibility); visErr != nil {
+		return nil, false, visErr
+	}
+
 	// aihub#465: in the same place and for the same reason — this is the one
 	// function every memory write reaches, and it has to stay above the first
 	// query. A stringified structured_payload used to be merged into
@@ -1699,6 +1708,61 @@ func MemoryTypePrefixGloss() string {
 	return strings.Join(globs, ", ")
 }
 
+// ─── Visibility Enum ──────────────────────────────────────────────────────────
+
+// memoryVisibilities mirrors the memories_visibility_check CHECK in
+// internal/db/migrations/0023_memories_visibility_public.sql, which is the LAST
+// of three migrations to define it (0006 -> 0010 -> 0023).
+//
+// aihub#434. Before this list existed, `visibility` was the one CHECK-constrained
+// caller-supplied column in the whole schema with no Go guard in front of it:
+// RememberRequest binds it straight from the wire, Remember defaulted "" to
+// "project" and passed everything else through, so `visibility: "everyone"`
+// reached the INSERT and came back as
+//
+//	500 INTERNAL_ERROR  ... violates check constraint
+//	"memories_visibility_check" (SQLSTATE 23514)
+//
+// which is the exact answer aihub#396's policy row exists to forbid. It was found
+// by enumerating the schema's CHECKs rather than by a report, which is what
+// db_check_policy_test.go is for.
+//
+// ⚠️ Mirrored EXACTLY, "public" included. Whether pf_remember should be able to
+// create a public memory directly is a real question and this is not the place it
+// gets answered: narrowing the Go set below the CHECK here would be a NEW rule
+// smuggled in under a bug fix, and it would silently break the artifact-share
+// path, which writes 'public' through this same function. The policy is "Go
+// refuses what the column refuses, sooner and more legibly" — not "Go refuses
+// more".
+var memoryVisibilities = map[string]bool{
+	"private": true,
+	"project": true,
+	"team":    true,
+	"admin":   true,
+	"public":  true,
+}
+
+// MemoryVisibilityList returns the legal memories.visibility values, sorted.
+// Exported so the MCP layer can publish the same set it will be judged against.
+func MemoryVisibilityList() []string { return sortedKeys(memoryVisibilities) }
+
+// validateMemoryVisibility rejects a visibility the column would refuse.
+//
+// "" is ACCEPTED, and unlike validateWorkItemPriority's version of this rule
+// that is not because the caller already defaulted it — Remember's default runs
+// forty lines BELOW this call, so "" genuinely arrives here. Treating it as
+// illegal would reject every caller that simply does not mention visibility.
+// Moving the default above the check instead would work too and is deliberately
+// not done: the guard would then depend on statement order in a 400-line
+// function for its correctness, which is the kind of coupling that survives
+// exactly until somebody reorders it.
+func validateMemoryVisibility(visibility string) *AihubError {
+	if visibility == "" || memoryVisibilities[visibility] {
+		return nil
+	}
+	return vocabularyErr("visibility", visibility, MemoryVisibilityList())
+}
+
 // MemoryTypeEnum is the curated select list for memory types (aihub#70).
 // Canonical 16 + actively-used {rule.coding, rule.work, fact.note} = 19.
 // Select-UX list ONLY — server validation stays lenient (4-prefix check),
@@ -1991,19 +2055,37 @@ const replyCommitSQL = `
 		), commits)
 		WHERE id = $1`
 
+// maxCommitReplyRunes caps a threaded commit reply, in CHARACTERS — the same
+// unit and the same number as work_items.content's CHECK. See ReplyCommit.
+const maxCommitReplyRunes = 20000
+
 // ReplyCommit appends a threaded reply to a single commit inside a memory's
 // commits JSONB column. It emits memory_commit_replied (best-effort, same
 // fire-and-forget pattern as ResolveCommit's memory_commit_resolved).
 //
-// Validation: body must be non-empty and ≤ 20000 chars (matching the
-// memory body cap searched in domain code).
+// Validation: body must be non-empty and ≤ maxCommitReplyRunes CHARACTERS.
+//
+// ⚠️ aihub#434 corrected two things here that were wrong together. The unit was
+// bytes (`len(body)`) while the message said "characters", so a 20,000-character
+// Chinese body — 60,000 bytes, and legal everywhere else in this file — was
+// refused with a 413 that named a limit it did not exceed; and the doc comment
+// claimed the number matched "the memory body cap searched in domain code",
+// which does not exist: memories.content is a bare TEXT NOT NULL with no CHECK
+// and no Go cap. What the number DOES match is work_items.content's CHECK
+// (maxWorkItemContentRunes), whose unit Postgres length() makes characters — so
+// counting runes here is what makes the two 20000s the same 20000.
+//
+// This cap is Go-only and mirrors no constraint: the reply lands inside the
+// commits JSONB column, which carries none. It is therefore NOT in
+// db_check_policy_test.go's registry, and that is correct rather than an
+// omission — that gate enumerates CHECKs.
 func ReplyCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, authorUserID, authorDisplay, body string) error {
 	if body == "" {
 		return NewErr(ErrBadRequest, "reply body is required")
 	}
-	const maxBody = 20000
-	if len(body) > maxBody {
-		return NewErr(ErrPayloadTooLarge, fmt.Sprintf("reply body exceeds %d characters", maxBody))
+	if n := utf8.RuneCountInString(body); n > maxCommitReplyRunes {
+		return NewErr(ErrPayloadTooLarge,
+			fmt.Sprintf("reply body is %d characters, the maximum is %d", n, maxCommitReplyRunes))
 	}
 
 	project, status, _, err := findCommitEntry(ctx, pool, memID, commitID)

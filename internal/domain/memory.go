@@ -650,7 +650,6 @@ type RecallRequest struct {
 	SimilarityThreshold float64  `json:"similarity_threshold,omitempty"`
 	MinStrength         float64  `json:"min_strength"`
 	IncludeArchived     bool     `json:"include_archived,omitempty"`
-	RecencyWeight       float64  `json:"recency_weight"`
 	RecallAlgo          string   `json:"recall_algo,omitempty"`
 	Cursor              string   `json:"cursor,omitempty"`
 	CallerUserID        string   `json:"-"`
@@ -2265,11 +2264,12 @@ func recallHybrid(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, v
 // to topK.
 //
 // Interleaving rather than concatenating is the point: the two halves are ranked by
-// incomparable keys (the vector half by 0.7*cosine + 0.3*tanh(strength), the text half by
-// reference time), so there is no honest way to sort them into one list — and any scheme
-// that appends one after the other reintroduces the aihub#270 starvation as soon as the
-// first half alone fills topK. Round-robin guarantees each half gets its share of the
-// budget while preserving the internal order of both.
+// incomparable keys (the vector half by cosine bucketed to 0.01, with effective strength
+// deciding only within a bucket; the text half by reference time, or by lexical rank when
+// recall_algo=lexical), so there is no honest way to sort them into one list — and any
+// scheme that appends one after the other reintroduces the aihub#270 starvation as soon
+// as the first half alone fills topK. Round-robin guarantees each half gets its share of
+// the budget while preserving the internal order of both.
 func mergeRecallHalves(vec, txt *RecallResponse, topK int) *RecallResponse {
 	merged := make([]MemoryWithStrength, 0, topK)
 	seen := make(map[string]bool, topK)
@@ -2326,12 +2326,6 @@ func mergeRecallHalves(vec, txt *RecallResponse, topK int) *RecallResponse {
 // summed Total both rely on is a property of the query rather than of a subtle argument
 // about the partition — and stays true if that partition is ever reworked.
 func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, nonEmbeddableOnly bool) (*RecallResponse, error) {
-	// NOTE: RecencyWeight is currently a reserved-but-unused knob. The text/tag
-	// recall path orders by memRefTimeSQL (see ORDER BY below) and does not blend
-	// a separate recency score. The default is intentionally not set here so the
-	// field stays an explicit no-op rather than a misleading "applied" value;
-	// implementing recency blending is tracked separately.
-
 	args := []any{req.Project}
 	idx := 2
 

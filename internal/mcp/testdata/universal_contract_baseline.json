@@ -12,12 +12,5 @@
     "subject": "work_item_id",
     "wi": "aihub#423",
     "note": "identical to pf_cut_alpha's: the recorded body carries project, new_stable_tag, source_alpha_tag and workspace_root, never work_item_id. Same stub endpoint pair (handleCutAlpha/handlePromote take no pool)."
-  },
-  {
-    "gate": "BOUND_FIELD_UNPUBLISHED",
-    "tool": "pf_update_user",
-    "subject": "handleUpdateUser.author_aliases",
-    "wi": "aihub#426",
-    "note": "PATCH /v1/admin/users/:id binds author_aliases and pf_update_user publishes display_name, id and role. pf_create_user publishes it, so the value can be set once at creation and never corrected from MCP."
   }
 ]

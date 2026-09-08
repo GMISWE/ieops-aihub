@@ -4,7 +4,7 @@
 {
   "tool": "pf_create_user",
   "description_sha256": "2d565545d332fd2ab0e3371e540b6186b3cfef2157335371e0efa76758e521c6",
-  "input_schema_sha256": "6c532269e03eb77bf39aa48d638df82208b9a85571109df9edc1f5b6bd031e91",
+  "input_schema_sha256": "9f0307d6a3a4d8f731b4e09738174327c43bfda16444eed0f90c549b0470f96d",
   "params": {
     "author_aliases": {
       "type": "array",
@@ -20,11 +20,19 @@
     },
     "role": {
       "type": "string",
-      "required": false
+      "required": false,
+      "enum": [
+        "admin",
+        "writer"
+      ]
     },
     "user_type": {
       "type": "string",
-      "required": false
+      "required": false,
+      "enum": [
+        "human",
+        "machine"
+      ]
     }
   },
   "response_keys_observed": [
@@ -45,8 +53,8 @@ Five parameters, one required. "Create a new user (**admin only**)."
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `display_name` | string | yes | human-readable display name |
-| `user_type` | string | no | `human` or `machine`, default `human` |
-| `role` | string | no | global role: `writer` or `admin`, default `writer` |
+| `user_type` | string | no | enum `human` or `machine`, default `human`; a machine user's email is generated, not supplied |
+| `role` | string | no | enum `writer` or `admin`, default `writer` — the GLOBAL role, not a project member role |
 | `email` | string | no | required for human users; auto-generated for machine users |
 | `author_aliases` | array | no | git author aliases for this user |
 
@@ -55,9 +63,20 @@ description says it is required for human users. That is another conditional
 requirement a flat `required` list cannot express, so it is prose and the server
 enforces it.
 
-Neither `user_type` nor `role` is a `propEnum`, so an out-of-vocabulary value is not
-refused before the handler runs — unlike `pf_create_work_item`'s `priority` and
-`source`, which were converted from prose to enums for exactly that reason.
+`user_type` and `role` were prose — "User type: human or machine" — until
+`aihub#463` made them enums drawn from `domain.UserTypeList` and
+`domain.UserGlobalRoleList`, the same values the server refuses to insert, so the
+published set and the accepted set are one value rather than two that agree today.
+That is `aihub#396`'s ruling for `pf_create_work_item`'s `priority` and `source`,
+applied to the second table it fits.
+
+⚠️ The enum is what a caller is OFFERED, not what stops it. `aihub#396` recorded
+that the go-sdk validates an enum before the handler runs; on go-sdk v1.6.0 that
+holds only for the generic `AddTool[In, Out]` path, and polyforge registers through
+the untyped `(*mcp.Server).AddTool`, whose `callTool` hands the request straight to
+the handler with no schema step. Measured in
+`internal/mcp/create_user_vocab_test.go`: `role: "maintainer"` still arrives in the
+`POST` body. What changed is the answer at the far end — see hop 4.
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -77,6 +96,14 @@ under the admin group.
   email.
 - `machine` users get a generated email, which is what lets an agent identity exist
   without a mailbox.
+- `aihub#463`: an out-of-vocabulary `user_type` or `role` is now a **400** naming the
+  field, the rejected value and the legal set, refused before the `INSERT` by
+  `internal/domain/user_fields.go` (`ValidateUserType`) from
+  `internal/server/router.go` (`handleCreateUser`). It used to reach the `INSERT`,
+  violate the CHECK in `internal/db/migrations/0001_initial.sql` and come back as
+  `500 INTERNAL_ERROR failed to create user` — that handler discards the pgx error,
+  so not even the SQLSTATE survived, and the caller was told to retry something that
+  can never succeed.
 
 ## hop 5 — what comes back
 
@@ -95,6 +122,10 @@ not set one rather than that the field is dropped.
 
 ## Open
 
-- Whether `user_type` and `role` should be `propEnum` is the same question
-  `aihub#396` answered "yes" for the work-item fields. No adjudicated row extends
-  that answer to this tool, so it is recorded rather than asserted.
+- `pf_update_user` still publishes `role` as prose ("Updated global role: writer or
+  admin") and `handleUpdateUser` still validates nothing, so an illegal role on the
+  PATCH path remains a 500 from the CHECK. `aihub#463` was scoped to the create
+  path and did not touch it; the vocabulary it would use is already exported
+  (`internal/domain/user_fields.go`).
+- `email` is still conditionally required in prose, which a flat `required` list
+  cannot express. Unchanged by `aihub#463` and not a vocabulary question.

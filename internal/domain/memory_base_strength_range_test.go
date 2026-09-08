@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 )
 
@@ -196,4 +197,104 @@ func bsShow(v *float64) string {
 		return "<omitted>"
 	}
 	return strconv.FormatFloat(*v, 'g', -1, 64)
+}
+
+// TestBaseStrengthIsTruncatedByThePgxInt2Codec is aihub#475's measurement, kept
+// executable.
+//
+// aihub#459 recorded the coercion mechanism as UNVERIFIED and named two
+// candidates: "(a) pgx refuses to encode" or "(b) the value is coerced
+// silently". It is (b), the direction is TOWARD ZERO, and there is no error at
+// any value — so the three tests above, which pin the RANGE, do not between them
+// pin what actually reaches the column. A value can satisfy every one of them
+// and still be stored as a different number.
+//
+// This is a CHARACTERISATION test, and its subject is a dependency rather than
+// this repo's own code, which is the point: the truncation is the only reason
+// handleReinforceMemory and Remember must report the value they read back
+// instead of the one they computed. If a pgx upgrade turns it into an error, or
+// a QueryExecMode change routes the literal to the server (where the rule is
+// round-half-to-even, not truncate — 4.5 would become 4 but 3.5 would become 4
+// too), the justification for those RETURNING clauses has changed and this goes
+// red where the reasoning lives.
+//
+// It does NOT assert that truncation is desirable. aihub#459 owns that.
+func TestBaseStrengthIsTruncatedByThePgxInt2Codec(t *testing.T) {
+	// Premise 1: the column really is int2. If aihub#459 is settled by widening
+	// the column, this whole test is about the wrong codec and must be re-derived
+	// rather than left green against an OID nothing writes any more.
+	const ddl = "../db/migrations/0006_events_memories.sql"
+	src, err := os.ReadFile(ddl)
+	require.NoError(t, err)
+	require.Regexp(t, `base_strength\s+SMALLINT`, string(src),
+		"%s no longer declares base_strength SMALLINT. This test characterises pgx's "+
+			"int2 codec because that is the codec the column forces; against any other "+
+			"column type it is measuring something the write path never uses.", ddl)
+
+	// Premise 2: the pool takes no QueryExecMode override, so params are encoded
+	// client-side through the described OID (the extended protocol's default)
+	// rather than being interpolated as literals for the server to round.
+	poolSrc, err := os.ReadFile("../db/db.go")
+	require.NoError(t, err)
+	require.NotContains(t, string(poolSrc), "QueryExecMode",
+		"internal/db/db.go now sets a QueryExecMode. Under SimpleProtocol the literal "+
+			"reaches Postgres and is ROUNDED half-to-even instead of truncated, so the "+
+			"table below stops describing what aihub does. Re-measure before editing it.")
+
+	m := pgtype.NewMap()
+	encode := func(t *testing.T, v float64, format int16) string {
+		t.Helper()
+		buf, encErr := m.Encode(pgtype.Int2OID, format, v, nil)
+		// The (a) arm of aihub#459's two candidates, refuted here rather than
+		// assumed: an error at ANY of these values would mean the caller does get
+		// a signal, and the whole "silent no-op" defect would not exist.
+		require.NoError(t, encErr,
+			"pgx now REFUSES base_strength=%g rather than coercing it. That is a better "+
+				"behaviour, not a worse one — but it is a different one, and the "+
+				"handlers' error paths were written for a value that always encodes.", v)
+		var back float64
+		require.NoError(t, m.Scan(pgtype.Int2OID, format, buf, &back))
+		return strconv.FormatFloat(back, 'g', -1, 64)
+	}
+
+	// Every row measured at the pinned pgx version. The two out-of-range rows are
+	// kept because they are the mechanism behind aihub#412's 13 INTERNAL_ERRORs:
+	// 0.9 is inside the range the schema used to publish and encodes to 0, which
+	// is what memories_base_strength_check refused.
+	for _, tc := range []struct {
+		in   float64
+		want string
+	}{
+		{3.0, "3"},   // control: an integral value must survive untouched
+		{5.0, "5"},   // control: MaxBaseStrength
+		{1.0, "1"},   // control: MinBaseStrength
+		{3.5, "3"},   // NOT 4 — toward zero, not nearest
+		{4.5, "4"},   // NOT 4 by rounding half-to-even; by truncation
+		{4.999, "4"}, // the whole fractional part is dropped
+		{1.9, "1"},
+		{0.9, "0"},  // the corpus value; 0 violates the CHECK
+		{-0.5, "0"}, // toward zero from below, so -0.5 is 0 and not -1
+	} {
+		for _, f := range []struct {
+			name   string
+			format int16
+		}{
+			{"binary", pgtype.BinaryFormatCode},
+			{"text", pgtype.TextFormatCode},
+		} {
+			got := encode(t, tc.in, f.format)
+			require.Equal(t, tc.want, got,
+				"pgx %s encoding of base_strength=%g reached the column as %s, expected %s. "+
+					"Both formats are checked because a codec that changed in only one of "+
+					"them would still be a change in what gets stored.", f.name, tc.in, got, tc.want)
+		}
+	}
+
+	// The consequence, stated as the assertion the handlers depend on: a delta
+	// under 1 applied to a stored value is a no-op. That is why
+	// handleReinforceMemory must answer with the row's value — reporting the
+	// arithmetic would claim a change that did not happen, on every call, forever.
+	require.Equal(t, "3", encode(t, DefaultBaseStrength+0.5, pgtype.BinaryFormatCode),
+		"3 + 0.5 must still store 3; if it does not, the aihub#475 defect no longer "+
+			"has the mechanism its fix was written for")
 }

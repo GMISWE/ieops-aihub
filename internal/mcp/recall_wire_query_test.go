@@ -255,7 +255,10 @@ func TestWireQueryRecallRefusesUnreadableNumbers(t *testing.T) {
 		{"NaN disables the filter from the inside", "similarity_threshold", "NaN"},
 		{"a boolean is not a number in any spelling", "similarity_threshold", true},
 		{"the same reader guards min_strength", "min_strength", "high"},
-		{"and recency_weight", "recency_weight", "0.4ish"},
+		// `recency_weight` had an arm here ("0.4ish"). aihub#469 withdrew the
+		// parameter, so there is no longer a reader to guard: an unparseable
+		// value for a name this tool does not publish is not refused, it is
+		// reported back as an unknown parameter.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q := newQueryRecorder(t)
@@ -298,8 +301,10 @@ func TestWireQueryRecallStillAcceptsEveryReadableSpelling(t *testing.T) {
 		{"similarity_threshold", "0.99", "0.99"},
 		{"min_strength", float64(1.5), "1.5"},
 		{"min_strength", "1.5", "1.5"},
-		{"recency_weight", float64(0.4), "0.4"},
-		{"recency_weight", "0.4", "0.4"},
+		// `recency_weight` had both spellings here until aihub#469 withdrew it.
+		// min_strength keeps this control populated for the numeric-string path,
+		// so removing those two arms narrows the table without leaving the
+		// green half of the pair vacuous.
 	} {
 		t.Run(fmt.Sprintf("%s=%#v", tc.param, tc.shape), func(t *testing.T) {
 			q := newQueryRecorder(t)

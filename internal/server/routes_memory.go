@@ -419,19 +419,23 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 		if minPresent {
 			req.MinStrength = minStrength
 		}
-		// recency_weight is deliberately range-UNCHECKED beyond being a finite
-		// number. It is a reserved-but-unused knob (see the note on it in
-		// domain.Recall): every value is equally inert today, so any range this
-		// file declared would be a contract invented by the validator rather than
-		// one the ranking code keeps. Rule 1's parse check still applies —
-		// `recency_weight=notanumber` is a caller bug whatever the knob does.
-		recencyWeight, rwPresent, rwErr := queryFloat(c, "recency_weight")
-		if rwErr != nil {
-			return writeError(c, rwErr)
-		}
-		if rwPresent {
-			req.RecencyWeight = recencyWeight
-		}
+		// ⚠️ There is deliberately no `recency_weight` bind here (aihub#469). It
+		// was parsed with queryFloat and assigned to req.RecencyWeight, which no
+		// function in internal/domain ever read, so the value travelled three
+		// hops to reach a field nothing consumed.
+		//
+		// It went with the parameter rather than outliving it: keeping the bind
+		// after pf_recall stopped publishing the name is precisely the state
+		// aihub#424 had to clean up after aihub#394 withdrew `mode` — a field the
+		// server fills that no MCP caller can reach, which satisfies every gate
+		// that quantifies over published parameters because withdrawing one
+		// removes it from that quantifier's view.
+		//
+		// Why it is gone rather than honoured is recorded where the schema used
+		// to publish it (recallNumberParams, internal/mcp/tools_memory.go): the
+		// blend the design document specified was measured to re-introduce the
+		// defect aihub#311 fixed, and recency was already the dominant sort key
+		// on all three recall paths, so there was nothing for the knob to add.
 		// aihub#148, hop 3 of four. The cosine floor is fully implemented in
 		// domain (memory_vector.go's `if req.SimilarityThreshold > 0`, plus
 		// Recall's rule that a caller-set threshold suppresses the empty-vector

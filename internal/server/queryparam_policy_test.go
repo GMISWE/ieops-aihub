@@ -117,7 +117,11 @@ func TestPolicyRule1_MalformedParamsAreRejectedEverywhere(t *testing.T) {
 		{"recall similarity_threshold negative", recallRequestNilPool, "project=p_qp_policy&similarity_threshold=-1", "-1"},
 		{"recall min_strength garbage", recallRequestNilPool, "project=p_qp_policy&min_strength=notanumber", "notanumber"},
 		{"recall min_strength negative", recallRequestNilPool, "project=p_qp_policy&min_strength=-2", "-2"},
-		{"recall recency_weight garbage", recallRequestNilPool, "project=p_qp_policy&recency_weight=notanumber", "notanumber"},
+		// `recency_weight=notanumber` was a case here. aihub#469 removed the
+		// handler's bind along with the published parameter, so this endpoint no
+		// longer parses that name and Rule 1 has nothing to say about it —
+		// keeping the case would assert a 400 for a query parameter the handler
+		// is now correct to ignore.
 		{"recall top_k garbage", recallRequestNilPool, "project=p_qp_policy&top_k=abc", "abc"},
 		{"recall include_archived not a bool", recallRequestNilPool, "project=p_qp_policy&include_archived=yes", "yes"},
 		// NaN and ±Inf parse fine in Go and compare false against every bound, so

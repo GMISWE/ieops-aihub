@@ -210,9 +210,19 @@ func csvArg(args map[string]any, key string) string {
 // did not send this parameter".
 //
 // Refusing here rather than forwarding the raw text is deliberate. The server
-// would reject it too — handleRecall reads these three through queryFloat and
-// queryFloatInRange — but a request that cannot succeed should not cost a round
-// trip, and the caller gets the same sentence either way.
+// would reject it too — handleRecall reads both of them through
+// queryFloatInRange, which delegates the parse to queryFloat — but a request
+// that cannot succeed should not cost a round trip, and the caller gets the same
+// sentence either way.
+//
+// ⚠️ This sentence said "these three ... through queryFloat and
+// queryFloatInRange" until aihub#469 withdrew `recency_weight`, which was the
+// third and the only one handleRecall read through bare queryFloat. It is called
+// out rather than quietly corrected because a comment asserting a stale hop
+// count is the same defect class aihub#469 was filed for: the design doc's
+// changelog L7 claimed "API 文档和实现对齐" about that very parameter, and the
+// claim outlived the thing it described. This file is not where the parameter
+// lived, which is exactly why the edit was easy to miss.
 //
 // NaN and ±Inf are refused for queryFloat's reason: they parse fine and compare
 // false against every bound, so they disable a filter from the inside.

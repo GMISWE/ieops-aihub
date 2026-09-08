@@ -4,7 +4,7 @@
 {
   "tool": "pf_recall",
   "description_sha256": "52355ed415a03b181b816da58b68327c4e4c5ca44cfab692bdbeb2d8bbc00b0a",
-  "input_schema_sha256": "80256c4c95eb201603512f27056d2569cabb7422f00b2e7b55c588dd3db38b26",
+  "input_schema_sha256": "b34d958f730c3fa9e79a1e47d105363ec4df53f492f5262e3c1342022a45960e",
   "params": {
     "cursor": {
       "type": "string",
@@ -31,10 +31,6 @@
     },
     "query": {
       "type": "string",
-      "required": false
-    },
-    "recency_weight": {
-      "type": "number",
       "required": false
     },
     "similarity_threshold": {
@@ -87,8 +83,46 @@ defect.
 | `cursor` | string | no | TEXT-path paging only |
 | `min_strength` | number | no | effective strength = `base_strength` (1-5) after decay; default 0.3 filters nothing |
 | `include_archived` | boolean | no | default false |
-| `recency_weight` | number | no | default 0.3 |
 | `fields` | enum | no | `brief` — first line only, drops `related`/`tags` |
+
+`recency_weight` was published here from the day this tool was added (`50bfc35`)
+until `aihub#469` withdrew it, and bound by `handleRecall` into
+`domain.RecallRequest.RecencyWeight`. Forwarding came later and in two steps:
+`6eda521` began forwarding it from an inline conditional, and only `7cb982f`
+factored that into the slice now called `recallNumberParams`. For the 20 commits
+between `50bfc35` and `6eda521` it was published and NOT forwarded, along with
+`similarity_threshold` and `min_strength` — that gap is `aihub#148`.
+
+No read ever reached the ranking: on the tree as withdrawn, none of the six
+functions in `internal/domain` that take a `*RecallRequest` touched the field, so
+every value returned the page the caller would have got without it, no error and
+no warning. Not "nothing ever read it" — `Recall` held a self-default
+(`if req.RecencyWeight <= 0 { req.RecencyWeight = 0.3 }`) until `9064a35`
+deleted it on 2026-06-05, and `aihub#424` counted exactly that shape as a read.
+The accurate claim is narrower and survives either way: no read of this field
+could ever change a result.
+
+Its hop 0-1 promise was `default 0.3`, while the source comment — at the head of
+`recallText` in `internal/domain/memory.go`, not on the field itself — said the
+default was deliberately NOT applied. The row asserted exactly one thing and that
+was the thing least true.
+
+It is gone rather than implemented, and not for want of demand — implementing it
+was measured to be a regression. `docs/design/polyforge-v1-design.md` §7.5
+specified `sim×(1-w) + normalized_recency×w + normalized_strength×0.1` at w=0.3,
+the same shape as the fused score `aihub#311` removed from the vector path as a
+defect. The embedding model packs a result set's cosines into a band ~0.04 wide,
+so a 0.3-weighted recency term spans several times the whole spread of the signal
+it blends into: replayed on a real 20-row result set, the highest-cosine row fell
+from rank 1 to rank 10 and similarity inversions rose from 16/190 to 98/190. And
+there was nothing to win, because recency was never absent — see hop 4.
+
+⚠️ That row is also the reason `aihub#469` exists rather than being caught: the
+card gate's K4 arm requires only that a published parameter be named in backticks
+somewhere in the prose. The row was four cells wide and its whole hop-1 promise
+was the two words "default 0.3" — but it did carry the backticked name, so K4 was
+satisfied. K4 cannot tell "documented" from "listed", which is the gap the hop-4
+arm added by this work item closes from the other side.
 
 The `type` description exists because three skill templates taught a single
 pipe-separated string in place of the array, nothing split it, and the resulting
@@ -137,6 +171,29 @@ passing nothing returned the same 20 items in the same order.
 
 ## hop 4 — what it actually does
 
+- **Ordering, and why there is no knob for recency.** All three paths already rank
+  by recency, so there was never a dimension for a caller to turn up:
+  - **text, default** — `ORDER BY GREATEST(last_activated_at, created_at) DESC,
+    id DESC` (`memRefTimeSQL`). Recency is the only ranking SIGNAL — `id DESC`
+    is the deterministic tiebreaker for rows sharing a reference time, and
+    `aihub#239`'s cursor key, not a second signal. There is no similarity
+    score on this path to blend it against.
+  - **text, `recall_algo=lexical`** — `ts_rank` first, then `tanh` of effective
+    strength, which carries `exp(-days/stability)`.
+  - **vector** — cosine bucketed to 0.01 first, then effective strength inside a
+    bucket, same decay term. `aihub#311` made cosine primary after a fused
+    `0.7*cosine + 0.3*tanh(strength)` score ranked a memory below a LESS similar
+    one for being older and more activated: the target held the set's highest
+    cosine (0.7227) and came second to 0.7202. Reweighting was measured
+    insufficient — the model packs a result set's cosines into a band ~0.04 wide,
+    so any non-trivial second term flips gaps that small. Bucketing keeps recency
+    deciding only genuine near-ties.
+
+  This is the hop `recency_weight` was withdrawn from (`aihub#469`), and the two
+  facts are one fact: the knob was never read, and had it been honoured with the
+  formula the design document specified, it would have re-created the defect
+  `aihub#311` fixed. At w=0.3 a 30-day age gap overturns a cosine gap of 0.2709,
+  6.8× the whole band; keeping cosine dominant would need w < 0.06.
 - **`similarity_threshold` has no default and must keep none.** Measured on one
   project with limit=200: a pure-punctuation noise query scores 0.4712 at its WORST
   hit while a real query whose top hit is correct scores 0.4798 at its BEST — 0.0086

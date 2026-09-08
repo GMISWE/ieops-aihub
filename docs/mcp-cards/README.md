@@ -175,7 +175,7 @@ top-level key a live response actually carries must be declared** — by the car
 or by `live-response-keys.json` for keys the generated corpus cannot hold. The
 declared set may not shrink below what the server emits; growing it stays cheap.
 
-Of the 48 published tools, K10 drives **42**. The six it cannot are `pf_commit`,
+Of the 45 published tools, K10 drives **39**. The six it cannot are `pf_commit`,
 `pf_diff`, `pf_pr`, `pf_push`, `pf_ship` and `pf_wrap`, each needing a git
 worktree, a git remote or the `gh` CLI. They are named in `liveWalkOutOfReach`,
 and that list is checked both ways: a tool that stops being driven without being

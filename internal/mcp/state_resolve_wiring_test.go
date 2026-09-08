@@ -254,14 +254,9 @@ func credSites() []credSite {
 			},
 			wantPath: "/v1/memories",
 		},
-		{
-			site: "internal/mcp/tools_memory.go emitArtifactAction (adopt/close/ignore)",
-			tool: "pf_adopt_artifact",
-			args: map[string]any{
-				"work_item_id": resolveSlug, "memory_id": "mem_res", "artifact_type": "methodology.spec",
-			},
-			wantPath: "/v1/events",
-		},
+		// emitArtifactAction (pf_adopt/close/ignore_artifact) USED TO BE HERE. Its
+		// three tools were retired by aihub#446 (aihub#411 T2-7) and the shared
+		// helper deleted with them, so this is a removal, not a lost row.
 		// pf_create_dependency and pf_remove_dependency USED TO BE HERE, and their
 		// removal is aihub#324 rather than a lost row.
 		//

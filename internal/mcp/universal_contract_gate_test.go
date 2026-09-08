@@ -112,12 +112,22 @@ const (
 	// tools standing policy, removals are expected. Lowered to 40 rather than
 	// to 48 deliberately: 48 would restore floor == measured and reproduce the
 	// same defect on the next unpublish. 40 sits near half, like every sibling.
-	floorTools       = 40  // measured 2026-09-08: 48 (was 50 before aihub#448 unpublished the two release tools)
-	floorParams      = 200 // measured: 237 across those 50
+	// ⚠️ Every "measured" value below is re-derived, not carried forward. Four of
+	// them were STALE when aihub#446 re-ran them — they still described the
+	// 50-tool era (237 params, 46 of 50 on the wire, 46 projections, 278 bound
+	// fields) even though aihub#448 had already taken the set to 48. Each gate
+	// PRINTS its own number, so re-derive rather than edit by arithmetic:
+	//
+	//	GOWORK=off go test ./internal/mcp/ -run '^TestContractEvery' -count=1 -v
+	//
+	// (the G1-G4 log lines), and for floorToolsOnWire, which no log line prints,
+	// raise it to an absurd value and read the count out of the failure.
+	floorTools       = 40  // measured 2026-09-08: 45 (48 before aihub#446 retired the three artifact-action tools, 50 before aihub#448)
+	floorParams      = 200 // measured: 222 across those 45
 	floorRoutes      = 40  // measured: 80 route registrations in package server
-	floorToolsOnWire = 25  // measured: 46 of 50 tools make at least one HTTP call
-	floorProjections = 20  // measured: 46 tool results G3 could inspect
-	floorBoundFields = 20  // measured: 278 server-side names G4 resolved
+	floorToolsOnWire = 25  // measured: 39 of 45 tools make at least one HTTP call
+	floorProjections = 20  // measured: 41 tool results G3 could inspect
+	floorBoundFields = 20  // measured: 251 server-side names G4 resolved
 
 	// floorStrongParams bounds how much of G1 may rest on the WEAKER of its two
 	// measurements. A token-proved verdict says "this argument's own value left
@@ -126,7 +136,7 @@ const (
 	// with the argument doing nothing. Without a floor the gate could silently
 	// degrade to all-key-presence — every arm still green, nothing red, and the
 	// discriminating half gone.
-	floorStrongParams = 120 // measured: 203 of 237 verdicts token-proved
+	floorStrongParams = 120 // measured: 190 of 222 verdicts token-proved
 )
 
 // ─────────────────────────── the baseline & its shape ────────────────────────

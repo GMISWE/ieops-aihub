@@ -150,7 +150,7 @@ func TestRememberRejectsOutOfRangeBaseStrengthBeforeThePool(t *testing.T) {
 	// without setting DedupMode at all.
 	for _, dedup := range []string{"off", ""} {
 		for _, v := range []float64{0.9, 0.5, 0, 5.5} {
-			err, panicked := rememberWithNoPool(req(dedup, &v))
+			panicked, err := rememberWithNoPool(req(dedup, &v))
 			require.Nil(t, panicked,
 				"base_strength=%g with dedup_mode=%q reached the (nil) pool: the guard is "+
 					"either missing or sits below the first query, where pf_update_memory "+
@@ -166,14 +166,14 @@ func TestRememberRejectsOutOfRangeBaseStrengthBeforeThePool(t *testing.T) {
 		// The control. 3 is the column DEFAULT and squarely legal; it must get
 		// past the guard, which with a nil pool it can only demonstrate by dying
 		// on it.
-		err, panicked := rememberWithNoPool(req(dedup, bsPtr(DefaultBaseStrength)))
+		panicked, err := rememberWithNoPool(req(dedup, bsPtr(DefaultBaseStrength)))
 		require.NotNil(t, panicked,
 			"base_strength=%g is legal and Remember returned %v instead of proceeding to "+
 				"the pool — the guard is rejecting values the column accepts",
 			float64(DefaultBaseStrength), err)
 
 		// And absent is legal too: the field is optional, and Remember defaults it.
-		_, panicked = rememberWithNoPool(req(dedup, nil))
+		panicked, _ = rememberWithNoPool(req(dedup, nil))
 		require.NotNil(t, panicked,
 			"an omitted base_strength must be left alone for Remember to default, not rejected")
 	}
@@ -183,10 +183,10 @@ func TestRememberRejectsOutOfRangeBaseStrengthBeforeThePool(t *testing.T) {
 // possible outcomes happened. It exists because a panic escaping a test kills the
 // whole package binary, which would report this file's failure as every other
 // domain test's failure too.
-func rememberWithNoPool(req *RememberRequest) (err error, panicked any) {
+func rememberWithNoPool(req *RememberRequest) (panicked any, err error) {
 	defer func() { panicked = recover() }()
 	_, _, err = Remember(context.Background(), nil, req)
-	return err, nil
+	return nil, err
 }
 
 func bsPtr(v float64) *float64 { return &v }

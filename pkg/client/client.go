@@ -4,6 +4,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,6 +98,66 @@ func IsCode(err error, code string) bool {
 	return apiErr.Code == code
 }
 
+// idempotencyKeyPrefix namespaces the client-generated Idempotency-Key, per the
+// design's `idem_...` form (§4.1 "认证").
+const idempotencyKeyPrefix = "idem_"
+
+// newIdempotencyKey mints a key for ONE outbound request.
+//
+// crypto/rand.Text returns at least 128 bits over the RFC 4648 base32 alphabet
+// and, unlike rand.Read, has no error to drop on the floor — which matters for a
+// value whose whole job is to be unrepeatable.
+func newIdempotencyKey() string { return idempotencyKeyPrefix + rand.Text() }
+
+// setStandardHeaders applies the headers that are a property of the PROTOCOL
+// rather than of any one endpoint, so that both request builders in this package
+// get them from one place and a third one cannot quietly skip them.
+//
+// # Idempotency-Key (aihub#436)
+//
+// The design has required `Idempotency-Key: idem_...` on every mutating request
+// since §4.1, restated as H-R3-8 ("header only; all POST/PATCH must carry it"),
+// and the server holds up its half — aihub#152 is where its fingerprint check
+// was made correct. IdempotencyMiddleware sits on the whole /v1 group, caches
+// the response under
+// <api_key_id>:<idempotency_key> for 24h, replays it for a later request whose
+// fingerprint (method + request target + body) matches, and answers 409
+// IDEMPOTENCY_KEY_REUSED when it does not. No client sent the header, so the
+// mandatory half of that contract had a compliance rate of zero and the
+// middleware was exercised by nothing but its own unit tests.
+//
+// A FRESH key per outbound request, and deliberately not per logical operation.
+// The cache replays on a key hit, so a key reused across two genuinely different
+// creates would serve the first one's response for the second — the header would
+// stop being a safety net and become a correctness bug. It also gives §11 C9 for
+// free: a force_create=true retry after a 409 must not inherit the previous key,
+// and here it structurally cannot.
+//
+// What that buys, exactly. This package runs no retry loop of its own, so the
+// only thing that ever re-sends a request is net/http's transport retry of a
+// request that failed on a REUSED connection — and adding this header is what
+// enables it for POST/PATCH, because (as of Go 1.26) the unexported
+// (*http.Request).isReplayable admits a non-GET method precisely when the body
+// is rewindable and an Idempotency-Key (or X-Idempotency-Key) is present — if a
+// future Go drops that clause the retry simply stops happening, which costs this
+// package nothing it had before. That retry replays the same *http.Request:
+// same header value, same bytes via GetBody. So the server sees the same
+// fingerprint under the same key and either replays or executes once, and a
+// transport retry can never raise the 409 — that needs one key with two
+// different fingerprints, which nothing here can produce.
+//
+// A CALLER-level retry (an agent re-invoking pf_ship, pf_claim_work_item, …) is
+// a new call into this package and gets a new key. It is a different mechanism
+// from the `idempotency_key` BODY parameter on claim, which dedups on
+// run_attempts in the database and returns the existing attempt; the two keep
+// different guarantees and the design requires both (H-R3-8).
+func (c *Client) setStandardHeaders(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if req.Method == http.MethodPost || req.Method == http.MethodPatch {
+		req.Header.Set("Idempotency-Key", newIdempotencyKey())
+	}
+}
+
 // Client is the aihub HTTP API client.
 type Client struct {
 	baseURL    string
@@ -130,7 +191,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	c.setStandardHeaders(req)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -180,7 +241,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string) ([]byte, string
 	if err != nil {
 		return nil, "", fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	c.setStandardHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

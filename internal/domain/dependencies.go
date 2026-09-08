@@ -514,7 +514,7 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		// (migration 0013 backfilled arbitrary values) is not a membership.
 		entry.Slug = &slug
 		entry.Accessible = callerRole == "admin" ||
-			roleLevel(callerProjectRoles[entry.Project]) >= roleLevel("viewer")
+			RoleLevel[callerProjectRoles[entry.Project]] >= RoleLevel["viewer"]
 		if !entry.Accessible {
 			entry.ID = "hidden"
 		}
@@ -549,7 +549,7 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		// (migration 0013 backfilled arbitrary values) is not a membership.
 		entry.Slug = &slug
 		entry.Accessible = callerRole == "admin" ||
-			roleLevel(callerProjectRoles[entry.Project]) >= roleLevel("viewer")
+			RoleLevel[callerProjectRoles[entry.Project]] >= RoleLevel["viewer"]
 		if !entry.Accessible {
 			entry.ID = "hidden"
 		}

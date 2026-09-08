@@ -87,9 +87,13 @@ callers have been handed.
 
 ## Open
 
-- **§6.4 item 1** — whether any live `projects.members` row actually holds
-  `role:"maintainer"` needs a DB read nobody has made. Migration `0013` mapped
-  `maintainer` to `writer` on backfill, so such a row can only have arrived from a
-  later members write. The fix is right either way; the urgency is unmeasured.
+- **§6.4 item 1 — measured.** `aihub#443`'s attrs record the DB read (a live-DB read
+  dated 2026-09-08, so it dates rather than pins — a row count is not a property of a
+  commit): 4 live `projects.members` rows hold `role:"maintainer"`, so a
+  `maintainer` reported by this tool is a role a real row really carries. Migration
+  `0013` mapped `maintainer` to `writer` on backfill, so those rows arrived from later
+  members writes, as this card said they would have to. The urgency is therefore no
+  longer unmeasured: it is low for this tool, which only reports the role, and it was
+  real for `pf_list_dependencies`, which ranked it.
 - The mcp/server duplication above is held together by a comment, not a gate. That
   is stated in the source and is not closed by this card.

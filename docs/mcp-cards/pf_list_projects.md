@@ -68,4 +68,14 @@ the corpus README warns about.
 
 ## Open
 
-- **§6.4 item 1** — whether any live row holds `maintainer` is unmeasured.
+- **§6.4 item 1 is measured, not open.** `aihub#443`'s attrs record the DB read
+  (a live-DB read dated 2026-09-08, so it dates rather than pins — a row count is not
+  a property of a commit): 4 live `projects.members` rows hold `maintainer`, and
+  the distinct role strings across all 10 projects and 47 member rows are exactly
+  `viewer | writer | maintainer`. **The inversion could never bite here, for a simpler
+  reason than the measurement**: this endpoint does not rank a role at all. It scopes
+  by the SQL predicate in `internal/domain/projects.go` (`ListProjects`) — public, plus
+  `owner_user_id`, plus a `members` containment test — and `roleLevel` is not on its
+  path. `members` is reported, not compared. `pf_list_dependencies` is the tool where
+  the inverted ladder did bite, and it is the one of T2-8's two named surfaces with
+  live instances.

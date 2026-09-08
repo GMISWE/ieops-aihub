@@ -93,9 +93,18 @@ have been handed.
 
 ## Open
 
-- **§6.4 item 1 is still open even though the fix landed.** Whether any live
-  `projects.members` row ever held `maintainer` — i.e. whether the inversion ever bit
-  a real caller — needs a DB read nobody has made. Migration `0013` mapped
-  `maintainer` to `writer` on backfill, so such a row could only have arrived from a
-  later members write. The card records the code path and its history, not a claim
-  about live data.
+- **§6.4 item 1 is CLOSED for this tool, and it closed against the card's own
+  hedge.** `aihub#443` made the DB read while fixing the ladder and recorded it in
+  that work item's attrs — a **live-DB read dated 2026-09-08**, which dates rather
+  than pins: a row count is not a property of any commit, so a later reader must
+  re-run it rather than re-derive it from the tree. As of that read, 4 live
+  `projects.members` rows hold `maintainer`, and across all 10 projects and 47 member
+  rows the distinct role strings are exactly `viewer | writer | maintainer`. Migration
+  `0013` mapped `maintainer` to `writer` on backfill, so those rows did arrive from
+  later members writes, as this card predicted. **The inversion bit here**: one
+  maintainer of another project holds the global role `writer` rather than `admin`, so
+  `ListDependencies` scored that caller 0 and shadowed cross-project entries as
+  `accessible:false` / `id:"hidden"`. This tool is the half of the T2-8 blast radius
+  with live instances; the `GET /v1/projects/:name` half had none, because all 4 rows
+  belong to their project's own `owner_user_id` and the owner check short-circuits
+  before the member loop.

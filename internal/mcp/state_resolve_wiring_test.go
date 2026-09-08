@@ -870,6 +870,13 @@ func TestSlugAddressedWorktreeToolsResolveTheCanonicalWorktree(t *testing.T) {
 // stubCleaned shape for the same four — the state dir a normal claim leaves
 // behind. Pre-change the filename lookup misses entirely and the tools die with
 // "read state file for wi ...: state file not found".
+//
+// ⚠️ That quoted wording is HISTORICAL as of aihub#428, which unified this
+// family's three prefixes into one minted by config.StateFileMissingErr. Grepping
+// the tree for it today finds nothing; the current text begins
+// "STATE_FILE_MISSING: no local credential for wi ...". The old string is kept
+// here because the sentence is about what the PRE-aihub#319 build did, and
+// rewriting it would misreport that build.
 func TestSlugAddressedWorktreeToolsResolveWhenOnlyTheCanonicalFileExists(t *testing.T) {
 	for _, s := range worktreeSites() {
 		t.Run(s.tool, func(t *testing.T) {

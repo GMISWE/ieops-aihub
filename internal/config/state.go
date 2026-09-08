@@ -135,6 +135,58 @@ func ResolveStateFile(idOrSlug string) (*StateFile, error) {
 	return ReadStateFile(idOrSlug)
 }
 
+// StateFileMissingErr mints the ONE refusal every credentialed call site
+// returns when config.ResolveStateFile fails. It is the single minting point:
+// no caller should build this message itself.
+//
+// ─── What it replaces (aihub#428) ───────────────────────────────────────────
+//
+// This is the corpus's largest error family — 133 of 2,756 groups (4.83%),
+// hand-validated at 141/141 precision — and it spoke with three different
+// voices across fourteen sites, none of which knew about the others:
+//
+//	read state file for wi <ID>:                  internal/coding/scenario.go, reached by
+//	                                              pf_diff / pf_commit / pf_push / pf_pr (86 calls)
+//	read state file (wi must be claimed first):   pf_emit_event ALONE (32 calls)
+//	read state file:                              the other nine tools
+//
+// The only ACTIONABLE wording — the parenthetical naming the fix — was reached
+// by one tool out of twelve, and not the common one: pf_commit alone is 71 calls
+// and said merely "read state file for wi X". A caller that had simply not
+// claimed the work item was told what FAILED and, in eleven cases out of twelve,
+// nothing about what to do. This message is the union of the three, not a choice
+// among them: it names the wi (the coding prefix's one advantage), it says what
+// to do (pf_emit_event's), and it adds the code neither had.
+//
+// ─── Why the code, and why in the string ────────────────────────────────────
+//
+// The family filed under CLIENT_UNCLASSIFIED — 195 calls, 31.15% of all 626
+// recorded failures — for a structural reason: errResult (internal/mcp/server.go)
+// emits a bare string, so a client-side refusal has nowhere to put a code. The
+// largest error family was therefore also the least analysable one.
+//
+// STATE_FILE_MISSING goes in the string because that is where this codebase
+// already puts client-side codes: classifyStepUpdateErr returns
+// "STALE_LOCAL_CREDENTIAL: state file deleted — please re-claim this work item"
+// through the same errResult path. A second convention would have been worse
+// than the one that exists, and giving errResult a structured envelope is a
+// change to every tool's response shape rather than to this family's wording.
+// That is a real improvement and it is NOT this work item; filed as its own
+// concern rather than smuggled in here.
+//
+// ⚠️ The code is a PREFIX and callers may match on it, so treat it as API: the
+// aihub#421 suite pins it per tool. %w is deliberate — errors.Is/As still reach
+// the os error underneath, which is what distinguishes "never claimed" (ENOENT)
+// from "claimed but the file is corrupt" (a parse error). The advice is correct
+// for both: re-claiming rewrites the file either way, which is why the wording
+// says "no local credential" rather than asserting the wi is unclaimed. Naming a
+// cause this function has not established is how a fail-closed message starts
+// misdiagnosing the case it did not consider.
+func StateFileMissingErr(wiID string, err error) error {
+	return fmt.Errorf("STATE_FILE_MISSING: no local credential for wi %s — "+
+		"claim it first with /pf-work %s, then retry: %w", wiID, wiID, err)
+}
+
 // DeleteStateFile removes <workspace>/.polyforge/state/<wi_id>.json.
 func DeleteStateFile(wiID string) error {
 	return os.Remove(filepath.Join(StateDir(), wiID+".json"))

@@ -28,7 +28,11 @@ package mcp_test
 //     family by 38%. The tests assert on the message text, via result["_raw"],
 //     because with no code that is the entire contract.
 //
-//  2. The wording is not uniform. Three distinct prefixes cover twelve tools:
+//  2. The wording WAS not uniform. aihub#428 unified it; the paragraph below is
+//     kept in the past tense because the per-tool table it explains is gone, and
+//     a reader who finds only the answer cannot tell whether the split was
+//     considered or never noticed. Three distinct prefixes used to cover twelve
+//     tools:
 //
 //     read state file for wi <SLUG>: ...            pf_commit 71+1, pf_pr 12, pf_push 2
 //     read state file (wi must be claimed first):   pf_emit_event 16 + 16
@@ -43,20 +47,33 @@ package mcp_test
 //     that row would assert behaviour the tree deliberately dropped.)
 //
 //     The actionable half — the parenthetical that tells the reader to claim
-//     first — is reached by ONE tool out of twelve. The aihub#421 brief assumed
-//     it was the family's answer; it is one tool's answer. The table below
-//     therefore carries a per-tool expectation and asserts the split as it
-//     stands, rather than asserting a uniformity that does not exist or quietly
-//     testing only the one tool that would pass.
+//     first — was reached by ONE tool out of twelve. The aihub#421 brief assumed
+//     it was the family's answer; it was one tool's answer. The table therefore
+//     carried a per-tool expectation and asserted the split as it stood, rather
+//     than asserting a uniformity that did not exist or quietly testing only the
+//     one tool that would pass.
 //
-//     ⚠️ Unifying the wording is filed as aihub#428, and that change MUST update
-//     the wantPrefix column below. That is not an inconvenience, it is the
-//     reason the column exists: a test asserting "some prefix" would have let
-//     eleven tools keep the unhelpful wording silently. A separate defect found
-//     the same way — pf_update_step deleting the wrong state-file key on a
-//     stale credential — is filed as aihub#427; it is not covered here, because
-//     it needs a credential that RESOLVES and then fails, which is the opposite
-//     precondition to this file's.
+//     THAT IS WHAT MADE THE FIX POSSIBLE TO LAND SAFELY, and it is the argument
+//     for writing tables this way. Because the column pinned the real split
+//     per-tool, aihub#428 could not unify the wording without every one of these
+//     five rows going red and being looked at — including pf_emit_event, the one
+//     tool that was already right and whose wording still had to change to reach
+//     the shared minting point. A test that had asserted "some prefix" would have
+//     stayed green through both the defect and the fix, and told nobody anything
+//     about either.
+//
+//     ⚠️ RESOLVED. Unifying the wording was aihub#428, and it did update the
+//     column — by replacing it with wantStateFileRefusalPrefix, since the split
+//     the column described no longer exists. Every credentialed tool now mints
+//     this refusal through config.StateFileMissingErr, which lives in
+//     internal/config because that is the only package both internal/mcp and
+//     internal/coding can import (internal/mcp imports internal/coding, so the
+//     reverse is a cycle) — and the commonest prefix of the three was the one in
+//     internal/coding. A separate defect found the same way — pf_update_step
+//     deleting the wrong state-file key on a stale credential — was aihub#427,
+//     fixed and merged; it is not covered here, because it needs a credential
+//     that RESOLVES and then fails, which is the opposite precondition to this
+//     file's.
 //
 // Why DB-free. The refusal happens before a single byte leaves the process, so a
 // database would add nothing but a skip condition. The load-bearing assertion in
@@ -77,6 +94,7 @@ package mcp_test
 //	go test ./internal/mcp/ -run 'TestStateFileMissing' -v -count=1
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,10 +107,27 @@ import (
 // the prefix its own handler puts on the failure. The prefix is per-tool on
 // purpose: see note (2) in the file comment.
 type credentialedTool struct {
-	name       string
-	args       map[string]any
-	wantPrefix string
+	name string
+	args map[string]any
 }
+
+// wantStateFileRefusalPrefix is the ONE prefix every credentialed tool now emits,
+// minted by config.StateFileMissingErr.
+//
+// ⚠️ THIS USED TO BE A PER-TOOL `wantPrefix` FIELD ON THE STRUCT ABOVE, and its
+// removal is aihub#428 rather than a weakening of this test. The column existed
+// because the wording was genuinely per-tool — three prefixes across twelve tools
+// — and the aihub#421 header said in as many words that a unification MUST move
+// it: "a test asserting 'some prefix' would have let eleven tools keep the
+// unhelpful wording silently."
+//
+// That is still true, and it is why the assertion did not become "some prefix".
+// It became a SHARED one: every tool is checked against this single constant, so
+// a tool that re-diverges fails on the tool that diverged rather than on a column
+// somebody would have had to remember to update. Keeping a per-tool field holding
+// twelve identical values would have implied a per-tool decision that is no longer
+// being made — the decision now lives in exactly one function.
+const wantStateFileRefusalPrefix = "STATE_FILE_MISSING: "
 
 // credentialedTools is a SAMPLE, not the whole set, and the difference matters
 // enough to spell out.
@@ -123,21 +158,21 @@ func credentialedTools(wiID string) []credentialedTool {
 	return []credentialedTool{
 		{"pf_update_step", map[string]any{
 			"work_item_id": wiID, "step_id": "execute", "status": "in_progress",
-		}, "read state file: "},
+		}},
 		{"pf_complete_attempt", map[string]any{
 			"work_item_id": wiID, "status": "wrapped",
-		}, "read state file: "},
+		}},
 		{"pf_pause_attempt", map[string]any{
 			"work_item_id": wiID,
-		}, "read state file: "},
+		}},
 		{"pf_acquire_locks", map[string]any{
 			"work_item_id": wiID,
-		}, "read state file: "},
+		}},
 		// The one tool whose wording tells the reader what to do about it.
 		{"pf_emit_event", map[string]any{
 			"work_item_id": wiID, "event_type": "note",
 			"payload": map[string]any{"text": "aihub#421 probe"},
-		}, "read state file (wi must be claimed first): "},
+		}},
 	}
 }
 
@@ -173,10 +208,28 @@ func TestStateFileMissing_RefusesBeforeAnyUpstreamCall(t *testing.T) {
 			}
 			msg := errorText(t, result)
 
-			if !strings.HasPrefix(msg, tc.wantPrefix) {
-				t.Errorf("message = %q\nwant prefix %q\n(the prefix is this handler's own wrapping; "+
-					"it is NOT shared across tools — only pf_emit_event says \"wi must be claimed first\")",
-					msg, tc.wantPrefix)
+			// aihub#428: one prefix, and it carries a CODE. The family used to
+			// file under CLIENT_UNCLASSIFIED (31.15% of all recorded failures)
+			// precisely because errResult emits a bare string with nothing to
+			// classify on; this prefix is what makes the largest error family
+			// countable.
+			if !strings.HasPrefix(msg, wantStateFileRefusalPrefix) {
+				t.Errorf("message = %q\nwant prefix %q — every credentialed tool mints this refusal "+
+					"through config.StateFileMissingErr, so a tool with its own wording has gone "+
+					"around the single minting point (aihub#428)", msg, wantStateFileRefusalPrefix)
+			}
+			// The ACTIONABLE half, which is the whole point of the wi: before
+			// aihub#428 exactly one tool out of twelve told the reader what to do,
+			// and it was not the common one (pf_commit alone is 71 corpus calls
+			// and said only "read state file for wi X").
+			if !strings.Contains(msg, "/pf-work") {
+				t.Errorf("message = %q, want it to name the recovery command. A caller that simply "+
+					"has not claimed the work item is told what failed and nothing about what to do "+
+					"— which is the state eleven of the twelve tools were in (aihub#428)", msg)
+			}
+			if !strings.Contains(msg, "no local credential for wi "+wiID) {
+				t.Errorf("message = %q, want it to name the work item — the one advantage the "+
+					"coding.WorktreePath prefix had, which the unified wording had to keep", msg)
 			}
 			if want := "state file not found for " + wiID; !strings.Contains(msg, want) {
 				t.Errorf("message = %q, want it to contain %q — config.ReadStateFile's wording, which "+
@@ -334,5 +387,246 @@ func TestStateFileMissing_ClaimedStateFileMakesTheSameCallWork(t *testing.T) {
 				t.Errorf("%s sent attempt_id=%v, want ra_recovered", tc.name, got.Body["attempt_id"])
 			}
 		})
+	}
+}
+
+// ─── aihub#428: the registry the family never had ───────────────────────────
+
+// TestStateFileRefusalHasExactlyOneMintingPoint is the mechanism, and it exists
+// because the aihub#428 brief's sharpest observation was that there wasn't one:
+//
+//	"There is also no mechanism behind the set: no flag on the tool definition,
+//	 no wrapper, no list. The predicate is literally 'the handler body calls
+//	 config.ResolveStateFile'."
+//
+// That is how one message became three. Unifying the wording without adding a
+// mechanism would fix the symptom and leave the cause, and the next handler
+// added would drift again — silently, because nothing would be watching.
+//
+// The invariant is deliberately NOT "every ResolveStateFile caller mints this
+// refusal". That statement is FALSE, and asserting it would have forced a wrong
+// change: see stateRefusalExemptSites below.
+func TestStateFileRefusalHasExactlyOneMintingPoint(t *testing.T) {
+	root := moduleRoot(t)
+	var offenders []string
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "vendor", "testdata":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		b, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			// The three pre-aihub#428 prefixes all began this way, and so would
+			// any fourth one written from the same instinct.
+			if strings.Contains(line, `Errorf("read state file`) {
+				offenders = append(offenders,
+					fmt.Sprintf("%s:%d: %s", filepath.ToSlash(rel), i+1, strings.TrimSpace(line)))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+
+	if len(offenders) > 0 {
+		t.Errorf("%d site(s) build a state-file refusal by hand instead of calling "+
+			"config.StateFileMissingErr:\n  %s\n\nThat is how this family came to speak with three "+
+			"different voices across twelve tools, only one of which told the reader what to do. "+
+			"Route it through the helper (aihub#428).",
+			len(offenders), strings.Join(offenders, "\n  "))
+	}
+}
+
+// stateRefusalCallSites is the production inventory of the family: which files
+// mint this refusal, and how many times each.
+//
+// ⚠️ THIS EXISTS BECAUSE THE SCAN ABOVE IS NOT ENOUGH, and the gap is worth
+// naming rather than leaving for someone to fall into. That scan matches the
+// literal text `Errorf("read state file`, i.e. the shape the three OLD prefixes
+// happened to share. It therefore catches a REVERSION — which is exactly what it
+// caught in this change's M1 mutant — but it would not notice a fourth voice
+// invented from scratch, say `fmt.Errorf("could not load credentials: %w", err)`.
+// A gate that only recognises yesterday's wording cannot stop tomorrow's drift.
+//
+// This inventory closes that: it counts CALLS TO THE HELPER, so a site that stops
+// using it fails here no matter what it does instead.
+//
+// Keeping the numbers current is the cost, and it is deliberate — the same
+// ratchet the repo uses elsewhere. Adding a credentialed tool means adding a
+// count here, which is one line and a moment's thought about whether the new tool
+// really is a member of this family. Removing tools means lowering it: aihub#448
+// unpublishes pf_cut_alpha and pf_promote, which is tools_release.go's whole
+// entry, so that change must delete the row below rather than edit it.
+var stateRefusalCallSites = map[string]int{
+	"internal/coding/scenario.go":     1,
+	"internal/mcp/tools_coding.go":    2,
+	"internal/mcp/tools_events.go":    1,
+	"internal/mcp/tools_lifecycle.go": 3,
+	"internal/mcp/tools_memory.go":    4,
+	"internal/mcp/tools_release.go":   2,
+	"internal/mcp/tools_step.go":      1,
+}
+
+// TestStateRefusalCallSitesAreAccountedFor pins the inventory above against the
+// tree, in BOTH directions: a file that stops minting the refusal is as much a
+// finding as one that starts.
+func TestStateRefusalCallSitesAreAccountedFor(t *testing.T) {
+	root := moduleRoot(t)
+	found := map[string]int{}
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "vendor", "testdata":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".go") || strings.HasSuffix(d.Name(), "_test.go") {
+			return nil
+		}
+		b, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		n := 0
+		for _, line := range strings.Split(string(b), "\n") {
+			// The declaration is not a call site.
+			if strings.Contains(line, "func StateFileMissingErr(") {
+				continue
+			}
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			n += strings.Count(line, "StateFileMissingErr(")
+		}
+		if n > 0 {
+			found[filepath.ToSlash(rel)] = n
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+
+	for file, want := range stateRefusalCallSites {
+		if got := found[file]; got != want {
+			t.Errorf("%s mints the refusal %d time(s), inventory says %d. If a credentialed tool "+
+				"was added or removed, update stateRefusalCallSites in the same change — a site that "+
+				"silently stops using config.StateFileMissingErr is how the three prefixes happened "+
+				"the first time (aihub#428)", file, got, want)
+		}
+	}
+	for file, got := range found {
+		if _, listed := stateRefusalCallSites[file]; !listed {
+			t.Errorf("%s mints the refusal %d time(s) but is not in stateRefusalCallSites. Add it, "+
+				"so the inventory keeps describing the whole family rather than the part somebody "+
+				"remembered", file, got)
+		}
+	}
+
+	total := 0
+	for _, n := range found {
+		total += n
+	}
+	if total == 0 {
+		t.Fatal("found no call sites at all — the scan is broken, not the tree; every assertion " +
+			"above would be vacuously satisfied")
+	}
+}
+
+// stateRefusalExemptSites are the ResolveStateFile call sites that must NOT be
+// converted, with the reason each is a different question rather than the same
+// question worded differently.
+//
+// There are 18 ResolveStateFile call sites in production and only 14 are members
+// of this family. Writing that down is the point: "unify the wording" is exactly
+// the kind of instruction that gets over-applied, and the fourth entry below is
+// one an over-eager unification would visibly damage.
+var stateRefusalExemptSites = map[string]string{
+	"internal/mcp/tools_coding.go worktreePathFor": "best-effort lookup; swallows the error " +
+		"and returns early rather than refusing, so there is no caller-facing message at all.",
+	"internal/mcp/tools_coding.go commit lock gate": "discloses a SIDE EFFECT — \"so nothing was " +
+		"committed\" — which the generic refusal does not and must not claim. Replacing it would " +
+		"delete the one sentence telling the caller the index was left alone.",
+	"internal/mcp/tools_lifecycle.go prior-worktree read": "best-effort; a miss is normal and the " +
+		"error is deliberately ignored.",
+	"internal/mcp/tools_lifecycle.go worktree lookup": "returns (\"\", false); a bool, not a message.",
+}
+
+// TestStateRefusalExemptionsStillSayWhatTheyMean is the NEGATIVE control for the
+// gate above, and the reason the exemption set is a test rather than a comment.
+//
+// The gate only counts hand-rolled refusals, so it is satisfied by converting
+// EVERYTHING — including the commit lock gate, whose message exists to say that
+// nothing was committed. A caller who is told only "no local credential, claim it
+// first" has lost the answer to the question they actually have at that moment,
+// which is whether their commit landed. Over-unification is the failure mode this
+// wi could plausibly produce, and the gate alone cannot see it.
+func TestStateRefusalExemptionsStillSayWhatTheyMean(t *testing.T) {
+	if len(stateRefusalExemptSites) != 4 {
+		t.Fatalf("the exemption set has %d entries, expected 4 — if a call site was added or "+
+			"removed, say which and why here rather than letting the count drift",
+			len(stateRefusalExemptSites))
+	}
+	// The reasons are the payload, not decoration: an exemption list whose
+	// entries carry none is just a list of things somebody decided not to touch,
+	// and the next reader cannot tell a deliberate exemption from an oversight.
+	// Asserting them keeps a future edit from emptying one to silence a failure.
+	for site, reason := range stateRefusalExemptSites {
+		if len(strings.TrimSpace(reason)) < 40 {
+			t.Errorf("exemption %q carries no real reason (%q). Say why this site is a DIFFERENT "+
+				"question rather than the same one worded differently", site, reason)
+		}
+	}
+
+	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal/mcp/tools_coding.go"))
+	if err != nil {
+		t.Fatalf("read tools_coding.go: %v", err)
+	}
+	src := string(b)
+
+	// The disclosure that must survive the unification, quoted from the source it
+	// protects rather than described.
+	const disclosure = "so nothing was committed"
+	if !strings.Contains(src, disclosure) {
+		t.Errorf("the commit-time lock gate no longer says %q. That message is EXEMPT from "+
+			"aihub#428's unification: the generic refusal says a credential is missing, which is "+
+			"true, and says nothing about whether the commit landed, which is what the caller needs "+
+			"at that moment. Unifying it is a regression, not a completion.", disclosure)
+	}
+	// And it must still be a refusal about the same underlying failure, so the
+	// assertion above cannot be satisfied by an unrelated sentence.
+	if !strings.Contains(src, "could not read this work item's attempt") {
+		t.Error("the commit-gate disclosure no longer names the credential read it is reporting on")
 	}
 }

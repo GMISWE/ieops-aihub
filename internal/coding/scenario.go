@@ -36,7 +36,7 @@ import (
 func WorktreePath(wiID, repo, workspaceRoot string) (string, error) {
 	sf, err := config.ResolveStateFile(wiID)
 	if err != nil {
-		return "", fmt.Errorf("read state file for wi %s: %w", wiID, err)
+		return "", config.StateFileMissingErr(wiID, err)
 	}
 
 	// Primary: state file has explicit worktrees map (set by pf_claim_work_item).

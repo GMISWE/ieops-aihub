@@ -168,7 +168,7 @@ func (s *Server) registerStepTools() {
 		// Inject credentials from state file
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
+			return errResult(config.StateFileMissingErr(wiID, err))
 		}
 
 		// Heartbeat mode: only requires work_item_id + credentials

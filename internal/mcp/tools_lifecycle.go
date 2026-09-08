@@ -1261,7 +1261,7 @@ func (s *Server) registerLifecycleTools() {
 
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
+			return errResult(config.StateFileMissingErr(wiID, err))
 		}
 
 		// Emit the note FIRST — the CompleteAttempt below deletes the state file
@@ -1614,7 +1614,7 @@ func (s *Server) registerLifecycleTools() {
 		}
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
+			return errResult(config.StateFileMissingErr(wiID, err))
 		}
 		body := map[string]any{
 			"attempt_id":     sf.AttemptID,
@@ -1659,7 +1659,7 @@ func (s *Server) registerLifecycleTools() {
 		}
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
+			return errResult(config.StateFileMissingErr(wiID, err))
 		}
 		body := map[string]any{
 			"attempt_id":     sf.AttemptID,

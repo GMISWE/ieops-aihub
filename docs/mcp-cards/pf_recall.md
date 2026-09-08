@@ -146,6 +146,16 @@ passing nothing returned the same 20 items in the same order.
 - **`cursor` works on the TEXT path only.** The vector path and the hybrid merge both
   set an empty cursor and return a nil `next_cursor`, so paging a semantic recall
   gets page one forever.
+- **`cursor` is composite, and only half of it is validated.** The token is
+  `<RFC3339Nano>|<id>` — reference time plus the `id DESC` tiebreaker `aihub#239`
+  added — so a malformed one is refused with a 400 naming the parameter
+  (`aihub#435`), but the check reads the TIMESTAMP half only. The id half stays
+  opaque on purpose: constraining it would put a second copy of the id format in
+  the handler, which starts refusing cursors this server is still issuing the day
+  the format moves. Before `aihub#435` the whole token went raw into
+  `$n::timestamptz` and a token the server never issued came back 500 with the
+  driver's text. Cursors minted before `aihub#239` carry the timestamp alone and
+  still pass.
 - **`work_item_id` must be the canonical id**; a slug matches nothing and answers 200
   with an empty list.
 - **`type` entries that match nothing come back in `unmatched_types`**, which is what
@@ -192,6 +202,10 @@ other.
 - **§6.1 T1-2** — `top_k`'s ceiling is a clamp, and the ruling widens the numeric
   gate's scope to hop 2 rather than narrowing the policy; this file is one of the
   three instances that escaped the package-scoped gate.
+- **§6.1 T1-6 — LANDED** (`aihub#435`) — a malformed `cursor` is a 400 at the
+  handler. This tool is the one that made the ruling non-trivial: its cursor is
+  the only composite one, so "validate it as RFC3339Nano" taken literally would
+  have rejected every cursor Recall has ever issued.
 - **§6.2 T2-19 — LANDED** with T1-3 (`aihub#433`), and in that order for the reason
   the ruling gave: a threshold and the value it thresholds must be published on the
   same scale, so `pf_remember`'s range was fixed first. `min_strength` now says which

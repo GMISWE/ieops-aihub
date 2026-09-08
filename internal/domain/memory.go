@@ -778,6 +778,24 @@ func parseRecallCursor(cursor string) (ts, id string) {
 	return cursor, ""
 }
 
+// RecallCursorTimestamp returns the half of a Recall cursor that this server
+// formatted, and therefore the only half a validator may have an opinion about.
+//
+// It exists for the handler that REJECTS a malformed cursor (aihub#435). That
+// check has to split the token by the SAME rule the query builder splits it
+// with, and the alternative — a second copy of `LastIndex(cursor, "|")` over in
+// internal/server — is a copy whose only failure mode is disagreeing with this
+// one, silently, on the day the encoding changes.
+//
+// Splitting it is not optional there either. The token is composite, so
+// validating the whole string as RFC3339 would reject every cursor
+// formatRecallCursor has ever emitted: a correct-looking Rule 1 fix that turns
+// "page 2 sometimes 500s" into "page 2 always 400s".
+func RecallCursorTimestamp(cursor string) string {
+	ts, _ := parseRecallCursor(cursor)
+	return ts
+}
+
 // MemoryStrength calculates effective_strength (raw) per §7.2.
 // Formula: base_strength × exp(-days_since / stability_days)
 // days_since is measured from memoryRefTime (M8, revised by aihub#236).

@@ -108,6 +108,14 @@ Two parameters here have first-class defect histories:
 - The stream is a **whitelisted semantic record**, not a wire log: the server keeps
   no per-request log, which is why `aihub#412` had to reconstruct the request/response
   chain from transcripts instead.
+- `cursor` is **validated at the handler and refused with a 400** naming the
+  parameter and quoting the value (`aihub#435`). It used to go raw into
+  `e.created_at < $n::timestamptz`, where a token this server never issued failed
+  the cast at execute time and came back 500 carrying the driver's text — a
+  caller error reported as a server fault, which sends the reader to the logs
+  rather than to their own client. An accepted token is forwarded as the
+  caller's own string — trimmed, never re-serialised — because the cast stays the
+  domain's.
 
 ## hop 5 — what comes back
 
@@ -122,12 +130,14 @@ union of top-level keys real callers have been handed.
 - **§6.2 T2-18** — state on each `user_id`-shaped parameter which of the three
   identities it filters. **This tool's `user_id` says "Filter by user" and does not.**
   That is the row's live instance here.
-- **§6.1 T1-6** — a caller-supplied `cursor` that will not parse should be a 400 at
-  the handler, not a 500 that sends the reader to the server logs.
+- **§6.1 T1-6 — LANDED** (`aihub#435`). A caller-supplied `cursor` that will not
+  parse is a 400 at the handler, not a 500 that sends the reader to the server
+  logs. The check lives in `internal/server/queryparam.go` (`queryCursor`), which
+  is now the one reader all three cursor-carrying list endpoints go through —
+  this one, `pf_list_work_items` and `pf_recall`. Two readings of one parameter
+  name is how the next variant gets in.
 
 ## Open
 
-- **§6.1 T1-6 is filed, not landed** (`aihub#435`): today a malformed `cursor` is not
-  guaranteed to come back as a 400.
 - **§6.2 T2-18 is unaddressed on this tool.** Which identity `user_id` filters is not
   stated in the schema, and this card does not settle it by asserting one.

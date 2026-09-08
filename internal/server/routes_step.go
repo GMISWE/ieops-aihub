@@ -476,11 +476,15 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			//     2,222 transcripts, 50 carry heartbeat=true, and 49 of those carry
 			//     status="in_progress" plus a step_id (the 50th carries neither).
 			//   - heartbeat + status="completed" answering 200 heartbeat_ok is
-			//     PINNED as intended, by four tests in three packages
+			//     PINNED as intended, by three tests in this package that each send
+			//     that exact combination and assert it
 			//     (routes_step_outcome_records_db_test.go,
-			//     routes_step_identity_db_test.go, routes_step_history_row_db_test.go
-			//     and mcp/tools_step_contract_test.go), and by aihub#398's owner
+			//     routes_step_identity_db_test.go and
+			//     routes_step_history_row_db_test.go), and by aihub#398's owner
 			//     decision, which chose to DOCUMENT the drop rather than change it.
+			//     mcp/tools_step_contract_test.go pins the SCHEMA SENTENCE that
+			//     describes the drop, which is a different guarantee — it would
+			//     survive a change of behaviour.
 			//
 			// So the remaining honest option is the one aihub#314 built for exactly
 			// this shape — request_adjusted, "what the server DID to a value it

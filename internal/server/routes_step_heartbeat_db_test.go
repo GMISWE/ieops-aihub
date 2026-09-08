@@ -208,9 +208,11 @@ func TestHandleUpdateStep_HeartbeatDBFailureIsReportedNotDiscarded(t *testing.T)
 // lifecycle.md says "add heartbeat=true to an in_progress call every ~5 min",
 // and 49 of the 50 heartbeat calls in the measured transcript corpus carry
 // status="in_progress" plus a step_id — and heartbeat+status="completed"
-// answering 200 heartbeat_ok is separately pinned as intended by four tests in
-// three packages and by aihub#398's owner decision to document the drop rather
-// than change it. So the values are reported back through aihub#314's
+// answering 200 heartbeat_ok is separately pinned as intended by three tests in
+// this package (routes_step_outcome_records_db_test.go,
+// routes_step_identity_db_test.go, routes_step_history_row_db_test.go) and by
+// aihub#398's owner decision to document the drop rather than change it. So the
+// values are reported back through aihub#314's
 // request_adjusted list, whose meaning is exactly this: what the server did to
 // a value it held.
 //

@@ -4,7 +4,7 @@
 {
   "tool": "pf_remember",
   "description_sha256": "bec195df7750ddb2b3b4714765c5ded5e0a03f968e184a781d347c9e3f553fc7",
-  "input_schema_sha256": "7d21b6ad970abe474d384aec2964c5373cc8cae80150d52f1e7d39faa63ff67d",
+  "input_schema_sha256": "a3e5cd83578aa67d7bfaa21a221a997af5c7b9dcd25eaea86d2913007eedc428",
   "params": {
     "attrs": {
       "type": "object",
@@ -103,7 +103,7 @@ domain list so the published set and the accepted set are one value.
 | `visibility` | string | yes | `private\|project\|team\|admin` |
 | `work_item_id` | string | no | associated work item |
 | `base_strength` | number | no | "Initial strength, 1-5 (default 3)" |
-| `attrs` | object | no | additional attributes |
+| `attrs` | object | no | additional attributes; a non-object — including a JSON-encoded string of one — is a 400 |
 | `expires_at` | string | no | RFC3339 |
 | `dedup_mode` | string | no | deduplication mode |
 | `related_memory_ids` | array | no | related memory ids |

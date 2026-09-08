@@ -4,7 +4,7 @@
 {
   "tool": "pf_update_work_item",
   "description_sha256": "29b3c7434085f3bd45cf9acebf95466a7fe1ae8757a6d86786d03886c6687c30",
-  "input_schema_sha256": "196dcf0f041327b6a44f1cc2be9842d83262f966b33172f591a53cb2c902c055",
+  "input_schema_sha256": "6c2b187c571996c10c7755e305d756cba1a9ec3237aa103189680d7205cd13c2",
   "params": {
     "attrs": {
       "type": "object",
@@ -129,8 +129,8 @@ that a caller gets wrong by default.
 | `labels` | array | no | max from the domain constant |
 | `declared_resources` | array | no | the whole list, replaced |
 | `resources_version` | integer | no | CAS guard — omitting it overwrites unconditionally |
-| `attrs` | object | no | **REPLACES** the whole object; unsent keys are DELETED |
-| `attrs_patch` | object | no | shallow merge; `null` STORES a null rather than deleting |
+| `attrs` | object | no | **REPLACES** the whole object; unsent keys are DELETED; a non-object is a 400 |
+| `attrs_patch` | object | no | shallow merge; `null` STORES a null rather than deleting; a non-object is a 400 |
 | `attrs_unset` | array | no | applied AFTER `attrs_patch`, so a key in both is deleted |
 | `content` | string | no | markdown ≤20000; not echoed back |
 | `brief` | boolean | no | replaces the body with `content_len` |

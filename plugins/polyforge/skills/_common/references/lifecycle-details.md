@@ -148,3 +148,16 @@ in removes the ordering hazard described in §2 along with the round-trip.
 
 The marketplace repo has historically tracked `.pf_meta.json` / `.pf_steps.json`, which is how
 step-state scratch files end up staged by accident. (team memory: `mem_IG1CV2pN`)
+
+## 6. Ownership — the execute boundary when superpowers writes the content
+
+Deferred out of the resident fragment by aihub#338: on the native branch there is no superpowers
+to bound, and on the superpowers branch `hooks/pf-skill-router` already injects the same boundary
+in its engine pointer, so a resident copy was paying for itself twice and reaching the wrong
+audience once.
+
+superpowers produces content only, which is **not** a lifecycle bypass — the iron rule is about
+skipping claim / step / artifact / wrap, none of which it touches. **Execute boundary (D6)**: let
+superpowers run its implementation loop, but **stop before
+`superpowers:finishing-a-development-branch`**. Commit, PR, wrap and CI gating come back to
+polyforge at that point.

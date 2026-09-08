@@ -210,6 +210,27 @@ header = (
 
 SEP = "\n\n---\n\n"
 
+# --- Iron Rules ride the router, not SessionStart (aihub#338 layer 2) --------------------
+# pf-execute runs in a dispatched SUBAGENT, and a subagent does not inherit SessionStart's
+# additionalContext. Measured 2026-09-04 with a zero-tool-call probe pinned to the first
+# action: CLAUDE.md and MEMORY.md arrive, IR1-IR3 do not. PreToolUse, on the other hand,
+# DOES fire inside a subagent (measured the same day — pf-commit-guard blocked a push from
+# one), so this hook is the only resident channel that reaches the executor at all.
+#
+# Read the SAME file pf-session-start reads. There is deliberately no copy of the rules in
+# this script: aihub#294 is three months of silent drift between two hand-maintained copies
+# of exactly this text, and a paraphrase written at dispatch time would be worse still —
+# nothing can diff a paraphrase against its source. If the fragment is missing the header
+# simply carries no rules, which is visible, rather than a stale restatement, which is not.
+#
+# It goes in the HEADER, not in parts[]: the degrade loop below drops whole fragments to fit,
+# and a rule that can be dropped to make room is not a rule. Cost is charged to the same
+# budget as everything else, and aihub#338 paid for it by re-tiering engine.native.md and
+# _common/lifecycle.md rather than by raising the gate.
+iron_rules = read(os.path.join(skills_dir, "using-polyforge", "fragments", "iron-rules.md"))
+if iron_rules and iron_rules.strip():
+    header = header + SEP + iron_rules.strip()
+
 # (name, on-disk path under the plugin root, drop_rank, text).
 # List order is EMISSION order. drop_rank orders DEGRADATION only, lowest dropped first:
 # storage is a four-line note, memory costs only recall context, lifecycle costs correct wi

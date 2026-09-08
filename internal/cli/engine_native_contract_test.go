@@ -215,8 +215,10 @@ func TestEngineNativeContract(t *testing.T) {
 // so LevelExtractorIsNotBlind and NegativeControl_ModelNameAsLevelIsRejected below exist to
 // prove the check still discriminates, since a vacuous gate and a satisfied one look identical.
 //
-// This gate deliberately does NOT assert any particular depth→model mapping. Wiring one changes
-// cost on every project at once and is the owner's decision; see §0f of
+// This gate deliberately does NOT assert any particular depth→model mapping, and after
+// aihub#338 there still is none: the wired tier is keyed on the STEP ID, which costs `level:`
+// nothing and leaves common/review's depth enumeration untouched. Changing what `level:` means
+// would change cost on every project at once and remains the owner's decision; see §0f of
 // skills/pf-execute/references/engine-native-details.md.
 
 // scenarioReviewLevels is the vocabulary the scenario repo's `level:` directive can take.
@@ -385,22 +387,52 @@ func TestEngineNativeLevelVocabularyContract(t *testing.T) {
 		}
 	})
 
-	t.Run("EngineDocsSayTheTierIsNotWired", func(t *testing.T) {
-		// The subset check is satisfied by SILENCE: a document that says nothing about model
-		// selection passes it. Silence is not the fix — the defect was a reader believing a
-		// mechanism worked, so the corrected text has to say that it does not. Each marker is
-		// paired with the ban above, giving the two-sided pair 2b of the payload suite
-		// established: presence of the truth, absence of the claim.
-		for rel, marker := range map[string]string{
-			"skills/pf-execute/engine.native.md":                    "No per-step model override exists",
-			"skills/pf-execute/references/engine-native-details.md": "There is no per-step model tier",
+	t.Run("EngineDocsSayHowTheTierIsChosen", func(t *testing.T) {
+		// The subset check above is satisfied by SILENCE: a document that says nothing about
+		// model selection passes it. Silence is not good enough — the aihub#358 defect was a
+		// reader believing a mechanism worked, so the text has to state what actually happens.
+		//
+		// Until aihub#338 the true statement was "there is no per-step model tier" and these
+		// markers asserted exactly that. aihub#338 WIRED one, on the owner's 2026-09-04
+		// decision (task-kind -> tier), so the true statement changed and the markers moved
+		// with it — as the note they replace instructed. What did NOT change is the shape: the
+		// pair is still two-sided, presence of the truth AND absence of the superseded claim,
+		// because a document carrying both would be self-contradicting and each half alone is
+		// satisfiable for free.
+		for rel, want := range map[string]string{
+			"skills/pf-execute/engine.native.md":                    "keyed on the step's KIND, never on `level:`",
+			"skills/pf-execute/references/engine-native-details.md": "The model tier is keyed on step KIND",
 		} {
 			body := readEngineDoc(t, pluginRoot, rel)
-			if !strings.Contains(body, marker) {
-				t.Errorf("%s does not contain %q. Without it the document is merely SILENT about "+
-					"per-step model selection, and silence is what let a reader assume the tier "+
-					"worked. If the wording drifted, move this marker with it; deleting it is not "+
-					"the same change.", rel, marker)
+			if !strings.Contains(body, want) {
+				t.Errorf("%s does not contain %q. Without it the document is merely SILENT "+
+					"about how a step's model is chosen, and silence is what let a reader "+
+					"assume a broken tier worked. If the wording drifted, move this marker with "+
+					"it; deleting it is not the same change.", rel, want)
+			}
+		}
+		for rel, retired := range map[string][]string{
+			"skills/pf-execute/engine.native.md":                    {"No per-step model override exists"},
+			"skills/pf-execute/references/engine-native-details.md": {"There is no per-step model tier"},
+		} {
+			body := readEngineDoc(t, pluginRoot, rel)
+			for _, claim := range retired {
+				if strings.Contains(body, claim) {
+					t.Errorf("%s still says %q. That was true until aihub#338 wired the "+
+						"task-kind tier and is false now; leaving it beside the new text gives "+
+						"the reader two contradictory answers and no way to tell which is "+
+						"current.", rel, claim)
+				}
+			}
+		}
+		// The mapping has to be a real predicate in the resident loop, not a promise in prose.
+		// This is the string the engine dispatches on; if it goes, the tier is aspirational
+		// again and the paragraph above becomes the aihub#358 defect with new wording.
+		body := readEngineDoc(t, pluginRoot, "skills/pf-execute/engine.native.md")
+		for _, frag := range []string{`endswith("_review")`, "RAISED_TIER", "DEFAULT_TIER"} {
+			if !strings.Contains(body, frag) {
+				t.Errorf("skills/pf-execute/engine.native.md no longer contains %q — the step "+
+					"body no longer selects a tier, whatever the surrounding prose claims", frag)
 			}
 		}
 	})

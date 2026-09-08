@@ -99,10 +99,8 @@ const (
 // If you GROW one past its gate, do NOT raise the number — move text to the on-demand tier
 // (skills/**/references/, reached by a `📄 Read …` pointer in the resident fragment).
 //
-// ⚠️ `native` is the binding branch and it is nearly full: ~150 characters of resident headroom
-// under its own gate and ~200 of worst-case headroom under the harness limit, against the ~2,850
-// the superpowers branch enjoys. Two ceilings bind before this map does, and neither can be
-// bought off by raising a number here:
+// ⚠️ `native` is the binding branch and it is the one that runs out of room first. Two ceilings
+// bind before this map does, and neither can be bought off by raising a number here:
 //
 //   - normLen must stay under ~9,600, or gate+slack+2 pointers crosses 10,000 and the worst-case
 //     assertion below fires whatever is written here;
@@ -115,9 +113,17 @@ const (
 // deferred sections are reached by a section reference (`§0e`) through an EXISTING pointer. The
 // next contributor who needs to add a paragraph to a native-branch fragment must RE-TIER
 // something out to skills/**/references/, not re-budget.
+//
+// aihub#338 added the Iron Rules to the header (+735 chars on BOTH branches) and paid for them
+// by re-tiering, not by re-budgeting: engine.native.md -121, _common/lifecycle.md -601,
+// _common/memory.md -128 (-850 on disk), with the removed prose moved into existing references/
+// files or — in memory.md's case — deleted outright, because it asserted that a session-start
+// fragment was "already in context", which is false on exactly the subagent path this serves.
+// Net on native: 9,433 -> 9,318, i.e. 115 characters BELOW where it started, which is what
+// bought back the control-5a margin the paragraph above says is the real ceiling.
 var routerBudget = map[string]int{
-	"pf-execute/superpowers": 6996 + routerGateSlack,
-	"pf-execute/native":      9391 + routerGateSlack,
+	"pf-execute/superpowers": 7002 + routerGateSlack,
+	"pf-execute/native":      9318 + routerGateSlack,
 }
 
 // routerBranches are the engine branches the router can select. The gate measures every one:
@@ -487,6 +493,89 @@ func assertPointersResolve(t *testing.T, key, pluginRoot, ctx string) {
 	}
 }
 
+// ironRulesFragment is the ONE authoritative copy of IR1-IR3. hooks/pf-session-start reads it for
+// the session payload and, since aihub#338, hooks/pf-skill-router reads the SAME file for its
+// header. Nothing here restates the rules: a second copy is what aihub#294 already cost this repo
+// (IR1's worktree path drifted between two hand-maintained copies for three months), so the
+// assertion below compares the payload against the file rather than against a literal.
+const ironRulesFragment = "skills/using-polyforge/fragments/iron-rules.md"
+
+// TestRoutedSkillHook_InjectsIronRules is the aihub#338 layer-2 gate.
+//
+// WHY IT EXISTS
+// A dispatched subagent does not inherit SessionStart's additionalContext, and /pf-execute runs
+// in one. Measured 2026-09-04 with a zero-tool-call probe pinned to the subagent's FIRST action:
+// CLAUDE.md and MEMORY.md arrived, IR1-IR3 did not. PreToolUse does fire inside a subagent
+// (measured the same day — pf-commit-guard blocked a push from one), so this hook is the only
+// resident channel that reaches the executor, and the rules ride it.
+//
+// WHY THESE THREE ASSERTIONS AND NOT "the payload mentions IR1"
+//  1. VERBATIM against the file on disk, so a paraphrase or a drifted second copy fails. A
+//     marker check would pass on a copy that had drifted, which is the defect being avoided.
+//  2. In the HEADER, i.e. before the first fragment separator. parts[] is what the degrade loop
+//     drops to fit, and a rule that can be dropped to make room is not a rule.
+//  3. Both branches. A real user gets exactly one of them and which one is not the runner's
+//     choice; the native branch is the one with no budget to spare, so it is the one that would
+//     be "fixed" by dropping this.
+//
+// Anti-vacuity: the fragment itself is checked non-empty and checked to carry all three rule
+// headings first. strings.Contains(payload, "") is true for every payload ever produced, so an
+// emptied or truncated fragment would otherwise turn this whole test green while delivering
+// nothing — the same shape as the NegativeControl in engine_native_contract_test.go.
+func TestRoutedSkillHook_InjectsIronRules(t *testing.T) {
+	pluginRoot := pluginRootDir(t)
+
+	raw, err := os.ReadFile(filepath.Join(pluginRoot, ironRulesFragment))
+	if err != nil {
+		t.Fatalf("%s: cannot read it (%v). It is the single source for IR1-IR3 in both the "+
+			"session payload and the router header; if it moved, both channels lost the rules "+
+			"and this gate must fail rather than skip.", ironRulesFragment, err)
+	}
+	rules := strings.TrimSpace(string(raw))
+	if rules == "" {
+		t.Fatalf("%s is empty. Every containment assertion below would pass vacuously.",
+			ironRulesFragment)
+	}
+	for _, marker := range []string{"IR1 —", "IR2 —", "IR3 —"} {
+		if !strings.Contains(rules, marker) {
+			t.Fatalf("%s does not contain %q, so 'the payload contains this file' would no "+
+				"longer mean 'the payload contains the Iron Rules'", ironRulesFragment, marker)
+		}
+	}
+
+	for _, skill := range routedSkills(t, pluginRoot) {
+		for _, br := range routerBranches {
+			key := skill + "/" + br.name
+			t.Run(key, func(t *testing.T) {
+				r := renderRouter(t, pluginRoot, skill, br.superpowers)
+
+				idx := strings.Index(r.ctx, rules)
+				if idx < 0 {
+					t.Fatalf("%s: the payload does not carry %s verbatim. A subagent running "+
+						"this step would have no Iron Rules at all (aihub#338 layer 2), or the "+
+						"header has grown its own paraphrase — which is the aihub#294 "+
+						"two-copies defect, not a fix for this one.", key, ironRulesFragment)
+				}
+				// Position is asserted against the FIRST parts[] fragment rather than against
+				// the first separator: the header ends with a separator of its own, so "after
+				// a separator" is where the rules correctly live and would prove nothing.
+				first := strings.Index(r.ctx, "# _common/memory.md")
+				if first < 0 {
+					t.Fatalf("%s: cannot find the first parts[] fragment in the payload, so "+
+						"'the rules are in the header' has no boundary to be measured against",
+						key)
+				}
+				if idx > first {
+					t.Errorf("%s: the Iron Rules appear at offset %d, after the first parts[] "+
+						"fragment at %d — i.e. they are a fragment, not the header. The degrade "+
+						"loop drops fragments to fit, so rules placed there can be dropped to "+
+						"make room for whatever pushed the payload over.", key, idx, first)
+				}
+			})
+		}
+	}
+}
+
 // TestRoutedSkillHook_SizeGateDiscriminates is control 5a. Without it, the size assertions
 // above pass just as happily on a gate that has drifted far above the payload.
 func TestRoutedSkillHook_SizeGateDiscriminates(t *testing.T) {
@@ -589,6 +678,18 @@ func assertDegradesLoudly(t *testing.T, pluginRoot, skill string) {
 	if !strings.Contains(over.ctx, routerBannerMark) {
 		t.Errorf("degraded payload carries no banner — the omission would be silent, which is " +
 			"the failure mode this exists to remove")
+	}
+	// aihub#338: the degrade loop drops FRAGMENTS. The Iron Rules are in the header precisely
+	// so that it cannot drop them, and this is the only place that state can be observed —
+	// every other assertion in this file measures a tree that does not degrade.
+	if raw, err := os.ReadFile(filepath.Join(overRoot, ironRulesFragment)); err != nil {
+		t.Errorf("%s: %v", ironRulesFragment, err)
+	} else if rules := strings.TrimSpace(string(raw)); rules == "" {
+		t.Errorf("%s is empty, so the containment check below would be vacuous", ironRulesFragment)
+	} else if !strings.Contains(over.ctx, rules) {
+		t.Errorf("the DEGRADED payload (%d chars) lost the Iron Rules. They live in the header "+
+			"for exactly this reason: a rule that gets dropped to make room is not a rule. "+
+			"stderr: %s", charLen(over.ctx), over.stderr)
 	}
 	if !strings.Contains(over.stderr, "over the 10000-char harness limit") {
 		t.Errorf("nothing usable on stderr for an over-budget payload: %q", over.stderr)

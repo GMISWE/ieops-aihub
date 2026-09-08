@@ -14,8 +14,7 @@ The router substitutes that slot with a JSON **array**; do NOT wrap it in quotes
 list, so a single string containing `|` is one type name matching nothing — a 400 (aihub#289).
 
 Display results with `effective_strength >= 0.3` (💡 prefix); `pf_activate_memory(id)` for any the
-model judges actually useful. The display format and the Memory-First principle come from the
-session-start `memory-first` fragment, already in your context.
+model judges actually useful.
 
 ## After the engine — record useful learnings
 

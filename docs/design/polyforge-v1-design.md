@@ -625,7 +625,9 @@ FOR EACH ROW EXECUTE FUNCTION fn_wi_updated_at();
 -- goal 更新改为 API 层权限控制 + audit，不在 DDL 层阻断
 -- server handler 在 PATCH goal 时检查：
 --   a. caller 是 reporter 或 maintainer
---   b. wi.status IN ('queued', 'paused')，running 时返回 409 GOAL_CHANGE_NOT_ALLOWED
+--   b. wi.status IN ('queued', 'paused', 'blocked')（aihub#440 起含 blocked：blocked 没有
+--      在跑的 attempt，与 cancelGate 已接受的理由相同），running 时返回 409
+--      CONFLICT_WI_ALREADY_CLAIMED，终态返回 409 CONFLICT_TERMINAL_STATE
 --   c. goal_change_reason 必填
 --   d. emit wi_goal_updated event {old_goal, new_goal, reason, changed_by}
 
@@ -1157,8 +1159,11 @@ PATCH  /v1/work_items/{id_or_slug}
          goal_change_reason?}    --   必须同时传；caller=reporter/maintainer；status=queued/paused
                                  --   goal 更新不重置 step_state（保留原步骤）
   → {work_item}
-  goal 更新失败：409 GOAL_CHANGE_NOT_ALLOWED（wi 正在 running）
-                403 FORBIDDEN（非 reporter/maintainer）
+  goal 更新失败：409 CONFLICT_WI_ALREADY_CLAIMED（wi 正在 running；aihub#440 前是
+                    GOAL_CHANGE_NOT_ALLOWED）
+                409 CONFLICT_TERMINAL_STATE（wi 已终态）
+                403 FORBIDDEN（非 reporter/maintainer/admin）—— 本行一直是这么写的，
+                    而服务端在 aihub#440 之前返回的是 409，现已与本行一致
 
 POST   /v1/work_items/{id_or_slug}/cancel
   -- 决策6: 新增专用 cancel 接口
@@ -3195,7 +3200,13 @@ type EmbeddingProvider interface {
 HTTP 400
   BAD_REQUEST              请求格式错误（字段缺失/类型错误）
   GOAL_MULTILINE             goal 包含换行符
-  GOAL_CHANGE_NOT_ALLOWED  goal 更新时 wi 处于 running 状态（需先 pause）
+  GOAL_CHANGE_NOT_ALLOWED  【aihub#440 起已退役，不再由服务端产生；常量保留以便旧客户端分支仍能解析】
+                           原义：goal 更新时 wi 处于 running 状态（需先 pause）。
+                           现由 internal/domain/work_items.go (wiEditTierByField) 的
+                           可编辑矩阵接手：状态不对 = 409（running →
+                           CONFLICT_WI_ALREADY_CLAIMED，终态 → CONFLICT_TERMINAL_STATE），
+                           调用者不对 = 403 FORBIDDEN。注意本条一直被归在 §17 的 HTTP 400
+                           段落下，而 codeToHTTPStatus 从来映射成 409
   INVALID_PHASE_YAML       phase_yaml_snapshot schema 无效
   INVALID_STEP_TRANSITION  step 状态转移不合法
   PROJECT_AMBIGUOUS        project 无法自动推断，需显式传参
@@ -3239,7 +3250,11 @@ HTTP 409
                                   details: {db_value, phase_yaml_value, wi_type}
   WI_TYPE_MISMATCH                wi_type 在 phase.yaml 里不存在（§8.4 / §22 校验）
                                   details: {wi_type, available_wi_types:[...]}
-  WI_RECLASSIFY_FORBIDDEN         PATCH wi_type 时权限不足或 wi.status 不允许（需 queued/paused）
+  WI_RECLASSIFY_FORBIDDEN         【aihub#440 起已退役，不再由服务端产生；常量保留】
+                                  原义：PATCH wi_type 时权限不足或 wi.status 不允许。
+                                  它同时承担「状态不对」和「调用者不对」两种拒绝，正是
+                                  aihub#242 在 cancel 路径上消除的混淆；现按同一矩阵拆成
+                                  409（状态）/ 403 FORBIDDEN（调用者）
   CONFLICT_SERIALIZATION_FAILURE  Postgres class 40 事务回滚（40001 序列化失败 / 40P01 死锁）：
                                   服务端正常、请求合法，只是这个事务输掉了并发竞争，重试即可
                                   （aihub#334；此前漏成 500 INTERNAL_ERROR）

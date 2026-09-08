@@ -246,8 +246,32 @@ type wiListPageData struct {
 	DoneCursor     string
 	DoneNextCursor string
 	DoneShown      int
-	Err            string
+	// DoneNotice is a NON-FATAL advisory about how the Done page on screen was
+	// produced: the rows below it are real data, they are just not the page the
+	// request named. Today its one producer is a `?done_cursor=` that is not a
+	// page token this server minted, where the answer is the newest page plus
+	// this sentence rather than a silent substitution (aihub#466).
+	//
+	// SegErr is the opposite state and must not be confused with it: the selected
+	// segment could not be loaded AT ALL, so there are no rows and the template
+	// renders this instead of the rows AND instead of the "Nothing here" empty
+	// state. An empty list and a failed list are different facts, and printing
+	// the first for the second is the defect aihub#466 fixed — the header count
+	// beside it comes from a separate COUNT(*), so the page could show a non-zero
+	// archive total above zero rows with nothing saying why.
+	DoneNotice string
+	SegErr     string
+	Err        string
 }
+
+// doneCursorNoticePrefix and doneFetchErrPrefix are the /ui-side sentences that
+// carry the consequence a JSON 400 has no room for — what the page did INSTEAD.
+// The detail after each one is the domain's own message, reused verbatim (see
+// the notes at their call sites in handleUIWIList).
+const (
+	doneCursorNoticePrefix = "这个分页链接无法识别,已回到最新一页 — "
+	doneFetchErrPrefix     = "归档列表没能加载(这不是一个空归档,上方的总数来自另一条查询) — "
+)
 
 // segNav is one entry in the LCRS sidebar (aihub#185): a segment's display label,
 // its live count, whether it is the selected segment, and whether a divider is
@@ -911,8 +935,44 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		// Cursor for the Done segment's server-side pagination (aihub#298).
 		// Empty = newest page. Only Done reads it; the active segments are
 		// bounded and ship whole.
-		doneCursor := strings.TrimSpace(c.QueryParam("done_cursor"))
+		//
+		// Read through queryCursor — the SAME reader aihub#435 put in front of
+		// /v1/work_items, whose cursor this one literally is: both are
+		// listWorkItemsNextCursor's output, a bare RFC3339Nano timestamp, and
+		// both end up at `%s %s $n::timestamptz` in buildListWorkItemsWhere. One
+		// definition of "what is a page token", so a token cannot be legal on one
+		// surface and not the other (aihub#466).
+		//
+		// What differs is the ANSWER, not the validator, and that split is the
+		// /ui exemption in queryparam.go applied rather than re-argued: /v1's
+		// caller is a program that can read a 400, /ui's is a browser following a
+		// link this server wrote, so an error page fails a human over a parameter
+		// they did not knowingly set. So the page still renders — the NEWEST page,
+		// which is what a stale bookmark wants — and says so in DoneNotice.
+		//
+		// 🔴 Not silently. A silent fall back to page one is Rule 1's forbidden
+		// move (queryparam.go: "a default is byte-identical to 'the caller did not
+		// send this parameter'"), and it is worse here than for `limit`: a page of
+		// archive rows is indistinguishable from the page that was asked for, so a
+		// reader walking the archive would see it loop with nothing to read.
+		//
+		// aerr.Message is reused verbatim as the notice's detail rather than
+		// reworded. It already names the parameter, quotes the value and states
+		// what is legal — the three properties aihub#435's requireCursor400 pins —
+		// and it is also the only way to quote the offending token without a
+		// second raw read of the same parameter, which is the thing
+		// cursor_validation_test.go's census exists to prevent.
+		//
+		// The notice is raised only when Done is the segment on screen. The read
+		// itself is unconditional (one reader, one place, whatever ?seg= says),
+		// but `?seg=unclaimed&done_cursor=garbage` did not fall back to any page:
+		// nothing consumed the token at all, and a notice claiming otherwise would
+		// be a true-sounding sentence about something that did not happen.
+		doneCursor, _, doneCursorErr := queryCursor(c, "done_cursor", nil)
 		data.DoneCursor = doneCursor
+		if doneCursorErr != nil && selectedSeg == "done" {
+			data.DoneNotice = doneCursorNoticePrefix + doneCursorErr.Message
+		}
 
 		stalled := stalledSet(ctx, pool, project, allMode, projects, u)
 		segCounts, segRows := segmentListRows(rows, viewer, data.Mine, stalled)
@@ -974,7 +1034,28 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 			if doneCursor != "" {
 				df.Cursor = &doneCursor
 			}
-			if dr, next, derr := fetchListRowsPaged(ctx, pool, queryProject, df); derr == nil {
+			//
+			// 🔴 derr is REPORTED, not discarded. It used to be swallowed by the
+			// condition itself (`if ... derr == nil` with no else), so any failure
+			// of this one query left data.SegRows at its zero value and the
+			// template printed its "Nothing here" empty state — under a header
+			// count that comes from fetchDoneCount, a separate real COUNT(*) that
+			// stays exact. A non-zero total above zero rows and no message reads as
+			// "the archive is empty", which is the aihub#298 illusion this segment
+			// was rebuilt to remove, arriving by a different road (aihub#466).
+			//
+			// It is a SEGMENT-level state, not data.Err: that field replaces the
+			// whole two-column layout, taking the sidebar and every other
+			// segment's count down with it for the failure of one query.
+			//
+			// This half also covers what the cursor check cannot. queryCursor
+			// refuses a token Postgres would refuse, but a token it ACCEPTS can
+			// still fail the query for reasons that have nothing to do with paging
+			// — and before this, all of those rendered as an empty archive too.
+			dr, next, derr := fetchListRowsPaged(ctx, pool, queryProject, df)
+			if derr != nil {
+				data.SegErr = doneFetchErrPrefix + derr.Message
+			} else {
 				data.SegRows = dr
 				data.DoneNextCursor = next
 				data.DoneShown = len(dr)

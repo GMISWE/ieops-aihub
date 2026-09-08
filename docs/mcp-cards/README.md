@@ -161,7 +161,16 @@ and is tracked as `aihub#482`.
 
 ```sh
 # after any tool schema or description change
+
+# 1. READ FIRST, before running anything: the card's hop 0-1 table and its prose
+#    against the new schema text, and fix whatever the change falsified. This
+#    step is first because regenerating first produces a GREEN gate with stale
+#    prose — see the "Regenerating is not the repair" note below.
+
+# 2. then rewrite the machine block (hashes, params, nothing else)
 GOWORK=off PF_CARDS_REGEN=1 go test ./internal/mcp/ -run TestGenerateContractCards
+
+# 3. verify
 GOWORK=off go test ./internal/mcp/ -run TestContractCard -v
 ```
 

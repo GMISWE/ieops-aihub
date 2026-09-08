@@ -682,8 +682,14 @@ func (s *Server) registerLifecycleTools() {
 			// sending it loud. pf_list_work_items' `kind` is a different parameter
 			// (a deprecated alias for its wi_type FILTER) and stays. Class gate:
 			// TestUpdateWorkItemPublishesOnlyParamsTheServerBinds.
-			"work_item_id":           prop("string", "Work item ID or slug"),
-			"goal":                   prop("string", "Updated goal (status must be queued or paused)"),
+			"work_item_id": prop("string", "Work item ID or slug"),
+			// aihub#440: the status set widened to include `blocked` when the
+			// per-field guards became one editability matrix — a blocked wi has no
+			// live attempt, which is the same argument cancelGate already accepts
+			// for the far more destructive cancel. domain.wiEditTierByField holds
+			// the matrix. +10 bytes of always-resident schema, budgeted against the
+			// resources_version note below.
+			"goal":                   prop("string", "Updated goal (status must be queued, paused or blocked)"),
 			"goal_change_reason":     prop("string", "Reason for goal change (required with goal)"),
 			"priority":               propEnum("string", "Updated priority", domain.WorkItemPriorityList()),
 			"milestone":              prop("string", "Updated milestone"),
@@ -1356,6 +1362,17 @@ func (s *Server) registerLifecycleTools() {
 		// the gap resource_events.go documents is reachable; the claim tool's is
 		// SERIALIZABLE, where aihub#430 measured the same interleaving coming back
 		// as a retryable 409 with the row untouched. Do not re-add it there.
+		//
+		// aihub#451 finished the job that deletion started: the qualifier that
+		// STAYED here now has a test under it — force_takeover_commit_window_db_test.go
+		// in internal/domain. aihub#430 had also probed READ COMMITTED and got a
+		// refusal, which reads like "nothing can reach this gap"; but that probe
+		// committed only the LOCK ROW inside the window. Commit the foreign
+		// ATTEMPT row inside it too — which is exactly what a claim in flight
+		// holds, since FnClaimWorkItem writes both in one transaction — and the
+		// takeover succeeds, rewrites a live foreign holder's row, and tells
+		// neither side. So this clause is not a hedge and not a leftover: delete
+		// it only in the change that closes the gap.
 		Description: "Force-take ownership of a work item from another agent. ⚠️ It takes over the WORK " +
 			"ITEM, not other people's locks: a lock held by a running or paused attempt of a DIFFERENT " +
 			"work item still answers 409 CONFLICT_LOCK_TAKEN and does not change hands (aihub#393). It " +

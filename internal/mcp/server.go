@@ -117,6 +117,16 @@ func (s *Server) Connect(ctx context.Context, transport sdkmcp.Transport) (*sdkm
 // caller's problem. It is logged and the tool is still registered with an empty
 // published set — which discloses every argument as unknown, loudly and on the
 // first call, rather than silently disabling the check for that one tool.
+//
+// Every tool registered here also has a CONTRACT CARD under docs/mcp-cards/
+// (indexed by docs/mcp-tools.md) recording what each of its parameters and
+// response fields does, hop by hop. Editing a Tool literal in this package's
+// tools_*.go — its description, a parameter description, or the schema itself —
+// falsifies that card, and contract_cards_gate_test.go goes red on the always-on
+// Unit tests step (K3 on either hash, K9 on a cell still quoting the old text)
+// rather than letting the stale card ship. Read the card against the new text
+// BEFORE regenerating its machine block — regenerating first is green with stale
+// prose. docs/mcp-cards/README.md has the recipe.
 func (s *Server) addTool(t *sdkmcp.Tool, h sdkmcp.ToolHandler) {
 	published, err := publishedParamNames(t.InputSchema)
 	if err != nil {

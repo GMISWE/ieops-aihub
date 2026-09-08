@@ -779,7 +779,10 @@ func (s *Server) registerLifecycleTools() {
 			"bound to (aihub#392).",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID or slug"),
-			"idempotency_key": prop("string", "Idempotency key for DB dedup. Resending a key returns the "+
+			"idempotency_key": prop("string", "Idempotency key for DB dedup on run_attempts — a BODY "+
+				"parameter, NOT the HTTP Idempotency-Key header, which the client now mints per request "+
+				"on its own (aihub#436); different guarantees, and the design requires both. "+
+				"Resending a key returns the "+
 				"EXISTING attempt, and this process reuses the session_secret it recorded for that key so "+
 				"the credential stays valid (aihub#392: it used to mint a new one, and every later call "+
 				"then answered 'invalid session_secret'). ⚠️ Only works where that record exists: "+

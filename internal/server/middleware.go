@@ -378,9 +378,28 @@ func checkProjectAccess(c echo.Context, u *UserContext, project, minRole string)
 	userRole, ok := u.ProjectRoles[project]
 	// Compared through roleLevel rather than tested for non-emptiness, matching
 	// handleListWorkItems' ids= branch (router.go): roleLevel maps an unrecognised
-	// string to 0, and migration 0013_backfill_projects.sql copied arbitrary legacy
-	// role values in. A role that does not reach viewer is not a membership, so it
+	// string to 0. A role that does not reach viewer is not a membership, so it
 	// must not be told the project exists either.
+	//
+	// What can put an unrecognised string in this map: it is built from
+	// projects.members — by BearerAuth above and by loadUserByAPIKeyID in
+	// ui_handlers_auth.go, both through roleForUserInMembers, which returns the
+	// JSONB's role verbatim and never checks it against a vocabulary.
+	// TestProjectRolesHaveOneDerivation holds that to the two of them.
+	// domain.UpdateProject is the only validator, and it is application-level only:
+	// projects.members is JSONB with no CHECK constraint, so any write that does not
+	// go through UpdateProject can store anything. Measured on the fully migrated
+	// schema (aihub#460): direct INSERTs stored the role "some_legacy_role", stored
+	// the number 42, and stored a member carrying no role key at all — all three
+	// accepted, while users.role, which does have a CHECK, rejected the same string.
+	//
+	// Not migration 0013_backfill_projects.sql, which earlier revisions of this
+	// comment blamed on every site. 0013 filtered: its members loop is
+	// `WHERE (pr).value#>>'{}' IN ('viewer','writer','maintainer')`, mapping
+	// maintainer to writer, and the column it read — users.project_roles — was
+	// dropped by 0014. Anyone who checked that citation found it disproved the
+	// comment and would reasonably have deleted this guard. The guard is right; the
+	// reason it used to give was not.
 	if !ok || userRole == "" || roleLevel[userRole] < roleLevel["viewer"] {
 		ae := errNotVisible()
 		writeError(c, ae) //nolint:errcheck

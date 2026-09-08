@@ -510,8 +510,10 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		}
 		// Slug unconditionally; only ID is withheld. Membership is compared through
 		// roleLevel rather than tested for non-emptiness, matching
-		// checkProjectAccess: a legacy role string that reaches no known level
-		// (migration 0013 backfilled arbitrary values) is not a membership.
+		// checkProjectAccess: a role string that reaches no known level is not a
+		// membership. The roles arrive verbatim from projects.members, and behind
+		// UpdateProject's validation that JSONB has no CHECK constraint of its own,
+		// so an unrecognised value is reachable (aihub#460).
 		entry.Slug = &slug
 		entry.Accessible = callerRole == "admin" ||
 			RoleLevel[callerProjectRoles[entry.Project]] >= RoleLevel["viewer"]
@@ -545,8 +547,10 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		}
 		// Slug unconditionally; only ID is withheld. Membership is compared through
 		// roleLevel rather than tested for non-emptiness, matching
-		// checkProjectAccess: a legacy role string that reaches no known level
-		// (migration 0013 backfilled arbitrary values) is not a membership.
+		// checkProjectAccess: a role string that reaches no known level is not a
+		// membership. The roles arrive verbatim from projects.members, and behind
+		// UpdateProject's validation that JSONB has no CHECK constraint of its own,
+		// so an unrecognised value is reachable (aihub#460).
 		entry.Slug = &slug
 		entry.Accessible = callerRole == "admin" ||
 			RoleLevel[callerProjectRoles[entry.Project]] >= RoleLevel["viewer"]

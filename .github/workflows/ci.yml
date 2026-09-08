@@ -901,6 +901,60 @@ jobs:
       #             rather than only reasoned about: all three subtests PASS with
       #             no `--- SKIP`, and the name-gated greps were run as extracted
       #             from this file.
+      #   233 -> 236 aihub#442 added 3 DB-gated functions, all in internal/server
+      #             (routes_step_heartbeat_db_test.go:
+      #             TestHandleUpdateStep_HeartbeatReportsWhetherItRefreshedAnything,
+      #             TestHandleUpdateStep_HeartbeatDBFailureIsReportedNotDiscarded,
+      #             TestHandleUpdateStep_HeartbeatDisclosesTheArgumentsItDrops).
+      #
+      #             🔴 This entry is a BACK-FILL, not a fresh addition, and that
+      #             is the thing worth recording. Those three functions reached
+      #             main with fee1ca6 (PR #396) carrying neither their manifest
+      #             lines nor a step, so this gate was red ON MAIN and on every
+      #             PR's merge ref until this line was written. It is registered
+      #             here, under aihub#451, only because that wi held the lock on
+      #             both files at the time — the coverage itself is aihub#442's.
+      #
+      #             BOTH halves of the gate were failing, which is the useful
+      #             detail: the manifest equality check (233 entries against an
+      #             inventory of 236) AND the coverage check (230/233, with the
+      #             three "executed by NO CI step, so they SKIP forever and CI
+      #             stays green"). The aihub#451 entry above failed only the
+      #             first, because its step already named its test. A change
+      #             that adds a test and forgets BOTH is the case this gate was
+      #             built for, and it worked — what failed is that the PR was
+      #             merged over a red Build & Test.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched, and in both
+      #             directions on the SAME inventory. Verbatim, before the three
+      #             manifest lines and the step were added:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 233 entries,
+      #                 inventory measured 236
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 236
+      #                 (require only a DB: 233, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 74
+      #               dbtestcov: covered by a CI step: 230/233
+      #               ::error::dbtestcov: 3 … not in the manifest … 3 … executed
+      #                 by NO CI step
+      #             and after:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 236 entries,
+      #                 inventory measured 236
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 236
+      #                 (require only a DB: 233, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 75
+      #               dbtestcov: covered by a CI step: 233/233
+      #               dbtestcov: OK
+      #
+      #             The step's own `run:` text was executed against a real
+      #             Postgres (pgvector/pgvector:pg16, migrated with goose to 33)
+      #             rather than only reasoned about: all three functions PASS
+      #             with no `--- SKIP`, and with AIHUB_TEST_DB unset it exits 1
+      #             on the first "did not run".
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -2284,6 +2338,47 @@ jobs:
           done
           ! grep -q -- '--- SKIP' step_identity.log \
             || { echo "::error::an aihub#398 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#442, and this step is REMEDIAL: the tests it runs landed in
+      # main with fee1ca6 (PR #396) without their manifest lines and without a
+      # step, so the aihub#303 gate went red on main itself and on every PR's
+      # merge ref. Both halves of that gate were failing — 233 entries against
+      # an inventory of 236, and "3 gated test functions executed by NO CI step,
+      # so they SKIP forever and CI stays green", which is precisely the
+      # condition the gate exists to catch. It caught it. What was missing was
+      # this step and those three lines, added here (aihub#451) because that wi
+      # held the lock on both files.
+      #
+      # THE DB IS THE POINT for the first two, and in opposite directions. The
+      # heartbeat's UPDATE is keyed on work_item_id, so on a work item with no
+      # wi_step_state row it matches ZERO rows and returns NO error — a
+      # nil-pool unit test cannot tell that from a successful write, and the
+      # handler used to answer "heartbeat_ok" either way. FnClaimWorkItem's
+      # wi_step_state upsert is deliberately non-fatal, so that state is
+      # reachable in production, not contrived. The other arm needs a real
+      # failing write for the same reason: `_, _ = pool.Exec(...)` discarded it.
+      # Both are asserted from the DATABASE as well as from the response, since
+      # a response field echoing a constant would satisfy the response half on
+      # its own.
+      #
+      # All three in one -run: they are one file and one branch of
+      # handleUpdateStep, and the third (a heartbeat carrying a step_id or
+      # status it silently drops) is the aihub#290 "do not accept a parameter
+      # you do not act on" rule applied to the same request path.
+      - name: aihub#442 heartbeat write and dropped-argument DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestHandleUpdateStep_Heartbeat(DBFailureIsReportedNotDiscarded|DisclosesTheArgumentsItDrops|ReportsWhetherItRefreshedAnything)$' -count=1 -v 2>&1 | tee step_heartbeat.log
+          for want in TestHandleUpdateStep_HeartbeatReportsWhetherItRefreshedAnything \
+                      TestHandleUpdateStep_HeartbeatDBFailureIsReportedNotDiscarded \
+                      TestHandleUpdateStep_HeartbeatDisclosesTheArgumentsItDrops; do
+            grep -q -- "--- PASS: $want" step_heartbeat.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the heartbeat can again report a refresh it never made, discard a failed step_started_at write, or drop a step_id it was sent without saying so"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' step_heartbeat.log \
+            || { echo "::error::an aihub#442 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#396. THE point of running this against a real database: the checks
       # it asserts run before any query, so a nil-pool unit test could prove the

@@ -215,5 +215,10 @@ but nothing catches a stale paragraph.
 
 Adjudicated policy is cited by document section and row id — `§6.1 T1-12` in
 [`../audits/aihub-411-design-decision-table.md`](../audits/aihub-411-design-decision-table.md)
-— never by memory id. The eight items in that document's `§6.4` are **not**
-settled, and a card that touches one says so under `## Open`.
+— never by memory id. The eight items in that document's `§6.4` started **not**
+settled, and a card that touches one says so under `## Open`. They are closed one at
+a time, not as a set: item 7 by `aihub#440` and item 2 by `aihub#447`, each recorded
+in that same section of the card that owns it, naming the work item and what it
+measured. So "a card touching a `§6.4` item says so under Open" still holds — what
+the entry says there is OPEN or CLOSED, and a blanket "none of them is settled" is
+now false.

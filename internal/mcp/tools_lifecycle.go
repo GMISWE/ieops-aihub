@@ -694,7 +694,7 @@ func (s *Server) registerLifecycleTools() {
 			"priority":               propEnum("string", "Updated priority", domain.WorkItemPriorityList()),
 			"milestone":              prop("string", "Updated milestone"),
 			"wi_type":                prop("string", "Updated wi_type"),
-			"requires_human_session": prop("boolean", "Updated requires_human_session"),
+			"requires_human_session": prop("boolean", requiresHumanSessionUpdateDescription),
 			"reclassify_reason":      prop("string", "Reason for wi_type change (min 10 chars)"),
 			"labels":                 prop("array", fmt.Sprintf("Updated labels (max %d)", domain.MaxWorkItemLabels())),
 			"declared_resources":     declaredResourcesProp("Updated declared resources"),
@@ -709,8 +709,8 @@ func (s *Server) registerLifecycleTools() {
 			// response. Measured: 325 -> 427 characters, +102, against the +90 the
 			// members_version rewrite spent. Budget any further edit against that.
 			"resources_version": prop("integer", "Compare-and-set guard for declared_resources: ALWAYS send the resources_version pf_get_work_item returned. The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version. Every write of declared_resources increments this counter. Leaving it out overwrites unconditionally: a concurrent writer's list is silently discarded, locks and all, and you still get a 200."),
-			"attrs":             prop("object", "REPLACES the whole attrs object: every key you do not resend is DELETED. Use it only when you intend to overwrite attrs wholesale (e.g. after reading the current value). To add or change keys without destroying the others, use attrs_patch. Cannot be combined with attrs_patch/attrs_unset."),
-			"attrs_patch":       prop("object", "Merge these keys into attrs, leaving every other key untouched (aihub#288). Shallow: a top-level key in the patch replaces that key's stored value outright, it is NOT merged into it recursively, and null STORES a JSON null rather than deleting. To delete keys use attrs_unset. Cannot be combined with attrs."),
+			"attrs":             prop("object", "REPLACES the whole attrs object: every key you do not resend is DELETED. Use it only when you intend to overwrite attrs wholesale (e.g. after reading the current value). To add or change keys without destroying the others, use attrs_patch. Cannot be combined with attrs_patch/attrs_unset."+jsonObjectPropNote),
+			"attrs_patch":       prop("object", "Merge these keys into attrs, leaving every other key untouched (aihub#288). Shallow: a top-level key in the patch replaces that key's stored value outright, it is NOT merged into it recursively, and null STORES a JSON null rather than deleting. To delete keys use attrs_unset. Cannot be combined with attrs."+jsonObjectPropNote),
 			"attrs_unset":       prop("array", "Top-level attrs keys to delete (array of strings). Applied AFTER attrs_patch, so a key in both ends up deleted. Cannot be combined with attrs."),
 			"content":           prop("string", contentPropDescription),
 			// aihub#281. The echo suppression above needs no flag because it only
@@ -1983,6 +1983,39 @@ func propEnum(typ, description string, enum []string) map[string]any {
 	return p
 }
 
+// jsonObjectPropNote is the hop-1 half of the aihub#465 shape guard, appended to
+// the description of every caller-supplied jsonb object parameter that has NO
+// length cap: `attrs` (pf_create_work_item, pf_batch_create_work_items,
+// pf_update_work_item, pf_remember), `attrs_patch` (pf_update_work_item) and
+// `structured_payload` (pf_save_artifact).
+//
+// aihub#486. The guard shipped enforced and unpublished, which is the mirror of
+// aihub#238's published-but-unenforced enum: the InputSchema said
+// `"type": "object"` and stopped there, so nothing told a caller what a
+// violation looks like or how to repair it — and hop 1 is the only thing an LLM
+// caller sees. The claim is not new, only newly stated: `internal/domain`'s
+// validateJSONObjectParam has rejected these with a 400 since aihub#465.
+//
+// The middle sentence is the one a caller cannot guess, and it is why this text
+// is worth its resident bytes: 18 of the 19 stringified values measured over the
+// transcript corpus were a model hand-writing escaped JSON that came out
+// malformed, not a client wrapping a good object. "Send an object" alone tells
+// those 18 nothing about what to change.
+//
+// The closing sentence is here because its absence is what filed aihub#420: a
+// caller who reads only "must be a JSON object", looks at the object they meant
+// to send, and concludes the real limit is size.
+//
+// ⚠️ `payload` does NOT take this string. It is the one guarded field with a
+// real size cap, so the closing sentence would be false there — see
+// emitEventPayloadPropDescription in internal/mcp/tools_events.go, and
+// jsonObjectParamSizeNote in internal/domain/work_items.go, which makes the same
+// split on the error-message side.
+const jsonObjectPropNote = " Must be a JSON object: a string (including a JSON-encoded string of the object you meant), " +
+	"an array, a number or a boolean is rejected with 400 naming the type received, and nothing is written. " +
+	"Do not hand-write the escaped JSON — send the object and let your client serialise it. " +
+	"Size is never the reason for that 400: this field has no length cap."
+
 // maxBatchWorkItems bounds pf_batch_create_work_items. Generous relative to the
 // measured behaviour it replaces — the adjacent-create runs this fuses were a
 // handful of follow-ups long, not dozens — while still keeping one MCP call from
@@ -2007,7 +2040,7 @@ func workItemFieldProps() map[string]any {
 		// while it cannot validate prose.
 		"priority":               propEnum("string", "Work item priority", domain.WorkItemPriorityList()),
 		"wi_type":                prop("string", "Work item type (fix_bug, feature, chore, etc.)"),
-		"requires_human_session": prop("boolean", "Whether this wi requires a human session"),
+		"requires_human_session": prop("boolean", requiresHumanSessionCreateDescription),
 		"milestone":              prop("string", "Milestone name"),
 		"labels":                 prop("array", fmt.Sprintf("Labels (max %d)", domain.MaxWorkItemLabels())),
 		"declared_resources":     declaredResourcesProp("Declared resource locks"),
@@ -2016,13 +2049,64 @@ func workItemFieldProps() map[string]any {
 		// vocabulary — sending "jira" instead of "sync_jira" was a 500. Published
 		// as an enum from the same list the validator uses.
 		"source":       propEnum("string", "How this work item was filed", domain.WorkItemSourceList()),
-		"attrs":        prop("object", "Additional attributes"),
+		"attrs":        prop("object", "Additional attributes."+jsonObjectPropNote),
 		"blocked_by":   prop("array", blockedByPropDescription),
 		"content":      prop("string", contentPropDescription),
 		"force_create": prop("boolean", "Force create bypassing duplicate check"),
 		"force_reason": prop("string", "Reason for force create"),
 	}
 }
+
+// requiresHumanSessionCreateDescription is the published description of
+// `requires_human_session` on the two create paths.
+//
+// It names the THIRD state, which is the aihub#411 T2-9 ruling. The column is a
+// *bool — true / false / NULL — and NULL is not "unset pending a default": it is
+// its own ready-queue segment (`unclassified[]`, domain.GetReadyQueue), which
+// items[] and readyOnlyPredicate both exclude. Published as a bare boolean with
+// no mention of omission, the one state a caller reached BY DOING NOTHING was the
+// state the contract did not name. aihub#397 measured exactly that and was
+// cancelled as description-only, which the adjudication ruled is not a
+// cancellation reason.
+//
+// The claim-path sentence is contract, not background. aihub#411 itself was
+// created with requires_human_session: null, did not stay null, and the write was
+// attributed to an unrelated attrs_patch-only pf_update_work_item call. aihub#447
+// reproduced the whole sequence on two server builds and found the update writes
+// nothing here; the FIRST claim does, from a server default. A caller that cannot
+// see the claim-path write in any published text has no way to reach that
+// conclusion, which is how one line of silence bought an unexplained-behaviour
+// row in the audit.
+const requiresHumanSessionCreateDescription = "Whether a human has to be in the session for this wi. " +
+	"THREE states, not two: true, false, and OMITTED. Omitting it stores NULL, which is NOT a default of " +
+	"false — the wi goes to the ready queue's unclassified[] segment instead of items[], the segment that " +
+	"means \"takeable now by an agent\", and pf_list_work_items' ready_only filter does not return it. NULL is " +
+	"not permanent: the FIRST pf_claim_work_item on such a wi resolves it to true from a server default, " +
+	"writes that back and records a wi_classification_resolved event. Send false explicitly for a wi an " +
+	"agent may take unattended."
+
+// requiresHumanSessionUpdateDescription is the counterpart of the constant above
+// on pf_update_work_item, which can reach only TWO of the three states.
+//
+// Nil binds to "leave the column alone" (domain.buildWorkItemUpdate), so an
+// explicit null is the same no-op as omitting the field. That is measured rather
+// than read off the type: aihub#447 sent both against a scratch wi on a live-era
+// build and on origin/main, and the stored value did not move either time.
+//
+// The last sentence is the one worth the bytes. The value a caller finds in this
+// field is very often one the CLAIM wrote, and this tool's reply carries the
+// field whether or not the call touched it — which is exactly how aihub#411 T2-9
+// came to record an attrs_patch-only update as the writer of a NULL -> true
+// transition that FnClaimWorkItem had made a minute earlier.
+//
+// Declared here rather than inline so the map literal above keeps its alignment
+// groups; the neighbouring aihub#337 note explains why length is a real cost on
+// this tool in particular.
+const requiresHumanSessionUpdateDescription = "Set the human-session classification to true or false. " +
+	"It cannot reach the third state: there is no way back to NULL (unclassified) through this tool, because " +
+	"omitting this field and sending an explicit null BOTH mean \"leave the stored value alone\". A wi that was " +
+	"still NULL when it was first claimed is already true — the claim resolves NULL from a server default — so " +
+	"this field is how you CORRECT that value, not how you undo it."
 
 // blockedByPropDescription is the published description of `blocked_by`.
 //

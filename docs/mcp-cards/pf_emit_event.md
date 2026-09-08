@@ -4,7 +4,7 @@
 {
   "tool": "pf_emit_event",
   "description_sha256": "4555d2a5b9c4ae07cebd69b13ffc2ed9d5a1b3841983b7debcb6a1d58be9b7a7",
-  "input_schema_sha256": "71fa1a5448f0f952673190e87076a6d741a24c14dc9a75aa17f859cbdcf76190",
+  "input_schema_sha256": "fc5f7f10a5bed12573f5888d535f797003d26fbabefa693723ec3a403a50b5fd",
   "params": {
     "admin": {
       "type": "boolean",
@@ -43,7 +43,7 @@ the finding this card exists to carry.
 |---|---|---|---|
 | `work_item_id` | string | yes | which work item |
 | `event_type` | string | yes | "Event type (e.g. note, wi_reclassified, step_started)" |
-| `payload` | object | yes | arbitrary JSON object |
+| `payload` | object | yes | arbitrary JSON object; a non-object is a 400, and the 64 KB cap is checked first |
 | `pinned` | boolean | no | surfaces first in status/resume |
 | `admin` | boolean | no | requires role=admin |
 

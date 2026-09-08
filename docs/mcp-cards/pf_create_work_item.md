@@ -4,7 +4,7 @@
 {
   "tool": "pf_create_work_item",
   "description_sha256": "2978a1542ea8458bd057eea171e82bbd04eecdec320281d9b37b3ce3c14b9d69",
-  "input_schema_sha256": "b8ed2f451a7296239fb4b432b912229e705e5c261f68f6a1b6799e610f03152b",
+  "input_schema_sha256": "44d9c769709e718a5c72f5e9b6c3a4ce0917485d3108ae73a00cf5112da26a14",
   "params": {
     "attrs": {
       "type": "object",
@@ -135,13 +135,13 @@ exists downstream of.
 | `scenario` | string | no | default `coding` |
 | `priority` | enum | no | `urgent\|high\|normal\|low`, from the domain list |
 | `wi_type` | string | no | `fix_bug`, `feature`, `chore`, … |
-| `requires_human_session` | boolean | no | routes the wi to a human rather than the auto queue |
+| `requires_human_session` | boolean | no | **three states**: `true`, `false`, or omitted (= `NULL`, *unclassified*) |
 | `milestone` | string | no | milestone name |
 | `labels` | array | no | max from the domain constant |
 | `declared_resources` | array | no | `{type, uri, intent}` + optional `repo` |
 | `parent_work_item_id` | string | no | parent wi |
 | `source` | enum | no | how it was filed; a closed vocabulary |
-| `attrs` | object | no | additional attributes |
+| `attrs` | object | no | additional attributes; a non-object — including a JSON-encoded string of one — is a 400 |
 | `blocked_by` | array | no | creates real `blocks` edges and sets status=blocked |
 | `content` | string | no | markdown ≤20000 chars; **not echoed back** |
 | `force_create` | boolean | no | bypass the duplicate check |
@@ -185,7 +185,16 @@ so stored payloads keep round-tripping.
   `coding|writing|data` and creation rejects everything but `coding`, so the
   parameter accepts a value no row can hold.
 - **`requires_human_session` decides which ready-queue section the wi lands in**, so
-  it is the field that determines whether an agent is ever dispatched to it.
+  it is the field that determines whether an agent is ever dispatched to it — and it
+  has **three** states, not the two its `boolean` type suggests (`aihub#411` T2-9,
+  published by `aihub#447`). Omitting it stores `NULL`, which is not a default of
+  `false`: the work item goes to `unclassified[]` rather than `items[]`, and
+  `ready_only` excludes it. `NULL` is also not permanent — `domain.FnClaimWorkItem`
+  resolves it to `true` from a server default on the FIRST claim, writes it back and
+  emits `wi_classification_resolved`, so a work item that has ever been claimed
+  cannot still be unclassified. That claim-path write is what `aihub#411` T2-9
+  recorded as an unexplained side effect of an unrelated `pf_update_work_item` call;
+  see this card's Policy section.
 - **`attrs` must be a JSON object** (`aihub#465`). It binds to a bare
   `json.RawMessage` and is assigned straight into the jsonb column, so before that
   work item a JSON-encoded STRING of an object was stored verbatim under a 200 and
@@ -212,8 +221,27 @@ content is an absent one.
 - **§6.2 T2-6** — the memory-type leniency question is adjacent: an enum in a schema
   the SDK will not enforce should not be called an enum. Here the SDK **does**
   enforce `priority` and `source`, which is the difference.
+- **§6.2 T2-9** — the ruling was *state the third state in the schema (`omit ⇒
+  unclassified, not dispatched`)*, and the description above now does. Its second
+  half — the one-shot live observation that an `attrs_patch`-only
+  `pf_update_work_item` moved a `NULL` to `true` — was settled by `aihub#447` and
+  **did not reproduce on either arm**. Same sequence, twice: create with the field
+  omitted, `attrs_patch`-only update through the MCP layer, then claim; run against a
+  server built from `origin/main` and against one built from a live-era commit. The
+  update left the column `NULL` both times and the claim set it `true` both times,
+  emitting `wi_classification_resolved` sub-millisecond before `attempt_started` —
+  the same ordered pair the live timeline of `aihub#411` itself carries, 51 minutes
+  BEFORE the update it was attributed to. So the write is real, has a named
+  mechanism, and is not on the update path; nothing was "fixed", because nothing on
+  that path was broken.
 
 ## Open
 
 - Nothing this card can settle. `scenario` accepting values no row can hold is
   recorded rather than fixed: narrowing it is a contract change.
+- The claim-path resolution itself is recorded, not re-opened. It is a constant
+  (`domain.defaultRequiresHumanSession`), the server has no second source to check a
+  classification against, and `domain.ErrRequiresHumanSessionMismatch` documents at
+  length why the 409 that was supposed to police it never fired. Whether an
+  unclassified work item should be resolvable by a claim at all is a design
+  question this card only makes visible.

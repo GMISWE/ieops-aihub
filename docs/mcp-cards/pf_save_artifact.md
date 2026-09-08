@@ -4,7 +4,7 @@
 {
   "tool": "pf_save_artifact",
   "description_sha256": "ab4084d04ce966ddcef924811147a590ae516f5f03f620f5f3ba2f5627a8e31e",
-  "input_schema_sha256": "21dba35d3c43db5af9f58e7db6b1181a60afefeb5577db2316edad3ec899b4e6",
+  "input_schema_sha256": "91cbb9de8fc93a99cd8ad180199b70c3ed76f8aa87a76b765f6e52996c780385",
   "params": {
     "content": {
       "type": "string",
@@ -74,7 +74,7 @@ SDK refuses an out-of-vocabulary value before the handler runs.
 | `work_item_id` | string | yes | which work item this artifact belongs to |
 | `content` | string | no | inline content; provide `content` OR `path`, not both |
 | `path` | string | no | a local UTF-8 markdown file, read by the LOCAL process |
-| `structured_payload` | object | no | optional structured payload |
+| `structured_payload` | object | no | optional structured payload; a non-object — including a JSON-encoded string of one — is a 400 |
 | `visibility` | string | no | `private\|project\|team\|admin`, default `project` |
 | `supersedes_memory_id` | string | no | memory this supersedes |
 | `html` | string | no | pre-rendered HTML stored verbatim |

@@ -394,6 +394,23 @@ var recallStringParams = []string{"project", "query", "visibility", "work_item_i
 // gate, not as configuration.
 var recallNumberParams = []string{"similarity_threshold", "min_strength"}
 
+// recallBoolParams are the pf_recall arguments published as JSON booleans.
+// Forwarded as "true" when set, omitted otherwise — the server reads an absent
+// param as false, so sending "false" would be redundant and would make
+// "explicitly false" and "unset" identical on the wire in any case.
+//
+// A slice with one entry rather than an inline conditional, and that is the
+// point of aihub#464 rather than tidiness. The inline form read through boolArg,
+// which discards parseBoolArg's `ok`, so `include_archived: "yess"` was answered
+// false — this parameter's DEFAULT — and the caller who had asked for archived
+// memories got the active-only page with nothing at any of the four hops saying
+// so. That is the same Rule 1 escape aihub#432 closed for the three numbers
+// above, in the same function, on the one argument it did not cover. Naming the
+// set makes the rejection loop below uniform with the numeric one, and lets
+// TestRecallEveryBooleanParamHasARejectionProbe cover a boolean added tomorrow
+// on the day it is added.
+var recallBoolParams = []string{"include_archived"}
+
 // recallSchema is pf_recall's published InputSchema — hop 1.
 func recallSchema() json.RawMessage {
 	return objectSchema(map[string]any{
@@ -499,13 +516,28 @@ func recallSchema() json.RawMessage {
 // buildRecallParams renders pf_recall's MCP arguments into the query string for
 // GET /v1/memories — hop 2 of the four-hop contract.
 //
-// Returns an error when a numeric argument ARRIVED and could not be read. That
-// is Rule 1 (internal/server/queryparam.go) applied at this hop, and aihub#432
-// is where it arrived: the numbers used to go through a local reader that
-// answered 0 for unparseable text, which is this tool's "not specified", so
-// `similarity_threshold: "notanumber"` produced an unfiltered page and no
-// complaint at any of the four hops. parseNumArg now separates "not sent" from
-// "not readable" and only the first of those may be silent.
+// Returns an error when an argument ARRIVED and could not be read as the type
+// this tool publishes. That is Rule 1 (internal/server/queryparam.go) applied at
+// this hop, and aihub#432 is where it arrived: the numbers used to go through a
+// local reader that answered 0 for unparseable text, which is this tool's "not
+// specified", so `similarity_threshold: "notanumber"` produced an unfiltered
+// page and no complaint at any of the four hops. parseNumArg now separates "not
+// sent" from "not readable" and only the first of those may be silent.
+//
+// ⚠️ aihub#432 fixed the numbers and left the boolean, which is why the sentence
+// above says "an argument" rather than "a numeric argument". `include_archived`
+// kept reading through boolArg — the lenient wrapper that DISCARDS
+// parseBoolArg's `ok` — so `include_archived: "yess"` was answered false, which
+// is that parameter's default: a caller who asked for archived memories was
+// handed the active-only page and told nothing. It was spotted in aihub#432's
+// own self-review, filed as aihub#464 rather than fixed in passing, and the
+// lesson is about scope rather than about booleans — the parameter that survived
+// the audit was the one the audit's own subject ("the three numbers") had
+// already excluded, in the very function being audited.
+//
+// The rejection now belongs to the FUNCTION, so recallBoolParams and
+// recallNumberParams are both covered by completeness gates in
+// recall_params_wiring_test.go.
 //
 // A zero still means "not specified", and that is a DIFFERENT and unfixed
 // ambiguity: `similarity_threshold: 0` and no threshold at all remain the same
@@ -560,8 +592,19 @@ func buildRecallParams(args map[string]any) (url.Values, error) {
 			params.Set("type", t)
 		}
 	}
-	if boolArg(args, "include_archived") {
-		params.Set("include_archived", "true")
+	// Booleans. Same shape as the numbers above and as buildListWorkItemsParams:
+	// absent is silent, unreadable is refused naming the parameter (aihub#464).
+	for _, k := range recallBoolParams {
+		value, present, ok := parseBoolArg(args, k)
+		if !present {
+			continue
+		}
+		if !ok {
+			return nil, fmt.Errorf("%s must be a boolean (true/false, \"true\"/\"false\", or 1/0), got %s", k, describeArg(args[k]))
+		}
+		if value {
+			params.Set(k, "true")
+		}
 	}
 	// recall_algo: explicit arg wins, else env (POLYFORGE_RECALL_ALGO) lets a plugin
 	// build opt into the opt③ L1 lexical-relevance recall path server-side without
@@ -666,7 +709,7 @@ func rememberSchema() json.RawMessage {
 		"visibility":           prop("string", "private|project|team|admin"),
 		"work_item_id":         prop("string", "Associated work item ID"),
 		"base_strength":        prop("number", "Initial strength, 1-5 (default 3)"),
-		"attrs":                prop("object", "Additional attributes"),
+		"attrs":                prop("object", "Additional attributes."+jsonObjectPropNote),
 		"expires_at":           prop("string", "Expiry timestamp (RFC3339)"),
 		"dedup_mode":           prop("string", "Deduplication mode"),
 		"related_memory_ids":   prop("array", "Related memory IDs"),
@@ -805,7 +848,7 @@ func saveArtifactSchema() json.RawMessage {
 		"work_item_id":         prop("string", "Work item ID"),
 		"content":              prop("string", "Artifact content (inline). Provide content OR path, not both."),
 		"path":                 prop("string", "Local filesystem path to a UTF-8 markdown file to read as the artifact content (read by the local MCP process; must resolve within the workspace, <=1 MiB). Provide content OR path, not both."),
-		"structured_payload":   prop("object", "Optional structured payload"),
+		"structured_payload":   prop("object", "Optional structured payload."+jsonObjectPropNote),
 		"visibility":           prop("string", "private|project|team|admin (default: project)"),
 		"supersedes_memory_id": prop("string", "Memory ID this supersedes"),
 		"html":                 prop("string", "Optional pre-rendered HTML stored verbatim in rendered_html (full standalone document or body fragment). Overrides server-side markdown auto-render; use for custom-styled artifact views served by the artifact HTML viewer."),

@@ -144,21 +144,21 @@ var recallFieldsDeliberatelyUnpublished = map[string]string{
 //
 // 🔴 This exists because withdrawing a parameter removes it from the published
 // quantifier's field of view, which is exactly how `mode` survived aihub#394's
-// withdrawal and had to be cleaned up separately by aihub#424. aihub#469
-// withdrew recency_weight's schema, forwarding and bind, but could not delete
-// the struct field: internal/domain/memory.go was held by aihub#465 for the whole
-// run. The field is unreachable and inert — zero caller-visible surface — and
-// that is precisely the state aihub#424 recorded as invisible to every gate in
-// this package, so it is recorded here instead of trusted to memory.
+// withdrawal and had to be cleaned up separately by aihub#424. Such a field is
+// unreachable and inert — zero caller-visible surface — and that is precisely
+// the state aihub#424 recorded as invisible to every gate in this package, so it
+// is recorded here instead of trusted to memory.
+//
+// The map is empty, and that is the ratchet having worked rather than a gap. Its
+// one entry was `recency_weight`, whose schema, forwarding and bind aihub#469
+// withdrew while internal/domain/memory.go was locked by aihub#465; aihub#485
+// then deleted the struct field and the stale NOTE in recallText, so the entry
+// went with them. Add another only alongside a work item that will do the same.
 //
 // Entries are checked in both directions below. Deleting the field makes the
 // entry stale and this arm fails naming it, which is the intended coupling: the
 // cleanup cannot land without also removing its own bookkeeping.
-var recallFieldsKnownDeadTrackedByWi = map[string]string{
-	"recency_weight": "aihub#485 — hops 1-3 withdrawn by aihub#469; the field and the " +
-		"now-false NOTE in recallText remain only because internal/domain/memory.go was " +
-		"locked by aihub#465. Delete both, and this entry with them",
-}
+var recallFieldsKnownDeadTrackedByWi = map[string]string{}
 
 // recallParamToField overrides the json-tag mapping where the PUBLISHED parameter
 // name and the struct field's json tag differ.

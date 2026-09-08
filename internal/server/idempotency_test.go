@@ -13,6 +13,8 @@ package server
 // a re-derivation of the logic under test.
 
 import (
+	"bytes"
+	"container/list"
 	"context"
 	"encoding/json"
 	"go/ast"
@@ -22,18 +24,29 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/labstack/echo/v4"
+
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
 // resetIdempotencyCache empties the process-global cache so tests do not inherit
 // each other's entries. Registered with t.Cleanup by newIdempotencyHarness.
+//
+// It resets all FOUR pieces of state, not just the map: the recency list, the
+// byte total and the counters are as global as the entries are, and a test that
+// asserts on IdempotencyCacheBytes or IdempotencyCacheStats reads whatever the
+// previous test left behind otherwise (aihub#461).
 func resetIdempotencyCache() {
 	idempotencyMu.Lock()
 	defer idempotencyMu.Unlock()
-	idempotencyCache = map[string]*cachedResponse{}
+	idempotencyCache = map[string]*list.Element{}
+	idempotencyLRU = list.New()
+	idempotencyBytes = 0
+	idempotencyStats = IdempotencyStats{}
 }
 
 // idemHarness wires BearerAuth's output (a *UserContext) plus the real
@@ -515,5 +528,560 @@ func TestMainSchedulesTheIdempotencyPurger(t *testing.T) {
 
 	if calls != 1 {
 		t.Fatalf("func main calls server.StartIdempotencyCachePurger %d times, want exactly 1 — an unscheduled purger is the defect aihub#152 reported", calls)
+	}
+}
+
+// ─── aihub#461: the byte budget, O(1) eviction and the calibration instrument ──
+//
+// Everything below is new in aihub#461. Read the constant block in
+// idempotency.go first: the numbers these tests defend were measured against a
+// populated cache for the first time (aihub#436 populated it; nothing sent the
+// header before that), and the measurement is dated because it will rot.
+
+// TestIdempotencyCaps_AreMutuallyConsistent gates the relationships BETWEEN the
+// caps, which is where a plausible-looking edit to any one of them goes wrong.
+//
+// Each clause names the failure it prevents, because "these constants look
+// reasonable" is not a test.
+func TestIdempotencyCaps_AreMutuallyConsistent(t *testing.T) {
+	// A single maximal entry must not be able to dominate the budget. If it
+	// could, one big response would evict the entire cache to make room for
+	// itself, and makeRoomLocked's nil-victim branch would be reachable rather
+	// than the assertion it is documented as.
+	if minBudget := 16 * (maxIdempotencyBodyBytes + idempotencyEntryOverhead); maxIdempotencyTotalBytes < minBudget {
+		t.Errorf("maxIdempotencyTotalBytes=%d is under 16 maximal entries (%d); one large response would evict everything",
+			maxIdempotencyTotalBytes, minBudget)
+	}
+
+	// Both caps must be reachable, or one of them is decoration. The crossover
+	// is maxIdempotencyTotalBytes/maxIdempotencyEntries: below that mean entry
+	// size the entry cap binds first, above it the byte budget does. The
+	// measured mean is ~770 B, so the crossover has to sit ABOVE that (else the
+	// entry cap could never bind in production) and within an order of
+	// magnitude of maxIdempotencyBodyBytes (else the byte budget could not bind
+	// before the entry cap even for the largest permitted responses).
+	crossover := maxIdempotencyTotalBytes / maxIdempotencyEntries
+	if crossover <= 1024 {
+		t.Errorf("crossover mean entry size is %d B, at or below the measured mean of ~770 B: the byte budget would bind first on ordinary traffic and the entry cap would be dead", crossover)
+	}
+	if crossover >= maxIdempotencyBodyBytes {
+		t.Errorf("crossover mean entry size is %d B, at or above the per-entry cap %d: no reachable response mix could ever make the byte budget bind",
+			crossover, maxIdempotencyBodyBytes)
+	}
+}
+
+// idempotencyFlood stores n entries of bodyBytes each, with strictly increasing
+// ExpiresAt (constant TTL ⇒ insertion order), and returns their keys.
+func idempotencyFlood(t *testing.T, n, bodyBytes int, prefix string) []string {
+	t.Helper()
+	now := time.Now()
+	body := []byte(strings.Repeat("x", bodyBytes))
+	keys := make([]string, 0, n)
+	for i := range n {
+		key := "k_1:" + prefix + strconv.Itoa(i)
+		keys = append(keys, key)
+		storeIdempotent(key, &cachedResponse{
+			StatusCode:  200,
+			Body:        body,
+			Fingerprint: strings.Repeat("f", 64),
+			ExpiresAt:   now.Add(idempotencyTTL + time.Duration(i)*time.Millisecond),
+		})
+	}
+	if len(keys) != len(uniqueStrings(keys)) {
+		t.Fatalf("the fixture generated duplicate keys, so it never reached any cap")
+	}
+	return keys
+}
+
+// TestIdempotency_ByteBudgetBoundsTheCache is the cap aihub#461 added, stated as
+// the property that matters: entries the entry cap would happily hold are
+// evicted because their BYTES do not fit.
+//
+// The fixture is sized so the entry cap cannot be what bounds the result — 600
+// entries against a cap of 4096 — so a green result cannot be produced by the
+// pre-existing entry cap doing the work.
+func TestIdempotency_ByteBudgetBoundsTheCache(t *testing.T) {
+	resetIdempotencyCache()
+	t.Cleanup(resetIdempotencyCache)
+
+	const bodyBytes = 64 << 10 // 64 KiB: ~512 of these fill the 32 MiB budget
+	const entries = 600
+	keys := idempotencyFlood(t, entries, bodyBytes, "bytes-")
+
+	if got := IdempotencyCacheBytes(); got > maxIdempotencyTotalBytes {
+		t.Fatalf("cache accounts %d bytes, budget is %d — nothing bounds it", got, maxIdempotencyTotalBytes)
+	}
+	if n := IdempotencyCacheLen(); n >= entries {
+		t.Fatalf("all %d entries survived: %d × %d B is %d bytes, which is over the %d-byte budget, so the byte cap did nothing",
+			n, entries, bodyBytes, entries*bodyBytes, maxIdempotencyTotalBytes)
+	}
+	if n := IdempotencyCacheLen(); n > maxIdempotencyEntries {
+		t.Fatalf("cache holds %d entries, over the entry cap %d", n, maxIdempotencyEntries)
+	}
+
+	// It has to be the BYTE cap that evicted, not the entry cap: 600 < 4096.
+	s := IdempotencyCacheStats()
+	if s.EvictedForByteCap == 0 {
+		t.Fatalf("no eviction was attributed to the byte cap (stats: %+v); either the accounting is not maintained or the entry cap is doing the work", s)
+	}
+	if s.EvictedForEntryCap != 0 {
+		t.Fatalf("%d evictions were attributed to the entry cap with only %d entries stored; the attribution is wrong", s.EvictedForEntryCap, entries)
+	}
+
+	// The oldest went first and the newest survived, as in the entry-cap case.
+	if _, ok := loadIdempotent(keys[0]); ok {
+		t.Errorf("%s survived; eviction is not dropping the least recently used entry first", keys[0])
+	}
+	if _, ok := loadIdempotent(keys[len(keys)-1]); !ok {
+		t.Errorf("%s was evicted; the most recent entry must be the one kept", keys[len(keys)-1])
+	}
+}
+
+// TestIdempotency_ByteAccountingIsMaintainedOnEveryRemovalPath is the test for
+// the failure mode that has no symptom: a removal that forgets to decrement the
+// byte total. The cache then shrinks while its accounted size grows, and the
+// budget evicts a healthy cache down to nothing — with IdempotencyCacheLen, the
+// only pre-aihub#461 observable, reporting nothing unusual.
+//
+// All three removal paths are exercised: expiry-on-read, the purge sweep, and
+// eviction.
+func TestIdempotency_ByteAccountingIsMaintainedOnEveryRemovalPath(t *testing.T) {
+	resetIdempotencyCache()
+	t.Cleanup(resetIdempotencyCache)
+
+	// Path 1: expiry on read.
+	storeIdempotent("k_1:expired", &cachedResponse{StatusCode: 200, Body: []byte("body"), Fingerprint: "f", ExpiresAt: time.Now().Add(-time.Second)})
+	if got := IdempotencyCacheBytes(); got == 0 {
+		t.Fatalf("storing an entry accounted 0 bytes")
+	}
+	if _, ok := loadIdempotent("k_1:expired"); ok {
+		t.Fatalf("an expired entry was reported live")
+	}
+	if got := IdempotencyCacheBytes(); got != 0 {
+		t.Errorf("after expiry-on-read the cache holds %d entries and accounts %d bytes, want 0", IdempotencyCacheLen(), got)
+	}
+
+	// Path 2: the purge sweep.
+	storeIdempotent("k_1:stale", &cachedResponse{StatusCode: 200, Body: []byte("body"), Fingerprint: "f", ExpiresAt: time.Now().Add(-time.Second)})
+	PurgeExpiredIdempotencyCache()
+	if got := IdempotencyCacheBytes(); got != 0 {
+		t.Errorf("after the purge sweep the cache accounts %d bytes, want 0", got)
+	}
+
+	// Path 3: eviction, and the accounted total must equal a fresh sum over
+	// what is actually left rather than a number that has drifted.
+	idempotencyFlood(t, maxIdempotencyEntries+64, 128, "acct-")
+	want := 0
+	idempotencyMu.Lock()
+	for _, el := range idempotencyCache {
+		want += el.Value.(*idempotencyEntry).bytes
+	}
+	got := idempotencyBytes
+	idempotencyMu.Unlock()
+	if got != want {
+		t.Errorf("accounted total is %d bytes but the live entries sum to %d — a removal path is not maintaining it", got, want)
+	}
+
+	// And a repeated key must replace rather than double-count.
+	before := IdempotencyCacheBytes()
+	entry := &cachedResponse{StatusCode: 200, Body: []byte("same"), Fingerprint: "f", ExpiresAt: time.Now().Add(time.Hour)}
+	storeIdempotent("k_1:repeat", entry)
+	afterFirst := IdempotencyCacheBytes()
+	storeIdempotent("k_1:repeat", entry)
+	if afterSecond := IdempotencyCacheBytes(); afterSecond != afterFirst {
+		t.Errorf("re-storing one key moved the accounted total from %d to %d (started at %d); the same key must not be counted twice",
+			afterFirst, afterSecond, before)
+	}
+}
+
+// TestIdempotencyEviction_IsConstantWork is the O(1) claim in makeRoomLocked,
+// gated.
+//
+// It counts list elements examined (IdempotencyStats.EvictionScanned) rather
+// than measuring elapsed time, and the timing is what says why that matters
+// rather than what the gate asserts. Measured on one idle machine, 2,000
+// inserts into a full cache: 418.7µs each through the scan this replaced,
+// 1.2µs each through the recency list — and the first figure is a LOWER bound
+// on the original, which ran an expiry sweep over the whole cache before the
+// victim scan as well. A threshold separating those two is still a flake on a
+// loaded CI runner, whereas counting the work is deterministic: an O(n)
+// implementation lands near evictions × maxIdempotencyEntries instead of near
+// evictions, which is the 2,048,500-versus-500 this gate was checked against.
+func TestIdempotencyEviction_IsConstantWork(t *testing.T) {
+	resetIdempotencyCache()
+	t.Cleanup(resetIdempotencyCache)
+
+	const overflow = 500
+	idempotencyFlood(t, maxIdempotencyEntries+overflow, 16, "scan-")
+
+	s := IdempotencyCacheStats()
+	evicted := s.EvictedForEntryCap + s.EvictedForByteCap
+	if evicted == 0 {
+		t.Fatalf("flooding %d entries past a cap of %d evicted nothing; the fixture, not the eviction, is broken",
+			overflow, maxIdempotencyEntries)
+	}
+	// One examination per eviction is what the recency list costs. The slack
+	// absorbs bookkeeping without admitting a scan: even 2 examinations per
+	// eviction is O(1), while one O(n) pass over this cache is 4096.
+	if budget := 2*evicted + 16; s.EvictionScanned > budget {
+		t.Fatalf("eviction examined %d entries to evict %d (budget %d): that is a scan over the cache, not O(1) work",
+			s.EvictionScanned, evicted, budget)
+	}
+}
+
+// TestIdempotency_LRUKeepsWhatWasRecentlyUsed separates LRU from the FIFO it
+// replaced, and it is the discriminating test for the eviction ORDER: under
+// FIFO the promoted entry below is the very next one evicted, and under an
+// evict-from-the-front mutation the newest entry disappears instead.
+//
+// The behaviour matters exactly when this cache stops being write-only. Today
+// nothing reuses a key (see IdempotencyMiddleware) so recency order equals
+// insertion order and LRU degenerates to the FIFO it replaced — the point is
+// that the day a reusing caller appears, the entry it keeps hitting is the one
+// eviction must not take.
+func TestIdempotency_LRUKeepsWhatWasRecentlyUsed(t *testing.T) {
+	resetIdempotencyCache()
+	t.Cleanup(resetIdempotencyCache)
+
+	keys := idempotencyFlood(t, maxIdempotencyEntries, 16, "lru-")
+	oldest, secondOldest := keys[0], keys[1]
+
+	// Use the oldest entry. This is the only thing that distinguishes it.
+	if _, ok := loadIdempotent(oldest); !ok {
+		t.Fatalf("%s is missing before the cache was even over its cap", oldest)
+	}
+
+	// One more entry: exactly one eviction.
+	storeIdempotent("k_1:lru-newcomer", &cachedResponse{
+		StatusCode: 200, Body: []byte("x"), Fingerprint: "f",
+		ExpiresAt: time.Now().Add(idempotencyTTL),
+	})
+
+	if _, ok := loadIdempotent(oldest); !ok {
+		t.Errorf("%s was evicted although it was the most recently USED entry; eviction is ordered by insertion, not by use", oldest)
+	}
+	if _, ok := loadIdempotent(secondOldest); ok {
+		t.Errorf("%s survived; the least recently used entry was not the victim", secondOldest)
+	}
+	if _, ok := loadIdempotent("k_1:lru-newcomer"); !ok {
+		t.Errorf("the entry just stored was evicted; eviction is taking from the front of the recency list")
+	}
+}
+
+// idempotencyMeasuredMix is the mutating-request mix this cache was sized
+// against: calls per 24h at the busiest 24h in the record
+// (2026-09-07T12:46Z → 2026-09-08T12:46Z, ~1.8e3 mutating requests server-wide),
+// paired with the real Go value each endpoint answers with.
+//
+// 🔴 It is a PINNED MEASUREMENT and it will rot. Re-derive it from the line
+// StartIdempotencyCachePurger writes every 10 minutes:
+//
+//	docker logs <container> 2>&1 | grep -F 'idempotency:' | tail -20
+//
+// peak_entries there is this table's `calls` column summed, measured rather
+// than estimated, and peak_bytes is what this test computes. If they disagree
+// by more than ~2×, fix the table — not the assertion below.
+//
+// How the `calls` column was counted — including which parts of it are
+// bracketed rather than observed — is on maxIdempotencyTotalBytes. Do not
+// re-derive it from this list: the two sources have opposite biases and the
+// per-endpoint mapping is the part that needs the caveats, which are stated
+// once, there.
+//
+// The `value` column is the actual response type, not a transcript of one, so
+// this measurement follows the struct: add a field to domain.WorkItem and the
+// steady state recomputes here. The `target` paths are synthetic — only the
+// response shape is under measurement — and the work-item content is 850
+// characters, chosen so the fixture serialises to 1,754 B: the mean response
+// over the 1,102 real work items whose distribution is on
+// maxIdempotencyBodyBytes.
+var idempotencyMeasuredMix = []struct {
+	name   string
+	calls  int
+	method string
+	target string
+	value  any
+}{
+	{"step_update_fused", 400, http.MethodPatch, "/v1/shape/step",
+		map[string]any{"status": "completed", "next_step": "code_review", "next_step_status": "in_progress"}},
+	{"event_created", 421, http.MethodPost, "/v1/shape/event",
+		map[string]string{"event_id": "evt_MnQ4xR2v"}},
+	{"memory_created", 217, http.MethodPost, "/v1/shape/memory", map[string]any{
+		"id": "mem_8sKd0PqW", "memory_id": "mem_8sKd0PqW", "is_new": true,
+		"type": "methodology.execute", "project": "aihub", "visibility": "project",
+		"activation_count": 0, "stability_days": 1.0, "base_strength": 3.0,
+		"created_at": time.Date(2026, 9, 8, 12, 46, 19, 0, time.UTC),
+	}},
+	{"work_item_created", 121, http.MethodPost, "/v1/shape/wi_create", measuredWorkItemFixture(850)},
+	{"work_item_updated", 190, http.MethodPatch, "/v1/shape/wi_update", measuredWorkItemFixture(850)},
+	{"attempt_claimed", 76, http.MethodPost, "/v1/shape/claim", measuredClaimFixture()},
+	{"attempt_completed", 82, http.MethodPost, "/v1/shape/complete", map[string]bool{"ok": true}},
+	{"locks_acquired", 75, http.MethodPost, "/v1/shape/locks", measuredLocksFixture()},
+	{"commit_locks", 130, http.MethodPost, "/v1/shape/commit_locks", &domain.ReconcileCommitLocksResponse{
+		Checked: 3, Probed: 3,
+		Covered:       []string{"internal/server/idempotency.go", "internal/server/idempotency_test.go"},
+		AcquiredPaths: []string{"internal/server/router.go"},
+	}},
+	{"dependency_created", 26, http.MethodPost, "/v1/shape/dependency",
+		map[string]any{"blocked_work_item_id": "wi_UZ0OzzEB", "blocking_work_item_id": "wi_KrKQAik0", "kind": "blocks"}},
+	{"misc_small", 18, http.MethodPost, "/v1/shape/misc", map[string]bool{"ok": true}},
+}
+
+// measuredWorkItemFixture builds the largest mutating response shape in the API
+// — the full domain.WorkItem that POST /v1/work_items and PATCH
+// /v1/work_items/:id both answer with — with `content` of contentBytes
+// characters.
+func measuredWorkItemFixture(contentBytes int) *domain.WorkItem {
+	wiType, rhs, content := "chore", true, strings.Repeat("x", contentBytes)
+	at := time.Date(2026, 9, 8, 12, 34, 21, 0, time.UTC)
+	attempt := "ra_KrKQAik0"
+	return &domain.WorkItem{
+		ID: "wi_UZ0OzzEB", Seq: 461, Slug: "aihub#461", Project: "aihub", Scenario: "coding",
+		Goal:     "re-check the idempotency cache caps now that every POST/PATCH populates them",
+		Source:   "human",
+		WIType:   &wiType,
+		Priority: "normal", RequiresHumanSession: &rhs,
+		Labels: []string{"idempotency", "aihub-436-followup", "capacity"},
+		Status: "running",
+		DeclaredResources: json.RawMessage(`[{"intent":"write","repo":"aihub","type":"path","uri":"file:internal/server/idempotency.go"},` +
+			`{"intent":"write","repo":"aihub","type":"path","uri":"file:internal/server/idempotency_test.go"}]`),
+		ResourcesVersion: 1,
+		ReporterUserID:   "u_5dFjeaMZ", ReporterDisplay: "xiaokang.w",
+		CurrentAttemptID: &attempt, CurrentAttemptEpoch: 1,
+		Attrs:     json.RawMessage(`{}`),
+		Content:   &content,
+		CreatedAt: at, UpdatedAt: at,
+	}
+}
+
+func measuredClaimFixture() *domain.ClaimResponse {
+	rhs, wiType := true, "chore"
+	return &domain.ClaimResponse{
+		AttemptID: "ra_KrKQAik0", ClaimEpoch: 1, CurrentAttemptEpoch: 1,
+		AcquiredLocks: []domain.ResourceLock{
+			{ResourceType: "file_scope", ResourceKey: "aihub:aihub:internal/server/idempotency.go", OwnerAttemptID: "ra_KrKQAik0", ClaimEpoch: 1},
+			{ResourceType: "file_scope", ResourceKey: "aihub:aihub:internal/server/idempotency_test.go", OwnerAttemptID: "ra_KrKQAik0", ClaimEpoch: 1},
+		},
+		RequiresHumanSession: &rhs, WIType: &wiType,
+		Slug: "aihub#461", Project: "aihub", ID: "wi_UZ0OzzEB",
+		Goal: "re-check the idempotency cache caps now that every POST/PATCH populates them",
+	}
+}
+
+func measuredLocksFixture() *domain.AcquireLocksResponse {
+	return &domain.AcquireLocksResponse{
+		Acquired: []domain.ResourceLock{},
+		AlreadyHeld: []domain.ResourceLock{
+			{ResourceType: "file_scope", ResourceKey: "aihub:aihub:internal/server/idempotency.go", OwnerAttemptID: "ra_KrKQAik0", ClaimEpoch: 1},
+			{ResourceType: "file_scope", ResourceKey: "aihub:aihub:internal/server/idempotency_test.go", OwnerAttemptID: "ra_KrKQAik0", ClaimEpoch: 1},
+		},
+	}
+}
+
+// TestIdempotency_MeasuredSteadyStateFitsTheBudget is the derivation of
+// maxIdempotencyTotalBytes, executed rather than asserted in a comment.
+//
+// It drives the REAL middleware over the REAL response types (an in-memory echo
+// server; the only synthetic parts are the request paths and the traffic
+// weights), reads each shape's accounted cost from IdempotencyCacheBytes, and
+// checks that a full TTL window of the measured mix leaves the budget with
+// headroom — and that the budget is not so far above the measurement that it
+// stops bounding anything.
+//
+// Both bounds catch a real defect. Too small: the cache evicts inside its TTL
+// on an ordinary day, silently narrowing the replay window. Too large: 4 GiB is
+// what this constant replaced, which is not a bound a container can act on.
+func TestIdempotency_MeasuredSteadyStateFitsTheBudget(t *testing.T) {
+	resetIdempotencyCache()
+	t.Cleanup(resetIdempotencyCache)
+
+	e := echo.New()
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			c.Set(string(ctxUser), &UserContext{UserID: "u_test", Role: "writer", APIKeyID: "k_measure"})
+			return next(c)
+		}
+	})
+	e.Use(IdempotencyMiddleware())
+	for _, shape := range idempotencyMeasuredMix {
+		value := shape.value
+		e.Add(shape.method, shape.target, func(c echo.Context) error {
+			return c.JSON(http.StatusOK, value)
+		})
+	}
+
+	total, calls := 0, 0
+	for _, shape := range idempotencyMeasuredMix {
+		before := IdempotencyCacheBytes()
+		req := httptest.NewRequest(shape.method, shape.target, strings.NewReader(`{"probe":1}`))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		req.Header.Set("Idempotency-Key", "measure-"+shape.name)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d, want 200 — the fixture never reached the cache", shape.name, rec.Code)
+		}
+		size := IdempotencyCacheBytes() - before
+		if size <= 0 {
+			t.Fatalf("%s: the response was not cached (accounted delta %d)", shape.name, size)
+		}
+		if size*4 > maxIdempotencyBodyBytes {
+			t.Errorf("%s: one entry accounts %d B, within 4× of the per-entry cap %d — the cap no longer has the headroom its comment claims",
+				shape.name, size, maxIdempotencyBodyBytes)
+		}
+		t.Logf("%-20s %5d calls/24h × %6d B = %9d B", shape.name, shape.calls, size, shape.calls*size)
+		total += shape.calls * size
+		calls += shape.calls
+	}
+
+	t.Logf("measured steady state: %d entries, %d B (%.2f MiB); budget %d B (%.0f×)",
+		calls, total, float64(total)/(1<<20), maxIdempotencyTotalBytes, float64(maxIdempotencyTotalBytes)/float64(total))
+
+	if total*8 > maxIdempotencyTotalBytes {
+		t.Errorf("a TTL window of the measured mix is %d B and the budget is %d B — under 8× headroom, so an ordinary busy day evicts inside the TTL",
+			total, maxIdempotencyTotalBytes)
+	}
+	if total*64 < maxIdempotencyTotalBytes {
+		t.Errorf("a TTL window of the measured mix is %d B and the budget is %d B — over 64× the measurement, so the budget is not bounding anything reachable",
+			total, maxIdempotencyTotalBytes)
+	}
+}
+
+// syncBuffer is a bytes.Buffer that is safe to write from the purger goroutine
+// while the test reads it. Without the mutex this test is a data race that only
+// fails under -race, which CI runs.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestIdempotencyCachePurger_LogsTheCalibrationLine tests the WIRING, not the
+// formatter: that the goroutine production actually runs emits the line the
+// constant block tells the next person to re-measure from. A correct formatter
+// nobody calls is the aihub#152 defect over again (PurgeExpiredIdempotencyCache
+// was correct code with no caller).
+func TestIdempotencyCachePurger_LogsTheCalibrationLine(t *testing.T) {
+	resetIdempotencyCache()
+	t.Cleanup(resetIdempotencyCache)
+
+	var out syncBuffer
+	prev := setIdempotencyLogWriter(&out)
+	t.Cleanup(func() { setIdempotencyLogWriter(prev) })
+
+	storeIdempotent("k_1:logged", &cachedResponse{
+		StatusCode: 200, Body: []byte(`{"ok":true}`), Fingerprint: "f",
+		ExpiresAt: time.Now().Add(idempotencyTTL),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startIdempotencyCachePurger(ctx, 2*time.Millisecond)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(out.String(), "idempotency:") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the purger ran for 2s and never wrote a stats line; got %q", out.String())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	line := out.String()
+	// The keys a calibration reader needs. bytes= and hits= are the two that
+	// did not exist before aihub#461, and hits= is the one that can falsify
+	// the "structurally zero hit rate" this cache is sized against.
+	for _, want := range []string{"entries=", "bytes=", "peak_entries=", "peak_bytes=", "stores=", "hits=", "replays=", "evicted_byte_cap="} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the stats line is missing %q: %s", want, line)
+		}
+	}
+}
+
+// TestIdempotencyCacheStats_CountHitsReplaysAndReuse makes the counters
+// falsifiable. They are the instrument the sizing above depends on, and an
+// instrument that reports zero because it is never incremented is
+// indistinguishable from the finding it is supposed to be able to report — a
+// production hit rate of exactly zero.
+func TestIdempotencyCacheStats_CountHitsReplaysAndReuse(t *testing.T) {
+	h := newIdempotencyHarness(t, "k_stats")
+
+	if s := IdempotencyCacheStats(); s.Stores != 0 || s.Hits != 0 {
+		t.Fatalf("counters are not reset between tests: %+v", s)
+	}
+
+	h.do(http.MethodPost, "/v1/work_items", `{"goal":"a"}`, "stats-key")
+	if s := IdempotencyCacheStats(); s.Stores != 1 || s.Hits != 0 || s.Replays != 0 {
+		t.Errorf("after one fresh request: stores=%d hits=%d replays=%d, want 1/0/0", s.Stores, s.Hits, s.Replays)
+	}
+
+	// Same key, same request: a replay.
+	h.do(http.MethodPost, "/v1/work_items", `{"goal":"a"}`, "stats-key")
+	if s := IdempotencyCacheStats(); s.Hits != 1 || s.Replays != 1 || s.ReuseRejected != 0 {
+		t.Errorf("after a replay: hits=%d replays=%d reuse_rejected=%d, want 1/1/0", s.Hits, s.Replays, s.ReuseRejected)
+	}
+
+	// Same key, different body: a 409, which is a hit that is NOT a replay.
+	rec := h.do(http.MethodPost, "/v1/work_items", `{"goal":"b"}`, "stats-key")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("reused key with a different body: status %d, want 409", rec.Code)
+	}
+	if s := IdempotencyCacheStats(); s.Hits != 2 || s.Replays != 1 || s.ReuseRejected != 1 {
+		t.Errorf("after a rejected reuse: hits=%d replays=%d reuse_rejected=%d, want 2/1/1", s.Hits, s.Replays, s.ReuseRejected)
+	}
+}
+
+// TestIdempotencyEviction_HasNoScanOverTheCache is the structural half of the
+// O(1) claim, and it exists because the counter half can be defeated by the
+// obvious mistake: reintroducing a scan WITHOUT instrumenting it leaves
+// EvictionScanned small and TestIdempotencyEviction_IsConstantWork green. A
+// counter reports what the code chooses to report; this reads the source.
+//
+// The rule is narrow on purpose — makeRoomLocked may contain the one loop that
+// drops victims one at a time, and nothing else. A `range` over the map or the
+// list, or a second nested loop, is the two-pass sweep-then-scan this replaced.
+func TestIdempotencyEviction_HasNoScanOverTheCache(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "idempotency.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse idempotency.go: %v", err)
+	}
+
+	var body *ast.BlockStmt
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "makeRoomLocked" {
+			body = fn.Body
+		}
+	}
+	if body == nil {
+		t.Fatal("makeRoomLocked is gone; if eviction moved, move this gate with it rather than deleting it")
+	}
+
+	loops, ranges := 0, 0
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.ForStmt:
+			loops++
+		case *ast.RangeStmt:
+			ranges++
+		}
+		return true
+	})
+	if ranges != 0 {
+		t.Errorf("makeRoomLocked contains %d range statement(s): iterating the cache to choose a victim is the O(n) eviction aihub#461 removed", ranges)
+	}
+	if loops > 1 {
+		t.Errorf("makeRoomLocked contains %d for-loops, want at most 1 (the one that drops victims): a nested loop is a scan over the cache", loops)
 	}
 }

@@ -786,30 +786,36 @@ func (s *Server) registerLifecycleTools() {
 				"replaying a key from another machine, or after the state file was deleted, is still left "+
 				"unauthenticated. Send a NEW key unless retrying a call whose response you never saw."),
 			"requested_locks": requestedLocksProp("Resource locks to acquire"),
-			// aihub#410: "does not change hands" is enforced by a predicate, not by
-			// a serialized transaction, and the difference is publishable. The
-			// guarantee comes from lockUpsertSQL's conditional ON CONFLICT DO
-			// UPDATE plus probeForeignLockHolders — but FnForceTakeover opens its
-			// transaction with pool.Begin, i.e. READ COMMITTED, so a foreign lock
-			// row COMMITTED after that statement's snapshot can still be
-			// overwritten, and no owner_replaced event records it. The full
-			// measurement, and the reason the isolation level was deliberately not
-			// raised in aihub#393, are in internal/domain/resource_events.go above
-			// lockUpsertSQL.
+			// aihub#410's "…except in a narrow commit-window race" used to end this
+			// string. It was inherited from a note written about the OTHER tool and
+			// is not true here, and aihub#430 settled that by measurement rather
+			// than by reading: claim_takeover_commit_window_db_test.go builds the
+			// exact interleaving the qualifier describes — a foreign lock row
+			// committed inside this claim's window, after its snapshot and while
+			// its upsert is blocked on the duplicate key — and the claim comes back
 			//
-			// The qualifier is one clause — 51 B on the rendered schema, measured
-			// with an in-memory MCP client rather than dump-mcp-schemas, whose
-			// contract JSON carries no descriptions at all — rather than that
-			// paragraph, because this string is resident in the prefix of EVERY
-			// request: an agent needs to know the guarantee has an edge, not how
-			// Postgres SSI works. Naming the wi is what makes the detail findable
-			// for free.
+			//	409 CONFLICT_SERIALIZATION_FAILURE (SQLSTATE 40001), row unchanged
+			//
+			// because FnClaimWorkItem opens SERIALIZABLE (run_attempts.go) while
+			// FnForceTakeover opens pool.Begin, i.e. READ COMMITTED. At SERIALIZABLE
+			// a stale read is REPORTED, so the two ways this statement could move a
+			// foreign row are: the aihub#393 predicate passes, which means the owner
+			// has ended and the displacement is the point, or the read was stale,
+			// which is a 40001 the caller is told to retry. Neither is silent.
+			//
+			// ⚠️ The qualifier therefore stays on pf_force_takeover's own
+			// description, whose path is the READ COMMITTED one, and this site must
+			// NOT copy it back: the guarantee differs because the isolation level
+			// differs, and one sentence cannot be true of both. What that test does
+			// NOT claim is that no interleaving whatsoever can displace a row on
+			// this path — it measures the one the qualifier described. The full
+			// analysis of the READ COMMITTED gap is still in
+			// internal/domain/resource_events.go above lockUpsertSQL.
 			"force_takeover": prop("boolean", "Force takeover if already claimed. ⚠️ It takes over the WORK "+
 				"ITEM, not other people's locks: a lock held by a running or paused attempt of a "+
 				"DIFFERENT work item still answers 409 CONFLICT_LOCK_TAKEN and does not change hands "+
 				"(aihub#393). It reclaims this work item's own locks, and rows whose owning attempt has "+
-				"ended. No flag displaces another work item's lock, except in a narrow commit-window "+
-				"race (aihub#410)."),
+				"ended. No flag displaces another work item's lock."),
 			"scenario_ref": prop("string", "Git SHA of local scenario clone at claim time (optional)"),
 		}, []string{"work_item_id", "idempotency_key"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
@@ -1315,11 +1321,15 @@ func (s *Server) registerLifecycleTools() {
 	// pf_force_takeover
 	s.addTool(&sdkmcp.Tool{
 		Name: "pf_force_takeover",
-		// aihub#410: same qualifier as the force_takeover prop on
-		// pf_claim_work_item, and it belongs on BOTH — these are two published
-		// statements of one guarantee, and a caller reads whichever tool they are
-		// about to call. See that site for why the exception is four words here
-		// and a paragraph in internal/domain/resource_events.go.
+		// aihub#410's commit-window qualifier lives HERE and only here (aihub#430).
+		// It used to be on pf_claim_work_item's force_takeover prop as well, on the
+		// argument that "these are two published statements of one guarantee" —
+		// which was wrong: the two tools reach lockUpsertSQL at different isolation
+		// levels, so it is one statement about two different guarantees. This
+		// handler's path is FnForceTakeover's pool.Begin (READ COMMITTED), where
+		// the gap resource_events.go documents is reachable; the claim tool's is
+		// SERIALIZABLE, where aihub#430 measured the same interleaving coming back
+		// as a retryable 409 with the row untouched. Do not re-add it there.
 		Description: "Force-take ownership of a work item from another agent. ⚠️ It takes over the WORK " +
 			"ITEM, not other people's locks: a lock held by a running or paused attempt of a DIFFERENT " +
 			"work item still answers 409 CONFLICT_LOCK_TAKEN and does not change hands (aihub#393). It " +

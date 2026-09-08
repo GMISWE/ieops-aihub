@@ -36,7 +36,7 @@ func (s *Server) registerReleaseTools() {
 
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
+			return errResult(config.StateFileMissingErr(wiID, err))
 		}
 
 		body := map[string]any{
@@ -81,7 +81,7 @@ func (s *Server) registerReleaseTools() {
 
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
+			return errResult(config.StateFileMissingErr(wiID, err))
 		}
 
 		body := map[string]any{

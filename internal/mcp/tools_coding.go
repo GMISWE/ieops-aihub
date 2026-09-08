@@ -513,7 +513,7 @@ func (s *Server) registerCodingTools() {
 
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
+			return errResult(config.StateFileMissingErr(wiID, err))
 		}
 
 		paths := strSliceArg(args, "paths")
@@ -581,7 +581,7 @@ func (s *Server) registerCodingTools() {
 
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
+			return errResult(config.StateFileMissingErr(wiID, err))
 		}
 
 		// Execute wrap: push + PR (idempotent only when the existing PR

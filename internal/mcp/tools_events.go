@@ -100,7 +100,7 @@ func (s *Server) registerEventTools() {
 		// Inject credentials from state file
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
-			return errResult(fmt.Errorf("read state file (wi must be claimed first): %w", err))
+			return errResult(config.StateFileMissingErr(wiID, err))
 		}
 
 		body := map[string]any{

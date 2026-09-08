@@ -144,7 +144,7 @@ func (s *Server) registerMemoryTools() {
 		}
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
+			return errResult(config.StateFileMissingErr(wiID, err))
 		}
 		result, err := s.client.ReinforceMemory(ctx, memID, buildReinforceMemoryBody(args, sf))
 		if err != nil {
@@ -173,7 +173,7 @@ func (s *Server) registerMemoryTools() {
 		}
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
+			return errResult(config.StateFileMissingErr(wiID, err))
 		}
 		result, err := s.client.UpdateMemory(ctx, memID, buildUpdateMemoryBody(args, sf))
 		if err != nil {
@@ -228,7 +228,7 @@ func (s *Server) registerMemoryTools() {
 
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
-			return errResult(fmt.Errorf("read state file: %w", err))
+			return errResult(config.StateFileMissingErr(wiID, err))
 		}
 
 		result, err := s.client.Remember(ctx, buildSaveArtifactBody(args, sf, artifactContent))
@@ -520,7 +520,7 @@ func (s *Server) emitArtifactAction(ctx context.Context, req *sdkmcp.CallToolReq
 
 	sf, err := config.ResolveStateFile(wiID)
 	if err != nil {
-		return errResult(fmt.Errorf("read state file: %w", err))
+		return errResult(config.StateFileMissingErr(wiID, err))
 	}
 
 	result, err := s.client.EmitEvent(ctx, buildArtifactActionBody(args, sf, action))

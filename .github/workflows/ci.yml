@@ -4731,6 +4731,94 @@ jobs:
           version: v2.12.2
           args: --timeout=5m
 
+      # ── gofmt ────────────────────────────────────────────────────────
+      # Relocated here from .github/workflows/gofmt.yml by aihub#498
+      # (2026-09-09), which deleted that workflow. aihub#479 landed it as a
+      # workflow of its own for one reason only — this file was held by
+      # another live attempt's file lock at the time — and its header named
+      # this job as the intended home. Nothing about the check changed in the
+      # move; the two check names it used to publish, "gofmt" and "Lint",
+      # collapse into "Lint".
+      #
+      # golangci-lint above does NOT check formatting here: this repo has no
+      # .golangci.yml, so `run` uses v2.12.2's implicit default linter set —
+      # errcheck, govet, ineffassign, staticcheck, unused — and that set
+      # contains no formatter. Measured on main at 538c0d8 (aihub#479,
+      # 2026-09-08): `golangci-lint run --timeout=5m` reported `0 issues.` on
+      # the same tree where `gofmt -l .` named seven files. Team memory
+      # carried the opposite belief, that `golangci-lint run` gates
+      # formatting by default. It does not, and this step is the standing
+      # refutation.
+      #
+      # The GATE is the point, not the reformat. aihub#479 was filed against
+      # 2 unclean files and executed against 7 — the other five drifted in
+      # while it sat in the queue, under a green CI. Reformatting an ungated
+      # tree buys exactly one clean day.
+      #
+      # ── Why a `gofmt -l` step and not `formatters:` in .golangci.yml ──────
+      # That is the obvious consolidation, and it was measured before being
+      # rejected. Two independent defects, both reproduced on this repo's own
+      # drift:
+      #
+      #   1. It is blind to build-tagged files. golangci-lint loads PACKAGES;
+      #      gofmt walks FILES. All 14 files under tests/integration/ carry
+      #      `//go:build integration`, so `go list ./tests/...` matches no
+      #      packages and golangci-lint answers "no go files to analyze:
+      #      running `go mod tidy` may solve the problem". One of the seven
+      #      unclean files on main was tests/integration/helpers_test.go, and
+      #      a `formatters: [gofmt]` config did not report it.
+      #   2. It silently truncates. `issues.max-same-issues` defaults to 3,
+      #      and every formatter finding shares the one message "File is not
+      #      properly formatted", so a tree with seven unclean files reported
+      #      exactly three. Setting max-same-issues and max-issues-per-linter
+      #      to 0 lifted it to six — the six loadable ones — which is how
+      #      defect 1 was isolated from it.
+      #
+      # Defect 2 is configurable; defect 1 is not, being inherent to checking
+      # format through a package loader. `gofmt -l .` over the working tree
+      # has neither. For the record the config file itself is harmless — the
+      # enabled linter set was measured byte-identical with and without it —
+      # so the reason to avoid it is coverage, not blast radius.
+      #
+      # `if: !cancelled()` is what keeps the relocation honest. As two jobs,
+      # gofmt and golangci-lint reported independently; as plain sequential
+      # steps a red golangci-lint would skip this one and publish nothing
+      # about formatting, which is strictly less than the workflow it
+      # replaces. The condition restores that independence.
+      #
+      # No `go mod download` and no build: gofmt parses source and resolves
+      # no imports, so this step needs neither the module cache nor the
+      # postgres service the test job carries. It is seconds, not minutes.
+      #
+      # `gofmt -l .` walks the working tree, so it covers build-tagged files,
+      # every cmd/ and plugins/ tree, and anything a future package layout
+      # adds, without a paths: filter or a package list to keep in sync.
+      #
+      # ⚠️ The non-obvious way to trip this gate. Since Go 1.19 gofmt
+      # reformats DOC comments, and the doc-comment printer applies TeX quote
+      # conventions: a pair of backquotes becomes U+201C and a pair of
+      # apostrophes ('') becomes U+201D. So spelling a SQL empty-string
+      # literal the natural way, as '', inside a doc comment makes the file
+      # gofmt-dirty — and `gofmt -w` then SILENTLY REWRITES WHAT THE SENTENCE
+      # SAYS, turning the literal into a closing quotation mark. Two doc
+      # comments on main had exactly that; both were reworded to "the empty
+      # string" rather than formatted, because the formatted form was wrong.
+      # If this gate goes red on a comment, read the diff before accepting
+      # its fix. Non-doc comments (inside a function body) and string and
+      # rune literals are left alone, which is where every other '' in this
+      # repo lives.
+      - name: gofmt
+        if: ${{ !cancelled() }}
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt is not clean; run: gofmt -w \$(gofmt -l .)"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+          echo "gofmt: clean"
+
   build-push:
     name: Build & Push Docker image (main)
     needs: test

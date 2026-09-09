@@ -4,7 +4,7 @@
 {
   "tool": "pf_update_memory",
   "description_sha256": "e373c1b2dd6fc7d2da8301632578d70f162feaa3cc682aaced84abaffddb0f1a",
-  "input_schema_sha256": "017f27ab3c7ea1799127c7266bc53ebf683d124094e5980757bb5d1f6a153697",
+  "input_schema_sha256": "945ba1d2776c5da93d813ec1c338f47f4fb161ed2700a9558907623044549151",
   "params": {
     "base_strength": {
       "type": "number",
@@ -73,7 +73,7 @@ distinct semantic from sending a zero value.
 | `content` | string | no | new content (omit to keep current) |
 | `visibility` | string | no | new visibility (omit to keep current) |
 | `tags` | array | no | new tags (omit to keep current) |
-| `base_strength` | number | no | new base strength, 1-5 (omit to keep current) |
+| `base_strength` | number | no | new base strength, **integer** 1-5 (omit to keep current); a fractional value is a 400 |
 
 "Any id in the lineage" is load-bearing: a memory is versioned, and updating creates
 a **new version** and advances the `latest_id` cursor, so the id a caller holds from
@@ -105,6 +105,14 @@ Destination: `PATCH /v1/memories/<id>/update` via `pkg/client/client.go`
   (`TestPublishedBaseStrengthRangeIsTheEnforcedOne`) iterates `pf_remember` and
   `pf_update_memory` alike, so a description here that went silent about the range
   would turn that gate red.
+- **Since `aihub#459` (owner ruling 2026-09-09) the value must also be a WHOLE
+  NUMBER, and it is inherited here rather than decided here.** The same guard gained
+  `internal/domain/memory.go` (`ValidateIntegralStrength`) after its range check, so
+  `2.5` is a 400 on this tool without a line of this tool's own code changing —
+  which is the point of the guard sitting in `Remember` rather than in either
+  handler. The description was updated for the reason the range one was: a caller
+  told about a refusal by only one of two tools that share a guard meets the other's
+  400 with no warning, and the gate above iterates both.
 - `tags` is a **replacement**, like every other field here: the value sent becomes
   the list.
 
@@ -124,6 +132,14 @@ real callers have been handed.
   surfaces and `TestRecallMinStrengthPublishesWhichScaleItIsOn` covers `min_strength`,
   both in `internal/mcp/tools_memory_test.go`, and both build the range from
   `domain.MinBaseStrength` / `domain.MaxBaseStrength` rather than typing it out.
+- **§6.1 T1-3 residual (owner ruling 2026-09-09) — LANDED** (`aihub#459`): the legal
+  set is the INTEGERS in that range, not the reals in it. The range could be
+  anchored on a constant; integrality cannot, so
+  `TestPublishedBaseStrengthRangeIsTheEnforcedOne` anchors it on the enforcement —
+  it drives `domain.Remember` with a nil pool, where a refused value returns before
+  the pool is touched and an accepted one can only prove it got through by dying on
+  it. That covers this tool as well as `pf_remember`, because this tool's body
+  reaches the same function.
 - **§6.2 T2-1** — one editability matrix for the whole struct and one error code per
   rejection kind; the "omit to keep current" convention is this tool's local version
   of that matrix.

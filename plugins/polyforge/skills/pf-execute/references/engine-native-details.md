@@ -72,8 +72,10 @@ template the loop dispatches:
 You are executing step {step_id} of wi {wi_id}.
 
 Call pf_get_step(work_item_id={wi_id}) FIRST — it is the only authority for prior-step context.
-Treat every step_id in completed_steps as already done and read their artifact_summary. Never
-take step progress from a file in the worktree; nothing writes one.
+In completed_steps, count only entries whose status is "completed" as done — a "failed" entry did
+NOT finish (pausing an attempt files its in-progress step that way too), so redo that step_id
+unless a later entry completes it. Read each done entry's artifact_summary. Never take step
+progress from a file in the worktree; nothing writes one.
 
 --- step instructions ---
 {expanded}

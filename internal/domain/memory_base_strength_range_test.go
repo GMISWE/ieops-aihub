@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"strconv"
@@ -297,4 +298,157 @@ func TestBaseStrengthIsTruncatedByThePgxInt2Codec(t *testing.T) {
 	require.Equal(t, "3", encode(t, DefaultBaseStrength+0.5, pgtype.BinaryFormatCode),
 		"3 + 0.5 must still store 3; if it does not, the aihub#475 defect no longer "+
 			"has the mechanism its fix was written for")
+}
+
+// ─────────────────────────── aihub#459: integrality ──────────────────────────
+//
+// The three tests above pin the RANGE and the fourth characterises what pgx does
+// to a value inside it. aihub#459 is the disposition the fourth one deliberately
+// did not take: the owner ruled on 2026-09-09 that a non-integral strength is
+// REFUSED, rather than rounded in Go or made storable by widening the column.
+//
+// Same split as above, and for the same reason: one test asserts the RULE, one
+// asserts that the create path is WIRED to it, and one asserts the rule's
+// PRECEDENCE against the range check — because a value can violate both, and
+// which error it gets is a fact about this code that a reader should not have to
+// re-derive.
+
+// TestValidateIntegralStrengthIsTheWholeNumberRule covers the rule itself.
+//
+// It is exported and shared, so the arms below check the two things a shared
+// rule can get wrong that a private one cannot: that it names the caller's OWN
+// field rather than a hard-coded one, and that it is the same answer for both.
+func TestValidateIntegralStrengthIsTheWholeNumberRule(t *testing.T) {
+	// Negative and zero are included on purpose. base_strength can never be
+	// either (the range check runs first), but strength_delta is an ADDEND and
+	// -1 is an entirely ordinary one, so a rule that only understood the
+	// base_strength side would reject legal reinforce traffic. Negative zero is
+	// built with math.Copysign rather than written as -0.0, which Go folds to
+	// plain 0 at compile time — the literal would test nothing (staticcheck
+	// SA4026 says so), and math.Trunc(-0) is -0, which must be accepted.
+	negZero := math.Copysign(0, -1)
+	for _, v := range []float64{-5, -1, 0, 1, 2, 3, 4, 5, 42, negZero} {
+		require.Nil(t, ValidateIntegralStrength("strength_delta", v),
+			"%g is a whole number and must be accepted", v)
+		require.Nil(t, ValidateIntegralStrength("base_strength", v),
+			"%g is a whole number and must be accepted", v)
+	}
+
+	for _, v := range []float64{0.5, -0.5, 2.5, 1.1, 4.999, 3.0000001, -1.5} {
+		err := ValidateIntegralStrength("strength_delta", v)
+		require.NotNil(t, err, "%g is not a whole number and must be refused", v)
+		require.Equal(t, ErrBadRequest, err.Code,
+			"a value the server can see is wrong is the caller's error (aihub#411 T1-6)")
+		require.Equal(t, 400, err.HTTPStatus)
+		// The field the CALLER named, leading the message — the same property the
+		// range check is held to above, and the one a shared helper is most
+		// likely to lose, by hard-coding whichever field it was written for.
+		require.True(t, strings.HasPrefix(err.Message, "strength_delta "),
+			"the message must OPEN by naming the offending field; got %q", err.Message)
+		require.Contains(t, err.Message, fmt.Sprintf("%g", v),
+			"the message must quote the rejected value back; got %q", err.Message)
+
+		other := ValidateIntegralStrength("base_strength", v)
+		require.NotNil(t, other)
+		require.True(t, strings.HasPrefix(other.Message, "base_strength "),
+			"got %q", other.Message)
+	}
+
+	// The control on the control: the two messages must differ ONLY in the field
+	// name. A helper that quietly said "base_strength" in the body of a
+	// strength_delta rejection would satisfy every prefix assertion above and
+	// still send the caller to the wrong argument.
+	a := ValidateIntegralStrength("strength_delta", 2.5)
+	b := ValidateIntegralStrength("base_strength", 2.5)
+	require.Equal(t,
+		strings.TrimPrefix(a.Message, "strength_delta"),
+		strings.TrimPrefix(b.Message, "base_strength"),
+		"the two rejections must be the same sentence about the same rule")
+}
+
+// TestValidateBaseStrengthRefusesFractionalInRangeValues covers the arm the
+// range tests above cannot reach: a value they call legal.
+//
+// 4.5 satisfies every assertion in
+// TestValidateBaseStrengthRejectsWhatTheColumnWouldRefuse — it is inside
+// [1,5] — and before aihub#459 it was admitted, encoded through pgx's int2
+// codec, and stored as 4. That is the gap this arm closes, so the values here
+// are deliberately ones the range check would wave through.
+func TestValidateBaseStrengthRefusesFractionalInRangeValues(t *testing.T) {
+	for _, v := range []float64{1.5, 2.5, 3.5, 4.5, 4.999, 1.0000001} {
+		err := validateBaseStrength(&v)
+		require.NotNil(t, err,
+			"base_strength %g is inside [%g,%g] but not a whole number: the column is "+
+				"SMALLINT, so admitting it means answering 200 having stored %g",
+			v, float64(MinBaseStrength), float64(MaxBaseStrength), math.Trunc(v))
+		require.Equal(t, ErrBadRequest, err.Code)
+		require.True(t, strings.HasPrefix(err.Message, "base_strength "),
+			"got %q", err.Message)
+		require.Contains(t, err.Message, "whole number",
+			"the message must say WHY the value is refused, or a caller reading it "+
+				"alongside the range message cannot tell the two rejections apart; got %q",
+			err.Message)
+	}
+
+	// PRECEDENCE, and it is a negative control on the change rather than a new
+	// requirement: every base_strength the aihub#412 corpus actually carried
+	// (0.9 x9, 0.8 x2, 0.85, 0.1) violates BOTH rules, and each must still get
+	// the RANGE error it got before this work item. The range is the constraint
+	// the caller hit first and the one the column would have refused outright;
+	// re-answering those 13 calls with "not a whole number" would be a true
+	// sentence that points at the smaller of two problems.
+	for _, v := range []float64{0.9, 0.8, 0.85, 0.1, 5.5, -0.5} {
+		err := validateBaseStrength(&v)
+		require.NotNil(t, err)
+		require.Contains(t, err.Message, "is out of range",
+			"base_strength %g is out of range AND fractional; the range error is the one "+
+				"it took before aihub#459 and must remain the one it takes; got %q",
+			v, err.Message)
+	}
+}
+
+// TestRememberRefusesFractionalBaseStrengthBeforeThePool covers WHERE the new
+// decision is taken, and is the integrality twin of
+// TestRememberRejectsOutOfRangeBaseStrengthBeforeThePool above.
+//
+// A rule with no caller is the state this repo was in for exactly as long as
+// aihub#459 was open: the truncation was measured, written down in three
+// comments and a characterisation test, and nothing refused anything. Asserting
+// the rule alone would go green in that state, so this asserts the wiring — and
+// against a nil pool, which additionally pins the guard ABOVE the first query,
+// where it has to be for pf_update_memory and pf_save_artifact to inherit it.
+func TestRememberRefusesFractionalBaseStrengthBeforeThePool(t *testing.T) {
+	req := func(dedup string, bs *float64) *RememberRequest {
+		return &RememberRequest{
+			Project: "p", Type: "experience.debug", Content: "c",
+			Visibility: "project", DedupMode: dedup, BaseStrength: bs,
+		}
+	}
+
+	// Both dedup modes, for the reason the range test states: "off" skips
+	// textDedupCheck and so does not pin the guard's position, while the default
+	// queries immediately — and the default is what pf_update_memory uses.
+	for _, dedup := range []string{"off", ""} {
+		for _, v := range []float64{2.5, 4.5, 1.5, 4.999} {
+			panicked, err := rememberWithNoPool(req(dedup, &v))
+			require.Nil(t, panicked,
+				"base_strength=%g with dedup_mode=%q reached the (nil) pool: an in-range "+
+					"fractional value is still being handed to the int2 codec, which "+
+					"truncates it toward zero and stores %g under a 200",
+				v, dedup, math.Trunc(v))
+			require.Error(t, err)
+			var ae *AihubError
+			require.ErrorAs(t, err, &ae)
+			require.Equal(t, ErrBadRequest, ae.Code)
+			require.Contains(t, ae.Message, "whole number", "got %q", ae.Message)
+		}
+
+		// The control, restated here rather than inherited: 3 is the column
+		// DEFAULT and a whole number, and it must reach the pool. Without this
+		// arm a guard that refused every base_strength would pass the loop above.
+		panicked, err := rememberWithNoPool(req(dedup, bsPtr(DefaultBaseStrength)))
+		require.NotNil(t, panicked,
+			"base_strength=%g is a whole number inside the range and Remember returned %v "+
+				"instead of proceeding to the pool", float64(DefaultBaseStrength), err)
+	}
 }

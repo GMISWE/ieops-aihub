@@ -1794,6 +1794,23 @@ jobs:
       # value; that equality holds under all three of its options. Exactly one
       # arm pins the number, and it says there why it is entitled to.
       #
+      # 🟢 aihub#459 (2026-09-09) answered that, and the answer was REFUSE, so
+      # the paragraph above is now history rather than a live caveat. The first
+      # function no longer runs `strength_delta: 0.5` expecting a 200 — that
+      # input is a 400 before the first query — and the arm that pinned `3.0`
+      # is gone with the mechanism it described. What replaced it is the thing
+      # only a database can check: the refusal leaves base_strength AND
+      # activation_count untouched and emits no memory_reinforced event, which
+      # is what a guard moved below the UPDATE would break while still
+      # returning the right status.
+      #
+      # ⚠️ And the equality itself is now weaker than it reads. With every
+      # accepted delta integral and the column SMALLINT, a handler publishing
+      # its own arithmetic and one publishing the row cannot disagree, so this
+      # step no longer discriminates between them. The DB-free
+      # TestReinforceResponseReportsTheStoredBaseStrength named below is what
+      # does; it is not a companion to this step, it is the load-bearing arm.
+      #
       # The DB-free companions have no line in the ledger above, and one of them
       # is why this step is not the only cover: server
       # TestReinforceResponseReportsTheStoredBaseStrength parses the shipped
@@ -1808,7 +1825,7 @@ jobs:
           go test ./internal/server/ -run '^TestReinforceMemory_ResponseMatchesTheStoredBaseStrength$' -count=1 -v 2>&1 | tee reinforce_returning.log
           go test ./internal/server/ -run '^TestReinforceMemory_IntegralDeltaStillMoves$' -count=1 -v 2>&1 | tee reinforce_control.log
           grep -q -- '--- PASS: TestReinforceMemory_ResponseMatchesTheStoredBaseStrength' reinforce_returning.log \
-            || { echo "::error::TestReinforceMemory_ResponseMatchesTheStoredBaseStrength did not run (expected '--- PASS:'); the reinforce endpoint can again answer 200 naming a base_strength the column does not hold, which for any |strength_delta| below 1 is a permanent no-op reporting progress on every call"; exit 1; }
+            || { echo "::error::TestReinforceMemory_ResponseMatchesTheStoredBaseStrength did not run (expected '--- PASS:'); nothing then checks that a refused fractional strength_delta leaves the row and the event log untouched (aihub#459), nor that the 200 body names the value the column holds (aihub#475)"; exit 1; }
           grep -q -- '--- PASS: TestReinforceMemory_IntegralDeltaStillMoves' reinforce_control.log \
             || { echo "::error::TestReinforceMemory_IntegralDeltaStillMoves did not run (expected '--- PASS:'); without it the test above is satisfied by a handler that reinforces nothing and reports the unchanged row honestly, and the clamp is unasserted"; exit 1; }
           ! grep -q -- '--- SKIP' reinforce_returning.log \

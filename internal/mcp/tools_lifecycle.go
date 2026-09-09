@@ -688,7 +688,24 @@ func (s *Server) registerLifecycleTools() {
 			// for the far more destructive cancel. domain.wiEditTierByField holds
 			// the matrix. +10 bytes of always-resident schema, budgeted against the
 			// resources_version note below.
-			"goal":                   prop("string", "Updated goal (status must be queued, paused or blocked)"),
+			// aihub#474: the two shape constraints now hold on BOTH write paths, so
+			// this description states both — it used to state neither, while
+			// pf_create_work_item's stated both, and a caller reading the pair
+			// reasonably concluded the cap was create-only. The number comes from
+			// domain.MaxWorkItemGoalRunes() rather than being retyped: a published
+			// limit and the enforced limit that drift apart are how aihub#433 got a
+			// 500 out of an in-range value. "Single-line" is the same word
+			// pf_create_work_item uses for the same refusal (ErrGoalMultiline),
+			// which this path has always applied and never published.
+			//
+			// Cost, on the same ledger as the +10 above: 55 -> 72 bytes of
+			// always-resident schema, +17. Bought deliberately. The alternative
+			// this tool spent a wave discovering is a caller that reads the create
+			// tool's cap, sends the same string here, and gets a 500 from a
+			// constraint name it has no way to map back to a field.
+			"goal": prop("string", fmt.Sprintf(
+				"Single-line goal ≤%d chars (status must be queued, paused or blocked)",
+				domain.MaxWorkItemGoalRunes())),
 			"goal_change_reason":     prop("string", "Reason for goal change (required with goal)"),
 			"priority":               propEnum("string", "Updated priority", domain.WorkItemPriorityList()),
 			"milestone":              prop("string", "Updated milestone"),
@@ -2086,7 +2103,13 @@ const maxBatchWorkItems = 50
 // silent-drop failure the batch tool exists downstream of.
 func workItemFieldProps() map[string]any {
 	return map[string]any{
-		"goal":     prop("string", "Single-line goal ≤500 chars"),
+		// aihub#474: byte-identical to the string that was typed here before, and
+		// deliberately so — this is not a contract change, it is the same promise
+		// sourced from the constant that enforces it. Both work-item write paths
+		// now publish the cap from one place, so the number cannot move in the
+		// validator while two hand-typed descriptions keep quoting the old one.
+		"goal": prop("string", fmt.Sprintf("Single-line goal ≤%d chars",
+			domain.MaxWorkItemGoalRunes())),
 		"scenario": prop("string", "Scenario (default: coding)"),
 		// aihub#396: a real enum, not a pipe-separated string in a description.
 		// The values come from domain, which is where the check that refuses them

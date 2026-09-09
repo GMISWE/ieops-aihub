@@ -584,7 +584,7 @@ var dbCheckPolicies = map[string]dbCheckPolicy{
 			"if the update struct ever grows the field.",
 	},
 	"work_items.work_items_goal_check": {
-		Where:       "CreateWorkItem (work_items.go): the rune-count check and strings.ContainsAny(req.Goal, \"\\n\\r\")",
+		Where:       "validateWorkItemGoalShape (work_item_fields.go), in both CreateWorkItem and UpdateWorkItem",
 		Disposition: dispMirroredLimit,
 		BoundExpr:   `length\(goal\)\s*<=\s*(\d+)`,
 		GoLimit:     maxWorkItemGoalRunes,

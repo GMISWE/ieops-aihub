@@ -113,7 +113,12 @@ state file is deleted immediately afterwards, so the reason is lost with no erro
 
 ## 3. Lock-conflict report template
 
-When `pf_acquire_locks` returns `ErrConflictLockTaken`, stop and report exactly this shape:
+`pf_acquire_locks` runs once per wi, at the very start of the **execute** step — before the
+loop, before reading the scenario .md, before any dispatch; never for spec or plan.
+`acquired`/`already_held` means proceed.
+
+On `ErrConflictLockTaken` the payload carries `conflict_with`, which names the file(s), the
+holding actor, their work item and their attempt_id. Stop and report exactly this shape:
 
 ```
 ## Result
@@ -145,6 +150,9 @@ beforehand (aihub#290: 201 measured note→terminal pairs, 0.325% of billed inpu
 in removes the ordering hazard described in §2 along with the round-trip.
 
 ## 5. Commit hygiene background
+
+Never stage `.pf_meta.json`, the only file the engine writes. `git checkout HEAD --` it, or
+name the paths you do want: `pf_commit(paths=[...])`.
 
 The marketplace repo has historically tracked `.pf_meta.json` / `.pf_steps.json`, which is how
 step-state scratch files end up staged by accident. (team memory: `mem_IG1CV2pN`)

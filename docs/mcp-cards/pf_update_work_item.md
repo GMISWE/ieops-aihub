@@ -4,7 +4,7 @@
 {
   "tool": "pf_update_work_item",
   "description_sha256": "29b3c7434085f3bd45cf9acebf95466a7fe1ae8757a6d86786d03886c6687c30",
-  "input_schema_sha256": "53bbfa577b63dcb85a695ad7be32284df348876425aeb35cfa25d2d778a44894",
+  "input_schema_sha256": "PENDING_REGEN_AFTER_MERGE",
   "params": {
     "attrs": {
       "type": "object",
@@ -119,7 +119,7 @@ that a caller gets wrong by default.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `work_item_id` | string | yes | id or slug |
-| `goal` | string | no | single-line; only while status is queued, paused or blocked, and only for the reporter / a maintainer / an admin |
+| `goal` | string | no | single-line, ≤500 chars; only while status is queued, paused or blocked, and only for the reporter / a maintainer / an admin |
 | `goal_change_reason` | string | no | required with `goal` |
 | `priority` | enum | no | from the domain list |
 | `milestone` | string | no | updated milestone |
@@ -197,15 +197,27 @@ except `work_item_id` and `brief` into the body of
   existing meaning in both fields.
 - **`goal` and `wi_type` are status-gated, permission-gated and reason-gated** —
   by the matrix below rather than by a guard of their own.
-- **`goal` does carry one guard of its own: a newline refuses the write.**
-  `internal/domain/work_items.go` (`UpdateWorkItem`) rejects a `goal` containing `\n`
-  or `\r` with `ErrGoalMultiline`, and that check sits BEHIND the matrix for the same
-  reason `goal_change_reason`'s does — an edit refused on state is not first told its
-  goal is multiline. What this path does NOT check is length: `pf_create_work_item`
-  refuses a goal over 500 characters and this tool has no equivalent, so the same
-  string is accepted here and rejected there. Both facts are stated as found;
-  `aihub#474` owns whether the cap should apply on update, and this card does not
-  anticipate that call.
+- **`goal` carries two guards of its own, and since `aihub#474` (2026-09-09) they
+  are the same two `pf_create_work_item` applies.** `internal/domain/work_item_fields.go`
+  (`validateWorkItemGoalShape`) refuses a goal over 500 characters with a 400
+  `BAD_REQUEST` and one containing `\n` or `\r` with `ErrGoalMultiline`, in that
+  order, and BOTH work-item write paths call it. The checks sit BEHIND the matrix
+  for the same reason `goal_change_reason`'s does — an edit refused on state is not
+  first told its goal is multiline.
+- **The length half was missing here until `aihub#474`, and what it cost is not
+  what the report assumed.** The filing said this tool STORED an over-length goal.
+  It did not: `work_items_goal_check` caps `length(goal)` at 500 in the database
+  (`internal/db/migrations/0002_work_items.sql`, unaltered by any later migration),
+  so the write was refused by Postgres as SQLSTATE 23514 and reached the caller as a
+  500 with a constraint name in it. So the defect was never data integrity; it was
+  that the two tools answered the SAME illegal string two different ways, which is
+  the `aihub#396` class exactly. The owner ruled the asymmetry an oversight on
+  2026-09-09 rather than a deliberate exemption, and the fix is one shared function
+  rather than a second copy of the check, so a future third write path cannot
+  reintroduce the split. Adding the cap refuses no existing caller: measured on
+  production 2026-09-09, 2,286 work items, `max(char_length(goal))` exactly 500,
+  zero rows above it — which is also why the boundary value is pinned as ACCEPTED
+  by `internal/domain/work_item_goal_shape_test.go`.
 
 ### The editability matrix (`aihub#440`)
 
@@ -256,12 +268,15 @@ no body", never "the body was withheld".
 
 - **§6.1 T1-9** — `kind`'s withdrawal is the rule applied: prose contradicting hop 3
   is a bug, and the legal dispositions are withdraw, fix, or file.
-- **§6.1 T1-9, second application** — the published `goal` description states the
-  status gate and is silent about the multiline refusal, while
-  `pf_create_work_item`'s states both its shape constraints. The disposition split:
-  the refusal that exists is documented here and on the hop 0-1 row above, and the
-  cap that does not exist is FILED (`aihub#474`) rather than written into prose as
-  though it were there.
+- **§6.1 T1-9, second application — CLOSED by `aihub#474` (2026-09-09).** The
+  published `goal` description used to state the status gate and nothing else,
+  while `pf_create_work_item`'s stated both of its shape constraints. The
+  disposition at the time was a split: document the refusal that existed, FILE the
+  cap that did not. The filing came back "oversight" rather than "deliberate
+  exemption", so the cap now exists on this path and the description states both
+  constraints — and it builds the number from `domain.MaxWorkItemGoalRunes()`
+  rather than retyping it, which is the T1-9 failure mode one level up: a published
+  limit that no longer tracks the enforced one reads as true and is not.
 - **§6.2 T2-1** — one editability matrix for the whole struct, one error code per
   rejection KIND (409 state, 403 permission), and no field silently exempt.
   **Implemented** in `internal/domain/work_items.go` (`updateGate`); "no field

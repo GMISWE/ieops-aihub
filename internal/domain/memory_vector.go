@@ -31,6 +31,27 @@ import (
 // ponytail: the 0.01 cosine bucket is the freshness/semantic-match tradeoff dial.
 // Widening it lets strength decide more often; narrowing it toward 0 approaches a
 // pure cosine sort. Do NOT reintroduce a weighted sum of the two (see aihub#311).
+//
+// 🔴 CALLERS MUST BOUND req.TopK BEFORE CALLING THIS — there is no ceiling here.
+// Until 2026-09-09 this function re-clamped topK to 200 on its own, duplicating
+// the ceiling normalizeRecallTopK (internal/domain/memory.go) had already
+// applied. The owner ruled that duplicate DELETED (aihub#551, owner ruling
+// 2026-09-09), on the ground that the only production caller — recallRouted,
+// in internal/domain/memory.go — normalizes req.TopK before the copy that
+// reaches here, so the clamp could not fire from the API, and a bound that
+// cannot fire is a bound nothing holds to the invariant: the aihub#309 shape.
+//
+// What that ruling accepts, stated plainly rather than defended against: this
+// function is EXPORTED, so a future in-repo caller that reaches it without
+// going through normalizeRecallTopK gets NO page-size bound at all, and its
+// unbounded value goes straight into the LIMIT clause below. That is a bug in
+// the caller. A silent belt-and-suspenders clamp here is precisely what was
+// removed, and re-adding one would put this site back in the clampdisclosure
+// ledger (internal/citest/clampdisclosure) as an undisclosed clamp.
+//
+// The `topK <= 0` default below is NOT a bound: it substitutes a default where
+// the caller named no page size, changing nothing the caller sent, which is why
+// the aihub#532 census holds that shape out as a non-clamp.
 func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*RecallResponse, error) {
 	qvec, err := embProvider.Embed(ctx, req.Query)
 	if err != nil {
@@ -43,9 +64,6 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 	topK := req.TopK
 	if topK <= 0 {
 		topK = 20
-	}
-	if topK > 200 {
-		topK = 200
 	}
 	minStrength := req.MinStrength
 	if minStrength <= 0 {

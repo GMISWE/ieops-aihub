@@ -2253,11 +2253,32 @@ const (
 // of TestHandleRecall_TotalAndLimitAlias pins it at the HTTP layer). Any positive
 // request is honoured up to the ceiling.
 //
-// This is the ONLY place a recall page size is bounded, and callers must not add a
-// cap of their own. A cap applied upstream of this function is invisible from
-// here, so nothing can hold it to the invariant above — which is precisely how
-// aihub#309 happened, and why the ceiling on the next line was unreachable, and
-// therefore false, for as long as it did.
+// TWO places bound a recall page size, not one. This function is the disclosed
+// one — Recall appends the adjustment around it. The other is queryIntLenientUI
+// (internal/server/queryparam.go), which handleUIMemories
+// (internal/server/ui_handlers_memory.go) calls with a ceiling of 200 before the
+// value becomes RecallRequest.TopK, so it bounds the page size UPSTREAM of here
+// and is invisible from here: nothing holds it to the invariant above. It is
+// harmless today only by a coincidence of literals — its ceiling is spelled 200,
+// the same number as recallTopKCeiling — so raising the constant here would
+// leave /ui silently capped at the old value. That site is on record as a
+// STRUCTURAL waiver in the clampdisclosure ledger
+// (internal/citest/clampdisclosure, disclosureWaivers), because /ui answers in
+// server-rendered HTML and has no request_adjusted field to disclose through.
+// Whether the two should be unified is aihub#552, filed 2026-09-09 and open.
+//
+// This comment read "This is the ONLY place a recall page size is bounded" until
+// 2026-09-09. It was false when written. aihub#551 corrected it (owner ruling
+// 2026-09-09) after the aihub#532 clamp census found a THIRD bounding site —
+// RecallWithVector re-clamping the same parameter DOWNSTREAM of this function —
+// and the owner ruled that duplicate deleted. Deleting it did not make "only"
+// true, because the /ui site was never the one under discussion.
+//
+// Do not add another. A cap applied upstream of this function is precisely how
+// aihub#309 happened, and why recallTopKCeiling was unreachable, and therefore
+// false, for as long as it did. (That clause used to say "the ceiling on the
+// next line"; the anchor is semantic now because this comment grew and a
+// positional one rots without anything going red.)
 //
 // Landing above the ceiling is still visible to the caller without a new response
 // field: Total reports the full matching count independently of pagination on

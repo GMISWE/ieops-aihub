@@ -70,9 +70,17 @@ func TestEveryClampDisclosesOrCarriesANamedWaiver(t *testing.T) {
 // asserted separately, along with the three buckets: a classifier that put
 // everything in one bucket would satisfy the gate and measure nothing.
 //
-// The numbers are floors, deliberately under the 18 sites present when
-// aihub#532 landed, because clamps are legitimately added and deleted and a gate
-// pinned to an exact count is a gate somebody edits to ship anything.
+// The numbers are floors, deliberately well under the census population,
+// because clamps are legitimately added and deleted and a gate pinned to an
+// exact count is a gate somebody edits to ship anything.
+//
+// No population figure is restated here (aihub#493 discipline: eleven of
+// nineteen restated "Measured: N" values in this repo's gate comments were
+// wrong again one day after being re-derived, every one of them dated, so
+// dating is refuted as the fix). This arm PRINTS the current population and
+// its three buckets instead. Re-derive with
+//
+//	GOWORK=off go test ./internal/citest/clampdisclosure/ -run TestScannerStillSeesEveryKnownClampSite -count=1 -v
 func TestScannerStillSeesEveryKnownClampSite(t *testing.T) {
 	const floor = 12
 
@@ -100,6 +108,17 @@ func TestScannerStillSeesEveryKnownClampSite(t *testing.T) {
 			scoped++
 		}
 	}
+
+	// The census population, printed rather than restated in a comment — see the
+	// re-derivation command in this function's doc.
+	//
+	// These are SITE counts, not ledger-ENTRY counts, and the two legitimately
+	// differ: a waiver key omits the line number and the bound, so the reinforce
+	// saturation's two clamps (a floor and a ceiling) are two sites under one
+	// key. Reading the printed "waived" against len(disclosureWaivers) and
+	// expecting them to agree is the trap this note exists to close.
+	t.Logf("clamp census: %d sites — %d disclosed, %d waived, %d out of scope",
+		len(sites), disclosed, waived, scoped)
 	if disclosed == 0 {
 		t.Errorf("no clamp in the repo was resolved as DISCLOSED, but three are "+
 			"(normalizeRecallTopK, NormalizeListWorkItemsLimit, newReadyQueue). The disclosure "+
@@ -697,36 +716,5 @@ func TestTheSeedWaiverIsTheReinforceSaturation(t *testing.T) {
 	if w.Param != "strength_delta" {
 		t.Errorf("the reinforce waiver names Param=%q; the caller-facing parameter is "+
 			"strength_delta", w.Param)
-	}
-}
-
-// TestThePendingSiteIsRegisteredRatherThanQuietlyWaived pins the census's one
-// real finding in the state it is actually in.
-//
-// RecallWithVector clamps top_k a second time, after normalizeRecallTopK has
-// already bounded it and Recall has already disclosed it. Nobody has ruled on
-// what should happen to it, and aihub#532 did not rule either — the wi carries
-// the question. This arm is what stops the entry from being upgraded to
-// "accepted" by an editor who does not know it was never adjudicated: changing
-// the kind means changing a test that says why.
-func TestThePendingSiteIsRegisteredRatherThanQuietlyWaived(t *testing.T) {
-	const key = "internal/domain/memory_vector.go:RecallWithVector:topK"
-	w, ok := Waivers()[key]
-	if !ok {
-		// It may legitimately be gone — that is one of the three answers. But
-		// then it must be gone from the tree too, which the arm at the top of
-		// this file checks.
-		t.Skipf("%s is no longer in the ledger; if the clamp is also gone, the question aihub#532 "+
-			"raised has been answered", key)
-	}
-	if w.Kind != KindPendingAdjudication {
-		t.Errorf("the second top_k ceiling is recorded as %s. aihub#532 found it and did NOT "+
-			"adjudicate it: the choice between deleting it, disclosing it, and keeping it as "+
-			"defence-in-depth belongs to whoever owns the convention. If that call has now been "+
-			"made, cite it here — a kind is a claim about who decided.", w.Kind)
-	}
-	if !mentionsWorkItem(w.Citation) {
-		t.Errorf("the pending entry cites %q, which names no work item. A pending question with "+
-			"nowhere to look is the silence, not the fix.", w.Citation)
 	}
 }

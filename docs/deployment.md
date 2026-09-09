@@ -572,6 +572,35 @@ server-side mitigation to fall back on: synthesising the missing
 `step_attempt_id` is the "record garbage rather than refuse" trade aihub#390
 rejected on purpose.
 
+**Second worked example, and the first one this checklist was written in time to
+catch: aihub#440, merged as `573c06c` (committed 2026-09-08 16:54 UTC).**
+`pf_update_work_item` now refuses `labels`, `priority`, `milestone`,
+`requires_human_session` and `declared_resources` on a `wrapped`, `failed` or
+`cancelled` work item with `409 CONFLICT_TERMINAL_STATE`
+(`internal/domain/work_items.go`, `updateGate`); before it, those five had no
+status guard and succeeded there. aihub#495 records it as
+that batch's only `200 → 409` transition, and it differs from aihub#399 in a way
+worth reading, because the difference is what tells you how long the window is:
+
+- **The refusal itself has no client half at all.** The whole gate is server-side
+  and there is no local pre-flight to be missing, so an old binary and a new one
+  meet it identically. Nothing is written by a rejected patch — the strictest
+  supplied tier governs the whole patch, so a mixed patch is refused entire rather
+  than applied in part — and `attrs`, `attrs_patch` and `attrs_unset` stay writable
+  on a terminal record, which is what post-wrap bookkeeping actually uses.
+- **The DESCRIPTION half is the one that skews.** The refusal was published at
+  hop 1 by aihub#495, in the tool description that ships inside the binary, so
+  until a machine refreshes it the caller is reading a contract that does not
+  mention the 409 while the server is enforcing it. That is the ordinary window,
+  and step 7's forced refresh below closes it.
+- **Measured, so the risk can be sized rather than guessed:** over the 21-day
+  transcript corpus (87 files, 738 `pf_update_work_item` calls), 49 ran against a
+  closed record and **none of them carried a working-tier field** — 28 `attrs_patch`,
+  20 `attrs`, 1 `attrs_unset`. That count is aihub#440's own, recorded in the
+  matrix comment in `internal/domain/work_items.go` and in
+  `docs/mcp-cards/pf_update_work_item.md`. So this refusal breaks zero measured
+  callers, which is a reason to deploy it calmly, not a reason to skip the read.
+
 So, as part of this deploy and not as a follow-up:
 
 - **Before step 1**, read the release's `internal/server/` and `internal/mcp/`

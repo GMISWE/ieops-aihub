@@ -1316,7 +1316,25 @@ type ForceTakeoverResponse struct {
 	// NewSessionSecret is intentionally NOT in JSON (Decision A): the client supplied it
 	// in the request body and already knows the plaintext.
 	NewSessionSecret string `json:"-"`
-	OK               bool   `json:"ok"`
+	// UnrecognizedResources is the SAME report ClaimResponse carries, under the
+	// same key and produced by the same UnrecognizedDeclaredResources call
+	// (aihub#509, closing the half of aihub#411 T2-12 that aihub#416 left open).
+	//
+	// It is not a second convention: a takeover re-derives this work item's locks
+	// from the same stored declared_resources a claim does, so it skips exactly
+	// the same entries, and it used to skip them in silence because this struct
+	// had no field for it. The old defence was that a takeover "is always
+	// followed by a fresh claim, which does report" — true of the polyforge flow
+	// and false of the HTTP surface, where POST /force_takeover is its own
+	// endpoint and returns a running attempt that already holds (or does not
+	// hold) the locks. A caller reading this response is entitled to the same
+	// warning the claiming one gets.
+	//
+	// Empty on a healthy work item, and `omitempty`, so nothing appears in the
+	// ordinary case — the same absence-means-nothing-adjusted convention
+	// ClaimResponse uses.
+	UnrecognizedResources []string `json:"unrecognized_resources,omitempty"`
+	OK                    bool     `json:"ok"`
 }
 
 // FnForceTakeover implements the force_takeover operation (H-R7-4).
@@ -1385,6 +1403,14 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	// different sets. The locks are derived from the SAME declaredRes slice the
 	// re-insert loop below uses, so the two cannot check different paths.
 	declaredRes := unmarshalDeclaredResources(wi.DeclaredResources)
+
+	// aihub#509: computed from the RAW payload, not from declaredRes, for the
+	// same reason FnClaimWorkItem does it that way — unmarshalDeclaredResources
+	// is tolerant by design and turns an unparseable payload into an empty
+	// slice, so a report derived from the decoded slice would say "nothing wrong"
+	// about exactly the payload that is most wrong.
+	ftUnrecognized := UnrecognizedDeclaredResources(wi.DeclaredResources)
+
 	ftLocks := make([]ResourceLockReq, 0, len(declaredRes))
 	ftProbes := make([]lockConflictProbe, 0, len(declaredRes))
 	for _, res := range declaredRes {
@@ -1495,8 +1521,15 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	// `repo` field added by aihub#261 would have been the second instance of that
 	// bug in this same function, so the list is deleted rather than extended.
 	// aihub#238: entries the mapper cannot understand yield no lock here either.
-	// Stored data, so this must not fail the takeover; the subsequent fresh claim
-	// reports them via ClaimResponse.unrecognized_resources.
+	// Stored data, so this must not fail the takeover.
+	//
+	// ⚠️ This comment used to close with "the subsequent fresh claim reports them
+	// via ClaimResponse.unrecognized_resources", and that sentence was the whole
+	// argument for staying silent here. aihub#509 removed it rather than
+	// rephrasing it: it describes the polyforge SKILL flow, not this endpoint,
+	// and a response is not excused from reporting by what some other call might
+	// do next. The report is now on this response too, as
+	// ForceTakeoverResponse.unrecognized_resources — same producer, same key.
 	//
 	// aihub#343: through acquireLockUpsert, one lock_acquired per row.
 	//
@@ -1544,7 +1577,10 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		NewAttemptID:      newAttemptID,
 		NewClaimEpoch:     newEpoch,
 		NewSessionSecret:  newSecret,
-		OK:                true,
+		// aihub#509. Derived above, from the same stored payload the lock
+		// re-derivation read, so the two cannot describe different declarations.
+		UnrecognizedResources: ftUnrecognized,
+		OK:                    true,
 	}, nil
 }
 
@@ -1967,6 +2003,23 @@ type AcquireLocksResponse struct {
 	// nothing produces such a row and the ordinary answer here is empty. The
 	// remaining producer is an explicit requested_locks.
 	AlreadyHeld []ResourceLock `json:"already_held"`
+	// UnrecognizedResources is the SAME report ClaimResponse carries, under the
+	// same key and produced by the same UnrecognizedDeclaredResources call
+	// (aihub#509, closing the half of aihub#411 T2-12 that aihub#416 left open).
+	//
+	// This endpoint has the strongest claim on it of the three, because its whole
+	// contract is "tell me which locks I now hold" and its own decode comment
+	// already says so: silently deriving zero targets answers that question with
+	// an empty list and a 200, which is something the server never checked. An
+	// entry the mapper cannot understand produces no target and so was invisible
+	// in exactly the same way — the two lists came back complete and correct, and
+	// said nothing about the declaration that contributed to neither.
+	//
+	// ⚠️ Read it as a report on the DECLARATIONS, not as a third lock list.
+	// Acquired and AlreadyHeld stay a partition of the attempt's lock set; this
+	// names declared entries that are in neither because they derive no lock at
+	// all. Empty on a healthy work item, and `omitempty`.
+	UnrecognizedResources []string `json:"unrecognized_resources,omitempty"`
 }
 
 // FnAcquireLocks acquires file_scope write-intent locks for a running attempt
@@ -2030,6 +2083,16 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 	if !decodeOK {
 		return nil, NewErr(ErrInternalError, "failed to parse declared_resources")
 	}
+
+	// aihub#509: from the RAW payload, like claim and force_takeover, so the
+	// report describes what was STORED rather than what survived decoding.
+	//
+	// Placed after the decode failure above and not before it: on this endpoint
+	// an unparseable payload is an ERROR, not a warning (see the comment on that
+	// return), so there is no response to attach a report to. That is a genuine
+	// difference from the other two paths and it is theirs, not this one's —
+	// they must stay claimable, this one must not lie about lock coverage.
+	alUnrecognized := UnrecognizedDeclaredResources(wi.DeclaredResources)
 
 	type targetLock struct {
 		lockType string
@@ -2236,5 +2299,11 @@ func FnAcquireLocks(ctx context.Context, pool *pgxpool.Pool, wiID string, req *A
 		}
 		return nil, NewErr(ErrInternalError, "failed to commit acquire_locks")
 	}
-	return &AcquireLocksResponse{Acquired: acquired, AlreadyHeld: alreadyHeld}, nil
+	return &AcquireLocksResponse{
+		Acquired:    acquired,
+		AlreadyHeld: alreadyHeld,
+		// aihub#509. Derived above, from the same stored payload the target
+		// derivation read.
+		UnrecognizedResources: alUnrecognized,
+	}, nil
 }

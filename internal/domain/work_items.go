@@ -3561,6 +3561,43 @@ func newReadyQueue(requestedMax int) (*ReadyQueue, int) {
 // items in ready section" until aihub#449; that was measured wrong in aihub#401
 // and is corrected in the schema rather than here, because the caller reads the
 // schema.
+//
+// # Every segment fails the whole call (aihub#500)
+//
+// All seven `pool.Query` errors propagate. Until aihub#500 FIVE of them did not:
+// stalled, paused, needs_human_session, unclassified and stale_running each
+// wrapped their whole drain in `if err == nil { … }` with no else, so a send-time
+// failure rendered that segment as an empty list and still returned 200. Only
+// items[] and running[] checked `err != nil`.
+//
+// 🔴 aihub#500 opened naming stale_running the sole offender, "while the other six
+// return dbErr". That was measured wrong — the shape was five sites, and
+// stale_running only looked unique because it spelled its variable `staleErr`
+// instead of shadowing `err`. Fixing the one named site would have left four
+// identical defects behind while publishing "now aligned with the other six" as
+// the reason, so the class is closed here rather than the instance.
+//
+// What decides it is not a majority vote among the segments, because there was no
+// majority to appeal to. It is that each of those five already disagreed WITH
+// ITSELF: the same segment that discarded the send-time error returns dbErrCause
+// on rows.Err() a dozen lines below, for the same underlying condition (aihub#382
+// / aihub#386 put it there). A segment cannot be best-effort on one error path
+// and fatal on the other for one failure — one of the two is unfinished, and the
+// fatal half is the one with a written reason. Making best-effort real would have
+// meant DOWNGRADING the rows.Err() half, a larger change in the exact direction
+// internal/citest/rowserr exists to prevent.
+//
+// Nothing recorded best-effort as intended: not the design-doc changelog, not the
+// contract card, not conflictGuardExemptions — and that guard could not have
+// caught this anyway, since it is scoped to transactional functions and this one
+// opens no transaction. The shape arrived unremarked as the tail of an additive
+// change, exactly as stale_running's `omitempty` did in aihub#36.
+//
+// The wire cost is narrower than it first looks. A pool that is down already fails
+// at items[], the first query, so the reachable case is degradation BETWEEN
+// segments — and there a partial queue is the harmful answer, because aihub#449
+// made all seven keys always-present precisely so that an empty one asserts
+// "nothing is here" rather than "no data reached you".
 func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max int) (*ReadyQueue, *AihubError) {
 	result, max := newReadyQueue(max)
 
@@ -3628,34 +3665,35 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		ORDER BY ae.created_at DESC`,
 		project,
 	)
-	if err == nil {
-		defer stalledRows.Close()
-		for stalledRows.Next() {
-			var item StalledItem
-			var stalledAt time.Time
-			var stall, actorDisplay *string
-			// aihub#206: actor_display on the wi_stalled event can be NULL
-			// (e.g. escalated-stall events emitted without a display name
-			// set), which can't scan into item.LastActorDisplay's plain
-			// string directly — scan through a nullable local instead.
-			if err := stalledRows.Scan(&item.ID, &item.Slug, &stall, &stalledAt, &actorDisplay); err != nil {
-				continue
-			}
-			if stall != nil {
-				item.StallReason = *stall
-			}
-			if actorDisplay != nil {
-				item.LastActorDisplay = *actorDisplay
-			}
-			item.StalledSince = stalledAt.Format(time.RFC3339)
-			result.Stalled = append(result.Stalled, item)
-		}
-		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-		if err := stalledRows.Err(); err != nil {
-			return nil, dbErrCause(err, "failed to read stalled items rows")
-		}
-		stalledRows.Close()
+	if err != nil {
+		return nil, NewErr(ErrInternalError, "failed to query stalled items")
 	}
+	defer stalledRows.Close()
+	for stalledRows.Next() {
+		var item StalledItem
+		var stalledAt time.Time
+		var stall, actorDisplay *string
+		// aihub#206: actor_display on the wi_stalled event can be NULL
+		// (e.g. escalated-stall events emitted without a display name
+		// set), which can't scan into item.LastActorDisplay's plain
+		// string directly — scan through a nullable local instead.
+		if err := stalledRows.Scan(&item.ID, &item.Slug, &stall, &stalledAt, &actorDisplay); err != nil {
+			continue
+		}
+		if stall != nil {
+			item.StallReason = *stall
+		}
+		if actorDisplay != nil {
+			item.LastActorDisplay = *actorDisplay
+		}
+		item.StalledSince = stalledAt.Format(time.RFC3339)
+		result.Stalled = append(result.Stalled, item)
+	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := stalledRows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read stalled items rows")
+	}
+	stalledRows.Close()
 
 	// paused[]: status=paused
 	pausedRows, err := pool.Query(ctx, `
@@ -3666,29 +3704,30 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		ORDER BY wi.updated_at DESC`,
 		project,
 	)
-	if err == nil {
-		defer pausedRows.Close()
-		for pausedRows.Next() {
-			var item PausedItem
-			var lat *time.Time
-			var actorDisplay *string
-			if err := pausedRows.Scan(&item.ID, &item.Slug, &lat, &actorDisplay, &item.PauseReason); err != nil {
-				continue
-			}
-			if lat != nil {
-				item.PausedSince = lat.Format(time.RFC3339)
-			}
-			if actorDisplay != nil {
-				item.LastActorDisplay = *actorDisplay
-			}
-			result.Paused = append(result.Paused, item)
-		}
-		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-		if err := pausedRows.Err(); err != nil {
-			return nil, dbErrCause(err, "failed to read paused items rows")
-		}
-		pausedRows.Close()
+	if err != nil {
+		return nil, NewErr(ErrInternalError, "failed to query paused items")
 	}
+	defer pausedRows.Close()
+	for pausedRows.Next() {
+		var item PausedItem
+		var lat *time.Time
+		var actorDisplay *string
+		if err := pausedRows.Scan(&item.ID, &item.Slug, &lat, &actorDisplay, &item.PauseReason); err != nil {
+			continue
+		}
+		if lat != nil {
+			item.PausedSince = lat.Format(time.RFC3339)
+		}
+		if actorDisplay != nil {
+			item.LastActorDisplay = *actorDisplay
+		}
+		result.Paused = append(result.Paused, item)
+	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := pausedRows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read paused items rows")
+	}
+	pausedRows.Close()
 
 	// needs_human_session[]: queued + no blocker + requires_human_session=true
 	humanRows, err := pool.Query(ctx, `
@@ -3705,24 +3744,25 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		LIMIT $2`,
 		project, max,
 	)
-	if err == nil {
-		defer humanRows.Close()
-		for humanRows.Next() {
-			var item ReadyItem
-			var cat time.Time
-			if err := humanRows.Scan(&item.ID, &item.Slug, &item.WIType, &item.Priority, &item.Goal, &cat); err != nil {
-				continue
-			}
-			catStr := cat.Format(time.RFC3339)
-			item.CreatedAt = catStr
-			result.NeedsHumanSession = append(result.NeedsHumanSession, item)
-		}
-		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-		if err := humanRows.Err(); err != nil {
-			return nil, dbErrCause(err, "failed to read needs_human_session items rows")
-		}
-		humanRows.Close()
+	if err != nil {
+		return nil, NewErr(ErrInternalError, "failed to query needs_human_session items")
 	}
+	defer humanRows.Close()
+	for humanRows.Next() {
+		var item ReadyItem
+		var cat time.Time
+		if err := humanRows.Scan(&item.ID, &item.Slug, &item.WIType, &item.Priority, &item.Goal, &cat); err != nil {
+			continue
+		}
+		catStr := cat.Format(time.RFC3339)
+		item.CreatedAt = catStr
+		result.NeedsHumanSession = append(result.NeedsHumanSession, item)
+	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := humanRows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read needs_human_session items rows")
+	}
+	humanRows.Close()
 
 	// unclassified[]: queued + no blocker + requires_human_session IS NULL.
 	//
@@ -3745,27 +3785,28 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		LIMIT $2`,
 		project, max,
 	)
-	if err == nil {
-		defer unclRows.Close()
-		for unclRows.Next() {
-			var item ReadyItem
-			var cat time.Time
-			if err := unclRows.Scan(&item.ID, &item.Slug, &item.WIType, &item.Priority, &item.Goal, &cat); err != nil {
-				continue
-			}
-			catStr := cat.Format(time.RFC3339)
-			item.CreatedAt = catStr
-			result.Unclassified = append(result.Unclassified, item)
-		}
-		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-		if err := unclRows.Err(); err != nil {
-			return nil, dbErrCause(err, "failed to read unclassified items rows")
-		}
-		unclRows.Close()
+	if err != nil {
+		return nil, NewErr(ErrInternalError, "failed to query unclassified items")
 	}
+	defer unclRows.Close()
+	for unclRows.Next() {
+		var item ReadyItem
+		var cat time.Time
+		if err := unclRows.Scan(&item.ID, &item.Slug, &item.WIType, &item.Priority, &item.Goal, &cat); err != nil {
+			continue
+		}
+		catStr := cat.Format(time.RFC3339)
+		item.CreatedAt = catStr
+		result.Unclassified = append(result.Unclassified, item)
+	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := unclRows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read unclassified items rows")
+	}
+	unclRows.Close()
 
 	// stale_running[]: running wi with updated_at > 24h (ownership reminder, not forced)
-	staleRows, staleErr := pool.Query(ctx, `
+	staleRows, err := pool.Query(ctx, `
 		SELECT wi.id, wi.slug, wi.goal, ra.actor_display, ra.last_active_at
 		FROM work_items wi
 		JOIN run_attempts ra ON ra.id = wi.current_attempt_id
@@ -3775,23 +3816,24 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		ORDER BY wi.updated_at ASC`,
 		project,
 	)
-	if staleErr == nil {
-		defer staleRows.Close()
-		for staleRows.Next() {
-			var item RunningItem
-			var lat time.Time
-			if err := staleRows.Scan(&item.ID, &item.Slug, &item.Goal, &item.OwnerDisplay, &lat); err != nil {
-				continue
-			}
-			item.LastActiveAt = lat.Format(time.RFC3339)
-			result.StaleRunning = append(result.StaleRunning, item)
-		}
-		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-		if err := staleRows.Err(); err != nil {
-			return nil, dbErrCause(err, "failed to read stale_running items rows")
-		}
-		staleRows.Close()
+	if err != nil {
+		return nil, NewErr(ErrInternalError, "failed to query stale_running items")
 	}
+	defer staleRows.Close()
+	for staleRows.Next() {
+		var item RunningItem
+		var lat time.Time
+		if err := staleRows.Scan(&item.ID, &item.Slug, &item.Goal, &item.OwnerDisplay, &lat); err != nil {
+			continue
+		}
+		item.LastActiveAt = lat.Format(time.RFC3339)
+		result.StaleRunning = append(result.StaleRunning, item)
+	}
+	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+	if err := staleRows.Err(); err != nil {
+		return nil, dbErrCause(err, "failed to read stale_running items rows")
+	}
+	staleRows.Close()
 
 	return result, nil
 }

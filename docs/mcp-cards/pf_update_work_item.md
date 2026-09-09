@@ -311,13 +311,17 @@ no body", never "the body was withheld".
   direction: not prose that outlived its behaviour, but a refusal that arrived
   without prose. The published `goal` description now says **non-empty**, because
   `""` went from stored to refused on this path and a caller holding the old
-  contract would meet the new 400 by hitting it. `internal/mcp/goal_cap_publication_test.go`
-  (`TestUpdateToolPublishesThatTheGoalMustBeNonEmpty`) is the gate, so the word
-  cannot be edited out while the check stays. `pf_create_work_item`'s and
-  `pf_batch_create_work_items`' descriptions do NOT carry the word: they share one
-  string, and changing it moves both of their `input_schema_sha256` — a change
-  whose file scope has to include those two cards. Left as its own change rather
-  than smuggled into this one.
+  contract would meet the new 400 by hitting it. The gate is
+  `internal/mcp/goal_cap_publication_test.go` (`TestPublishedGoalCapIsTheEnforcedOne`),
+  so the word cannot be edited out while the check stays. **Closed on the create side by `aihub#520`**
+  (2026-09-09): `pf_create_work_item` and `pf_batch_create_work_items` share one
+  `goal` string (`workItemFieldProps`) and now carry the word too, so all three
+  tools that write this column publish the same refusal. That was left as its own
+  change because editing the shared string moves both of their
+  `input_schema_sha256` and stales their cards, which its file scope had to
+  include. The `aihub#507` gate was NAMED for this tool while it was the only one
+  carrying the word; `aihub#520` folded it into the quantified loop above rather
+  than leaving a second named test, which is what its own doc comment asked for.
 - **§6.1 T1-9, second application — CLOSED by `aihub#474` (2026-09-09).** The
   published `goal` description used to state the status gate and nothing else,
   while `pf_create_work_item`'s stated both of its shape constraints. The

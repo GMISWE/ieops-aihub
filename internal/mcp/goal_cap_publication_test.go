@@ -40,12 +40,23 @@ import (
 )
 
 // TestPublishedGoalCapIsTheEnforcedOne checks every tool that publishes a `goal`
-// parameter against domain.MaxWorkItemGoalRunes().
+// parameter against the shape domain enforces: the cap
+// (domain.MaxWorkItemGoalRunes()), the newline refusal, and non-emptiness.
 //
 // It quantifies over the live tool list rather than over a hand-written pair of
 // names on purpose: pf_batch_create_work_items publishes the same field through
 // the shared workItemFieldProps, and a third tool that grows a `goal` is exactly
 // the case a two-name list would silently skip.
+//
+// The non-emptiness arm arrived here by that route. aihub#507 shipped it as a
+// test named for pf_update_work_item alone, because at that moment only that
+// tool's description carried the word and the loop below would have failed on the
+// other two — a red gate for a gap the work item had deliberately not closed. Its
+// doc comment said to fold it in here rather than leave a second named test if
+// the create side ever stated it too, and aihub#520 stated it. Three descriptions
+// asserted by one loop is what stops them drifting apart again; two tests, one
+// quantified and one named, is a shape where the named tool is the only one that
+// cannot silently lose the word.
 func TestPublishedGoalCapIsTheEnforcedOne(t *testing.T) {
 	limit := domain.MaxWorkItemGoalRunes()
 	want := "≤" + strconv.Itoa(limit) + " chars"
@@ -73,6 +84,24 @@ func TestPublishedGoalCapIsTheEnforcedOne(t *testing.T) {
 				"is refused. Both halves are one CHECK (`length(goal) <= %d AND goal !~ "+
 				"E'[\\n\\r]'`) and both are enforced in Go; publishing one of them is how the "+
 				"update tool came to document neither.", tool, desc, limit)
+		}
+		// aihub#507's arm, quantified by aihub#520. `pf_update_work_item {goal: ""}`
+		// used to be STORED — 200, and a work item that renders blank everywhere —
+		// while pf_create_work_item answered the identical value with 400 "goal is
+		// required". domain.validateWorkItemGoalPresent now refuses it on both
+		// paths. A newly reachable refusal that no published text mentions is
+		// discovered by being hit, which is the §6.1 T1-9 failure mode with the
+		// sign flipped: not prose outliving its behaviour, but behaviour arriving
+		// without prose. And on the create paths the refusal was never new at all —
+		// only unstated, because JSON-Schema `required` means "must be present",
+		// not "must be non-empty", so `goal: ""` satisfied the published schema and
+		// took the 400 regardless.
+		if !strings.Contains(strings.ToLower(desc), "non-empty") {
+			t.Errorf("%s publishes goal as %q, which does not say the value must be non-empty. "+
+				"domain.validateWorkItemGoalPresent refuses \"\" with 400 \"goal is required\" on "+
+				"every path that writes this column. `required` in the published schema means "+
+				"the property must be PRESENT, so a caller reading it cannot learn that the "+
+				"empty string is refused — it learns by sending one.", tool, desc)
 		}
 		// The aihub#433 arm: a description that states the cap AND some other
 		// number states two caps, and the reader cannot tell which is enforced.
@@ -178,43 +207,4 @@ func toolNames(m map[string]string) []string {
 		out = append(out, k)
 	}
 	return out
-}
-
-// TestUpdateToolPublishesThatTheGoalMustBeNonEmpty is aihub#507's half of the
-// bridge above: the refusal a caller is TOLD about must be the refusal the
-// server performs, for the guard that work item added.
-//
-// `pf_update_work_item {goal: ""}` used to be stored — 200, and a work item that
-// renders blank everywhere — while pf_create_work_item answered the identical
-// value with 400 "goal is required". domain.validateWorkItemGoalPresent now
-// refuses it on both paths. A NEWLY REACHABLE refusal that no published text
-// mentions is discovered by being hit, which is the §6.1 T1-9 failure mode with
-// the sign flipped: not prose outliving its behaviour, but behaviour arriving
-// without prose.
-//
-// ⚠️ Named rather than quantified over every tool publishing `goal`, and that is
-// a deliberate narrowing rather than the oversight the test above warns about.
-// The word lives on this tool's own description string; the other two share
-// workItemFieldProps' string, and adding it there would move
-// pf_create_work_item's and pf_batch_create_work_items' input_schema_sha256 and
-// staleness-fail their cards (K3) in a change whose file scope does not include
-// them. So the create side stating it too is left as its own change, and this
-// arm asserts exactly what aihub#507 shipped. If that change happens, fold this
-// into the loop above rather than adding a second named test.
-func TestUpdateToolPublishesThatTheGoalMustBeNonEmpty(t *testing.T) {
-	const tool = "pf_update_work_item"
-
-	desc, ok := publishedGoalDescriptions(t)[tool]
-	if !ok {
-		t.Fatalf("%s publishes no `goal` description — either the parameter was withdrawn "+
-			"(in which case delete this test with it) or the walk is broken and the "+
-			"assertion below would be vacuous", tool)
-	}
-	if !strings.Contains(strings.ToLower(desc), "non-empty") {
-		t.Errorf("%s publishes goal as %q, which does not say the value must be non-empty. "+
-			"domain.validateWorkItemGoalPresent refuses \"\" here with 400 \"goal is "+
-			"required\" since aihub#507; before it, the same value was STORED. A caller "+
-			"holding the old contract clears a goal deliberately and now gets a 400 with "+
-			"nothing in the schema that predicted it.", tool, desc)
-	}
 }

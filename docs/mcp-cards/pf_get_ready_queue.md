@@ -128,6 +128,26 @@ existed only in the design doc's sketch. The first went with the ownership model
 v1.21 and the second was deleted from `work_items` in v1.22; the third is a fourth
 dead field `aihub#411` T2-20 did not list, and `RunningItem` has never carried it.
 
+🔴 **An empty segment now always means "nothing is here" (`aihub#500`).** Making the
+seven keys always-present only pays off if an empty one is trustworthy, and until
+this wi it was not: FIVE segments — `stalled`, `paused`, `needs_human_session`,
+`unclassified` and `stale_running` — wrapped their whole drain in `if err == nil {…}`
+with no else, so a `pool.Query` that failed to send rendered that segment as `[]`
+inside an HTTP 200. All seven now return `500 INTERNAL_ERROR "failed to query <segment>
+items"` instead, matching what `items` and `running` already did.
+
+That is an error-contract change, from silently-partial to failing, and it is the
+right direction here because each of those five already returned `dbErrCause` from
+`rows.Err()` a dozen lines below for the same underlying failure — best-effort on one
+error path and fatal on the other is not a policy, it is an unfinished check. The
+reachable case is narrow: a pool that is down already fails at `items`, the first
+query, so this only shows up when the pool degrades BETWEEN segments — precisely when
+a partial queue is most misleading. `aihub#500` opened describing `stale_running` as
+the only such segment; that was measured wrong, and the count arm of
+`internal/domain/ready_queue_query_errors_test.go`
+(`TestReadyQueueAnswersEveryQueryError`) now holds the shape for all seven and for any
+eighth added later.
+
 The corpus record above spans 155 calls with a 0.00%
 error rate. Four of those results were prose rather than strict JSON, which is why
 the census counts `json_object_results` and `prose_results` separately — a prose

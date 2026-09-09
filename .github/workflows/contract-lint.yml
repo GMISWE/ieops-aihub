@@ -101,6 +101,15 @@ on:
       # allowlist at all — enforced in the script but untriggered in CI. That is
       # the same "the check did not exist on that PR" hole aihub#326/#347 above
       # were about: the defect just moves one file over and stays green.
+      # C5 (aihub#518) adds a second code authority to that job:
+      # internal/domain/resource_events.go's `lockCause*` constants, which the
+      # design doc restates as two TypeScript unions. That file needs BOTH
+      # trigger directions too, and it already has them — the code side rides
+      # the 'internal/domain/**' glob above, the doc side rides 'docs/**' here.
+      # 🔴 If 'internal/domain/**' is ever narrowed to specific paths, keep
+      # resource_events.go in it: without that direction, a PR adding a cause
+      # constant and nothing else never runs C5, which is exactly how
+      # `wi_cancelled` and `derivation_retired` reached main undocumented.
       - 'docs/**'
       - 'scripts/pf_docs_contract_check.py'
       # README.md is here for one reason (aihub#439): it holds the "How docs

@@ -268,6 +268,26 @@ changes a migration. goose is forward-and-back per migration and there is no
 automatic pre-deploy gate, so on a schema-changing release **take a DB snapshot
 first** ([Backups](#9-backups)).
 
+**Where an unexplained `already_held` lock comes from (migration `0038`,
+aihub#416, landed 2026-09-09).** The window this ordering opens — migrations
+applied, old container still serving — leaves one visible after-effect, and it is
+benign. Migration `0038` deletes the `git_branch` and `deploy_env` `resource_locks`
+rows whose derivation the same release retires; the binary still running during
+the window has not retired it yet, so it keeps deriving those two types and
+re-inserts rows behind the migration until the cutover. After the cutover nothing
+derives them, so nothing probes them and nothing blocks on them — they are inert
+relics, not live locks. Where they do show up is `pf_acquire_locks`'s
+`already_held`, with no declaration anywhere to explain them.
+
+They clear themselves as soon as the holding attempt goes terminal: wrap and fail
+delete by owner attempt with no type filter, so they take the relics along with
+everything else. The one attempt they never leave is one that stays
+**paused forever** — pause releases `file_scope` only, and
+the orphan sweep skips paused attempts. That is precisely the state `0038` exists
+to clear, and its one-shot remedy is spent, so on such an attempt these rows
+persist indefinitely. There is nothing to do about them; the point is not to read
+one as a live lock on your next deploy.
+
 ## 5. Start the server
 
 ```bash
@@ -324,7 +344,7 @@ The endpoint disables itself once any user exists (a second call returns
 | check | command | expected |
 |---|---|---|
 | DB + server + embedding | `curl -s localhost:8080/v1/health` | `{"db_ok":true,"embedding_ok":true,...,"status":"ok"}` — `status` is `degraded` (still HTTP 200) if a dependency is down; see [Health & version endpoints](#health--version-endpoints) |
-| build info | `curl -s localhost:8080/v1/version` | JSON with `version`, `git_commit`, `build_time`, `min_client_version` |
+| build info | `curl -s localhost:8080/v1/version` | the build-info JSON — field list under [Health & version endpoints](#health--version-endpoints), which is this page's only copy of it |
 | web console | `curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' localhost:8080/ui/` | `302 .../ui/wi` |
 
 Open `http://<host>:8080/ui/` in a browser and sign in with the admin API key.
@@ -837,7 +857,7 @@ the only authoritative copy of it.
 | endpoint | use |
 |---|---|
 | `GET /v1/health` | server + DB + embedding-backend status (body below) |
-| `GET /v1/version` | running version, git commit, build time, min client version |
+| `GET /v1/version` | identity of the running build **and of the running process** (body below) |
 | `GET /ui/` | web console (redirects to `/ui/wi`) |
 
 `GET /v1/health` needs no authentication and answers:
@@ -890,3 +910,31 @@ Two limits to know before you act on a green answer:
 naming the failing dependency and the `embedding_error_kind`, instead of the
 bare `[ok] config: aihub reachable` it printed when it only looked at the
 status code.
+
+`GET /v1/version` also needs no authentication and answers:
+
+```json
+{
+  "version": "dev",
+  "git_commit": "0cb7e5537c2b7b0e5c7e5b6c9a9f1b2c3d4e5f60",
+  "build_time": "2026-09-09T04:00:00+00:00",
+  "started_at": "2026-09-09T04:03:11.482913Z",
+  "min_client_version": "1.0.0"
+}
+```
+
+| field | meaning |
+|---|---|
+| `version` | the `VERSION` build-arg. **Reads `dev` on every main-branch image** — CI passes `GIT_COMMIT` and `BUILD_TIME` but not `VERSION`, so only a tag-driven release build sets it. Never use it to tell two main-branch deploys apart |
+| `git_commit` | the full 40-character commit the image was built from (`github.sha`). This is the field the deploy and rollback steps on this page assert against |
+| `build_time` | the head commit's timestamp, as passed to the image build |
+| `started_at` | when **this process** started, RFC3339 with nanoseconds. The other four are fixed for a given image — three come from build-time ldflags and `min_client_version` is a literal in the handler — so this is the only field that moves when a container is restarted without a rebuild |
+| `min_client_version` | the oldest `polyforge` binary the server will talk to |
+
+This table is **this page's only copy** of that shape; the `Verify` step above
+points here rather than restating it. The definition of record is design
+§4 `System` in [`docs/design/polyforge-v1-design.md`](design/polyforge-v1-design.md),
+and the code authority is `internal/server/router.go` (`handleVersion`).
+`started_at` arrived with `aihub#416` and this page went four fields for a
+while; that is what the single-copy rule is here to stop (`aihub#518`,
+2026-09-09).

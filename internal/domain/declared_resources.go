@@ -272,7 +272,7 @@ func ValidateDeclaredResources(raw json.RawMessage) *AihubError {
 					"got_type":    typ,
 					"valid_types": DeclaredResourceTypeList(),
 					"entry_shape": `{"type":"path","uri":"file:<repo-relative-path>","intent":"write"}`,
-					"hint":        "`file_scope`, `git_branch`, `worktree`, `tcp_port` and `deploy_env` are resource_locks.resource_type values (what the server DERIVES); declared_resources.type is the input vocabulary above. A file path is type=\"path\".",
+					"hint":        "`file_scope`, `git_branch`, `worktree`, `tcp_port` and `deploy_env` are resource_locks.resource_type values; declared_resources.type is the input vocabulary above. Since aihub#416 the server DERIVES exactly one of them — `file_scope`, from path/document/section entries; the other four are legal only in an explicit requested_locks. A file path is type=\"path\".",
 				})
 		}
 		uri, _ := item["uri"].(string)

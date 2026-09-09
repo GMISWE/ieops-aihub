@@ -944,9 +944,27 @@ func resolveRememberWorkItemRef(ctx context.Context, q Querier, ref, project str
 // rounding rule to appeal to. These constants therefore bound what may be
 // stored; they do not make an in-range value storable AS STATED. Both write
 // paths read the stored value back with RETURNING, which is what keeps their
-// responses from naming a value the column does not hold. What SHOULD happen to
-// a non-integral in-range value — refuse it, round it, or widen the column — is
-// aihub#459's, and is open.
+// responses from naming a value the column does not hold.
+//
+// 🟢 aihub#459 SETTLED what should happen to a non-integral in-range value, and
+// the owner's ruling on 2026-09-09 was the first of its three options: REFUSE
+// it. Not round it — rounding answers 200 while storing a number the caller did
+// not name, which is the defect one layer up wearing a politer face — and not
+// widen the column, which would change what the Ebbinghaus recomputation in SQL
+// multiplies. So these constants no longer bound the legal set on their own: it
+// is the INTEGERS in [MinBaseStrength, MaxBaseStrength], and the integral half
+// is enforced by ValidateIntegralStrength below, on this write path and on
+// handleReinforceMemory's strength_delta alike.
+//
+// One consequence worth stating because it is easy to read the wrong way: the
+// truncation above is now unreachable through the API — the only two statements
+// that write the column are Remember's INSERT and handleReinforceMemory's
+// UPDATE, and after the ruling every value either can carry is already whole (a
+// stored value is SMALLINT, a delta is integral, and the clamp's bounds are
+// integers). The RETURNING clauses stay anyway. What makes them right is that a
+// response cannot then disagree with the row, not that a disagreement happens
+// to be reachable today; deleting them would make the next widening of this
+// path a silent lie again.
 //
 // DefaultBaseStrength is what an omitted base_strength becomes, and it is the
 // column's own DEFAULT for the same reason: the value a caller gets by saying
@@ -969,17 +987,20 @@ const (
 // The two agree on the range, which is what MinBaseStrength/MaxBaseStrength
 // are for; they differ on the remedy because the inputs differ.
 //
-// 🔴 aihub#475 — the reject-over-clamp argument in the paragraph above is sound
-// but this guard does not deliver all of it, and pretending otherwise is how
-// the gap stays invisible. A value INSIDE the range but not integral (4.5, say)
-// is admitted here and then truncated toward zero by pgx's int2 codec, so the
-// call answers 200 having stored something the caller did not ask for — the
-// exact outcome the paragraph rejects. What stops it becoming a silent lie is
-// Remember's `RETURNING ... base_strength`: the response reports 4, not 4.5.
-// That is honesty, not enforcement. Making 4.5 an error, rounding it, or making
-// it storable are the three options aihub#459 owns; this guard admits exactly
-// what it always admitted until that is decided, because narrowing it here
-// would be taking that decision by the back door.
+// 🟢 aihub#459 (owner ruling 2026-09-09, "传整数") closed the hole aihub#475
+// documented here, and the hole is worth restating because the fix is only
+// legible against it. A value INSIDE the range but not integral (4.5, say) used
+// to be admitted here and then truncated toward zero by pgx's int2 codec, so
+// the call answered 200 having stored something the caller did not ask for —
+// the exact outcome the paragraph above rejects for an out-of-range value. All
+// that stood between that and a silent lie was Remember's `RETURNING ...
+// base_strength`, which reports 4 rather than 4.5: honesty, not enforcement.
+// The ruling picked refusal over rounding and over widening the column, so 4.5
+// is now a 400 as well — the same remedy the range half already used, for the
+// same reason. The two checks stay SEPARATE and in this order: a value that is
+// both out of range and fractional (0.9, every value the aihub#412 corpus
+// actually carried) still gets the range error it always got, because that is
+// the error whose message names the constraint the caller violated first.
 //
 // 400, not 500 (aihub#411 T1-6): a value the server can see is wrong is the
 // caller's error, and answering 500 sends the reader to a server log that does
@@ -993,14 +1014,61 @@ const (
 // of it. The fix does not depend on which: every one of those values is outside
 // the range the column accepts.
 func validateBaseStrength(bs *float64) *AihubError {
-	if bs == nil || (*bs >= MinBaseStrength && *bs <= MaxBaseStrength) {
+	if bs == nil {
+		return nil
+	}
+	// Written as the negation of "is in range" rather than as "is below OR above"
+	// so that a NaN — which compares false against both bounds — keeps taking the
+	// RANGE error it took before aihub#459 split this function in two, instead of
+	// falling through to the integrality check and getting a different message
+	// for the same input. JSON cannot carry a NaN, so this is about the guard not
+	// changing behaviour it was not asked to change, not about live traffic.
+	if !(*bs >= MinBaseStrength && *bs <= MaxBaseStrength) {
+		return NewErr(ErrBadRequest, fmt.Sprintf(
+			"base_strength %g is out of range: it must be between %g and %g. "+
+				"The memories.base_strength column is CHECK-constrained to that range, "+
+				"so a value outside it cannot be stored. Omit the field to take the default of %g.",
+			*bs, MinBaseStrength, MaxBaseStrength, DefaultBaseStrength))
+	}
+	return ValidateIntegralStrength("base_strength", *bs)
+}
+
+// ValidateIntegralStrength rejects a strength value that is not a whole number.
+//
+// It is exported and takes the field NAME because there are two of these and
+// they live in different packages: base_strength, checked by
+// validateBaseStrength above for every memory write, and strength_delta,
+// checked by handleReinforceMemory (internal/server/routes_memory.go) before it
+// adds the delta to a stored value. Writing the rule once is the same argument
+// MinBaseStrength / MaxBaseStrength are here for — one column, one answer about
+// what may be in it (aihub#411 T1-3) — and the field name is a parameter rather
+// than two copies of the sentence because the reason is identical and only the
+// offending argument differs.
+//
+// Why the DELTA is checked and not just the sum: the sum is what reaches the
+// column, so checking only the sum would be sufficient for storage and useless
+// for the caller. A delta of 0.5 on a row stored at 3 clamps to 3.5, truncates
+// to 3, and the call would report "3" while having named 3.5 — a rejection at
+// the argument the caller actually chose says which input to fix. And because
+// every stored value is already whole (SMALLINT) and the clamp's bounds are
+// integers, an integral delta guarantees an integral sum: the pair of checks is
+// what makes "the stored strength is always the integer somebody asked for"
+// true, rather than true-so-far.
+//
+// 400, not 500, for aihub#411 T1-6's reason: a value the server can see is
+// wrong is the caller's error, and the caller can trivially comply.
+func ValidateIntegralStrength(field string, v float64) *AihubError {
+	if v == math.Trunc(v) {
 		return nil
 	}
 	return NewErr(ErrBadRequest, fmt.Sprintf(
-		"base_strength %g is out of range: it must be between %g and %g. "+
-			"The memories.base_strength column is CHECK-constrained to that range, "+
-			"so a value outside it cannot be stored. Omit the field to take the default of %g.",
-		*bs, MinBaseStrength, MaxBaseStrength, DefaultBaseStrength))
+		"%s %g is not a whole number: it must be an integer. The "+
+			"memories.base_strength column is SMALLINT, so a fractional value never "+
+			"reaches it as stated — the driver truncates toward zero without an error "+
+			"(3.5 stores 3, 0.9 stores 0), which is why this is refused here rather "+
+			"than rounded for you: rounding would answer 200 while storing a strength "+
+			"you did not name. Send the integer you mean.",
+		field, v))
 }
 
 // validateRememberJSONParams is Remember's aihub#465 shape guard over the two

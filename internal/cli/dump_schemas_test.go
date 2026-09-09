@@ -81,11 +81,14 @@ func TestDumpMCPSchemas_Completeness(t *testing.T) {
 	// pf_create_user.role, not pf_save_artifact.type, and the difference is the
 	// point of aihub#445. role is a closed set the server actually refuses to go
 	// outside (aihub#463: domain.UserGlobalRoleList, validated by handleCreateUser
-	// with a 400, mirroring the users.role CHECK). pf_save_artifact.type is
-	// published as a 6-value enum that NOTHING enforces — no client-side check,
-	// and internal/domain/memory.go (Remember) accepts any methodology.* name —
-	// so it is the same published-but-unenforced shape this work item withdrew,
-	// and pinning a test to it would entrench it.
+	// with a 400, mirroring the users.role CHECK). pf_save_artifact.type was at
+	// the time published as a 6-value enum that NOTHING enforced — no client-side
+	// check, and internal/domain/memory.go (Remember) accepts any methodology.*
+	// name — so it was the same published-but-unenforced shape aihub#445
+	// withdrew, and pinning a test to it would have entrenched it. aihub#499 then
+	// withdrew that one too; the arm below is what this paragraph was waiting
+	// for, and it asserts the ABSENCE of the enum, so the specimen still cannot
+	// move back here.
 	userTool, ok := schema.Tools["pf_create_user"]
 	if !ok {
 		t.Fatal("pf_create_user missing from schema")
@@ -112,6 +115,27 @@ func TestDumpMCPSchemas_Completeness(t *testing.T) {
 	if len(rememberType.Enum) != 0 {
 		t.Errorf("pf_remember.params.type publishes enum %v; the accepted set is a prefix rule, "+
 			"not a closed list, so no enum can state it (aihub#445)", rememberType.Enum)
+	}
+
+	// pf_save_artifact.type must not carry one either (aihub#499). The paragraph
+	// above named it as the parameter aihub#445 left behind and declined to
+	// assert on it, because pinning a published-but-unenforced enum would
+	// entrench it. aihub#499 withdrew it — measured live 2026-09-09, 3 of the
+	// 1,185 methodology.* rows in production are off those six — and enforced
+	// domain.MethodologyTypePrefix instead, so the assertion the paragraph was
+	// waiting for is now the opposite one and belongs here.
+	artifactTool, ok := schema.Tools["pf_save_artifact"]
+	if !ok {
+		t.Fatal("pf_save_artifact missing from schema")
+	}
+	artifactType, ok := artifactTool.Params["type"]
+	if !ok {
+		t.Fatal("pf_save_artifact.params.type missing")
+	}
+	if len(artifactType.Enum) != 0 {
+		t.Errorf("pf_save_artifact.params.type publishes enum %v; what the tool enforces is the "+
+			"methodology. PREFIX (validatePfSaveArtifactArgs), and the six names are suggestions, "+
+			"so no enum can state the accepted set (aihub#499)", artifactType.Enum)
 	}
 
 	// Verify that pf_claim_work_item requires work_item_id.

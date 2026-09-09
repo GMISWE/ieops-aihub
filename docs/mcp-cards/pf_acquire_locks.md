@@ -72,11 +72,31 @@ There is no lock list on the wire: the server reads the work item's own
 server sent them. The corpus record above spans 320 calls at a 4.38% error rate,
 which is consistent with a tool whose refusal is a normal outcome.
 
+A **third** key can appear: `unrecognized_resources`, added by `aihub#509`
+(2026-09-09), one human-readable line per `declared_resources` entry the lock mapper
+cannot understand. It is `omitempty` and a healthy work item never carries it. Read
+it as a report on the **declarations**, not as a third lock list — `acquired` and
+`already_held` stay a partition of the attempt's lock set, and this names entries
+that are in neither because they derive nothing. It is the same producer and the
+same key `pf_claim_work_item` uses, deliberately: an entry that derives no target
+used to fall out of both lists silently, so the two came back complete and correct
+while saying nothing about the declaration that contributed to neither.
+
+⚠️ It is **not** in `response_keys_observed` above, and that is not an omission.
+That list is copied from `aihub#412`'s generated corpus, whose window closed before
+the key existed; and because the key is `omitempty` and every work item the K10 live
+walk drives declares no resources, no live response carries it either, so it has no
+entry in `live-response-keys.json` — an invented entry there fails that arm as
+readily as a missing one. Both files are therefore correct as they stand.
+
 ## Policy
 
 - **§6.2 T2-12** — repo and service entries become **advisory** and derive no lock.
   Landed by `aihub#416` (2026-09-09), which is why the `already_held` sentence above
-  no longer names `git_branch`/`deploy_env` as a live population.
+  no longer names `git_branch`/`deploy_env` as a live population. The row's other
+  half — the unmappable-entry report this tool used to skip in silence — landed by
+  `aihub#509` (2026-09-09) as the `unrecognized_resources` key described in hop 5,
+  and the row is `landed` rather than `landed-in-part` from that date.
 - **§6.2 T2-13** — the empty-`repo` lock-key form must stay byte-identical. Nobody
   should tidy the two shapes into one three-segment key: doing so strands every live
   lock, because a key with no repo segment and a key with an empty one are different

@@ -759,6 +759,47 @@ func memoryTypeParamDesc() string {
 		"is accepted and stored: " + strings.Join(domain.PfRememberTypeEnum, ", ") + "."
 }
 
+// rememberVisibilityParamDesc is pf_remember's published `visibility`
+// description, built from the same list the write path is judged against.
+//
+// aihub#495. It used to be the hand-typed literal "private|project|team|admin",
+// four of the column's FIVE legal values — `public` was added to
+// memories_visibility_check by migration 0023 and to the Go mirror by aihub#434,
+// and the published set was never widened with it. So the one tier that changes
+// who can read the memory was the one tier a caller reading hop 1 could not know
+// existed, and hop 1 is the only thing a tool caller ever sees.
+//
+// Derived rather than retyped, for the reason aihub#474 gave about the goal cap:
+// a hand-typed vocabulary and the vocabulary that enforces it drift silently, and
+// this one already had. domain.MemoryVisibilityList() is also what
+// domain.vocabularyErr renders into the 400, so the set a caller is shown up
+// front and the set the refusal names are now one value in one order.
+//
+// The ⚠️ is not decoration. `public` is not merely "wider than team": it is the
+// tier internal/server/router.go's GET /share/:id gates on, an UNAUTHENTICATED
+// route, and internal/server/routes_artifacts.go (`handleSharedArtifact`) names
+// this exact reachability — "`public` is settable by a project writer straight
+// from POST /v1/memories … so it is not by itself a deliberate publication". A
+// vocabulary list that presented it as the fifth item in a ladder would publish
+// the value and withhold the only thing about it a caller needs.
+//
+// It says "when it also has a renderable body" rather than "and nothing written
+// through this tool has one", which is true of a default deployment (the render
+// set is methodology.* and this tool refuses those types) but is NOT a promise
+// this tool can make: renderTypes is configurable, so the conjunct is the honest
+// stopping point.
+//
+// ⚠️ Scoped to this tool. pf_save_artifact and pf_update_memory publish the same
+// column and are the file scope of other work items; see the gate in
+// visibility_vocab_publication_test.go for which of them is checked and why.
+func rememberVisibilityParamDesc() string {
+	return "Visibility tier. ENFORCED: one of " +
+		strings.Join(domain.MemoryVisibilityList(), "|") +
+		" (memories_visibility_check, mirrored in Go — anything else is a 400 naming the field). " +
+		"⚠️ `public` is the anonymous-share tier: GET /share/:id serves a public memory with NO auth " +
+		"when it also has a renderable body. Send `project` unless you mean to publish."
+}
+
 // rememberSchema is pf_remember's published InputSchema.
 //
 // pf_remember has no forwarding block to drift from: its handler passes the
@@ -786,7 +827,7 @@ func rememberSchema() json.RawMessage {
 		"project":              prop("string", "Project name"),
 		"type":                 prop("string", memoryTypeParamDesc()),
 		"content":              prop("string", "Memory content"),
-		"visibility":           prop("string", "private|project|team|admin"),
+		"visibility":           prop("string", rememberVisibilityParamDesc()),
 		"work_item_id":         prop("string", "Associated work item ID"),
 		"base_strength":        prop("number", "Initial strength, integer 1-5 (default 3). A fractional value is refused"),
 		"attrs":                prop("object", "Additional attributes."+jsonObjectPropNote),

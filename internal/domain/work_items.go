@@ -2263,6 +2263,37 @@ var jsonObjectParamSizeNote = map[string]string{
 	"payload":            "payload's own 64KB cap is checked first, and this value is under it",
 }
 
+// JSONObjectParamSizeNote returns the size sentence one guarded field's shape
+// rejection carries, or "" for a field this package does not guard.
+//
+// GuardedJSONObjectParams returns every field the table covers, sorted.
+//
+// Both exported for aihub#495. aihub#486 published "Size is never the reason for
+// that 400: this field has no length cap" in six MCP parameter descriptions
+// (internal/mcp, `jsonObjectPropNote`) and left the claim hanging: the only
+// assertion behind it, TestSizeNoteMatchesTheCapThatActuallyExists, reads THIS
+// table and never the schema text, so a published sentence that stopped being
+// true — or a per-field split like `payload`'s copied onto the wrong parameter —
+// would have shipped green.
+//
+// The table is the right thing for the MCP layer to read rather than a second
+// constant of its own, precisely because that test already checks each entry
+// against the behaviour it describes: a 200 KB object accepted for the three
+// uncapped fields, a 70 KB `payload` refused. A hop-1 gate that reads this map
+// therefore reaches the server's actual behaviour in two links, instead of
+// comparing one hand-typed sentence to another hand-typed sentence.
+func JSONObjectParamSizeNote(field string) string { return jsonObjectParamSizeNote[field] }
+
+// GuardedJSONObjectParams returns the fields jsonObjectParamSizeNote covers.
+func GuardedJSONObjectParams() []string {
+	out := make([]string, 0, len(jsonObjectParamSizeNote))
+	for field := range jsonObjectParamSizeNote {
+		out = append(out, field)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // jsonObjectParamErr builds the 400 for a jsonb object parameter that is not an
 // object. One builder for all four fields (aihub#465) rather than a copy per
 // field: the caller mistake is identical and so is the repair, and a second
@@ -2794,6 +2825,60 @@ const (
 	// TestEveryWorkItemStatusIsClassified makes it unreachable.
 	wiStatusUnknown
 )
+
+// WorkItemFieldsByEditTier returns the editability matrix's ROWS, keyed by tier
+// name ("contract" | "working" | "record"), each list sorted.
+//
+// WorkItemStatusesByEditClass returns its COLUMNS, keyed by class name ("open" |
+// "live" | "closed"), each list sorted, derived by classifying every value in
+// WorkItemStatusValues().
+//
+// Both exported for aihub#495, whose subject is that this matrix shipped
+// ENFORCED and unpublished: the tool description said "Update a work item (goal,
+// wi_type, priority, labels, etc.)" while five fields had just gone from writable
+// to 409 on a terminal work item. The repair is text, and text alone rots — so
+// internal/mcp gates its published description against these two functions rather
+// than against a list retyped there. Adding a field to the working tier without
+// naming it at hop 1 is then a red test, which is the only version of this fix
+// that survives the next field.
+//
+// They return the membership, not the verdict. updateGate remains the only thing
+// that decides an outcome; a second implementation of the decision, exported for
+// a test to compare against, would be two decisions.
+func WorkItemFieldsByEditTier() map[string][]string {
+	out := map[string][]string{}
+	for field, tier := range wiEditTierByField {
+		out[tier.String()] = append(out[tier.String()], field)
+	}
+	for _, fields := range out {
+		sort.Strings(fields)
+	}
+	return out
+}
+
+// WorkItemStatusesByEditClass returns the matrix's status columns.
+func WorkItemStatusesByEditClass() map[string][]string {
+	names := map[wiStatusClass]string{
+		wiStatusOpen:   "open",
+		wiStatusLive:   "live",
+		wiStatusClosed: "closed",
+	}
+	out := map[string][]string{}
+	for _, status := range WorkItemStatusValues() {
+		name, ok := names[wiStatusClassOf(status)]
+		if !ok {
+			// Unreachable while TestEveryWorkItemStatusIsClassified is green. Not
+			// skipped: a status that falls out of the classification must be
+			// visible to whoever reads this, not quietly absent from every column.
+			name = "unknown"
+		}
+		out[name] = append(out[name], status)
+	}
+	for _, statuses := range out {
+		sort.Strings(statuses)
+	}
+	return out
+}
 
 // wiStatusClassOf classifies one work_items.status value.
 func wiStatusClassOf(status string) wiStatusClass {

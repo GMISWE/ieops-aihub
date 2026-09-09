@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_pause_attempt",
-  "description_sha256": "97ab52c4996df4eec89ffcc91015a6cf6cc3bc758a3a5e4f1d32ccc8e38d6bed",
+  "description_sha256": "fcfae2916f42bafa65ec2a703a2278ba4752aae19153db5edc845d913a161946",
   "input_schema_sha256": "b2a0b799191acc6ff59530c2dc1df8b535735fce5fe9b62b4d718a79380cc79e",
   "params": {
     "pause_reason": {
@@ -26,7 +26,12 @@
 
 Two parameters. The description carries the lock semantics because they differ from
 every other terminal path: pausing **releases** `file_scope` locks acquired
-mid-attempt and **retains** `git_branch`/`deploy_env` for resume.
+mid-attempt and **retains** every other lock type for resume.
+
+⚠️ Since `aihub#416` that retained set is normally EMPTY — `file_scope` is the only
+lock the server derives — so the description says so rather than describing a
+retention a caller will never observe. It is non-empty only for an attempt that
+supplied `requested_locks` explicitly.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
@@ -79,11 +84,15 @@ callers have been handed.
   than one code for everything — it is unchanged, still 409, and still reached only
   by a caller whose secret is VALID, so the unification cannot shadow it.
 - **§6.2 T2-15** — which lock types survive a pause is exactly the row the
-  de-locking ruling shrinks to `file_scope`.
+  de-locking ruling shrinks to `file_scope`. Landed by `aihub#416` (2026-09-09):
+  the pause SQL is byte-unchanged (it always named `file_scope` explicitly); what
+  changed is that nothing else is being derived for it to retain.
 
 ## Open
 
-- **§6.4 item 6** — after the de-locking ruling lands, "retained for resume" will
-  describe a set with nothing in it. That is `aihub#416`'s to resolve, and this
-  description will need re-reading when it does. `aihub#416` was still open
-  (`paused`) at the last re-check, 2026-09-08.
+- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).** The
+  prediction this bullet made came true — "retained for resume" now usually
+  describes an empty set — and the resolution was to say so in the description
+  rather than to drop the clause. Dropping it would be wrong in the one case that
+  still reaches it: an attempt holding a `requested_locks` row keeps it across a
+  pause, and a caller told otherwise would expect a release that does not happen.

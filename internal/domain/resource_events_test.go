@@ -493,9 +493,23 @@ func TestEventVocabulary_NeedsNoMigration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", e.Name(), err)
 		}
-		src := string(body)
-		// 0006 lists lock_acquired / lock_released in a schema COMMENT, which is
-		// the precedent the vocabulary follows, not an allowlist entry.
+		// 🔴 COMMENTS ARE STRIPPED FIRST, and that is what makes this gate
+		// discriminating rather than merely noisy (aihub#416). The question is
+		// whether a migration puts one of these types INTO the allowlist, and an
+		// allowlist entry is SQL — a `--` line can only ever discuss one.
+		//
+		// Measured: aihub#416's 0038 both writes a lock_released row and mentions
+		// chk_evt_work_item_id in prose explaining why it does NOT need to touch
+		// the constraint, and against the raw text this gate reported that as the
+		// no-NULL invariant breaking. A gate that fires on a migration doing
+		// exactly what it demands is a gate that gets edited away.
+		//
+		// It cannot hide a real edit in the other direction: a type reaches the
+		// allowlist only by appearing in the CHECK, which is code, not comment.
+		// (The stripper is line-oriented and would mangle a `--` inside a string
+		// literal; no migration in this directory contains one, and one that did
+		// could only make this gate MORE eager.)
+		src := stripSQLLineComments(string(body))
 		if !strings.Contains(src, "chk_evt_work_item_id") {
 			continue
 		}
@@ -508,4 +522,19 @@ func TestEventVocabulary_NeedsNoMigration(t *testing.T) {
 				"and the deploy is no longer migration-free.", e.Name())
 		}
 	}
+}
+
+// stripSQLLineComments removes `--` line comments so a gate reading migration
+// SQL sees statements rather than prose about them. See
+// TestEventVocabulary_NeedsNoMigration for why the distinction is load-bearing.
+func stripSQLLineComments(src string) string {
+	lines := strings.Split(src, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if i := strings.Index(line, "--"); i >= 0 {
+			line = line[:i]
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }

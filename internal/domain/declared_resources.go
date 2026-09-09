@@ -23,9 +23,20 @@ import (
 // resourceToLock understands (§25 mapping). Keep in lock-step with
 // resourceToLock in conflicts.go.
 //
-// external_ref is deliberately present: it is a KNOWN type that maps to NO lock,
-// which is why "resourceToLock returned an empty lock type" can never itself be
-// used as the error signal.
+// 🔴 THREE of these six are KNOWN types that map to NO lock — `external_ref`,
+// and since aihub#416 also `repo` and `service` — which is why "resourceToLock
+// returned an empty lock type" can never itself be used as the error signal.
+// That sentence used to name external_ref alone, and the count is the only part
+// of it that changed: the reasoning was always that an empty lock type is
+// ambiguous between "unknown type" and "known type that locks nothing", and it
+// is now ambiguous three ways instead of one. UnrecognizedDeclaredResources
+// answers the question this map exists for, and it consults this map rather than
+// the mapper's return value for exactly that reason.
+//
+// A type is in this set because it is a legal thing to DECLARE, not because it
+// takes a lock. repo and service are still validated, still stored, and still
+// read by PredictConflicts rules 2, 4 and 6; they simply derive no
+// resource_locks row.
 var declaredResourceTypes = map[string]bool{
 	"repo":         true,
 	"path":         true,
@@ -81,9 +92,16 @@ func ResourceLockTypeList() []string { return sortedKeys(resourceLockTypes) }
 //
 // An empty value means "no fixed prefix": the type takes an absolute URL, which
 // is the branch of uriSchemeProblem below that does not test a prefix.
-// external_ref is the only such type today, deliberately — it is the one
-// declared type that maps to no lock at all, so there is no key for a prefix to
-// namespace.
+// external_ref is the only such type today, deliberately — it names something
+// outside this system entirely, so there is no polyforge-side namespace for a
+// prefix to select.
+//
+// ⚠️ That reason used to be stated as "it is the one declared type that maps to
+// no lock at all". Since aihub#416 that is false — repo and service map to no
+// lock either — and it was never the load-bearing half anyway: repo: and
+// service: keep their prefixes precisely because those names still MEAN
+// something here (rules 2, 4 and 6 join on the whole uri, so the prefix is part
+// of the value that is matched).
 var declaredResourceURISchemes = map[string]string{
 	"repo":         "repo:",
 	"path":         "file:",

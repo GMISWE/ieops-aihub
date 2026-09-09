@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -939,15 +938,24 @@ func (s *Server) registerLifecycleTools() {
 			body["scenario_ref"] = sr
 		}
 
-		// aihub#356: tell the server which branch each declared repo's worktree is
-		// about to be on, so its git_branch lock is keyed on that instead of on
-		// declared_resources[].task_branch — a value nothing downstream reads. It
-		// goes IN the claim body rather than in a follow-up call so a genuine
-		// branch collision can still refuse this claim; see claimTaskBranches.
-		taskBranches := s.claimTaskBranches(ctx, wiID)
-		if len(taskBranches) > 0 {
-			body["task_branches"] = taskBranches
-		}
+		// aihub#416: `task_branches` is deliberately NOT sent, and the whole
+		// aihub#356 machine that computed it is gone (claimTaskBranches,
+		// claimBranchForRepo, declaredRepoNames, keyedBranchProblems, and
+		// server-side ClaimRequest.TaskBranches / EffectiveDeclaredResource).
+		//
+		// It existed for ONE consumer: the git_branch lock key, which a repo
+		// declaration no longer derives. With no key to spell, predicting the
+		// branch before the claim bought nothing and cost a whole extra
+		// GetWorkItem round-trip per claim plus a worktree stat/rev-parse pass —
+		// so the claim is now one request shorter than it was.
+		//
+		// ⚠️ Worktree CREATION never went through it and is untouched: that path
+		// runs newClaimBranchNames -> resolveClaimBranch -> addClaimWorktree,
+		// below, and reads no task branch from anywhere. What DID go with the
+		// chain is keyedBranchProblems, whose entire subject was "the lock names
+		// a branch the worktree is not on" — a sentence with no referent once the
+		// lock is gone. The other worktree_problems entries (aihub#328's rejected
+		// directories) are unaffected and still reported.
 
 		result, err := s.client.ClaimWorkItem(ctx, wiID, body)
 		if err != nil {
@@ -1198,8 +1206,6 @@ func (s *Server) registerLifecycleTools() {
 				}
 			}
 		}
-		worktreeProblems = append(worktreeProblems, keyedBranchProblems(taskBranches, worktrees)...)
-
 		// The claim response the model sees: everything the server sent, MINUS the
 		// keys claim_response_slim.go names and gives a reason for.
 		//
@@ -1224,6 +1230,38 @@ func (s *Server) registerLifecycleTools() {
 		safeResult["attempt_id"] = sf.AttemptID
 		safeResult["claim_epoch"] = sf.ClaimEpoch
 		addWorktrees(safeResult, sf.Worktrees)
+		// aihub#416 D2: record where this attempt starts from, per repo, now that
+		// the worktrees exist. See domain.RecordRepoPinsRequest for why this is a
+		// second request rather than a field on the claim.
+		//
+		// Best-effort, deliberately, and on BOTH halves. The pins are provenance:
+		// a claim that cannot record them is still a claim that succeeded, and
+		// failing here would turn a lost annotation into a lost session — the same
+		// posture claimTaskBranches took ("EVERY failure returns nil") without its
+		// downside, since nothing downstream is keyed on the value.
+		//
+		// Reported on the response either way. A missing pin has to be VISIBLE,
+		// because the rule that comes with it (owner ruling Q-4) is that a
+		// conclusion drawn in a repo with no pin must say it has no provenance —
+		// and a caller cannot follow a rule about a value it was never shown.
+		if pins := claimRepoPins(ctx, sf.Worktrees); len(pins) > 0 {
+			body := map[string]any{
+				"attempt_id":     sf.AttemptID,
+				"claim_epoch":    sf.ClaimEpoch,
+				"session_secret": sf.SessionSecret,
+				"repo_pins":      pins,
+			}
+			if _, pinErr := s.client.RecordRepoPins(ctx, sf.WIID, body); pinErr != nil {
+				fmt.Fprintf(os.Stderr, "polyforge: record repo pins for %s: %v\n", sf.WIID, pinErr)
+				worktreeProblems = append(worktreeProblems, fmt.Sprintf(
+					"repo pins were not recorded (%v), so this attempt has NO server-side record of which "+
+						"commit each repo started from. The claim itself succeeded and the worktrees are "+
+						"usable; what is missing is provenance. Any conclusion this session publishes from "+
+						"reading a repo has to say so rather than presenting itself as reproducible.", pinErr))
+			} else {
+				safeResult["repo_pins"] = pins
+			}
+		}
 		// aihub#328: a rejected directory has to reach the caller, not just stderr.
 		// The claim itself succeeded, so this is a warning on an ok:true response
 		// rather than an error — but without it the agent proceeds believing it has
@@ -1619,11 +1657,13 @@ func (s *Server) registerLifecycleTools() {
 			"Legal from queued, paused or blocked; a RUNNING work item is refused with 409 " +
 			"CONFLICT_WI_ALREADY_CLAIMED (force_takeover first, then cancel) and an already-terminal one " +
 			"with 409 CONFLICT_TERMINAL_STATE. " +
-			"The lock release matters for a PAUSED work item: pausing keeps the git_branch / deploy_env / " +
-			"worktree / tcp_port locks so a resume can go on holding the branch, and before aihub#355 " +
-			"cancelling left them held forever — the work item was terminal, so no claim, force_takeover " +
-			"or complete_attempt could ever release them, and the orphan sweep skips a paused attempt's " +
-			"rows by design. Every release emits a lock_released event with cause=wi_cancelled, so " +
+			"The lock release matters for a PAUSED work item: pausing releases only file_scope locks and " +
+			"keeps every other type, and before aihub#355 cancelling left those held forever — the work " +
+			"item was terminal, so no claim, force_takeover or complete_attempt could ever release them, " +
+			"and the orphan sweep skips a paused attempt's rows by design. Since aihub#416 the retained " +
+			"set is normally empty, because the only lock the server derives is file_scope; it is " +
+			"non-empty for an attempt that supplied requested_locks explicitly, or that predates that " +
+			"change. Every release emits a lock_released event with cause=wi_cancelled, so " +
 			"pf_read_events can confirm it. " +
 			"🔴 RETRYABLE: the status check is now re-run inside the transaction against a locked row, so " +
 			"a cancel racing a claim can return 409 CONFLICT_WI_ALREADY_CLAIMED (correctly — the previous " +
@@ -1657,7 +1697,7 @@ func (s *Server) registerLifecycleTools() {
 	// pf_pause_attempt
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_pause_attempt",
-		Description: "Pause the current attempt (releases file_scope locks acquired mid-attempt; git_branch/deploy_env locks are retained for resume; status → paused). State file is preserved for resume.",
+		Description: "Pause the current attempt (releases file_scope locks acquired mid-attempt; any other lock type is retained for resume — since aihub#416 that set is normally empty, because file_scope is the only lock the server derives; status → paused). State file is preserved for resume.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID (used to find state file)"),
 			"pause_reason": prop("string", "Optional reason for pausing"),
@@ -1702,8 +1742,8 @@ func (s *Server) registerLifecycleTools() {
 	s.addTool(&sdkmcp.Tool{
 		Name: "pf_acquire_locks",
 		Description: "Acquire file_scope locks for the current running attempt from the work item's declared_resources (reconcile mid-attempt; blocks on conflict, never steals). " +
-			"`acquired` is what THIS call took; `already_held` is every other lock the attempt holds, of every type, read from the lock table — including locks with no live declaration behind them: git_branch and deploy_env locks, locks taken from a client-supplied requested_locks, and file_scope locks predating aihub#264. The two are disjoint and together are the attempt's full lock set. " +
-			"Since aihub#264, removing a path from declared_resources DOES release its file_scope lock, at the moment of the update; git_branch and deploy_env locks are not released that way and are held until the attempt ends.",
+			"`acquired` is what THIS call took; `already_held` is every other lock the attempt holds, of every type, read from the lock table — including locks with no live declaration behind them: locks taken from a client-supplied requested_locks, file_scope locks predating aihub#264, and (on a database with rows older than aihub#416) git_branch/deploy_env rows, which nothing derives any more. The two are disjoint and together are the attempt's full lock set. " +
+			"Since aihub#264, removing a path from declared_resources DOES release its file_scope lock, at the moment of the update. Any surviving non-file_scope row is not released that way and is held until the attempt ends.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID (used to find state file)"),
 		}, []string{"work_item_id"}),
@@ -2206,18 +2246,28 @@ func cloneArgs(in map[string]any) map[string]any {
 // enforces it.
 func declaredResourcesProp(description string) map[string]any {
 	p := prop("array", description+
-		` — entries are {"type","uri","intent"} plus an optional "repo" on path entries (aihub#261). NOTE: type takes a DECLARED type (repo/path/document/section/service/external_ref), NOT a lock type: file_scope/git_branch/worktree/tcp_port/deploy_env are resource_locks.resource_type values the server derives. A file path is type="path", uri="file:<repo-relative-path>". The path field is `+"`uri`"+`, not value/path/scope.`)
+		` — entries are {"type","uri","intent"} plus an optional "repo" on path entries (aihub#261). NOTE: type takes a DECLARED type (repo/path/document/section/service/external_ref), NOT a lock type: file_scope/git_branch/worktree/tcp_port/deploy_env are resource_locks.resource_type values. ⚠️ Since aihub#416 the server derives exactly ONE of them — file_scope, from path/document/section entries. git_branch and deploy_env are no longer derived from anything (a repo or service entry takes no lock), and worktree/tcp_port never were; all four remain legal only in an explicit requested_locks. A file path is type="path", uri="file:<repo-relative-path>". The path field is `+"`uri`"+`, not value/path/scope.`)
 	p["items"] = map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			// aihub#395 part 3. `external_ref` is the one declared type that
-			// derives NO lock — resourceToLock returns ("","") for it — and it is
-			// also exempt from the no-uri warning, so it is the only entry that can
-			// be declared, accepted, and produce no signal of any kind. Under a
-			// field whose own description says "Declared resource locks", that reads
-			// as a lock. Say what it is instead of leaving the caller to measure it.
-			"type": propEnum("string", "Declared resource type (NOT a lock type). ⚠️ external_ref takes "+
-				"NO lock and no warning — an annotation only; every other type derives a lock.",
+			// aihub#395 part 3 said "external_ref takes NO lock ...; every other
+			// type derives a lock". aihub#416 made the second half false: repo and
+			// service now derive nothing either, so THREE of the six types take no
+			// lock and only path/document/section do.
+			//
+			// The sentence is rewritten rather than dropped because #395's reason
+			// survives the change and gets bigger: a caller reads this under a
+			// field whose own description says "Declared resource locks", so an
+			// entry that is accepted and produces no lock has to be named as such
+			// or the caller measures it the hard way. What DID change is that the
+			// no-lock set is no longer a curiosity of one annotation type — it is
+			// now the majority — and that repo/service still produce a signal
+			// (predict rules 2, 4, 6), which external_ref's own warning-exemption
+			// means it does not.
+			"type": propEnum("string", "Declared resource type (NOT a lock type). ⚠️ Only path/document/section "+
+				"take a lock (file_scope). repo and service take NONE since aihub#416 — they are advisory: they "+
+				"feed pf_predict_conflicts, the timeline and deploy preflight, and derive no resource_locks row. "+
+				"external_ref takes no lock and no warning either — an annotation only.",
 				domain.DeclaredResourceTypeList()),
 			// aihub#395 part 4. Generated from domain.declaredResourceURISchemes,
 			// which is the table ValidateDeclaredResources enforces — so the
@@ -2245,8 +2295,9 @@ func declaredResourcesProp(description string) map[string]any {
 					`"refactor" (on a repo entry, flags other refactors of the same repo). "write" is the `+
 					`conventional default; other values are accepted but inert. ⚠️ "read" is honoured on `+
 					`path/document/section ONLY — no write lock, and a path overlap reports info instead `+
-					`of soft_block. A repo entry still takes git_branch and a service entry deploy_env `+
-					`whatever the intent says, so "read" on those two is inert, not permissive.`),
+					`of soft_block. On repo and service entries "read" is inert for a different reason `+
+					`since aihub#416: those two take no lock under ANY intent, so there is nothing for `+
+					`"read" to suppress.`),
 			// aihub#261. The uri of a path/document/section entry is REPO-relative,
 			// and until this field existed nothing in the payload said which repo —
 			// so in a multi-repo project every repo's go.mod / Makefile / README.md
@@ -2276,7 +2327,34 @@ func declaredResourcesProp(description string) map[string]any {
 			// work item must keep round-tripping. Deleting the field would silently
 			// drop it from every stored payload that carries one, which is a data
 			// loss to fix a documentation defect.
-			"task_branch": prop("string", "Task branch (repo entries only). Only a FALLBACK for lock-key derivation since aihub#356: a claim keys the git_branch lock on the branch it predicts it will check out (polyforge/<project>-<seq>-<goal>, or whatever branch already exists), and this value survives only for a repo the claim predicts NO branch for. ⚠️ That set is larger than it looks and the following is NOT exhaustive: no clone of the repo on this machine; the repo missing from the workspace .polyforge.yaml project; a worktree directory that already exists and that git refuses to verify, which makes the claim skip that repo and predict nothing for it; or the prediction step failing as a whole (work item unreadable, no workspace root, project unknown), in which case every declaration stands. Separately, pf_force_takeover sends no task_branches at all, so it never overrides this value for any repo. ⚠️ Predicting is not creating: if the prediction is made and the worktree then fails to materialise, the predicted name still wins over this one, and the claim reports that in worktree_problems. So do not rely on this to protect a hand-made branch in a repo the workspace has a clone of. Defaults to main."),
+			// aihub#416: `task_branch` is deliberately NOT published, the same plan
+			// B as `base_branch` two comments up and for the same reason — it is
+			// read by nothing.
+			//
+			// Its ONLY consumer was the git_branch lock key
+			// ("<repo>/<task_branch>", domain.resourceToLock), and the de-locking
+			// ruling retired that derivation: a repo entry now takes no lock under
+			// any intent, so there is no key left for this value to spell. The
+			// aihub#356 machine that overrode it at claim time went with it
+			// (claimTaskBranches, ClaimRequest.TaskBranches,
+			// EffectiveDeclaredResource), so this field is not merely overridden
+			// now — it is read by nothing at all.
+			//
+			// Publishing it would be the aihub#395 defect exactly: a parameter a
+			// caller can set, that is accepted with a 200, and that changes
+			// nothing. Withdrawn rather than deleted, again per #395: the struct
+			// field domain.DeclaredResourceItem.TaskBranch and its decode in
+			// decodeDeclaredResources STAY, because stored declared_resources are
+			// JSON and dropping the field would silently discard the value from
+			// every work item that already carries one — a data loss to fix a
+			// documentation defect.
+			//
+			// ⚠️ Do not re-publish it as "documentation of which branch the work
+			// happens on". Nothing reads it, so it would document nothing; the
+			// branch a work item is really on is `git rev-parse --abbrev-ref HEAD`
+			// in its worktree, which is what pf_ship / pf_pr / pf_push / pf_wrap
+			// already ask, and the commit a claim starts from is recorded server-
+			// side as run_attempts.repo_pins.
 		},
 		"required": []string{"type", "uri"},
 	}
@@ -2634,293 +2712,28 @@ func resolveClaimBranch(srcPath string, n claimBranchNames) string {
 }
 
 // ---------------------------------------------------------------------------
-// Keying the git_branch lock on the branch work really happens on (aihub#356)
+// Retired: keying the git_branch lock on the branch work really happens on
+// (aihub#356, retired by aihub#416)
 // ---------------------------------------------------------------------------
 //
-// The server derives a git_branch lock from every {"type":"repo"} entry in
-// declared_resources, keyed "<repo>/<task_branch>". But nothing puts the claim's
-// real branch in task_branch: this file computes the name at claim time and
-// stores it nowhere, and resolveClaimBranch may attach to a DIFFERENT existing
-// branch entirely. Measured on ieops#996 — key
-// ieops-ctlchain/polyforge/pin-bump-token, worktree on
-// polyforge/ieops-996-proxy-pin-bump-... — so the lock guarded a name no attempt
-// ever checked out, and two agents on one branch could not collide on it.
+// This is where claimTaskBranches, claimBranchForRepo, declaredRepoNames,
+// worktreeCurrentBranch and keyedBranchProblems lived. All five existed to make
+// ONE value correct — the "<repo>/<branch>" key of the git_branch lock a repo
+// declaration derived — and the de-locking ruling retired that derivation
+// outright (domain.resourceToLock). With no key to spell there is nothing left
+// for them to get right, so they are deleted rather than left as dead code
+// nobody dares touch.
 //
-// The three functions below answer "which branch will this claim really leave
-// checked out", and the handler sends the answer with the claim as
-// task_branches. See domain.ClaimRequest.EffectiveDeclaredResource for what the
-// server does with it and why the client is the authority.
-
-// worktreeCurrentBranch reports the branch checked out at wtPath, or "" when
-// there is no answer — wtPath is not a worktree, or its HEAD is detached, which
-// --abbrev-ref renders as the literal "HEAD" rather than as an error.
+// ⚠️ WORKTREE CREATION NEVER USED THEM and is unchanged. It runs
+// newClaimBranchNames -> resolveClaimBranch -> addClaimWorktree; the only place
+// the two paths ever met was keyedBranchProblems, which compared the predicted
+// key against the created worktree. Read that as: nothing about which branch a
+// claim checks out has changed, only whether a lock is keyed on the answer.
 //
-// Deliberately the SAME question pf_ship / pf_pr / pf_push / pf_wrap already ask
-// (internal/coding.GitCurrentBranch), because the point of aihub#356 is that the
-// lock key and those four tools read one fact instead of two.
-func worktreeCurrentBranch(wtPath string) string {
-	cmd := exec.Command("git", "-C", wtPath, "rev-parse", "--abbrev-ref", "HEAD")
-	// .Output() and the scrubbed environment for the reasons spelled out on
-	// verifyClaimWorktree: this parses stdout, git writes diagnostics to stderr
-	// while exiting 0, and GIT_DIR / GIT_WORK_TREE beat -C.
-	cmd.Env = envWithout(os.Environ(), "GIT_DIR", "GIT_WORK_TREE")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	if b := strings.TrimSpace(string(out)); b != "HEAD" {
-		return b
-	}
-	return ""
-}
-
-// claimBranchForRepo predicts the branch this claim will leave checked out in
-// one repo's worktree, or "" when it will leave none.
-//
-// It mirrors the claim handler's own three outcomes, in the handler's order,
-// because a prediction that disagrees with what the handler then does would key
-// the lock on a second fictional name instead of the declared one:
-//
-//  1. the worktree directory already exists and verifies — the handler REUSES
-//     it without resolving anything, so its current HEAD is the answer;
-//  2. it exists and does not verify — the handler skips that repo, so this claim
-//     puts nothing on any branch there;
-//  3. it does not exist — addClaimWorktree attaches to whatever
-//     resolveClaimBranch finds, and creates n.Branch when nothing matches.
-//
-// ⚠️ Case 3 is why this cannot be "recompute the name and use that". When the
-// goal has been edited since the branch was made, or the branch was created
-// under the pre-aihub#322 scheme, resolveClaimBranch attaches to the OLD name
-// while newClaimBranchNames computes a new one — and it is the old one, the one
-// git will really check out, that the lock has to name.
-func claimBranchForRepo(srcPath, wtPath string, n claimBranchNames) string {
-	if n.Branch == "" {
-		return "" // the handler treats this as "skip worktree creation"
-	}
-	if _, err := os.Stat(wtPath); err == nil {
-		if verifyClaimWorktree(wtPath) != nil {
-			return ""
-		}
-		return worktreeCurrentBranch(wtPath)
-	}
-	if fi, err := os.Stat(srcPath); err != nil || !fi.IsDir() {
-		return "" // no clone to add a worktree to; addClaimWorktree will fail
-	}
-	if existing := resolveClaimBranch(srcPath, n); existing != "" {
-		return existing
-	}
-	return n.Branch
-}
-
-// declaredRepoNames returns the repo names a work item's declared_resources
-// carry in {"type":"repo"} entries — the only entries that take a git_branch
-// lock, so the only ones an override can affect.
-//
-// The prefix is trimmed exactly as domain.resourceToLock trims it, INCLUDING
-// the case where there is no "repo:" prefix to trim. The two must agree on what
-// the repo is called or the override lands under a key the server never looks
-// up, which is a silent no-op rather than an error.
-//
-// Read off the wire JSON rather than through domain.DeclaredResourceItem: this
-// process can be talking to an older or newer server, and an entry shape it does
-// not recognise must degrade to "no override for that repo".
-func declaredRepoNames(raw any) map[string]bool {
-	items, ok := raw.([]any)
-	if !ok {
-		return nil
-	}
-	out := map[string]bool{}
-	for _, it := range items {
-		m, ok := it.(map[string]any)
-		if !ok {
-			continue
-		}
-		if t, _ := m["type"].(string); t != "repo" {
-			continue
-		}
-		uri, _ := m["uri"].(string)
-		if name := strings.TrimPrefix(uri, "repo:"); name != "" {
-			out[name] = true
-		}
-	}
-	return out
-}
-
-// claimTaskBranches answers, for every repo the work item declares, which branch
-// the claim about to be made will really work on.
-//
-// ⚠️ IT RUNS BEFORE THE CLAIM, and that ordering is the whole design rather than
-// an accident. The lock is taken inside the claim transaction, and a real
-// git_branch collision has to be able to REFUSE the claim with 409
-// CONFLICT_LOCK_TAKEN. Re-keying the lock afterwards, once the worktrees exist,
-// would move that refusal to a point where the attempt is already live and there
-// is nothing left to refuse — trading a mis-keyed lock for an unenforceable one.
-//
-// The cost is one extra GET per claim, because the branch name needs the work
-// item's project, seq and goal and a claim otherwise learns those from its own
-// response. That is small beside what this same handler already spends: a
-// network `git fetch` bounded at 90 seconds, per repo.
-//
-// EVERY failure IN HERE returns nil, meaning "say nothing, let the declaration
-// stand" — which is exactly the pre-aihub#356 behaviour. This refines a lock
-// key; it is not a precondition for claiming. Failing a claim because a branch
-// name could not be predicted would trade a mis-keyed lock for an unclaimable
-// work item.
-//
-// ⚠️ THAT GUARANTEE STOPS AT THIS FUNCTION'S EDGE. A repo this DOES answer for
-// has its declared task_branch overridden the moment the claim goes out, and
-// creating the worktree happens afterwards and can still fail. Then the key
-// names a branch nothing is on and the declaration has lost — the one case
-// aihub#356 does not degrade to pre-fix behaviour. keyedBranchProblems is what
-// tells the caller; there is no way to take the key back.
-func (s *Server) claimTaskBranches(ctx context.Context, wiID string) map[string]string {
-	wi, err := s.client.GetWorkItem(ctx, wiID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "polyforge: task-branch lock keys for %s: %v\n", wiID, err)
-		return nil
-	}
-	repos := declaredRepoNames(wi["declared_resources"])
-	if len(repos) == 0 {
-		return nil // nothing here takes a git_branch lock
-	}
-
-	project, _ := wi["project"].(string)
-	slug, _ := wi["slug"].(string)
-	goal, _ := wi["goal"].(string)
-	canonicalWIID, _ := wi["id"].(string)
-	seq := ""
-	if idx := strings.LastIndex(slug, "#"); idx >= 0 {
-		seq = slug[idx+1:]
-	}
-	ulid8 := claimBranchULID8(canonicalWIID)
-	// The same guards the worktree loop below applies before it creates
-	// anything. Predicting a branch for a claim that will create no worktree at
-	// all would key the lock on a name as fictional as the declared one.
-	if project == "" || seq == "" || ulid8 == "" {
-		return nil
-	}
-
-	wsRoot := os.Getenv("POLYFORGE_WORKSPACE_ROOT")
-	if wsRoot == "" {
-		wsRoot = config.FindWorkspaceRoot()
-	}
-	if wsRoot == "" {
-		return nil
-	}
-	cfg := resolveWorkspaceConfig(wsRoot, s.cfg)
-	if cfg == nil {
-		return nil
-	}
-	proj, ok := cfg.Projects[project]
-	if !ok {
-		return nil
-	}
-
-	names := newClaimBranchNames(project, seq, goal, ulid8)
-	wtDir := fmt.Sprintf("pf.%s-%s", project, seq)
-	out := map[string]string{}
-	for _, repo := range proj.Repos {
-		if !repos[repo.Name] {
-			continue
-		}
-		branch := claimBranchForRepo(
-			filepath.Join(wsRoot, ".repo", repo.Name),
-			filepath.Join(wsRoot, wtDir, repo.Name),
-			names)
-		if branch != "" {
-			out[repo.Name] = branch
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// keyedBranchProblems reports every way the branch a claim keyed its git_branch
-// lock on can already be wrong by the time the worktrees exist. The claim has
-// committed and nothing is corrupt, so these are warnings — what is wrong is
-// which name the lock holds.
-//
-// ⚠️ IT ITERATES WHAT WAS KEYED, NOT WHAT SUCCEEDED, and that is the substance
-// of this function rather than a detail of it. The first cut ranged over
-// `worktrees`, i.e. over the repos a worktree was created or reused for — so the
-// ONE case where the key is certainly wrong, a repo whose branch was predicted
-// and whose `worktree add` then failed, was the single case it could not see.
-// Measured during aihub#356 review with .repo/aihub left as a directory with
-// .git removed: task_branches on the wire carried aihub, no worktree existed,
-// and worktree_problems came back nil.
-//
-// ⚠️ THIS IS THE ONLY PLACE THE PREDICTION CAN BE CHECKED AT ALL. The key has to
-// be chosen BEFORE the claim (claimTaskBranches says why), and the worktrees
-// only exist after it, so nothing else in the process ever holds both facts.
-// Reported on the response rather than to stderr for the reason aihub#328 gives:
-// an MCP server's stderr goes to a log the calling agent never reads.
-//
-// Called unconditionally, outside every guard on the worktree block, because
-// each of those guards is itself a path on which a branch may have been keyed
-// and no worktree created.
-//
-// PRECONDITION: every value in taskBranches is non-empty. Its only caller passes
-// what claimTaskBranches built, and that stores a repo only under `if branch !=
-// ""`, so a "" here would mean no branch was keyed and every message below would
-// name an empty branch. This used to carry a `if want == "" { continue }` guard
-// for that case; it was unreachable and is gone. A future second caller that
-// cannot promise this must filter before calling, not re-add the skip here.
-func keyedBranchProblems(taskBranches, worktrees map[string]string) []string {
-	repos := make([]string, 0, len(taskBranches))
-	for repo := range taskBranches {
-		repos = append(repos, repo)
-	}
-	// Map order would reshuffle the response between two identical claims.
-	//
-	// ⚠️ NOTHING PINS THIS. aihub#356 review mutant M5 deleted this line and the
-	// `sort` import with it (its only use in the package's non-test files), and
-	// the whole repo stayed clean — measured:
-	//
-	//	$ go build ./...            -> exit 0
-	//	$ go vet ./...              -> exit 0
-	//	$ go test ./... -count=1    -> exit 0
-	//	$ golangci-lint run ./...   -> 0 issues
-	//
-	// The only observable difference is the ORDER of an already-rare warning
-	// list, and nothing constructs two problems in one call: the sole test that
-	// reaches this function does so through the claim handler, and
-	// newClaimWorkspace's .polyforge.yaml declares exactly ONE repo, so the list
-	// it produces is never longer than 1. Stated as a known gap rather than
-	// papered over: a fixture with two repos, both keyed and both failing to get
-	// a worktree, is what would make this ordering real.
-	sort.Strings(repos)
-
-	var problems []string
-	for _, repo := range repos {
-		want := taskBranches[repo]
-		wt, ok := worktrees[repo]
-		if !ok {
-			problems = append(problems, fmt.Sprintf(
-				"%s: this claim keyed its git_branch lock on %q and then created NO worktree for that repo, "+
-					"so nothing is on that branch and the lock is naming a branch that may not exist. "+
-					"⚠️ That key REPLACED the task_branch the work item declared, so if the declaration named a "+
-					"branch someone made by hand, it is no longer the branch being protected. "+
-					"Check %s in .repo/ and this workspace's .polyforge.yaml — the underlying git error, if there "+
-					"was one, is on the polyforge MCP server's stderr. Once the repo is usable, pf_pause_attempt "+
-					"and claim again to re-key the lock.",
-				repo, want, repo))
-			continue
-		}
-		got := worktreeCurrentBranch(wt)
-		if got == "" || got == want {
-			continue
-		}
-		problems = append(problems, fmt.Sprintf(
-			"%s: this claim keyed its git_branch lock on %q, but the worktree came out on %q — "+
-				"so that lock is protecting a branch nobody is working on and will not stop a second "+
-				"agent taking %q. Nothing is corrupt and the worktree is usable; to re-key it, "+
-				"pf_pause_attempt and claim again now that the branch exists.",
-			repo, want, got, got))
-	}
-	return problems
-}
+// What replaces the fact these functions were reaching for is
+// run_attempts.repo_pins (aihub#416 D2): after the worktrees exist, the claim
+// records each one's `git rev-parse HEAD`, which says where the work STARTED
+// rather than guessing where it will go. See claimRepoPins below.
 
 // attachWorktree puts an EXISTING branch into wtPath.
 //
@@ -2962,6 +2775,51 @@ func attachWorktree(srcPath, wtPath, branch string) error {
 // t.Parallel() — verified, not assumed. Whoever adds the first t.Parallel() here
 // owns turning this into an explicit parameter or a per-call option.
 var claimFetchTimeout = 90 * time.Second
+
+// claimRepoPins reads the commit each freshly-claimed worktree is sitting on:
+// {"<repo>": "<40-char sha>"} (aihub#416 D2).
+//
+// 🔴 A repo whose HEAD cannot be read is OMITTED, never mapped to "" or to a
+// placeholder. The owner ruling (Q-4) is that a claim succeeds anyway and the
+// missing pin is reported, and the whole value of the map depends on a reader
+// being able to tell "started here" from "no record" at a glance. An empty
+// string in a map of shas is the kind of value that gets compared, logged and
+// eventually believed.
+//
+// The same environment scrubbing as verifyClaimWorktree, for the same measured
+// reason: `-C` does not beat GIT_DIR / GIT_WORK_TREE, and with those set this
+// would report ANOTHER repository's HEAD while exiting 0 — a pin that is
+// confidently wrong, which is worse than the absence this function is careful
+// about everywhere else.
+func claimRepoPins(ctx context.Context, worktrees map[string]string) map[string]string {
+	if len(worktrees) == 0 {
+		return nil
+	}
+	pins := make(map[string]string, len(worktrees))
+	for repo, wtPath := range worktrees {
+		cmd := exec.CommandContext(ctx, "git", "-C", wtPath, "rev-parse", "HEAD")
+		cmd.Env = envWithout(os.Environ(), "GIT_DIR", "GIT_WORK_TREE")
+		out, err := cmd.Output()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "polyforge: repo pin for %s (%s): %v\n", repo, wtPath, err)
+			continue
+		}
+		sha := strings.TrimSpace(string(out))
+		// Length-checked rather than trusted. `rev-parse HEAD` in a repository
+		// with no commits at all exits 128 and is caught above, but an unborn or
+		// otherwise odd HEAD can print something short — and a truncated sha in
+		// this map would silently fail to match the commit it names.
+		if len(sha) != 40 {
+			fmt.Fprintf(os.Stderr, "polyforge: repo pin for %s: HEAD is %q, not a 40-char sha\n", repo, sha)
+			continue
+		}
+		pins[repo] = sha
+	}
+	if len(pins) == 0 {
+		return nil
+	}
+	return pins
+}
 
 // addClaimWorktree materialises wtPath as a git worktree of srcPath.
 //

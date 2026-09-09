@@ -492,6 +492,18 @@ func (c *Client) AcquireLocks(ctx context.Context, wiID string, body any) (map[s
 	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/acquire_locks", body, &out)
 }
 
+// RecordRepoPins calls POST /v1/work_items/:wiID/repo_pins — the second hop of a
+// claim (aihub#416). body carries the attempt credentials and
+// {"<repo>": "<40-char sha>"} read out of the worktrees the claim just created.
+//
+// Separate from ClaimWorkItem because the worktrees do not exist yet when the
+// claim goes out; see domain.RecordRepoPinsRequest for why predicting them
+// instead was the option that was rejected.
+func (c *Client) RecordRepoPins(ctx context.Context, wiID string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/repo_pins", body, &out)
+}
+
 // ReconcileCommitLocks calls POST /v1/work_items/:wiID/commit_locks — the
 // commit-time gate (aihub#366). body carries the attempt credentials, the repo,
 // and the paths the pending commit contains.

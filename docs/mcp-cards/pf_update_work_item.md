@@ -4,7 +4,7 @@
 {
   "tool": "pf_update_work_item",
   "description_sha256": "29b3c7434085f3bd45cf9acebf95466a7fe1ae8757a6d86786d03886c6687c30",
-  "input_schema_sha256": "6c2b187c571996c10c7755e305d756cba1a9ec3237aa103189680d7205cd13c2",
+  "input_schema_sha256": "53bbfa577b63dcb85a695ad7be32284df348876425aeb35cfa25d2d778a44894",
   "params": {
     "attrs": {
       "type": "object",
@@ -178,8 +178,10 @@ except `work_item_id` and `brief` into the body of
   gives about `members_version` — a guard whose input nobody can find is a guard
   nobody passes.
 - **Narrowing `declared_resources` releases the corresponding `file_scope` locks**
-  at the moment of the update (`aihub#264`). `git_branch` and `deploy_env` locks are
-  not released that way and are held until the attempt ends.
+  at the moment of the update (`aihub#264`). Any other lock type is not released that
+  way and is held until the attempt ends. ⚠️ Since `aihub#416` there is normally no
+  other type to hold: `repo` and `service` entries derive no lock, so narrowing a
+  declaration to nothing releases everything the update path can reach.
 - **`attrs` vs `attrs_patch` is the difference between a merge and a wipe.**
   `attrs_patch` is shallow: a top-level key replaces that key's stored value
   outright rather than merging into it recursively, and `null` stores a JSON null.

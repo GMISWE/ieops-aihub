@@ -214,21 +214,38 @@ func TestRequestedLocksValidatedBeforeServerSideDerivation(t *testing.T) {
 // anchor on ValidateRequestedLocks / UnrecognizedDeclaredResources and on the
 // ABSENCE of ValidateDeclaredResources(wi.DeclaredResources) — none of them on
 // this call. So if that one anchor is re-spelled, nothing else notices.
+//
+// ⚠️ aihub#416 CHANGED WHICH HALF OF THE GUARD CARRIES THIS CASE, and the
+// change is recorded rather than papered over by editing the fixture. The
+// example above — a stored {"type":"service"} with no uri — used to reach
+// `lockKey == ""` with lockType already set to "deploy_env". Now service derives
+// nothing at all, so it is caught one clause earlier, by `lockType == ""`.
+//
+// The OUTCOME asserted below is identical and is what aihub#238 cares about: no
+// row is inserted for that entry. What is no longer asserted, because it is no
+// longer reachable, is the `lockKey == ""` clause itself: the only types that
+// still derive are path/document/section, and fileScopeLockKey always returns at
+// least "<project>:", so a derived key cannot be empty. That clause is now
+// belt-and-braces — do not delete it (a future lock type could reintroduce the
+// case), but do not read this test as covering it either.
 func TestDerivationSkipsEmptyLockKey(t *testing.T) {
 	req := &ClaimRequest{}
 	probes := deriveClaimLocks(req,
-		json.RawMessage(`[{"type":"service"},{"type":"repo","uri":"repo:aihub","task_branch":"polyforge/x"}]`),
+		json.RawMessage(`[{"type":"service"},{"type":"path","uri":"file:internal/a.go"}]`),
 		"aihub")
 	locks := req.RequestedLocks
 	for _, l := range locks {
 		if l.ResourceKey == "" {
 			t.Errorf(`the derivation does not skip an empty lockKey — a stored {"type":"service"} with no uri inserts resource_type=%q resource_key="" (aihub#238)`, l.ResourceType)
 		}
+		if l.ResourceType == "deploy_env" {
+			t.Errorf(`a stored {"type":"service"} with no uri derived a deploy_env row (key %q) — aihub#416 retired that derivation entirely`, l.ResourceKey)
+		}
 	}
 	// The skip must not be a blanket refusal: the well-formed entry alongside it
 	// still has to derive, or "skips empty keys" is satisfied by deriving nothing.
-	if len(locks) != 1 || locks[0].ResourceKey != "aihub/polyforge/x" {
-		t.Fatalf("locks = %+v, want exactly the one well-formed git_branch entry", locks)
+	if len(locks) != 1 || locks[0].ResourceKey != "aihub:internal/a.go" {
+		t.Fatalf("locks = %+v, want exactly the one well-formed file_scope entry", locks)
 	}
 	if len(probes) != len(locks) {
 		t.Errorf("probes (%d) and locks (%d) went out of step — lockProbes[i] no longer pairs with RequestedLocks[i] (aihub#261)", len(probes), len(locks))

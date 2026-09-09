@@ -4,7 +4,7 @@
 {
   "tool": "pf_create_work_item",
   "description_sha256": "2978a1542ea8458bd057eea171e82bbd04eecdec320281d9b37b3ce3c14b9d69",
-  "input_schema_sha256": "44d9c769709e718a5c72f5e9b6c3a4ce0917485d3108ae73a00cf5112da26a14",
+  "input_schema_sha256": "b1e687549be3f2dcc20446bb94b6c2b245077db11437b3d936408cd54cb12b5c",
   "params": {
     "attrs": {
       "type": "object",
@@ -166,11 +166,13 @@ Because the map is forwarded wholesale there is no forwarding table to drift fro
 every published property is on the wire by construction. The risk on this tool is
 therefore at hops 1 and 4, not hop 2.
 
-`declared_resources` entries carry `task_branch`, which since `aihub#356` is only a
-FALLBACK for lock-key derivation, and deliberately no longer carry `base_branch`:
-that field was published and read by nothing, so a caller who set it got a worktree
-off the hard-coded `origin/main` with no error. The struct field and decoder stay,
-so stored payloads keep round-tripping.
+`declared_resources` entries deliberately carry NEITHER `base_branch` NOR
+`task_branch`. Each was published and read by nothing at the point it was withdrawn:
+`base_branch` never had a reader at all (`aihub#395`), and `task_branch` lost its
+only one when `aihub#416` retired the `git_branch` lock a repo entry derived. Both
+struct fields and their decoder stay, so stored payloads carrying either value keep
+round-tripping — deleting a field would drop it from every stored payload that has
+one, which is a data loss to fix a documentation defect.
 
 ## hop 4 — what it actually does
 

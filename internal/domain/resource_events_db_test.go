@@ -427,7 +427,15 @@ func TestLockEventsDB_EveryMutationSiteEmits(t *testing.T) {
 			t.Fatalf("marshal: %v", err)
 		}
 		wi := seedWIWithResources(t, pool, proj, uid, "pause emits", declared)
-		claim, aerr := claimWI(t, pool, uid, wi.ID, "idem-343-site-pause")
+		// 🔴 The git_branch row is REQUESTED, not derived (aihub#416). What this
+		// arm measures is the RETENTION contract — pause releases file_scope only
+		// and everything else must still read as held from the event stream — and
+		// that contract is unchanged. Only the way a non-file_scope row comes into
+		// existence changed, so the fixture asks for one directly.
+		claim, aerr := claimFreshWithLocksErr(t, pool, uid, wi.ID, "idem-343-site-pause", []ResourceLockReq{
+			{ResourceType: "git_branch", ResourceKey: "repo-343/pf343-pause"},
+			{ResourceType: "file_scope", ResourceKey: proj + ":repo-343:a.go"},
+		})
 		if aerr != nil {
 			t.Fatalf("claim: %v", aerr)
 		}

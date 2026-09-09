@@ -32,7 +32,11 @@ EXPECTED SKILL BEHAVIOR:
                          session_info={machine_id: <hostname>},
                          requested_locks=[{resource_type: "git_branch",
                                            resource_key: "marketplace/polyforge/<slug>"}])
-     → returns {attempt_id, claim_epoch, expires_at}
+     → returns {attempt_id, claim_epoch, acquired_locks, repo_pins}
+     NOTE: no `expires_at` — v1.21 removed it from this schema, and aihub#416 added
+           `repo_pins` (per-repo starting commit, recorded after the worktrees
+           exist). A pin is provenance, not a constraint: nothing enforces it and
+           it does not expire.
      Save ATTEMPT_ID, CLAIM_EPOCH
   6. State file written at WORKSPACE_ROOT/.polyforge/state/WI_ID.json
   7. Worktree created at WORKSPACE_ROOT/pf.<shortid>/marketplace/
@@ -112,13 +116,20 @@ ASSERT MCP CALLS:
 ASSERT STATE after pause:
   - WI_ID status="paused"
   - prepare_context.status="failed" (reset for retry on resume)
-  - Lease released (expires_at in the past or cleared)
-  - Locks retained on git_branch resource
+  - Locks retained on git_branch resource — ⚠️ ONLY because step 5 asked for that
+    lock in `requested_locks`. Since aihub#416 (2026-09-09) a `repo` declaration
+    derives no lock, so a claim that asked for nothing retains nothing across a
+    pause. The pause SQL is unchanged (it releases `file_scope` and keeps the rest);
+    what shrank is the set it has to keep.
   - State file still present at WORKSPACE_ROOT/.polyforge/state/WI_ID.json
   - Worktree still present at WT_PATH (not cleaned up on pause)
 
 NOTE: A different agent cannot claim WI_ID while locks are held (lock conflict).
 pf-status will show WI_ID in the paused[] segment, not items[].
+NOTE: 🔴 "while locks are held" is the whole condition, and after aihub#416 an
+      ordinary claim holds none — the indefinite blocking this line describes was
+      the reported symptom that work item removed. It still applies to the lock
+      step 5 requests explicitly.
 
 ---
 

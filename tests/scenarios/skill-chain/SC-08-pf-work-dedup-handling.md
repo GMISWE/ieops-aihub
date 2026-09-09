@@ -110,7 +110,10 @@ EXPECTED SKILL BEHAVIOR (transition to Mode B):
                          resource_key: "marketplace/polyforge/<slug>"}],
        mode="fresh"
      )
-     → returns {attempt_id, claim_epoch, expires_at}
+     → returns {attempt_id, claim_epoch, acquired_locks, repo_pins}
+     NOTE: the explicit `requested_locks` is load-bearing here since aihub#416
+           (2026-09-09): a `repo` declaration derives no `git_branch` lock, so this
+           is the only way the row exists. No `expires_at` — v1.21 removed it.
 
   3. State file written at WORKSPACE_ROOT/.polyforge/state/EXISTING_WI_ID.json
 

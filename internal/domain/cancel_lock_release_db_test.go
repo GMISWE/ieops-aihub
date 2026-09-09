@@ -85,7 +85,21 @@ func TestCancelWorkItemReleasesEveryLockItStillHolds(t *testing.T) {
 
 	holder := seedClaimableWI(t, pool, project, u,
 		"release every lock a cancelled work item still holds", declared)
-	claim, aerr := claimWI(t, pool, u, holder.ID, "aihub355-cancel-claim")
+	// 🔴 The git_branch and deploy_env rows are now REQUESTED, not derived
+	// (aihub#416): the repo and service entries in `declared` above produce no
+	// lock. They are the fixture this suite needs, because what aihub#355 is
+	// about is a cancel releasing the types a PAUSE retains — and pause still
+	// retains every non-file_scope type, so the leak this guards against is
+	// unchanged in kind. Only its most common source is gone.
+	//
+	// The repo and service entries stay in `declared` as the negative control
+	// for the retirement: if either started deriving again, the claim would
+	// return duplicate keys and the ElementsMatch below would fail.
+	claim, aerr := claimFreshWithLocksErr(t, pool, u, holder.ID, "aihub355-cancel-claim", []ResourceLockReq{
+		{ResourceType: "git_branch", ResourceKey: branchKey},
+		{ResourceType: "deploy_env", ResourceKey: envKey},
+		{ResourceType: "file_scope", ResourceKey: holderPathKey},
+	})
 	require.Nil(t, aerr, "claim failed: %+v", aerr)
 
 	require.ElementsMatch(t, []string{branchKey, envKey, holderPathKey},
@@ -130,7 +144,8 @@ func TestCancelWorkItemReleasesEveryLockItStillHolds(t *testing.T) {
 	blocker := seedClaimableWI(t, pool, project, u,
 		"the claim a cancelled work items retained git_branch lock blocks",
 		`[{"type":"repo","uri":"repo:aihub","intent":"write","task_branch":"`+branch+`"}]`)
-	blockedBefore, codeBefore := claimBlocks(t, pool, blocker.ID, u, "aihub355-blocked-before")
+	blockedBefore, codeBefore := claimBlocksWithLocks(t, pool, blocker.ID, u, "aihub355-blocked-before",
+		[]ResourceLockReq{{ResourceType: "git_branch", ResourceKey: branchKey}})
 	require.True(t, blockedBefore,
 		"fixture check: a second work item declaring branch %q must be blocked BEFORE the cancel, "+
 			"or the unblocking asserted below proves nothing. got code=%q", branch, codeBefore)
@@ -171,7 +186,8 @@ func TestCancelWorkItemReleasesEveryLockItStillHolds(t *testing.T) {
 	})
 
 	t.Run("the party those locks were blocking can now claim", func(t *testing.T) {
-		blocked, code := claimBlocks(t, pool, blocker.ID, u, "aihub355-blocked-after")
+		blocked, code := claimBlocksWithLocks(t, pool, blocker.ID, u, "aihub355-blocked-after",
+			[]ResourceLockReq{{ResourceType: "git_branch", ResourceKey: branchKey}})
 		require.False(t, blocked,
 			"still blocked after the holder was cancelled — with the holder terminal there is "+
 				"no attempt to take over and no session to ask, so this is permanent. got code=%q", code)

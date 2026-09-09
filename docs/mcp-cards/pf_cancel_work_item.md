@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_cancel_work_item",
-  "description_sha256": "22b5ffd38c1a47f1d8163d6c698ed89aaa90c30c25636a5c9335f0c94a8f3231",
+  "description_sha256": "be34ae201d4ae3c83fff8f32df80da145c5c2477ef33856ae71190ce5ce03952",
   "input_schema_sha256": "9cefaa19ce14188a6f2e77d6c54018f1f18be9cb6b435b93695c6b3f1834e1c8",
   "params": {
     "reason": {
@@ -53,11 +53,16 @@ is why it works on a work item this machine holds no state file for.
 - **It releases every resource lock still held on the work item's behalf**, each
   emitting a `lock_released` event with `cause=wi_cancelled`, so `pf_read_events`
   can confirm the release actually happened.
-- **That release is what the change was for.** Pausing deliberately KEEPS the
-  `git_branch` / `deploy_env` / worktree / `tcp_port` locks so a resume can go on
-  holding the branch — and before `aihub#355`, cancelling a paused work item left
-  them held forever: the wi was terminal, so no claim, takeover or completion could
-  ever release them, and the orphan sweep skips a paused attempt's rows by design.
+- **That release is what the change was for.** Pausing deliberately releases only
+  `file_scope` and KEEPS every other lock type — and before `aihub#355`, cancelling a
+  paused work item left those held forever: the wi was terminal, so no claim,
+  takeover or completion could ever release them, and the orphan sweep skips a paused
+  attempt's rows by design.
+- ⚠️ **Since `aihub#416` the retained set is normally EMPTY**, because `file_scope`
+  is the only lock the server derives. It is non-empty for an attempt that supplied
+  `requested_locks` explicitly, and for rows predating that change. So this release
+  path is now a rarely-exercised safety net rather than the ordinary case — which is
+  why it is still tested and still described, not why it should be removed.
 - **The status check is re-run inside the transaction against a locked row.** A
   cancel racing a claim now returns 409 correctly; the previous 200 was a lie, and it
   released a live attempt's locks.
@@ -96,6 +101,8 @@ high error rate here is not by itself evidence of a defect.
 
 ## Open
 
-- **§6.4 item 6** — what the de-locking ruling does to the release path here is
-  `aihub#416`'s question, not this card's. Still open (`paused`) at the last
-  re-check, 2026-09-08.
+- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).** What the
+  de-locking ruling did to this release path is: nothing to the CODE, and one thing
+  to what it usually finds. The release is still "every lock still held on this work
+  item's behalf, whatever its type"; the derivation that used to guarantee two such
+  locks per attempt is gone, so the set it operates on is usually empty.

@@ -1782,12 +1782,22 @@ func handlerReaderSet(t *testing.T, handler string, structs map[string][]string,
 // supplies — the /ui pages POST to some of these routes too — and (b) a header
 // or an idempotency key this process derives rather than exposing.
 var serverNamesNoToolCanReach = map[string]string{
-	"handleClaimWorkItem.task_branches": "derived by the MCP handler from the worktrees the " +
-		"claim is about to create (aihub#356) — the caller cannot know the branch names, and " +
-		"the whole point is that the CLIENT reports what it will check out. The reason and its " +
-		"limits are recorded in claim_param_contract_test.go's " +
-		"claimFieldsDeliberatelyUnpublished; this entry points at it rather than restating it, " +
-		"so the two cannot drift apart.",
+	// ⚠️ `handleClaimWorkItem.task_branches` was the first entry here until
+	// aihub#416, and it was removed rather than re-worded: the git_branch
+	// derivation it existed for is retired, so the handler binds no such field
+	// and the client sends no such value. The staleness arm below is what would
+	// have caught leaving it behind.
+	//
+	// Its successor is NOT here, and deliberately: repo pins are recorded through
+	// their own published route (POST /v1/work_items/:id/repo_pins) with the
+	// attempt credentials, so there is no unreachable server-side name to exempt.
+	// An allowlist entry avoided is worth more than an allowlist entry explained.
+	// No aihub#416 entry is needed for the repo-pin route either, and that was
+	// checked rather than assumed: an exemption for handleRecordRepoPins.repo_pins
+	// was written, and this gate REFUSED it as stale, because pf_claim_work_item
+	// really does send the field on the route it calls. G4 asks whether a
+	// server-side name is reachable from some tool, not whether a human could
+	// type it — and the claim tool reaching it is the whole design.
 	// aihub#425. Recorded here rather than published, because the decision to keep
 	// it out of the model-visible contract is deliberate and still sound. The
 	// authority is recall_params_wiring_test.go's recallUnpublishedForwardedParams,

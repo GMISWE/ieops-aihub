@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -30,6 +31,41 @@ type ConflictPrediction struct {
 	ActorDisplay string           `json:"actor_display,omitempty"`
 	WIID         string           `json:"work_item_id,omitempty"`
 	WISlug       string           `json:"work_item_slug,omitempty"`
+	// LastActiveAgeSeconds is how long ago the conflicting attempt last reported
+	// activity (run_attempts.last_active_at), on the declaration-join rules that
+	// have an attempt row to read it from: 2 (repo), 4 (repo refactor) and
+	// 6 (service). aihub#416.
+	//
+	// 🔴 It is what makes the de-locking ruling's deploy preflight a call that
+	// already exists. mechanics (3) asks for "running attempts with service
+	// declarations + heartbeat age", and with this field
+	// pf_predict_conflicts(declared_resources=[{"type":"service", ...}]) IS that
+	// list — no new endpoint and no new tool.
+	//
+	// 🔴 A POINTER, and that is not style. With `omitempty` on a bare int64 the
+	// value 0 disappears, and 0 is a real and important answer here: an attempt
+	// that reported activity within the last second is the MOST live holder
+	// there is, and rendering it as "no age recorded" would invert the reading.
+	// nil means the rule had no attempt row; 0 means "just now".
+	//
+	// ⚠️ It is an AGE, not a lease. Nothing in this system expires on it (design
+	// v1.21 removed expires_at outright and handleRenewLease answers 410 Gone);
+	// it is published so a HUMAN can judge wait-versus-takeover, and no code path
+	// may branch on it.
+	LastActiveAgeSeconds *int64 `json:"last_active_age_seconds,omitempty"`
+}
+
+// lastActiveAgeSeconds converts a run_attempts.last_active_at reading into the
+// age carried on a prediction. Clamped at zero because clock_timestamp() on the
+// server and time.Now() here are two clocks: a row written microseconds ago can
+// read as very slightly in the future, and a negative age would be reported as
+// though the attempt were active in the future rather than now.
+func lastActiveAgeSeconds(lastActive time.Time) *int64 {
+	age := int64(time.Since(lastActive).Seconds())
+	if age < 0 {
+		age = 0
+	}
+	return &age
 }
 
 // PredictConflictsRequest is the body for POST /v1/conflicts/predict.
@@ -187,37 +223,59 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		}
 	}
 
-	// Rule 2: same git_branch conflict (soft_block)
+	// Rule 2: another running work item DECLARES the same repo (soft_block)
+	//
+	// 🔴 THIS RULE READS DECLARATIONS, NOT LOCKS, and the rewrite was mandatory
+	// rather than tidy-up (aihub#416 §5.3). It used to hardcode
+	// `rl.resource_type='git_branch'` in SQL, which BYPASSED resourceToLock —
+	// so retiring the git_branch derivation without touching this query would
+	// have left it matching zero rows forever, and zero rows is byte-identical
+	// to "no conflict". That is the fake all-clear aihub#238 was filed to
+	// remove, and it would have come back inside the same function.
+	//
+	// The shape is rule 4's and rule 5's, deliberately: `declared_resources @>`
+	// against a running work item. Those two were already the "advisory
+	// declaration" pattern the de-locking ruling generalises, so this rule now
+	// joins them instead of being the odd one out.
+	//
+	// ⚠️ The wording moved from "is working on the same repo BRANCH" to
+	// "declares the same repo" because the old sentence became FALSE, not merely
+	// stale: no branch name participates in the judgement any more. Two attempts
+	// on two different branches of one repo match this rule, and they should —
+	// what it reports is shared blast radius, which is why it is soft_block and
+	// not hard_block. Callers keying on the description text are the reason this
+	// is called out rather than silently changed.
 	for _, res := range resources {
 		if res.Type != "repo" {
 			continue
 		}
 		repoName := strings.TrimPrefix(res.URI, "repo:")
 		rows, err := pool.Query(ctx, `
-			SELECT rl.owner_attempt_id, ra.actor_display, wi.slug, wi.id
-			FROM resource_locks rl
-			JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
-			JOIN work_items wi ON wi.id = ra.work_item_id
-			WHERE rl.resource_type='git_branch'
-			  AND rl.resource_key LIKE $1 || '/%'
-			  AND ra.status='running'`,
-			repoName,
+			SELECT ra.id, ra.actor_display, wi.slug, wi.id, ra.last_active_at
+			FROM work_items wi
+			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
+			WHERE wi.status='running'
+			  AND wi.declared_resources @> $1::jsonb`,
+			`[{"type":"repo","uri":"repo:`+repoName+`"}]`,
 		)
 		if err == nil {
 			for rows.Next() {
 				var ownerAttemptID, actorDisplay, wiSlug, wiID string
-				if err := rows.Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID); err != nil {
+				var lastActive time.Time
+				if err := rows.Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID, &lastActive); err != nil {
 					continue
 				}
 				result.Predictions = append(result.Predictions, ConflictPrediction{
-					Rule:         2,
-					Severity:     SeveritySoftBlock,
-					Description:  "Another attempt is working on the same repo branch",
-					ResourceType: "git_branch",
-					AttemptID:    ownerAttemptID,
-					ActorDisplay: actorDisplay,
-					WISlug:       wiSlug,
-					WIID:         wiID,
+					Rule:                 2,
+					Severity:             SeveritySoftBlock,
+					Description:          "Another attempt declares the same repo",
+					ResourceType:         "repo",
+					ResourceKey:          repoName,
+					AttemptID:            ownerAttemptID,
+					ActorDisplay:         actorDisplay,
+					WISlug:               wiSlug,
+					WIID:                 wiID,
+					LastActiveAgeSeconds: lastActiveAgeSeconds(lastActive),
 				})
 				if result.Severity != SeverityHardBlock {
 					result.Severity = SeveritySoftBlock
@@ -225,7 +283,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			}
 			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
 			if err := rows.Err(); err != nil {
-				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 2 git_branch rows: %v\n", err)
+				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 2 repo declaration rows: %v\n", err)
 			}
 			rows.Close()
 		}
@@ -291,7 +349,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		}
 		repoName := strings.TrimPrefix(res.URI, "repo:")
 		rows, err := pool.Query(ctx, `
-			SELECT ra.actor_display, wi.slug, wi.id
+			SELECT ra.actor_display, wi.slug, wi.id, ra.last_active_at
 			FROM work_items wi
 			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
 			WHERE wi.status='running'
@@ -301,7 +359,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		if err == nil {
 			for rows.Next() {
 				var actorDisplay, wiSlug, wiID string
-				if err := rows.Scan(&actorDisplay, &wiSlug, &wiID); err != nil {
+				var lastActive time.Time
+				if err := rows.Scan(&actorDisplay, &wiSlug, &wiID, &lastActive); err != nil {
 					continue
 				}
 				result.Predictions = append(result.Predictions, ConflictPrediction{
@@ -312,6 +371,11 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 					ResourceKey:  repoName,
 					ActorDisplay: actorDisplay,
 					WISlug:       wiSlug,
+					// aihub#416: the same age rules 2 and 6 carry. Rule 4 is a repo
+					// prediction too, and a caller that got an age from rule 2 and
+					// none from rule 4 for one repo would read the gap as "that one
+					// is not live".
+					LastActiveAgeSeconds: lastActiveAgeSeconds(lastActive),
 				})
 				if result.Severity != SeverityHardBlock {
 					result.Severity = SeveritySoftBlock
@@ -357,6 +421,71 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
 			if err := rows.Err(); err != nil {
 				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 5 external_ref rows: %v\n", err)
+			}
+			rows.Close()
+		}
+	}
+
+	// Rule 6: another running work item declares the same service (info)
+	//
+	// 🔴 NEW IN aihub#416, and it exists because retiring the deploy_env
+	// derivation would otherwise have left `service` with NO rule at all. Rule 1
+	// was its only reader, and rule 1 goes through derivedLockProbe, which now
+	// returns ("","") for a service — so a service declaration would have
+	// produced a silent empty result. The de-locking ruling says advisory
+	// entries "feed pf_predict_conflicts"; before this, the rule they were
+	// supposed to feed did not exist.
+	//
+	// 🔴 `info`, NOT soft_block, and the difference is the whole design. Two
+	// observers sharing one service is no longer a problem to be prevented: each
+	// records the service generation at the start of its observation and re-reads
+	// it at the end, and a mismatch invalidates that observation. So what a
+	// caller needs here is a FACT ("somebody else is looking at this service, and
+	// here is how recently they were active"), not an obstacle. Deploy-versus-
+	// observation exclusion is the runbook's job, not this predicate's.
+	//
+	// Outside the `if !req.DryRun` guard, like rules 2-5: only rule 1 is gated on
+	// dry_run, because only rule 1 answers "would an insert collide". A rule that
+	// reads declarations has nothing to be advisory about — it already is.
+	for _, res := range resources {
+		if res.Type != "service" {
+			continue
+		}
+		svc := strings.TrimPrefix(res.URI, "service:")
+		rows, err := pool.Query(ctx, `
+			SELECT ra.id, ra.actor_display, wi.slug, wi.id, ra.last_active_at
+			FROM work_items wi
+			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
+			WHERE wi.status='running'
+			  AND wi.declared_resources @> $1::jsonb`,
+			`[{"type":"service","uri":"service:`+svc+`"}]`,
+		)
+		if err == nil {
+			for rows.Next() {
+				var ownerAttemptID, actorDisplay, wiSlug, wiID string
+				var lastActive time.Time
+				if err := rows.Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID, &lastActive); err != nil {
+					continue
+				}
+				result.Predictions = append(result.Predictions, ConflictPrediction{
+					Rule:                 6,
+					Severity:             SeverityInfo,
+					Description:          "Another attempt declares the same service",
+					ResourceType:         "service",
+					ResourceKey:          svc,
+					AttemptID:            ownerAttemptID,
+					ActorDisplay:         actorDisplay,
+					WISlug:               wiSlug,
+					WIID:                 wiID,
+					LastActiveAgeSeconds: lastActiveAgeSeconds(lastActive),
+				})
+				// Deliberately NO write to result.Severity. An info prediction that
+				// raised the top-level severity would be a soft_block wearing
+				// another name, and pf-work's pre-claim gate reads that field.
+			}
+			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+			if err := rows.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 6 service declaration rows: %v\n", err)
 			}
 			rows.Close()
 		}
@@ -449,19 +578,19 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 //   - Both halves of the contract sentence are about paths, every recorded
 //     instance is a path, and pf-plan's guidance only ever teaches intent=read
 //     on a `path` entry.
-//   - git_branch and deploy_env are NOT per-file exclusions that a reader can
-//     harmlessly share. Dropping them for intent=read would let a second
-//     attempt take a branch another attempt is on — and because both takeover
-//     paths DELETE the prior attempt's locks before re-deriving, an existing
-//     branch lock would be silently released on the next takeover rather than
-//     merely not taken.
-//   - PredictConflicts rule 2 (same-repo git_branch) has no intent check
-//     either, so leaving repo alone keeps derivation and prediction in
-//     agreement for repo entries. Applying the rule here and not there would
-//     recreate, on `repo`, exactly the rule-1-vs-rule-3 contradiction this
-//     change exists to remove. Whether intent=read should mean anything at all
-//     for repo/service is genuinely undecided; deciding it needs rule 2 changed
-//     in the same breath.
+//   - 🔴 The open question this list used to end on — "whether intent=read
+//     should mean anything at all for repo/service is genuinely undecided;
+//     deciding it needs rule 2 changed in the same breath" — was DISSOLVED
+//     rather than answered (aihub#416, aihub#411 row T1-8). Since repo and
+//     service derive no lock at all (resourceToLock), intent cannot make a
+//     difference to them under any value, so there is no longer a rule for it
+//     to be inconsistent with. Rule 2 did change in the same breath, and in the
+//     other direction: it stopped reading the lock table entirely.
+//   - The condition therefore stays written on lockType even though file_scope
+//     is now the only type it can ever see. That is deliberate: a future lock
+//     type must state its own intent rule rather than inherit this one by
+//     falling through, which is precisely what writing it on res.Type would
+//     allow.
 //
 // Kept as a separate function from resourceToLock, and NOT folded into it. Note
 // what that split does and does not buy: rule 3 does not call resourceToLock at
@@ -694,39 +823,57 @@ func derivedFileScopeLocks(raw json.RawMessage, project string) (byKey map[strin
 }
 
 // resourceToLock converts a DeclaredResourceItem to a (resource_type, resource_key) pair per §25 mapping.
-// project namespaces file_scope keys (aihub#222); it is ignored for git_branch/deploy_env.
+// project namespaces file_scope keys (aihub#222).
 //
 // ⚠️ This mapper answers "which lock KEY does this resource correspond to", not
 // "does this resource take a lock". It deliberately ignores Intent. If you are
 // about to insert a resource_locks row or check one for a conflict, call
 // derivedLock instead (aihub#342).
 //
-// ⚠️ FOR A REPO ENTRY, res.TaskBranch IS NOT NECESSARILY WHAT THE WORK ITEM
-// DECLARED. On the claim path the direct caller is deriveClaimLocks (extracted
-// from FnClaimWorkItem by aihub#356), and it runs each item through
-// ClaimRequest.EffectiveDeclaredResource first, which substitutes the branch the
-// claiming client is actually checking out (aihub#356). Read that method before
-// concluding from this line that the key comes from declared_resources: the two
-// agree only when the claim attaches to a branch whose name the declaration
-// happened to guess. Nothing here needs to change for that — the substitution
-// deliberately happens on the INPUT so this mapper stays the single place the
-// "<repo>/<branch>" format is spelled.
+// 🔴 THREE of the six declared types map to NO lock, and repo/service joined
+// external_ref there by owner ruling, not by oversight (aihub#416, the ruling in
+// its attrs.owner_ruling_2026_09_07, verbatim: 「对于仓库/服务问题，我的建议是不要
+// 上锁，会引入更多的问题，我们应该从逻辑层面去解决这个问题」). What each of them
+// used to derive, and what replaces it:
+//
+//   - repo -> ("git_branch", "<repo>/<branch>"). One repo declaration took the
+//     branch for the whole attempt, which serialised parallel batches that
+//     touched no common file. Replaced by git itself: every work item works its
+//     own task branch, and a genuine write-write collision surfaces as a
+//     rejected push or a merge conflict — a stronger detector than a lock keyed
+//     on a branch NAME, which is all this ever was.
+//   - service -> ("deploy_env", "<service>"). One service declaration took the
+//     environment until the attempt ENDED, and pause does not release it
+//     (acquireLocksReleasePausedSQL deletes file_scope only), so a paused
+//     observer blocked every deploy to that environment indefinitely with no
+//     automatic exit — the orphan sweep does not reach a paused attempt.
+//     Replaced by detection: an observer records the service generation before
+//     and after, and a mismatch invalidates the OBSERVATION instead of excluding
+//     everybody else. The lock could not have prevented the thing it named
+//     anyway — it stopped another polyforge work item, never the person running
+//     `docker run` on the same host.
+//
+// 🔴 WHAT DID NOT CHANGE, so a reader does not over-generalise this. `repo` and
+// `service` are still LEGAL declared types (declaredResourceTypes), still
+// validated for their uri scheme, and still feed PredictConflicts (rules 2, 4
+// and 6, all of which now join on work_items.declared_resources rather than on
+// the lock table), the timeline and deploy preflight. They are advisory, not
+// ignored. And the resource_locks CHECK constraint is UNCHANGED: 'git_branch'
+// and 'deploy_env' remain legal lock types, reachable through an explicit
+// client-supplied requested_locks, exactly as 'worktree' and 'tcp_port' already
+// were — retiring a DERIVATION is not retiring a vocabulary.
+//
+// ⚠️ res.TaskBranch is consequently read by nothing here. The field and its
+// decode stay (DeclaredResourceItem.TaskBranch) because stored declared_resources
+// are JSON and deleting a field silently drops it from every payload that
+// carries one; it is withdrawn from the published schema instead, which is the
+// aihub#395 base_branch precedent.
 func resourceToLock(res DeclaredResourceItem, project string) (lockType, lockKey string) {
 	switch res.Type {
-	case "repo":
-		repoName := strings.TrimPrefix(res.URI, "repo:")
-		branch := res.TaskBranch
-		if branch == "" {
-			branch = "main"
-		}
-		return "git_branch", repoName + "/" + branch
 	case "path", "document", "section":
 		return "file_scope", fileScopeLockKey(project, res.Repo, res.URI)
-	case "service":
-		svc := strings.TrimPrefix(res.URI, "service:")
-		return "deploy_env", svc
-	case "external_ref":
-		return "", "" // no lock for external_ref
+	case "repo", "service", "external_ref":
+		return "", "" // advisory declarations: no lock is derived (aihub#416)
 	}
 	return "", ""
 }
@@ -795,9 +942,10 @@ func resourceToLock(res DeclaredResourceItem, project string) (lockType, lockKey
 // a migration, would have to GUESS the repo for every existing declaration, and a
 // wrong repo segment is a missed conflict: the one outcome worse than the bug.
 //
-// Only file_scope keys are namespaced: git_branch keys are already
-// repo-qualified (repo/branch), and deploy_env keys (service) are intentionally
-// global so cross-project deploys to one environment still conflict.
+// Only file_scope keys are namespaced, and since aihub#416 that is the whole
+// story rather than one case of several: file_scope is the only lock type
+// resourceToLock derives at all. A key supplied verbatim in requested_locks is
+// namespaced by whoever wrote it and by nothing here.
 func fileScopeLockKey(project, repo, uri string) string {
 	repo = normalizeRepo(repo)
 	if repo == "" {
@@ -863,7 +1011,13 @@ type lockConflictProbe struct {
 }
 
 // exactProbe is the whole probe for a lock type that has no qualification
-// structure (git_branch, deploy_env): one key, exact equality, as before.
+// structure: one key, exact equality, as before.
+//
+// Since aihub#416 no DERIVED lock reaches it — file_scope is the only type
+// resourceToLock produces and it has its own probe — but it stays reachable, and
+// is not dead: deriveClaimLocks builds one for every client-supplied
+// requested_locks entry, which is the only remaining way to take a git_branch,
+// deploy_env, worktree or tcp_port row.
 func exactProbe(key string) lockConflictProbe {
 	return lockConflictProbe{Keys: []string{key}}
 }

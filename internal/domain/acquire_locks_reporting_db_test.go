@@ -140,7 +140,21 @@ func TestAcquireLocksReportsEveryHeldLock(t *testing.T) {
 			`{"type":"path","uri":"file:`+kept+`","intent":"write"},`+
 			`{"type":"path","uri":"file:`+dropped+`","intent":"write"}]`)
 
-	claim := claimFresh(t, pool, wi.ID, u, "aihub345-claim")
+	// 🔴 The git_branch row is now REQUESTED, not derived (aihub#416). The repo
+	// declaration above no longer produces one, and this suite needs such a row
+	// as a fixture: the population it is about — "a lock the attempt holds that
+	// no current declaration explains" — is exactly what `already_held` used to
+	// under-report, and it still exists. requested_locks is the surviving way to
+	// create it (owner ruling Q-3 kept that path deliberately open).
+	//
+	// The repo entry is LEFT in the declaration on purpose, as the negative
+	// control for the retirement itself: if it ever started deriving a lock
+	// again, the ElementsMatch below would find four keys, not three.
+	claim := claimFreshWithLocks(t, pool, wi.ID, u, "aihub345-claim", []ResourceLockReq{
+		{ResourceType: "git_branch", ResourceKey: "aihub/aihub345"},
+		{ResourceType: "file_scope", ResourceKey: keptKey},
+		{ResourceType: "file_scope", ResourceKey: droppedKey},
+	})
 	attemptID := claim.AttemptID
 	require.ElementsMatch(t, []string{"aihub/aihub345", keptKey, droppedKey}, heldLockKeys(t, pool, attemptID),
 		"fixture check: the claim must really have taken all three locks, or nothing below is measuring under-reporting")
@@ -220,9 +234,15 @@ func TestAcquireLocksReportsEveryHeldLock(t *testing.T) {
 	})
 
 	// The second silent population: locks this endpoint never acquires and so
-	// never used to name. git_branch is taken at claim from a `repo`
-	// declaration and released only at wrap, so it is held for the entire life
-	// of every ordinary attempt.
+	// never used to name.
+	//
+	// ⚠️ ITS SOURCE CHANGED, its existence did not (aihub#416). git_branch used
+	// to be taken at claim from a `repo` declaration, which made this the
+	// ordinary state of every attempt in the system. It is now reachable only
+	// through an explicit requested_locks, so the population is RARE rather than
+	// universal — and that makes reporting it more important, not less: a caller
+	// who now sees a non-file_scope key in already_held has no declaration
+	// anywhere to explain it from.
 	t.Run("a non-file-scope lock is reported", func(t *testing.T) {
 		require.Contains(t, heldLockKeys(t, pool, attemptID), "aihub/aihub345",
 			"fixture check: the git_branch lock must really be held, or this arm asserts nothing")

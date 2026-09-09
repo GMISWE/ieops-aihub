@@ -85,7 +85,7 @@ item, gated on a re-measure below 0.1%.
 | `pf_force_takeover` | Take a wi from another agent (same-user, or maintainer/admin). |
 | `pf_get_ready_queue` | LCRS **seven**-segment ready queue for a project: `items`, `running`, `stalled`, `paused`, `needs_human_session`, `unclassified`, `stale_running`. **Every segment is always present** — an empty one is `[]`, never a missing key. It was six-until-non-empty before aihub#449 removed `stale_running`'s `omitempty`, so a caller on an older server sees the key only when something is stale, and cannot tell that case from an empty one. `max` is a **per-segment** page size and reaches only three of the seven: `items`, `needs_human_session` and `unclassified` each take it as their own `LIMIT`, while `running`, `stalled`, `paused` and `stale_running` are unbounded — so it is not a budget over the response, and one section being full says nothing about the others. Items in `items[]` carry `id`, `slug`, `wi_type`, `priority`, `goal`; the other two item segments add `created_at`, and that asymmetry is as designed rather than a gap. |
 | `pf_cancel_work_item` | Cancel a work item. |
-| `pf_pause_attempt` | Pause: release `file_scope` locks, retain `git_branch`/`deploy_env` for resume. |
+| `pf_pause_attempt` | Pause: release `file_scope` locks, retain every other lock type for resume — since aihub#416 that set is normally empty, because `file_scope` is the only lock the server derives. |
 | `pf_acquire_locks` | Acquire declared `file_scope` locks mid-attempt (blocks on conflict, never steals). |
 
 ## Memory and artifacts (9) - `internal/mcp/tools_memory.go`

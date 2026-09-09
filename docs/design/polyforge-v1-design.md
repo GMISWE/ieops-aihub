@@ -30,6 +30,14 @@
 
 ## Changelog
 
+- v1.25（aihub#416，owner 2026-09-07 裁决「仓库/服务不上锁，从逻辑层面解决」）：**`repo` / `service` 声明退休为纯告示，不再派生任何 `resource_locks` 行**。
+  改动点唯一：`resourceToLock` 的两个 `case` 返回空对，与既有的 `external_ref` 同形；`derivedLock`（intent 规则的家）**不动**——「任何 intent 都不取锁」不是 intent 的函数。
+  **`resource_locks` 的 CHECK 词表一个字不改**：`worktree`/`tcp_port` 早就是「派生死、词表活」的先例，这两个只是加入这一类，显式 `requested_locks` 仍可取（逃生门保留）。`file_scope` 全链路（key 形状、`lockConflictProbe`、`FnAcquireLocks`、#366 commit 闸）逐位不变。
+  换来的两件事：**仓库**靠 git 本身检测写冲突（各 wi 自己的 task 分支 + push 拒绝 / PR 冲突），claim 记 `run_attempts.repo_pins`（migration `0037`，per-repo 40 位 SHA）作为**出处**——不是约束，不校验、不拦截、不过期，中途 `pull` 没有任何东西会发现；**服务**靠观测者自查代数：观测开始记一次 `GET /v1/version`，结束复读，严格不等即整次观测作废重跑（§D3）。为此 `/v1/version` 新增 `started_at`（进程分量），因为原有四个字段全部来自构建期 ldflags，同镜像重启后逐字节相同——探针缺进程分量的失效方向是**假绿**。
+  `pf_predict_conflicts` 规则 2 从读锁表改写为读声明（照规则 4/5 范式）；不改它会让它永远返回零行，而零行与「真的没冲突」逐字符不可分辨（aihub#238 修过的同一失效模式）。新增规则 6（service，`info`）：否则退休 `deploy_env` 会让 service 声明变成零信号。三条声明 join 规则带 `last_active_age_seconds`，**给人读的事实，不是持有权凭证**：没有任何代码按这个数分支。
+  存量行由 migration `0038` 一次性删除，逐行发 `lock_released` 事件（`cause=derivation_retired`）：派生退休后没有任何代码再探测它们，它们从「阻塞」变成「不可见的垃圾」。
+  ⚠️ **本条不引入任何「按时间判定持有者是否还活着」的机制**——到期、续期、时钟裁决、隔离令牌，一个都没有。v1.21 删掉的正是那一整套，`PATCH /v1/work_items/:id/renew` 如今一律答 410 Gone（「claim is permanent ownership」）是它的墓碑，ownership 从此是永久的、只靠角色权限收回。任何把它按别的名字重新引入的设计（例如「pin 会失效」「代数超时」「观测窗口」）与本条直接冲突，读到这里的人应当拒绝它。
+  连带退休：aihub#356 的整条 `task_branches` 机器（`claimTaskBranches` → `ClaimRequest.TaskBranches` → `EffectiveDeclaredResource`）唯一产物就是那个 `git_branch` key，随之删除，claim 因此少一次 `GetWorkItem` 往返；`declared_resources[].task_branch` 照 `base_branch`（aihub#395）先例从发布 schema 撤下，结构体字段与解码保留（存量 JSON 必须继续 round-trip）。
 - v1.24: 综合 Opus R9 Part A：C-R9-1 migration seed 默认数据；C-R9-2 CAS 冲突禁止自动 merge，强制手工确认；C-R9-3 scenario config 不存在→503；C-R9-4 classification_rules.set.wi_type 写入时校验；C-R9-5 zombie sweeper 改为 system force_takeover + lost 状态（释放 locks）【已作废：aihub#441 退役了 'lost'。该 sweeper 从未实现，且在 v1.21 的 ownership-only 模型下不可实现——判定「持有者已死」只能靠 TTL，而 v1.21 删的正是它；详见 §2.3 DDL 勘误块】；C-R9-6 wi.wi_type=NULL 时禁止 claim；C-R9-7 Wi Agent = 角色，两种载体明确区分；C-R9-10 fn_claim 时验证 wi_type 仍存在；H-R9-8 pf-add-type 先 server 后本地；H-R9-9 agent_events.work_item_id 改 NULLABLE；H-R9-11 paused 时 fn_complete_attempt 自动 force_terminate；H-R9-12 mode=resume 同 user 隐式 takeover；M-R9-20 GC sweep 7 SQL 语法修正；Part B 精简：memory_embeddings 合并进 memories（12→10 表）；wi_sequences 删除；pf_acquire_lock/pf_release_lock/pf_update_artifact/pf_reconcile_artifacts/pf_manage_actors 删除（38→32 工具）；execute-scenario 推 v2；pf-debug/pf-event/pf-review stub 内联（skill 18→12）；pf-add-type 合并到 NL 路由
 - v1.23: 新增 scenario_phase_configs 表（scenario 级 SoT，替代 per-attempt phase_yaml_snapshot）；run_attempts 删 phase_yaml_snapshot、加 phase_config_version 审计字段；claim 不再上传 phase.yaml，server 直接查 scenario_phase_configs；新增 GET/PUT /v1/scenarios/{scenario}/phase_config HTTP API + pf_get_scenario_config/pf_update_scenario_config MCP 工具；wi_classification_rules 移入 scenario_phase_configs；/pf-add-type skill 新增；§27 KL4 跨 workspace 漂移已解决，移出 KL
 - v1.22: 删除 work_items.kind 字段——wi_type 单字段决定执行路径和 requires_human_session；phase.yaml wi_types 完全用户可定制（无固定枚举）；wi_classification_rules 匹配条件改为 priority + wi_type_prefix；pf_list_work_items kind 过滤改为 wi_type；WorkItem schema 移除 kind
@@ -4395,20 +4403,40 @@ type Step struct {
 
 ---
 
-## 23. 冲突预测规则（M12，5 条）
+## 23. 冲突预测规则（M12，6 条）
 
-`pf_predict_conflicts` 按以下顺序应用 5 条规则，任一 hard_block 即停止：
+> 🔴 **v1.25（aihub#416）改了两条**：规则 2 从读锁表改成读声明，并新增规则 6。
+> 原因不是整理：规则 2 的 SQL 里硬编码 `resource_type='git_branch'`，**绕开了
+> `resourceToLock`**，所以派生一退休它就永远返回零行——而零行与「真的没冲突」
+> 逐字符不可分辨（aihub#238 修过的同一失效模式，在同一个函数里）。规则 6 是因为
+> 退休 `deploy_env` 之后 `service` 声明除规则 1 外**没有任何规则**，裁决说「喂
+> predict」，而被喂的那条规则当时还不存在。
+>
+> ⚠️ **连带的严重度天花板下降，必须当契约读**：只声明 `repo` / `service` 的
+> payload **再也不会返回 `hard_block`**（规则 1 走 `derivedLockProbe`，对这两类
+> 返回空对，因此不触发）。`repo` 上限 `soft_block`，`service` 上限 `info`。
+> `pf-work` 的 pre-claim 闸读的就是这个字段，所以它写进了
+> `pf_predict_conflicts` 的工具描述——不写，调用方会把 `severity:"info"`
+> 读成「查过了，没冲突」。
+
+`pf_predict_conflicts` 按以下顺序应用 6 条规则，任一 hard_block 即停止：
 
 ```
 规则 1：resource_lock 冲突
   running attempt 的 resource_locks 与 declared_resources 有相同 (type, key)
   → severity: hard_block
   → 在 claim 原子事务内二次校验（advisory 只是预检）
+  → v1.25：只有 path/document/section 能走到这里（repo/service 不派生锁）
 
-规则 2：同分支冲突
+规则 2：同 repo 声明（v1.25 重写，不再读锁表）
   declared_resources 含 {type:"repo", uri:"repo:X"} 且
-  running attempt 的 resource_locks 含 (git_branch, "X/<任意>")
+  另一个 status='running' 的 wi 的 declared_resources 也含同一条
   → severity: soft_block（warn）
+  → 带 last_active_age_seconds
+  → ⚠️ 措辞从「同一个 repo *分支*」改成「声明了同一个 repo」：判定里
+    不再有任何分支信息参与，旧措辞是一句假话。两个 attempt 在同一 repo
+    的**不同**分支上也会命中本规则——它报的是共同影响面，所以是
+    soft_block 而不是 hard_block。
 
 规则 3：path glob 重叠
   declared_resources 的 file:path 与 running attempt 的 file:path glob 重叠
@@ -4423,9 +4451,76 @@ type Step struct {
   双方均引用同一 jira:KEY / github:issue/N
   → severity: info（仅提示）
 
+规则 6：同 service 声明（v1.25 新增）
+  declared_resources 含 {type:"service", uri:"service:X"} 且
+  另一个 status='running' 的 wi 也声明同一条
+  → severity: info
+  → 带 last_active_age_seconds
+  → 🔴 是 info 而不是 soft_block：有了代数闸（§23.1），两个观测者共用一个
+    服务不再是要被阻止的事，只是人可能想知道的事实。部署与观测的互斥归
+    runbook，不归本谓词。
+  → 不受 dry_run 门控（只有规则 1 受）
+
 dry_run=true 时跳过规则 1 的 lock 检查，仅做资源预测。
 predict_conflicts 是 advisory，claim 时仍在事务内原子执行规则 1。
 ```
+
+### 23.1 服务代数：观测者自查协议（v1.25，aihub#416 D3）
+
+`deploy_env` 锁被退休后，「别人别动这个服务」不再靠**排他**，而靠观测者**自查**。
+把预防换成检测。
+
+```
+观测开始 → 读探针 → 记 generation_open
+         → 执行观测（可能很长）
+         → 读探针 → 记 generation_close
+         → open == close ？
+            是 → 结论有效，工件带上两个代数戳
+            否 → 本次观测【整次作废】，重跑
+```
+
+**判定面是「严格不等即作废」，没有阈值。** 任何阈值都会把「代数变了但我觉得没关系」
+变成一次人工豁免，而豁免是这条机制唯一能失效的方式。
+
+**探针注册表**放在 per-project 的 scenario 仓（`services.yaml`），键 = `declared_resources`
+里 `service:` 之后那个字符串（与 `resourceToLock` 曾经的 `TrimPrefix` 逐字一致）。放那里
+而不放服务端表，是因为读探针的永远是**观测者**（跑在 workspace 里），服务端从不需要求值；
+而 scenario 仓已经被每个 claim 克隆，且已经有 pin（`wi_step_state.scenario_ref`），
+所以「用哪一版探针定义做的这次观测」是免费拿到的。它在 git 里 ⇒ 加一个服务要过 PR review。
+
+`aihub` 的代数表达式是 `git_commit @ started_at`。**不要把 `version` 写进去**：生产上它恒为
+`"dev"`（CI 的 main 分支镜像构建不传 `VERSION` build-arg），常量放进代数只会给出虚假信心。
+
+**作废落三处，其中两处承重：**
+
+| 落点 | 写什么 | 承重？ |
+|---|---|---|
+| 观测工件的 `structured_payload` | `generation_open` / `generation_close`，各带 `{service, probe_id, scenario_ref, value, at}` | 🔴 承重——结论必须带前提，否则事后无法复审 |
+| step 状态 | `pf_update_step(status="failed", error_type="observation_invalidated")` | 🔴 承重——唯一让作废「不可静默忽略」的地方 |
+| 事件 | `pf_emit_event(event_type="observation_invalidated", …)` | 派生（细节留痕） |
+| wi `attrs` | ❌ **不写** | — |
+
+`attrs` 不行的理由：它是**决定**的家；一个 wi 可能有多次观测，写 attrs 要么互相覆盖
+（`attrs_patch` 是浅合并，第二次会盖掉第一次的同名 key），要么无界增长。事件表天然
+append-only，是这类记录的正确形状。**不需要 migration**：`EmitEvent` 对非 admin
+event_type 不做枚举校验，而 `chk_evt_work_item_id` 只约束 `work_item_id IS NULL` 的行。
+
+🔴 **这道闸挡什么、不挡什么——写在这里而不是留给下一个人踩：**
+
+| 失败模型 | 是否被代数闸检测 |
+|---|---|
+| 观测中途服务被重新部署（新镜像） | ✅ `git_commit` 变 |
+| 观测中途服务被重启（同镜像） | ✅ 靠 `started_at`（这就是它存在的原因） |
+| 观测中途底层数据被改（DB 写入） | ❌ **完全不挡**——观测对象是数据时，服务代数与它无关 |
+| 观测中途配置热更新（不重启进程） | ❌ 不挡 |
+
+「探针缺失」必须是**显式失败**，不能是静默跳过：报「探针缺失」，**不是**报「代数一致」。
+空洞绿是这类蕴含式闸唯一的失效方式。
+
+⚠️ **本轮交付的是机制的前三格，强制那一格是空的**（owner 2026-09-08 裁决 Q-2 选 C）：
+没有任何东西阻止一个观测者**根本不记代数**。建闸需要先定义「观测类工件」的判别式，而
+今天工件类型只有六个 `methodology.*`，零个真实观测样本——现在定判别式必然取宽误伤。
+**不要把「约定」说成「机制」。**
 
 ---
 
@@ -4555,14 +4650,20 @@ v2 在 MCP server 层硬限制（通过 step_context 检测活跃的 step_attemp
    → server handler 对 writing/data 返回 405 NOT_IMPLEMENTED
 
 -- C-R3-8: resource_locks.resource_type 与 DeclaredResource.type 映射
-   声明资源类型 → 锁类型映射表：
-     "repo"         → git_branch（key: "<project>/<branch_name>"）
-     "path"         → file_scope（key: "<repo>:<glob>"）
-     "service"      → deploy_env（key: "<service_name>"）
-     "external_ref" → 不申请锁（仅冲突预测规则 5 使用）
+   声明资源类型 → 锁类型映射表（🔴 v1.25/aihub#416 起，三类不派生锁）：
+     "path"         → file_scope（key: "<project>:<repo>:<repo 相对路径>"，见 aihub#222/#261）
      "document"     → file_scope（同 path）
      "section"      → file_scope（同 path）
-   client 在 claim 时按此映射生成 requested_locks，server 校验匹配
+     "repo"         → 不派生锁（v1.25 退休；曾为 git_branch，key "<repo>/<branch>"）
+     "service"      → 不派生锁（v1.25 退休；曾为 deploy_env，key "<service_name>"）
+     "external_ref" → 不申请锁（一直如此；冲突预测规则 5 使用）
+   ⚠️ 三类「不派生锁」不等于「被忽略」：repo/service 仍是合法声明、仍校验 uri
+   scheme、仍喂 predict 的规则 2/4/6、事件与部署预检。退休的是**派生**，不是**词表**——
+   上面 DDL 的 CHECK 一个字不改，`git_branch`/`deploy_env` 仍可由显式
+   requested_locks 取得（与 worktree/tcp_port 同一状态）。
+   ⚠️ 「client 在 claim 时按此映射生成 requested_locks」是**过时描述**：正常
+   polyforge 流程把 requested_locks 留空，由 server 从 declared_resources 派生
+   （`deriveClaimLocks`）；显式 requested_locks 是被信任的逃生门，server 不再校验匹配。
 
 -- H-R3-1: pf_cut_alpha / pf_promote 已补充 §5.6
 -- H-R3-2: pf_save_artifact 在 skill mechanic 中所有调用统一使用全名 methodology.*

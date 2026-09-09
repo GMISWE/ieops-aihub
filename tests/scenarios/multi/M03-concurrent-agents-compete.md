@@ -11,30 +11,42 @@ Tests the real multi-agent coordination flow.
 
 ## Steps
 
+🔴 **aihub#416 (2026-09-09) changed WHERE the contention comes from.** The two work
+items below still compete for one `git_branch` lock and Bob is still blocked — but
+the lock now exists only because both claims ASK for it in `requested_locks`. The
+`repo` declaration derives nothing (owner ruling of 2026-09-07), so `task_branch` has
+been dropped from the declarations and the shared-branch key survives only in the
+explicit claim bodies. Read this scenario as "two agents asking for one lock", not as
+"two agents declaring one repo".
+
+
 ### Admin: create two wi's competing for the same branch
 AS ADMIN:
 CALL: pf_create_work_item(project="marketplace",
       goal="[test] M03 Alice's task — needs shared-feature branch",
       wi_type="fix_bug", priority="high",
-      declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
-                           "task_branch":"polyforge/m03-shared-feature"}])
+      declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive"}])
 NOTE: save response.id as WI_ALICE
 
 AS ADMIN:
 CALL: pf_create_work_item(project="marketplace",
       goal="[test] M03 Bob's task — also needs shared-feature branch",
       wi_type="fix_bug", priority="normal",
-      declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
-                           "task_branch":"polyforge/m03-shared-feature"}])
+      declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive"}])
 NOTE: save response.id as WI_BOB
 
 ### predict_conflicts: both wi's show potential conflict with each other
 AS ADMIN:
 CALL: pf_predict_conflicts(
-      declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
-                           "task_branch":"polyforge/m03-shared-feature"}],
+      declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive"}],
       work_item_id=WI_ALICE)
 NOTE: record severity; advisory only
+NOTE: aihub#416 (2026-09-09) — a repo-only payload now tops out at `soft_block`
+      (predict rule 2, a declaration join) and can NEVER return `hard_block`,
+      because a repo entry derives no lock for the lock-table rule to find. Each
+      prediction also carries `last_active_age_seconds`. Do not read a
+      severity below `hard_block` here as "no conflict"; read it as "another
+      running wi declares the same repo, judge for yourself".
 
 ### Alice claims first (wins the lock)
 AS ALICE:

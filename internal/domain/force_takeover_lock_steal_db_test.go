@@ -79,8 +79,18 @@ func ftsSecondUser(t *testing.T, pool *pgxpool.Pool, uid string) string {
 // ftsClaim claims wiID, optionally as a force takeover, as the given user.
 func ftsClaim(t *testing.T, pool *pgxpool.Pool, uid, wiID, idem string, force bool) (*ClaimResponse, *AihubError) {
 	t.Helper()
+	return ftsClaimWithLocks(t, pool, uid, wiID, idem, force, nil)
+}
+
+// ftsClaimWithLocks is ftsClaim with an explicit requested_locks slice, needed
+// since aihub#416 retired the git_branch derivation: the arm below has to arrange
+// a LIVE same-work-item holder of a non-file_scope row, and requested_locks is
+// now the only way one is created.
+func ftsClaimWithLocks(t *testing.T, pool *pgxpool.Pool, uid, wiID, idem string, force bool, locks []ResourceLockReq) (*ClaimResponse, *AihubError) {
+	t.Helper()
 	return FnClaimWorkItem(context.Background(), pool, wiID, &ClaimRequest{
 		IdempotencyKey: idem,
+		RequestedLocks: locks,
 		SessionInfo:    SessionInfo{MachineID: "m-393", SessionSecret: testSecret},
 		ForceOver:      force,
 	}, uid, "", "tester")
@@ -346,9 +356,21 @@ func TestForceTakeoverLockSteal_ControlsStillAllowTheLegitimateDisplacements(t *
 		uid := testUser(t, pool)
 		proj := testProject(t, pool, uid)
 
-		// A repo entry, so the claim derives a git_branch lock. The branch name
-		// carries the project because a git_branch key is "<repo>/<branch>" and
-		// is NOT project-namespaced, unlike file_scope.
+		// 🔴 The git_branch row is REQUESTED here, not derived (aihub#416): a repo
+		// entry no longer maps to one. The repo entry stays in the declaration
+		// because this arm is about a lock with a live SAME-work-item holder, and
+		// leaving the declaration in place keeps the fixture readable as "a work
+		// item that works on repo-a" rather than as a bare key.
+		//
+		// What the arm measures is untouched by the retirement: pause releases
+		// file_scope only, so a non-file_scope row survives on the PAUSED
+		// attempt, and the resume must still displace it because the holder
+		// belongs to the same work item. That predicate is "foreign", not "live"
+		// (aihub#393), and this is the arm that reddens for a fix keyed on
+		// liveness alone.
+		//
+		// The branch name carries the project because a git_branch key is
+		// "<repo>/<branch>" and is NOT project-namespaced, unlike file_scope.
 		branch := "br-" + proj
 		declared, err := json.Marshal([]map[string]any{
 			{"type": "repo", "uri": "repo:repo-a", "intent": "write", "task_branch": branch},
@@ -357,7 +379,8 @@ func TestForceTakeoverLockSteal_ControlsStillAllowTheLegitimateDisplacements(t *
 			t.Fatalf("marshal: %v", err)
 		}
 		wi := seedWIWithResources(t, pool, proj, uid, "own paused git_branch lock, resumed", declared)
-		first, aerr := ftsClaim(t, pool, uid, wi.ID, "idem-393-paused", false)
+		branchLock := []ResourceLockReq{{ResourceType: "git_branch", ResourceKey: "repo-a/" + branch}}
+		first, aerr := ftsClaimWithLocks(t, pool, uid, wi.ID, "idem-393-paused", false, branchLock)
 		if aerr != nil {
 			t.Fatalf("first claim: %v", aerr)
 		}
@@ -384,7 +407,7 @@ func TestForceTakeoverLockSteal_ControlsStillAllowTheLegitimateDisplacements(t *
 			t.Fatalf("fixture: first attempt is %q, want \"paused\"", status)
 		}
 
-		second, aerr := ftsClaim(t, pool, uid, wi.ID, "idem-393-paused-2", false)
+		second, aerr := ftsClaimWithLocks(t, pool, uid, wi.ID, "idem-393-paused-2", false, branchLock)
 		if aerr != nil {
 			t.Fatalf("resuming a wi whose OWN paused attempt holds the lock must succeed, got %v", aerr)
 		}

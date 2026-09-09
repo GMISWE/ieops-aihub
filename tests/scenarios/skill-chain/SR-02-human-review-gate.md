@@ -24,9 +24,14 @@ ADMIN (via MCP): pf_create_work_item(
   wi_type="critical_bug",
   requires_human_session=true,
   priority="urgent",
-  declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
-    "task_branch":"polyforge/critical-sr02-test"}]
+  declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive"}]
 )
+NOTE: `task_branch` was dropped from this declaration by aihub#416 (2026-09-09) —
+      the published schema no longer carries it, because its only reader was the
+      retired `git_branch` lock key. Sending it was accepted and did nothing, which
+      is why the payload above used to pass while meaning nothing. This scenario
+      never depended on a lock in the first place: what keeps WI_CRITICAL away from
+      Alice is requires_human_session=true (ready-queue routing), asserted below.
 Save as WI_CRITICAL.
 
 SKILL_INVOKE (as ADMIN): polyforge:pf-status

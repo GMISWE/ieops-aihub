@@ -4,7 +4,7 @@
 {
   "tool": "pf_remember",
   "description_sha256": "bec195df7750ddb2b3b4714765c5ded5e0a03f968e184a781d347c9e3f553fc7",
-  "input_schema_sha256": "961f2f09dcd05e15d96516d4bdf2292ee1b5054d6b58ccff88fc9e9677fc86dd",
+  "input_schema_sha256": "3fd891dcc03b4c9d2e44114fda3f92df709e272b774679404d6a8ae352e55e00",
   "params": {
     "attrs": {
       "type": "object",
@@ -86,7 +86,7 @@ set and the accepted set are one set only if nothing closed is published.
 | `project` | string | yes | project name |
 | `type` | string | yes | full name, e.g. `experience.debug`; must start with `experience.` / `fact.` / `rule.` and carry no `\|`; `methodology.*` refused here; 13 curated names are published as suggestions |
 | `content` | string | yes | memory content |
-| `visibility` | string | yes | `private\|project\|team\|admin` |
+| `visibility` | string | yes | one of `admin\|private\|project\|public\|team`, built from `domain.MemoryVisibilityList()`; `public` is the anonymous-share tier and the description says what it costs |
 | `work_item_id` | string | no | associated work item |
 | `base_strength` | number | no | "Initial strength, integer 1-5 (default 3). A fractional value is refused" |
 | `attrs` | object | no | additional attributes; a non-object — including a JSON-encoded string of one — is a 400 |
@@ -160,6 +160,35 @@ assuming it. The risk on this tool is at hops 1 and 4.
   is where the 13 come from. Both are derived from one another rather than typed
   twice, and NEITHER refuses anything. The consequence a caller should know: a type
   outside the 19 stores fine and the UI dropdown will never offer it back.
+- **`visibility` published four of the column's five values until `aihub#495`
+  (2026-09-09), and the missing one was `public`.** Migration
+  `internal/db/migrations/0023_memories_visibility_public.sql` added it for
+  unauthenticated artifact sharing and `aihub#434` mirrored the CHECK into Go —
+  "Mirrored EXACTLY, 'public' included", `internal/domain/memory.go`
+  (`memoryVisibilities`) — so `internal/domain/memory.go`
+  (`validateMemoryVisibility`) has accepted it on this path ever since, and this
+  tool's description said it did not exist. It is not a fifth rung on a ladder:
+  `public` is the tier `internal/server/router.go`'s `GET /share/:id` gates on, and
+  `internal/server/routes_artifacts.go` (`handleSharedArtifact`) is
+  **unauthenticated**. That handler's own header already recorded the reachability
+  — "`public` is settable by a project writer straight from `POST /v1/memories` …
+  so it is not by itself a deliberate publication" — a fact about THIS tool,
+  written on the read side, and published nowhere its caller could see it. The
+  description now names the value AND the consequence, and the string is built from
+  `internal/domain/memory.go` (`MemoryVisibilityList`), which is also what
+  `internal/domain/work_item_fields.go` (`vocabularyErr`) renders into the 400 — so the set a
+  caller is shown and the set the refusal names are one value in one order.
+  ⚠️ **What a public memory written through THIS tool is actually reachable at is a
+  narrower question than the tier suggests**, and the description stops short of
+  answering it on purpose. `handleSharedArtifact` gates on `public` **and**
+  `internal/server/routes_artifacts.go` (`hasRenderableBody`), which needs either a
+  stored `rendered_html` — this tool publishes no `html` parameter, so it never
+  writes one — or a type in the render set, which
+  `internal/domain/memory.go` (`defaultRenderTypes`) makes the `methodology.*`
+  names this tool refuses. On a default deployment the two conditions therefore
+  cannot both hold for a `pf_remember` row. They are not a promise: the render set
+  is configurable at startup (`internal/domain/memory.go` (`InitRenderTypes`)), so
+  the conjunct is where an honest published claim stops.
 - **`work_item_id` is validated against `project`.** A work item in another project
   is refused rather than silently stored.
 - `dedup_mode` and `supersedes_memory_id` change what happens to an existing similar
@@ -226,6 +255,23 @@ use either.
     matters: a CHECK stricter than Go would turn a 400 naming the field into a 500
     carrying the driver's constraint text, which is the `aihub#433` failure mode in
     a new place.
+- **§6.1 T1-4 — the caller-facing half, applied to `visibility` by `aihub#495`
+  (2026-09-09).** T1-4 says a vocabulary a DB CHECK enforces must also be checked in
+  Go and answered with a 400 naming the field, because "the CHECK is the last line
+  of defence and never the one facing the caller". `aihub#434` did that half. What
+  it left is the half above it: the vocabulary the caller is SHOWN. Published as
+  four of five values, `visibility` had a Go guard that would refuse nothing a
+  caller sent — the caller simply never sent the fifth, because hop 1 said it did
+  not exist. `internal/mcp/tools_memory.go` (`rememberVisibilityParamDesc`) builds
+  the string from `internal/domain/memory.go` (`MemoryVisibilityList`), and
+  `internal/mcp/visibility_vocab_publication_test.go` asserts the SET both ways — a
+  legal value hop 1 hides fails, and an offered value the column refuses fails too,
+  which is the direction a shortening back to a literal would take.
+  ⚠️ **Scoped to this tool, and the arm says so rather than quietly measuring less
+  than its name.** `pf_save_artifact`'s `visibility` still carries the same
+  four-value literal and `pf_update_memory`'s names no values at all; both write
+  this column, and both are the file scope of other work items in this batch. The
+  fix there is one entry each in that gate's `visibilityVocabTools`.
 - **§6.2 T2-19** — `pf_recall`'s `min_strength` must be put on the same scale, after
   T1-3 lands.
 

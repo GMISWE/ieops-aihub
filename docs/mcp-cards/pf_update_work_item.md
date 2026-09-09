@@ -3,8 +3,8 @@
 ```json
 {
   "tool": "pf_update_work_item",
-  "description_sha256": "29b3c7434085f3bd45cf9acebf95466a7fe1ae8757a6d86786d03886c6687c30",
-  "input_schema_sha256": "d8dfe797c7469f5b1a072ebb9a49fcd44b21ce0a58998e62fd117b1c1fccb7f8",
+  "description_sha256": "49d4dfb79191528af8b91e23b4909b8d97b68eb9330c535cb62d1753f92c887c",
+  "input_schema_sha256": "9675487a26bb93c26f17ff7a9ebc63ef72c089439caadb9bc565ac54a69f53ad",
   "params": {
     "attrs": {
       "type": "object",
@@ -116,6 +116,20 @@
 Sixteen parameters, three of which carry a compare-and-set or destructive semantic
 that a caller gets wrong by default.
 
+**Since `aihub#495` the tool-level description carries the editability matrix
+itself**, not just the parameter list it used to name. That is a hop-1 change with
+no behaviour behind it: the matrix has been enforced since `aihub#440`, and it was
+written down in the comment above `internal/domain/work_items.go`
+(`wiEditTierByField`), in the table below, and in `docs/mcp-tools.md` — three
+places, none of them on the wire. The description now states the three tiers, the
+three status classes, the two 409s and the 403, the mixed-patch rule, and — named
+individually, because it is the only cell that MOVED — that `labels`, `priority`,
+`milestone`, `requires_human_session` and `declared_resources` used to succeed on a
+terminal work item. `internal/mcp/update_wi_edit_matrix_publication_test.go`
+anchors that text on `domain.WorkItemFieldsByEditTier` and
+`domain.WorkItemStatusesByEditClass` rather than on a list retyped in the test, so
+a seventh working-tier field cannot join the tier unpublished.
+
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `work_item_id` | string | yes | id or slug |
@@ -123,7 +137,7 @@ that a caller gets wrong by default.
 | `goal_change_reason` | string | no | required with `goal` |
 | `priority` | enum | no | from the domain list |
 | `milestone` | string | no | updated milestone |
-| `wi_type` | string | no | updated type |
+| `wi_type` | string | no | updated type; only while status is queued, paused or blocked — the same tier, predicate and status set as `goal`, and since `aihub#495` its description says so too |
 | `requires_human_session` | boolean | no | sets `true` or `false`; **cannot reach the third state** — no way back to `NULL` |
 | `reclassify_reason` | string | no | required with a `wi_type` change, min 10 chars |
 | `labels` | array | no | max from the domain constant |
@@ -313,6 +327,21 @@ no body", never "the body was withheld".
   constraints — and it builds the number from `domain.MaxWorkItemGoalRunes()`
   rather than retyping it, which is the T1-9 failure mode one level up: a published
   limit that no longer tracks the enforced one reads as true and is not.
+- **§6.1 T1-9, fourth application — `aihub#495` (2026-09-09).** The third
+  application's direction again, one scope up: not one parameter's refusal
+  arriving without prose, but the whole matrix. `aihub#440` moved five fields from
+  *writable on a wrapped work item* to 409 `CONFLICT_TERMINAL_STATE` — the only
+  200 → 409 transition in that batch — and published nothing, while `wi_type`'s
+  description still read `Updated wi_type` though `goal`, its partner in the same
+  tier under the same predicate, had been rewritten to state the status gate. Both
+  are on the wire now. The gate is
+  `internal/mcp/update_wi_edit_matrix_publication_test.go`, and it reads
+  `internal/domain/work_items.go` (`WorkItemFieldsByEditTier`) and
+  (`WorkItemStatusesByEditClass`) rather than a list retyped in the test — a third
+  copy of the matrix would go green on precisely the day a sixth working-tier
+  field joined it unpublished, which is the event the gate exists for. It checks
+  both contract-tier parameters, not only the one that was wrong, because the
+  defect was the PAIR disagreeing.
 - **§6.2 T2-1** — one editability matrix for the whole struct, one error code per
   rejection KIND (409 state, 403 permission), and no field silently exempt.
   **Implemented** in `internal/domain/work_items.go` (`updateGate`); "no field

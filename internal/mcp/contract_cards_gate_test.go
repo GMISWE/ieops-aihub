@@ -87,7 +87,9 @@ package mcp_test
 //	K11 open honesty   an `## Open` bullet asserting an unfalsifiable negative
 //	                   ("nobody has made", "is unmeasured", "was not updated by"),
 //	                   or naming an aihub#NNN with no date — the arm that reads
-//	                   the one section no other arm reads at all
+//	                   the one section no other arm reads at all; and an
+//	                   openCitationWaivers entry whose stated count has drifted
+//	                   from what the arm actually waived
 //
 // The list jumps K9 to K11 because K10 is taken; it is the DB-gated arm and lives
 // elsewhere, described next.
@@ -140,6 +142,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1293,7 +1296,8 @@ var openWorkItemRef = regexp.MustCompile(`\baihub#\d+\b`)
 var openISODate = regexp.MustCompile(`\b20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b`)
 
 // openCitationWaivers exempts a card from the DATE half only — never from the
-// phrase ban — and every entry states who holds the file and when it can go.
+// phrase ban — and every entry states who holds the file, when it can go, and
+// HOW MANY undated citations it covers.
 //
 // 🔴 This is the K5/K9 shape: an exemption that is NAMED, carries its reason, and
 // is falsifiable in both directions. A waived card that turns out to have NO
@@ -1301,6 +1305,20 @@ var openISODate = regexp.MustCompile(`\b20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]
 // going red the moment the gap it covers closes — which is a stronger property
 // than maxHistoricalQuoteRows has, and it is available here only because the
 // waiver names a card rather than counting rows.
+//
+// 🔴 The reason MUST state a count, and aihub#494 measured why on 2026-09-09. A
+// waiver names a CARD; the thing it excuses is a CITATION, and one card can hold
+// several. The single entry this map has ever held read "its one undated citation
+// is `aihub#459`" while docs/mcp-cards/pf_remember.md carried TWO undated bullets,
+// and the arm logged "2 undated citation(s) waived" directly beneath a reason
+// saying one. The second bullet was exempt under a sentence that never mentioned
+// it, and the self-emptying property went with it: undatedHere could not reach 0
+// while the unmentioned bullet stayed undated, so STALE_WAIVER could not fire
+// however completely the gap the reason DESCRIBED had closed. The count is
+// therefore checked against this arm's own tally, and a reason stating none is
+// itself a failure — without that half, omitting the count is the cheapest way to
+// comply with a rule about counts, which is the maxHistoricalQuoteRows argument
+// applied to prose instead of to a ceiling.
 //
 // 🟢 EMPTY since aihub#459 (2026-09-09), and that is the arm working as designed
 // rather than an absence of need. The single entry waived
@@ -1313,6 +1331,119 @@ var openISODate = regexp.MustCompile(`\b20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]
 // moment the gap closes, which is what makes this map self-emptying rather than a
 // list that accumulates.
 var openCitationWaivers = map[string]string{}
+
+// openWaiverNumberWords is the spelled-out half of a waiver's count claim.
+//
+// It stops at ten on purpose. A card holding more than ten undated citations is a
+// card to fix rather than one to waive, and past that range the digit is the
+// clearer way to write it anyway — so this covers the forms a reason actually uses
+// without turning into a general English number parser.
+var openWaiverNumberWords = map[string]int{
+	"no": 0, "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+	"six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+
+// openWaiverCountClaim matches the count a waiver's reason states about the card it
+// covers: "its one undated citation is `aihub#459`", "2 undated citations", "no
+// undated citation".
+//
+// 🔴 Anchored on the NOUN and not on a bare number, for the reason openISODate
+// range-checks its months rather than accepting anything date-shaped. A waiver
+// reason is dense with digits that are not counts — `aihub#445`, `aihub#483` and an
+// ISO date all appear in the only entry this map has held — and a pattern reading
+// one of those as the claim would compare this arm's tally against a work-item
+// number and report a mismatch that means nothing.
+var openWaiverCountClaim = regexp.MustCompile(
+	`(?i)\b(no|zero|one|two|three|four|five|six|seven|eight|nine|ten|\d{1,3})\s+undated\s+citation`)
+
+// openWaiverClaimedCounts returns the DISTINCT counts a reason states, in order of
+// first appearance. None means the reason makes no count claim at all; more than
+// one means it makes claims that disagree with each other. In neither case is there
+// a single number for the arm to check, and the two are reported separately because
+// the edit that fixes them differs.
+func openWaiverClaimedCounts(reason string) []int {
+	var counts []int
+	seen := map[int]bool{}
+	for _, m := range openWaiverCountClaim.FindAllStringSubmatch(reason, -1) {
+		tok := strings.ToLower(m[1])
+		n, ok := openWaiverNumberWords[tok]
+		if !ok {
+			parsed, err := strconv.Atoi(tok)
+			if err != nil {
+				// Unreachable: the pattern admits only the words above and \d{1,3}.
+				continue
+			}
+			n = parsed
+		}
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		counts = append(counts, n)
+	}
+	return counts
+}
+
+// openWaiverProblems is the whole waiver half of K11 for ONE card, returned as
+// plain strings.
+//
+// 🔴 It is a function rather than inline arm code because openCitationWaivers is
+// EMPTY on a healthy tree — which is the arm working as designed, and also means
+// every branch below is unreachable from the card set. An arm whose triggers only
+// run on the day somebody adds an exemption is an arm nobody finds out is broken
+// until the day they rely on it, so the triggers are exercised against fixtures in
+// TestOpenCitationWaiverIsCheckedAgainstItsOwnCount instead. That is not a
+// hypothetical: the count check exists because the one entry this map ever held
+// carried a count that was wrong for its entire life and nothing looked at it.
+func openWaiverProblems(cardPath, reason string, undatedHere int) []string {
+	var problems []string
+	claims := openWaiverClaimedCounts(reason)
+
+	switch {
+	case undatedHere == 0:
+		problems = append(problems, fmt.Sprintf(
+			"K11 STALE_WAIVER: openCitationWaivers exempts %s from the date requirement, "+
+				"and that card now has no undated citation. The exemption has outlived its "+
+				"gap, which is the K5 failure in another place — delete the entry. Its "+
+				"recorded reason was: %s", cardPath, reason))
+	case len(claims) == 1 && claims[0] != undatedHere:
+		problems = append(problems, fmt.Sprintf(
+			"K11 STALE_WAIVER: openCitationWaivers exempts %s from the date requirement "+
+				"and its reason claims %d undated citation(s), but this arm waived %d. A "+
+				"waiver names a CARD while what it excuses is a CITATION, so the two numbers "+
+				"drifting apart is not bookkeeping. Waiving MORE than the reason claims means "+
+				"bullets are exempt under a sentence that never mentions them, and while any "+
+				"of those stays undated the tally cannot reach 0, so the self-emptying arm "+
+				"above can never fire either — that is the case aihub#494 measured on "+
+				"2026-09-09. Waiving FEWER means the reason describes a gap that is already "+
+				"part-closed. Either way, re-read the card and rewrite the entry against what "+
+				"is actually there. Its recorded reason was: %s",
+			cardPath, claims[0], undatedHere, reason))
+	}
+
+	switch {
+	case len(claims) == 0:
+		problems = append(problems, fmt.Sprintf(
+			"K11 WAIVER_NO_COUNT: openCitationWaivers exempts %s with a reason that states "+
+				"no count of the undated citations it covers, so there is nothing to compare "+
+				"against the %d this arm waived. Say it in the form the arm logs, e.g. \"its "+
+				"one undated citation is `aihub#NNN`\" or \"2 undated citations\". The count "+
+				"is required rather than encouraged because it is the only thing keeping a "+
+				"card-scoped exemption from silently covering a citation nobody signed off "+
+				"on, and an optional one is dodged by leaving the count out. Its recorded "+
+				"reason was: %s", cardPath, undatedHere, reason))
+	case len(claims) > 1:
+		problems = append(problems, fmt.Sprintf(
+			"K11 WAIVER_COUNT_AMBIGUOUS: openCitationWaivers exempts %s with a reason "+
+				"stating %d counts that disagree (%v) of the undated citations it covers, so "+
+				"there is no single claim to check against the %d this arm waived. Picking "+
+				"the first would make the check depend on sentence order, which is not "+
+				"something a reader would predict — state the count once. Its recorded reason "+
+				"was: %s", cardPath, len(claims), claims, undatedHere, reason))
+	}
+
+	return problems
+}
 
 // TestContractCardOpenSectionsAreFalsifiable is K11.
 //
@@ -1395,11 +1526,10 @@ func TestContractCardOpenSectionsAreFalsifiable(t *testing.T) {
 				truncateBullet(bullet))
 		}
 
-		if isWaived && undatedHere == 0 {
-			t.Errorf("K11 STALE_WAIVER: openCitationWaivers exempts %s from the date "+
-				"requirement, and that card now has no undated citation. The exemption has "+
-				"outlived its gap, which is the K5 failure in another place — delete the "+
-				"entry. Its recorded reason was: %s", c.path, reason)
+		if isWaived {
+			for _, problem := range openWaiverProblems(c.path, reason, undatedHere) {
+				t.Error(problem)
+			}
 		}
 	}
 
@@ -1481,6 +1611,238 @@ func truncateBullet(b string) string {
 		return b
 	}
 	return string(r[:max]) + " […]"
+}
+
+// TestOpenCitationWaiverIsCheckedAgainstItsOwnCount drives the waiver half of K11
+// directly, against fixtures rather than against the card set.
+//
+// 🔴 It has to. openCitationWaivers is EMPTY on a healthy tree, so running the arm
+// over docs/mcp-cards/ executes none of those branches at all — the arm is green
+// there whether the checks work or not, which is the exact shape the floors in this
+// file exist to refuse one level up.
+//
+// The last two cases are the historical entry verbatim. That entry claimed "one
+// undated citation" while docs/mcp-cards/pf_remember.md carried two, and the arm
+// logged "2 undated citation(s) waived" beneath it for the entry's whole life with
+// nothing red. Pinning the regression to the reason's own TEXT rather than to a
+// paraphrase is deliberate: a paraphrase is written after the fix, by someone who
+// already knows what the check looks for, so it cannot show the check would have
+// caught the thing that actually happened.
+func TestOpenCitationWaiverIsCheckedAgainstItsOwnCount(t *testing.T) {
+	const historicalReason = "aihub#445 holds docs/mcp-cards/pf_remember.md with a live attempt " +
+		"(status `running`, checked 2026-09-08) and that card's first Open bullet IS " +
+		"#445's subject — §6.4 item 4, the memory-type CHECK. Editing it from aihub#483 " +
+		"would take the file lock out from under a rebase in flight. Its one undated " +
+		"citation is `aihub#459`, which was still `queued` at that check, so the bullet " +
+		"is TRUE — only undated. Delete this entry once #445 lands; the arm will already " +
+		"be telling you to."
+
+	cases := []struct {
+		name string
+		// reason is the string a waiver entry would carry.
+		reason string
+		// undated is what the arm tallied for that card.
+		undated int
+		// want is the failure NAME of each expected problem, in order. Names rather
+		// than whole messages so rewording a message does not red this test, while
+		// dropping or confusing a check still does.
+		want []string
+		// contains pins the load-bearing values inside the message, which a name
+		// alone cannot: a mismatch report naming the wrong two numbers is useless
+		// and would otherwise pass.
+		contains []string
+	}{
+		{
+			name:    "count matches the tally, spelled out",
+			reason:  "aihub#500 holds the file, checked 2026-09-09; its two undated citations are `aihub#1` and `aihub#2`.",
+			undated: 2,
+		},
+		{
+			name:    "count matches the tally, as a digit",
+			reason:  "aihub#500 holds the file, checked 2026-09-09; 2 undated citations, both `queued`.",
+			undated: 2,
+		},
+		{
+			name:     "waives more than the reason claims",
+			reason:   "aihub#500 holds the file, checked 2026-09-09; its one undated citation is `aihub#1`.",
+			undated:  3,
+			want:     []string{"K11 STALE_WAIVER"},
+			contains: []string{"claims 1 undated citation(s)", "waived 3"},
+		},
+		{
+			name:     "waives fewer than the reason claims",
+			reason:   "aihub#500 holds the file, checked 2026-09-09; its three undated citations are all `queued`.",
+			undated:  1,
+			want:     []string{"K11 STALE_WAIVER"},
+			contains: []string{"claims 3 undated citation(s)", "waived 1"},
+		},
+		{
+			name:     "a reason claiming none, over a card that has some",
+			reason:   "aihub#500 holds the file, checked 2026-09-09; there are no undated citations left.",
+			undated:  2,
+			want:     []string{"K11 STALE_WAIVER"},
+			contains: []string{"claims 0 undated citation(s)", "waived 2"},
+		},
+		{
+			// The pre-existing half, kept under test because the new branches sit in
+			// the same switch and could shadow it.
+			name:     "the gap has closed",
+			reason:   "aihub#500 holds the file, checked 2026-09-09; its one undated citation is `aihub#1`.",
+			undated:  0,
+			want:     []string{"K11 STALE_WAIVER"},
+			contains: []string{"now has no undated citation"},
+		},
+		{
+			// A correct count of zero is still an exemption that exempts nothing, and
+			// the gap-closed branch must win rather than the count agreeing its way to
+			// silence.
+			name:     "claims none and covers none",
+			reason:   "aihub#500 holds the file, checked 2026-09-09; no undated citation remains.",
+			undated:  0,
+			want:     []string{"K11 STALE_WAIVER"},
+			contains: []string{"now has no undated citation"},
+		},
+		{
+			name:     "no count stated at all",
+			reason:   "aihub#500 holds docs/mcp-cards/pf_recall.md with a live attempt, checked 2026-09-09. Delete this entry once it lands.",
+			undated:  1,
+			want:     []string{"K11 WAIVER_NO_COUNT"},
+			contains: []string{"the 1 this arm waived"},
+		},
+		{
+			name:     "no count stated, and the gap has closed",
+			reason:   "aihub#500 holds the file with a live attempt, checked 2026-09-09.",
+			undated:  0,
+			want:     []string{"K11 STALE_WAIVER", "K11 WAIVER_NO_COUNT"},
+			contains: []string{"now has no undated citation"},
+		},
+		{
+			// Repeating the SAME count is ordinary English, not a contradiction — a
+			// reason routinely names the gap and then says when it closes. Without
+			// this case the ambiguity check reddens a correct waiver, which is the
+			// expensive kind of false red: it teaches the next author that the count
+			// rule is something to route around.
+			name:    "the same count stated twice",
+			reason:  "aihub#500 holds the file, checked 2026-09-09; its one undated citation is `aihub#1`, so delete this entry once that one undated citation is dated.",
+			undated: 1,
+		},
+		{
+			name:     "two counts that disagree",
+			reason:   "aihub#500 holds the file, checked 2026-09-09; its one undated citation is `aihub#1`, and the other 2 undated citations are `aihub#2` and `aihub#3`.",
+			undated:  3,
+			want:     []string{"K11 WAIVER_COUNT_AMBIGUOUS"},
+			contains: []string{"[1 2]", "the 3 this arm waived"},
+		},
+		{
+			// Proves the pattern reads the NOUN and not the digits. Every number in
+			// this reason except the count is a work-item reference or a date, and a
+			// bare-number pattern would take `aihub#445` as the claim.
+			name:    "work-item numbers and dates are not counts",
+			reason:  "aihub#445 held it and aihub#483 wrote this entry, re-checked 2026-09-09; its 2 undated citations are `aihub#459` and `aihub#476`.",
+			undated: 2,
+		},
+		{
+			name:     "the historical entry, against the card it was written for",
+			reason:   historicalReason,
+			undated:  2,
+			want:     []string{"K11 STALE_WAIVER"},
+			contains: []string{"claims 1 undated citation(s)", "waived 2"},
+		},
+		{
+			// The same entry against the card it DESCRIBED. Its count was right about
+			// one bullet; what it never mentioned was the second one. Without this
+			// case a check that reddened every waiver unconditionally would pass the
+			// case above and look like a working count check.
+			name:    "the historical entry, against the card its reason described",
+			reason:  historicalReason,
+			undated: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := openWaiverProblems("docs/mcp-cards/fixture.md", tc.reason, tc.undated)
+
+			names := make([]string, 0, len(got))
+			for _, g := range got {
+				name, _, ok := strings.Cut(g, ":")
+				if !ok {
+					t.Fatalf("problem carries no `NAME:` prefix, so no reader can tell "+
+						"which check produced it:\n    %s", g)
+				}
+				names = append(names, name)
+			}
+			if !equalStrings(names, tc.want) {
+				t.Errorf("problem names = %v, want %v\nfull output:\n%s",
+					names, tc.want, strings.Join(got, "\n\n"))
+			}
+
+			joined := strings.Join(got, "\n")
+			for _, want := range tc.contains {
+				if !strings.Contains(joined, want) {
+					t.Errorf("message does not contain %q, so it does not tell the reader "+
+						"what it measured:\n%s", want, joined)
+				}
+			}
+		})
+	}
+}
+
+// TestOpenCitationWaiverCheckIsWiredIntoTheArm pins the one thing the fixture
+// table above structurally cannot.
+//
+// 🔴 openCitationWaivers is empty, so deleting the openWaiverProblems call from
+// TestContractCardOpenSectionsAreFalsifiable changes NOTHING that runs: the arm
+// still passes over every card, the fixtures still pass against the function, and
+// the waiver checks are simply never reached by the gate. That is a live-looking
+// green over a disconnected check — the failure this file's floors refuse for
+// counts, applied to a call site. Reading the source is the only instrument
+// available here, because the branch it guards cannot be entered from a card set
+// that waives nothing.
+func TestOpenCitationWaiverCheckIsWiredIntoTheArm(t *testing.T) {
+	const (
+		gateFile = "contract_cards_gate_test.go"
+		armName  = "TestContractCardOpenSectionsAreFalsifiable"
+		callName = "openWaiverProblems"
+	)
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, gateFile, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v — this arm cannot report a missing call site from a file "+
+			"it could not read, so this is a failure rather than a skip", gateFile, err)
+	}
+
+	var arm *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == armName {
+			arm = fn
+			break
+		}
+	}
+	if arm == nil {
+		t.Fatalf("%s declares no func %s. If K11's arm was renamed, rename it here too — "+
+			"a wiring check that cannot find the thing it checks reports green forever",
+			gateFile, armName)
+	}
+
+	called := false
+	ast.Inspect(arm.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == callName {
+			called = true
+		}
+		return !called
+	})
+	if !called {
+		t.Errorf("%s does not call %s, so every waiver check is dead code from the gate's "+
+			"side: openCitationWaivers is empty, so nothing about that shows up as a "+
+			"failing card, and the fixtures in the test above go on passing against a "+
+			"function the arm no longer consults. Restore the call.", armName, callName)
+	}
 }
 
 // ──────────────────────────────── generator ──────────────────────────────────

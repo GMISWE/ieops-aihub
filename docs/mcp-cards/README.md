@@ -185,10 +185,43 @@ left out because on this tree it reds `pf_recall.md`'s *"the knob was never read
 a true claim about what the code does, as often as it catches a real one.
 
 The date half has one exemption, `openCitationWaivers` in the gate, which names the
-card, the reason and the date and covers the **date rule only** — never the phrase
-ban. It is falsifiable in both directions: a waived card that stops having an
-undated citation is reported as a stale waiver, so the entry goes red the moment
-the gap it covers closes.
+card, the reason, the date and **how many undated citations it covers**, and applies
+to the **date rule only** — never the phrase ban. It is falsifiable in both
+directions, and `aihub#494` measured on 2026-09-09 that one of those directions was
+missing.
+
+A waiver names a **card**; what it excuses is a **citation**, and one card can hold
+several. The only entry the map has ever held read *"its one undated citation is
+`aihub#459`"* while `pf_remember.md` carried two undated bullets, and the arm logged
+*"2 undated citation(s) waived"* directly beneath it. The second bullet was exempt
+under a sentence that never mentioned it — and the self-emptying property went with
+it, because the tally could not reach zero while that unmentioned bullet stayed
+undated, so the stale-waiver report could not fire however completely the gap the
+reason *described* had closed. There are now three findings rather than one:
+
+- **`STALE_WAIVER`** — the card has no undated citation left (the original,
+  self-emptying case), **or** the reason's count and the arm's tally disagree, in
+  either direction.
+- **`WAIVER_NO_COUNT`** — the reason states no count, so there is nothing to
+  compare against. Required rather than encouraged, for the reason
+  `maxHistoricalQuoteRows` is a signed constant: an optional count check is
+  satisfied by leaving the count out, so the escape hatch would cost less than
+  compliance.
+- **`WAIVER_COUNT_AMBIGUOUS`** — the reason states counts that disagree with each
+  other, so picking one would make the check depend on sentence order.
+
+The count is read from the reason's own prose — *"its one undated citation is …"*,
+*"2 undated citations"* — anchored on the noun rather than on a bare number, so the
+`aihub#NNN` references and ISO dates a reason is full of cannot be mistaken for it.
+There is deliberately no second, machine-readable copy of the count to drift from:
+the sentence a human reads **is** the claim the gate checks.
+
+⚠️ The map is **empty** on a healthy tree, so none of those branches is reachable
+from `docs/mcp-cards/` and the arm is green there whether they work or not. They are
+exercised against fixtures by `TestOpenCitationWaiverIsCheckedAgainstItsOwnCount`,
+the historical entry's verbatim text among them, and the call site itself is pinned
+by `TestOpenCitationWaiverCheckIsWiredIntoTheArm` — without that, deleting the call
+would change nothing that runs.
 
 ### K7 is copy-to-copy, K10 is the one that reaches a server
 

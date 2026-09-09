@@ -305,4 +305,123 @@ func TestAcquireLocksReportsEveryHeldLock(t *testing.T) {
 		assert.NotContains(t, reportedKeys(resp.Acquired), readKey,
 			"reporting a lock must not be confused with taking one; intent=read still acquires nothing")
 	})
+
+	// aihub#509 — the THIRD silence on this endpoint, and the one that is not
+	// about a lock at all.
+	//
+	// The four arms above are about locks the attempt HOLDS and the response did
+	// not name. This one is about a declaration that holds NOTHING and the
+	// response did not name either: an entry the mapper cannot understand derives
+	// no target, falls out of the loop, and therefore appears in neither
+	// `acquired` nor `already_held`. Both lists come back complete and correct,
+	// and the caller reads "these are my locks" from an answer that never
+	// mentions the declaration it is missing one for.
+	//
+	// That is the same defect aihub#238 closed on the claim path, arriving on a
+	// different endpoint; aihub#411 T2-12 recorded it and aihub#416 shrank it
+	// (repo and service now derive no lock BY DESIGN, so they are not unmappable
+	// and are not reported) without closing it.
+	//
+	// ⚠️ The RAW UPDATE is load-bearing for the same reason as in the
+	// removed-declaration arm above, and for one more: ValidateDeclaredResources
+	// rejects both shapes below at the API, deliberately, so the only way this
+	// state exists is as STORED data that predates the validator — which is
+	// precisely the population the report is for ("roughly 14% of existing
+	// entries would fail it, and those work items must stay claimable").
+	// seedClaimableWI goes through CreateWorkItem and would 400.
+	//
+	// MUTANT: internal/domain/run_attempts.go, FnAcquireLocks — drop
+	// `UnrecognizedResources` from the returned AcquireLocksResponse literal.
+	// Only this subtest goes red; the four above stay green, because none of
+	// them reads that field.
+	t.Run("an unmappable declaration is reported", func(t *testing.T) {
+		// Both shapes UnrecognizedDeclaredResources recognises, so the arm
+		// cannot pass by handling one of them:
+		//   1. a type outside the declared vocabulary — here `file_scope`, which
+		//      is a resource_locks type and the exact confusion aihub#238 names;
+		//   2. a legal type with no `uri` — here `service`, which since aihub#416
+		//      derives nothing at all, so "no uri" and "no lock" are the same
+		//      fact about it.
+		// Plus a healthy path entry, as the control that "report everything"
+		// is not satisfied by reporting everything.
+		//
+		// ⚠️ `{"type":"path"}` with no uri would ALSO be reported, and is
+		// deliberately not the fixture used here. Measured on this tree:
+		// deriveClaimLocks turns it into file_scope `"<project>:"` — a real lock
+		// on a junk key — because fileScopeLockKey always emits the project
+		// prefix, so the `lockKey == ""` skip never fires for it. The report's
+		// wording ("acquires no lock") is therefore inaccurate for exactly that
+		// shape. That is a pre-existing property of UnrecognizedDeclaredResources
+		// and not aihub#509's to change — aihub#509 mirrors the claim path's
+		// report, it does not redefine it — but building this arm on it would
+		// pin the inaccuracy.
+		const healthy = "internal/domain/healthy509.go"
+		_, err := pool.Exec(ctx,
+			`UPDATE work_items SET declared_resources = $1::jsonb WHERE id = $2`,
+			`[{"type":"file_scope","uri":"file:internal/domain/mistyped509.go","intent":"write"},`+
+				`{"type":"service","intent":"write"},`+
+				`{"type":"path","uri":"file:`+healthy+`","intent":"write"}]`, wi.ID)
+		require.NoError(t, err)
+
+		resp := acquire(t)
+
+		require.Len(t, resp.UnrecognizedResources, 2,
+			"two entries derive no lock and neither can be seen in acquired/already_held; got %v "+
+				"(acquired=%v already_held=%v)",
+			resp.UnrecognizedResources, reportedKeys(resp.Acquired), reportedKeys(resp.AlreadyHeld))
+		assert.Contains(t, resp.UnrecognizedResources[0], "file_scope",
+			"the report must name the offending type — `file_scope` is a resource_locks type, not a "+
+				"declared one, and telling the caller which of its entries is inert is the whole point")
+		assert.Contains(t, resp.UnrecognizedResources[0], "mistyped509.go",
+			"the report must quote the uri, or a caller with several entries of one type cannot tell which")
+		assert.Contains(t, resp.UnrecognizedResources[1], "`uri`",
+			"the no-uri shape must be reported as a MISSING FIELD, not as an unknown type; those are "+
+				"different mistakes with different repairs")
+		assert.Contains(t, resp.UnrecognizedResources[1], "service",
+			"the report must name the entry's type, or a caller cannot tell which of its declarations "+
+				"is the one missing a uri")
+
+		// The control, and it is the half a "report everything" mutant fails:
+		// the healthy entry must be a LOCK, not a warning.
+		assert.NotContains(t, resp.UnrecognizedResources[0]+resp.UnrecognizedResources[1], healthy,
+			"a well-formed path entry was reported as unmappable — this would make the field noise, and "+
+				"a field that fires on healthy input stops being read")
+		assert.Contains(t,
+			append(reportedKeys(resp.Acquired), reportedKeys(resp.AlreadyHeld)...),
+			project+":"+healthy,
+			"fixture check: the healthy entry must really have produced a lock, or the assertion above "+
+				"passes because nothing was derived at all")
+
+		// And the shape stays a shape: unrecognized_resources is a report on
+		// DECLARATIONS, so it must not disturb the acquired/already_held
+		// partition the four arms above establish.
+		assert.ElementsMatch(t,
+			append(reportedKeys(resp.Acquired), reportedKeys(resp.AlreadyHeld)...),
+			heldLockKeys(t, pool, attemptID),
+			"acquired + already_held must still be exactly what the table says this attempt holds; the "+
+				"new field reports declarations that took no lock, it does not add a third lock list")
+	})
+
+	// The negative control for the arm above: on a healthy payload the field is
+	// absent, not empty-but-present.
+	//
+	// It is a separate subtest because it fails for a DIFFERENT mutant — one that
+	// hard-codes a non-nil report, or wires the wrong producer in — and because
+	// `omitempty` is the convention every other report on these responses uses
+	// (see RequestAdjustment): a caller must be able to read "no key" as "nothing
+	// to say" rather than as "old server".
+	t.Run("a clean declaration reports nothing", func(t *testing.T) {
+		_, err := pool.Exec(ctx,
+			`UPDATE work_items SET declared_resources = $1::jsonb WHERE id = $2`,
+			`[{"type":"path","uri":"file:internal/domain/clean509.go","intent":"write"},`+
+				`{"type":"repo","uri":"repo:aihub","intent":"write"},`+
+				`{"type":"external_ref","uri":"https://example.invalid/509"}]`, wi.ID)
+		require.NoError(t, err)
+
+		resp := acquire(t)
+		assert.Empty(t, resp.UnrecognizedResources,
+			"repo, external_ref and a well-formed path are all LEGAL declarations. repo derives no lock "+
+				"since aihub#416 and external_ref never did, and neither is unmappable — reporting them "+
+				"would make the field fire on every healthy work item in the system (aihub#509)")
+	})
 }

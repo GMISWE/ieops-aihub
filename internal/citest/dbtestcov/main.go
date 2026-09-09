@@ -232,6 +232,19 @@ type WorkflowScan struct {
 	// arguments could not be resolved, so they credit no coverage. Silently
 	// dropping them would under-credit (safe) but invisibly (not safe).
 	Dropped []string
+	// Assertions holds every `--- PASS:` assertion in the workflow, from every
+	// step and not only the DB ones: the names rot the same way wherever they
+	// are written. checkAssertedNames verifies each one names a test that
+	// exists (aihub#508).
+	Assertions []PassAssertion
+	// Unasserted describes DB `go test` invocations that no `--- PASS:`
+	// assertion names. Nothing then pins WHICH tests the step ran, so deleting
+	// a want-list entry — the cheapest way to silence a stale-name failure —
+	// would be free. All 81 invocations in ci.yml carried one when this check
+	// was added, so it costs nothing but the escape hatch.
+	Unasserted []string
+	// AssertionProblems holds `--- PASS:` lines that could not be read at all.
+	AssertionProblems []string
 }
 
 func main() {
@@ -340,6 +353,17 @@ func run(inventoryPath, workflowPath, gomodPath, sourceRoot, manifestPath string
 		return err
 	}
 
+	// aihub#508: the steps' `--- PASS:` assertions name SUBTESTS, which nothing
+	// above this line can see — every other check here compares function names.
+	trees, err := collectTestNames(sourceRoot, module)
+	if err != nil {
+		return err
+	}
+	assertedProblems, err := checkAssertedNames(scan, trees)
+	if err != nil {
+		return err
+	}
+
 	report(out, "dbtestcov: %s-gated test functions: %d (require only a DB: %d, need extra env: %d)\n",
 		dbEnvVar, len(gated), len(required), len(extraEnv))
 	report(out, "dbtestcov: %s go test invocations found in %s: %d\n", dbEnvVar, workflowPath, len(scan.Invocations))
@@ -348,6 +372,8 @@ func run(inventoryPath, workflowPath, gomodPath, sourceRoot, manifestPath string
 			strings.Join(g.ExtraEnv, ", "), dbEnvVar, shortPkg(g.Package), g.Name)
 	}
 	report(out, "dbtestcov: covered by a CI step: %d/%d\n", len(required)-len(missing), len(required))
+	report(out, "dbtestcov: %q assertions checked against the source: %d\n",
+		strings.TrimSpace(passMarker), len(scan.Assertions))
 
 	var problems []string
 	problems = append(problems, manifestProblems...)
@@ -399,6 +425,33 @@ func run(inventoryPath, workflowPath, gomodPath, sourceRoot, manifestPath string
 		var b strings.Builder
 		fmt.Fprintf(&b, "%d skip guard(s) read %s but do not name it in the message they skip with, so the test they guard would not be classified as DB-gated at all:", len(convictions), dbEnvVar)
 		for _, s := range convictions {
+			fmt.Fprintf(&b, "\n    %s", s)
+		}
+		problems = append(problems, b.String())
+	}
+	if len(assertedProblems) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d %q assertion(s) in %s name a test path the source does not have, so the step is red on the "+
+			"runner while `go test ./...` is green here:", len(assertedProblems), strings.TrimSpace(passMarker), workflowPath)
+		for _, s := range assertedProblems {
+			fmt.Fprintf(&b, "\n    %s", s)
+		}
+		problems = append(problems, b.String())
+	}
+	if len(scan.AssertionProblems) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d line(s) assert on %q in a form dbtestcov cannot read, so the names they name are unchecked:",
+			len(scan.AssertionProblems), strings.TrimSpace(passMarker))
+		for _, s := range scan.AssertionProblems {
+			fmt.Fprintf(&b, "\n    %s", s)
+		}
+		problems = append(problems, b.String())
+	}
+	if len(scan.Unasserted) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d DB `go test` invocation(s) have no %q assertion, so nothing records WHICH tests they ran:",
+			len(scan.Unasserted), strings.TrimSpace(passMarker))
+		for _, s := range scan.Unasserted {
 			fmt.Fprintf(&b, "\n    %s", s)
 		}
 		problems = append(problems, b.String())
@@ -1957,15 +2010,24 @@ func ParseWorkflow(data []byte, module string) (*WorkflowScan, error) {
 			sc := parseShellScript(script)
 			lines := sc.Texts()
 
+			stepName := st.Name
+			if stepName == "" {
+				stepName = jobName + " (unnamed step)"
+			}
+
+			// `--- PASS:` assertions are collected from EVERY step, before the
+			// DB filter: a name asserted by a non-DB step rots exactly the same
+			// way, and the check that verifies it needs no database.
+			assertions, assertProblems := collectPassAssertions(sc, stepName)
+			scan.Assertions = append(scan.Assertions, assertions...)
+			scan.AssertionProblems = append(scan.AssertionProblems, assertProblems...)
+
 			hasDB := hasKey(st.Env, dbEnvVar) || hasKey(job.Env, dbEnvVar) || hasKey(wf.Env, dbEnvVar) ||
 				anyLineMatches(lines, inlineDBEnv)
 			if !hasDB {
 				continue
 			}
-			stepName := st.Name
-			if stepName == "" {
-				stepName = jobName + " (unnamed step)"
-			}
+			firstInv := len(scan.Invocations)
 
 			// Conditional execution would make coverage depend on the event
 			// that triggered the run. Refusing to model it is safer than
@@ -2042,6 +2104,34 @@ func ParseWorkflow(data []byte, module string) (*WorkflowScan, error) {
 								"before its invocation greps a file that does not exist yet (exit 2, inverted to 0): %s",
 							stepName, inv.Log, skipGuardMarker, skipGuardMarker, inv.Log, offender))
 					}
+				}
+			}
+
+			// Symmetry with the SKIP guard, one level finer (aihub#508). The
+			// SKIP guard proves SOMETHING ran; the `--- PASS:` assertions are
+			// the only thing that says WHICH tests ran, and they are what
+			// checkAssertedNames keeps honest. An invocation nothing asserts on
+			// is therefore not merely thinner — it is the state a stale
+			// assertion can be *deleted* into, at no cost, the moment the name
+			// check goes red.
+			for i := firstInv; i < len(scan.Invocations); i++ {
+				inv := scan.Invocations[i]
+				if inv.Log == "" || inv.Log == "/dev/null" {
+					continue // already reported by the guard checks above
+				}
+				named := false
+				for _, as := range assertions {
+					for _, alt := range as.Alts {
+						if alt.Log == inv.Log {
+							named = true
+						}
+					}
+				}
+				if !named {
+					scan.Unasserted = append(scan.Unasserted, fmt.Sprintf(
+						"%s: nothing greps %s for %q, so the step asserts that something ran but not WHICH tests ran; "+
+							"add a `grep -q -- '%sTestX/…' %s || exit 1` assertion (or a `for want in …` list of them)",
+						stepName, inv.Log, strings.TrimSpace(passMarker), passMarker, inv.Log))
 				}
 			}
 		}

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -734,6 +735,7 @@ func TestRun_ReportsAnUncoveredDBGatedTest(t *testing.T) {
 		{"output", "TestUncovered", "    a_test.go:2: set AIHUB_TEST_DB to run this integration test\n"},
 		{"skip", "TestUncovered", ""},
 	}))
+	writeTestSource(t, dir, "TestCovered", "TestUncovered")
 	wf := filepath.Join(dir, "ci.yml")
 	writeFile(t, wf, `
 jobs:
@@ -745,6 +747,7 @@ jobs:
         run: |
           set -o pipefail
           go test ./internal/domain/ -run '^(TestCovered)$' -v 2>&1 | tee a.log
+          grep -q -- '--- PASS: TestCovered' a.log || exit 1
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
 	gomod := filepath.Join(dir, "go.mod")
@@ -773,6 +776,7 @@ jobs:
         run: |
           set -o pipefail
           go test ./internal/domain/ -run '^(TestCovered|TestUncovered)$' -v 2>&1 | tee a.log
+          grep -q -- '--- PASS: TestCovered' a.log || exit 1
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
 	out.Reset()
@@ -800,6 +804,7 @@ func manifestFixture(t *testing.T, dir string, tests ...string) (inv, wf, gomod 
 	}
 	inv = filepath.Join(dir, "inv.json")
 	writeFile(t, inv, jsonEvents(t, testModule+"/internal/domain", evs))
+	writeTestSource(t, dir, tests...)
 	wf = filepath.Join(dir, "ci.yml")
 	writeFile(t, wf, `
 jobs:
@@ -811,6 +816,7 @@ jobs:
         run: |
           set -o pipefail
           go test ./internal/domain/ -v 2>&1 | tee a.log
+          grep -q -- '--- PASS: `+tests[0]+`' a.log || exit 1
           ! grep -q -- '--- SKIP' a.log || exit 1
 `)
 	gomod = filepath.Join(dir, "go.mod")
@@ -1168,9 +1174,27 @@ func TestParseWorkflow_RealCIWorkflow(t *testing.T) {
 
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writeTestSource writes the package a fixture's workflow claims to run, so
+// that the `--- PASS:` assertions in it name test functions that exist. Since
+// aihub#508 the gate reads the SOURCE as well as the inventory: a fixture whose
+// workflow asserts a name no file declares is now a failure, and rightly so —
+// that is the defect the check exists for.
+func writeTestSource(t *testing.T, dir string, names ...string) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("package domain\n\nimport \"testing\"\n")
+	for _, n := range names {
+		fmt.Fprintf(&b, "\nfunc %s(t *testing.T) {}\n", n)
+	}
+	writeFile(t, filepath.Join(dir, "internal", "domain", "a_test.go"), b.String())
 }
 
 // pkgDir writes a whole synthetic package and returns its directory. The

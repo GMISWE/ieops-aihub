@@ -1277,8 +1277,24 @@ func handleUpdateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 			idx++
 		}
 		if req.Role != nil {
-			if *req.Role != "writer" && *req.Role != "admin" {
-				return writeError(c, domain.NewErr(domain.ErrBadRequest, "role must be writer or admin"))
+			// aihub#496. This used to be `*req.Role != "writer" && *req.Role !=
+			// "admin"` answered with the bare sentence "role must be writer or
+			// admin" — a THIRD copy of a vocabulary that already exists twice (the
+			// CHECK in 0001_initial.sql and domain.userGlobalRoles), and an answer
+			// carrying no `details`, so the caller was told neither which field was
+			// refused, nor what it sent, nor what it may send instead.
+			//
+			// ⚠️ The status code did not change: it was a 400 before and is a 400
+			// now (measured — see update_user_vocab_test.go, whose assertion is on
+			// `details` precisely because the old MESSAGE already contained the
+			// words "role", "writer" and "admin"). The record that said this path
+			// "remains a 500 from the CHECK" — pf_create_user.md's Open section —
+			// was wrong, and is corrected in the same change.
+			//
+			// The nil check stays: role is optional here, and "" is not a legal
+			// value, so validating outside it would refuse every rename.
+			if aihubErr := domain.ValidateUserGlobalRole(*req.Role); aihubErr != nil {
+				return writeError(c, aihubErr)
 			}
 			sets = append(sets, "role=$"+itoa(idx))
 			args = append(args, *req.Role)

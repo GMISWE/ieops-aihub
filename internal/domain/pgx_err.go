@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -118,4 +119,28 @@ func pgxErr(err error, notFoundMsg, internalMsg string) *AihubError {
 		return aerr
 	}
 	return NewErr(ErrInternalError, fmt.Sprintf("%s: %v", internalMsg, err))
+}
+
+// bestEffortExec runs a statement whose failure the call site is content to
+// discard, and returns non-nil for the one class of failure that CANNOT be
+// discarded.
+//
+// aihub#492. "Best effort" is a statement about the caller's tolerance, but
+// inside a transaction the database also gets a vote: a class-40 rollback ends
+// the transaction outright. Nothing after it can run, tx.Commit answers with
+// pgx.ErrTxCommitRollback — a bare sentinel, not a *pgconn.PgError — and the
+// retryConflictErr guard every commit site already carries cannot classify a
+// sentinel. So a discarded 40001 does not cost the caller an event; it costs
+// them the whole request, reported as an unclassifiable 500 instead of the
+// retryable 409 the contract promises. aihub#334 established exactly this at
+// FnCompleteAttempt's unblockDependentWI call ("'non-fatal' is exactly the
+// wrong word for that"); this is that reasoning applied to the remaining
+// fire-and-forget event emissions on the SERIALIZABLE claim and
+// complete-attempt paths.
+//
+// Everything outside class 40 is still discarded, byte for byte as before, so
+// this narrows what "best effort" means rather than withdrawing it.
+func bestEffortExec(ctx context.Context, tx pgx.Tx, what, sql string, args ...any) *AihubError {
+	_, err := tx.Exec(ctx, sql, args...)
+	return retryConflictErr(err, what)
 }

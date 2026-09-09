@@ -2210,8 +2210,24 @@ func workItemFieldProps() map[string]any {
 		// The values come from domain, which is where the check that refuses them
 		// lives, so the published set and the accepted set are one value. propEnum
 		// existed and was used four lines below for another field; this one was
-		// written as prose, and the SDK validates an enum before the handler runs
-		// while it cannot validate prose.
+		// written as prose.
+		//
+		// ⚠️ aihub#396 also recorded a REASON that is false, and it is corrected
+		// here rather than repeated (aihub#496, 2026-09-09): "the SDK validates an
+		// enum before the handler runs". Measured on go-sdk v1.6.0 by aihub#463
+		// (2026-09-08): applySchema -> resolved.Validate is wired only into the
+		// GENERIC AddTool[In, Out]; polyforge registers through the untyped method
+		// (*mcp.Server).AddTool (see addTool in server.go), and Server.callTool
+		// hands that path straight to the handler with NO schema step. A test drove
+		// an out-of-vocabulary value through a real client session into the POST
+		// body to establish it.
+		//
+		// So the enum constrains the CLIENT — an LLM reading tools/list, and any
+		// client that validates before sending — and nothing in this process. The
+		// hard refusal is the Go validator in domain, which answers 400 naming the
+		// field; the enum is how a caller learns the set before spending a round
+		// trip. Publishing an enum without the Go check would move a 500 nowhere,
+		// which is why both halves are always done together.
 		"priority":               propEnum("string", "Work item priority", domain.WorkItemPriorityList()),
 		"wi_type":                prop("string", "Work item type (fix_bug, feature, chore, etc.)"),
 		"requires_human_session": prop("boolean", requiresHumanSessionCreateDescription),

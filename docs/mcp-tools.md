@@ -99,7 +99,7 @@ item, gated on a re-measure below 0.1%.
 | `pf_reinforce_memory` | Add context and adjust strength (same row, no new version). |
 | `pf_update_memory` | Update a memory: create a new version superseding the current head and advance the `latest_id` cursor, so an id you already hold still resolves to the latest. |
 | `pf_redact_memory` | Soft-delete a memory. |
-| `pf_save_artifact` | Save a methodology artifact (`spec`/`plan`/`review`/`execute`/`retro`/`wrap_summary`), optionally with pre-rendered HTML. |
+| `pf_save_artifact` | Save a methodology artifact, optionally with pre-rendered HTML. **`type` must start with `methodology.`, and that PREFIX — not a list of names — is what is enforced** (`validatePfSaveArtifactArgs`, aihub#499). `spec`/`plan`/`review`/`execute`/`retro`/`wrap_summary` are SUGGESTED; an off-list `methodology.*` name is accepted and stored, but is not pre-rendered and does not appear in the work item's artifact-links section, both of which name the six literally. The six were published as a JSON-Schema `enum` from aihub#211 until aihub#499 withdrew it: nothing had ever enforced the names, and 3 of the 1,185 `methodology.*` rows measured live on 2026-09-09 sit outside them. |
 | `pf_resolve_commit` | Resolve a spec/plan annotation commit with a reply. |
 
 ⚠️ **Retired, and this is a behaviour change** (`aihub#446`, `aihub#411` T2-7):

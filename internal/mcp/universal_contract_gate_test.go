@@ -98,6 +98,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 	"github.com/GMISWE/ieops-aihub/internal/mcp"
 	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
@@ -654,6 +655,27 @@ var semanticValuesNotDistinctive = map[string]bool{
 var semanticValuesByTool = map[string]string{
 	"pf_update_step.status":      "completed",
 	"pf_complete_attempt.status": "paused",
+
+	// aihub#499. Until then this parameter needed no entry: it published a
+	// 6-value enum, so probeValue's enum branch handed it a legal value for
+	// free. Withdrawing the enum removed that supply, `type` fell through to the
+	// generic token, and validatePfSaveArtifactArgs refuses a value outside
+	// domain.MethodologyTypePrefix — so the tool made NO request and G1 reported
+	// all eight of its parameters unforwarded while every one of them is
+	// forwarded correctly. That is the SAME false-defect shape exclusiveParams
+	// below was written for, arriving from the other direction: there a maximal
+	// argument set was illegal, here the probe VALUE was.
+	//
+	// 🔴 So the reading to resist is "the gate found a bug in aihub#499". The
+	// gate found that its own value synthesis was leaning on an enum, which is
+	// exactly what a withdrawn enum is supposed to stop supplying.
+	//
+	// Derived from the suggested list rather than retyped: any member is legal,
+	// so the index is not load-bearing, and a rename of the six cannot leave a
+	// dead literal here. Unlike the enum branch this value IS its own token —
+	// nothing else in the request contains it — so the verdict is now
+	// token-proved rather than key-presence-only.
+	"pf_save_artifact.type": domain.MethodologyTypeEnum[0],
 }
 
 // probeValue invents the value one parameter is probed with, and returns the

@@ -153,7 +153,10 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
     - Do NOT include solution approach (that belongs in spec/plan)
 
     **Split the facts into two labelled groups — every claim goes in one of them:**
-    - **Measured** — you ran it or read it this session; cite the command or `file:line`.
+    - **Measured** — you ran it or read it this session; cite the command, or the file plus
+      the symbol (`internal/domain/memory.go` (`UpdateMemory`)). **Never a line number** —
+      wi bodies are not C1-gated, so an anchor written here rots with nothing going red
+      (README "How docs cite code"; aihub#411 T1-13 named this line as the source).
     - **Unverified / inferred** — say so, and name the one command that would settle it.
 
     A plausible reading that was never run is the usual way a wi ships a spec whose premise

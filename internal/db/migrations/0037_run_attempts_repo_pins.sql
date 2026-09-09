@@ -38,12 +38,36 @@
 -- confused (owner ruling Q-4: the claim still succeeds and reports the failure
 -- through worktree_problems).
 --
--- DEPLOY ORDER: apply BEFORE starting the binary that writes it. The reverse
--- order fails loudly and harmlessly — the INSERT in FnClaimWorkItem names the
--- column, so a claim against the old schema is refused whole (42703) and nothing
--- is half-written. ROLLBACK to the previous binary is safe and lossless: that
--- binary never names the column, and rows carrying pins read fine because
--- nothing reads them.
+-- DEPLOY ORDER: apply BEFORE starting the binary that writes it. The order
+-- requirement stands. The reason this header used to give for it does not.
+--
+-- 🔴 THE 42703 TRIPWIRE THIS HEADER CLAIMED NEVER EXISTED. The old text said
+-- the reverse order "fails loudly and harmlessly — the INSERT in
+-- FnClaimWorkItem names the column, so a claim against the old schema is
+-- refused whole (42703)". That INSERT deliberately does NOT name repo_pins, and
+-- ClaimRequest's own comment says why: the pins are read out of the worktrees,
+-- which the MCP handler builds AFTER the claim returns. So a claim against the
+-- old schema SUCCEEDS, whole. There was no tripwire to lose.
+--
+-- THE REAL SIGNAL IS A PER-CLAIM WARNING. Measured 2026-09-09 (aihub#512) on a
+-- live pg18 by dropping the column and driving the real claim path: the claim
+-- succeeded, and the 42703 landed one hop later in FnRecordRepoPins, whose
+-- UPDATE does name the column. It reaches the caller through dbErr as a 500
+-- INTERNAL_ERROR. The client half treats that hop as best-effort and suppresses
+-- exactly one status — 404, a server predating the /repo_pins route — so
+-- isNotFound is false for a 500 and EVERY claim appends a worktree_problems
+-- entry reporting that this attempt has no server-side record of which commit
+-- each repo started from.
+--
+-- ⚠️ That is the worse of the two failures, not the milder one. A refused claim
+-- would stop the deploy; a warning on an ok:true response is the "warning
+-- nobody can act on" class that this same change's 404 suppression (aihub#416,
+-- PR #423) exists to prevent, reappearing through the deploy-order door and
+-- repeating on every claim until this migration lands. Nothing is half-written
+-- either way: the pin is provenance and no code path is keyed on it.
+--
+-- ROLLBACK to the previous binary is safe and lossless: that binary never names
+-- the column, and rows carrying pins read fine because nothing reads them.
 ALTER TABLE run_attempts ADD COLUMN IF NOT EXISTS repo_pins JSONB;
 
 COMMENT ON COLUMN run_attempts.repo_pins IS

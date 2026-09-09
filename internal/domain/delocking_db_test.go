@@ -45,6 +45,19 @@ package domain
 //	M4  delete rule 6
 //	    -> AC-15/AC-16/AC-17 red
 //	M5  make rule 6 set result.Severity = SeveritySoftBlock
+//
+// aihub#511 later added the containment-operand arms at the END of
+// TestDeLockingPredictReportsAdvisoryEntries — the four rules that read
+// declarations built the right-hand side of `@>` as concatenated JSON text.
+// Their mutants, measured 2026-09-09 against a local Postgres 16:
+//
+//	M6-M9  restore the concatenated literal in rule 2 / 4 / 5 / 6
+//	       -> the doublequote and backslash arms go red for exactly that rule
+//	          while the plain arm stays green, and the DB-free source guard
+//	          (TestPredictContainmentOperandsAreNotConcatenatedJSON) goes red too
+//	M10    drop the ::text casts from declaresContainmentSQL
+//	       -> the PLAIN arm goes red as well (rules 2, 5 and 6), which is what
+//	          makes the "the casts are load-bearing" comment a measurement
 //	    -> AC-15 red on the top-level severity. ⚠️ AC-18 stays GREEN under M5,
 //	       measured rather than assumed: soft_block is not hard_block, so the
 //	       ceiling assertion is satisfied by the very leak AC-15 catches. The two
@@ -304,6 +317,96 @@ func TestDeLockingPredictReportsAdvisoryEntries(t *testing.T) {
 						"cannot fire for them and there is nothing left that could justify the "+
 						"ceiling this value promises", name, dry)
 			}
+		}
+	})
+
+	// ── aihub#511: the containment operand must cross as a PARAMETER ─────────
+	//
+	// Rules 2, 4, 5 and 6 all ask the same question — "does another RUNNING work
+	// item DECLARE this entry" — and all four used to build the right-hand side
+	// of `@>` by pasting the declared name into a JSON literal in Go. A name
+	// holding a double quote closed that string early, Postgres refused the
+	// operand with 22P02, the error went to stderr, and the caller got
+	// {"predictions":[],"severity":"info"} — byte-identical to a genuine
+	// all-clear, which is the aihub#238 failure mode the rule 2 header above says
+	// the rule exists to avoid. Nothing rejected the name on the way in:
+	// ValidateDeclaredResources checks the uri SCHEME and says nothing about the
+	// characters after it.
+	//
+	// Every arm is a PAIR, and the plain half is not decoration: "zero
+	// predictions for the hostile name" says nothing unless the identical query
+	// returns one for a name that differs only in its characters.
+	//
+	// Two hostile shapes, because they fail differently and only one is audible:
+	//
+	//	`"`   a syntax error Postgres reports (22P02). Loud in the log, invisible
+	//	      in the response.
+	//	`\b`  NOT a syntax error: "repo:qc\backslash" is well-formed JSON for
+	//	      `repo:qc<backspace>ackslash`, so the operand parses and simply means
+	//	      something else. Nothing is logged anywhere, the query returns zero
+	//	      rows, and no caller can tell that from "nobody else declared it".
+	//
+	// Rules 4 and 5 are exercised here rather than beside AC-14/AC-15 because
+	// they PRE-DATE aihub#416 and had no arm at all — the concatenation rule 2
+	// picked up in its rewrite was copied from them.
+	t.Run("declared names that look like json still match every containment rule", func(t *testing.T) {
+		for _, arm := range []struct{ label, name string }{
+			{"plain", "qc-plain-511"},
+			{"doublequote", `qc"quote-511`},
+			{"backslash", `qc\backslash-511`},
+		} {
+			t.Run(arm.label, func(t *testing.T) {
+				// One holder per name shape, declaring all four entry types the four
+				// containment rules read. intent=refactor on the repo entry is what
+				// lets ONE declaration answer rule 2 (any repo) and rule 4 (refactor
+				// only) both. json.Marshal, not concatenation — building this fixture
+				// the way the bug built its operand would corrupt the fixture in
+				// exactly the way that hides the bug.
+				declared, err := json.Marshal([]DeclaredResourceItem{
+					{Type: "repo", URI: "repo:" + arm.name, Intent: "refactor"},
+					{Type: "service", URI: "service:" + arm.name, Intent: "write"},
+					{Type: "external_ref", URI: "https://ex.test/" + arm.name},
+				})
+				require.NoError(t, err)
+
+				h := seedClaimableWI(t, pool, project, u, "aihub#511 holder: "+arm.label, string(declared))
+				claimFresh(t, pool, h.ID, u, "aihub511-"+arm.label)
+
+				// The key each rule echoes back for this fixture. Rules 2, 4 and 6
+				// report the name with its scheme stripped; rule 5's key IS the
+				// external_ref uri, whole.
+				wantKey := map[int]string{
+					2: arm.name,
+					4: arm.name,
+					5: "https://ex.test/" + arm.name,
+					6: arm.name,
+				}
+
+				resp := predictFor(t, pool, project, string(declared), false)
+				for _, rule := range []int{2, 4, 5, 6} {
+					got := predictionsOfRule(resp, rule)
+					// assert-and-continue, not require: a hostile name breaks all four
+					// rules at once, and a failure report that names only the first
+					// would understate the blast radius.
+					if !assert.Len(t, got, 1,
+						"rule %d returned %d predictions for the name %q, which another RUNNING work "+
+							"item declares VERBATIM. Zero is not 'no conflict' here — the plain arm of "+
+							"this same table proves the query matches, so zero means the operand "+
+							"Postgres received was not the name that was declared. In the response that "+
+							"is indistinguishable from a real all-clear, which is what pf-work's "+
+							"pre-claim gate reads. predictions=%+v",
+						rule, len(got), arm.name, resp.Predictions) {
+						continue
+					}
+					assert.Equal(t, h.Slug, got[0].WISlug,
+						"rule %d named %q, but the work item declaring %q is %q",
+						rule, got[0].WISlug, arm.name, h.Slug)
+					assert.Equal(t, wantKey[rule], got[0].ResourceKey,
+						"rule %d reported resource_key %q for the declared name %q — the key is echoed "+
+							"back to the caller, so a mangled one names a resource nobody declared",
+						rule, got[0].ResourceKey, arm.name)
+				}
+			})
 		}
 	})
 }

@@ -121,9 +121,28 @@ const (
 // fragment was "already in context", which is false on exactly the subagent path this serves.
 // Net on native: 9,433 -> 9,318, i.e. 115 characters BELOW where it started, which is what
 // bought back the control-5a margin the paragraph above says is the real ceiling.
+//
+// aihub#478 added output-format.md to the same header (+766 on BOTH branches) and was paid for
+// the same way, from the resident COMMON fragments so that both branches settle rather than one:
+// _common/memory.md -342, _common/lifecycle.md -373, _common/storage.md -65 (-780 on disk),
+// plus a native-only -77 for a heartbeat line engine.native.md duplicated out of
+// _common/lifecycle.md, which is injected on both branches anyway. What MOVED rather than
+// vanished went to a section that was already its subject — the lock-conflict prose to
+// lifecycle-details §3, the .pf_* mechanics to §5 — and what vanished was either restated
+// elsewhere in the same payload or addressed to whoever edits the template rather than to the
+// model reading it. Net: native 9,318 -> 9,227,
+// superpowers 7,002 -> 6,988. Both BELOW where they started, again.
+//
+// pf-spec / pf-plan are header-only (routerModeHeaderOnly): no fragments, so their number is the
+// header alone and is identical on both branches. That equality is not a coincidence to be
+// tidied away — it is the assertion that the engine branch really is not consulted in that mode.
 var routerBudget = map[string]int{
-	"pf-execute/superpowers": 7002 + routerGateSlack,
-	"pf-execute/native":      9318 + routerGateSlack,
+	"pf-execute/superpowers": 6988 + routerGateSlack,
+	"pf-execute/native":      9227 + routerGateSlack,
+	"pf-plan/native":         1735 + routerGateSlack,
+	"pf-plan/superpowers":    1735 + routerGateSlack,
+	"pf-spec/native":         1735 + routerGateSlack,
+	"pf-spec/superpowers":    1735 + routerGateSlack,
 }
 
 // routerBranches are the engine branches the router can select. The gate measures every one:
@@ -136,8 +155,10 @@ var routerBranches = []struct {
 	{"native", false},
 }
 
-// onDemandFiles are the deferred fragments. Each must exist on disk, be pointed at from the
-// payload, and NOT have its body inlined into the payload — that is what "deferred" means.
+// onDemandFiles are the deferred fragments of the STEP-BODY mode. Each must exist on disk, be
+// pointed at from the payload, and NOT have its body inlined into it — that is what "deferred"
+// means. A header-only payload defers nothing and is checked the opposite way: it must name no
+// plugin-root path at all.
 // marker is a string distinctive to that file; it anchors the "not inlined" check so the
 // check cannot pass merely because the marker was a typo.
 var onDemandFiles = []struct {
@@ -303,6 +324,14 @@ const (
 	routerBannerMark = "POLYFORGE SKILL-ROUTER PAYLOAD OVER BUDGET"
 	// The sentence in the router's header that has to survive truncation.
 	routerBudgetNotice = "Fragments marked 📄 are NOT injected"
+	// Its header-only counterpart. Deliberately a DIFFERENT sentence: that mode defers nothing,
+	// so promising a deferred tier there would send the model after files this payload never
+	// named. What has to survive truncation instead is the claim that the SKILL.md still rules.
+	routerHeaderOnlyNotice = "the SKILL.md is self-sufficient and remains authoritative"
+
+	// The first parts[] fragment, i.e. the boundary between "header" and "droppable". Used to
+	// prove the header-resident fragments sit ahead of everything the degrade loop can drop.
+	routerFirstPartMark = "# _common/memory.md"
 )
 
 // TestRouterPreviewWindowCheckDiscriminates is the control for the ordering assertion above.
@@ -331,9 +360,11 @@ func TestRouterPreviewWindowCheckDiscriminates(t *testing.T) {
 func TestRoutedSkillHook_PayloadFitsHarnessLimit(t *testing.T) {
 	pluginRoot := pluginRootDir(t)
 	skills := routedSkills(t, pluginRoot)
+	modes := routerModes(t, pluginRoot)
 
 	seen := map[string]bool{}
 	for _, skill := range skills {
+		headerOnly := modes[skill] == routerModeHeaderOnly
 		for _, br := range routerBranches {
 			key := skill + "/" + br.name
 			seen[key] = true
@@ -410,19 +441,40 @@ func TestRoutedSkillHook_PayloadFitsHarnessLimit(t *testing.T) {
 				if !strings.HasPrefix(r.ctx, "[polyforge router]") {
 					t.Errorf("%s: the payload does not start with the router header", key)
 				}
-				if !strings.Contains(tle(r.ctx), routerBudgetNotice) {
-					t.Errorf("%s: the budget notice is outside the %d-char preview window, so a "+
-						"truncated payload would not tell the model anything is missing",
-						key, routerPreviewChars)
+				notice := routerBudgetNotice
+				if headerOnly {
+					notice = routerHeaderOnlyNotice
+				}
+				if !strings.Contains(tle(r.ctx), notice) {
+					t.Errorf("%s: %q is outside the %d-char preview window, so a truncated "+
+						"payload would not tell the model what it is holding",
+						key, notice, routerPreviewChars)
 				}
 
 				// 3. no unsubstituted placeholder, and every on-demand pointer resolves.
 				if strings.Contains(r.ctx, "@@") {
 					t.Errorf("%s: an @@…@@ placeholder survived substitution", key)
 				}
-				assertPointersResolve(t, key, pluginRoot, r.ctx)
+				if headerOnly {
+					// The mirror of assertPointersResolve, and a real check rather than a
+					// waiver: this mode injects no fragment, so a plugin-root path appearing
+					// in it means one leaked in — and the header makes no promise that
+					// anything was deferred, so the model would never be told to read it.
+					if r.pointers != 0 {
+						t.Errorf("%s is header-only, yet its payload names the plugin root %d "+
+							"time(s). Either a fragment leaked into this mode or the header "+
+							"grew a pointer it does not explain.", key, r.pointers)
+					}
+				} else {
+					assertPointersResolve(t, key, pluginRoot, r.ctx)
+				}
 
-				// 4. tiering is real — deferred bodies are not also inlined.
+				// 4. tiering is real — deferred bodies are not also inlined. Step-body only:
+				// there is no deferred tier to be honest about in header-only mode, and the
+				// pointer check above is what covers it there.
+				if headerOnly {
+					return
+				}
 				for _, od := range onDemandFiles {
 					if od.branch != "" && od.branch != br.name {
 						continue
@@ -493,57 +545,82 @@ func assertPointersResolve(t *testing.T, key, pluginRoot, ctx string) {
 	}
 }
 
-// ironRulesFragment is the ONE authoritative copy of IR1-IR3. hooks/pf-session-start reads it for
-// the session payload and, since aihub#338, hooks/pf-skill-router reads the SAME file for its
-// header. Nothing here restates the rules: a second copy is what aihub#294 already cost this repo
-// (IR1's worktree path drifted between two hand-maintained copies for three months), so the
-// assertion below compares the payload against the file rather than against a literal.
-const ironRulesFragment = "skills/using-polyforge/fragments/iron-rules.md"
+// ironRulesFragment / outputFormatFragment are the ONE authoritative copy of each text.
+// hooks/pf-session-start reads both for the session payload, and hooks/pf-skill-router reads the
+// SAME two files for its header — iron-rules since aihub#338, output-format since aihub#478.
+// Nothing here restates either: a second copy is what aihub#294 already cost this repo (IR1's
+// worktree path drifted between two hand-maintained copies for three months), so the assertions
+// below compare the payload against the file rather than against a literal.
+const (
+	ironRulesFragment    = "skills/using-polyforge/fragments/iron-rules.md"
+	outputFormatFragment = "skills/using-polyforge/fragments/output-format.md"
+)
+
+// headerResidentFragment is a fragment the router must copy into its HEADER, verbatim.
+//
+// markers is the ANTI-VACUITY guard: strings.Contains(payload, "") is true for every payload
+// ever produced, so an emptied or gutted fragment would otherwise turn the whole assertion green
+// while delivering nothing — the same shape as the NegativeControl in
+// engine_native_contract_test.go. They are checked against the FILE first, so "the payload
+// contains this file" keeps meaning "the payload contains this rule".
+type headerResidentFragment struct {
+	rel     string
+	markers []string
+	lost    string // what a dispatched subagent is left without when this goes missing
+}
+
+var (
+	ironRulesResident = headerResidentFragment{
+		rel:     ironRulesFragment,
+		markers: []string{"IR1 —", "IR2 —", "IR3 —"},
+		lost:    "no Iron Rules at all (aihub#338 layer 2)",
+	}
+	outputFormatResident = headerResidentFragment{
+		rel: outputFormatFragment,
+		markers: []string{
+			"MUST follow this format exactly", "## Result", "## Status", "## Next steps",
+			"max 5 items", // the rule most easily lost to a "shorter" rewrite of the example
+		},
+		lost: "the three-segment CONTRACT — the Status field list, the max-5 rule and the MUST " +
+			"— leaving only the three headings _common/lifecycle.md names, which is exactly the " +
+			"aihub#478 gap",
+	}
+)
 
 // TestRoutedSkillHook_InjectsIronRules is the aihub#338 layer-2 gate.
+// TestRoutedSkillHook_InjectsOutputFormat is the aihub#478 one. Both run assertHeaderResident.
 //
-// WHY IT EXISTS
-// A dispatched subagent does not inherit SessionStart's additionalContext, and /pf-execute runs
-// in one. Measured 2026-09-04 with a zero-tool-call probe pinned to the subagent's FIRST action:
-// CLAUDE.md and MEMORY.md arrived, IR1-IR3 did not. PreToolUse does fire inside a subagent
+// WHY THEY EXIST
+// A dispatched subagent does not inherit SessionStart's additionalContext, and every routed skill
+// runs in one. Measured 2026-09-04 with a zero-tool-call probe pinned to the subagent's FIRST
+// action: CLAUDE.md and MEMORY.md arrived, IR1-IR3 did not. PreToolUse does fire inside a subagent
 // (measured the same day — pf-commit-guard blocked a push from one), so this hook is the only
-// resident channel that reaches the executor, and the rules ride it.
+// resident channel that reaches the executor, and both texts ride it.
 //
-// WHY THESE THREE ASSERTIONS AND NOT "the payload mentions IR1"
-//  1. VERBATIM against the file on disk, so a paraphrase or a drifted second copy fails. A
-//     marker check would pass on a copy that had drifted, which is the defect being avoided.
-//  2. In the HEADER, measured as "ahead of the first parts[] fragment" — NOT as "after the
-//     first separator", which the header's own trailing separator would satisfy for free.
-//     parts[] is what the degrade loop drops to fit, and a rule that can be dropped to make
-//     room is not a rule.
-//  3. Both branches. A real user gets exactly one of them and which one is not the runner's
-//     choice; the native branch is the one with no budget to spare, so it is the one that would
-//     be "fixed" by dropping this.
-//
-// Anti-vacuity: the fragment itself is checked non-empty and checked to carry all three rule
-// headings first. strings.Contains(payload, "") is true for every payload ever produced, so an
-// emptied or truncated fragment would otherwise turn this whole test green while delivering
-// nothing — the same shape as the NegativeControl in engine_native_contract_test.go.
+// WHY THESE ASSERTIONS AND NOT "the payload mentions IR1"
+//  1. VERBATIM against the file on disk, so a paraphrase or a drifted second copy fails. A marker
+//     check would pass on a copy that had drifted, which is the defect being avoided.
+//  2. In the HEADER, measured as "ahead of the first parts[] fragment" — NOT as "after the first
+//     separator", which the header's own trailing separator would satisfy for free. parts[] is
+//     what the degrade loop drops to fit, and a rule that can be dropped to make room is not a
+//     rule. In header-only mode there is no parts[] at all, so the same claim is asserted as the
+//     ABSENCE of one: nothing in that payload is droppable.
+//  3. Every routed skill and both branches. A real user gets exactly one branch and which one is
+//     not the runner's choice; the native branch is the one with no budget to spare, so it is the
+//     one that would be "fixed" by dropping this.
 func TestRoutedSkillHook_InjectsIronRules(t *testing.T) {
-	pluginRoot := pluginRootDir(t)
+	assertHeaderResident(t, ironRulesResident)
+}
 
-	raw, err := os.ReadFile(filepath.Join(pluginRoot, ironRulesFragment))
-	if err != nil {
-		t.Fatalf("%s: cannot read it (%v). It is the single source for IR1-IR3 in both the "+
-			"session payload and the router header; if it moved, both channels lost the rules "+
-			"and this gate must fail rather than skip.", ironRulesFragment, err)
-	}
-	rules := strings.TrimSpace(string(raw))
-	if rules == "" {
-		t.Fatalf("%s is empty. Every containment assertion below would pass vacuously.",
-			ironRulesFragment)
-	}
-	for _, marker := range []string{"IR1 —", "IR2 —", "IR3 —"} {
-		if !strings.Contains(rules, marker) {
-			t.Fatalf("%s does not contain %q, so 'the payload contains this file' would no "+
-				"longer mean 'the payload contains the Iron Rules'", ironRulesFragment, marker)
-		}
-	}
+func TestRoutedSkillHook_InjectsOutputFormat(t *testing.T) {
+	assertHeaderResident(t, outputFormatResident)
+}
+
+func assertHeaderResident(t *testing.T, frag headerResidentFragment) {
+	t.Helper()
+	pluginRoot := pluginRootDir(t)
+	modes := routerModes(t, pluginRoot)
+	body := mustHeaderFragmentBody(t, pluginRoot, frag)
 
 	for _, skill := range routedSkills(t, pluginRoot) {
 		for _, br := range routerBranches {
@@ -551,31 +628,61 @@ func TestRoutedSkillHook_InjectsIronRules(t *testing.T) {
 			t.Run(key, func(t *testing.T) {
 				r := renderRouter(t, pluginRoot, skill, br.superpowers)
 
-				idx := strings.Index(r.ctx, rules)
+				idx := strings.Index(r.ctx, body)
 				if idx < 0 {
 					t.Fatalf("%s: the payload does not carry %s verbatim. A subagent running "+
-						"this step would have no Iron Rules at all (aihub#338 layer 2), or the "+
-						"header has grown its own paraphrase — which is the aihub#294 "+
-						"two-copies defect, not a fix for this one.", key, ironRulesFragment)
+						"this skill would have %s — or the header has grown its own paraphrase, "+
+						"which is the aihub#294 two-copies defect, not a fix for this one.",
+						key, frag.rel, frag.lost)
 				}
-				// Position is asserted against the FIRST parts[] fragment rather than against
-				// the first separator: the header ends with a separator of its own, so "after
-				// a separator" is where the rules correctly live and would prove nothing.
-				first := strings.Index(r.ctx, "# _common/memory.md")
+
+				first := strings.Index(r.ctx, routerFirstPartMark)
+				if modes[skill] == routerModeHeaderOnly {
+					if first >= 0 {
+						t.Errorf("%s is header-only, yet its payload carries a parts[] fragment "+
+							"at offset %d. The mode's whole guarantee is that there is nothing "+
+							"the degrade loop could drop this text to make room for.", key, first)
+					}
+					return
+				}
 				if first < 0 {
 					t.Fatalf("%s: cannot find the first parts[] fragment in the payload, so "+
-						"'the rules are in the header' has no boundary to be measured against",
+						"'this text is in the header' has no boundary to be measured against",
 						key)
 				}
 				if idx > first {
-					t.Errorf("%s: the Iron Rules appear at offset %d, after the first parts[] "+
-						"fragment at %d — i.e. they are a fragment, not the header. The degrade "+
-						"loop drops fragments to fit, so rules placed there can be dropped to "+
-						"make room for whatever pushed the payload over.", key, idx, first)
+					t.Errorf("%s: %s appears at offset %d, after the first parts[] fragment at "+
+						"%d — i.e. it is a fragment, not the header. The degrade loop drops "+
+						"fragments to fit, so text placed there can be dropped to make room for "+
+						"whatever pushed the payload over.", key, frag.rel, idx, first)
 				}
 			})
 		}
 	}
+}
+
+// mustHeaderFragmentBody reads a header-resident fragment and proves it is usable as evidence
+// before anything is compared against it.
+func mustHeaderFragmentBody(t *testing.T, pluginRoot string, frag headerResidentFragment) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(pluginRoot, frag.rel))
+	if err != nil {
+		t.Fatalf("%s: cannot read it (%v). It is the single source for this text in both the "+
+			"session payload and the router header; if it moved, both channels lost it and this "+
+			"gate must fail rather than skip.", frag.rel, err)
+	}
+	body := strings.TrimSpace(string(raw))
+	if body == "" {
+		t.Fatalf("%s is empty. Every containment assertion against it would pass vacuously.",
+			frag.rel)
+	}
+	for _, marker := range frag.markers {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("%s does not contain %q, so 'the payload contains this file' would no "+
+				"longer mean 'the payload contains the rule'", frag.rel, marker)
+		}
+	}
+	return body
 }
 
 // TestRoutedSkillHook_SizeGateDiscriminates is control 5a. Without it, the size assertions
@@ -588,7 +695,13 @@ func TestRoutedSkillHook_SizeGateDiscriminates(t *testing.T) {
 			t.Run(key, func(t *testing.T) {
 				base := renderRouter(t, pluginRoot, skill, br.superpowers)
 				probeRoot := copyPluginTree(t, pluginRoot)
-				padFragment(t, filepath.Join(probeRoot, "skills", "_common", "memory.md"), routerProbeChars)
+				// iron-rules.md rather than _common/memory.md (aihub#478). The header is the
+				// only text resident in BOTH modes: padding a parts[] fragment adds nothing at
+				// all to a header-only payload, so the equality check below would fail for two
+				// of the three routed skills — a red that says nothing about the gate, which is
+				// the state a control must never be able to reach. The +400 is identical either
+				// way; the equality assertion is what keeps it honest.
+				padFragment(t, filepath.Join(probeRoot, ironRulesFragment), routerProbeChars)
 				probe := renderRouter(t, probeRoot, skill, br.superpowers)
 
 				// Compared on normLen, not raw length: the copy lives at a different absolute
@@ -598,9 +711,11 @@ func TestRoutedSkillHook_SizeGateDiscriminates(t *testing.T) {
 				if probe.degraded {
 					// Most likely cause is the environment, not the tree: the probe renders
 					// from a copy under TMPDIR, whose absolute path is substituted into the
-					// payload once per 📄 pointer. A TMPDIR of roughly 127+ characters pushes
-					// base+400 past the harness limit and the hook then degrades by design.
-					// (Bisected: an 87-char root passes, 127 fails. GitHub runners land ~105.)
+					// payload once per 📄 pointer, so a long root costs
+					// pointers x (len(root) - len(routerRootToken)). On the native branch
+					// (2 pointers, base 9,227) base+400 crosses the harness limit at a root of
+					// about 200 characters and the hook then degrades by design; GitHub runners
+					// land ~105. Header-only payloads carry no pointer and are indifferent.
 					// Check that before touching routerProbeChars or the budget — this is
 					// never a false green, only a confusing red.
 					t.Fatalf("%s: the probe build degraded, so its size is capped by "+
@@ -636,11 +751,44 @@ func TestRoutedSkillHook_SizeGateDiscriminates(t *testing.T) {
 // failure mode, so drive it explicitly.
 func TestRoutedSkillHook_DegradesLoudly(t *testing.T) {
 	pluginRoot := pluginRootDir(t)
+	modes := routerModes(t, pluginRoot)
 	// Widens with TARGETS like the other two tests: a skill added to the hook must not get a
 	// degrade path that nobody ever drove. The native branch is the one measured because it is
 	// the larger of the two and therefore the one that reaches the limit first.
 	for _, skill := range routedSkills(t, pluginRoot) {
-		t.Run(skill, func(t *testing.T) { assertDegradesLoudly(t, pluginRoot, skill) })
+		t.Run(skill, func(t *testing.T) {
+			if modes[skill] == routerModeHeaderOnly {
+				// The degrade loop drops parts[], and this mode has none — the fixture below
+				// pads a fragment that is not injected, so it could never drive the path. That
+				// exemption is ASSERTED, not assumed: if a fragment ever leaks into this mode
+				// it acquires a degrade path nothing drives, which is precisely the silent
+				// state this suite exists to remove.
+				assertNothingDroppable(t, pluginRoot, skill)
+				return
+			}
+			assertDegradesLoudly(t, pluginRoot, skill)
+		})
+	}
+}
+
+// assertNothingDroppable is the header-only counterpart of assertDegradesLoudly: it proves the
+// exemption is structural rather than an oversight.
+func assertNothingDroppable(t *testing.T, pluginRoot, skill string) {
+	t.Helper()
+	r := renderRouter(t, pluginRoot, skill, false)
+	for _, mark := range []string{
+		routerFirstPartMark, "# _common/storage.md", "# _common/lifecycle.md",
+		"native engine (Wi Agent main loop)",
+	} {
+		if strings.Contains(r.ctx, mark) {
+			t.Errorf("%s is header-only, but its payload carries %q. It now has droppable "+
+				"fragments and no test drives their degrade path — route it as step-body or "+
+				"take the fragment back out.", skill, mark)
+		}
+	}
+	if strings.Contains(r.ctx, routerBannerMark) {
+		t.Errorf("%s: the over-budget banner appears on a header-only payload of %d chars",
+			skill, charLen(r.ctx))
 	}
 }
 
@@ -681,17 +829,17 @@ func assertDegradesLoudly(t *testing.T, pluginRoot, skill string) {
 		t.Errorf("degraded payload carries no banner — the omission would be silent, which is " +
 			"the failure mode this exists to remove")
 	}
-	// aihub#338: the degrade loop drops FRAGMENTS. The Iron Rules are in the header precisely
-	// so that it cannot drop them, and this is the only place that state can be observed —
-	// every other assertion in this file measures a tree that does not degrade.
-	if raw, err := os.ReadFile(filepath.Join(overRoot, ironRulesFragment)); err != nil {
-		t.Errorf("%s: %v", ironRulesFragment, err)
-	} else if rules := strings.TrimSpace(string(raw)); rules == "" {
-		t.Errorf("%s is empty, so the containment check below would be vacuous", ironRulesFragment)
-	} else if !strings.Contains(over.ctx, rules) {
-		t.Errorf("the DEGRADED payload (%d chars) lost the Iron Rules. They live in the header "+
-			"for exactly this reason: a rule that gets dropped to make room is not a rule. "+
-			"stderr: %s", charLen(over.ctx), over.stderr)
+	// aihub#338 / aihub#478: the degrade loop drops FRAGMENTS. Both header-resident texts live
+	// in the header precisely so that it cannot drop them, and this is the only place that
+	// state can be observed — every other assertion in this file measures a tree that does not
+	// degrade. Read from overRoot, the tree that actually degraded, not from pluginRoot.
+	for _, frag := range []headerResidentFragment{ironRulesResident, outputFormatResident} {
+		body := mustHeaderFragmentBody(t, overRoot, frag)
+		if !strings.Contains(over.ctx, body) {
+			t.Errorf("the DEGRADED payload (%d chars) lost %s. It lives in the header for "+
+				"exactly this reason: a rule that gets dropped to make room is not a rule. "+
+				"stderr: %s", charLen(over.ctx), frag.rel, over.stderr)
+		}
 	}
 	if !strings.Contains(over.stderr, "over the 10000-char harness limit") {
 		t.Errorf("nothing usable on stderr for an over-budget payload: %q", over.stderr)

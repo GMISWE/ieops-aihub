@@ -44,36 +44,36 @@ prefer `rule.*` / `fact.*`.
 | plan output | `methodology.plan` | pf-execute, pf-retro |
 | release record | `methodology.release` | pf-release |
 
-🔴 **Six of those rows are off the curated list, and they fail in three different ways.**
-Be precise about which, because the modes are not interchangeable:
+🔴 **Six of those rows are off the curated list, in three different ways** — not
+interchangeable, so be precise about which:
 
-- `methodology.spec` / `methodology.plan` — **`pf_remember` refuses all `methodology.*`**
-  outright (`PfRememberTypeEnum` is the curated list minus `methodology.*`, and
-  `handleRemember` has a hard gate, aihub#210). Write these with `pf_save_artifact`.
-- `methodology.release` — refused by `pf_remember` *and* absent from
-  `MethodologyTypeEnum` (`spec|plan|review|execute|retro|wrap_summary`), so
-  `pf_save_artifact` rejects it too. **This row is valid nowhere.**
+- `methodology.spec` / `methodology.plan` — **`pf_remember` refuses every `methodology.*`**
+  outright (`validatePfRememberArgs`, a hard prefix gate, aihub#210). Use `pf_save_artifact`.
+- `methodology.release` — refused by `pf_remember`, and absent from the
+  `MethodologyTypeEnum` (`spec|plan|review|execute|retro|wrap_summary`) that
+  `pf_save_artifact` PUBLISHES. That tool enforces the `methodology.` prefix and the
+  aihub#210 credential gate, **never the six names**, so the row is stored, not refused.
+  (Corrected 2026-09-09 from "valid nowhere".)
 - `experience.init` / `rule.init` / the `fact.<subtopic>` placeholder — **accepted by the
   server**, whose validation is a lenient four-prefix check (`experience.` / `fact.` /
-  `rule.` / `methodology.`), but off the curated enum, so the tool schema does not offer
-  them and contract-lint flags them. Usable, not blessed.
+  `rule.` / `methodology.`) now mirrored by the `memories_type_check` DB constraint. Off
+  the curated list and nothing more: aihub#445 withdrew the JSON-Schema `enum`, so neither
+  the schema nor contract-lint refuses them. Usable, not blessed.
 
 The curated list is `experience.approach|code|debug|pitfall`,
 `fact.architecture|constraint|note|reference`,
-`rule.coding|convention|process|scheduling|work`. **The tool schema is authoritative.**
+`rule.coding|convention|process|scheduling|work` — **suggestions. The four prefixes are
+the contract**, and since aihub#445 the schema says so in prose.
 
-That mismatch is exactly the point. This table was duplicated into `.polyforge/usage.md` by
-`polyforge init`, and that file is never regenerated once it exists — so the copy there has
-been wrong since 2026-05-25 and no one could fix it. aihub#294 moved the table here, to the
-versioned channel, deliberately UNCHANGED plus this correction rather than quietly rewritten,
-so the drift stays visible. Reconciling the rows with the enum is not yet tracked by a work
-item. This is now the only copy.
+`polyforge init` copied this table into `.polyforge/usage.md`, which is never regenerated
+once it exists — so that copy has been wrong since 2026-05-25 and no one could fix it.
+aihub#294 moved the table here, UNCHANGED plus these corrections rather than quietly
+rewritten, so the drift stays visible. This is now the only copy.
 
-This takes precedence over the harness's default local-memory instruction within a polyforge
-workspace. Caveat: the harness may still auto-recall a pre-existing local `MEMORY.md` at
-session start until those local files are retired; retiring the migrated local files and any
-global-config change are tracked as a separate follow-up (the data already lives in aihub via
-aihub#74 Stream C).
+This takes precedence over the harness's default local-memory instruction inside a polyforge
+workspace. Caveat: the harness may still auto-recall a pre-existing local `MEMORY.md` until
+those files are retired — retiring them and any global-config change are a separate
+follow-up (the data already lives in aihub, aihub#74 Stream C).
 
 ### `fields="brief"` — the axis to choose it on (aihub#313)
 

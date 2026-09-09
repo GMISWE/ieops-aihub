@@ -12,11 +12,14 @@ package mcp_test
 //	unknown_params_test.go             (#389)  every tool, one mechanism
 //
 // Between them they found four contract defects in one week, each by hand, each
-// after the tool had shipped. The measured size of the surface they audit is 45
-// tools and 222 published parameters, so a per-tool audit is not a plan — and it
-// covers nothing added after the audit. (Those two are the same measurement as
-// floorTools/floorParams below; re-derive them with the command stated there
-// rather than copying either number to the other place.) This file keeps their
+// after the tool had shipped. The surface they audit is the whole published
+// toolset and every parameter on it — of the order of tens of tools and hundreds
+// of parameters — so a per-tool audit is not a plan, and it covers nothing added
+// after the audit. (The exact sizes are the same measurement as
+// floorTools/floorParams below, and are deliberately not written here either:
+// this sentence used to say "222 published parameters" while telling the reader
+// not to copy the number to a second place, and it was 221 by the time aihub#493
+// re-derived it. Run the command stated at floorTools.) This file keeps their
 // mechanisms and changes the QUANTIFIER: every tool the registry publishes,
 // every parameter it publishes, measured the day it is added.
 //
@@ -119,22 +122,29 @@ const (
 	// tools standing policy, removals are expected. Lowered to 40 rather than
 	// to 48 deliberately: 48 would restore floor == measured and reproduce the
 	// same defect on the next unpublish. 40 sits near half, like every sibling.
-	// ⚠️ Every "measured" value below is re-derived, not carried forward. Four of
-	// them were STALE when aihub#446 re-ran them — they still described the
-	// 50-tool era (237 params, 46 of 50 on the wire, 46 projections, 278 bound
-	// fields) even though aihub#448 had already taken the set to 48. Each gate
-	// PRINTS its own number, so re-derive rather than edit by arithmetic:
+	// ⚠️ The measured values are NOT carried in these comments, and that is a
+	// change aihub#493 made after measuring what carrying them cost. Four were
+	// STALE when aihub#446 re-ran them — they still described the 50-tool era
+	// (237 params, 46 of 50 on the wire, 46 projections, 278 bound fields) even
+	// though aihub#448 had already taken the set to 48 — and on 2026-09-09, one
+	// day and 21 PRs after the surviving ones were re-derived, four of the seven
+	// were wrong again (floorParams claimed 222 where G1 printed 221, floorRoutes
+	// claimed 80 where G2 printed 81, floorBoundFields claimed 251 where G4
+	// printed 253, floorStrongParams claimed 190 of 222 where G1 printed 189 of
+	// 221) and floorToolsOnWire named the wrong QUANTITY as well as the wrong
+	// number. Each gate PRINTS its own number, so read it there:
 	//
 	//	GOWORK=off go test ./internal/mcp/ -run '^TestContractEvery' -count=1 -v
 	//
 	// (the G1-G4 log lines), and for floorToolsOnWire, which no log line prints,
 	// raise it to an absurd value and read the count out of the failure.
-	floorTools       = 40  // measured 2026-09-08: 45 (48 before aihub#446 retired the three artifact-action tools, 50 before aihub#448)
-	floorParams      = 200 // measured: 222 across those 45
-	floorRoutes      = 40  // measured: 80 route registrations in package server
-	floorToolsOnWire = 25  // measured: 39 of 45 tools make at least one HTTP call
-	floorProjections = 20  // measured: 41 tool results G3 could inspect
-	floorBoundFields = 20  // measured: 251 server-side names G4 resolved
+	// measured_floor_comment_gate_test.go keeps the values out of this block.
+	floorTools       = 40  // G1's tool count
+	floorParams      = 200 // G1's parameter count
+	floorRoutes      = 40  // G2's route count ("against N routes")
+	floorToolsOnWire = 25  // G2's OUTBOUND REQUEST count — not a tool count, and not the distinct-path count G2 logs; only the FLOOR_ failure prints it
+	floorProjections = 20  // G3's inspected-result count
+	floorBoundFields = 20  // G4's resolved server-side name occurrences
 
 	// floorStrongParams bounds how much of G1 may rest on the WEAKER of its two
 	// measurements. A token-proved verdict says "this argument's own value left
@@ -143,7 +153,7 @@ const (
 	// with the argument doing nothing. Without a floor the gate could silently
 	// degrade to all-key-presence — every arm still green, nothing red, and the
 	// discriminating half gone.
-	floorStrongParams = 120 // measured: 190 of 222 verdicts token-proved
+	floorStrongParams = 120 // G1's "verdicts token-proved" count
 )
 
 // ─────────────────────────── the baseline & its shape ────────────────────────

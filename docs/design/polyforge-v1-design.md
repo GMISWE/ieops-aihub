@@ -1227,8 +1227,12 @@ POST   /v1/work_items/{id_or_slug}/claim
   body: {idempotency_key, session_info:{machine_id,session_secret},
          requested_locks?, mode:fresh|resume, force_takeover?,
          phase_yaml_snapshot?}       ← client 上传 phase.yaml 内容
-  → {attempt_id, claim_epoch, expires_at, session_secret,
-     acquired_locks, current_attempt_epoch}
+  → {attempt_id, claim_epoch, acquired_locks, current_attempt_epoch,
+     requires_human_session, wi_type, slug?, project?, id?, goal?,
+     step_recovery_hint?, unrecognized_resources?}
+  -- 勘误（aihub#493）：原先画的 expires_at 随 v1.21 一起删除，session_secret 由
+  --   MCP 层自己生成（tools_lifecycle.go，C6-2：先写 state file 再 claim），服务端
+  --   从不回传它。以 internal/domain/run_attempts.go (ClaimResponse) 为准。
 
 POST   /v1/work_items/{id_or_slug}/complete
   body: {attempt_id, claim_epoch, session_secret,
@@ -1654,8 +1658,8 @@ pf_claim_work_item(id_or_slug, idempotency_key, session_info,
                    force_takeover?)
   -- v1.23: phase_yaml_snapshot 参数已删除
   -- server 直接读 scenario_phase_configs[wi.scenario]，client 无需上传
-  → {attempt_id, claim_epoch, expires_at, session_secret,
-     acquired_locks, current_attempt_epoch}
+  → 同 POST /v1/work_items/{id}/claim 的响应体（见 §4.3；expires_at /
+    session_secret 两个字段的勘误也在那里）
 
 pf_complete_attempt(attempt_id, claim_epoch, session_secret,
                     status:wrapped|failed|paused,
@@ -1985,7 +1989,7 @@ pf_get_ready_queue(project, max?)
 | `using-polyforge` | meta，Iron Rules，NL 路由（含"新 wi_type"流程 B7 合并），三段式规范，Memory-First |
 | `pf-work` | new/claim/resume/force_takeover |
 | `pf-stop` | pause/wrap/fail |
-| `pf-status` | list/timeline/ready queue（六段 LCRS） |
+| `pf-status` | list/timeline/ready queue（七段 LCRS，见勘误 #11） |
 | `pf-spec` | 写 spec artifact（B8: pf-debug 合并为 spec 的调试变体） |
 | `pf-plan` | 写 plan，spawn child wi（含 blocked_by） |
 | `pf-execute` | Wi Agent 调度 Step Agent |
@@ -3379,7 +3383,13 @@ HTTP 409
   CONFLICT_CAS_FAILED             resources_version / step version CAS 校验失败
                                   details: {current_version: N}
   CONFLICT_WI_ALREADY_CLAIMED     wi 已被其他 attempt claim（status=running）
-                                  details: {current_attempt:{id,actor_display,expires_at,claim_epoch,owner_user_type}}
+                                  details: {current_attempt:{id,actor_display,claim_epoch,last_active_at}}
+                                  -- 勘误（aihub#493）：本行原先画 expires_at + owner_user_type,
+                                  --   两个字段 FnClaimWorkItem 从来没有发过。expires_at 随 v1.21
+                                  --   的 ownership 模型删除；owner_user_type 全仓零命中（与勘误
+                                  --   #11 的 running[].owner_user_type 同名同源）；真正在发的
+                                  --   last_active_at 反而一直没画。以 internal/domain/run_attempts.go
+                                  --   (FnClaimWorkItem) 构造的那个 details map 为准。
   CONFLICT_HARD_BLOCK             claim 时资源冲突无法绕过
                                   details: {predictions:[...]}
   CONFLICT_DUPLICATE              wi dedup 完全匹配
@@ -4082,7 +4092,9 @@ review/代码审查          → /pf-review
 
 ── 全局视图 ──
 1. pf_get_ready_queue(project)  ← v1.20: 一次调用拿六段（含 needs_human_session + unclassified）
-2. 渲染 LCRS 六段视图（items/running/stalled/paused/needs_human_session/unclassified）
+2. 渲染 LCRS 七段视图（items/running/stale_running/stalled/paused/
+   needs_human_session/unclassified）—— aihub#449 去掉 stale_running 的 omitempty
+   后七段恒在，见勘误 #11。上一行的「六段」是 v1.20 当时的记录，刻意保留
    -- Alice-Session-1 W1 修复：/pf-status 现在显示完整的"需要你来处理"列表
 3. 输出三段式（需要关注的段落重点高亮）
 ```

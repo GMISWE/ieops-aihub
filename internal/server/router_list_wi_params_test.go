@@ -351,11 +351,26 @@ func TestListWorkItems_IdsWithoutProjectDeniedWhenScopedToANonMemberProject(t *t
 // A role string outside the three known values is level 0 in roleLevel, so
 // checkProjectAccess denies it on the ?project= path. The ids= path must agree.
 //
-// Reachable in principle: SetProjectMembers validates to viewer/writer/maintainer
-// today, but migration 0013_backfill_projects.sql copied arbitrary
-// users.project_roles values into projects.members, mapping only
-// maintainer→writer. Testing the role for non-emptiness would let such a row
-// grant a read that ?project= refuses (aihub#280).
+// Reachable, and MEASURED reachable rather than argued — but not for either of
+// the two reasons this comment used to give. aihub#460 corrected both at the
+// guard itself (see checkProjectAccess in middleware.go, which is the
+// authoritative write-up); aihub#493 found the stale copy still sitting here.
+//
+//   - "SetProjectMembers validates to viewer/writer/maintainer": there is no
+//     SetProjectMembers anywhere in this repo. domain.UpdateProject is the only
+//     validator, and it is application-level only — projects.members is JSONB
+//     with no CHECK, so any write that does not go through it stores anything.
+//     Measured on the fully migrated schema: direct INSERTs accepted the role
+//     "some_legacy_role", the number 42, and a member with no role key at all.
+//   - "migration 0013_backfill_projects.sql copied arbitrary values": 0013
+//     FILTERED, `WHERE (pr).value#>>'{}' IN ('viewer','writer','maintainer')`,
+//     and the column it read was dropped by 0014. Anyone who checked that
+//     citation found it disproved the comment — and the reasonable next move is
+//     to delete the guard.
+//
+// The guard is right; both reasons it used to give were not. Testing the role
+// for non-emptiness would let an unvalidated row grant a read that ?project=
+// refuses (aihub#280).
 func TestListWorkItems_IdsWithoutProjectRejectsUnknownRoleStrings(t *testing.T) {
 	uc := viewerUser()
 	uc.ProjectRoles = map[string]string{"legacyproject": "some_legacy_role"}

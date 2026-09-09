@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// TestOrchestratorLCRS verifies the six-segment ready-queue (LCRS) view.
+// TestOrchestratorLCRS verifies the seven-segment ready-queue (LCRS) view.
 //
 // Per domain.ReadyQueue:
 //   - items[]              — queued, no blocker, requires_human_session=false
@@ -17,6 +17,12 @@ import (
 //   - stalled[]            — stalled wi
 //   - paused[]             — status=paused
 //   - unclassified[]       — queued but wi_type not recognized (no phase config match)
+//   - stale_running[]      — running and untouched for 24h; a reminder segment,
+//     not a takeable one. It arrived as the tail field of aihub#36 carrying an
+//     `omitempty`, so the key was absent whenever nothing was stale and callers
+//     could not see it; aihub#449 removed the `omitempty` and made the seventh
+//     segment unconditional. This comment said six because it was written while
+//     the field was invisible. See the field's own comment on domain.ReadyQueue.
 //
 // This test creates one auto (fix_bug) and one human-session (feature) wi, then
 // verifies each lands in the expected segment.

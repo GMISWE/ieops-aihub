@@ -1,6 +1,6 @@
-# SC-03 — pf-status shows LCRS six-segment ready queue
+# SC-03 — pf-status shows LCRS seven-segment ready queue
 
-Tests that pf-status correctly renders the six-segment view with wi's
+Tests that pf-status correctly renders the seven-segment view with wi's
 in different states: items, running, stalled, paused, needs_human_session, unclassified.
 
 ## Setup
@@ -42,7 +42,7 @@ USER_INTENT: "show me the current status of all work items"
 
 EXPECTED SKILL BEHAVIOR:
   1. pf_get_ready_queue(project="marketplace")
-  2. Render six segments: items[], running[], stalled[], paused[], needs_human_session[], unclassified[]
+  2. Render seven segments: items[], running[], stale_running[], stalled[], paused[], needs_human_session[], unclassified[]
   3. Show wi summaries with owner, priority, slug
 
 ASSERT MCP CALLS:
@@ -74,6 +74,6 @@ CLEANUP:
   - Re-claim then wrap WI_PAUSED (pf_claim_work_item mode="resume" then pf_complete_attempt(status="wrapped"))
 
 ## PASS criteria
-pf-status renders all six segments correctly; wi's appear in correct segments;
+pf-status renders all seven segments correctly; wi's appear in correct segments;
 WI_BLOCKED_DEP appears in stalled[] with blocker identified;
 WI_UNCLASSIFIED appears in unclassified[].

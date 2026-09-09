@@ -62,8 +62,14 @@ Each card opens with a **generated** fenced `json` block and continues with
   [`../audits/aihub-412-corpus-facts/response-keys/`](../audits/aihub-412-corpus-facts/response-keys/)
   and compared against it by the gate, so the copy cannot drift **from that
   record**. `null` means that corpus holds no record for the tool — which is a
-  different fact from an empty list, and for the three artifact-action tools it is
-  itself evidence. What holds the list against a **live** response is K10, in a
+  different fact from an empty list, and for a tool the corpus window never
+  observed it is itself evidence. This used to name "the three artifact-action
+  tools" as that example: `pf_adopt_artifact` / `pf_close_artifact` /
+  `pf_ignore_artifact` were unpublished by `aihub#446` and their cards deleted
+  with them, so the example outlived what it pointed at. The roster of `null`
+  cards is whatever `grep -l '"response_keys_observed": null' docs/mcp-cards/*.md`
+  returns, and is not written out here because it moves whenever the corpus is
+  re-extracted. What holds the list against a **live** response is K10, in a
   separate DB-gated file; read "K7 is copy-to-copy, K10 is the one that reaches a
   server" below before trusting the list on its own.
 - **`docs/mcp-cards/live-response-keys.json`** is the other half of that
@@ -118,8 +124,18 @@ Scoping it to the start of a cell is what makes the arm usable: a quote *inside*
 sentence is the author's own words about the text, and the cards rely on that —
 this set quotes the withdrawn `"non-conflicting"` in `pf_get_ready_queue.md`'s
 prose, and writes `` `fields="brief"` `` and `ABSENT means "no step state"` inside
-sentences. Over the whole hop 0-1 section K9 would report six such glosses as
-drift; scoped this way it checks 28 real quotes and reports none of them.
+sentences. Over the whole hop 0-1 section K9 would report those glosses as drift;
+scoped this way it reports none of them. How many real quotes remain in scope is
+printed by the arm itself, on the `K9:` line of
+
+```
+GOWORK=off go test ./internal/mcp/ -run '^TestContractCardQuotes' -count=1 -v
+```
+
+and is deliberately not restated here — this sentence claimed 28 while the arm
+printed 23 (`aihub#493`), the same rot the floor comments in
+`internal/mcp/contract_cards_gate_test.go` carried until
+`TestMeasuredFloorCommentsCarryNoValue` took the values out of them.
 
 If a **row** must quote text the tool no longer publishes, mark that row:
 

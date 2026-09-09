@@ -1,6 +1,14 @@
 package server
 
-// Web UI: /ui/queue — six-segment LCRS ready-queue view for a project.
+// Web UI: /ui/queue — the ready-queue count strip for a project.
+//
+// ⚠️ This said "six-segment LCRS ready-queue view" until aihub#493, and by then
+// it was wrong twice over: domain.ReadyQueue has had SEVEN segments since
+// aihub#449 removed stale_running's omitempty, and this page stopped rendering
+// segments at all — what it renders is stripCounts, the FOUR headline counts
+// (Running / Needs you / Unclaimed / Stalled), three of them derived from the wi
+// list's own grouping rather than from the queue. Aligning the number would have
+// made the sentence wrong in a quieter way; the sentence had to go.
 //
 // The ready queue no longer has its own full page. It is embedded as a
 // collapsible block at the top of the /ui/wi list page, which polls the

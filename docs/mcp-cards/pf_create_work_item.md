@@ -149,8 +149,22 @@ exists downstream of.
 
 Two of those are enums rather than prose *because* prose failed: `priority` was a
 pipe-separated string in a description, and `source` read as free text while being a
-closed vocabulary — sending `jira` instead of `sync_jira` was a 500. The SDK
-validates an enum before the handler runs and cannot validate prose.
+closed vocabulary — sending `jira` instead of `sync_jira` was a 500.
+
+⚠️ The enum is what a caller is OFFERED, not what stops it. `aihub#396` recorded that
+"the SDK validates an enum before the handler runs and cannot validate prose", and
+that reason is **false for this codebase** — corrected here by `aihub#496`
+(2026-09-09). `aihub#463` measured it on go-sdk v1.6.0 (2026-09-08):
+`applySchema -> resolved.Validate` is reached only from the generic
+`AddTool[In, Out]`, while polyforge registers through the untyped
+`(*mcp.Server).AddTool`, whose `callTool` hands the request straight to the handler
+with no schema step. An out-of-vocabulary value still arrives in the `POST` body.
+
+What the enum is actually worth is unchanged and still worth having: it is how a
+caller — an LLM reading `tools/list`, and any client that validates before sending —
+learns the set without spending a round trip. The refusal is the server-side Go
+validator, which answers 400 naming the field. Both halves are required; publishing
+the enum alone would move a 500 nowhere.
 
 `blocked_by` states what it DOES, not merely what it is a list of, because
 `aihub#357` was filed on the belief that it only flipped `status`.

@@ -159,12 +159,30 @@ func TestAcquireLocksReportsEveryHeldLock(t *testing.T) {
 	require.ElementsMatch(t, []string{"aihub/aihub345", keptKey, droppedKey}, heldLockKeys(t, pool, attemptID),
 		"fixture check: the claim must really have taken all three locks, or nothing below is measuring under-reporting")
 
+	// aihub#492's retry, applied here by aihub#509 because that item's own
+	// coverage note does not reach this file. It says the retry was put in
+	// `claimWI` so that seven suites including this one are "covered without
+	// being edited" — but this suite claims through `claimFreshWithLocks`
+	// (lock_intent_derivation_db_test.go), which is a different helper and was
+	// not wrapped, and nothing wrapped FnAcquireLocks here at all.
+	// FnAcquireLocks is SERIALIZABLE and serialization_retry_test.go's header
+	// names it explicitly, so every arm below could lose an SSI race to another
+	// DB-gated test binary and report a failure the database asked us to retry.
+	//
+	// In the shared closure rather than at the new call sites, for the reason
+	// aihub#492 gives: the five arms that predate aihub#509 are covered without
+	// being edited. It cannot weaken any of them — the helper retries only
+	// ErrConflictSerializationFailure, never ErrInternalError, and SSI gives the
+	// retry a fresh serializable execution, so a refusal that should happen
+	// still does.
 	acquire := func(t *testing.T) *AcquireLocksResponse {
 		t.Helper()
-		resp, aerr := FnAcquireLocks(ctx, pool, wi.ID, &AcquireLocksRequest{
-			AttemptID:     attemptID,
-			ClaimEpoch:    claim.ClaimEpoch,
-			SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
+		resp, aerr := retryOnSerializationConflict(t, "acquire_locks", func() (*AcquireLocksResponse, *AihubError) {
+			return FnAcquireLocks(ctx, pool, wi.ID, &AcquireLocksRequest{
+				AttemptID:     attemptID,
+				ClaimEpoch:    claim.ClaimEpoch,
+				SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
+			})
 		})
 		require.Nil(t, aerr, "acquire_locks failed: %+v", aerr)
 		return resp

@@ -141,6 +141,24 @@ jobs:
       # what all of those have in common: none of them changes the gated count,
       # so the ratchet below cannot substitute for any of them.
       #
+      # aihub#508 added the one axis all of the above still missed: SUBTEST
+      # names. Everything described so far compares FUNCTION names, while the
+      # assertion a step actually makes is `--- PASS: TestX/a_named_subtest` —
+      # so on 2026-09-09 a renamed subtest left this gate, the manifest and a
+      # local `go test ./...` all green while the step itself went red on the
+      # runner. dbtestcov now enumerates the test-name tree from the AST
+      # (including table-driven arms and `"prefix_"+tc.name` concatenations)
+      # and requires every `--- PASS:` assertion in this file to name a path
+      # that exists AND that its own step's `-run` selects. Two consequences
+      # worth knowing before editing a want-list below: a line asserting on the
+      # marker in any spelling dbtestcov cannot read is a failure rather than a
+      # skip, and an invocation with no `--- PASS:` assertion at all is a
+      # failure too — otherwise deleting the want-list entry would be the
+      # cheapest way to answer a stale-name report. See
+      # internal/citest/dbtestcov/asserted.go, which also names the residual
+      # holes (it does not execute the step, and a subtest whose name is
+      # computed at run time is reported as unverifiable rather than proven).
+      #
       # `env -u` rather than merely omitting an env: block, so that adding a
       # job-level AIHUB_TEST_DB later cannot silently turn this into a green
       # no-op (with the variable set, nothing SKIPs, the inventory is empty and
@@ -2865,6 +2883,16 @@ jobs:
       # Running the file rather than a transcription of it is the point: a copy
       # pasted into the test would keep passing after somebody edited the real
       # migration, and the migration's content IS acceptance criterion AC-19.
+      #
+      # The last eight want-list entries are a back-fill (aihub#508, 2026-09-09).
+      # aihub#510 added five arms under `a work item that names itself…` and
+      # aihub#511 three under `declared names that look like json…`, both as
+      # subtests of an already-registered DB-gated function — so neither moved
+      # gated_tests.txt, neither needed a new step, and both landed with this
+      # list untouched. Nothing was wrong: the list is one-directional, and no
+      # gate reads the other way (an unasserted subtest is invisible here). They
+      # are written down now because the aihub#508 check proves these eight
+      # paths exist, which is the half that used to rot silently.
       - name: aihub#416 de-locking DB tests
         env:
           AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
@@ -2881,6 +2909,14 @@ jobs:
                       TestDeLockingPredictReportsAdvisoryEntries/rule_6_still_fires_under_dry_run \
                       TestDeLockingPredictReportsAdvisoryEntries/last_active_age_seconds_tracks_the_attempts_last_active_at \
                       TestDeLockingPredictReportsAdvisoryEntries/a_repo_or_service_only_payload_never_returns_hard_block \
+                      TestDeLockingPredictReportsAdvisoryEntries/a_work_item_that_names_itself_is_not_its_own_conflict/the_caller_alone_declares_it,_so_there_is_nothing_to_report \
+                      TestDeLockingPredictReportsAdvisoryEntries/a_work_item_that_names_itself_is_not_its_own_conflict/an_anonymous_create_preview_still_reports_both \
+                      TestDeLockingPredictReportsAdvisoryEntries/a_work_item_that_names_itself_is_not_its_own_conflict/another_work_item_declaring_the_same_name_is_still_reported \
+                      TestDeLockingPredictReportsAdvisoryEntries/a_work_item_that_names_itself_is_not_its_own_conflict/naming_itself_by_slug_works_too \
+                      TestDeLockingPredictReportsAdvisoryEntries/a_work_item_that_names_itself_is_not_its_own_conflict/the_exclusion_holds_under_dry_run \
+                      TestDeLockingPredictReportsAdvisoryEntries/declared_names_that_look_like_json_still_match_every_containment_rule/plain \
+                      TestDeLockingPredictReportsAdvisoryEntries/declared_names_that_look_like_json_still_match_every_containment_rule/doublequote \
+                      TestDeLockingPredictReportsAdvisoryEntries/declared_names_that_look_like_json_still_match_every_containment_rule/backslash \
                       TestDeLockingMigration0038AndRepoPins \
                       TestDeLockingMigration0038AndRepoPins/running_the_migration_deletes_both_retired_types_and_leaves_file_scope \
                       TestDeLockingMigration0038AndRepoPins/the_retired_types_stay_in_the_check_vocabulary \
@@ -4739,10 +4775,20 @@ jobs:
       # while the live tool still returned it — probed on pf_whoami's `role`, and
       # re-probed on this tree with K10 in place (K7 green, K10 red).
       #
-      # K10 is the arm that reaches a server: it drives 42 of the 48 published
-      # tools through a real Postgres, the real router, pkg/client and a real MCP
+      # K10 is the arm that reaches a server: it drives ALL 45 published tools
+      # through a real Postgres, the real router, pkg/client and a real MCP
       # session, and refuses any top-level key a live response carries that neither
-      # the card nor docs/mcp-cards/live-response-keys.json declares. The other nine
+      # the card nor docs/mcp-cards/live-response-keys.json declares. It observes a
+      # JSON object from 44 of them — the 45th is pf_diff, whose result is a raw
+      # diff and so carries no top-level keys (liveWalkProseOnly). Corrected
+      # 2026-09-09 (aihub#508): this said "42 of the 48", which was stale on both
+      # numbers. 45 is re-measured, not carried — `GOWORK=off go test
+      # ./internal/mcp/ -run '^TestContractCard'` prints `K1/K2: 45 published
+      # tools, 45 cards`; 44 follows from liveWalkOutOfReach being EMPTY since
+      # aihub#501 gave the six git-dependent tools a live arm, less the one
+      # prose-only entry.
+      #
+      # The other nine
       # arms run in the always-on "Unit tests" step and compare one checked-in file
       # with another; only this one can tell the cards apart from the running
       # system. It cannot be folded into that step, because that step deliberately

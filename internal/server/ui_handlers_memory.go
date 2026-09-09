@@ -247,7 +247,15 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 		// matching GET /v1/memories' min_strength. Lenient because this is /ui.
 		data.StrengthMin = queryFloatLenientUI(c, "strength_min", 0, math.Inf(1), 0.3)
 
-		// Limit — default 50, max 200.
+		// Limit — default 50, max 200. The 200 is DELIBERATELY the same number
+		// as recallTopKCeiling (internal/domain/memory.go): this call bounds the
+		// recall page size UPSTREAM of domain.normalizeRecallTopK, so if the
+		// constant there ever rose alone, /ui would stay silently capped here —
+		// the aihub#309 shape one degree lighter. The owner ruled (aihub#552,
+		// 2026-09-09, option ③) to keep the fork and pin the coincidence
+		// instead: TestUIRecallLimitCeilingEqualsRecallTopKCeiling
+		// (ui_recall_ceiling_gate_test.go) reads both literals out of the source
+		// and goes red the day either side moves without the other.
 		data.Limit = queryIntLenientUI(c, "limit", 50, 200)
 
 		// Build filter-query string for "self link" pagination / detail back-link.

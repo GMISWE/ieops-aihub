@@ -2240,6 +2240,17 @@ func ReplyCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, autho
 // Deliberately unexported, and no test may derive an expectation from either: a
 // fixture that reads the constant under test moves with the defect instead of
 // catching it. The tests in memory_topk_test.go spell 20 and 200 out.
+//
+// One more literal is DELIBERATELY equal to recallTopKCeiling: the /ui memories
+// page's limit ceiling, spelled 200 in handleUIMemories
+// (internal/server/ui_handlers_memory.go), which bounds the same parameter
+// upstream of normalizeRecallTopK. The owner ruled (aihub#552, 2026-09-09,
+// option ③) to keep that fork rather than export this constant, so the equality
+// is held by TestUIRecallLimitCeilingEqualsRecallTopKCeiling
+// (internal/server/ui_recall_ceiling_gate_test.go) — a gate that reads BOTH
+// source literals and compares them to each other. That derives no expectation
+// from the constant, which is what the rule above forbids: neither value is the
+// oracle there, the relation is.
 const (
 	recallTopKDefault = 20
 	recallTopKCeiling = 200
@@ -2258,14 +2269,17 @@ const (
 // (internal/server/queryparam.go), which handleUIMemories
 // (internal/server/ui_handlers_memory.go) calls with a ceiling of 200 before the
 // value becomes RecallRequest.TopK, so it bounds the page size UPSTREAM of here
-// and is invisible from here: nothing holds it to the invariant above. It is
-// harmless today only by a coincidence of literals — its ceiling is spelled 200,
-// the same number as recallTopKCeiling — so raising the constant here would
-// leave /ui silently capped at the old value. That site is on record as a
+// and is invisible from here. Its ceiling is spelled 200, the same number as
+// recallTopKCeiling, and that equality is DELIBERATE, not a coincidence any
+// more: the owner ruled (aihub#552, 2026-09-09, option ③) to keep the fork and
+// pin it, so TestUIRecallLimitCeilingEqualsRecallTopKCeiling
+// (internal/server/ui_recall_ceiling_gate_test.go) now compares the two source
+// literals, and raising the constant here turns that gate red instead of
+// leaving /ui silently capped at the old value. That site stays on record as a
 // STRUCTURAL waiver in the clampdisclosure ledger
 // (internal/citest/clampdisclosure, disclosureWaivers), because /ui answers in
-// server-rendered HTML and has no request_adjusted field to disclose through.
-// Whether the two should be unified is aihub#552, filed 2026-09-09 and open.
+// server-rendered HTML and has no request_adjusted field to disclose through —
+// the ruling kept the site, so the waiver stands.
 //
 // This comment read "This is the ONLY place a recall page size is bounded" until
 // 2026-09-09. It was false when written. aihub#551 corrected it (owner ruling

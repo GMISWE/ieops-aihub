@@ -1301,15 +1301,18 @@ var openISODate = regexp.MustCompile(`\b20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]
 // going red the moment the gap it covers closes — which is a stronger property
 // than maxHistoricalQuoteRows has, and it is available here only because the
 // waiver names a card rather than counting rows.
-var openCitationWaivers = map[string]string{
-	"pf_remember": "aihub#445 holds docs/mcp-cards/pf_remember.md with a live attempt " +
-		"(status `running`, checked 2026-09-08) and that card's first Open bullet IS " +
-		"#445's subject — §6.4 item 4, the memory-type CHECK. Editing it from aihub#483 " +
-		"would take the file lock out from under a rebase in flight. Its one undated " +
-		"citation is `aihub#459`, which was still `queued` at that check, so the bullet " +
-		"is TRUE — only undated. Delete this entry once #445 lands; the arm will already " +
-		"be telling you to.",
-}
+//
+// 🟢 EMPTY since aihub#459 (2026-09-09), and that is the arm working as designed
+// rather than an absence of need. The single entry waived
+// docs/mcp-cards/pf_remember.md because aihub#445 held that file with a live
+// attempt while its Open bullets went undated. aihub#445 is now `wrapped` (closed
+// 2026-09-08), the file is free, and both of that card's Open citations have been
+// dated — one re-checked, one deleted because aihub#459 landed the ruling it was
+// waiting for. The exemption's own reason said "delete this entry once #445 lands;
+// the arm will already be telling you to", and it was: STALE_WAIVER fires the
+// moment the gap closes, which is what makes this map self-emptying rather than a
+// list that accumulates.
+var openCitationWaivers = map[string]string{}
 
 // TestContractCardOpenSectionsAreFalsifiable is K11.
 //

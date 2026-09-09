@@ -6,19 +6,22 @@ package server
 // routes_memory_reinforce_honesty_test.go asserts the shape of the code and can
 // run anywhere. It cannot run the defect: the bug was a divergence between a
 // response body and a stored row, and observing that needs a row. So this file
-// reproduces the reported sequence against a real database — reinforce with
-// `strength_delta: 0.5` twice — and compares each response against
-// memories.base_strength read straight back out.
+// drives the real handler against a real database and compares every published
+// base_strength against memories.base_strength read straight back out.
 //
 //	AIHUB_TEST_DB='postgres://postgres:…@localhost:5432/aihub_test?sslmode=disable' \
 //	  go test ./internal/server/ -run TestReinforceMemory_ -v -count=1
 //
-// 🔴 The criterion is response == column, NOT response == 3. Writing 3 into the
-// assertion would pin today's truncation rule, and aihub#459 may yet decide that
-// a fractional delta is refused, rounded, or made storable by widening the
-// column. Under all three of those the response must still equal the row; only
-// the number changes. The arm that pins the number is the no-op arm below, and
-// it says in one place why it is allowed to.
+// 🟢 REVISED BY aihub#459 (2026-09-09), which is the revision the previous
+// version of this comment asked for by name. It said: "The criterion is
+// response == column, NOT response == 3 … aihub#459 may yet decide that a
+// fractional delta is refused, rounded, or made storable by widening the column.
+// Under all three of those the response must still equal the row; only the
+// number changes." The owner ruled REFUSED, so the sequence this file used to
+// reproduce verbatim — a row at 3, reinforced twice with `strength_delta: 0.5`
+// — is now a 400 before the first query, and the arm that pinned `3.0` is gone
+// with the mechanism it described. The criterion itself is unchanged and still
+// asserted, on integral deltas.
 
 import (
 	"context"
@@ -52,10 +55,13 @@ func seedReinforceableMemory(t *testing.T, pool *pgxpool.Pool, proj, author, id 
 	return id
 }
 
-// callReinforce drives the real handler. No attempt credentials: the memory is
-// experience.*, so enforceMethodologyAttemptGate's verify-if-supplied branch
-// asks for none.
-func callReinforce(t *testing.T, pool *pgxpool.Pool, memID, body string, uc *UserContext) *httptest.ResponseRecorder {
+// callReinforceRaw drives the real handler and returns whatever it answered. No
+// attempt credentials: the memory is experience.*, so
+// enforceMethodologyAttemptGate's verify-if-supplied branch asks for none.
+//
+// Split from callReinforce by aihub#459: a rejection is now one of the outcomes
+// this file has to observe, and a helper that requires 200 cannot see one.
+func callReinforceRaw(t *testing.T, pool *pgxpool.Pool, memID, body string, uc *UserContext) *httptest.ResponseRecorder {
 	t.Helper()
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPatch, "/v1/memories/"+memID+"/reinforce", strings.NewReader(body))
@@ -66,8 +72,36 @@ func callReinforce(t *testing.T, pool *pgxpool.Pool, memID, body string, uc *Use
 	c.SetParamValues(memID)
 	setUser(c, uc)
 	require.NoError(t, handleReinforceMemory(pool)(c))
+	return rec
+}
+
+// callReinforce is callReinforceRaw for the calls that must succeed.
+func callReinforce(t *testing.T, pool *pgxpool.Pool, memID, body string, uc *UserContext) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := callReinforceRaw(t, pool, memID, body, uc)
 	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
 	return rec
+}
+
+// reinforceRowState reads back the two columns the handler mutates and publishes.
+func reinforceRowState(t *testing.T, pool *pgxpool.Pool, id string) (float64, int) {
+	t.Helper()
+	var bs float64
+	var count int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT base_strength, activation_count FROM memories WHERE id = $1`, id).Scan(&bs, &count))
+	return bs, count
+}
+
+// reinforceEventCount counts the memory_reinforced events the project holds.
+// seedReinforceableMemory clears them, so this measures one run.
+func reinforceEventCount(t *testing.T, pool *pgxpool.Pool, proj string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM agent_events WHERE project=$1 AND event_type='memory_reinforced'`,
+		proj).Scan(&n))
+	return n
 }
 
 // storedBaseStrength reads the column back. Typed float64 to match what the
@@ -91,14 +125,30 @@ func reinforceRespBaseStrength(t *testing.T, rec *httptest.ResponseRecorder) flo
 	return body.BaseStrength
 }
 
-// TestReinforceMemory_ResponseMatchesTheStoredBaseStrength is the reported
-// sequence, verbatim: a row at 3, reinforced twice with strength_delta 0.5.
+// TestReinforceMemory_ResponseMatchesTheStoredBaseStrength holds aihub#475's
+// criterion — every published base_strength must be the one the column holds —
+// and, since aihub#459, records what the endpoint does with the input that used
+// to make the two disagree.
 //
-// Before the fix, both calls answered 3.5 while the row stayed at 3, so the
-// second call — which had read 3 back and added 0.5 again — reported the same
-// "progress" as the first. Two calls rather than one is what separates "the
-// number is rounded somewhere" from "this is a permanent no-op reporting
-// success": one call alone cannot show that the value never moves.
+// Arm 1 is the reported sequence's successor. `strength_delta: 0.5` is now a
+// 400, and this asserts it at the level only a database can: the refusal leaves
+// the row EXACTLY as it was — same base_strength, same activation_count — and
+// writes no memory_reinforced event. routes_memory_reinforce_integral_test.go
+// proves with a nil pool that the guard runs before the pool is reached; this
+// arm is what "before" means to the data, and it is the one that would catch a
+// guard moved below the UPDATE.
+//
+// 🔴 Arm 2 is WEAKER than it was, and saying so is the point of this paragraph.
+// With every accepted delta integral and every stored value SMALLINT, a handler
+// that published its own arithmetic and one that published the row can no longer
+// DISAGREE, so `response == column` has stopped discriminating between them here
+// — it is a consistency check now, not a detector. What still discriminates is
+// DB-free and always-on: TestReinforceResponseReportsTheStoredBaseStrength
+// parses the shipped handler and requires the published base_strength to be an
+// identifier scanned from a statement whose SQL says RETURNING base_strength.
+// That gate, not this file, is what a later refactor back to a bare Exec would
+// break. Deleting it because "the DB test covers it" would be deleting the only
+// arm that does.
 func TestReinforceMemory_ResponseMatchesTheStoredBaseStrength(t *testing.T) {
 	pool := setupStepTestDB(t)
 	uid, proj := seedStepTestUserAndProject(t, pool)
@@ -114,33 +164,47 @@ func TestReinforceMemory_ResponseMatchesTheStoredBaseStrength(t *testing.T) {
 		APIKeyID:     "k_475",
 	}
 
+	// ── Arm 1: a fractional delta is refused and writes nothing (aihub#459) ──
+	rec := callReinforceRaw(t, pool, memID,
+		`{"additional_context":"fractional","strength_delta":0.5}`, writer)
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"strength_delta 0.5 must be refused: the column is SMALLINT, so before "+
+			"aihub#459 this stored 3 and answered 3.5 — body=%s", rec.Body.String())
+	require.Contains(t, rec.Body.String(), "strength_delta",
+		"the rejection must name the caller's own argument; body=%s", rec.Body.String())
+
+	bs, count := reinforceRowState(t, pool, memID)
+	require.Equal(t, 3.0, bs,
+		"the refused call moved base_strength to %v; a 400 must leave the row alone", bs)
+	require.Equal(t, 0, count,
+		"the refused call bumped activation_count to %d. reinforce mutates more than "+
+			"base_strength, so a guard placed after the UPDATE would return the right "+
+			"status over the wrong row — which is the failure a status-only assertion "+
+			"cannot see", count)
+	require.Equal(t, 0, reinforceEventCount(t, pool, proj),
+		"the refused call emitted a memory_reinforced event; the durable history would "+
+			"then record a reinforcement the caller was told did not happen")
+
+	// ── Arm 2: the criterion, on the deltas that are still accepted ──────────
 	first := reinforceRespBaseStrength(t,
-		callReinforce(t, pool, memID, `{"additional_context":"first","strength_delta":0.5}`, writer))
-	afterFirst := storedBaseStrength(t, pool, memID)
+		callReinforce(t, pool, memID, `{"additional_context":"first","strength_delta":1}`, writer))
+	afterFirst, _ := reinforceRowState(t, pool, memID)
 	require.Equal(t, afterFirst, first,
 		"THE criterion: the 200 body said base_strength=%v and the column holds %v. A "+
-			"response may not name a value the row does not hold — whatever aihub#459 "+
-			"decides may be stored, this equality holds under all three of its options",
+			"response may not name a value the row does not hold",
 		first, afterFirst)
+	require.Equal(t, 4.0, afterFirst,
+		"an integral delta must still take effect — without this the equality above is "+
+			"satisfied by a handler that reinforces nothing and reports the unchanged row")
 
 	second := reinforceRespBaseStrength(t,
-		callReinforce(t, pool, memID, `{"additional_context":"second","strength_delta":0.5}`, writer))
-	afterSecond := storedBaseStrength(t, pool, memID)
+		callReinforce(t, pool, memID, `{"additional_context":"second","strength_delta":1}`, writer))
+	afterSecond, countAfter := reinforceRowState(t, pool, memID)
 	require.Equal(t, afterSecond, second,
 		"the second call's body said base_strength=%v and the column holds %v", second, afterSecond)
-
-	// The no-op, named. This arm DOES pin the number, and it is allowed to
-	// because it is the defect's mechanism rather than a policy: pgx truncates
-	// toward zero client-side (internal/domain,
-	// TestBaseStrengthIsTruncatedByThePgxInt2Codec), so 3 + 0.5 twice is 3 twice.
-	// If aihub#459 changes what may be stored, THIS is the arm that must be
-	// revisited — deliberately, and in that work item.
-	require.Equal(t, 3.0, afterSecond,
-		"two reinforces of +0.5 moved the stored strength to %v; the mechanism this fix "+
-			"reports honestly is that they move it nowhere", afterSecond)
-	require.Equal(t, first, second,
-		"the caller was handed %v then %v for two identical no-ops; before aihub#475 both "+
-			"were 3.5, which is the progress report that never happened", first, second)
+	require.Equal(t, 5.0, afterSecond)
+	require.Equal(t, 2, countAfter,
+		"two accepted reinforces after one refused one must leave activation_count at 2")
 
 	// The durable record has to agree with the body. An honest 200 over a lying
 	// event would leave the false number in the history a later reader
@@ -161,6 +225,8 @@ func TestReinforceMemory_ResponseMatchesTheStoredBaseStrength(t *testing.T) {
 		evt.BaseStrength, afterSecond)
 	require.Equal(t, 2, evt.ActivationCount,
 		"activation_count is read back from the same RETURNING and must be the row's")
+	require.Equal(t, 2, reinforceEventCount(t, pool, proj),
+		"exactly the two accepted calls may have emitted an event")
 }
 
 // TestReinforceMemory_IntegralDeltaStillMoves is the positive control for the

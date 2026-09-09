@@ -730,6 +730,13 @@ func memoryTypeParamDesc() string {
 // tools_memory_test.go asserts this string against domain.MinBaseStrength /
 // domain.MaxBaseStrength so the two cannot drift apart again.
 //
+// aihub#459 (owner ruling 2026-09-09) adds the word "integer", and it is not a
+// stylistic addition: the published TYPE is still `number` because that is what
+// the JSON wire carries, so the description is the only place a caller is told
+// that 2.5 — in range, and a perfectly good `number` — is a 400. The same test
+// gates the word against the behaviour, so dropping it here or dropping the
+// enforcement there both go red.
+//
 // aihub#445 / aihub#411 T2-6: `type` is NOT an enum any more. See
 // memoryTypeParamDesc.
 func rememberSchema() json.RawMessage {
@@ -739,7 +746,7 @@ func rememberSchema() json.RawMessage {
 		"content":              prop("string", "Memory content"),
 		"visibility":           prop("string", "private|project|team|admin"),
 		"work_item_id":         prop("string", "Associated work item ID"),
-		"base_strength":        prop("number", "Initial strength, 1-5 (default 3)"),
+		"base_strength":        prop("number", "Initial strength, integer 1-5 (default 3). A fractional value is refused"),
 		"attrs":                prop("object", "Additional attributes."+jsonObjectPropNote),
 		"expires_at":           prop("string", "Expiry timestamp (RFC3339)"),
 		"dedup_mode":           prop("string", "Deduplication mode"),
@@ -774,19 +781,27 @@ func activateMemorySchema() json.RawMessage {
 // reinforceMemorySchema is pf_reinforce_memory's published InputSchema — hop 1.
 //
 // aihub#475: strength_delta used to publish the bare words "Strength delta",
-// which is true and useless. The stored column is SMALLINT, so the sum is
+// which is true and useless. The stored column is SMALLINT, so the sum was
 // truncated toward zero on the way in and a delta smaller than 1 in magnitude
-// normally stores nothing at all — a caller reading the old description had no
-// way to know that, and before the same work item the 200 body reported the
-// untruncated arithmetic, so the call looked like it had worked. The text below
-// states the granularity and points at the response, which is now the row's own
-// value. It deliberately does NOT say a fractional delta is rejected or rounded:
-// it is neither today, and which of those it should become is aihub#459's.
+// stored nothing at all — a caller reading the old description had no way to
+// know that, and before the same work item the 200 body reported the
+// untruncated arithmetic, so the call looked like it had worked. That text
+// stated the granularity and pointed at the response, and deliberately stopped
+// short of saying a fractional delta was rejected or rounded, because it was
+// neither.
+//
+// aihub#459 (owner ruling 2026-09-09) settled it: refused. So the description
+// no longer describes truncation, and that removal is the point — a caller who
+// is told "a delta under 1 usually changes nothing" will still send 0.5 and
+// then wonder; one who is told it is refused cannot. The truncation itself has
+// not gone anywhere (see domain.ValidateIntegralStrength), it has just stopped
+// being reachable through this parameter, and a description that keeps
+// explaining an unreachable mechanism is teaching the caller the wrong model.
 func reinforceMemorySchema() json.RawMessage {
 	return objectSchema(map[string]any{
 		"memory_id":          prop("string", "Memory ID"),
 		"additional_context": prop("string", "Additional context for the memory"),
-		"strength_delta":     prop("number", "Strength delta added to the memory's stored strength, then clamped to 1-5. Stored as a whole number: a fractional result is truncated toward zero, so a delta under 1 in magnitude usually changes nothing. The response reports the value actually stored."),
+		"strength_delta":     prop("number", "Integer delta added to the memory's stored strength, then clamped to 1-5. A fractional delta is refused with a 400: strength is a whole number. The response reports the value actually stored."),
 		"work_item_id":       prop("string", "Work item ID (for credential injection)"),
 	}, []string{"memory_id", "additional_context", "work_item_id"})
 }
@@ -825,13 +840,18 @@ func buildReinforceMemoryBody(args map[string]any, sf *config.StateFile) map[str
 // RememberRequest and calls Remember. It used to publish no range at all, which
 // is the quieter half of T1-3: silence about a constraint is not neutral when the
 // sibling tool is publishing a wrong one.
+//
+// aihub#459: and for the same reason the integrality is published here too. One
+// guard covers both tools, so a caller told about it by only one of them would
+// meet the other's 400 with no warning — which is the T1-3 shape again, in the
+// direction of silence rather than of a wrong answer.
 func updateMemorySchema() json.RawMessage {
 	return objectSchema(map[string]any{
 		"memory_id":     prop("string", "Memory ID (any id in the lineage)"),
 		"content":       prop("string", "New content (omit to keep current)"),
 		"visibility":    prop("string", "New visibility (omit to keep current)"),
 		"tags":          prop("array", "New tags (omit to keep current)"),
-		"base_strength": prop("number", "New base strength, 1-5 (omit to keep current)"),
+		"base_strength": prop("number", "New base strength, integer 1-5 (omit to keep current). A fractional value is refused"),
 		"work_item_id":  prop("string", "Work item ID (for credential injection)"),
 	}, []string{"memory_id", "work_item_id"})
 }

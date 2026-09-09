@@ -4,7 +4,7 @@
 {
   "tool": "pf_remember",
   "description_sha256": "bec195df7750ddb2b3b4714765c5ded5e0a03f968e184a781d347c9e3f553fc7",
-  "input_schema_sha256": "026d81dc9e37c2b6c4f49d1aa1b9f1f25cfc59d712ce7e540846ffca6b35cb01",
+  "input_schema_sha256": "961f2f09dcd05e15d96516d4bdf2292ee1b5054d6b58ccff88fc9e9677fc86dd",
   "params": {
     "attrs": {
       "type": "object",
@@ -88,7 +88,7 @@ set and the accepted set are one set only if nothing closed is published.
 | `content` | string | yes | memory content |
 | `visibility` | string | yes | `private\|project\|team\|admin` |
 | `work_item_id` | string | no | associated work item |
-| `base_strength` | number | no | "Initial strength, 1-5 (default 3)" |
+| `base_strength` | number | no | "Initial strength, integer 1-5 (default 3). A fractional value is refused" |
 | `attrs` | object | no | additional attributes; a non-object — including a JSON-encoded string of one — is a 400 |
 | `expires_at` | string | no | RFC3339 |
 | `dedup_mode` | string | no | deduplication mode |
@@ -106,6 +106,18 @@ with the driver's constraint text. The `aihub#412` corpus records **13 `pf_remem
 calls carrying `base_strength`, every value inside the published range and outside the
 enforced one, against 13 `pf_remember` INTERNAL_ERRORs naming
 `memories_base_strength_check`.** That is §6.1 T1-3's owner ruling, now landed.
+
+**The range was only half of it, and `aihub#459` closed the other half on
+2026-09-09: the value must also be a WHOLE NUMBER.** The published type is `number`
+and the column is `SMALLINT`, so `2.5` used to satisfy every guard, get truncated
+toward zero by pgx's int2 codec client-side — no error, so Postgres never saw the
+fraction — and be stored as `2` under a 200. `aihub#475` measured that and made the
+response report the row's own value rather than Go's arithmetic, which made the
+answer honest without making it what the caller asked for. The owner's ruling picked
+refusal over rounding and over widening the column, so the value is now a 400. The
+type stays `number` — that is what JSON carries — which is exactly why the
+description had to say `integer`: with the type unchanged, the published text is the
+only place a caller can learn that an in-range `number` is refused.
 
 `tags` reached the endpoint unpublished until `aihub#425`: this handler forwards its
 whole argument map, so the value was on the wire and reachable only by guessing a
@@ -179,6 +191,20 @@ use either.
   (`Remember`), so it covers `pf_remember`, `pf_save_artifact` and `pf_update_memory`
   alike — `internal/domain/memory.go` (`UpdateMemory`) builds a `RememberRequest` and
   goes through the same function.
+- **§6.1 T1-3 residual (owner ruling 2026-09-09) — LANDED** (`aihub#459`). Refuse a
+  non-integral `base_strength`; do not round it in Go, and do not widen the column.
+  `internal/domain/memory.go` (`ValidateIntegralStrength`) is the rule, called by
+  (`validateBaseStrength`) after the range check and by
+  `internal/server/routes_memory.go` (`handleReinforceMemory`) on `strength_delta`,
+  so one column keeps one answer about what may be in it. The order of the two
+  checks is deliberate and pinned by a test: a value that is out of range AND
+  fractional — which is every `base_strength` the `aihub#412` corpus carried — still
+  takes the RANGE error, because that is the constraint it violated first.
+  `internal/mcp/tools_memory_test.go`
+  (`TestPublishedBaseStrengthRangeIsTheEnforcedOne`) now gates the word `integer` in
+  the description against the behaviour of `internal/domain/memory.go` (`Remember`)
+  itself, driven with a nil pool, so a guard that exists and is never called reads
+  as red rather than as green.
 - **§6.2 T2-6 (owner ruling) — LANDED** (`aihub#445`). Keep the leniency, stop
   calling the 13-value list an enum in a schema the SDK will not enforce, and add
   the DB CHECK for the four prefixes. Both halves shipped together, because either
@@ -220,7 +246,7 @@ use either.
   warning. Read it with `obj_description` on `pg_constraint`. What remains open is a
   fact about the data, not about this ruling: whether production holds any such rows
   is unknown until the migration runs there, and if it does, `convalidated` stays
-  false until someone settles them and runs the one-line `VALIDATE`.
-- **`aihub#459` is open and is the residual of T1-3.** The column is `SMALLINT` while
-  both Go and the published schema say `number`, so an in-range FRACTIONAL value still
-  cannot be stored as stated. Deliberately out of scope of the range fix.
+  false until someone settles them and runs the one-line `VALIDATE`. Re-checked
+  2026-09-09: `aihub#445` is `wrapped` (closed 2026-09-08), so the migration is
+  merged and this is now a question about a deployment rather than about work in
+  flight — read `obj_description` on `pg_constraint` wherever it has run.

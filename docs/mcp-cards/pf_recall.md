@@ -4,7 +4,7 @@
 {
   "tool": "pf_recall",
   "description_sha256": "52355ed415a03b181b816da58b68327c4e4c5ca44cfab692bdbeb2d8bbc00b0a",
-  "input_schema_sha256": "b34d958f730c3fa9e79a1e47d105363ec4df53f492f5262e3c1342022a45960e",
+  "input_schema_sha256": "441ec21f5467f1204d74e5415c84dce83cef1ce58479f6584fe4ac4d13ba46f8",
   "params": {
     "cursor": {
       "type": "string",
@@ -45,10 +45,6 @@
       "type": "array",
       "required": false
     },
-    "visibility": {
-      "type": "string",
-      "required": false
-    },
     "work_item_id": {
       "type": "string",
       "required": false
@@ -67,7 +63,7 @@
 
 ## hop 0-1 — what the caller is told
 
-Twelve parameters. This is the tool `aihub#148` was filed against, and the split
+Ten parameters. This is the tool `aihub#148` was filed against, and the split
 between "published" and "forwarded" here is the repo's reference example of a hop-2
 defect.
 
@@ -76,7 +72,6 @@ defect.
 | `project` | string | yes | project name |
 | `query` | string | no | semantic search query |
 | `type` | array | no | ARRAY of type names; `.*` is a prefix wildcard; `\|` is NOT a separator |
-| `visibility` | string | no | filter by visibility |
 | `work_item_id` | string | no | filter by work item |
 | `top_k` | string | no | default 20, ceiling 200; a JSON number is accepted |
 | `similarity_threshold` | number | no | cosine 0-1, vector half only, **OFF by default** |
@@ -123,6 +118,41 @@ somewhere in the prose. The row was four cells wide and its whole hop-1 promise
 was the two words "default 0.3" — but it did carry the backticked name, so K4 was
 satisfied. K4 cannot tell "documented" from "listed", which is the gap the hop-4
 arm added by this work item closes from the other side.
+
+`visibility` was published here as "Filter by visibility" from the day this tool
+was added (`50bfc35`, where all three hops are already present — unlike
+`recency_weight`, forwarding never lagged publication) until `aihub#484` withdrew
+it on 2026-09-09, forwarded in
+`internal/mcp/tools_memory.go` (`recallStringParams`) and bound by
+`internal/server/routes_memory.go` (`handleRecall`) into
+`internal/domain/memory.go` (`RecallRequest`). It is the second instance of the
+class above and the reason the two rows read differently: it was found by
+`internal/mcp/recall_hop4_reader_gate_test.go` on that gate's FIRST run, having
+been written for `recency_weight`.
+
+Hops 1-3 were intact and hop 4 was empty. None of the six functions in
+`internal/domain` that take a `*RecallRequest` read the field, so a caller
+sending `visibility=project` got the whole page — no error, no warning, and a
+response byte-identical to the one they would have got without it. The
+visibility predicates that DO exist on both recall paths are authorization
+scoping derived from `CallerRole`/`CallerUserID` — `AND (visibility != 'private'
+OR author_user_id = $n)` and `AND visibility != 'admin'`, SQL literals rather
+than the caller's filter. That is why a name-only search made the field look
+read, and why withdrawing it changes nothing about who can see what.
+
+⚠️ Its disposition was **not** the same call as `recency_weight`'s, which is why
+it was tracked for a work item of its own rather than folded in. `recency_weight`
+duplicated ordering the code already had, so implementing it was measurably a
+regression. There is no such duplicate here: the recall path genuinely cannot
+filter by visibility, so implementing it would have been a real capability, and
+choosing not to build one is an owner's call rather than an engineering finding.
+The owner ruled withdraw on 2026-09-09, on **demand rather than harm** — over the
+transcript corpus (850 raw `pf_recall` calls deduplicated by `tool_use` id to
+835, spanning 2026-06-23 to 2026-09-09) ZERO carried a `visibility` argument. A
+second corpus window recorded inside this repo agrees:
+`../audits/aihub-412-corpus-facts/param-types-vs-schema.md` marks this tool's
+`visibility` row "published, never observed". Nothing published was ever used, so
+the withdrawal costs no caller a capability they had.
 
 The `type` description exists because three skill templates taught a single
 pipe-separated string in place of the array, nothing split it, and the resulting
@@ -213,6 +243,13 @@ passing nothing returned the same 20 items in the same order.
   `$n::timestamptz` and a token the server never issued came back 500 with the
   driver's text. Cursors minted before `aihub#239` carry the timestamp alone and
   still pass.
+- **There is no caller-facing visibility filter, and there never was one.** The
+  `visibility` clauses in both recall paths are authorization scoping the server
+  derives from the caller's own role and id, so they narrow a page the same way
+  whether or not the caller says anything. The published parameter that appeared
+  to offer control over them was withdrawn by `aihub#484` on 2026-09-09 — see
+  hop 0-1. What a caller can still do is read each row's `visibility` in the
+  response; what they cannot do is select on it.
 - **`work_item_id` must be the canonical id**; a slug matches nothing and answers 200
   with an empty list.
 - **`type` entries that match nothing come back in `unmatched_types`**, which is what

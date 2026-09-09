@@ -644,7 +644,6 @@ type RememberRequest struct {
 type RecallRequest struct {
 	Project             string   `json:"project"`
 	Types               []string `json:"types,omitempty"`
-	Visibility          string   `json:"visibility,omitempty"`
 	WorkItemID          *string  `json:"work_item_id,omitempty"`
 	Query               string   `json:"query,omitempty"`
 	TopK                int      `json:"top_k,omitempty"`

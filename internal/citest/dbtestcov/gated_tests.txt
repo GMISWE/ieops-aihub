@@ -59,8 +59,14 @@
 # re-derive it in flight because it was written nowhere, and whoever forgets
 # this file is sent straight to it. On 2026-09-08 aihub#442 landed three
 # DB-gated heartbeat tests without their lines, and main's "aihub#303 DB-test
-# coverage gate" step went red — "232 entries, inventory measured 235" — until
-# the next commit added them (aihub#451).
+# coverage gate" step went red — "232 entries, inventory measured 235", measured
+# ON MAIN — until the next commit added them (aihub#451).
+#
+# ⚠️ The same incident is written up in .github/workflows/ci.yml's ledger with
+# the pair 233/236, and the two do NOT contradict each other: that one was taken
+# on aihub#451's branch, which already carried its own test and its own line, so
+# both sides are one higher. Each pair is right for its own tree. Neither said
+# which tree until aihub#493; both say so now.
 internal/domain TestAcquireLocksReportsEveryHeldLock
 internal/domain TestActivate_DoesNotReviveSupersededVersion
 internal/domain TestActivate_RedactedSuccessorDoesNotCountAsSupersession

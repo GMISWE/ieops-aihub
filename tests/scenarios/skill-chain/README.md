@@ -73,7 +73,7 @@ Human wi's flow: Session 2 → pf-execute runs spec/plan inline, dispatches codi
 |---|---|---|---|
 | SC-01 | fix_bug full cycle: pf-work→pf-execute(prepare_context→code_change→commit_and_pr)→pf-stop | fix_bug | 1 (auto) |
 | SC-02 | feature with spec+plan: pf-work→pf-spec→pf-plan→code_change→commit_and_pr→review→pf-stop | feature | 2 (human-led) |
-| SC-03 | pf-status LCRS six-segment view with wi's in all states | mixed | any |
+| SC-03 | pf-status LCRS seven-segment view with wi's in all states | mixed | any |
 | SC-04 | pf-retro extracts learnings after wrap | any | any |
 | SC-05 | pf-execute drives fix_bug wi end-to-end (auto, Session 1) | fix_bug | 1 (auto) |
 | SC-06 | pf-stop pause and resume lifecycle | any | any |

@@ -1285,10 +1285,18 @@ func handleUpdateMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			return domainErr(c, err)
 		}
 
-		// Emit memory_updated event (best effort — memory_updated is not in
-		// chk_evt_work_item_id's whitelist, so this only lands when the memory
-		// carries a work_item_id; a constraint violation here must not fail
-		// the request, matching handleReinforceMemory's memory_reinforced emission).
+		// Emit memory_updated event (best effort). memory_updated IS in
+		// chk_evt_work_item_id's NULL-wi whitelist — migration 0026 added it there
+		// for exactly this handler ("emitted without a work_item_id when the
+		// updated memory has none") and 0036 carries it forward — so BOTH branches
+		// below are legal and a memory with no work item still gets its event.
+		// This comment used to say the opposite, and the else-branch three lines
+		// down refuted it: the code inserts a NULL work_item_id row that the
+		// comment said the constraint would reject (corrected by aihub#493). The
+		// branch split is about STAMPING the owning work item when there is one,
+		// not about what the CHECK permits. A constraint violation here must still
+		// not fail the request, matching handleReinforceMemory's memory_reinforced
+		// emission.
 		payload, _ := json.Marshal(map[string]any{
 			"memory_id":     memID,
 			"new_memory_id": newHead.ID,

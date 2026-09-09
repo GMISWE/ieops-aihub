@@ -174,62 +174,76 @@ const (
 // same reasoning applies to every number below.
 const (
 	// floorCards is the card-side twin of floorTools, which this file reuses from
-	// universal_contract_gate_test.go rather than restating. Measured 2026-09-08:
-	// 45 cards for 45 published tools.
+	// universal_contract_gate_test.go rather than restating. K1/K2 prints the card
+	// and tool counts these bound.
 	//
-	// ⚠️ Re-derive these, do not adjust them by arithmetic. Each arm PRINTS the
-	// number it measured, so
+	// ⚠️ Re-derive these, do not adjust them by arithmetic, and do NOT write the
+	// derived value into the comments here. Each arm PRINTS the number it
+	// measured, so
 	//
 	//	GOWORK=off go test ./internal/mcp/ -run '^TestContractCard' -count=1 -v
 	//
-	// is the whole recipe. aihub#446 found two of the values below stale against
-	// the tree they were written on (floorCardParams said 232 where K3 measured
-	// 231, floorCardAnchors said 207 across 30 files where K6 measured 258 across
-	// 38), which is what re-deriving catches and copying forward does not.
+	// is the whole recipe, and each constant below names the arm whose printed
+	// line carries its current value.
+	//
+	// 🔴 Why the values are no longer restated here (aihub#493). They used to be,
+	// each one carrying the date it was taken on, and the date stopped nothing:
+	// aihub#446 found two stale against the very tree they were written on
+	// (floorCardParams claimed 232 where K3 printed 231; floorCardAnchors claimed
+	// 207 across 30 files where K6 printed 258 across 38), aihub#483 confirmed
+	// five more stale, and re-running the arms one day later — after 21 unrelated
+	// PRs — put SEVEN of the nine back out of date. Nothing compared a number in
+	// this block against the arm that prints it, so the only thing a restated
+	// value could do was be wrong. measured_floor_comment_gate_test.go
+	// (TestMeasuredFloorCommentsCarryNoValue) now keeps them out.
 	floorCards = 40
-	// floorCardParams bounds the total parameter rows the cards pin. Measured
-	// 2026-09-08: 222 across the 45 tools.
+	// floorCardParams bounds the total parameter rows the cards pin against the
+	// live contract. Current value: the K3 line.
 	floorCardParams = 180
 	// floorCardAnchors bounds how many file+symbol citations the anchor arm
 	// actually resolved. Without it, a card set that cited nothing would pass K6
-	// by having nothing to check. Measured 2026-09-08: 240 across 38 files.
+	// by having nothing to check. Current value: the K6 line.
 	floorCardAnchors = 60
 	// floorCardSections bounds how many required sections K4 found and measured.
 	// The arm quantifies over sections, so a card set the walk could not split
-	// into sections would satisfy it by having none. Measured 2026-09-08: 270
-	// (45 cards x 6 sections).
+	// into sections would satisfy it by having none. Current value: the K4/K5
+	// line.
 	floorCardSections = 200
 	// floorCardCorpus bounds how many cards K7 compared against a corpus record.
 	// Without it, deleting the corpus records AND the card lists together leaves
-	// K7 comparing nothing and reporting green. Measured 2026-09-08: 42 of 45
-	// cards have a record.
+	// K7 comparing nothing and reporting green. Current value: the K7 line.
 	floorCardCorpus = 30
 	// floorCardQuotes bounds how many verbatim quotes K9 checked against the live
 	// schema. A card set that quoted nothing would pass that arm by quoting
-	// nothing. Measured 2026-09-08: 22 leading-quote hop 0-1 cells across 18 cards.
+	// nothing. Current value: the K9 line.
 	floorCardQuotes = 12
 	// floorOpenBullets bounds how many `## Open` bullets K11 read. The arm
 	// quantifies over bullets, so a card set whose Open sections were emptied down
-	// to K4's 16-character floor would satisfy it by asserting nothing. Measured
-	// 2026-09-08: 55 bullets across the 45 cards.
+	// to K4's 16-character floor would satisfy it by asserting nothing. Current
+	// value: the first count on the K11 line.
 	floorOpenBullets = 40
 	// floorOpenCitations bounds how many of those bullets named a work item, i.e.
 	// how many the date half of K11 actually checked. Without it, deleting every
 	// citation from every Open section leaves that half comparing nothing and
 	// reporting green — and deleting the citation is exactly the cheap way to
-	// comply with a rule about citations. Measured 2026-09-08: 22 citing bullets.
+	// comply with a rule about citations. Current value: the "naming a work item"
+	// count on the K11 line.
 	floorOpenCitations = 14
 )
 
 // maxPendingCards is a CEILING ON DEBT, not a floor on a measurement, so unlike
-// every constant above it IS set at the measured value on purpose. Lowering it
-// happens for free as cards get written; raising it has to be a deliberate edit
-// somebody signs off on. Measured 2026-09-08: 0 cards are pending.
+// every constant above it IS set at the measured value on purpose — so the
+// constant IS the number and there is nothing left to restate in prose. Lowering
+// it happens for free as cards get written; raising it has to be a deliberate
+// edit somebody signs off on. K4/K5 prints the pending count beside this
+// ceiling, which is where to read it from.
 const maxPendingCards = 0
 
 // maxHistoricalQuoteRows is the same kind of ceiling for K9's escape hatch: the
 // number of hop 0-1 table rows allowed to carry cardHistoricalMarker and quote
-// text the live schema no longer publishes. Measured 2026-09-08: 0.
+// text the live schema no longer publishes. K9 prints the exempted count beside
+// the quotes it checked, and this ceiling is the measurement, so it is not
+// restated in prose here.
 //
 // 🔴 The ceiling is the reason the marker is safe to offer at all. An exemption
 // that costs one comment on one line is cheaper than reading the schema, so it
@@ -864,13 +878,18 @@ var cardGoPathRef = regexp.MustCompile("`((?:[\\w.-]+/)+[\\w.-]+\\.go)`(?: \\(`(
 // scripts/pf_docs_contract_check.py's C2 does not glob this directory either.
 //
 // Banned rather than globbed for, deliberately. A bare filename need not identify
-// a file: measured 2026-09-08, 8 .go basenames in this repo's 376 are used more
-// than once and main.go alone is used 5 times, so a glob would resolve some names
-// to whichever match it hit first. An anchor that passes while pointing somewhere
-// the author did not mean is worse than one that goes red, and rejecting the form
-// outright costs the author one directory name. It is also the rule C1 already
-// enforces against line numbers, for the same reason — a citation has to identify
-// exactly one place.
+// a file: this repo has .go basenames carried by more than one file, main.go by
+// several, so a glob would resolve some names to whichever match it hit first.
+// The counts are deliberately not written here — they moved twice in two days
+// while this comment claimed one pair (see the floor block above and
+// measured_floor_comment_gate_test.go). Re-derive with
+//
+//	git ls-files '*.go' | xargs -n1 basename | sort | uniq -c | awk '$1>1'
+//
+// An anchor that passes while pointing somewhere the author did not mean is
+// worse than one that goes red, and rejecting the form outright costs the author
+// one directory name. It is also the rule C1 already enforces against line
+// numbers, for the same reason — a citation has to identify exactly one place.
 //
 // The class excludes "/", so this cannot also match a path-qualified anchor: there
 // is no backtick inside `internal/server/routes_step.go` for a match to start at.
@@ -898,8 +917,8 @@ func TestContractCardAnchorsResolve(t *testing.T) {
 		}
 		for _, m := range cardBareGoFileRef.FindAllStringSubmatch(string(raw), -1) {
 			t.Errorf("K6 ANCHOR_BARE_FILENAME: %s/%s cites `%s` with no directory. Cite the "+
-				"repo-relative path (`<dir>/%s`): 8 of this repo's 376 .go basenames are used "+
-				"more than once, so a bare name need not identify a file — nothing can check it "+
+				"repo-relative path (`<dir>/%s`): this repo carries .go basenames used by more "+
+				"than one file, so a bare name need not identify a file — nothing can check it "+
 				"and the next reader guesses which one was meant. This form was reported by "+
 				"nothing at all before aihub#473: cardGoPathRef requires a `/`, so it was the "+
 				"one anchor shape the gate could not see.",

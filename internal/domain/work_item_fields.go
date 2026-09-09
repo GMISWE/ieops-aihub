@@ -118,13 +118,21 @@ func MaxWorkItemGoalRunes() int { return maxWorkItemGoalRunes }
 // automated caller should not have to parse prose to retry correctly — which is
 // the entire difference between this and the 500 it replaces.
 func vocabularyErr(field, got string, allowed []string) *AihubError {
-	sort.Strings(allowed)
+	// Sort a COPY. Every caller today passes a freshly built slice (sortedKeys),
+	// so sorting in place is harmless on this tree — which is precisely why it
+	// would stay harmless-looking right up to the first caller that hands over a
+	// package-level slice and finds it reordered under it. The mutation is
+	// invisible from the call site, the failure would be in someone else's
+	// output, and the copy costs one allocation on an error path (aihub#493).
+	sorted := make([]string, len(allowed))
+	copy(sorted, allowed)
+	sort.Strings(sorted)
 	return NewErrDetails(ErrBadRequest,
-		fmt.Sprintf("%s %q is not a legal value; allowed: %v", field, got, allowed),
+		fmt.Sprintf("%s %q is not a legal value; allowed: %v", field, got, sorted),
 		map[string]any{
 			"field":   field,
 			"got":     got,
-			"allowed": allowed,
+			"allowed": sorted,
 		})
 }
 

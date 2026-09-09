@@ -374,11 +374,20 @@ const lockDeleteByKeySQL = `DELETE FROM resource_locks rl WHERE rl.resource_type
 // against a run_attempts snapshot that may already be stale.
 //
 // ⚠️ NOT every caller runs SERIALIZABLE, contrary to what this comment used to
-// assert. Measured 2026-09-07 (aihub#393):
+// assert. First measured 2026-09-07 (aihub#393), in run_attempts.go:
 //
-//	run_attempts.go:395   FnClaimWorkItem   BeginTx(IsoLevel: pgx.Serializable)
-//	run_attempts.go:1708  FnAcquireLocks    BeginTx(IsoLevel: pgx.Serializable)
-//	run_attempts.go:1263  FnForceTakeover   pool.Begin(ctx)   <- READ COMMITTED
+//	FnClaimWorkItem   BeginTx(IsoLevel: pgx.Serializable)
+//	FnAcquireLocks    BeginTx(IsoLevel: pgx.Serializable)
+//	FnForceTakeover   pool.Begin(ctx)   <- READ COMMITTED
+//
+// The three rows used to carry line numbers as well. All three were wrong by
+// aihub#493 two days later, and wrong a second time within that same day's
+// merges — the file moves under them, nothing checks them, and a reader who
+// followed one landed in an unrelated function and had no way to tell. The
+// function names are the anchor because they are what the compiler keeps true;
+// this is the rule scripts/pf_docs_contract_check.py's C1 already enforces under
+// docs/, applied here by hand because it does not reach .go comments. Re-derive
+// with `grep -n 'pool.Begin' internal/domain/run_attempts.go`.
 //
 // So on the FnForceTakeover path the gap above is reachable, not hypothetical:
 // two concurrent takeovers, or a takeover racing a claim, can each read a

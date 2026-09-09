@@ -1348,7 +1348,7 @@ func writeUsageMd(path string) error {
 /pf-work <wi_id>                # claim existing wi
 
 # Check status
-/pf-status                      # LCRS six-segment ready queue
+/pf-status                      # LCRS seven-segment ready queue
 
 # Layer 2 methodology (inside a claimed wi)
 /pf-spec  /pf-plan  /pf-execute  /pf-retro

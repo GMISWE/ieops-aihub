@@ -962,7 +962,18 @@ jobs:
       #             detail: the manifest equality check (233 entries against an
       #             inventory of 236) AND the coverage check (230/233, with the
       #             three "executed by NO CI step, so they SKIP forever and CI
-      #             stays green"). The aihub#451 entry above failed only the
+      #             stays green").
+      #
+      #             ⚠️ Read that 233/236 as measured on aihub#451's BRANCH, which
+      #             already carried its own test and its own manifest line — not
+      #             as what main showed. On main the same failure read
+      #             "232 entries, inventory measured 235", which is the pair
+      #             gated_tests.txt's own header records for this incident. Both
+      #             pairs are right for the tree they were taken on and they
+      #             differ by aihub#451's +1 on each side; two files telling one
+      #             incident with two different number pairs and neither saying
+      #             which tree it measured is what made them look contradictory
+      #             (aihub#493). The aihub#451 entry above failed only the
       #             first, because its step already named its test. A change
       #             that adds a test and forgets BOTH is the case this gate was
       #             built for, and it worked — what failed is that the PR was
@@ -4788,11 +4799,19 @@ jobs:
       # aihub#501 gave the six git-dependent tools a live arm, less the one
       # prose-only entry.
       #
-      # The other nine
-      # arms run in the always-on "Unit tests" step and compare one checked-in file
-      # with another; only this one can tell the cards apart from the running
-      # system. It cannot be folded into that step, because that step deliberately
-      # runs with AIHUB_TEST_DB unset (see the "aihub#242 DB tests" note above).
+      # Every other arm — K1 through K9 and K11, ten labels in seven test
+      # functions — runs in the always-on "Unit tests" step and compares one
+      # checked-in file with another; only this one can tell the cards apart from
+      # the running system. The set is named rather than counted on purpose: this
+      # said "the other nine arms" and was wrong by one, because a bare count
+      # cannot be checked against anything, while a named range visibly excludes
+      # a K12 somebody adds. Re-derive with
+      #   grep -ohE '"K[0-9]+' internal/mcp/*_test.go | sort -uV
+      # (K10 is this step's own two files, *_live_e2e_db_test.go and
+      # *_live_git_e2e_db_test.go).
+      #
+      # It cannot be folded into that step, because that step deliberately runs
+      # with AIHUB_TEST_DB unset (see the "aihub#242 DB tests" note above).
       #
       # Needs only a database (real router in-process via httptest, real SDK
       # client), so no extra service. Same -v + grep discipline as every DB step

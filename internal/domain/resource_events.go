@@ -408,14 +408,23 @@ const lockDeleteByKeySQL = `DELETE FROM resource_locks rl WHERE rl.resource_type
 //	500 INTERNAL_ERROR  failed to update work_item after force_takeover:
 //	                    current transaction is aborted (SQLSTATE 25P02)
 //
-// The 40001 arrives HERE, at acquireLockUpsert, and FnForceTakeover discards
-// every upsert error that is not the typed lock refusal — deliberately, so a
-// recovery operation is not failed over lock bookkeeping. So the transaction is
-// already aborted when the next statement runs, and 25P02 is not class 40, so
-// nothing classifies it. That is aihub#410's shape on the path aihub#410 did not
-// cover: raising the isolation level alone trades a silent displacement for an
-// unclassified 500, and closing this gap costs the retry wrapper AND that
-// discard, not just the BeginTx line.
+// The 40001 arrives HERE, at acquireLockUpsert, and FnForceTakeover USED TO
+// discard every upsert error that was not the typed lock refusal. So the
+// transaction was already aborted when the next statement ran, and 25P02 is not
+// class 40, so nothing classified it: aihub#410's shape on the path aihub#410
+// did not cover.
+//
+// aihub#497 closed that half. FnForceTakeover now consults retryConflictErr at
+// this loop and at its other four class-40-capable discards, so a rollback
+// surfaces as the retryable 409 rather than as a 500 about whichever statement
+// ran next. The discard for every error that leaves the transaction USABLE is
+// unchanged and still deliberate — a recovery operation must not be failed over
+// lock bookkeeping. Pinned by the force-takeover arms of
+// TestSerializationFailureSurfacesAsRetryable409.
+//
+// So what raising this transaction to SERIALIZABLE still costs is the retry
+// wrapper, not the discard: the caller would now be told to retry, and nothing
+// on this path retries for them.
 //
 // What the aihub#393 predicate buys on this path is therefore the single-threaded
 // guarantee, not a serialized one: it closes the case where a takeover

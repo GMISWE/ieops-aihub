@@ -1,6 +1,11 @@
 package domain
 
-import "testing"
+import (
+	"os"
+	"regexp"
+	"strings"
+	"testing"
+)
 
 // aihub#222: file_scope lock keys must be namespaced by project so that
 // byte-identical relative paths in different projects (a fork repo and its
@@ -87,5 +92,62 @@ func TestFileScopeLockKey_Shape(t *testing.T) {
 	}
 	if got := fileScopeLockKey("aihub", "ieops-core", "file:a/b.go"); got != "aihub:ieops-core:a/b.go" {
 		t.Errorf("fileScopeLockKey(repo) = %q, want %q", got, "aihub:ieops-core:a/b.go")
+	}
+}
+
+// aihub#511: no PredictConflicts containment operand may be a JSON literal
+// spliced together in Go.
+//
+// Why a SOURCE-level arm, next to DB arms that already prove the four rules
+// behave: the concatenated shape is a REGRESSION, and it has appeared twice.
+// Rules 4 and 5 carried it from the start, and rule 2 — which bound its repo
+// name as $1 in `resource_key LIKE $1 || '/%'` — had it re-introduced when
+// aihub#416 rewrote that query into a containment test. The DB arms in
+// delocking_db_test.go (declared names that look like json...) say the rules
+// that exist today are right; this one fails the moment a FIFTH query is written
+// the old way, with no database and no fixture, which is what makes it worth its
+// oddity.
+//
+// The detector deliberately does NOT demand jsonb_build_object: building the
+// operand with json.Marshal and binding it is equally safe, and a guard that
+// outlawed the alternative would be enforcing a preference rather than the rule.
+// What it catches is the assembly of the literal itself.
+func TestPredictContainmentOperandsAreNotConcatenatedJSON(t *testing.T) {
+	// A JSON array-of-objects operand assembled in Go source. Anchored on the
+	// two keys every declared_resources entry carries, so it describes this
+	// payload rather than JSON in general.
+	concatenatedEntryLiteral := regexp.MustCompile(`\[\{"type":"[^"]*","uri":"`)
+
+	// Positive control, and it runs FIRST: a detector that fires on nothing
+	// reports a clean file exactly the way it reports a file it cannot read.
+	// This string is the pre-fix rule 2 operand, verbatim.
+	const preFix = "`[{\"type\":\"repo\",\"uri\":\"repo:`+repoName+`\"}]`"
+	if !concatenatedEntryLiteral.MatchString(preFix) {
+		t.Fatalf("the detector does not fire on the pre-aihub#511 source it exists to catch (%s), "+
+			"so a clean result below would be evidence about the regexp and not about the file", preFix)
+	}
+
+	src, err := os.ReadFile("conflicts.go")
+	if err != nil {
+		t.Fatalf("read conflicts.go: %v — this guard is textual, so it has to be re-pointed when the "+
+			"code moves rather than deleted", err)
+	}
+
+	for i, line := range strings.Split(string(src), "\n") {
+		// Comments are skipped because the doc comment on declaresContainmentSQL
+		// quotes the broken operand VERBATIM, and the record of what the bug
+		// looked like is worth more than the two lines of scanning it costs.
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		if m := concatenatedEntryLiteral.FindString(line); m != "" {
+			t.Errorf("conflicts.go line %d builds a declared_resources operand by concatenation (%s...): "+
+				"pass the declared name as a bound PARAMETER instead (declaresContainmentSQL / "+
+				"declaresIntentContainmentSQL, or json.Marshal + $n). A `\"` in a repo or service name "+
+				"makes this a 22P02 the caller never sees, and a `\\b` makes it valid json for a "+
+				"DIFFERENT string with nothing logged at all — both answer "+
+				`{"predictions":[],"severity":"info"}, which is byte-identical to a real all-clear`,
+				i+1, m)
+		}
 	}
 }

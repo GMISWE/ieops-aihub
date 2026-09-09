@@ -30,6 +30,7 @@ package domain
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -431,6 +432,246 @@ func TestSerializationFailureSurfacesAsRetryable409(t *testing.T) {
 			"got %d %s: %s", aerr.HTTPStatus, aerr.Code, aerr.Message)
 		assert.Equal(t, ErrConflictSerializationFailure, aerr.Code,
 			"got %s: %s", aerr.Code, aerr.Message)
+	})
+
+	// aihub#497. FnForceTakeover is the one lock path that opens its transaction
+	// with pool.Begin — READ COMMITTED — so aihub#334 classified the statements on
+	// it but nothing on it had ever actually been raced. aihub#451 raised the
+	// isolation level as a mutant and found a second swallow underneath the first:
+	// the 40001 arrives at acquireLockUpsert, whose error FnForceTakeover discarded
+	// unless it was the typed lock refusal. The transaction was therefore already
+	// aborted when `UPDATE work_items` ran, and the caller was handed
+	//
+	//	500 INTERNAL_ERROR  failed to update work_item after force_takeover:
+	//	                    current transaction is aborted (SQLSTATE 25P02)
+	//
+	// 25P02 is class 25, so no classifier anywhere on the path could see it: the
+	// caller is told about the SECOND victim, and told the server is broken.
+	//
+	// This arm runs on serializableTestPool for exactly the reason the
+	// UpdateProject arm at the top of this file does. internal/db/db.go builds the
+	// production pool with pgxpool.New(ctx, dsn) and pins no isolation level, so
+	// `pool.Begin` here inherits whatever default_transaction_isolation the
+	// database, the role or the DSN carries. Handing this function a
+	// SERIALIZABLE-defaulted pool is therefore a CONFIGURATION of today's binary,
+	// not a code change — which is what makes this 40001 reachable rather than
+	// hypothetical, and it is the same argument this file already accepted for
+	// UpdateProject.
+	//
+	// The contended row is an ORPHAN (its owner wrapped), which is the
+	// displacement lockUpsertSQL exists to perform, so the aihub#393 predicate
+	// permits the update and the upsert really does reach for the row lock. Owned
+	// by a LIVE foreign attempt it would be refused with CONFLICT_LOCK_TAKEN
+	// before any serialization failure could occur, and this arm would be
+	// measuring aihub#393 instead.
+	t.Run("force takeover lock upsert gets a retryable 409, not a 500", func(t *testing.T) {
+		ctx := context.Background()
+		serPool := serializableTestPool(t)
+		requireIsolation(t, serPool, "serializable")
+
+		uid := testUser(t, pool)
+		proj := testProject(t, pool, uid)
+		other := ftsSecondUser(t, pool, uid)
+
+		wiB, bAttempt := ftcwSeedTakenOverWI(t, pool, proj, uid,
+			"B: force-taken over while the contended lock row is being rewritten",
+			"repo-a", "contested_by_497.go", "idem-497-b")
+
+		// A held the row and then ended, so what the upsert faces is the orphan
+		// reclaim it is entitled to perform rather than a live foreign holder.
+		wiA := seedWIWithResources(t, pool, proj, uid,
+			"A: ended holder of the contended path", json.RawMessage(`[]`))
+		aAttempt := cwRunningAttemptWithoutLocks(t, pool, uid, wiA.ID, "idem-497-a")
+		key := proj + ":repo-a:contested_by_497.go"
+		commitLock := cwInsertLockInOpenTx(t, pool, key, aAttempt)
+		commitLock()
+		cwSetAttemptStatus(t, pool, aAttempt, "wrapped")
+		require.Equal(t, aAttempt, ftsLockOwner(t, pool, key),
+			"the fixture must start with the orphan row in place, or the upsert below never "+
+				"reaches for a row lock and this arm measures nothing")
+
+		// This arm ends with the takeover REFUSED, so the contended row is left
+		// owned by A's wrapped attempt — i.e. an orphan lock. RunOrphanLockSweep is
+		// global, while TestLockEventsDB_EveryMutationSiteEmits/orphan_sweep_release
+		// counts the orphans of ONE work item and pins the sweep's Affected to that
+		// number, so any row left behind here fails that assertion depending on the
+		// order the two run in. Clean up rather than leaving global state around.
+		t.Cleanup(func() {
+			_, cerr := pool.Exec(context.Background(), `
+				DELETE FROM resource_locks WHERE resource_type = 'file_scope' AND resource_key = $1`, key)
+			assert.NoError(t, cerr, "failed to clean up the contended lock row")
+		})
+
+		// The holder: the same row, rewritten and left uncommitted. Raw SQL rather
+		// than a second domain call, so a bug in the function under test cannot
+		// also break the fixture meant to expose it.
+		holder, err := pool.Acquire(ctx)
+		require.NoError(t, err)
+		defer holder.Release()
+		tx, err := holder.Begin(ctx)
+		require.NoError(t, err)
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback(ctx)
+			}
+		}()
+		_, err = tx.Exec(ctx, `
+			UPDATE resource_locks SET claim_epoch = claim_epoch + 1
+			WHERE resource_type = 'file_scope' AND resource_key = $1`, key)
+		require.NoError(t, err)
+
+		got := make(chan ftcwResult, 1)
+		go func() {
+			resp, aerr := ftcwTakeover(serPool, wiB.ID, other, proj, "aihub#497 serialization measurement")
+			got <- ftcwResult{resp, aerr}
+		}()
+
+		waitForLockWaiter(t, pool, "%INSERT INTO resource_locks%",
+			"the force takeover's lock upsert (INSERT INTO resource_locks ... ON CONFLICT)")
+		require.NoError(t, tx.Commit(ctx))
+		committed = true
+
+		var out ftcwResult
+		select {
+		case out = <-got:
+		case <-time.After(60 * time.Second):
+			t.Fatal("the blocked force takeover never returned after the holder committed")
+		}
+
+		require.NotNil(t, out.aerr,
+			"the takeover's transaction lost a serialization race at the lock upsert, so it cannot "+
+				"report success; got resp=%#v", out.resp)
+		assert.Equal(t, 409, out.aerr.HTTPStatus,
+			"a force takeover that lost a class-40 race must be retryable, not a broken server. got %d %s: %s",
+			out.aerr.HTTPStatus, out.aerr.Code, out.aerr.Message)
+		assert.Equal(t, ErrConflictSerializationFailure, out.aerr.Code,
+			"got %s: %s — an INTERNAL_ERROR naming `failed to update work_item after force_takeover` "+
+				"means the upsert error is being discarded again and the caller is being told about "+
+				"the statement that merely ran second", out.aerr.Code, out.aerr.Message)
+		// Discriminating on purpose: dbErr keeps the driver text out of the
+		// message, so the pre-fix 500 mentions no SQLSTATE at all and asserting
+		// the ABSENCE of "25P02" would have passed before the fix as well. What
+		// differs is WHICH statement the caller is told about — the upsert that
+		// lost the race, or the UPDATE that merely ran after it.
+		assert.NotContains(t, out.aerr.Message, "failed to update work_item",
+			"the caller is being told about `UPDATE work_items`, which only failed with 25P02 because "+
+				"the lock upsert had already aborted the transaction; the error must name the "+
+				"class-40 cause instead")
+		assert.Contains(t, out.aerr.Message, "40001",
+			"the class-40 SQLSTATE must survive into the message the caller reads; got %q", out.aerr.Message)
+
+		details, ok := out.aerr.Details.(map[string]any)
+		require.True(t, ok, "the conflict must carry machine-readable retry guidance; got %#v", out.aerr.Details)
+		assert.Equal(t, true, details["retryable"],
+			"a caller deciding whether to retry must not have to parse the message")
+		assert.Equal(t, "40001", details["sqlstate"],
+			"the originating SQLSTATE must survive, or the 409 is undiagnosable; got %#v", details["sqlstate"])
+
+		// FnForceTakeover supersedes the prior attempt and releases its locks
+		// BEFORE it re-derives, so a failure that is not atomic leaves B with no
+		// running attempt at all.
+		assert.Equal(t, "running", ftsAttemptStatus(t, pool, bAttempt),
+			"B's attempt %q is not running after the failed takeover; a 409 must leave the work "+
+				"item exactly as it was", bAttempt)
+	})
+
+	// aihub#497, second hop. The arm above races the lock UPSERT; this one races
+	// the DELETE that runs before it, so the fix is not pinned to one statement
+	// shape. It is here for the reason the memory-supersede arm above is: a fix
+	// that happens to work at the hop the first arm exercises, and nowhere else,
+	// passes with one arm and fails in production at the other.
+	//
+	// The interleaving differs in what the prior attempt owns. B's prior attempt
+	// holds a lock row on a key B does NOT declare, so releaseLocks' `DELETE FROM
+	// resource_locks WHERE owner_attempt_id = <prior>` matches it and blocks on
+	// the uncommitted holder, while the upsert loop further down never touches
+	// that key. Before aihub#497 the 40001 was discarded here too, and the caller
+	// was told `500 INTERNAL_ERROR failed to create new attempt after
+	// force_takeover` — a third statement, two hops downstream of the one that
+	// actually lost the race.
+	t.Run("force takeover lock release gets a retryable 409, not a 500", func(t *testing.T) {
+		ctx := context.Background()
+		serPool := serializableTestPool(t)
+		requireIsolation(t, serPool, "serializable")
+
+		uid := testUser(t, pool)
+		proj := testProject(t, pool, uid)
+		other := ftsSecondUser(t, pool, uid)
+
+		wiB, bAttempt := ftcwSeedTakenOverWI(t, pool, proj, uid,
+			"B: force-taken over while its prior attempt's lock row is held",
+			"repo-a", "declared_by_497b.go", "idem-497b-b")
+
+		// A key the prior attempt owns and the takeover does NOT re-derive, so
+		// only releaseLocks reaches it.
+		relKey := proj + ":repo-a:released_by_497b.go"
+		commitRel := cwInsertLockInOpenTx(t, pool, relKey, bAttempt)
+		commitRel()
+		require.Equal(t, bAttempt, ftsLockOwner(t, pool, relKey),
+			"the fixture must start with the prior attempt owning %q, or the DELETE below "+
+				"matches no row and never blocks", relKey)
+		t.Cleanup(func() {
+			_, cerr := pool.Exec(context.Background(), `
+				DELETE FROM resource_locks WHERE resource_type = 'file_scope' AND resource_key = $1`, relKey)
+			assert.NoError(t, cerr, "failed to clean up the contended lock row")
+		})
+
+		holder, err := pool.Acquire(ctx)
+		require.NoError(t, err)
+		defer holder.Release()
+		tx, err := holder.Begin(ctx)
+		require.NoError(t, err)
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback(ctx)
+			}
+		}()
+		_, err = tx.Exec(ctx, `
+			UPDATE resource_locks SET claim_epoch = claim_epoch + 1
+			WHERE resource_type = 'file_scope' AND resource_key = $1`, relKey)
+		require.NoError(t, err)
+
+		got := make(chan ftcwResult, 1)
+		go func() {
+			resp, aerr := ftcwTakeover(serPool, wiB.ID, other, proj, "aihub#497 release-hop measurement")
+			got <- ftcwResult{resp, aerr}
+		}()
+
+		waitForLockWaiter(t, pool, "%DELETE FROM resource_locks%",
+			"the force takeover's lock release (DELETE FROM resource_locks)")
+		require.NoError(t, tx.Commit(ctx))
+		committed = true
+
+		var out ftcwResult
+		select {
+		case out = <-got:
+		case <-time.After(60 * time.Second):
+			t.Fatal("the blocked force takeover never returned after the holder committed")
+		}
+
+		require.NotNil(t, out.aerr,
+			"the takeover's transaction lost a serialization race at the lock release, so it cannot "+
+				"report success; got resp=%#v", out.resp)
+		assert.Equal(t, 409, out.aerr.HTTPStatus,
+			"got %d %s: %s", out.aerr.HTTPStatus, out.aerr.Code, out.aerr.Message)
+		assert.Equal(t, ErrConflictSerializationFailure, out.aerr.Code,
+			"got %s: %s — an INTERNAL_ERROR here means releaseLocks' error is being discarded "+
+				"wholesale again and the caller is being told about a later statement",
+			out.aerr.Code, out.aerr.Message)
+		assert.NotContains(t, out.aerr.Message, "failed to create new attempt",
+			"the caller is being told about `INSERT INTO run_attempts`, which only failed with 25P02 "+
+				"because the lock release had already aborted the transaction")
+
+		details, ok := out.aerr.Details.(map[string]any)
+		require.True(t, ok, "the conflict must carry machine-readable retry guidance; got %#v", out.aerr.Details)
+		assert.Equal(t, "40001", details["sqlstate"],
+			"the originating SQLSTATE must survive; got %#v", details["sqlstate"])
+
+		assert.Equal(t, "running", ftsAttemptStatus(t, pool, bAttempt),
+			"B's attempt %q is not running after the failed takeover; a 409 must leave the work "+
+				"item exactly as it was", bAttempt)
 	})
 
 	t.Run("read committed loser still succeeds", func(t *testing.T) {

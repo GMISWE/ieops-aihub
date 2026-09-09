@@ -94,13 +94,32 @@ package domain
 //	                    current transaction is aborted (SQLSTATE 25P02)
 //
 // Instrumented on that same mutant, the 40001 arrives at acquireLockUpsert — and
-// FnForceTakeover discards every upsert error that is not the typed lock
-// refusal, on purpose, so a recovery operation is not failed over lock
-// bookkeeping. The transaction is therefore already aborted when the next
-// statement runs, and 25P02 is not class 40, so nothing classifies it: aihub#410's
-// shape on the path aihub#410 did not cover. That is measured evidence for what
-// resource_events.go's comment only argued — closing this gap costs the retry
-// wrapper AND that discard, not just the BeginTx line.
+// FnForceTakeover discarded every upsert error that was not the typed lock
+// refusal, on purpose, so a recovery operation was not failed over lock
+// bookkeeping. The transaction was therefore already aborted when the next
+// statement ran, and 25P02 is not class 40, so nothing classified it: aihub#410's
+// shape on the path aihub#410 did not cover. That was measured evidence for what
+// resource_events.go's comment only argued.
+//
+// ⚠️ The DISCARD half is fixed as of aihub#497, so the 500 above is the record of
+// what the swallow did and NOT a description of today's build. Re-measured on
+// that same SERIALIZABLE mutant, 2026-09-09, after the fix:
+//
+//	409 CONFLICT_SERIALIZATION_FAILURE  failed to acquire lock
+//	  file_scope:<proj>:repo-a:contested_by_451.go during force_takeover:
+//	  ERROR: could not serialize access due to concurrent update (SQLSTATE
+//	  40001); the transaction was rolled back after losing a concurrency race
+//	  — retry the request
+//
+// Both arms of this file still go red under that mutant, exactly as the table
+// above records — but for a different and better reason: a classified retryable
+// 409 naming the statement that actually lost the race, instead of an
+// unclassifiable 500 about the statement that merely ran next. The third control
+// stays green. What is STILL missing is the retry wrapper, which is why the
+// isolation level here is deliberately still pool.Begin: the caller would now be
+// correctly told to retry, and nothing on this path retries for them. The
+// force-takeover arms of TestSerializationFailureSurfacesAsRetryable409 pin the
+// 409 that replaced the 500.
 //
 // ⚠️ This test asserts that a defect is REACHABLE, which is an unusual thing to
 // pin, so be clear about what makes it go red and what to do then. Raising

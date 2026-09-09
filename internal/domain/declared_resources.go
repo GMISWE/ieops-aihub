@@ -238,12 +238,22 @@ func uriSchemeProblem(typ, uri string) (problem, expected string) {
 // declared_resources (claim, force_takeover, acquire_locks): roughly 14% of
 // existing entries would fail it, and those work items must stay claimable.
 //
-// Of those stored-data paths, only FnClaimWorkItem currently reports what it
-// could not map — it calls UnrecognizedDeclaredResources and returns the result
-// as ClaimResponse.unrecognized_resources. FnForceTakeover and FnAcquireLocks
-// still skip unmappable entries without reporting, because neither response
-// carries a field for it; force_takeover is at least always followed by a fresh
-// claim, which does report. Do not read this comment as "all three report".
+// All THREE of those stored-data paths report what they could not map: each
+// calls UnrecognizedDeclaredResources and returns the result under the same
+// `unrecognized_resources` key — on ClaimResponse, on ForceTakeoverResponse and
+// on AcquireLocksResponse (aihub#509, closing the surviving half of aihub#411
+// T2-12).
+//
+// ⚠️ This paragraph used to say the opposite, and closed with "Do not read this
+// comment as 'all three report'". Both takeover and acquire_locks skipped
+// unmappable entries in silence because neither response had a field for it, and
+// the standing excuse was that a takeover is always followed by a fresh claim
+// which does report. That is a property of the polyforge skill flow, not of the
+// HTTP surface: each of these is its own endpoint, and acquire_locks in
+// particular exists to answer "which locks do I hold" — a question a skipped
+// declaration silently changes the answer to. Kept as history rather than
+// deleted, because "the next call reports it" is the shape of the argument, and
+// it will be reachable for whatever field is added next.
 func ValidateDeclaredResources(raw json.RawMessage) *AihubError {
 	trimmed := strings.TrimSpace(string(raw))
 	if len(trimmed) == 0 || trimmed == "null" {
@@ -272,7 +282,7 @@ func ValidateDeclaredResources(raw json.RawMessage) *AihubError {
 					"got_type":    typ,
 					"valid_types": DeclaredResourceTypeList(),
 					"entry_shape": `{"type":"path","uri":"file:<repo-relative-path>","intent":"write"}`,
-					"hint":        "`file_scope`, `git_branch`, `worktree`, `tcp_port` and `deploy_env` are resource_locks.resource_type values (what the server DERIVES); declared_resources.type is the input vocabulary above. A file path is type=\"path\".",
+					"hint":        "`file_scope`, `git_branch`, `worktree`, `tcp_port` and `deploy_env` are resource_locks.resource_type values; declared_resources.type is the input vocabulary above. Since aihub#416 the server DERIVES exactly one of them — `file_scope`, from path/document/section entries; the other four are legal only in an explicit requested_locks. A file path is type=\"path\".",
 				})
 		}
 		uri, _ := item["uri"].(string)
@@ -320,9 +330,10 @@ func ValidateDeclaredResources(raw json.RawMessage) *AihubError {
 //
 // This is the stored-data counterpart of ValidateDeclaredResources: the lock
 // derivation paths cannot reject historical rows without making those work items
-// unclaimable, but they must stop being silent about them. Callers surface the
-// result (claim returns it as unrecognized_resources) so the operator sees that
-// a resource they declared is holding no lock.
+// unclaimable, but they must stop being silent about them. All three surface the
+// result under the same `unrecognized_resources` key — FnClaimWorkItem at both
+// its exits, FnForceTakeover and FnAcquireLocks since aihub#509 — so the operator
+// sees that a resource they declared is holding no lock.
 func UnrecognizedDeclaredResources(raw json.RawMessage) []string {
 	trimmed := strings.TrimSpace(string(raw))
 	if len(trimmed) == 0 || trimmed == "null" {

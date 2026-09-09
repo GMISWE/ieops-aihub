@@ -101,6 +101,22 @@ Under a delete-list, `expires_at` needs no entry: v1.21 removed it, the response
 does not carry it, and naming it here would be the same rot that left it in the old
 CLAIM keep-list.
 
+`unrecognized_resources` was added to the response by `aihub#509` (2026-09-09) and
+reaches the model for free, which is the delete-list working as designed: nobody had
+to add it to a keep-list. It is one line per `declared_resources` entry the lock
+mapper cannot understand — the same producer and key `pf_claim_work_item` carries —
+and it is `omitempty`, so a healthy work item never sees it. Until then a takeover
+re-derived this work item's locks from stored declarations, skipped the ones it
+could not map, and said nothing; the standing defence was that a takeover is always
+followed by a fresh claim, which does report, and that is a property of the
+polyforge skill flow rather than of this endpoint.
+
+⚠️ It is **not** in `response_keys_observed` above. That list is copied from
+`aihub#412`'s generated corpus, whose 18 takeovers all predate the key; and since
+`omitempty` plus a K10 walk whose work items declare no resources means no live
+response carries it, it has no `live-response-keys.json` entry either — an invented
+entry fails that arm as readily as a missing one.
+
 ## Policy
 
 - **§6.1 T1-5** — delete-list is the only projection shape.
@@ -110,6 +126,9 @@ CLAIM keep-list.
   the locks this call re-derives for the new attempt are `file_scope` only.
 - **§6.2 T2-8 — LANDED** (`aihub#443`). Who may call this is a role question, and
   the two disagreeing role ladders it was about are now one shared map.
+- **§6.2 T2-12 — LANDED** (`aihub#509`, 2026-09-09). The half `aihub#416` left open
+  was this response's silence about declarations the mapper cannot understand; it is
+  now the `unrecognized_resources` key described in hop 5.
 
 ## Open
 

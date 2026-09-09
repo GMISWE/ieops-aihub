@@ -199,4 +199,137 @@ func TestServerFilledResponseFieldsAreEchoed(t *testing.T) {
 			"force takeover: echoing the superseded attempt would look well-formed and authenticate as a "+
 				"dead attempt")
 	})
+
+	// aihub#509 — the same class one field further on, and it belongs in THIS
+	// file for the reason the header gives: the defect is "a field the SERVER
+	// fills that the CLIENT cannot reconstruct", and `unrecognized_resources` is
+	// one. The client cannot derive it — deciding whether a stored declaration
+	// maps to a lock needs the server's own mapper — and until aihub#509 the
+	// takeover response had no field to put it in, so a takeover skipped
+	// unmappable entries in exactly the silence aihub#238 removed from claim.
+	//
+	// The standing excuse was that a takeover "is always followed by a fresh
+	// claim, which does report". That is a property of the polyforge skill flow,
+	// not of POST /force_takeover, which is its own endpoint and returns a
+	// running attempt holding whatever locks it managed to re-derive.
+	//
+	// MUTANT: internal/domain/run_attempts.go, FnForceTakeover's response
+	// literal — drop `UnrecognizedResources: ftUnrecognized`. Only this subtest
+	// goes red; the three above stay green, because none of them reads the field.
+	//
+	// ⚠️ Its own work item, seeded and mutated in this subtest, rather than the
+	// shared `wi`: the arms above assert on a HEALTHY work item, and giving the
+	// shared fixture a mistyped declaration would change what they are measuring.
+	// The RAW UPDATE is required — ValidateDeclaredResources rejects this payload
+	// at CreateWorkItem, deliberately, so the only way the state exists is as
+	// stored data predating the validator, which is the population the report
+	// exists for.
+	t.Run("force takeover reports unmappable declarations", func(t *testing.T) {
+		ctx := context.Background()
+		sick := seedClaimableWI(t, pool, project, u,
+			"carry a mistyped declaration through a takeover so the response has to mention it", "")
+		_, err := pool.Exec(ctx,
+			`UPDATE work_items SET declared_resources = $1::jsonb WHERE id = $2`,
+			// A resource_locks type used as a declared type — the confusion
+			// aihub#238 names — beside a healthy path entry that must NOT be
+			// reported, so "mention everything" does not pass.
+			`[{"type":"deploy_env","uri":"service:aihub509","intent":"write"},`+
+				`{"type":"path","uri":"file:internal/domain/echo509.go","intent":"write"}]`, sick.ID)
+		require.NoError(t, err)
+
+		// aihub#492's retry on all three calls in this subtest.
+		// FnClaimWorkItem and FnForceTakeover are both SERIALIZABLE and
+		// serialization_retry_test.go's header names them, so on a shared test
+		// database another package's DB-gated binary can abort either with
+		// 40001 — an error the server's own contract says to retry.
+		//
+		// Only the aihub#509 arm is wrapped; the three subtests above go through
+		// this file's `claim()` closure and are left as aihub#492 left them,
+		// because widening that closure would change what they exercise.
+		_, aerr := retryOnSerializationConflict(t, "claim "+sick.ID, func() (*ClaimResponse, *AihubError) {
+			return FnClaimWorkItem(ctx, pool, sick.ID, &ClaimRequest{
+				IdempotencyKey: "aihub509-echo-claim",
+				SessionInfo: SessionInfo{
+					MachineID:     "m_aihub509",
+					SessionSecret: "aihub509-secret-0123456789abcdef0123456789abcdef0123456789ab",
+				},
+			}, u, "", "tester")
+		})
+		require.Nil(t, aerr, "claim failed: %+v", aerr)
+
+		resp, aerr := retryOnSerializationConflict(t, "force_takeover", func() (*ForceTakeoverResponse, *AihubError) {
+			return FnForceTakeover(ctx, pool, sick.ID, u, "tester", "admin",
+				map[string]string{project: "maintainer"},
+				&ForceTakeoverRequest{
+					Reason:      "aihub#509: the takeover response must report what it could not map",
+					SessionInfo: SessionInfo{MachineID: "m_aihub509", SessionSecret: "aihub509-takeover-secret"},
+				})
+		})
+		require.Nil(t, aerr, "force_takeover failed: %+v", aerr)
+
+		require.Len(t, resp.UnrecognizedResources, 1,
+			"exactly the mistyped entry should be reported; got %v", resp.UnrecognizedResources)
+		assert.Contains(t, resp.UnrecognizedResources[0], "deploy_env",
+			"the report must name the offending type — the takeover re-derived locks from this payload "+
+				"and silently skipped this entry, which is what left the caller believing it was guarded")
+		assert.Contains(t, resp.UnrecognizedResources[0], "service:aihub509",
+			"the report must quote the uri, or a caller with several entries cannot tell which is inert")
+		assert.NotContains(t, resp.UnrecognizedResources[0], "echo509.go",
+			"the healthy path entry must not be reported; a warning that fires on good input stops being read")
+
+		// Same producer as the claim path, asserted by comparing against it
+		// rather than by re-stating the strings: aihub#509's requirement is that
+		// the takeover MIRRORS the existing report, not that it invents a second
+		// wording for the same fact.
+		var stored []byte
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT declared_resources FROM work_items WHERE id=$1`, sick.ID).Scan(&stored))
+		assert.Equal(t, UnrecognizedDeclaredResources(stored), resp.UnrecognizedResources,
+			"the takeover must report byte-identically to the claim path — a second wording for the same "+
+				"condition is a second contract for a caller to learn")
+
+		// ─── the arm that pins WHICH payload the report is computed from ─────
+		//
+		// aihub#509 reads the RAW column, not the decoded slice, and that choice
+		// is not cosmetic: unmarshalDeclaredResources is tolerant by design — a
+		// payload it cannot parse becomes an EMPTY slice and the takeover
+		// proceeds, because a work item must stay recoverable. A report derived
+		// from the decoded slice would therefore say "nothing wrong" about
+		// exactly the payload that is most wrong, and be silent in precisely the
+		// case aihub#238 exists for.
+		//
+		// A jsonb SCALAR is the reproduction: legal in the column, unparseable as
+		// a resource array. Nothing else in the system produces it, which is the
+		// point — this is stored data nobody validated.
+		//
+		// MUTANT: internal/domain/run_attempts.go, FnForceTakeover — compute
+		// ftUnrecognized from `declaredRes` (marshal the decoded slice back)
+		// instead of from wi.DeclaredResources. Every assertion above stays
+		// green, because a well-formed mistyped entry survives that round trip;
+		// only this one goes red. Without it, the raw-vs-decoded choice is pinned
+		// by source text alone.
+		_, err = pool.Exec(ctx,
+			`UPDATE work_items SET declared_resources = $1::jsonb WHERE id = $2`,
+			`"declared_resources was overwritten with a string"`, sick.ID)
+		require.NoError(t, err)
+
+		resp2, aerr := retryOnSerializationConflict(t, "force_takeover", func() (*ForceTakeoverResponse, *AihubError) {
+			return FnForceTakeover(ctx, pool, sick.ID, u, "tester", "admin",
+				map[string]string{project: "maintainer"},
+				&ForceTakeoverRequest{
+					Reason:      "aihub#509: an unparseable payload must be reported, not swallowed",
+					SessionInfo: SessionInfo{MachineID: "m_aihub509", SessionSecret: "aihub509-takeover-secret-2"},
+				})
+		})
+		require.Nil(t, aerr, "force_takeover must still SUCCEED on an unparseable payload — refusing it "+
+			"would make the work item unrecoverable, which is the outcome the tolerant decode exists to "+
+			"prevent: %+v", aerr)
+		require.Len(t, resp2.UnrecognizedResources, 1,
+			"an unparseable declared_resources payload derives NO locks at all and must say so; got %v",
+			resp2.UnrecognizedResources)
+		assert.Contains(t, resp2.UnrecognizedResources[0], "not a JSON array",
+			"the report must name the parse failure — this is the loudest possible version of the "+
+				"silence aihub#238 removed from claim, and a takeover that returns a running attempt "+
+				"holding zero locks without a word is how a caller believes it is guarded")
+	})
 }

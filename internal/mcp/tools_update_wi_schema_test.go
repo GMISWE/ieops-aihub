@@ -117,10 +117,27 @@ func TestListWorkItemsUserIDDescriptionDisclosesReporterOnly(t *testing.T) {
 // pipe-separated list inside a DESCRIPTION, four lines above a `propEnum` call
 // that would have made it a real enum. `source` was published as "Source
 // reference", which reads as free text and is a seven-value CHECK constraint.
-// Both cost the same thing: the go-sdk validates an `enum` before the handler
-// runs (mcp/tool.go, resolved.Validate) and cannot validate prose, so an
-// out-of-vocabulary value travelled all four hops and came back as
-// 500 INTERNAL_ERROR with a SQLSTATE in it.
+// Both cost the same thing: an out-of-vocabulary value travelled all four hops
+// and came back as 500 INTERNAL_ERROR with a SQLSTATE in it.
+//
+// 🔴 aihub#396 attributed that cost to the SDK — "the go-sdk validates an `enum`
+// before the handler runs (mcp/tool.go, resolved.Validate) and cannot validate
+// prose". That premise is FALSE for this codebase and the correction is recorded
+// here rather than left to be re-derived (aihub#496, 2026-09-09).
+//
+// aihub#463 measured it on go-sdk v1.6.0 (2026-09-08): applySchema ->
+// resolved.Validate is reached from toolForErr, on the GENERIC AddTool[In, Out]
+// path only. polyforge registers through the untyped method
+// (*mcp.Server).AddTool (addTool in server.go), and Server.callTool invokes the
+// handler with no schema step — driven end to end by a test that pushed an
+// illegal value through a real client session into the POST body.
+//
+// What that changes, and what it does not: the enum still belongs here, because
+// it is how a caller LEARNS the set (an LLM reading tools/list, and any client
+// that validates before sending). It is simply not what REFUSES the value. The
+// refusal is server-side Go validation answering 400 with the field named —
+// enums are advisory, the Go check is the hard layer. So the assertions below
+// are unchanged in substance, but they defend publication, not enforcement.
 //
 // The published set is taken from domain — the package whose validator refuses
 // the value — so a caller is offered exactly what the server accepts. The
@@ -141,9 +158,11 @@ func enumOfProp(t *testing.T, tool, param string) []string {
 	rawEnum, ok := raw["enum"].([]any)
 	if !ok {
 		desc, _ := raw["description"].(string)
-		t.Fatalf("%s publishes %q with NO enum (description: %q). The go-sdk validates an enum "+
-			"before the handler runs and cannot validate a pipe-separated list in prose, so an "+
-			"illegal value crosses every hop and dies at the DB CHECK as a 500 (aihub#396).",
+		t.Fatalf("%s publishes %q with NO enum (description: %q). A closed vocabulary stated as "+
+			"prose is a set no caller can read mechanically, so an illegal value crosses every "+
+			"hop and dies at the DB CHECK as a 500 (aihub#396). NB the enum is advisory — this "+
+			"process does not validate it (aihub#463 measured the untyped AddTool path); the "+
+			"server-side Go check is what refuses the value, and both are required (aihub#496).",
 			tool, param, desc)
 	}
 	out := make([]string, 0, len(rawEnum))

@@ -4,7 +4,7 @@
 {
   "tool": "pf_update_user",
   "description_sha256": "3e110327081ad0220cea2e0391bd37a68435a2ceb455aadf9692419352f17e31",
-  "input_schema_sha256": "8bcf1a1d2abf64bef76b88da34dad657b0e2ef9335200407cedbbb1cb11e1da2",
+  "input_schema_sha256": "1a527e2b4303c9a95caa406ae5a56529190f3eb0df038267fc5f04ca36aa961b",
   "params": {
     "author_aliases": {
       "type": "array",
@@ -20,7 +20,11 @@
     },
     "role": {
       "type": "string",
-      "required": false
+      "required": false,
+      "enum": [
+        "admin",
+        "writer"
+      ]
     }
   },
   "response_keys_observed": null,
@@ -37,8 +41,20 @@ aliases (**admin only**)."
 |---|---|---|---|
 | `id` | string | yes | "User ID" |
 | `display_name` | string | no | updated display name |
-| `role` | string | no | updated global role: `writer` or `admin` |
+| `role` | string | no | **enum** — the global role, NOT a project member role |
 | `author_aliases` | array | no | **REPLACES the whole list**; omit to keep, send `[]` to clear |
+
+`role` was published as the prose sentence "Updated global role: writer or admin"
+until `aihub#496` (2026-09-09), while the sibling create path had published the same
+column as a real `enum` since `aihub#463`. One column, two tools, two different
+answers to "what may I send" — and only one of them machine-readable. It is now a
+`propEnum` sourced from `domain.UserGlobalRoleList()`, the same list the validator
+uses, so the published set and the accepted set are one value.
+
+⚠️ The enum constrains the **client**, not this process. `aihub#463` measured that
+polyforge's untyped `(*mcp.Server).AddTool` registration runs no schema step, so
+nothing here refuses an out-of-vocabulary value on the strength of the enum; it is
+how a caller learns the set before spending a round trip. The refusal is hop 4.
 
 `author_aliases` is the reason this card exists. The handler has always forwarded it
 — it copies its whole args map into the body — and the server has always bound it, so
@@ -71,6 +87,28 @@ argument reaches the PATCH body.
   when present.
 - `role` writes the **global** role — `writer | admin` — not a project member role.
   Changing it does not touch `projects.members`.
+- An out-of-vocabulary `role` is refused **before** the `UPDATE`, with a `400`
+  naming the field, echoing the value and listing the legal set:
+
+  ```json
+  {"code":"BAD_REQUEST",
+   "details":{"allowed":["admin","writer"],"field":"role","got":"maintainer"},
+   "message":"role \"maintainer\" is not a legal value; allowed: [admin writer]"}
+  ```
+
+  🔴 The record this corrects (`pf_create_user.md`'s Open section) said this path
+  "remains a 500 from the CHECK". Measured 2026-09-09 by `aihub#496`: it was
+  **always a 400**. `handleUpdateUser` has carried an inline `!= "writer" && !=
+  "admin"` check since the original round-2a commit. What it lacked was `details` —
+  so the answer named neither the value nor the set — and being hand-typed it was a
+  **third copy** of a vocabulary already held by the `users.role` CHECK in
+  `0001_initial.sql` and by `domain.userGlobalRoles`. It now calls
+  `domain.ValidateUserGlobalRole`, so all three cannot drift apart.
+
+  Omitting `role` is still distinct from sending it: the field binds as `*string`
+  and validation runs inside the nil check, so a display-name-only update is not
+  judged against the vocabulary. `internal/server/update_user_vocab_test.go` holds
+  both directions, DB-free through the nil-pool instrument.
 - There is no delete-user tool on this surface. A user is created and updated; the
   only removal available anywhere here is `pf_update_project`'s membership write.
 
@@ -98,3 +136,8 @@ live server and holds the result to `ok`, declared in
 
 - Nothing this card can settle. The null corpus record is explained above rather than
   treated as a disuse signal.
+- Noted, not a defect this card owns: `user_type` is **not updatable** on this path
+  at all. The request struct binds only `display_name`, `role` and `author_aliases`,
+  so a `user_type` sent to `PATCH /v1/admin/users/:id` is silently dropped rather
+  than refused. It is unreachable from MCP — this tool does not publish it — so the
+  exposure is HTTP-only. Recorded 2026-09-09 by `aihub#496`, whose scope was `role`.

@@ -403,9 +403,14 @@ func resolveVisibleRefOnTx(ctx context.Context, tx pgx.Tx, field, ref, ownProjec
 // which is the safe reading and what every non-HTTP caller wants.
 func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItemRequest, callerUserID, callerDisplay string,
 	callerProjectRoles map[string]string, callerRole string) (*WorkItem, *AihubError) {
-	// Validate goal
-	if req.Goal == "" {
-		return nil, NewErr(ErrBadRequest, "goal is required")
+	// Validate goal. aihub#507: the required-ness check moved into
+	// validateWorkItemGoalPresent — byte-identical behaviour, same code, same
+	// message, same position ahead of the shape check, and deliberately so. It is
+	// a move rather than a change because UpdateWorkItem now calls the same
+	// function, and a refusal both doors must agree on cannot be a literal typed
+	// once per door.
+	if vErr := validateWorkItemGoalPresent(req.Goal); vErr != nil {
+		return nil, vErr
 	}
 	if vErr := validateWorkItemGoalShape(req.Goal); vErr != nil {
 		return nil, vErr
@@ -3011,6 +3016,23 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 	if req.Goal != nil {
 		if req.GoalChangeReason == nil || len(*req.GoalChangeReason) < 10 {
 			return nil, NewErr(ErrBadRequest, "goal_change_reason is required (min 10 chars) when updating goal")
+		}
+		// aihub#507: an EMPTY goal is refused here too, with create's own message,
+		// from the function create calls. It used to be stored: work_items.goal is
+		// TEXT NOT NULL and NOT NULL admits '', so nothing downstream objected and
+		// the caller got a 200 and a work item that renders blank everywhere. This
+		// is the first check on this path that is about the goal's VALUE rather
+		// than its shape, and it is inside the `req.Goal != nil` guard on purpose:
+		// clearing a goal is now refused, LEAVING IT ALONE is untouched, and only
+		// the pointer can tell those two requests apart.
+		//
+		// It sits AFTER goal_change_reason rather than before it, which keeps the
+		// error a caller sending `{goal: ""}` with no reason already gets. Adding
+		// a refusal is this change; reordering two existing 400s is not, and a
+		// caller branching on the old first answer should not have to find that out
+		// from a bug report.
+		if vErr := validateWorkItemGoalPresent(*req.Goal); vErr != nil {
+			return nil, vErr
 		}
 		// aihub#474: BOTH shape halves, from the one function CreateWorkItem also
 		// calls. Only the newline half used to be here, so an over-cap goal that

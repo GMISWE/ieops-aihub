@@ -179,3 +179,42 @@ func toolNames(m map[string]string) []string {
 	}
 	return out
 }
+
+// TestUpdateToolPublishesThatTheGoalMustBeNonEmpty is aihub#507's half of the
+// bridge above: the refusal a caller is TOLD about must be the refusal the
+// server performs, for the guard that work item added.
+//
+// `pf_update_work_item {goal: ""}` used to be stored — 200, and a work item that
+// renders blank everywhere — while pf_create_work_item answered the identical
+// value with 400 "goal is required". domain.validateWorkItemGoalPresent now
+// refuses it on both paths. A NEWLY REACHABLE refusal that no published text
+// mentions is discovered by being hit, which is the §6.1 T1-9 failure mode with
+// the sign flipped: not prose outliving its behaviour, but behaviour arriving
+// without prose.
+//
+// ⚠️ Named rather than quantified over every tool publishing `goal`, and that is
+// a deliberate narrowing rather than the oversight the test above warns about.
+// The word lives on this tool's own description string; the other two share
+// workItemFieldProps' string, and adding it there would move
+// pf_create_work_item's and pf_batch_create_work_items' input_schema_sha256 and
+// staleness-fail their cards (K3) in a change whose file scope does not include
+// them. So the create side stating it too is left as its own change, and this
+// arm asserts exactly what aihub#507 shipped. If that change happens, fold this
+// into the loop above rather than adding a second named test.
+func TestUpdateToolPublishesThatTheGoalMustBeNonEmpty(t *testing.T) {
+	const tool = "pf_update_work_item"
+
+	desc, ok := publishedGoalDescriptions(t)[tool]
+	if !ok {
+		t.Fatalf("%s publishes no `goal` description — either the parameter was withdrawn "+
+			"(in which case delete this test with it) or the walk is broken and the "+
+			"assertion below would be vacuous", tool)
+	}
+	if !strings.Contains(strings.ToLower(desc), "non-empty") {
+		t.Errorf("%s publishes goal as %q, which does not say the value must be non-empty. "+
+			"domain.validateWorkItemGoalPresent refuses \"\" here with 400 \"goal is "+
+			"required\" since aihub#507; before it, the same value was STORED. A caller "+
+			"holding the old contract clears a goal deliberately and now gets a 400 with "+
+			"nothing in the schema that predicted it.", tool, desc)
+	}
+}

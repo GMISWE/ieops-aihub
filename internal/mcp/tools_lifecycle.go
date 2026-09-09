@@ -703,8 +703,30 @@ func (s *Server) registerLifecycleTools() {
 			// this tool spent a wave discovering is a caller that reads the create
 			// tool's cap, sends the same string here, and gets a 500 from a
 			// constraint name it has no way to map back to a field.
+			//
+			// aihub#507 adds "non-empty", and it is a promise this tool did not
+			// keep until the same work item made it true: `goal: ""` used to be
+			// STORED here — 200, work item saved, goal blank in every list — while
+			// pf_create_work_item answered the identical value with 400 "goal is
+			// required". Both paths now refuse it from one function
+			// (domain.validateWorkItemGoalPresent). The word is the caller-facing
+			// half of that: a refusal nobody is told about is discovered by being
+			// hit, and this one is newly reachable, so it is the description's job
+			// to arrive before the 400 does. Two words rather than a sentence
+			// because "empty" and "required" are the same fact and the message
+			// already says the other one.
+			//
+			// Cost, same ledger again: 72 -> 82 bytes, +10.
+			//
+			// ⚠️ Do NOT generalise this word into workItemFieldProps' goal
+			// description. That string is shared by pf_create_work_item and
+			// pf_batch_create_work_items, and editing it moves BOTH of their
+			// input_schema_sha256 — so their contract cards go stale in the same
+			// commit, and K3 in contract_cards_gate_test.go is what tells you.
+			// Whether the create side should say it too is a real question and a
+			// separate change, with those two cards in its file scope.
 			"goal": prop("string", fmt.Sprintf(
-				"Single-line goal ≤%d chars (status must be queued, paused or blocked)",
+				"Single-line non-empty goal ≤%d chars (status must be queued, paused or blocked)",
 				domain.MaxWorkItemGoalRunes())),
 			"goal_change_reason":     prop("string", "Reason for goal change (required with goal)"),
 			"priority":               propEnum("string", "Updated priority", domain.WorkItemPriorityList()),

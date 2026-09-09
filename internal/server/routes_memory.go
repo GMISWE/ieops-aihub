@@ -212,9 +212,16 @@ func enforceMethodologyAttemptGate(
 
 // handleRecall handles GET /v1/memories.
 //
-// There is deliberately no page-size constant here. Page size is bounded in
-// exactly one place, domain.normalizeRecallTopK — see aihub#309 at the call to
-// domain.Recall below for what a second one did.
+// There is deliberately no page-size constant here, and this handler adds no cap
+// of its own — see aihub#309 at the call to domain.Recall below for what a second
+// one did.
+//
+// Page size is bounded in TWO places repo-wide, not one: domain.normalizeRecallTopK,
+// which this path reaches through domain.Recall, and queryIntLenientUI, which only
+// the /ui handlers call and which bounds the value before it is ever a TopK. This
+// sentence claimed "exactly one place" until 2026-09-09 and was false when written;
+// aihub#551 corrected it (owner ruling 2026-09-09), and unifying the two is
+// aihub#552. See normalizeRecallTopK's own doc comment for the full accounting.
 const recallContentMax = 800
 
 // firstPipedType returns the first `type` entry containing a `|`, and whether one

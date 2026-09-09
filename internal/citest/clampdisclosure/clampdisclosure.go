@@ -316,38 +316,6 @@ var disclosureWaivers = map[string]Waiver{
 		Decided:  "2026-09-09",
 		Citation: "internal/server/queryparam.go, \"The /ui exemption, declared here rather than taken quietly\" (aihub#340); enumerated by aihub#532",
 	},
-
-	// 🔴 NOT A DECISION. This is the third site the census found, registered as a
-	// known violation awaiting adjudication rather than waived quietly, because
-	// quietly is how the first two got here.
-	//
-	// What is true: RecallWithVector bounds topK at 200 on its own, and its only
-	// production caller (recallRouted, internal/domain/memory.go) has already
-	// run req.TopK through normalizeRecallTopK before the copy that reaches it,
-	// so the value arriving here is always in [1,200] and this clamp cannot fire
-	// from the API today. It is a shadowed duplicate, not a live silent clamp.
-	//
-	// Why it is still registered: normalizeRecallTopK's own doc comment says
-	// "This is the ONLY place a recall page size is bounded, and callers must not
-	// add a cap of their own", and that sentence is false as written. It is also
-	// the exact shape of aihub#309 — a bound nothing holds to the invariant —
-	// and RecallWithVector is EXPORTED, so a second caller reaching it with an
-	// unnormalized value gets a clamp that discloses nothing.
-	//
-	// The three answers are a real choice and this gate is not the place to make
-	// it: delete the duplicate so the comment becomes true; keep it and disclose;
-	// or keep it as defence-in-depth with a stated waiver. aihub#532 carries the
-	// question to the owner.
-	"internal/domain/memory_vector.go:RecallWithVector:topK": {
-		Kind:  KindPendingAdjudication,
-		Param: "top_k",
-		Reason: "a second ceiling on the same parameter normalizeRecallTopK already bounds and " +
-			"Recall already discloses. Unreachable from the API today because recallRouted " +
-			"normalizes first, and therefore silent rather than wrong — but the disclosing site's " +
-			"own comment forbids a second cap, and this function is exported",
-		Decided:  "2026-09-09",
-		Citation: "found by the aihub#532 census; contradicts internal/domain/memory.go (normalizeRecallTopK); shape of aihub#309",
-	},
 }
 
 // Waivers and ScopeNotes hand out copies of the ledger so a test can drive the

@@ -101,12 +101,23 @@ func seedWIWithResources(t *testing.T, pool *pgxpool.Pool, proj, uid, goal strin
 	return wi
 }
 
+// aihub#492: retried on a class-40 rollback. FnClaimWorkItem is SERIALIZABLE
+// and its lock probe seq-scans three shared relations, so any DB-gated test
+// binary in another package that commits while this claim is open can abort it
+// with 40001 — see serialization_retry_test.go for the mechanism and for why
+// retrying here cannot weaken an assertion. The retry lives in this helper
+// rather than at its call sites so that every file using it — seven at the
+// time of writing, this one plus resource_events, delocking,
+// lock_intent_derivation, lock_probe_error, cancel_lock_release and
+// acquire_locks_reporting — is covered without being edited.
 func claimWI(t *testing.T, pool *pgxpool.Pool, uid, wiID, idem string) (*ClaimResponse, *AihubError) {
 	t.Helper()
-	return FnClaimWorkItem(context.Background(), pool, wiID, &ClaimRequest{
-		IdempotencyKey: idem,
-		SessionInfo:    SessionInfo{MachineID: "m-261", SessionSecret: testSecret},
-	}, uid, "", "tester")
+	return retryOnSerializationConflict(t, "claim "+wiID, func() (*ClaimResponse, *AihubError) {
+		return FnClaimWorkItem(context.Background(), pool, wiID, &ClaimRequest{
+			IdempotencyKey: idem,
+			SessionInfo:    SessionInfo{MachineID: "m-261", SessionSecret: testSecret},
+		}, uid, "", "tester")
+	})
 }
 
 // claimFreshWithLocksErr is claimWI with an explicit requested_locks slice,
@@ -118,11 +129,14 @@ func claimWI(t *testing.T, pool *pgxpool.Pool, uid, wiID, idem string) (*ClaimRe
 // because its callers assert on the *AihubError themselves.
 func claimFreshWithLocksErr(t *testing.T, pool *pgxpool.Pool, uid, wiID, idem string, locks []ResourceLockReq) (*ClaimResponse, *AihubError) {
 	t.Helper()
-	return FnClaimWorkItem(context.Background(), pool, wiID, &ClaimRequest{
-		IdempotencyKey: idem,
-		RequestedLocks: locks,
-		SessionInfo:    SessionInfo{MachineID: "m-261", SessionSecret: testSecret},
-	}, uid, "", "tester")
+	// aihub#492: retried for the same reason as claimWI above.
+	return retryOnSerializationConflict(t, "claim "+wiID, func() (*ClaimResponse, *AihubError) {
+		return FnClaimWorkItem(context.Background(), pool, wiID, &ClaimRequest{
+			IdempotencyKey: idem,
+			RequestedLocks: locks,
+			SessionInfo:    SessionInfo{MachineID: "m-261", SessionSecret: testSecret},
+		}, uid, "", "tester")
+	})
 }
 
 func fileScopeKeys(locks []ResourceLock) []string {
@@ -265,11 +279,14 @@ func TestFileScopeRepoKey_ForceTakeoverDerivesRepoQualifiedKey(t *testing.T) {
 		t.Fatalf("initial claim: %v", aerr)
 	}
 
-	if _, aerr := FnForceTakeover(ctx, pool, wi.ID, uid, "taker", "admin",
-		map[string]string{proj: "owner"},
-		&ForceTakeoverRequest{Reason: "aihub#261 derivation coverage",
-			SessionInfo: SessionInfo{MachineID: "m-261-ft", SessionSecret: testSecret}},
-	); aerr != nil {
+	// aihub#492: FnForceTakeover is SERIALIZABLE and runs the same lock probe as
+	// a claim, so it loses the same races. See serialization_retry_test.go.
+	if _, aerr := retryOnSerializationConflict(t, "force_takeover", func() (*ForceTakeoverResponse, *AihubError) {
+		return FnForceTakeover(ctx, pool, wi.ID, uid, "taker", "admin",
+			map[string]string{proj: "owner"},
+			&ForceTakeoverRequest{Reason: "aihub#261 derivation coverage",
+				SessionInfo: SessionInfo{MachineID: "m-261-ft", SessionSecret: testSecret}})
+	}); aerr != nil {
 		t.Fatalf("force_takeover: %v", aerr)
 	}
 
@@ -311,8 +328,11 @@ func TestFileScopeRepoKey_AcquireLocksDoesNotCollideAcrossRepos(t *testing.T) {
 	mustExec(t, pool, `UPDATE work_items SET declared_resources='`+
 		string(declaredWithRepo("repo-b", "Dockerfile"))+`'::jsonb WHERE id='`+wiB.ID+`'`)
 
-	resp, aerr := FnAcquireLocks(ctx, pool, wiB.ID, &AcquireLocksRequest{
-		AttemptID: claimB.AttemptID, ClaimEpoch: claimB.ClaimEpoch, SessionSecret: testSecret,
+	// aihub#492: FnAcquireLocks is SERIALIZABLE too — same probe, same races.
+	resp, aerr := retryOnSerializationConflict(t, "acquire_locks", func() (*AcquireLocksResponse, *AihubError) {
+		return FnAcquireLocks(ctx, pool, wiB.ID, &AcquireLocksRequest{
+			AttemptID: claimB.AttemptID, ClaimEpoch: claimB.ClaimEpoch, SessionSecret: testSecret,
+		})
 	})
 	if aerr != nil {
 		t.Fatalf("acquire_locks for repo-b's Dockerfile was blocked by repo-a's: %v", aerr)
@@ -597,11 +617,12 @@ func TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite(t *testing.T) {
 		if _, aerr := claimWI(t, pool, uid, wi.ID, "idem-261-inf-ft"); aerr != nil {
 			t.Fatalf("claim: %v", aerr)
 		}
-		if _, aerr := FnForceTakeover(ctx, pool, wi.ID, uid, "taker", "admin",
-			map[string]string{proj: "owner"},
-			&ForceTakeoverRequest{Reason: "aihub#261 inference coverage",
-				SessionInfo: SessionInfo{MachineID: "m-261-inf", SessionSecret: testSecret}},
-		); aerr != nil {
+		if _, aerr := retryOnSerializationConflict(t, "force_takeover", func() (*ForceTakeoverResponse, *AihubError) {
+			return FnForceTakeover(ctx, pool, wi.ID, uid, "taker", "admin",
+				map[string]string{proj: "owner"},
+				&ForceTakeoverRequest{Reason: "aihub#261 inference coverage",
+					SessionInfo: SessionInfo{MachineID: "m-261-inf", SessionSecret: testSecret}})
+		}); aerr != nil {
 			t.Fatalf("force_takeover: %v", aerr)
 		}
 		var key string
@@ -626,8 +647,10 @@ func TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite(t *testing.T) {
 		}
 		mustExec(t, pool, `UPDATE work_items SET declared_resources='`+
 			string(declaredViaRepoEntry("repo-a", "pf261-al", "Dockerfile"))+`'::jsonb WHERE id='`+wi.ID+`'`)
-		resp, aerr := FnAcquireLocks(ctx, pool, wi.ID, &AcquireLocksRequest{
-			AttemptID: claim.AttemptID, ClaimEpoch: claim.ClaimEpoch, SessionSecret: testSecret,
+		resp, aerr := retryOnSerializationConflict(t, "acquire_locks", func() (*AcquireLocksResponse, *AihubError) {
+			return FnAcquireLocks(ctx, pool, wi.ID, &AcquireLocksRequest{
+				AttemptID: claim.AttemptID, ClaimEpoch: claim.ClaimEpoch, SessionSecret: testSecret,
+			})
 		})
 		if aerr != nil {
 			t.Fatalf("acquire_locks: %v", aerr)

@@ -30,6 +30,11 @@
 
 ## Changelog
 
+- v1.26（aihub#510，2026-09-09）：**`pf_predict_conflicts` 的四条声明 join 规则（2/4/5/6）不再把调用方自己报成冲突**。
+  §23 写规则 2/6 时一直写的是「**另一个** status='running' 的 wi」、规则 4/5 写的是「双方」，而 SQL 从来没排除过调用方——所以一个已 claim 的 wi 拿自己的 `declared_resources` 去问，就得到自己那条 soft_block / info，`severity` 也随之抬起来（`pf-work` 的 pre-claim 闸读的正是那个字段）。**这不是设计变更，是实现追上本节原本就写着的那个词**；也不是 v1.25 引入的：规则 2 重写前读的是调用方自己的锁行，重写后 join 的是它自己的声明，同一个缺陷换了个来源。
+  实现落在**两条共享 containment 片段内部**（`internal/domain/conflicts.go` (`notCallersOwnWISQL`)）而不是四个调用点上：片段的文档注释早就要求「今后任何问同一个问题的查询必须复用这两个常量」，把谓词放进去，第五条规则就自动继承，放在调用点则可以被漏掉。
+  「自己」的身份取自 `work_item_id`，**因此它从「可选，仅作上下文」变成调用方的身份**，工具 schema 的参数说明已照改（`input_schema_sha256` 随之变，卡片机器块已重生成）。opt-in 是构造上的必然：没有 `work_item_id` 就没有「自己」可排除，而 create-preview 本来就没有自己（wi 还不存在），那条路径逐字不变。⚠️ 该参数收 id **或** slug，过滤必须用 aihub#357 归一化之后的 canonical id——绑原始参数会对 `pf-work` 模式 B 最常发的写法静默失效；参数按**空字符串**而非 NULL 表示「没报身份」，因为 `wi.id <> NULL` 是 NULL，会让四条规则同时静默，正是 aihub#238 那种假全清。
+  ⚠️ **只修了声明那一半**：读锁表的规则 1（`hard_block`，命中即 `return`）与规则 3（`file_scope`）仍会把调用方自己的锁行报成「已被另一个 attempt 持有」，刻意留着——规则 1 决定的就是 pre-claim 闸分支的那个值。`docs/mcp-cards/pf_predict_conflicts.md` 的「两个方向都不可信」段落因此保留，并写清了哪一半已修。
 - v1.25（aihub#416，owner 2026-09-07 裁决「仓库/服务不上锁，从逻辑层面解决」）：**`repo` / `service` 声明退休为纯告示，不再派生任何 `resource_locks` 行**。
   改动点唯一：`resourceToLock` 的两个 `case` 返回空对，与既有的 `external_ref` 同形；`derivedLock`（intent 规则的家）**不动**——「任何 intent 都不取锁」不是 intent 的函数。
   **`resource_locks` 的 CHECK 词表一个字不改**：`worktree`/`tcp_port` 早就是「派生死、词表活」的先例，这两个只是加入这一类，显式 `requested_locks` 仍可取（逃生门保留）。`file_scope` 全链路（key 形状、`lockConflictProbe`、`FnAcquireLocks`、#366 commit 闸）逐位不变。
@@ -4437,6 +4442,27 @@ type Step struct {
 > `pf_predict_conflicts` 的工具描述——不写，调用方会把 `severity:"info"`
 > 读成「查过了，没冲突」。
 
+> 🔴 **v1.26（aihub#510）：「另一个」这个词从正文里的措辞变成了 SQL 里的谓词。**
+> 本节写规则 2 和规则 6 时一直写的是「**另一个** status='running' 的 wi」，
+> 规则 4/5 写的是「双方」——但四条声明 join 规则的 SQL **从来没有排除调用方
+> 自己**。于是一个已 claim 的 wi 拿自己的 declared_resources 去问，就把自己
+> 报成 soft_block（规则 2/4）或 info（规则 5/6），连 `severity` 一起抬上去。
+> 这不是 v1.25 引入的：规则 2 在重写前读的是调用方自己的**锁行**，重写后 join
+> 的是调用方自己的**声明**，同一个缺陷换了个来源。⇒ **本条不是改设计，是让实现
+> 追上本节原本就写着的那个词。**
+>
+> 「自己」的身份取自 `work_item_id`，**因此它不再是「可选，仅作上下文」**：
+> 没有它就没有「自己」可排除。这是构造上的必然而不是取舍——建 wi 前的
+> create-preview 本来就没有自己可言（wi 还不存在），所以那条路径逐字不变。
+> ⚠️ 该参数收 id **或** slug，而 slug 匹配不上 `work_items.id`，所以过滤必须用
+> aihub#357 那次归一化之后的 canonical id；绑原始参数会对 `pf-work` 模式 B
+> 最常发的那种写法**静默失效**。
+>
+> ⚠️ **只修了声明那一半。**读锁表的规则 1（`hard_block`，命中即 `return`、
+> 压掉后面所有规则）和规则 3（`file_scope`）仍然会把调用方自己的锁行报成
+> 「已被**另一个** attempt 持有」。留着是刻意的：规则 1 答的是「取这把锁会不会
+> 撞」，而它决定的正是 `pf-work` pre-claim 闸分支的那个值。
+
 `pf_predict_conflicts` 按以下顺序应用 6 条规则，任一 hard_block 即停止：
 
 ```
@@ -4464,10 +4490,12 @@ type Step struct {
 规则 4：同 repo refactor
   双方均声明 {uri:"repo:X", intent:"refactor"}
   → severity: soft_block
+  → v1.26：「双方」不含调用方自己（见上方 aihub#510 说明）
 
 规则 5：external_ref 重叠
   双方均引用同一 jira:KEY / github:issue/N
   → severity: info（仅提示）
+  → v1.26：「双方」不含调用方自己（见上方 aihub#510 说明）
 
 规则 6：同 service 声明（v1.25 新增）
   declared_resources 含 {type:"service", uri:"service:X"} 且

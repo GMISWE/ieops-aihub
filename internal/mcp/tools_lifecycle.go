@@ -687,7 +687,7 @@ func (s *Server) registerLifecycleTools() {
 	// description goes 58 -> 1,058 bytes. Measured 2026-09-09 against the
 	// aihub#419 budget in tools_list_payload_budget_test.go, which is a ceiling on
 	// the whole tools/list payload plus a per-tool share: this tool was already
-	// the largest at 6,796 B / 9% of 70,495 B and is 7,839 B / 10% of 71,843 B
+	// the largest at 6,796 B / 9% of 70,495 B and is 7,839 B / 10% of 71,900 B
 	// after this change (the wi_type note below is the other +55), still well
 	// under the 15% share. Bought deliberately, and the alternative was worse —
 	// the same disclosure spread over five parameter descriptions repeats the

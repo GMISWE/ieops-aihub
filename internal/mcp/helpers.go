@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -454,4 +455,19 @@ func parseArgs(raw json.RawMessage) (map[string]any, error) {
 // (tools_coding.go's g.err) still classify.
 func isAihubCode(err error, code string) bool {
 	return client.IsCode(err, code)
+}
+
+// isNotFound reports whether err is an aihub APIError carrying HTTP 404.
+//
+// Keyed on the STATUS, not on an error code, and that is the point: a request to
+// a route the server does not have at all is answered by the router, not by a
+// handler, so it carries no aihub error code to match on. This is how a newer
+// client detects "that server predates this capability" as distinct from "the
+// thing I asked about does not exist" — both are 404, and a caller that must
+// tell them apart has to look at what it asked for, not at the answer.
+//
+// Added by aihub#416 for the repo-pin recording hop, which is best-effort and
+// must stay silent against a server that has no /repo_pins route.
+func isNotFound(err error) bool {
+	return client.IsStatus(err, http.StatusNotFound)
 }

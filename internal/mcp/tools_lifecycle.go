@@ -1270,11 +1270,29 @@ func (s *Server) registerLifecycleTools() {
 			}
 			if _, pinErr := s.client.RecordRepoPins(ctx, sf.WIID, body); pinErr != nil {
 				fmt.Fprintf(os.Stderr, "polyforge: record repo pins for %s: %v\n", sf.WIID, pinErr)
-				worktreeProblems = append(worktreeProblems, fmt.Sprintf(
-					"repo pins were not recorded (%v), so this attempt has NO server-side record of which "+
-						"commit each repo started from. The claim itself succeeded and the worktrees are "+
-						"usable; what is missing is provenance. Any conclusion this session publishes from "+
-						"reading a repo has to say so rather than presenting itself as reproducible.", pinErr))
+				// 🔴 A 404 is NOT reported to the caller, and the exception is
+				// deliberate. This process can be newer than the aihub it is
+				// talking to, and a server that predates aihub#416 has no
+				// /repo_pins route at all — so on every claim against it this
+				// would append a warning about missing provenance that the agent
+				// can do absolutely nothing about. A warning nobody can act on
+				// trains people to skip warnings, which costs more than the one
+				// it delivers.
+				//
+				// ⚠️ The distinction is "the capability is absent" versus "the
+				// capability failed", and only the second is the caller's
+				// problem. Everything else — a credential mismatch, a 409, a
+				// broken connection — still reaches the response, because the
+				// rule that comes with a pin (a conclusion drawn in an unpinned
+				// repo must say it has no provenance) needs the caller to know
+				// the pin is missing.
+				if !isNotFound(pinErr) {
+					worktreeProblems = append(worktreeProblems, fmt.Sprintf(
+						"repo pins were not recorded (%v), so this attempt has NO server-side record of which "+
+							"commit each repo started from. The claim itself succeeded and the worktrees are "+
+							"usable; what is missing is provenance. Any conclusion this session publishes from "+
+							"reading a repo has to say so rather than presenting itself as reproducible.", pinErr))
+				}
 			} else {
 				safeResult["repo_pins"] = pins
 			}

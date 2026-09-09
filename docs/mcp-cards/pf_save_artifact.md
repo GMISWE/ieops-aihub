@@ -3,8 +3,8 @@
 ```json
 {
   "tool": "pf_save_artifact",
-  "description_sha256": "ab4084d04ce966ddcef924811147a590ae516f5f03f620f5f3ba2f5627a8e31e",
-  "input_schema_sha256": "91cbb9de8fc93a99cd8ad180199b70c3ed76f8aa87a76b765f6e52996c780385",
+  "description_sha256": "cd615eceedc57b064f28a94572a572edc8a4c2ff9af71b760c1ac9ee1d966418",
+  "input_schema_sha256": "d6574f66687976273e8a59f6d4946362a61e99c38e081dde7967e8a48770bec9",
   "params": {
     "content": {
       "type": "string",
@@ -28,15 +28,7 @@
     },
     "type": {
       "type": "string",
-      "required": true,
-      "enum": [
-        "methodology.execute",
-        "methodology.plan",
-        "methodology.retro",
-        "methodology.review",
-        "methodology.spec",
-        "methodology.wrap_summary"
-      ]
+      "required": true
     },
     "visibility": {
       "type": "string",
@@ -65,12 +57,15 @@
 
 ## hop 0-1 — what the caller is told
 
-Eight parameters, two required. `type` is a real enum from the domain list, so the
-SDK refuses an out-of-vocabulary value before the handler runs.
+Eight parameters, two required. `type` is a plain string whose ENFORCED rule is a
+PREFIX, not a list: it must start with `methodology.`, and the six named kinds are
+suggestions. It was published as a 6-value enum from `aihub#211` until `aihub#499`
+(2026-09-09) withdrew it — see Policy below for why the names went and the prefix
+stayed.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
-| `type` | enum | yes | one of the six `methodology.*` kinds |
+| `type` | string | yes | starts with `methodology.`; the six kinds are suggested, not exhaustive |
 | `work_item_id` | string | yes | which work item this artifact belongs to |
 | `content` | string | no | inline content; provide `content` OR `path`, not both |
 | `path` | string | no | a local UTF-8 markdown file, read by the LOCAL process |
@@ -103,6 +98,14 @@ Two renames at this hop:
 
 `visibility`, `structured_payload`, `supersedes_memory_id` and `html` are forwarded
 only when non-empty.
+
+**One refusal happens BEFORE the wire** (`validatePfSaveArtifactArgs`, `aihub#499`):
+`type` must start with `methodology.`, and it is checked here rather than in domain
+because this tool and `pf_remember` share `POST /v1/memories` — the server cannot
+narrow to `methodology.*` without breaking `pf_remember`, which must accept the
+other three prefixes. So the error carries no HTTP status: the request never
+leaves the process. Its mirror is `validatePfRememberArgs`, which refuses that same
+prefix, and between them the two tools partition the four prefixes.
 
 ## hop 4 — what it actually does
 
@@ -141,18 +144,58 @@ rate, which is consistent with a credentialed write whose state file may be miss
 
 ## Policy
 
-- **§6.2 T2-6** — this card used to say the type list here IS enforced, "a `propEnum`
-  the SDK checks and a server-side branch", and drew that as the contrast with
-  `pf_remember`'s 13-value list. `aihub#445` measured both halves and neither holds.
-  The SDK checks nothing on this registration path (`aihub#463`, read on go-sdk
-  v1.6.0: polyforge registers through the untyped `(*mcp.Server).AddTool` method,
-  whose `callTool` invokes the handler with no schema step), and what the server
-  enforces is the `methodology.` PREFIX plus the credential gate — no client-side
-  validator and no server branch pins the SIX names, so `methodology.anything`
-  passes `internal/domain/memory.go` (`Remember`) and stores. The 6-value enum here
-  is therefore the same published-but-unenforced shape T2-6 withdrew from
-  `pf_remember`; the ruling names only the 13-value list, so this one is recorded
-  rather than changed.
+- **§6.2 T2-6 — RESOLVED** (`aihub#499`, 2026-09-09). This card used to say the type
+  list here IS enforced, "a `propEnum` the SDK checks and a server-side branch",
+  and drew that as the contrast with `pf_remember`'s 13-value list. `aihub#445`
+  measured both halves and neither held: the SDK checks nothing on this
+  registration path (`aihub#463`, read on go-sdk v1.6.0: polyforge registers
+  through the untyped `(*mcp.Server).AddTool` method, whose `callTool` invokes the
+  handler with no schema step), and no server branch pinned the SIX names, so
+  `methodology.anything` passed `internal/domain/memory.go` (`Remember`) and
+  stored. `aihub#445` recorded that as a gap; `aihub#499` closed it, and the two
+  halves moved in OPPOSITE directions:
+
+  - **The six names were withdrawn**, following `aihub#445`'s shape one layer
+    along. §6.2 T2-6's ruling is "keep the leniency", and the accepted set is open
+    in fact and not only in principle: measured live 2026-09-09 across all ten
+    projects, 1,185 `methodology.*` rows carry **3** that are off the six
+    (`methodology.playbook`, `ieops` `wi_TYllxcv1` — operator handover documents
+    that no member of the six describes). Enforcing the names would have refused
+    real artifacts.
+  - **The `methodology.` prefix is now enforced** —
+    `internal/mcp/tools_memory.go` (`validatePfSaveArtifactArgs`), the mirror of
+    `validatePfRememberArgs`. 🔴 This card's earlier claim that the server enforced
+    that prefix was ALSO wrong: `internal/server/routes_memory.go`
+    (`handleRemember`) only BRANCHES on it — its non-methodology arm merely
+    verifies the supplied credential — and `Remember` accepts all four of
+    `MemoryTypePrefixes`, so `pf_save_artifact(type="fact.note")` with a live
+    claim put a non-artifact through the artifact door. The check makes the older
+    published claim honest rather than adding a new promise.
+
+    ⚠️ Scope of that last measurement, because the links were verified
+    separately and not end to end: hop 2 forwarding `fact.note` is measured (drop
+    the new prefix arm and the argument is accepted and sent), and each later
+    link is independently covered — `handleRemember`'s arm selection, `Remember`'s
+    four-prefix loop, and `memories_type_check` mirroring that same list
+    (`internal/domain/memory_type_check_test.go`). No single test drives the whole
+    path, so "it stored" is DERIVED from those four, not observed once.
+
+  The check lives at hop 2, not in domain, because this tool and `pf_remember`
+  share `POST /v1/memories` and the server cannot narrow to `methodology.*`
+  without breaking `pf_remember`, which must accept the other three prefixes. A
+  tool-level narrowing is only expressible where the tool is known.
+
+  ⚠️ One consequence of keeping the set open, stated because nothing in the schema
+  says it: an off-list `methodology.*` type IS stored, but it is **not
+  pre-rendered** and does **not** appear in the work item's artifact-links
+  section — `internal/domain/memory.go` (`defaultRenderTypes`) and
+  `internal/server/ui_handlers_wi.go` (`fetchArtifactLinks`) both name the six
+  literally. `internal/server/ui_embed.go` (`uiFuncMap`) holds the one
+  consumer deliberately written for any `methodology.*` type — its
+  `artifactInitial` helper reads the segment after the last dot, so the avatar
+  letter works for a name outside the six. The `type`
+  description says this; the three `methodology.playbook` rows above are living
+  with it.
 - **§6.1 T1-5** — no projection at all on this response.
 
 ## Open

@@ -213,21 +213,21 @@ func (s *Server) registerMemoryTools() {
 	// pf_save_artifact
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_save_artifact",
-		Description: "Save a methodology artifact (methodology.spec|plan|review|execute|retro|wrap_summary). Credentials injected from state file.",
+		Description: "Save a methodology artifact. type must start with methodology. (suggested: spec, plan, review, execute, retro, wrap_summary — an off-list methodology.* name is also accepted). Credentials injected from state file.",
 		InputSchema: saveArtifactSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
 			return errResult(err)
 		}
-		artifactType := strArg(args, "type")
-		if artifactType == "" {
-			return errResult(fmt.Errorf("type is required"))
+		// aihub#499. The two required-field checks used to be inline here; they
+		// moved into the validator with the prefix arm so that one function is
+		// the whole of this tool's argument contract, the way
+		// validatePfRememberArgs is for its mirror.
+		if err := validatePfSaveArtifactArgs(args); err != nil {
+			return errResult(err)
 		}
 		wiID := strArg(args, "work_item_id")
-		if wiID == "" {
-			return errResult(fmt.Errorf("work_item_id is required"))
-		}
 		artifactContent, err := resolveArtifactContent(args, config.WorkspaceRoot())
 		if err != nil {
 			return errResult(err)
@@ -986,10 +986,132 @@ func buildRedactMemoryBody(args map[string]any) map[string]any {
 	return map[string]any{"reason": strArg(args, "reason")}
 }
 
+// methodologyTypeParamDesc is pf_save_artifact's `type` description, and the
+// withdrawal of its enum (aihub#499, the tail of aihub#445 / aihub#411 §6.2 T2-6).
+//
+// The 6-value propEnum this replaces was ADVISORY and read as MANDATORY —
+// aihub#211 added it to give contract-lint something to check, and the card even
+// claimed the SDK refused an out-of-vocabulary value before the handler ran.
+// aihub#445 measured both halves false. This process validates nothing on that
+// registration path (aihub#463, go-sdk v1.6.0: the untyped (*mcp.Server).AddTool
+// invokes the handler with no schema step), and the server's gate is a PREFIX
+// plus the aihub#210 credential check, so `methodology.anything` stored.
+//
+// WHY WITHDRAW THE NAMES AND ENFORCE THE PREFIX, rather than enforce the names.
+// aihub#411 §6.2 T2-6's ruling is "keep the leniency", and the accepted set is
+// open in fact and not just in principle: measured live 2026-09-09 over all ten
+// projects, 1,185 methodology.* rows include 3 off these six
+// (methodology.playbook, ieops wi_TYllxcv1 — operator handover docs that no
+// member of the six describes). Pinning the six would have refused real
+// artifacts. So this follows aihub#445's shape, for the same reason and one
+// layer along: the published set and the enforced set are ONE set, and where
+// leniency is the decided behaviour the repair is to stop publishing a closed
+// one. The inverse case is aihub#463, where the vocabulary really was closed and
+// the repair was to make the server enforce it.
+//
+// 🔴 The prefix half is NOT merely published, it is now checked
+// (validatePfSaveArtifactArgs). Before aihub#499 nothing required it either:
+// handleRemember only BRANCHES on the prefix, and domain.Remember accepts all
+// four of MemoryTypePrefixes, so pf_save_artifact(type="fact.note") with a live
+// claim put a non-artifact through the artifact door. The tool description had
+// said "methodology.* kinds" since aihub#211 while that was untrue, so the check
+// makes the older claim honest rather than adding a new promise.
+//
+// ⚠️ That last sentence is DERIVED, not measured end to end. Verified: hop 2
+// forwards fact.note (remove the prefix arm and TestSaveArtifactTypeIsEnforced
+// accepts it), handleRemember picks its non-methodology arm, Remember's loop
+// admits the fact. prefix, and memories_type_check mirrors that same list. Four
+// covered links, no single test over the whole path.
+//
+// The check has to live at THIS hop, not in domain: pf_save_artifact and
+// pf_remember share POST /v1/memories, and the server cannot narrow to
+// methodology.* without breaking pf_remember, which must accept the other three
+// prefixes. That is why the mirror gate validatePfRememberArgs is here too — a
+// tool-level narrowing is only expressible where the tool is known.
+//
+// Built from domain.MethodologyTypePrefix and domain.MethodologyTypeEnum so the
+// published text cannot drift from either the check or the suggested list.
+// tools_save_artifact_vocab_test.go holds both halves: no `enum` key, and a
+// description that states the enforced rule and every suggested value.
+func methodologyTypeParamDesc() string {
+	return "Artifact type, full name (e.g. " + domain.MethodologyTypeEnum[0] + "). ENFORCED: must " +
+		"start with " + domain.MethodologyTypePrefix + " (pf_remember takes the other prefixes), " +
+		"contain no '|', and carry this work item's attempt credentials, which this tool sends " +
+		"from the state file. SUGGESTED, not a closed set — an off-list name with the " +
+		domain.MethodologyTypePrefix + " prefix is accepted and stored: " +
+		strings.Join(domain.MethodologyTypeEnum, ", ") + ". An off-list type is stored but is " +
+		"NOT pre-rendered and does NOT appear in the work item's artifact list, both of which " +
+		"name the six literally (domain.defaultRenderTypes, server.fetchArtifactLinks)."
+}
+
+// offPrefixHint says what to DO about a type pf_save_artifact just refused, and
+// it branches because the single most natural hint is wrong for half the cases.
+//
+// "store it with pf_remember instead" is right for fact.note — a legal memory
+// type through the other door — and wrong for "spec", which pf_remember refuses
+// too (no legal prefix at all), so a caller following that advice earns a second
+// 400. The aihub#211 case is exactly the second kind: the corpus calls were bare
+// "spec" / "retro", the six names with the prefix filed off, and for those the
+// useful hint names the value they meant.
+func offPrefixHint(artifactType string) string {
+	qualified := domain.MethodologyTypePrefix + artifactType
+	for _, v := range domain.MethodologyTypeEnum {
+		if v == qualified {
+			return "did you mean " + qualified + "? The prefix is part of the type name, not a namespace the tool adds"
+		}
+	}
+	for _, p := range domain.MemoryTypePrefixes {
+		if p != domain.MethodologyTypePrefix && strings.HasPrefix(artifactType, p) {
+			return "that is a pf_remember type, not an artifact — pf_save_artifact writes " +
+				"work-item-bound methodology artifacts only"
+		}
+	}
+	return "an artifact type is a full name beginning with " + domain.MethodologyTypePrefix +
+		"; for a non-artifact memory use pf_remember, whose accepted prefixes are " +
+		domain.MemoryTypePrefixGloss()
+}
+
+// validatePfSaveArtifactArgs enforces pf_save_artifact's contract before the
+// HTTP call: required fields present, and the type inside
+// domain.MethodologyTypePrefix — the mirror of validatePfRememberArgs, which
+// refuses that same prefix (aihub#210). aihub#499 added the prefix arm; see
+// methodologyTypeParamDesc for why it is a prefix and not the six names, and why
+// it cannot live in domain.
+//
+// The '|' arm duplicates no word list: domain.Remember rejects a piped type on
+// the write path already (aihub#289). It is here so the refusal names the
+// parameter at the hop the caller can see, rather than arriving as a server 400
+// about a "memory type" from a tool whose parameter is called an artifact type.
+func validatePfSaveArtifactArgs(args map[string]any) error {
+	artifactType := strArg(args, "type")
+	if artifactType == "" {
+		return fmt.Errorf("type is required")
+	}
+	if strArg(args, "work_item_id") == "" {
+		return fmt.Errorf("work_item_id is required")
+	}
+	if !strings.HasPrefix(artifactType, domain.MethodologyTypePrefix) {
+		return fmt.Errorf("type %q is not a legal value; allowed: types starting with %q "+
+			"(suggested: %s). %s",
+			artifactType, domain.MethodologyTypePrefix,
+			strings.Join(domain.MethodologyTypeEnum, ", "),
+			offPrefixHint(artifactType))
+	}
+	if strings.Contains(artifactType, "|") {
+		return fmt.Errorf("type %q contains '|', which is not part of the memory type "+
+			"vocabulary. An artifact has exactly ONE type; '|' is not a separator here, and a "+
+			"type stored with it could never be recalled by type. Pick one concrete type "+
+			"(e.g. %s)", artifactType, domain.MethodologyTypeEnum[0])
+	}
+	return nil
+}
+
 // saveArtifactSchema is pf_save_artifact's published InputSchema.
+//
+// aihub#499: `type` is NOT an enum any more. See methodologyTypeParamDesc.
 func saveArtifactSchema() json.RawMessage {
 	return objectSchema(map[string]any{
-		"type":                 propEnum("string", "Artifact type (must be one of the methodology.* kinds)", domain.MethodologyTypeEnum),
+		"type":                 prop("string", methodologyTypeParamDesc()),
 		"work_item_id":         prop("string", "Work item ID"),
 		"content":              prop("string", "Artifact content (inline). Provide content OR path, not both."),
 		"path":                 prop("string", "Local filesystem path to a UTF-8 markdown file to read as the artifact content (read by the local MCP process; must resolve within the workspace, <=1 MiB). Provide content OR path, not both."),

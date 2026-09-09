@@ -1742,11 +1742,11 @@ func tokenSet(s string) map[string]bool {
 // refuses anything. MemoryTypeEnum, PfRememberTypeEnum and MethodologyTypeEnum
 // below are all curated SUGGESTIONS — measured, not assumed: nothing validates a
 // memory type against any of them, and aihub#445 withdrew the JSON-Schema `enum`
-// that presented PfRememberTypeEnum as a closed set. (MethodologyTypeEnum is
-// still published as one on pf_save_artifact; what that tool enforces is the
-// methodology. prefix plus the aihub#210 credential gate, never the six names.
-// aihub#411 §6.2 T2-6 named only the 13-value list, so that one is recorded in
-// docs/mcp-cards/pf_save_artifact.md rather than changed here.)
+// that presented PfRememberTypeEnum as a closed set. aihub#499 (2026-09-09)
+// withdrew the last one: MethodologyTypeEnum was published as pf_save_artifact's
+// `type` enum while nothing pinned the six names, so that tool now publishes the
+// rule it actually applies — MethodologyTypePrefix plus the aihub#210 credential
+// gate — and keeps the six as suggestions.
 //
 // The set this one describes is infinite by design (§6.2 T2-6 keeps the
 // leniency), so no list of concrete type names can ever equal it; that is
@@ -1849,22 +1849,47 @@ var MemoryTypeEnum = []string{
 var PfRememberTypeEnum = func() []string {
 	out := make([]string, 0, len(MemoryTypeEnum))
 	for _, t := range MemoryTypeEnum {
-		if !strings.HasPrefix(t, "methodology.") {
+		if !strings.HasPrefix(t, MethodologyTypePrefix) {
 			out = append(out, t)
 		}
 	}
 	return out
 }()
 
-// MethodologyTypeEnum is the methodology.* subset of MemoryTypeEnum — the only
-// types pf_save_artifact accepts. Exposing it as the tool's `type` enum lets
-// contract-lint catch server-400 calls like pf_save_artifact(type="spec") /
-// type="retro" (aihub#211). Derived from MemoryTypeEnum so the two never drift;
-// mirror of PfRememberTypeEnum.
+// MethodologyTypePrefix is the ENFORCED half of pf_save_artifact's `type`
+// vocabulary: the one member of MemoryTypePrefixes that tool accepts. It is the
+// exact complement of pf_remember's refusal (validatePfRememberArgs), so the two
+// doors into memories.type partition the four prefixes between them rather than
+// overlapping.
+//
+// Both the published description and the check read this constant
+// (internal/mcp's methodologyTypeParamDesc and validatePfSaveArtifactArgs), so
+// the rule a caller is told and the rule that refuses them cannot drift apart —
+// which is the whole of aihub#499.
+const MethodologyTypePrefix = "methodology."
+
+// MethodologyTypeEnum is the methodology.* subset of MemoryTypeEnum: the
+// SUGGESTED artifact kinds, not the accepted set.
+//
+// 🔴 It was published as pf_save_artifact's `type` JSON-Schema `enum` from
+// aihub#211 until aihub#499 (2026-09-09), and nothing ever enforced the six
+// names — not this process (aihub#463: polyforge registers through the untyped
+// (*mcp.Server).AddTool, whose callTool invokes the handler with no schema step)
+// and not the server, whose gate is a PREFIX. aihub#445 measured that and
+// recorded it; aihub#499 withdrew the enum, because the accepted set is
+// genuinely open and a closed list could not describe it: measured live
+// 2026-09-09 across all ten projects, 1,185 methodology.* rows carried 3 that
+// are off these six (methodology.playbook, ieops wi_TYllxcv1 — operator
+// handover docs with no slot among the six), and enforcing the names would have
+// refused them.
+//
+// What aihub#499 enforces instead is MethodologyTypePrefix, which this list is
+// a subset of, so the six stay a suggestion and stay derived from MemoryTypeEnum
+// (mirror of PfRememberTypeEnum) rather than being retyped anywhere.
 var MethodologyTypeEnum = func() []string {
 	out := make([]string, 0, 6)
 	for _, t := range MemoryTypeEnum {
-		if strings.HasPrefix(t, "methodology.") {
+		if strings.HasPrefix(t, MethodologyTypePrefix) {
 			out = append(out, t)
 		}
 	}

@@ -20,18 +20,22 @@ SKILL_INVOKE (as ADMIN): polyforge:pf-status
 ADMIN creates 3 wi's via MCP (simulating /pf-work --no-claim pattern):
   WI_FIX1: pf_create_work_item(project="marketplace", goal="fix: null check in auth",
     wi_type="fix_bug", requires_human_session=false, priority="high",
-    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
-      "task_branch":"polyforge/fix1-test-sr01"}])
+    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive"}])
   WI_FIX2: pf_create_work_item(project="marketplace", goal="fix: timeout in search endpoint",
     wi_type="fix_bug", requires_human_session=false, priority="high",
-    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
-      "task_branch":"polyforge/fix2-test-sr01"}])
+    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive"}])
   WI_CHORE: pf_create_work_item(project="marketplace", goal="chore: update dependencies",
     wi_type="chore", requires_human_session=false, priority="normal",
-    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
-      "task_branch":"polyforge/chore-test-sr01"}])
+    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive"}])
 
-NOTE: All three wi's have different task_branches to avoid lock contention.
+NOTE: `task_branch` was dropped from these three declarations by aihub#416
+      (2026-09-09) — the published schema no longer carries it, because its only
+      reader was the retired `git_branch` lock key. The old rationale ("different
+      task_branches avoid lock contention") was already false by then: a `repo`
+      declaration derives NO lock, and no claim in this scenario passes
+      `requested_locks`, so the three wi's take no locks at all. They run
+      concurrently because nothing here contends — not because their branch
+      names differ.
 
 SKILL_INVOKE (as ADMIN): polyforge:pf-status
 ASSERT: all 3 wi's in items[] segment
@@ -50,7 +54,8 @@ SKILL_INVOKE (as BOB): polyforge:pf-work WI_CHORE
 ASSERT:
   - pf_claim called (Bob's key), WI_CHORE status=running
   - Worktree created for BOB at a DIFFERENT path from Alice's (different shortid)
-  - Alice and Bob hold DIFFERENT wi's (no conflict — separate task_branches)
+  - Alice and Bob hold DIFFERENT wi's (no conflict — neither claim takes a lock:
+    a `repo` declaration derives none, and no `requested_locks` is passed)
   - WI_FIX2 remains in items[] (nobody claimed it)
 
 ### Phase 4: Admin checks status mid-execution

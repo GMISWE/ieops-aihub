@@ -8,9 +8,14 @@ Must return 403. Confirms cross-user takeover permission enforcement.
 Reference: domain/run_attempts.go FnForceTakeover — cross-user requires maintainer/admin.
 
 ## P1-2 — Pause retains lock; second agent blocked
-Alice pauses a wi (keeps lock); Bob tries to claim same resource → 409 CONFLICT_LOCK_TAKEN.
-After Alice resumes, lock is re-acquired; Bob must wait again.
-Reference: FnCompleteAttempt(paused) keeps resource_locks intact.
+Alice pauses a wi while holding a lock she asked for in `requested_locks`; Bob tries to
+claim that same lock → 409 CONFLICT_LOCK_TAKEN. After Alice resumes the lock is still
+hers; Bob must wait again.
+Reference: pause does NOT keep every lock — `acquireLocksReleasePausedSQL` deletes
+`file_scope` rows and retains every other type. And since aihub#416 (2026-09-09) a
+`repo` declaration derives no lock at all, so the two agents must contend on a lock one
+of them explicitly requested; declaring the same repo no longer blocks anyone.
+Realized as P1-02-pause-retains-lock.md, which carries the same caveat in full.
 
 ## P1-3 — Stale credential after force-takeover
 After Admin force-takes over Alice's wi, Alice's old attempt credentials are stale.

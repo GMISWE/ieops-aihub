@@ -4,7 +4,7 @@
 {
   "tool": "pf_predict_conflicts",
   "description_sha256": "21efef2052245dd6164941753069ea379387987353eaa9f0e94e4f2054ba4552",
-  "input_schema_sha256": "d88d52410ef100adb7f9725effa8cfc66bc8516c5b5f24a3e2718379299ca096",
+  "input_schema_sha256": "29195768b65df6b4e0d8ca6854d1f3b78c4932dca3b60bfaaf888447da2d61a3",
   "params": {
     "declared_resources": {
       "type": "array",
@@ -39,7 +39,7 @@ Four parameters, one required.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `declared_resources` | array | yes | `{type, uri, intent}` + optional `repo` |
-| `work_item_id` | string | no | "optional, for context" |
+| `work_item_id` | string | no | id or slug; "the only way this call learns which running work item is YOU" |
 | `project` | string | no | namespaces `file_scope` checks; optional when `work_item_id` is set |
 | `dry_run` | boolean | no | "do not mutate state" |
 
@@ -49,6 +49,22 @@ locks as conflicts after a claim, and it false-negatives on read intent. The
 `aihub#387` ruling that withdrew `pf_get_ready_queue`'s `non_conflicting` cites
 exactly that, on the grounds that building on this predicate would have produced a
 second untrustworthy one.
+
+**`aihub#510` fixed one HALF of the first direction, and the half it did not fix is
+why the paragraph above still stands.** The four rules that read
+`declared_resources` — 2, 4, 5 and 6 — no longer report the caller back to itself.
+The two that read the **lock table** — 1 (`hard_block`) and 3 (`file_scope`) — still
+do, so a claimed work item re-predicting its own `path` declarations is still handed
+its own lock as somebody else's. Split that way because the two halves are different
+claims: a declaration overlap is advisory and self-overlap is meaningless, whereas
+rule 1 answers "would taking this lock collide", it `return`s on the first hit and
+suppresses every rule after it, and changing that changes the value `pf-work`'s
+pre-claim gate branches on.
+
+⚠️ **The declaration half is opt-in, and it cannot be otherwise:** the exclusion
+needs `work_item_id`, so a predict that names nobody is unchanged. That is correct
+for the create-preview path, which names nobody because the work item does not exist
+yet — but it means an agent that omits the parameter still gets itself back.
 
 The only reliable conflict signal in this system is **the return value of
 `pf_claim_work_item`**, which reports what it actually took.
@@ -103,6 +119,18 @@ the per-type URI scheme rules are stated.
   ago that attempt reported activity. It is what makes deploy preflight an existing
   call rather than a new endpoint. ⚠️ It is an AGE, not a lease — nothing expires
   on it and no code branches on it.
+- **The four declaration rules exclude the caller** (`aihub#510`). All of them join
+  `work_items` on `status='running'` plus a declaration overlap, and a claimed work
+  item asking about its own declarations satisfies both halves — so it used to be
+  reported back to itself as a `soft_block` (2, 4) or an `info` (5, 6), and the
+  top-level `severity` rose with it. The exclusion is bound as a parameter inside
+  the two shared containment fragments (`internal/domain/conflicts.go`
+  (`notCallersOwnWISQL`)) rather than at the four call sites, so a fifth rule
+  written with them inherits it.
+- ⚠️ **`work_item_id` may be an id OR a slug, and the exclusion depends on the
+  `aihub#357` resolution of the two.** A slug matches no `work_items.id`, so a
+  filter bound to the raw parameter would silently do nothing for the spelling
+  `pf-work`'s own Mode B sends.
 - `file_scope` keys are namespaced by project, and a `path` entry without `repo`
   keeps the two-segment key form that conflicts with every repo's copy of that path.
 
@@ -128,10 +156,19 @@ worth recording.
 - **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).** What a
   prediction reports for an advisory entry was that item's open question; the answer
   is in hop 4 above and in the tool description. What that work item deliberately did
-  NOT do is exclude a work item's own attempt from rules 2, 4 and 6 — see the next
-  bullet, which it leaves exactly as it found it.
-- The two measured untrustworthy directions are recorded, not fixed. No adjudicated
-  row commits to fixing them, and `aihub#416` (landed 2026-09-09) did not change
-  either: rule 2 read the caller's own lock row before and joins the caller's own
-  declaration now, so "reports an attempt's OWN locks as conflicts" survives the
-  rewrite unchanged in kind.
+  NOT do is exclude a work item's own attempt from rules 2, 4 and 6; `aihub#510`
+  (2026-09-09) did that, for those three plus rule 5.
+- **The LOCK half of the self-report is still open**, and it is the sharper half.
+  Measured 2026-09-09 on one claimed work item re-predicting its own `path`
+  declaration: with `dry_run=false` the answer is `severity: "hard_block"` and a
+  single rule-1 prediction reading `Resource lock is already held by another
+  attempt` whose `work_item_slug` **is the caller**; with `dry_run=true` rule 1 is
+  skipped and rule 3 answers `soft_block` / `File path overlaps with another running
+  attempt`, again naming the caller. The two are never both visible, because rule 1
+  returns on its first hit. `aihub#510` (2026-09-09) scoped itself to the
+  declaration rules and left this untouched deliberately — rule 1 decides the value
+  `pf-work`'s pre-claim gate branches on. No adjudicated row commits to fixing it,
+  and `aihub#510`'s attrs record no decision on it as of 2026-09-09.
+- **The read-intent false negative is still unfixed**, and no adjudicated row
+  commits to fixing it. `aihub#416` (landed 2026-09-09) and `aihub#510` (2026-09-09)
+  both left it alone.

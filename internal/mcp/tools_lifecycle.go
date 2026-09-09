@@ -664,9 +664,52 @@ func (s *Server) registerLifecycleTools() {
 	})
 
 	// pf_update_work_item
+	//
+	// aihub#495: the description below is the hop-1 half of aihub#440's
+	// editability matrix, which shipped ENFORCED and unpublished. The matrix is
+	// domain.wiEditTierByField and domain.updateGate; the card
+	// (docs/mcp-cards/pf_update_work_item.md) and docs/mcp-tools.md both carry the
+	// table, and neither is on the wire — hop 1 is the only thing a tool caller
+	// ever sees, so a rule stated only there is a rule a caller meets by being
+	// refused.
+	//
+	// 🔴 The last sentence is the one that had to be here rather than only in the
+	// card. Every other clause describes a refusal that predates the change:
+	// `content` has answered 409 CONFLICT_TERMINAL_STATE on a terminal work item
+	// since long before aihub#440, and the contract tier's two codes are
+	// cancelGate's. The five WORKING-tier fields are the batch's only 200 -> 409
+	// transition — they had no status guard at all and were writable on a wrapped
+	// work item — so they are the only part of this text a caller could hold a
+	// correct-yesterday belief about. Naming them individually costs bytes and
+	// buys the one thing a matrix summary cannot: which cell MOVED.
+	//
+	// Cost, on the same ledger as the per-parameter notes below: the tool
+	// description goes 58 -> 1,058 bytes. Measured 2026-09-09 against the
+	// aihub#419 budget in tools_list_payload_budget_test.go, which is a ceiling on
+	// the whole tools/list payload plus a per-tool share: this tool was already
+	// the largest at 6,796 B / 9% of 70,495 B and is 7,839 B / 10% of 71,900 B
+	// after this change (the wi_type note below is the other +55), still well
+	// under the 15% share. Bought deliberately, and the alternative was worse —
+	// the same disclosure spread over five parameter descriptions repeats the
+	// status classes five times and still cannot state the mixed-patch rule,
+	// which is about the patch rather than about any one field.
 	s.addTool(&sdkmcp.Tool{
-		Name:        "pf_update_work_item",
-		Description: "Update a work item (goal, wi_type, priority, labels, etc.)",
+		Name: "pf_update_work_item",
+		Description: "Update a work item. Editability is ONE matrix over three field tiers, and the STRICTEST " +
+			"tier the patch touches governs the whole patch — a patch that mixes tiers is refused whole, never " +
+			"applied in part. " +
+			"contract (goal, wi_type): only while status is queued, paused or blocked, and only for the " +
+			"reporter, a project maintainer or an admin. " +
+			"working (content, labels, priority, milestone, requires_human_session, declared_resources): any " +
+			"non-terminal status. " +
+			"record (attrs, attrs_patch, attrs_unset): EVERY status, including a wrapped work item — deliberate, " +
+			"and load-bearing for post-wrap records. " +
+			"A refusal names the KIND, not the field: 409 CONFLICT_WI_ALREADY_CLAIMED (running) or 409 " +
+			"CONFLICT_TERMINAL_STATE (wrapped, failed, cancelled) for a wrong state, 403 FORBIDDEN for a wrong " +
+			"caller. " +
+			"🔴 NEW since aihub#440, and the only part of this that used to be otherwise: labels, priority, " +
+			"milestone, requires_human_session and declared_resources had NO status guard and succeeded on a " +
+			"terminal work item; they now answer 409 CONFLICT_TERMINAL_STATE there.",
 		InputSchema: objectSchema(map[string]any{
 			// No `kind` in this schema (aihub#383). It was published here and
 			// forwarded below, but domain.UpdateWorkItemRequest has no `kind` json
@@ -728,10 +771,22 @@ func (s *Server) registerLifecycleTools() {
 			"goal": prop("string", fmt.Sprintf(
 				"Single-line non-empty goal ≤%d chars (status must be queued, paused or blocked)",
 				domain.MaxWorkItemGoalRunes())),
-			"goal_change_reason":     prop("string", "Reason for goal change (required with goal)"),
-			"priority":               propEnum("string", "Updated priority", domain.WorkItemPriorityList()),
-			"milestone":              prop("string", "Updated milestone"),
-			"wi_type":                prop("string", "Updated wi_type"),
+			"goal_change_reason": prop("string", "Reason for goal change (required with goal)"),
+			"priority":           propEnum("string", "Updated priority", domain.WorkItemPriorityList()),
+			"milestone":          prop("string", "Updated milestone"),
+			// aihub#495: `wi_type` sits in the SAME tier as `goal`, under the same
+			// predicate, in the same map entry pair (domain.wiEditTierByField), and
+			// aihub#440 widened the status set for both at once. `goal`'s description
+			// was rewritten to say so and this one was not, so the pair published two
+			// different contracts for one rule — which is the aihub#474 failure mode
+			// the other way round: there, a caller read pf_create_work_item's `goal`
+			// and inferred the cap was create-only; here, a caller reads `goal` and
+			// has no reason to think `wi_type` shares its gate.
+			//
+			// Same words as `goal`'s parenthetical, on purpose. The status class is
+			// one fact (domain.wiStatusOpen) and two spellings of it would be two
+			// things to keep in step.
+			"wi_type":                prop("string", "Updated wi_type (status must be queued, paused or blocked)"),
 			"requires_human_session": prop("boolean", requiresHumanSessionUpdateDescription),
 			"reclassify_reason":      prop("string", "Reason for wi_type change (min 10 chars)"),
 			"labels":                 prop("array", fmt.Sprintf("Updated labels (max %d)", domain.MaxWorkItemLabels())),

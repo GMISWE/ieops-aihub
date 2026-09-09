@@ -18,8 +18,12 @@ The subagent must follow pf-execute skill instructions, not call MCP tools direc
 - Project: marketplace
 - WI_ID: pre-created fix_bug wi, already claimed (state file written, worktree exists)
   - WI_ID status = "running"
-  - State file at WORKSPACE_ROOT/.polyforge/state/WI_ID.json (contains attempt_id,
-    claim_epoch, workspace_root, repo, task_branch)
+  - State file at WORKSPACE_ROOT/.polyforge/state/WI_ID.json — the `config.StateFile`
+    struct: wi_id, attempt_id, claim_epoch, session_secret, claimed, plus the
+    optional slug, project, claimed_at, idem_key and worktrees (repo → abs path).
+    NOTE: it has never held `workspace_root`, `repo` or `task_branch`. The workspace
+    root is not stored because the file is already workspace-scoped
+    (`config.StateDir()`), and the per-repo worktree path is in `worktrees`.
   - Worktree at WORKSPACE_ROOT/pf.<shortid>/marketplace/ (WT_PATH)
   - wi goal: "fix: remove stale cache entry on user logout"
   - wi_type: fix_bug, requires_human_session=false

@@ -80,6 +80,22 @@ does not edit the caller's own array.
   worse than creating nothing.
 - **An item with no `goal` fails locally** and is reported with its index rather than
   sent.
+- **A per-item `attrs` that is not a JSON object is a per-item 400** (`aihub#465`,
+  published here by `aihub#486`, recorded on this card by `aihub#495`). The guard is
+  `internal/domain/work_items.go` (`validateJSONObjectParam`), which runs on the
+  server inside `CreateWorkItem` — so unlike the missing-`goal` check above it costs
+  a round trip, and unlike a whole-batch refusal it takes exactly one item down: the
+  400 lands in `failed` with that item's `index`, and every well-formed sibling is
+  still created. The rejection names the type and the byte length, and for a string
+  reports through `details.string_decodes_to` whether the quoted text was itself
+  valid JSON; nothing is coerced. ⚠️ **The failure this matters for is the one a
+  batch makes likelier.** 18 of the 19 stringified values in the `aihub#412` corpus
+  are a model hand-writing escaped JSON that came out malformed, and a batch is
+  where a model hand-writes N of them in one message — so N items can carry the same
+  serialisation mistake and the response reports it N times, once per index, rather
+  than as one failed call. Size is never the reason: `attrs` has no length cap,
+  which is `internal/domain/work_items.go` (`jsonObjectParamSizeNote`)'s entry for
+  it and is asserted against real behaviour rather than restated.
 
 ## hop 5 — what comes back
 

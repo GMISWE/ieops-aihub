@@ -2272,8 +2272,17 @@ jobs:
       # leave advisory: the guard it covers is the ONLY enforcement of the
       # <undercover> rule, it is a PreToolUse hook so no Go test reaches it, and
       # the defect aihub#272 fixed had been live since the guard shipped. So the
-      # unwired list above is now: launcher-bash32, pf-repo-sync, pf-seam-check,
-      # pf-skill-router.
+      # unwired list above is now: launcher-bash32, pf-repo-sync, pf-seam-check.
+      # UPDATE (aihub#513): pf-skill-router.test.sh is wired below as well, which
+      # is what took it off that list. It also corrects the aihub#304 UPDATE above.
+      # "It is Go rather than shell precisely so it cannot become advisory" was
+      # true of the mechanism and false of the coverage: the Go gates enumerate
+      # routed skills OUT OF the hook's own TARGETS dict (routedSkills/routerModes
+      # in internal/cli/skill_recall_type_test.go), so deleting a skill from TARGETS
+      # shrank them rather than failing them — measured green with "pf-spec"
+      # removed. The Go side now carries a literal floor as well
+      # (TestRoutedSkills_LiteralFloor); this suite is the half that names pf-spec
+      # and pf-plan literally.
       # aihub#249: GET /v1/memories previously parsed only `top_k` (a `?limit=N`
       # caller was silently ignored) and RecallResponse carried no `total`; and
       # GET /v1/memories/:id did not exist at all. These run against the
@@ -4405,6 +4414,62 @@ jobs:
           [ "${n:-0}" -ge 90 ] \
             || { echo "::error::only $n PASS lines from pf-commit-guard.test.sh, floor is 90 — checks have gone missing"; exit 1; }
           echo "commit-guard gate: $n checks passed"
+
+      # aihub#513: every Go gate over the router BOOTSTRAPS from the hook's own
+      # TARGETS dict, so de-routing a skill shrinks those gates instead of failing
+      # them. Measured on this tree: delete the "pf-spec" entry from TARGETS plus
+      # its two routerBudget rows and `go test ./internal/cli/... -count=1` comes
+      # back fully green, while a dispatched /pf-spec silently stops receiving the
+      # Iron Rules and the three-segment output format (the aihub#478 payload).
+      #
+      # pf-skill-router.test.sh is the only artifact that names pf-spec and pf-plan
+      # LITERALLY — `for sk in pf-spec pf-plan` — and the same mutation turns 11 of
+      # its named checks red. It has existed since aihub#478 and sat on the unwired
+      # list above the whole time, which made all 57 of its checks advisory: red
+      # only when somebody remembered to invoke it by hand. aihub#513 also adds a
+      # literal floor on the Go side (internal/cli, TestRoutedSkills_LiteralFloor);
+      # the two halves fail independently and neither subsumes the other.
+      #
+      # Hermetic, so this gates no new infrastructure: python3 plus fixtures under
+      # mktemp, no docker, no network, no database, and HOME is stubbed so the
+      # suite cannot read the real ~/.claude.
+      #
+      # The named checks are one per (skill x engine branch) drawn from the 11 the
+      # de-routing mutation kills, plus the inert and malformed-payload ones so the
+      # opposite mutation (route everything) is named too. The PASS-count floor
+      # alone would not be enough: deleting a check and the routing it covers in
+      # one change keeps the exit code green and only moves the count.
+      - name: aihub#513 skill-router gate
+        run: |
+          set -o pipefail
+          bash plugins/polyforge/tests/pf-skill-router.test.sh 2>&1 | tee skill_router.log
+          for want in "PASS: pf-spec (sp off) carries IR1" \
+                      "PASS: pf-spec (sp on) carries IR1" \
+                      "PASS: pf-spec (sp off) carries the output format" \
+                      "PASS: pf-spec (sp on) carries the output format" \
+                      "PASS: pf-plan (sp off) carries IR1" \
+                      "PASS: pf-plan (sp on) carries IR1" \
+                      "PASS: pf-plan (sp off) carries the output format" \
+                      "PASS: pf-plan (sp on) carries the output format" \
+                      "PASS: bare 'pf-spec' routes the same as the prefixed form" \
+                      "PASS: execute native main loop injected" \
+                      "PASS: execute payload carries IR1" \
+                      "PASS: execute superpowers pointer" \
+                      "PASS: pf-help -> no injection" \
+                      "PASS: pf-status -> no injection" \
+                      "PASS: garbage stdin -> no output" \
+                      "ALL PASS"; do
+            grep -qF -- "$want" skill_router.log \
+              || { echo "::error::pf-skill-router.test.sh did not report '$want' — the skill-router gate is not actually executing"; exit 1; }
+          done
+          # The suite short-circuits to exit 0 when python3 is missing, so the exit
+          # code alone cannot tell "all checks passed" from "no check ran".
+          ! grep -q '^SKIP:' skill_router.log \
+            || { echo "::error::pf-skill-router.test.sh SKIPped (python3 missing on the runner?) — it exits 0 in that case, so this step would otherwise be a green no-op"; exit 1; }
+          n=$(grep -c '^  PASS: ' skill_router.log || true)
+          [ "${n:-0}" -ge 57 ] \
+            || { echo "::error::only $n PASS lines from pf-skill-router.test.sh, floor is 57 — checks have gone missing"; exit 1; }
+          echo "skill-router gate: $n checks passed"
 
       # aihub#421 (layer 3 of the MCP stability programme): the top abnormal
       # flows from the aihub#412 corpus inventory, turned into invariant tests.

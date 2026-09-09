@@ -156,6 +156,95 @@ func routerModes(t *testing.T, pluginRoot string) map[string]string {
 	return out
 }
 
+// ─── Literal floor under the two helpers above (aihub#513) ───────────────────
+//
+// routedSkills and routerModes both bootstrap from the hook's own TARGETS dict. That is what
+// makes ADDING a routed skill widen every gate in this package for free — and it is the one
+// thing they structurally cannot catch, because REMOVING a skill shrinks the set they
+// enumerate instead of failing against it.
+//
+// Measured (aihub#513, reproduced on this tree, not only on 0cb7e55 where it was found):
+// delete the `"pf-spec"` entry from TARGETS together with its two routerBudget rows, and
+// `go test ./internal/cli/... -count=1` comes back fully green. Not one gate here notices. A
+// dispatched /pf-spec would stop receiving the Iron Rules and the three-segment output
+// format — the exact payload aihub#478 added — with nothing red anywhere.
+// plugins/polyforge/tests/pf-skill-router.test.sh does name pf-spec and pf-plan literally
+// and does go red (11 named checks), which is why aihub#513 also wired that suite into
+// ci.yml. This gate is the Go-side half: it lives in internal/cli, so it ships without a
+// plugin version bump and runs under the unfiltered "Unit tests" step.
+//
+// So the routed set is restated here as a LITERAL. It is deliberately NOT derived from
+// TARGETS: a floor that reads the file it is checking is not a floor, it is a mirror.
+//
+// Adding a skill to TARGETS does not require touching this list — the derived helpers
+// already cover widening, and pinning the full set here would turn every addition into a
+// two-file edit for no signal. Removing one DOES require touching it, and that asymmetry is
+// the point: de-routing a skill becomes a deliberate edit a reviewer sees, not a silent
+// shrink of the gate that was supposed to be watching.
+var routerFloor = []struct {
+	skill string
+	mode  string
+	why   string
+}{
+	{"pf-execute", routerModeStepBody, "the SKILL.md is a stub, so the injection IS the step body"},
+	{"pf-plan", routerModeHeaderOnly, "aihub#478: a dispatched subagent inherits no SessionStart payload"},
+	{"pf-spec", routerModeHeaderOnly, "aihub#478: same argument as pf-plan"},
+}
+
+func TestRoutedSkills_LiteralFloor(t *testing.T) {
+	if len(routerFloor) == 0 {
+		t.Fatal("routerFloor is empty — this gate would assert nothing, which is the same " +
+			"silent success it exists to remove")
+	}
+	pluginRoot := pluginRootDir(t)
+	routed := routedSkills(t, pluginRoot)
+	modes := routerModes(t, pluginRoot)
+
+	present := make(map[string]bool, len(routed))
+	for _, s := range routed {
+		present[s] = true
+	}
+
+	for _, want := range routerFloor {
+		if !present[want.skill] {
+			t.Errorf("%q is no longer in hooks/pf-skill-router's TARGETS dict, so the router is "+
+				"inert for it. Every other gate in this package enumerates TARGETS, so de-routing "+
+				"SHRINKS them and stays green — this assertion is the only one that turns red. "+
+				"Routed set is now %v. It is on the floor because: %s. If the removal is "+
+				"intended, delete its routerFloor entry in the same change.",
+				want.skill, routed, want.why)
+			continue
+		}
+		if got := modes[want.skill]; got != want.mode {
+			t.Errorf("TARGETS[%q] declares mode %q, floor expects %q (%s). The mode selects which "+
+				"assertions apply to the payload, so a flip re-judges the skill by another mode's "+
+				"rules rather than failing it — the same silent-shrink shape as de-routing.",
+				want.skill, got, want.mode, want.why)
+		}
+	}
+}
+
+// TestRoutedSkills_FloorDiscriminates is the floor's own positive control. The floor compares
+// a literal list against a parsed set, so its failure mode is a membership test that can
+// never report absent — and that failure looks exactly like a passing gate. Run the same
+// lookup against a name that must NOT be routed.
+func TestRoutedSkills_FloorDiscriminates(t *testing.T) {
+	pluginRoot := pluginRootDir(t)
+	routed := routedSkills(t, pluginRoot)
+	present := make(map[string]bool, len(routed))
+	for _, s := range routed {
+		present[s] = true
+	}
+	// pf-status is a real skill the hook is deliberately inert for (it is absent from
+	// TARGETS, so the hook exits 0 without emitting anything). If that ever changes this
+	// control must pick a different known-absent name rather than be deleted.
+	const notRouted = "pf-status"
+	if present[notRouted] {
+		t.Fatalf("%q is now routed, so it can no longer serve as this control's known-absent "+
+			"name — pick another one. Routed set: %v", notRouted, routed)
+	}
+}
+
 // renderHook runs the real hook exactly as the harness does: payload on stdin,
 // CLAUDE_PLUGIN_ROOT pointing at the plugin tree. Returns the injected context.
 func renderHook(t *testing.T, pluginRoot, skill string) string {

@@ -18,28 +18,29 @@ ADMIN creates 5 wi's (all requires_human_session=false):
 
   WI_DB: pf_create_work_item(goal="chore: migrate DB schema",
     wi_type="chore", priority="high",
-    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
-      "task_branch":"polyforge/db-sr04"}])
+    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive"}])
 
   WI_API: pf_create_work_item(goal="fix: API returns wrong status code",
     wi_type="fix_bug", priority="high",
-    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
-      "task_branch":"polyforge/api-sr04"}])
+    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive"}])
 
   WI_UI: pf_create_work_item(goal="chore: update UI components",
     wi_type="chore", priority="normal",
-    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
-      "task_branch":"polyforge/ui-sr04"}])
+    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive"}])
 
   WI_TEST: pf_create_work_item(goal="chore: add integration tests",
     wi_type="chore", priority="normal",
-    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
-      "task_branch":"polyforge/test-sr04"}])
+    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive"}])
 
   WI_DOCS: pf_create_work_item(goal="chore: update API docs",
     wi_type="chore", priority="low",
-    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive",
-      "task_branch":"polyforge/docs-sr04"}])
+    declared_resources=[{"type":"repo","uri":"repo:marketplace","intent":"exclusive"}])
+
+NOTE: `task_branch` was dropped from all five declarations by aihub#416 (2026-09-09) —
+      the published schema no longer carries it, because its only reader was the
+      retired `git_branch` lock key. The ordering this scenario tests comes from
+      priority and from pf_create_dependency, never from a lock, so the assertions
+      are unaffected.
 
 ADMIN creates dependencies (no claim needed: aihub#324 removed the credential
 injection these tools never used — authorization is project role alone):
@@ -79,7 +80,8 @@ SKILL_INVOKE (as BOB): polyforge:pf-work WI_UI
 ASSERT:
   - WI_UI claimed by Bob, status=running
   - Alice and Bob have separate worktrees (different shortids)
-  - No lock conflict (WI_DB and WI_UI use different task_branches)
+  - No lock conflict (neither claim takes a lock: since aihub#416 a `repo`
+    declaration derives none, and no `requested_locks` is passed)
 
 ### Phase 3: Alice wraps WI_DB (unblocks WI_API)
 SKILL_INVOKE (as ALICE): polyforge:pf-stop --wrap
@@ -133,6 +135,7 @@ CLEANUP (as ADMIN):
 ## PASS criteria
 Dependency ordering enforced (stalled[] correctly populated);
 blocked wi's move to items[] after blocker wraps (cascade unblock works);
-high-priority tasks picked first; parallel agents don't conflict on separate branches;
+high-priority tasks picked first; parallel agents don't conflict (no lock is taken
+on either side, so there is nothing to serialise them);
 all wrap calls use pf_wrap (coding scenario);
 pf_create_dependency uses correct params: blocked_wi_id, blocking_wi_id, kind.

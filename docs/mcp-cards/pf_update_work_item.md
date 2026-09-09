@@ -4,7 +4,7 @@
 {
   "tool": "pf_update_work_item",
   "description_sha256": "29b3c7434085f3bd45cf9acebf95466a7fe1ae8757a6d86786d03886c6687c30",
-  "input_schema_sha256": "PENDING_REGEN_AFTER_MERGE",
+  "input_schema_sha256": "b66d24d40f9aac67d137b468702934ad68909019c6e9233a6c6e0e8613ccc446",
   "params": {
     "attrs": {
       "type": "object",

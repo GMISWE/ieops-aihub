@@ -663,11 +663,15 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			"reason":                   "claim by same user or explicit takeover",
 			"actor_user_id":            callerUserID,
 		})
-		_, _ = tx.Exec(ctx, `
+		// aihub#492: the emission stays best-effort, but a class-40 rollback is
+		// not a lost event — it is a dead transaction. See bestEffortExec.
+		if aerr := bestEffortExec(ctx, tx, "failed to emit attempt_superseded event", `
 			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
 			VALUES ($1, $2, $3, $4, 'attempt_superseded', $5, $6)`,
 			supEvtID, wi.ID, callerUserID, callerDisplay, supPayload, wi.Project,
-		)
+		); aerr != nil {
+			return nil, aerr
+		}
 	}
 
 	// Insert resource_locks for requested locks.
@@ -727,6 +731,18 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	priorStepErr := tx.QueryRow(ctx,
 		`SELECT current_step_status, step_started_at FROM wi_step_state WHERE work_item_id=$1`, wi.ID,
 	).Scan(&priorStepStatus, &priorStepStartedAt)
+	// aihub#492: priorStepErr is read, not returned — pgx.ErrNoRows is the
+	// normal "no prior step state" answer and the guard at the read site below
+	// treats any error as "no hint". A class-40 rollback is not that. Postgres
+	// has already aborted this transaction, so nothing below can commit and
+	// tx.Commit reports pgx.ErrTxCommitRollback — a plain sentinel, not a
+	// *pgconn.PgError, which retryConflictErr at the commit site cannot
+	// classify. Reading past it therefore replaces a classified retryable 409
+	// with an unclassifiable 500. Same reasoning, and the same fix, as the
+	// unblockDependentWI site in FnCompleteAttempt (aihub#334).
+	if aerr := retryConflictErr(priorStepErr, "failed to read prior step state"); aerr != nil {
+		return nil, aerr
+	}
 
 	// Upsert wi_step_state (C-R7-9: INSERT ... ON CONFLICT DO UPDATE)
 	// scenario_ref is the git SHA of the local scenario clone at claim time (client-provided).
@@ -741,6 +757,13 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		wi.ID, wi.WIType, req.ScenarioRef,
 	)
 	if err != nil {
+		// aihub#492: "non-fatal" holds only for errors that leave the
+		// transaction usable. A class-40 rollback does not — see the
+		// prior-step read above for why continuing past one downgrades a
+		// retryable 409 into a 500 at tx.Commit.
+		if aerr := retryConflictErr(err, "failed to upsert wi_step_state"); aerr != nil {
+			return nil, aerr
+		}
 		// Non-fatal but log: agent will lack scenario_ref and fall back to default behavior.
 		fmt.Fprintf(os.Stderr, "claim: wi_step_state upsert failed (scenario_ref not written): %v\n", err)
 	}
@@ -772,11 +795,16 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		// can add a key defeats the compiled gate, which asserts on that function's bytes.
 		evtID := NewID("evt")
 		evtPayload := classificationResolvedEventPayload(resolvedRHS)
-		_, _ = tx.Exec(ctx, `
+		// aihub#492: see bestEffortExec. evtPayload is still the bare builder's
+		// bytes and nothing here marshals anything, so the honesty gate in
+		// rhs_classification_honesty_test.go is untouched.
+		if aerr := bestEffortExec(ctx, tx, "failed to emit wi_classification_resolved event", `
 			INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
 			VALUES ($1, $2, $3, $4, 'wi_classification_resolved', $5, $6)`,
 			evtID, wi.ID, callerUserID, callerDisplay, evtPayload, wi.Project,
-		)
+		); aerr != nil {
+			return nil, aerr
+		}
 		wi.RequiresHumanSession = &resolvedRHS
 	}
 
@@ -792,11 +820,15 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		"is_takeover":   isTakeover,
 		"claim_epoch":   newEpoch,
 	})
-	_, _ = tx.Exec(ctx, `
+	// aihub#492: this one fires on EVERY claim, so it was the widest of the
+	// discard sites — see bestEffortExec.
+	if aerr := bestEffortExec(ctx, tx, "failed to emit attempt_started event", `
 		INSERT INTO agent_events (id, work_item_id, run_attempt_id, actor_user_id, actor_display, api_key_id, event_type, payload, project)
 		VALUES ($1, $2, $3, $4, $5, $6, 'attempt_started', $7, $8)`,
 		evtID, wi.ID, newAttemptID, callerUserID, callerDisplay, callerAPIKeyID, evtPayload, wi.Project,
-	)
+	); aerr != nil {
+		return nil, aerr
+	}
 
 	// Determine step_recovery_hint from the state we read BEFORE the reset upsert.
 	// (Reading post-upsert would always return idle — that was the original bug.)
@@ -1052,11 +1084,16 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 		evtPayloadMap["pause_reason"] = *pauseReason
 	}
 	evtPayload, _ := json.Marshal(evtPayloadMap)
-	_, _ = tx.Exec(ctx, `
+	// aihub#492: see bestEffortExec. This is the same defect the
+	// unblockDependentWI call below already fixed under aihub#334, on the
+	// statement immediately before it.
+	if aerr := bestEffortExec(ctx, tx, "failed to emit attempt_completed event", `
 		INSERT INTO agent_events (id, work_item_id, run_attempt_id, event_type, payload, project)
 		VALUES ($1, $2, $3, 'attempt_completed', $4, $5)`,
 		evtID, wi.ID, req.AttemptID, evtPayload, wi.Project,
-	)
+	); aerr != nil {
+		return aerr
+	}
 
 	// If terminal (wrapped/failed): unblock dependent wi + set methodology expires_at
 	if req.Status == "wrapped" || req.Status == "failed" {
@@ -1071,10 +1108,13 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 			return aihubErr
 		}
 		// C4: set methodology.* memory expires_at = closed_at + 90d
-		_, _ = tx.Exec(ctx, `
+		// aihub#492: see bestEffortExec.
+		if aerr := bestEffortExec(ctx, tx, "failed to set methodology memory expiry", `
 			UPDATE memories SET expires_at = clock_timestamp() + interval '90 days'
 			WHERE work_item_id = $1 AND type LIKE 'methodology.%' AND expires_at IS NULL`,
-			wi.ID)
+			wi.ID); aerr != nil {
+			return aerr
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -1123,11 +1163,15 @@ func fnForceTerminateStep(ctx context.Context, tx pgx.Tx, wiID, attemptID string
 		"error_type":      "force_terminate_step",
 		"escalated":       false,
 	})
-	_, _ = tx.Exec(ctx, `
+	// aihub#492: this runs on FnCompleteAttempt's SERIALIZABLE transaction —
+	// see bestEffortExec.
+	if aerr := bestEffortExec(ctx, tx, "failed to emit step_failed event", `
 		INSERT INTO agent_events (id, work_item_id, run_attempt_id, event_type, payload, project)
 		VALUES ($1, $2, $3, 'step_failed', $4,
 		        (SELECT project FROM work_items WHERE id=$2))`,
-		evtID, wiID, attemptID, payload)
+		evtID, wiID, attemptID, payload); aerr != nil {
+		return aerr
+	}
 
 	// Reset wi_step_state
 	_, err = tx.Exec(ctx, `

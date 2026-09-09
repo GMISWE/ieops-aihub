@@ -1431,8 +1431,31 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	stepErr := tx.QueryRow(ctx, `
 		SELECT current_step_status, current_step_attempt FROM wi_step_state WHERE work_item_id=$1`, wi.ID,
 	).Scan(&stepStatus, &stepAttempt)
+	// aihub#497: stepErr is read, not returned — pgx.ErrNoRows is the normal "this
+	// work item has no step state" answer and the guard below treats any error as
+	// "no step to terminate". A class-40 rollback is not that. Same read, same
+	// reasoning and same fix as aihub#492's prior-step read on the claim path.
+	if aerr := retryConflictErr(stepErr, "failed to read step state"); aerr != nil {
+		return nil, aerr
+	}
 	if stepErr == nil && stepStatus == "in_progress" {
-		fnForceTerminateStep(ctx, tx, wi.ID, priorID, stepAttempt) //nolint:errcheck
+		// aihub#497: this call discarded its return, and since aihub#492 wired
+		// bestEffortExec into fnForceTerminateStep that return is exactly where a
+		// class-40 rollback comes back. Discarding it undid that fix from the
+		// caller's side. Every OTHER error it reports stays discarded — a force
+		// takeover is a recovery operation and failing it over step bookkeeping
+		// would leave the work item stuck with an attempt nobody holds — but a
+		// rollback is not bookkeeping, it is the end of the transaction, and
+		// there is nothing left to carry on with.
+		//
+		// A Code comparison rather than retryConflictErr because this hop returns
+		// an *AihubError, not a driver error; ErrConflictSerializationFailure is
+		// constructed in exactly one place (retryConflictErr), so the two agree by
+		// construction.
+		if aerr := fnForceTerminateStep(ctx, tx, wi.ID, priorID, stepAttempt); aerr != nil &&
+			aerr.Code == ErrConflictSerializationFailure {
+			return nil, aerr
+		}
 	}
 
 	// Supersede old attempt
@@ -1447,12 +1470,23 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	// lock_released trail. The error stays discarded, matching what this line has
 	// always done — a force takeover is a recovery operation and failing it over
 	// a lock delete would leave the work item stuck with an attempt nobody holds.
+	//
+	// aihub#497: with the one exception a transaction cannot tolerate. Everything
+	// the paragraph above says still holds for every error that leaves the
+	// transaction usable; a class-40 rollback does not leave it usable, so
+	// "carry on regardless" is not one of the options. Carrying on past one
+	// replaces the retryable 409 with an unclassifiable 500 raised by whichever
+	// statement happens to run next. See bestEffortExec.
 	ftActor := lockEventActor{UserID: callerUserID, Display: callerDisplay}
 	ftOp := newLockOp(lockCauseForceTakeover, ftActor).withExtra(map[string]any{
 		"prior_attempt_id": priorID,
 		"reason":           req.Reason,
 	})
-	releaseLocks(ctx, tx, lockDeleteByAttemptSQL, ftOp, priorID) //nolint:errcheck
+	if _, relErr := releaseLocks(ctx, tx, lockDeleteByAttemptSQL, ftOp, priorID); relErr != nil {
+		if aerr := retryConflictErr(relErr, "failed to release the prior attempt's locks"); aerr != nil {
+			return nil, aerr
+		}
+	}
 
 	// Emit force_takeover event
 	evtID := NewID("evt")
@@ -1461,11 +1495,21 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		"prior_actor":      currentActorDisplay,
 		"reason":           req.Reason,
 	})
-	_, _ = tx.Exec(ctx, `
+	// aihub#497: see bestEffortExec. aihub#492 converted six of these on the
+	// claim and complete-attempt paths and deliberately left this one, on the
+	// grounds that this transaction is READ COMMITTED so class 40 could not
+	// arrive. That is true only of the 40001 half: 40P01 is raised when Postgres
+	// breaks a lock cycle, which it does at ANY isolation level, and this
+	// function's isolation level is not a constant either — internal/db/db.go
+	// builds the pool with pgxpool.New and pins none, so the database, the role
+	// or the DSN decides it. The emission stays best-effort for everything else.
+	if aerr := bestEffortExec(ctx, tx, "failed to emit force_takeover event", `
 		INSERT INTO agent_events (id, work_item_id, actor_user_id, actor_display, event_type, payload, project)
 		VALUES ($1, $2, $3, $4, 'force_takeover', $5, $6)`,
 		evtID, wi.ID, callerUserID, "", evtPayload, wi.Project,
-	)
+	); aerr != nil {
+		return nil, aerr
+	}
 
 	// H3 + Decision A: use the session_secret supplied by the client.
 	// The client generated it before calling and wrote it to its local state file;
@@ -1537,10 +1581,25 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 	// displace a live foreign holder is now reported as 409 CONFLICT_LOCK_TAKEN
 	// — swallowing it is what let this path steal locks, and a takeover that
 	// silently proceeds without the lock it was asked to take is a second way to
-	// leave the caller believing it holds something it does not. Every OTHER
-	// error stays discarded, as it always was: a force takeover is a recovery
-	// operation and failing it over a lock bookkeeping error would leave the work
-	// item stuck with an attempt nobody holds.
+	// leave the caller believing it holds something it does not.
+	//
+	// aihub#497: a class-40 rollback is the second error this loop cannot walk
+	// past, and it is not a matter of tolerance. aihub#451 measured the shape by
+	// raising this transaction to SERIALIZABLE: the 40001 landed here, the
+	// discard swallowed it, and the caller was handed
+	//
+	//	500 INTERNAL_ERROR  failed to update work_item after force_takeover:
+	//	                    current transaction is aborted (SQLSTATE 25P02)
+	//
+	// from the statement below — 25P02, class 25, which no classifier on the path
+	// can recognise. So the discard did not cost this takeover a lock row, it
+	// cost the caller the retryable 409 and told them the server was broken
+	// instead. This is aihub#410's shape, on the path aihub#410 did not cover.
+	//
+	// The remaining discard is unchanged and still deliberate: every error that
+	// leaves the transaction usable is a lock bookkeeping failure, and a force
+	// takeover is a recovery operation that must not fail over one, or the work
+	// item is left stuck with an attempt nobody holds.
 	//
 	// ftLocks/ftProbes were derived above, from this same declaredRes.
 	for _, l := range ftLocks {
@@ -1549,6 +1608,11 @@ func FnForceTakeover(ctx context.Context, pool *pgxpool.Pool, wiID, callerUserID
 		if upErr != nil {
 			if aihubErr := lockTakenErrFor(upErr); aihubErr != nil {
 				return nil, aihubErr
+			}
+			if aerr := retryConflictErr(upErr, fmt.Sprintf(
+				"failed to acquire lock %s:%s during force_takeover",
+				l.ResourceType, l.ResourceKey)); aerr != nil {
+				return nil, aerr
 			}
 		}
 	}

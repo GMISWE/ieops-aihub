@@ -1554,10 +1554,31 @@ jobs:
       #     lock nor a commit, which is what stops the fix from being scoped to
       #     the two hop shapes the other arms happen to use.
       #
-      # The last name in the list is the control, not a fourth instance: at READ
+      # aihub#497 added two more, both on FnForceTakeover, which is the one lock
+      # path that opens its transaction with pool.Begin — READ COMMITTED — and
+      # then DISCARDED the class-40 error rather than wrapping it as a 500. The
+      # caller was therefore told about whichever statement happened to run next
+      # and failed with 25P02, which is class 25 and unclassifiable:
+      #
+      #   - the lock-upsert arm loses at `INSERT INTO resource_locks ... ON
+      #     CONFLICT DO UPDATE`, and before the fix reported `500 failed to
+      #     update work_item after force_takeover`;
+      #   - the lock-release arm loses one hop earlier, at `DELETE FROM
+      #     resource_locks`, and reported `500 failed to create new attempt
+      #     after force_takeover` — a THIRD statement, two hops downstream of
+      #     the race. Two arms because a fix shaped to the upsert alone passes
+      #     the first and leaves the second returning 500; measured.
+      #
+      # Both run on serializableTestPool. internal/db/db.go builds the pool with
+      # pgxpool.New and pins no isolation level, so `pool.Begin` inherits
+      # default_transaction_isolation from the database, the role or the DSN —
+      # which makes these reachable by CONFIGURATION of today's binary, the same
+      # argument this step already accepted for the UpdateProject arm.
+      #
+      # The last name in the list is the control, not another instance: at READ
       # COMMITTED the same interleaving must still SUCCEED. Without it, "turn
-      # every contended write into a 409" would satisfy all four assertions
-      # above and break every existing caller.
+      # every contended write into a 409" would satisfy every assertion above
+      # and break every existing caller.
       - name: aihub#334 serialization-failure mapping DB tests
         env:
           AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
@@ -1568,6 +1589,8 @@ jobs:
                       'TestSerializationFailureSurfacesAsRetryable409/concurrent_claim_gets_a_retryable_409,_not_a_500' \
                       'TestSerializationFailureSurfacesAsRetryable409/unblock_sweep_row-lock_error_still_must_not_500' \
                       'TestSerializationFailureSurfacesAsRetryable409/memory_supersede_loser_gets_a_retryable_409,_not_a_500' \
+                      'TestSerializationFailureSurfacesAsRetryable409/force_takeover_lock_upsert_gets_a_retryable_409,_not_a_500' \
+                      'TestSerializationFailureSurfacesAsRetryable409/force_takeover_lock_release_gets_a_retryable_409,_not_a_500' \
                       'TestSerializationFailureSurfacesAsRetryable409/read_committed_loser_still_succeeds'; do
             grep -q -- "--- PASS: $want" serialization_failure.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); an aihub#334 instance is unguarded"; exit 1; }

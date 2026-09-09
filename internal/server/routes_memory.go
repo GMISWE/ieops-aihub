@@ -974,14 +974,22 @@ func handleListEvents(pool *pgxpool.Pool) echo.HandlerFunc {
 //   - stability_days recomputed via the Ebbinghaus formula
 //   - last_activated_at / last_activated_by updated
 //   - attrs.reinforcements gets a new entry {added_at, from_wi, context}
-//   - base_strength optionally adjusted by strength_delta (clamped to
+//   - base_strength optionally adjusted by strength_delta (which must be a whole
+//     number since aihub#459, and whose sum is clamped to
 //     [domain.MinBaseStrength, domain.MaxBaseStrength], i.e. the column's own CHECK)
 //
 // Returns {memory_id, activation_count, base_strength} per §5.2, and since
 // aihub#475 those last two are the values the UPDATE's RETURNING handed back
-// rather than the ones Go computed. They can differ: base_strength is SMALLINT
-// and pgx truncates a fractional value toward zero on the way in, so a
-// strength_delta of 0.5 stores nothing and the response now says so.
+// rather than the ones Go computed.
+//
+// They could differ, and that is why they are read back: base_strength is
+// SMALLINT and pgx truncates a fractional value toward zero on the way in, so
+// before aihub#459 a strength_delta of 0.5 stored nothing while the handler
+// believed it had stored 3.5. aihub#475 made the ANSWER honest about that;
+// aihub#459's ruling (2026-09-09) removed the input that produced it, by
+// refusing a non-integral strength_delta with a 400 below. Both are kept: the
+// refusal is what a caller can act on, the read-back is what stops any later
+// arithmetic here from claiming a change the row did not take.
 func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		u := GetUser(c)
@@ -1001,6 +1009,33 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		if req.AdditionalContext == "" {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest,
 				"additional_context is required"))
+		}
+
+		// aihub#459 (owner ruling 2026-09-09): a non-integral strength_delta is
+		// the caller's error, not something to round on their behalf.
+		//
+		// It sits HERE — with the other argument checks, above the first query —
+		// for the same reason domain.validateBaseStrength sits above Remember's:
+		// a check that runs after the row is loaded answers a different question
+		// (is this argument well-formed FOR THIS MEMORY) than the one being
+		// asked, and a caller with a malformed delta and an invisible memory
+		// would get told about the memory instead of about their argument. The
+		// answer does not depend on the row, so nothing about the row is read to
+		// produce it — and no information about the row leaks by returning it
+		// first, because the message is derived entirely from what the caller
+		// sent.
+		//
+		// The rule is domain's, not two literals here: internal/domain/memory.go
+		// (ValidateIntegralStrength) is the same function validateBaseStrength
+		// calls, so the create path and this one cannot drift about what a whole
+		// number is. Corpus check before adding it (docs/audits/
+		// aihub-412-corpus-facts/param-types-vs-schema.md): strength_delta was
+		// observed ZERO times in the 21-day census, so this refuses no traffic
+		// that has ever existed.
+		if req.StrengthDelta != nil {
+			if intErr := domain.ValidateIntegralStrength("strength_delta", *req.StrengthDelta); intErr != nil {
+				return writeError(c, intErr)
+			}
 		}
 
 		ctx, cancel := contextWithTimeout(c)
@@ -1074,11 +1109,18 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			//
 			// The consequence this handler is responsible for is below, at the
 			// UPDATE: the value the response reports must be the one the column
-			// holds, never this arithmetic. Whether a non-integral value should be
-			// refused, rounded, or made storable by widening the column is
-			// aihub#459's call and is deliberately NOT taken here — the clamp is
-			// unchanged, and every value that reached the column before still
-			// reaches it, unchanged.
+			// holds, never this arithmetic.
+			//
+			// 🟢 aihub#459 has since taken the decision aihub#475 left open —
+			// refuse, rather than round or widen the column — and it is taken at
+			// the guard near the top of this handler, NOT in this clamp. That
+			// placement is the substance rather than a detail: the clamp is
+			// applied to a SUM, and by the time a sum is fractional the caller's
+			// own argument is no longer visible in it. With the delta required to
+			// be integral and the stored value SMALLINT, every value this
+			// arithmetic can produce is already whole, so the truncation the
+			// paragraph above describes is now unreachable from the API — the
+			// clamp itself is unchanged, and still bounds nothing but the range.
 			newBaseStrength = memBaseStrength + *req.StrengthDelta
 			if newBaseStrength > domain.MaxBaseStrength {
 				newBaseStrength = domain.MaxBaseStrength

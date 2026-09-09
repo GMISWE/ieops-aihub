@@ -761,13 +761,16 @@ func (s *Server) registerLifecycleTools() {
 			//
 			// Cost, same ledger again: 72 -> 82 bytes, +10.
 			//
-			// ⚠️ Do NOT generalise this word into workItemFieldProps' goal
-			// description. That string is shared by pf_create_work_item and
-			// pf_batch_create_work_items, and editing it moves BOTH of their
-			// input_schema_sha256 — so their contract cards go stale in the same
-			// commit, and K3 in contract_cards_gate_test.go is what tells you.
-			// Whether the create side should say it too is a real question and a
-			// separate change, with those two cards in its file scope.
+			// aihub#520 settled the question this comment used to defer, which was
+			// whether the create side should say it too. It does: the word is in
+			// workItemFieldProps' goal description now, so all three tools that
+			// publish `goal` state it. What made it a separate change is that the
+			// shared string moves the input_schema_sha256 of pf_create_work_item
+			// and pf_batch_create_work_items — K3 in contract_cards_gate_test.go is
+			// what tells you — so those two cards had to be in its file scope.
+			// The gate is no longer named on this tool:
+			// TestPublishedGoalCapIsTheEnforcedOne quantifies "non-empty" over
+			// every tool publishing `goal`, which is where a fourth one lands too.
 			"goal": prop("string", fmt.Sprintf(
 				"Single-line non-empty goal ≤%d chars (status must be queued, paused or blocked)",
 				domain.MaxWorkItemGoalRunes())),
@@ -2198,12 +2201,26 @@ const maxBatchWorkItems = 50
 // silent-drop failure the batch tool exists downstream of.
 func workItemFieldProps() map[string]any {
 	return map[string]any{
-		// aihub#474: byte-identical to the string that was typed here before, and
-		// deliberately so — this is not a contract change, it is the same promise
-		// sourced from the constant that enforces it. Both work-item write paths
-		// now publish the cap from one place, so the number cannot move in the
-		// validator while two hand-typed descriptions keep quoting the old one.
-		"goal": prop("string", fmt.Sprintf("Single-line goal ≤%d chars",
+		// aihub#474: the number is sourced from the constant that enforces it
+		// rather than typed here, so it cannot move in the validator while two
+		// hand-typed descriptions keep quoting the old one. Both work-item write
+		// paths publish the cap from one place.
+		//
+		// aihub#520 adds "non-empty", the word aihub#507 put on
+		// pf_update_work_item's own `goal` string and deliberately left off this
+		// shared one. The refusal is not new on these two paths, only unpublished:
+		// both handlers above reject `goal: ""` in this package before the request
+		// leaves it (`goal is required` — whole-call on pf_create_work_item,
+		// per-item and reported by index on pf_batch_create_work_items), and
+		// domain.validateWorkItemGoalPresent answers 400 with the same text on
+		// every path that writes the column. What was missing is the caller-facing
+		// half: JSON-Schema `required` means "must be PRESENT", not "must be
+		// non-empty", so a caller reading the published schema could satisfy it
+		// with the empty string and be refused anyway. aihub#507 stopped short
+		// because editing this string moves the input_schema_sha256 of BOTH tools
+		// that share it and stales their contract cards; those two cards are in
+		// this change's file scope and are regenerated in the same commit.
+		"goal": prop("string", fmt.Sprintf("Single-line non-empty goal ≤%d chars",
 			domain.MaxWorkItemGoalRunes())),
 		"scenario": prop("string", "Scenario (default: coding)"),
 		// aihub#396: a real enum, not a pipe-separated string in a description.

@@ -254,12 +254,40 @@ top-level key a live response actually carries must be declared** — by the car
 or by `live-response-keys.json` for keys the generated corpus cannot hold. The
 declared set may not shrink below what the server emits; growing it stays cheap.
 
-Of the 45 published tools, K10 drives **39**. The six it cannot are `pf_commit`,
-`pf_diff`, `pf_pr`, `pf_push`, `pf_ship` and `pf_wrap`, each needing a git
-worktree, a git remote or the `gh` CLI. They are named in `liveWalkOutOfReach`,
-and that list is checked both ways: a tool that stops being driven without being
-added to it fails the arm, and a listed tool that IS driven fails it as a stale
+K10 drives **all 45** published tools (`aihub#501`, 2026-09-09). It drove 39 when
+`aihub#482` wrote it; the six it could not were `pf_commit`, `pf_diff`, `pf_pr`,
+`pf_push`, `pf_ship` and `pf_wrap`, each needing a git worktree, a git remote or
+the `gh` CLI, and their key lists rested on the corpus copy alone across 2,388
+recorded calls. `internal/mcp/card_response_keys_live_git_e2e_db_test.go` builds what they
+wanted — a bare repo as origin and a clone as the worktree, both under
+`t.TempDir()` — and folds them into the same walk, so `liveWalkOutOfReach` is now
+empty.
+
+Two things about that arm are qualified, and both are stated on the file rather
+than left to be discovered:
+
+- **`gh` is a stub on PATH**, because the alternative is a test that opens pull
+  requests on GitHub. So the arm cannot see a change in what *GitHub* calls its
+  fields — but it does see aihub's whole side of that boundary, and the stub
+  answers `pr list --json <fields>` with **exactly the fields it was asked for**,
+  so `pf_pr`'s observed keys track `coding.ghGetPRFields` instead of a list
+  written into the test. Adding a field there reddens K10 until a card names it.
+- **`pf_diff` returns a raw diff**, so it has no top-level keys to compare and its
+  card correctly lists none. It is declared in `liveWalkProseOnly`, not in
+  `liveWalkOutOfReach` — "carries no keys" and "cannot be driven" are different
+  claims, and that arm holds all three parts of the first one: the walk drove it,
+  the result was not JSON, and the card claims no keys.
+
+Both lists are checked both ways: a tool that stops being driven without being
+added to one fails the arm, and a listed tool that IS driven fails it as a stale
 exemption. So the walk cannot shrink except in a diff somebody signs.
+
+The first thing the git arm found is in `live-response-keys.json`:
+`pf_wrap.pushed_sha`. The field has existed since 2026-08-14 and the corpus spans
+calls to 2026-09-07, yet none of its 90 recorded `pf_wrap` calls carried the key —
+which, since it is emitted whenever `pushed` is true, means **every wrap in the
+corpus was an idempotent replay that pushed nothing**. Six months of records could
+not have shown that; one live call did.
 
 ## Working on a card
 

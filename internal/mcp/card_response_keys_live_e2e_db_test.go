@@ -86,12 +86,16 @@ package mcp_test
 // would make this file a mirror of the fixture, which is the copy-to-copy
 // failure it was written to end.
 //
-// ─── What it cannot reach ───────────────────────────────────────────────────
+// ─── What it cannot reach: nothing, since aihub#501 ─────────────────────────
 //
-// Six tools need a git worktree and a GitHub remote — pf_commit, pf_diff,
-// pf_pr, pf_push, pf_ship, pf_wrap. They are not driven here and nothing else
-// measures their cards against a live response. That is a real gap, and it is
-// named rather than papered over: liveWalkOutOfReach below is the list, and K10
+// Six tools used to need a git worktree and a GitHub remote — pf_commit,
+// pf_diff, pf_pr, pf_push, pf_ship, pf_wrap — and were named in
+// liveWalkOutOfReach with the reason. aihub#501 built the fixture they wanted
+// (a bare repo as origin, a clone as the worktree, both under t.TempDir(), and
+// a stub `gh` whose field set is derived from the flag aihub passes it) and
+// folded them into this same walk; card_response_keys_live_git_e2e_db_test.go
+// holds that half and states exactly which layer of each is live and which is
+// qualified. liveWalkOutOfReach is now EMPTY, and the arm that reads it still
 // fails if a tool joins it, so shrinking the walk is not a silent option.
 //
 // ─── Running it ─────────────────────────────────────────────────────────────
@@ -130,13 +134,31 @@ const liveKeysFileRel = "docs/mcp-cards/live-response-keys.json"
 // result from. Same reason every floor in contract_cards_gate_test.go exists: a
 // walk that drove nothing would satisfy every per-tool arm below by having
 // nothing to quantify over. Measured 2026-09-08: 39 of the 45 published tools.
-const floorLiveTools = 34
+// Measured 2026-09-09 after aihub#501 added the git arm: 44 — all 45 minus
+// pf_diff, whose result is prose and so contributes no keys (liveWalkProseOnly).
+//
+// The headroom is kept at the 5 it was set with, deliberately, rather than
+// tightened to make a total loss of the git arm trip this. That loss is already
+// named tool-by-tool by REACH_GAP and GIT_WALK_GAP below, which cannot be
+// satisfied vacuously; a floor duplicating them would only add a second number
+// to update.
+const floorLiveTools = 39
 
 // floorLiveKeyChecks bounds the (tool, key) pairs the walk confirmed declared —
 // on the card or, for the entries listed below, in the golden file. floorLiveTools
-// alone is satisfied by 39 tools that each answer `{}`; this is the arm that says
-// the responses had content. Measured 2026-09-08: 247.
-const floorLiveKeyChecks = 190
+// alone is satisfied by 44 tools that each answer `{}`; this is the arm that says
+// the responses had content. Measured 2026-09-08: 247. Measured 2026-09-09 with
+// the git arm: 284 on a freshly migrated database, which is what CI runs against
+// and what it stayed at over repeated runs against that same database, and 285 on
+// one that had already served about twenty runs of this suite. That ±1 is not new
+// and is not the git arm's: the same drift was measured on the base walk before
+// aihub#501 (248 fresh, 249 on the long-lived database), so it lives somewhere in
+// the 39 tools runLiveKeyWalk drives. Which one is unconfirmed; it is left alone
+// because the floor keeps the ~77% ratio the first one was set at and clears both
+// values by ~65, and because it is a fact about the fixture rather than about a
+// contract. The unconditional non-JSON log at the end of the test is there so a
+// future move in this number can be attributed instead of guessed at.
+const floorLiveKeyChecks = 218
 
 // maxUndeclaredLiveKeys is a CEILING ON DEBT, not a floor on a measurement, so
 // like maxPendingCards it IS set at the measured value on purpose. Every entry
@@ -146,18 +168,42 @@ const floorLiveKeyChecks = 190
 // raising it costs an edit here that somebody signs. Retiring a tool lowers it the
 // same way: aihub#446 took it 16 -> 13 by removing pf_adopt/close/ignore_artifact,
 // whose one entry each was the whole of their response. Measured 2026-09-08: 13.
-const maxUndeclaredLiveKeys = 13
+//
+// 13 -> 14 on 2026-09-09: aihub#501 gave the six git-dependent tools a live arm
+// and the first thing it found was pf_wrap's `pushed_sha`, a key callers have been
+// handed since 2026-08-14 that no card names. That is the debt this ceiling
+// counts, and the point of the arm is that it is now counted rather than
+// invisible; the entry in the golden file carries the derivation.
+const maxUndeclaredLiveKeys = 14
 
 // liveWalkOutOfReach names the published tools this walk cannot drive, with the
 // reason. It is asserted to be EXACTLY the set of undriven tools, so a tool that
 // silently stops being driven fails K10 rather than quietly shrinking the walk.
-var liveWalkOutOfReach = map[string]string{
-	"pf_commit": "needs a real git worktree: it stages and commits files in the wi's checkout",
-	"pf_diff":   "needs a real git worktree to diff",
-	"pf_pr":     "needs a GitHub remote and the gh CLI",
-	"pf_push":   "needs a git remote to push to",
-	"pf_ship":   "commit + push + PR in one call, so all three of the above",
-	"pf_wrap":   "completes the attempt AND pushes/opens a PR, so it needs the remote too",
+//
+// 🔴 IT IS EMPTY, AND THE EMPTINESS IS THE POINT — every published tool is now
+// driven against a live response. It held six entries until aihub#501
+// (pf_commit, pf_diff, pf_pr, pf_push, pf_ship, pf_wrap), all of them wanting a
+// git worktree and a remote, and card_response_keys_live_git_e2e_db_test.go
+// builds both. The map stays because it is the declared escape hatch: a tool
+// that genuinely cannot be driven belongs here WITH ITS REASON rather than
+// silently absent, and REACH_GAP below is what forces that choice to be made in
+// a reviewed edit. Deleting the map would make "not driven" expressible by doing
+// nothing.
+var liveWalkOutOfReach = map[string]string{}
+
+// liveWalkProseOnly names the tools the walk DOES drive but whose successful
+// result is not a JSON object, so they contribute no top-level keys.
+//
+// This is a different claim from liveWalkOutOfReach's and must not be collapsed
+// into it. "Cannot be driven" is a gap in the walk; "carries no keys" is a fact
+// about the tool, and it is the same fact the aihub#412 corpus records state of
+// their own empty lists ("not measurable this way", not "returns nothing"). Each
+// entry is held three ways by the arm below — the walk really drove the tool, the
+// result really was not JSON, and the card really claims no keys — so an entry
+// here cannot be used to excuse a tool whose keys stopped being checked.
+var liveWalkProseOnly = map[string]string{
+	"pf_diff": "the whole result is a raw unified diff, so there are no top-level keys; " +
+		"its card lists none and the walk asserts the diff names the file it changed",
 }
 
 // ─────────────────────────────── the walk ────────────────────────────────────
@@ -168,38 +214,58 @@ var liveWalkOutOfReach = map[string]string{
 type liveKeyWalk struct {
 	s        *e2eStack
 	observed map[string]map[string]bool
-	failed   map[string][]string
+	// prose records tools whose call SUCCEEDED but whose result is not a JSON
+	// object, so there are no top-level keys to compare. It is separate from
+	// failed because the two are different facts and only one of them is a
+	// problem: a refusal means the walk could not drive the tool, while prose
+	// means it drove it and the tool has no key surface. Before aihub#501 the
+	// distinction did not exist, so pf_diff — whose whole result is a raw diff —
+	// could only have been recorded as a failure.
+	prose  map[string]bool
+	failed map[string][]string
 }
 
 func newLiveKeyWalk(s *e2eStack) *liveKeyWalk {
 	return &liveKeyWalk{
 		s:        s,
 		observed: map[string]map[string]bool{},
+		prose:    map[string]bool{},
 		failed:   map[string][]string{},
 	}
 }
 
 // drive calls one tool and folds its top-level keys into the union.
+func (w *liveKeyWalk) drive(t *testing.T, tool string, args map[string]any) map[string]any {
+	t.Helper()
+	_, decoded := w.driveResult(t, tool, args)
+	return decoded
+}
+
+// driveResult is drive with the raw result text handed back as well, for the one
+// caller that needs it: a tool whose result is prose decodes to no keys, so the
+// text is the only evidence that the call did anything (see runLiveGitKeyWalk's
+// pf_diff row).
 //
 // A refusal is RECORDED rather than fatal, and then reported by the assertion
 // phase as a tool that produced no observation. Failing here instead would turn
 // "one fixture drifted" into a stack trace at the first tool, hiding every later
 // one; the whole walk's coverage is the measurement, so the report has to be of
 // the whole walk.
-func (w *liveKeyWalk) drive(t *testing.T, tool string, args map[string]any) map[string]any {
+func (w *liveKeyWalk) driveResult(t *testing.T, tool string, args map[string]any) (string, map[string]any) {
 	t.Helper()
 	text, isErr := w.s.callAllowingError(t, tool, args)
 	if isErr {
 		w.failed[tool] = append(w.failed[tool], liveKeysAbbrev(text))
-		return nil
+		return text, nil
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
 		// Prose (slim-render) results carry no top-level keys. The corpus records
 		// say the same of their own empty lists: "not measurable this way", not
 		// "returns nothing".
+		w.prose[tool] = true
 		w.failed[tool] = append(w.failed[tool], "prose result: "+liveKeysAbbrev(text))
-		return nil
+		return text, nil
 	}
 	set := w.observed[tool]
 	if set == nil {
@@ -209,7 +275,7 @@ func (w *liveKeyWalk) drive(t *testing.T, tool string, args map[string]any) map[
 	for k := range decoded {
 		set[k] = true
 	}
-	return decoded
+	return text, decoded
 }
 
 func (w *liveKeyWalk) keys(tool string) []string {
@@ -279,6 +345,11 @@ func TestE2ELiveResponseKeysAreDeclaredOnTheCards(t *testing.T) {
 	s := newE2EStack(t)
 	w := newLiveKeyWalk(s)
 	runLiveKeyWalk(t, w)
+	// aihub#501: the six git-dependent tools, folded into the SAME walk. The
+	// golden file is checked by equality against (live \ card) across every tool,
+	// so a second walk with a second assertion phase would need a second golden
+	// file and the equality would stop meaning anything in either.
+	runLiveGitKeyWalk(t, w)
 
 	cards := readCards(t)
 	golden := readLiveKeysFile(t)
@@ -394,25 +465,67 @@ func TestE2ELiveResponseKeysAreDeclaredOnTheCards(t *testing.T) {
 			"the cards absorb the keys.", undeclared, liveKeysFileRel, maxUndeclaredLiveKeys)
 	}
 
-	// ── the undriven set is exactly the declared out-of-reach set ───────────
+	// ── every published tool is accounted for, one of three ways ────────────
+	//
+	// Observed (its keys were compared above), prose (it was driven and has no
+	// keys), or declared out of reach. Silence is the one answer this arm does
+	// not accept, because a tool that quietly stops being driven is a tool whose
+	// card quietly stops being checked.
 	for _, tool := range sortedCardNames(cards) {
-		_, listed := liveWalkOutOfReach[tool]
-		if w.observed[tool] != nil {
-			if listed {
+		_, outOfReach := liveWalkOutOfReach[tool]
+		_, proseOnly := liveWalkProseOnly[tool]
+		switch {
+		case w.observed[tool] != nil:
+			if outOfReach {
 				t.Errorf("K10 REACH_STALE: %s is listed in liveWalkOutOfReach but the walk drove it. "+
 					"Delete the entry; a reason for not measuring something that IS measured is how "+
 					"a walk shrinks back without anyone noticing.", tool)
 			}
-			continue
-		}
-		if !listed {
-			t.Errorf("K10 REACH_GAP: %s is published and carries a card, but the walk produced no "+
-				"live observation of it (refusals: %v). Either drive it or add it to "+
-				"liveWalkOutOfReach with the reason it cannot be driven. Silence is the one answer "+
-				"this arm does not accept, because a tool that quietly stops being driven is a tool "+
-				"whose card quietly stops being checked.", tool, w.failed[tool])
+			if proseOnly {
+				t.Errorf("K10 PROSE_STALE: %s is listed in liveWalkProseOnly but the walk observed a "+
+					"JSON object from it, so it does have a key surface and that surface is now "+
+					"being checked. Delete the entry — a tool listed as keyless while returning "+
+					"keys reads as coverage of something nothing measures.", tool)
+			}
+		case w.prose[tool]:
+			if outOfReach {
+				t.Errorf("K10 REACH_STALE: %s is listed in liveWalkOutOfReach but the walk drove it "+
+					"(the result was prose, not a refusal). Move the entry to liveWalkProseOnly.", tool)
+			}
+			if !proseOnly {
+				t.Errorf("K10 PROSE_UNDECLARED: the walk drove %s and its result was not a JSON "+
+					"object, so no key of it was compared against its card. That is legitimate for a "+
+					"tool that renders prose and a silent hole for one that does not — declare which "+
+					"in liveWalkProseOnly. Result: %v", tool, w.failed[tool])
+			} else if keys := cards[tool].block.ResponseKeysObserved; len(keys) > 0 {
+				t.Errorf("K10 PROSE_CARD_CLAIMS_KEYS: %s is declared prose-only, and its live result "+
+					"really carries no top-level keys, but its card names %d of them (%v). One of the "+
+					"two is wrong, and the card is what a reader believes.", tool, len(keys), keys)
+			}
+		default:
+			if !outOfReach {
+				t.Errorf("K10 REACH_GAP: %s is published and carries a card, but the walk produced no "+
+					"live observation of it (refusals: %v). Either drive it or add it to "+
+					"liveWalkOutOfReach with the reason it cannot be driven.", tool, w.failed[tool])
+			}
 		}
 	}
+
+	// A prose-only entry for a tool the walk never drove at all is the fourth
+	// direction, and it is checked here rather than left to REACH_GAP above:
+	// that arm would report "nothing drove this tool" and say nothing about the
+	// declaration claiming it was driven and keyless.
+	for _, tool := range sortedLiveKeys(liveWalkProseOnly) {
+		if !w.prose[tool] && w.observed[tool] == nil {
+			t.Errorf("K10 PROSE_NOT_DRIVEN: liveWalkProseOnly declares %s carries no keys, but the "+
+				"walk never drove it (refusals: %v). The entry asserts a measurement that was not "+
+				"taken, which is the shape of an exemption outliving the thing it exempted.",
+				tool, w.failed[tool])
+		}
+	}
+
+	// ── the aihub#501 arm drove all six of the git-dependent tools ──────────
+	assertLiveGitWalkDroveAllSix(t, w)
 
 	if regen {
 		golden.Keys = fresh
@@ -420,6 +533,16 @@ func TestE2ELiveResponseKeysAreDeclaredOnTheCards(t *testing.T) {
 	}
 	t.Logf("K10: %d tools driven live, %d (tool, key) pairs confirmed declared, %d of them via %s",
 		len(driven), checks, undeclared, liveKeysFileRel)
+	// Every non-JSON result, logged unconditionally rather than only inside the
+	// floor failures. The counts above move for two unrelated reasons — a tool
+	// stopped being driven, or a response changed shape — and without this line
+	// the two are indistinguishable in a CI log, which is how a flake in a walk
+	// this long stays unexplained. pf_diff appears here on every green run: its
+	// result is a diff, which is the whole content of liveWalkProseOnly.
+	if len(w.failed) > 0 {
+		t.Logf("K10: non-JSON results this run (expected: %d prose-only tool(s)): %v",
+			len(liveWalkProseOnly), w.failed)
+	}
 }
 
 func sortedLiveKeyTools(m map[string]map[string]string) []string {

@@ -27,12 +27,23 @@ package domain
 //
 // # Why the blast radius is bigger than one work item
 //
-// A `{"type":"repo"}` entry with no task_branch derives the git_branch key
-// `<repo>/main`, and the claim conflict probe matches holders whose attempt is
-// 'running' or 'paused'. One pause-then-cancel of a wi that declared a repo
-// therefore blocks EVERY later claim declaring that repo's default branch, with
-// no holder anybody can talk to — the wi is cancelled. deploy_env keys are
-// shared by name and leak the same way.
+// 🔴 The cheap route into that blast radius is gone (aihub#416, landed in
+// aihub#423), and what it used to be is worth stating because it is why this
+// suite exists: a `{"type":"repo"}` entry with no task_branch derived the
+// git_branch key `<repo>/main`, so one pause-then-cancel of a work item that
+// merely DECLARED a repo blocked every later claim on that repo's default
+// branch. Today repo and service declarations are advisory and take no lock at
+// all — file_scope is the only type the server derives (resourceToLock in
+// conflicts.go).
+//
+// The reach survives the retirement, from a narrower source. git_branch and
+// deploy_env are still legal lock types, still reachable through an explicit
+// requested_locks (as worktree and tcp_port always were); the claim conflict
+// probe still matches holders whose attempt is 'running' or 'paused'; and
+// deploy_env keys are still shared by name rather than namespaced per work
+// item. So a leaked row still blocks strangers, with no holder anybody can talk
+// to — the wi is cancelled. That is why the fixture below takes both types
+// through requested_locks rather than through the declarations.
 //
 // # What the assertions end on
 //

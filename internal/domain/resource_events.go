@@ -446,10 +446,15 @@ const lockDeleteByKeySQL = `DELETE FROM resource_locks rl WHERE rl.resource_type
 // stricter version to break working behaviour:
 //
 //   - "another work item", not "another attempt". Resuming a paused work item
-//     displaces its OWN paused attempt's git_branch and deploy_env rows —
+//     displaces its OWN paused attempt's retained rows —
 //     acquireLocksReleasePausedSQL releases only file_scope, and a claim from
 //     status=paused sets no isTakeover and releases nothing, so the owner it
-//     overwrites is live. Measured 2026-09-07.
+//     overwrites is live. Measured 2026-09-07, on git_branch and deploy_env
+//     rows. Since aihub#416 (landed in aihub#423) neither type is derived from
+//     anything, so the retained set is normally empty and reaching this branch
+//     takes an explicit requested_locks; the measurement stands anyway, because
+//     the branch turns on the OWNER of the row and not on how the row was
+//     created.
 //   - "running/paused", not "exists". An un-swept orphan row — owner wrapped,
 //     failed or superseded, the sweep in gc.go up to a minute away — is exactly
 //     the displacement this statement exists to perform. Refusing it would make
@@ -511,7 +516,16 @@ const acquireLocksInsertSQL = `
 	RETURNING resource_type, resource_key, owner_attempt_id, claim_epoch`
 
 // acquireLocksReleasePausedSQL releases only file_scope locks when an attempt
-// transitions to paused (git_branch / deploy_env locks are kept for resume).
+// transitions to paused; every other lock type is retained so a resume can go
+// on holding it.
+//
+// The predicate is on resource_type, not on where the row came from, so
+// aihub#416 (landed in aihub#423) left this statement untouched while changing
+// what it retains in practice: file_scope is now the only lock the server
+// derives, so the retained set is normally EMPTY, and a non-file_scope row
+// survives a pause only when an explicit requested_locks asked for it. See
+// resourceToLock in conflicts.go for what a repo or service declaration does
+// instead.
 const acquireLocksReleasePausedSQL = `DELETE FROM resource_locks rl WHERE rl.owner_attempt_id=$1 AND rl.resource_type='file_scope'`
 
 // releaseUndeclaredLocksSQL drops the file_scope locks a narrowing orphaned.
@@ -573,12 +587,22 @@ const releaseUndeclaredLocksSQL = `
 // FnClaimWorkItem rejects a cancelled work item (run_attempts.go, the
 // wrapped/failed/cancelled branch), FnForceTakeover rejects anything not
 // running, and FnCompleteAttempt needs a live attempt on a non-terminal item.
-// Nothing in the API could release them again. A leaked git_branch key is the
+// Nothing in the API could release them again. A leaked git_branch key was the
 // bad case rather than a theoretical one: a `{"type":"repo"}` entry with no
-// task_branch derives `<repo>/main`, and the claim conflict probe matches
+// task_branch derived `<repo>/main`, and the claim conflict probe matches
 // holders whose attempt is 'running' or 'paused' — so one pause-then-cancel of
-// a work item declaring a repo blocks every later claim of that repo's default
-// branch, permanently.
+// a work item that merely declared a repo blocked every later claim of that
+// repo's default branch.
+//
+// 🔴 That derivation is retired (aihub#416, landed in aihub#423): repo and
+// service declarations are advisory and take no lock, so file_scope is the only
+// type the server derives and the cheap route into this state is gone. The
+// statement is not gone with it, because the VOCABULARY was not retired — a
+// git_branch or deploy_env row is still reachable through an explicit
+// requested_locks (as worktree and tcp_port always were), deploy_env keys are
+// still shared by name rather than namespaced per work item, and pause still
+// retains every type except file_scope. A rarer route into the same leak is
+// still a leak with no exit.
 //
 // Scoped by work_item_id through run_attempts, NOT by the current attempt id,
 // and NOT filtered by resource_type — the two ways this could have been written

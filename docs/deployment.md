@@ -268,6 +268,26 @@ changes a migration. goose is forward-and-back per migration and there is no
 automatic pre-deploy gate, so on a schema-changing release **take a DB snapshot
 first** ([Backups](#9-backups)).
 
+**Where an unexplained `already_held` lock comes from (migration `0038`,
+aihub#416, landed 2026-09-09).** The window this ordering opens — migrations
+applied, old container still serving — leaves one visible after-effect, and it is
+benign. Migration `0038` deletes the `git_branch` and `deploy_env` `resource_locks`
+rows whose derivation the same release retires; the binary still running during
+the window has not retired it yet, so it keeps deriving those two types and
+re-inserts rows behind the migration until the cutover. After the cutover nothing
+derives them, so nothing probes them and nothing blocks on them — they are inert
+relics, not live locks. Where they do show up is `pf_acquire_locks`'s
+`already_held`, with no declaration anywhere to explain them.
+
+They clear themselves as soon as the holding attempt goes terminal: wrap and fail
+delete by owner attempt with no type filter, so they take the relics along with
+everything else. The one attempt they never leave is one that stays
+**paused forever** — pause releases `file_scope` only, and
+the orphan sweep skips paused attempts. That is precisely the state `0038` exists
+to clear, and its one-shot remedy is spent, so on such an attempt these rows
+persist indefinitely. There is nothing to do about them; the point is not to read
+one as a live lock on your next deploy.
+
 ## 5. Start the server
 
 ```bash

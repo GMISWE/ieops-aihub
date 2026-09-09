@@ -72,12 +72,16 @@ var recallRequestTypeNames = map[string]bool{"RecallRequest": true}
 // while still printing a plausible pass, so the instrument has to prove it can
 // see reads at all before its silence about one field means anything.
 //
-// Measured 2026-09-08, over the 6 functions in internal/domain taking a
-// RecallRequest: the census resolves 12 distinct field names. Of the 12
-// json-tagged fields, 10 resolve at least one read and TWO resolve zero —
-// recency_weight (withdrawn here, aihub#469) and visibility (aihub#484). The
-// other two census entries are CallerUserID and CallerRole, which are read but
-// tagged `json:"-"` and so are not part of the published contract.
+// Measured 2026-09-08 and re-measured 2026-09-09, over the 6 functions in
+// internal/domain taking a RecallRequest: the census resolves 12 distinct field
+// names on both dates. What changed is underneath that number. On 2026-09-08
+// the struct had 12 json-tagged fields, 10 resolving at least one read and TWO
+// resolving zero — recency_weight (withdrawn by aihub#469, field deleted by
+// aihub#485) and visibility (withdrawn by aihub#484). Both are now gone, so the
+// 10 json-tagged fields that remain each resolve at least one read, and the
+// census total is unchanged only because the other two entries were never
+// json-tagged: CallerUserID and CallerRole are read but tagged `json:"-"`, so
+// they are not part of the published contract this gate is about.
 //
 // The floor is deliberately below 12 rather than pinned to it: this constant
 // guards against the scan breaking, and a scan that legitimately sees one fewer
@@ -112,21 +116,24 @@ var recallParamsNotReadByDomain = map[string]string{
 // entry out rather than letting it sit forever as a blanket pass. That is the
 // difference between a deferral that is gated and a deferral that is a comment.
 //
-// The first run of this gate found `visibility` without being written for it:
-// published as "Filter by visibility", forwarded in recallStringParams, bound at
-// routes_memory.go:371-372, and read by none of the six domain functions that
-// take a RecallRequest. It is NOT folded into aihub#469's withdrawal because the
-// disposition is not the same call — recency_weight duplicated ordering the code
-// already had, whereas the recall path genuinely cannot filter by visibility, so
-// implementing it is a real capability rather than a re-run of a fixed bug. That
-// choice belongs to the owner; aihub#484 carries it.
-var recallParamsKnownUnreadTrackedByWi = map[string]string{
-	"visibility": "aihub#484 — published, forwarded and bound (routes_memory.go:371-372) " +
-		"but read by no recall-path function; the authorization clauses in recallText and " +
-		"RecallWithVector derive from CallerRole/CallerUserID, not from this filter. " +
-		"Disposition (implement the filter vs withdraw the promise) is an owner call, " +
-		"deliberately not decided by aihub#469",
-}
+// The map is empty, and that is the ratchet having worked rather than a gap.
+//
+// Its one entry was `visibility`, which the FIRST run of this gate found without
+// the gate having been written for it: published as "Filter by visibility",
+// forwarded in recallStringParams, bound in handleRecall, and read by none of
+// the six domain functions that take a RecallRequest. It was deliberately not
+// folded into aihub#469's withdrawal, because the disposition was not the same
+// call — recency_weight duplicated ordering the code already had, whereas the
+// recall path genuinely cannot filter by visibility, so implementing it would
+// have been a real capability rather than a re-run of a fixed bug. That choice
+// belonged to the owner, aihub#484 carried it, and on 2026-09-09 the owner ruled
+// withdraw: not because implementing would harm, but because nobody was asking —
+// 0 of 835 deduplicated pf_recall calls in the transcript corpus had ever sent
+// the argument, which the checked-in aihub#412 corpus audit records independently
+// as "published, never observed". The parameter went, so the entry went with it.
+//
+// Add another only alongside a work item that will do the same.
+var recallParamsKnownUnreadTrackedByWi = map[string]string{}
 
 // recallFieldsDeliberatelyUnpublished are RecallRequest fields the server fills
 // from a source other than a published MCP argument. Unlike the two maps above

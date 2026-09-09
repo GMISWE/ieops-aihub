@@ -370,9 +370,18 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 				c.QueryParam("type"))))
 		}
 		req.Types = types
-		if vis := c.QueryParam("visibility"); vis != "" {
-			req.Visibility = vis
-		}
+		// ⚠️ No `visibility` bind here — withdrawn by aihub#484 on 2026-09-09,
+		// in the SAME change as pf_recall's published parameter and
+		// domain.RecallRequest.Visibility. Hops 1-3 had to go together:
+		// withdrawing the schema alone leaves a field this handler fills that no
+		// MCP caller can reach, which is exactly what aihub#424 had to clean up
+		// after aihub#394 withdrew `mode`, and G4 in
+		// internal/mcp/universal_contract_gate_test.go goes red on that shape.
+		//
+		// The visibility predicates the recall below still applies are
+		// authorization scoping built inside internal/domain from CallerRole /
+		// CallerUserID, never from a caller-supplied filter, so nothing about
+		// who can see what changes here.
 		// Carried raw on purpose: domain.Recall resolves this id-or-slug to the
 		// canonical work_items.id before anything compares it to a column
 		// (aihub#363). Resolving it a second time here would put the same rule

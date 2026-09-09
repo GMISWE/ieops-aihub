@@ -316,7 +316,42 @@ func (s *Server) registerMemoryTools() {
 //
 // `cursor` is forwarded but deliberately not published: paging is driven by
 // next_cursor from a previous response, not composed by the model.
-var recallStringParams = []string{"project", "query", "visibility", "work_item_id", "top_k", "cursor"}
+//
+// ⚠️ `visibility` was the third entry here, published by recallSchema as
+// "Filter by visibility" and bound by handleRecall, from the day pf_recall was
+// added until aihub#484 withdrew it on 2026-09-09. All three hops are present
+// in `50bfc35` itself — checked, not assumed: the schema property, this
+// forwarding list and handleRecall's `c.QueryParam("visibility")` are all in
+// that commit's tree, so unlike recency_weight there is no later step where
+// forwarding caught up with publication. It was the SECOND instance
+// of aihub#469's class and was found by the gate that work item wrote, on that
+// gate's first run: hops 1-3 were all intact and hop 4 was empty. None of the
+// six functions in internal/domain that take a *RecallRequest ever read the
+// field, so a caller sending `visibility=project` got an unfiltered page — no
+// error, no warning, and a response byte-identical to the one they would have
+// got without it.
+//
+// The visibility predicates that DO exist on both recall paths are
+// authorization scoping derived from CallerRole / CallerUserID —
+// `AND (visibility != 'private' OR author_user_id = $n)` and
+// `AND visibility != 'admin'` — SQL literals rather than the caller's filter.
+// That is why a name-only grep for `.Visibility` made the field look read, and
+// it is also why withdrawing changes no result: those clauses never consulted
+// this parameter and still do not.
+//
+// Withdrawn rather than implemented, and — unlike recency_weight — NOT because
+// implementing would regress. The recall path genuinely cannot filter by
+// visibility, so building it would have been a real capability; the choice was
+// therefore the owner's, and on 2026-09-09 the owner ruled withdraw. The
+// measurement it rests on is demand, not harm: over the transcript corpus at
+// /root/.claude/projects (2,250 files, 850 raw pf_recall calls deduplicated by
+// tool_use id to 835, spanning 2026-06-23 to 2026-09-09), ZERO carried a
+// visibility argument. That is corroborated independently and from inside this
+// repo by docs/audits/aihub-412-corpus-facts/param-types-vs-schema.md, whose
+// pf_recall row for `visibility` reads "published, never observed" against a
+// different corpus window. Nothing published here was ever used, so the
+// withdrawal costs no caller a capability they had.
+var recallStringParams = []string{"project", "query", "work_item_id", "top_k", "cursor"}
 
 // recallNumberParams are the pf_recall arguments published as JSON numbers.
 //
@@ -373,11 +408,15 @@ var recallStringParams = []string{"project", "query", "visibility", "work_item_i
 // that no function in internal/domain reads, UNLESS that parameter is named in
 // one of the two maps at the top of that file — `recallParamsNotReadByDomain`
 // (consumed in this process) or `recallParamsKnownUnreadTrackedByWi` (a known
-// defect with an open work item). Both are populated today, so the gate is not
-// the unconditional rule this note would otherwise imply: `visibility` is
-// published, unread, and green by ratchet. Re-adding `recency_weight` with a
-// ratchet entry instead of a reader would therefore pass — which is why the
-// entries carry a wi number and are checked for staleness in both directions.
+// defect with an open work item). The first still holds `fields`; the SECOND is
+// empty as of 2026-09-09, because its one entry was `visibility` and aihub#484
+// withdrew that parameter, which took the entry with it.
+//
+// So the gate is unconditional TODAY, but it is not unconditional by
+// construction, and the difference matters to anyone reading this note as a
+// rule: re-adding `recency_weight` with a ratchet entry instead of a reader
+// would still pass. That is why the entries carry a wi number and are checked
+// for staleness in both directions.
 // A third surface exists and is not an exemption list: `recallParamToField`
 // remaps a published name onto a differently-named field (it carries `type` ->
 // `Types`), so a wrong entry there could point an unread parameter at a field
@@ -411,8 +450,11 @@ func recallSchema() json.RawMessage {
 		// SKILL.md templates taught type="a|b|c", nothing split it, and the
 		// resulting empty set read as "no relevant memory". The model reads this
 		// string, so this string has to state the contract.
-		"type":         prop("array", "Memory types to filter — an ARRAY of names, one per entry: [\"experience.*\",\"rule.work\"]. Entries ending in .* are prefix wildcards. Do NOT pack several types into one string with '|' — that is not a separator and is rejected with a 400."),
-		"visibility":   prop("string", "Filter by visibility"),
+		"type": prop("array", "Memory types to filter — an ARRAY of names, one per entry: [\"experience.*\",\"rule.work\"]. Entries ending in .* are prefix wildcards. Do NOT pack several types into one string with '|' — that is not a separator and is rejected with a 400."),
+		// ⚠️ No `visibility` here — withdrawn by aihub#484 on 2026-09-09; see the
+		// tombstone on recallStringParams above for the measurement. It promised
+		// "Filter by visibility" and no recall-path function in internal/domain
+		// ever read it, and 0 of 835 deduplicated corpus calls had ever sent one.
 		"work_item_id": prop("string", "Filter by work item ID"),
 		"top_k": prop("string", "Max results (default 20, ceiling 200). A JSON number is also "+
 			"accepted, and is what most callers send."),

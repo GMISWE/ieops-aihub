@@ -106,9 +106,17 @@ var recallWireProbes = map[string][]struct {
 	want     string
 	rejected bool
 }{
-	"project":      {{shape: "aihub", want: "aihub"}},
-	"query":        {{shape: "token cost", want: "token cost"}},
-	"visibility":   {{shape: "project", want: "project"}},
+	"project": {{shape: "aihub", want: "aihub"}},
+	"query":   {{shape: "token cost", want: "token cost"}},
+	// ⚠️ `visibility`'s probe sat right here, asserting `{shape: "project",
+	// want: "project"}` — and it PASSED, correctly, for the whole time the
+	// parameter shipped. That was the trap, and it is the same one
+	// recency_weight's block below records: hop 2 was intact, and no probe in
+	// this table can ask whether anything READS a value on arrival. aihub#484
+	// withdrew the parameter on 2026-09-09 and the probe went with it; the hop
+	// this table cannot see is gated by
+	// TestRecallEveryPublishedParamIsReadByTheRankingCode
+	// (recall_hop4_reader_gate_test.go), which is what found it.
 	"work_item_id": {{shape: "wi_abc", want: "wi_abc"}},
 	// THE PARAMETER THIS WI IS ABOUT. 0.99 is the value the live probe used;
 	// 0 is the off value and must stay off (see TestRecallThresholdHasNoDefault);

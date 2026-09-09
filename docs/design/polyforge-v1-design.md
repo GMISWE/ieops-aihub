@@ -1408,9 +1408,21 @@ GET    /v1/memories
   -- 例：type=["experience.*","rule.scheduling"] 或 type=["methodology.spec"]
   -- H2: type 参数语法定义：string[]，每个元素是 <scheme>、<scheme>.*、<scheme>.<subtype>
   -- 例：type=["experience.*","rule.scheduling"] 或 type=["methodology.spec"]
-  query: project, type(string[], 前缀/精确匹配), visibility,
-  -- M10: visibility 过滤语义：仅返回 visibility=X 的 memory
-  --      server 另外强制 access control：private 只返回 author=caller 的条目
+  query: project, type(string[], 前缀/精确匹配),
+  -- aihub#484（2026-09-09）: visibility 已撤下，连同原先写在这里的 M10
+  --   「仅返回 visibility=X 的 memory」过滤语义。它曾在这里列出、被转发、被
+  --   handler 绑定，但 internal/domain 里六个接 *RecallRequest 的函数没有一个读它
+  --   ⇒ 传任何值都返回同一页（无 error 无 warning）。
+  --   与 recency_weight 不同，这里不是「实现了反而更差」—— 召回路径确实无法按
+  --   visibility 过滤，实现它是一项真能力，所以这是 owner 的选择；owner 于
+  --   2026-09-09 裁定撤下，依据是需求而非危害：本机 transcript 语料 835 次
+  --   去重 pf_recall 调用中【0 次】带过该参数；仓内
+  --   docs/audits/aihub-412-corpus-facts/param-types-vs-schema.md 的 pf_recall 行在另一
+  --   个语料窗口上独立记着同一件事：「published, never observed」。
+  -- ⇒ 别与下面响应体里的 visibility 混淆：那是返回字段，仍在。
+  -- server 侧的 access control 与本参数无关、且从未依赖过它：private 只返回
+  --   author=caller 的条目、admin 对非 admin 不可见，两条都是由 CallerRole /
+  --   CallerUserID 推导成的 SQL 字面量，撤参数不改变它们。
   work_item_id, query(语义/文本), top_k,
   -- aihub#249: limit 是 top_k 的别名（历史上只解析 top_k，?limit=N 会被静默
   --   忽略）；两者都传时 top_k 优先。上限/默认值不变（默认 20，clamp 200）。
@@ -1717,9 +1729,11 @@ pf_remember(project, type, content, visibility,
   → {memory_id} | {code:SIMILAR_EXISTS,...}
 
 pf_recall(project, query?, type?,   -- H2: type 为 string[]，支持通配符 experience.*
-          visibility?, work_item_id?, top_k?,
+          work_item_id?, top_k?,
           similarity_threshold?, min_strength?(default 0.3),
-          include_archived?(default false))   -- recency_weight 已撤下，aihub#469，见 §7.5
+          include_archived?(default false))
+  -- recency_weight 已撤下，aihub#469，见 §7.5
+  -- visibility 已撤下，aihub#484（2026-09-09），见上文 GET /v1/memories 的撤下说明
   → {items:[{id,type,content,effective_strength,activation_count,...}]}
 
 pf_activate_memory(memory_id)
@@ -2185,10 +2199,13 @@ FIRST ground-truth item in the returned list; 0 = not in top 10」，不是我�
 
 ⚠️ **它不是「任何已发布但无读点的参数都会报红」** —— 该文件顶部有两张表可以
 豁免：`recallParamsNotReadByDomain`（本进程自己消费，如 `fields`）与
-`recallParamsKnownUnreadTrackedByWi`（已知缺陷 + 未关闭的 wi）。两张表当下都
-非空：`visibility` 就是「已发布、无读点、闸却是绿的」，挂在 aihub#484 上。
+`recallParamsKnownUnreadTrackedByWi`（已知缺陷 + 未关闭的 wi）。前者仍非空（`fields`）；
+**后者自 2026-09-09 起是空的** —— 它唯一的一项是 `visibility`（「已发布、无读点、
+闸却是绿的」，挂在 aihub#484 上），而 aihub#484 把该参数撤了，条目就跟着走了。
+那正是「两个方向查陈旧」在起作用，不是缺口。
 表项必须写 wi 号，并在两个方向上查陈旧（参数被撤 / 缺陷被修好都会让该项报红），
-所以它是棘轮而不是永久豁免 —— 但读这段的人不要把闸当成无条件规则。
+所以它是棘轮而不是永久豁免 —— 但读这段的人不要把闸当成无条件规则：
+**今天它恰好无条件，只是因为棘轮恰好空了，不是因为结构上不可能再加一项。**
 
 ### 7.6 Memory-First 原则（所有 skill 遵守）
 
@@ -3127,7 +3144,8 @@ pf wrap [--wi-id=<id>]                 # → pf_wrap（coding scenario）
 
 `pf init` 生成带版本标记的模板，`pf init --apply` 填充：
 - repos 表（从 README + gh api 生成 description）
-- scheduling_rules（`pf_recall(type=rule.scheduling, visibility=team)`）
+- scheduling_rules（`pf_recall(type=rule.scheduling)` —— visibility 参数已由 aihub#484
+  撤下（2026-09-09），本例原先写的 `visibility=team` 从未生效过）
 - 版本号（`<!-- polyforge:managed:version="1.0" -->`）
 
 `pf doctor` 检查 CLAUDE.md 版本是否落后，落后提示 `pf init --apply`。

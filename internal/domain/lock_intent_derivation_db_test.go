@@ -117,8 +117,29 @@ func countFileScopeLocks(t *testing.T, pool *pgxpool.Pool, key string) int {
 // claimFresh runs a normal claim and requires it to succeed.
 func claimFresh(t *testing.T, pool *pgxpool.Pool, wiID, userID, idemKey string) *ClaimResponse {
 	t.Helper()
+	return claimFreshWithLocks(t, pool, wiID, userID, idemKey, nil)
+}
+
+// claimFreshWithLocks is claimFresh with an explicit requested_locks slice.
+//
+// It exists because aihub#416 retired the git_branch / deploy_env derivations,
+// and requested_locks is now the ONLY way a non-file_scope row comes into
+// existence (owner ruling Q-3 kept that path open deliberately). Several suites
+// need such a row as a FIXTURE — to test that it is reported, released or
+// displaced — and after the retirement they can no longer get one by declaring a
+// repo.
+//
+// 🔴 Using the escape hatch as the fixture is the honest substitution, not a
+// convenience: the population those suites are about ("a lock this attempt holds
+// that no current declaration explains") did not disappear with the derivation,
+// it only lost its most common source. Seeding it any other way — a raw INSERT
+// into resource_locks, say — would bypass the acquisition path and stop testing
+// that the row is created the way production creates it.
+func claimFreshWithLocks(t *testing.T, pool *pgxpool.Pool, wiID, userID, idemKey string, locks []ResourceLockReq) *ClaimResponse {
+	t.Helper()
 	resp, aerr := FnClaimWorkItem(context.Background(), pool, wiID, &ClaimRequest{
 		IdempotencyKey: idemKey,
+		RequestedLocks: locks,
 		SessionInfo: SessionInfo{
 			MachineID:     "m_locktest",
 			SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
@@ -228,36 +249,56 @@ func TestReadIntentTakesNoWriteLock(t *testing.T) {
 			writeKey, writeOwner, resp.NewAttemptID)
 	})
 
-	// The scope marker for the decision recorded on derivedLock: the read rule
-	// is applied to file_scope ONLY. A `repo` entry keeps its git_branch lock
-	// whatever its intent says, because a branch is not a per-file exclusion two
-	// readers can share, and because PredictConflicts rule 2 has no intent check
-	// either — applying the rule here and not there would rebuild, on `repo`,
-	// the very contradiction this file closes on `path`.
+	// The scope marker for the decision recorded on derivedLock. It used to read
+	// "a read declaration on a repo still takes its branch lock", pinning the
+	// fact that the intent rule was scoped to file_scope and a repo entry kept
+	// its git_branch lock under any intent.
 	//
-	// MUTANT: in derivedLock, drop the `lockType == "file_scope" &&` guard. Only
-	// this subtest goes red — which is the point: widening that rule is a real
-	// decision about branch safety and must not be reachable by accident.
-	t.Run("a read declaration on a repo still takes its branch lock", func(t *testing.T) {
+	// 🔴 aihub#416 INVERTED THE OBSERVABLE AND LEFT THE DECISION INTACT, which is
+	// why this arm is rewritten rather than deleted. A repo entry now takes NO
+	// lock, under any intent — so "read does not suppress it" is still true and
+	// is no longer visible as a lock in the table. The scope marker on derivedLock
+	// therefore has to be checked against the mapper instead of against the
+	// resource_locks row it used to produce.
+	//
+	// MUTANT: in derivedLock, drop the `lockType == "file_scope" &&` guard. That
+	// no longer reddens anything here — with only file_scope left to derive, the
+	// guard is a no-op today, and this arm says so instead of pretending
+	// otherwise. What it DOES still catch is the retirement being reverted: a
+	// repo declaration that starts producing a row again fails the count below.
+	// (The mapper-level statement of the same rule, across every intent value, is
+	// TestResourceToLock_RepoAndServiceDeriveNoLock in
+	// lock_derivation_retired_test.go.)
+	t.Run("a read declaration on a repo takes no lock at all", func(t *testing.T) {
 		wi := seedClaimableWI(t, pool, project, u,
-			"declare a repo as read and keep the branch to yourself anyway",
+			"declare a repo as read and take nothing, because a repo takes nothing",
 			`[{"type":"repo","uri":"repo:aihub","intent":"read","task_branch":"aihub342-scope"}]`)
 
 		resp := claimFresh(t, pool, wi.ID, u, "aihub342-repo-read")
 
-		require.Len(t, resp.AcquiredLocks, 1,
-			"a repo declaration must still take its git_branch lock regardless of intent; got %+v", resp.AcquiredLocks)
-		assert.Equal(t, "git_branch", resp.AcquiredLocks[0].ResourceType)
-		assert.Equal(t, "aihub/aihub342-scope", resp.AcquiredLocks[0].ResourceKey)
+		assert.Empty(t, resp.AcquiredLocks,
+			"a repo declaration derives no lock since aihub#416, whatever the intent says; got %+v", resp.AcquiredLocks)
 
 		var n int
 		require.NoError(t, pool.QueryRow(ctx,
 			`SELECT count(*) FROM resource_locks WHERE resource_type='git_branch' AND resource_key=$1`,
 			"aihub/aihub342-scope").Scan(&n))
-		assert.Equal(t, 1, n,
-			"the branch lock must exist in the table: without it a second attempt can check out the same "+
-				"branch, and because both takeover paths DELETE prior locks before re-deriving, an existing "+
-				"branch lock would be RELEASED on the next takeover rather than merely not taken")
+		assert.Equal(t, 0, n,
+			"a git_branch row appeared for a repo declaration. Nothing releases it: pause keeps every "+
+				"non-file_scope type and the orphan sweep skips a paused attempt, which is the condition "+
+				"aihub#416 exists to remove")
+
+		// The control, and it is the whole reason the count above is not
+		// vacuous: the retirement must be scoped to repo/service, so a WRITE path
+		// declared by the same shape of work item still takes its file_scope lock.
+		wi2 := seedClaimableWI(t, pool, project, u,
+			"a repo entry beside a path entry still locks the path",
+			`[{"type":"repo","uri":"repo:aihub","intent":"read"},`+
+				`{"type":"path","uri":"file:internal/domain/scope416.go","intent":"write"}]`)
+		resp2 := claimFresh(t, pool, wi2.ID, u, "aihub416-repo-plus-path")
+		require.Len(t, resp2.AcquiredLocks, 1,
+			"the path beside the repo must still lock; got %+v", resp2.AcquiredLocks)
+		assert.Equal(t, "file_scope", resp2.AcquiredLocks[0].ResourceType)
 	})
 
 	// MUTANT: internal/domain/conflicts.go, PredictConflicts rule 1 — drop the

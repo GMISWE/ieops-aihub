@@ -94,17 +94,35 @@ Three things are added at this hop that no parameter names:
   "invalid session_secret".
 - **`session_info.machine_id`**, from `POLYFORGE_MACHINE_ID` or the hostname. The
   server 400s without it.
-- **`task_branches`**, computed by `claimTaskBranches`, so each declared repo's
-  `git_branch` lock is keyed on the branch the claim predicts it will check out
-  rather than on `declared_resources[].task_branch`.
+- ⚠️ **`task_branches` is NO LONGER SENT** (`aihub#416`). It existed for one
+  consumer — the `git_branch` lock key a repo declaration derived — and that
+  derivation is retired, so `claimTaskBranches` and its whole chain are gone along
+  with the extra `GetWorkItem` round-trip they cost. This call is one request
+  shorter than it was.
 
 `requested_locks` is forwarded verbatim when present; `force_takeover` only when
 true; `scenario_ref` only when non-empty.
 
 ## hop 4 — what it actually does
 
-- **The claim creates a run attempt, derives locks, and creates a git worktree per
-  repo in the project.** The worktree half is non-fatal and the failures reach the
+- **The claim creates a run attempt, derives locks, creates a git worktree per repo
+  in the project, and then records a `repo_pin` per worktree.** The pin half is
+  `aihub#416`: after the worktrees exist, the tool reads `git rev-parse HEAD` in each
+  and POSTs them to `/v1/work_items/<id>/repo_pins`, which stores them on
+  `run_attempts.repo_pins` (migration `0037`). They come back on this response as
+  `repo_pins` and on `pf_get_step`.
+  🔴 **A pin is PROVENANCE, not a constraint.** It answers "which tree was this
+  conclusion reached on". Nothing enforces it, nothing notices a mid-attempt `git
+  pull`, and it does not expire. A repo whose worktree could not be built is ABSENT
+  from the map, the claim still succeeds, and the absence is reported in
+  `worktree_problems` — a conclusion drawn in such a repo has to say it has no
+  provenance rather than borrow the credibility of the pins beside it.
+  ⚠️ It is a SECOND request, not a claim field, because the worktrees do not exist
+  when the claim goes out. Predicting them beforehand is what `aihub#356` did for
+  branch names and what `aihub#416` deleted.
+- **Locks derived at claim are `file_scope` only** since `aihub#416`. A `repo` or
+  `service` entry in `declared_resources` derives nothing; `acquired_locks` on this
+  response is empty for a work item that declares no path. The worktree half is non-fatal and the failures reach the
   RESPONSE, not just stderr: `worktree_problems` carries a directory that exists but
   that `verifyClaimWorktree` refuses. That verification is `rev-parse
   --show-toplevel` compared against the path, not `--git-dir`, because git searches
@@ -140,16 +158,18 @@ because those are what every later credential-checked call authenticates with.
   where the keep-list failure was most expensive.
 - **§6.2 T2-15** — the landed lock semantics are accepted; `deploy_env` and
   `git_branch` derivation retires under the de-locking ruling, shrinking the row to
-  `file_scope`. Until that lands, this call still takes all three.
+  `file_scope`. Landed by `aihub#416` (2026-09-09): this call now takes `file_scope`
+  only, unless a caller supplies `requested_locks` explicitly.
 - **§6.2 T2-3** — one status code for "invalid attempt credential" across all
   tools; the replay hazard above is why the code matters here.
 
 ## Open
 
-- **§6.4 item 6** — the de-locking group's open questions belong to `aihub#416`, not
-  to this card: the generation probe registry, where an invalidation is recorded,
-  and what `pf_predict_conflicts` reports for an advisory entry are open by design.
-  `aihub#416` was still open (`paused`) at the last re-check, 2026-09-08.
+- **§6.4 item 6 is PARTLY closed as of `aihub#416` (2026-09-09).** What that work
+  item settled and this card now describes: repo/service derive no lock, and a claim
+  records `repo_pins`. What it deliberately left for the scenario repo, so this card
+  cannot answer it: the generation probe registry lives in `services.yaml` there, on
+  its own lifecycle, and is not part of this tool's contract.
 - A replay from a machine with no state file for the key is still left
   unauthenticated. Closing it needs the server to say "this was a replay"; stated in
   the `idempotency_key` description rather than fixed.

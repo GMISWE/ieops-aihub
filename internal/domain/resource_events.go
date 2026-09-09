@@ -205,7 +205,33 @@ const (
 	// lockCauseOwnerReplaced is the release side of an upsert that rewrote an
 	// existing row's owner. It has no call site of its own: see lockUpsertSQL.
 	lockCauseOwnerReplaced = "owner_replaced"
+	// lockCauseDerivationRetired is the one-off release performed by migration
+	// 0038 when the git_branch / deploy_env derivations were retired (aihub#416).
+	//
+	// 🔴 IT HAS NO GO WRITER, AND THAT IS THE POINT, so do not "clean it up".
+	// Every other cause in this list names an operation a caller can perform
+	// again; this one names an event that happened exactly once, to the rows a
+	// retired derivation had left behind. The constant exists because the READ
+	// side is Go — anyone filtering pf_read_events for these releases needs the
+	// string to be spelled in the same place as its neighbours rather than
+	// re-typed from a migration nobody reads twice.
+	//
+	// Distinguishing it from attempt_terminal or orphan_sweep is the whole
+	// audit value: those mean "the holder finished", and none of these holders
+	// did. Many of them were live paused attempts whose locks nothing could ever
+	// have released — pause deletes file_scope only and the orphan sweep skips a
+	// paused attempt — which is the condition that made this wi necessary. An
+	// auditor who sees `attempt_terminal` on those rows would conclude the
+	// attempts ended, and none of them had.
+	lockCauseDerivationRetired = "derivation_retired"
 )
+
+// LockCauseDerivationRetired is lockCauseDerivationRetired's exported spelling,
+// for the migration's own regression test and for any reader outside package
+// domain that needs to name the one-off release. Exported deliberately rather
+// than duplicating the literal in a _test package: a second copy of a vocabulary
+// value is a second thing that can drift.
+const LockCauseDerivationRetired = lockCauseDerivationRetired
 
 // ─── Actor / operation context ───────────────────────────────────────────────
 

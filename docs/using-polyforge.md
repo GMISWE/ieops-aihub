@@ -151,8 +151,13 @@ frontmatter，没这个文件就退到 `<wi_type>.md`，两个都没有则取 `t
 三个 flag 选一个。**真正的差别在锁上**：
 
 - **`/pf-stop --pause`** — attempt 结束、wi 变 `paused`。
-  **只释放 `file_scope` 类型的锁；`git_branch` / `deploy_env` 的锁继续替你占着**，
-  这样 `--resume` 回来时分支和环境还是你的。state 文件保留。
+  **只释放 `file_scope` 类型的锁，其余类型继续替你占着**。state 文件保留。
+  🔴 **aihub#416（2026-09-09）起，「其余类型」通常是空的**：声明 `repo` / `service`
+  不再派生任何锁，所以暂停时没有分支锁或环境锁替你占着——`--resume` 回来时分支还在
+  （worktree 没被动过），但它从来不是靠锁保住的，靠的是 git。只有你显式发过
+  `requested_locks` 的锁才会被留下。
+  ⚠️ 反过来说：**一个 paused 的 wi 不再无限期挡住别人部署那个环境**。那正是
+  aihub#416 要修的症状。
 - **`/pf-stop --wrap`** — 成功终态。coding 场景走 `pf_wrap` = push + PR +
   `complete_attempt(wrapped)` + 删 state 文件；**这个 attempt 的锁全部释放**。
 - **`/pf-stop --fail`** — 失败终态，`pf_complete_attempt(status="failed")`；

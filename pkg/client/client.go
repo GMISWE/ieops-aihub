@@ -83,7 +83,37 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
+	// 🔴 The no-Code branch renders the string the unstructured fallback used to
+	// return, BYTE-IDENTICALLY (aihub#416). An error body with no `code` is not
+	// an aihub error at all — it is the router answering for a route the server
+	// does not have, or a proxy — and before this it degraded to a plain
+	// fmt.Errorf, which threw the STATUS away. Callers that need to tell "this
+	// server has no such route" from "this call was refused" could not: both were
+	// opaque strings.
+	//
+	// Kept byte-identical rather than improved, because the text is what several
+	// years of logs and one or two error-matching sites have seen. What changes
+	// is that the value is now inspectable; what it PRINTS does not change.
+	if e.Code == "" {
+		return fmt.Sprintf("aihub %d: unexpected error", e.StatusCode)
+	}
 	return fmt.Sprintf("aihub %d %s: %s%s", e.StatusCode, e.Code, e.Message, formatDetails(e.Details))
+}
+
+// IsStatus reports whether err is an aihub APIError carrying the given HTTP
+// status, whether or not the response body was a structured aihub error.
+//
+// It exists for the one question a CODE cannot answer: "does this server have
+// this route at all". A 404 from an unregistered route is produced by the
+// router, so it carries no aihub code — the caller has to key on the status.
+// aihub#416's repo-pin hop is the first such caller: it must stay silent against
+// an aihub older than that change and loud about every other failure.
+func IsStatus(err error, status int) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.StatusCode == status
 }
 
 // IsCode reports whether err is an aihub APIError whose code is EXACTLY code.
@@ -326,7 +356,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 				Details:    errResp.Details,
 			}
 		}
-		return fmt.Errorf("aihub %d: unexpected error", resp.StatusCode)
+		// Structured even with no code, so the STATUS survives for IsStatus.
+		// Error() renders exactly the string this used to return.
+		return &APIError{StatusCode: resp.StatusCode, Message: errResp.Message}
 	}
 
 	if out != nil {
@@ -378,7 +410,10 @@ func (c *Client) doRaw(ctx context.Context, method, path string) ([]byte, string
 				Details:    errResp.Details,
 			}
 		}
-		return nil, "", fmt.Errorf("aihub %d: unexpected error", resp.StatusCode)
+		// Structured even with no code, for the reason the sibling site above
+		// gives: the status is the only thing that answers "does this server have
+		// this route", and a plain fmt.Errorf discards it.
+		return nil, "", &APIError{StatusCode: resp.StatusCode, Message: errResp.Message}
 	}
 
 	return body, resp.Header.Get("Content-Type"), nil
@@ -490,6 +525,18 @@ func (c *Client) PauseAttempt(ctx context.Context, wiID string, body any) (map[s
 func (c *Client) AcquireLocks(ctx context.Context, wiID string, body any) (map[string]any, error) {
 	var out map[string]any
 	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/acquire_locks", body, &out)
+}
+
+// RecordRepoPins calls POST /v1/work_items/:wiID/repo_pins — the second hop of a
+// claim (aihub#416). body carries the attempt credentials and
+// {"<repo>": "<40-char sha>"} read out of the worktrees the claim just created.
+//
+// Separate from ClaimWorkItem because the worktrees do not exist yet when the
+// claim goes out; see domain.RecordRepoPinsRequest for why predicting them
+// instead was the option that was rejected.
+func (c *Client) RecordRepoPins(ctx context.Context, wiID string, body any) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, "POST", "/v1/work_items/"+seg(wiID)+"/repo_pins", body, &out)
 }
 
 // ReconcileCommitLocks calls POST /v1/work_items/:wiID/commit_locks — the

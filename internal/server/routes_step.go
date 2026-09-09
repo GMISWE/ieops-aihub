@@ -73,6 +73,22 @@ type StepState struct {
 	StepStartedAt      *time.Time `json:"step_started_at,omitempty"`
 	Version            int64      `json:"version"`
 	ScenarioRef        *string    `json:"scenario_ref,omitempty"`
+	// RepoPins is the CURRENT attempt's per-repo starting commit
+	// ({"<repo>": "<40-char sha>"}, aihub#416). It lives on run_attempts, not on
+	// wi_step_state, and is surfaced here because this is the call a resuming
+	// agent already makes — the alternative was a second round-trip for a fact
+	// that answers the same question the rest of this response answers ("what is
+	// the state of the work I am picking up").
+	//
+	// ⚠️ It is provenance, not a constraint: see domain.ClaimRequest.RepoPins.
+	// Nothing checks a worktree against it, and it does not expire.
+	//
+	// Absent when the work item has no attempt, when the attempt recorded none
+	// (no worktree was built), and on a row written before migration 0037. Those
+	// three are deliberately NOT distinguished here — all of them mean "no
+	// recorded starting commit", and inventing three spellings of that would
+	// invite a caller to branch on which one it got.
+	RepoPins map[string]string `json:"repo_pins,omitempty"`
 
 	// CompletedSteps is the prior-step context a resuming agent needs in order
 	// to skip work that is already done, oldest first, retries included.
@@ -260,6 +276,7 @@ func RegisterStepRoutes(v1 *echo.Group, pool *pgxpool.Pool) {
 	v1.POST("/work_items/:id/pause", handlePauseAttempt(pool))
 	v1.POST("/work_items/:id/acquire_locks", handleAcquireLocks(pool))
 	v1.POST("/work_items/:id/commit_locks", handleReconcileCommitLocks(pool))
+	v1.POST("/work_items/:id/repo_pins", handleRecordRepoPins(pool))
 	// Phase 2 stubs
 	v1.POST("/releases/alpha", handleCutAlpha())
 	v1.POST("/releases/promote", handlePromote())
@@ -305,6 +322,29 @@ func handleGetStep(pool *pgxpool.Pool) echo.HandlerFunc {
 			// pool.
 			return writeError(c, domain.NewErr(domain.ErrInternalError,
 				"step state read failed"))
+		}
+
+		// aihub#416: the current attempt's repo pins, read separately because they
+		// live on run_attempts while everything above lives on wi_step_state.
+		//
+		// Best-effort by design, and it is the one read in this handler that is:
+		// the three reads above refuse to answer "idle / nothing done" on a query
+		// failure because that answer is indistinguishable from a true one and
+		// would make a resuming agent redo finished work. A missing pin cannot
+		// mislead in that direction — it is already the honest value for a claim
+		// that built no worktree — so failing the whole request over it would
+		// trade a real capability for a fact that is advisory by construction.
+		var pinsRaw []byte
+		if err := pool.QueryRow(c.Request().Context(), `
+			SELECT ra.repo_pins
+			FROM work_items wi
+			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
+			WHERE wi.id = $1`, wiID,
+		).Scan(&pinsRaw); err == nil && len(pinsRaw) > 0 {
+			var pins map[string]string
+			if json.Unmarshal(pinsRaw, &pins) == nil {
+				s.RepoPins = pins
+			}
 		}
 
 		// The step history is read even when wi_step_state has no row. Those two
@@ -1321,4 +1361,36 @@ func derefStr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// handleRecordRepoPins backs POST /v1/work_items/:id/repo_pins (aihub#416).
+//
+// "writer", matching handleAcquireLocks and handleReconcileCommitLocks: it
+// writes to the attempt row, so it is not a read. The attempt credential inside
+// FnRecordRepoPins is the real gate — project writer access says you may act on
+// this work item, the credential says you are the attempt whose provenance this
+// is.
+func handleRecordRepoPins(pool *pgxpool.Pool) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		u := GetUser(c)
+		var req domain.RecordRepoPinsRequest
+		if err := c.Bind(&req); err != nil {
+			return writeError(c, domain.NewErr(domain.ErrBadRequest, err.Error()))
+		}
+
+		wi, err := domain.GetWorkItem(c.Request().Context(), pool, c.Param("id"))
+		if err != nil {
+			return writeError(c, hideNotFound(err))
+		}
+		if err := checkProjectAccess(c, u, wi.Project, "writer"); err != nil {
+			return err
+		}
+
+		// The canonical id, never c.Param("id"): that may be a slug, and
+		// FnRecordRepoPins locks work_items by id (aihub#127).
+		if aihubErr := domain.FnRecordRepoPins(c.Request().Context(), pool, wi.ID, &req); aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
+		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
+	}
 }

@@ -84,14 +84,30 @@ For scenarios where step 2 uses MCP pf_claim_work_item, read credentials from:
 
 ### declared_resources (pf_create_work_item)
 ```json
-[{"type": "repo", "uri": "repo:<repoName>", "intent": "exclusive",
-  "task_branch": "polyforge/<branchName>"}]
+[{"type": "repo", "uri": "repo:<repoName>", "intent": "exclusive"},
+ {"type": "path", "uri": "file:<repo-relative-path>", "intent": "write"}]
 ```
+
+🔴 **Which entries take a lock changed in aihub#416 (2026-09-09).** Only
+`path` / `document` / `section` derive one (`file_scope`, keyed
+`<project>:<repo>:<path>`). A `repo` or `service` entry is ADVISORY: it feeds
+`pf_predict_conflicts`, the timeline and deploy preflight, and derives no
+`resource_locks` row at all. So a scenario that needs two work items to BLOCK each
+other must contend on a path, not on a repo.
+
+`task_branch` is no longer published (same wi, following the `base_branch` precedent
+of aihub#395): its one reader was the retired `git_branch` lock key. Sending it is
+accepted and does nothing.
 
 ### requested_locks (pf_claim_work_item)
 ```json
 [{"resource_type": "git_branch", "resource_key": "<repo>/<branch>"}]
 ```
+
+⚠️ Since aihub#416 this is the ONLY way a `git_branch` / `deploy_env` /
+`worktree` / `tcp_port` row is created — the escape hatch the owner ruling
+deliberately kept (Q-3). The scenarios below that contend on a `git_branch` lock all
+go through it, which is why they still pass.
 
 ### pf_update_step responses
 - `status="in_progress"` → `{status: "in_progress"}`

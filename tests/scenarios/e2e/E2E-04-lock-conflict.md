@@ -4,6 +4,19 @@ Tests that two wi's competing for the same git_branch lock:
 1. WI_A acquires lock → WI_B claim blocked with CONFLICT_LOCK_TAKEN
 2. WI_A wraps → lock released → WI_B claim succeeds
 
+⚠️ **STILL VALID AFTER aihub#416, and for a reason worth stating** (2026-09-09).
+That work item retired the `repo → git_branch` DERIVATION, not the `git_branch` lock
+TYPE: it stays in the `resource_locks` CHECK and an explicit `requested_locks` may
+still ask for it (owner ruling Q-3 kept that escape hatch open on purpose). Every
+claim below passes `requested_locks` explicitly, so this scenario exercises the
+surviving path and its assertions are unchanged.
+
+🔴 What it no longer demonstrates: that DECLARING a repo blocks anybody. It does not —
+see E2E-08's control step. The `task_branch` field has been dropped from the
+declarations below because aihub#416 withdrew it from the published schema (it had
+one reader, the retired lock key); leaving it would invite a caller to think it still
+does something.
+
 ## Setup
 
 CALL: pf_create_work_item(project="marketplace",
@@ -12,8 +25,7 @@ CALL: pf_create_work_item(project="marketplace",
       declared_resources=[{
         "type": "repo",
         "uri": "repo:marketplace",
-        "intent": "exclusive",
-        "task_branch": "polyforge/e2e-04-conflict-branch"
+        "intent": "exclusive"
       }])
 NOTE: save response.id as WI_A
 
@@ -23,8 +35,7 @@ CALL: pf_create_work_item(project="marketplace",
       declared_resources=[{
         "type": "repo",
         "uri": "repo:marketplace",
-        "intent": "exclusive",
-        "task_branch": "polyforge/e2e-04-conflict-branch"
+        "intent": "exclusive"
       }])
 NOTE: save response.id as WI_B
 

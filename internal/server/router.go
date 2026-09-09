@@ -209,13 +209,39 @@ func handleWhoami() echo.HandlerFunc {
 	}
 }
 
-// handleVersion returns the server version and min_client_version.
+// handleVersion returns the server version, min_client_version and the identity
+// of the running PROCESS.
+//
+// 🔴 started_at is aihub#416 D5 and it is the only reason this handler changed.
+// The de-locking ruling replaced the deploy_env lock with detection: an observer
+// records this service's "generation" before a long observation and re-reads it
+// after, and a difference invalidates the observation. The other three fields
+// are baked in at build time, so all three are byte-identical across a restart
+// of the same image — meaning the probe would report "unchanged" for a service
+// that was stopped and started underneath the observation. version.ProcessStartTime
+// is the component that moves.
+//
+// ⚠️ The generation is `git_commit @ started_at`, NOT anything involving
+// `version`: that field is the constant "dev" in production (CI's main-branch
+// image build passes no VERSION build-arg), so including it would add characters
+// and no information. This is recorded in the scenario repo's services.yaml,
+// which is where the expression a probe evaluates actually lives.
+//
+// ⚠️ What this does NOT detect, so nobody trusts it past its range: a config
+// hot-reload, and any change to the DATA the observation was really about. The
+// generation identifies the process, not the world it serves.
+//
+// Unauthenticated, like the rest of this endpoint. The value discloses process
+// uptime, which the response's build_time already implies, and an observer that
+// had to authenticate to read a generation could not be a third party checking
+// somebody else's conclusion.
 func handleVersion() echo.HandlerFunc {
 	return func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]any{
 			"version":            version.Version,
 			"git_commit":         version.GitCommit,
 			"build_time":         version.BuildTime,
+			"started_at":         version.ProcessStartTime.Format(time.RFC3339Nano),
 			"min_client_version": "1.0.0",
 		})
 	}

@@ -303,6 +303,8 @@ re-proposed the thing that had been removed:
 | `wi-filed:aihub#N` | the ruling implies a behaviour change; filed silently, with this row's evidence carried verbatim into the wi body |
 | `superseded-by:aihub#416` | the question is dissolved rather than answered by the owner's de-locking ruling |
 | `already-landed:aihub#N` | the ruling was executed between this table being written and being adjudicated |
+| `landed:aihub#N` | the ruling has since been IMPLEMENTED, and the row records what landed and when. Added 2026-09-09 for `#416`; distinct from `already-landed`, which means "was already done when the owner ruled" — this one means "was done afterwards, because the owner ruled" |
+| `landed-in-part:aihub#N` | 🔴 part of the row landed and part did not. It exists so a partial landing cannot be read as a whole one: the row must say which half is still open, and T2-12 is the instance (the advisory half landed with `#416`; the silent-report half on `FnForceTakeover` / `FnAcquireLocks` did not) |
 
 ⚠️ **The "Decided?" column of §1 and §2 has rotted since it was written, and that is the
 expected direction.** Seven wi's the rows describe as `queued` or `running` have since
@@ -321,7 +323,7 @@ they are the record of *what was reviewed*; this section is the record of *what 
 | **T1-5** | Delete-list is the only projection shape. The last keep-list was converted after this table was written. | `already-landed:aihub#418` |
 | **T1-6** | Validate `cursor` as RFC3339Nano at the handler and answer 400 — a 500 on a caller-supplied token sends the reader to the server logs. | `wi-filed:aihub#435` |
 | **T1-7** | 🔴 **Owner: ENABLE the header.** Make the in-tree client send `Idempotency-Key` on every POST/PATCH — enabling is cheaper than demoting the design, because all requests already flow through one client. Do **not** retire the middleware. | `wi-filed:aihub#436` |
-| **T1-8** | 🔴 **Owner:** dissolved. `git_branch` and `deploy_env` lock derivation retires outright, so "what should `read` mean for repo/service" no longer needs an answer. `file_scope` is unchanged. | `superseded-by:aihub#416` |
+| **T1-8** | 🔴 **Owner:** dissolved. `git_branch` and `deploy_env` lock derivation retires outright, so "what should `read` mean for repo/service" no longer needs an answer. `file_scope` is unchanged. **LANDED `aihub#416` (2026-09-09):** `resourceToLock`'s `repo`/`service` arms return `("","")`; `derivedLock`'s `lockType == "file_scope"` condition is deliberately KEPT even though `file_scope` is now the only type it can see, so a future lock type must state its own intent rule rather than inherit this one. The open sentence the row quotes ("deciding it needs rule 2 changed in the same breath") was honoured literally — rule 2 changed in the same commit, and stopped reading the lock table. | `superseded-by:aihub#416` · `landed:aihub#416` |
 | **T1-9** | Prose that contradicts hop 3 or 4 is a **bug at the same priority as the behaviour**, and "description-only" is **not** a cancellation reason. Legal dispositions are: withdraw the param, fix the code so the prose becomes true, or file it. The three cancelled wi's are revived below. | `rule-recorded` |
 | **T1-10** | One budget over the whole `tools/list` payload, with per-tool ceilings derived from it; the resident cost is a property of the payload, not of a tool. | ~~`wi-filed:aihub#437`~~ → **`already-landed:aihub#419`** (merge `6db45a2`, PR #359). 🔴 The ruling was **already implemented when `#437` was filed**: `internal/mcp/tools_list_payload_budget_test.go` (`toolsListPayloadBudget`) budgets the whole serialised `tools/list` payload, and (`toolsListPerToolShareLimit`) derives the per-tool ceiling as a *share* of that total — the exact shape ruled here, measured through the real `tools/list` rather than `dump-mcp-schemas`. `#437` was filed ~6h after `#419` wrapped and **cancelled 2026-09-08 with no reason recorded anywhere** (its attrs are empty), which left `aihub#481` unable to separate "the class was deliberately rejected" from "closed for an unrelated reason, so the question survives" — it recorded that the class decision "must be re-confirmed with the owner before any work" and set `requires_human_session` rather than guess. Root cause was mutual invisibility — neither the gate nor this row named the other; the gate's header now points back at this row (`aihub#488`), so **keep both halves in step**. |
 | **T1-11** | Never pre-declare a ratchet file — let the commit-time lock gate take it — and write that rule into the two files' own headers, where an executor will read it. | `wi-filed:aihub#438` |
@@ -335,7 +337,7 @@ they are the record of *what was reviewed*; this section is the record of *what 
 | **T2-1** | One editability matrix for the whole struct, one error code per rejection **kind** (409 state, 403 permission), and no field silently exempt. | `wi-filed:aihub#440` |
 | **T2-2** | Accept `#398` as scoped — identity predicate now, state predicate held behind a corpus re-measure. The sequencing **is** the decision; do not re-open. | `already-landed:aihub#398` |
 | **T2-3** | One status code for "invalid attempt credential" across all tools; retire `lost` or give it a writer; add the cancelled-attempt status the cancel path says it needs. | `wi-filed:aihub#441` |
-| **T2-4** | 🔴 **Owner: the word "lease" stays dead.** The wording fix landed with `#398`; what remains is the discarded heartbeat DB error — check it, or state in code that nothing depends on it. | `superseded-by:aihub#416` · `wi-filed:aihub#442` |
+| **T2-4** | 🔴 **Owner: the word "lease" stays dead.** The wording fix landed with `#398`; what remains is the discarded heartbeat DB error — check it, or state in code that nothing depends on it. **RE-AFFIRMED, not landed, by `aihub#416` (2026-09-09):** that wi replaced two exclusion mechanisms and introduced no expiry of any kind — the repo pin does not lapse, the service generation has no window, and `last_active_age_seconds` is published for a human with no code branching on it. Its design-doc entry (v1.25) states the prohibition explicitly. The heartbeat DB error `#442` names is untouched and still open. | `superseded-by:aihub#416` · `wi-filed:aihub#442` |
 | **T2-5** | Publish the event vocabulary as an enum on `pf_emit_event` and rename the `types` filter's description. Free text plus three partial whitelists means a typo is indistinguishable from a new kind of event. | `wi-filed:aihub#444` |
 | **T2-6** | Keep the leniency; stop calling the 13-value list an enum in a schema the SDK will not enforce; add the DB CHECK for the four prefixes — the DB is the only layer that can make an unrecallable row impossible. | `wi-filed:aihub#445` |
 | **T2-7** | Retire the three action tools, or give `artifact_action` a reader. Zero calls, zero readers, three schemas in every request's prefix. | `wi-filed:aihub#446` |
@@ -343,10 +345,10 @@ they are the record of *what was reviewed*; this section is the record of *what 
 | **T2-9** | State the third state in the schema (omit means *unclassified, not dispatched*), and settle the one-shot live side effect with a **two-armed** reproduction, since one arm cannot distinguish "already fixed" from "never happened". | `wi-filed:aihub#447` |
 | **T2-10** | Unpublish both release tools until Phase 2, per `#387`'s Plan B — and close `aihub#423` explicitly, since unpublishing removes its premise and a duplicate left open is one that rots. | `wi-filed:aihub#448` |
 | **T2-11** | Settled policy, nothing to rule. Record the one caveat: "scoped to visible projects" has **two** implementation shapes, so a new resolver must be told which one it inherits. | `already-landed:aihub#402` · `rule-recorded` |
-| **T2-12** | 🔴 **Owner:** repo and service entries become **advisory** and derive no lock. The surviving half — the unmappable-entry report on the two lock paths that stay silent — rides on `#416`'s spec, which already names this row. | `superseded-by:aihub#416` |
+| **T2-12** | 🔴 **Owner:** repo and service entries become **advisory** and derive no lock. The surviving half — the unmappable-entry report on the two lock paths that stay silent — rides on `#416`'s spec, which already names this row. **LANDED `aihub#416` (2026-09-09)** for the advisory half: the mapping table this row prints is now `path` / `document` / `section` → `file_scope` and `repo` / `service` / `external_ref` → no lock, and `declaredResourceTypes`' own comment names all three lockless types instead of one. ⚠️ **The surviving half did NOT land**: `FnForceTakeover` and `FnAcquireLocks` still report no unmappable entry, because `#416` changed which types map, not which paths report. It is smaller than it was — two of the three formerly-unmappable-type sources now map to nothing BY DESIGN — but it is not closed. | `superseded-by:aihub#416` · `landed-in-part:aihub#416` |
 | **T2-13** | Nothing to rule. Record **why** the empty-`repo` key form must stay byte-identical, so nobody tidies the two shapes into one three-segment key and strands every live lock. | `rule-recorded` |
 | **T2-14** | Nothing to re-decide. The "plugin bump and server deploy are one change" hazard is an operational **precondition**, not a note in a wrapped wi's attrs. | `already-landed:aihub#399` · `wi-filed:aihub#438` |
-| **T2-15** | 🔴 **Owner:** the landed semantics are accepted; the fail-open probe was fixed and the race qualifier is filed, and `deploy_env` and `git_branch` lock derivation retires under the de-locking ruling, shrinking this row to `file_scope`. | `superseded-by:aihub#416` · `already-landed:aihub#410` |
+| **T2-15** | 🔴 **Owner:** the landed semantics are accepted; the fail-open probe was fixed and the race qualifier is filed, and `deploy_env` and `git_branch` lock derivation retires under the de-locking ruling, shrinking this row to `file_scope`. **LANDED `aihub#416` (2026-09-09):** the row is now `file_scope`-only in practice — `probeForeignLockHolders` and `lockUpsertSQL` are byte-unchanged, and what shrank is the lock set they operate on. Migration `0038` additionally deleted the existing `git_branch`/`deploy_env` rows, each with a `lock_released` event carrying the new `cause=derivation_retired`; without that they would have become rows no declaration explains and no probe reaches. The two types stay in the `resource_locks` CHECK and remain reachable through `requested_locks` (owner ruling Q-3), so "shrinking to `file_scope`" describes derivation, not vocabulary. | `superseded-by:aihub#416` · `already-landed:aihub#410` · `landed:aihub#416` |
 | **T2-16** | The chain needs no change of its own — it inverts for exactly one legal role, so rule T2-8 first. Record that the out-of-scope-reads-as-not-found rule applies to **admins too**, since that is the exemption a later "admins see everything" change would quietly remove. | `rule-recorded` |
 | **T2-17** | Delete `release-manager` from the prose; keep the two-vocabulary split but **name** it in the contract cards, since only the fictional value is visible to an LLM caller. | `wi-filed:aihub#448` |
 | **T2-18** | State on each `user_id`-shaped param which of the three identities — reporter, attempt owner, watcher — it filters. | `wi-filed:aihub#444` |
@@ -356,7 +358,9 @@ they are the record of *what was reviewed*; this section is the record of *what 
 | **T2-22** | Nothing to re-decide on the two real CAS fields. The model-invented third one is ruled by T1-1 — no prose edit can remove it. | `rule-recorded` |
 
 **Counts over the 35 rows.** `wi-filed` **25** · `already-landed` **6** · `superseded-by:aihub#416`
-**4** · `rule-recorded` **5** (four sole, one alongside `already-landed`). Rows carrying two tags
+**4** · `rule-recorded` **5** (four sole, one alongside `already-landed`) · `landed` **2** ·
+`landed-in-part` **1** (added 2026-09-09, all three on the `#416` group: T1-8 and T2-15 landed
+whole, T2-12 landed only its advisory half). Rows carrying two tags
 are counted under each, and a tag a row records as RETRACTED still counts where the row keeps it —
 T1-10's struck-through `wi-filed` is inside the 25, beside the `already-landed` that replaced it.
 **All 35 rulings** are additionally written back as memory, per the requirement above — the memory
@@ -420,7 +424,19 @@ them is blocked on the owner reading this document.
    a DB read this wi could not make, so the cost of closing the vocabulary is unknown.
 6. **The de-locking group's open questions are `#416`'s, not this table's.** The generation
    probe registry, where an invalidation is recorded, and what `pf_predict_conflicts` reports
-   for an advisory entry are all listed in that wi's `spec_must_answer` and are open by design.
+   for an advisory entry were all listed in that wi's `spec_must_answer` and were open by design.
+   🔴 **Two of the three are now answered (`aihub#416` landed 2026-09-09), one moved rather than
+   closed.** `pf_predict_conflicts` reports `soft_block` for a declared repo (rewritten rule 2)
+   and `info` for a declared service (new rule 6), both from a declaration join, both carrying
+   `last_active_age_seconds`; invalidation is recorded in three places, of which two are
+   load-bearing — the observation artifact's `structured_payload` and a `step` transition to
+   `failed(error_type="observation_invalidated")` — with an `observation_invalidated` event as
+   the derived third, and deliberately NOT in `work_items.attrs`. The probe REGISTRY moved to
+   the per-project scenario repo (`services.yaml`), which is a different repository on its own
+   lifecycle, so it is out of this table's reach rather than settled by it. And the ENFORCEMENT
+   of the generation protocol is unbuilt on purpose (owner ruling Q-2 = C, 2026-09-08): the
+   mechanism ships without a gate, because defining "an observation artifact" today would take
+   a discriminator with no real samples behind it.
 7. **T2-1 leaves one sub-question open in both directions.** "No field silently exempt" does not
    say whether `attrs` staying writable on a terminal wi is the defect or the feature — existing
    tooling depends on that write path. The wi states it rather than choosing.

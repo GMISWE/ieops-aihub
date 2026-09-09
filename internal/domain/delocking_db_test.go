@@ -1,0 +1,613 @@
+package domain
+
+// aihub#416 acceptance criteria that only a database can answer.
+//
+//	AC-2   a claim declaring only repo + service holds ZERO resource_locks rows
+//	AC-3   two work items declaring the SAME repo both claim (no 409)
+//	AC-4   two work items declaring the SAME service both claim (no 409)
+//	AC-14  predict rule 2 reports soft_block from a DECLARATION join, and its
+//	       description no longer says "branch"
+//	AC-15  predict rule 6 reports exactly one info per service and does not raise
+//	       the top-level severity
+//	AC-16  rule 6 still fires under dry_run=true
+//	AC-17  last_active_age_seconds tracks run_attempts.last_active_at
+//	AC-18  a repo-only or service-only payload never returns hard_block
+//	AC-19  migration 0038 left the two retired lock types at zero rows, each with
+//	       a lock_released event carrying cause=derivation_retired
+//	       + run_attempts.repo_pins round-trips through FnRecordRepoPins
+//
+// ─── Why these need a database and the unit arms do not ────────────────────
+//
+// lock_derivation_retired_test.go proves the MAPPER derives nothing and the
+// CLAIM'S DERIVATION contributes nothing. Neither can see the row count, and the
+// row count is the whole claim of this work item: "a wi declaring a repo
+// serialises every other wi on that repo" was a statement about resource_locks,
+// and only resource_locks can refute it. AC-3 in particular is the reason this
+// work item exists, so it gets a test that fails on the pre-change tree by
+// returning 409 CONFLICT_LOCK_TAKEN rather than by an assertion on a mapper.
+//
+// Predict is here for a sharper reason. Rule 2 used to read the lock table with
+// 'git_branch' hardcoded in SQL, which BYPASSED resourceToLock — so the mutant
+// that matters ("revert rule 2 to reading resource_locks") is invisible to every
+// unit test in this package, and produces ZERO PREDICTIONS, which is
+// byte-identical to "no conflict". That is aihub#238's fake all-clear, and only
+// a DB test with two really-running work items can tell the two apart.
+//
+// ─── Mutants, measured ─────────────────────────────────────────────────────
+//
+//	M1  restore `case "repo": return "git_branch", ...` in resourceToLock
+//	    -> AC-2/AC-3 red (two claims, second is 409 CONFLICT_LOCK_TAKEN)
+//	M2  restore `case "service": return "deploy_env", svc`
+//	    -> AC-2/AC-4 red
+//	M3  revert rule 2's query to the resource_locks form
+//	    -> AC-14 red with ZERO predictions, which is exactly the failure mode
+//	       the assertion is worded to catch
+//	M4  delete rule 6
+//	    -> AC-15/AC-16/AC-17 red
+//	M5  make rule 6 set result.Severity = SeveritySoftBlock
+//	    -> AC-15 red on the top-level severity. ⚠️ AC-18 stays GREEN under M5,
+//	       measured rather than assumed: soft_block is not hard_block, so the
+//	       ceiling assertion is satisfied by the very leak AC-15 catches. The two
+//	       arms are not redundant — AC-18 bounds the ceiling, AC-15 pins the
+//	       exact value, and only the second sees this mutant.
+//
+// Run:
+//
+//	AIHUB_TEST_DB=postgres://.../aihub_test?sslmode=disable \
+//	go test ./internal/domain/ -run 'TestDeLocking' -v -count=1
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// advisoryOnly is the payload at the centre of this work item: a repo and a
+// service, and nothing that locks.
+const advisoryOnly = `[{"type":"repo","uri":"repo:aihub","intent":"write"},` +
+	`{"type":"service","uri":"service:aihub","intent":"write"}]`
+
+// TestDeLockingClaimTakesNoRepoOrServiceLock is AC-2, AC-3 and AC-4.
+//
+// One function with subtests: internal/citest/dbtestcov counts DB-gated
+// FUNCTIONS, and ci.yml asserts `--- PASS:` per subtest, so the per-criterion
+// claim belongs in the subtest name.
+func TestDeLockingClaimTakesNoRepoOrServiceLock(t *testing.T) {
+	pool := setupLatestTestDB(t)
+
+	u := testUser(t, pool)
+	project := testProject(t, pool, u)
+
+	// AC-2. The assertion is on the TABLE, not on ClaimResponse.AcquiredLocks:
+	// the response is built from the same slice the derivation filled, so an
+	// insert that happened without being reported — or reported without
+	// happening — would agree with itself.
+	t.Run("a claim declaring only repo and service holds zero lock rows", func(t *testing.T) {
+		wi := seedClaimableWI(t, pool, project, u, "declare a repo and a service and lock nothing", advisoryOnly)
+		claim := claimFresh(t, pool, wi.ID, u, "aihub416-ac2")
+
+		require.Empty(t, heldLockKeys(t, pool, claim.AttemptID),
+			"a wi declaring only a repo and a service holds resource_locks rows. Nothing releases "+
+				"them: pause deletes file_scope only and the orphan sweep skips a paused attempt, "+
+				"so each one blocks that repo or environment for as long as the attempt is not "+
+				"terminal — the reported symptom aihub#416 exists to remove")
+
+		// Anti-vacuity. "zero rows" is also satisfied by a claim that did not
+		// happen, by a work item that declared nothing, and by a heldLockKeys
+		// that cannot see this attempt — so a file_scope declaration on the SAME
+		// work item shape has to produce a row through the same helpers.
+		wi2 := seedClaimableWI(t, pool, project, u, "the same shape plus a path, which must still lock",
+			`[{"type":"repo","uri":"repo:aihub","intent":"write"},`+
+				`{"type":"service","uri":"service:aihub","intent":"write"},`+
+				`{"type":"path","uri":"file:internal/domain/ac2.go","intent":"write"}]`)
+		claim2 := claimFresh(t, pool, wi2.ID, u, "aihub416-ac2-control")
+		require.Equal(t, []string{project + ":aihub:internal/domain/ac2.go"},
+			heldLockKeys(t, pool, claim2.AttemptID),
+			"control: the path entry must still take exactly one file_scope lock, or the empty result "+
+				"above is evidence about the query rather than about the derivation")
+	})
+
+	// AC-3 — the reason this work item exists. On the pre-change tree the second
+	// claim answers 409 CONFLICT_LOCK_TAKEN on git_branch:aihub/main, which is
+	// what serialised parallel batches that shared a repo and no file.
+	t.Run("two work items declaring the same repo both claim", func(t *testing.T) {
+		const declared = `[{"type":"repo","uri":"repo:shared-repo-416","intent":"write"}]`
+		first := seedClaimableWI(t, pool, project, u, "first wi on the shared repo", declared)
+		second := seedClaimableWI(t, pool, project, u, "second wi on the same shared repo", declared)
+
+		c1, aerr := claimWI(t, pool, u, first.ID, "aihub416-ac3-a")
+		require.Nil(t, aerr, "the first claim failed: %+v", aerr)
+		c2, aerr := claimWI(t, pool, u, second.ID, "aihub416-ac3-b")
+		require.Nil(t, aerr,
+			"a second work item declaring the SAME repo was refused: %+v. That refusal is the "+
+				"serialisation aihub#416 removes — two work items on one repo touching no common "+
+				"file have no reason to exclude each other, and git itself detects a real "+
+				"write-write collision at push time", aerr)
+
+		assert.Empty(t, heldLockKeys(t, pool, c1.AttemptID), "the first claim took a lock for a repo entry")
+		assert.Empty(t, heldLockKeys(t, pool, c2.AttemptID), "the second claim took a lock for a repo entry")
+	})
+
+	// AC-4, the same shape on the other retired type. It is a separate subtest
+	// rather than a loop because the two derivations are separate `case` arms and
+	// a mutant restoring one must not be masked by the other still being retired.
+	t.Run("two work items declaring the same service both claim", func(t *testing.T) {
+		const declared = `[{"type":"service","uri":"service:shared-svc-416","intent":"write"}]`
+		first := seedClaimableWI(t, pool, project, u, "first wi observing the shared service", declared)
+		second := seedClaimableWI(t, pool, project, u, "second wi observing the same service", declared)
+
+		c1, aerr := claimWI(t, pool, u, first.ID, "aihub416-ac4-a")
+		require.Nil(t, aerr, "the first claim failed: %+v", aerr)
+		c2, aerr := claimWI(t, pool, u, second.ID, "aihub416-ac4-b")
+		require.Nil(t, aerr,
+			"a second work item declaring the SAME service was refused: %+v. deploy_env had no "+
+				"project segment and was held until the attempt ENDED, and pause does not release "+
+				"it — so one paused observer blocked every deploy to that environment with no "+
+				"automatic exit", aerr)
+
+		assert.Empty(t, heldLockKeys(t, pool, c1.AttemptID), "the first claim took a lock for a service entry")
+		assert.Empty(t, heldLockKeys(t, pool, c2.AttemptID), "the second claim took a lock for a service entry")
+	})
+}
+
+// predictFor runs PredictConflicts as an owner of `project` over one payload.
+func predictFor(t *testing.T, pool *pgxpool.Pool, project, declared string, dryRun bool) *PredictConflictsResponse {
+	t.Helper()
+	resp, aerr := PredictConflicts(context.Background(), pool, &PredictConflictsRequest{
+		Project:           project,
+		DeclaredResources: json.RawMessage(declared),
+		DryRun:            dryRun,
+	}, map[string]string{project: "owner"})
+	require.Nil(t, aerr, "PredictConflicts failed: %+v", aerr)
+	return resp
+}
+
+// predictionsOfRule filters a response to one rule.
+func predictionsOfRule(resp *PredictConflictsResponse, rule int) []ConflictPrediction {
+	out := []ConflictPrediction{}
+	for _, p := range resp.Predictions {
+		if p.Rule == rule {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// TestDeLockingPredictReportsAdvisoryEntries is AC-14 through AC-18.
+func TestDeLockingPredictReportsAdvisoryEntries(t *testing.T) {
+	pool := setupLatestTestDB(t)
+
+	u := testUser(t, pool)
+	project := testProject(t, pool, u)
+
+	const repoName = "predict-repo-416"
+	const svcName = "predict-svc-416"
+	const repoDeclared = `[{"type":"repo","uri":"repo:` + repoName + `","intent":"write"}]`
+	const svcDeclared = `[{"type":"service","uri":"service:` + svcName + `","intent":"write"}]`
+
+	// One RUNNING work item declaring both, which is what every rule below joins
+	// against. It is claimed, so wi.status='running' and wi.current_attempt_id
+	// point at a live attempt — both halves of rules 2 and 6's join.
+	holder := seedClaimableWI(t, pool, project, u, "the running holder the predictions report",
+		`[{"type":"repo","uri":"repo:`+repoName+`","intent":"write"},`+
+			`{"type":"service","uri":"service:`+svcName+`","intent":"write"}]`)
+	holderClaim := claimFresh(t, pool, holder.ID, u, "aihub416-predict-holder")
+	require.Empty(t, heldLockKeys(t, pool, holderClaim.AttemptID),
+		"fixture check: the holder must hold NO lock, or a prediction could be coming from the "+
+			"lock table and this whole file would be measuring the wrong thing")
+
+	// AC-14. The zero-predictions wording is deliberate: the mutant that reverts
+	// this rule to the lock table produces zero rows, and zero rows read exactly
+	// like "no conflict" (aihub#238). The message says so, so a future reader of
+	// a failure knows which of the two they are looking at.
+	t.Run("rule 2 reports soft block for a declared repo without reading the lock table", func(t *testing.T) {
+		resp := predictFor(t, pool, project, repoDeclared, false)
+		rule2 := predictionsOfRule(resp, 2)
+		require.Len(t, rule2, 1,
+			"rule 2 returned %d predictions for a repo another RUNNING work item declares. Zero here is "+
+				"NOT 'no conflict' — it is what the pre-rewrite rule returns for every input once the "+
+				"git_branch derivation is retired, because its SQL hardcoded resource_type='git_branch' "+
+				"and bypassed the mapper. predictions=%+v", len(rule2), resp.Predictions)
+
+		p := rule2[0]
+		assert.Equal(t, SeveritySoftBlock, p.Severity, "rule 2 must stay soft_block")
+		assert.Equal(t, holder.Slug, p.WISlug, "the prediction must name the work item that declares the repo")
+		assert.NotContains(t, p.Description, "branch",
+			"the description still says 'branch' (%q), and no branch name participates in the judgement "+
+				"any more — two attempts on two different branches of one repo match this rule", p.Description)
+		assert.Equal(t, "repo", p.ResourceType,
+			"resource_type must name what was declared, not the lock type that is no longer derived")
+	})
+
+	// AC-15. Two assertions, and the second is the one a mutant would slip past:
+	// an `info` that raises the top-level severity is a soft_block under another
+	// name, and pf-work's pre-claim gate reads that field, not the array.
+	t.Run("rule 6 reports exactly one info per service and does not raise severity", func(t *testing.T) {
+		resp := predictFor(t, pool, project, svcDeclared, false)
+		rule6 := predictionsOfRule(resp, 6)
+		require.Len(t, rule6, 1,
+			"rule 6 returned %d predictions for a service another RUNNING work item declares. Before "+
+				"aihub#416 added it, a service declaration had NO rule but rule 1 — so retiring the "+
+				"deploy_env derivation without this rule leaves service declarations with no signal at "+
+				"all. predictions=%+v", len(rule6), resp.Predictions)
+
+		p := rule6[0]
+		assert.Equal(t, SeverityInfo, p.Severity, "rule 6 must be info")
+		assert.Equal(t, holder.Slug, p.WISlug)
+		assert.Equal(t, "service", p.ResourceType)
+		assert.Equal(t, SeverityInfo, resp.Severity,
+			"the TOP-LEVEL severity was raised to %q by an info prediction. pf-work's pre-claim gate "+
+				"branches on this field, so an info that raises it is a soft_block wearing another name",
+			resp.Severity)
+	})
+
+	// AC-16. Only rule 1 is dry_run-gated, because only rule 1 answers "would an
+	// insert collide". A rule that reads declarations has nothing to be advisory
+	// about — it already is.
+	t.Run("rule 6 still fires under dry run", func(t *testing.T) {
+		resp := predictFor(t, pool, project, svcDeclared, true)
+		require.Len(t, predictionsOfRule(resp, 6), 1,
+			"rule 6 disappeared under dry_run=true. dry_run means 'do not consult the lock table', and "+
+				"this rule does not consult it — predictions=%+v", resp.Predictions)
+	})
+
+	// AC-17. Asserted as a CHANGE, not as a value: a hardcoded 0, or a field
+	// computed from the wrong column, would satisfy "it is present and small".
+	t.Run("last active age seconds tracks the attempts last active at", func(t *testing.T) {
+		fresh := predictionsOfRule(predictFor(t, pool, project, repoDeclared, false), 2)
+		require.Len(t, fresh, 1)
+		require.NotNil(t, fresh[0].LastActiveAgeSeconds,
+			"no last_active_age_seconds on a repo prediction; deploy preflight is meant to be this "+
+				"call, and without the age a human cannot judge wait-versus-takeover")
+		assert.LessOrEqual(t, *fresh[0].LastActiveAgeSeconds, int64(120),
+			"a just-claimed attempt reported an age of %ds", *fresh[0].LastActiveAgeSeconds)
+
+		// Move the column back an hour and re-read. Nothing else changes, so the
+		// only thing that can move the number is the column it is computed from.
+		mustExec(t, pool,
+			`UPDATE run_attempts SET last_active_at = clock_timestamp() - interval '1 hour' WHERE id = '`+
+				holderClaim.AttemptID+`'`)
+		aged := predictionsOfRule(predictFor(t, pool, project, repoDeclared, false), 2)
+		require.Len(t, aged, 1)
+		require.NotNil(t, aged[0].LastActiveAgeSeconds)
+		assert.Greater(t, *aged[0].LastActiveAgeSeconds, int64(3000),
+			"last_active_at moved back an hour and the reported age is %ds — the field is not computed "+
+				"from that column", *aged[0].LastActiveAgeSeconds)
+
+		// ⚠️ NOT a lease. The age is published for a human to read; nothing in
+		// this system expires on it. This line is the negative control for that
+		// sentence: an hour-old attempt is still reported, still soft_block, and
+		// still holds its work item.
+		assert.Equal(t, SeveritySoftBlock, aged[0].Severity,
+			"an hour-old attempt changed severity — something is treating the age as an expiry, which "+
+				"design v1.21 removed from this system outright")
+	})
+
+	// AC-18, the §5.3 public claim, checked on the value pf-work branches on.
+	t.Run("a repo or service only payload never returns hard block", func(t *testing.T) {
+		for name, declared := range map[string]string{
+			"repo only":    repoDeclared,
+			"service only": svcDeclared,
+			"both":         `[{"type":"repo","uri":"repo:` + repoName + `","intent":"write"},{"type":"service","uri":"service:` + svcName + `","intent":"write"}]`,
+		} {
+			for _, dry := range []bool{false, true} {
+				resp := predictFor(t, pool, project, declared, dry)
+				assert.NotEqual(t, SeverityHardBlock, resp.Severity,
+					"%s (dry_run=%v) returned hard_block. Neither type derives a lock, so rule 1 "+
+						"cannot fire for them and there is nothing left that could justify the "+
+						"ceiling this value promises", name, dry)
+			}
+		}
+	})
+}
+
+// TestDeLockingMigration0038AndRepoPins is AC-19 plus the repo-pin round trip.
+//
+// 🔴 AC-19 is asserted as a POST-CONDITION OF THE SCHEMA, not by running the
+// migration inside the test. setupLatestTestDB hands back a database already
+// migrated to head, so "zero rows of the two retired types" is a statement about
+// what migration 0038 left behind — which is the actual acceptance criterion. A
+// test that re-ran the DO block would be testing a copy of it.
+//
+// ⚠️ WHAT THAT CANNOT SEE, said rather than implied: on a database that never
+// held a git_branch or deploy_env row, "zero rows" is true for free and the
+// event assertion below has nothing to read. That is why the event arm is
+// CONDITIONAL and the row-count arm is not — the row count is the criterion, the
+// events are the audit trail, and asserting the audit of a deletion that never
+// happened would fail on a clean database while proving nothing on a dirty one.
+// The real evidence for the event half is the deployment run against production,
+// recorded in aihub#416's attrs.
+func TestDeLockingMigration0038AndRepoPins(t *testing.T) {
+	pool := setupLatestTestDB(t)
+	ctx := context.Background()
+
+	t.Run("running the migration deletes both retired types and leaves file scope", func(t *testing.T) {
+		u := testUser(t, pool)
+		project := testProject(t, pool, u)
+		wi := seedClaimableWI(t, pool, project, u, "hold one lock of each retired type", advisoryOnly)
+
+		// Seeded through the CLAIM path with explicit requested_locks, because
+		// that is how such a row is created now, and a raw INSERT would not
+		// exercise the FK and epoch columns the migration's join reads back.
+		branchKey := "repo416/" + project
+		envKey := "env416-" + project
+		pathKey := project + ":internal/domain/mig38.go"
+		claim, aerr := claimFreshWithLocksErr(t, pool, u, wi.ID, "aihub416-mig38", []ResourceLockReq{
+			{ResourceType: "git_branch", ResourceKey: branchKey},
+			{ResourceType: "deploy_env", ResourceKey: envKey},
+			{ResourceType: "file_scope", ResourceKey: pathKey},
+		})
+		require.Nil(t, aerr, "seeding claim failed: %+v", aerr)
+		require.ElementsMatch(t, []string{branchKey, envKey, pathKey}, heldLockKeys(t, pool, claim.AttemptID),
+			"fixture check: all three rows must exist BEFORE the migration runs, or a post-run absence "+
+				"proves nothing")
+
+		before := lockReleasedDerivationRetiredCount(t, pool)
+
+		// 🔴 THE MIGRATION FILE ITSELF is executed, not a copy of it pasted here.
+		// A copy would keep passing after somebody edited the real one, which is
+		// the failure mode this whole arm exists to prevent — and the migration's
+		// content IS the acceptance criterion for AC-19.
+		mustExec(t, pool, goosUpSection(t, "0038_retire_lock_derivation_rows.sql"))
+
+		remaining := heldLockKeys(t, pool, claim.AttemptID)
+		assert.Equal(t, []string{pathKey}, remaining,
+			"after 0038 the attempt holds %v. Both retired types must be gone and file_scope must "+
+				"survive: the migration removes rows that nothing derives, releases or probes any "+
+				"more, and touching file_scope would take a lock somebody is relying on", remaining)
+
+		// The audit half. Two events, one per deleted row, both with the new
+		// cause — a silent bulk DELETE would recreate at scale exactly the
+		// condition aihub#343 exists to remove, where a lock is acquired on a
+		// timeline and never released on it.
+		got := derivationRetiredReleases(t, pool, claim.AttemptID)
+		require.Len(t, got, 2,
+			"0038 deleted 2 rows for this attempt and wrote %d lock_released events. Without one per "+
+				"row, every future reader of this attempt's timeline sees locks taken and never "+
+				"given back", len(got))
+		assert.ElementsMatch(t, []string{branchKey, envKey}, []string{got[0].key, got[1].key})
+		for _, e := range got {
+			assert.Contains(t, []string{"git_branch", "deploy_env"}, e.typ)
+			assert.NotEmpty(t, e.opID, "no op_id, so the events of this one operation cannot be regrouped")
+			assert.NotEmpty(t, e.attemptID, "no attempt_id, so a reviewer cannot tell WHOSE lock this was")
+		}
+		assert.Equal(t, got[0].opID, got[1].opID,
+			"the two releases carry different op_ids; one migration is one operation")
+
+		assert.Greater(t, lockReleasedDerivationRetiredCount(t, pool), before,
+			"the derivation_retired event count did not move — the events above may be left over from "+
+				"an earlier run rather than written by this one")
+
+		// Idempotence, because a migration can be re-run against a database that
+		// already has it (a rebuilt test DB, a re-applied goose state). The
+		// second run must find nothing and write nothing rather than fail.
+		countAfterFirst := lockReleasedDerivationRetiredCount(t, pool)
+		mustExec(t, pool, goosUpSection(t, "0038_retire_lock_derivation_rows.sql"))
+		assert.Equal(t, countAfterFirst, lockReleasedDerivationRetiredCount(t, pool),
+			"re-running 0038 wrote more events with nothing left to delete")
+	})
+
+	t.Run("the retired types stay in the check vocabulary", func(t *testing.T) {
+		// AC-6, and the anti-vacuity control for the arm above: a schema that had
+		// DROPPED these types from the constraint would make "no such rows" true
+		// for entirely the wrong reason, and would break the requested_locks
+		// escape hatch the owner ruling deliberately kept open (Q-3).
+		var allowed bool
+		require.NoError(t, pool.QueryRow(ctx, `
+			SELECT pg_get_constraintdef(oid) LIKE '%git_branch%'
+			   AND pg_get_constraintdef(oid) LIKE '%deploy_env%'
+			FROM pg_constraint WHERE conname = 'resource_locks_resource_type_check'`).Scan(&allowed))
+		assert.True(t, allowed,
+			"the resource_locks CHECK no longer admits git_branch/deploy_env. aihub#416 retired the "+
+				"DERIVATION, not the vocabulary: requested_locks may still ask for them, and "+
+				"worktree/tcp_port are the standing precedent for a type that is legal and underived")
+	})
+
+	// The repo-pin round trip: written by FnRecordRepoPins, read back off the
+	// column. Asserted through the real function rather than a raw UPDATE, so the
+	// credential check and the JSONB encoding are both exercised.
+	t.Run("repo pins round trip through the recording call", func(t *testing.T) {
+		u := testUser(t, pool)
+		project := testProject(t, pool, u)
+		wi := seedClaimableWI(t, pool, project, u, "record where this attempt started from", advisoryOnly)
+		claim := claimFresh(t, pool, wi.ID, u, "aihub416-pins")
+
+		var before *string
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT repo_pins::text FROM run_attempts WHERE id=$1`, claim.AttemptID).Scan(&before))
+		require.Nil(t, before,
+			"a fresh claim already carries repo_pins. It must be NULL until the pins are recorded — "+
+				"the worktrees do not exist yet at claim time, so any value here is invented")
+
+		pins := map[string]string{
+			"aihub":      "0123456789abcdef0123456789abcdef01234567",
+			"ieops-core": "89abcdef0123456789abcdef0123456789abcdef",
+		}
+		require.Nil(t, FnRecordRepoPins(ctx, pool, wi.ID, &RecordRepoPinsRequest{
+			AttemptID:     claim.AttemptID,
+			ClaimEpoch:    claim.ClaimEpoch,
+			SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
+			RepoPins:      pins,
+		}))
+
+		var stored []byte
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT repo_pins FROM run_attempts WHERE id=$1`, claim.AttemptID).Scan(&stored))
+		var got map[string]string
+		require.NoError(t, json.Unmarshal(stored, &got))
+		assert.Equal(t, pins, got, "the pins did not round-trip through the column")
+
+		// The credential is the gate, not project access. Without this, any
+		// writer on the project could assert where somebody else's conclusions
+		// came from.
+		aerr := FnRecordRepoPins(ctx, pool, wi.ID, &RecordRepoPinsRequest{
+			AttemptID:     claim.AttemptID,
+			ClaimEpoch:    claim.ClaimEpoch,
+			SessionSecret: "not-the-secret-this-attempt-was-bound-to",
+			RepoPins:      map[string]string{"aihub": "ffffffffffffffffffffffffffffffffffffffff"},
+		})
+		require.NotNil(t, aerr, "a wrong session_secret recorded repo pins for somebody else's attempt")
+
+		// And the refusal must have changed nothing.
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT repo_pins FROM run_attempts WHERE id=$1`, claim.AttemptID).Scan(&stored))
+		require.NoError(t, json.Unmarshal(stored, &got))
+		assert.Equal(t, pins, got, "the refused call still wrote; the transaction is not rolling back whole")
+
+		// An empty map is a no-op, not a wipe: "I built no worktrees" and "forget
+		// what I told you" are different statements, and only the first is
+		// reachable from the client.
+		require.Nil(t, FnRecordRepoPins(ctx, pool, wi.ID, &RecordRepoPinsRequest{
+			AttemptID:     claim.AttemptID,
+			ClaimEpoch:    claim.ClaimEpoch,
+			SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
+			RepoPins:      nil,
+		}))
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT repo_pins FROM run_attempts WHERE id=$1`, claim.AttemptID).Scan(&stored))
+		require.NoError(t, json.Unmarshal(stored, &got))
+		assert.Equal(t, pins, got,
+			"an empty repo_pins wiped the column. A later failed claim would then erase the provenance "+
+				"of work already done under this attempt")
+	})
+
+	// The read-back surface a resuming agent uses. It is asserted here rather
+	// than in internal/server because what it has to prove is that the value the
+	// WRITER stored is the value the READER returns, and both halves are cheapest
+	// to drive from one place.
+	t.Run("recorded pins are readable from the attempt row a step read joins", func(t *testing.T) {
+		u := testUser(t, pool)
+		project := testProject(t, pool, u)
+		wi := seedClaimableWI(t, pool, project, u, "pins visible through the current attempt", advisoryOnly)
+		claim := claimFresh(t, pool, wi.ID, u, "aihub416-pins-read")
+		pins := map[string]string{"aihub": "1111111111111111111111111111111111111111"}
+		require.Nil(t, FnRecordRepoPins(ctx, pool, wi.ID, &RecordRepoPinsRequest{
+			AttemptID:     claim.AttemptID,
+			ClaimEpoch:    claim.ClaimEpoch,
+			SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
+			RepoPins:      pins,
+		}))
+
+		// The exact join handleGetStep performs: work_items.current_attempt_id ->
+		// run_attempts.repo_pins. Written out rather than calling the handler so
+		// this stays a domain test, and kept identical to it on purpose — a
+		// divergence here would be a reader that cannot see what the writer wrote.
+		var raw []byte
+		require.NoError(t, pool.QueryRow(ctx, `
+			SELECT ra.repo_pins
+			FROM work_items wi
+			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
+			WHERE wi.id = $1`, wi.ID).Scan(&raw))
+		var got map[string]string
+		require.NoError(t, json.Unmarshal(raw, &got))
+		assert.Equal(t, pins, got)
+	})
+
+	// Guard against the pin quietly becoming a clock. There is no expiry
+	// anywhere; this asserts the column holds what was put in it however old the
+	// attempt looks.
+	t.Run("a pin does not expire", func(t *testing.T) {
+		u := testUser(t, pool)
+		project := testProject(t, pool, u)
+		wi := seedClaimableWI(t, pool, project, u, "an old attempt keeps its pin", advisoryOnly)
+		claim := claimFresh(t, pool, wi.ID, u, "aihub416-pins-age")
+		pins := map[string]string{"aihub": "2222222222222222222222222222222222222222"}
+		require.Nil(t, FnRecordRepoPins(ctx, pool, wi.ID, &RecordRepoPinsRequest{
+			AttemptID:     claim.AttemptID,
+			ClaimEpoch:    claim.ClaimEpoch,
+			SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
+			RepoPins:      pins,
+		}))
+		mustExec(t, pool, `UPDATE run_attempts SET started_at = clock_timestamp() - interval '30 days',
+			last_active_at = clock_timestamp() - interval '30 days' WHERE id = '`+claim.AttemptID+`'`)
+
+		var raw []byte
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT repo_pins FROM run_attempts WHERE id=$1`, claim.AttemptID).Scan(&raw))
+		var got map[string]string
+		require.NoError(t, json.Unmarshal(raw, &got))
+		assert.Equal(t, pins, got,
+			"a 30-day-old attempt lost its pin. There is no such thing as a stale pin, only an old one: "+
+				"design v1.21 removed expires_at from this schema and handleRenewLease answers 410 Gone")
+	})
+}
+
+// goosUpSection returns the executable body of a migration's `-- +goose Up`
+// section, read from the real file in internal/db/migrations.
+//
+// It exists so a migration test runs the ARTIFACT rather than a transcription of
+// it. The goose directives are stripped because they are instructions to goose,
+// not SQL; everything between them is executed verbatim.
+func goosUpSection(t *testing.T, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "db", "migrations", name))
+	if err != nil {
+		t.Fatalf("read migration %s: %v", name, err)
+	}
+	src := string(body)
+	up := strings.Index(src, "-- +goose Up")
+	down := strings.Index(src, "-- +goose Down")
+	if up < 0 || down < 0 || down < up {
+		t.Fatalf("%s does not have an Up section followed by a Down section", name)
+	}
+	section := src[up+len("-- +goose Up") : down]
+	section = strings.ReplaceAll(section, "-- +goose StatementBegin", "")
+	section = strings.ReplaceAll(section, "-- +goose StatementEnd", "")
+	if !strings.Contains(section, "resource_locks") {
+		t.Fatalf("%s's Up section does not mention resource_locks — the extraction is broken, not the migration", name)
+	}
+	return section
+}
+
+// retiredRelease is one lock_released event written by migration 0038.
+type retiredRelease struct{ typ, key, attemptID, opID string }
+
+// derivationRetiredReleases reads the migration's audit events for one attempt.
+func derivationRetiredReleases(t *testing.T, pool *pgxpool.Pool, attemptID string) []retiredRelease {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `
+		SELECT payload->>'resource_type', payload->>'resource_key',
+		       payload->>'attempt_id', payload->>'op_id'
+		FROM agent_events
+		WHERE event_type = 'lock_released'
+		  AND payload->>'cause' = $1
+		  AND payload->>'attempt_id' = $2`,
+		LockCauseDerivationRetired, attemptID)
+	if err != nil {
+		t.Fatalf("read derivation_retired events: %v", err)
+	}
+	defer rows.Close()
+	out := []retiredRelease{}
+	for rows.Next() {
+		var e retiredRelease
+		if err := rows.Scan(&e.typ, &e.key, &e.attemptID, &e.opID); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	return out
+}
+
+// lockReleasedDerivationRetiredCount is the whole-table count, used only to
+// prove the arm above wrote something rather than reading an earlier run's rows.
+func lockReleasedDerivationRetiredCount(t *testing.T, pool *pgxpool.Pool) int64 {
+	t.Helper()
+	var n int64
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM agent_events
+		WHERE event_type = 'lock_released' AND payload->>'cause' = $1`,
+		LockCauseDerivationRetired).Scan(&n); err != nil {
+		t.Fatalf("count derivation_retired events: %v", err)
+	}
+	return n
+}

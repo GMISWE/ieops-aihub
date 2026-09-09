@@ -17,9 +17,13 @@ CALL: pf_create_work_item(project="marketplace",
       declared_resources=[{
         "type": "repo",
         "uri": "repo:marketplace",
-        "intent": "exclusive",
-        "task_branch": "polyforge/e2e-02-test"
+        "intent": "exclusive"
       }])
+NOTE: `task_branch` was dropped from this declaration by aihub#416 (2026-09-09) —
+      the published schema no longer carries it, because its only reader was the
+      retired git_branch lock key. Worktree creation never read it: which branch a
+      claim checks out is decided by newClaimBranchNames / resolveClaimBranch, so
+      the assertions below are unaffected.
 ASSERT: response.status == "queued"
 NOTE: save response.id as WI_ID, response.seq as SEQ
 

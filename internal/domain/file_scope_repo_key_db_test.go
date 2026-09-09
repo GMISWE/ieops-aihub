@@ -109,6 +109,22 @@ func claimWI(t *testing.T, pool *pgxpool.Pool, uid, wiID, idem string) (*ClaimRe
 	}, uid, "", "tester")
 }
 
+// claimFreshWithLocksErr is claimWI with an explicit requested_locks slice,
+// returning the error rather than failing the test.
+//
+// Same reason as claimFreshWithLocks (lock_intent_derivation_db_test.go): since
+// aihub#416 a non-file_scope row can only be created through requested_locks, so
+// a suite that needs one as a fixture has to ask for it. This variant exists
+// because its callers assert on the *AihubError themselves.
+func claimFreshWithLocksErr(t *testing.T, pool *pgxpool.Pool, uid, wiID, idem string, locks []ResourceLockReq) (*ClaimResponse, *AihubError) {
+	t.Helper()
+	return FnClaimWorkItem(context.Background(), pool, wiID, &ClaimRequest{
+		IdempotencyKey: idem,
+		RequestedLocks: locks,
+		SessionInfo:    SessionInfo{MachineID: "m-261", SessionSecret: testSecret},
+	}, uid, "", "tester")
+}
+
 func fileScopeKeys(locks []ResourceLock) []string {
 	out := []string{}
 	for _, l := range locks {

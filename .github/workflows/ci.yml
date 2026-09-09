@@ -1228,6 +1228,71 @@ jobs:
       #             exit 0 with all six named `--- PASS:` lines present and no
       #             `--- SKIP`, and with AIHUB_TEST_DB unset it exits 1 on the
       #             first "did not run".
+      #   251 -> 254 aihub#416 added 3 DB-gated functions, all in internal/domain
+      #             (delocking_db_test.go:
+      #             TestDeLockingClaimTakesNoRepoOrServiceLock,
+      #             TestDeLockingPredictReportsAdvisoryEntries,
+      #             TestDeLockingMigration0038AndRepoPins), covering the
+      #             de-locking ruling that aihub#411 §6.2 T2-12/T2-15 and §6.1
+      #             T1-8 all point at.
+      #
+      #             Three functions rather than one, for the reason aihub#444 and
+      #             aihub#434 both gave: they need different things from the
+      #             database and fail for unrelated reasons. The first seeds two
+      #             work items and drives real claims; the second seeds nothing
+      #             and only reads predictions off a running holder; the third
+      #             EXECUTES a migration and mutates the shared database. Folding
+      #             them would let a CI step name the function while the arm that
+      #             needs seeding, or the arm that needs the migration, quietly
+      #             stopped running — and would make the mutating arm's blast
+      #             radius impossible to place in this file's step order.
+      #
+      #             The DB-free companions carry the mapper and the claim-path
+      #             derivation and have no line here:
+      #             internal/domain/lock_derivation_retired_test.go asserts
+      #             resourceToLock returns ("","") for repo/service under every
+      #             intent and that deriveClaimLocks contributes no lock for
+      #             them, and internal/server/version_generation_test.go asserts
+      #             the /v1/version process component by re-executing its own
+      #             test binary — both in the default `go test ./...`. What only
+      #             a database can say is the ROW COUNT, which is the entire claim
+      #             of this work item, and whether two claims on one repo now both
+      #             succeed where the second used to answer 409.
+      #
+      #             Measured with GOWORK=off and AIHUB_TEST_DB unset in the
+      #             inventory run, so the database is untouched, and in both
+      #             directions on the SAME inventory — taken AFTER merging
+      #             origin/main at 5b8879c, which is why these are 251/254 rather
+      #             than a number derived by arithmetic from the entry above.
+      #             Verbatim, with the tests written but before the manifest lines
+      #             and the step:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 251 entries,
+      #                 inventory measured 254
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 254
+      #                 (require only a DB: 251, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 80
+      #               dbtestcov: covered by a CI step: 248/251
+      #               ::error::dbtestcov: 3 … not in the manifest … 3 … executed
+      #                 by NO CI step
+      #             and after:
+      #               dbtestcov: gated-test manifest
+      #                 internal/citest/dbtestcov/gated_tests.txt: 254 entries,
+      #                 inventory measured 254
+      #               dbtestcov: AIHUB_TEST_DB-gated test functions: 254
+      #                 (require only a DB: 251, need extra env: 3)
+      #               dbtestcov: AIHUB_TEST_DB go test invocations found in
+      #                 .github/workflows/ci.yml: 81
+      #               dbtestcov: covered by a CI step: 251/251
+      #               dbtestcov: OK
+      #
+      #             The step's own `run:` text was executed as EXTRACTED from this
+      #             file against a real Postgres (pgvector/pgvector:pg18, migrated
+      #             with goose 0001 -> 0038) rather than only reasoned about:
+      #             exit 0 with all 16 named `--- PASS:` lines present and no
+      #             `--- SKIP`, and with AIHUB_TEST_DB unset it exits 1 on the
+      #             first "did not run".
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -2748,6 +2813,54 @@ jobs:
           ! grep -q -- '--- SKIP' db_check_policy.log \
             || { echo "::error::an aihub#434 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#416: the de-locking acceptance criteria that only a database can
+      # answer. The DB-free half (lock_derivation_retired_test.go) runs in "Unit
+      # tests" and needs no step here — it proves the MAPPER and the CLAIM'S
+      # DERIVATION produce nothing for a repo or service entry. What only a
+      # database can say is the ROW COUNT, and the row count is the whole claim of
+      # that work item: "a wi declaring a repo serialises every other wi on that
+      # repo" was a statement about resource_locks.
+      #
+      # ⚠️ THE MIGRATION ARM MUTATES THE SHARED DATABASE, and it is placed here
+      # deliberately rather than anywhere convenient. TestDeLockingMigration0038
+      # AndRepoPins executes the Up body of 0038 read out of the real file, which
+      # DELETEs every git_branch/deploy_env row in the database — including any a
+      # neighbouring step's fixture left behind. That is harmless for the steps
+      # ABOVE (each finishes before the next starts) and for the steps BELOW
+      # (aihub#239 onwards touch memory and recall, not locks). Do NOT move a
+      # lock-fixture step after this one without re-reading that sentence.
+      #
+      # Running the file rather than a transcription of it is the point: a copy
+      # pasted into the test would keep passing after somebody edited the real
+      # migration, and the migration's content IS acceptance criterion AC-19.
+      - name: aihub#416 de-locking DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestDeLocking' -count=1 -v 2>&1 | tee delocking.log
+          for want in TestDeLockingClaimTakesNoRepoOrServiceLock \
+                      TestDeLockingClaimTakesNoRepoOrServiceLock/a_claim_declaring_only_repo_and_service_holds_zero_lock_rows \
+                      TestDeLockingClaimTakesNoRepoOrServiceLock/two_work_items_declaring_the_same_repo_both_claim \
+                      TestDeLockingClaimTakesNoRepoOrServiceLock/two_work_items_declaring_the_same_service_both_claim \
+                      TestDeLockingPredictReportsAdvisoryEntries \
+                      TestDeLockingPredictReportsAdvisoryEntries/rule_2_reports_soft_block_for_a_declared_repo_without_reading_the_lock_table \
+                      TestDeLockingPredictReportsAdvisoryEntries/rule_6_reports_exactly_one_info_per_service_and_does_not_raise_severity \
+                      TestDeLockingPredictReportsAdvisoryEntries/rule_6_still_fires_under_dry_run \
+                      TestDeLockingPredictReportsAdvisoryEntries/last_active_age_seconds_tracks_the_attempts_last_active_at \
+                      TestDeLockingPredictReportsAdvisoryEntries/a_repo_or_service_only_payload_never_returns_hard_block \
+                      TestDeLockingMigration0038AndRepoPins \
+                      TestDeLockingMigration0038AndRepoPins/running_the_migration_deletes_both_retired_types_and_leaves_file_scope \
+                      TestDeLockingMigration0038AndRepoPins/the_retired_types_stay_in_the_check_vocabulary \
+                      TestDeLockingMigration0038AndRepoPins/repo_pins_round_trip_through_the_recording_call \
+                      TestDeLockingMigration0038AndRepoPins/recorded_pins_are_readable_from_the_attempt_row_a_step_read_joins \
+                      TestDeLockingMigration0038AndRepoPins/a_pin_does_not_expire; do
+            grep -q -- "--- PASS: $want" delocking.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#416 de-locking coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' delocking.log \
+            || { echo "::error::an aihub#416 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: aihub#239 recall cursor tie + supersede carry DB tests
         env:
           AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
@@ -3282,7 +3395,7 @@ jobs:
           for want in 'TestReadIntentTakesNoWriteLock/claim_derives_no_lock_for_a_read_declaration' \
                       'TestReadIntentTakesNoWriteLock/write_declaration_still_takes_the_lock' \
                       'TestReadIntentTakesNoWriteLock/force_takeover_derives_no_lock_for_a_read_declaration' \
-                      'TestReadIntentTakesNoWriteLock/a_read_declaration_on_a_repo_still_takes_its_branch_lock' \
+                      'TestReadIntentTakesNoWriteLock/a_read_declaration_on_a_repo_takes_no_lock_at_all' \
                       'TestReadIntentTakesNoWriteLock/predict_and_claim_agree_on_a_read_declaration_over_a_held_lock'; do
             grep -q -- "--- PASS: $want" read_intent_locks.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#342 intent rule is not actually verified on that derivation path"; exit 1; }

@@ -320,14 +320,32 @@ func TestDeclaredResourcesProp_DoesNotPublishBaseBranch(t *testing.T) {
 			"claim off origin/main with no error at any hop — aihub#395 part 2. Withdraw it from "+
 			"the schema, or make something honour it.", desc)
 	}
+	// aihub#416 WITHDREW task_branch TOO, by the same precedent and for the same
+	// reason: its only consumer was the git_branch lock key, and that derivation
+	// is retired. So it is asserted as a withdrawal here rather than left to rot
+	// as a live parameter — one gate, two fields, one rule.
+	if _, published := props["task_branch"]; published {
+		desc, _ := itemPropDescription(t, items, "task_branch")
+		t.Errorf("declared_resources entries still publish `task_branch` (%q). Since aihub#416 a repo "+
+			"entry derives no git_branch lock, so this value has no reader at all — the same state "+
+			"aihub#395 withdrew base_branch from. Withdraw it, or make something honour it.", desc)
+	}
+
 	// Anti-vacuity, and it is load-bearing: an items schema that lost its
-	// properties block would satisfy the assertion above while withdrawing the
-	// whole entry shape. `task_branch` is the neighbour that IS still read (it is
-	// the fallback lock-key source aihub#356 left in place), so its presence
-	// proves this test is looking at a populated schema.
-	if _, ok := props["task_branch"]; !ok {
-		t.Error("`task_branch` is not published either — this test can no longer tell " +
-			"\"base_branch was withdrawn\" from \"the entry shape is empty\"")
+	// properties block would satisfy both assertions above while withdrawing the
+	// whole entry shape.
+	//
+	// ⚠️ The anti-vacuity control MOVED with aihub#416, from task_branch to
+	// `uri`, because the old control was itself withdrawn. `uri` is the right
+	// replacement rather than a convenient one: it is REQUIRED by this schema
+	// (see the "required" list), so unlike an optional neighbour it cannot be
+	// withdrawn by a later change without that change being obviously about the
+	// entry shape.
+	for _, want := range []string{"type", "uri"} {
+		if _, ok := props[want]; !ok {
+			t.Errorf("`%s` is not published — this test can no longer tell "+
+				"\"base_branch and task_branch were withdrawn\" from \"the entry shape is empty\"", want)
+		}
 	}
 }
 
@@ -353,10 +371,15 @@ func TestDeclaredResourcesProp_QualifiesReadIntent(t *testing.T) {
 				"derivedLock drops the lock for file_scope only. Got: %q", want, desc)
 		}
 	}
+	// The repo/service half survives aihub#416 with its REASON inverted: they are
+	// still the types where "read" is inert, but now because they take no lock at
+	// all rather than because the exemption does not reach them. A description
+	// that stopped naming them would leave a caller to assume the unqualified
+	// promise applies, which is aihub#395 part 1 again.
 	for _, want := range []string{"repo", "service"} {
 		if !strings.Contains(desc, want) {
-			t.Errorf("the intent description does not say what read does on a %q entry (it still "+
-				"takes its lock). Got: %q", want, desc)
+			t.Errorf("the intent description does not say what read does on a %q entry (nothing — "+
+				"it takes no lock under any intent since aihub#416). Got: %q", want, desc)
 		}
 	}
 }
@@ -371,12 +394,21 @@ func TestDeclaredResourcesProp_SaysExternalRefTakesNoLock(t *testing.T) {
 	if !ok {
 		t.Fatal("items schema does not describe `type`")
 	}
-	if !strings.Contains(desc, "external_ref") {
-		t.Errorf("the type description does not mention external_ref at all, so nothing tells a "+
-			"caller that the one lockless type is lockless. Got: %q", desc)
+	// ⚠️ aihub#416 made the lockless set THREE types, not one: repo and service
+	// joined external_ref. All three are asserted, because the failure this gate
+	// exists to prevent — an entry a caller declares, that is accepted, and that
+	// produces no lock while the field is described as "Declared resource locks"
+	// — is now reachable through the two commonest declared types rather than
+	// through one annotation type.
+	for _, want := range []string{"external_ref", "repo", "service"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("the type description does not mention %q at all, so nothing tells a "+
+				"caller that this lockless type is lockless. Got: %q", want, desc)
+		}
 	}
-	if !strings.Contains(strings.ToLower(desc), "no lock") {
-		t.Errorf("the type description does not say external_ref takes NO lock. Got: %q", desc)
+	if !strings.Contains(strings.ToLower(desc), "no lock") &&
+		!strings.Contains(strings.ToLower(desc), "take none") {
+		t.Errorf("the type description does not say the lockless types take NO lock. Got: %q", desc)
 	}
 	// ⚠️ The other half of this — that the claim is TRUE — cannot be asserted from
 	// here: resourceToLock is unexported and adding an exported test-only shim to

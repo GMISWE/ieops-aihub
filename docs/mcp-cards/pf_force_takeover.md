@@ -57,9 +57,11 @@ session secret, builds `{reason, session_info{session_secret, machine_id}}` and 
 `pkg/client/client.go` (`ForceTakeover`) → `POST /v1/work_items/<id>/force_takeover`,
 bound by `internal/server/router.go` (`handleForceTakeover`).
 
-**No `task_branches` are sent**, unlike a claim. That is why a
-`declared_resources[].task_branch` value survives a takeover and can win the
-lock-key derivation for a repo the claim would have predicted a branch for.
+**No `task_branches` are sent**, and since `aihub#416` neither does a claim — the
+whole mechanism is gone with the `git_branch` derivation it keyed. This paragraph
+used to record an asymmetry between the two calls (a takeover re-derived a repo's
+lock from the declaration while a claim overrode it); there is no longer a repo lock
+for either to derive, so the asymmetry is gone rather than resolved.
 
 ## hop 4 — what it actually does
 
@@ -104,13 +106,15 @@ CLAIM keep-list.
 - **§6.1 T1-5** — delete-list is the only projection shape.
 - **§6.2 T2-15** — the landed lock semantics are accepted and the race qualifier is
   filed; `deploy_env` and `git_branch` derivation retires under the de-locking
-  ruling, shrinking the row to `file_scope`.
+  ruling, shrinking the row to `file_scope`. Landed by `aihub#416` (2026-09-09), so
+  the locks this call re-derives for the new attempt are `file_scope` only.
 - **§6.2 T2-8 — LANDED** (`aihub#443`). Who may call this is a role question, and
   the two disagreeing role ladders it was about are now one shared map.
 
 ## Open
 
-- **§6.4 item 6** — the de-locking group's open questions belong to `aihub#416`,
-  still open (`paused`) at the last re-check, 2026-09-08. The commit-window race
-  above is documented, not closed; the full analysis lives beside the lock upsert
-  statement in `internal/domain/resource_events.go`.
+- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09)**: the
+  de-locking ruling changed what this call re-derives, not how. The commit-window
+  race above is documented, not closed, and `aihub#416` did not touch it; the full
+  analysis lives beside the lock upsert statement in
+  `internal/domain/resource_events.go`.

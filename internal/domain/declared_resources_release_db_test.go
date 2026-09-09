@@ -72,8 +72,23 @@ func updateDeclared(t *testing.T, pool *pgxpool.Pool, wiID, userID, declared str
 // which an assertion on a bare bool cannot.
 func claimBlocks(t *testing.T, pool *pgxpool.Pool, wiID, userID, idemKey string) (blocked bool, code ErrCode) {
 	t.Helper()
+	return claimBlocksWithLocks(t, pool, wiID, userID, idemKey, nil)
+}
+
+// claimBlocksWithLocks is claimBlocks for a claim that asks for its locks
+// explicitly.
+//
+// Needed since aihub#416: a work item that wants to CONTEND for a non-file_scope
+// lock can no longer do it by declaring the repo or service, because those
+// derive nothing. The contention itself is unchanged — resource_locks is still
+// PRIMARY KEY (resource_type, resource_key) and one key still admits one holder
+// — so the arms that measure "blocked before, unblocked after" keep their
+// meaning by asking for the key directly.
+func claimBlocksWithLocks(t *testing.T, pool *pgxpool.Pool, wiID, userID, idemKey string, locks []ResourceLockReq) (blocked bool, code ErrCode) {
+	t.Helper()
 	_, aerr := FnClaimWorkItem(context.Background(), pool, wiID, &ClaimRequest{
 		IdempotencyKey: idemKey,
+		RequestedLocks: locks,
 		SessionInfo: SessionInfo{
 			MachineID:     "m_locktest",
 			SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
@@ -116,9 +131,17 @@ func TestNarrowingDeclaredResourcesReleasesItsLocks(t *testing.T) {
 		"release the file_scope locks whose declaration was removed", declaredAll)
 	claim := claimFresh(t, pool, holder.ID, u, "aihub264-claim")
 
-	require.ElementsMatch(t, []string{"aihub/aihub264", droppedKey, flippedKey, keptKey},
+	// THREE keys, not four: the {"type":"repo"} entry in declaredAll derives no
+	// git_branch lock since aihub#416. It is still declared, and deliberately so
+	// — it is what makes the three path entries inherit the ":aihub:" repo
+	// segment their keys above are built from (aihub#261), so removing it would
+	// silently change every key in this suite.
+	//
+	// The count is also the negative control for the retirement: a fourth key
+	// here means a repo declaration started deriving a lock again.
+	require.ElementsMatch(t, []string{droppedKey, flippedKey, keptKey},
 		heldLockKeys(t, pool, claim.AttemptID),
-		"fixture check: the claim must really have taken all four locks, or nothing below is measuring a release")
+		"fixture check: the claim must really have taken all three file_scope locks, or nothing below is measuring a release")
 
 	// MUTANT: internal/domain/work_items.go, UpdateWorkItem — delete the
 	// releaseUndeclaredFileScopeLocks call. This subtest goes red; "a still

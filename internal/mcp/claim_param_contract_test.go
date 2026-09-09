@@ -113,8 +113,18 @@ var claimParamsNotActedOn = map[string]string{}
 // sends on the caller's behalf — so they are written down rather than left to
 // be discovered.
 var claimFieldsDeliberatelyUnpublished = map[string]string{
-	"session_info":  "minted by the MCP handler itself: machine_id from the environment and a session_secret generated here and persisted to the state file. Publishing it would let a caller forge another machine's credential.",
-	"task_branches": "derived by claimTaskBranches from the worktrees this claim is about to create (aihub#356). The caller cannot know the branch names; the whole point is that the client reports what it will check out. Honoured in EffectiveDeclaredResource rather than in FnClaimWorkItem, which is why the intra-function census below does not see it and the staleness check for this map is the package-wide one.",
+	"session_info": "minted by the MCP handler itself: machine_id from the environment and a session_secret generated here and persisted to the state file. Publishing it would let a caller forge another machine's credential.",
+	// ⚠️ `task_branches` was the second entry here until aihub#416, and it went
+	// by DELETION rather than by re-wording: the git_branch derivation it fed is
+	// retired, so ClaimRequest no longer binds the field, EffectiveDeclaredResource
+	// no longer exists, and claimTaskBranches no longer exists. The staleness arm
+	// below is what would have caught leaving it: an exemption naming a field the
+	// struct does not bind is reported as stale.
+	//
+	// The provenance that replaced it (repo pins) does NOT belong here. It is not
+	// a claim parameter at all — it is recorded by a separate call after the
+	// worktrees exist, POST /v1/work_items/:id/repo_pins — precisely so that no
+	// unfillable field has to be exempted on this route.
 }
 
 // ─── hop 4: how does the claim path read each ClaimRequest field? ───────────

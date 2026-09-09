@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -96,95 +95,37 @@ type ClaimRequest struct {
 	// wi_step_state keyed by work item, so every re-claim already sees it.
 	ForceOver   bool    `json:"force_takeover"`
 	ScenarioRef *string `json:"scenario_ref,omitempty"` // git SHA of local scenario clone at claim time
-	// TaskBranches maps a repo name to the branch the claiming client is about
-	// to check out in that repo's worktree. It exists so the git_branch lock is
-	// keyed on the branch work will really happen on. (aihub#356)
+	// ⚠️ There is deliberately no `task_branches` here either (aihub#416), and
+	// it went for the same reason as `mode` above rather than by tidying.
 	//
-	// See EffectiveDeclaredResource for why the client is the authority here and
-	// what happens when it says nothing.
-	TaskBranches map[string]string `json:"task_branches,omitempty"`
-}
+	// aihub#356 added it, and EffectiveDeclaredResource beside it, so the
+	// git_branch lock a repo declaration derived would be keyed on the branch the
+	// claiming client was really about to check out instead of on
+	// declared_resources[].task_branch. That derivation is retired
+	// (resourceToLock): a repo entry takes no lock under any intent. So the field
+	// had exactly one reader, that reader computed exactly one thing, and the
+	// thing no longer exists — binding it would leave a request field an MCP
+	// caller cannot set and the server cannot act on, which is the state
+	// aihub#424 removed `mode` from and TestClaimRequestBindsNothingUnreachable
+	// gates against.
+	//
+	// The CLIENT half went with it (internal/mcp/tools_lifecycle.go): the claim
+	// no longer spends a GetWorkItem round-trip predicting branch names. What
+	// records where an attempt started is RepoPins below, taken from the
+	// worktrees after they exist rather than predicted before they do.
 
-// EffectiveDeclaredResource returns res as THIS claim will map it to a lock:
-// for a repo entry whose repo the client has reported a branch for, the
-// declared task_branch is replaced by that branch. Everything else is returned
-// untouched, so only the git_branch key can move. (aihub#356)
-//
-// ⚠️ WHY THE CLIENT IS THE AUTHORITY, when declared_resources is otherwise the
-// contract. The branch a claim works on is not the declared task_branch and
-// never was: pf_claim_work_item derives polyforge/<project>-<seq>-<kebab goal>
-// at claim time, or attaches to whatever branch already exists in the clone,
-// and that name is stored nowhere — not in the state file, not on the work
-// item. Every downstream tool already agrees: pf_ship, pf_pr, pf_push and
-// pf_wrap all read `git rev-parse --abbrev-ref HEAD` out of the worktree. The
-// lock was the last reader of the declaration, so it protected a branch name
-// nobody used. Measured on ieops#996: key ieops-ctlchain/polyforge/pin-bump-token
-// against a worktree sitting on polyforge/ieops-996-proxy-pin-bump-....
-//
-// ⚠️ ONLY WHEN THE CLAIM CREATES A BRANCH does the mismatch appear; ieops#994 is
-// the control, where the branch already existed and the two names agreed. So a
-// fix keyed on "what this claim would compute today" is NOT enough: when the
-// claim attaches to a branch an earlier claim made under an older goal, the
-// computed name and the checked-out name differ, and it is the checked-out one
-// that has to win. That is why this takes a value from the client instead of
-// recomputing the name here — the server cannot see which refs the clone holds.
-//
-// An absent or empty entry leaves the declaration in force. That is the honest
-// degradation rather than a gap: a claim that PREDICTS no branch for a repo (no
-// workspace on this machine, the repo missing from .polyforge.yaml, no clone
-// under .repo/, an existing worktree directory git refuses to call one) has said
-// nothing about it, and the declaration is then the only statement anyone has
-// made.
-//
-// ⚠️ "PREDICTED A BRANCH" IS NOT "PUT A WORKTREE ON ONE", and the gap between
-// them is the single case where aihub#356 does NOT degrade to pre-fix
-// behaviour. The client predicts before the claim — it has to, or a genuine
-// branch collision could no longer refuse the claim — and creates the worktree
-// after. When the prediction is made and the `worktree add` then FAILS, this
-// substitution still happens: the key names a branch nothing is on, and it has
-// overridden a task_branch someone may have declared by hand precisely to
-// protect it. The claim still succeeds, and nothing on this side of the wire can
-// see it; the CLIENT detects it afterwards and returns it to the caller in
-// worktree_problems (keyedBranchProblems, internal/mcp/tools_lifecycle.go).
-//
-// ⚠️ DO NOT WRITE HERE THAT A FAILED `worktree add` LEAVES THE DECLARATION IN
-// FORCE. It does not. That sentence was in this comment until aihub#356's review
-// measured the opposite, and a reader who trusts it will hand-declare a
-// task_branch believing a stale clone protects it.
-//
-// ⚠️ WHAT THIS DOES NOT REACH. Both are known and deliberate, not oversights —
-// read them before assuming the whole system now agrees on one branch name:
-//
-//   - FnForceTakeover re-derives every lock from declared_resources with no
-//     override available, so a pf_force_takeover REVERTS a repo's git_branch key
-//     to the declared name. It creates no worktree of its own and the branch fact
-//     lives in a state file that may belong to another machine entirely, so
-//     which worktree would be authoritative there is a separate decision.
-//     Takeover through the CLAIM path (force_takeover=true in a claim body) runs
-//     this method and is unaffected.
-//   - PredictConflicts rule 1 compares exact keys built from the declaration, so
-//     its git_branch arm now systematically fails to match a real lock. ⚠️ DO NOT
-//     read that as "it was never a useful signal", which is what this comment
-//     used to say. Before this change rule 1 and the claim AGREED, because both
-//     derived the key from the declaration, so rule 1 predicted exactly what the
-//     claim would do. What it is now is a FALSE NEGATIVE, and on precisely the
-//     conflict this change newly makes reachable: pf_predict_conflicts derives no
-//     branch names and has no task_branches to read, so two work items that will
-//     resolve to ONE real branch pass rule 1, come back soft_block from rule 2,
-//     and the second then takes a hard 409 at claim that the prediction said
-//     would not happen. Rule 2 is the arm still carrying a real signal — it
-//     matches `resource_key LIKE '<repo>/%'`, i.e. any attempt on the same repo
-//     whatever the branch — and this change does not touch it. Closing rule 1
-//     needs the PREDICTING client to report its branches the way the claiming one
-//     now does; that is a separate change and is not in aihub#356's scope.
-func (req *ClaimRequest) EffectiveDeclaredResource(res DeclaredResourceItem) DeclaredResourceItem {
-	if res.Type != "repo" || len(req.TaskBranches) == 0 {
-		return res
-	}
-	if b := req.TaskBranches[strings.TrimPrefix(res.URI, "repo:")]; b != "" {
-		res.TaskBranch = b
-	}
-	return res
+	// ⚠️ And deliberately no `repo_pins` here, though run_attempts HAS that
+	// column (migration 0037). The claim cannot carry them: the pins are read out
+	// of the worktrees, and the MCP handler creates those AFTER the claim returns
+	// — it must, because a claim can be refused (409 on an already-claimed work
+	// item) and building worktrees for a refused claim would leave litter on
+	// disk. Predicting them before the claim is the aihub#356 mistake this wi
+	// just deleted: a value guessed at claim time and then quietly wrong.
+	//
+	// They are recorded by a second call instead, RecordRepoPinsRequest /
+	// FnRecordRepoPins below, which the same MCP tool makes as soon as the
+	// worktrees exist. Binding a field here that no caller could fill would be
+	// the `mode` shape above.
 }
 
 // SessionInfo carries machine_id and session_secret.
@@ -380,13 +321,11 @@ func deriveClaimLocks(req *ClaimRequest, declaredResources json.RawMessage, proj
 	// a field missing from the list never reaches the mapper and reads as a
 	// zero value — and the `repo` field added here is exactly such a field.
 	for _, d := range unmarshalDeclaredResources(declaredResources) {
-		// aihub#356: the git_branch key follows the branch the claiming
-		// client is really about to check out, not declared_resources[].
-		// task_branch. Applied to the item rather than to the derived key so
-		// the probe below is built from the same value as the key — a key and
-		// a probe that disagree is a lock that inserts on one name and
-		// collides on another.
-		d = req.EffectiveDeclaredResource(d)
+		// aihub#416: the `d = req.EffectiveDeclaredResource(d)` substitution
+		// that used to open this loop is gone with the git_branch derivation it
+		// served — see ClaimRequest for why the whole task_branches path went
+		// rather than being left inert.
+		//
 		// derivedLockProbe, not resourceToLock (aihub#342): an intent=read
 		// declaration takes no write lock. This line is the reported
 		// instance — claim took a file_scope lock for a read-only path
@@ -897,6 +836,33 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		ID:                    wi.ID,
 		Goal:                  wi.Goal,
 	}, nil
+}
+
+// repoPinsJSON renders a claim's repo pins for the JSONB column, or nil when
+// there are none (aihub#416).
+//
+// 🔴 nil, NOT `{}`, and the difference is load-bearing rather than tidy. NULL
+// means "this claim recorded no starting commit for anything" — the honest state
+// for a claim that built no worktree, and for every row written before migration
+// 0037. An empty object would say "we looked, and there were zero repos", which
+// is a different claim and a false one on both of those paths. A later reader
+// asking "does this conclusion have provenance" has to be able to tell them
+// apart.
+//
+// A marshal failure degrades to NULL rather than failing the claim. The value is
+// provenance; losing it must never cost somebody a claim (the same posture the
+// wi_step_state upsert below takes for scenario_ref). map[string]string cannot
+// in fact fail to marshal, which is why this is a fallback and not a branch with
+// a test behind it.
+func repoPinsJSON(pins map[string]string) []byte {
+	if len(pins) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(pins)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // nilIfEmpty returns nil if s is empty, else a pointer to s.
@@ -1830,6 +1796,95 @@ func lockTakenErrFor(err error) *AihubError {
 	)
 }
 
+// ─── Repo pins (aihub#416) ──────────────────────────────────────────────────
+
+// RecordRepoPinsRequest is the body for POST /v1/work_items/:id/repo_pins.
+//
+// 🔴 WHY THIS IS A SECOND CALL AND NOT PART OF THE CLAIM. The pin is
+// `git rev-parse HEAD` inside a worktree, and the worktrees do not exist when
+// the claim goes out — the MCP client builds them from the claim RESPONSE, and
+// it has to be that way round because a claim can be refused (409 on a work item
+// somebody else holds) and building worktrees for a refused claim would leave
+// directories behind for a session that never started.
+//
+// The alternative was to PREDICT the commit before the claim, which is exactly
+// what aihub#356 did for branch names and exactly what this wi deleted: a value
+// computed before the fact, silently wrong whenever the prediction and the
+// filesystem disagreed, with a whole reporting mechanism (keyedBranchProblems)
+// built to apologise for it afterwards. Recording after the fact cannot be
+// wrong; it can only be absent, and absent is a state the reader can see.
+type RecordRepoPinsRequest struct {
+	AttemptID     string `json:"attempt_id"`
+	ClaimEpoch    int64  `json:"claim_epoch"`
+	SessionSecret string `json:"session_secret"`
+	// RepoPins maps repo name to the 40-char commit sha that repo's worktree was
+	// on when this attempt started work. A repo whose worktree could not be built
+	// is ABSENT rather than mapped to "" (owner ruling Q-4).
+	RepoPins map[string]string `json:"repo_pins"`
+}
+
+// FnRecordRepoPins stores the current attempt's per-repo starting commits.
+//
+// Credential-checked exactly like every other per-attempt write: only the live
+// attempt may record its own provenance, or the field would be a place for
+// anyone with writer access to assert where somebody else's conclusions came
+// from.
+//
+// 🔴 It OVERWRITES rather than merging, and that is the conservative direction
+// here even though merging is conservative almost everywhere else in this file.
+// A re-claim after a pause makes a NEW attempt row, so this only ever overwrites
+// within one attempt — i.e. the same session recording the same worktrees a
+// second time, where the later reading is the more accurate one. Merging would
+// instead accumulate pins for repos whose worktrees have since been removed, and
+// a pin naming a tree that is no longer there is worse than no pin at all,
+// because it looks like evidence.
+//
+// 🔴 It records NOTHING and answers 200 for an empty map, rather than clearing
+// the column. "I built no worktrees" and "forget what I told you" are different
+// statements and only the first one is reachable from the client; a call that
+// could blank the record would let a later failed claim erase the provenance of
+// the work already done under this attempt.
+func FnRecordRepoPins(ctx context.Context, pool *pgxpool.Pool, wiID string, req *RecordRepoPinsRequest) *AihubError {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return NewErr(ErrInternalError, "failed to begin transaction")
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var wi WorkItem
+	err = tx.QueryRow(ctx, `
+		SELECT id, project, status, current_attempt_id, current_attempt_epoch
+		FROM work_items WHERE id=$1 FOR UPDATE`, wiID,
+	).Scan(&wi.ID, &wi.Project, &wi.Status, &wi.CurrentAttemptID, &wi.CurrentAttemptEpoch)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return NewErr(ErrNotFound, "work item not found")
+		}
+		return dbErr(err, "failed to lock work_item")
+	}
+
+	if aihubErr := verifyAttemptCredential(ctx, tx, wi, req.AttemptID, req.ClaimEpoch, req.SessionSecret); aihubErr != nil {
+		return aihubErr
+	}
+
+	if len(req.RepoPins) > 0 {
+		if _, err := tx.Exec(ctx,
+			`UPDATE run_attempts SET repo_pins=$1 WHERE id=$2`,
+			repoPinsJSON(req.RepoPins), req.AttemptID,
+		); err != nil {
+			return dbErr(err, "failed to record repo pins")
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		if aerr := retryConflictErr(err, "failed to commit repo pins"); aerr != nil {
+			return aerr
+		}
+		return NewErr(ErrInternalError, "failed to commit repo pins")
+	}
+	return nil
+}
+
 // ─── AcquireLocks request / response ────────────────────────────────────────
 
 // AcquireLocksRequest is the body for POST /v1/work_items/:id/acquire_locks.
@@ -1849,19 +1904,24 @@ type AcquireLocksResponse struct {
 	// have re-derived (aihub#345). Acquired and AlreadyHeld are disjoint, and
 	// together they are exactly the attempt's lock set.
 	//
-	// It includes locks with no live declaration behind them: git_branch and
-	// deploy_env locks taken at claim, locks from a client-supplied
-	// requested_locks, and file_scope locks whose declared_resources entry was
-	// removed before aihub#264.
+	// It includes locks with no live declaration behind them: locks from a
+	// client-supplied requested_locks, file_scope locks whose declared_resources
+	// entry was removed before aihub#264, and — on a database carrying rows older
+	// than aihub#416 — git_branch/deploy_env rows taken at claim by a build that
+	// still derived them.
 	//
-	// ⚠️ aihub#264 changed the last of those. Removing a path from
+	// ⚠️ aihub#264 changed the second of those. Removing a path from
 	// declared_resources through UpdateWorkItem now DOES release its file_scope
 	// lock, in the same transaction as the update — so that population is no
 	// longer produced by the ordinary API path, and this field reports it only
 	// for locks that predate the change or were never derived from a declaration
-	// at all. git_branch and deploy_env are deliberately NOT released that way,
-	// so they remain the main reason an attempt holds a lock it cannot explain
-	// from its current declarations.
+	// at all.
+	//
+	// ⚠️ This list used to say that git_branch and deploy_env "remain the main
+	// reason an attempt holds a lock it cannot explain from its current
+	// declarations". aihub#416 retired both derivations, so on a current build
+	// nothing produces such a row and the ordinary answer here is empty. The
+	// remaining producer is an explicit requested_locks.
 	AlreadyHeld []ResourceLock `json:"already_held"`
 }
 

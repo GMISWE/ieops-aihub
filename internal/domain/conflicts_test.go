@@ -41,26 +41,39 @@ func TestResourceToLock_SamePathSameProjectStillCollides(t *testing.T) {
 	}
 }
 
-// git_branch and deploy_env keys must NOT be namespaced by project: git_branch
-// is already repo-qualified (repo/branch) and deploy_env (service) is
-// intentionally global so cross-project deploys to one environment still conflict.
-func TestResourceToLock_BranchAndEnvKeysUnaffectedByProject(t *testing.T) {
-	_, branchA := resourceToLock(DeclaredResourceItem{Type: "repo", URI: "repo:ieops-v2", TaskBranch: "polyforge/x"}, "ieops")
-	_, branchB := resourceToLock(DeclaredResourceItem{Type: "repo", URI: "repo:ieops-v2", TaskBranch: "polyforge/x"}, "global-routing")
-	if branchA != branchB {
-		t.Errorf("git_branch key changed with project: %q vs %q (must be repo-qualified only)", branchA, branchB)
-	}
-	if want := "ieops-v2/polyforge/x"; branchA != want {
-		t.Errorf("git_branch key = %q, want %q", branchA, want)
-	}
-
-	_, envA := resourceToLock(DeclaredResourceItem{Type: "service", URI: "service:tot"}, "ieops")
-	_, envB := resourceToLock(DeclaredResourceItem{Type: "service", URI: "service:tot"}, "aihub")
-	if envA != envB {
-		t.Errorf("deploy_env key changed with project: %q vs %q (cross-project deploy must still conflict)", envA, envB)
-	}
-	if want := "tot"; envA != want {
-		t.Errorf("deploy_env key = %q, want %q", envA, want)
+// aihub#416 retired what this test used to assert.
+//
+// It was TestResourceToLock_BranchAndEnvKeysUnaffectedByProject, and it pinned
+// the KEY FORMATS of the two derivations that no longer happen: that a repo
+// entry keyed "<repo>/<branch>" ignoring the project, and that a service entry
+// keyed the bare service name so cross-project deploys to one environment still
+// collided. Both statements are now false, and the second one's REASON — that
+// two projects deploying to one environment must conflict — is precisely what
+// the de-locking ruling withdrew: exclusion is replaced by the observer's
+// generation check, and deploy exclusion moves to the runbook.
+//
+// It is replaced rather than deleted, because the property it protected still
+// exists in the neighbourhood: `project` must not leak into a key it does not
+// belong in. That question now has only one type to ask it of, and
+// TestFileScopeLockKey_Shape below already pins the answer — so what is kept
+// here is the RETIREMENT itself, phrased so this file cannot silently regain a
+// project-namespacing bug on a resurrected type.
+//
+// The behavioural arm lives in lock_derivation_retired_test.go; this one is the
+// note that stops a reader of THIS file concluding the old formats still hold.
+func TestResourceToLock_NoProjectSensitiveKeyOutsideFileScope(t *testing.T) {
+	// Every declared type, both projects, one assertion: the only type that may
+	// produce a key at all is file_scope, and it is the only one whose key may
+	// differ between projects.
+	for _, typ := range []string{"repo", "service", "external_ref"} {
+		res := DeclaredResourceItem{Type: typ, URI: typ + ":x", TaskBranch: "polyforge/x"}
+		for _, project := range []string{"ieops", "global-routing"} {
+			if lt, lk := resourceToLock(res, project); lt != "" || lk != "" {
+				t.Errorf("resourceToLock(%s, project=%q) = (%q, %q), want no lock — aihub#416 retired "+
+					"the git_branch and deploy_env derivations, so no key format survives to be "+
+					"project-sensitive or not", typ, project, lt, lk)
+			}
+		}
 	}
 }
 

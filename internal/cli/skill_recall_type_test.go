@@ -106,6 +106,56 @@ func routedSkills(t *testing.T, pluginRoot string) []string {
 	return out
 }
 
+// Router MODES, as declared by the first field of each TARGETS tuple (aihub#478).
+//
+//	step-body   — pf-execute. The payload IS the step body: header + _common/* + engine fragment.
+//	header-only — pf-spec / pf-plan. The SKILL.md is self-sufficient, so only the header rides.
+//
+// Every gate in this package that asks "what must this payload contain" branches on this, so it
+// is PARSED out of the hook rather than restated here, for the same reason routedSkills is.
+const (
+	routerModeStepBody   = "step-body"
+	routerModeHeaderOnly = "header-only"
+)
+
+// routerModes maps each routed skill to its mode.
+//
+// An entry whose mode cannot be parsed, or that declares a mode no assertion here knows, is a
+// FATAL rather than a default. Defaulting is how a third mode would ship judged by the rules of
+// one of the first two — the same shape as a skill escaping routedSkills by being new.
+func routerModes(t *testing.T, pluginRoot string) map[string]string {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join(pluginRoot, "hooks", "pf-skill-router"))
+	if err != nil {
+		t.Fatalf("read hook: %v", err)
+	}
+	s := string(src)
+	start := strings.Index(s, "TARGETS = {")
+	if start < 0 {
+		t.Fatal("hooks/pf-skill-router no longer contains a `TARGETS = {` dict — this gate " +
+			"reads each skill's mode out of it and cannot silently degrade to assuming one")
+	}
+	modeRe := regexp.MustCompile(`(?m)^ {4}"([a-z0-9-]+)":\s*\(\s*"([a-z-]+)"`)
+	out := map[string]string{}
+	for _, m := range modeRe.FindAllStringSubmatch(s[start:], -1) {
+		out[m[1]] = m[2]
+	}
+	for _, skill := range routedSkills(t, pluginRoot) {
+		mode, ok := out[skill]
+		if !ok {
+			t.Fatalf("TARGETS[%q] has no parseable mode in its first tuple field. The gates in "+
+				"this package branch on it, so an unreadable entry would be judged by whatever "+
+				"default was chosen for it instead of by its own rules.", skill)
+		}
+		if mode != routerModeStepBody && mode != routerModeHeaderOnly {
+			t.Fatalf("TARGETS[%q] declares mode %q, which no assertion in this package knows how "+
+				"to judge. Teach the gates the new mode rather than letting it ship measured by "+
+				"the rules of a different one.", skill, mode)
+		}
+	}
+	return out
+}
+
 // renderHook runs the real hook exactly as the harness does: payload on stdin,
 // CLAUDE_PLUGIN_ROOT pointing at the plugin tree. Returns the injected context.
 func renderHook(t *testing.T, pluginRoot, skill string) string {
@@ -163,23 +213,37 @@ var pfRecallCallRe = regexp.MustCompile(`pf_recall\([^)]*\)`)
 func TestRoutedSkillHook_RendersNoPipedType(t *testing.T) {
 	pluginRoot := pluginRootDir(t)
 	skills := routedSkills(t, pluginRoot)
-	t.Logf("routed skills parsed from TARGETS: %v", skills)
+	modes := routerModes(t, pluginRoot)
+	t.Logf("routed skills parsed from TARGETS: %v (modes %v)", skills, modes)
 
 	for _, skill := range skills {
 		t.Run(skill, func(t *testing.T) {
 			ctx := renderHook(t, pluginRoot, skill)
 
-			// Coverage guard: if the injected body stops containing a pf_recall call at
-			// all, the pipe assertion below becomes vacuous and we must hear about it.
 			calls := pfRecallCallRe.FindAllString(ctx, -1)
-			if len(calls) == 0 {
-				t.Fatalf("no pf_recall call in the rendered body for %s — either the "+
-					"Memory-First recall was removed (a separate problem) or this gate "+
-					"has stopped covering anything", skill)
-			}
-			t.Logf("rendered pf_recall calls for %s:", skill)
-			for _, c := range calls {
-				t.Logf("    %s", c)
+			if modes[skill] == routerModeHeaderOnly {
+				// This mode injects no _common/memory.md, so it has no recall to render. The
+				// absence is ASSERTED rather than skipped: a header-only payload that grew a
+				// pf_recall call would be carrying a step body, which is the one thing its
+				// mode promises it does not do. The two whole-payload checks below still run —
+				// the header is rendered text like any other and can carry either defect.
+				if len(calls) != 0 {
+					t.Errorf("%s is header-only, yet its payload renders %d pf_recall call(s) "+
+						"— a fragment leaked into a mode that is supposed to be header alone: "+
+						"%v", skill, len(calls), calls)
+				}
+			} else {
+				// Coverage guard: if the injected body stops containing a pf_recall call at
+				// all, the pipe assertion below becomes vacuous and we must hear about it.
+				if len(calls) == 0 {
+					t.Fatalf("no pf_recall call in the rendered body for %s — either the "+
+						"Memory-First recall was removed (a separate problem) or this gate "+
+						"has stopped covering anything", skill)
+				}
+				t.Logf("rendered pf_recall calls for %s:", skill)
+				for _, c := range calls {
+					t.Logf("    %s", c)
+				}
 			}
 
 			// No unsubstituted placeholder may survive into the model's context.
@@ -211,7 +275,11 @@ func TestRoutedSkillHook_RendersNoPipedType(t *testing.T) {
 // the type filter entirely, would satisfy the test above.
 func TestRoutedSkillHook_RendersAnArrayTypeFilter(t *testing.T) {
 	pluginRoot := pluginRootDir(t)
+	modes := routerModes(t, pluginRoot)
 	for _, skill := range routedSkills(t, pluginRoot) {
+		if modes[skill] == routerModeHeaderOnly {
+			continue // no memory fragment, hence no type filter; asserted absent above
+		}
 		t.Run(skill, func(t *testing.T) {
 			ctx := renderHook(t, pluginRoot, skill)
 			for _, c := range pfRecallCallRe.FindAllString(ctx, -1) {

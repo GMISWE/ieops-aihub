@@ -57,7 +57,7 @@ for name in "${names[@]}"; do
             subagent-driven-development)
                 warn "skill name: $name" "SKILL.md missing; pf-skill-router's engine pointer for this skill will not resolve" ;;
             finishing-a-development-branch)
-                warn "skill name: $name" "SKILL.md missing; _common/lifecycle.md's D6 execute boundary references this terminal skill" ;;
+                warn "skill name: $name" "SKILL.md missing; the D6 execute boundary (_common/references/lifecycle-details.md 6) references this terminal skill" ;;
             executing-plans)
                 warn "skill name: $name" "SKILL.md missing; pf-skill-router.test.sh's negative assertion (ck_not) for this name may go stale" ;;
         esac
@@ -69,7 +69,7 @@ for name in "${names[@]}"; do
             subagent-driven-development)
                 warn "skill name: $name" "frontmatter name is '$fm_name'; pf-skill-router's engine pointer for this skill will not resolve" ;;
             finishing-a-development-branch)
-                warn "skill name: $name" "frontmatter name is '$fm_name'; _common/lifecycle.md's D6 execute boundary references this terminal skill" ;;
+                warn "skill name: $name" "frontmatter name is '$fm_name'; the D6 execute boundary (_common/references/lifecycle-details.md 6) references this terminal skill" ;;
             executing-plans)
                 warn "skill name: $name" "frontmatter name is '$fm_name'; pf-skill-router.test.sh's negative assertion (ck_not) for this name may go stale" ;;
         esac

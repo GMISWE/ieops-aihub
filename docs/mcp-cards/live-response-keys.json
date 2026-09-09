@@ -28,6 +28,9 @@
     },
     "pf_update_user": {
       "ok": "Published and never called in the corpus window, so no corpus record and a null card list."
+    },
+    "pf_wrap": {
+      "pushed_sha": "Found by aihub#501's live git arm (2026-09-09), the first live response pf_wrap has ever been measured against. The field is not new — commit 6d5369f added it on 2026-08-14, three weeks inside the corpus's call span of 2026-06-23..2026-09-07 — and it is emitted whenever `pushed` is true, which is in the record. So its absence from the union over 90 calls is not a gap in the extraction: every pf_wrap in the corpus was an idempotent replay that pushed nothing (WrapActionReusedPR), because the polyforge flow reaches pf_wrap only after pf_ship or pf_push already delivered. A corpus of any size could not have shown this key; the first wrap that actually pushed did."
     }
   }
 }

@@ -4,7 +4,7 @@
 {
   "tool": "pf_reinforce_memory",
   "description_sha256": "9954803dee8b3d7e57f17d935200e67175ab432db2335542cb4cbd19c0deb5b5",
-  "input_schema_sha256": "aa6137b1a82c539bdf66b8701b05f392bcac1822c6e63cc6c7d7d156b16c4a18",
+  "input_schema_sha256": "9d1569dc2ba4152358e48e3f61b56e44a86d2179208ba3d0387fc13e08a0d11d",
   "params": {
     "additional_context": {
       "type": "string",
@@ -42,7 +42,7 @@ whole story of `aihub#325`.
 | `memory_id` | string | yes | "Memory ID" |
 | `additional_context` | string | yes | additional context for the memory |
 | `work_item_id` | string | yes | "Work item ID (for credential injection)" |
-| `strength_delta` | number | no | "Integer delta added to the memory's stored strength, then clamped to 1-5. A fractional delta is refused with a 400: strength is a whole number. The response reports the value actually stored." |
+| `strength_delta` | number | no | "Integer delta added to the memory's stored strength; the sum saturates at 1-5 rather than being refused, so a delta that overflows is applied only in part. A fractional delta is refused with a 400: strength is a whole number. The response reports the value actually stored." |
 
 The parenthetical on `work_item_id` understates it. The server VERIFIES the attempt
 credentials against that work item and writes it into the reinforcement's
@@ -61,6 +61,19 @@ told "a delta under 1 usually changes nothing" will still send `0.5` and then
 wonder, while one told it is refused cannot. The truncation has not gone anywhere;
 it has stopped being reachable through this parameter, and a description that keeps
 explaining an unreachable mechanism teaches the wrong model.
+
+**The saturation is published as of `aihub#506` (owner ruling 2026-09-09), and that
+is the whole of that work item — no behaviour moved.** The old text's "then clamped
+to 1-5" was true and insufficient: it sat one sentence away from "a fractional delta
+is refused", so a caller had every reason to read an overflowing sum the same way.
+The two outcomes are not interchangeable. A refusal tells the caller their delta did
+not land; the clamp answers 200 having stored a value the caller did not name, and
+the reported value is the only place the size of the loss is visible.
+`internal/mcp/tools_memory_test.go`
+(`TestPublishedStrengthDeltaSaysWhatReinforceEnforces`) now gates both halves of the
+string — the bounds, built from `internal/domain/memory.go` (`MaxBaseStrength`)
+rather than typed out, and the word `saturat` — so the older wording is red rather
+than merely stale.
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -99,6 +112,19 @@ and the resolved state file into the body of `PATCH /v1/memories/<id>/reinforce`
   deliberate**: this call applies a delta to a stored value, so a sum outside the
   range is arithmetic rather than a stated intent, while a caller-supplied
   `base_strength` outside the range is a statement the server can refuse.
+- **That asymmetry was adjudicated on 2026-09-09 (`aihub#506`): keep the clamp and
+  write it into the contract.** The parallel that made it a question was real — the
+  integrality ruling one field over refused the same "answered 200 having stored
+  something you did not name" shape — and the owner separated them on exactly the
+  ground above, that a SUM is arithmetic where a named value is an intent. The two
+  candidates that lost were a 400 on an overflowing sum and a `clamped: true` field
+  in the response; the second is why the response shape is untouched and K10's
+  declared key set with it. So a delta of `+4` on a row stored at `4` still answers
+  200 with `base_strength` `5` — the difference is that the caller is told in
+  advance that it will. "Unchanged" is a claim with an arm behind it rather than an
+  assurance: `internal/server/routes_memory_reinforce_returning_db_test.go`
+  (`TestReinforceMemory_IntegralDeltaStillMoves`) drives a delta past the top
+  against a real database and requires `MaxBaseStrength` back.
 - **A non-integral `strength_delta` is a 400 since `aihub#459` (owner ruling
   2026-09-09), and the refusal is on the DELTA rather than on the sum.** Checking
   only the sum would be sufficient for storage and useless for the caller: `0.5` on
@@ -142,17 +168,6 @@ file), so the rate is not attributable to the defect alone.
 
 ## Open
 
-- **What a delta that overflows the RANGE should do is still nobody's ruling, and
-  `aihub#459` narrowed the question rather than answering it.** Its premise was
-  settled by `aihub#475` (of its two candidates — "pgx refuses to encode" versus
-  "the value is coerced silently" — it is the second, truncating toward zero), and
-  its own disposition landed on 2026-09-09: a non-integral `strength_delta` is
-  refused, so the GRANULARITY half is closed. The clamp is untouched, so a delta of
-  `+4` on a row stored at `4` is still silently answered as `5`, and the 200 body
-  reports `5` — honest about the row, and silent about the fact that the caller
-  asked for something the row could not take. That is the same "answered 200 having
-  stored something you did not name" shape the integrality ruling refused one field
-  over, and the argument for keeping it (a SUM is arithmetic, not a stated intent)
-  is real but was never adjudicated against that parallel. Re-checked 2026-09-09:
-  `aihub#459` is `running` with this change in flight; `aihub#475` wrapped
-  2026-09-08.
+- Nothing this card can settle. The clamp question that stood here was ruled on
+  2026-09-09 (`aihub#506`, owner: keep the saturation and publish it), and it is
+  recorded where the behaviour is — hop 0-1 and hop 4 — rather than here.

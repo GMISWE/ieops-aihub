@@ -839,11 +839,22 @@ func activateMemorySchema() json.RawMessage {
 // not gone anywhere (see domain.ValidateIntegralStrength), it has just stopped
 // being reachable through this parameter, and a description that keeps
 // explaining an unreachable mechanism is teaching the caller the wrong model.
+//
+// aihub#506 (owner ruling 2026-09-09) added the saturation half, and it is a
+// contract change with NO behaviour change behind it. The clamp was already
+// published as "then clamped to 1-5", which is true and still let a caller read
+// an overflowing sum as a refusal, because the very next sentence says a
+// fractional delta IS refused. The two outcomes are not interchangeable: a
+// refusal tells the caller their delta did not land, while the clamp answers 200
+// having stored a value the caller did not name. So the text now says the sum
+// SATURATES rather than being refused, and that an overflowing delta is applied
+// only in part; the sentence pointing at the response stays, because the stored
+// value is the only place the size of the loss is visible.
 func reinforceMemorySchema() json.RawMessage {
 	return objectSchema(map[string]any{
 		"memory_id":          prop("string", "Memory ID"),
 		"additional_context": prop("string", "Additional context for the memory"),
-		"strength_delta":     prop("number", "Integer delta added to the memory's stored strength, then clamped to 1-5. A fractional delta is refused with a 400: strength is a whole number. The response reports the value actually stored."),
+		"strength_delta":     prop("number", "Integer delta added to the memory's stored strength; the sum saturates at 1-5 rather than being refused, so a delta that overflows is applied only in part. A fractional delta is refused with a 400: strength is a whole number. The response reports the value actually stored."),
 		"work_item_id":       prop("string", "Work item ID (for credential injection)"),
 	}, []string{"memory_id", "additional_context", "work_item_id"})
 }

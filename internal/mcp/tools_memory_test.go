@@ -169,6 +169,25 @@ func rememberBaseStrengthReachesPool(bs float64) (panicked any, err error) {
 // deliberate: this file can see the published string and the rule, and cannot
 // see the handler; a test that claimed all three from here would be asserting
 // the middle one on trust.
+//
+// ─── The saturation half (aihub#506) ──────────────────────────────────────────
+//
+// The owner ruled on 2026-09-09 that the clamp STAYS and is written into the
+// contract, so this test grew a second obligation on the same string. It is not
+// covered by the range arm alone: the description already said "clamped to 1-5"
+// and that reads as a refusal beside a neighbouring sentence about a delta that
+// IS refused, while the two outcomes differ in whether a 200 stored a value the
+// caller never named. So the word is asserted as well as the numbers.
+//
+// The numbers are anchored on domain.MinBaseStrength / domain.MaxBaseStrength
+// for the same reason as the test above — since aihub#433 those constants ARE
+// the handler's clamp bounds, so a bound that moves without the description
+// being retyped is red. The behaviour the word claims is asserted where the
+// clamp lives, against a real database
+// (internal/server/routes_memory_reinforce_returning_db_test.go,
+// TestReinforceMemory_IntegralDeltaStillMoves, which drives a delta past the top
+// and requires MaxBaseStrength back). Claiming it from here would be the same
+// on-trust assertion the paragraph above refuses.
 func TestPublishedStrengthDeltaSaysWhatReinforceEnforces(t *testing.T) {
 	desc := memoryPropDescription(t, "pf_reinforce_memory", reinforceMemorySchema(), "strength_delta")
 
@@ -188,6 +207,22 @@ func TestPublishedStrengthDeltaSaysWhatReinforceEnforces(t *testing.T) {
 				"through this parameter: a fractional delta is refused before it is added "+
 				"to anything.", desc, gone)
 		}
+	}
+
+	// aihub#506: the range, built from the constants rather than typed out, and
+	// the word that says what happens AT it.
+	want := fmt.Sprintf("%g-%g", float64(domain.MinBaseStrength), float64(domain.MaxBaseStrength))
+	if !strings.Contains(desc, want) {
+		t.Errorf("pf_reinforce_memory publishes strength_delta as %q, which never states the "+
+			"%s bounds the handler's clamp actually holds the sum to", desc, want)
+	}
+	if !strings.Contains(strings.ToLower(desc), "saturat") {
+		t.Errorf("pf_reinforce_memory publishes strength_delta as %q, which states the bounds "+
+			"but not that a sum outside them is SATURATED rather than refused (owner ruling "+
+			"2026-09-09, aihub#506). Beside a sentence about a fractional delta that is "+
+			"refused, a bare \"clamped\" leaves a caller free to read the overflow as a 400 "+
+			"too — and the difference is whether the call answered 200 having stored a value "+
+			"the caller did not name.", desc)
 	}
 
 	// The rule the string describes, in both directions.

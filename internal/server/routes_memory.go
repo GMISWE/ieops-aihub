@@ -220,8 +220,11 @@ func enforceMethodologyAttemptGate(
 // which this path reaches through domain.Recall, and queryIntLenientUI, which only
 // the /ui handlers call and which bounds the value before it is ever a TopK. This
 // sentence claimed "exactly one place" until 2026-09-09 and was false when written;
-// aihub#551 corrected it (owner ruling 2026-09-09), and unifying the two is
-// aihub#552. See normalizeRecallTopK's own doc comment for the full accounting.
+// aihub#551 corrected it (owner ruling 2026-09-09). aihub#552 then ruled
+// (2026-09-09, option ③) NOT to unify them: the fork stays, and the two 200s are
+// pinned equal by TestUIRecallLimitCeilingEqualsRecallTopKCeiling
+// (ui_recall_ceiling_gate_test.go). See normalizeRecallTopK's own doc comment
+// for the full accounting.
 const recallContentMax = 800
 
 // firstPipedType returns the first `type` entry containing a `|`, and whether one

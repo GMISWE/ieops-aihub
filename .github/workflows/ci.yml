@@ -3376,12 +3376,27 @@ jobs:
       # "read overlaps report as info" are two halves of one contract sentence
       # and only the first half has code of its own.
       #
-      # The repo subtest is a scope marker, not coverage: the read rule is
-      # applied to file_scope ONLY, so a `repo` entry keeps its git_branch lock
-      # whatever its intent says. Dropping that would let a second attempt take
-      # a branch another attempt is on, and — because both takeover paths DELETE
-      # prior locks before re-deriving — would RELEASE an existing branch lock
-      # on the next takeover rather than merely not take it.
+      # The repo subtest is a scope marker, not coverage, and aihub#416 (landed
+      # in aihub#423) inverted the observable it marks while leaving the decision
+      # intact. It used to read "a read declaration on a repo still takes its
+      # branch lock", pinning the fact that the intent rule was scoped to
+      # file_scope so a `repo` entry kept its git_branch lock whatever its intent
+      # said. Today a repo declaration derives NO lock under any intent
+      # (resourceToLock in conflicts.go returns an empty pair for repo and
+      # service), so the arm asserts an empty AcquiredLocks plus zero git_branch
+      # rows for the key that declaration used to produce.
+      #
+      # derivedLock still writes the read rule on lockType rather than on
+      # res.Type, so with file_scope the only derivable type the guard is a no-op
+      # today and dropping it reddens nothing in this step. What the arm still
+      # catches is the retirement being REVERTED: a repo declaration that starts
+      # producing a row again fails that count. Its control sits inside the same
+      # subtest — a `path` entry declared beside the repo must still take its
+      # file_scope lock — because "repo takes nothing" is equally satisfied by a
+      # claim that locked nothing at all. The mapper-level statement of the same
+      # rule, across every intent value, is in
+      # internal/domain/lock_derivation_retired_test.go, which needs no database
+      # and therefore has no step of its own here.
       #
       # Five subtests of ONE function, not five functions, for the reason the
       # aihub#334 and aihub#151 entries give: the gate counts functions and this
@@ -3527,12 +3542,27 @@ jobs:
       # predicate, skipped by the sweep, and unreachable by claim, force_takeover
       # or complete_attempt because all three refuse a terminal work item.
       #
-      # The last arm is the one that makes this a step rather than a unit test:
-      # a `{"type":"repo"}` entry with no task_branch derives git_branch
-      # `<repo>/main`, and the claim conflict probe matches holders whose attempt
-      # is running OR paused — so one pause-then-cancel of a wi declaring a repo
-      # blocks every later claim of that repo's default branch, permanently, with
-      # no holder to negotiate with.
+      # 'the_party_those_locks_were_blocking_can_now_claim' is what makes this a
+      # step rather than a unit test: it ends at a real FnClaimWorkItem by a
+      # second work item, and the same claim is measured BEFORE the cancel as a
+      # fixture check, so the unblocking cannot be satisfied by a lock that never
+      # blocked anybody.
+      #
+      # The cheap route into that blast radius is gone (aihub#416, landed in
+      # aihub#423). It used to be this: a `{"type":"repo"}` entry with no
+      # task_branch DERIVED the git_branch key `<repo>/main`, so one
+      # pause-then-cancel of a wi that merely declared a repo blocked every later
+      # claim of that repo's default branch. Repo and service declarations are
+      # advisory now and derive no lock at all.
+      #
+      # The leak did not go with it, which is why the step stays. git_branch and
+      # deploy_env are still legal lock types, still reachable through an explicit
+      # requested_locks (as worktree and tcp_port always were); pause still
+      # retains every type except file_scope; and the claim conflict probe still
+      # matches holders whose attempt is running OR paused. So the fixture takes
+      # both types through requested_locks rather than through the declarations,
+      # and the block it produces is still permanent, with no holder to negotiate
+      # with — the wi is cancelled.
       #
       # 'the_cancel_does_not_touch_another_work_items_lock' is the paired control:
       # the release is scoped by work_item_id and reaches across claim epochs, so
@@ -4730,6 +4760,94 @@ jobs:
         with:
           version: v2.12.2
           args: --timeout=5m
+
+      # ── gofmt ────────────────────────────────────────────────────────
+      # Relocated here from .github/workflows/gofmt.yml by aihub#498
+      # (2026-09-09), which deleted that workflow. aihub#479 landed it as a
+      # workflow of its own for one reason only — this file was held by
+      # another live attempt's file lock at the time — and its header named
+      # this job as the intended home. Nothing about the check changed in the
+      # move; the two check names it used to publish, "gofmt" and "Lint",
+      # collapse into "Lint".
+      #
+      # golangci-lint above does NOT check formatting here: this repo has no
+      # .golangci.yml, so `run` uses v2.12.2's implicit default linter set —
+      # errcheck, govet, ineffassign, staticcheck, unused — and that set
+      # contains no formatter. Measured on main at 538c0d8 (aihub#479,
+      # 2026-09-08): `golangci-lint run --timeout=5m` reported `0 issues.` on
+      # the same tree where `gofmt -l .` named seven files. Team memory
+      # carried the opposite belief, that `golangci-lint run` gates
+      # formatting by default. It does not, and this step is the standing
+      # refutation.
+      #
+      # The GATE is the point, not the reformat. aihub#479 was filed against
+      # 2 unclean files and executed against 7 — the other five drifted in
+      # while it sat in the queue, under a green CI. Reformatting an ungated
+      # tree buys exactly one clean day.
+      #
+      # ── Why a `gofmt -l` step and not `formatters:` in .golangci.yml ──────
+      # That is the obvious consolidation, and it was measured before being
+      # rejected. Two independent defects, both reproduced on this repo's own
+      # drift:
+      #
+      #   1. It is blind to build-tagged files. golangci-lint loads PACKAGES;
+      #      gofmt walks FILES. All 14 files under tests/integration/ carry
+      #      `//go:build integration`, so `go list ./tests/...` matches no
+      #      packages and golangci-lint answers "no go files to analyze:
+      #      running `go mod tidy` may solve the problem". One of the seven
+      #      unclean files on main was tests/integration/helpers_test.go, and
+      #      a `formatters: [gofmt]` config did not report it.
+      #   2. It silently truncates. `issues.max-same-issues` defaults to 3,
+      #      and every formatter finding shares the one message "File is not
+      #      properly formatted", so a tree with seven unclean files reported
+      #      exactly three. Setting max-same-issues and max-issues-per-linter
+      #      to 0 lifted it to six — the six loadable ones — which is how
+      #      defect 1 was isolated from it.
+      #
+      # Defect 2 is configurable; defect 1 is not, being inherent to checking
+      # format through a package loader. `gofmt -l .` over the working tree
+      # has neither. For the record the config file itself is harmless — the
+      # enabled linter set was measured byte-identical with and without it —
+      # so the reason to avoid it is coverage, not blast radius.
+      #
+      # `if: !cancelled()` is what keeps the relocation honest. As two jobs,
+      # gofmt and golangci-lint reported independently; as plain sequential
+      # steps a red golangci-lint would skip this one and publish nothing
+      # about formatting, which is strictly less than the workflow it
+      # replaces. The condition restores that independence.
+      #
+      # No `go mod download` and no build: gofmt parses source and resolves
+      # no imports, so this step needs neither the module cache nor the
+      # postgres service the test job carries. It is seconds, not minutes.
+      #
+      # `gofmt -l .` walks the working tree, so it covers build-tagged files,
+      # every cmd/ and plugins/ tree, and anything a future package layout
+      # adds, without a paths: filter or a package list to keep in sync.
+      #
+      # ⚠️ The non-obvious way to trip this gate. Since Go 1.19 gofmt
+      # reformats DOC comments, and the doc-comment printer applies TeX quote
+      # conventions: a pair of backquotes becomes U+201C and a pair of
+      # apostrophes ('') becomes U+201D. So spelling a SQL empty-string
+      # literal the natural way, as '', inside a doc comment makes the file
+      # gofmt-dirty — and `gofmt -w` then SILENTLY REWRITES WHAT THE SENTENCE
+      # SAYS, turning the literal into a closing quotation mark. Two doc
+      # comments on main had exactly that; both were reworded to "the empty
+      # string" rather than formatted, because the formatted form was wrong.
+      # If this gate goes red on a comment, read the diff before accepting
+      # its fix. Non-doc comments (inside a function body) and string and
+      # rune literals are left alone, which is where every other '' in this
+      # repo lives.
+      - name: gofmt
+        if: ${{ !cancelled() }}
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt is not clean; run: gofmt -w \$(gofmt -l .)"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+          echo "gofmt: clean"
 
   build-push:
     name: Build & Push Docker image (main)

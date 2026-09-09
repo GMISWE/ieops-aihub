@@ -122,12 +122,18 @@ not set one rather than that the field is dropped.
 
 ## Open
 
-- `pf_update_user` still publishes `role` as prose ("Updated global role: writer or
-  admin") and `handleUpdateUser` still validates nothing, so an illegal role on the
-  PATCH path remains a 500 from the CHECK. `aihub#463` was scoped to the create
-  path and did not touch it; the vocabulary it would use is already exported
-  (`internal/domain/user_fields.go`). `aihub#463` wrapped 2026-09-08, so at that
-  re-check this residual was no longer carried by the work item that left it.
+- ~~`pf_update_user` still publishes `role` as prose and `handleUpdateUser` still
+  validates nothing, so an illegal role on the PATCH path remains a 500 from the
+  CHECK.~~ **Closed by `aihub#496` (2026-09-09), and the bullet was wrong on its
+  facts.** `handleUpdateUser` did validate `role` — inline, since the original
+  round-2a commit — so an illegal role was answered `400 BAD_REQUEST "role must be
+  writer or admin"`, **never a 500**; it was measured, not re-read. The real defect
+  the bullet had mis-described was twofold: that 400 carried no `details`, so it
+  named neither the rejected value nor the legal set, and the check was a **third
+  hand-typed copy** of a vocabulary already held by the CHECK in
+  `0001_initial.sql` and by `domain.userGlobalRoles`. Both are fixed: the handler
+  now calls `domain.ValidateUserGlobalRole`, and `pf_update_user.role` publishes
+  the enum. See `internal/server/update_user_vocab_test.go`.
 - `email` is still conditionally required in prose, which a flat `required` list
   cannot express. Unchanged by `aihub#463`, which wrapped 2026-09-08, and not a
   vocabulary question; re-checked the same day.

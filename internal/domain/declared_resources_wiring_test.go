@@ -317,3 +317,77 @@ func TestPredictConflicts_RejectsAWrongURISchemeBeforeTouchingDB(t *testing.T) {
 		t.Errorf("error should quote the offending uri; got %q", err.Message)
 	}
 }
+
+// ─── aihub#509: the report is on ALL THREE stored-data paths, not just claim ──
+//
+// aihub#238 put UnrecognizedDeclaredResources on FnClaimWorkItem and left
+// FnForceTakeover and FnAcquireLocks silent, because neither response had a
+// field to put it in. aihub#411 T2-12 recorded that as the row's surviving half
+// and aihub#416 shrank it without closing it. This is the guard on the close.
+//
+// A source scan for the same reason the claim guard above is one: both functions
+// take a *pgxpool.Pool and reach the database before they reach this code, so a
+// behavioural test of the wiring would have to be DB-gated, and a DB-gated test
+// runs only in the ci.yml step that names it. The behavioural arms exist too and
+// are DB-gated by necessity (claim_response_echo_db_test.go's `force takeover
+// reports unmappable declarations` and acquire_locks_reporting_db_test.go's `an
+// unmappable declaration is reported`); this guard is what runs in the always-on
+// unit step.
+//
+// Each path is anchored on TWO literals — the computation and the struct fill —
+// and the two functions use DIFFERENT local names (ftUnrecognized /
+// alUnrecognized) on purpose. The claim guard above records why: a single
+// substring shared by both paths let a mutant blank one of them and stay green.
+// With distinct names, a scan for one path cannot be satisfied by the other.
+//
+// ⚠️ Same limits as every source scan in this file: it measures TEXT. It cannot
+// see a call whose result is dropped (the fill anchor is what covers that here,
+// since the local is otherwise unused and the compiler would object), and it
+// goes red on a behaviour-preserving rename. The messages say what was scanned
+// for and leave the diagnosis to the reader.
+func TestTakeoverAndAcquireLocksReportUnrecognizedResources(t *testing.T) {
+	src := sourceOf(t, "run_attempts.go")
+
+	ft := bodyOf(t, src, "FnForceTakeover")
+	if !strings.Contains(ft, "ftUnrecognized := UnrecognizedDeclaredResources(wi.DeclaredResources)") {
+		t.Error("FnForceTakeover does not compute UnrecognizedDeclaredResources from the stored payload — " +
+			"a takeover re-derives locks from the same declarations a claim does and skips the same entries, " +
+			"so leaving this out puts the caller back where aihub#238 found the claim path (aihub#509, aihub#411 T2-12)")
+	}
+	if !strings.Contains(ft, "UnrecognizedResources: ftUnrecognized") {
+		t.Error("ForceTakeoverResponse does not carry UnrecognizedResources — computing the report and not " +
+			"returning it is the same silence with more code (aihub#509)")
+	}
+
+	al := bodyOf(t, src, "FnAcquireLocks")
+	if !strings.Contains(al, "alUnrecognized := UnrecognizedDeclaredResources(wi.DeclaredResources)") {
+		t.Error("FnAcquireLocks does not compute UnrecognizedDeclaredResources from the stored payload — " +
+			"this endpoint's whole contract is \"tell me which locks I hold\", and an entry that derives no " +
+			"target is absent from both lists it returns without a word (aihub#509, aihub#411 T2-12)")
+	}
+	if !strings.Contains(al, "UnrecognizedResources: alUnrecognized") {
+		t.Error("AcquireLocksResponse does not carry UnrecognizedResources (aihub#509)")
+	}
+}
+
+// The negative half, and it is not symmetry for its own sake: the cheapest way
+// to make an unmappable entry stop being a problem is to reject it, and on
+// stored data that turns ~14% of existing work items into ones that cannot be
+// taken over or reconciled. TestClaimDoesNotHardFailOnStoredDeclaredResources
+// guards the claim path against exactly that swap; these two had no such guard
+// because they had nothing to swap.
+//
+// FnAcquireLocks is the one at real risk. It ALREADY returns an error for an
+// unparseable payload (`decodeDeclaredResources` → 500), deliberately, so
+// "errors on bad declared_resources" is an established local habit there, and
+// extending it from the payload to the entry is a small-looking edit.
+func TestTakeoverAndAcquireLocksDoNotHardFailOnStoredDeclaredResources(t *testing.T) {
+	src := sourceOf(t, "run_attempts.go")
+	for _, fn := range []string{"FnForceTakeover", "FnAcquireLocks"} {
+		if strings.Contains(bodyOf(t, src, fn), "ValidateDeclaredResources(wi.DeclaredResources)") {
+			t.Errorf("%s hard-validates STORED declared_resources — roughly 14%% of existing entries fail that "+
+				"validator, and those work items must stay recoverable; report with "+
+				"UnrecognizedDeclaredResources instead (aihub#238, aihub#509)", fn)
+		}
+	}
+}

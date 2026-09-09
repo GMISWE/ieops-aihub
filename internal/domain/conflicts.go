@@ -118,6 +118,76 @@ type PredictConflictsResponse struct {
 	WillUnlock  []WillUnlockItem     `json:"will_unlock"`
 }
 
+// declaresContainmentSQL is the WHERE fragment PredictConflicts rules 2, 5 and 6
+// use to ask "does some OTHER RUNNING work item DECLARE this entry", and
+// declaresIntentContainmentSQL is the same question with the intent pinned as
+// well (rule 4). "Other" is enforced here, not by the caller — see
+// notCallersOwnWISQL below.
+//
+// 🔴 THE OPERAND IS BUILT BY POSTGRES OUT OF BOUND PARAMETERS AND IS NEVER
+// ASSEMBLED AS JSON TEXT IN GO (aihub#511). All four rules used to paste the
+// declared name into a JSON literal — `[{"type":"repo","uri":"repo:`+name+`"}]`
+// — and nothing on the way in constrains the characters of a name:
+// ValidateDeclaredResources checks the uri SCHEME and stops there. That broke in
+// two ways, and the second is why "reject odd names at the door" would not have
+// been a fix:
+//
+//   - a name holding `"` closed the string early, Postgres refused the operand
+//     with 22P02, and the error went to stderr while the CALLER received
+//     {"predictions":[],"severity":"info"} — byte-identical to a genuine
+//     all-clear, which is exactly the aihub#238 failure mode rule 2's own header
+//     below says it exists to avoid;
+//   - a name holding `\b` produced VALID json for a DIFFERENT string, so there
+//     was no error to log at all: the query matched nothing, silently, and no
+//     caller could tell that from "nobody else declared it".
+//
+// This is a regression rather than an oversight, which is why the rule is
+// written here instead of left in a commit message: rule 2 bound its repo name
+// as $1 (`resource_key LIKE $1 || '/%'`) until the aihub#416 rewrite replaced
+// that query with a concatenated containment literal, and rules 4 and 5 had
+// carried the concatenated shape since before that. Anything added later that
+// asks the same question must reuse these two constants.
+//
+// ⚠️ The ::text casts are load-bearing, not decoration: jsonb_build_object takes
+// "any", so without them Postgres cannot infer the parameter types and refuses
+// to prepare the statement.
+//
+// 🔴 BOTH FRAGMENTS OPEN WITH notCallersOwnWISQL, AND THAT IS WHY THE
+// SELF-EXCLUSION LIVES INSIDE THEM RATHER THAN AT THE FOUR CALL SITES
+// (aihub#510). A work item is not its own conflict, but every one of these rules
+// used to report the caller back to itself: they join work_items on status
+// 'running' and a declaration overlap, and a CLAIMED work item asking about its
+// own declarations satisfies both halves. Folding the predicate into the shared
+// fragments makes a fifth rule written with them inherit the exclusion, which
+// the sentence above already demands of it; bolted onto the call sites instead,
+// the fifth rule would be free to forget it.
+const notCallersOwnWISQL = `wi.id <> $1`
+
+// declaresContainmentSQL and declaresIntentContainmentSQL both take the caller's
+// own work item id as $1, so the containment operands start at $2.
+//
+// 🔴 $1 IS A PLAIN STRING AND MUST STAY ONE — pass PredictConflicts's
+// canonicalWIID, never req.WorkItemID. Two distinct traps, and both answer
+// {"predictions":[],"severity":"info"}, the aihub#238 fake all-clear this whole
+// comment block keeps circling back to:
+//
+//   - req.WorkItemID is a *string, and a nil pointer crosses to Postgres as NULL.
+//     `wi.id <> NULL` is NULL, not true, so NO row passes the predicate and ALL
+//     FOUR rules go silent at once. The empty string is the correct "the caller
+//     did not identify itself" value: no work item id is empty, so comparing
+//     against it leaves the predicate true for every row, and an anonymous
+//     create-preview predict keeps its pre-aihub#510 answer exactly.
+//   - work_item_id arrives as an id OR a slug (aihub#357), and a slug matches no
+//     work_items.id at all — the filter would silently do nothing for every
+//     caller that spells itself the way pf-work's own Mode B does
+//     (`pf_predict_conflicts(work_item_id=<slug>, dry_run=true)`). canonicalWIID
+//     is the resolved id, which is what makes this fix depend on that one.
+const declaresContainmentSQL = notCallersOwnWISQL +
+	` AND wi.declared_resources @> jsonb_build_array(jsonb_build_object('type',$2::text,'uri',$3::text))`
+
+const declaresIntentContainmentSQL = notCallersOwnWISQL +
+	` AND wi.declared_resources @> jsonb_build_array(jsonb_build_object('type',$2::text,'uri',$3::text,'intent',$4::text))`
+
 // PredictConflicts applies the 5 conflict rules and returns predictions.
 // Implements §23 of the design doc.
 func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConflictsRequest, callerProjectRoles map[string]string) (*PredictConflictsResponse, *AihubError) {
@@ -255,8 +325,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			FROM work_items wi
 			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
 			WHERE wi.status='running'
-			  AND wi.declared_resources @> $1::jsonb`,
-			`[{"type":"repo","uri":"repo:`+repoName+`"}]`,
+			  AND `+declaresContainmentSQL,
+			canonicalWIID, "repo", "repo:"+repoName,
 		)
 		if err == nil {
 			for rows.Next() {
@@ -353,8 +423,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			FROM work_items wi
 			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
 			WHERE wi.status='running'
-			  AND wi.declared_resources @> $1::jsonb`,
-			`[{"type":"repo","uri":"repo:`+repoName+`","intent":"refactor"}]`,
+			  AND `+declaresIntentContainmentSQL,
+			canonicalWIID, "repo", "repo:"+repoName, "refactor",
 		)
 		if err == nil {
 			for rows.Next() {
@@ -399,8 +469,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			FROM work_items wi
 			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
 			WHERE wi.status='running'
-			  AND wi.declared_resources @> $1::jsonb`,
-			`[{"type":"external_ref","uri":"`+res.URI+`"}]`,
+			  AND `+declaresContainmentSQL,
+			canonicalWIID, "external_ref", res.URI,
 		)
 		if err == nil {
 			for rows.Next() {
@@ -457,8 +527,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			FROM work_items wi
 			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
 			WHERE wi.status='running'
-			  AND wi.declared_resources @> $1::jsonb`,
-			`[{"type":"service","uri":"service:`+svc+`"}]`,
+			  AND `+declaresContainmentSQL,
+			canonicalWIID, "service", "service:"+svc,
 		)
 		if err == nil {
 			for rows.Next() {

@@ -45,6 +45,26 @@ package domain
 //	M4  delete rule 6
 //	    -> AC-15/AC-16/AC-17 red
 //	M5  make rule 6 set result.Severity = SeveritySoftBlock
+//
+// aihub#510 later added the self-exclusion arms at the END of
+// TestDeLockingPredictReportsAdvisoryEntries: the same four rules reported the
+// CALLER back to itself, because a claimed work item asking about its own
+// declarations satisfies both halves of their join. Its mutants (M11-M14) are
+// listed beside that subtest rather than here, because the reason each one is
+// visible is the two-name fixture it is measured against.
+//
+// aihub#511 earlier added the containment-operand arms to the same function —
+// the four rules that read declarations built the right-hand side of `@>` as
+// concatenated JSON text.
+// Their mutants, measured 2026-09-09 against a local Postgres 16:
+//
+//	M6-M9  restore the concatenated literal in rule 2 / 4 / 5 / 6
+//	       -> the doublequote and backslash arms go red for exactly that rule
+//	          while the plain arm stays green, and the DB-free source guard
+//	          (TestPredictContainmentOperandsAreNotConcatenatedJSON) goes red too
+//	M10    drop the ::text casts from declaresContainmentSQL
+//	       -> the PLAIN arm goes red as well (rules 2, 5 and 6), which is what
+//	          makes the "the casts are load-bearing" comment a measurement
 //	    -> AC-15 red on the top-level severity. ⚠️ AC-18 stays GREEN under M5,
 //	       measured rather than assumed: soft_block is not hard_block, so the
 //	       ceiling assertion is satisfied by the very leak AC-15 catches. The two
@@ -157,16 +177,44 @@ func TestDeLockingClaimTakesNoRepoOrServiceLock(t *testing.T) {
 	})
 }
 
-// predictFor runs PredictConflicts as an owner of `project` over one payload.
+// predictFor runs PredictConflicts as an owner of `project` over one payload,
+// WITHOUT naming a caller — which is what a create-preview does.
 func predictFor(t *testing.T, pool *pgxpool.Pool, project, declared string, dryRun bool) *PredictConflictsResponse {
 	t.Helper()
-	resp, aerr := PredictConflicts(context.Background(), pool, &PredictConflictsRequest{
+	return predictAs(t, pool, project, "", declared, dryRun)
+}
+
+// predictAs is predictFor with the caller identifying itself (aihub#510).
+//
+// wiRef is an id OR a slug, because work_item_id accepts both and pf-work's own
+// Mode B spells it as a slug. The empty string means "no work_item_id at all",
+// and it is passed as an ABSENT field rather than as a pointer to "": the
+// request field is a *string, and the difference between nil and a pointer to
+// the empty string is the difference between a filter that does nothing and one
+// that could compare against NULL.
+func predictAs(t *testing.T, pool *pgxpool.Pool, project, wiRef, declared string, dryRun bool) *PredictConflictsResponse {
+	t.Helper()
+	req := &PredictConflictsRequest{
 		Project:           project,
 		DeclaredResources: json.RawMessage(declared),
 		DryRun:            dryRun,
-	}, map[string]string{project: "owner"})
+	}
+	if wiRef != "" {
+		req.WorkItemID = &wiRef
+	}
+	resp, aerr := PredictConflicts(context.Background(), pool, req, map[string]string{project: "owner"})
 	require.Nil(t, aerr, "PredictConflicts failed: %+v", aerr)
 	return resp
+}
+
+// slugsOfRule lists the work items one rule named, so an assertion can say WHO
+// was reported rather than only how many were.
+func slugsOfRule(resp *PredictConflictsResponse, rule int) []string {
+	out := []string{}
+	for _, p := range predictionsOfRule(resp, rule) {
+		out = append(out, p.WISlug)
+	}
+	return out
 }
 
 // predictionsOfRule filters a response to one rule.
@@ -305,6 +353,268 @@ func TestDeLockingPredictReportsAdvisoryEntries(t *testing.T) {
 						"ceiling this value promises", name, dry)
 			}
 		}
+	})
+
+	// ── aihub#511: the containment operand must cross as a PARAMETER ─────────
+	//
+	// Rules 2, 4, 5 and 6 all ask the same question — "does another RUNNING work
+	// item DECLARE this entry" — and all four used to build the right-hand side
+	// of `@>` by pasting the declared name into a JSON literal in Go. A name
+	// holding a double quote closed that string early, Postgres refused the
+	// operand with 22P02, the error went to stderr, and the caller got
+	// {"predictions":[],"severity":"info"} — byte-identical to a genuine
+	// all-clear, which is the aihub#238 failure mode the rule 2 header above says
+	// the rule exists to avoid. Nothing rejected the name on the way in:
+	// ValidateDeclaredResources checks the uri SCHEME and says nothing about the
+	// characters after it.
+	//
+	// Every arm is a PAIR, and the plain half is not decoration: "zero
+	// predictions for the hostile name" says nothing unless the identical query
+	// returns one for a name that differs only in its characters.
+	//
+	// Two hostile shapes, because they fail differently and only one is audible:
+	//
+	//	`"`   a syntax error Postgres reports (22P02). Loud in the log, invisible
+	//	      in the response.
+	//	`\b`  NOT a syntax error: "repo:qc\backslash" is well-formed JSON for
+	//	      `repo:qc<backspace>ackslash`, so the operand parses and simply means
+	//	      something else. Nothing is logged anywhere, the query returns zero
+	//	      rows, and no caller can tell that from "nobody else declared it".
+	//
+	// Rules 4 and 5 are exercised here rather than beside AC-14/AC-15 because
+	// they PRE-DATE aihub#416 and had no arm at all — the concatenation rule 2
+	// picked up in its rewrite was copied from them.
+	t.Run("declared names that look like json still match every containment rule", func(t *testing.T) {
+		for _, arm := range []struct{ label, name string }{
+			{"plain", "qc-plain-511"},
+			{"doublequote", `qc"quote-511`},
+			{"backslash", `qc\backslash-511`},
+		} {
+			t.Run(arm.label, func(t *testing.T) {
+				// One holder per name shape, declaring all four entry types the four
+				// containment rules read. intent=refactor on the repo entry is what
+				// lets ONE declaration answer rule 2 (any repo) and rule 4 (refactor
+				// only) both. json.Marshal, not concatenation — building this fixture
+				// the way the bug built its operand would corrupt the fixture in
+				// exactly the way that hides the bug.
+				declared, err := json.Marshal([]DeclaredResourceItem{
+					{Type: "repo", URI: "repo:" + arm.name, Intent: "refactor"},
+					{Type: "service", URI: "service:" + arm.name, Intent: "write"},
+					{Type: "external_ref", URI: "https://ex.test/" + arm.name},
+				})
+				require.NoError(t, err)
+
+				h := seedClaimableWI(t, pool, project, u, "aihub#511 holder: "+arm.label, string(declared))
+				claimFresh(t, pool, h.ID, u, "aihub511-"+arm.label)
+
+				// The key each rule echoes back for this fixture. Rules 2, 4 and 6
+				// report the name with its scheme stripped; rule 5's key IS the
+				// external_ref uri, whole.
+				wantKey := map[int]string{
+					2: arm.name,
+					4: arm.name,
+					5: "https://ex.test/" + arm.name,
+					6: arm.name,
+				}
+
+				resp := predictFor(t, pool, project, string(declared), false)
+				for _, rule := range []int{2, 4, 5, 6} {
+					got := predictionsOfRule(resp, rule)
+					// assert-and-continue, not require: a hostile name breaks all four
+					// rules at once, and a failure report that names only the first
+					// would understate the blast radius.
+					if !assert.Len(t, got, 1,
+						"rule %d returned %d predictions for the name %q, which another RUNNING work "+
+							"item declares VERBATIM. Zero is not 'no conflict' here — the plain arm of "+
+							"this same table proves the query matches, so zero means the operand "+
+							"Postgres received was not the name that was declared. In the response that "+
+							"is indistinguishable from a real all-clear, which is what pf-work's "+
+							"pre-claim gate reads. predictions=%+v",
+						rule, len(got), arm.name, resp.Predictions) {
+						continue
+					}
+					assert.Equal(t, h.Slug, got[0].WISlug,
+						"rule %d named %q, but the work item declaring %q is %q",
+						rule, got[0].WISlug, arm.name, h.Slug)
+					assert.Equal(t, wantKey[rule], got[0].ResourceKey,
+						"rule %d reported resource_key %q for the declared name %q — the key is echoed "+
+							"back to the caller, so a mangled one names a resource nobody declared",
+						rule, got[0].ResourceKey, arm.name)
+				}
+			})
+		}
+	})
+
+	// ── aihub#510: a work item is not its own conflict ───────────────────────
+	//
+	// All four containment rules join work_items on status='running' AND a
+	// declaration overlap, and a CLAIMED work item asking about its own
+	// declarations satisfies both halves — so it was reported back to itself as a
+	// soft_block (rules 2, 4) or an info (rules 5, 6). aihub#416's rewrite did not
+	// introduce this; rule 2 read the caller's own LOCK row before it and joins
+	// the caller's own DECLARATION after it, so the defect survived the rewrite
+	// unchanged in kind. The contract card recorded it as a known untrustworthy
+	// direction rather than fixing it. This is the fix for the declaration half.
+	//
+	// It is opt-in by construction, not by preference: a predict that names no
+	// work item has no self to exclude, and the create-preview path deliberately
+	// names none because the work item does not exist yet. So `work_item_id`
+	// stops being "optional, for context" and becomes the caller's identity,
+	// which is why its schema description says so now.
+	//
+	// 🔴 THE TWO NAMES ARE THE WHOLE DESIGN OF THIS TABLE. `sharedName` is
+	// declared by the caller AND by a second running work item; `soleName` by the
+	// caller only. Without the second name, "zero predictions" would be satisfied
+	// by a filter that excluded everything, and the fake all-clear this file keeps
+	// circling back to would have been reintroduced by the test meant to prevent
+	// it. Every arm below therefore checks WHO was reported, not just how many.
+	//
+	// Mutants, measured 2026-09-09 against a local Postgres 16 (4/4 caught; the
+	// aihub#511 source guard stays green under all four, which is correct — it
+	// pins how the operand is built, not who is excluded from it):
+	//
+	//	M11  replace notCallersOwnWISQL in declaresContainmentSQL with a
+	//	     tautology that still consumes $1
+	//	     -> 4 red: "the caller alone declares it" (rules 2/5/6 report the
+	//	        caller, and severity comes back soft_block instead of info),
+	//	        "another work item ... still reported" (2 slugs instead of 1),
+	//	        "by slug", "under dry run"
+	//	M12  the same in declaresIntentContainmentSQL
+	//	     -> THE SAME 4 red, via rule 4 alone. The two constants are not
+	//	        separately observable by arm, because every arm checks all four
+	//	        rules; what separates them is WHICH rule appears in the failure.
+	//	M13  bind req.WorkItemID (the *string) instead of canonicalWIID
+	//	     -> the anonymous arm red at 0 predictions instead of 2 (nil pointer
+	//	        -> NULL -> `wi.id <> NULL` is NULL -> every rule silent), and
+	//	        "by slug" red as well. It also reds the five aihub#416/#511 arms
+	//	        that expect a prediction at all, which is the blast radius of the
+	//	        NULL trap. ⚠️ "the caller alone declares it" and "under dry run"
+	//	        stay GREEN under M13 — they assert EMPTINESS, and silence
+	//	        satisfies them. The anonymous arm is the only one that sees this.
+	//	M14  drop `canonicalWIID = id` from the aihub#357 lookup, so the raw
+	//	     work_item_id is bound
+	//	     -> "by slug" red ALONE, every other arm green. That single-arm
+	//	        result is what makes the aihub#357 dependency measured rather
+	//	        than asserted.
+	t.Run("a work item that names itself is not its own conflict", func(t *testing.T) {
+		const sharedName = "shared-510"
+		const soleName = "sole-510"
+
+		// intent=refactor on the repo entries is what lets one declaration answer
+		// rule 2 (any repo) and rule 4 (refactor only) at once.
+		entriesFor := func(name string) []DeclaredResourceItem {
+			return []DeclaredResourceItem{
+				{Type: "repo", URI: "repo:" + name, Intent: "refactor"},
+				{Type: "service", URI: "service:" + name, Intent: "write"},
+				{Type: "external_ref", URI: "https://ex.test/" + name},
+			}
+		}
+		marshal := func(items []DeclaredResourceItem) string {
+			b, err := json.Marshal(items)
+			require.NoError(t, err)
+			return string(b)
+		}
+
+		sharedPayload := marshal(entriesFor(sharedName))
+		solePayload := marshal(entriesFor(soleName))
+
+		// The caller: RUNNING, declaring both names.
+		caller := seedClaimableWI(t, pool, project, u, "aihub#510 the caller asking about its own declarations",
+			marshal(append(entriesFor(sharedName), entriesFor(soleName)...)))
+		callerClaim := claimFresh(t, pool, caller.ID, u, "aihub510-caller")
+		require.Empty(t, heldLockKeys(t, pool, callerClaim.AttemptID),
+			"fixture check: the caller must hold NO lock, or these predictions could be coming from "+
+				"the lock table (rules 1 and 3), which this work item does NOT change")
+
+		// The other work item: RUNNING, declaring the shared name only. It is the
+		// negative control for every arm — a filter written too wide hides it too.
+		other := seedClaimableWI(t, pool, project, u, "aihub#510 somebody else declaring the shared name", sharedPayload)
+		claimFresh(t, pool, other.ID, u, "aihub510-other")
+
+		containmentRules := []int{2, 4, 5, 6}
+
+		// The payoff arm, and it is an A/B on ONE payload: the only thing that
+		// differs between this and the anonymous arm below is work_item_id.
+		t.Run("the caller alone declares it, so there is nothing to report", func(t *testing.T) {
+			resp := predictAs(t, pool, project, caller.ID, solePayload, false)
+			for _, rule := range containmentRules {
+				assert.Empty(t, slugsOfRule(resp, rule),
+					"rule %d reported %v for a name only the CALLER (%s) declares. A work item is not "+
+						"its own conflict, and the anonymous arm of this same table proves the query "+
+						"still matches — so this is the caller being handed itself back. predictions=%+v",
+					rule, slugsOfRule(resp, rule), caller.Slug, resp.Predictions)
+			}
+			assert.Equal(t, SeverityInfo, resp.Severity,
+				"the top-level severity is %q for a payload nobody but the caller declares. This is the "+
+					"field pf-work's pre-claim gate branches on, so a self-report here reads as "+
+					"'somebody else is on this' to the one agent that already knows it is not",
+				resp.Severity)
+		})
+
+		// Same payload, no identity: the pre-aihub#510 answer, unchanged. This arm
+		// is also the positive control for the one above — it proves the two
+		// declarations really are there to be found.
+		t.Run("an anonymous create preview still reports both", func(t *testing.T) {
+			resp := predictAs(t, pool, project, "", sharedPayload, false)
+			for _, rule := range containmentRules {
+				assert.ElementsMatch(t, []string{caller.Slug, other.Slug}, slugsOfRule(resp, rule),
+					"rule %d named %v with no work_item_id supplied, want both running declarers. A "+
+						"predict that identifies nobody has no self to exclude, and the create-preview "+
+						"path names nobody because the work item does not exist yet — so this answer "+
+						"must not have moved. Zero here means the filter compared against NULL and "+
+						"silenced every rule. predictions=%+v",
+					rule, slugsOfRule(resp, rule), resp.Predictions)
+			}
+			assert.Equal(t, SeveritySoftBlock, resp.Severity,
+				"severity = %q; two running work items declare this repo and rule 2 is soft_block", resp.Severity)
+		})
+
+		// The negative control as its own arm: excluding yourself must not exclude
+		// anybody else.
+		t.Run("another work item declaring the same name is still reported", func(t *testing.T) {
+			resp := predictAs(t, pool, project, caller.ID, sharedPayload, false)
+			for _, rule := range containmentRules {
+				assert.Equal(t, []string{other.Slug}, slugsOfRule(resp, rule),
+					"rule %d named %v; want exactly [%s] — the caller (%s) excluded and the other "+
+						"declarer kept. Both failure directions land here: %s still present is the bug "+
+						"unfixed, %s missing is a filter written wide enough to hide real conflicts. "+
+						"predictions=%+v",
+					rule, slugsOfRule(resp, rule), other.Slug, caller.Slug, caller.Slug, other.Slug,
+					resp.Predictions)
+			}
+			assert.Equal(t, SeveritySoftBlock, resp.Severity,
+				"severity = %q; somebody else really does declare this repo", resp.Severity)
+		})
+
+		// work_item_id accepts an id OR a slug and pf-work's Mode B sends the
+		// slug. A slug matches no work_items.id, so a filter bound to the RAW
+		// parameter rather than to the resolved id would do nothing for the caller
+		// that spells itself the commonest way.
+		t.Run("naming itself by slug works too", func(t *testing.T) {
+			resp := predictAs(t, pool, project, caller.Slug, solePayload, false)
+			for _, rule := range containmentRules {
+				assert.Empty(t, slugsOfRule(resp, rule),
+					"rule %d reported %v when the caller named itself by SLUG (%s) rather than by id "+
+						"(%s). work_item_id takes both, aihub#357 resolves it to the canonical id "+
+						"before the rules run, and the filter has to use that resolution — bound to "+
+						"the raw parameter it compares a slug against work_items.id and never matches. "+
+						"predictions=%+v",
+					rule, slugsOfRule(resp, rule), caller.Slug, caller.ID, resp.Predictions)
+			}
+		})
+
+		// dry_run changes nothing here: only rule 1 is gated on it, and the four
+		// rules under test read declarations rather than the lock table.
+		t.Run("the exclusion holds under dry run", func(t *testing.T) {
+			resp := predictAs(t, pool, project, caller.ID, solePayload, true)
+			for _, rule := range containmentRules {
+				assert.Empty(t, slugsOfRule(resp, rule),
+					"rule %d reported %v under dry_run=true. dry_run means 'do not consult the lock "+
+						"table' and these rules do not consult it, so the caller's identity cannot "+
+						"depend on it either. predictions=%+v",
+					rule, slugsOfRule(resp, rule), resp.Predictions)
+			}
+		})
 	})
 }
 

@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -408,11 +407,8 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	if req.Goal == "" {
 		return nil, NewErr(ErrBadRequest, "goal is required")
 	}
-	if utf8.RuneCountInString(req.Goal) > maxWorkItemGoalRunes {
-		return nil, NewErr(ErrBadRequest, fmt.Sprintf("goal exceeds %d characters", maxWorkItemGoalRunes))
-	}
-	if strings.ContainsAny(req.Goal, "\n\r") {
-		return nil, NewErr(ErrGoalMultiline, "goal must not contain newlines")
+	if vErr := validateWorkItemGoalShape(req.Goal); vErr != nil {
+		return nil, vErr
 	}
 	if req.Project == "" {
 		return nil, NewErr(ErrBadRequest, "project is required")
@@ -3016,8 +3012,14 @@ func UpdateWorkItem(ctx context.Context, pool *pgxpool.Pool, idOrSlug string, ca
 		if req.GoalChangeReason == nil || len(*req.GoalChangeReason) < 10 {
 			return nil, NewErr(ErrBadRequest, "goal_change_reason is required (min 10 chars) when updating goal")
 		}
-		if strings.ContainsAny(*req.Goal, "\n\r") {
-			return nil, NewErr(ErrGoalMultiline, "goal must not contain newlines")
+		// aihub#474: BOTH shape halves, from the one function CreateWorkItem also
+		// calls. Only the newline half used to be here, so an over-cap goal that
+		// `pf_create_work_item` answers with a 400 got past this path and was
+		// refused by the column CHECK instead — a 500 with a SQLSTATE in it, for
+		// the same input. Sharing the function is what makes the two paths agree
+		// by construction rather than by two literals that happen to match today.
+		if vErr := validateWorkItemGoalShape(*req.Goal); vErr != nil {
+			return nil, vErr
 		}
 	}
 

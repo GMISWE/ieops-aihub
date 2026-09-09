@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -101,6 +102,15 @@ func WorkItemSourceList() []string { return sortedKeys(workItemSources) }
 // MaxWorkItemLabels exposes the labels cap for the published description.
 func MaxWorkItemLabels() int { return maxWorkItemLabels }
 
+// MaxWorkItemGoalRunes exposes the goal cap for the published descriptions, for
+// the same reason MaxWorkItemLabels above exists: a number typed into an MCP
+// tool description is a promise, and a promise retyped by hand is one the
+// enforcement can walk away from without anybody noticing. aihub#474 found the
+// walked-away half on the OTHER side of this pair — the cap enforced on create
+// and absent on update — so the accessor lands with the fix rather than after
+// it.
+func MaxWorkItemGoalRunes() int { return maxWorkItemGoalRunes }
+
 // vocabularyErr builds the 400 for a value outside a closed set.
 //
 // The legal values go in the message AND in details. In the message because
@@ -149,6 +159,56 @@ func validateWorkItemLabels(labels []string) *AihubError {
 				"got":   len(labels),
 				"max":   maxWorkItemLabels,
 			})
+	}
+	return nil
+}
+
+// validateWorkItemGoalShape checks the two SHAPE constraints on a goal that was
+// supplied: the rune cap and the newline ban. They are the two halves of
+// work_items_goal_check, and this is the function db_check_policy_test.go names
+// as the Go mirror of it.
+//
+// ─── Why this is one function and not two copies (aihub#474) ─────────────────
+//
+// It used to be two copies, and they disagreed. CreateWorkItem checked both
+// halves; UpdateWorkItem checked only the newline half. The asymmetry was
+// invisible because nothing in the tree ever said updates were exempt; it was
+// not a decision, it was a line nobody wrote. The owner ruled it an oversight on
+// 2026-09-09.
+//
+// ⚠️ What the missing half actually cost, measured rather than assumed.
+// aihub#474's own body says `pf_update_work_item` STORED an over-cap goal. It
+// did not. work_items_goal_check (migration 0002, unaltered by any later
+// migration) caps length(goal) at 500 in the database, so an over-cap update was
+// refused by POSTGRES as SQLSTATE 23514 — which is neither 40001 nor 40P01, so
+// dbErr fell through to ErrInternalError. The real defect is therefore that the
+// two tools answered the SAME illegal string two different ways: a 400 naming
+// the field on create, and a 500 with a constraint name in it on update. That is
+// exactly the defect class aihub#396 exists to remove, arriving through the one
+// door aihub#396 did not close. The integrity of the column was never at risk;
+// the caller-facing contract was.
+//
+// Re-adding the missing line to the update path would have fixed the instance
+// and left the SHAPE that produced it: two call sites, two literals, no
+// structural reason for them to agree tomorrow. One function is the fix that
+// cannot come apart — a third write path gets both halves by calling it, and a
+// half deleted here is deleted for every caller at once, which is a mutation a
+// test can see.
+//
+// EMPTINESS is deliberately NOT checked here, for the reason the priority
+// validator above gives: on an update, `goal: ""` and no goal at all are
+// different requests, and only CreateWorkItem is in a position to say that a
+// goal is required. That check stays where it can be right.
+//
+// RUNES, not bytes — see maxWorkItemGoalRunes. A 500-character Chinese goal is
+// 1,500 bytes and Postgres accepts it, so a byte-counting guard here would
+// refuse input the column takes.
+func validateWorkItemGoalShape(goal string) *AihubError {
+	if utf8.RuneCountInString(goal) > maxWorkItemGoalRunes {
+		return NewErr(ErrBadRequest, fmt.Sprintf("goal exceeds %d characters", maxWorkItemGoalRunes))
+	}
+	if strings.ContainsAny(goal, "\n\r") {
+		return NewErr(ErrGoalMultiline, "goal must not contain newlines")
 	}
 	return nil
 }

@@ -144,15 +144,23 @@ func TestGoalShapeIsTheSameContractOnBothWritePaths(t *testing.T) {
 	})
 
 	t.Run("emptiness is not this function's business", func(t *testing.T) {
-		// The create path refuses "" with its own "goal is required"; the update
-		// path must not inherit that, because on an update `goal: ""` and no goal
-		// at all are different requests and only one of them is this function's
-		// input. If this ever starts failing, a required-ness check has leaked in
-		// here and every update that omits goal is at risk.
+		// BOTH write paths refuse "" since aihub#507 — and still not from here.
+		// This function is the Go mirror of work_items_goal_check (the
+		// correspondence db_check_policy_test.go asserts), and that CHECK permits
+		// the empty string, so a required-ness check folded in would make the
+		// mirror enforce a rule the constraint does not have while that test kept
+		// passing. The refusal lives in validateWorkItemGoalPresent, which both
+		// paths call separately; see work_item_goal_required_test.go.
+		//
+		// The other half of the old reason survives unchanged: `goal: ""` and no
+		// goal at all are different requests on an update, and the `req.Goal != nil`
+		// guard at the call site is what tells them apart. Both this arm and the
+		// nesting arm in that file are what keep a required-ness check from
+		// reaching every update that omits goal.
 		if err := validateWorkItemGoalShape(""); err != nil {
-			t.Errorf("the empty goal was refused here with %v; required-ness belongs to "+
-				"CreateWorkItem, which is the only caller in a position to say a goal is "+
-				"required", err)
+			t.Errorf("the empty goal was refused here with %v; required-ness is "+
+				"validateWorkItemGoalPresent's, and keeping it out of this function is what "+
+				"lets this one keep claiming to be work_items_goal_check's Go mirror", err)
 		}
 	})
 }

@@ -4,7 +4,7 @@
 {
   "tool": "pf_update_work_item",
   "description_sha256": "29b3c7434085f3bd45cf9acebf95466a7fe1ae8757a6d86786d03886c6687c30",
-  "input_schema_sha256": "b66d24d40f9aac67d137b468702934ad68909019c6e9233a6c6e0e8613ccc446",
+  "input_schema_sha256": "d8dfe797c7469f5b1a072ebb9a49fcd44b21ce0a58998e62fd117b1c1fccb7f8",
   "params": {
     "attrs": {
       "type": "object",
@@ -119,7 +119,7 @@ that a caller gets wrong by default.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `work_item_id` | string | yes | id or slug |
-| `goal` | string | no | single-line, ≤500 chars; only while status is queued, paused or blocked, and only for the reporter / a maintainer / an admin |
+| `goal` | string | no | single-line, **non-empty**, ≤500 chars; only while status is queued, paused or blocked, and only for the reporter / a maintainer / an admin |
 | `goal_change_reason` | string | no | required with `goal` |
 | `priority` | enum | no | from the domain list |
 | `milestone` | string | no | updated milestone |
@@ -204,6 +204,31 @@ except `work_item_id` and `brief` into the body of
   order, and BOTH work-item write paths call it. The checks sit BEHIND the matrix
   for the same reason `goal_change_reason`'s does — an edit refused on state is not
   first told its goal is multiline.
+- **An EMPTY goal is refused since `aihub#507` (2026-09-09), and until then it was
+  STORED.** `pf_create_work_item` had always answered `goal: ""` with a 400
+  `BAD_REQUEST` "goal is required"; this tool wrote the empty string and returned
+  200, leaving a work item that renders blank in every list and in the ready queue.
+  Nothing downstream objected, and nothing was going to: `work_items.goal` is
+  `TEXT NOT NULL` and `NOT NULL` admits the empty string, so unlike the length half
+  below there was no constraint to turn it into even a bad error. The owner ruled
+  on 2026-09-09 that this path mirrors create, and both now call one function,
+  `internal/domain/work_item_fields.go` (`validateWorkItemGoalPresent`) — same
+  code, same message, so the two doors cannot drift apart again. **The refusal
+  breaks nobody**: measured on production 2026-09-09, 2,309 work items, zero with
+  an empty goal and zero with a whitespace-only one, so "empty means clear the
+  goal" was never a used affordance. ⚠️ **Clearing a goal is refused; leaving it
+  alone is not.** Omitting `goal` and sending an explicit `null` are still the same
+  no-op — the check sits inside the `req.Goal != nil` guard, which is the only
+  thing that can tell `goal: ""` from no `goal` at all. And it is `""` ONLY: a
+  whitespace-only goal is still accepted, because create accepts it and the ruling
+  was to mirror create — refusing it here alone would close one asymmetry by
+  opening another.
+- **Required-ness is a SEPARATE function from the shape checks, on purpose.**
+  `validateWorkItemGoalShape` is the declared Go mirror of `work_items_goal_check`
+  (the correspondence `internal/domain/db_check_policy_test.go` asserts), and that
+  CHECK permits the empty string. Folding the emptiness rule into it would make the
+  mirror enforce something the database does not while that test kept passing, so
+  the two rules stay two functions and each call site calls both.
 - **The length half was missing here until `aihub#474`, and what it cost is not
   what the report assumed.** The filing said this tool STORED an over-length goal.
   It did not: `work_items_goal_check` caps `length(goal)` at 500 in the database
@@ -268,6 +293,17 @@ no body", never "the body was withheld".
 
 - **§6.1 T1-9** — `kind`'s withdrawal is the rule applied: prose contradicting hop 3
   is a bug, and the legal dispositions are withdraw, fix, or file.
+- **§6.1 T1-9, third application — `aihub#507` (2026-09-09).** The rule's other
+  direction: not prose that outlived its behaviour, but a refusal that arrived
+  without prose. The published `goal` description now says **non-empty**, because
+  `""` went from stored to refused on this path and a caller holding the old
+  contract would meet the new 400 by hitting it. `internal/mcp/goal_cap_publication_test.go`
+  (`TestUpdateToolPublishesThatTheGoalMustBeNonEmpty`) is the gate, so the word
+  cannot be edited out while the check stays. `pf_create_work_item`'s and
+  `pf_batch_create_work_items`' descriptions do NOT carry the word: they share one
+  string, and changing it moves both of their `input_schema_sha256` — a change
+  whose file scope has to include those two cards. Left as its own change rather
+  than smuggled into this one.
 - **§6.1 T1-9, second application — CLOSED by `aihub#474` (2026-09-09).** The
   published `goal` description used to state the status gate and nothing else,
   while `pf_create_work_item`'s stated both of its shape constraints. The

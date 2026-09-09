@@ -195,10 +195,15 @@ func validateWorkItemLabels(labels []string) *AihubError {
 // half deleted here is deleted for every caller at once, which is a mutation a
 // test can see.
 //
-// EMPTINESS is deliberately NOT checked here, for the reason the priority
-// validator above gives: on an update, `goal: ""` and no goal at all are
-// different requests, and only CreateWorkItem is in a position to say that a
-// goal is required. That check stays where it can be right.
+// EMPTINESS is still NOT checked here, and after aihub#507 that is a sharper
+// statement than it was: both write paths DO refuse an empty goal now, they just
+// do not refuse it from inside this function. The reason is what this function
+// is — the Go mirror of work_items_goal_check, named as such by
+// db_check_policy_test.go. That CHECK permits the empty string (the column is
+// TEXT NOT NULL, and NOT NULL admits it), so a required-ness check folded in here
+// would make the mirror enforce something the constraint does not, and the one
+// test that compares the two would stop meaning what it says. Required-ness is
+// validateWorkItemGoalPresent below, a sibling both paths call.
 //
 // RUNES, not bytes — see maxWorkItemGoalRunes. A 500-character Chinese goal is
 // 1,500 bytes and Postgres accepts it, so a byte-counting guard here would
@@ -209,6 +214,60 @@ func validateWorkItemGoalShape(goal string) *AihubError {
 	}
 	if strings.ContainsAny(goal, "\n\r") {
 		return NewErr(ErrGoalMultiline, "goal must not contain newlines")
+	}
+	return nil
+}
+
+// validateWorkItemGoalPresent refuses an empty goal, and it is the ONE copy of
+// that refusal — both work-item write paths call it (aihub#507).
+//
+// ─── What it fixes ───────────────────────────────────────────────────────────
+//
+// `pf_create_work_item {goal: ""}` was a 400 "goal is required"; the identical
+// value through `pf_update_work_item` was STORED. Same column, two doors, two
+// answers — the aihub#396 class again, and the third instance after aihub#396
+// itself and aihub#474. It differs from #474's instance in the direction of the
+// disagreement: there the divergent answer was a 500 from the column CHECK, so
+// the data was never at risk. Here the CHECK has nothing to say (TEXT NOT NULL
+// admits the empty string), so the update path wrote an empty goal and returned
+// 200 — a work
+// item that renders blank in every list and in the ready queue, with no error
+// anywhere to trace it back to. The owner ruled on 2026-09-09 that update must
+// mirror create.
+//
+// ⚠️ Enabling a refusal on a live write path is a behaviour change, so it was
+// measured first rather than argued: production Cloud SQL, 2026-09-09, 2,309
+// work items, `length(goal) = 0` → 0 rows, and `length(btrim(goal)) = 0 AND
+// length(goal) > 0` (whitespace-only) → 0 rows. No stored record depends on the
+// old behaviour and
+// no caller is observably using it.
+//
+// ─── Why a separate function and not a third branch in the shape validator ───
+//
+// aihub#474's lesson is that one rule written twice is a rule that comes apart,
+// and the message here is a literal ("goal is required") that a caller may branch
+// on, so it must have one home. But the shape validator is not that home: it is
+// the declared Go mirror of work_items_goal_check, and the empty string
+// SATISFIES that CHECK.
+// Two functions, one call site each per path, keeps both claims true — the mirror
+// stays a mirror, and required-ness still cannot drift between the doors.
+//
+// ─── The boundary that is deliberately NOT crossed ───────────────────────────
+//
+// "" only. A whitespace-only goal (" ") is ACCEPTED here, because create accepts
+// it and the ruling was to mirror create — refusing it on update alone would
+// close one asymmetry by opening another, which is the defect class itself. The
+// census above found zero rows of either kind, so nothing is riding on the
+// choice today; tightening both paths together is a separate ruling.
+//
+// ⚠️ This function never decides whether a goal was SUPPLIED. On the update path
+// `goal: ""` and no `goal` at all are different requests, and that distinction
+// lives at the call site's `req.Goal != nil` guard, where the pointer still
+// carries it. A guard moved in here would refuse every update that leaves the
+// goal alone.
+func validateWorkItemGoalPresent(goal string) *AihubError {
+	if goal == "" {
+		return NewErr(ErrBadRequest, "goal is required")
 	}
 	return nil
 }

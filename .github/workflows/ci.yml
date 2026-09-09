@@ -3395,7 +3395,7 @@ jobs:
           for want in 'TestReadIntentTakesNoWriteLock/claim_derives_no_lock_for_a_read_declaration' \
                       'TestReadIntentTakesNoWriteLock/write_declaration_still_takes_the_lock' \
                       'TestReadIntentTakesNoWriteLock/force_takeover_derives_no_lock_for_a_read_declaration' \
-                      'TestReadIntentTakesNoWriteLock/a_read_declaration_on_a_repo_still_takes_its_branch_lock' \
+                      'TestReadIntentTakesNoWriteLock/a_read_declaration_on_a_repo_takes_no_lock_at_all' \
                       'TestReadIntentTakesNoWriteLock/predict_and_claim_agree_on_a_read_declaration_over_a_held_lock'; do
             grep -q -- "--- PASS: $want" read_intent_locks.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#342 intent rule is not actually verified on that derivation path"; exit 1; }

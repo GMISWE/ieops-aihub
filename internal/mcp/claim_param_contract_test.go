@@ -113,7 +113,7 @@ var claimParamsNotActedOn = map[string]string{}
 // sends on the caller's behalf — so they are written down rather than left to
 // be discovered.
 var claimFieldsDeliberatelyUnpublished = map[string]string{
-	"session_info":  "minted by the MCP handler itself: machine_id from the environment and a session_secret generated here and persisted to the state file. Publishing it would let a caller forge another machine's credential.",
+	"session_info": "minted by the MCP handler itself: machine_id from the environment and a session_secret generated here and persisted to the state file. Publishing it would let a caller forge another machine's credential.",
 	// ⚠️ `task_branches` was the second entry here until aihub#416, and it went
 	// by DELETION rather than by re-wording: the git_branch derivation it fed is
 	// retired, so ClaimRequest no longer binds the field, EffectiveDeclaredResource

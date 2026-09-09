@@ -4,7 +4,7 @@
 {
   "tool": "pf_create_work_item",
   "description_sha256": "2978a1542ea8458bd057eea171e82bbd04eecdec320281d9b37b3ce3c14b9d69",
-  "input_schema_sha256": "b1e687549be3f2dcc20446bb94b6c2b245077db11437b3d936408cd54cb12b5c",
+  "input_schema_sha256": "bd546eb788a6c4f5062d6aa03698211e70f7a6b2b4b6ae2aa7983194026b8a19",
   "params": {
     "attrs": {
       "type": "object",
@@ -131,7 +131,7 @@ exists downstream of.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `project` | string | yes | project to file under |
-| `goal` | string | yes | single-line, ≤500 chars |
+| `goal` | string | yes | single-line, non-empty, ≤500 chars |
 | `scenario` | string | no | default `coding` |
 | `priority` | enum | no | `urgent\|high\|normal\|low`, from the domain list |
 | `wi_type` | string | no | `fix_bug`, `feature`, `chore`, … |
@@ -234,6 +234,20 @@ content is an absent one.
   it by **enumerating DB CHECKs, not fields**; `scenario` above is a live instance of
   a CHECK the published schema does not reflect.
 - **§6.1 T1-5** — the content suppression is a delete, not a keep-list.
+- **§6.1 T1-9 — `aihub#520` (2026-09-09).** The `goal` description now says
+  **non-empty**. The refusal is not new here, only unpublished: the handler rejects
+  `goal: ""` locally with `goal is required` before the request leaves the process,
+  and `internal/domain/work_item_fields.go` (`validateWorkItemGoalPresent`) answers
+  400 with the same text on every path that writes the column. But `required` in a
+  published schema means the property must be PRESENT, not that its value must be
+  non-empty, so a caller reading the schema could satisfy it with `""` and be
+  refused anyway. `aihub#507` made the behaviour identical on
+  `pf_update_work_item` and stated the word only there, leaving this tool and
+  `pf_batch_create_work_items` — which share one string via `workItemFieldProps` —
+  to a change that could carry their two cards.
+  `internal/mcp/goal_cap_publication_test.go` (`TestPublishedGoalCapIsTheEnforcedOne`)
+  now quantifies the word over every tool publishing `goal`, so the three
+  descriptions cannot drift apart again.
 - **§6.2 T2-6** — the memory-type leniency question is adjacent: an enum in a schema
   the SDK will not enforce should not be called an enum. Here the SDK **does**
   enforce `priority` and `source`, which is the difference.

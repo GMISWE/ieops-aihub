@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # PreToolUse(Skill) router hook for polyforge v1.
-# Fires right before a Skill tool call (there is no dedicated SkillStart event). When the
-# skill being invoked is polyforge:pf-execute, this hook ASSEMBLES that step's body at the
-# call site and injects it via hookSpecificOutput.additionalContext — the SKILL.md file
-# itself is a stub, so this injection IS the step body. pf-spec and pf-plan are
-# self-sufficient SKILL.md files (no stub, no injection) and are not routed by this hook.
+# Fires right before a Skill tool call (there is no dedicated SkillStart event). Two MODES,
+# chosen per skill by the first field of its TARGETS entry below:
 #
-# Composition (see skills/_common/*.md and skills/pf-execute/engine.native.md):
+#   step-body   — pf-execute. The SKILL.md is a stub, so this hook ASSEMBLES that step's body
+#                 at the call site and injects it via hookSpecificOutput.additionalContext:
+#                 the injection IS the step body.
+#   header-only — pf-spec, pf-plan. The SKILL.md is self-sufficient and is NOT replaced. Only
+#                 the header rides, carrying the resident context a DISPATCHED subagent does
+#                 not inherit from SessionStart (aihub#478). Nothing is assembled.
+#
+# Composition in step-body mode (skills/_common/*.md and skills/pf-execute/engine.native.md):
 #   additionalContext = header
 #                     + _common/memory.md      (Memory-First recall + team-memory sync)
 #                     + <engine fragment>       (superpowers pointer  |  engine.native.md)
@@ -14,6 +18,7 @@
 #                     + _common/lifecycle.md    (step reporting / ownership / wrap)
 # The _common/* fragments are injected in BOTH branches — lifecycle never depends on which
 # engine writes the content. Only the engine fragment branches on whether superpowers is enabled.
+# header-only mode emits the header alone and selects no engine fragment at all.
 #
 # 🔴 SIZE BUDGET (aihub#304). The assembled payload has a hard 10,000-CHARACTER limit: past it
 # the harness writes the whole thing to a file and delivers only a ~2,000-character preview, and
@@ -26,7 +31,7 @@
 # is the wi worktree, not the plugin directory.
 # If a fragment needs to grow, move something to the on-demand tier; do not raise the gate.
 #
-# Inert (exit 0, no output) for any non-target skill (including pf-spec/pf-plan), and
+# Inert (exit 0, no output) for any skill absent from TARGETS, and
 # FAIL-SILENT on any error: if this hook emits nothing for pf-execute, the stub's
 # load-bearing pointer line routes the model to engine.native.md + _common/*.md (the
 # fallback). It never blocks or denies a skill call.
@@ -77,7 +82,19 @@ if not skill:
     sys.exit(0)
 base = skill.split(":")[-1]  # "polyforge:pf-execute" -> "pf-execute"
 
-# Per-skill parameters: (step_id, artifact_type, recall_type_filter, superpowers_engine_pointer)
+# Per-skill parameters:
+#   (mode, step_id, artifact_type, recall_type_filter, superpowers_engine_pointer)
+#
+# mode is the FIRST field so it is readable at a glance and parseable without evaluating the
+# tuple — internal/cli/skill_router_payload_test.go reads it out of this source to decide which
+# assertions apply to which skill, exactly as it already reads the keys. A skill added here with
+# an unknown mode fails that gate rather than escaping it.
+#
+#   "step-body"   assemble header + _common/* + engine fragment (pf-execute's SKILL.md is a stub).
+#   "header-only" emit the header ALONE. The four fields after mode are unused and are written
+#                 empty. Used for pf-spec / pf-plan, whose SKILL.md files are self-sufficient:
+#                 the point is not to give them a body but to give them the resident context a
+#                 dispatched subagent never inherits from SessionStart (aihub#478).
 #
 # recall_type_filter is a LIST, not a string (aihub#289). pf_recall's `type` parameter is a
 # list of type names; a single string with '|' in it is ONE type name, matches no row, and
@@ -90,7 +107,7 @@ base = skill.split(":")[-1]  # "polyforge:pf-execute" -> "pf-execute"
 # that strictness is the point: the string should not be paste-able anywhere in here.)
 TARGETS = {
     "pf-execute": (
-        "execute", "", ["experience.*", "rule.*"],
+        "step-body", "execute", "", ["experience.*", "rule.*"],
         "Delegate each scenario step's implementation to `superpowers:subagent-driven-development` "
         "(with TDD / systematic-debugging / code-review / verification as sub-engines per step). "
         "**Stop before `superpowers:finishing-a-development-branch`** — commit/PR/wrap/CI go back to polyforge.\n\n"
@@ -103,10 +120,16 @@ TARGETS = {
         "guarantee: a coding task that genuinely needs architectural reasoning may use opus; a BLOCKED re-dispatch may escalate.\n\n"
         "Parallel dispatch is only for independent investigation; parallel implementation must be split into child work items.",
     ),
+    # Routed for the header ONLY (aihub#478). Both were previously absent from this dict, so a
+    # dispatched /pf-spec or /pf-plan received no injection at all — neither the Iron Rules nor
+    # the output format, for the same measured reason pf-execute did not: a subagent does not
+    # inherit SessionStart's additionalContext. Their SKILL.md files stay authoritative.
+    "pf-plan": ("header-only", "plan", "", [], ""),
+    "pf-spec": ("header-only", "spec", "", [], ""),
 }
 if base not in TARGETS:
     sys.exit(0)  # not a target skill -> inert (let the call through untouched)
-step_id, artifact_type, recall_type, sp_pointer = TARGETS[base]
+mode, step_id, artifact_type, recall_type, sp_pointer = TARGETS[base]
 
 plugin_root = os.environ.get("PF_PLUGIN_ROOT", "")
 skills_dir = os.path.join(plugin_root, "skills")
@@ -177,70 +200,98 @@ def subst(txt):
 def common(name):
     return subst(read(os.path.join(skills_dir, "_common", name)) or "")
 
-memory_frag  = common("memory.md")
-storage_frag = common("storage.md")
-lifecycle_frag = common("lifecycle.md")
-
-if superpowers_on:
-    engine_frag = (
-        f"## Engine fragment (superpowers enabled)\n\n{sp_pointer}\n\n"
-        "This is not a lifecycle bypass: polyforge still owns claim / step reporting / save_artifact / "
-        "commit / PR / wrap."
-    )
-    engine_label = f"superpowers ({base})"
-    engine_path = "hooks/pf-skill-router (TARGETS[%r] pointer)" % base
-else:
-    native = read(os.path.join(skills_dir, base, "engine.native.md"))
-    if not native:
-        sys.exit(0)  # no native engine fragment to inject -> inert (stub fallback takes over)
-    engine_frag = subst(native)
-    engine_label = "native (engine.native.md)"
-    engine_path = "skills/%s/engine.native.md" % base
-
-# Any missing common fragment -> fail silent (let the stub fallback route to repo files).
-if not (memory_frag and storage_frag and lifecycle_frag):
-    sys.exit(0)
-
-header = (
-    f"[polyforge router] `/{base}` step `{step_id}` — engine: {engine_label}. The SKILL.md is a "
-    "stub; the text below is the step body, assembled and injected at the call site, and it takes "
-    "precedence. Fragments marked 📄 are NOT injected — this payload has a hard 10,000-character "
-    "limit and `Read` is how you get the rest (aihub#304)."
-)
-
 SEP = "\n\n---\n\n"
 
-# --- Iron Rules ride the router, not SessionStart (aihub#338 layer 2) --------------------
-# pf-execute runs in a dispatched SUBAGENT, and a subagent does not inherit SessionStart's
+# (name, on-disk path under the plugin root, drop_rank, text). Populated in step-body mode only;
+# header-only mode leaves it EMPTY, which is what makes the degrade loop below a no-op there —
+# there is nothing droppable in a payload that is all header.
+parts = []
+
+if mode == "step-body":
+    memory_frag  = common("memory.md")
+    storage_frag = common("storage.md")
+    lifecycle_frag = common("lifecycle.md")
+
+    if superpowers_on:
+        engine_frag = (
+            f"## Engine fragment (superpowers enabled)\n\n{sp_pointer}\n\n"
+            "This is not a lifecycle bypass: polyforge still owns claim / step reporting / save_artifact / "
+            "commit / PR / wrap."
+        )
+        engine_label = f"superpowers ({base})"
+        engine_path = "hooks/pf-skill-router (TARGETS[%r] pointer)" % base
+    else:
+        native = read(os.path.join(skills_dir, base, "engine.native.md"))
+        if not native:
+            sys.exit(0)  # no native engine fragment to inject -> inert (stub fallback takes over)
+        engine_frag = subst(native)
+        engine_label = "native (engine.native.md)"
+        engine_path = "skills/%s/engine.native.md" % base
+
+    # Any missing common fragment -> fail silent (let the stub fallback route to repo files).
+    if not (memory_frag and storage_frag and lifecycle_frag):
+        sys.exit(0)
+
+    header = (
+        f"[polyforge router] `/{base}` step `{step_id}` — engine: {engine_label}. The SKILL.md is a "
+        "stub; the text below is the step body, assembled and injected at the call site, and it takes "
+        "precedence. Fragments marked 📄 are NOT injected — this payload has a hard 10,000-character "
+        "limit and `Read` is how you get the rest (aihub#304)."
+    )
+
+    # List order is EMISSION order. drop_rank orders DEGRADATION only, lowest dropped first:
+    # storage is a four-line note, memory costs only recall context, lifecycle costs correct wi
+    # state, and the engine is the loop itself — without it there is nothing to run at all.
+    parts = [
+        ("_common/memory.md",    "skills/_common/memory.md",    1, memory_frag.rstrip("\n")),
+        ("engine",               engine_path,                   3, engine_frag.rstrip("\n")),
+        ("_common/storage.md",   "skills/_common/storage.md",   0, storage_frag.rstrip("\n")),
+        ("_common/lifecycle.md", "skills/_common/lifecycle.md", 2, lifecycle_frag.rstrip("\n")),
+    ]
+else:
+    # header-only. Deliberately makes NO claim about deferred fragments — there are none, and
+    # the step-body header's "Fragments marked 📄 are NOT injected" sentence would be a lie
+    # here, pointing the model at a tier this payload does not use.
+    header = (
+        f"[polyforge router] `/{base}` — the SKILL.md is self-sufficient and remains "
+        "authoritative; nothing below replaces or overrides it. This is only the resident "
+        "context a DISPATCHED subagent does not inherit from SessionStart (aihub#478)."
+    )
+
+# --- The resident rules ride the router, not SessionStart (aihub#338 L2, aihub#478) -------
+# A routed skill runs in a dispatched SUBAGENT, and a subagent does not inherit SessionStart's
 # additionalContext. Measured 2026-09-04 with a zero-tool-call probe pinned to the first
 # action: CLAUDE.md and MEMORY.md arrive, IR1-IR3 do not. PreToolUse, on the other hand,
 # DOES fire inside a subagent (measured the same day — pf-commit-guard blocked a push from
 # one), so this hook is the only resident channel that reaches the executor at all.
 #
-# Read the SAME file pf-session-start reads. There is deliberately no copy of the rules in
-# this script: aihub#294 is three months of silent drift between two hand-maintained copies
-# of exactly this text, and a paraphrase written at dispatch time would be worse still —
-# nothing can diff a paraphrase against its source. If the fragment is missing the header
-# simply carries no rules, which is visible, rather than a stale restatement, which is not.
+# TWO fragments, both session-resident and both lost on that path:
+#   iron-rules.md    IR1-IR3 (aihub#338 layer 2).
+#   output-format.md the three-segment response format (aihub#478). Before this, the payload
+#                    named the three labels in _common/lifecycle.md and nothing more, so a
+#                    dispatched executor had the headings without the contract — the field
+#                    list, the max-5 rule and "MUST follow this format exactly" all arrived
+#                    only in a main session. That fragment now carries only what
+#                    output-format.md does NOT: which source to take "Next steps" from when
+#                    requires_human_session is true.
 #
-# It goes in the HEADER, not in parts[]: the degrade loop below drops whole fragments to fit,
+# Read the SAME files pf-session-start reads. There is deliberately no copy of either text in
+# this script: aihub#294 is three months of silent drift between two hand-maintained copies
+# of exactly this kind of text, and a paraphrase written at dispatch time would be worse still
+# — nothing can diff a paraphrase against its source. If a fragment is missing the header
+# simply carries nothing from it, which is visible, rather than a stale restatement, which is not.
+#
+# They go in the HEADER, not in parts[]: the degrade loop below drops whole fragments to fit,
 # and a rule that can be dropped to make room is not a rule. Cost is charged to the same
-# budget as everything else, and aihub#338 paid for it by re-tiering engine.native.md and
-# _common/lifecycle.md rather than by raising the gate.
-iron_rules = read(os.path.join(skills_dir, "using-polyforge", "fragments", "iron-rules.md"))
-if iron_rules and iron_rules.strip():
-    header = header + SEP + iron_rules.strip()
-
-# (name, on-disk path under the plugin root, drop_rank, text).
-# List order is EMISSION order. drop_rank orders DEGRADATION only, lowest dropped first:
-# storage is a four-line note, memory costs only recall context, lifecycle costs correct wi
-# state, and the engine is the loop itself — without it there is nothing to run at all.
-parts = [
-    ("_common/memory.md",    "skills/_common/memory.md",    1, memory_frag.rstrip("\n")),
-    ("engine",               engine_path,                   3, engine_frag.rstrip("\n")),
-    ("_common/storage.md",   "skills/_common/storage.md",   0, storage_frag.rstrip("\n")),
-    ("_common/lifecycle.md", "skills/_common/lifecycle.md", 2, lifecycle_frag.rstrip("\n")),
-]
+# budget as everything else, and both were paid for by re-tiering rather than by raising the
+# gate — aihub#338 moved 850 chars out of three resident fragments for the Iron Rules, and
+# aihub#478's 766 for the output format came out of the same common fragments (-780) plus one
+# native-only duplicate (-77), ending 91 characters BELOW where the native branch started.
+# See internal/cli/skill_router_payload_test.go for the per-file accounting and the gate.
+for _resident in ("iron-rules.md", "output-format.md"):
+    _body = read(os.path.join(skills_dir, "using-polyforge", "fragments", _resident))
+    if _body and _body.strip():
+        header = header + SEP + _body.strip()
 
 ctx = SEP.join([header] + [t for _, _, _, t in parts])
 
@@ -264,6 +315,17 @@ if len(ctx) > MAX_CHARS:
     full_len = len(ctx)
 
     def banner(dropped):
+        if not parts:
+            # header-only: there is nothing droppable, so saying "dropped X" would be a lie and
+            # naming a plugin root to `Read` would point at a tier this payload does not use.
+            return (
+                "⚠️ **POLYFORGE SKILL-ROUTER PAYLOAD OVER BUDGET — THIS HEADER IS TRUNCATED.**\n"
+                "The header for `/%s` is %d characters against a %d-character harness limit and "
+                "carries no droppable fragments, so it was cut instead. Treat any rule below as "
+                "possibly incomplete. This is a bug in the header, not in your session (see "
+                "`internal/cli/skill_router_payload_test.go`).\n"
+                % (base, full_len, MAX_CHARS)
+            )
         return (
             "⚠️ **POLYFORGE SKILL-ROUTER PAYLOAD OVER BUDGET — THIS STEP BODY IS INCOMPLETE.**\n"
             "The assembled body for `/%s` is %d characters against a %d-character harness "
@@ -297,7 +359,9 @@ if len(ctx) > MAX_CHARS:
         "degraded %d-char payload; dropped %s. Run "
         "`go test ./internal/cli/ -run TestRoutedSkillHook` and move text to the on-demand "
         "tier (skills/**/references/) — do not raise the gate.\n"
-        % (base, full_len, MAX_CHARS, len(ctx), ", ".join(dropped) or "every fragment")
+        % (base, full_len, MAX_CHARS, len(ctx),
+           ", ".join(dropped) or ("nothing — this payload is all header" if not parts
+                                  else "every fragment"))
     )
 
 # Default ALLOW + inject: additionalContext with no permissionDecision lets the Skill call

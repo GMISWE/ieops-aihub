@@ -80,7 +80,7 @@ import (
 //     pf-spec/pf-plan Step 1 fire only when those two skills are invoked — a session that
 //     answers a question, runs /pf-status, or dispatches /pf-execute reaches neither.
 //     Assertion 1 below pins that call site in place.
-//   - _common/memory.md:16's recall (router-injected for pf-execute) is not redundant
+//   - _common/memory.md's Memory-First recall (router-injected for pf-execute) is not redundant
 //     either, and the reason is NOT that skill_recall_type_test.go asserts on it — that
 //     assertion is a vacuity guard for aihub#289's piped-type check, not a product rule.
 //     The real reason: on the rhs=false path, /pf-execute is dispatched as a SUBAGENT

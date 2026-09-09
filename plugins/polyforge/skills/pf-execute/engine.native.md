@@ -29,11 +29,9 @@ pf_update_step(work_item_id=<current>, step_id=sections[0].step_id, status="in_p
 for i, (step_id, content) in enumerate(sections):
     expanded = expand_includes(content, sha)
 
-    # subagent prompt, verbatim in §0b: pf_get_step FIRST (completed_steps is what is
-    # already done), then the expanded instructions, then "return one summary line".
+    # subagent prompt, verbatim in §0b: pf_get_step FIRST (a completed_steps entry counts
+    # as done only if its status is "completed"), then the instructions, then a summary line.
     dispatch subagent(model=RAISED_TIER if is_review(step_id) else DEFAULT_TIER, prompt=...)
-
-    # long steps: pf_update_step(..., status="in_progress", heartbeat=true) every ~5 min
 
     if a step called pf_pause_attempt (or a pf_* call is rejected "attempt is paused"):
         break   # stop the loop; no retry, and do NOT call pf_complete_attempt (§0e)

@@ -1,8 +1,7 @@
-# _common/lifecycle.md — step lifecycle & ownership (injected for pf-execute)
+# _common/lifecycle.md — step lifecycle & ownership
 
-> Resident here = what every step needs; once-per-wi calls are on demand — `Read`
-> 📄 **`@@PLUGIN_ROOT@@/skills/_common/references/lifecycle-details.md`** (not injected: hard
-> 10,000-char payload budget, aihub#304).
+> Resident = what every step needs. Once-per-wi detail is on demand: `Read`
+> 📄 **`@@PLUGIN_ROOT@@/skills/_common/references/lifecycle-details.md`** (aihub#304 budget).
 
 ## Bracket every step
 
@@ -23,37 +22,34 @@ sa_id = next_sa
 ```
 
 - `next_step` completes one step and starts its successor in ONE transaction. Omit it on the LAST
-  step and on `failed` (rejected there, not ignored). ⚠️ If `pf_update_step` does not publish it
-  the binary is older — §1, and that fallback has a trap.
+  step and on `failed` (rejected there, not ignored). ⚠️ Not published? Older binary — §1.
 - `step_id` is the scenario `## Step:` name; unvalidated, so a typo is silent.
-- `artifact_summary`: status only (no diff / plan / code); it may lead with one structured line —
+- `artifact_summary`: status only, no diff / plan / code. Optional structured lead line:
   `pr=<owner/repo>#<number> base=<branch>` or `Pattern <A|B>:`.
 - Long steps: add `heartbeat=true` to an `in_progress` call every ~5 min.
 
 ## Ownership
 
 claim / locks / `pf_update_step` / `pf_save_artifact` / commit / push / PR / wrap / CI gating are
-**polyforge's**; an engine produces content only. §6 has the superpowers execute boundary (D6).
+**polyforge's**; an engine produces content only.
 
-**`.pf_*` hygiene**: never stage `.pf_meta.json` (the only file the engine writes) — `git
-checkout HEAD --` it, or use `pf_commit(paths=[...])`.
+**`.pf_*` hygiene**: never stage `.pf_meta.json`, the only file the engine writes — §5.
 
 ## Execute step only: `pf_acquire_locks(work_item_id=<current>)` BEFORE the loop
 
 At the very start of the **execute** step — before the loop, before reading the scenario .md,
 before any dispatch. Not for spec or plan. **`acquired`/`already_held`** → proceed.
-**`ErrConflictLockTaken`** (payload carries `conflict_with`) → **STOP, do NOT enter the loop**:
-report the file, holder and attempt_id three-segment (template in §3), offer `/pf-stop --pause`,
-and do **NOT** call `pf_complete_attempt(failed)` — the attempt stays active, waiting.
+**`ErrConflictLockTaken`** → **STOP, do NOT enter the loop** and do **NOT** call
+`pf_complete_attempt(failed)`; the attempt stays active, waiting. 🔴 `Read` §3 — it has the
+conflict fields, the report template and what to offer instead.
 
 ## Once per wi — 🔴 `Read` the on-demand file §0 before either
 
 `commit_and_pr` → **`pf_ship(...)`**; end of the loop → **`pf_complete_attempt(status="wrapped",
-note=...)`**, then each worktree, then their shared `pf.<slug>/` parent ONCE. §0 carries both
-argument shapes, the force-push warning and the ordering — do not reconstruct them from memory.
+note=...)`**, then worktree cleanup. §0 has the argument shapes, the ordering and the force-push
+warning — do not reconstruct them from memory.
 
 ## Three-segment output
 
-Every pf-* response uses `Result` / `Status` / `Next steps`. For `requires_human_session=true`
-wi's, take "Next steps" from `using-polyforge/fragments/post-claim-routing.md` — on-demand, so
-`Read` it first.
+The format is in the header. For `requires_human_session=true` wi's take "Next steps" from
+`using-polyforge/fragments/post-claim-routing.md` — on-demand, so `Read` it first.

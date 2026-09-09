@@ -213,12 +213,13 @@ disable the polyforge plugin. `--uninstall` only undoes the statusLine takeover.
 
 `pf-seam-check` pins the 6.1.1 baseline of the cached `superpowers` plugin that pf-execute's
 engine pointer hardcodes against: `subagent-driven-development` (the engine pointer itself),
-`finishing-a-development-branch` (`_common/lifecycle.md`'s D6 boundary), and
+`finishing-a-development-branch` (the D6 execute boundary, in
+`_common/references/lifecycle-details.md` §6 since aihub#338), and
 `executing-plans` (the one the router test's negative assertion checks stays absent from the
 execute pointer) -- plus the `superpowers@` prefix `pf-skill-router` scans for in
-`enabledPlugins`. pf-spec and pf-plan are self-sufficient SKILL.md files with no router
-injection and no superpowers dependency, so they are out of scope for this check. Any
-`[WARN]` line means the installed superpowers version drifted from one of these assumptions
+`enabledPlugins`. pf-spec and pf-plan are routed header-only since aihub#478 — the Iron Rules
+and the output format, no engine fragment — so they have no superpowers dependency and are out
+of scope for this check. Any `[WARN]` line means the installed superpowers version drifted from one of these assumptions
 and pf-execute's engine pointer may now silently no-op (the router falls back to native
 engine without telling you). Treat a WARN as: re-verify the seam by hand against the new
 superpowers version, then update the pin (`PIN_VERSION` in `bin/pf-seam-check`) and any

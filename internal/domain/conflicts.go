@@ -118,6 +118,42 @@ type PredictConflictsResponse struct {
 	WillUnlock  []WillUnlockItem     `json:"will_unlock"`
 }
 
+// declaresContainmentSQL is the WHERE fragment PredictConflicts rules 2, 5 and 6
+// use to ask "does this RUNNING work item DECLARE this entry", and
+// declaresIntentContainmentSQL is the same question with the intent pinned as
+// well (rule 4).
+//
+// 🔴 THE OPERAND IS BUILT BY POSTGRES OUT OF BOUND PARAMETERS AND IS NEVER
+// ASSEMBLED AS JSON TEXT IN GO (aihub#511). All four rules used to paste the
+// declared name into a JSON literal — `[{"type":"repo","uri":"repo:`+name+`"}]`
+// — and nothing on the way in constrains the characters of a name:
+// ValidateDeclaredResources checks the uri SCHEME and stops there. That broke in
+// two ways, and the second is why "reject odd names at the door" would not have
+// been a fix:
+//
+//   - a name holding `"` closed the string early, Postgres refused the operand
+//     with 22P02, and the error went to stderr while the CALLER received
+//     {"predictions":[],"severity":"info"} — byte-identical to a genuine
+//     all-clear, which is exactly the aihub#238 failure mode rule 2's own header
+//     below says it exists to avoid;
+//   - a name holding `\b` produced VALID json for a DIFFERENT string, so there
+//     was no error to log at all: the query matched nothing, silently, and no
+//     caller could tell that from "nobody else declared it".
+//
+// This is a regression rather than an oversight, which is why the rule is
+// written here instead of left in a commit message: rule 2 bound its repo name
+// as $1 (`resource_key LIKE $1 || '/%'`) until the aihub#416 rewrite replaced
+// that query with a concatenated containment literal, and rules 4 and 5 had
+// carried the concatenated shape since before that. Anything added later that
+// asks the same question must reuse these two constants.
+//
+// ⚠️ The ::text casts are load-bearing, not decoration: jsonb_build_object takes
+// "any", so without them Postgres cannot infer the parameter types and refuses
+// to prepare the statement.
+const declaresContainmentSQL = `wi.declared_resources @> jsonb_build_array(jsonb_build_object('type',$1::text,'uri',$2::text))`
+
+const declaresIntentContainmentSQL = `wi.declared_resources @> jsonb_build_array(jsonb_build_object('type',$1::text,'uri',$2::text,'intent',$3::text))`
+
 // PredictConflicts applies the 5 conflict rules and returns predictions.
 // Implements §23 of the design doc.
 func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConflictsRequest, callerProjectRoles map[string]string) (*PredictConflictsResponse, *AihubError) {
@@ -255,8 +291,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			FROM work_items wi
 			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
 			WHERE wi.status='running'
-			  AND wi.declared_resources @> $1::jsonb`,
-			`[{"type":"repo","uri":"repo:`+repoName+`"}]`,
+			  AND `+declaresContainmentSQL,
+			"repo", "repo:"+repoName,
 		)
 		if err == nil {
 			for rows.Next() {
@@ -353,8 +389,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			FROM work_items wi
 			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
 			WHERE wi.status='running'
-			  AND wi.declared_resources @> $1::jsonb`,
-			`[{"type":"repo","uri":"repo:`+repoName+`","intent":"refactor"}]`,
+			  AND `+declaresIntentContainmentSQL,
+			"repo", "repo:"+repoName, "refactor",
 		)
 		if err == nil {
 			for rows.Next() {
@@ -399,8 +435,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			FROM work_items wi
 			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
 			WHERE wi.status='running'
-			  AND wi.declared_resources @> $1::jsonb`,
-			`[{"type":"external_ref","uri":"`+res.URI+`"}]`,
+			  AND `+declaresContainmentSQL,
+			"external_ref", res.URI,
 		)
 		if err == nil {
 			for rows.Next() {
@@ -457,8 +493,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			FROM work_items wi
 			JOIN run_attempts ra ON ra.id = wi.current_attempt_id
 			WHERE wi.status='running'
-			  AND wi.declared_resources @> $1::jsonb`,
-			`[{"type":"service","uri":"service:`+svc+`"}]`,
+			  AND `+declaresContainmentSQL,
+			"service", "service:"+svc,
 		)
 		if err == nil {
 			for rows.Next() {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Gate docs/ against the executable authorities it describes (aihub#352).
 
-Four checks. Each one goes RED on a real drift, and each exists because the
+Five checks. Each one goes RED on a real drift, and each exists because the
 drift it catches is otherwise SILENT — nothing in this repo turns red today when
 a doc's copy of a code fact stops matching the code.
 
@@ -45,6 +45,21 @@ a doc's copy of a code fact stops matching the code.
       Like C3 it asserts SET equality and not just totals, and for the same
       reason: the tally names four tags, so a tag carried by a row the
       paragraph never mentions is a drift no sum can see.
+
+  C5  The design doc's lock_acquired + lock_released `cause:` unions cover
+      exactly the `lockCause*` constants in internal/domain/resource_events.go.
+      The doc restates that vocabulary as a TypeScript union, and the copy went
+      stale TWICE without anything noticing: `wi_cancelled` (aihub#355) and
+      `derivation_retired` (aihub#416) each added a constant, each was written
+      into the changelog and into docs/mcp-cards/, and neither reached the
+      union. Both were found by a human review a wave later (aihub#518).
+
+      Set equality on the UNION of the two doc unions, deliberately: which
+      event a cause rides on is not derivable from the constant block —
+      `derivation_retired` has no Go writer at all, migration 0038 emits it —
+      so splitting it here would make this file a THIRD copy of the fact. The
+      limit is stated in the doc beside the tables so nobody reads a green C5
+      as "the split is checked".
 
 Usage:
     python3 scripts/pf_docs_contract_check.py --schemas /tmp/pf-tool-schemas.json
@@ -375,13 +390,14 @@ def check_c3_tool_inventory(doc_text: str, schema_tools: set[str]) -> list[str]:
 
 
 class InstrumentFailure(Exception):
-    """C4 could not run, which is NOT the same as C4 finding nothing wrong.
+    """A check could not run, which is NOT the same as it finding nothing wrong.
 
-    A recount over zero rows satisfies any tally, so the instrument has to prove
-    it found what it grades before its silence can mean anything. Raised rather
-    than appended to the error list so main() can exit 2 (instrument) instead of
-    1 (docs drift): the two need different fixes, and conflating them is how a
-    gate becomes a no-op that still prints OK.
+    Raised by C4 and C5. A recount over zero rows satisfies any tally, and a set
+    comparison against an empty set passes for the same empty reason, so the
+    instrument has to prove it found what it grades before its silence can mean
+    anything. Raised rather than appended to the error list so main() can exit 2
+    (instrument) instead of 1 (docs drift): the two need different fixes, and
+    conflating them is how a gate becomes a no-op that still prints OK.
     """
 
 
@@ -633,6 +649,96 @@ def check_c4_411_tally(text: str) -> list[str]:
             f"`aihub#{max(filed)}`."
         )
 
+    return errors
+
+
+# ─── C5 ───────────────────────────────────────────────────────────────────────
+
+RESOURCE_EVENTS_REL = "internal/domain/resource_events.go"
+RESOURCE_EVENTS_GO = os.path.join(REPO_ROOT, RESOURCE_EVENTS_REL)
+DESIGN_DOC_REL = "docs/design/polyforge-v1-design.md"
+DESIGN_DOC_MD = os.path.join(REPO_ROOT, DESIGN_DOC_REL)
+
+# A const line binding a cause name to its wire string:
+#     lockCauseWICancelled = "wi_cancelled"
+# The exported alias `LockCauseDerivationRetired = lockCauseDerivationRetired`
+# carries no string literal, so this pattern skips it — correct, because it is a
+# second SPELLING of a value already collected, not a second value.
+GO_LOCK_CAUSE_RE = re.compile(r'^\s*lockCause\w+\s*=\s*"([a-z_]+)"\s*$', re.M)
+
+# The design doc's two payload schemas. Each is introduced by a comment line at
+# column 0 inside a ```typescript fence, and each carries a `cause:` union that
+# may wrap over several lines and ends at the first `;`.
+DOC_LOCK_EVENT_MARKERS = ("lock_acquired", "lock_released")
+
+
+def _doc_cause_union(design_text: str, event: str) -> set[str]:
+    """Pull one `cause:` union out of the design doc's payload schema block."""
+    marker = re.search(rf"^// {event}\b", design_text, re.M)
+    if marker is None:
+        raise InstrumentFailure(
+            f"C5 could not find the `// {event}` payload schema in "
+            f"{DESIGN_DOC_REL}. If the block moved or was renamed, retarget C5; "
+            "do not let it pass by finding nothing."
+        )
+    # Bounded window rather than the rest of the file: an unterminated union
+    # would otherwise swallow the next schema and report its causes as this
+    # one's.
+    window = design_text[marker.start() : marker.start() + 2000]
+    union = re.search(r"^\s*cause:\s*(.*?);", window, re.M | re.S)
+    if union is None:
+        raise InstrumentFailure(
+            f"C5 found `// {event}` in {DESIGN_DOC_REL} but no `cause:` union "
+            "within the following 2000 characters."
+        )
+    values = set(re.findall(r'"([a-z_]+)"', union.group(1)))
+    if not values:
+        raise InstrumentFailure(
+            f"C5 parsed an EMPTY `cause:` union for `{event}` in "
+            f"{DESIGN_DOC_REL}. An empty set compares clean against anything."
+        )
+    return values
+
+
+def check_c5_lock_cause_union(design_text: str, go_text: str) -> list[str]:
+    """Assert the doc's two lock-cause unions cover exactly the Go constants.
+
+    Set equality on the UNION of the two doc unions, not on either one alone.
+    That is a deliberate limit and it is stated in the doc beside the tables:
+    which of the two events a cause rides on is not derivable from the constant
+    block — `derivation_retired` has no Go writer at all (migration 0038 emits
+    it) — so a hand-maintained acquired/released split in this file would be a
+    third copy of the very fact the check exists to stop copying. What C5 does
+    catch is the drift that actually happened twice: a new `lockCause*` constant
+    landing with neither union updated (`wi_cancelled`/aihub#355,
+    `derivation_retired`/aihub#416, both found by review in aihub#518).
+    """
+    go_causes = set(GO_LOCK_CAUSE_RE.findall(go_text))
+    if not go_causes:
+        raise InstrumentFailure(
+            f"C5 found no `lockCause* = \"...\"` constants in "
+            f"{RESOURCE_EVENTS_REL}. Either the block moved or the pattern "
+            "rotted; either way the check did not run."
+        )
+
+    doc_causes: set[str] = set()
+    for event in DOC_LOCK_EVENT_MARKERS:
+        doc_causes |= _doc_cause_union(design_text, event)
+
+    errors = []
+    for cause in sorted(go_causes - doc_causes):
+        errors.append(
+            f"C5: cause {cause!r} is defined in {RESOURCE_EVENTS_REL} but "
+            f"appears in neither lock event's `cause:` union in "
+            f"{DESIGN_DOC_REL}. Add it to the union it is emitted on."
+        )
+    for cause in sorted(doc_causes - go_causes):
+        errors.append(
+            f"C5: cause {cause!r} is listed in a lock event's `cause:` union in "
+            f"{DESIGN_DOC_REL} but no `lockCause*` constant in "
+            f"{RESOURCE_EVENTS_REL} defines it. The doc names a value the "
+            "server cannot emit."
+        )
     return errors
 
 
@@ -1009,6 +1115,109 @@ def self_test() -> int:
             # crash. The main run reports the same condition as exit 2.
             failures.append(f"C4 cannot read this repo's aihub#411 table: {exc}")
 
+    # C5. Synthetic doc + Go blocks in the same shape as the real ones: a union
+    # that wraps across lines, an exported alias with no string literal, and
+    # prose naming a cause OUTSIDE the union (which must not count as coverage).
+    c5_go = (
+        "const (\n"
+        '\tlockCauseClaim      = "claim"\n'
+        '\tlockCauseWICancelled = "wi_cancelled"\n'
+        '\tlockCauseOrphanSweep = "orphan_sweep"\n'
+        ")\n"
+        "const LockCauseOrphanSweep = lockCauseOrphanSweep\n"
+    )
+    c5_doc = (
+        "// lock_acquired  (aihub#343)\n"
+        "{ resource_type: string;\n"
+        '  cause: "claim";\n'
+        "  op_id: string }\n"
+        "\n"
+        "// lock_released  (aihub#343)\n"
+        "{ resource_type: string;\n"
+        '  cause: "wi_cancelled"\n'
+        '       |"orphan_sweep";\n'
+        "  op_id: string }\n"
+    )
+    expect("C5 clean", check_c5_lock_cause_union(c5_doc, c5_go), False)
+    expect(
+        "C5 new Go constant not in either union",
+        check_c5_lock_cause_union(
+            c5_doc, c5_go.replace(")\n", '\tlockCauseNew = "brand_new"\n)\n', 1)
+        ),
+        True,
+    )
+    expect(
+        "C5 doc names a cause the code cannot emit",
+        check_c5_lock_cause_union(
+            c5_doc.replace('"orphan_sweep";', '"orphan_sweep"|"ghost";'), c5_go
+        ),
+        True,
+    )
+    # The exact failure aihub#518 fixed: the constant exists, the changelog
+    # mentions it, only the union is missing it.
+    expect(
+        "C5 union dropped one cause",
+        check_c5_lock_cause_union(
+            c5_doc.replace('       |"orphan_sweep";', "       ;"), c5_go
+        ),
+        True,
+    )
+    # Naming a cause in PROSE beside the schema must not satisfy the union —
+    # that is precisely how the real doc looked while being wrong.
+    expect(
+        "C5 prose mention is not coverage",
+        check_c5_lock_cause_union(
+            c5_doc.replace('       |"orphan_sweep";', "       ;")
+            + '// "orphan_sweep" is the gc sweep\n',
+            c5_go,
+        ),
+        True,
+    )
+    for label, doc, exc_expected in (
+        ("C5 missing schema block", "nothing here", "could not find"),
+        (
+            "C5 union unparseable",
+            "// lock_acquired  (x)\n{ no union here }\n// lock_released (x)\n",
+            "no `cause:` union",
+        ),
+    ):
+        try:
+            check_c5_lock_cause_union(doc, c5_go)
+            failures.append(f"{label}: expected InstrumentFailure, got none")
+        except InstrumentFailure as exc:
+            if exc_expected not in str(exc):
+                failures.append(f"{label}: wrong InstrumentFailure: {exc}")
+    try:
+        check_c5_lock_cause_union(c5_doc, "package domain\n")
+        failures.append("C5 no Go constants: expected InstrumentFailure, got none")
+    except InstrumentFailure:
+        pass
+    # And against the real repo, for the same reason C4 is: a block that moved
+    # reports here before it reports in CI.
+    for label, path in (
+        ("C5 design doc", DESIGN_DOC_MD),
+        ("C5 resource_events.go", RESOURCE_EVENTS_GO),
+    ):
+        if not os.path.exists(path):
+            failures.append(
+                f"{label} is missing at {path}, so C5 has nothing to compare. "
+                "Retarget C5 or retire it; do not leave it pointing at a "
+                "deleted file."
+            )
+    if os.path.exists(DESIGN_DOC_MD) and os.path.exists(RESOURCE_EVENTS_GO):
+        with open(DESIGN_DOC_MD, encoding="utf-8") as fh:
+            real_design = fh.read()
+        with open(RESOURCE_EVENTS_GO, encoding="utf-8") as fh:
+            real_go = fh.read()
+        try:
+            expect(
+                "C5 passes on this repo's lock-cause unions",
+                check_c5_lock_cause_union(real_design, real_go),
+                False,
+            )
+        except InstrumentFailure as exc:
+            failures.append(f"C5 cannot read this repo's lock-cause unions: {exc}")
+
     if failures:
         for failure in failures:
             print(f"SELF-TEST FAIL: {failure}", file=sys.stderr)
@@ -1089,6 +1298,18 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    for label, path in (
+        ("design doc", DESIGN_DOC_MD),
+        ("Go source", RESOURCE_EVENTS_GO),
+    ):
+        if not os.path.exists(path):
+            print(
+                f"error: C5's {label} is missing at {path}, so it has nothing "
+                "to compare. Retarget C5 or remove it rather than letting the "
+                "check disappear silently.",
+                file=sys.stderr,
+            )
+            return 2
     # Instrument integrity, not a docs error: C1's messages route authors to a
     # README section, so a dangling pointer stops the run rather than shipping
     # advice nobody can follow.
@@ -1110,6 +1331,17 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    # C5's parse is instrument-level for the same reason.
+    with open(DESIGN_DOC_MD, encoding="utf-8") as fh:
+        design_text = fh.read()
+    with open(RESOURCE_EVENTS_GO, encoding="utf-8") as fh:
+        resource_events_text = fh.read()
+    try:
+        c5_errors = check_c5_lock_cause_union(design_text, resource_events_text)
+    except InstrumentFailure as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     c2_files = superpowers_files + [MCP_TOOLS_MD]
 
     errors: list[str] = []
@@ -1121,6 +1353,7 @@ def main() -> int:
     # is a design document and legitimately names files that do not exist yet.
     errors += check_c2_referenced_go_files_exist(c2_files)
     errors += c4_errors
+    errors += c5_errors
 
     with open(args.schemas, encoding="utf-8") as fh:
         schema_tools = set(json.load(fh)["tools"])
@@ -1136,7 +1369,10 @@ def main() -> int:
     print(
         f"OK: docs/ line-number citations closed; superpowers Go references "
         f"resolve; mcp-tools.md matches all {len(schema_tools)} registered "
-        f"tools; the aihub#411 §6 tally matches a recount of its rows."
+        f"tools; the aihub#411 §6 tally matches a recount of its rows; the "
+        f"design doc's lock-cause unions cover exactly the "
+        f"{len(set(GO_LOCK_CAUSE_RE.findall(resource_events_text)))} "
+        f"lockCause* constants."
     )
     return 0
 

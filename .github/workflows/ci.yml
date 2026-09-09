@@ -3376,12 +3376,27 @@ jobs:
       # "read overlaps report as info" are two halves of one contract sentence
       # and only the first half has code of its own.
       #
-      # The repo subtest is a scope marker, not coverage: the read rule is
-      # applied to file_scope ONLY, so a `repo` entry keeps its git_branch lock
-      # whatever its intent says. Dropping that would let a second attempt take
-      # a branch another attempt is on, and — because both takeover paths DELETE
-      # prior locks before re-deriving — would RELEASE an existing branch lock
-      # on the next takeover rather than merely not take it.
+      # The repo subtest is a scope marker, not coverage, and aihub#416 (landed
+      # in aihub#423) inverted the observable it marks while leaving the decision
+      # intact. It used to read "a read declaration on a repo still takes its
+      # branch lock", pinning the fact that the intent rule was scoped to
+      # file_scope so a `repo` entry kept its git_branch lock whatever its intent
+      # said. Today a repo declaration derives NO lock under any intent
+      # (resourceToLock in conflicts.go returns an empty pair for repo and
+      # service), so the arm asserts an empty AcquiredLocks plus zero git_branch
+      # rows for the key that declaration used to produce.
+      #
+      # derivedLock still writes the read rule on lockType rather than on
+      # res.Type, so with file_scope the only derivable type the guard is a no-op
+      # today and dropping it reddens nothing in this step. What the arm still
+      # catches is the retirement being REVERTED: a repo declaration that starts
+      # producing a row again fails that count. Its control sits inside the same
+      # subtest — a `path` entry declared beside the repo must still take its
+      # file_scope lock — because "repo takes nothing" is equally satisfied by a
+      # claim that locked nothing at all. The mapper-level statement of the same
+      # rule, across every intent value, is in
+      # internal/domain/lock_derivation_retired_test.go, which needs no database
+      # and therefore has no step of its own here.
       #
       # Five subtests of ONE function, not five functions, for the reason the
       # aihub#334 and aihub#151 entries give: the gate counts functions and this
@@ -3527,12 +3542,27 @@ jobs:
       # predicate, skipped by the sweep, and unreachable by claim, force_takeover
       # or complete_attempt because all three refuse a terminal work item.
       #
-      # The last arm is the one that makes this a step rather than a unit test:
-      # a `{"type":"repo"}` entry with no task_branch derives git_branch
-      # `<repo>/main`, and the claim conflict probe matches holders whose attempt
-      # is running OR paused — so one pause-then-cancel of a wi declaring a repo
-      # blocks every later claim of that repo's default branch, permanently, with
-      # no holder to negotiate with.
+      # 'the_party_those_locks_were_blocking_can_now_claim' is what makes this a
+      # step rather than a unit test: it ends at a real FnClaimWorkItem by a
+      # second work item, and the same claim is measured BEFORE the cancel as a
+      # fixture check, so the unblocking cannot be satisfied by a lock that never
+      # blocked anybody.
+      #
+      # The cheap route into that blast radius is gone (aihub#416, landed in
+      # aihub#423). It used to be this: a `{"type":"repo"}` entry with no
+      # task_branch DERIVED the git_branch key `<repo>/main`, so one
+      # pause-then-cancel of a wi that merely declared a repo blocked every later
+      # claim of that repo's default branch. Repo and service declarations are
+      # advisory now and derive no lock at all.
+      #
+      # The leak did not go with it, which is why the step stays. git_branch and
+      # deploy_env are still legal lock types, still reachable through an explicit
+      # requested_locks (as worktree and tcp_port always were); pause still
+      # retains every type except file_scope; and the claim conflict probe still
+      # matches holders whose attempt is running OR paused. So the fixture takes
+      # both types through requested_locks rather than through the declarations,
+      # and the block it produces is still permanent, with no holder to negotiate
+      # with — the wi is cancelled.
       #
       # 'the_cancel_does_not_touch_another_work_items_lock' is the paired control:
       # the release is scoped by work_item_id and reaches across claim epochs, so

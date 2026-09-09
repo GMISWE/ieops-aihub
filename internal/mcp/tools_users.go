@@ -80,7 +80,26 @@ func (s *Server) registerUserTools() {
 		InputSchema: objectSchema(map[string]any{
 			"id":           prop("string", "User ID"),
 			"display_name": prop("string", "Updated display name"),
-			"role":         prop("string", "Updated global role: writer or admin"),
+			// aihub#496. Published as prose — "Updated global role: writer or
+			// admin" — while the sibling create path has published the same
+			// vocabulary as a real enum since aihub#463. A caller reading one tool
+			// got a machine-readable set and reading the other got a sentence
+			// about one, for the same column.
+			//
+			// The values come from domain, the package that refuses anything
+			// outside them, so the published set and the accepted set are one
+			// value. Same caveat as everywhere else on this surface: the enum
+			// constrains the CLIENT and not this process (aihub#463 measured that
+			// the untyped AddTool path runs no schema step) — the hard refusal is
+			// domain.ValidateUserGlobalRole in handleUpdateUser, added by this
+			// same change, which answers 400 naming the field.
+			//
+			// "Global" is load-bearing: this is NOT a project member role
+			// (viewer|writer|maintainer), and neither vocabulary contains the
+			// other (aihub#411 §6.2 T2-17). `maintainer` is the mistake a caller
+			// conflating them actually makes.
+			"role": propEnum("string", "Updated global role across every project, NOT a project "+
+				"member role", domain.UserGlobalRoleList()),
 			// aihub#425/#426. handleUpdateUser has always bound this — PATCH
 			// /v1/admin/users/:id sets `author_aliases=$n` whenever the field is
 			// present — and this handler has always forwarded it, because it

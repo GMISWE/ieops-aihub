@@ -2090,7 +2090,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_complete_attempt":  {Candidates: 14, Cited: 0, Unclassified: 14, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_force_takeover":    {Candidates: 17, Cited: 0, Unclassified: 17, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_get_ready_queue":   {Candidates: 23, Cited: 2, Unclassified: 21, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_predict_conflicts": {Candidates: 20, Cited: 0, Unclassified: 19, PendingImplementation: 0, KnownDefect: 1, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_predict_conflicts": {Candidates: 20, Cited: 15, Unclassified: 0, PendingImplementation: 0, KnownDefect: 2, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
 	"pf_ship":              {Candidates: 8, Cited: 0, Unclassified: 8, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_update_step":       {Candidates: 17, Cited: 0, Unclassified: 17, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_wrap":              {Candidates: 3, Unclassified: 3},

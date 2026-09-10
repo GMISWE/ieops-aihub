@@ -52,33 +52,68 @@ second untrustworthy one.
 
 **`aihub#510` fixed one HALF of the first direction, and the half it did not fix is
 why the paragraph above still stands.** The four rules that read
-`declared_resources` — 2, 4, 5 and 6 — no longer report the caller back to itself.
+`declared_resources` — 2, 4, 5 and 6 — no longer report the caller back to itself,
+which `internal/domain/delocking_db_test.go`
+(`TestDeLockingPredictReportsAdvisoryEntries`) drives rule by rule against a second
+running work item declaring the same name.
 The two that read the **lock table** — 1 (`hard_block`) and 3 (`file_scope`) — still
 do, so a claimed work item re-predicting its own `path` declarations is still handed
-its own lock as somebody else's. Split that way because the two halves are different
+its own lock as somebody else's.
+<!-- probe-waiver: kind=known-defect | decided=2026-09-10 |
+citation=aihub#543 attrs.owner_annotations_2026_09_10 Q3 ruling; fix carried by
+aihub#564 |
+reason=the same measured defect the Open section below carries, in summary. The
+owner ruled Q3 on 2026-09-10 that it is a ledger row and not a probe, because a
+probe pinning today's answer would arrive red on the day aihub#564 lands and the
+cheapest compliant path is then deleting the probe. Both sentences are classified
+so the ledger counts the claim wherever a reader meets it, rather than counting it
+once and leaving the other unclassified. -->
+Split that way because the two halves are different
 claims: a declaration overlap is advisory and self-overlap is meaningless, whereas
 rule 1 answers "would taking this lock collide", it `return`s on the first hit and
-suppresses every rule after it, and changing that changes the value `pf-work`'s
-pre-claim gate branches on.
+suppresses every rule after it — pinned as a property of the whole ladder by
+`internal/domain/predict_rule_shape_test.go`
+(`TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt`) — and changing that
+changes the value `pf-work`'s pre-claim gate branches on.
 
 ⚠️ **The declaration half is opt-in, and it cannot be otherwise:** the exclusion
-needs `work_item_id`, so a predict that names nobody is unchanged. That is correct
+needs `work_item_id`, so a predict that names nobody is unchanged, which the
+anonymous create-preview arm of `internal/domain/delocking_db_test.go`
+(`TestDeLockingPredictReportsAdvisoryEntries`) pins where it stands. That is correct
 for the create-preview path, which names nobody because the work item does not exist
 yet — but it means an agent that omits the parameter still gets itself back.
 
 The only reliable conflict signal in this system is **the return value of
 `pf_claim_work_item`**, which reports what it actually took.
+<!-- prose-only: because=judgement -->
 
 🔴 **`aihub#416` moved the SEVERITY CEILING for `repo` and `service` entries, and
-the description now says so.** A payload of only those two types can no longer
+the description now says so** — read off a live session and compared with the
+severity vocabulary the server enforces, in
+`internal/mcp/predict_published_ceiling_test.go`
+(`TestPredictPublishedSeverityCeilingUsesTheEnforcedVocabularies`). A
+payload of only those two types can no longer
 return `hard_block`: they derive no lock, so the lock-table rule cannot fire for
-them. A repo overlap reports `soft_block` (rule 2 or 4) and a service overlap
-`info` (rule 6), both from a join on other running work items' declarations.
-`path` / `document` / `section` are unaffected and can still return `hard_block`.
+them — the two halves of that are held by
+`internal/domain/read_intent_scope_test.go`
+(`TestReadIntentIsHonouredOnlyOnTheTypesThatDeriveALock`) and by
+`TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt`, and its published
+statement by `TestPredictPublishedSeverityCeilingUsesTheEnforcedVocabularies`.
+A repo overlap reports `soft_block` (rule 2 or 4) and a service overlap
+`info` (rule 6), both from a join on other running work items' declarations, which
+`internal/domain/delocking_db_test.go`
+(`TestDeLockingPredictReportsAdvisoryEntries`) drives and
+`TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt` pins per rule.
+`path` / `document` / `section` are unaffected and can still return `hard_block`,
+driven for a path by `internal/domain/file_scope_repo_key_db_test.go`
+(`TestFileScopeRepoKey_PredictRule1NoHardBlockAcrossRepos`) and held for all three
+types by `TestResourceToLock_PathStillDerivesFileScope`.
 
 That change is published rather than left to be measured because it is invisible
 to a caller otherwise — same parameters, same response shape, same 200 — and
-`pf-work`'s pre-claim gate branches on `severity`. **Read `severity: "info"` on a
+`pf-work`'s pre-claim gate branches on `severity`.
+<!-- prose-only: because=cross-repo -->
+**Read `severity: "info"` on a
 service as "somebody else declares it, judge for yourself", not as "checked, no
 conflict":** the exclusion that value used to stand behind no longer exists.
 
@@ -87,22 +122,38 @@ conflict":** the exclusion that value used to stand behind no longer exists.
 `internal/mcp/tools_conflicts.go` (`registerConflictTools`) checks only that
 `declared_resources` is present and passes the **whole argument map** to
 `pkg/client/client.go` (`PredictConflicts`) → `POST /v1/conflicts/predict`, bound by
-`internal/server/router.go` (`handlePredictConflicts`).
+`internal/server/router.go` (`handlePredictConflicts`) — all three observed on the
+request a fake aihub really received, in `internal/mcp/predict_wire_shape_test.go`
+(`TestPredictForwardsTheWholeArgumentMapAndChecksOnlyForTheDeclaration`).
 
 Wholesale forwarding again, so there is no hop-2 drift surface. The entry shape is
 published through the shared `internal/mcp/tools_lifecycle.go`
 (`declaredResourcesProp`), which is where the `type`-versus-lock-type distinction and
-the per-type URI scheme rules are stated.
+the per-type URI scheme rules are stated — the sharing itself by
+`internal/mcp/predict_published_ceiling_test.go`
+(`TestPredictPublishesTheSharedDeclaredResourcesEntryShape`), the two rules by
+`internal/mcp/resource_schema_test.go`
+(`TestDeclaredResourcesProp_EnumeratesDeclaredTypesNotLockTypes`) and
+(`TestDeclaredResourcesProp_PublishesTheEnforcedURISchemes`).
 
 ## hop 4 — what it actually does
 
 - Reports predicted lock conflicts for the supplied resources and `will_unlock` —
-  which blocked work item would be unblocked.
+  which blocked work item would be unblocked — with the rules driven in
+  `internal/domain/delocking_db_test.go`
+  (`TestDeLockingPredictReportsAdvisoryEntries`) and the `will_unlock` half in
+  `internal/server/dependencies_slug_db_test.go`
+  (`TestDependencyEndpointsResolveSlugs`).
 - **`intent: "read"` is honoured on `path`/`document`/`section` only.** On a repo or
   service entry `read` is inert for a different reason since `aihub#416`: those two
-  take no lock under any intent, so there is nothing for it to suppress.
+  take no lock under any intent, so there is nothing for it to suppress —
+  `internal/domain/read_intent_scope_test.go`
+  (`TestReadIntentIsHonouredOnlyOnTheTypesThatDeriveALock`) walks the live declared
+  type vocabulary against every intent and holds both halves of that "only".
 - **Three of the six declared types derive NO lock**: `external_ref` (always), plus
-  `repo` and `service` since `aihub#416`. `external_ref` additionally produces no
+  `repo` and `service` since `aihub#416`, each checked at the mapper by
+  `internal/domain/lock_derivation_retired_test.go`
+  (`TestResourceToLock_RepoAndServiceDeriveNoLock`). `external_ref` additionally produces no
   warning, so it remains the one entry that can be declared, accepted, and produce
   no signal of any kind. `repo` and `service` do produce a signal — rules 2, 4
   and 6 below.
@@ -113,7 +164,11 @@ the per-type URI scheme rules are stated.
   function. Its description changed with it, from "is working on the same repo
   **branch**" to "**declares** the same repo", because no branch name participates
   in the judgement any more.
-- **Rule 6 is new** (`service`, `info`, not gated on `dry_run`). Without it, retiring
+- **Rule 6 is new** (`service`, `info`, and it is not gated on `dry_run`), which
+  `internal/domain/delocking_db_test.go`
+  (`TestDeLockingPredictReportsAdvisoryEntries`) drives under both values of
+  `dry_run` and `TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt` holds
+  as a property of the ladder. Without it, retiring
   `deploy_env` would have left a service declaration with no rule at all.
 - **`last_active_age_seconds`** rides on the repo and service predictions: how long
   ago that attempt reported activity. It is what makes deploy preflight an existing
@@ -126,13 +181,22 @@ the per-type URI scheme rules are stated.
   top-level `severity` rose with it. The exclusion is bound as a parameter inside
   the two shared containment fragments (`internal/domain/conflicts.go`
   (`notCallersOwnWISQL`)) rather than at the four call sites, so a fifth rule
-  written with them inherits it.
+  written with them inherits it — the inheritance itself is what
+  `internal/domain/predict_self_exclusion_test.go`
+  (`TestPredictSelfExclusionIsBoundInsideTheSharedContainmentFragments`) holds,
+  since no behavioural arm can reach a rule that does not exist yet.
 - ⚠️ **`work_item_id` may be an id OR a slug, and the exclusion depends on the
   `aihub#357` resolution of the two.** A slug matches no `work_items.id`, so a
   filter bound to the raw parameter would silently do nothing for the spelling
-  `pf-work`'s own Mode B sends.
-- `file_scope` keys are namespaced by project, and a `path` entry without `repo`
-  keeps the two-segment key form that conflicts with every repo's copy of that path.
+  `pf-work`'s own Mode B sends, which the by-slug arm of
+  `internal/domain/delocking_db_test.go`
+  (`TestDeLockingPredictReportsAdvisoryEntries`) drives on its own.
+- `file_scope` keys are namespaced by project
+  (`internal/domain/conflicts_predict_test.go`
+  (`TestPredictConflicts_FileScopeProjectScoped`)), and a `path` entry without `repo`
+  keeps the two-segment key form that conflicts with every repo's copy of that path
+  (`internal/domain/file_scope_repo_key_db_test.go`
+  (`TestFileScopeRepoKey_UnqualifiedDeclarationStillConflictsWithQualifiedHolder`)).
 
 ## hop 5 — what comes back
 
@@ -182,6 +246,7 @@ worth recording.
   paragraph is carried as a `known-defect` ledger row rather than pinned by a
   probe, because a probe would arrive red on the day of the fix; `aihub#564`
   (filed 2026-09-10) carries that fix, and the row goes when it lands.
+  <!-- prose-only: because=external-state -->
 - **The read-intent false negative is still unfixed**, and no adjudicated row
   commits to fixing it. `aihub#416` (landed 2026-09-09) and `aihub#510` (2026-09-09)
   both left it alone.

@@ -142,9 +142,19 @@ the prefix of every request.
 Two of those descriptions are corrections rather than documentation. `user_id`'s
 hop-4 predicate is `reporter_user_id` only, so "Filter by user ID" promised a
 superset and the excess came back as a silent empty page — "which wis are mine"
-returned the ones the caller filed and none they were working on. And `kind` is a
-deprecated FILTER alias here, which is a different parameter from the `kind` that
-`pf_update_work_item` withdrew.
+returned the ones the caller filed and none they were working on;
+`internal/domain/work_items_list_filters_test.go`
+(`TestBuildListWorkItemsWhere_EveryFilterFieldReachesSQL`) binds the filter field to
+that one column with its value bound as an argument, and
+`internal/mcp/tools_update_wi_schema_test.go`
+(`TestListWorkItemsUserIDDescriptionDisclosesReporterOnly`) requires the published
+description to keep saying so. And `kind` is a deprecated FILTER alias here, a
+different parameter from the `kind` that `pf_update_work_item` withdrew —
+`internal/mcp/tools_list_wi_schema_test.go`
+(`TestListWorkItemsPublishesBothTypeSpellings`) requires both spellings to be published
+and `kind`'s own description to mark itself deprecated and point at `wi_type`, while
+`internal/mcp/tools_update_wi_schema_test.go` (`TestUpdateWorkItemDoesNotPublishKind`)
+holds the withdrawal on the other tool.
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -155,11 +165,19 @@ into the query string for `pkg/client/client.go` (`ListWorkItems`) →
 Three forwarding tables, and the split is the contract:
 
 - `listWorkItemsStringParams` — forwarded verbatim via `scalarArg`, so a JSON number
-  is accepted where a string is published.
+  is accepted where a string is published, which
+  `internal/mcp/tools_list_wi_schema_test.go`
+  (`TestListWorkItemsForwardsEveryPublishedParamByValue`) drives one shape at a time
+  off the `listWIWireProbes` table, including the `float64` spellings of `limit` and
+  `min_similarity` that `strArg` would have dropped.
 - `listWorkItemsBoolParams` — forwarded only when TRUE, and a value that is not a
-  boolean is **rejected** rather than defaulted to false. Defaulting is what made
-  `ready_only: "true"` return the unfiltered list, indistinguishable from not
-  sending it.
+  boolean is **rejected** rather than defaulted to false; both halves live in
+  `internal/mcp/tools_list_wi_schema_test.go` — the omission
+  (`TestListWorkItemsOmitsFalseBooleans`) and the refusal, in the `wantErr` rows
+  `yes` and `2` that (`TestListWorkItemsForwardsEveryPublishedParamByValue`) runs.
+  Defaulting is what made `ready_only: "true"` return the unfiltered list,
+  indistinguishable from not sending it.
+  <!-- prose-only: because=history -->
 - `listWorkItemsCSVParams` (`ids`, `status`) — accept either a CSV string or a JSON
   array. Both shapes occur: every skill that filtered by status wrote
   `status=["wrapped"]`, `strArg` returned `""`, and the release flow listed the
@@ -167,60 +185,126 @@ Three forwarding tables, and the split is the contract:
 
 Name agreement between those tables and the schema is hop 2 and is **not
 sufficient** — it was green throughout the period `status=["wrapped"]` was being
-discarded, because the name matched and the decoder could not read the shape. That
-is why `buildListWorkItemsParams` is a named function with a by-value test over it.
+discarded, because the name matched and the decoder could not read the shape.
+<!-- prose-only: because=history -->
+That is why `buildListWorkItemsParams` is a named function with a by-value test over
+it: `internal/mcp/tools_list_wi_schema_test.go` calls it per shape
+(`TestListWorkItemsForwardsEveryPublishedParamByValue`), per real skill call
+(`TestListWorkItemsForwardsRealSkillCallShapes`) and per array-or-string decode
+(`TestListWorkItemsCSVArgAcceptsArrayAndString`), and requires every published
+parameter to have a value probe at all
+(`TestListWorkItemsEveryPublishedParamHasAWireProbe`).
 
 ## hop 4 — what it actually does
 
 - `query` and `similar_to` are **mutually exclusive** and neither combines with
-  `sort`/`order`/`cursor`. `similarity` compares only WITHIN one result set; there is
-  no relevance filter, so ANY input returns a full page. Judge by
-  `semantic.ranked_candidates` and by reading the goals.
+  `sort`/`order`/`cursor` — `internal/server/routes_wi_similar_to_db_test.go`
+  (`TestSimilarTo_RejectionsAreExplicitNeverSilent`) requires a 400 carrying the words
+  "mutually exclusive" for the pair and a 400 for each of the three ordering
+  parameters. `similarity` compares only WITHIN one result set, and unless
+  `min_similarity` sets a floor ANY input returns a full page: the same file's
+  (`TestSimilarTo_MinSimilarityIsReachableAndDefaultsOff`) asserts the default floor
+  is 0 and that an orthogonal row — cosine exactly 0 — still comes back on the page,
+  and (`TestSimilarTo_SemanticBlockDistinguishesThePaths`) pins the query-relative
+  scale the response publishes. Judge by `semantic.ranked_candidates` and by reading
+  the goals.
 - `min_similarity` above 0 without `query` or `similar_to` is a 400, never a silent
-  no-op. 0 is the default, means OFF, and is always accepted. No globally valid
+  no-op — `internal/server/routes_wi_similar_to_db_test.go`
+  (`TestSimilarTo_SemanticBlockDistinguishesThePaths`) sends it once alongside a
+  `query=` the server can only answer from ILIKE and once entirely alone, and requires
+  400 for both. 0 is the default, means OFF, and is always accepted. No globally valid
   value exists — measured, garbage and real queries overlap on every
   similarity-derived statistic — so none is ever defaulted.
 - `limit` above 200 is served as 200 **and reported in `request_adjusted`**; a
-  non-integer is 400. That is both numeric rules honoured on one parameter, and it
-  is the shape `pf_get_ready_queue`'s `max` does not have.
+  non-integer is 400 — `internal/domain/work_items_status_vocab_test.go`
+  (`TestNormalizeListWorkItemsLimit`) tables the clamp,
+  `internal/mcp/request_adjusted_e2e_db_test.go`
+  (`TestE2ERequestAdjustedDisclosesListLimitClamp`) drives the disclosure end to end,
+  `internal/mcp/request_adjusted_wiring_test.go`
+  (`TestListWorkItemsResponseCarriesRequestAdjusted`) holds that the projection keeps
+  it, and `internal/server/queryparam_policy_test.go`
+  (`TestPolicyRule1_MalformedParamsAreRejectedEverywhere`) covers `limit=abc`,
+  `limit=12abc` and `limit=true`. That is both numeric rules honoured on one
+  parameter, and it stopped being the only such parameter when `aihub#432` gave
+  `pf_get_ready_queue`'s `max` a `request_adjusted` entry of its own:
+  `internal/domain/ready_queue_disclosure_test.go`
+  (`TestReadyQueueDisclosesTheMaxItAdjusted`) holds that clamp and the same
+  `internal/server/queryparam_policy_test.go` table covers `max=abc` and `max=5x`.
 - `ids` bounds the query to projects the caller can see. An inaccessible `project=`
   answers 404 while ids the caller cannot see are silently omitted, and **neither
-  says whether the thing exists**.
+  says whether the thing exists** — `internal/domain/work_items_list_filters_test.go`
+  (`TestBuildListWorkItemsWhere_AccessibleProjectsBoundsAnUnscopedQuery`) holds that
+  the allow-list reaches the SQL as a project clause, and
+  `internal/server/project_visibility_gate_test.go`
+  (`TestProjectVisibility_NonMemberGetsTheSharedNotFound`) holds that the denial is
+  the shared 404 and does not name the project it refused.
 - `cursor` is refused with a 400 when it is not a token this endpoint issued
   (`aihub#382`, moved onto the shared reader by `aihub#435`), and when it is, the
-  caller's own string is forwarded — trimmed, never re-serialised. The
-  `::timestamptz` cast belongs to the domain, and re-printing a parsed timestamp
-  here would be a second conversion upstream of the one that counts.
+  caller's own string is forwarded — trimmed, never re-serialised;
+  `internal/server/list_work_items_cursor_test.go` holds the refusal before any query
+  runs (`TestListWorkItems_UnparseableCursorRejectedBeforeDB`) and the verbatim
+  forwarding of a token `next_cursor` would emit
+  (`TestListWorkItems_WellFormedCursorReachesTheFilterVerbatim`), while
+  `internal/server/cursor_validation_test.go`
+  (`TestCursor_EveryCursorParamGoesThroughOneReader`) is what keeps this endpoint on
+  the shared reader. The `::timestamptz` cast belongs to the domain, and re-printing a
+  parsed timestamp here would be a second conversion upstream of the one that counts.
 
 ## hop 5 — what comes back
 
 `internal/mcp/list_wi_slim.go` (`slimListWorkItemsResult`) drops every item key whose
 value is null — `content` plus six that mean "none" — losslessly, by a per-value
-check rather than by assertion. So on this tool **an absent key means null**, which
-the description states as an invariant rather than as a field list: a checked-in
-list of droppable fields would rot exactly as quietly as the response shape it
-describes. `seq` and `scenario` are deliberately NOT among them despite passing the
-same rule.
+check rather than by assertion, which `internal/mcp/list_wi_slim_e2e_test.go` holds in
+both directions: the seven deletions with the reason each is lossless
+(`TestListWorkItemsResponseDropsReconstructibleFields`) and the reverse half a
+delete-everything projection would fail
+(`TestListWorkItemsResponseKeepsEveryConsumedField`), with
+`internal/mcp/list_wi_slim_test.go`
+(`TestSlimListWorkItems_KeepsNonNullValuesOfNullDroppedFields`) covering the guard
+those two are blind to. So on this tool **an absent key means null**, which the
+description states as an invariant rather than as a field list: a checked-in list of
+droppable fields would rot exactly as quietly as the response shape it describes.
+`seq` and `scenario` are deliberately NOT among them despite passing the same rule,
+held together in `internal/mcp/list_wi_slim_test.go`
+(`TestSlimListWorkItems_KeepsValueGatedCandidates`) so that keeping one and dropping
+the other — the revision this card is the record of — is red.
 
-That projection is why `content` is always null here and why the spec step is told
-to read a work item with `pf_get_work_item` instead.
+That projection is why `content` is always null here:
+`internal/domain/list_work_items_select_columns_test.go`
+(`TestWorkItemListSelectsCarryTheCASTokenAndNotTheBody`) censuses both full-record
+SELECTs, the paging one and the vector one, and requires neither to project
+`wi.content`. The coding scenario's spec step is told to read a work item with
+`pf_get_work_item` instead for that reason.
+<!-- prose-only: because=cross-repo -->
 
 ## Policy
 
 - **§6.1 T1-5** — delete-list is the only projection shape; this is the tool it was
   proved on.
 - **§6.1 T1-2 / T1-12** — `limit` is the reference implementation of both numeric
-  rules: 400 on unparseable, clamp-and-disclose on out of range.
+  rules: 400 on unparseable, clamp-and-disclose on out of range, held by the four arms
+  the hop-4 bullet above names, of which `internal/server/queryparam_policy_test.go`
+  (`TestPolicyRule1_MalformedParamsAreRejectedEverywhere`) is the one that sweeps the
+  rule across every endpoint rather than this parameter alone.
 - **§6.1 T1-6 — LANDED.** This endpoint got there first (`aihub#382`); `aihub#435`
   moved the check into `internal/server/queryparam.go` (`queryCursor`) and gave
   `pf_recall` and `pf_read_events`, which had none, the same one.
 - **§6.1 T1-10** — the resident schema budget is a property of the whole
-  `tools/list` payload; this tool carries the only per-tool ceiling that existed
-  before that ruling, and the ruling is to derive per-tool ceilings from a payload
-  budget rather than to add 47 more constants.
+  `tools/list` payload, and `internal/mcp/tools_list_payload_budget_test.go`
+  (`TestToolsListPayloadStaysWithinItsWireBudget`) is where that is now enforced,
+  bounding the whole serialised payload and the largest single tool's share of it;
+  this tool carries the only per-tool ceiling that existed before that ruling
+  (`internal/mcp/tools_list_wi_schema_size_test.go`,
+  `TestListWorkItemsSchemaStaysWithinItsWireBudget`), `pf_update_step` gained the
+  second one in `aihub#543`'s first probe wave, and the ruling is to derive per-tool
+  ceilings from a payload budget rather than to add 47 more constants.
 
 ## Open
 
-- **§6.4 item 8** — the `user_id` predicate is corrected in the description only.
-  Widening it to cover attempt owner and watchers changes every existing caller's
-  result set and is deliberately not done here.
+- **§6.4 item 8** — the `user_id` predicate is corrected in the description only,
+  and the two arms the hop-1 paragraph above names — the description
+  (`TestListWorkItemsUserIDDescriptionDisclosesReporterOnly`) and the SQL
+  (`TestBuildListWorkItemsWhere_EveryFilterFieldReachesSQL`) — are what keep the
+  correction and the predicate agreeing. Widening it to cover attempt owner and
+  watchers changes every existing caller's result set and is deliberately not done
+  here.

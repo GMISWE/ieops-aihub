@@ -3,6 +3,9 @@ package domain
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
 	"os"
 	"regexp"
@@ -450,5 +453,99 @@ func TestRememberRefusesFractionalBaseStrengthBeforeThePool(t *testing.T) {
 		require.NotNil(t, panicked,
 			"base_strength=%g is a whole number inside the range and Remember returned %v "+
 				"instead of proceeding to the pool", float64(DefaultBaseStrength), err)
+	}
+}
+
+// TestUpdateMemoryInheritsTheStrengthGuardRatherThanRestatingIt is aihub#543
+// wave 2, slice L6 — the structural half of the pf_update_memory card's
+// integrality sentence.
+//
+// The card says the whole number rule "is inherited here rather than decided
+// here … so `2.5` is a 400 on this tool without a line of this tool's own code
+// changing — which is the point of the guard sitting in `Remember` rather than
+// in either handler."
+//
+// The three arms above hold what the guard DOES. What they cannot show is that
+// pf_update_memory reaches it, and that turns out to be the load-bearing half:
+// the nil-pool technique those arms use does not transfer here, because
+// UpdateMemory calls GetLatestByID before it builds anything, so a nil pool
+// panics on the read rather than telling you what the guard would have said.
+// The inheritance is therefore asserted as a code property — one call to
+// Remember, and no strength check of its own — with the 400 itself driven
+// against a real database by TestUpdateMemory's own base_strength subtests.
+//
+// Why "no check of its own" is asserted rather than just "calls Remember": a
+// second copy of the rule inside UpdateMemory would satisfy a call-site check
+// perfectly and would be exactly the drift aihub#411 T1-3 is about — one column
+// with more than one answer, each locally self-consistent. The two directions
+// together say the rule is in one place and this path reaches it.
+//
+//	M1  make UpdateMemory call validateBaseStrength itself before
+//	    building the RememberRequest                              RED (RESTATED)
+//	M2  make UpdateMemory call ValidateIntegralStrength itself    RED (RESTATED)
+//	M3  have UpdateMemory INSERT directly instead of calling
+//	    Remember                                                  RED (NOT_INHERITED)
+//	M4  rename Remember and update only the call site             RED
+//	    (NOT_INHERITED — the arm names the function the card names,
+//	    so a rename is a card change too)
+func TestUpdateMemoryInheritsTheStrengthGuardRatherThanRestatingIt(t *testing.T) {
+	const src = "memory.go"
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, src, nil, 0)
+	require.NoError(t, err, "parse %s", src)
+
+	bodies := map[string]*ast.BlockStmt{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Recv != nil || fn.Body == nil {
+			return true
+		}
+		if fn.Name.Name == "UpdateMemory" || fn.Name.Name == "Remember" {
+			bodies[fn.Name.Name] = fn.Body
+		}
+		return true
+	})
+	require.Contains(t, bodies, "UpdateMemory",
+		"%s no longer declares UpdateMemory, so this arm walked nothing", src)
+	require.Contains(t, bodies, "Remember",
+		"%s no longer declares Remember, so the function the guard is supposed to sit in "+
+			"cannot be checked and the inheritance claim is unverifiable", src)
+
+	calls := func(body *ast.BlockStmt) map[string]bool {
+		out := map[string]bool{}
+		ast.Inspect(body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch fn := call.Fun.(type) {
+			case *ast.Ident:
+				out[fn.Name] = true
+			case *ast.SelectorExpr:
+				out[fn.Sel.Name] = true
+			}
+			return true
+		})
+		return out
+	}
+
+	fromUpdate := calls(bodies["UpdateMemory"])
+	fromRemember := calls(bodies["Remember"])
+
+	require.True(t, fromUpdate["Remember"],
+		"NOT_INHERITED: UpdateMemory does not call Remember. The card's account of why 2.5 is "+
+			"a 400 on pf_update_memory without a line of its own code changing rests entirely "+
+			"on this path reaching the guard; a write that bypasses Remember bypasses "+
+			"validateBaseStrength with it.")
+	require.True(t, fromRemember["validateBaseStrength"],
+		"the guard has left Remember, so \"inherited here rather than decided here\" now "+
+			"points at a function that no longer decides it")
+
+	for _, guard := range []string{"validateBaseStrength", "ValidateIntegralStrength"} {
+		require.False(t, fromUpdate[guard],
+			"RESTATED: UpdateMemory calls %s itself. The card says the rule is inherited "+
+				"rather than decided here, and a second copy is the aihub#411 T1-3 shape — one "+
+				"column, two locally-consistent answers, drifting apart at the next edit. If "+
+				"the duplication is deliberate, the card is what has to change.", guard)
 	}
 }

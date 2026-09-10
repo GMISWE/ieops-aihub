@@ -243,7 +243,8 @@ func TestListWorkItemsResponseDropsReconstructibleFields(t *testing.T) {
 //
 // ⚠️ Read the citations as "why it is plausible this is read", NOT as proof.
 // The skill documentation this repo ships is measurably out of sync with this
-// response: using-polyforge/fragments/output-format.md:26 has the model render a
+// response: using-polyforge/fragments/output-format.md (its multi-wi column list,
+// the file's closing line) has the model render a
 // multi-wi list with an `owner_display` column, and no item this endpoint serves
 // has ever had that field (domain.WorkItem has reporter_display; owner_display
 // is the ready queue's ReadyItem/RunningItem). So a field NAMED in the docs may

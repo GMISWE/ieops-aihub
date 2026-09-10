@@ -56,7 +56,8 @@ package mcp
 // No field is removed for "looks unused" either. That judgement has no
 // error-detection path on an LLM-facing API, and the evidence that would have to
 // back it does not exist. The skill documentation is measurably out of sync with
-// this response: using-polyforge/fragments/output-format.md:26 tells the model to
+// this response: using-polyforge/fragments/output-format.md (its multi-wi column
+// list) tells the model to
 // render a multi-wi list with an `owner_display` column, and no work item served
 // by this endpoint has ever had such a field (domain.WorkItem has
 // reporter_display; owner_display belongs to the ready queue's ReadyItem and

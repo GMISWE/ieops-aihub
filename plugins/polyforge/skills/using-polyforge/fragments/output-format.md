@@ -13,10 +13,9 @@ Every polyforge skill response MUST follow this format exactly. Violations = bug
 | goal | <truncated to 60 chars> |
 | status | running |
 | owner | you (ra_8d2E4F1a) |
-| locks | git_branch:polyforge/wi-xxx |
+| locks | file_scope ×2 |
 | blocked | — |
 | step | 2/4 review |
-| expires | 28min |
 
 ## Next steps
 - `/pf-spec` — write spec, AI guides scope definition

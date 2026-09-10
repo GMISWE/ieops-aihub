@@ -178,7 +178,9 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
    ```
    pf_predict_conflicts(declared_resources=<new wi's resources>, dry_run=true)
    ```
-   Show impact. If hard conflict → stop and explain.
+   Show impact. If hard conflict → stop and explain. Severity ceiling (aihub#423): a
+   repo/service-only declaration never reports `hard_block` any more — read its `info` as
+   "somebody else declares it too", not as "no conflict".
 
 4. **Create** (do NOT claim yet):
    ```

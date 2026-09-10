@@ -136,13 +136,19 @@ const (
 // pf-spec / pf-plan are header-only (routerModeHeaderOnly): no fragments, so their number is the
 // header alone and is identical on both branches. That equality is not a coincidence to be
 // tidied away — it is the assertion that the engine branch really is not consulted in that mode.
+// aihub#553's 1.1.31 batch moved these: aihub#519 corrected output-format.md's Status example
+// (the de-locked locks line, the lease-era expires row), -34 chars in the header of every
+// routed skill; aihub#553 grew engine.native.md (native branch only) by +84 for the explicit
+// dispatch-model instruction. Net native: 9,227 -> 9,277, inside its existing band, so its
+// entry deliberately keeps the old floor rather than raising the gate toward the ~9,460
+// discriminator ceiling.
 var routerBudget = map[string]int{
-	"pf-execute/superpowers": 6988 + routerGateSlack,
+	"pf-execute/superpowers": 6954 + routerGateSlack,
 	"pf-execute/native":      9227 + routerGateSlack,
-	"pf-plan/native":         1735 + routerGateSlack,
-	"pf-plan/superpowers":    1735 + routerGateSlack,
-	"pf-spec/native":         1735 + routerGateSlack,
-	"pf-spec/superpowers":    1735 + routerGateSlack,
+	"pf-plan/native":         1701 + routerGateSlack,
+	"pf-plan/superpowers":    1701 + routerGateSlack,
+	"pf-spec/native":         1701 + routerGateSlack,
+	"pf-spec/superpowers":    1701 + routerGateSlack,
 }
 
 // routerBranches are the engine branches the router can select. The gate measures every one:

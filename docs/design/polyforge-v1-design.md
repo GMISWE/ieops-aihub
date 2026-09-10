@@ -1963,10 +1963,9 @@ pf_get_ready_queue(project, max?)
 | owner   | Wang Xiaokang (ra_8d2E4F1a)            |
 |         | 格式：<actor_display> (<attempt_id>)   |
 |         | 自己持有时：you (<attempt_id>)         |
-| locks   | git_branch:polyforge/wi-xxx            |
+| locks   | file_scope ×2                          |
 | blocked | —                                      |
 | step    | 2/4 review                             |
-| expires | 28min                                  |
 
 ## 下一步
 - `/pf-spec` — 写 spec，AI 引导定义范围

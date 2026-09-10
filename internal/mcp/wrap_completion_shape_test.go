@@ -500,7 +500,7 @@ func fencedBlocks(t *testing.T, text string) []string {
 		}
 	}
 	if open {
-		t.Fatalf("the markdown has an unclosed fence, so this walk read the tail of the file as "+
+		t.Fatalf("the markdown has an unclosed fence, so this walk read the tail of the file as " +
 			"one block and its prose as code")
 	}
 	return out

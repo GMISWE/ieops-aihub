@@ -144,15 +144,11 @@ Started executing <slug>, N steps total.
 `engine.native.md` carries this as a two-line branch in the auto loop. The reasoning:
 
 A step template that hits a blocker calls `pf_emit_event(note)` + `pf_pause_attempt` and hands
-the wi to a human. From that moment the server hard-rejects every call that authenticates
-through `verifyAttemptCredential` — `pf_update_step`, `pf_save_artifact`, `pf_complete_attempt`,
-`pf_commit`, `pf_acquire_locks`, `pf_wrap`. One tool keeps working, by design: `pf_emit_event`'s
-lighter credential check reads the attempt id, the claim epoch and the secret, never the
-attempt's status, so a paused attempt may still write notes to the timeline (owner ruling,
-2026-09-10, aihub#585) — the reason for a pause is often best recorded after it. Pausing
-therefore cannot corrupt step state; the loop simply cannot advance. What it *can* do is walk
-into a cascade of surprise credential errors and retry the rejected calls, which is what this
-branch exists to prevent.
+the wi to a human. From that moment the attempt is no longer `running`, and the server's
+`verifyAttemptCredential` hard-rejects EVERY credential-checked `pf_*` call — `pf_update_step`,
+`pf_save_artifact`, `pf_complete_attempt`, all of them. Pausing therefore cannot corrupt step
+state; the loop simply cannot advance. What it *can* do is walk into a cascade of surprise
+credential errors and retry them, which is what this branch exists to prevent.
 
 Break out of the loop on either signal:
 

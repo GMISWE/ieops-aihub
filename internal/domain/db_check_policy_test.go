@@ -60,7 +60,8 @@ package domain
 //     the call site in Remember leaves it green. That half is behavioural and
 //     lives in db_check_policy_db_test.go and work_item_field_validation_db_test.go.
 //   - It does not mean the answer is 400. dispGuarded records the cases where it
-//     deliberately is not (scenario answers 501), with the status written down.
+//     deliberately is not (scenario answers 405 NOT_IMPLEMENTED), with the
+//     status written down.
 //   - For dispMirroredByTest it means the named test exists and looks like what
 //     it claims, not that the named test is correct. That test's own assertions
 //     are its business; this registry's job is that no CHECK is unaccounted for.
@@ -607,12 +608,14 @@ var dbCheckPolicies = map[string]dbCheckPolicy{
 		GoVocab:     WorkItemPriorityList(),
 	},
 	"work_items.work_items_scenario_check": {
-		Where:       "CreateWorkItem (work_items.go): `req.Scenario != \"coding\"` -> 501 NOT_IMPLEMENTED",
+		Where:       "CreateWorkItem (work_items.go): `req.Scenario != \"coding\"` -> 405 NOT_IMPLEMENTED",
 		Disposition: dispGuarded,
 		Reason: "STRICTER than the CHECK, so no value can reach the constraint and the 500 is unreachable. " +
-			"The answer is 501, not 400, and that is deliberate for a reserved-but-unbuilt scenario — " +
-			"whether an OUT-of-vocabulary scenario deserves a 400 instead is a separate question this " +
-			"entry does not settle (carried over verbatim from aihub#396's registry).",
+			"The answer is NOT_IMPLEMENTED (HTTP 405 — codeToHTTPStatus, errors.go), not 400, and that " +
+			"is deliberate for a reserved-but-unbuilt scenario — whether an OUT-of-vocabulary scenario " +
+			"deserves a 400 instead is a separate question this entry does not settle (carried over from " +
+			"aihub#396's registry, whose entry said \"501\" — a status this code never returned; " +
+			"measured and corrected 2026-09-10, aihub#592).",
 	},
 	"work_items.work_items_source_check": {
 		Where:       "domain.workItemSources (work_item_fields.go), via validateWorkItemSource",

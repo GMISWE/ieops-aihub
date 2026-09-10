@@ -12,11 +12,14 @@ package mcp_test
 // Four of five is not a rounding error here. `public` is the one tier that
 // changes WHO CAN READ the row: internal/server/router.go routes GET /share/:id
 // to internal/server/routes_artifacts.go (`handleSharedArtifact`), which is
-// unauthenticated and gates on `visibility == "public"`. That handler's own
-// header already records the reachability — "`public` is settable by a project
-// writer straight from POST /v1/memories … so it is not by itself a deliberate
-// publication" — which is a fact about THIS tool, written on the read side, and
-// published nowhere the caller of this tool could see it.
+// unauthenticated and gates on `visibility == "public"`. The read side already
+// records the reachability — "`public` is settable by a project writer straight
+// from POST /v1/memories … so it is not by itself a deliberate publication" —
+// in the header of `hasRenderableBody`, the serve condition that handler gates
+// through (attribution corrected 2026-09-10, aihub#592: this header used to
+// place the sentence on the handler itself). It is a fact about THIS tool,
+// written on the read side, and published nowhere the caller of this tool could
+// see it.
 //
 // WHY A GATE AND NOT JUST THE FIX
 // -------------------------------

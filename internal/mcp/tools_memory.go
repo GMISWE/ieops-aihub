@@ -782,9 +782,12 @@ func memoryTypeParamDesc() string {
 //
 // The ⚠️ is not decoration. `public` is not merely "wider than team": it is the
 // tier internal/server/router.go's GET /share/:id gates on, an UNAUTHENTICATED
-// route, and internal/server/routes_artifacts.go (`handleSharedArtifact`) names
-// this exact reachability — "`public` is settable by a project writer straight
-// from POST /v1/memories … so it is not by itself a deliberate publication". A
+// route, and internal/server/routes_artifacts.go names this exact reachability
+// — "`public` is settable by a project writer straight from POST /v1/memories …
+// so it is not by itself a deliberate publication" — in the header of
+// `hasRenderableBody`, the serve condition `handleSharedArtifact` gates through
+// (attribution corrected 2026-09-10, aihub#592: this comment used to place the
+// sentence on the handler itself). A
 // vocabulary list that presented it as the fifth item in a ladder would publish
 // the value and withhold the only thing about it a caller needs.
 //

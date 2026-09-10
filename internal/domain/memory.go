@@ -2938,7 +2938,13 @@ func GetLatestByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 }
 
 // UpdateMemoryRequest is the body for PATCH /v1/memories/:id/update. Any nil
-// (or empty-slice, for Tags) field inherits the current lineage head's value.
+// field inherits the current lineage head's value — Tags included: only a NIL
+// slice inherits. UpdateMemory copies req.Tags whenever it is non-nil, so a
+// non-nil EMPTY slice (`"tags": []` on the wire) replaces the head's list with
+// no tags rather than inheriting (measured 2026-09-10, aihub#592; this comment
+// used to claim empty-slice inherits too). The replacement half is pinned by
+// TestUpdateMemory's "tags replace rather than merge" subtest
+// (memory_latest_test.go).
 type UpdateMemoryRequest struct {
 	Content      *string
 	Visibility   *string

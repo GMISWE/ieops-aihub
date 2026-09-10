@@ -1147,11 +1147,10 @@ func handleCreateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 		defer cancel()
 
 		var req struct {
-			Email         *string  `json:"email"`
-			DisplayName   string   `json:"display_name"`
-			UserType      string   `json:"user_type"`
-			Role          string   `json:"role"`
-			AuthorAliases []string `json:"author_aliases"`
+			Email       *string `json:"email"`
+			DisplayName string  `json:"display_name"`
+			UserType    string  `json:"user_type"`
+			Role        string  `json:"role"`
 		}
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
@@ -1197,18 +1196,20 @@ func handleCreateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "email is required for human users"))
 		}
 
-		// author_aliases is NOT NULL in the schema — default to empty slice when not provided.
-		if req.AuthorAliases == nil {
-			req.AuthorAliases = []string{}
-		}
-
+		// aihub#587 (2026-09-10): author_aliases is no longer bound or written
+		// here. The parameter was withdrawn from pf_create_user/pf_update_user
+		// (owner ruling: no reader exists anywhere in internal/ or pkg/, and
+		// commit records take their author from the authenticated caller), so
+		// the column is dormant — TEXT[] NOT NULL DEFAULT '{}' in
+		// 0001_initial.sql, and the DEFAULT is what lands. Dropping the column
+		// is a destructive migration left to a separate decision.
 		userID := domain.NewID("u")
 		var id string
 		err := pool.QueryRow(ctx, `
-			INSERT INTO users (id, email, display_name, user_type, role, author_aliases)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			INSERT INTO users (id, email, display_name, user_type, role)
+			VALUES ($1, $2, $3, $4, $5)
 			RETURNING id`,
-			userID, *email, req.DisplayName, req.UserType, req.Role, req.AuthorAliases,
+			userID, *email, req.DisplayName, req.UserType, req.Role,
 		).Scan(&id)
 		if err != nil {
 			return internalError(c, "failed to create user")
@@ -1269,10 +1270,13 @@ func handleUpdateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
+		// aihub#587 (2026-09-10): author_aliases is deliberately NOT bound —
+		// the parameter was withdrawn (see handleCreateUser), so a body
+		// carrying it behaves exactly as though it carried nothing, the same
+		// silent-drop verdict every other unbound field gets from c.Bind.
 		var req struct {
-			DisplayName   *string  `json:"display_name"`
-			Role          *string  `json:"role"`
-			AuthorAliases []string `json:"author_aliases"`
+			DisplayName *string `json:"display_name"`
+			Role        *string `json:"role"`
 		}
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
@@ -1311,12 +1315,6 @@ func handleUpdateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 			args = append(args, *req.Role)
 			idx++
 		}
-		if req.AuthorAliases != nil {
-			sets = append(sets, "author_aliases=$"+itoa(idx))
-			args = append(args, req.AuthorAliases)
-			idx++
-		}
-
 		if len(sets) == 0 {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "no fields to update"))
 		}
@@ -1521,8 +1519,8 @@ func handleBootstrap(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		userID := domain.NewID("u")
 		if _, err := pool.Exec(ctx, `
-			INSERT INTO users (id, email, display_name, user_type, role, api_keys, author_aliases)
-			VALUES ($1, $2, $3, 'human', 'admin', $4, '{}')`,
+			INSERT INTO users (id, email, display_name, user_type, role, api_keys)
+			VALUES ($1, $2, $3, 'human', 'admin', $4)`,
 			userID, req.Email, req.DisplayName, apiKeysJSON,
 		); err != nil {
 			return internalError(c, "failed to create bootstrap admin user")

@@ -433,112 +433,93 @@ func publishedRequiredAndProps(t *testing.T, tool string) ([]string, map[string]
 	return schema.Required, schemaProps(t, published)
 }
 
-// TestAuthorAliasesIsWrittenAndNeverRead is the census behind the correction
-// aihub#543 wave 2 made to pf_create_user.md.
+// TestAuthorAliasesIsNeitherWrittenNorRead is the census behind the aihub#587
+// withdrawal, and it is aihub#543's arm with its direction FLIPPED.
 //
-// 🔴 The card used to say `author_aliases` "set here is how commits attribute to
-// this user", and pf_update_user.md said the same in passing. Measured
-// 2026-09-10: `users.author_aliases` has WRITERS and no READER. Nothing in
-// internal/ or pkg/ selects the column, so no code path in aihub maps a git
-// author to a user by it — commit records take their author from the
-// authenticated caller instead. That makes the field the §6.1 T1-9 shape the
-// pf_update_user card's own Policy section names: a published field nothing
-// reads, whose rule is withdraw, fix, or file.
+// History, in order, because each state corrected the previous one:
 //
-// The `display_name` control is the load-bearing half. "No SELECT mentions this
-// column" is answered `true` by a scanner that recognises no SELECT at all, and
-// that reads as compliance. `display_name` is on the same table and IS selected
-// (handleListUsers), so a broken read-detector fails there before this arm can
-// report a clean absence.
+//   - The cards used to say `author_aliases` "is how commits attribute to this
+//     user". aihub#543 (2026-09-10) measured the tree: the column had three
+//     write sites and NO reader anywhere in internal/ or pkg/ — commit records
+//     take their author from the authenticated caller — so this arm was born
+//     as TestAuthorAliasesIsWrittenAndNeverRead, holding "written, never read".
+//   - aihub#587 (2026-09-10, owner ruling): a column written for nobody is the
+//     §6.1 T1-9 shape, and the ruling was to WITHDRAW the parameter from
+//     pf_create_user and pf_update_user and remove the three write sites,
+//     rather than wire a reader. The column stays — dropping it is a
+//     destructive migration and a separate decision — dormant: neither written
+//     nor read.
 //
-// 🔴 THAT CONTROL WAS NOT ENOUGH, measured 2026-09-10 by aihub#543's review
-// round. It proves the detector sees a SELECT written as ONE string literal, and
-// nothing proved it saw one written the way this repo writes long statements. Two
-// shapes walked straight through all four subtests (mutants A3-1 and A3-2 below,
-// both executed against HEAD's classifier and both GREEN there):
+// So the floor this arm used to hold ("at least two of three write sites") is
+// now the defect it refuses: ANY SQL write of the column is a write site
+// reintroduced after the withdrawal, and any SELECT is a reader the cards say
+// does not exist. Either finding means the schemas, the cards and this arm all
+// have to move in the same change.
 //
-//	a SELECT split across two literals    the fragment holding the column carries
-//	                                      no `select` keyword, so it matched
-//	                                      neither pattern and landed in NEITHER
-//	                                      list — a clean absence reported for a
-//	                                      visible read
-//	UPDATE … RETURNING author_aliases     matched `\bupdate\b` and filed as a
-//	                                      WRITE, so a statement handing the column
-//	                                      back to the handler counted as evidence
-//	                                      for "no reader"
+// The `display_name` controls are the load-bearing half, one per direction.
+// "No SQL touches this column" is answered true by a scanner that recognises
+// no SQL at all, and that reads as compliance. `display_name` is on the same
+// table, IS selected (handleListUsers) and IS written (handleCreateUser's
+// INSERT, handleUpdateUser's SET fragment), so a broken detector fails on the
+// control before this arm can report a clean absence. Before aihub#587 the
+// subject column's own writes doubled as the write-side control; an arm
+// asserting ZERO writes needs the control on a column that still has some. The
+// two synthetic shape controls — a SELECT split across concatenated literals,
+// and an UPDATE … RETURNING — are kept from aihub#543's review round: they
+// hold the classifier itself, and what it still cannot see (a statement
+// assembled through a SLICE of fragments) is recorded in sqlLiteralFamilies'
+// doc comment, which is why the cards say "no statement this census can see"
+// rather than "none".
 //
-// The classifier now joins `+`-concatenation chains into one family and treats a
-// RETURNING clause as a read (a family can be both), and the two synthetic
-// controls below hold each shape. What it STILL cannot see is a statement
-// assembled through a slice of fragments, which is why the two cards now say "no
-// SELECT this census can see" rather than "read nowhere" — the wording and the
-// instrument were made to agree, in that order of preference: the instrument
-// first.
+// The published half flipped with the enforcement half: neither tool may
+// publish the name any more, and neither tool description may resurrect the
+// attribution claim — the withdrawal is only real if both halves hold. The
+// disclosure half (a caller still sending the name is TOLD so, via the
+// aihub#389 request_adjusted.unknown_params echo) is
+// TestAuthorAliasesWithdrawalIsDisclosed in
+// update_user_param_publication_test.go.
 //
-// The published half is asserted too: neither tool's description may claim the
-// field is used for attribution. That is the sentence that was false, and if the
-// gap ever closes both the description and the cards have to move in the same
-// change as the reader.
+// MUTANTS (aihub#587, 2026-09-10 — each applied to this tree, run, and
+// reverted; `git diff --stat` was checked non-empty before each run so a
+// verdict cannot come from a mutant that never landed):
 //
-// MUTANTS:
-//
-//	M27 enforcement: add `author_aliases` to handleListUsers' SELECT
-//	                                          RED  no_select_reads_it, naming the
-//	                                               file — and the correct repair is
-//	                                               to update the cards, not the arm
-//	M28 publication: put "used for attribution" back into either published
-//	     description                          RED  no_description_claims_a_reader
-//	M29 floor: drop `author_aliases` from TWO of its three write sites
-//	                                          RED  it_is_written_somewhere. ⚠️
-//	                                               Dropping ONE is GREEN — the floor
-//	                                               is two of three, which is what a
-//	                                               floor is for; the single-site
-//	                                               case is caught in internal/server
-//	                                               by
-//	                                               TestCreateUserResponseIsTheHandlersOwnProjection
-//	                                               (the_column_is_written)
-//	M30 floor: make the read-detector match nothing
-//	                                          RED  the display_name control
-//
-// MUTANTS (aihub#543's review round, 2026-09-10 — each applied to this tree, run,
-// and reverted; the router.go sha256 was compared before and after so a green
-// verdict cannot be a mutant that never landed):
-//
-//	A3-1 add author_aliases to handleListUsers' SELECT, written as a
-//	     CONCATENATION of two literals the way router.go's user UPDATE is
-//	                                          GREEN on HEAD's classifier — the
-//	                                               demonstration this hardening
-//	                                               answers
-//	                                          RED  on this one, no_select_reads_it
-//	                                               naming router.go:1233
-//	A3-2 append " RETURNING author_aliases" to the user UPDATE
-//	                                          GREEN on HEAD's classifier (filed as
-//	                                               a write)
-//	                                          RED  on this one, no_select_reads_it
-//	                                               naming router.go:1325
-func TestAuthorAliasesIsWrittenAndNeverRead(t *testing.T) {
+//	W1 enforcement: restore `author_aliases` (value '{}') to handleCreateUser's
+//	     INSERT column list                  RED  it_is_written_nowhere
+//	W2 enforcement: restore the `author_aliases=$n` SET fragment to
+//	     handleUpdateUser                    RED  it_is_written_nowhere
+//	W3 enforcement: add author_aliases to handleListUsers' SELECT
+//	                                          RED  no_select_reads_it
+//	W4 publication: republish the parameter on pf_create_user
+//	                                          RED  neither_tool_publishes_it
+//	W5 floor: make the write patterns match nothing
+//	                                          RED  the_detector_sees_a_real_write
+//	W6 floor: make the read patterns match nothing
+//	                                          RED  the_detector_sees_a_real_read
+func TestAuthorAliasesIsNeitherWrittenNorRead(t *testing.T) {
 	const column = "author_aliases"
-	const readControl = "display_name"
+	const control = "display_name"
 
 	writes, reads := columnSQLSites(t, column)
-	controlWrites, controlReads := columnSQLSites(t, readControl)
+	controlWrites, controlReads := columnSQLSites(t, control)
 
 	t.Run("the_detector_sees_a_real_read", func(t *testing.T) {
 		if len(controlReads) == 0 {
 			t.Fatalf("the scan found no SELECT mentioning %q, which handleListUsers declares "+
 				"(`SELECT id, email, display_name, user_type, role FROM users`). A read-detector "+
 				"that sees no reads answers \"nothing reads it\" about every column, so the "+
-				"finding below would be an artefact. Writes seen for the control: %v",
-				readControl, controlWrites)
+				"clean absence below would be an artefact.", control)
 		}
 	})
 
-	// 🔴 The two SHAPE controls, and they are the aihub#543 review-round addition.
-	// The subtest above proves the classifier sees a read written as one literal;
-	// neither it nor anything else proved it sees a read written the way this repo
-	// actually writes long statements. Both shapes are driven over a synthetic file
-	// rather than over the tree, because a control that needs the tree to contain
-	// the shape stops being a control the day somebody tidies it up.
+	t.Run("the_detector_sees_a_real_write", func(t *testing.T) {
+		if len(controlWrites) == 0 {
+			t.Fatalf("the scan found no SQL write mentioning %q, which handleCreateUser INSERTs "+
+				"and handleUpdateUser SETs. A write-detector that sees no writes anywhere would "+
+				"answer \"not written\" about every column, so the zero-write finding below "+
+				"would be an artefact.", control)
+		}
+	})
+
 	t.Run("the_detector_sees_a_concatenated_read", func(t *testing.T) {
 		const src = `package p
 
@@ -583,43 +564,51 @@ func q() string {
 		}
 	})
 
-	t.Run("it_is_written_somewhere", func(t *testing.T) {
-		if len(writes) < 2 {
-			t.Fatalf("the scan found %d SQL write(s) of %q: %v. The column is written by "+
-				"handleCreateUser, handleUpdateUser and the bootstrap admin INSERT, so fewer "+
-				"than two means this walk is not reading the tree — and a walk that finds no "+
-				"writes and no reads is silent, not clean.", len(writes), column, writes)
+	t.Run("it_is_written_nowhere", func(t *testing.T) {
+		if len(writes) > 0 {
+			t.Errorf("%q is written at %v.\naihub#587 (2026-09-10) withdrew the parameter from "+
+				"pf_create_user and pf_update_user and removed all three write sites "+
+				"(handleCreateUser's INSERT, handleUpdateUser's SET, the bootstrap admin "+
+				"INSERT), because nothing anywhere reads the column. A write site coming back "+
+				"means either the withdrawal is being reverted — republish the schemas and "+
+				"rewrite docs/mcp-cards/pf_create_user.md and pf_update_user.md in the same "+
+				"change — or a writer was added without a reader, which is the state the owner "+
+				"ruled out.", column, writes)
 		}
 	})
 
 	t.Run("no_select_reads_it", func(t *testing.T) {
 		if len(reads) > 0 {
-			t.Errorf("%q is now SELECTed at %v.\nThat closes the gap this arm records, and the "+
-				"repair is NOT to relax this arm: docs/mcp-cards/pf_create_user.md and "+
-				"docs/mcp-cards/pf_update_user.md both state that the column has no reader, and "+
-				"the published descriptions are asserted below not to claim one. Update all "+
-				"three in the same change as the reader.", column, reads)
+			t.Errorf("%q is now SELECTed at %v.\nThe column is dormant since aihub#587: no "+
+				"writer, no reader, parameter withdrawn. A reader appearing means the "+
+				"dormant-column record is stale — docs/mcp-cards/pf_create_user.md, "+
+				"pf_update_user.md and pf_list_users.md all say nothing reads it — and a "+
+				"reader with no writer reads only the DEFAULT. Update the cards, and whatever "+
+				"is supposed to feed the reader, in the same change.", column, reads)
 		}
 	})
 
-	t.Run("no_description_claims_a_reader", func(t *testing.T) {
+	t.Run("neither_tool_publishes_it", func(t *testing.T) {
 		for _, tool := range []string{"pf_create_user", "pf_update_user"} {
-			props := schemaProps(t, publishedTool(t, tool))
-			p, published := props[column]
-			if !published {
-				t.Errorf("%s does not publish %q; aihub#426 published it on pf_update_user "+
-					"precisely so it would stop being reachable only by guessing", tool, column)
-				continue
+			published := publishedTool(t, tool)
+			props := schemaProps(t, published)
+			if _, stillThere := props[column]; stillThere {
+				t.Errorf("%s still publishes %q. aihub#587 withdrew the parameter, so a "+
+					"published name here is either an incomplete withdrawal or an "+
+					"undocumented republication — the aihub#389 echo names the key in "+
+					"request_adjusted.unknown_params today precisely because no schema "+
+					"mentions it.", tool, column)
 			}
-			lower := strings.ToLower(p.Description)
-			for _, claim := range []string{"attribut", "maps to", "mapped to"} {
+			// The false sentence this surface used to carry was "aliases are how
+			// commits attribute to this user". With the parameter gone, the prose
+			// could still resurrect the claim on the tool description itself, so
+			// that side is held too.
+			lower := strings.ToLower(published.Description)
+			for _, claim := range []string{"alias", "attribut"} {
 				if strings.Contains(lower, claim) {
-					t.Errorf("%s's %q description contains %q: %q\nNothing in this repo reads "+
-						"the column, so a description promising attribution is the exact "+
-						"sentence wave 2 removed from the cards. If a reader now exists, say so "+
-						"here AND in both cards AND wire the reader — this arm's "+
-						"no_select_reads_it subtest is what keeps the three honest.",
-						tool, column, claim, p.Description)
+					t.Errorf("%s's tool description still contains %q: %q — the parameter "+
+						"was withdrawn by aihub#587 and nothing on this surface touches "+
+						"users.author_aliases any more.", tool, claim, published.Description)
 				}
 			}
 		}

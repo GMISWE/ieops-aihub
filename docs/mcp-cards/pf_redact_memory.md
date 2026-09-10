@@ -60,7 +60,8 @@ attempt-gated when it is not. ⚠️ The aihub#325 credential invariant
 body carries no `attempt_id`, so it has always SKIPPED this tool — but its blind
 spot is the opposite shape from the one this card used to name. Credentials
 WITHOUT a work item is the exact pair that invariant refuses, so a renderer that
-started sending them would move this tool from skipped to RED. What the
+started sending them would move this tool from skipped to RED.
+<!-- prose-only: because=counterfactual --> What the
 invariant cannot see is credentials arriving WITH a work item: that satisfies it,
 and it is the shape that would quietly turn a role-authorized path into one a
 reader takes for attempt-gated. The exact key set above is the positive control

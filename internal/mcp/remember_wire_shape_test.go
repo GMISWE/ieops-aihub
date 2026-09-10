@@ -4,20 +4,20 @@ package mcp_test
 // refuses to put there at all.
 //
 //	"`validatePfRememberArgs` checks the four required fields and refuses any
-//	 `methodology.` prefix, then the handler passes the argument map verbatim to
-//	 `Remember` → `POST /v1/memories`"
+//	 `methodology.` prefix, then the handler passes the argument map, projected
+//	 to the published property set, to `Remember` → `POST /v1/memories`"
 //	    -> TestRememberRefusesItsOwnContractBeforeAnyRequest
 //	"**`methodology.*` is refused client-side**, before the HTTP call"
 //	    -> TestRememberRefusesItsOwnContractBeforeAnyRequest
-//	the `hasRenderableBody` conjunct in the ⚠️ visibility bullet
-//	    -> TestRememberForwardsUnpublishedRenderedHTMLToTheBinder
+//	the 🟢 CLOSED paragraph in the ⚠️ visibility bullet (aihub#586)
+//	    -> TestRememberStripsUnpublishedRenderedHTMLBeforeTheWire
 //
 // 🔴 Why a second recorder rather than `newMemoryWireStack`: that stack's `call`
 // helper t.Fatals on an error result and on a call that made no request, which
 // are the two OUTCOMES this file is about. A refusal-shaped probe cannot borrow a
 // harness whose contract is "a request happened".
 //
-//	GOWORK=off go test ./internal/mcp/ -run 'TestRememberRefusesItsOwnContract|TestRememberForwardsUnpublishedRenderedHTML' -count=1
+//	GOWORK=off go test ./internal/mcp/ -run 'TestRememberRefusesItsOwnContract|TestRememberStripsUnpublishedRenderedHTML' -count=1
 
 import (
 	"encoding/json"
@@ -229,132 +229,179 @@ func TestRememberRefusesItsOwnContractBeforeAnyRequest(t *testing.T) {
 	})
 }
 
-// TestRememberForwardsUnpublishedRenderedHTMLToTheBinder is the arm behind the
-// card's CORRECTED ⚠️ visibility bullet.
+// TestRememberStripsUnpublishedRenderedHTMLBeforeTheWire is the arm behind the
+// card's 🟢 CLOSED paragraph in the ⚠️ visibility bullet (aihub#586, owner
+// ruling 2026-09-10).
 //
-// 🔴 The card used to say the opposite. It reasoned that `hasRenderableBody`
-// needs either a stored `rendered_html` — "this tool publishes no `html`
-// parameter, so it never writes one" — or a type in the render set, and
-// concluded that on a default deployment the two `/share/:id` conditions
-// "cannot both hold for a `pf_remember` row". Measured here, the inference is
-// unsound at its first step: this handler forwards its whole argument map, so an
-// UNPUBLISHED `rendered_html` argument lands in the body verbatim and binds to
-// `domain.RememberRequest.RenderedHTML`. That is the same unpublished-but-
-// reachable path `tags` took until aihub#425, and it is written into this very
-// card two paragraphs above.
+// 🔴 This test's predecessor pinned the OPPOSITE behaviour, and the history
+// matters to anyone tempted to "restore" it. Until aihub#586 the handler
+// forwarded its whole argument map, so an UNPUBLISHED `rendered_html` argument
+// landed in the body verbatim, bound to domain.RememberRequest.RenderedHTML,
+// and resolveRenderedHTML stored it verbatim for ANY type — which made
+// `visibility: public` plus a name hop 1 never mentions an anonymously
+// /share-readable row. The predecessor
+// (TestRememberForwardsUnpublishedRenderedHTMLToTheBinder) measured that chain
+// after the card had reasoned it impossible; its own mutant table already
+// recorded that the projection now in place keeps every landBody probe in
+// memory_tools_wire_test.go green ("the projection keeps all 13 published
+// names ... measured"), so the fix was landed against a known-green blast
+// radius.
 //
-// The chain's third link is held next door: resolveRenderedHTML's precedence #1
-// stores an explicit non-empty value verbatim FOR ANY TYPE
-// (internal/domain/memory_render_test.go, TestResolveRenderedHTML_ExplicitOverrides),
-// and the INSERT writes what it returns. So the conjunct IS reachable, and what
-// the card can honestly say is that the caller has to know a name hop 1 does not
-// publish.
+// What this arm holds, in order:
 //
-// ⚠️ What this arm does NOT claim: that the row is then served. That needs a
-// database and a route, and the /share half is held by
-// internal/server/routes_artifacts_test.go's public/non-public pair.
+//	strip       the observed body carries NO `rendered_html` key, while the
+//	            published siblings sent alongside it arrive byte-identical —
+//	            so the strip is a projection, not a rejection and not a
+//	            rewrite;
+//	binder      the observed bytes decode into domain.RememberRequest with
+//	            RenderedHTML nil. The json tag is deliberately NOT removed
+//	            server-side (pf_save_artifact's published `html` lands on it),
+//	            so absence-in-the-struct must come from absence-on-the-wire;
+//	disclosure  the tool result's request_adjusted carries an unknown_params
+//	            entry NAMING rendered_html with applied=[] — the aihub#389
+//	            echo, whose "we used nothing you sent under these names" claim
+//	            this tool used to falsify and now satisfies by construction;
+//	control     a call sending only published names still carries them all and
+//	            gets NO request_adjusted, so the disclosure above is earned by
+//	            the stripped key rather than emitted unconditionally.
+//
+// ⚠️ What this arm does NOT claim: that no row on a live server can reach the
+// /share state through this tool. That needs a database and the real router,
+// and is held end to end by remember_strip_e2e_db_test.go
+// (TestE2ERememberStripsRenderedHTMLFromTheShareSurface), REST positive
+// control included.
 //
 // MUTANTS:
 //
-//	M14 enforcement: project the args map in the pf_remember handler so only
-//	    published names are forwarded         RED  forwards/rendered_html
-//	                                               (and GREEN next door: the
-//	                                               projection keeps all 13 published
-//	                                               names, so memory_tools_wire's
-//	                                               landBody probes still pass —
-//	                                               measured, because the first draft
-//	                                               of this note guessed the opposite)
-//	M15 enforcement: drop the `rendered_html` json tag from RememberRequest
-//	                                          RED  binds
-//	M16 enforcement: assert the absent case wrongly (send nothing, expect a value)
-//	                                          RED  the negative control
-//	M17 publication: delete the citation from the corrected card bullet
+//	M14 enforcement: delete pf_remember from wireStrippedTools
+//	                                          RED  the strip arm (rendered_html
+//	                                               back on the wire)
+//	M15 enforcement: make stripUnpublishedArgs return raw unchanged
+//	                                          RED  the strip arm
+//	M16 enforcement: strip WITHOUT disclosing (skip discloseUnknownParams for
+//	    stripped tools)                       RED  the disclosure arm
+//	M17 publication: delete the citation from the card's CLOSED paragraph
 //	                                          RED  K12
-func TestRememberForwardsUnpublishedRenderedHTMLToTheBinder(t *testing.T) {
-	const custom = "<!doctype html><html><body>unpublished but stored</body></html>"
+func TestRememberStripsUnpublishedRenderedHTMLBeforeTheWire(t *testing.T) {
+	const custom = "<!doctype html><html><body>unpublished and now stripped</body></html>"
 
 	// Hop 1: the name really is unpublished. Without this the rest is a probe of
 	// an ordinary published parameter and says nothing the wire file does not.
 	props := rememberPublishedProps(t)
 	for _, name := range []string{"html", "rendered_html"} {
 		if _, published := props[name]; published {
-			t.Fatalf("pf_remember publishes %q. The card's bullet is about a name hop 1 does "+
-				"NOT carry; if it now does, the bullet needs rewriting rather than this arm "+
-				"needing a fix.", name)
+			t.Fatalf("pf_remember publishes %q. This arm is about a name hop 1 does NOT carry; "+
+				"if it now does, aihub#586's option ② has been superseded by option ① and the "+
+				"card needs rewriting rather than this arm needing a fix.", name)
 		}
 	}
 
 	rc := newRememberCounter(t)
-	if text, isErr := rc.call(t, map[string]any{
+	text, isErr := rc.call(t, map[string]any{
 		"project": "p_probe", "type": "experience.debug", "content": "a memory body",
 		"visibility": "public", "rendered_html": custom,
-	}); isErr {
-		t.Fatalf("the call was refused, so nothing below is a fact about forwarding: %s", text)
+	})
+	if isErr {
+		t.Fatalf("the call was refused, so nothing below is a fact about the strip — the ruling "+
+			"is strip-and-report, not reject: %s", text)
 	}
 	rc.mu.Lock()
 	body := rc.body
 	rc.mu.Unlock()
 
-	// Hop 2: it is on the wire, byte-identical.
-	got, present := body["rendered_html"]
-	if !present {
-		t.Fatalf("forwards/rendered_html: the request body carries nothing under that key: %v\n"+
-			"The card's hop 2-3 section says this handler forwards its argument map VERBATIM; "+
-			"if that stopped being true it is a contract change, not a fix to this arm.", body)
+	// The strip. The exact key, absent.
+	if got, present := body["rendered_html"]; present {
+		t.Errorf("strip: the request body still carries rendered_html (%#v). This is the "+
+			"aihub#586 vulnerability itself: an unpublished name riding the forwarded map into "+
+			"a bound field.", got)
 	}
-	if got != custom {
-		t.Errorf("forwards/rendered_html: arrived as %#v, want the caller's own bytes %#v", got, custom)
-	}
-	// A published sibling in the same request, so a body that decoded into
-	// something unrecognisable cannot satisfy the assertion above by accident.
-	if body["content"] != "a memory body" {
-		t.Fatalf("the published `content` did not arrive either (%v), so this recorder is not "+
-			"reading the request it thinks it is", body["content"])
+	// Published siblings from the same request, byte-identical — the ruling's
+	// "published keys unaffected" half, and the guard against a strip that
+	// projects to the wrong set.
+	for key, want := range map[string]string{
+		"content": "a memory body", "visibility": "public", "project": "p_probe",
+	} {
+		if body[key] != want {
+			t.Errorf("strip: published %q arrived as %#v, want %#v — the projection must not "+
+				"touch what hop 1 carries", key, body[key], want)
+		}
 	}
 
-	// Hop 3: the server's request struct binds it. Decoded from the OBSERVED
-	// bytes rather than from a literal, so a rename on either side is red.
+	// The binder, driven with the OBSERVED bytes: nothing arrives, nothing binds.
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("re-marshal the observed body: %v", err)
 	}
 	var req domain.RememberRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
-		t.Fatalf("binds: the observed body does not decode into domain.RememberRequest: %v", err)
+		t.Fatalf("binder: the observed body does not decode into domain.RememberRequest: %v", err)
 	}
-	if req.RenderedHTML == nil || *req.RenderedHTML != custom {
-		t.Errorf("binds: RememberRequest.RenderedHTML is %v after binding the observed body. "+
-			"handleRemember binds this struct straight from the body, so a nil here would mean "+
-			"the value stops at the server's door — which is what the card used to assume.",
-			req.RenderedHTML)
+	if req.RenderedHTML != nil {
+		t.Errorf("binder: RememberRequest.RenderedHTML bound %q from a stripped body — the key "+
+			"is reaching the wire under a spelling the strip does not cover", *req.RenderedHTML)
 	}
 
-	// The negative control. Without it, a binder that filled RenderedHTML from
-	// anything at all would pass.
+	// The disclosure: request_adjusted names the stripped key, applied is empty.
+	var result map[string]any
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		t.Fatalf("disclosure: the tool result is not a JSON object: %v (%q)", err, text)
+	}
+	entries, _ := result["request_adjusted"].([]any)
+	if len(entries) == 0 {
+		t.Fatalf("disclosure: no request_adjusted on the response. The ruling is strip AND "+
+			"report; a silent strip is aihub#389's defect resurrected one hop earlier. "+
+			"Response: %s", text)
+	}
+	found := false
+	for _, e := range entries {
+		entry, _ := e.(map[string]any)
+		if entry["param"] != "unknown_params" {
+			continue
+		}
+		requested, _ := entry["requested"].([]any)
+		for _, name := range requested {
+			if name == "rendered_html" {
+				found = true
+			}
+		}
+		if applied, _ := entry["applied"].([]any); len(applied) != 0 {
+			t.Errorf("disclosure: unknown_params.applied = %#v, want [] — a non-empty applied "+
+				"says some of the named keys took effect, which is what the strip exists to "+
+				"make false", applied)
+		}
+	}
+	if !found {
+		t.Errorf("disclosure: request_adjusted names no rendered_html under unknown_params: %s", text)
+	}
+
+	// The control: only published names — all forwarded, nothing disclosed.
 	rc2 := newRememberCounter(t)
-	if text, isErr := rc2.call(t, map[string]any{
+	cleanText, isErr := rc2.call(t, map[string]any{
 		"project": "p_probe", "type": "experience.debug", "content": "a memory body",
 		"visibility": "public",
-	}); isErr {
-		t.Fatalf("the control call was refused: %s", text)
+	})
+	if isErr {
+		t.Fatalf("the control call was refused: %s", cleanText)
 	}
 	rc2.mu.Lock()
 	plain := rc2.body
 	rc2.mu.Unlock()
+	for _, key := range []string{"project", "type", "content", "visibility"} {
+		if _, present := plain[key]; !present {
+			t.Errorf("control: published %q did not reach the wire on a clean call — the strip "+
+				"is projecting to the wrong set", key)
+		}
+	}
 	if _, present := plain["rendered_html"]; present {
-		t.Errorf("a call that sent no rendered_html still put one on the wire (%v) — the "+
-			"forwarding is inventing keys, and the positive arm above proves nothing",
-			plain["rendered_html"])
+		t.Errorf("control: a call that sent no rendered_html still put one on the wire (%v) — "+
+			"the forwarding is inventing keys", plain["rendered_html"])
 	}
-	rawPlain, err := json.Marshal(plain)
-	if err != nil {
-		t.Fatalf("re-marshal the control body: %v", err)
+	var cleanResult map[string]any
+	if err := json.Unmarshal([]byte(cleanText), &cleanResult); err != nil {
+		t.Fatalf("control: the clean result is not a JSON object: %v", err)
 	}
-	var plainReq domain.RememberRequest
-	if err := json.Unmarshal(rawPlain, &plainReq); err != nil {
-		t.Fatalf("the control body does not decode into domain.RememberRequest: %v", err)
-	}
-	if plainReq.RenderedHTML != nil {
-		t.Errorf("binding a body with no rendered_html produced %q", *plainReq.RenderedHTML)
+	if v, present := cleanResult["request_adjusted"]; present {
+		t.Errorf("control: request_adjusted = %#v on a call with nothing to disclose — an "+
+			"unconditional disclosure discloses nothing", v)
 	}
 }

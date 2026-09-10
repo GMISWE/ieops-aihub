@@ -54,11 +54,12 @@ Two parameters. `aihub#385` audited this tool with **zero positive controls**, s
 its "no defects found" verdict was explicitly recorded at reduced strength — that
 is a property of the audit, not of the tool, and it is why this card leans on the
 source rather than on that report.
+<!-- prose-only: because=external-state -->
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `work_item_id` | string | yes | "Work item ID or slug" — both accepted |
-| `brief` | boolean | no | "Omit the content field from the response (default false)" |
+| `brief` | boolean | no | "Omit the content field from the response (default false)" — the deletion held by `TestGetWorkItemBriefDeletesContentAndLeavesNoLengthBehind` |
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -104,7 +105,9 @@ while `content` must come back on the plain call and must be ABSENT under `brief
 deleting it is what the flag is for, so requiring it to survive both calls would be
 requiring the flag not to work. Two consequences worth carding:
 
-- **This is the tool that returns `content`.** `pf_list_work_items` will not do: its
+- **This is the tool that returns `content`** — and the list tool's projection never
+  carries it, held by `TestWorkItemListSelectsCarryTheCASTokenAndNotTheBody`.
+  `pf_list_work_items` will not do: its
   response is projected and its `content` is null by design, held by
   `internal/domain/list_work_items_select_columns_test.go`
   (`TestWorkItemListSelectsCarryTheCASTokenAndNotTheBody`), which censuses both
@@ -120,7 +123,8 @@ requiring the flag not to work. Two consequences worth carding:
   is the field `pf_list_work_items` cannot supply at all, and it is the reason the
   coding scenario's spec step names this tool.
   <!-- prose-only: because=cross-repo -->
-- **`brief=true` deletes `content` outright and reports no length.** It is a
+- **`brief=true` deletes `content` outright and reports no length**
+  (`TestGetWorkItemBriefDeletesContentAndLeavesNoLengthBehind`). It is a
   different operation from `pf_update_work_item`'s `brief`, which replaces the body
   with `content_len` — `internal/mcp/get_work_item_shape_test.go`
   (`TestGetWorkItemBriefDeletesContentAndLeavesNoLengthBehind`) asserts the ABSENCE of
@@ -188,5 +192,6 @@ corpus record above spans 2,063 calls, the highest-volume tool in the census, at
 ## Open
 
 - Nothing this card can settle. The `aihub#385` audit's control gap is recorded
-  above so the "no defects" line is read at the strength it was given. That audit
+  above so the "no defects" line is read at the strength it was given.
+  <!-- prose-only: because=external-state --> That audit
   wrapped 2026-09-07; re-checked 2026-09-08.

@@ -70,6 +70,12 @@ type e2eStack struct {
 	session *sdkmcp.ClientSession
 	client  *client.Client
 	project string
+	// baseURL is the live router's own address, for the one kind of request
+	// pkg/client cannot make: an UNAUTHENTICATED one. GET /share/:id is
+	// anonymous by design and the aihub#586 arm has to drive it that way —
+	// through the client it would carry the admin key and prove nothing about
+	// anonymous reachability.
+	baseURL string
 }
 
 // newE2EStack seeds a user, an API key and a project, then stands up the real
@@ -150,7 +156,7 @@ func newE2EStack(t *testing.T) *e2eStack {
 	}
 	t.Cleanup(func() { _ = session.Close() })
 
-	return &e2eStack{pool: pool, session: session, client: aihubClient, project: project}
+	return &e2eStack{pool: pool, session: session, client: aihubClient, project: project, baseURL: ts.URL}
 }
 
 // call invokes a tool and returns the response text and its decoded form.

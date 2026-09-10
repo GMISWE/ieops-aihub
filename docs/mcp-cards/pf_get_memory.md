@@ -78,6 +78,7 @@ credentials.
 
 That route did not always exist — a by-id memory read was absent from the router
 entirely, which is what made the truncation flags unusable before `aihub#269`.
+<!-- prose-only: because=history -->
 
 ## hop 4 — what it actually does
 
@@ -111,8 +112,9 @@ rationale as `pf_recall`'s.
 ⚠️ **This line used to claim the two helpers differed, and they do not.**
 `34df071` changed `marshalJSON` from `json.MarshalIndent` to `json.Marshal` for
 every tool in the server, so `jsonResult` became compact too — the two are
-byte-identical today, and `jsonResultCompact`'s own doc comment still measures
-itself against a `MarshalIndent` path that is gone. The behaviour was never the
+byte-identical today, pinned by `internal/mcp/json_result_identity_test.go`
+(`TestJSONResultAndCompactAreByteIdentical`), and `jsonResultCompact`'s own doc
+comment still measures itself against a `MarshalIndent` path that is gone. The behaviour was never the
 problem; the sentence was, because it told a reader this tool differed from its
 siblings in a way it does not and pointed the next token-saving change at a
 conversion that has already landed everywhere.

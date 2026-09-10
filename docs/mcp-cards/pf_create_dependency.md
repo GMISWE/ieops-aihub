@@ -37,8 +37,8 @@ inline, which is unusual and deliberate.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
-| `blocked_wi_id` | string | yes | the work item that is blocked |
-| `blocking_wi_id` | string | yes | the work item that is blocking |
+| `blocked_wi_id` | string | yes | the work item that is blocked — the direction driven end to end by `TestBlockedByIsMachineReadable` |
+| `blocking_wi_id` | string | yes | the work item that is blocking — same arm, same edge, other end (`TestBlockedByIsMachineReadable`) |
 | `kind` | string | yes | `blocks\|supersedes\|related` |
 | `note` | string | no | optional note |
 

@@ -695,42 +695,56 @@ func TestRecallResolvesTheWorkItemFilterBeforeComparingIt(t *testing.T) {
 }
 
 // TestNoSelectInThisRepoReadsAuthorAliases holds the pf_list_users card's
-// account of `author_aliases`: the column is written and never read.
+// account of `author_aliases`: the column is DORMANT — since aihub#587
+// (2026-09-10) it is neither written nor read, and the parameter that fed it is
+// withdrawn from pf_create_user and pf_update_user.
 //
 // It came out of correcting a sentence that called it "the field that matters
 // most in this response" — it is not in that response at all
 // (internal/server/list_users_response_shape_test.go), and the wider measurement
-// is that no query anywhere in this repo selects it. What
-// docs/design/polyforge-v1-design.md reserves it for — matching a git commit
-// author to a user id — is therefore still a reservation, and a card that says
-// the mapping happens is describing an intention.
+// was that no query anywhere in this repo selects it. What
+// docs/design/polyforge-v1-design.md reserved it for — matching a git commit
+// author to a user id — never happened; the aihub#587 ruling withdrew the
+// parameter rather than wire that reader, and the column stays only because
+// dropping it is a destructive migration and a separate decision.
 //
-// 🔴 The census is over SQL LITERALS rather than over the word: the column is
-// mentioned in an MCP schema, in two request structs and in two write
-// statements, and a check keyed on the identifier would report all five as
-// readers. A SELECT is the shape a read takes here.
+// 🔴 The census is over SQL LITERALS rather than over the word: a check keyed
+// on the identifier would count comments and doc references as readers. A
+// SELECT is the shape a read takes here.
 //
 // Two floors, because either failure produces the same green: the walk has to
-// find a real population of queries, and it has to find the column at least once
-// — a scan that reaches no file and a scan that reaches every file except the
-// ones touching this column are otherwise indistinguishable.
+// find a real population of queries, and its literal scan has to be shown able
+// to see a column name at all. Until aihub#587 the second floor was "the walk
+// sees author_aliases mentioned somewhere", satisfied by the column's own write
+// statements; with those removed, ZERO mentions became the CORRECT reading of
+// the tree, so the floor moved to a positive control — `display_name`, same
+// table, still both written and selected — which a tidy-up cannot silently
+// empty. The sibling census with per-statement write/read classification is
+// TestAuthorAliasesIsNeitherWrittenNorRead
+// (internal/mcp/user_admin_surface_test.go); this arm keeps the wider net (ALL
+// non-test Go under the repo root, not just internal/ and pkg/).
 //
-// MUTANTS (applied to this tree; the verdict is what ran):
+// MUTANTS (aihub#587, 2026-09-10; the verdict is what ran):
 //
 //	M41 enforcement: add author_aliases to handleListUsers' SELECT   RED
 //	M42 control:     split the column name across two literals
 //	    (`"… role, author_" + "aliases"`)                          GREEN — a
-//	                 recorded LIMIT: a census over literals cannot see a name
-//	                 assembled at run time, and saying so is cheaper than a
+//	                 recorded LIMIT: this census reads one literal at a time and
+//	                 cannot see a name assembled at run time (the sibling census
+//	                 above joins concatenation chains and does catch that shape
+//	                 under internal/ and pkg/); saying so is cheaper than a
 //	                 pattern that pretends otherwise
+//	M43 floor:       misspell the control column                    RED  the
+//	                 control floor names display_name as unseen
 //	P8  publication: rename this arm                                 RED  K12
 //	                                                                 ARM_CITATION
 //	                                                                 _UNRESOLVED
 func TestNoSelectInThisRepoReadsAuthorAliases(t *testing.T) {
 	const column = "author_aliases"
+	const control = "display_name"
 	const repoRoot = "../.."
 
-	queries, mentions := 0, 0
+	queries, controlMentions := 0, 0
 	var readers []string
 	err := filepath.Walk(repoRoot, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
@@ -769,11 +783,10 @@ func TestNoSelectInThisRepoReadsAuthorAliases(t *testing.T) {
 			if hasSelect {
 				queries++
 			}
-			if !strings.Contains(v, column) {
-				return true
+			if strings.Contains(v, control) {
+				controlMentions++
 			}
-			mentions++
-			if hasSelect {
+			if strings.Contains(v, column) && hasSelect {
 				readers = append(readers, filepath.ToSlash(path))
 			}
 			return true
@@ -789,17 +802,19 @@ func TestNoSelectInThisRepoReadsAuthorAliases(t *testing.T) {
 		t.Errorf("the census found %d SQL literal(s), floor is %d — a walk that reaches no queries "+
 			"reports every column as unread", queries, floorQueries)
 	}
-	if mentions == 0 {
-		t.Errorf("the census never saw %q in any SQL literal, so it cannot tell \"nothing reads it\" "+
-			"from \"nothing mentions it\". The column is written by two statements in "+
-			"internal/server/router.go; a scan that misses those is broken rather than reassuring",
-			column)
+	if controlMentions == 0 {
+		t.Errorf("the census never saw %q in any string literal, so its literal scan is reading "+
+			"nothing and \"no SELECT mentions %s\" below would be an artefact. Until aihub#587 "+
+			"this floor was held by %s's own write statements; those are gone by design, so the "+
+			"control is a column the same table still uses everywhere", control, column, column)
 	}
 	if len(readers) > 0 {
 		t.Errorf("%q is now SELECTed in %v. The pf_list_users card says no query in this repo reads "+
-			"it, and draws the conclusion that the git-author mapping the design reserves it for is "+
-			"still a reservation. If that has changed, the card's sentence is the thing to fix — and "+
-			"if the new reader is this tool's own handler, the response shape moved too.",
+			"the column and that it has been dormant since aihub#587 withdrew the parameter — a "+
+			"reader with no writer reads only the DEFAULT '{}'. If a reader is really being wired, "+
+			"the card's sentence, both user cards and the zero-write census "+
+			"(TestAuthorAliasesIsNeitherWrittenNorRead) are the things to fix — and if the new "+
+			"reader is this tool's own handler, the response shape moved too.",
 			column, readers)
 	}
 }

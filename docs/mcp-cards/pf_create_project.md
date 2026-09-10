@@ -4,7 +4,7 @@
 {
   "tool": "pf_create_project",
   "description_sha256": "23fc9a29fd3772a5e5f7f76f79bdb7201a93cd16850980dee36223a34d879762",
-  "input_schema_sha256": "e768c3d52cad5d6a1654be73791e9634f374f67f29217260ed4e8060f544a18c",
+  "input_schema_sha256": "44e52026f09fcbef50486764906790b6602c754231abd304dc4396b7b7d10559",
   "params": {
     "description": {
       "type": "string",
@@ -55,14 +55,20 @@ Five parameters, one required.
 | `scenario` | string | no | scenario repo URL |
 | `repos` | array | no | `{name, url, github_owner_repo?, description?}` + an all-or-nothing structured block |
 
-The `repos` description carries an **all-or-nothing** rule: if any structured field
-(`positioning`, `tech_stack`, `main_modules`, `change_scenarios`, `generated_at`,
-`generated_commit`) is set, all four content fields are required, in English — a
-sentence `internal/mcp/project_publication_contract_test.go`
-(`TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema`) requires of every tool
-that publishes the parameter, naming each of the six fields. That is a conditional
-requirement a flat `required` array cannot express, so it is stated in prose:
-`TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema` reads this tool's
+The `repos` description carries an **all-or-nothing** rule over the block's
+content half: if any of the four content fields (`positioning`, `tech_stack`,
+`main_modules`, `change_scenarios`) is set, all four content fields are required, in
+English — while the two generation-metadata fields do not trigger the rule, so a
+repo entry carrying only `generated_at` or only `generated_commit` is accepted with
+no content field at all — both halves required of every tool that publishes the
+parameter, naming each of the six fields, by
+`internal/mcp/project_publication_contract_test.go`
+(`TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema`). Since `aihub#588` that
+arm also refuses the wording this paragraph used to carry — "if any structured
+field is set" over the whole six-field block, a wider trigger than the server has
+ever read.
+The conditional is one a flat `required` array cannot express, so it is stated in
+prose: `TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema` reads this tool's
 `required` array and finds `name` alone in it, which is the same limitation that
 produced `pf_ship` and `pf_batch_create_work_items` as separate tools.
 
@@ -82,7 +88,9 @@ passes the **whole argument map** to `pkg/client/client.go` (`CreateProject`) �
   holds each part: the six columns the INSERT names, the caller in the owner
   position, the two schema defaults the statement leaves alone, and the increment
   that hands the slug out.
-- **`scenario` is the URL the step graph is resolved from.** Its last two path
+- **`scenario` is the URL the step graph is resolved from.**
+  <!-- prose-only: because=cross-repo -->
+  Its last two path
   segments become the owner-qualified clone directory, which is why two orgs' repos
   of the same name no longer share one checkout: they used to, and the second was
   never cloned while its projects silently ran the first org's step graph.
@@ -94,15 +102,17 @@ passes the **whole argument map** to `pkg/client/client.go` (`CreateProject`) �
   the parameter and measures what becomes of a `members` key sent here anyway, and
   `internal/domain/project_creation_row_test.go` holds the reason it has no effect,
   which is that the create request struct has no field to bind it to.
-- The all-or-nothing rule fires on a NARROWER trigger than the description's
-  wording: `internal/domain/projects.go` (`validateDescriptionBlock`) runs on every
-  repo entry but returns immediately unless the entry's own `hasDescriptionBlock`
-  predicate is true, and that predicate tests the four content fields and nothing
-  else — so a repo carrying only `generated_at` or only `generated_commit` is
-  accepted with no content field at all, which
+- The all-or-nothing rule's trigger is the four content fields and nothing else:
+  `internal/domain/projects.go` (`validateDescriptionBlock`) runs on every repo
+  entry but returns immediately unless the entry's own `hasDescriptionBlock`
+  predicate is true, and that predicate tests the four content fields — re-measured
+  2026-09-10 under `aihub#588` — so a repo carrying only `generated_at` or only
+  `generated_commit` is accepted with no content field at all, which
   `internal/domain/project_repo_block_rule_test.go`
   (`TestRepoDescriptionBlockTriggersOnTheFourContentFieldsOnly`) drives one field at
-  a time, in both directions.
+  a time, in both directions. The published description used to overstate that
+  trigger as "any structured field"; since `aihub#588` it states this same
+  partition, and the enforcement did not move.
 
 ## hop 5 — what comes back
 
@@ -132,9 +142,24 @@ object looks like in a 21-day window; it is not evidence of disuse in the sense
   (`TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema`) holds the schema half
   and `internal/domain/project_repo_block_rule_test.go`
   (`TestRepoDescriptionBlockTriggersOnTheFourContentFieldsOnly`) the server half.
-- The published wording of that rule is wider than the enforcement, and which of the
-  two should move is not settled here: hop 1 says "any structured field" over a
-  six-field block, and the server reads four of them. Measured 2026-09-10 under
-  `aihub#582`, and pinned at the measured value by
-  `internal/domain/project_repo_block_rule_test.go`, so closing the gap in either
-  direction is a diff that has to move this card with it.
+- ~~The published wording of that rule is wider than the enforcement, and which of
+  the two should move is not settled here: hop 1 says "any structured field" over a
+  six-field block, and the server reads four of them.~~ **Closed by `aihub#588`
+  (2026-09-10, owner ruling ①): the DESCRIPTION moved to the measured rule; the
+  enforcement did not** (`TestRepoDescriptionBlockTriggersOnTheFourContentFieldsOnly`
+  holds the enforcement half). First measured 2026-09-10 under `aihub#582` and re-measured
+  the same day on the `aihub#588` tree: `hasDescriptionBlock` reads exactly
+  `positioning`/`tech_stack`/`main_modules`/`change_scenarios`, and a repo entry
+  carrying only `generated_at` or only `generated_commit` is accepted — held one
+  field at a time, in both directions, by
+  `internal/domain/project_repo_block_rule_test.go`
+  (`TestRepoDescriptionBlockTriggersOnTheFourContentFieldsOnly`). Enforcement
+  deliberately stayed put: today it is LOOSER than the old wording, so no caller is
+  hurt, while widening it to match would newly refuse metadata-only entries
+  existing callers may already send.
+  <!-- prose-only: because=counterfactual -->
+  Both tools' corrected descriptions — and the
+  absence of the old sentence — are held by
+  `internal/mcp/project_publication_contract_test.go`
+  (`TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema`); the schema hashes on
+  this card and `pf_update_project.md` moved with the wording.

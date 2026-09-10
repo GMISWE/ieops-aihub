@@ -606,9 +606,15 @@ func briefLine(content string) string {
 	return cap(strings.Join(strings.Fields(content), " "))
 }
 
-// jsonResultCompact marshals v WITHOUT indentation. opt3: results the LLM
-// consumes do not need pretty-printing; saves ~20-30% whitespace tokens vs the
-// default MarshalIndent path.
+// jsonResultCompact marshals v WITHOUT indentation — which is no longer a
+// contrast: 34df071 (aihub#212) moved marshalJSON, the single marshal point
+// behind jsonResult, from json.MarshalIndent to json.Marshal, so the two
+// helpers have produced byte-identical output ever since (measured 2026-09-10,
+// aihub#592; this comment used to claim a "~20-30% whitespace" saving vs a
+// MarshalIndent default that no longer exists). The identity is pinned by
+// TestGetMemoryAndItsIndentingSiblingAreBothCompact
+// (get_memory_card_claims_test.go); folding this helper into jsonResult is the
+// dead-code candidate aihub#592 records.
 func jsonResultCompact(v any) (*sdkmcp.CallToolResult, error) {
 	b, err := json.Marshal(v)
 	if err != nil {

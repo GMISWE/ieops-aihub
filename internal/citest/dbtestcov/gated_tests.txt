@@ -1,72 +1,72 @@
-# AIHUB_TEST_DB-gated test functions: the ratchet for the aihub#303 DB-test
-# coverage gate (see internal/citest/dbtestcov/main.go, and aihub#320 for why
-# this file is a set of names rather than the `-min-gated N` integer it
-# replaced).
 #
-# One line per top-level test function that SKIPs for want of a database:
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
 #
 #     <module-relative package> <TestName> [+EXTRA_ENV ...]
-#
-# A trailing `+VAR` records that the test's own skip message asks for more than
-# a database, so CI cannot run it and no CI step may name it. Sorted, one entry
-# per line, no duplicates — all three are enforced.
-#
-# The gate demands that this file EQUAL the measured inventory, so:
-#
-#   * adding a DB-gated test means adding its line here (the gate prints the
-#     exact line to paste), and
-#   * removing one means deleting its line here, in the same change. That
-#     deletion is the point: it is the reviewable record of which DB coverage
-#     was deliberately given up. Nothing regenerates this file for you.
-#
-# Provenance lives in `git blame`, not in a prose changelog: the line and the
-# commit that added the test are the same diff.
-#
-# ── Operating rule: never PRE-DECLARE this file ──────────────────────────────
-# (aihub#438, from the aihub#411 decision table, row T1-11)
-#
-# This file and .github/workflows/ci.yml are the repo's two shared ratchets, and
-# both get edited by work items that are not otherwise about them: every change
-# that adds an AIHUB_TEST_DB-gated test needs a line here. Do NOT put either
-# path in a work item's declared_resources, and do not pf_acquire_locks it up
-# front.
-# Let the commit-time lock gate take it instead — pf_commit and pf_ship send the
-# pending commit's paths, and every path this attempt does not already hold gets
-# a file_scope lock acquired right there. See internal/domain/commit_locks.go
-# (FnReconcileCommitLocks).
-#
-# Declaring costs more than it buys. A lock taken at claim is held until the
-# ATTEMPT ends unless someone deliberately narrows declared_resources to drop it
-# (releaseUndeclaredFileScopeLocks, internal/domain/work_items.go), so by default
-# declaring this path blocks every other work item that has to add a line to it
-# for the whole attempt. Not declaring gives up no safety: a path a different live
-# attempt already holds is REFUSED at commit time with CONFLICT_LOCK_TAKEN
-# naming the holder, nothing is committed, and the files stay staged. Two work
-# items that appended in parallel this way (aihub#392, and aihub#399 with 3 new
-# lines against 211) auto-merged with no conflict — which is what the sorted,
-# one-entry-per-line format above is for.
-#
-# Two corollaries, because the gate sits at COMMIT time and not at claim time:
-#
-#   * Commit through pf_commit/pf_ship. A bare `git commit` never reaches the
-#     gate, so no lock is taken and no refusal can happen (it also loses the
 #     commit event).
-#   * A merge commit is built from MERGE_HEAD rather than from a staged change
+#     deletion is the point: it is the reviewable record of which DB coverage
+#     exact line to paste), and
+#     gate, so no lock is taken and no refusal can happen (it also loses the
 #     set, so the gate reports `lock_gate: not_run`. aihub#392 stashed and left
 #     the commit to pf_ship precisely so the gate would RUN.
-#
-# Why the rule is written HERE rather than in a runbook: two executors had to
-# re-derive it in flight because it was written nowhere, and whoever forgets
-# this file is sent straight to it. On 2026-09-08 aihub#442 landed three
+#     was deliberately given up. Nothing regenerates this file for you.
+#   * A merge commit is built from MERGE_HEAD rather than from a staged change
+#   * Commit through pf_commit/pf_ship. A bare `git commit` never reaches the
+#   * adding a DB-gated test means adding its line here (the gate prints the
+#   * removing one means deleting its line here, in the same change. That
+# (FnReconcileCommitLocks).
+# (aihub#438, from the aihub#411 decision table, row T1-11)
+# (releaseUndeclaredFileScopeLocks, internal/domain/work_items.go), so by default
+# A trailing `+VAR` records that the test's own skip message asks for more than
+# AIHUB_TEST_DB-gated test functions: the ratchet for the aihub#303 DB-test
+# ATTEMPT ends unless someone deliberately narrows declared_resources to drop it
 # DB-gated heartbeat tests without their lines, and main's "aihub#303 DB-test
-# coverage gate" step went red — "232 entries, inventory measured 235", measured
+# Declaring costs more than it buys. A lock taken at claim is held until the
+# Let the commit-time lock gate take it instead — pf_commit and pf_ship send the
 # ON MAIN — until the next commit added them (aihub#451).
-#
-# ⚠️ The same incident is written up in .github/workflows/ci.yml's ledger with
-# the pair 233/236, and the two do NOT contradict each other: that one was taken
-# on aihub#451's branch, which already carried its own test and its own line, so
+# One line per top-level test function that SKIPs for want of a database:
+# Provenance lives in `git blame`, not in a prose changelog: the line and the
+# The gate demands that this file EQUAL the measured inventory, so:
+# This file and .github/workflows/ci.yml are the repo's two shared ratchets, and
+# Two corollaries, because the gate sits at COMMIT time and not at claim time:
+# Why the rule is written HERE rather than in a runbook: two executors had to
+# a database, so CI cannot run it and no CI step may name it. Sorted, one entry
+# a file_scope lock acquired right there. See internal/domain/commit_locks.go
+# attempt already holds is REFUSED at commit time with CONFLICT_LOCK_TAKEN
+# both get edited by work items that are not otherwise about them: every change
 # both sides are one higher. Each pair is right for its own tree. Neither said
+# commit that added the test are the same diff.
+# coverage gate (see internal/citest/dbtestcov/main.go, and aihub#320 for why
+# coverage gate" step went red — "232 entries, inventory measured 235", measured
+# declaring this path blocks every other work item that has to add a line to it
+# for the whole attempt. Not declaring gives up no safety: a path a different live
+# front.
+# items that appended in parallel this way (aihub#392, and aihub#399 with 3 new
+# lines against 211) auto-merged with no conflict — which is what the sorted,
+# naming the holder, nothing is committed, and the files stay staged. Two work
+# on aihub#451's branch, which already carried its own test and its own line, so
+# one-entry-per-line format above is for.
+# path in a work item's declared_resources, and do not pf_acquire_locks it up
+# pending commit's paths, and every path this attempt does not already hold gets
+# per line, no duplicates — all three are enforced.
+# re-derive it in flight because it was written nowhere, and whoever forgets
+# replaced).
+# that adds an AIHUB_TEST_DB-gated test needs a line here. Do NOT put either
+# the pair 233/236, and the two do NOT contradict each other: that one was taken
+# this file is a set of names rather than the `-min-gated N` integer it
+# this file is sent straight to it. On 2026-09-08 aihub#442 landed three
 # which tree until aihub#493; both say so now.
+# ── Operating rule: never PRE-DECLARE this file ──────────────────────────────
+# ⚠️ The same incident is written up in .github/workflows/ci.yml's ledger with
 internal/domain TestAcquireLocksReportsEveryHeldLock
 internal/domain TestActivate_DoesNotReviveSupersededVersion
 internal/domain TestActivate_RedactedSuccessorDoesNotCountAsSupersession
@@ -156,11 +156,13 @@ internal/domain TestNarrowingDeclaredResourcesReleasesItsLocks
 internal/domain TestPartitionDDLTimeoutsAreApplied
 internal/domain TestPauseReasonOmittedWhenNil
 internal/domain TestPauseReasonSurfacedInReadyQueue
+internal/domain TestPausedAttemptStillWritesTimelineEvents
 internal/domain TestPausedAttemptTerminal_AnEndedAttemptAnswersMismatchNotPaused
 internal/domain TestPausedAttemptTerminal_CompleteOnAPausedAttemptChangesNothing
 internal/domain TestPausedAttemptTerminal_ResumeDoesNotRevivateTheOldCredential
 internal/domain TestPausedAttemptTerminal_ResumeThenCompleteSucceeds
 internal/domain TestPredictConflicts_FileScopeProjectScoped
+internal/domain TestPredictLockRulesLeaveTheCallerOut
 internal/domain TestReadIntentTakesNoWriteLock
 internal/domain TestRecallCursor_LegacyCursorStillPaginates
 internal/domain TestRecallCursor_TiedReferenceTimeSkipsNoRows
@@ -243,6 +245,7 @@ internal/mcp TestE2ERecallSimilarityThresholdSelectsRatherThanTruncates
 internal/mcp TestE2ERecallTopKAcceptsAJSONNumber
 internal/mcp TestE2EReinforceMemoryRejectsAMismatchedWorkItem
 internal/mcp TestE2EReinforceMemoryWorkItemIDReachesTheGate
+internal/mcp TestE2ERememberStripsRenderedHTMLFromTheShareSurface
 internal/mcp TestE2ERequestAdjustedDisclosesListLimitClamp
 internal/mcp TestE2ERequestAdjustedDisclosesRecallTopKCap
 internal/mcp TestE2ETerminalWithoutClaim_ADetachedSessionWithTheLiveCredentialWraps
@@ -255,6 +258,7 @@ internal/mcp TestProjectMembersCASVersionIsReadableFromListProjects
 internal/mcp TestProjectMembersRemovalDeclaredRemovalSucceedsEndToEnd
 internal/mcp TestProjectMembersRemovalUndeclaredTruncationIsRefusedEndToEnd
 internal/server TestBlockedBySlugCannotProbeInvisibleProjects
+internal/server TestCreateAPIKeyStoresOnlyTheHashAndTheMintedKeyAuthenticates
 internal/server TestDependencyEndpointsResolveSlugs
 internal/server TestHandleGetMemory_AdminSeesPrivate
 internal/server TestHandleGetMemory_AuthzDenied_NoProjectAccess

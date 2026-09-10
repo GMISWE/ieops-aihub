@@ -20,10 +20,11 @@ package mcp_test
 // ⚠️ The card's slug sentence is NOT held here. Its corrected halves are held by
 // internal/server/get_step_history_source_test.go (the echo and the events
 // filter) and internal/domain/card_claims_wave2_test.go (the recall filter),
-// beside the two DB-gated arms those name. The pf_get_step DESCRIPTION still
-// carries the stale "return nothing for a slug" advice; that is product text
-// outside this card's scope and is reported for a follow-up rather than pinned
-// here — a probe on today's wording would arrive red on the day it is fixed.
+// beside the two DB-gated arms those name. The pf_get_step DESCRIPTION carried
+// the stale "return nothing for a slug" advice until aihub#590 (2026-09-10)
+// corrected it; the corrected wording — and the absence of the stale clause
+// anywhere in the published surface — is pinned by slug_publication_test.go,
+// not here.
 //
 // No database:
 //

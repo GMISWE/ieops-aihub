@@ -69,7 +69,7 @@ credentials.
   computed with `internal/domain/projects.go` (`RoleLevel`) — one map,
   `viewer:1, writer:2, maintainer:3`, which `internal/server/middleware.go` shares BY
   VALUE rather than copying, so the two packages rank a role identically by
-  construction. Until `aihub#443` landed this function ran a second, disagreeing
+  construction, and `TestRoleLevelIsTheDomainLadder` fails if the two fork again. Until `aihub#443` landed this function ran a second, disagreeing
   ladder that scored `maintainer` 0 and gave rung 3 to `owner`, so a `maintainer` on
   the far-end project failed `>= viewer` and had the edge marked inaccessible while
   the server package scored the same role at 3.
@@ -139,7 +139,8 @@ the union of top-level keys real callers have been handed.
   hedge.** `aihub#443` made the DB read while fixing the ladder and recorded it in
   that work item's attrs — a **live-DB read dated 2026-09-08**, which dates rather
   than pins: a row count is not a property of any commit, so a later reader must
-  re-run it rather than re-derive it from the tree. As of that read, 4 live
+  re-run it rather than re-derive it from the tree.
+  <!-- prose-only: because=external-state --> As of that read, 4 live
   `projects.members` rows hold `maintainer`, and across all 10 projects and 47 member
   rows the distinct role strings are exactly `viewer | writer | maintainer`.
   <!-- prose-only: because=measurement -->

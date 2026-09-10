@@ -56,7 +56,9 @@ slice build it, so this row is the debt the deferral leaves. It goes when the ce
 lands. -->
 `aihub#430` measured the same interleaving on the
 claim path and found it comes back as a retryable 409 with the row untouched,
-because that path opens SERIALIZABLE while this one opens READ COMMITTED. It is one
+because that path opens SERIALIZABLE while this one opens READ COMMITTED — the pair
+pinned at the source by `internal/domain/txn_isolation_probe_test.go`
+(`TestClaimOpensSerializableAndTakeoverOpensReadCommitted`). It is one
 statement about two different guarantees, so it must not be copied back.
 
 `aihub#451` then measured the exception itself on THIS path, in
@@ -127,6 +129,7 @@ be a keep-list holding five named keys, which dropped `id`,
 takeover could key its state file canonically. This handler reads all three itself
 and then told the model none of them, so the answer withheld the identity the call
 had just established.
+<!-- prose-only: because=history -->
 
 `new_attempt_id` and `new_claim_epoch` are asserted from the state file just
 written rather than relayed, which
@@ -202,6 +205,7 @@ direction of `internal/mcp/card_response_keys_live_e2e_db_test.go`
 ## Open
 
 - **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09)**: the
+  <!-- prose-only: because=external-state -->
   de-locking ruling changed what this call re-derives, not how. The commit-window
   race above is documented, not closed, and `aihub#416` did not touch it; the full
   analysis lives beside the lock upsert statement in

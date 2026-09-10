@@ -91,12 +91,12 @@ are one set only if nothing closed is published.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `project` | string | yes | project name |
-| `type` | string | yes | full name, e.g. `experience.debug`; must start with `experience.` / `fact.` / `rule.` and carry no `\|`; `methodology.*` refused here; 13 curated names are published as suggestions |
+| `type` | string | yes | full name, e.g. `experience.debug`; must start with `experience.` / `fact.` / `rule.` and carry no `\|`; `methodology.*` refused here; 13 curated names are published as suggestions — prefixes and the no-pipe rule by `TestMemoryTypeCheckMatchesTheGoPrefixes`, the methodology subtraction by `TestPfRememberTypeEnum_NoMethodology` |
 | `content` | string | yes | memory content |
-| `visibility` | string | yes | one of `admin\|private\|project\|public\|team`, built from `domain.MemoryVisibilityList()`; `public` is the anonymous-share tier and the description says what it costs |
+| `visibility` | string | yes | one of `admin\|private\|project\|public\|team`, built from `domain.MemoryVisibilityList()`; `public` is the anonymous-share tier and the description says what it costs (`TestPublishedMemoryVisibilityVocabularyIsTheEnforcedOne`) |
 | `work_item_id` | string | no | associated work item |
 | `base_strength` | number | no | "Initial strength, integer 1-5 (default 3). A fractional value is refused" |
-| `attrs` | object | no | additional attributes; a non-object — including a JSON-encoded string of one — is a 400 |
+| `attrs` | object | no | additional attributes; a non-object — including a JSON-encoded string of one — is a 400 (`TestStringifiedObjectParamIsRejected`) |
 | `expires_at` | string | no | RFC3339 |
 | `dedup_mode` | string | no | deduplication mode |
 | `related_memory_ids` | array | no | related memory ids |
@@ -115,7 +115,6 @@ The `aihub#412` corpus records **13 `pf_remember`
 calls carrying `base_strength`, every value inside the published range and outside the
 enforced one, against 13 `pf_remember` INTERNAL_ERRORs naming
 `memories_base_strength_check`.** That is §6.1 T1-3's owner ruling, now landed.
-<!-- prose-only: because=measurement -->
 
 **The range was only half of it, and `aihub#459` closed the other half on
 2026-09-09: the value must also be a WHOLE NUMBER.** The published type is `number`
@@ -123,7 +122,8 @@ and the column is `SMALLINT`, so `2.5` used to satisfy every guard, get truncate
 toward zero by pgx's int2 codec client-side — no error, so Postgres never saw the
 fraction — and be stored as `2` under a 200. `aihub#475` measured that and made the
 response report the row's own value rather than Go's arithmetic, which made the
-answer honest without making it what the caller asked for. The owner's ruling picked
+answer honest without making it what the caller asked for.
+<!-- prose-only: because=history --> The owner's ruling picked
 refusal over rounding and over widening the column, so the value is now a 400. The
 type stays `number` — that is what JSON carries — which is exactly why the
 description had to say `integer`: with the type unchanged, the published text is the
@@ -144,20 +144,47 @@ create it and then call `pf_update_memory`.
 
 `internal/mcp/tools_memory.go` (`validatePfRememberArgs`) checks the four required
 fields — `internal/mcp/tools_memory_test.go` (`TestValidatePfRememberArgs`) — and
-refuses any `methodology.` prefix, then the handler passes the **argument map
-verbatim** to `pkg/client/client.go` (`Remember`) → `POST /v1/memories`, bound by
-`internal/server/routes_memory.go` (`handleRemember`). The verb and the route are
-observed on a request a fake aihub really received, alongside the two refusals
-costing no request at all, by `internal/mcp/remember_wire_shape_test.go`
+refuses any `methodology.` prefix, then the handler passes the argument map,
+**projected to the published property set**, to `pkg/client/client.go` (`Remember`)
+→ `POST /v1/memories`, bound by `internal/server/routes_memory.go`
+(`handleRemember`). The verb and the route are observed on a request a fake aihub
+really received, alongside the two refusals costing no request at all, by
+`internal/mcp/remember_wire_shape_test.go`
 (`TestRememberRefusesItsOwnContractBeforeAnyRequest`).
 
-Because the map is forwarded wholesale there is no forwarding table to drift from —
-every published property is on the wire by construction, and the guard over
-`internal/mcp/tools_memory.go` (`rememberSchema`) states that identity rather than
-assuming it: `internal/mcp/memory_tools_wire_test.go`
-(`TestMemoryToolsForwardEveryPublishedPropertyByValue`) asserts each landing as a
-value and (`TestMemoryToolsEveryPublishedPropertyHasAWireProbe`) is the completeness
-half. The risk on this tool is at hops 1 and 4.
+The projection is `aihub#586` (owner ruling 2026-09-10), and it cuts both ways:
+<!-- prose-only: because=external-state -->
+
+- **Every published property is on the wire by construction.** The projection keeps
+  exactly what `internal/mcp/tools_memory.go` (`rememberSchema`) publishes, so there
+  is still no forwarding table to drift from, and the guard states that identity
+  rather than assuming it: `internal/mcp/memory_tools_wire_test.go`
+  (`TestMemoryToolsForwardEveryPublishedPropertyByValue`) asserts each landing as a
+  value and (`TestMemoryToolsEveryPublishedPropertyHasAWireProbe`) is the
+  completeness half.
+- **No unpublished name is.** The map used to be forwarded VERBATIM, and
+  `internal/domain/memory.go` (`RememberRequest`) binds five names this schema does
+  not publish — `attempt_id`, `claim_epoch`, `session_secret`, `rendered_html` and
+  `structured_payload`, the census read off the struct's own tags and pinned by
+  `internal/mcp/wire_strip_test.go`
+  (`TestRememberUnpublishedBindableKeysAreExactlyTheCensus`) — so a caller who
+  guessed a spelling got a capability hop 1 never sold, and for `rendered_html` an
+  anonymously shareable one (the 🟢 paragraph in the `visibility` bullet below).
+  Now `internal/mcp/server.go` (`addTool`) strips the unknown set for this tool
+  before the handler runs, and the response's `request_adjusted` names every
+  stripped key under `unknown_params` — the `aihub#389` echo, whose `applied: []`
+  claim this tool used to falsify and now satisfies by construction. Stripped keys
+  absent from the wire, published siblings byte-identical, disclosure earned rather
+  than unconditional: all read off real requests by
+  `internal/mcp/remember_wire_shape_test.go`
+  (`TestRememberStripsUnpublishedRenderedHTMLBeforeTheWire`), and across the whole
+  wholesale-forwarding family — this tool, `pf_save_artifact`, `pf_update_memory` —
+  by `internal/mcp/wire_strip_family_test.go`
+  (`TestWireStrippedFamilyDropsUnpublishedKeysAndDisclosesThem`), with the roster
+  itself pinned by `internal/mcp/wire_strip_test.go`
+  (`TestWireStrippedToolsAreExactlyTheMemoryWriteFamily`).
+
+The remaining risk on this tool is at hops 1 and 4.
 
 ## hop 4 — what it actually does
 
@@ -204,7 +231,9 @@ half. The risk on this tool is at hops 1 and 4.
   (`TestPfRememberTypeEnum_NoMethodology`), and the fact that this tool is the one
   the subtraction is for by `internal/mcp/tools_memory_type_vocab_test.go`
   (`TestRememberTypeDescriptionIsDerivedNotRetyped`). Both are derived from one
-  another rather than typed twice, and NEITHER refuses anything. The consequence a
+  another rather than typed twice (`TestRememberTypeDescriptionIsDerivedNotRetyped`),
+  and NEITHER refuses anything — the off-list type stays storable end to end
+  (`TestMemoryTypeCheckDB_OffListTypeStaysStorableEndToEnd`). The consequence a
   caller should know: a type outside the 19 stores fine and the UI dropdown will
   never offer it back.
 - **`visibility` published four of the column's five values until `aihub#495`
@@ -249,30 +278,43 @@ half. The risk on this tool is at hops 1 and 4.
   `methodology.*` names it refuses — censused by
   `internal/domain/render_types_reach_test.go`
   (`TestDefaultRenderTypesAreOnlyTypesPfRememberRefuses`).
-  🔴 **The first branch is open.** `rendered_html` is an unpublished name on this
-  tool and this handler forwards its whole argument map, so a caller who sends it
-  under that exact spelling puts it on the wire, `internal/domain/memory.go`
-  (`RememberRequest`) binds it, and `internal/domain/memory.go`
-  (`resolveRenderedHTML`) stores an explicit non-empty value verbatim for ANY type —
-  the three hops in order by `internal/mcp/remember_wire_shape_test.go`
-  (`TestRememberForwardsUnpublishedRenderedHTMLToTheBinder`) and
-  `internal/domain/memory_render_test.go`
-  (`TestResolveRenderedHTML_ExplicitOverrides`). So `visibility: public` plus an
-  unpublished `rendered_html` is enough to put a `pf_remember` row into the state
-  `internal/server/routes_artifacts_test.go` (`TestSharedArtifact_Public_200`)
-  serves with no auth — the same unpublished-but-reachable path `tags` took until
-  `aihub#425`, two paragraphs above.
-  ⚠️ This card used to reason the other way and concluded that on a default
-  deployment the two conditions cannot both hold for a `pf_remember` row; that was
-  measured false on 2026-09-10 at its first step, and what remains undriven is only
-  the whole journey in one harness — a single request from `pf_remember` to a 200 on
-  `/share/:id`, which would need a database and a route together.
+  🟢 **The first branch was open until `aihub#586` closed it (owner ruling
+  2026-09-10, option ②).** `rendered_html` is an unpublished name on this tool, and
+  until that fix the handler forwarded its whole argument map, so a caller who sent
+  it under that exact spelling put it on the wire, `internal/domain/memory.go`
+  (`RememberRequest`) bound it, and `internal/domain/memory.go`
+  (`resolveRenderedHTML`) stored an explicit non-empty value verbatim for ANY type.
+  <!-- prose-only: because=history -->
+  So `visibility: public` plus an unpublished `rendered_html` was enough to put a
+  `pf_remember` row into the state `internal/server/routes_artifacts_test.go`
+  (`TestSharedArtifact_Public_200`) serves with no auth — the same
+  unpublished-but-reachable path `tags` took until `aihub#425`, two paragraphs
+  above, with anonymous readability rather than a second round trip as the stake.
+  ⚠️ This card had reasoned that combination impossible on a default deployment;
+  measured on 2026-09-10, the inference was unsound at its first step, and the
+  measurement is what aihub#586 was filed on.
+  The closure is the hop 2 projection in this card's hop 2-3 section: the name is
+  stripped before the wire and named in `request_adjusted`, held by
+  `internal/mcp/remember_wire_shape_test.go`
+  (`TestRememberStripsUnpublishedRenderedHTMLBeforeTheWire`); and the journey this
+  card once called undriven now runs whole — one call carrying `visibility: public`
+  and `rendered_html`, the row's column required NULL, an ANONYMOUS `/share/:id`
+  required not to serve the payload, and a REST control on the same run proving the
+  server-side channel `pf_save_artifact`'s published `html` rides is untouched — in
+  `internal/mcp/remember_strip_e2e_db_test.go`
+  (`TestE2ERememberStripsRenderedHTMLFromTheShareSurface`), against a real database
+  and the real router. `internal/domain/memory_render_test.go`
+  (`TestResolveRenderedHTML_ExplicitOverrides`) still holds the storage precedence,
+  deliberately: the binder and the store are untouched, so the closure lives
+  entirely at this tool's boundary.
   The closure of the second branch is no promise either: the render set is
   configurable at startup (`internal/domain/memory.go` (`InitRenderTypes`)), so a
   deployment can open that one too — `internal/domain/render_types_reach_test.go`
   (`TestInitRenderTypesAdmitsATypePfRememberAccepts`) — and the conjunct is where an
   honest published claim stops.
-- **`work_item_id` is validated against `project`.** A work item in another project
+- **`work_item_id` is validated against `project`**
+  (`TestRememberWorkItemRefIsScopedToTheRequestProject`, driven end to end by
+  `TestRememberRejectsCrossProjectWorkItem`). A work item in another project
   is refused rather than silently stored — the predicate lives inside the resolving
   query, so "no such work item" and "not in this project" are one zero-row outcome
   (`internal/domain/memory_work_item_scope_test.go`,
@@ -323,9 +365,10 @@ card does NOT declare and so cannot see a key that stops being sent.
   rejects an out-of-range caller-stated value with a 400 that opens by naming the
   field (`TestValidateBaseStrengthRejectsWhatTheColumnWouldRefuse`). The guard sits
   above the first query in `internal/domain/memory.go`
-  (`Remember`), so it covers `pf_remember`, `pf_save_artifact` and `pf_update_memory`
-  alike — `internal/domain/memory.go` (`UpdateMemory`) builds a `RememberRequest` and
-  goes through the same function.
+  (`Remember`) — `TestRememberRejectsOutOfRangeBaseStrengthBeforeThePool` proves the
+  ordering with a nil pool — so it covers `pf_remember`, `pf_save_artifact` and
+  `pf_update_memory` alike: `internal/domain/memory.go` (`UpdateMemory`) builds a
+  `RememberRequest` and goes through the same function.
 - **§6.1 T1-3 residual (owner ruling 2026-09-09) — LANDED** (`aihub#459`). Refuse a
   non-integral `base_strength`; do not round it in Go, and do not widen the column —
   the refusal wired above the first query by

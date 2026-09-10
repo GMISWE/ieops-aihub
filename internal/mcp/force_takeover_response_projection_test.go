@@ -19,8 +19,9 @@ package mcp_test
 // copy is in a state file the model does not read.
 //
 // ⚠️ Not because a downstream tool demands it: pf_read_events resolves id-or-slug
-// since aihub#343 and pf_recall since aihub#363, so the "both return nothing for
-// a slug" line still carried by pf_get_step's tool description is stale. Under a
+// since aihub#343 and pf_recall since aihub#363 — the "both return nothing for
+// a slug" line pf_get_step's tool description carried was stale until aihub#590
+// (2026-09-10) corrected it (pinned by slug_publication_test.go). Under a
 // delete-list nobody has to prove a field is needed — that is the whole shape.
 //
 // ─── Why the fix is the SHAPE, not the three names ──────────────────────────

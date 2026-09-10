@@ -1322,6 +1322,30 @@ jobs:
       #             exit 0 with all 16 named `--- PASS:` lines present and no
       #             `--- SKIP`, and with AIHUB_TEST_DB unset it exits 1 on the
       #             first "did not run".
+      #   254 -> 255 aihub#585 added 1 DB-gated function, internal/domain
+      #             (paused_attempt_emit_event_dbgated_test.go,
+      #             TestPausedAttemptStillWritesTimelineEvents) — recorded here
+      #             by aihub#586's merge because the aihub#585 change added the
+      #             step and the manifest line without a tally entry, and this
+      #             list's next row would otherwise jump by two.
+      #   255 -> 256 aihub#586 added 1 DB-gated function, internal/mcp
+      #             (remember_strip_e2e_db_test.go,
+      #             TestE2ERememberStripsRenderedHTMLFromTheShareSurface): the
+      #             unpublished `rendered_html` strip driven whole — one MCP call
+      #             carrying visibility public and rendered_html, the row's
+      #             column required NULL, an anonymous /share/:id required not to
+      #             serve the payload — with a REST control on the same run
+      #             proving the server-side channel pf_save_artifact's published
+      #             `html` rides is untouched. Only a database and the real
+      #             router together can say either half, which is why the wire
+      #             and disclosure arms beside it (remember_wire_shape_test.go,
+      #             wire_strip_family_test.go, wire_strip_test.go) have no line
+      #             here. Measured on a scratch pgvector/pgvector:pg18 migrated
+      #             0001 -> 0038: dbtestcov answered "covered by a CI step:
+      #             253/253 ... OK" (253 = 256 entries minus the three
+      #             +EMBEDDING_BASE_URL exclusions), measured AFTER merging
+      #             origin/main at 3f2862c — re-derived from the tools rather
+      #             than by arithmetic from the entry above.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -2985,6 +3009,63 @@ jobs:
           ! grep -q -- '--- SKIP' delocking.log \
             || { echo "::error::an aihub#416 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#564: the lock-table rules (1 and 3) of pf_predict_conflicts leave
+      # the caller's own attempt out, the way aihub#510 taught the declaration
+      # rules to. Eight arms drive both directions: the self-held lock stops
+      # being reported (rule 1 hard_block, rule 3 dry_run soft_block, the
+      # pf-work Mode B gate reading, and the mixed self+foreign payload where
+      # the self-held row used to suppress the real conflict), and the controls
+      # that keep the rule a rule (a foreign holder still hard_blocks and
+      # soft_blocks, an anonymous create-preview keeps its self-report, a
+      # caller spelled as a slug is still excluded). Safe after the 0038 step
+      # above: every fixture here is claimed inside this step and takes
+      # file_scope rows, not the git_branch/deploy_env rows that migration
+      # deletes.
+      - name: aihub#564 predict lock-rule self-exclusion DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestPredictLockRulesLeaveTheCallerOut$' -count=1 -v 2>&1 | tee predict_lock_self_exclusion.log
+          for want in TestPredictLockRulesLeaveTheCallerOut \
+                      TestPredictLockRulesLeaveTheCallerOut/rule1_self_held_lock_is_excluded \
+                      TestPredictLockRulesLeaveTheCallerOut/rule1_foreign_lock_still_hard_blocks \
+                      TestPredictLockRulesLeaveTheCallerOut/rule3_self_held_lock_is_excluded \
+                      TestPredictLockRulesLeaveTheCallerOut/rule1_dry_run_gate_reading \
+                      TestPredictLockRulesLeaveTheCallerOut/rule3_foreign_lock_still_soft_blocks \
+                      TestPredictLockRulesLeaveTheCallerOut/mixed_payload_reports_only_the_foreign_holder \
+                      TestPredictLockRulesLeaveTheCallerOut/anonymous_predict_keeps_the_self_report \
+                      TestPredictLockRulesLeaveTheCallerOut/exclusion_holds_when_identified_by_slug; do
+            grep -q -- "--- PASS: $want" predict_lock_self_exclusion.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#564 lock-rule self-exclusion coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' predict_lock_self_exclusion.log \
+            || { echo "::error::an aihub#564 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#591: pf_create_api_key's hop-4 sentence — "mints a key, stores its
+      # hash, and returns the plaintext once" — had no arm at all; the only
+      # coverage read the PUBLISHED DESCRIPTION. This probe drives the real
+      # router against the real database: the stored row carries HashKey(raw)
+      # and never the plaintext (so no later read can leak it, which is what
+      # makes "once" enforceable), and the minted key authenticates a real
+      # request through the real middleware — the arm that goes red the day
+      # the mint's hash and the middleware's comparison diverge. Independent of
+      # the 0038 step above: the fixture writes only users.api_keys.
+      - name: aihub#591 api-key mint stores-only-the-hash DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestCreateAPIKeyStoresOnlyTheHashAndTheMintedKeyAuthenticates$' -count=1 -v 2>&1 | tee api_key_mint.log
+          for want in TestCreateAPIKeyStoresOnlyTheHashAndTheMintedKeyAuthenticates \
+                      TestCreateAPIKeyStoresOnlyTheHashAndTheMintedKeyAuthenticates/the_row_stores_the_hash_and_never_the_plaintext \
+                      TestCreateAPIKeyStoresOnlyTheHashAndTheMintedKeyAuthenticates/the_minted_key_authenticates_a_real_request; do
+            grep -q -- "--- PASS: $want" api_key_mint.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#591 api-key mint coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' api_key_mint.log \
+            || { echo "::error::an aihub#591 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: aihub#239 recall cursor tie + supersede carry DB tests
         env:
           AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
@@ -3407,6 +3488,28 @@ jobs:
           done
           ! grep -q -- '--- SKIP' reinforce_wi_e2e.log \
             || { echo "::error::an aihub#325 E2E test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#586: the unpublished `rendered_html` argument used to ride
+      # pf_remember's wholesale-forwarded argument map into
+      # RememberRequest.RenderedHTML and be stored verbatim for any type, so
+      # `visibility: public` plus a name no schema publishes produced an
+      # anonymously /share-readable row. The strip (owner ruling 2026-09-10,
+      # option ②) closes that at the tool boundary; the fake-backed arms in
+      # remember_wire_shape_test.go and wire_strip_family_test.go hold the wire
+      # and the disclosure, and only this test can hold the two live surfaces —
+      # the stored row and the anonymous route — plus the REST control proving
+      # the server-side channel pf_save_artifact's published `html` rides is
+      # untouched. Same -v + grep discipline as every DB step here.
+      - name: aihub#586 pf_remember rendered_html strip E2E DB test
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/mcp/ -run '^TestE2ERememberStripsRenderedHTMLFromTheShareSurface$' -count=1 -v 2>&1 | tee remember_strip_e2e.log
+          grep -q -- '--- PASS: TestE2ERememberStripsRenderedHTMLFromTheShareSurface (' remember_strip_e2e.log \
+            || { echo "::error::TestE2ERememberStripsRenderedHTMLFromTheShareSurface did not run; the aihub#586 strip is not verified end to end"; exit 1; }
+          ! grep -q -- '--- SKIP' remember_strip_e2e.log \
+            || { echo "::error::the aihub#586 E2E test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#151: the pre-share visibility bookkeeping in SetMemoryVisibility.
       #
@@ -4921,6 +5024,33 @@ jobs:
           done
           ! grep -q -- '--- SKIP' attempt_status_vocabulary.log \
             || { echo "::error::an aihub#441 attempt-status vocabulary test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#585 (owner ruling ②, 2026-09-10): a paused attempt retains the
+      # right to write timeline events. The aihub#583 census
+      # (TestOnlyOneCredentialVerifierRefusesAPausedAttempt, DB-free, runs in
+      # the "Unit tests" step) pins WHICH credential verifier refuses a paused
+      # attempt at the source level; only a database can say the grant actually
+      # works — that a real pause through FnCompleteAttempt leaves EmitEvent
+      # accepting the paused attempt's own credential triple, landing the row on
+      # the timeline, and still refusing a wrong secret on that same paused
+      # attempt. Both cards (pf_pause_attempt, pf_emit_event) cite this
+      # function, and the two subtests are pinned by name for the aihub#508
+      # reason the step above states of its own: a card cites the parent
+      # function, so a deleted subtest would leave the citation resolving and
+      # K12 green while the claim went unheld.
+      - name: aihub#585 paused-attempt event-writing grant DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestPausedAttemptStillWritesTimelineEvents$' -count=1 -v 2>&1 | tee paused_emit_grant.log
+          for want in "TestPausedAttemptStillWritesTimelineEvents/the_paused_attempts_own_credentials_still_emit" \
+                      "TestPausedAttemptStillWritesTimelineEvents/a_wrong_secret_on_the_same_paused_attempt_is_refused"; do
+            grep -q -- "--- PASS: $want" paused_emit_grant.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#585 event-writing grant is not actually executing — the pf_pause_attempt and pf_emit_event cards both cite this arm"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' paused_emit_grant.log \
+            || { echo "::error::an aihub#585 paused-attempt grant test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
   publish-schemas:
     name: Publish MCP Schemas

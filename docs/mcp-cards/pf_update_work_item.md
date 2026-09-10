@@ -135,19 +135,19 @@ a seventh working-tier field cannot join the tier unpublished.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `work_item_id` | string | yes | id or slug |
-| `goal` | string | no | single-line, **non-empty**, ≤500 chars; only while status is queued, paused or blocked, and only for the reporter / a maintainer / an admin |
+| `goal` | string | no | single-line, **non-empty**, ≤500 chars (`TestGoalShapeIsTheSameContractOnBothWritePaths`); only while status is queued, paused or blocked, and only for the reporter / a maintainer / an admin (`TestUpdateGate`) |
 | `goal_change_reason` | string | no | required with `goal` |
 | `priority` | enum | no | from the domain list |
 | `milestone` | string | no | updated milestone |
-| `wi_type` | string | no | updated type; only while status is queued, paused or blocked — the same tier, predicate and status set as `goal`, and since `aihub#495` its description says so too |
+| `wi_type` | string | no | updated type; only while status is queued, paused or blocked — the same tier, predicate and status set as `goal` (`TestUpdateGate`, `TestOnlyGoalAndWITypeCarryAPermissionGate`), and since `aihub#495` its description says so too |
 | `requires_human_session` | boolean | no | sets `true` or `false`; **cannot reach the third state** — no way back to `NULL` |
 | `reclassify_reason` | string | no | required with a `wi_type` change, min 10 chars |
 | `labels` | array | no | max from the domain constant |
 | `declared_resources` | array | no | the whole list, replaced |
 | `resources_version` | integer | no | CAS guard — omitting it overwrites unconditionally |
-| `attrs` | object | no | **REPLACES** the whole object; unsent keys are DELETED; a non-object is a 400 |
-| `attrs_patch` | object | no | shallow merge; `null` STORES a null rather than deleting; a non-object is a 400 |
-| `attrs_unset` | array | no | applied AFTER `attrs_patch`, so a key in both is deleted |
+| `attrs` | object | no | **REPLACES** the whole object; unsent keys are DELETED (`TestUpdateWorkItemAttrs_ReplaceStillDestroysUnsentKeys`); a non-object is a 400 (`TestStringifiedObjectParamIsRejected`) |
+| `attrs_patch` | object | no | shallow merge (`TestUpdateWorkItemAttrsPatch_DoesNotDestroyOtherKeys`); `null` STORES a null rather than deleting (a `TestUpdateWorkItemAttrsUnset_DeletesNamedKeys` subtest); a non-object is a 400 (`TestStringifiedObjectParamIsRejected`) |
+| `attrs_unset` | array | no | applied AFTER `attrs_patch`, so a key in both is deleted (`TestUpdateWorkItemAttrsUnset_DeletesNamedKeys`) |
 | `content` | string | no | markdown ≤20000; not echoed back |
 | `brief` | boolean | no | replaces the body with `content_len` |
 
@@ -209,8 +209,9 @@ except `work_item_id` and `brief` into the body of
 
 ## hop 4 — what it actually does
 
-- **`resources_version` is the only thing standing between two writers.** Leaving it
-  out overwrites unconditionally: a concurrent writer's list is silently discarded,
+- **`resources_version` is the only thing standing between two writers**
+  (`TestDeclaredResourcesCASRetry_LosingWriteIsDiscardedWholeNotJustItsVersion`).
+  Leaving it out overwrites unconditionally: a concurrent writer's list is silently discarded,
   locks and all, and the caller still gets a 200 — three arms, one per clause:
   `internal/domain/work_items_cas_test.go`
   (`TestBuildWorkItemUpdate_DeclaredResourcesAlwaysIncrementsVersion`) shows the
@@ -253,7 +254,8 @@ except `work_item_id` and `brief` into the body of
   `null` stores a JSON null, and
   (`TestUpdateWorkItemAttrsUnset_DeletesNamedKeys`) carries the subtest where a
   `null` is shown to be stored rather than treated as a delete.
-- **Both are shape-checked, and `attrs` only since `aihub#465`.** `attrs_patch`
+- **Both are shape-checked, and `attrs` only since `aihub#465`**
+  (`TestStringifiedObjectParamIsRejected` quantifies over both). `attrs_patch`
   had to be, because `jsonb || jsonb` silently does something else with an array;
   `attrs` is a plain column assignment, so Postgres stored whatever JSON arrived
   and answered 200 — including a JSON-encoded STRING of the object the caller
@@ -277,7 +279,8 @@ except `work_item_id` and `brief` into the body of
   (`TestOnlyGoalAndWITypeCarryAPermissionGate`) with the status half in
   (`TestUpdateGate`).
 - **`goal` carries two guards of its own, and since `aihub#474` (2026-09-09) they
-  are the same two `pf_create_work_item` applies.** `internal/domain/work_item_fields.go`
+  are the same two `pf_create_work_item` applies**
+  (`TestGoalShapeIsTheSameContractOnBothWritePaths`). `internal/domain/work_item_fields.go`
   (`validateWorkItemGoalShape`) refuses a goal over 500 characters with a 400
   `BAD_REQUEST` and one containing `\n` or `\r` with `ErrGoalMultiline`, in that
   order, and BOTH work-item write paths call it —
@@ -292,7 +295,7 @@ except `work_item_id` and `brief` into the body of
   (`TestTheEditMatrixIsCheckedBeforeTheGoalAndReasonRules`) reads off the parsed call
   positions inside `UpdateWorkItem`.
 - **An EMPTY goal is refused since `aihub#507` (2026-09-09), and until then it was
-  STORED.** `pf_create_work_item` had always answered `goal: ""` with a 400
+  STORED** (`TestBothWorkItemWritePathsRefuseAnEmptyGoal`). `pf_create_work_item` had always answered `goal: ""` with a 400
   `BAD_REQUEST` "goal is required"; this tool wrote the empty string and returned
   200, leaving a work item that renders blank in every list and in the ready queue —
   the refusal, its code and its message are pinned verbatim by
@@ -332,7 +335,9 @@ except `work_item_id` and `brief` into the body of
   mirror enforce something the database does not while that test kept passing, so
   the two rules stay two functions and each call site calls both.
 - **The length half was missing here until `aihub#474`, and what it cost is not
-  what the report assumed.** The filing said this tool STORED an over-length goal.
+  what the report assumed.**
+  <!-- prose-only: because=history -->
+  The filing said this tool STORED an over-length goal.
   It did not: `work_items_goal_check` caps `length(goal)` at 500 in the database
   (`internal/db/migrations/0002_work_items.sql`, unaltered by any later migration —
   `internal/domain/db_check_policy_test.go`
@@ -341,7 +346,9 @@ except `work_item_id` and `brief` into the body of
   so the write was refused by Postgres as SQLSTATE 23514 and reached the caller as a
   500 with a constraint name in it. So the defect was never data integrity; it was
   that the two tools answered the SAME illegal string two different ways, which is
-  the `aihub#396` class exactly. The owner ruled the asymmetry an oversight on
+  the `aihub#396` class exactly.
+  <!-- prose-only: because=history -->
+  The owner ruled the asymmetry an oversight on
   2026-09-09 rather than a deliberate exemption, and the fix is one shared function
   rather than a second copy of the check, so a future third write path cannot
   reintroduce the split. Adding the cap refuses no existing caller: measured on
@@ -364,7 +371,7 @@ wrong caller, which is every cell of (`TestUpdateGate`) plus
 |---|---|---|---|---|
 | contract | `goal`, `wi_type` | reporter / project maintainer / admin only, else **403 `FORBIDDEN`** | **409 `CONFLICT_WI_ALREADY_CLAIMED`** — pause first | **409 `CONFLICT_TERMINAL_STATE`** |
 | working | `content`, `labels`, `priority`, `milestone`, `requires_human_session`, `declared_resources` | allowed | allowed | **409 `CONFLICT_TERMINAL_STATE`** |
-| record | `attrs`, `attrs_patch`, `attrs_unset` | allowed | allowed | **allowed** — the one exemption, and it is deliberate |
+| record | `attrs`, `attrs_patch`, `attrs_unset` | allowed | allowed | **allowed** — the one exemption, and it is deliberate (`TestTerminalWorkItemKeepsTheAttrsWritePath`, `TestOnlyTheAttrsFieldsAreExemptOnATerminalWorkItem`) |
 
 - **The strictest tier a patch touches governs the whole patch**, in both
   directions, by `internal/domain/work_items_update_gate_test.go`
@@ -400,7 +407,8 @@ wrong caller, which is every cell of (`TestUpdateGate`) plus
   codes in the table are that tool's own three, so one rule now covers both tools.
   The constants stay declared and mapped (`internal/domain/errors.go`
   (`ErrGoalChangeNotAllowed`)) so a stale client's branch still resolves.
-- **`blocked` is new for the contract tier.** `goal` and `wi_type` used to be
+- **`blocked` is new for the contract tier** (`TestUpdateGate` drives it beside
+  queued and paused). `goal` and `wi_type` used to be
   refused there; a blocked work item has no live attempt to invalidate, which is
   the argument `aihub#242` already accepted for cancel.
 
@@ -427,8 +435,9 @@ the same bytes.
 the two replies themselves are held by
 (`TestPublishedBriefDifferenceFromGetIsTheEnforcedOne`), which drives both tools
 against one served record. A work item with no body comes back as
-`content: null` with no `content_len`, so a missing `content_len` means "this wi has
-no body", never "the body was withheld".
+`content: null` with no `content_len` (`TestDropContentEchoLeavesABodylessNullAloneAndReportsNoLength`),
+so a missing `content_len` means "this wi has no body", never "the body was
+withheld".
 
 ## Policy
 
@@ -453,6 +462,7 @@ no body", never "the body was withheld".
   include. The `aihub#507` gate was NAMED for this tool while it was the only one
   carrying the word; `aihub#520` folded it into the quantified loop above rather
   than leaving a second named test, which is what its own doc comment asked for.
+  <!-- prose-only: because=history -->
 - **§6.1 T1-9, second application — CLOSED by `aihub#474` (2026-09-09).** The
   published `goal` description used to state the status gate and nothing else,
   while `pf_create_work_item`'s stated both of its shape constraints. The
@@ -488,14 +498,17 @@ no body", never "the body was withheld".
 
 ## Open
 
-- **§6.4 item 2 — CLOSED by `aihub#447`, and this is the card it lands on.** T2-9's
+- **§6.4 item 2 — CLOSED by `aihub#447`, and this is the card it lands on.**
+  <!-- prose-only: because=external-state -->
+  T2-9's
   live side effect was a `pf_update_work_item` call sending **only** `work_item_id`
   and `attrs_patch` that moved `requires_human_session` from `null` to `true` and
   persisted it, with no field of that name anywhere in the request.
-  <!-- prose-only: because=external-state -->
   Both parameters
   involved are published by this tool and documented at length above, so the README
-  rule — a card touching a `§6.4` item says so here — points at this card. **It did
+  rule — a card touching a `§6.4` item says so here — points at this card.
+  <!-- prose-only: because=judgement -->
+  **It did
   not reproduce, and the write has a different author.** The audit's recipe was run
   on both arms it asks for: the same sequence (create with the field omitted,
   `attrs_patch`-only update through the MCP layer, then claim) against a server built
@@ -506,7 +519,9 @@ no body", never "the body was withheld".
   both, emitting `wi_classification_resolved` (`source: server_default`)
   sub-millisecond before `attempt_started`. That is the same ordered pair
   `aihub#411`'s own live timeline carries, one minute after it was filed and **51
-  minutes before** the update it was attributed to. So the mechanism is
+  minutes before** the update it was attributed to.
+  <!-- prose-only: because=external-state -->
+  So the mechanism is
   `domain.FnClaimWorkItem`'s C-R9-12 fallback, which resolves an unclassified work
   item from a server default on first claim; it is still live and unchanged, and the
   value it resolves to is a constant pinned by
@@ -538,7 +553,8 @@ no body", never "the body was withheld".
   including by the batch that shipped this change — while the working tier's new
   refusal on a closed record breaks zero measured calls. `aihub#440` wrapped
   2026-09-08 and was re-checked the same day.
-- **`milestone` is the one unexercised cell.** It appears in none of the 738
+- **`milestone` is the one unexercised cell.**
+  <!-- prose-only: because=measurement -->
+  It appears in none of the 738
   measured calls, so its new terminal-state refusal rests on the tier argument
   alone rather than on observed traffic.
-  <!-- prose-only: because=measurement -->

@@ -55,8 +55,26 @@ func (s *Server) registerUserTools() {
 			// the other (aihub#411 §6.2 T2-17).
 			"role": propEnum("string", "Global role across every project, NOT a project member role (default: writer)",
 				domain.UserGlobalRoleList()),
-			"email":          prop("string", "Email address (required for human users; auto-generated for machine users)"),
-			"author_aliases": prop("array", "Git author aliases for this user"),
+			"email": prop("string", "Email address (required for human users; auto-generated for machine users)"),
+			// aihub#587 (2026-09-10): `author_aliases` is WITHDRAWN from this
+			// schema, and handleCreateUser no longer binds it. Measured before
+			// the withdrawal: users.author_aliases had three write sites and no
+			// SQL statement the census could see reading it, anywhere in
+			// internal/ or pkg/ — commit records take their author from the
+			// authenticated caller, never from this column, so the value was
+			// stored for nobody. The owner's ruling on aihub#587 was to
+			// withdraw the parameter rather than wire a reader. The COLUMN
+			// stays (TEXT[] NOT NULL DEFAULT '{}' in 0001_initial.sql, so the
+			// DEFAULT is what lands now): dropping it is a destructive
+			// migration and a separate decision, recorded as dormant in
+			// docs/mcp-cards/pf_create_user.md. A caller still sending the
+			// name gets it disclosed by the aihub#389 echo
+			// (request_adjusted.unknown_params) rather than silently dropped —
+			// TestAuthorAliasesWithdrawalIsDisclosed
+			// (update_user_param_publication_test.go) — and the census arm
+			// that used to hold "written, never read" now holds "neither
+			// written nor read": TestAuthorAliasesIsNeitherWrittenNorRead
+			// (user_admin_surface_test.go).
 		}, []string{"display_name"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -76,7 +94,7 @@ func (s *Server) registerUserTools() {
 	// pf_update_user
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_update_user",
-		Description: "Update a user's display name, role or git author aliases (admin only)",
+		Description: "Update a user's display name or role (admin only)",
 		InputSchema: objectSchema(map[string]any{
 			"id":           prop("string", "User ID"),
 			"display_name": prop("string", "Updated display name"),
@@ -100,40 +118,15 @@ func (s *Server) registerUserTools() {
 			// conflating them actually makes.
 			"role": propEnum("string", "Updated global role across every project, NOT a project "+
 				"member role", domain.UserGlobalRoleList()),
-			// aihub#425/#426. handleUpdateUser has always bound this — PATCH
-			// /v1/admin/users/:id sets `author_aliases=$n` whenever the field is
-			// present — and this handler has always forwarded it, because it
-			// copies its whole args map into the body. Only the schema was
-			// missing, so the value was reachable solely by a caller who guessed a
-			// name no schema mentions. Measured, not assumed: the argument reaches
-			// the PATCH body unpublished (see update_user_param_publication_test.go).
-			//
-			// The consequence was narrow and total: pf_create_user publishes
-			// author_aliases, so aliases could be set at creation and then never
-			// changed from MCP again — and the one case that could not be fixed
-			// was the one that matters: an alias that was wrong, or an author who
-			// acquired a new email.
-			//
-			// ⚠️ This block used to say "aliases are how a git commit author maps
-			// to a user". Measured 2026-09-10 by aihub#543: users.author_aliases
-			// has writers and NO reader anywhere in internal/ or pkg/, so nothing
-			// in aihub attributes a commit by it — commit records take their
-			// author from the authenticated caller. The census is
-			// TestAuthorAliasesIsWrittenAndNeverRead (user_admin_surface_test.go),
-			// which also refuses a description here that claims attribution, and
-			// the corrected sentence is in docs/mcp-cards/pf_create_user.md and
-			// pf_update_user.md. Publishing a bound field is still right; what was
-			// wrong was the reason given for it mattering.
-			//
-			// The empty-array spelling is published because the server
-			// distinguishes it and nothing else says so: the request struct binds
-			// []string and the handler tests `req.AuthorAliases != nil`, so an
-			// omitted field leaves the column alone while `[]` decodes to a
-			// non-nil empty slice and CLEARS it. Absent and empty are different
-			// instructions here, and a caller who reads "omit to keep current"
-			// nowhere would reasonably send [] meaning "no change".
-			"author_aliases": prop("array", "Updated git author aliases — REPLACES the whole list. "+
-				"Omit to leave unchanged; send [] to clear every alias."),
+			// aihub#587 (2026-09-10): `author_aliases` is WITHDRAWN here too —
+			// see the pf_create_user comment above for the ruling, the measured
+			// no-reader census and the arms. This tool published the field from
+			// aihub#425/#426 until aihub#587 so an alias set at creation could be
+			// corrected; with no reader anywhere in internal/ or pkg/, that
+			// correction capability preserved a value nothing consumes, and
+			// handleUpdateUser no longer binds it — a PATCH body carrying the
+			// name now behaves exactly as though it carried nothing, the same
+			// verdict user_type has always had on this path.
 		}, []string{"id"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)

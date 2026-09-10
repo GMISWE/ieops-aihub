@@ -4,7 +4,7 @@
 {
   "tool": "pf_read_events",
   "description_sha256": "c495ca6b4e50e46b49bc56d8e8eeb357784284e54b737ff696a6734c6f6d42ae",
-  "input_schema_sha256": "bbd3846e6d7b3bb0b6d94865efbe2e90bb3f49cd3663c47ec5c1bbf0c5497aa4",
+  "input_schema_sha256": "785169078a3d1f45d3949297e10d1fc19540df6cc0ff26eda0e454ccf4b33de8",
   "params": {
     "cursor": {
       "type": "string",
@@ -59,7 +59,7 @@ directions.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
-| `work_item_id` | string | no | one work item (or use `project`) |
+| `work_item_id` | string | no | one work item — canonical id or slug (or use `project`) |
 | `project` | string | no | one project (or use `work_item_id`) |
 | `user_id` | string | no | "Filter by ACTOR: matches agent_events.actor_user_id" |
 | `types` | array | no | "A FILTER, not a whitelist and not a validator" — a claim emits one `lock_acquired` PER declared path |
@@ -67,6 +67,12 @@ directions.
 | `since` | string | no | RFC3339 |
 | `limit` | string | no | max events (server default 50) |
 | `pinned_first` | boolean | no | pinned events first |
+
+Since `aihub#590` (2026-09-10) the `work_item_id` property states the id-or-slug fact
+itself — it used to read "Work item ID (or use project)", which left the slug every
+human and skill types looking unsupported while the handler had resolved it since
+`aihub#343` — held by `internal/mcp/slug_publication_test.go`
+(`TestSlugAcceptanceIsPublishedByReadEvents`).
 
 The description carries a **cutover caveat** on the tool itself rather than only in
 the design doc: `lock_acquired` / `lock_released` / `wi_resources_updated` exist only
@@ -133,6 +139,7 @@ parameter at all.
   `aihub#343`, which fixed the read side in the same change that started emitting the
   lock events this card's hop-0 caveat is about, and which was filed on two
   production readings taken before that fix.
+  <!-- prose-only: because=history -->
   The advice went with the defect — there is nothing left to work around.
 - **`types` is a FILTER rather than a whitelist**, and `aihub#444` renamed it for
   that reason (`aihub#411` §6.2 T2-5) — `internal/mcp/tools_events_vocab_test.go`
@@ -149,7 +156,8 @@ parameter at all.
   `wi_created`, `wi_note`, `correction`, `attempt_paused`, `wi_rhs_changed` among
   them — name nothing any code path emits. That is `aihub#259`'s failure mode
   surviving its own fix: the parameter now reaches the server and filters correctly
-  on a name that cannot exist. The vocabulary is published on
+  on a name that cannot exist — the discrimination between a real and an impossible
+  type is what `TestE2EReadEventsTypesFilterDiscriminates` measures. The vocabulary is published on
   `pf_emit_event`'s `event_type` rather than repeated here, so the two tools share
   one copy of it on the wire: `internal/mcp/tools_events_vocab_test.go` requires that
   copy to name every entry of `domain.EventVocabulary`
@@ -165,6 +173,7 @@ parameter at all.
 - The stream is a **whitelisted semantic record**, not a wire log: the server keeps
   no per-request log, which is why `aihub#412` had to reconstruct the request/response
   chain from transcripts instead.
+  <!-- prose-only: because=judgement -->
 - `cursor` is **validated at the handler and refused with a 400** naming the
   parameter and quoting the value (`aihub#435`) —
   `internal/server/cursor_validation_test.go`

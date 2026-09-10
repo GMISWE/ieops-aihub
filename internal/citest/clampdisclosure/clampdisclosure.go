@@ -222,6 +222,14 @@ var clampsOutsideTheConvention = map[string]ScopeNote{
 		Origin: "a bracket-nesting counter while splitting a `go test -run` pattern, in CI " +
 			"tooling that serves no request at all; floored at 0 because an unmatched ']' is legal",
 	},
+	"internal/citest/cardclaims/cardclaims.go:cleanLine:o": {
+		Origin: "a byte offset into ONE LINE of a contract card's own markdown, after the " +
+			"classification markers have been cut out of it and the remainder trimmed. Floored " +
+			"at 0 because a marker sitting in the leading whitespace lands ahead of the trimmed " +
+			"text; capped at len(trimmed) for the trailing case. Nobody sends a card its own " +
+			"offsets — this is CI tooling reading files in the repo, and it serves no request",
+	},
+
 	"internal/domain/conflicts.go:lastActiveAgeSeconds:age": {
 		Origin: "the age of a run_attempts.last_active_at reading, computed here from two " +
 			"different clocks. It is REPORTED to a caller (last_active_age_seconds) and was never " +

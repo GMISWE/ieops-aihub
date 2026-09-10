@@ -5,6 +5,24 @@ import (
 	"testing"
 )
 
+// testIndex is the arm index the fixtures resolve against. Hand-built rather than
+// walked, so a fixture's verdict does not move when an unrelated test is renamed —
+// and so the "cites a test that does not exist" case has something it reliably is
+// not in.
+var testIndex = ArmIndex{
+	Built: true,
+	Funcs: map[string]bool{
+		"TestReadIntentTakesNoWriteLock":                  true,
+		"TestClaimRecordsRepoPins":                        true,
+		"TestResourceToLock_FileScopeNamespacedByProject": true,
+	},
+	Files: map[string]bool{
+		"internal/domain/delocking_db_test.go": true,
+		"delocking_db_test.go":                 true,
+		"claim_response_projection_test.go":    true,
+	},
+}
+
 // 🔴 Why this file is as long as it is.
 //
 // K12's ledger MATCHES on a healthy tree — that is the arm working — so every
@@ -114,6 +132,11 @@ func TestRecogniserRejectsWhatItDeliberatelyDoesNotRecognise(t *testing.T) {
 	}
 }
 
+func citesForTest(s string) bool {
+	ok, _ := CitesAnArm("fixture.md", s, testIndex)
+	return ok
+}
+
 func TestCitingAnArmIsNarrowerThanCitingAFile(t *testing.T) {
 	// 🔴 The one that retires debt, so it is the one worth pinning hardest: if
 	// naming ANY .go file counted, a card could clear its ledger by describing
@@ -129,13 +152,13 @@ func TestCitingAnArmIsNarrowerThanCitingAFile(t *testing.T) {
 		"The registry is `internal/mcp/tools_lifecycle.go`.",
 	}
 	for _, s := range cited {
-		if !CitesAnArm(s) {
+		if !citesForTest(s) {
 			t.Errorf("CitesAnArm(%q) = false; a sentence naming its arm must retire its own "+
 				"debt, or the only way to close the ledger is a marker", s)
 		}
 	}
 	for _, s := range notCited {
-		if CitesAnArm(s) {
+		if citesForTest(s) {
 			t.Errorf("CitesAnArm(%q) = true; that names the implementation, not a gate over "+
 				"it. Counting it as probed would let a card retire debt by saying where the "+
 				"code is, which is the one thing a reader of this ledger must not be able to "+
@@ -154,9 +177,11 @@ func TestMarkerAttachesToTheSentenceItFollows(t *testing.T) {
 		"  written yet, and this is the claim it will hold first. -->\n" +
 		"  A `service` entry answers `info` and carries `last_active_age_seconds`.\n"
 
-	sentences, orphans := ReadCard("fixture.md", prose)
-	if len(orphans) != 0 {
-		t.Fatalf("orphans = %d, want 0: %+v", len(orphans), orphans)
+	read := ReadCard("fixture.md", prose)
+	sentences := read.Sentences
+	if len(read.Orphans) != 0 || len(read.Dropped) != 0 {
+		t.Fatalf("orphans = %d, dropped = %d, want 0/0: %+v %+v",
+			len(read.Orphans), len(read.Dropped), read.Orphans, read.Dropped)
 	}
 	if len(sentences) != 2 {
 		t.Fatalf("split into %d sentence(s), want 2:\n%+v", len(sentences), sentences)
@@ -192,12 +217,12 @@ func TestMarkerOnALineTheWalkDoesNotReadIsAnOrphan(t *testing.T) {
 		"| `dry_run` | boolean | no | <!-- prose-only: because=history --> |\n",
 		"```go\n<!-- prose-only: because=history -->\n```\n",
 	} {
-		_, orphans := ReadCard("fixture.md", prose)
-		if len(orphans) != 1 {
-			t.Errorf("orphans = %d, want 1 for:\n%s", len(orphans), prose)
+		read := ReadCard("fixture.md", prose)
+		if len(read.Orphans) != 1 {
+			t.Errorf("orphans = %d, want 1 for:\n%s", len(read.Orphans), prose)
 		}
 	}
-	tally := Tally("fixture.md", "## hop 0-1 <!-- prose-only: because=history -->\n\nx\n")
+	tally := Tally("fixture.md", "## hop 0-1 <!-- prose-only: because=history -->\n\nx\n", testIndex)
 	if !hasFinding(tally.Problems, "K12 MARKER_ORPHAN") {
 		t.Errorf("Tally did not report MARKER_ORPHAN: %v", tally.Problems)
 	}
@@ -213,7 +238,7 @@ func TestSplitterReproducesTheSizerOnAMixedSection(t *testing.T) {
 		"```json\n{\"tool\": \"pf_x\"}\n```\n\n" +
 		"A `path` entry derives a `file_scope` lock. `repo` entries derive none.\n" +
 		"tiny\n"
-	sentences, _ := ReadCard("fixture.md", prose)
+	sentences := ReadCard("fixture.md", prose).Sentences
 	if len(sentences) != 2 {
 		t.Fatalf("split %d sentence(s), want 2 — the table, the fence, the heading and the "+
 			"sub-floor fragment are all outside the population:\n%+v", len(sentences), sentences)
@@ -286,7 +311,7 @@ func TestEveryMarkerFieldFindingFires(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			prose := "A `path` entry derives a `file_scope` lock. " + tc.marker + "\n"
-			tally := Tally("fixture.md", prose)
+			tally := Tally("fixture.md", prose, testIndex)
 			if !hasFinding(tally.Problems, tc.want) {
 				t.Errorf("no %s. A finding that cannot be triggered from a fixture is a "+
 					"finding nobody knows is broken until they rely on it.\ngot: %v",
@@ -307,7 +332,7 @@ func TestKindsThatNameNobodyAreAcceptedWithoutAWorkItem(t *testing.T) {
 			"citation=internal/server/queryparam.go, the /ui exemption note | " +
 			"reason=asserting this needs a second machine, which the harness cannot " +
 			"create from a unit test. -->\n"
-		tally := Tally("fixture.md", prose)
+		tally := Tally("fixture.md", prose, testIndex)
 		if hasFinding(tally.Problems, "K12 WAIVER_NO_WORK_ITEM") {
 			t.Errorf("kind %s was required to name a work item: %v", kind, tally.Problems)
 		}
@@ -357,7 +382,7 @@ func TestClassificationConflictsFire(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tally := Tally("fixture.md", tc.prose)
+			tally := Tally("fixture.md", tc.prose, testIndex)
 			if !hasFinding(tally.Problems, tc.want) {
 				t.Errorf("no %s\ngot: %v", tc.want, tally.Problems)
 			}
@@ -408,10 +433,33 @@ func TestLedgerIsCheckedInBothDirections(t *testing.T) {
 			absent: []string{"K12 DEBT_GROWTH"},
 		},
 		{
-			name:   "a relabel that both rises and falls is reported as growth",
+			// 🔴 The commonest operation in a probe wave, and the first version of
+			// classifyDrift accused it of being the worst one: filing a legitimate marker
+			// on a grandfathered sentence moves it out of Unclassified into a classified
+			// column, and "some column rose" was read as growth. The message then told the
+			// author a card sentence asserted something with neither an arm nor a marker,
+			// in the same diff where they had just added the marker.
+			name:   "filing a marker on a grandfathered sentence is a reclassification",
+			ledger: map[string]Census{"pf_a": {Candidates: 5, Unclassified: 5}},
+			want:   []string{"K12 RECLASSIFIED"},
+			absent: []string{"K12 DEBT_GROWTH", "K12 STALE_DEBT"},
+		},
+		{
+			// The escape the per-kind columns exist to expose. Same finding, because
+			// both are "a sentence moved between classes and the row must be re-pinned";
+			// the message names both readings so the diff has to say which.
+			name:   "a relabel between waiver kinds is a reclassification too",
 			ledger: map[string]Census{"pf_a": {Candidates: 5, Unclassified: 4, AcceptedUnprobed: 1}},
+			want:   []string{"K12 RECLASSIFIED"},
+			absent: []string{"K12 DEBT_GROWTH"},
+		},
+		{
+			// The one thing that must still be growth: a sentence with no arm and no
+			// marker appearing where none was.
+			name:   "an unheld sentence appearing is growth",
+			ledger: map[string]Census{"pf_a": {Candidates: 4, Unclassified: 3, PendingImplementation: 1}},
 			want:   []string{"K12 DEBT_GROWTH"},
-			absent: []string{"K12 STALE_DEBT"},
+			absent: []string{"K12 RECLASSIFIED", "K12 STALE_DEBT"},
 		},
 		{
 			// 🔴 The swap: one assertable sentence added, one previously-unclassified
@@ -499,4 +547,281 @@ func hasFinding(problems []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// ───────────────────── citation resolution and negation ──────────────────────
+
+func TestACitationThatResolvesToNothingDoesNotRetireDebt(t *testing.T) {
+	// 🔴 The sharpest hole this package had. The comment on armSymbol used to claim
+	// "both forms are already K6-resolved"; that is false for the symbol form,
+	// because both of K6's anchor patterns require a .go suffix and a bare
+	// `TestSomething` in prose matches neither. So a card could clear a claim by
+	// citing a test nobody ever wrote, with every arm in the repo green.
+	const s = "A `path` entry derives a `file_scope` lock, held by `TestNoSuchProbeEverExisted`."
+	ok, problems := CitesAnArm("fixture.md", s, testIndex)
+	if ok {
+		t.Errorf("an unresolvable citation retired the claim — the ledger clears while "+
+			"nothing holds it: %q", s)
+	}
+	if !hasFinding(problems, "K12 ARM_CITATION_UNRESOLVED") {
+		t.Errorf("no ARM_CITATION_UNRESOLVED; a citation that resolves nowhere has to be "+
+			"reported, not merely uncounted: %v", problems)
+	}
+
+	const file = "Held by `internal/domain/no_such_file_test.go`."
+	if ok, problems := CitesAnArm("fixture.md", file, testIndex); ok ||
+		!hasFinding(problems, "K12 ARM_CITATION_UNRESOLVED") {
+		t.Errorf("a path citation to a file that does not exist was accepted: ok=%v %v",
+			ok, problems)
+	}
+
+	if _, problems := CitesAnArm("fixture.md", "x", ArmIndex{}); !hasFinding(problems, "K12 ARM_INDEX_MISSING") {
+		t.Errorf("a zero index answered as though the tree declared no tests: %v", problems)
+	}
+}
+
+func TestACitationInsideANegationDoesNotRetireDebt(t *testing.T) {
+	// The live case is in aihub#543's own §1.4 sample.
+	const negated = "It false-negatives on read intent: `TestReadIntentTakesNoWriteLock` " +
+		"holds the lock derivation, not the prediction's answer."
+	ok, problems := CitesAnArm("fixture.md", negated, testIndex)
+	if ok {
+		t.Errorf("a sentence saying what an arm does NOT hold retired the claim: %q", negated)
+	}
+	if !hasFinding(problems, "K12 CITATION_IN_NEGATIVE") {
+		t.Errorf("no CITATION_IN_NEGATIVE: %v", problems)
+	}
+}
+
+func TestTheNegationScanIsTightEnoughToLeaveRealCitationsAlone(t *testing.T) {
+	// 🔴 The control, and it is not decorative: a first version of the negation list
+	// banned "rather than", "nothing", "deliberately" and "is not", and reddened
+	// BOTH of the only two genuinely-cited sentences in the ten scoped cards. A
+	// false positive here puts a probed claim back into debt, so this direction
+	// costs as much as the other one.
+	cases := []string{
+		"That is a checked property rather than a fact of the implementation: " +
+			"`TestClaimRecordsRepoPins` drives the registered tool.",
+		"`TestResourceToLock_FileScopeNamespacedByProject` pins it, and nothing in the " +
+			"name of a test is prose about the test.",
+		"`TestClaimRecordsRepoPins` deliberately drives the whole path.",
+	}
+	for _, s := range cases {
+		ok, problems := CitesAnArm("fixture.md", s, testIndex)
+		if !ok {
+			t.Errorf("a real citation was refused: %q\n%v", s, problems)
+		}
+	}
+}
+
+// ───────────────────────── the walk's own failure modes ──────────────────────
+
+func TestBulletsAreHardSentenceBoundaries(t *testing.T) {
+	// 🔴 Measured on pf_claim_work_item before this: 9 of 36 units spanned several
+	// bullets, because the sizer's start class has no '-'. Two consequences, both
+	// load-bearing — one citation retired every claim merged with it, and a "used
+	// to" anywhere in a merged run ejected every live claim in the run.
+	prose := "## hop 4\n\n" +
+		"- `repo` entries derive no lock.\n" +
+		"- Rule 2 used to return a `git_branch` lock.\n" +
+		"- A `service` entry answers `info`.\n"
+	sentences := ReadCard("fixture.md", prose).Sentences
+	if len(sentences) != 3 {
+		t.Fatalf("split into %d unit(s), want 3 — adjacent bullets merged:\n%+v",
+			len(sentences), sentences)
+	}
+	live := 0
+	for _, s := range sentences {
+		if ok, _ := IsCandidate(s.Text); ok {
+			live++
+		}
+	}
+	if live != 2 {
+		t.Errorf("%d candidate(s), want 2: the past-tense bullet must eject ITSELF and not "+
+			"the live claims either side of it", live)
+	}
+}
+
+func TestAMarkerOnAShortFragmentIsReportedNotReassigned(t *testing.T) {
+	// Placement runs over every unit including the sub-floor ones, so a marker whose
+	// host is filtered out is reported rather than sliding onto the previous
+	// sentence — a classification landing on a claim nobody wrote it for.
+	prose := "## hop 4\n\n" +
+		"- A `path` entry derives a `file_scope` lock namespaced by project.\n" +
+		"- `ok` stays. <!-- prose-only: because=history -->\n"
+	read := ReadCard("fixture.md", prose)
+	if len(read.Dropped) != 1 {
+		t.Fatalf("dropped = %d, want 1 (orphans=%d, sentences=%d)",
+			len(read.Dropped), len(read.Orphans), len(read.Sentences))
+	}
+	for _, s := range read.Sentences {
+		if len(s.Markers) != 0 {
+			t.Errorf("the marker was reassigned to %q instead of being reported", s.Text)
+		}
+	}
+	if !hasFinding(Tally("fixture.md", prose, testIndex).Problems, "K12 MARKER_TARGET_DROPPED") {
+		t.Errorf("Tally did not report MARKER_TARGET_DROPPED")
+	}
+}
+
+func TestOffsetsSurviveALeadingMarkerOnTheLine(t *testing.T) {
+	// 🔴 The line is cleaned and trimmed before an offset is taken. Doing it the
+	// other way makes every offset on a line with a LEADING marker too large by the
+	// whitespace the trim removes, so a second marker on that line lands past the
+	// next sentence's start and the strict-< placement puts it on the wrong claim.
+	prose := "## hop 4\n\n" +
+		"A `path` entry derives a `file_scope` lock namespaced by project.\n" +
+		"<!-- prose-only: because=history --> A `repo` entry derives no lock at all. " +
+		"<!-- prose-only: because=judgement -->\n" +
+		"A `service` entry answers `info` on a declaration join.\n"
+	read := ReadCard("fixture.md", prose)
+	if len(read.Sentences) != 3 || len(read.Orphans) != 0 || len(read.Dropped) != 0 {
+		t.Fatalf("walk produced %d sentence(s), %d orphan(s), %d dropped",
+			len(read.Sentences), len(read.Orphans), len(read.Dropped))
+	}
+	got := []int{len(read.Sentences[0].Markers), len(read.Sentences[1].Markers),
+		len(read.Sentences[2].Markers)}
+	if got[0] != 1 || got[1] != 1 || got[2] != 0 {
+		t.Errorf("markers landed on %v, want [1 1 0] — the leading marker classifies the "+
+			"sentence it follows and the trailing one classifies its own", got)
+	}
+}
+
+func TestAWrappedMarkerAfterAClosedCommentStillCoalesces(t *testing.T) {
+	// 🔴 Deciding openness from the line's FIRST `<!--` means a line already carrying
+	// a closed comment — K9's `<!-- historical -->` is one, and it lives in these very
+	// cards — never coalesces a second, wrapped marker that starts after it. The
+	// marker then fails to parse and the sentence reads as unclassified with no
+	// finding anywhere, which is the silent shape this package is against.
+	prose := "## hop 4\n\n" +
+		"A `path` entry derives a `file_scope` lock. <!-- historical --> <!-- probe-waiver: " +
+		"kind=pending-implementation | decided=2026-09-10 |\n" +
+		"citation=aihub#543 | reason=the DB fixture for this derivation is not written " +
+		"yet, and this is the claim it will hold first. -->\n"
+	read := ReadCard("fixture.md", prose)
+	if len(read.Sentences) == 0 || len(read.Sentences[0].Markers) != 1 {
+		t.Fatalf("the wrapped marker did not coalesce: sentences=%d markers=%v",
+			len(read.Sentences), read.Sentences)
+	}
+	if read.Sentences[0].Markers[0].Kind != KindPendingImplementation {
+		t.Errorf("parsed as %+v", read.Sentences[0].Markers[0])
+	}
+}
+
+func TestAnInlineCodeCommentTokenDoesNotOpenAComment(t *testing.T) {
+	// 🔴 A card documenting this syntax writes the token in backticks. Treating that
+	// as a comment swallows every fence and table after it to the end of the file,
+	// silently rewriting the population of the whole card.
+	prose := "## hop 4\n\n" +
+		"The marker opens with `<!--` and closes with the usual terminator.\n\n" +
+		"| param | type |\n|---|---|\n\n" +
+		"A `path` entry derives a `file_scope` lock namespaced by project.\n"
+	read := ReadCard("fixture.md", prose)
+	if len(read.Sentences) != 2 {
+		t.Fatalf("an inline-code comment token swallowed the rest of the card: %d unit(s)\n%+v",
+			len(read.Sentences), read.Sentences)
+	}
+}
+
+func TestReasonIsAFieldKeyNotASubstring(t *testing.T) {
+	// Cutting the body at the first "reason=" anywhere means a citation that merely
+	// mentions the word truncates the entry there and files whatever followed as the
+	// reason, silently.
+	prose := "A `path` entry derives a `file_scope` lock. " +
+		"<!-- probe-waiver: kind=pending-implementation | decided=2026-09-10 | " +
+		"citation=aihub#543, whose reason=X argument is quoted here | " +
+		"reason=the DB fixture for this derivation is not written yet. -->\n"
+	read := ReadCard("fixture.md", prose)
+	m := read.Sentences[0].Markers[0]
+	if !strings.Contains(m.Citation, "whose reason=X argument") {
+		t.Errorf("citation was truncated at a substring: %q", m.Citation)
+	}
+	if !strings.HasPrefix(m.Reason, "the DB fixture") {
+		t.Errorf("reason picked up the citation's text: %q", m.Reason)
+	}
+}
+
+func TestARepeatedFieldIsReportedNotResolvedLastWins(t *testing.T) {
+	// 🔴 Appending `| kind=accepted-unprobed` to a long wrapped known-defect marker
+	// both moved its column and skipped the work-item requirement, because every
+	// check ran against the last kind parsed. Invisible in review.
+	prose := "A `path` entry derives a `file_scope` lock. " +
+		"<!-- probe-waiver: kind=known-defect | decided=2026-09-10 | citation=aihub#543 | " +
+		"kind=accepted-unprobed | reason=measured behaviour the repo does not want " +
+		"pinned right now. -->\n"
+	problems := Tally("fixture.md", prose, testIndex).Problems
+	if !hasFinding(problems, "K12 DUPLICATE_FIELD") {
+		t.Errorf("no DUPLICATE_FIELD: %v", problems)
+	}
+	if got := ReadCard("fixture.md", prose).Sentences[0].Markers[0].Kind; got != KindKnownDefect {
+		t.Errorf("the repeated key won: kind=%q — the first value must stand so the checks "+
+			"run against what a reader reads first", got)
+	}
+}
+
+func TestAMisspelledMarkerIsReportedRatherThanInert(t *testing.T) {
+	// The worst failure mode available: the author and the reviewer both read a
+	// classification in the diff and the arm reads an ordinary HTML comment.
+	for _, raw := range []string{
+		"<!-- prose_only: because=history -->",
+		"<!-- Probe-Waiver: kind=known-defect -->",
+		"<!-- probewaiver: kind=known-defect -->",
+	} {
+		prose := "A `path` entry derives a `file_scope` lock. " + raw + "\n"
+		if !hasFinding(Tally("fixture.md", prose, testIndex).Problems, "K12 MARKER_NAME_UNRECOGNISED") {
+			t.Errorf("%s went unreported", raw)
+		}
+	}
+	// The control: K9's marker carries no colon and must stay silent, and so must a
+	// correctly-spelled one.
+	for _, raw := range []string{"<!-- historical -->", "<!-- prose-only: because=history -->"} {
+		prose := "Rule 2 used to return a `git_branch` lock. " + raw + "\n"
+		if hasFinding(Tally("fixture.md", prose, testIndex).Problems, "K12 MARKER_NAME_UNRECOGNISED") {
+			t.Errorf("%s was reported as a misspelling", raw)
+		}
+	}
+}
+
+func TestAnUnknownFieldIsReported(t *testing.T) {
+	prose := "A `path` entry derives a `file_scope` lock. " +
+		"<!-- probe-waiver: kinds=known-defect | decided=2026-09-10 | citation=aihub#543 | " +
+		"reason=measured behaviour the repo does not want pinned right now. -->\n"
+	if !hasFinding(Tally("fixture.md", prose, testIndex).Problems, "K12 UNKNOWN_FIELD") {
+		t.Errorf("a misspelled key was dropped instead of reported")
+	}
+}
+
+func TestADateShapedStringThatIsNotADateIsRefused(t *testing.T) {
+	for _, d := range []string{"2026-02-31", "2026-13-01", "2026-00-10", "20260910"} {
+		prose := "A `path` entry derives a `file_scope` lock. " +
+			"<!-- probe-waiver: kind=pending-implementation | decided=" + d + " | " +
+			"citation=aihub#543 | reason=the DB fixture for this derivation is not written " +
+			"yet, and this is the claim it will hold first. -->\n"
+		if !hasFinding(Tally("fixture.md", prose, testIndex).Problems, "K12 WAIVER_NO_DATE") {
+			t.Errorf("decided=%s was accepted as a calendar date", d)
+		}
+	}
+	if !validDate("2026-02-28") || !validDate("2024-02-29") {
+		t.Errorf("a real date was refused")
+	}
+}
+
+func TestScanAllSeesMarkersTheWalkNeverPlaces(t *testing.T) {
+	// The two questions it answers, and the fence difference between them.
+	body := "# card\n\n```json\n{\"tool\": \"x\"}\n<!-- prose-only: because=history -->\n```\n\n" +
+		"<!-- probe-waiver: kind=known-defect | decided=2026-09-10 | citation=aihub#564 | " +
+		"reason=measured behaviour the repo does not want pinned right now. -->\n"
+	all, _ := ScanAll(body, false)
+	if len(all) != 2 {
+		t.Errorf("scanning everything found %d marker(s), want 2 — the one inside the "+
+			"machine block is exactly the blind spot this exists for", len(all))
+	}
+	outside, _ := ScanAll(body, true)
+	if len(outside) != 1 {
+		t.Errorf("scanning outside fences found %d marker(s), want 1 — a card documenting "+
+			"the syntax in a code sample must not be reddened for quoting it", len(outside))
+	}
+	if _, unrec := ScanAll("<!-- prose_only: because=history -->", true); len(unrec) != 1 {
+		t.Errorf("ScanAll missed a marker-shaped comment with an unrecognised name")
+	}
 }

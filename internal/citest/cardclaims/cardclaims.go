@@ -32,9 +32,10 @@
 //
 //	assertable + probed    the sentence CITES ITS ARM in its own prose, in the
 //	                       semantic-anchor form K6 already resolves. No ledger
-//	                       row: a ledger holding 40% of 995 sentences as pointers
-//	                       is a second copy of the cards, and a second copy's only
-//	                       failure mode is disagreeing with the first.
+//	                       row: a ledger holding a pointer for every assertable
+//	                       sentence in the set is a second copy of the cards, and a
+//	                       second copy's only failure mode is disagreeing with the
+//	                       first.
 //	assertable + unprobed  an in-card `probe-waiver` marker carrying a Kind, a
 //	                       date, a citation and a reason. THIS IS DEBT.
 //	not assertable         an in-card `prose-only` marker carrying a `because`
@@ -59,9 +60,17 @@ package cardclaims
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"maps"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -210,8 +219,10 @@ func validKind(k string) bool {
 //	<!-- probe-waiver: kind=pending-implementation | decided=2026-09-10 | citation=aihub#543 | reason=… -->
 //	<!-- prose-only: because=history -->
 //
-// `reason` is last and runs to the closing `-->`, so a reason may contain the
-// separator. Every other field is `key=value` between pipes.
+// Fields are pipe-separated `key=value`. `reason` takes every remaining field, so
+// a reason may contain the separator — but it is recognised as a FIELD KEY, never
+// as a substring, because a citation reading "the reason=… argument" would
+// otherwise silently truncate the entry.
 const (
 	MarkerWaiver    = "probe-waiver"
 	MarkerProseOnly = "prose-only"
@@ -219,11 +230,30 @@ const (
 
 var markerRe = regexp.MustCompile(`(?s)<!--\s*(probe-waiver|prose-only)\s*:\s*(.*?)\s*-->`)
 
-// isoDate matches a real ISO calendar date. Month and day are range-checked so the
-// requirement cannot be satisfied by something date-SHAPED — a version, a dotted
-// identifier, a hash prefix — which an unchecked \d\d-\d\d would accept. Same
-// reasoning, same pattern, as K11's openISODate.
-var isoDate = regexp.MustCompile(`^20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$`)
+// markerShapedRe matches ANY `<!-- name: … -->` comment, so a marker whose name is
+// misspelled or miscased can be reported instead of being inert.
+//
+// 🔴 An unrecognised marker is the worst failure mode this package has: the author
+// believes a sentence is classified, the reviewer reads a classification in the
+// diff, and the arm sees an ordinary HTML comment and counts the sentence as
+// unclassified — which then only shows up as a ledger number nobody connects to
+// the typo. K9's `<!-- historical -->` carries no colon and is unaffected.
+var markerShapedRe = regexp.MustCompile(`(?s)<!--\s*([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*?)-->`)
+
+// isoDate matches an ISO calendar date and then checks it EXISTS.
+//
+// The pattern alone accepts 2026-02-31, and a date-shaped string that is not a
+// date is exactly what K11's openISODate range-checks its months to refuse. The
+// parse is the check; the pattern is only there to reject a partial match.
+var isoDate = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+func validDate(s string) bool {
+	if !isoDate.MatchString(s) {
+		return false
+	}
+	t, err := time.Parse("2006-01-02", s)
+	return err == nil && t.Format("2006-01-02") == s
+}
 
 // workItemRef matches a work-item citation. Measured 2026-09-08 by K11: every x#N
 // form in the card set is aihub#N, so a wider pattern would buy nothing and could
@@ -235,6 +265,14 @@ var workItemRef = regexp.MustCompile(`\baihub#\d+\b`)
 // far below every real reason and far above zero, which is the floor discipline
 // the card gate's own constants state for themselves.
 const minReasonLen = 40
+
+// markerFields is the closed set of keys a marker may carry. Closed so a typo is
+// reported rather than dropped: an ignored `kinds=` key surfaces later as an empty
+// Kind, which reads to the author as the arm being broken rather than as their own
+// spelling.
+var markerFields = map[string]bool{
+	"kind": true, "because": true, "decided": true, "citation": true, "reason": true,
+}
 
 // Marker is one parsed in-card classification.
 type Marker struct {
@@ -251,6 +289,16 @@ type Marker struct {
 	Citation string
 	// Reason is why this sentence is not probed. Waivers only.
 	Reason string
+	// Duplicated names every key the marker states more than once.
+	//
+	// 🔴 Reported rather than resolved last-wins. A second `kind=` appended to a
+	// long wrapped marker is invisible in review and silently downgrades the entry —
+	// measured: appending `| kind=accepted-unprobed` to a known-defect row both
+	// changed its column and skipped the work-item requirement, because the kind the
+	// checks ran against was the last one parsed.
+	Duplicated []string
+	// Unknown names every key outside markerFields.
+	Unknown []string
 	// Raw is the marker as it appears in the card, for failure text.
 	Raw string
 	// Offset is the byte offset in the joined prose at which the marker sat before
@@ -262,6 +310,23 @@ type Marker struct {
 // about the sentence the marker is attached to; Classify does that.
 func (m Marker) Problems(card string) []string {
 	var out []string
+
+	if len(m.Duplicated) > 0 {
+		out = append(out, fmt.Sprintf(
+			"K12 DUPLICATE_FIELD: %s carries %s stating %v more than once. Resolving that "+
+				"last-wins would let a second `kind=` appended to a wrapped marker silently "+
+				"downgrade the entry AND skip the checks the first kind would have failed, "+
+				"with nothing in the rendered card to show for it. State each field once.",
+			card, m.Raw, m.Duplicated))
+	}
+	if len(m.Unknown) > 0 {
+		out = append(out, fmt.Sprintf(
+			"K12 UNKNOWN_FIELD: %s carries %s with key(s) %v, which this marker syntax does "+
+				"not define. An ignored key surfaces later as an empty field, which reads to "+
+				"the author as the arm being broken rather than as their own spelling. Known "+
+				"keys: kind, because, decided, citation, reason.", card, m.Raw, m.Unknown))
+	}
+
 	switch m.Form {
 	case MarkerProseOnly:
 		if !validBecause(string(m.Because)) {
@@ -288,12 +353,12 @@ func (m Marker) Problems(card string) []string {
 					"fact that tells them apart — aihub#411 T1-12 §6.1.",
 				card, m.Raw, m.Kind, WaiverKinds))
 		}
-		if !isoDate.MatchString(m.Decided) {
+		if !validDate(m.Decided) {
 			out = append(out, fmt.Sprintf(
-				"K12 WAIVER_NO_DATE: %s carries %s with decided=%q, which is not a real ISO "+
-					"calendar date. Undated, a classification is true on the day it is written "+
-					"and silently wrong afterwards — the form 5 of 48 cards took when they came "+
-					"to assert defects that were already fixed (aihub#476).",
+				"K12 WAIVER_NO_DATE: %s carries %s with decided=%q, which is not a calendar "+
+					"date that exists. Undated, a classification is true on the day it is "+
+					"written and silently wrong afterwards — the form 5 of 48 cards took when "+
+					"they came to assert defects that were already fixed (aihub#476).",
 				card, m.Raw, m.Decided))
 		}
 		if strings.TrimSpace(m.Citation) == "" {
@@ -322,6 +387,18 @@ func (m Marker) Problems(card string) []string {
 		}
 	}
 	return out
+}
+
+// unrecognisedMarkerProblem renders the finding for a marker-shaped comment whose
+// name is not one this package knows.
+func unrecognisedMarkerProblem(card, raw, name string) string {
+	return fmt.Sprintf(
+		"K12 MARKER_NAME_UNRECOGNISED: %s carries %s, whose name %q is neither %q nor %q. "+
+			"That comment classifies nothing and renders as nothing, so the author sees a "+
+			"classification in the diff, the reviewer sees one too, and this arm sees an "+
+			"ordinary HTML comment — the sentence stays unclassified and the only trace is a "+
+			"ledger number nobody connects to a typo. Fix the name or delete the comment.",
+		card, raw, name, MarkerWaiver, MarkerProseOnly)
 }
 
 // ─────────────────────────────── the recogniser ──────────────────────────────
@@ -476,23 +553,157 @@ func words(s string) []string {
 // armPath and armSymbol are the citation forms that say "an arm holds this".
 //
 // 🔴 Narrower than K6's anchor form on purpose. K6 resolves any backticked
-// repo-relative .go path and any parenthesised symbol, which is the right rule for
-// an ANCHOR — but an arm is a TEST, and `internal/domain/conflicts.go` in a
-// sentence names the implementation the claim is about, not a gate over it.
-// Counting that as "probed" would retire debt by describing where the code lives,
-// which is the one thing a reader of this ledger must not be able to do.
+// repo-relative .go path, but an arm is a TEST, and `internal/domain/conflicts.go`
+// in a sentence names the implementation the claim is about rather than a gate
+// over it. Counting that as "probed" would retire debt by describing where the
+// code lives, which is the one thing a reader of this ledger must not be able to
+// do.
 //
-// So a sentence is cited when it names a `*_test.go` file or a `Test…` symbol, in
-// backticks. Both forms are already K6-resolved, so a citation that does not exist
-// is red there before it is counted here.
+// 🔴 And the citation is RESOLVED against the tree here, not delegated. An earlier
+// version of this comment claimed "both forms are already K6-resolved"; that is
+// FALSE for the symbol form, because both of K6's anchor patterns require a .go
+// suffix and a bare `TestSomething` in prose matches neither. Measured: citing
+// `TestNoSuchProbeEverExisted` retired a claim with every arm green. Resolution is
+// therefore this package's job, against an index of the test functions and test
+// files the tree actually declares.
 var (
-	armPath   = regexp.MustCompile("`[^`\n]*_test\\.go`")
-	armSymbol = regexp.MustCompile("`Test[A-Z][A-Za-z0-9_]*`")
+	armPath   = regexp.MustCompile("`([^`\n]*_test\\.go)`")
+	armSymbol = regexp.MustCompile("`(Test[A-Z][A-Za-z0-9_]*)`")
 )
 
-// CitesAnArm is the "assertable + probed" test.
-func CitesAnArm(s string) bool {
-	return armPath.MatchString(s) || armSymbol.MatchString(s)
+// ArmIndex is what the tree really declares: every top-level `func Test…` in a
+// `*_test.go` file, and every `*_test.go` path, by repo-relative path and by base
+// name.
+type ArmIndex struct {
+	Funcs map[string]bool
+	Files map[string]bool
+	// Built is false for the zero value, so a caller that forgot to build one gets
+	// a failure rather than a silent "nothing resolves".
+	Built bool
+}
+
+// BuildArmIndex walks root for test files and parses each one. go/parser rather
+// than a regex over the bytes: a fixture string in a test file can contain a line
+// beginning `func TestFoo(`, and a scanner that counted it would let a citation
+// resolve against a name that exists only inside a string literal — which is the
+// same class of hole this function exists to close.
+func BuildArmIndex(root string) (ArmIndex, error) {
+	idx := ArmIndex{Funcs: map[string]bool{}, Files: map[string]bool{}, Built: true}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "vendor":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), "_test.go") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
+		idx.Files[filepath.ToSlash(rel)] = true
+		idx.Files[d.Name()] = true
+
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			return fmt.Errorf("parse %s: %w", rel, perr)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Test") {
+				continue
+			}
+			idx.Funcs[fn.Name.Name] = true
+		}
+		return nil
+	})
+	return idx, err
+}
+
+// citationNegation matches the phrases that turn a citation into a statement about
+// what an arm does NOT hold.
+//
+// The live case is in the spec's own sample: "`TestReadIntentTakesNoWriteLock`
+// holds the lock derivation, not the prediction's answer." That sentence names an
+// arm and is precisely a claim that the arm does not cover the sentence's subject.
+//
+// 🔴 Tight, and measured tight rather than assumed. A first version banned any
+// "rather than", "nothing", "deliberately", "is not" and reddened BOTH of the two
+// genuinely-cited sentences in the scoped set: pf_get_ready_queue's "a checked
+// property RATHER THAN a fact of the current implementation" (a contrast, not a
+// negation) and a sentence whose only "nothing" was inside the cited test's own
+// NAME, TestReadyQueueOmitsTheDisclosureKeyWhenNothingWasAdjusted. Precision
+// matters in both directions here: a false positive puts a genuinely-probed claim
+// back into debt, so this is not a place where over-reporting is free.
+//
+// Backticked spans are stripped before the scan for the second of those reasons —
+// a test name is not prose about the test.
+var citationNegation = regexp.MustCompile(
+	`(?i),\s+not\s+` +
+		`|\bdoes\s+not\s+(?:hold|cover|check|pin|assert|reach)\b` +
+		`|\bnot\s+(?:held|covered|pinned|checked|asserted)\s+by\b` +
+		`|\bno\s+arm\b` +
+		`|\bnothing\s+(?:holds|pins|checks|covers|asserts)\b`)
+
+// CitesAnArm is the "assertable + probed" test. It returns whether the sentence
+// retires its own debt, plus any problem with the citation itself.
+func CitesAnArm(card, s string, idx ArmIndex) (bool, []string) {
+	if !idx.Built {
+		return false, []string{
+			"K12 ARM_INDEX_MISSING: CitesAnArm was called with no arm index, so no citation " +
+				"can resolve and every cited sentence would count as debt. Build one with " +
+				"BuildArmIndex; a zero index is a caller mistake, not an empty tree."}
+	}
+
+	var problems []string
+	found := false
+	for _, m := range armPath.FindAllStringSubmatch(s, -1) {
+		name := strings.TrimPrefix(strings.TrimSpace(m[1]), "./")
+		if idx.Files[name] || idx.Files[filepath.Base(name)] {
+			found = true
+			continue
+		}
+		problems = append(problems, unresolvedCitation(card, name, s, "test file"))
+	}
+	for _, m := range armSymbol.FindAllStringSubmatch(s, -1) {
+		if idx.Funcs[m[1]] {
+			found = true
+			continue
+		}
+		problems = append(problems, unresolvedCitation(card, m[1], s, "test function"))
+	}
+	if !found {
+		return false, problems
+	}
+
+	if hit := citationNegation.FindString(stripBackticked(s)); hit != "" {
+		problems = append(problems, fmt.Sprintf(
+			"K12 CITATION_IN_NEGATIVE: %s names an arm inside a sentence carrying %q:\n"+
+				"    %s\nA sentence saying what an arm does NOT hold is not a sentence the arm "+
+				"holds, so this does not retire the claim and it is counted as unclassified. "+
+				"If the arm does hold it, say so without the negation; if it does not, the "+
+				"sentence needs its own probe or a marker.",
+			card, strings.TrimSpace(hit), truncate(s)))
+		return false, problems
+	}
+	return true, problems
+}
+
+func unresolvedCitation(card, name, sentence, what string) string {
+	return fmt.Sprintf(
+		"K12 ARM_CITATION_UNRESOLVED: %s cites %s `%s`, which this tree does not declare:\n"+
+			"    %s\nA citation is the only way a sentence retires its own debt without a "+
+			"marker, so an unresolvable one clears the ledger while nothing holds the claim. "+
+			"K6 does NOT cover this — both of its anchor patterns require a .go suffix, so a "+
+			"bare Test symbol in prose resolves nowhere before this arm. Name a test that "+
+			"exists, or file a marker.", card, what, name, truncate(sentence))
 }
 
 // ────────────────────────────── reading a card ───────────────────────────────
@@ -505,111 +716,236 @@ type Sentence struct {
 	Markers []Marker
 }
 
-// minSentenceLen mirrors the population sizer the aihub#543 spec §0.1 states, so
-// the numbers this package prints are comparable with the ones that sized the
-// work. Anything shorter is a fragment the splitter produced, not a claim.
+// minSentenceLen is the fragment floor. Anything shorter is something the splitter
+// produced rather than a claim somebody wrote.
 const minSentenceLen = 15
 
-// sentenceStarts are the runes a new sentence may begin with, matching the sizer.
-// A card sentence routinely opens with a bold marker, a backtick or a warning
-// emoji rather than a letter.
-const sentenceStarts = "🔴⚠`*_"
+// sentenceStarts are the runes, besides an uppercase letter or a digit, that may
+// begin a sentence.
+//
+// 🔴 Measured against the card set rather than copied from the spec's §0.1 sizer,
+// which this walk used to reproduce exactly. That sizer's start class is
+// [A-Z🔴⚠`*_], and §1.3 says in as many words what that costs: "The sentence
+// splitter merges adjacent bullets … It is a population sizer, not the unit
+// definition; the unit is the sentence-or-bullet a human reads. Any arm built on
+// it must therefore be a floor, never an equality."
+//
+// It is not a floor here, it is the population, and the merging was measured to be
+// load-bearing: in pf_claim_work_item alone, 9 of 36 units spanned several bullets,
+// so ONE citation retired several claims at once — and a "used to" anywhere in a
+// merged run ejected every live claim merged with it. So bullets are hard
+// boundaries (see bulletPrefix) and the start class is widened.
+const sentenceStarts = "🔴🟡🟢🟠🔵⚠✅❌`*_-+([\"'"
+
+// bulletPrefix reports whether a line opens a new list item, which this walk
+// treats as a hard sentence boundary regardless of what preceded it.
+func bulletPrefix(line string) bool {
+	if len(line) > 2 && (line[0] == '-' || line[0] == '*' || line[0] == '+') &&
+		(line[1] == ' ' || line[1] == '\t') {
+		return true
+	}
+	i := 0
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	return i > 0 && i+1 < len(line) && (line[i] == '.' || line[i] == ')') && line[i+1] == ' '
+}
+
+// CardRead is one card's prose, split and with every marker placed.
+type CardRead struct {
+	// Sentences are the units above the fragment floor.
+	Sentences []Sentence
+	// Orphans sat on a line the walk does not read — a heading, a table row, a
+	// fenced block — or before any sentence at all.
+	Orphans []Marker
+	// Dropped resolved to a unit BELOW the fragment floor.
+	//
+	// 🔴 Separate from Orphans because the failure is different and used to be
+	// silent: the marker had a host, the host was filtered out for being short, and
+	// the marker then attached to whichever sentence happened to precede it. That is
+	// a classification landing on a claim nobody wrote it for.
+	Dropped []Marker
+	// Unrecognised are marker-shaped comments whose name is not one of the two.
+	Unrecognised []string
+}
 
 // ReadCard splits a card's prose into sentences and attaches every marker to the
-// sentence it sits on. Markers on a line the walk does not read — a heading, a
-// table row, a fenced block — come back with Offset -1 and are orphans.
+// sentence it sits on.
 //
-// The walk mirrors the spec's own population sizer: fenced blocks, table rows and
-// headings are dropped, the remaining lines are joined, and the join is split on
-// sentence-final punctuation followed by whitespace and a sentence-start rune.
-// Deliberately the same walk, so a count here and a count from the sizer are about
-// the same population.
-func ReadCard(card, prose string) ([]Sentence, []Marker) {
-	joined, markers, orphans := joinProse(prose)
-	spans := splitSentences(joined)
+// The walk drops fenced blocks, table rows and headings, joins what is left, and
+// cuts it at sentence-final punctuation and at every list-item boundary.
+//
+// 🔴 A marker classifies the sentence it FOLLOWS, so the attachment is the last
+// unit that STARTS strictly before it. Strictly, because a marker written on its
+// own line between two sentences sits at exactly the second one's start offset,
+// and reading it as classifying what it precedes puts every trailing marker on the
+// wrong claim.
+func ReadCard(card, prose string) CardRead {
+	joined, markers, out := joinProse(prose)
+	spans := splitSentences(joined, out.cuts)
 
-	out := make([]Sentence, 0, len(spans))
+	// Placement runs over EVERY unit, including the sub-floor fragments, so a
+	// marker's host is the unit it really follows rather than the nearest survivor.
+	type unit struct {
+		text string
+		keep bool
+		idx  int
+	}
+	units := make([]unit, 0, len(spans))
+	read := CardRead{Orphans: out.orphans, Unrecognised: out.unrecognised}
 	for _, sp := range spans {
 		text := strings.TrimSpace(joined[sp.start:sp.end])
-		if len([]rune(text)) <= minSentenceLen {
-			continue
+		keep := len([]rune(text)) > minSentenceLen
+		u := unit{text: text, keep: keep, idx: -1}
+		if keep {
+			u.idx = len(read.Sentences)
+			read.Sentences = append(read.Sentences, Sentence{Card: card, Text: text, Start: sp.start})
 		}
-		out = append(out, Sentence{Card: card, Text: text, Start: sp.start})
+		units = append(units, u)
 	}
 
-	// 🔴 A marker classifies the sentence it FOLLOWS, so the attachment is the last
-	// sentence that STARTS strictly before it. Strictly, because a marker written on
-	// its own line between two sentences sits at exactly the second one's start
-	// offset, and reading it as classifying the sentence it precedes puts every
-	// trailing marker on the wrong claim — which this walk reported as a
-	// STALE_MARKER the first time one was filed, correctly.
 	for _, m := range markers {
-		idx := -1
-		for i := range out {
-			if out[i].Start < m.Offset {
-				idx = i
+		host := -1
+		for i, sp := range spans {
+			if sp.start < m.Offset {
+				host = i
 				continue
 			}
 			break
 		}
-		if idx < 0 {
-			orphans = append(orphans, m)
-			continue
+		switch {
+		case host < 0:
+			read.Orphans = append(read.Orphans, m)
+		case !units[host].keep:
+			read.Dropped = append(read.Dropped, m)
+		default:
+			s := &read.Sentences[units[host].idx]
+			s.Markers = append(s.Markers, m)
 		}
-		out[idx].Markers = append(out[idx].Markers, m)
 	}
-	return out, orphans
+	return read
 }
 
 type span struct{ start, end int }
 
-// joinProse drops what the sizer drops and extracts every marker as it goes,
-// recording each marker's offset in the joined text so it can be attached to a
-// sentence afterwards. A marker on a dropped line is returned as an orphan
-// immediately: it classifies nothing, and a classification nothing reads is the
-// exemption that outlives its gap.
-func joinProse(prose string) (joined string, markers, orphans []Marker) {
+// walkOut carries what joinProse found besides the text itself.
+type walkOut struct {
+	orphans      []Marker
+	unrecognised []string
+	cuts         []int
+}
+
+// joinProse drops what the walk does not read and extracts every marker as it
+// goes, recording each marker's offset in the joined text.
+//
+// 🔴 The line is cleaned and TRIMMED before an offset is taken from it. Doing it
+// the other way — the shape this had first — makes every offset on a line with a
+// leading marker too large by the width of the whitespace the trim removes, so the
+// second marker on such a line lands past the start of the next sentence and the
+// strict-< placement puts it on the wrong claim. Measured at 82 against 81 and 36
+// against 34 before the order was fixed.
+func joinProse(prose string) (string, []Marker, walkOut) {
 	var sb strings.Builder
+	var markers []Marker
+	var out walkOut
 	inFence := false
+
+	note := func(text string) {
+		out.orphans = append(out.orphans, parseMarkers(text, -1)...)
+		out.unrecognised = append(out.unrecognised, unrecognisedIn(text)...)
+	}
+
 	for _, line := range logicalLines(prose) {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
 			inFence = !inFence
-			orphans = append(orphans, parseMarkers(trimmed, -1)...)
+			note(trimmed)
 			continue
 		}
-		dropped := inFence || trimmed == "" ||
-			strings.HasPrefix(trimmed, "|") || strings.HasPrefix(trimmed, "#")
-		if dropped {
-			orphans = append(orphans, parseMarkers(trimmed, -1)...)
+		if inFence || trimmed == "" ||
+			strings.HasPrefix(trimmed, "|") || strings.HasPrefix(trimmed, "#") {
+			note(trimmed)
 			continue
 		}
-		clean, found := extractMarkers(trimmed, sb.Len())
-		markers = append(markers, found...)
-		clean = strings.TrimSpace(clean)
+
+		out.unrecognised = append(out.unrecognised, unrecognisedIn(trimmed)...)
+		clean, found := cleanLine(trimmed)
 		if clean == "" {
+			// The line held nothing but markers. They belong to whatever the joined
+			// text already ends with, which is where the reader met them.
+			for i := range found {
+				found[i].Offset = sb.Len()
+			}
+			markers = append(markers, found...)
 			continue
 		}
-		if sb.Len() > 0 {
+		base := sb.Len()
+		if base > 0 {
 			sb.WriteByte(' ')
+			base++
 		}
 		sb.WriteString(clean)
+		if bulletPrefix(clean) {
+			out.cuts = append(out.cuts, base)
+		}
+		for i := range found {
+			found[i].Offset += base
+		}
+		markers = append(markers, found...)
 	}
-	return sb.String(), markers, orphans
+	return sb.String(), markers, out
+}
+
+// cleanLine strips every marker from one line and returns the trimmed remainder
+// plus each marker's offset WITHIN that remainder.
+func cleanLine(line string) (string, []Marker) {
+	locs := markerRe.FindAllStringSubmatchIndex(line, -1)
+	if len(locs) == 0 {
+		return strings.TrimSpace(line), nil
+	}
+	var sb strings.Builder
+	var out []Marker
+	prev := 0
+	for _, l := range locs {
+		sb.WriteString(line[prev:l[0]])
+		m := parseMarker(line[l[0]:l[1]], line[l[2]:l[3]], line[l[4]:l[5]])
+		m.Offset = sb.Len()
+		out = append(out, m)
+		prev = l[1]
+	}
+	sb.WriteString(line[prev:])
+
+	raw := sb.String()
+	trimmed := strings.TrimSpace(raw)
+	lead := len(raw) - len(strings.TrimLeft(raw, " \t"))
+	for i := range out {
+		o := out[i].Offset - lead
+		if o < 0 {
+			o = 0
+		}
+		if o > len(trimmed) {
+			o = len(trimmed)
+		}
+		out[i].Offset = o
+	}
+	return trimmed, out
 }
 
 // logicalLines coalesces a marker comment that spans several physical lines into
 // one, so a reason long enough to need wrapping is still one marker.
 //
 // ⚠️ Markdown line breaks are a rendering artifact — the same argument K11's
-// cardOpenBullets makes for joining a bullet's lines before scanning it. Without
-// this, a wrapped marker would not match and its sentence would fall through as
-// unclassified; that failure is red rather than silent (the ledger row stops
-// matching), but red for a reason nobody could see from the message.
+// cardOpenBullets makes for joining a bullet's lines before scanning it.
 //
-// Fenced blocks are excluded, so a `<!--` inside a code sample cannot swallow the
-// rest of the block. An unterminated comment is returned as-is and simply fails to
-// match, which is again red rather than silent.
+// 🔴 Openness is decided by scanning the WHOLE line, not by its first `<!--`.
+// Deciding on the first one means a line already carrying a closed comment — K9's
+// `<!-- historical -->` is one, and lives in these very cards — never coalesces a
+// second, wrapped marker that starts after it: the marker then silently fails to
+// parse and the sentence reads as unclassified with no finding anywhere.
+//
+// 🔴 And `<!--` inside an inline code span does not open anything. A card
+// documenting this syntax writes the token in backticks, and treating that as a
+// comment swallows every fence and table after it to the end of the file.
 func logicalLines(prose string) []string {
 	var out []string
 	var pending []string
@@ -618,9 +954,9 @@ func logicalLines(prose string) []string {
 		trimmed := strings.TrimSpace(line)
 		if open {
 			pending = append(pending, trimmed)
-			if strings.Contains(trimmed, "-->") {
+			if open = scanComment(trimmed, true); !open {
 				out = append(out, strings.Join(pending, " "))
-				pending, open = nil, false
+				pending = nil
 			}
 			continue
 		}
@@ -629,7 +965,11 @@ func logicalLines(prose string) []string {
 			out = append(out, line)
 			continue
 		}
-		if i := strings.Index(line, "<!--"); !inFence && i >= 0 && !strings.Contains(line[i:], "-->") {
+		if inFence {
+			out = append(out, line)
+			continue
+		}
+		if scanComment(line, false) {
 			open = true
 			pending = []string{strings.TrimRight(line, " \t")}
 			continue
@@ -637,45 +977,58 @@ func logicalLines(prose string) []string {
 		out = append(out, line)
 	}
 	if open {
+		// Unterminated. Returned as-is: markerRe then fails to match, the sentence
+		// reads as unclassified and the ledger row stops matching, which is red.
 		out = append(out, strings.Join(pending, " "))
 	}
 	return out
 }
 
-// extractMarkers removes every marker from one line and returns the line without
-// them plus the markers, each carrying its offset in the joined text under
-// construction. base is the length of the joined buffer BEFORE this line; the
-// separating space this line will contribute is accounted for by biasing the
-// offset one byte later, which keeps a marker sitting at the very start of a line
-// inside that line's first sentence rather than the previous one.
-func extractMarkers(line string, base int) (string, []Marker) {
-	locs := markerRe.FindAllStringSubmatchIndex(line, -1)
-	if len(locs) == 0 {
-		return line, nil
-	}
-	var out []Marker
-	var sb strings.Builder
-	prev := 0
-	removed := 0
-	for _, l := range locs {
-		sb.WriteString(line[prev:l[0]])
-		raw := line[l[0]:l[1]]
-		m := parseMarker(raw, line[l[2]:l[3]], line[l[4]:l[5]])
-		// +1 for the space this line contributes to the join when base > 0.
-		off := base + l[0] - removed
-		if base > 0 {
-			off++
+// scanComment reports whether the line LEAVES an HTML comment open, given whether
+// one was open when it started. Backtick code spans are skipped while outside a
+// comment; inside one, a backtick is ordinary text.
+func scanComment(line string, open bool) bool {
+	inCode := false
+	for i := 0; i < len(line); {
+		if open {
+			if strings.HasPrefix(line[i:], "-->") {
+				open = false
+				i += 3
+				continue
+			}
+			i++
+			continue
 		}
-		m.Offset = off
-		out = append(out, m)
-		removed += l[1] - l[0]
-		prev = l[1]
+		if line[i] == '`' {
+			inCode = !inCode
+			i++
+			continue
+		}
+		if !inCode && strings.HasPrefix(line[i:], "<!--") {
+			open = true
+			i += 4
+			continue
+		}
+		i++
 	}
-	sb.WriteString(line[prev:])
-	return sb.String(), out
+	return open
 }
 
-// parseMarkers is the orphan path: it needs the markers but not the offsets.
+// unrecognisedIn returns the raw text of every marker-shaped comment whose name is
+// not one this package knows.
+func unrecognisedIn(text string) []string {
+	var out []string
+	for _, l := range markerShapedRe.FindAllStringSubmatchIndex(text, -1) {
+		name := text[l[2]:l[3]]
+		if name == MarkerWaiver || name == MarkerProseOnly {
+			continue
+		}
+		out = append(out, text[l[0]:l[1]])
+	}
+	return out
+}
+
+// parseMarkers is the no-offset path, for text the walk does not place.
 func parseMarkers(s string, offset int) []Marker {
 	var out []Marker
 	for _, l := range markerRe.FindAllStringSubmatchIndex(s, -1) {
@@ -686,26 +1039,23 @@ func parseMarkers(s string, offset int) []Marker {
 	return out
 }
 
-// parseMarker reads the key=value body. `reason` is last and runs to the end, so a
-// reason may contain the pipe separator; every other field is a pipe-separated
-// key=value.
+// parseMarker reads the pipe-separated key=value body.
+//
+// 🔴 `reason` is recognised as a FIELD KEY and then takes every remaining field,
+// never as a substring of the body. Cutting on the first "reason=" anywhere means a
+// citation reading `the reason=… argument` truncates the entry at that point and
+// files whatever followed as the reason, silently.
 func parseMarker(raw, form, body string) Marker {
 	m := Marker{Form: form, Raw: raw}
-	head := body
-	if i := strings.Index(body, "reason="); i >= 0 {
-		head = body[:i]
-		m.Reason = strings.TrimSpace(body[i+len("reason="):])
-	}
-	for _, part := range strings.Split(head, "|") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+	parts := strings.Split(body, "|")
+	seen := map[string]bool{}
+
+	set := func(k, v string) {
+		if seen[k] {
+			m.Duplicated = append(m.Duplicated, k)
+			return
 		}
-		k, v, ok := strings.Cut(part, "=")
-		if !ok {
-			continue
-		}
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		seen[k] = true
 		switch k {
 		case "kind":
 			m.Kind = WaiverKind(v)
@@ -715,19 +1065,43 @@ func parseMarker(raw, form, body string) Marker {
 			m.Decided = v
 		case "citation":
 			m.Citation = v
+		case "reason":
+			m.Reason = v
 		}
+	}
+
+	for i := 0; i < len(parts); i++ {
+		part := strings.TrimSpace(parts[i])
+		if part == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if !markerFields[k] {
+			m.Unknown = append(m.Unknown, k)
+			continue
+		}
+		if k == "reason" {
+			if i+1 < len(parts) {
+				v = strings.TrimSpace(v + "|" + strings.Join(parts[i+1:], "|"))
+			}
+			set(k, v)
+			break
+		}
+		set(k, v)
 	}
 	return m
 }
 
 // splitSentences cuts on sentence-final punctuation followed by whitespace and a
-// sentence-start rune. Hand-rolled because Go's regexp has no lookaround, and
-// deliberately the same rule as the spec's sizer so the two counts are about the
-// same population.
-func splitSentences(s string) []span {
-	var out []span
+// sentence-start rune, and at every offset in forced (the list-item boundaries).
+// Hand-rolled because Go's regexp has no lookaround.
+func splitSentences(s string, forced []int) []span {
 	rs := []rune(s)
-	// byte offset of each rune index
 	offs := make([]int, len(rs)+1)
 	b := 0
 	for i, r := range rs {
@@ -736,7 +1110,12 @@ func splitSentences(s string) []span {
 	}
 	offs[len(rs)] = b
 
-	start := 0
+	starts := map[int]bool{0: true}
+	for _, f := range forced {
+		if f > 0 && f < len(s) {
+			starts[f] = true
+		}
+	}
 	for i := 0; i < len(rs); i++ {
 		if rs[i] != '.' && rs[i] != '!' && rs[i] != '?' {
 			continue
@@ -746,19 +1125,55 @@ func splitSentences(s string) []span {
 			j++
 		}
 		if j == i+1 || j >= len(rs) {
-			continue // no whitespace after the punctuation, or end of text
-		}
-		n := rs[j]
-		if !unicode.IsUpper(n) && !strings.ContainsRune(sentenceStarts, n) {
 			continue
 		}
-		out = append(out, span{offs[start], offs[i+1]})
-		start = j
+		n := rs[j]
+		if !unicode.IsUpper(n) && !unicode.IsDigit(n) && !strings.ContainsRune(sentenceStarts, n) {
+			continue
+		}
+		starts[offs[j]] = true
 	}
-	if start < len(rs) {
-		out = append(out, span{offs[start], offs[len(rs)]})
+
+	keys := make([]int, 0, len(starts))
+	for k := range starts {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+
+	out := make([]span, 0, len(keys))
+	for i, k := range keys {
+		end := len(s)
+		if i+1 < len(keys) {
+			end = keys[i+1]
+		}
+		out = append(out, span{k, end})
 	}
 	return out
+}
+
+// ScanAll finds every marker anywhere in a text, with no placement — the arm for
+// asking "does this file carry a classification at all".
+//
+// skipFences is the difference between the two questions it answers. A SCOPED card
+// is walked, so a marker inside a fence there is an orphan and is reported by the
+// walk; an UNSCOPED card may legitimately quote the syntax in a code sample, and
+// flagging that would make documenting the marker impossible.
+func ScanAll(text string, skipFences bool) ([]Marker, []string) {
+	var keep []string
+	inFence := false
+	for _, line := range logicalLines(text) {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			inFence = !inFence
+			continue
+		}
+		if inFence && skipFences {
+			continue
+		}
+		keep = append(keep, trimmed)
+	}
+	joined := strings.Join(keep, "\n")
+	return parseMarkers(joined, -1), unrecognisedIn(joined)
 }
 
 // ────────────────────────────── classification ───────────────────────────────
@@ -799,7 +1214,7 @@ func (c Class) String() string {
 // Classify decides one sentence and reports everything wrong with the markers on
 // it. The problems are about placement and consistency; Marker.Problems covers the
 // marker's own fields, and Classify calls it so one walk reports both.
-func Classify(s Sentence) (Class, []string) {
+func Classify(s Sentence, idx ArmIndex) (Class, []string) {
 	var problems []string
 	var waivers, proseOnly []Marker
 	for _, m := range s.Markers {
@@ -848,7 +1263,8 @@ func Classify(s Sentence) (Class, []string) {
 			s.Card, marked, truncate(s.Text)))
 	}
 
-	cited := CitesAnArm(s.Text)
+	cited, citeProblems := CitesAnArm(s.Card, s.Text, idx)
+	problems = append(problems, citeProblems...)
 	if cited && len(waivers) > 0 {
 		problems = append(problems, fmt.Sprintf(
 			"K12 STALE_WAIVER: %s waives a sentence that already cites an arm:\n    %s\nThe "+
@@ -955,21 +1371,39 @@ type CardTally struct {
 }
 
 // Tally reads one card and classifies every sentence in it.
-func Tally(card, prose string) CardTally {
-	sentences, orphans := ReadCard(card, prose)
-	t := CardTally{Sentences: len(sentences)}
+func Tally(card, prose string, idx ArmIndex) CardTally {
+	read := ReadCard(card, prose)
+	t := CardTally{Sentences: len(read.Sentences)}
 
-	for _, m := range orphans {
+	for _, m := range read.Orphans {
 		t.Problems = append(t.Problems, fmt.Sprintf(
 			"K12 MARKER_ORPHAN: %s carries %s on a line this walk does not read — a heading, a "+
-				"table row or a fenced block. A marker classifies the SENTENCE it sits on, so "+
-				"one that sits on no sentence exempts nothing while looking like it does. Move "+
-				"it onto the prose it is about.", card, m.Raw))
+				"table row or a fenced block — or ahead of every sentence in the card. A marker "+
+				"classifies the SENTENCE it sits on, so one that sits on no sentence exempts "+
+				"nothing while looking like it does. Move it onto the prose it is about.",
+			card, m.Raw))
 		t.Problems = append(t.Problems, m.Problems(card)...)
 	}
+	for _, m := range read.Dropped {
+		t.Problems = append(t.Problems, fmt.Sprintf(
+			"K12 MARKER_TARGET_DROPPED: %s carries %s immediately after a fragment shorter than "+
+				"the %d-character floor, so the unit it classifies is not in the population. "+
+				"This used to be silent — the marker attached to whatever longer sentence "+
+				"happened to precede it, which is a classification landing on a claim nobody "+
+				"wrote it for. Put the marker after the sentence it is about.",
+			card, m.Raw, minSentenceLen))
+		t.Problems = append(t.Problems, m.Problems(card)...)
+	}
+	for _, raw := range read.Unrecognised {
+		name := "?"
+		if l := markerShapedRe.FindStringSubmatch(raw); len(l) > 1 {
+			name = l[1]
+		}
+		t.Problems = append(t.Problems, unrecognisedMarkerProblem(card, raw, name))
+	}
 
-	for _, s := range sentences {
-		class, problems := Classify(s)
+	for _, s := range read.Sentences {
+		class, problems := Classify(s, idx)
 		t.Problems = append(t.Problems, problems...)
 		if class != NotCandidate {
 			t.Census.Candidates++
@@ -1068,45 +1502,57 @@ func LedgerProblems(tallies map[string]CardTally, ledger map[string]Census, card
 	return out
 }
 
-// classifyDrift names the difference by what MOVED, because the three cases are
-// three different edits.
+// classifyDrift names the difference by what MOVED, because the cases are
+// different edits and the message has to name the right one.
 //
-// A change that both rises and falls in the debt columns — a relabel plus a new
-// claim — is reported as growth: the rise is the half that needs signing, and a
-// message that led with the fall would tell a reader to lower a number that has to
-// go up.
+// 🔴 The RECLASSIFIED case exists because the first version of this function
+// accused the most ordinary operation in the whole workflow of being the worst
+// one. Putting a legitimate marker on a grandfathered sentence moves it out of
+// Unclassified and into a classified column — and the old vector read "some column
+// rose" as growth, so the commonest action in a probe wave was reported as "a card
+// sentence now asserts something with neither a cited arm nor a named marker",
+// which is false in both halves. Only a rise in UNCLASSIFIED is new unheld debt.
 func classifyDrift(measured, recorded Census) (finding, explain string) {
-	debt := func(c Census) []int {
-		return []int{c.Unclassified, c.PendingImplementation, c.KnownDefect,
-			c.StructurallyUnreachable, c.AcceptedUnprobed, c.ProseOnly}
+	classified := func(c Census) []int {
+		return []int{c.PendingImplementation, c.KnownDefect, c.StructurallyUnreachable,
+			c.AcceptedUnprobed, c.ProseOnly}
 	}
-	m, r := debt(measured), debt(recorded)
-	grew, shrank := false, false
+	m, r := classified(measured), classified(recorded)
+	rose, fell := false, false
 	for i := range m {
 		if m[i] > r[i] {
-			grew = true
+			rose = true
 		}
 		if m[i] < r[i] {
-			shrank = true
+			fell = true
 		}
 	}
+	unheld := measured.Unclassified - recorded.Unclassified
+
 	switch {
-	case grew:
-		return "K12 DEBT_GROWTH", "Debt GREW. A card sentence now asserts something " +
+	case unheld > 0:
+		return "K12 DEBT_GROWTH", "UNHELD debt grew: a card sentence now asserts something " +
 			"with neither a cited arm nor a named marker, which is exactly the event 30+ " +
 			"false statements walked through unseen across the 2026-09-08 and 2026-09-09 " +
-			"waves. Write the probe, or file the marker and raise this row in a diff " +
+			"waves. Write the probe, or file the marker and re-pin this row in a diff " +
 			"somebody signs."
-	case shrank:
-		return "K12 STALE_DEBT", "A gap has CLOSED. Lower the row in the same change, or " +
-			"the vacated slot lets the next unclassified sentence in silently."
+	case rose:
+		return "K12 RECLASSIFIED", "No unheld debt was added — a sentence moved between " +
+			"classes. That is the ordinary result of filing a marker on a grandfathered " +
+			"sentence, and it is also what a relabel between waiver kinds looks like, which " +
+			"is the escape the per-kind columns exist to expose. Re-pin the row, and say in " +
+			"the diff which of the two it was."
+	case unheld < 0 || fell:
+		return "K12 STALE_DEBT", "A gap has CLOSED and nothing took its place. Lower the row " +
+			"in the same change, or the vacated slot lets the next unclassified sentence in " +
+			"silently."
 	default:
-		return "K12 POPULATION_MOVED", "No debt column moved — the assertable population " +
-			"or the cited count did. That is the swap this row exists to expose: a change " +
-			"adding one assertable sentence while citing one previously-unclassified " +
-			"sentence nets to zero across the debt columns and would otherwise pass green, " +
-			"which is a new unheld claim arriving under cover of somebody else's probe. " +
-			"Read both halves before pasting."
+		return "K12 POPULATION_MOVED", "No class count moved — the assertable population or " +
+			"the cited count did. That is the swap this row exists to expose: a change adding " +
+			"one assertable sentence while citing one previously-unclassified sentence nets " +
+			"to zero across the class columns and would otherwise pass green, which is a new " +
+			"unheld claim arriving under cover of somebody else's probe. Read both halves " +
+			"before pasting."
 	}
 }
 
@@ -1119,19 +1565,9 @@ func describeCensus(d Census) string {
 }
 
 func sortedTallyKeys(m map[string]CardTally) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(m))
 }
 
 func sortedCensusKeys(m map[string]Census) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(m))
 }

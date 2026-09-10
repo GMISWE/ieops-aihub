@@ -83,10 +83,12 @@ Three behaviours a caller has to know and cannot see from the schema:
   `step_attempt_id` — the UNIQUE index is in the arm above and the 409 a caller sees
   is `TestHandleUpdateStep_DuplicateStepAttemptIsAConflictNotASilentDrop`. Since
   `aihub#399` a terminal transition without one is refused 400 rather than answered
-  200, so "the step completed but is missing from the
+  200 — `TestValidateTerminalStepArgs_MCP` holds the requirement at the hop that
+  publishes it — so "the step completed but is missing from the
   history" is no longer reachable through the tool — `aihub#390` is where that was
   reachable, and the two records disagreeing is what that work item measured.
-- **`completed_steps: []` and the key being absent are different answers.** Empty
+- **`completed_steps: []` and the key being absent are different answers**
+  (`TestGetStepCompletedStepsDistinguishesEmptyFromAbsent`). Empty
   means nothing has completed —
   `internal/server/routes_step_dbgated_test.go`
   (`TestHandleGetStep_EmptyHistoryIsAnEmptyArrayNeverNull`) reads that off a real
@@ -97,7 +99,8 @@ Three behaviours a caller has to know and cannot see from the schema:
   each shape unchanged instead of filling one in. Absent means the server predates
   `aihub#265`. The description states this because a client that conflates them
   reports "no prior steps" for a work item that has six.
-- **A `failed` entry is not a finished step, and the query does not hide one.**
+- **A `failed` entry is not a finished step, and the query does not hide one**
+  (`TestCompletedStepsQueryHasNoStatusFilter`).
   `completedStepsQuery` (`internal/server/routes_step.go`) reads
   `wi_step_completions` by work item with NO status filter, and that table's
   `status` domain is `{completed, failed}`
@@ -176,12 +179,15 @@ naming one turns it into a promise and `getStepAdvertised` is then where it belo
   as the behaviour, and "description-only" is not a cancellation reason. This tool
   is the worked example: `aihub#265` fixed the description by fixing what the
   endpoint returns, rather than by trimming the promise.
+  <!-- prose-only: because=history -->
 - **§6.2 T2-21** — the `aihub#400` findings about this call were revived rather
   than left cancelled, on the grounds that it is "the one call every resuming agent
-  is told to make first". Landed as `aihub#450`: the `docs/mcp-tools.md` row that
+  is told to make first".
+  <!-- prose-only: because=external-state --> Landed as `aihub#450`: the `docs/mcp-tools.md` row that
   still promised a step graph, and the sentence that told the reader to ignore
   `status`.
 
 ## Open
 
 - Nothing this card can settle. The `§6.4` items do not touch this tool.
+  <!-- prose-only: because=external-state -->

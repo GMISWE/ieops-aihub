@@ -88,7 +88,9 @@ passes the **whole argument map** to `pkg/client/client.go` (`CreateProject`) �
   holds each part: the six columns the INSERT names, the caller in the owner
   position, the two schema defaults the statement leaves alone, and the increment
   that hands the slug out.
-- **`scenario` is the URL the step graph is resolved from.** Its last two path
+- **`scenario` is the URL the step graph is resolved from.**
+  <!-- prose-only: because=cross-repo -->
+  Its last two path
   segments become the owner-qualified clone directory, which is why two orgs' repos
   of the same name no longer share one checkout: they used to, and the second was
   never cloned while its projects silently ran the first org's step graph.
@@ -144,7 +146,8 @@ object looks like in a 21-day window; it is not evidence of disuse in the sense
   the two should move is not settled here: hop 1 says "any structured field" over a
   six-field block, and the server reads four of them.~~ **Closed by `aihub#588`
   (2026-09-10, owner ruling ①): the DESCRIPTION moved to the measured rule; the
-  enforcement did not.** First measured 2026-09-10 under `aihub#582` and re-measured
+  enforcement did not** (`TestRepoDescriptionBlockTriggersOnTheFourContentFieldsOnly`
+  holds the enforcement half). First measured 2026-09-10 under `aihub#582` and re-measured
   the same day on the `aihub#588` tree: `hasDescriptionBlock` reads exactly
   `positioning`/`tech_stack`/`main_modules`/`change_scenarios`, and a repo entry
   carrying only `generated_at` or only `generated_commit` is accepted — held one
@@ -153,7 +156,9 @@ object looks like in a 21-day window; it is not evidence of disuse in the sense
   (`TestRepoDescriptionBlockTriggersOnTheFourContentFieldsOnly`). Enforcement
   deliberately stayed put: today it is LOOSER than the old wording, so no caller is
   hurt, while widening it to match would newly refuse metadata-only entries
-  existing callers may already send. Both tools' corrected descriptions — and the
+  existing callers may already send.
+  <!-- prose-only: because=counterfactual -->
+  Both tools' corrected descriptions — and the
   absence of the old sentence — are held by
   `internal/mcp/project_publication_contract_test.go`
   (`TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema`); the schema hashes on

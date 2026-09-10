@@ -70,7 +70,7 @@ Description + InputSchema, ~115 tokens on every request, with
 | `step_id` | string | yes | on terminal transitions must equal the server's `current_step` |
 | `status` | string | yes | `in_progress` \| `completed` \| `failed` |
 | `step_attempt_id` | string | no | REQUIRED for completed/failed, enforced server-side |
-| `artifact_summary` | string | no | ≤4096 chars; longer is 413, not truncation |
+| `artifact_summary` | string | no | ≤4096 chars; longer is 413 rather than truncation (`TestHandleUpdateStep_ArtifactSummaryAtTheCapIsRecordedAndOverItIsRefused`) |
 | `error_type` | string | no | read on `failed`; ignored, not refused, on `completed` |
 | `escalated` | boolean | no | same: read only on `failed` |
 | `next_step` | string | no | complete-and-start in one call; only with `completed` |
@@ -97,7 +97,9 @@ of `PATCH /v1/work_items/<id>/step`, bound by
 `internal/server/routes_step.go` (`handleUpdateStep`). Three things happen at this
 hop that the schema cannot show:
 
-- **`step_id` is renamed on the wire.** The body key is `step`, observed on a
+- **`step_id` is renamed on the wire** (`TestFusedUpdateStepForwardsNextStep` observes
+  the body key, `TestUpdateStepPublishedParamsAreBoundServerSide` the binding). The
+  body key is `step`, observed on a
   request a fake aihub really received by `internal/mcp/tools_fusion_test.go`
   (`TestFusedUpdateStepForwardsNextStep`); the server reads `json:"step"`, which
   `internal/mcp/tools_step_contract_test.go`
@@ -153,7 +155,9 @@ canonical file.
   `TestHandleUpdateStep_ArtifactSummaryAtTheCapIsRecordedAndOverItIsRefused`).
   That is `aihub#399` closing `aihub#390`, where a best-effort INSERT wrapped in a
   SAVEPOINT swallowed a CHECK violation and the handler still answered 200.
-- **`next_step` is not guaranteed to be honoured by the peer.** This binary and the
+  <!-- prose-only: because=history -->
+- **`next_step` is not guaranteed to be honoured by the peer**
+  (`TestFusedUpdateStepDetectsAServerThatDroppedNextStep`). This binary and the
   aihub server deploy on separate schedules, so the schema publishing `next_step`
   says nothing about what the remote binds, so the tool is driven against a peer
   that drops the parameter by `internal/mcp/tools_fusion_test.go`

@@ -3042,6 +3042,30 @@ jobs:
           ! grep -q -- '--- SKIP' predict_lock_self_exclusion.log \
             || { echo "::error::an aihub#564 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#591: pf_create_api_key's hop-4 sentence — "mints a key, stores its
+      # hash, and returns the plaintext once" — had no arm at all; the only
+      # coverage read the PUBLISHED DESCRIPTION. This probe drives the real
+      # router against the real database: the stored row carries HashKey(raw)
+      # and never the plaintext (so no later read can leak it, which is what
+      # makes "once" enforceable), and the minted key authenticates a real
+      # request through the real middleware — the arm that goes red the day
+      # the mint's hash and the middleware's comparison diverge. Independent of
+      # the 0038 step above: the fixture writes only users.api_keys.
+      - name: aihub#591 api-key mint stores-only-the-hash DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestCreateAPIKeyStoresOnlyTheHashAndTheMintedKeyAuthenticates$' -count=1 -v 2>&1 | tee api_key_mint.log
+          for want in TestCreateAPIKeyStoresOnlyTheHashAndTheMintedKeyAuthenticates \
+                      TestCreateAPIKeyStoresOnlyTheHashAndTheMintedKeyAuthenticates/the_row_stores_the_hash_and_never_the_plaintext \
+                      TestCreateAPIKeyStoresOnlyTheHashAndTheMintedKeyAuthenticates/the_minted_key_authenticates_a_real_request; do
+            grep -q -- "--- PASS: $want" api_key_mint.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#591 api-key mint coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' api_key_mint.log \
+            || { echo "::error::an aihub#591 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: aihub#239 recall cursor tie + supersede carry DB tests
         env:
           AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable

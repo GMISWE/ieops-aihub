@@ -32,8 +32,8 @@ Three parameters, all required, and no `note`: removing an edge records no reaso
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
-| `blocked_wi_id` | string | yes | the work item that is blocked |
-| `blocking_wi_id` | string | yes | the work item that is blocking |
+| `blocked_wi_id` | string | yes | the work item that is blocked — the direction driven end to end by `TestBlockedByIsMachineReadable` |
+| `blocking_wi_id` | string | yes | the work item that is blocking — same arm, same edge, other end (`TestBlockedByIsMachineReadable`) |
 | `kind` | string | yes | `blocks\|supersedes\|related` |
 
 "Authorized by project writer on the blocked item's project; **no run-attempt
@@ -67,7 +67,8 @@ dropped inside the same function.
   `TestDeleteDependency_OtherBlockerRemains_StaysBlocked`).
 - The requeue sweep is synchronous with the removal, not a background job, so the
   status change is visible on the next read.
-- **Deleting an edge that matches no row answers `NOT_FOUND`.** The schema does not
+- **Deleting an edge that matches no row answers `NOT_FOUND`** (both subtests of
+  `TestDeleteDependency_OtherBlockerRemains_StaysBlocked`). The schema does not
   warn about it, and the three-segment address means a typo in `kind` addresses an
   edge that does not exist rather than failing to parse — so the answer is the same
   404 either way, and the real edge is untouched — both subtests of

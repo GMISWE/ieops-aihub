@@ -69,11 +69,11 @@ stayed.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
-| `type` | string | yes | starts with `methodology.`; the six kinds are suggested, not exhaustive |
+| `type` | string | yes | starts with `methodology.` (`TestTheTwoMemoryDoorsPartitionEveryTypePrefix` holds the door split); the six kinds are suggested rather than exhaustive |
 | `work_item_id` | string | yes | which work item this artifact belongs to |
 | `content` | string | no | inline content; provide `content` OR `path`, not both |
 | `path` | string | no | a local UTF-8 markdown file, read by the LOCAL process |
-| `structured_payload` | object | no | optional structured payload; a non-object — including a JSON-encoded string of one — is a 400 |
+| `structured_payload` | object | no | optional structured payload; a non-object — including a JSON-encoded string of one — is a 400 (`TestStringifiedObjectParamIsRejected`) |
 | `visibility` | string | no | `private\|project\|team\|admin`, default `project` |
 | `supersedes_memory_id` | string | no | memory this supersedes |
 | `html` | string | no | pre-rendered HTML stored verbatim |
@@ -182,7 +182,8 @@ section.
 ## hop 4 — what it actually does
 
 - **`internal/server/routes_memory.go` (`enforceMethodologyAttemptGate`) is the
-  branch point.** Its methodology arm binds to the TARGET memory's own work item,
+  branch point** (`TestEnforceMethodologyAttemptGate` drives its four
+  reject-before-verify cells). Its methodology arm binds to the TARGET memory's own work item,
   while its non-methodology arm demands the request's `work_item_id` whenever
   credentials are present, the four REJECT-BEFORE-VERIFY cells of that being driven
   against a nil pool by `internal/server/routes_memory_methodology_test.go`

@@ -53,8 +53,8 @@ withdrawn parameter is exactly what a stale document keeps describing.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `work_item_id` | string | yes | id or slug |
-| `idempotency_key` | string | yes | a BODY param for DB dedup, **not** the HTTP `Idempotency-Key` header; resending returns the EXISTING attempt and reuses its recorded secret |
-| `requested_locks` | array | no | `{resource_type, resource_key}` — usually omit and let the server derive |
+| `idempotency_key` | string | yes | a BODY param for DB dedup, **not** the HTTP `Idempotency-Key` header; resending returns the EXISTING attempt and reuses its recorded secret (`TestE2EClaimReplayKeepsTheSecretTheServerAccepts`) |
+| `requested_locks` | array | no | `{resource_type, resource_key}` — usually omit and let the server derive (`TestResourceToLock_PathStillDerivesFileScope`, `TestDeriveClaimLocks_RepoAndServiceContributeNoLock`) |
 | `force_takeover` | boolean | no | takes over the WORK ITEM, not another work item's locks |
 | `scenario_ref` | string | no | git SHA of the local scenario clone |
 
@@ -106,7 +106,10 @@ Three things are added at this hop that no parameter names:
   a fresh one there left the state file holding S2 while the row stored hash(S1), and
   every later credential-checked call answered "invalid session_secret".
 - **`session_info.machine_id`**, from `POLYFORGE_MACHINE_ID` or the hostname. The
-  server 400s without it.
+  server 400s without it, before any transaction is opened —
+  `internal/domain/claim_required_fields_probe_test.go`
+  (`TestClaimRefusesAMissingMachineIDBeforeTouchingDB`) drives the refusal with a nil
+  pool, so a pass proves no state was touched.
 - ⚠️ **`task_branches` is NO LONGER SENT** (`aihub#416`) —
   `internal/mcp/claim_wire_shape_test.go` (`TestClaimBodyCarriesNoTaskBranches`)
   drives a real claim and refuses the key anywhere in the body it sent. It existed for
@@ -124,14 +127,19 @@ true; `scenario_ref` only when non-empty — every one of those driven BOTH ways
 ## hop 4 — what it actually does
 
 - **The claim creates a run attempt, derives locks, creates a git worktree per repo in
-  the project, and then records a `repo_pin` per worktree.** The pin half is
+  the project, and then records a `repo_pin` per worktree** — the attempt and its
+  locks against a real database by `internal/mcp/claim_idempotent_replay_e2e_db_test.go`
+  (`TestE2EClaimReplayKeepsTheSecretTheServerAccepts`), the worktree and pin halves by
+  `internal/mcp/repo_pins_wiring_test.go` (`TestClaimRecordsRepoPins`). The pin half is
   `aihub#416`: after the worktrees exist, the tool reads `git rev-parse HEAD` in each
   and POSTs them to `/v1/work_items/<id>/repo_pins`, which stores them on
   `run_attempts.repo_pins` (migration `0037`), which
   `internal/mcp/repo_pins_wiring_test.go` (`TestClaimRecordsRepoPins`) drives against
   a real worktree and `internal/domain/delocking_db_test.go`
   (`TestDeLockingMigration0038AndRepoPins`) round-trips through the column. They come
-  back on this response as `repo_pins` and on `pf_get_step`.
+  back on this response as `repo_pins` (the echo asserted by `TestClaimRecordsRepoPins`)
+  and on `pf_get_step`, whose passthrough `internal/mcp/get_step_wire_shape_test.go`
+  holds by name for this key.
   🔴 **A pin is PROVENANCE, not a constraint.** It answers "which tree was this
   conclusion reached on". Nothing enforces it, nothing notices a mid-attempt `git
   pull`, and it does not expire. A repo whose worktree could not be built is ABSENT
@@ -142,6 +150,7 @@ true; `scenario_ref` only when non-empty — every one of those driven BOTH ways
   ⚠️ It is a SECOND request, not a claim field, because the worktrees do not exist
   when the claim goes out. Predicting them beforehand is what `aihub#356` did for
   branch names and what `aihub#416` deleted.
+  <!-- prose-only: because=history -->
 - **Locks derived at claim are `file_scope` only** since `aihub#416`, which
   `internal/domain/lock_derivation_retired_test.go`
   (`TestResourceToLock_PathStillDerivesFileScope`) holds at the mapper. A `repo` or
@@ -163,9 +172,11 @@ true; `scenario_ref` only when non-empty — every one of those driven BOTH ways
   (`TestForceTakeoverLockSteal_ClaimRefusesAForeignHolder`), the status pair in
   `internal/domain/claim_foreign_holder_statuses_test.go`
   (`TestPublishedForeignHolderStatusesAreTheEnforcedOnes`). `aihub#430` measured the
-  commit-window interleaving that qualifier used to describe and found it comes back
-  as 409 `CONFLICT_SERIALIZATION_FAILURE` with the row unchanged, because this path
-  opens SERIALIZABLE while `pf_force_takeover`'s opens READ COMMITTED. **The qualifier
+  commit-window interleaving that qualifier used to describe: it comes back as 409
+  `CONFLICT_SERIALIZATION_FAILURE` with the row unchanged. That refusal exists because
+  this path opens SERIALIZABLE while `pf_force_takeover`'s opens READ COMMITTED — the
+  pair is pinned at the source by `internal/domain/txn_isolation_probe_test.go`
+  (`TestClaimOpensSerializableAndTakeoverOpensReadCommitted`). **The qualifier
   therefore belongs on that tool's card and not this one** — one sentence cannot be
   true of both isolation levels.
 - **A failed local state write is NOT a no-op.** The claim already committed
@@ -204,7 +215,9 @@ because those are what every later credential-checked call authenticates with
 
 ## Open
 
-- **§6.4 item 6 is PARTLY closed as of `aihub#416` (2026-09-09).** What that work item
+- **§6.4 item 6 is PARTLY closed as of `aihub#416` (2026-09-09).**
+  <!-- prose-only: because=external-state -->
+  What that work item
   settled and this card now describes: repo/service derive no lock, and a claim
   records `repo_pins` — both held, by
   `TestDeriveClaimLocks_RepoAndServiceContributeNoLock` and

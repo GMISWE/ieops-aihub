@@ -33,7 +33,7 @@ Three parameters, two required, and a handling instruction.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
-| `user_id` | string | yes | user to create the key for |
+| `user_id` | string | yes | user to create the key for — the row the mint lands on, per `TestCreateAPIKeyStoresOnlyTheHashAndTheMintedKeyAuthenticates` |
 | `name` | string | yes | descriptive name for the key |
 | `project_scope` | string | no | optional project name restricting the key |
 
@@ -65,7 +65,7 @@ on the recorded request by `internal/mcp/api_key_surface_test.go`
 
 ## hop 4 — what it actually does
 
-- Mints a key, stores its hash, and returns the plaintext **once**.
+- Mints a key, stores its hash, and returns the plaintext **once** — all three clauses driven against a real router and database by `internal/server/api_key_create_db_test.go` (`TestCreateAPIKeyStoresOnlyTheHashAndTheMintedKeyAuthenticates`): the stored row carries the hash and never the plaintext, and the minted key authenticates a real request.
 - `project_scope` restricts the key to one project. That scoping interacts with the
   idempotency cache, whose key includes the API key id — so two keys for the same
   user are two idempotency namespaces.

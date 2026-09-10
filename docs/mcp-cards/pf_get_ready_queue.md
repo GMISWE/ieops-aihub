@@ -137,7 +137,8 @@ an in-memory session and fails both if a disclosure the server sent is dropped a
 an absent one is invented. pf_recall's projection has already swallowed three
 server-side fields this way (`total`, the truncation pair, `unmatched_types`).
 
-The section count is now ONE number in three places (`aihub#449` / `aihub#411` T2-20).
+The section count is now ONE number in three places (`aihub#449` / `aihub#411` T2-20,
+held by `TestReadyQueueSectionCountIsOneNumber`).
 `internal/domain/work_items.go` (`ReadyQueue`) marshals seven — `items`, `running`,
 `stalled`, `paused`, `needs_human_session`, `unclassified`, `stale_running` — the
 description says seven, and the Ready Queue block of
@@ -162,7 +163,8 @@ dead field `aihub#411` T2-20 did not list, and `RunningItem` has never carried i
 five types that marshal into this response, which is the authority the design-doc arm
 above does not read.
 
-🔴 **An empty segment now always means "nothing is here" (`aihub#500`).** Making the
+🔴 **An empty segment now always means "nothing is here" (`aihub#500`,
+`TestEveryReadyQueueSegmentQueryErrorIsA500NamingThatSegment`).** Making the
 seven keys always-present only pays off if an empty one is trustworthy, and until
 this wi it was not: FIVE segments — `stalled`, `paused`, `needs_human_session`,
 `unclassified` and `stale_running` — wrapped their whole drain in `if err == nil {…}`
@@ -242,7 +244,8 @@ corpus README warns about.
   named — but still mentions neither the 200 ceiling nor the disclosure, where
   `limit`'s neighbouring description on `pf_list_work_items` says both. That half is
   `aihub#411` T1-2/T1-12's and was left to it deliberately rather than edited twice
-  into the same string by two work items. The response already tells a caller what
+  into the same string by two work items.
+  <!-- prose-only: because=external-state --> The response already tells a caller what
   happened, which is the half that could not be worked around. `aihub#411`, which
   owns that half, wrapped 2026-09-07; re-checked 2026-09-08.
 - `response_keys_observed` above is a corpus census taken before `aihub#432` and

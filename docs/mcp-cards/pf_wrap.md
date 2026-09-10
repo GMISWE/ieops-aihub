@@ -54,7 +54,7 @@ Six parameters, two required.
 | `repo` | string | yes | repository name |
 | `pr_title` | string | no | used only if a PR does not exist yet |
 | `pr_body` | string | no | same |
-| `note` | string | no | closing note recorded before the attempt is completed |
+| `note` | string | no | closing note recorded before the attempt is completed — the ordering held by `TestPublishedNoteOrderingIsTheOrderTheToolUses`, and every retry resends it (`TestWrapCompletesAsWrappedWithNoFlagAndEveryRetryResendsItsNote`) |
 | `workspace_root` | string | no | workspace root path |
 
 "Idempotent **only** when a PR on the branch already covers local HEAD" is the

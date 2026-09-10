@@ -45,7 +45,7 @@ required here is the whole story of `aihub#325`.
 | `memory_id` | string | yes | "Memory ID" |
 | `additional_context` | string | yes | additional context for the memory |
 | `work_item_id` | string | yes | "Work item ID (for credential injection)" |
-| `strength_delta` | number | no | "Integer delta added to the memory's stored strength; the sum saturates at 1-5 rather than being refused, so a delta that overflows is applied only in part. A fractional delta is refused with a 400: strength is a whole number. The response reports the value actually stored." |
+| `strength_delta` | number | no | held by `TestReinforceClampBoundsAreNamedConstantsNotLiterals` (the saturation bounds) and `TestReinforceMemory_ResponseMatchesTheStoredBaseStrength` (the stored result): "Integer delta added to the memory's stored strength; the sum saturates at 1-5 rather than being refused, so a delta that overflows is applied only in part. A fractional delta is refused with a 400: strength is a whole number. The response reports the value actually stored." — the fractional refusal by `TestReinforceRefusesFractionalStrengthDeltaBeforeThePool` |
 
 The parenthetical on `work_item_id` understates it. The server VERIFIES the attempt
 credentials against that work item and writes it into the reinforcement's
@@ -69,7 +69,9 @@ it has stopped being reachable through this parameter, and a description that ke
 explaining an unreachable mechanism teaches the wrong model.
 
 **The saturation is published as of `aihub#506` (owner ruling 2026-09-09), and that
-is the whole of that work item — no behaviour moved.** The old text's "then clamped
+is the whole of that work item — no behaviour moved.**
+<!-- prose-only: because=external-state -->
+The old text's "then clamped
 to 1-5" was true and insufficient: it sat one sentence away from "a fractional delta
 is refused", so a caller had every reason to read an overflowing sum the same way.
 The two outcomes are not interchangeable. A refusal tells the caller their delta did
@@ -139,7 +141,8 @@ and the resolved state file into the body of `PATCH /v1/memories/<id>/reinforce`
   literal to appear anywhere in a comparison naming one, so `> MaxBaseStrength +
   0.5` is red as well as `> 5.0`.
 - **The clamp is not the last thing that touches the value, and until `aihub#475`
-  the code said it was.** `memories.base_strength` is `SMALLINT`, so pgx encodes the
+  the code said it was** (`TestBaseStrengthIsTruncatedByThePgxInt2Codec` measures
+  what touches it after). `memories.base_strength` is `SMALLINT`, so pgx encodes the
   float64 through its int2 codec, which truncates toward zero and returns no error —
   measured at the pinned version in both wire formats (`3.5`→`3`, `4.999`→`4`,
   `0.9`→`0`, `-0.5`→`0`) by `internal/domain/memory_base_strength_range_test.go`
@@ -158,7 +161,9 @@ and the resolved state file into the body of `PATCH /v1/memories/<id>/reinforce`
   `internal/domain/memory_base_strength_range_test.go`
   (`TestValidateBaseStrengthRejectsWhatTheColumnWouldRefuse`).
 - **That asymmetry was adjudicated on 2026-09-09 (`aihub#506`): keep the clamp and
-  write it into the contract.** The parallel that made it a question was real — the
+  write it into the contract.**
+  <!-- prose-only: because=external-state -->
+  The parallel that made it a question was real — the
   integrality ruling one field over refused the same "answered 200 having stored
   something you did not name" shape — and the owner separated them on exactly the
   ground above, that a SUM is arithmetic where a named value is an intent. The two
@@ -182,7 +187,8 @@ and the resolved state file into the body of `PATCH /v1/memories/<id>/reinforce`
   (`TestReinforceMemory_IntegralDeltaStillMoves`) drives a delta past the top
   against a real database and requires `MaxBaseStrength` back.
 - **A non-integral `strength_delta` is a 400 since `aihub#459` (owner ruling
-  2026-09-09), and the refusal is on the DELTA rather than on the sum.** Checking
+  2026-09-09), and the refusal is on the DELTA rather than on the sum**
+  (`TestReinforceRefusesFractionalStrengthDeltaBeforeThePool`). Checking
   only the sum would be sufficient for storage and useless for the caller: `0.5` on
   a row stored at `3` is a well-formed sum of `3.5`, and "3.5 is not a whole number"
   names a value nobody typed — observable rather than argued:
@@ -192,9 +198,10 @@ and the resolved state file into the body of `PATCH /v1/memories/<id>/reinforce`
   cannot have been about the sum, and
   (`TestReinforceAcceptsWholeAndAbsentStrengthDelta`) is the control that stops a
   handler refusing everything from satisfying it. The check sits with the other argument checks, above
-  the first query, so the answer is a fact about the argument rather than about the
-  memory — a caller with a malformed delta and an invisible memory is told about
-  their delta. The rule is `internal/domain/memory.go`
+  the first query — `TestReinforceRefusesFractionalStrengthDeltaBeforeThePool` proves
+  the ordering with a nil pool — so the answer is a fact about the argument rather
+  than about the memory: a caller with a malformed delta and an invisible memory is
+  told about their delta. The rule is `internal/domain/memory.go`
   (`ValidateIntegralStrength`), shared with the create path, and
   `internal/server/routes_memory_reinforce_integral_test.go` pins the placement by
   running the handler with a nil pool: a refusal cannot have touched the database,
@@ -218,8 +225,8 @@ and the resolved state file into the body of `PATCH /v1/memories/<id>/reinforce`
   `internal/server/routes_memory_reinforce_returning_db_test.go`
   (`TestReinforceMemory_ResponseMatchesTheStoredBaseStrength`).
 - **Sending credentials without the work item they belong to is the one combination
-  the gate rejects outright**, which is why the parameter is required rather than
-  optional-with-a-default.
+  the gate rejects outright** (`TestMemoryToolsSendCredentialsWithTheirWorkItem`),
+  which is why the parameter is required rather than optional-with-a-default.
 
 ## hop 5 — what comes back
 
@@ -257,3 +264,4 @@ the defect alone.
 - Nothing this card can settle. The clamp question that stood here was ruled on
   2026-09-09 (`aihub#506`, owner: keep the saturation and publish it), and it is
   recorded where the behaviour is — hop 0-1 and hop 4 — rather than here.
+  <!-- prose-only: because=external-state -->

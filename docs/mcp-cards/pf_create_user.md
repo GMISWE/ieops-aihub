@@ -49,7 +49,7 @@ Four parameters, one required. "Create a new user (**admin only**)."
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `display_name` | string | yes | human-readable display name |
-| `user_type` | string | no | enum `human` or `machine`, default `human`; a machine user's email is generated, not supplied |
+| `user_type` | string | no | enum `human` or `machine`, default `human` (`TestCreateUserVocabulariesArePublishedAsEnums`); a machine user's email is generated rather than supplied (`TestCreateUserEmailIsRequiredForHumansAndGeneratedForMachines`) |
 | `role` | string | no | enum `writer` or `admin`, default `writer` — the GLOBAL role, not a project member role |
 | `email` | string | no | required for human users; auto-generated for machine users |
 
@@ -95,6 +95,7 @@ the untyped `(*mcp.Server).AddTool`, whose `callTool` hands the request straight
 the handler with no schema step. Measured in
 `internal/mcp/create_user_vocab_test.go`: `role: "maintainer"` still arrives in the
 `POST` body. What changed is the answer at the far end — see hop 4.
+<!-- prose-only: because=history -->
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -105,7 +106,9 @@ under the admin group.
 
 ## hop 4 — what it actually does
 
-- Creates the user row and returns it. The response does **not** include an API key:
+- Creates the user row and returns it, the response being the handler's own
+  projection of that row (`TestCreateUserResponseIsTheHandlersOwnProjection`). The
+  response does **not** include an API key:
   that is `pf_create_api_key`, a separate call, and the `no_credential_is_returned`
   leg of `internal/server/user_admin_write_shape_test.go`
   (`TestCreateUserResponseIsTheHandlersOwnProjection`) refuses any key-, token- or
@@ -138,6 +141,7 @@ under the admin group.
   address's exact spelling is not pinned anywhere: it is built immediately before the
   insert, so no answer carries it, and the arm above holds that a machine user needs
   no mailbox rather than what the mailbox is called.
+  <!-- prose-only: because=judgement -->
 - `aihub#463`: an out-of-vocabulary `user_type` or `role` is now a **400** naming the
   field, the rejected value and the legal set, refused before the `INSERT` by
   `internal/domain/user_fields.go` (`ValidateUserType`) from

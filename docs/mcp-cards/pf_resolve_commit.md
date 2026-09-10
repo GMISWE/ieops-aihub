@@ -32,7 +32,7 @@ Three parameters, all required.
 |---|---|---|---|
 | `memory_id` | string | yes | "Memory ID" — the artifact carrying the annotation |
 | `commit_id` | string | yes | "Commit annotation ID" |
-| `reply` | string | yes | what was changed, or why the annotation is resolved |
+| `reply` | string | yes | what was changed, or why the annotation is resolved <!-- prose-only: because=judgement --> |
 
 "Commit" here means a **review annotation on a spec/plan artifact** rather than a git
 commit. That collision is worth stating on the card because `pf_commit` is a

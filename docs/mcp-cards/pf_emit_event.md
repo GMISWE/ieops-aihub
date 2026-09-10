@@ -45,10 +45,10 @@ the three set sizes in hop 4 are held against the live schema and the domain set
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `work_item_id` | string | yes | which work item |
-| `event_type` | string | yes | "NOT a closed set" — 45 published names, plus the three rules that really are enforced |
-| `payload` | object | yes | arbitrary JSON object; a non-object is a 400, and the 64 KB cap is checked first |
+| `event_type` | string | yes | "NOT a closed set" — 45 published names (`TestPublishedEventTypeCountsAreTheEnforcedOnes`), plus the three rules that really are enforced |
+| `payload` | object | yes | arbitrary JSON object; a non-object is a 400 (`TestStringifiedObjectParamIsRejected`), and the 64 KB cap is checked first (`TestSizeNoteMatchesTheCapThatActuallyExists`) |
 | `pinned` | boolean | no | surfaces first in status/resume |
-| `admin` | boolean | no | requires role=admin |
+| `admin` | boolean | no | requires role=admin — the 403 and its whitelist by `TestEmitEventAdminFlag_TheWhitelistStillRefusesSomething` |
 
 `event_type` is still a free string and there is still no CHECK behind it —
 `agent_events.event_type` is `TEXT NOT NULL` with no constraint, and **every other
@@ -108,7 +108,8 @@ via `internal/mcp/tools_coding.go` (`emitCodingEvent`).
   of several things: a wrap that actually delivered something, a lock release with
   its cause, a note whose credentials are about to be deleted.
 - **A paused attempt may still call this tool, and that is a ruled contract**
-  (owner ruling ②, 2026-09-10, `aihub#585`). The credential check here is
+  (owner ruling ②, 2026-09-10, `aihub#585`; driven end to end by
+  `TestPausedAttemptStillWritesTimelineEvents`). The credential check here is
   `verifyAttemptCredentialSimple` in `internal/domain/memory.go`, which verifies
   the current attempt id, the claim epoch and the secret hash while never reading
   the attempt's status — a pause moves none of those three — so the tools that
@@ -125,6 +126,7 @@ via `internal/mcp/tools_coding.go` (`emitCodingEvent`).
   reason, the checkpoint and the handover note land after the pause that made
   them necessary; the 2026-09-10 close-out wrote `aihub#543`'s checkpoint note
   exactly this way.
+  <!-- prose-only: because=judgement -->
 - **`payload` must be a JSON object, and the 400 says so in `payload`'s own terms**
   (`aihub#465`). It is published as an object and bound to a bare
   `json.RawMessage`, so a JSON-encoded STRING of an object used to be inserted
@@ -167,7 +169,8 @@ via `internal/mcp/tools_coding.go` (`emitCodingEvent`).
   whitelist from the admin-only set makes the containment structural: declaring an
   admin event can no longer be stricter than not declaring it.
 - **Omitting `work_item_id` for a type the CHECK does not permit is now a 400 rather
-  than a 500.** That CHECK was enforced in the database only, so the request ran to
+  than a 500** (`TestEmitEventNullWorkItem_IsA400NotA500`). That CHECK was enforced in
+  the database only, so the request ran to
   the INSERT and came back as the driver's `SQLSTATE 23514` text wrapped in
   `INTERNAL_ERROR` — measured; `internal/domain/event_types_db_test.go`
   (`TestEmitEventNullWorkItem_IsA400NotA500`) asserts the STATUS over three accepted

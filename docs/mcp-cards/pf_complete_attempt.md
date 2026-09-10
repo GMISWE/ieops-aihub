@@ -52,7 +52,7 @@ order the tool really uses are compared in one arm by
 | `work_item_id` | string | yes | used to find the state file |
 | `status` | string | yes | `wrapped` \| `failed` \| `paused` |
 | `force_terminate_step` | boolean | no | force-terminate an in-progress step |
-| `note` | string | no | closing note recorded BEFORE the attempt is completed |
+| `note` | string | no | closing note recorded BEFORE the attempt is completed (`TestPublishedNoteOrderingIsTheOrderTheToolUses`) |
 | `pause_reason` | string | no | read only when `status="paused"`, and refused with any other status |
 
 `note` exists because the closing note and the terminal call were always two
@@ -72,7 +72,9 @@ bound by `internal/server/router.go` (`handleCompleteAttempt`).
   `internal/mcp/complete_attempt_wire_shape_test.go`
   (`TestCompleteAttemptBodyForwardsTheFlagUngatedAndCarriesNoNote`).
 - **`pause_reason` is refused on any status but `paused`, and forwarded only when
-  non-empty.** The refusal (`aihub#452`) is raised before the state file is resolved
+  non-empty** (`TestCompleteAttemptRefusesPauseReasonOnNonPausedStatus`;
+  `TestCompleteAttemptForwardsPauseReason`,
+  `TestCompleteAttemptOmitsPauseReasonWhenAbsent`). The refusal (`aihub#452`) is raised before the state file is resolved
   and before the note below is emitted, so a declined call writes nothing at all —
   driven with a note attached, and the empty request list asserted, by
   `internal/mcp/attempt_lifecycle_param_contract_test.go`
@@ -109,7 +111,8 @@ bound by `internal/server/router.go` (`handleCompleteAttempt`).
   records it twice. That is documented rather than solved; an idempotency key on
   events is a bigger change.
 - **A step still `in_progress` fails the completion on `wrapped` and `failed`** unless
-  `force_terminate_step` is set — but **`paused` does not need the flag.** The H-R9-11
+  `force_terminate_step` is set — but **`paused` does not need the flag**
+  (`TestTheStepInProgressRefusalIsGatedOnPausedOrTheFlagAlone`). The H-R9-11
   block in `internal/domain/run_attempts.go` (`FnCompleteAttempt`) force-terminates a
   live step when `status="paused"` OR the flag is set, and refuses with
   `ErrConflictStepInProgress` only otherwise, so the flag is load-bearing on the two
@@ -128,7 +131,10 @@ bound by `internal/server/router.go` (`handleCompleteAttempt`).
   note, both driven against a refusing server by
   `internal/mcp/wrap_note_retry_test.go`
   (`TestWrapCompletesAsWrappedWithNoFlagAndEveryRetryResendsItsNote`).
-- **`pause_reason` is written on `paused` and on nothing else.** `internal/domain/run_attempts.go`
+- **`pause_reason` is written on `paused` and on nothing else** — the refusal on any
+  other status by `TestCompleteAttemptRefusesPauseReasonOnNonPausedStatus`, the
+  terminal-path nil by `TestTheTerminalPathNilsThePauseReasonBeforeTheWrite`.
+  `internal/domain/run_attempts.go`
   (`FnCompleteAttempt`) refuses a non-empty reason on any other status next to the
   status check, before it opens a transaction — exercised against a nil pool, which is
   what proves the refusal precedes the transaction, in

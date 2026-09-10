@@ -70,10 +70,10 @@ distinct semantic from sending a zero value.
 |---|---|---|---|
 | `memory_id` | string | yes | "any id in the lineage" |
 | `work_item_id` | string | yes | for credential injection |
-| `content` | string | no | new content (omit to keep current) |
-| `visibility` | string | no | new visibility (omit to keep current) |
-| `tags` | array | no | new tags (omit to keep current) |
-| `base_strength` | number | no | new base strength, **integer** 1-5 (omit to keep current); a fractional value is a 400 |
+| `content` | string | no | new content (omit to keep current — `TestMemoryToolsForwardAnOptionalParamOnlyWhenItCarriesAValue`) |
+| `visibility` | string | no | new visibility (omit to keep current — `TestMemoryToolsForwardAnOptionalParamOnlyWhenItCarriesAValue`) |
+| `tags` | array | no | new tags (omit to keep current — `TestMemoryToolsForwardAnOptionalParamOnlyWhenItCarriesAValue`) |
+| `base_strength` | number | no | new base strength, **integer** 1-5 (omit to keep current); a fractional value is a 400 (`TestValidateIntegralStrengthIsTheWholeNumberRule`) |
 
 "Any id in the lineage" is load-bearing: a memory is versioned, and updating creates
 a **new version** and advances the `latest_id` cursor, so the id a caller holds from
@@ -142,7 +142,8 @@ pinned by `internal/mcp/wire_strip_test.go`
   `pf_update_memory` alike, so a description here that went silent about the range
   would turn that gate red.
 - **Since `aihub#459` (owner ruling 2026-09-09) the value must also be a WHOLE
-  NUMBER, and it is inherited here rather than decided here.** The same guard gained
+  NUMBER, and it is inherited here rather than decided here**
+  (`TestValidateIntegralStrengthIsTheWholeNumberRule`). The same guard gained
   `internal/domain/memory.go` (`ValidateIntegralStrength`) after its range check, so
   `2.5` is a 400 on this tool without a line of this tool's own code changing —
   which is the point of the guard sitting in `Remember` rather than in either
@@ -183,7 +184,8 @@ real callers have been handed.
   both in `internal/mcp/tools_memory_test.go`, and both build the range from
   `domain.MinBaseStrength` / `domain.MaxBaseStrength` rather than typing it out.
 - **§6.1 T1-3 residual (owner ruling 2026-09-09) — LANDED** (`aihub#459`): the legal
-  set is the INTEGERS in that range, not the reals in it. The range could be
+  set is the INTEGERS in that range rather than the reals in it, anchored on the
+  enforcement by `TestPublishedBaseStrengthRangeIsTheEnforcedOne`. The range could be
   anchored on a constant; integrality cannot, so
   `TestPublishedBaseStrengthRangeIsTheEnforcedOne` anchors it on the enforcement —
   it drives `domain.Remember` with a nil pool, where a refused value returns before

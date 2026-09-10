@@ -2035,22 +2035,32 @@ func TestWiringPinSkeletonIsCalibrated(t *testing.T) {
 // nor carries a named classification marker makes the recorded count rise, and a
 // rise is red.
 //
-// ⚠️ "EVERY prose sentence" is what this said until 2026-09-10, and it was an
-// overstatement in one structural direction: cardclaims.joinProse skips any line
-// beginning with `|` or `#`, so TABLE ROWS and HEADINGS are outside the walk
-// entirely. They are not merely unclassified — they are never split into
-// sentences, so they cannot be counted OR waived, and a marker placed on one is
-// reported as MARKER_ORPHAN. Measured on this tree 2026-09-10 by running
-// cardclaims.IsCandidate over the 310 non-fenced table lines of all 45 cards: 46
-// of them are candidate-assertable, i.e. 46 claims this ratchet's population does
-// not contain. Hop 0-1 promises live in exactly those rows, which is where the
-// claim about each parameter's published meaning is written.
+// ⚠️ "EVERY prose sentence" was an overstatement until aihub#591 (2026-09-10)
+// closed the largest structural gap it hid: cardclaims.joinProse used to skip
+// every line beginning with `|`, so TABLE ROWS were outside the walk entirely —
+// never split into units, so their claims could not be counted OR waived, and a
+// marker in a cell was reported as MARKER_ORPHAN. Measured before the widening:
+// 46 of the 310 non-fenced table lines across the 45 cards were
+// candidate-assertable, and hop 0-1 promises live in exactly those rows — the
+// place each parameter's published meaning is written, i.e. the sentences a
+// caller reads FIRST. Rows are units now (hard-bounded at both edges; only the
+// |---| separators stay out, as table syntax), and the same change widened the
+// recogniser itself: wi/§-anchored behaviour sentences (form b — the
+// SERIALIZABLE isolation pair, and pf_get_step's recorded defect, live when it
+// was measured and corrected by aihub#590 in this same batch),
+// token-in-the-previous-sentence attribution (form c — "The server 400s without
+// it."), the measured non-effect verbs (governs/touches/sits/opens/counts/
+// come/tell), and sentence cuts through closing formatting (`.**`), which ended
+// the merged-bullet ejection where one "used to" evicted the live claims fused
+// behind it.
 //
-// Widening the walk to reach them is aihub#591 (filed 2026-09-10), because it
-// moves the population and every ledger row with it — a re-pin of all 45 rows,
-// which is that work item's whole subject. What belongs HERE is the disclosure:
-// a gate that reads as covering everything, while structurally skipping the rows
-// a caller reads first, is the shape this file's own K8 floors exist to refuse.
+// What is STILL outside the walk, stated so this header does not repeat its own
+// mistake: HEADINGS (structure, not prose) and FENCED BLOCKS (code the cards
+// quote). A marker on either is MARKER_ORPHAN, deliberately.
+//
+// The widening moved the population and every ledger row with it — 39 of 45
+// rows re-pinned from this arm's own failure output, the POPULATION_MOVED /
+// RECLASSIFIED discipline working as designed.
 //
 // ─── The hole it closes, and why a probe family alone would not ────────────
 //
@@ -2168,6 +2178,10 @@ func TestWiringPinSkeletonIsCalibrated(t *testing.T) {
 //	                                             RED  K12 DEBT_GROWTH
 //	M2  delete the one waiver marker in the tree RED  K12 DEBT_GROWTH
 //	M6  move that marker onto a table row        RED  K12 MARKER_ORPHAN + DEBT_GROWTH
+//	    ⚠️ M6's verdict is a wave-0 record: since aihub#591 table rows are READ, so
+//	    a marker moved onto one PLACES (no MARKER_ORPHAN) and the failure is the
+//	    ledger mismatch alone. The orphan finding still exists — headings, fences
+//	    and separator rows — and the R-series below re-proves the row direction.
 //	M7  file a marker on a card outside the set  RED  K12 MARKER_OUT_OF_SCOPE
 //	    ⚠️ M7 and M7b were applied when 35 cards sat outside the set. Phase 2 leaves
 //	    NONE, so neither is reproducible as written; the finding they exercise is now
@@ -2269,6 +2283,69 @@ func TestWiringPinSkeletonIsCalibrated(t *testing.T) {
 //	                                                   is documentation of aihub#543's
 //	                                                   dispatch sequence and nothing
 //	                                                   asserts on it
+//
+// ─── Recorded mutants — the aihub#591 widening (2026-09-10) ─────────────────
+//
+// Applied to this tree and reverted after each run (cp-based revert, after two
+// git-checkout reverts early in the change ate live card edits and had to be
+// re-applied — the verdicts below are from clean re-runs). Publication side
+// edits a CARD or a probe's CITATION; enforcement side edits the recogniser or
+// the code a new probe pins.
+//
+//	── publication side ──
+//	R1 add an assertable table row, uncited      RED  K12 DEBT_GROWTH — rows are
+//	                                                  population now, which is the
+//	                                                  whole point of the widening
+//	R2 delete pf_get_step's known-defect waiver  RED  K12 DEBT_GROWTH
+//	   ⚠️ a pre-merge verdict: aihub#590's fix landed later in the same batch, so
+//	   that waiver has since flipped to honest past tense plus a citation and the
+//	   row it moved reads KnownDefect: 0 — the self-emptying working as designed
+//	R9 strip the isolation probe's citation from
+//	   pf_force_takeover                         RED  K12 DEBT_GROWTH
+//	R10 point each of the seven other new probes'
+//	    citations at TestNoSuchProbeR10, one at
+//	    a time                                   RED  7× K12 ARM_CITATION_UNRESOLVED,
+//	                                                  5 of them + DEBT_GROWTH (the
+//	                                                  other 2 sentences carry a
+//	                                                  second, still-resolving arm)
+//
+//	── enforcement side, recogniser ──
+//	R3 skip every |-row again (drop the
+//	   separator-only condition)                 RED  3 cardclaims fixtures + K12
+//	                                                  MARKER_ORPHAN + 20×
+//	                                                  POPULATION_MOVED + STALE_DEBT
+//	R4 form (b) returns false                    RED  6 fixtures + 23× STALE_DEBT
+//	                                                  + 40× STALE_MARKER
+//	R5 attribution returns false                 RED  1 fixture + 9× STALE_DEBT
+//	                                                  + 10× STALE_MARKER
+//	R6 sentenceClosers = ""                      RED  1 fixture + 2× DEBT_GROWTH +
+//	                                                  9× POPULATION_MOVED +
+//	                                                  STALE_DEBT + STALE_MARKER —
+//	                                                  the merged-bullet ejection
+//	                                                  coming back
+//	R7 drop the six new verb pairs               RED  7 fixtures + 6×
+//	                                                  POPULATION_MOVED + 2×
+//	                                                  STALE_DEBT + 2× STALE_MARKER
+//
+//	── enforcement side, the new probes' subjects ──
+//	E1 FnClaimWorkItem opens pool.Begin          RED  the isolation probe
+//	E2 FnForceTakeover opens Serializable        RED  same probe, both findings
+//	E3 drop the machine_id refusal               RED  the nil-pool probe (loud:
+//	                                                  the claim path reaches the
+//	                                                  nil pool and panics)
+//	E4 marshalJSON back to MarshalIndent         RED  the byte-identity probe
+//	E5 rotate stores the plain, not bcrypt       RED  the rotate probe
+//	E6 slimRecallResultMode clones the map       RED  the identity probe
+//	E7 handleUpdateUser's UPDATE mentions
+//	   projects                                  RED  the write-target probe, both
+//	                                                  findings
+//	E8 bodyless echo reports content_len: 0      RED  the no-body probe, both
+//	                                                  subtests
+//
+//	── control, which must stay GREEN ──
+//	R8 reword a sentence the recogniser does
+//	   not flag                                  GREEN bound to the population,
+//	                                                   not to card churn
 //
 // 🔴 M11, M12, M13, M14, M15, M5b, M7b, M16 and M17a all come from a clean-context
 // review of this arm's FIRST version, which every one of them walked straight
@@ -2406,49 +2483,49 @@ const k12ContractCards = 45
 // ready to paste, which is the dbtestcov shape and exists so a number is never
 // re-derived by hand.
 var k12Ledger = map[string]cardclaims.Census{
-	"pf_acquire_locks":           {Candidates: 14, Cited: 13, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_acquire_locks":           {Candidates: 16, Cited: 13, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
 	"pf_activate_memory":         {Candidates: 4, Cited: 4, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_batch_create_work_items": {Candidates: 17, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_cancel_work_item":        {Candidates: 9, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_claim_work_item":         {Candidates: 22, Cited: 21, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_commit":                  {Candidates: 8, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_complete_attempt":        {Candidates: 14, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_create_api_key":          {Candidates: 6, Cited: 6, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_create_dependency":       {Candidates: 7, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_create_project":          {Candidates: 9, Cited: 9, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_create_user":             {Candidates: 19, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_create_work_item":        {Candidates: 25, Cited: 19, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 6},
-	"pf_diff":                    {Candidates: 6, Cited: 6, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_emit_event":              {Candidates: 22, Cited: 19, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_force_takeover":          {Candidates: 18, Cited: 16, Unclassified: 0, PendingImplementation: 1, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_get_memory":              {Candidates: 6, Cited: 6, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_get_ready_queue":         {Candidates: 23, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 7},
-	"pf_get_step":                {Candidates: 14, Cited: 12, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_get_work_item":           {Candidates: 16, Cited: 13, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_list_dependencies":       {Candidates: 11, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_list_projects":           {Candidates: 11, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
-	"pf_list_users":              {Candidates: 8, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_list_work_items":         {Candidates: 22, Cited: 19, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_pause_attempt":           {Candidates: 14, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_batch_create_work_items": {Candidates: 18, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_cancel_work_item":        {Candidates: 12, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
+	"pf_claim_work_item":         {Candidates: 29, Cited: 26, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_commit":                  {Candidates: 9, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_complete_attempt":        {Candidates: 18, Cited: 18, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_create_api_key":          {Candidates: 8, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_create_dependency":       {Candidates: 9, Cited: 9, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_create_project":          {Candidates: 12, Cited: 10, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_create_user":             {Candidates: 23, Cited: 18, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_create_work_item":        {Candidates: 30, Cited: 23, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 7},
+	"pf_diff":                    {Candidates: 8, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_emit_event":              {Candidates: 28, Cited: 24, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_force_takeover":          {Candidates: 21, Cited: 17, Unclassified: 0, PendingImplementation: 1, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_get_memory":              {Candidates: 8, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_get_ready_queue":         {Candidates: 26, Cited: 18, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 8},
+	"pf_get_step":                {Candidates: 20, Cited: 15, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_get_work_item":           {Candidates: 21, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_list_dependencies":       {Candidates: 13, Cited: 9, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
+	"pf_list_projects":           {Candidates: 14, Cited: 9, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_list_users":              {Candidates: 9, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_list_work_items":         {Candidates: 27, Cited: 23, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
+	"pf_pause_attempt":           {Candidates: 17, Cited: 15, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_pr":                      {Candidates: 13, Cited: 10, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_predict_conflicts":       {Candidates: 22, Cited: 20, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_predict_conflicts":       {Candidates: 27, Cited: 23, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
 	"pf_push":                    {Candidates: 8, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_read_events":             {Candidates: 12, Cited: 12, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_recall":                  {Candidates: 36, Cited: 30, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 6},
-	"pf_redact_memory":           {Candidates: 6, Cited: 6, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_reinforce_memory":        {Candidates: 22, Cited: 20, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_remember":                {Candidates: 46, Cited: 38, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 8},
-	"pf_remove_dependency":       {Candidates: 4, Cited: 3, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_resolve_commit":          {Candidates: 9, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_read_events":             {Candidates: 15, Cited: 13, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_recall":                  {Candidates: 47, Cited: 38, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 9},
+	"pf_redact_memory":           {Candidates: 8, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_reinforce_memory":        {Candidates: 31, Cited: 26, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_remember":                {Candidates: 53, Cited: 44, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 9},
+	"pf_remove_dependency":       {Candidates: 7, Cited: 6, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_resolve_commit":          {Candidates: 10, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_revoke_api_key":          {Candidates: 5, Cited: 5, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_rotate_identifier":       {Candidates: 7, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_save_artifact":           {Candidates: 24, Cited: 22, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_ship":                    {Candidates: 8, Cited: 6, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_update_memory":           {Candidates: 11, Cited: 10, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_update_project":          {Candidates: 14, Cited: 11, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_update_step":             {Candidates: 17, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_update_user":             {Candidates: 19, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_update_work_item":        {Candidates: 48, Cited: 41, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 7},
+	"pf_rotate_identifier":       {Candidates: 8, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_save_artifact":           {Candidates: 27, Cited: 25, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_ship":                    {Candidates: 7, Cited: 5, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_update_memory":           {Candidates: 17, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_update_project":          {Candidates: 17, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_update_step":             {Candidates: 21, Cited: 17, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_update_user":             {Candidates: 22, Cited: 17, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_update_work_item":        {Candidates: 66, Cited: 54, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 12},
 	"pf_whoami":                  {Candidates: 13, Cited: 11, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_wrap":                    {Candidates: 3, Cited: 3, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 }
@@ -2457,15 +2534,23 @@ const (
 	// floorK12Sentences bounds how many card sentences the walk actually split out
 	// of the scoped cards. A walk that splits nothing classifies nothing and every
 	// count below matches a ledger of zeroes, which is the same green as a card set
-	// with no debt. Re-pinned by phase 2 over 45 cards instead of 10. Current
+	// with no debt. Re-pinned by phase 2 over 45 cards instead of 10, and again by
+	// aihub#591 when table rows entered the walk (the measurement moved 1489 ->
+	// 1921) — sitting above the OLD population, so silently losing the widening is
+	// itself a floor failure rather than a smaller number nobody notices. Current
 	// value: the K12 line.
-	floorK12Sentences = 700
+	floorK12Sentences = 1700
 	// floorK12Candidates bounds how many of those the recogniser called assertable.
 	// This is the one that fails when the recogniser stops recognising — the
 	// specific way this arm can rot into a live-looking green. Re-pinned by phase 2;
 	// note it does NOT fall as probes land, because citing a sentence moves it
-	// between columns INSIDE Candidates. Current value: the K12 line.
-	floorK12Candidates = 380
+	// between columns INSIDE Candidates. Re-pinned by aihub#591 above the
+	// pre-widening 668, for the same reason as the sentence floor: the four new
+	// recogniser classes are population, and a regression that dropped them
+	// (table rows, wi-anchored sentences, attribution, the widened verb list)
+	// must fail HERE even if someone re-pins every ledger row to match. Current
+	// value: the K12 line.
+	floorK12Candidates = 750
 	// floorK12ArmIndex bounds how many top-level Test functions the citation
 	// resolver found in the tree. Without it an index that walked the wrong root
 	// resolves nothing, every citation is reported unresolved, and the repair a

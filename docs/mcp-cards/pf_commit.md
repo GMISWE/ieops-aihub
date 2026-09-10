@@ -134,7 +134,8 @@ rate is dominated by the refusals this gate is supposed to produce.
 ## Open
 
 - **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09)**, and the
-  answer is that there is no relationship to define. This gate takes `file_scope`
+  answer is that there is no relationship to define.
+  <!-- prose-only: because=external-state --> This gate takes `file_scope`
   locks for the PATHS a commit contains; an advisory `repo` or `service` entry
   derives no lock at all, so the two operate on disjoint sets — the disjointness by
   `internal/domain/commit_lock_type_test.go`

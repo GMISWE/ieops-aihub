@@ -417,8 +417,23 @@ func unrecognisedMarkerProblem(card, raw, name string) string {
 //
 // A sentence is CANDIDATE-ASSERTABLE when all three hold:
 //
-//  1. it names a published token — written in backticks, which is what makes the
-//     recogniser cheap;
+//  1. it is ANCHORED — one of three forms, in strictly weakening order:
+//     (a) it names a published token, written in backticks, which is what makes
+//     the recogniser cheap;
+//     (b) it carries backticked spans and every one is a wi-id or a section
+//     reference — a sentence pinned to a measurement or a ruling, the form the
+//     SERIALIZABLE isolation pair and the pf_get_step known-defect record take.
+//     Added by aihub#591 after those were measured invisible: a card can record
+//     a live defect in a sentence whose only backticks are `aihub#NNN`, and a
+//     population that cannot see it reads KnownDefect:0 on a card carrying one;
+//     (c) it has NO backticks at all, the sentence BEFORE it names a published
+//     token, and its verb is from the refusal-or-response subset — "The server
+//     400s without it." one bullet under `session_info.machine_id`, the
+//     token-in-previous-sentence attribution the wave-1 checkpoint measured.
+//     The subset is deliberately narrower than effectVerbs: with no token and
+//     no anchor, a bare copula would sweep every piece of narration that
+//     happens to follow a token into the population, which is noise even a
+//     gate tuned to over-report cannot spend;
 //  2. its verb is an effect-or-refusal verb;
 //  3. it is present tense about the current tree.
 //
@@ -433,6 +448,23 @@ func unrecognisedMarkerProblem(card, raw, name string) string {
 // inflections the cards actually write. Closed rather than open-ended because a
 // list somebody may extend at will is a list that grows to cover whatever the
 // author wanted excluded.
+//
+// 🔴 Widened by aihub#591 (2026-09-10) from the spec's original list, each
+// addition MEASURED against a live card sentence the old list passed over:
+// govern/touch ("the strictest tier a patch touches governs the whole patch",
+// pf_update_work_item — held by a named arm and invisible to this walk), sit
+// ("the guard sits above the first query", pf_remember — a placement claim an
+// AST arm can hold), open ("this path opens SERIALIZABLE", the isolation-level
+// pair on pf_claim_work_item/pf_force_takeover), count ("a same-size swap
+// counts as a removal", pf_update_project), come/comes ("they come back on this
+// response as `repo_pins`", pf_claim_work_item), tell/tells ("still tells a
+// caller to pass the canonical id", pf_recall).
+//
+// ⚠️ Two of them deliberately carry only the s-inflection: "opens" and "counts".
+// Their base forms are the everyday adjective/noun of these very cards — the
+// `## Open` section, "left open", "the count", "that count" — and admitting the
+// base form would flip narration about the ledger itself into candidates. The
+// s-form is a verb in every card occurrence measured.
 var effectVerbs = map[string]bool{
 	"is": true, "are": true,
 	"return": true, "returns": true,
@@ -451,6 +483,12 @@ var effectVerbs = map[string]bool{
 	"report": true, "reports": true,
 	"clamp": true, "clamps": true,
 	"400s": true, "409s": true,
+	"govern": true, "governs": true,
+	"touch": true, "touches": true,
+	"sit": true, "sits": true,
+	"come": true, "comes": true,
+	"tell": true, "tells": true,
+	"opens": true, "counts": true,
 }
 
 // historyPhrases is the ONE automatic disqualifier, and its narrowness is the
@@ -483,7 +521,7 @@ var (
 	bareSectionRef = regexp.MustCompile(`^§`)
 )
 
-// NamesPublishedToken is condition 1.
+// NamesPublishedToken is condition 1's form (a).
 func NamesPublishedToken(s string) bool {
 	for _, m := range backtickSpan.FindAllStringSubmatch(s, -1) {
 		tok := strings.TrimSpace(m[1])
@@ -491,6 +529,78 @@ func NamesPublishedToken(s string) bool {
 			continue
 		}
 		return true
+	}
+	return false
+}
+
+// NamesOnlyExcludedRefs is condition 1's form (b): the sentence carries at least
+// one backticked span and every span is a wi-id or a section reference. That is
+// an anchor — the sentence is pinned to a measurement or a ruling — without a
+// published token, which is exactly the shape the two measured misses take: the
+// isolation-level sentence on pf_force_takeover (`aihub#430` … opens SERIALIZABLE
+// while this one opens READ COMMITTED) and pf_get_step's record of the
+// tools_step.go falsehood — live when this was measured, corrected by aihub#590
+// in the same batch — whose only backticks were `aihub#400` and `aihub#450`.
+//
+// ⚠️ A sentence with NO backticks at all is deliberately not this form. The
+// anchor is what separates a recorded claim from narration; dropping it admits
+// every plain-prose sentence with a copula, and the population stops meaning
+// anything a probe wave could drain.
+func NamesOnlyExcludedRefs(s string) bool {
+	ms := backtickSpan.FindAllStringSubmatch(s, -1)
+	if len(ms) == 0 {
+		return false
+	}
+	for _, m := range ms {
+		tok := strings.TrimSpace(m[1])
+		if tok == "" || bareWorkItem.MatchString(tok) || bareSectionRef.MatchString(tok) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// attributionVerbs is condition 1's form (c) verb subset: refusal-or-response
+// verbs only. A subset of effectVerbs, and checked as ONE set deliberately — a
+// member added here without being an effect verb would recognise a sentence
+// IsCandidate's own condition 2 then rejects, and the two reasons would
+// contradict each other in the failure text.
+//
+// Why not the whole effect list: with no backtick anywhere in the sentence, the
+// only remaining signal is the verb, and "is"/"are"/"carries" appear in plain
+// narration constantly. Measured 2026-09-10 on this card set: attribution with
+// the full effect list admits 199 sentences, most of them commentary; with this
+// subset it admits the response-behaviour claims ("The server 400s without
+// it.", "Mints a key, stores its hash, and returns the plaintext once.") and
+// little else.
+var attributionVerbs = map[string]bool{
+	"return": true, "returns": true,
+	"answer": true, "answers": true,
+	"refuse": true, "refuses": true,
+	"reject": true, "rejects": true,
+	"400s": true, "409s": true,
+	// "counts" is the one member that is not a wire verb: "a same-size swap counts
+	// as a removal" (pf_update_project) is a rule OUTCOME — how the server
+	// classifies an input — measured in the same blind spot as the 400s sentence.
+	// s-inflection only, for the reason effectVerbs states: "the count" is this
+	// card set's everyday noun.
+	"counts": true,
+}
+
+// AttributedToPrevious is condition 1's form (c): no backticks in this sentence,
+// a published token named in the one before it, and a refusal-or-response verb
+// here. One hop only, and the hop is not transitive — the previous sentence must
+// name the token in ITS OWN text, not inherit it from a sentence before that, or
+// a chain of pronouns would carry an attribution across a whole section.
+func AttributedToPrevious(s, prev string) bool {
+	if prev == "" || backtickSpan.MatchString(s) || !NamesPublishedToken(prev) {
+		return false
+	}
+	for _, w := range words(strings.ToLower(s)) {
+		if attributionVerbs[w] {
+			return true
+		}
 	}
 	return false
 }
@@ -519,12 +629,15 @@ func IsHistorical(s string) bool {
 	return false
 }
 
-// IsCandidate is the recogniser. The second return value names the condition that
-// failed, so a failure message can say WHY a sentence was passed over rather than
-// leaving a reader to re-derive it.
-func IsCandidate(s string) (bool, string) {
-	if !NamesPublishedToken(s) {
-		return false, "names no published token in backticks"
+// IsCandidateInContext is the recogniser. The second return value names the
+// condition that failed, so a failure message can say WHY a sentence was passed
+// over rather than leaving a reader to re-derive it. prev is the unit the walk
+// read immediately before this one — "" at the start of a card — and is consulted
+// only by condition 1's form (c).
+func IsCandidateInContext(s, prev string) (bool, string) {
+	if !NamesPublishedToken(s) && !NamesOnlyExcludedRefs(s) && !AttributedToPrevious(s, prev) {
+		return false, "names no published token in backticks, no wi/section anchor, " +
+			"and no refusal-or-response verb attributed from the sentence before it"
 	}
 	if !HasEffectVerb(s) {
 		return false, "carries no effect-or-refusal verb"
@@ -533,6 +646,15 @@ func IsCandidate(s string) (bool, string) {
 		return false, "is written in the past tense (\"used to\")"
 	}
 	return true, ""
+}
+
+// IsCandidate is IsCandidateInContext with no preceding sentence — the form the
+// fixtures and one-off measurements call. Everything the walk classifies goes
+// through the context form, so a sentence recognised only by attribution is
+// invisible here and countable there; that asymmetry is form (c)'s definition,
+// not a disagreement between the two functions.
+func IsCandidate(s string) (bool, string) {
+	return IsCandidateInContext(s, "")
 }
 
 // stripBackticked removes backticked spans before the verb scan, so a symbol name
@@ -714,6 +836,11 @@ type Sentence struct {
 	Text    string
 	Start   int
 	Markers []Marker
+	// Prev is the text of the unit the walk read immediately before this one —
+	// INCLUDING units below the fragment floor, because attribution is about what
+	// a reader just read, and the floor is about what is worth counting. "" for
+	// the first unit of a card. Condition 1's form (c) is its only consumer.
+	Prev string
 }
 
 // minSentenceLen is the fragment floor. Anything shorter is something the splitter
@@ -755,8 +882,8 @@ func bulletPrefix(line string) bool {
 type CardRead struct {
 	// Sentences are the units above the fragment floor.
 	Sentences []Sentence
-	// Orphans sat on a line the walk does not read — a heading, a table row, a
-	// fenced block — or before any sentence at all.
+	// Orphans sat on a line the walk does not read — a heading, a table
+	// separator row, a fenced block — or before any sentence at all.
 	Orphans []Marker
 	// Dropped resolved to a unit BELOW the fragment floor.
 	//
@@ -772,8 +899,9 @@ type CardRead struct {
 // ReadCard splits a card's prose into sentences and attaches every marker to the
 // sentence it sits on.
 //
-// The walk drops fenced blocks, table rows and headings, joins what is left, and
-// cuts it at sentence-final punctuation and at every list-item boundary.
+// The walk drops fenced blocks, table separator rows and headings, joins what is
+// left, and cuts it at sentence-final punctuation, at every list-item boundary,
+// and at both edges of every table row.
 //
 // 🔴 A marker classifies the sentence it FOLLOWS, so the attachment is the last
 // unit that STARTS strictly before it. Strictly, because a marker written on its
@@ -793,15 +921,20 @@ func ReadCard(card, prose string) CardRead {
 	}
 	units := make([]unit, 0, len(spans))
 	read := CardRead{Orphans: out.orphans, Unrecognised: out.unrecognised}
+	prev := ""
 	for _, sp := range spans {
 		text := strings.TrimSpace(joined[sp.start:sp.end])
 		keep := len([]rune(text)) > minSentenceLen
 		u := unit{text: text, keep: keep, idx: -1}
 		if keep {
 			u.idx = len(read.Sentences)
-			read.Sentences = append(read.Sentences, Sentence{Card: card, Text: text, Start: sp.start})
+			read.Sentences = append(read.Sentences,
+				Sentence{Card: card, Text: text, Start: sp.start, Prev: prev})
 		}
 		units = append(units, u)
+		if text != "" {
+			prev = text
+		}
 	}
 
 	for _, m := range markers {
@@ -844,11 +977,22 @@ type walkOut struct {
 // second marker on such a line lands past the start of the next sentence and the
 // strict-< placement puts it on the wrong claim. Measured at 82 against 81 and 36
 // against 34 before the order was fixed.
+//
+// 🔴 TABLE ROWS ARE READ since aihub#591. This walk used to skip every |-prefixed
+// line, and the skip was measured to hide 46 candidate-assertable claims across
+// the 45 cards — the hop 0-1 rows where each parameter's published meaning is
+// written, i.e. the sentences a caller reads FIRST. They were not merely
+// unclassified: never split into units, they could not be counted OR waived, and
+// a marker on one was reported as MARKER_ORPHAN. A row now enters the walk as a
+// hard-bounded unit — a cut at its start and a cut after its end — because a row
+// is a cell list, not a clause of whatever prose surrounds it. Only the
+// |---|---| SEPARATOR rows stay outside: they are table syntax, not prose, the
+// way a fence line is.
 func joinProse(prose string) (string, []Marker, walkOut) {
 	var sb strings.Builder
 	var markers []Marker
 	var out walkOut
-	inFence := false
+	inFence, cutNext := false, false
 
 	note := func(text string) {
 		out.orphans = append(out.orphans, parseMarkers(text, -1)...)
@@ -862,8 +1006,9 @@ func joinProse(prose string) (string, []Marker, walkOut) {
 			note(trimmed)
 			continue
 		}
-		if inFence || trimmed == "" ||
-			strings.HasPrefix(trimmed, "|") || strings.HasPrefix(trimmed, "#") {
+		isRow := strings.HasPrefix(trimmed, "|")
+		if inFence || trimmed == "" || strings.HasPrefix(trimmed, "#") ||
+			(isRow && tableSeparatorRow(trimmed)) {
 			note(trimmed)
 			continue
 		}
@@ -885,15 +1030,31 @@ func joinProse(prose string) (string, []Marker, walkOut) {
 			base++
 		}
 		sb.WriteString(clean)
-		if bulletPrefix(clean) {
+		if cutNext || isRow || bulletPrefix(clean) {
 			out.cuts = append(out.cuts, base)
 		}
+		cutNext = isRow
 		for i := range found {
 			found[i].Offset += base
 		}
 		markers = append(markers, found...)
 	}
 	return sb.String(), markers, out
+}
+
+// tableSeparatorRow reports whether a |-prefixed line is a markdown alignment
+// separator — cells holding only dashes and colons — which is table SYNTAX and
+// carries no prose. Everything else that starts with | is a row of cells and is
+// read.
+func tableSeparatorRow(line string) bool {
+	for _, r := range line {
+		switch r {
+		case '|', '-', ':', ' ', '\t':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // cleanLine strips every marker from one line and returns the trimmed remainder
@@ -1100,6 +1261,18 @@ func parseMarker(raw, form, body string) Marker {
 // splitSentences cuts on sentence-final punctuation followed by whitespace and a
 // sentence-start rune, and at every offset in forced (the list-item boundaries).
 // Hand-rolled because Go's regexp has no lookaround.
+//
+// 🔴 Closing formatting runes may sit between the punctuation and the whitespace
+// — `.**`, `.)`, `."` — and the cut happens anyway (aihub#591). Without this, a
+// bold-terminated sentence merges with everything after it, and the merge is not
+// cosmetic: a "used to" in the bold half ejected every LIVE claim merged behind
+// it. Measured on pf_list_dependencies: "**`Accessible` is a role comparison,
+// and it used to be the wrong one.** It is now computed with … (`RoleLevel`)"
+// was ONE unit, so the live RoleLevel claim was outside the population entirely
+// — the merged-bullet ejection, the same defect class the forced list boundaries
+// fixed for bullets.
+var sentenceClosers = "*_\"')]`"
+
 func splitSentences(s string, forced []int) []span {
 	rs := []rune(s)
 	offs := make([]int, len(rs)+1)
@@ -1121,10 +1294,14 @@ func splitSentences(s string, forced []int) []span {
 			continue
 		}
 		j := i + 1
+		for j < len(rs) && strings.ContainsRune(sentenceClosers, rs[j]) {
+			j++
+		}
+		ws := j
 		for j < len(rs) && unicode.IsSpace(rs[j]) {
 			j++
 		}
-		if j == i+1 || j >= len(rs) {
+		if j == ws || j >= len(rs) {
 			continue
 		}
 		n := rs[j]
@@ -1227,7 +1404,7 @@ func Classify(s Sentence, idx ArmIndex) (Class, []string) {
 		}
 	}
 
-	candidate, why := IsCandidate(s.Text)
+	candidate, why := IsCandidateInContext(s.Text, s.Prev)
 	marked := len(waivers) + len(proseOnly)
 
 	// 🔴 The self-emptying half, and it is the property that makes this ledger
@@ -1406,9 +1583,11 @@ func Tally(card, prose string, idx ArmIndex) CardTally {
 	for _, m := range read.Orphans {
 		t.Problems = append(t.Problems, fmt.Sprintf(
 			"K12 MARKER_ORPHAN: %s carries %s on a line this walk does not read — a heading, a "+
-				"table row or a fenced block — or ahead of every sentence in the card. A marker "+
-				"classifies the SENTENCE it sits on, so one that sits on no sentence exempts "+
-				"nothing while looking like it does. Move it onto the prose it is about.",
+				"table separator row or a fenced block — or ahead of every sentence in the card. "+
+				"A marker classifies the SENTENCE it sits on, so one that sits on no sentence "+
+				"exempts nothing while looking like it does. Move it onto the prose it is about. "+
+				"(Table ROWS are read since aihub#591, so a marker in a cell is placed, not "+
+				"orphaned.)",
 			card, m.Raw))
 		t.Problems = append(t.Problems, m.Problems(card)...)
 	}

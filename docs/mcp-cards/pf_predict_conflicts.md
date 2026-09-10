@@ -39,8 +39,8 @@ Four parameters, one required.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `declared_resources` | array | yes | `{type, uri, intent}` + optional `repo` |
-| `work_item_id` | string | no | id or slug; "the only way this call learns which running work item is YOU" |
-| `project` | string | no | namespaces `file_scope` checks; optional when `work_item_id` is set |
+| `work_item_id` | string | no | id or slug (`TestDeLockingPredictReportsAdvisoryEntries` drives the slug spelling); "the only way this call learns which running work item is YOU" |
+| `project` | string | no | namespaces `file_scope` checks (`TestResourceToLock_FileScopeNamespacedByProject`); optional when `work_item_id` is set |
 | `dry_run` | boolean | no | "do not mutate state" |
 
 🔴 **This tool was measured untrustworthy in both directions; the self-report
@@ -148,7 +148,9 @@ the per-type URI scheme rules are stated — the sharing itself by
   (`TestDeLockingPredictReportsAdvisoryEntries`) and the `will_unlock` half in
   `internal/server/dependencies_slug_db_test.go`
   (`TestDependencyEndpointsResolveSlugs`).
-- **`intent: "read"` is honoured on `path`/`document`/`section` only.** On a repo or
+- **`intent: "read"` is honoured on `path`/`document`/`section` only**
+  (`TestReadIntentIsHonouredOnlyOnTheTypesThatDeriveALock` holds both halves of the
+  "only"). On a repo or
   service entry `read` is inert for a different reason since `aihub#416`: those two
   take no lock under any intent, so there is nothing for it to suppress —
   `internal/domain/read_intent_scope_test.go`
@@ -245,12 +247,16 @@ worth recording.
 
 ## Open
 
-- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).** What a
+- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).**
+  <!-- prose-only: because=external-state -->
+  What a
   prediction reports for an advisory entry was that item's open question; the answer
   is in hop 4 above and in the tool description. What that work item deliberately did
   NOT do is exclude a work item's own attempt from rules 2, 4 and 6; `aihub#510`
   (2026-09-09) did that, for those three plus rule 5.
-- **The LOCK half of the self-report is CLOSED as of `aihub#564` (2026-09-10).**
+  <!-- prose-only: because=history -->
+- **The LOCK half of the self-report is CLOSED as of `aihub#564` (2026-09-10)**
+  (`TestPredictLockRulesLeaveTheCallerOut` holds the closure in both directions).
   What stood here was the sharper half of the self-report, measured 2026-09-09: a
   claimed work item re-predicting its own `path` declaration used to get, with
   `dry_run=false`, `severity: "hard_block"` and a single rule-1 prediction

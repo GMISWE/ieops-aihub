@@ -66,14 +66,15 @@
 Ten parameters. This is the tool `aihub#148` was filed against, and the split
 between "published" and "forwarded" here is the repo's reference example of a hop-2
 defect.
+<!-- prose-only: because=history -->
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `project` | string | yes | project name |
 | `query` | string | no | semantic search query |
-| `type` | array | no | ARRAY of type names; `.*` is a prefix wildcard; `\|` is NOT a separator |
+| `type` | array | no | ARRAY of type names; `.*` is a prefix wildcard and `\|` is NOT a separator — both held by `TestUnmatchedTypes` |
 | `work_item_id` | string | no | filter by work item — canonical id or slug |
-| `top_k` | string | no | default 20, ceiling 200; a JSON number is accepted |
+| `top_k` | string | no | default 20, ceiling 200; a JSON number is accepted (`TestWireQueryRecallTopKAcceptsAJSONNumber`) |
 | `similarity_threshold` | number | no | cosine 0-1, vector half only, **OFF by default** |
 | `cursor` | string | no | TEXT-path paging only |
 | `min_strength` | number | no | effective strength = `base_strength` (1-5) after decay; default 0.3 filters nothing |
@@ -114,8 +115,8 @@ from rank 1 to rank 10 and similarity inversions rose from 16/190 to 98/190. And
 there was nothing to win, because recency was never absent — see hop 4.
 
 ⚠️ That row is also the reason `aihub#469` exists rather than being caught: the
-card gate's K4 arm requires only that a published parameter be named in backticks
-somewhere in the prose. The row was four cells wide and its whole hop-1 promise
+card gate's K4 arm (`internal/mcp/contract_cards_gate_test.go`) requires only that a
+published parameter be named in backticks somewhere in the prose. The row was four cells wide and its whole hop-1 promise
 was the two words "default 0.3" — but it did carry the backticked name, so K4 was
 satisfied. K4 cannot tell "documented" from "listed", which is the gap the hop-4
 arm added by this work item closes from the other side.
@@ -170,6 +171,7 @@ fails on any `type=` value containing a pipe, which is the correct behaviour —
 document that spells the anti-pattern out is a document somebody copies from.) `fields` is `propEnum` rather than `prop` because `fields` conventionally
 names a field LIST, so `fields="id,type"` is a natural guess that would silently
 return the full response — the exact cost the parameter exists to remove.
+<!-- prose-only: because=counterfactual -->
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -213,7 +215,7 @@ query string for `pkg/client/client.go` (`Recall`) → `GET /v1/memories`, bound
 
 Two deliberate asymmetries:
 
-- **`fields` is NOT forwarded.** The projection is a property of what this process
+- **`fields` is NOT forwarded** (`TestRecallFieldsNeedsNoServerHop`). The projection is a property of what this process
   hands the model, and this process is the last hop before the model, so it is
   consumed exactly where it is read — the empty wire value pinned by
   `internal/mcp/recall_params_wiring_test.go`
@@ -282,7 +284,9 @@ passing nothing returned the same 20 items in the same order.
   gets page one forever — held by `internal/domain/recall_card_claims_test.go`
   (`TestRecallCursorIsPromisedOnTheTextPathOnly`), which merges two halves that
   BOTH carry a cursor, since merging two cursorless ones would prove nothing.
-- **`cursor` is composite, and only half of it is validated.** The token is
+- **`cursor` is composite, and only half of it is validated**
+  (`TestCursor_MalformedIsRejectedBeforeTheQuery`,
+  `TestCursor_RecallIdHalfIsNotConstrained`). The token is
   `<RFC3339Nano>|<id>` — reference time plus the `id DESC` tiebreaker `aihub#239`
   added — so a malformed one is refused with a 400 naming the parameter
   (`aihub#435`), but the check reads the TIMESTAMP half only, both halves held in
@@ -296,7 +300,8 @@ passing nothing returned the same 20 items in the same order.
   the format moves. Before `aihub#435` the whole token went raw into
   `$n::timestamptz` and a token the server never issued came back 500 with the
   driver's text. Cursors minted before `aihub#239` carry the timestamp alone and
-  still pass.
+  still pass — the empty-id-half case `TestCursor_RecallIdHalfIsNotConstrained`
+  answers 200.
 - **There is no caller-facing visibility filter, and there never was one.** The
   `visibility` clauses in both recall paths are authorization scoping the server
   derives from the caller's own role and id, so they narrow a page the same way
@@ -312,7 +317,9 @@ passing nothing returned the same 20 items in the same order.
   to say they could.** The MCP projection withholds the field per item with its
   reason recorded beside it (`internal/mcp/recall_slim.go`,
   `recallItemWithheldKeys`: "an access-control fact already enforced
-  server-side"), so a recall page never carries it; the one MCP read that does is
+  server-side") — withheld end to end by
+  `TestRecallOffersNoVisibilitySelectorAndWithholdsTheFieldItself` — so a recall
+  page never carries it; the one MCP read that does is
   `pf_get_memory`, which projects nothing. Both directions are driven by
   `internal/mcp/recall_visibility_selector_test.go`
   (`TestRecallOffersNoVisibilitySelectorAndWithholdsTheFieldItself`) and the
@@ -379,11 +386,12 @@ is the tool where that mattered most — the direction that makes it one is held
 envelope key and an item key this projection has never heard of to reach the model
 anyway, and by `internal/mcp/recall_brief_test.go`
 (`TestSlimRecallResultMode_DivergesFromPreChangeOnlyOnUnknownKeys`). It **mutates the incoming map and returns the
-same map** — nothing is copied at the top level or per item, so nothing can be
-forgotten there. It was a keep-list once, and that shape dropped `total` and then
+same map** (`TestSlimRecallResultMutatesAndReturnsTheSameMap` pins the identity) —
+nothing is copied at the top level, so nothing can be forgotten there. It was a keep-list once, and that shape dropped `total` and then
 `content_truncated`/`content_full_len` silently, each surfacing as a separate bug
 filed weeks later: the REST endpoint looked correct and MCP quietly served less.
 `aihub#418` converted it, which is the conversion §6.1 T1-5 records as already landed.
+<!-- prose-only: because=history -->
 
 **The residual keep-list is exactly two keys, and it is documented in the file
 itself** (`internal/mcp/recall_slim.go`, `recallItemNarrowedKeys`): `attrs` is

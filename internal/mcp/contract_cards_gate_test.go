@@ -2293,7 +2293,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_list_work_items":         {Candidates: 22, Cited: 19, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
 	"pf_pause_attempt":           {Candidates: 14, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_pr":                      {Candidates: 13, Cited: 10, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_predict_conflicts":       {Candidates: 20, Cited: 15, Unclassified: 0, PendingImplementation: 0, KnownDefect: 2, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_predict_conflicts":       {Candidates: 22, Cited: 20, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_push":                    {Candidates: 8, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_read_events":             {Candidates: 12, Cited: 12, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_recall":                  {Candidates: 35, Cited: 28, Unclassified: 0, PendingImplementation: 0, KnownDefect: 1, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 6},

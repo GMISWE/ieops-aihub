@@ -33,7 +33,7 @@ func (s *Server) registerConflictTools() {
 			"path/document/section are unaffected and can still return hard_block. " +
 			"Predictions for repo and service carry last_active_age_seconds (how long ago that attempt reported activity) so the answer is judgeable; nothing expires on it.",
 		InputSchema: objectSchema(map[string]any{
-			"work_item_id":       prop("string", "Work item ID or slug. Optional, but NOT decorative (aihub#510): it is the only way this call learns which running work item is YOU, and the declaration rules use it to leave you out. Omit it from a claimed wi and your own declarations come back as your own soft_block/info."),
+			"work_item_id":       prop("string", "Work item ID or slug. Optional, but NOT decorative (aihub#510, aihub#564): it is the only way this call learns which running work item is YOU, and every rule uses it to leave you out — the declaration rules since aihub#510, the lock-table rules (1 hard_block, 3 file_scope) since aihub#564, so a claimed wi re-predicting its own declarations no longer gets its own locks back as somebody else's conflict. Omit it and your own locks and declarations come back as your own hard_block/soft_block/info."),
 			"project":            prop("string", "Project the declared resources belong to; namespaces file_scope conflict checks (aihub#222). Optional when work_item_id is set (the wi own project takes precedence)."),
 			"declared_resources": declaredResourcesProp("Resources to check for conflicts"),
 			"dry_run":            prop("boolean", "Dry run — do not mutate state"),

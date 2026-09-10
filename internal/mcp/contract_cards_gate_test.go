@@ -1886,8 +1886,8 @@ func TestOpenCitationWaiverCheckIsWiredIntoTheArm(t *testing.T) {
 
 // ─────────────────────────────────── K12 ─────────────────────────────────────
 //
-// K12 (aihub#543) is the RATCHET. It reads every prose sentence of the ten
-// phase-1 cards, decides by form which of them assert something a test could
+// K12 (aihub#543) is the RATCHET. It reads every prose sentence of all 45
+// contract cards, decides by form which of them assert something a test could
 // hold, and refuses new debt: an assertable sentence that neither cites its arm
 // nor carries a named classification marker makes the recorded count rise, and a
 // rise is red.
@@ -1905,8 +1905,9 @@ func TestOpenCitationWaiverCheckIsWiredIntoTheArm(t *testing.T) {
 // The counter-shape is a PROBE — one published claim encoded as an executable
 // assertion — and the tree already holds a dozen. But the cards hold on the order
 // of a thousand and a half prose units, of which this recogniser calls the larger
-// part candidate-assertable repo-wide. A plan that proposes hundreds of probes is
-// a plan that does not finish.
+// part candidate-assertable. A plan that proposes hundreds of probes is a plan
+// that does not finish, which is why the ACCOUNT of them ships first and the
+// probes draw the account down.
 //
 // ⚠️ Do not read that against the 995 in aihub#543 §0.1. This walk is deliberately
 // NOT that sizer: §1.3 says the sizer "counts a bullet list as fewer units than a
@@ -1922,6 +1923,36 @@ func TestOpenCitationWaiverCheckIsWiredIntoTheArm(t *testing.T) {
 // ~450 claims stay exactly as invisible as they are today, at a cost of two
 // waves. Built first, every one of them is COUNTED from the day it lands, the
 // count only moves in a diff somebody signs, and the probes then draw it down.
+//
+// ─── Phase 2: the roster is the whole card set ─────────────────────────────
+//
+// Wave 1 (aihub#566/#567/#568, 2026-09-10) drew the ten phase-1 cards to ZERO
+// unclassified in a day, which met the owner's recorded continue-(a) criterion, so
+// phase 2 widened k12Cards from ten cards to all 45 (aihub#572). What that cost
+// and bought, measured on this tree:
+//
+//	                        10 scoped   45 scoped
+//	sentences read                 353        1414
+//	candidate-assertable           147         626
+//	citing an arm                  125         152
+//	unclassified                     0         452
+//
+// 🔴 Those 452 are the phase-2 backlog, entered at their MEASURED values in one
+// change and nothing else: no probe, no marker, no card sentence edited. Filing
+// them is what makes them countable, and from here the number can only move in a
+// diff somebody signs. 12 of the 35 newly scoped cards already cited a resolvable
+// arm before anyone probed them (27 sentences), which is why the rows carry Cited
+// rather than assuming zero.
+//
+// ⚠️ The 626 is not 45/10 × 147. Two things pull against each other: the newly
+// scoped cards are slightly thinner on average (13.7 candidates each against phase
+// 1's 14.7), yet the three WIDEST cards in the repo are all among them —
+// pf_update_work_item 45, pf_remember 41, pf_recall 34, against phase 1's widest at
+// 23 — because spec §2.3 held width back behind the harness argument. Note the
+// ranking: §2.3 calls pf_recall and pf_update_work_item "the two widest cards in
+// the repo", which is the §0.1 SIZER's ordering, and by this walk pf_remember is
+// second. §9.2 says the two counts are not comparable; this is what that looks
+// like when someone orders a work queue by it.
 //
 // ─── What "classified" means, and where the classification lives ───────────
 //
@@ -1976,6 +2007,10 @@ func TestOpenCitationWaiverCheckIsWiredIntoTheArm(t *testing.T) {
 //	M2  delete the one waiver marker in the tree RED  K12 DEBT_GROWTH
 //	M6  move that marker onto a table row        RED  K12 MARKER_ORPHAN + DEBT_GROWTH
 //	M7  file a marker on a card outside the set  RED  K12 MARKER_OUT_OF_SCOPE
+//	    ⚠️ M7 and M7b were applied when 35 cards sat outside the set. Phase 2 leaves
+//	    NONE, so neither is reproducible as written; the finding they exercise is now
+//	    reached only through P3 and P7 below, which put a card outside the roster
+//	    first. Kept rather than deleted because the wave-0 verdict is what it is.
 //	M7b the same, written `<!--prose-only:` with no space — the spacing a literal
 //	    fence admitted and the parser did too    RED  K12 MARKER_OUT_OF_SCOPE
 //	M11 the SWAP: add one assertable sentence AND cite one previously-unclassified
@@ -2021,27 +2056,95 @@ func TestOpenCitationWaiverCheckIsWiredIntoTheArm(t *testing.T) {
 //	                                                   marker's date satisfies K11 for
 //	                                                   a visible sentence that has none
 //
+// ─── Recorded mutants — phase 2 (aihub#572, roster 10 -> 45) ───────────────
+//
+// Applied to this tree on 2026-09-10, reverted after each run; every one was
+// checked to have changed the tree (sha256 before/after, or a git rename) so that
+// a green verdict cannot be a mutant that never landed. Seven red, one green
+// control.
+//
+//	P1 drop one card from the widened roster, constant and ledger untouched
+//	                                             RED  K12 SCOPE_SHRANK
+//	                                                  + K12 ROSTER_INCOMPLETE
+//	                                                  + K12 LEDGER_UNSCOPED
+//	P2 delete one newly filed ledger row         RED  K12 LEDGER_MISSING
+//	P3 the CONSTANT-BUMP ESCAPE: drop a card from the roster, lower
+//	   k12ContractCards to 44, and delete that card's row — the diff somebody would
+//	   write to make P1 green
+//	                                             RED  K12 SCOPE_COUNT_DRIFT, which is
+//	                                                  the whole reason the constant is
+//	                                                  compared against the DISK and not
+//	                                                  only against the roster
+//	                                                  + K12 ROSTER_INCOMPLETE
+//	                                                  + 5× K12 MARKER_OUT_OF_SCOPE
+//	P4 raise one newly filed row's Unclassified by one, card untouched
+//	                                             RED  K12 STALE_DEBT
+//	P5 the NERVE CUT: unscopedCardNames stops comparing and returns nothing
+//	                                             RED  TestUnscopedCardNames… (3 cases)
+//	                                             🔴 and TestEveryCardIsInsideTheScopedSet
+//	                                                  stayed GREEN, which is the whole
+//	                                                  argument for the fixture: with the
+//	                                                  roster complete its loop body runs
+//	                                                  zero times, so the live arm cannot
+//	                                                  notice its own comparison dying
+//	P7 rename a card file and leave the roster alone — the ONE shape both count
+//	   comparisons miss, because 45 cards and 45 roster entries still agree
+//	                                             RED  K12 ROSTER_INCOMPLETE
+//	                                                  + K12 SCOPE_ORPHAN
+//	                                                  + K12 LEDGER_ORPHAN
+//	                                                  and NO SCOPE_SHRANK, which is what
+//	                                                  makes the two directions both
+//	                                                  necessary rather than redundant
+//
+//	P8 add a 46th card file and leave the roster alone — the arriving-unwatched case
+//	   this whole conversion is about
+//	                                             RED  K12 SCOPE_COUNT_DRIFT
+//	                                                  + K12 ROSTER_INCOMPLETE naming the
+//	                                                  new file
+//
+//	── control, which must stay GREEN ──
+//	P6 swap two roster entries' order            GREEN the roster is a set; its order
+//	                                                   is documentation of aihub#543's
+//	                                                   dispatch sequence and nothing
+//	                                                   asserts on it
+//
 // 🔴 M11, M12, M13, M14, M15, M5b, M7b, M16 and M17a all come from a clean-context
 // review of this arm's FIRST version, which every one of them walked straight
 // through. They are recorded together rather than quietly fixed because the list
 // is the honest answer to "how much would you trust this": a ratchet that can be
 // fooled is worse than none, since it is the thing everyone else stops checking.
 
-// k12Cards is the population this arm walks: the ten phase-1 tools of aihub#543
-// spec §2.2, in that document's dispatch order.
+// k12Cards is the population this arm walks: since phase 2 (aihub#572) that is
+// EVERY contract card in the repo, ordered the way aihub#543 dispatches them —
+// the ten phase-1 tools of spec §2.2, the six thin phase-1b cards of the same
+// section's tail, then the three phase-2 bands of §2.3.
 //
-// 🔴 Scoped rather than repo-wide, and the set only GROWS. Classifying all 45
-// cards in one change is a thousand-unit big bang; classifying ten is a wave. The
-// set is checked BOTH ways — an entry that is no longer a card is reported
-// (K12 LEDGER_ORPHAN), a card walked with no ledger row is reported
-// (K12 LEDGER_MISSING), and a ledger row for a card outside the set is reported
-// (K12 LEDGER_UNSCOPED) — because an arm that quietly measures less than its
-// title claims is the failure every floor in this file exists to catch.
+// 🔴 Pinned LITERALLY, and it stays pinned now that it covers everything. The
+// obvious phase-2 move was to delete the set and let the walk enumerate
+// docs/mcp-cards itself, and that is the one edit this arm must not make: a
+// population read off the filesystem shrinks whenever a card file is deleted or
+// renamed, and it shrinks SILENTLY, because a smaller walk agrees with a smaller
+// ledger and floorCards above leaves several cards of room. The literal roster is
+// what gives SCOPE_SHRANK, SCOPE_ORPHAN and LEDGER_UNSCOPED a subject to compare
+// against, and the set still only GROWS.
 //
-// Phase 2 grows it to the full roster, at which point the set is redundant and
-// should be DELETED with K1's roster arm taking over: a stale exemption is a
-// K5-class failure in another place.
+// It is checked in every direction it can be wrong, because an arm that quietly
+// measures less than its title claims is the failure every floor in this file
+// exists to catch:
+//
+//	roster wider than the tree    an entry that is no longer a card
+//	                              (K12 SCOPE_ORPHAN), and a ledger row for a
+//	                              non-card (K12 LEDGER_ORPHAN)
+//	roster narrower than the tree a card on disk the roster omits
+//	                              (K12 ROSTER_INCOMPLETE, in
+//	                              TestEveryCardIsInsideTheScopedSet) — this is the
+//	                              direction the roster cannot check about itself
+//	roster vs its declared size   dropping an entry (K12 SCOPE_SHRANK)
+//	roster vs the ledger          a scoped card with no row (K12 LEDGER_MISSING),
+//	                              a row for an unscoped card (K12 LEDGER_UNSCOPED)
 var k12Cards = []string{
+	// Phase 1 — spec §2.2, in that document's dispatch order. Wave 1 drew all ten
+	// to zero unclassified (aihub#566/#567/#568).
 	"pf_predict_conflicts", // measured untrustworthy in both directions
 	"pf_claim_work_item",   // issues the credential every later call authenticates with
 	"pf_force_takeover",    // irreversible, silent to the party it evicts, branched on
@@ -2052,14 +2155,64 @@ var k12Cards = []string{
 	"pf_commit",            // reaches the working tree and takes commit-time locks
 	"pf_ship",              // commit + push + PR in one call
 	"pf_wrap",              // terminal success
+
+	// Phase 1b — spec §2.2's tail: six thin cards on the harness phase 1 already
+	// loaded. Deferred out of wave 1 rather than skipped, so they enter here.
+	"pf_pr",
+	"pf_push",
+	"pf_diff",
+	"pf_resolve_commit",
+	"pf_pause_attempt",
+	"pf_cancel_work_item",
+
+	// Phase 2 band 1 — spec §2.3 data-write: the widest prose surface in the repo,
+	// and a wrong claim here is STORED and found later.
+	"pf_update_work_item",
+	"pf_remember",
+	"pf_create_work_item",
+	"pf_save_artifact",
+	"pf_update_memory",
+	"pf_reinforce_memory",
+	"pf_emit_event",
+	"pf_batch_create_work_items",
+	"pf_redact_memory",
+	"pf_activate_memory",
+	"pf_create_dependency",
+	"pf_remove_dependency",
+
+	// Phase 2 band 2 — spec §2.3 identity/authz: a wrong claim is an access decision.
+	"pf_create_user",
+	"pf_update_user",
+	"pf_create_api_key",
+	"pf_revoke_api_key",
+	"pf_rotate_identifier",
+	"pf_create_project",
+	"pf_update_project",
+	"pf_whoami",
+
+	// Phase 2 band 3 — spec §2.3 retrieval: a wrong claim reads as "nothing there",
+	// which is the aihub#270 class of defect.
+	"pf_recall",
+	"pf_list_work_items",
+	"pf_read_events",
+	"pf_get_memory",
+	"pf_get_work_item",
+	"pf_get_step",
+	"pf_list_dependencies",
+	"pf_list_projects",
+	"pf_list_users",
 }
 
-// k12PhaseOneTools is how many tools aihub#543 spec §2.2 puts in phase 1.
+// k12ContractCards is how many pf_* cards docs/mcp-cards holds, which since phase 2
+// is also how many this arm scopes: 10 in aihub#543 spec §2.2, 6 in that section's
+// phase-1b tail, and 29 in the three §2.3 bands.
 //
 // It is here so that silently dropping a card from the set above is red rather
 // than a smaller measurement nobody notices — the same reason the floors exist,
-// applied to the population's own definition.
-const k12PhaseOneTools = 10
+// applied to the population's own definition. Lowering it is legitimate only in the
+// same diff that removes the card and its ledger row, and floorCards bounds how far
+// that can go before K1 objects too.
+const k12ContractCards = 45
 
 // k12Ledger records what each scoped card currently holds, per class.
 //
@@ -2074,43 +2227,84 @@ const k12PhaseOneTools = 10
 // cannot check whether a `because` is honest, which is polyforge-scenario#20's
 // reviewer's job.
 //
-// 🟡 Every Unclassified below is GRANDFATHERED, not accepted. Wave 0 classifies
-// exactly one sentence — the aihub#543 §8 Q3 row on pf_predict_conflicts — and
-// freezes the rest where they stand, because the owner's Q2 ruling is to ATTEMPT
-// full coverage: the ratchet is the account book, not a renunciation of it. Probe
-// waves draw these to zero. Only `structurally-unreachable` is a terminal state.
+// 🟡 Every Unclassified below is GRANDFATHERED, not accepted. The ten phase-1
+// cards reached 0 in wave 1; the 35 rows phase 2 adds are entered at their
+// measured values and classify nothing, because the owner's Q2 ruling is to
+// ATTEMPT full coverage and the ratchet is the account book, not a renunciation of
+// it. Probe waves draw these to zero. Only `structurally-unreachable` is a
+// terminal state, and a row reaching 0 is as much a signed change as a row rising:
+// a vacated slot is where the next unclassified sentence hides.
 //
 // ⚠️ Do not adjust a row by arithmetic. Every failure prints the replacement line
 // ready to paste, which is the dbtestcov shape and exists so a number is never
 // re-derived by hand.
 var k12Ledger = map[string]cardclaims.Census{
-	"pf_acquire_locks":     {Candidates: 14, Cited: 13, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_claim_work_item":   {Candidates: 22, Cited: 21, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_commit":            {Candidates: 8, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_complete_attempt":  {Candidates: 14, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_force_takeover":    {Candidates: 18, Cited: 16, Unclassified: 0, PendingImplementation: 1, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_get_ready_queue":   {Candidates: 23, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 7},
-	"pf_predict_conflicts": {Candidates: 20, Cited: 15, Unclassified: 0, PendingImplementation: 0, KnownDefect: 2, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_ship":              {Candidates: 8, Cited: 6, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_update_step":       {Candidates: 17, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_wrap":              {Candidates: 3, Cited: 3, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_acquire_locks":           {Candidates: 14, Cited: 13, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_activate_memory":         {Candidates: 4, Cited: 0, Unclassified: 4, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_batch_create_work_items": {Candidates: 16, Cited: 0, Unclassified: 16, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_cancel_work_item":        {Candidates: 9, Cited: 0, Unclassified: 9, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_claim_work_item":         {Candidates: 22, Cited: 21, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_commit":                  {Candidates: 8, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_complete_attempt":        {Candidates: 14, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_create_api_key":          {Candidates: 6, Cited: 0, Unclassified: 6, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_create_dependency":       {Candidates: 6, Cited: 1, Unclassified: 5, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_create_project":          {Candidates: 6, Cited: 0, Unclassified: 6, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_create_user":             {Candidates: 13, Cited: 0, Unclassified: 13, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_create_work_item":        {Candidates: 25, Cited: 0, Unclassified: 25, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_diff":                    {Candidates: 6, Cited: 0, Unclassified: 6, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_emit_event":              {Candidates: 21, Cited: 0, Unclassified: 21, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_force_takeover":          {Candidates: 18, Cited: 16, Unclassified: 0, PendingImplementation: 1, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_get_memory":              {Candidates: 6, Cited: 0, Unclassified: 6, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_get_ready_queue":         {Candidates: 23, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 7},
+	"pf_get_step":                {Candidates: 12, Cited: 1, Unclassified: 11, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_get_work_item":           {Candidates: 13, Cited: 0, Unclassified: 13, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_list_dependencies":       {Candidates: 12, Cited: 0, Unclassified: 12, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_list_projects":           {Candidates: 11, Cited: 0, Unclassified: 11, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_list_users":              {Candidates: 5, Cited: 0, Unclassified: 5, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_list_work_items":         {Candidates: 21, Cited: 1, Unclassified: 20, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_pause_attempt":           {Candidates: 12, Cited: 0, Unclassified: 12, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_pr":                      {Candidates: 10, Cited: 0, Unclassified: 10, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_predict_conflicts":       {Candidates: 20, Cited: 15, Unclassified: 0, PendingImplementation: 0, KnownDefect: 2, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_push":                    {Candidates: 7, Cited: 0, Unclassified: 7, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_read_events":             {Candidates: 13, Cited: 0, Unclassified: 13, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_recall":                  {Candidates: 34, Cited: 2, Unclassified: 32, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_redact_memory":           {Candidates: 6, Cited: 0, Unclassified: 6, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_reinforce_memory":        {Candidates: 22, Cited: 4, Unclassified: 18, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_remember":                {Candidates: 41, Cited: 4, Unclassified: 37, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_remove_dependency":       {Candidates: 3, Cited: 0, Unclassified: 3, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_resolve_commit":          {Candidates: 9, Cited: 1, Unclassified: 8, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_revoke_api_key":          {Candidates: 5, Cited: 0, Unclassified: 5, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_rotate_identifier":       {Candidates: 7, Cited: 1, Unclassified: 6, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_save_artifact":           {Candidates: 22, Cited: 1, Unclassified: 21, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_ship":                    {Candidates: 8, Cited: 6, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_update_memory":           {Candidates: 10, Cited: 3, Unclassified: 7, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_update_project":          {Candidates: 14, Cited: 0, Unclassified: 14, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_update_step":             {Candidates: 17, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_update_user":             {Candidates: 16, Cited: 2, Unclassified: 14, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_update_work_item":        {Candidates: 45, Cited: 6, Unclassified: 39, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_whoami":                  {Candidates: 11, Cited: 0, Unclassified: 11, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_wrap":                    {Candidates: 3, Cited: 3, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 }
 
 const (
 	// floorK12Sentences bounds how many card sentences the walk actually split out
 	// of the scoped cards. A walk that splits nothing classifies nothing and every
 	// count below matches a ledger of zeroes, which is the same green as a card set
-	// with no debt. Current value: the K12 line.
-	floorK12Sentences = 180
+	// with no debt. Re-pinned by phase 2 over 45 cards instead of 10. Current
+	// value: the K12 line.
+	floorK12Sentences = 700
 	// floorK12Candidates bounds how many of those the recogniser called assertable.
 	// This is the one that fails when the recogniser stops recognising — the
-	// specific way this arm can rot into a live-looking green. Current value: the
-	// K12 line.
-	floorK12Candidates = 90
+	// specific way this arm can rot into a live-looking green. Re-pinned by phase 2;
+	// note it does NOT fall as probes land, because citing a sentence moves it
+	// between columns INSIDE Candidates. Current value: the K12 line.
+	floorK12Candidates = 380
 	// floorK12ArmIndex bounds how many top-level Test functions the citation
 	// resolver found in the tree. Without it an index that walked the wrong root
 	// resolves nothing, every citation is reported unresolved, and the repair a
-	// reader would reach for is deleting the citations. Current value: the K12 line.
+	// reader would reach for is deleting the citations. Deliberately NOT re-pinned
+	// by phase 2: it bounds the TREE's test population, not the card roster, so
+	// widening the roster is no evidence about it. Current value: the K12 line.
 	floorK12ArmIndex = 400
 )
 
@@ -2142,12 +2336,24 @@ func TestContractCardClaimsAreClassified(t *testing.T) {
 			len(armIndex.Funcs), floorK12ArmIndex)
 	}
 
-	if len(k12Cards) != k12PhaseOneTools {
-		t.Errorf("K12 SCOPE_SHRANK: k12Cards names %d card(s), and aihub#543 §2.2 puts %d "+
-			"tools in phase 1. Dropping one shrinks what this arm measures without shrinking "+
-			"what it claims to measure, which is the same failure the floors below refuse for "+
-			"counts. Add the card back, or move the number and say why in the same diff.",
-			len(k12Cards), k12PhaseOneTools)
+	if len(k12Cards) != k12ContractCards {
+		t.Errorf("K12 SCOPE_SHRANK: k12Cards names %d card(s), and docs/mcp-cards holds %d. "+
+			"Dropping one shrinks what this arm measures without shrinking what it claims to "+
+			"measure, which is the same failure the floors below refuse for counts. Add the "+
+			"card back, or move the number and say why in the same diff.",
+			len(k12Cards), k12ContractCards)
+	}
+	// 🔴 A DIFFERENT finding from SCOPE_SHRANK above, deliberately, because this one
+	// fires in both directions: docs/mcp-cards can also GROW past the constant, and
+	// calling that "shrank" would be a message false in one of its two halves —
+	// the defect class aihub#543 §9.6 records for the drift classifier.
+	if len(cards) != k12ContractCards {
+		t.Errorf("K12 SCOPE_COUNT_DRIFT: docs/mcp-cards holds %d card(s) and k12ContractCards "+
+			"says %d. Since phase 2 the roster is the WHOLE card set, so the two cannot "+
+			"differ without some card being either walked by nothing or named by nothing. "+
+			"TestEveryCardIsInsideTheScopedSet names the cards no roster entry covers, and "+
+			"SCOPE_ORPHAN below names the roster entries with no file.",
+			len(cards), k12ContractCards)
 	}
 
 	scoped := make(map[string]bool, len(k12Cards))
@@ -2243,38 +2449,51 @@ func cardNames(cards map[string]*card) map[string]bool {
 	return out
 }
 
-// TestCardClaimsMarkersStayInsideTheScopedSet refuses a classification marker on a
-// card K12 does not walk.
+// TestEveryCardIsInsideTheScopedSet is what the out-of-scope marker fence became
+// when phase 2 (aihub#572) widened k12Cards from ten cards to all 45.
 //
-// 🔴 Without it the marker syntax is available on all 45 cards while only ten are
-// counted, so a marker on card 11 would be written, reviewed, and then watched by
-// nothing — an exemption whose gap nobody can see close. Scoping the vocabulary to
-// the scoped set is what keeps "the set only grows" honest: the way to classify
-// card 11 is to add it to k12Cards, in the diff that adds the marker.
-func TestCardClaimsMarkersStayInsideTheScopedSet(t *testing.T) {
+// 🔴 CONVERTED rather than retired, because retiring it is the trap. The fence's
+// population was "the cards K12 does not walk", wave 0 had 35 of them, and phase 2
+// leaves ZERO — an arm whose population is empty is green forever, which is the
+// vacuous shape every floor in this file refuses. And the hole it guarded did not
+// close, it MOVED: SCOPE_SHRANK compares k12Cards against a constant, so a 46th
+// card added to docs/mcp-cards leaves roster and constant both at 45 and arrives
+// watched by nothing — no ledger row bounds it, not one of its sentences is
+// counted, and a classification marker on it would be written, reviewed, and then
+// read by no arm. That is exactly the wave-0 hole, at card 46 instead of card 11.
+//
+// So the check runs the other way round: every card ON DISK must be in the roster.
+// A marker on a card that is not gets its own finding as well, because a marker
+// nothing counts is strictly worse than a card nothing walks — the reader of that
+// card sees a classification the gate cannot see.
+func TestEveryCardIsInsideTheScopedSet(t *testing.T) {
 	cards := readCards(t)
-	scoped := make(map[string]bool, len(k12Cards))
-	for _, name := range k12Cards {
-		scoped[name] = true
+
+	// Order does not matter here: unscopedCardNames sorts what it reports, which is
+	// what keeps the failure output stable across Go's randomised map iteration.
+	names := make([]string, 0, len(cards))
+	for name := range cards {
+		names = append(names, name)
 	}
-	checked := 0
-	for name, c := range cards {
-		if scoped[name] {
-			continue
-		}
-		checked++
+
+	for _, name := range unscopedCardNames(names, k12Cards) {
+		c := cards[name]
+		t.Errorf("K12 ROSTER_INCOMPLETE: %s is a card and is not in k12Cards, so no ledger "+
+			"row bounds it and not one of its sentences is counted. Add it to k12Cards with "+
+			"its measured ledger row, and raise k12ContractCards, in the same change — since "+
+			"phase 2 the roster is meant to be COMPLETE, not merely growing.", c.path)
+
 		// 🔴 The same matcher K12 parses with, not a literal "<!-- probe-waiver:".
-		// A literal admits exactly one spacing; the parser admits any. Measured: a
-		// marker written without the space after `<!--` was invisible to this arm on
-		// all 35 unscoped cards while parsing perfectly everywhere else. And
+		// A literal admits exactly one spacing; the parser admits any. Measured in wave
+		// 0: a marker written without the space after `<!--` was invisible to this arm
+		// on all 35 unscoped cards while parsing perfectly everywhere else. And
 		// fence-aware in the other direction, so a card that DOCUMENTS the syntax in a
 		// code sample is not reddened for quoting it.
 		markers, unrecognised := cardclaims.ScanAll(c.body, true)
 		for _, m := range markers {
 			t.Errorf("K12 MARKER_OUT_OF_SCOPE: %s carries %s and is not in k12Cards, so "+
 				"nothing counts it and nothing will report it stale. Add the card to k12Cards "+
-				"with its ledger row in the same change — the set is meant to grow — or drop "+
-				"the marker.", c.path, m.Raw)
+				"with its ledger row in the same change — or drop the marker.", c.path, m.Raw)
 		}
 		for _, raw := range unrecognised {
 			t.Errorf("K12 MARKER_NAME_UNRECOGNISED: %s carries %s outside the scoped set. "+
@@ -2282,10 +2501,77 @@ func TestCardClaimsMarkersStayInsideTheScopedSet(t *testing.T) {
 				"the comment classifies nothing.", c.path, raw)
 		}
 	}
-	if checked < len(cards)-len(k12Cards) {
-		t.Errorf("K12 FLOOR_OUT_OF_SCOPE: only %d unscoped card(s) were examined out of %d — "+
-			"an arm that walks fewer cards than it claims reports green about the ones it "+
-			"skipped", checked, len(cards)-len(k12Cards))
+
+	// 🔴 The floor is on the CARDS READ, not on the comparisons made. Every card
+	// either matches the roster or is reported, so counting the loop's own turns
+	// would be a tautology that is satisfied by reading no cards at all — which is
+	// the one way this arm can be green while checking nothing.
+	if len(cards) < floorCards {
+		t.Errorf("K12 FLOOR_ROSTER: only %d card(s) were compared against the roster, floor "+
+			"is %d — an arm that reads fewer cards than the tree holds reports green about "+
+			"the ones it never saw, and this arm's whole job is the cards nobody listed",
+			len(cards), floorCards)
+	}
+}
+
+// unscopedCardNames returns the cards the tree holds that the roster does not
+// name, sorted, and nothing else — a roster entry with no card behind it is
+// SCOPE_ORPHAN's business and stays there, because the two are different mistakes
+// and the edit that fixes them differs.
+//
+// 🔴 Extracted from the arm above rather than inlined, and this is the whole point
+// of the extraction: on a healthy tree the roster is COMPLETE, so the arm's loop
+// body runs zero times and nothing exercises the comparison. That is the shape
+// aihub#543 §4.5 already refuses for the ledger — "a fixture test … because the
+// tables will be near-empty on a healthy tree" — and a guard whose live population
+// is empty by design needs it more, not less.
+func unscopedCardNames(cards, roster []string) []string {
+	scoped := make(map[string]bool, len(roster))
+	for _, name := range roster {
+		scoped[name] = true
+	}
+	var out []string
+	for _, name := range cards {
+		if !scoped[name] {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestUnscopedCardNamesFindsTheGap is the fixture arm for the comparison above.
+//
+// The last two cases are positive controls rather than decoration: one pins that a
+// roster entry with no card is NOT reported here, so the conversion did not quietly
+// absorb SCOPE_ORPHAN's job, and one pins the wave-0 state — an empty roster
+// reports every card — so a mutant that inverts the comparison cannot pass by
+// reporting nothing.
+func TestUnscopedCardNamesFindsTheGap(t *testing.T) {
+	tree := []string{"pf_a", "pf_b", "pf_c"}
+	for _, tc := range []struct {
+		name   string
+		cards  []string
+		roster []string
+		want   []string
+	}{
+		{"complete roster reports nothing", tree, []string{"pf_a", "pf_b", "pf_c"}, nil},
+		{"one card missing from the roster", tree, []string{"pf_a", "pf_c"}, []string{"pf_b"}},
+		{"two missing, reported sorted", tree, []string{"pf_b"}, []string{"pf_a", "pf_c"}},
+		{"roster order is irrelevant", tree, []string{"pf_c", "pf_a", "pf_b"}, nil},
+		{"a roster entry with no card is not this arm's finding", tree,
+			[]string{"pf_a", "pf_b", "pf_c", "pf_gone"}, nil},
+		{"an empty roster reports every card", tree, nil, tree},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := unscopedCardNames(tc.cards, tc.roster)
+			if !equalStrings(got, tc.want) {
+				t.Errorf("unscopedCardNames(%v, %v) = %v, want %v — this comparison is the only "+
+					"thing standing between a newly added card and arriving unwatched, and on a "+
+					"healthy tree it is the only thing that exercises it at all",
+					tc.cards, tc.roster, got, tc.want)
+			}
+		})
 	}
 }
 

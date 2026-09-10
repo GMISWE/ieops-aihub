@@ -50,7 +50,12 @@
 ## hop 0-1 — what the caller is told
 
 Eight parameters, none required — though the handler refuses a call carrying
-neither `work_item_id` nor `project`.
+neither `work_item_id` nor `project`, which
+`internal/mcp/read_events_published_claims_test.go`
+(`TestReadEventsRefusesACallNamingNeitherWorkItemNorProject`) holds on both halves:
+the published schema names those eight and declares nothing required, and the refusal
+costs zero HTTP requests, with either identifier alone accepted as a control in both
+directions.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
@@ -66,7 +71,13 @@ neither `work_item_id` nor `project`.
 The description carries a **cutover caveat** on the tool itself rather than only in
 the design doc: `lock_acquired` / `lock_released` / `wi_resources_updated` exist only
 from the deploy that shipped `aihub#343`, with no backfill, because
-`resource_locks` keeps no trace of a deleted row. It says *deploy*, not *commit*,
+`resource_locks` keeps no trace of a deleted row —
+`internal/mcp/read_events_published_claims_test.go`
+(`TestPublishedReadEventsCutoverCaveatNamesTheThreeLockEventsAndSaysDeploy`) reads that
+description off a live session, requires all three type names, the word *deploy* and
+the no-backfill clause, and checks each of the three against `domain.EventVocabulary`
+so a rename on one side alone leaves the caveat warning about a name nothing emits.
+It says *deploy*, not *commit*,
 deliberately — aihub rollouts need an explicit human instruction and can trail a
 merge by days, and during that gap a reader holding the commit date would read the
 emptiness as "the recorder was running and saw nothing". Cost measured rather than
@@ -88,26 +99,53 @@ Two parameters here have first-class defect histories:
   non-empty result reads as "those events exist" when they are some other type, and
   not finding a work item reads as "it was never cancelled" when no filtering
   occurred. One executor came within a step of publishing a "zero cancels" report
-  over 44 real cancellations. It is forwarded through `csvArg`, not `strSliceArg`,
-  because the wire form is comma-separated and a caller sending the bare scalar form
-  of an array-typed param must not be dropped either.
+  over 44 real cancellations. It is forwarded through `csvArg` rather than
+  `strSliceArg`, because the wire form is comma-separated and a caller sending the
+  bare scalar form of an array-typed param must not be dropped either:
+  `internal/mcp/tools_events_types_test.go` holds the array rendering
+  (`TestReadEventsWireQueryCarriesEveryPublishedProperty`), the bare scalar
+  (`TestReadEventsWireQueryAcceptsAScalarType`), and the direction the
+  fix could overshoot in — an unset `types` must stay "no filter" and never become an
+  empty selection matching nothing (`TestReadEventsWireQueryOmitsTypesWhenUnset`).
 - **`cursor` was neither published NOR forwarded.** The handler has always bound it
   and the endpoint has always returned `next_cursor`, so a caller holding one had no
   way to spend it and the second page of any event stream was unreachable from MCP.
 
-`pinned_first` is forwarded only when true.
+`pinned_first` is forwarded only when true —
+`internal/mcp/read_events_published_claims_test.go`
+(`TestReadEventsOmitsPinnedFirstWhenItIsFalse`) sends both spellings, because
+forwarding an explicit false would make it indistinguishable from not specifying the
+parameter at all.
 
 ## hop 4 — what it actually does
 
-- `work_item_id` **must be the canonical id**. The filter compares against a column
-  that FK-references `work_items(id)`, so a slug matches nothing and the call answers
-  200 with an empty list — indistinguishable from a work item that genuinely has no
-  events. `pf_get_step` echoes the canonical id and is the cheapest way to get one.
-- **`types` is a FILTER, not a whitelist**, and `aihub#444` renamed it for that
-  reason (`aihub#411` §6.2 T2-5). It validates nothing: an unrecognised value becomes
-  `event_type IN ('typo')`, matches no row, and answers 200 with an empty list — so a
-  typo, a type that has never existed and an event that genuinely did not happen are
-  the same result. Measured over 2,244 transcripts: 48 calls passed `types` carrying
+- `work_item_id` takes **either the canonical id or the slug**. The handler resolves
+  the reference and then queries on the resolved `wi.ID`, so the two spellings return
+  the same stream: `internal/server/events_slug_db_test.go`
+  (`TestListEventsBySlug_ReturnsTheSameStreamAsByID`) asserts EQUALITY between the two
+  arms rather than non-emptiness of the slug arm, because non-emptiness also passes a
+  handler that ignored `work_item_id` and returned the whole project, and
+  (`TestListEventsBySlug_StillScopesToTheWorkItem`) is what catches that. ⚠️ CORRECTED
+  2026-09-10: this bullet used to say the parameter must be the canonical id, that a
+  slug matched nothing, and that the call answered 200 with an empty list
+  indistinguishable from a work item with no events, and it advised getting a
+  canonical id out of `pf_get_step`'s echo. That was true of the tree before
+  `aihub#343`, which fixed the read side in the same change that started emitting the
+  lock events this card's hop-0 caveat is about; the resolution site in
+  `internal/server/routes_memory.go` carries the two production readings the fix was
+  filed on.
+  <!-- prose-only: because=history -->
+  The advice went with the defect — there is nothing left to work around.
+- **`types` is a FILTER rather than a whitelist**, and `aihub#444` renamed it for
+  that reason (`aihub#411` §6.2 T2-5) — `internal/mcp/tools_events_vocab_test.go`
+  (`TestReadEventsTypesIsDescribedAsAFilterNotAWhitelist`) reads the published
+  description and requires it to keep saying so. It validates nothing: an unrecognised
+  value becomes `event_type IN ('typo')`, matches no row, and answers 200 with an
+  empty list — so a typo, a type that has never existed and an event that genuinely
+  did not happen are the same result, which `internal/mcp/tools_events_types_test.go`
+  (`TestE2EReadEventsTypesFilterDiscriminates`) measures as the DIFFERENCE between a
+  real type and an impossible one, the two states the earlier defect made identical.
+  Measured over 2,244 transcripts: 48 calls passed `types` carrying
   34 distinct values, and roughly half of them — `wi_cancelled`, `attempt_claimed`,
   `wi_updated`, `wi_claimed`, `attempt_lost_lease`, `wi_wrapped`, `goal_changed`,
   `wi_created`, `wi_note`, `correction`, `attempt_paused`, `wi_rhs_changed` among
@@ -115,7 +153,11 @@ Two parameters here have first-class defect histories:
   surviving its own fix: the parameter now reaches the server and filters correctly
   on a name that cannot exist. The vocabulary is published on
   `pf_emit_event`'s `event_type` rather than repeated here, so the two tools share
-  one copy of it on the wire.
+  one copy of it on the wire: `internal/mcp/tools_events_vocab_test.go` requires that
+  copy to name every entry of `domain.EventVocabulary`
+  (`TestEmitEventTypeDescriptionPublishesTheVocabulary`) and to be DERIVED from it
+  rather than retyped (`TestEmitEventTypeDescriptionIsDerivedNotRetyped`), so a fourth
+  hand-maintained copy of the list cannot appear on the wire.
 - **`user_id` filters the ACTOR** — `internal/domain/memory.go` (`ListEvents`)
   compares `e.actor_user_id`, the id stamped on the event by whoever emitted it. That
   is a FOURTH identity, none of the three §6.2 T2-18 enumerates, which is why the
@@ -126,7 +168,12 @@ Two parameters here have first-class defect histories:
   no per-request log, which is why `aihub#412` had to reconstruct the request/response
   chain from transcripts instead.
 - `cursor` is **validated at the handler and refused with a 400** naming the
-  parameter and quoting the value (`aihub#435`). It used to go raw into
+  parameter and quoting the value (`aihub#435`) —
+  `internal/server/cursor_validation_test.go`
+  (`TestCursor_MalformedIsRejectedBeforeTheQuery`) runs six plausible client values
+  through this endpoint and requires the 400, a message LEADING with the parameter
+  name, the offending value quoted back, and the domain never entered. It used to go
+  raw into
   `e.created_at < $n::timestamptz`, where a token this server never issued failed
   the cast at execute time and came back 500 carrying the driver's text — a
   caller error reported as a server fault, which sends the reader to the logs
@@ -145,17 +192,27 @@ union of top-level keys real callers have been handed.
   itself a whitelist and states the consequence a caller cannot see: an unmatched
   name returns the same empty list as an event that did not happen. The vocabulary is
   published on `pf_emit_event.event_type` — as an open list rather than an `enum`,
-  because an MCP enum is advisory and the server enforces no vocabulary at all.
+  because an MCP enum is advisory and the server enforces no vocabulary at all, which
+  `internal/mcp/tools_events_vocab_test.go`
+  (`TestEmitEventTypeIsNotPublishedAsAClosedEnum`) holds against the published schema
+  alongside the two arms that require the list itself to be complete and derived.
 - **§6.2 T2-18 — LANDED** (`aihub#444`). `user_id` now names the identity it filters:
   the ACTOR (`agent_events.actor_user_id`), explicitly not the reporter, not the
   attempt owner and not a watcher. `pf_list_work_items.user_id` stays REPORTER
   (`aihub#383`); the two now say different things because they do different things.
 - **§6.1 T1-6 — LANDED** (`aihub#435`). A caller-supplied `cursor` that will not
-  parse is a 400 at the handler, not a 500 that sends the reader to the server
-  logs. The check lives in `internal/server/queryparam.go` (`queryCursor`), which
-  is now the one reader all three cursor-carrying list endpoints go through —
-  this one, `pf_list_work_items` and `pf_recall`. Two readings of one parameter
-  name is how the next variant gets in.
+  parse is a 400 at the handler rather than a 500 that sends the reader to the server
+  logs, and one this server minted reaches the domain byte for byte:
+  `internal/server/cursor_validation_test.go` holds the refusal
+  (`TestCursor_MalformedIsRejectedBeforeTheQuery`) and the control that keeps the fix
+  from over-reaching (`TestCursor_WellFormedReachesTheDomainVerbatim`), the second
+  being the discriminating half — "reject every cursor" satisfies the first
+  completely. The check lives in `internal/server/queryparam.go` (`queryCursor`),
+  which is now the one reader all three cursor-carrying list endpoints go through —
+  this one, `pf_list_work_items` and `pf_recall` — a property the same file's
+  (`TestCursor_EveryCursorParamGoesThroughOneReader`) enumerates by parsing every
+  non-test file of package `server` for cursor-shaped query parameters. Two readings
+  of one parameter name is how the next variant gets in.
 
 ## Open
 

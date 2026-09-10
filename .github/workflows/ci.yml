@@ -1322,6 +1322,30 @@ jobs:
       #             exit 0 with all 16 named `--- PASS:` lines present and no
       #             `--- SKIP`, and with AIHUB_TEST_DB unset it exits 1 on the
       #             first "did not run".
+      #   254 -> 255 aihub#585 added 1 DB-gated function, internal/domain
+      #             (paused_attempt_emit_event_dbgated_test.go,
+      #             TestPausedAttemptStillWritesTimelineEvents) — recorded here
+      #             by aihub#586's merge because the aihub#585 change added the
+      #             step and the manifest line without a tally entry, and this
+      #             list's next row would otherwise jump by two.
+      #   255 -> 256 aihub#586 added 1 DB-gated function, internal/mcp
+      #             (remember_strip_e2e_db_test.go,
+      #             TestE2ERememberStripsRenderedHTMLFromTheShareSurface): the
+      #             unpublished `rendered_html` strip driven whole — one MCP call
+      #             carrying visibility public and rendered_html, the row's
+      #             column required NULL, an anonymous /share/:id required not to
+      #             serve the payload — with a REST control on the same run
+      #             proving the server-side channel pf_save_artifact's published
+      #             `html` rides is untouched. Only a database and the real
+      #             router together can say either half, which is why the wire
+      #             and disclosure arms beside it (remember_wire_shape_test.go,
+      #             wire_strip_family_test.go, wire_strip_test.go) have no line
+      #             here. Measured on a scratch pgvector/pgvector:pg18 migrated
+      #             0001 -> 0038: dbtestcov answered "covered by a CI step:
+      #             253/253 ... OK" (253 = 256 entries minus the three
+      #             +EMBEDDING_BASE_URL exclusions), measured AFTER merging
+      #             origin/main at 3f2862c — re-derived from the tools rather
+      #             than by arithmetic from the entry above.
       - name: aihub#303 DB-test coverage gate
         run: |
           set -o pipefail
@@ -3407,6 +3431,28 @@ jobs:
           done
           ! grep -q -- '--- SKIP' reinforce_wi_e2e.log \
             || { echo "::error::an aihub#325 E2E test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#586: the unpublished `rendered_html` argument used to ride
+      # pf_remember's wholesale-forwarded argument map into
+      # RememberRequest.RenderedHTML and be stored verbatim for any type, so
+      # `visibility: public` plus a name no schema publishes produced an
+      # anonymously /share-readable row. The strip (owner ruling 2026-09-10,
+      # option ②) closes that at the tool boundary; the fake-backed arms in
+      # remember_wire_shape_test.go and wire_strip_family_test.go hold the wire
+      # and the disclosure, and only this test can hold the two live surfaces —
+      # the stored row and the anonymous route — plus the REST control proving
+      # the server-side channel pf_save_artifact's published `html` rides is
+      # untouched. Same -v + grep discipline as every DB step here.
+      - name: aihub#586 pf_remember rendered_html strip E2E DB test
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/mcp/ -run '^TestE2ERememberStripsRenderedHTMLFromTheShareSurface$' -count=1 -v 2>&1 | tee remember_strip_e2e.log
+          grep -q -- '--- PASS: TestE2ERememberStripsRenderedHTMLFromTheShareSurface (' remember_strip_e2e.log \
+            || { echo "::error::TestE2ERememberStripsRenderedHTMLFromTheShareSurface did not run; the aihub#586 strip is not verified end to end"; exit 1; }
+          ! grep -q -- '--- SKIP' remember_strip_e2e.log \
+            || { echo "::error::the aihub#586 E2E test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#151: the pre-share visibility bookkeeping in SetMemoryVisibility.
       #

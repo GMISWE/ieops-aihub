@@ -144,20 +144,46 @@ create it and then call `pf_update_memory`.
 
 `internal/mcp/tools_memory.go` (`validatePfRememberArgs`) checks the four required
 fields — `internal/mcp/tools_memory_test.go` (`TestValidatePfRememberArgs`) — and
-refuses any `methodology.` prefix, then the handler passes the **argument map
-verbatim** to `pkg/client/client.go` (`Remember`) → `POST /v1/memories`, bound by
-`internal/server/routes_memory.go` (`handleRemember`). The verb and the route are
-observed on a request a fake aihub really received, alongside the two refusals
-costing no request at all, by `internal/mcp/remember_wire_shape_test.go`
+refuses any `methodology.` prefix, then the handler passes the argument map,
+**projected to the published property set**, to `pkg/client/client.go` (`Remember`)
+→ `POST /v1/memories`, bound by `internal/server/routes_memory.go`
+(`handleRemember`). The verb and the route are observed on a request a fake aihub
+really received, alongside the two refusals costing no request at all, by
+`internal/mcp/remember_wire_shape_test.go`
 (`TestRememberRefusesItsOwnContractBeforeAnyRequest`).
 
-Because the map is forwarded wholesale there is no forwarding table to drift from —
-every published property is on the wire by construction, and the guard over
-`internal/mcp/tools_memory.go` (`rememberSchema`) states that identity rather than
-assuming it: `internal/mcp/memory_tools_wire_test.go`
-(`TestMemoryToolsForwardEveryPublishedPropertyByValue`) asserts each landing as a
-value and (`TestMemoryToolsEveryPublishedPropertyHasAWireProbe`) is the completeness
-half. The risk on this tool is at hops 1 and 4.
+The projection is `aihub#586` (owner ruling 2026-09-10), and it cuts both ways:
+
+- **Every published property is on the wire by construction.** The projection keeps
+  exactly what `internal/mcp/tools_memory.go` (`rememberSchema`) publishes, so there
+  is still no forwarding table to drift from, and the guard states that identity
+  rather than assuming it: `internal/mcp/memory_tools_wire_test.go`
+  (`TestMemoryToolsForwardEveryPublishedPropertyByValue`) asserts each landing as a
+  value and (`TestMemoryToolsEveryPublishedPropertyHasAWireProbe`) is the
+  completeness half.
+- **No unpublished name is.** The map used to be forwarded VERBATIM, and
+  `internal/domain/memory.go` (`RememberRequest`) binds five names this schema does
+  not publish — `attempt_id`, `claim_epoch`, `session_secret`, `rendered_html` and
+  `structured_payload`, the census read off the struct's own tags and pinned by
+  `internal/mcp/wire_strip_test.go`
+  (`TestRememberUnpublishedBindableKeysAreExactlyTheCensus`) — so a caller who
+  guessed a spelling got a capability hop 1 never sold, and for `rendered_html` an
+  anonymously shareable one (the 🟢 paragraph in the `visibility` bullet below).
+  Now `internal/mcp/server.go` (`addTool`) strips the unknown set for this tool
+  before the handler runs, and the response's `request_adjusted` names every
+  stripped key under `unknown_params` — the `aihub#389` echo, whose `applied: []`
+  claim this tool used to falsify and now satisfies by construction. Stripped keys
+  absent from the wire, published siblings byte-identical, disclosure earned rather
+  than unconditional: all read off real requests by
+  `internal/mcp/remember_wire_shape_test.go`
+  (`TestRememberStripsUnpublishedRenderedHTMLBeforeTheWire`), and across the whole
+  wholesale-forwarding family — this tool, `pf_save_artifact`, `pf_update_memory` —
+  by `internal/mcp/wire_strip_family_test.go`
+  (`TestWireStrippedFamilyDropsUnpublishedKeysAndDisclosesThem`), with the roster
+  itself pinned by `internal/mcp/wire_strip_test.go`
+  (`TestWireStrippedToolsAreExactlyTheMemoryWriteFamily`).
+
+The remaining risk on this tool is at hops 1 and 4.
 
 ## hop 4 — what it actually does
 
@@ -249,24 +275,35 @@ half. The risk on this tool is at hops 1 and 4.
   `methodology.*` names it refuses — censused by
   `internal/domain/render_types_reach_test.go`
   (`TestDefaultRenderTypesAreOnlyTypesPfRememberRefuses`).
-  🔴 **The first branch is open.** `rendered_html` is an unpublished name on this
-  tool and this handler forwards its whole argument map, so a caller who sends it
-  under that exact spelling puts it on the wire, `internal/domain/memory.go`
-  (`RememberRequest`) binds it, and `internal/domain/memory.go`
-  (`resolveRenderedHTML`) stores an explicit non-empty value verbatim for ANY type —
-  the three hops in order by `internal/mcp/remember_wire_shape_test.go`
-  (`TestRememberForwardsUnpublishedRenderedHTMLToTheBinder`) and
-  `internal/domain/memory_render_test.go`
-  (`TestResolveRenderedHTML_ExplicitOverrides`). So `visibility: public` plus an
-  unpublished `rendered_html` is enough to put a `pf_remember` row into the state
-  `internal/server/routes_artifacts_test.go` (`TestSharedArtifact_Public_200`)
-  serves with no auth — the same unpublished-but-reachable path `tags` took until
-  `aihub#425`, two paragraphs above.
-  ⚠️ This card used to reason the other way and concluded that on a default
-  deployment the two conditions cannot both hold for a `pf_remember` row; that was
-  measured false on 2026-09-10 at its first step, and what remains undriven is only
-  the whole journey in one harness — a single request from `pf_remember` to a 200 on
-  `/share/:id`, which would need a database and a route together.
+  🟢 **The first branch was open until `aihub#586` closed it (owner ruling
+  2026-09-10, option ②).** `rendered_html` is an unpublished name on this tool, and
+  until that fix the handler forwarded its whole argument map, so a caller who sent
+  it under that exact spelling put it on the wire, `internal/domain/memory.go`
+  (`RememberRequest`) bound it, and `internal/domain/memory.go`
+  (`resolveRenderedHTML`) stored an explicit non-empty value verbatim for ANY type.
+  <!-- prose-only: because=history -->
+  So `visibility: public` plus an unpublished `rendered_html` was enough to put a
+  `pf_remember` row into the state `internal/server/routes_artifacts_test.go`
+  (`TestSharedArtifact_Public_200`) serves with no auth — the same
+  unpublished-but-reachable path `tags` took until `aihub#425`, two paragraphs
+  above, with anonymous readability rather than a second round trip as the stake.
+  ⚠️ This card had reasoned that combination impossible on a default deployment;
+  measured on 2026-09-10, the inference was unsound at its first step, and the
+  measurement is what aihub#586 was filed on.
+  The closure is the hop 2 projection in this card's hop 2-3 section: the name is
+  stripped before the wire and named in `request_adjusted`, held by
+  `internal/mcp/remember_wire_shape_test.go`
+  (`TestRememberStripsUnpublishedRenderedHTMLBeforeTheWire`); and the journey this
+  card once called undriven now runs whole — one call carrying `visibility: public`
+  and `rendered_html`, the row's column required NULL, an ANONYMOUS `/share/:id`
+  required not to serve the payload, and a REST control on the same run proving the
+  server-side channel `pf_save_artifact`'s published `html` rides is untouched — in
+  `internal/mcp/remember_strip_e2e_db_test.go`
+  (`TestE2ERememberStripsRenderedHTMLFromTheShareSurface`), against a real database
+  and the real router. `internal/domain/memory_render_test.go`
+  (`TestResolveRenderedHTML_ExplicitOverrides`) still holds the storage precedence,
+  deliberately: the binder and the store are untouched, so the closure lives
+  entirely at this tool's boundary.
   The closure of the second branch is no promise either: the render set is
   configurable at startup (`internal/domain/memory.go` (`InitRenderTypes`)), so a
   deployment can open that one too — `internal/domain/render_types_reach_test.go`

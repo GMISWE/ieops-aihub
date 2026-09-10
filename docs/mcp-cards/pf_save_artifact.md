@@ -161,6 +161,24 @@ and it also records where the partition stops — a type carrying none of the fo
 refused by this tool at hop 2 and by `domain.Remember` at hop 4 rather than by
 `validatePfRememberArgs`.
 
+**An unpublished argument dies at the boundary before the builder even sees it
+(`aihub#586`, owner ruling 2026-09-10).** `buildSaveArtifactBody` was always a
+whitelist, so a caller-invented key never reached this tool's wire — but that was a
+property of one builder, not a guarantee, and the endpoint it shares with
+`pf_remember` binds names this schema does not publish (`rendered_html` among them,
+which the published `html` reaches deliberately). This tool is in the memory-write
+family whose unknown arguments `internal/mcp/server.go` (`addTool`) now strips
+before any handler runs and names in the response's `request_adjusted` under
+`unknown_params`, so the class stays closed even if a builder changes — driven with
+a bogus key plus a caller-spelled `rendered_html` by
+`internal/mcp/wire_strip_family_test.go`
+(`TestWireStrippedFamilyDropsUnpublishedKeysAndDisclosesThem`), whose
+`pf_save_artifact` arm also pins that a caller-supplied `attempt_id` cannot displace
+the state file's. The family roster is pinned by `internal/mcp/wire_strip_test.go`
+(`TestWireStrippedToolsAreExactlyTheMemoryWriteFamily`); why it is these three tools
+and what `pf_remember` was measured doing before the strip is that card's hop 2-3
+section.
+
 ## hop 4 — what it actually does
 
 - **`internal/server/routes_memory.go` (`enforceMethodologyAttemptGate`) is the

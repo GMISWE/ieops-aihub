@@ -108,6 +108,19 @@ above and `internal/mcp/memory_tools_wire_test.go`
 directions absence needs: the value is required to arrive in the URL, and the body
 is required to hold exactly the four keys that are not it.
 
+**An unpublished argument dies at the boundary before the builder sees it
+(`aihub#586`, owner ruling 2026-09-10).** The passthrough list was always a
+whitelist, so a caller-invented key never reached the PATCH body — a property of
+this builder, not a guarantee. This tool is in the memory-write family whose
+unknown arguments `internal/mcp/server.go` (`addTool`) now strips before any
+handler runs and names in the response's `request_adjusted` under `unknown_params`
+— driven with a bogus key plus a caller-spelled `rendered_html`, the name whose
+wholesale forwarding on `pf_remember` was `aihub#586`'s measured finding, by
+`internal/mcp/wire_strip_family_test.go`
+(`TestWireStrippedFamilyDropsUnpublishedKeysAndDisclosesThem`), with the roster
+pinned by `internal/mcp/wire_strip_test.go`
+(`TestWireStrippedToolsAreExactlyTheMemoryWriteFamily`).
+
 ## hop 4 — what it actually does
 
 - **Creates a new version rather than mutating in place**, and advances the cursor

@@ -4922,6 +4922,33 @@ jobs:
           ! grep -q -- '--- SKIP' attempt_status_vocabulary.log \
             || { echo "::error::an aihub#441 attempt-status vocabulary test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#585 (owner ruling ②, 2026-09-10): a paused attempt retains the
+      # right to write timeline events. The aihub#583 census
+      # (TestOnlyOneCredentialVerifierRefusesAPausedAttempt, DB-free, runs in
+      # the "Unit tests" step) pins WHICH credential verifier refuses a paused
+      # attempt at the source level; only a database can say the grant actually
+      # works — that a real pause through FnCompleteAttempt leaves EmitEvent
+      # accepting the paused attempt's own credential triple, landing the row on
+      # the timeline, and still refusing a wrong secret on that same paused
+      # attempt. Both cards (pf_pause_attempt, pf_emit_event) cite this
+      # function, and the two subtests are pinned by name for the aihub#508
+      # reason the step above states of its own: a card cites the parent
+      # function, so a deleted subtest would leave the citation resolving and
+      # K12 green while the claim went unheld.
+      - name: aihub#585 paused-attempt event-writing grant DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestPausedAttemptStillWritesTimelineEvents$' -count=1 -v 2>&1 | tee paused_emit_grant.log
+          for want in "TestPausedAttemptStillWritesTimelineEvents/the_paused_attempts_own_credentials_still_emit" \
+                      "TestPausedAttemptStillWritesTimelineEvents/a_wrong_secret_on_the_same_paused_attempt_is_refused"; do
+            grep -q -- "--- PASS: $want" paused_emit_grant.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#585 event-writing grant is not actually executing — the pf_pause_attempt and pf_emit_event cards both cite this arm"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' paused_emit_grant.log \
+            || { echo "::error::an aihub#585 paused-attempt grant test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

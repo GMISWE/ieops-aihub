@@ -83,16 +83,26 @@ Two details:
   stale credential — the code, the 409 and that exact wire message are held by
   `internal/domain/attempt_paused_terminal_dbgated_test.go`
   (`TestPausedAttemptTerminal_CompleteOnAPausedAttemptChangesNothing`).
-- ⚠️ **`pf_emit_event` is the one credential-checked call it does NOT refuse**, and
-  this bullet said "every credential-checked `pf_*` call" until `aihub#583` measured
-  it: that tool's lighter verifier `verifyAttemptCredentialSimple` in `internal/domain/memory.go`
-  checks the current attempt id, the epoch and the secret hash and stops, and a
-  pause moves none of the three — so a paused attempt can still write to the
-  timeline, which is why
-  `internal/domain/paused_refusal_scope_test.go`
-  (`TestOnlyOneCredentialVerifierRefusesAPausedAttempt`) enumerates the verifiers
-  and requires exactly one of them to answer `ATTEMPT_PAUSED`, so unifying the two
-  reddens this sentence rather than leaving it stale a second time.
+- **A paused attempt retains the right to write timeline events, and that is the
+  contract** (owner ruling ②, 2026-09-10, `aihub#585`; the asymmetry itself was
+  measured by `aihub#583`, which corrected this bullet's earlier claim that every
+  credential-checked call is refused). `pf_emit_event` authenticates through the
+  lighter verifier `verifyAttemptCredentialSimple` in `internal/domain/memory.go`,
+  whose whole check is the current attempt id, the claim epoch and the secret hash
+  — the attempt's status is never consulted, and a pause moves none of those three
+  — which `internal/domain/paused_refusal_scope_test.go`
+  (`TestOnlyOneCredentialVerifierRefusesAPausedAttempt`) holds as a census: it
+  enumerates the credential verifiers out of the AST and requires exactly one of
+  them, and never the Simple one, to answer `ATTEMPT_PAUSED`. The grant is driven
+  end-to-end by `internal/domain/paused_attempt_emit_event_dbgated_test.go`
+  (`TestPausedAttemptStillWritesTimelineEvents`): pause through the production
+  path, then `EmitEvent` succeeds on the paused attempt's own credentials while a
+  wrong secret on the same paused attempt still answers `ATTEMPT_MISMATCH`. The
+  retained right is load-bearing rather than residue: pausing hands a wi to a
+  human, and the note that says WHY often lands after the pause — the 2026-09-10
+  close-out paused `aihub#543` and then wrote its checkpoint note through exactly
+  this path. Unifying the two verifiers is therefore overturning a ruling rather
+  than finishing a cleanup, and both arms above go RED against such a diff.
 - So a step loop that pauses cannot corrupt step state — it simply cannot advance —
   but it can walk into a cascade of surprise credential errors if it retries.
 - `internal/mcp/tools_step.go` (`classifyStepUpdateErr`) is the client-side half:

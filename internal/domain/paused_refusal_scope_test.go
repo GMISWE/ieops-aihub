@@ -1,12 +1,13 @@
 package domain
 
 // aihub#543 probe wave 2, lane L11 — the `docs/mcp-cards/pf_pause_attempt.md`
-// hop-4 sentence about WHICH CALLS A PAUSE REFUSES, and the Policy sentence
+// hop-4 sentences about WHICH CALLS A PAUSE REFUSES, and the Policy sentence
 // about why the aihub#441 unification cannot shadow that refusal.
 //
-//	"**From that moment the server hard-rejects every credential-checked `pf_*`
-//	 call that goes through `verifyAttemptCredential`** with its own distinct
-//	 code, `ErrAttemptPaused` … `pf_emit_event` is the one exception …"
+//	"**From that moment the server hard-rejects every call that goes through
+//	 `verifyAttemptCredential`** with its own distinct code, `ErrAttemptPaused` …"
+//	"**A paused attempt retains the right to write timeline events, and that is
+//	 the contract** (owner ruling ②, 2026-09-10, `aihub#585` …)"
 //	"`ATTEMPT_PAUSED` … is unchanged, still 409, and still reached only by a
 //	 caller whose secret is VALID, so the unification cannot shadow it."
 //
@@ -23,10 +24,18 @@ package domain
 // That asymmetry is the residue of aihub#441 T2-3 itself: the row unified the
 // two verifiers' answer for a wrong SECRET and left their status handling
 // unequal, which errors.go's own comment on ErrAttemptMismatch describes for the
-// secret half and says nothing about for this one. The card's sentence is
-// corrected rather than the code, because widening the Simple verifier is a
-// behaviour change on pf_emit_event and this lane is a documentation lane — see
-// the PR body for the follow-up.
+// secret half and says nothing about for this one. Lane L11 corrected the card's
+// sentence rather than the code, because widening the Simple verifier is a
+// behaviour change on pf_emit_event and that lane was a documentation lane; the
+// behaviour question it filed as aihub#585 was then RULED, option ②, by the
+// owner on 2026-09-10: KEEP the behaviour — a paused attempt retains
+// event-writing rights by design (pausing hands a wi to a human, and the note
+// that says why often lands after the pause; the 2026-09-10 close-out paused
+// aihub#543 and then wrote its checkpoint note through exactly this path). Both
+// cards now state that grant affirmatively, this census is its structural pin,
+// and paused_attempt_emit_event_dbgated_test.go
+// (TestPausedAttemptStillWritesTimelineEvents) drives it end-to-end against a
+// real database.
 //
 // ─── Why this is a source census and not a behavioural arm ────────────────
 //
@@ -85,15 +94,21 @@ type verifierDecl struct {
 // MUTANTS (applied to this tree and run; the verdict is what happened):
 //
 //	M36 enforcement: add the paused branch to verifyAttemptCredentialSimple —
-//	    i.e. the FIX this card now points at
+//	    i.e. unify the two verifiers
 //	                                        RED  exactly_one_verifier_refuses_a
 //	                                             _paused_attempt, naming the
 //	                                             second one. 🔴 That is the
-//	                                             INTENDED red: the day the
-//	                                             behaviour is unified, the card's
-//	                                             exception clause becomes false
-//	                                             and has to be deleted in the same
-//	                                             diff. The failure message says so.
+//	                                             INTENDED red: since the owner
+//	                                             ruled the asymmetry IS the
+//	                                             contract (option ②, 2026-09-10,
+//	                                             aihub#585), unifying is
+//	                                             overturning a ruling — the
+//	                                             affirmative grant in both cards
+//	                                             becomes false and must be
+//	                                             deleted in the same diff, citing
+//	                                             a new ruling. The failure
+//	                                             message says so. Re-run RED
+//	                                             2026-09-10 under aihub#585.
 //	M37 enforcement: delete the `storedStatus == "paused"` branch from
 //	    verifyAttemptCredential             RED  exactly_one_verifier_refuses_a
 //	                                             _paused_attempt (zero found) —
@@ -130,14 +145,17 @@ func TestOnlyOneCredentialVerifierRefusesAPausedAttempt(t *testing.T) {
 		}
 		sort.Strings(refusing)
 		if len(refusing) != 1 || refusing[0] != pausedRefusalVerifier {
-			t.Errorf("the credential verifiers that answer ErrAttemptPaused are %v, and the card "+
-				"says exactly one does: %s.\n\nIf a verifier was ADDED to that list, the behaviour "+
-				"just became uniform and the card's exception clause is now false — delete the "+
-				"\"pf_emit_event is the one exception\" sentence from "+
-				"docs/mcp-cards/pf_pause_attempt.md in this same diff, and update this arm's "+
-				"expectation.\n\nIf the list is EMPTY, a paused attempt is no longer refused "+
-				"anywhere: a step loop that pauses can then go on advancing step state, which is "+
-				"the corruption aihub#209's distinct code exists to make impossible.\n\nWalked: %v",
+			t.Errorf("the credential verifiers that answer ErrAttemptPaused are %v, and the cards "+
+				"say exactly one does: %s.\n\nIf a verifier was ADDED to that list, the behaviour "+
+				"just became uniform — and that is OVERTURNING AN OWNER RULING, not a cleanup: "+
+				"option ② (2026-09-10, aihub#585) keeps a paused attempt's event-writing rights "+
+				"by design. Cite a new ruling, delete the affirmative grant bullets from "+
+				"docs/mcp-cards/pf_pause_attempt.md AND docs/mcp-cards/pf_emit_event.md in this "+
+				"same diff, retire TestPausedAttemptStillWritesTimelineEvents (which is also red "+
+				"right now), and update this arm's expectation.\n\nIf the list is EMPTY, a paused "+
+				"attempt is no longer refused anywhere: a step loop that pauses can then go on "+
+				"advancing step state, which is the corruption aihub#209's distinct code exists "+
+				"to make impossible.\n\nWalked: %v",
 				refusing, pausedRefusalVerifier, verifierNames(verifiers))
 		}
 	})

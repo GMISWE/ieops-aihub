@@ -1843,6 +1843,25 @@ func TestOpenCitationWaiverIsCheckedAgainstItsOwnCount(t *testing.T) {
 // counts, applied to a call site. Reading the source is the only instrument
 // available here, because the branch it guards cannot be entered from a card set
 // that waives nothing.
+//
+// 🔴 Hardened to the K12 pin's shape (aihub#565, 2026-09-10): it checks that the
+// RESULT IS CONSUMED, not merely that the call appears. The first version of this
+// pin accepted any CallExpr bearing the name, which `_ = openWaiverProblems(…)`
+// satisfies — the one-character nerve cut that leaves the call site in place
+// while every finding is thrown away. So the call must be the range expression of
+// a loop whose body fails the test. The walk itself is rangeConsumption, shared
+// with the K12 pin below and calibrated by TestWiringPinSkeletonIsCalibrated.
+//
+// MUTANTS (each applied to this tree on 2026-09-10, tree change proven by
+// `git diff --stat`, reverted after the run):
+//
+//	N1 replace the arm's `for _, problem := range openWaiverProblems(…) {
+//	   t.Error(problem) }` with `_ = openWaiverProblems(…)` — the nerve cut the
+//	   pre-aihub#565 pin passed                RED  this pin (does not range over)
+//	N2 keep the range, drop t.Error from its body
+//	                                           RED  this pin (never reach t.Error)
+//	N3 delete the call and its loop outright   RED  this pin (does not range over)
+//	N4 rename the arm and leave armName behind RED  this pin (declares no func)
 func TestOpenCitationWaiverCheckIsWiredIntoTheArm(t *testing.T) {
 	const (
 		gateFile = "contract_cards_gate_test.go"
@@ -1850,42 +1869,161 @@ func TestOpenCitationWaiverCheckIsWiredIntoTheArm(t *testing.T) {
 		callName = "openWaiverProblems"
 	)
 
+	called, consumed := rangeConsumption(parseGateArm(t, gateFile, armName, "K11"), callName)
+	if !called {
+		t.Errorf("%s does not range over %s, so every waiver check is dead code from the "+
+			"gate's side: openCitationWaivers is empty, so nothing about that shows up as a "+
+			"failing card, and the fixtures in the test above go on passing against a "+
+			"function the arm no longer consults. Restore the consuming range — a call "+
+			"whose result is discarded (`_ = %s(…)`) is the nerve cut this pin exists to "+
+			"refuse.", armName, callName, callName)
+	} else if !consumed {
+		t.Errorf("%s ranges over %s but its findings never reach t.Error or t.Fatal, so "+
+			"every waiver problem is computed and thrown away. That is worse than no call "+
+			"at all: the wiring reads as present to anyone grepping for it, and the arm is "+
+			"green on a card set the waiver checks disagree with.", armName, callName)
+	}
+}
+
+// ───────────────────────────── wiring-pin skeleton ───────────────────────────
+
+// parseGateArm parses gateFile and returns the named top-level function. Both
+// halves fail rather than skip: a wiring check that cannot find the thing it
+// checks reports green forever. `gate` names the K-line whose arm is being
+// located, so the rename hint in the failure points at the right one.
+//
+// Extracted (aihub#565) because the two wiring pins carried byte-copies of this
+// walk, and a copy is a drift surface: the reviewer's finding was that the next
+// hardening lands in one pin and not the other, leaving a pin that still LOOKS
+// like its twin while checking less — green by vacancy.
+func parseGateArm(t *testing.T, gateFile, armName, gate string) *ast.FuncDecl {
+	t.Helper()
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, gateFile, nil, parser.SkipObjectResolution)
 	if err != nil {
 		t.Fatalf("parse %s: %v — this arm cannot report a missing call site from a file "+
 			"it could not read, so this is a failure rather than a skip", gateFile, err)
 	}
-
-	var arm *ast.FuncDecl
 	for _, d := range f.Decls {
 		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == armName {
-			arm = fn
-			break
+			return fn
 		}
 	}
-	if arm == nil {
-		t.Fatalf("%s declares no func %s. If K11's arm was renamed, rename it here too — "+
-			"a wiring check that cannot find the thing it checks reports green forever",
-			gateFile, armName)
-	}
+	t.Fatalf("%s declares no func %s. If %s's arm was renamed, rename it here too — a "+
+		"wiring check that cannot find the thing it checks reports green forever",
+		gateFile, armName, gate)
+	return nil
+}
 
-	called := false
+// rangeConsumption reports whether arm's body ranges over a call whose
+// function's TERMINAL name is callName — a bare identifier (openWaiverProblems)
+// or the selector of a qualified call (cardclaims.LedgerProblems) — and whether
+// that range body reaches t.Error / t.Errorf / t.Fatal / t.Fatalf.
+//
+// `called` is deliberately NOT satisfied by a call outside a range expression:
+// `_ = callName(…)` discards the findings, and a bare `callName(…)` statement
+// does too, so both must read as "not wired" rather than as a weaker "wired".
+// Matching the terminal name rather than requiring the qualified form is safe in
+// the direction that matters: it can only ACCEPT more shapes of a genuinely
+// consuming range, never miss one, and within this file neither pinned callee
+// has a same-named sibling to collide with.
+func rangeConsumption(arm *ast.FuncDecl, callName string) (called, consumed bool) {
 	ast.Inspect(arm.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
+		rng, ok := n.(*ast.RangeStmt)
 		if !ok {
 			return true
 		}
-		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == callName {
-			called = true
+		call, ok := rng.X.(*ast.CallExpr)
+		if !ok {
+			return true
 		}
-		return !called
+		if terminalFuncName(call.Fun) != callName {
+			return true
+		}
+		called = true
+		ast.Inspect(rng.Body, func(inner ast.Node) bool {
+			c, ok := inner.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			s, ok := c.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			switch s.Sel.Name {
+			case "Error", "Errorf", "Fatal", "Fatalf":
+				consumed = true
+			}
+			return !consumed
+		})
+		return !consumed
 	})
-	if !called {
-		t.Errorf("%s does not call %s, so every waiver check is dead code from the gate's "+
-			"side: openCitationWaivers is empty, so nothing about that shows up as a "+
-			"failing card, and the fixtures in the test above go on passing against a "+
-			"function the arm no longer consults. Restore the call.", armName, callName)
+	return called, consumed
+}
+
+// terminalFuncName is the last identifier of a call's function expression:
+// `f(…)` -> "f", `pkg.F(…)` -> "F", anything else -> "".
+func terminalFuncName(e ast.Expr) string {
+	switch f := e.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	}
+	return ""
+}
+
+// TestWiringPinSkeletonIsCalibrated runs rangeConsumption over fixture sources
+// whose answer is already known, BEFORE either pin trusts it against this file —
+// the same anti-vacuity order TestEmissionAnalyserIsCalibrated establishes in
+// internal/domain. The nerve-cut fixture is the load-bearing one: it is the
+// exact shape the pre-aihub#565 K11 pin reported as wired.
+func TestWiringPinSkeletonIsCalibrated(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		callName string
+		called   bool
+		consumed bool
+	}{
+		{"consuming range over a bare call",
+			`for _, p := range helper() { t.Error(p) }`, "helper", true, true},
+		{"consuming range over a qualified call",
+			`for _, p := range pkg.Helper() { t.Fatalf("%s", p) }`, "Helper", true, true},
+		{"nerve cut: result discarded",
+			`_ = helper()`, "helper", false, false},
+		{"bare call statement, result dropped",
+			`helper()`, "helper", false, false},
+		{"deaf range: body never fails the test",
+			`for _, p := range helper() { _ = p }`, "helper", true, false},
+		{"range over some other call",
+			`for _, p := range other() { t.Error(p) }`, "helper", false, false},
+		{"no call at all",
+			`t.Log("nothing")`, "helper", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "package p\n\nfunc TestArm(t *testing.T) {\n\t" + tc.body + "\n}\n"
+			f, err := parser.ParseFile(token.NewFileSet(), "fixture.go", src, parser.SkipObjectResolution)
+			if err != nil {
+				t.Fatalf("fixture does not parse: %v", err)
+			}
+			var arm *ast.FuncDecl
+			for _, d := range f.Decls {
+				if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "TestArm" {
+					arm = fn
+				}
+			}
+			if arm == nil {
+				t.Fatal("fixture declares no TestArm")
+			}
+			called, consumed := rangeConsumption(arm, tc.callName)
+			if called != tc.called || consumed != tc.consumed {
+				t.Errorf("rangeConsumption = (called=%t, consumed=%t), want (%t, %t) — a "+
+					"skeleton that cannot separate these shapes clears both pins of nothing",
+					called, consumed, tc.called, tc.consumed)
+			}
+		})
 	}
 }
 
@@ -2622,9 +2760,13 @@ func TestUnscopedCardNamesFindsTheGap(t *testing.T) {
 // edit that passes a wiring check whose whole purpose is to refuse it. So the call
 // must be the range expression of a loop whose body fails the test.
 //
-// ⚠️ TestOpenCitationWaiverCheckIsWiredIntoTheArm above has the same weaker shape
-// and is NOT changed here: it is existing K11 code and this wave is scoped to K12.
-// Named rather than left as a silent gap.
+// ⚠️ The K11 twin above (TestOpenCitationWaiverCheckIsWiredIntoTheArm) had the
+// weaker call-presence shape when this pin was hardened, named then as a
+// deliberate scope cut rather than left as a silent gap; aihub#565 (2026-09-10)
+// has since hardened it to this same shape and moved the shared walk into
+// rangeConsumption, calibrated by TestWiringPinSkeletonIsCalibrated. M5b — the
+// `_ =` nerve cut on the LedgerProblems range — was re-run against this
+// refactored body on 2026-09-10 and stays RED.
 func TestCardClaimsLedgerCheckIsWiredIntoTheArm(t *testing.T) {
 	const (
 		gateFile = "contract_cards_gate_test.go"
@@ -2632,58 +2774,7 @@ func TestCardClaimsLedgerCheckIsWiredIntoTheArm(t *testing.T) {
 		callName = "LedgerProblems"
 	)
 
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, gateFile, nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("parse %s: %v — this arm cannot report a missing call site from a file it "+
-			"could not read, so this is a failure rather than a skip", gateFile, err)
-	}
-
-	var arm *ast.FuncDecl
-	for _, d := range f.Decls {
-		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == armName {
-			arm = fn
-			break
-		}
-	}
-	if arm == nil {
-		t.Fatalf("%s declares no func %s. If K12's arm was renamed, rename it here too — a "+
-			"wiring check that cannot find the thing it checks reports green forever",
-			gateFile, armName)
-	}
-
-	called, consumed := false, false
-	ast.Inspect(arm.Body, func(n ast.Node) bool {
-		rng, ok := n.(*ast.RangeStmt)
-		if !ok {
-			return true
-		}
-		call, ok := rng.X.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != callName {
-			return true
-		}
-		called = true
-		ast.Inspect(rng.Body, func(inner ast.Node) bool {
-			c, ok := inner.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			s, ok := c.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			switch s.Sel.Name {
-			case "Error", "Errorf", "Fatal", "Fatalf":
-				consumed = true
-			}
-			return !consumed
-		})
-		return !consumed
-	})
+	called, consumed := rangeConsumption(parseGateArm(t, gateFile, armName, "K12"), callName)
 
 	if !called {
 		t.Errorf("%s does not range over cardclaims.%s, so the whole ledger half is dead "+

@@ -1879,6 +1879,20 @@ jobs:
           done
           grep -q -- '--- PASS: TestRememberRejectsCrossProjectWorkItem/the_shared_domain_entry_refuses_it_with_no_handler_in_front' remember_wi_scope.log \
             || { echo "::error::the domain-entry arm did not run; without it a gate written into handleRemember passes every other arm while UpdateMemory and any future caller of domain.Remember still write the mismatch"; exit 1; }
+          # aihub#543 probe wave 2 — two pf_remember card claims hosted as subtests
+          # of this function rather than as new DB-gated functions. Pinned by name
+          # here because the card cites the PARENT: delete the subtests and the
+          # citation still resolves, K12 stays green, and this step's greps above
+          # would not notice either.
+          for want in 'TestRememberRejectsCrossProjectWorkItem/the_reply_carries_both_id_aliases_and_they_agree' \
+                      'TestRememberRejectsCrossProjectWorkItem/dedup_mode_decides_what_happens_to_a_similar_memory/off_stores_a_second_copy_and_annotates_nothing' \
+                      'TestRememberRejectsCrossProjectWorkItem/dedup_mode_decides_what_happens_to_a_similar_memory/suggest_stores_it_and_records_what_it_resembles' \
+                      'TestRememberRejectsCrossProjectWorkItem/dedup_mode_decides_what_happens_to_a_similar_memory/strict_refuses_and_names_the_row_it_collided_with' \
+                      'TestRememberRejectsCrossProjectWorkItem/dedup_mode_decides_what_happens_to_a_similar_memory/strict_still_accepts_a_genuinely_different_memory' \
+                      'TestRememberRejectsCrossProjectWorkItem/dedup_mode_decides_what_happens_to_a_similar_memory/strict_stores_a_near_miss_and_annotates_it_instead'; do
+            grep -q -- "--- PASS: $want" remember_wi_scope.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the pf_remember card cites this function for the id/memory_id alias and for what each dedup_mode spelling does, and a deleted subtest leaves the citation resolving to a function that no longer holds the claim"; exit 1; }
+          done
           ! grep -q -- '--- SKIP' remember_wi_scope.log \
             || { echo "::error::the aihub#371 remember scope test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 

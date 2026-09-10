@@ -4,12 +4,8 @@
 {
   "tool": "pf_create_user",
   "description_sha256": "2d565545d332fd2ab0e3371e540b6186b3cfef2157335371e0efa76758e521c6",
-  "input_schema_sha256": "9f0307d6a3a4d8f731b4e09738174327c43bfda16444eed0f90c549b0470f96d",
+  "input_schema_sha256": "84ea591c6eb33e7a0d8c95bd8862a00ca4fdd615da53e3efb213bf1df2c28818",
   "params": {
-    "author_aliases": {
-      "type": "array",
-      "required": false
-    },
     "display_name": {
       "type": "string",
       "required": true
@@ -48,7 +44,7 @@
 
 ## hop 0-1 — what the caller is told
 
-Five parameters, one required. "Create a new user (**admin only**)."
+Four parameters, one required. "Create a new user (**admin only**)."
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
@@ -56,7 +52,17 @@ Five parameters, one required. "Create a new user (**admin only**)."
 | `user_type` | string | no | enum `human` or `machine`, default `human`; a machine user's email is generated, not supplied |
 | `role` | string | no | enum `writer` or `admin`, default `writer` — the GLOBAL role, not a project member role |
 | `email` | string | no | required for human users; auto-generated for machine users |
-| `author_aliases` | array | no | git author aliases for this user |
+
+`author_aliases` used to be the fifth row — WITHDRAWN 2026-09-10 by `aihub#587`
+(owner ruling), because the column it fed has no reader anywhere in `internal/`
+or `pkg/` and commit records take their author from the authenticated caller,
+so the value was stored for nobody. Neither this tool nor `pf_update_user`
+publishes the name any more, held by `internal/mcp/user_admin_surface_test.go`
+(`TestAuthorAliasesIsNeitherWrittenNorRead`, `neither_tool_publishes_it`); a
+caller still sending it is told so by the response's
+`request_adjusted.unknown_params` entry, held by
+`internal/mcp/update_user_param_publication_test.go`
+(`TestAuthorAliasesWithdrawalIsDisclosed`).
 
 `email` is the interesting row: it is **not** in the `required` array, and the
 description says it is required for human users — both halves read off a real session
@@ -104,27 +110,26 @@ under the admin group.
   leg of `internal/server/user_admin_write_shape_test.go`
   (`TestCreateUserResponseIsTheHandlersOwnProjection`) refuses any key-, token- or
   secret-shaped name in the answer this handler builds.
-- `author_aliases` set here is **stored, and no SQL statement this census can see
-  reads it back** — measured 2026-09-10 by
+- `author_aliases` is **not accepted here any more**: withdrawn 2026-09-10 by
+  `aihub#587`, and `handleCreateUser` neither binds nor writes it, so the row is
+  created with the schema DEFAULT and the INSERT column list is held not to name
+  the column by `internal/server/user_admin_write_shape_test.go`
+  (`TestCreateUserResponseIsTheHandlersOwnProjection`, `the_column_is_not_written`).
+  The tree-wide census — zero SQL writes AND zero SQL reads of
+  `users.author_aliases` across `internal/` and `pkg/`, with `display_name` as
+  the positive control in both directions — is
   `internal/mcp/user_admin_surface_test.go`
-  (`TestAuthorAliasesIsWrittenAndNeverRead`), which censuses three writers and no
-  reader of `users.author_aliases` across `internal/` and `pkg/`, uses `display_name`
-  as the positive control for its read-detector, holds two further controls for the
-  shapes that detector used to miss — a SELECT split across concatenated literals,
-  and a `RETURNING` clause — and also refuses a published description that claims
-  attribution. What it cannot see is a statement assembled through a slice of
-  fragments, so the honest form is "no readable statement", not "no read"; on that
-  evidence no code path in aihub maps a git commit author to a user by this column,
-  and commit records take their author from the authenticated caller instead.
-  🔴 This bullet used to read "is how commits attribute to this user", and
-  `pf_update_user.md` said the same; neither was true of this tree.
-  The field is therefore the mirror of that card's §6.1 T1-9 case — a published field
-  nothing reads — and it is recorded rather than fixed here, because wiring a reader
-  is a behaviour change.
-- Until `aihub#425` published the same field on `pf_update_user`, aliases could be set
-  at creation and then **never changed from MCP again** — so the one case that could
-  not be fixed was the one that matters: an alias that was wrong, or an author who
-  acquired a new email.
+  (`TestAuthorAliasesIsNeitherWrittenNorRead`).
+  🔴 History of the sentence this replaces, because each state corrected the
+  previous one: this bullet used to read "is how commits attribute to this user"
+  — measured false by `aihub#543` (2026-09-10): the column had three write sites
+  and no reader, and attribution comes from the authenticated caller. That made
+  the field the §6.1 T1-9 shape (a published field nothing reads: withdraw, fix,
+  or file), and the `aihub#587` owner ruling chose WITHDRAW over wiring a
+  reader. The COLUMN stays — dormant, recorded 2026-09-10: dropping
+  `users.author_aliases` (`TEXT[] NOT NULL DEFAULT '{}'` in `0001_initial.sql`)
+  is a destructive migration and a separate decision the owner has not taken.
+  <!-- prose-only: because=external-state -->
 - `machine` users get a generated email, which is what lets an agent identity exist
   without a mailbox: the `machine_without_email_proceeds` leg of
   `internal/server/user_admin_write_shape_test.go`
@@ -155,17 +160,24 @@ record above spans 6 calls; the observed keys are `display_name`, `email`, `id`,
 `role`, `user_type`.
 <!-- prose-only: because=measurement -->
 
-🔴 `author_aliases` is absent from that list because the HANDLER drops it rather than
-because those six calls set none: `internal/server/router.go` (`handleCreateUser`)
-answers with a hand-built five-key map instead of the inserted row, so no
-`pf_create_user` response can carry `author_aliases`, `created_at` or `updated_at`
-however many callers set them — the response literal's key set is compared against
-aihub#412's corpus record in both directions, and the written-but-unreturned column
-asserted directly, by `internal/server/user_admin_write_shape_test.go`
-(`TestCreateUserResponseIsTheHandlersOwnProjection`). This card used to reason the
-other way, from "a non-projecting response" to a conclusion about caller behaviour;
-that inference was wrong, and it was wrong in the direction that reads as
-reassurance.
+🔴 `author_aliases` is absent from that list twice over, and both halves are held
+by one arm, `internal/server/user_admin_write_shape_test.go`
+(`TestCreateUserResponseIsTheHandlersOwnProjection`). First, the HANDLER
+projects it away rather than the six corpus calls not setting one:
+`internal/server/router.go` (`handleCreateUser`) answers with a hand-built
+five-key map instead of the inserted row, so no `pf_create_user` response can
+carry `author_aliases`, `created_at` or `updated_at` however many callers set
+them — the response literal's key set is compared against aihub#412's corpus
+record in both directions, and the dormant column's absence from the answer
+asserted directly by `TestCreateUserResponseIsTheHandlersOwnProjection`
+(`the_dormant_column_is_not_returned`).
+Second, since `aihub#587` (2026-09-10) the parameter is withdrawn and nothing
+writes the column at all, so the only value a future reader could return is the
+DEFAULT — held by the `the_column_is_not_written` leg of
+`TestCreateUserResponseIsTheHandlersOwnProjection`. This card used
+to reason the other way, from "a non-projecting response" to a conclusion about
+caller behaviour; that inference was wrong, and it was wrong in the direction
+that reads as reassurance.
 
 ## Policy
 

@@ -11,9 +11,11 @@ package server
 //
 //   - `author_aliases` is NOT in this response. handleListUsers selects five
 //     columns and builds each item from five keys; the column exists on `users`
-//     and pf_create_user / pf_update_user write it, but nothing reads it here.
-//     The pf_list_users card went further and called it "the field that matters
-//     most in this response".
+//     but nothing reads it here — and since aihub#587 (2026-09-10) nothing
+//     writes it either: the parameter is withdrawn from pf_create_user and
+//     pf_update_user and the column is dormant. The pf_list_users card went
+//     further still and had called it "the field that matters most in this
+//     response".
 //   - "every user row" is not what it returns: the query carries `ORDER BY
 //     created_at DESC LIMIT 100`, so a deployment with more than a hundred users
 //     is answered with the hundred newest and no signal that anything was left

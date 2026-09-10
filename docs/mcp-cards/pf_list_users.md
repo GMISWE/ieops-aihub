@@ -53,16 +53,19 @@ is a statement about routing, not about a branch inside the handler.
   between them, which is the part a vocabulary arm on either set alone cannot see:
   neither set contains the other, and `owner` is in neither. A card that did not say
   so would leave a reader assuming `role` means the same thing everywhere it appears.
-- `author_aliases` is the `users` column `pf_create_user` and `pf_update_user` write,
-  and this response does **not** carry it: the five columns above are the whole item
+- `author_aliases` is a DORMANT `users` column and this response does **not** carry
+  it: the five columns above are the whole item
   (`TestListUsersReturnsTheColumnsItSelectsAndCapsAtOneHundred`). No `SELECT`
   anywhere in this repo reads the column — `internal/domain/card_claims_wave2_test.go`
   (`TestNoSelectInThisRepoReadsAuthorAliases`) censuses every SQL literal in every
-  non-test file — so the git-author mapping `docs/design/polyforge-v1-design.md`
-  reserves it for is still a reservation. It could not be changed from MCP at all
-  until `pf_update_user` published it, which
-  `internal/mcp/update_user_param_publication_test.go`
-  (`TestUpdateUserAuthorAliasesIsPublished`) keeps true.
+  non-test file, with `display_name` as the positive control — and since
+  2026-09-10 nothing writes it either: `aihub#587` withdrew the parameter from
+  `pf_create_user` and `pf_update_user` and removed the write sites, held by
+  `internal/mcp/user_admin_surface_test.go`
+  (`TestAuthorAliasesIsNeitherWrittenNorRead`). The git-author mapping
+  `docs/design/polyforge-v1-design.md` reserved the column for was never built;
+  the column stays only because dropping it is a destructive migration and a
+  separate decision. <!-- prose-only: because=external-state -->
 
 ## hop 5 — what comes back
 

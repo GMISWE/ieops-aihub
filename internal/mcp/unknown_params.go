@@ -161,6 +161,36 @@ func unknownParamsAdjustment(unknown []string) domain.RequestAdjustment {
 	}
 }
 
+// unknownParamsLogLine builds the stderr sentence, per tool family, and is its
+// own function so the WORDING is probeable (aihub#570). The original line said
+// the names "were forwarded to nothing and had no effect" — measured false in
+// its first half: a wholesale-forwarding handler (pf_update_work_item is the
+// one this file's own header measured live) puts every unknown key on the
+// wire, where the server's JSON binding drops it. "Had no effect" was always
+// true; the stated mechanism was not, and a caller probing what the server
+// receives would catch this process asserting the opposite of what it does.
+//
+// Two branches because aihub#586 split the truth: the memory-write family's
+// unknown set is stripped at this boundary before the request is built, so for
+// those three tools nothing IS forwarded and the line may say so. Every other
+// tool gets the disjunction that covers both remaining shapes — a typed-body
+// handler never places the key on the wire, a wholesale forwarder sends it to
+// the server, which drops it at its JSON binding — because this hop knows the
+// tool name, not the handler's body-building style, and naming the wrong arm
+// for a given tool would be this defect again one sentence over.
+// unknown_params_wording_test.go pins both branches and refuses the old clause
+// by its exact words.
+func unknownParamsLogLine(tool string, unknown []string) string {
+	mechanism := "they had no effect: this tool's handler either never placed them on the wire, or " +
+		"sent them to the server, which dropped them at its JSON binding"
+	if wireStrippedTools[tool] {
+		mechanism = "they were stripped at this boundary before the request was built, so nothing " +
+			"was forwarded and they had no effect (aihub#586)"
+	}
+	return fmt.Sprintf("polyforge: %s received %d parameter(s) it does not publish: %v — %s (aihub#389)\n",
+		tool, len(unknown), unknown, mechanism)
+}
+
 // discloseUnknownParams logs the extras to stderr and attaches them to the
 // result. Safe on a nil result.
 func discloseUnknownParams(tool string, unknown []string, res *sdkmcp.CallToolResult) {
@@ -172,9 +202,7 @@ func discloseUnknownParams(tool string, unknown []string, res *sdkmcp.CallToolRe
 	// to decide whether phase 2 is safe. Neither substitutes for the other — an
 	// MCP server's stderr goes to a file the calling agent never reads, which is
 	// why response-only was never enough and log-only would have been invisible.
-	fmt.Fprintf(os.Stderr, "polyforge: %s received %d parameter(s) it does not publish: %v"+
-		" — they were forwarded to nothing and had no effect (aihub#389)\n",
-		tool, len(unknown), unknown)
+	fmt.Fprint(os.Stderr, unknownParamsLogLine(tool, unknown))
 	if res == nil {
 		return
 	}

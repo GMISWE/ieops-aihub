@@ -58,8 +58,17 @@ They are also logged to stderr.
 "request_adjusted":[{"param":"unknown_params","requested":["expected_version"],"applied":[]}]
 ```
 
-Read that as *"these reached nothing and changed nothing"* — whatever the rest of
-the response says. It is appended to the list, so a `request_adjusted` the server
+Read that as *"nothing you sent under these names was applied"* — whatever the rest
+of the response says. The mechanism differs by family (aihub#570, 2026-09-10): for
+the wholesale-forwarding memory writers (`pf_remember`, `pf_save_artifact`,
+`pf_update_memory`) the named keys are **stripped at the MCP boundary** before the
+request is built (`internal/mcp/wire_strip.go`, aihub#586), so nothing is forwarded;
+for every other tool they either never leave the process (handlers that build typed
+bodies) or ride the request to the server and are dropped at its JSON binding (the
+wholesale forwarders `internal/mcp/wire_strip.go` records). An earlier version of
+this paragraph said the names "reached nothing", which was false for that second
+group — the wording is pinned by `internal/mcp/unknown_params_wording_test.go`.
+It is appended to the list, so a `request_adjusted` the server
 itself produced (a clamped `limit`, say) is still there alongside it.
 
 Reporting rather than rejecting is deliberate and temporary. `additionalProperties:false`

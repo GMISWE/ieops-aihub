@@ -39,8 +39,8 @@ Four parameters, one required.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `declared_resources` | array | yes | `{type, uri, intent}` + optional `repo` |
-| `work_item_id` | string | no | id or slug; "the only way this call learns which running work item is YOU" |
-| `project` | string | no | namespaces `file_scope` checks; optional when `work_item_id` is set |
+| `work_item_id` | string | no | id or slug (`TestDeLockingPredictReportsAdvisoryEntries` drives the slug spelling); "the only way this call learns which running work item is YOU" |
+| `project` | string | no | namespaces `file_scope` checks (`TestResourceToLock_FileScopeNamespacedByProject`); optional when `work_item_id` is set |
 | `dry_run` | boolean | no | "do not mutate state" |
 
 🔴 **This tool has been measured untrustworthy in both directions**, and that is the
@@ -50,8 +50,9 @@ locks as conflicts after a claim, and it false-negatives on read intent. The
 exactly that, on the grounds that building on this predicate would have produced a
 second untrustworthy one.
 
-**`aihub#510` fixed one HALF of the first direction, and the half it did not fix is
-why the paragraph above still stands.** The four rules that read
+**`aihub#510` fixed one HALF of the first direction — the four declaration rules,
+rule by rule, in `TestDeLockingPredictReportsAdvisoryEntries` — and the half it did
+not fix is why the paragraph above still stands.** The four rules that read
 `declared_resources` — 2, 4, 5 and 6 — no longer report the caller back to itself,
 which `internal/domain/delocking_db_test.go`
 (`TestDeLockingPredictReportsAdvisoryEntries`) drives rule by rule against a second
@@ -144,7 +145,9 @@ the per-type URI scheme rules are stated — the sharing itself by
   (`TestDeLockingPredictReportsAdvisoryEntries`) and the `will_unlock` half in
   `internal/server/dependencies_slug_db_test.go`
   (`TestDependencyEndpointsResolveSlugs`).
-- **`intent: "read"` is honoured on `path`/`document`/`section` only.** On a repo or
+- **`intent: "read"` is honoured on `path`/`document`/`section` only**
+  (`TestReadIntentIsHonouredOnlyOnTheTypesThatDeriveALock` holds both halves of the
+  "only"). On a repo or
   service entry `read` is inert for a different reason since `aihub#416`: those two
   take no lock under any intent, so there is nothing for it to suppress —
   `internal/domain/read_intent_scope_test.go`
@@ -217,11 +220,14 @@ worth recording.
 
 ## Open
 
-- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).** What a
+- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).**
+  <!-- prose-only: because=external-state -->
+  What a
   prediction reports for an advisory entry was that item's open question; the answer
   is in hop 4 above and in the tool description. What that work item deliberately did
   NOT do is exclude a work item's own attempt from rules 2, 4 and 6; `aihub#510`
   (2026-09-09) did that, for those three plus rule 5.
+  <!-- prose-only: because=history -->
 - **The LOCK half of the self-report is still open**, and it is the sharper half.
   Measured 2026-09-09 on one claimed work item re-predicting its own `path`
   declaration: with `dry_run=false` the answer is `severity: "hard_block"` and a
@@ -239,7 +245,9 @@ worth recording.
   declaration rules and left lock-table rules 1 and 3 alone deliberately, because
   rule 1 decides the value the pre-claim gate branches on; aihub#564 carries the
   fix, and this row goes when it lands. -->
-  The two are never both visible, because rule 1 returns on its first hit.
+  The two are never both visible, because rule 1 returns on its first hit —
+  `TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt` holds the
+  short-circuit.
   `aihub#510` (2026-09-09) scoped itself to the declaration rules and left this
   untouched deliberately — rule 1 decides the value `pf-work`'s pre-claim gate
   branches on. It is adjudicated as of 2026-09-10: `aihub#543` ruled that this

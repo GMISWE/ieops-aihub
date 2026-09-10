@@ -76,6 +76,7 @@ is what makes this a *reconcile*, not a request.
   `internal/domain/acquire_locks_reporting_db_test.go`
   (`TestAcquireLocksReportsEveryHeldLock`). So the two lists
   answer different questions, and only their union answers "what am I holding".
+  <!-- prose-only: because=judgement -->
   ⚠️ That population USED to be universal (every attempt declaring a repo held a
   `git_branch` lock) and is now rare. Rare makes reporting it more important, not
   less: a non-`file_scope` key here has no declaration anywhere to explain it from.
@@ -165,7 +166,9 @@ they stand.
 
 ## Open
 
-- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).** The "of
+- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).**
+  <!-- prose-only: because=external-state -->
+  The "of
   every type" clause is kept deliberately rather than narrowed to `file_scope`: the
   server still ENFORCES a `requested_locks` row of any type in the CHECK vocabulary,
   so a description promising only `file_scope` would under-report exactly the

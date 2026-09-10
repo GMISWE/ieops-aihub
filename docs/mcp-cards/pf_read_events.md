@@ -133,6 +133,7 @@ parameter at all.
   `aihub#343`, which fixed the read side in the same change that started emitting the
   lock events this card's hop-0 caveat is about, and which was filed on two
   production readings taken before that fix.
+  <!-- prose-only: because=history -->
   The advice went with the defect — there is nothing left to work around.
 - **`types` is a FILTER rather than a whitelist**, and `aihub#444` renamed it for
   that reason (`aihub#411` §6.2 T2-5) — `internal/mcp/tools_events_vocab_test.go`
@@ -149,7 +150,8 @@ parameter at all.
   `wi_created`, `wi_note`, `correction`, `attempt_paused`, `wi_rhs_changed` among
   them — name nothing any code path emits. That is `aihub#259`'s failure mode
   surviving its own fix: the parameter now reaches the server and filters correctly
-  on a name that cannot exist. The vocabulary is published on
+  on a name that cannot exist — the discrimination between a real and an impossible
+  type is what `TestE2EReadEventsTypesFilterDiscriminates` measures. The vocabulary is published on
   `pf_emit_event`'s `event_type` rather than repeated here, so the two tools share
   one copy of it on the wire: `internal/mcp/tools_events_vocab_test.go` requires that
   copy to name every entry of `domain.EventVocabulary`
@@ -165,6 +167,7 @@ parameter at all.
 - The stream is a **whitelisted semantic record**, not a wire log: the server keeps
   no per-request log, which is why `aihub#412` had to reconstruct the request/response
   chain from transcripts instead.
+  <!-- prose-only: because=judgement -->
 - `cursor` is **validated at the handler and refused with a 400** naming the
   parameter and quoting the value (`aihub#435`) —
   `internal/server/cursor_validation_test.go`

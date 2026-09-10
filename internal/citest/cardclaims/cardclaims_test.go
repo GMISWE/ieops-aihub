@@ -61,6 +61,24 @@ func TestRecogniserAcceptsTheFormItIsWrittenFor(t *testing.T) {
 			"The server 400s a request carrying no `machine_id`."},
 		{"a reader census stated positively",
 			"`last_active_age_seconds` reports an age and no code branches on it."},
+
+		// ── the aihub#591 widening: each of these is a real card sentence the ──
+		// ── recogniser was MEASURED to pass over before 2026-09-10.          ──
+		{"form (b): a behaviour claim whose only backtick is a wi-id — the isolation pair",
+			"`aihub#430` measured the same interleaving on the claim path and found it " +
+				"comes back as a retryable 409 with the row untouched, because that path " +
+				"opens SERIALIZABLE while this one opens READ COMMITTED."},
+		{"form (b): a recorded live defect anchored to wi-ids only — the pf_get_step shape",
+			"The tool description still carries the same clause, which this card records " +
+				"rather than fixes: it is item 17 of `aihub#400` §3.2, and no probe pins it."},
+		{"a placement claim on 'sits'",
+			"The guard sits above the first query in `internal/domain/memory.go` (`Remember`), " +
+				"so it covers `pf_remember`, `pf_save_artifact` and `pf_update_memory` alike."},
+		{"a scope claim on 'governs'",
+			"The strictest tier a patch touches governs the whole `attrs_patch`, in both " +
+				"directions."},
+		{"a wire claim on 'come back'",
+			"They come back on this response as `repo_pins` and on `pf_get_step`."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,14 +108,18 @@ func TestRecogniserRejectsWhatItDeliberatelyDoesNotRecognise(t *testing.T) {
 			want: "names no published token",
 		},
 		{
-			name: "a work-item reference is not a published token",
-			text: "`aihub#510` is the work item that landed the exclusion.",
-			want: "names no published token",
+			// ⚠️ Until aihub#591 the fixture here was "`aihub#510` is the work item
+			// that landed the exclusion." rejected on condition 1. Form (b) now admits
+			// a wi-anchored sentence, so the boundary moved to condition 2: an anchor
+			// with no effect verb is still narration about a work item.
+			name: "a work-item reference with no effect verb stays out",
+			text: "`aihub#510` landed the exclusion for those three rules on 2026-09-09.",
+			want: "carries no effect-or-refusal verb",
 		},
 		{
-			name: "a section reference is not a published token either",
-			text: "`§6.1 T1-2` is the row this policy answers to.",
-			want: "names no published token",
+			name: "a section reference with no effect verb stays out too",
+			text: "See `§6.1 T1-2` for the two-vocabulary split.",
+			want: "carries no effect-or-refusal verb",
 		},
 		{
 			name: "a token with no effect verb",
@@ -209,12 +231,15 @@ func TestMarkerAttachesToTheSentenceItFollows(t *testing.T) {
 }
 
 func TestMarkerOnALineTheWalkDoesNotReadIsAnOrphan(t *testing.T) {
-	// A marker classifies the SENTENCE it sits on. On a heading, a table row or
-	// inside a fence it classifies nothing while looking like it does — which is
-	// the exemption-that-outlives-its-gap shape, arriving on day one.
+	// A marker classifies the SENTENCE it sits on. On a heading or inside a fence
+	// it classifies nothing while looking like it does — which is the
+	// exemption-that-outlives-its-gap shape, arriving on day one.
+	//
+	// ⚠️ A TABLE ROW is deliberately no longer in this list: aihub#591 put rows
+	// into the walk, so a marker in a cell places onto the row's own unit — see
+	// TestTableRowsAreCountableAndWaivable. The orphan population is what is left.
 	for _, prose := range []string{
 		"## hop 0-1 <!-- prose-only: because=history -->\n\nA `path` entry derives a lock.\n",
-		"| `dry_run` | boolean | no | <!-- prose-only: because=history --> |\n",
 		"```go\n<!-- prose-only: because=history -->\n```\n",
 	} {
 		read := ReadCard("fixture.md", prose)
@@ -228,20 +253,35 @@ func TestMarkerOnALineTheWalkDoesNotReadIsAnOrphan(t *testing.T) {
 	}
 }
 
-func TestSplitterReproducesTheSizerOnAMixedSection(t *testing.T) {
-	// The walk drops what the aihub#543 §0.1 population sizer drops — fences,
-	// table rows, headings — because a count here and a count from that command
-	// have to be about the same population, or the spec's numbers stop meaning
-	// anything about this arm.
+func TestWalkPopulationOnAMixedSection(t *testing.T) {
+	// ⚠️ This test used to require the walk to reproduce the aihub#543 §0.1 sizer —
+	// fences, table rows and headings all dropped. aihub#591 deliberately broke
+	// with the sizer on TABLE ROWS: 46 candidate-assertable claims were measured
+	// living in |-prefixed rows across the 45 cards, never split into units, so
+	// they could not be counted or waived. Rows are units now, each hard-bounded
+	// at both edges; fences, headings, SEPARATOR rows and sub-floor fragments stay
+	// outside.
 	prose := "## hop 0-1\n\n" +
 		"| param | type |\n|---|---|\n| `dry_run` | boolean |\n\n" +
 		"```json\n{\"tool\": \"pf_x\"}\n```\n\n" +
 		"A `path` entry derives a `file_scope` lock. `repo` entries derive none.\n" +
 		"tiny\n"
 	sentences := ReadCard("fixture.md", prose).Sentences
-	if len(sentences) != 2 {
-		t.Fatalf("split %d sentence(s), want 2 — the table, the fence, the heading and the "+
-			"sub-floor fragment are all outside the population:\n%+v", len(sentences), sentences)
+	if len(sentences) != 4 {
+		t.Fatalf("split %d sentence(s), want 4 — the header row, the data row and the two "+
+			"prose sentences; the fence, the heading, the separator row and the sub-floor "+
+			"fragment are all outside the population:\n%+v", len(sentences), sentences)
+	}
+	if sentences[0].Text != "| param | type |" || sentences[1].Text != "| `dry_run` | boolean |" {
+		t.Errorf("the two rows did not come through as their own units: %q / %q",
+			sentences[0].Text, sentences[1].Text)
+	}
+	// 🔴 The row boundary is load-bearing in BOTH directions: a row does not end in
+	// sentence punctuation, so without the trailing cut the prose after the table
+	// would silently join the last row and every claim in it would ride that row's
+	// classification.
+	if !strings.HasPrefix(sentences[2].Text, "A `path` entry") {
+		t.Errorf("the prose after the table merged into the last row: %q", sentences[2].Text)
 	}
 }
 
@@ -717,7 +757,8 @@ func TestAnInlineCodeCommentTokenDoesNotOpenAComment(t *testing.T) {
 		"| param | type |\n|---|---|\n\n" +
 		"A `path` entry derives a `file_scope` lock namespaced by project.\n"
 	read := ReadCard("fixture.md", prose)
-	if len(read.Sentences) != 2 {
+	// 3 units since aihub#591: the header ROW is read now, the separator is not.
+	if len(read.Sentences) != 3 {
 		t.Fatalf("an inline-code comment token swallowed the rest of the card: %d unit(s)\n%+v",
 			len(read.Sentences), read.Sentences)
 	}
@@ -823,5 +864,142 @@ func TestScanAllSeesMarkersTheWalkNeverPlaces(t *testing.T) {
 	}
 	if _, unrec := ScanAll("<!-- prose_only: because=history -->", true); len(unrec) != 1 {
 		t.Errorf("ScanAll missed a marker-shaped comment with an unrecognised name")
+	}
+}
+
+// ───────────────────────── the aihub#591 widening ─────────────────────────────
+
+// TestAttributionNeedsAllThreeLegs is form (c)'s calibration set: the known
+// positives that MUST be candidates and the known negatives that MUST NOT be.
+//
+// 🔴 The negatives are the load-bearing half. A gate that over-fires is repaired
+// by the cheapest compliant edit available, and for a prose gate that edit is
+// deleting the gate — so every widening here ships with the sentences it must
+// keep refusing, or the next author widens it the rest of the way.
+func TestAttributionNeedsAllThreeLegs(t *testing.T) {
+	tokenPrev := "- **`session_info.machine_id`**, from `POLYFORGE_MACHINE_ID` or the hostname."
+	plainPrev := "Three things are added at this hop that no parameter names:"
+
+	positives := []struct{ name, text, prev string }{
+		{"the measured miss on the claim card",
+			"The server 400s without it, naming the missing field.", tokenPrev},
+		{"a refusal continued from the token sentence",
+			"The server rejects a second spelling of the same flag.", tokenPrev},
+		{"a rule-outcome verb continued from the token sentence",
+			"A same-size swap counts as a removal; changing only a role does not.",
+			"A write that would drop somebody not named in `expected_removals` is refused."},
+	}
+	for _, tc := range positives {
+		if ok, why := IsCandidateInContext(tc.text, tc.prev); !ok {
+			t.Errorf("%s: IsCandidateInContext rejected %q (prev %q): %s — this is the "+
+				"token-in-previous-sentence class the wave-1 checkpoint measured invisible, "+
+				"and a recogniser that cannot see it reads a card carrying it as clean",
+				tc.name, tc.text, tc.prev, why)
+		}
+	}
+
+	negatives := []struct{ name, text, prev string }{
+		{"no previous sentence at all",
+			"The server 400s without it, naming the missing field.", ""},
+		{"the previous sentence names no token",
+			"The server 400s without it, naming the missing field.", plainPrev},
+		{"narration on a bare copula does not ride the token sentence",
+			"So the count is honest, the row is identifiable, and the caller is told " +
+				"which case it is looking at.", tokenPrev},
+		{"attribution does not chain through a second tokenless sentence",
+			"The server rejects the other spelling too.",
+			"The server 400s without it, naming the missing field."},
+		{"an effect verb outside the refusal-or-response subset is not enough",
+			"It carries the resolved id back to the caller on every path.", tokenPrev},
+	}
+	for _, tc := range negatives {
+		if ok, _ := IsCandidateInContext(tc.text, tc.prev); ok {
+			t.Errorf("%s: IsCandidateInContext accepted %q (prev %q). Attribution takes a "+
+				"token in the sentence BEFORE, no backticks here, and a refusal-or-response "+
+				"verb — drop any leg and plain narration floods the population, which is the "+
+				"overreach the wi that added this class names as the failure to avoid",
+				tc.name, tc.text, tc.prev)
+		}
+	}
+}
+
+// TestAttributionVerbsAreASubsetOfEffectVerbs pins the containment the two lists'
+// comments claim. A member added to the subset without being an effect verb would
+// make form (c) recognise a sentence condition 2 then rejects, and the failure
+// text would name two contradicting reasons for one sentence.
+func TestAttributionVerbsAreASubsetOfEffectVerbs(t *testing.T) {
+	for v := range attributionVerbs {
+		if !effectVerbs[v] {
+			t.Errorf("attributionVerbs holds %q, which effectVerbs does not — form (c) "+
+				"would accept a sentence that fails condition 2", v)
+		}
+	}
+}
+
+// TestTableRowsAreCountableAndWaivable is class (a) of the aihub#591 widening:
+// 46 candidate-assertable claims were measured living in |-prefixed rows, where
+// the old walk could neither count nor waive them and a marker was MARKER_ORPHAN.
+func TestTableRowsAreCountableAndWaivable(t *testing.T) {
+	prose := "## hop 0-1\n\n" +
+		"| param | type | required | meaning |\n" +
+		"|---|---|---|---|\n" +
+		"| `attrs` | object | no | a non-object — including a JSON-encoded string of " +
+		"one — is a 400 | <!-- prose-only: because=judgement -->\n"
+
+	read := ReadCard("fixture.md", prose)
+	if len(read.Orphans) != 0 {
+		t.Fatalf("orphans = %d, want 0 — a marker in a table cell must place, not orphan: %+v",
+			len(read.Orphans), read.Orphans)
+	}
+	if len(read.Sentences) != 2 {
+		t.Fatalf("split %d unit(s), want 2 (header row, data row):\n%+v",
+			len(read.Sentences), read.Sentences)
+	}
+
+	header, row := read.Sentences[0], read.Sentences[1]
+	if ok, _ := IsCandidate(header.Text); ok {
+		t.Errorf("the plain-word header row was called a candidate: %q — headers name no "+
+			"published token, and counting them would pad the population with table syntax",
+			header.Text)
+	}
+	if ok, why := IsCandidate(stripMarkerForTest(row.Text)); !ok {
+		t.Errorf("the data row was not a candidate (%s): %q — this is the hop 0-1 shape the "+
+			"46 measured claims take, and the whole point of reading rows", why, row.Text)
+	}
+	if len(row.Markers) != 1 || row.Markers[0].Because != BecauseJudgement {
+		t.Fatalf("the in-cell marker did not attach to the row: %+v", row.Markers)
+	}
+	class, _ := Classify(row, testIndex)
+	if class != ProseOnly {
+		t.Errorf("the marked row classified as %s, want prose-only — waivable means the "+
+			"classification machinery works on a row exactly as on a sentence", class)
+	}
+}
+
+func stripMarkerForTest(s string) string {
+	clean, _ := cleanLine(s)
+	return clean
+}
+
+// TestClosersEndSentencesAndScopeTheHistoryEjection is class (d)'s second half:
+// the merged-bullet "used to" ejection. Measured on pf_list_dependencies before
+// aihub#591: a bold-terminated historical sentence and the live claim after it
+// were ONE unit, so "used to" ejected the live claim from the population with it.
+func TestClosersEndSentencesAndScopeTheHistoryEjection(t *testing.T) {
+	prose := "## hop 4\n\n" +
+		"- **`Accessible` is a role comparison, and it used to be the wrong one.** " +
+		"It is now computed with `internal/domain/projects.go` (`RoleLevel`).\n"
+	sentences := ReadCard("fixture.md", prose).Sentences
+	if len(sentences) != 2 {
+		t.Fatalf("split %d unit(s), want 2 — `.**` must end the sentence the way `. ` does, "+
+			"or the history clause and the live claim share one classification:\n%+v",
+			len(sentences), sentences)
+	}
+	if ok, _ := IsCandidate(sentences[0].Text); ok {
+		t.Errorf("the past-tense half was called a candidate: %q", sentences[0].Text)
+	}
+	if ok, why := IsCandidate(sentences[1].Text); !ok {
+		t.Errorf("the live half was ejected with the history (%s): %q — that is exactly the "+
+			"merged-bullet ejection this splitter change exists to end", why, sentences[1].Text)
 	}
 }

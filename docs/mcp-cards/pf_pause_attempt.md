@@ -84,7 +84,8 @@ Two details:
   `internal/domain/attempt_paused_terminal_dbgated_test.go`
   (`TestPausedAttemptTerminal_CompleteOnAPausedAttemptChangesNothing`).
 - **A paused attempt retains the right to write timeline events, and that is the
-  contract** (owner ruling ②, 2026-09-10, `aihub#585`; the asymmetry itself was
+  contract** (owner ruling ②, 2026-09-10, `aihub#585`; driven end to end by
+  `TestPausedAttemptStillWritesTimelineEvents`, and the asymmetry itself was
   measured by `aihub#583`, which corrected this bullet's earlier claim that every
   credential-checked call is refused). `pf_emit_event` authenticates through the
   lighter verifier `verifyAttemptCredentialSimple` in `internal/domain/memory.go`,
@@ -101,7 +102,9 @@ Two details:
   retained right is load-bearing rather than residue: pausing hands a wi to a
   human, and the note that says WHY often lands after the pause — the 2026-09-10
   close-out paused `aihub#543` and then wrote its checkpoint note through exactly
-  this path. Unifying the two verifiers is therefore overturning a ruling rather
+  this path.
+  <!-- prose-only: because=judgement -->
+  Unifying the two verifiers is therefore overturning a ruling rather
   than finishing a cleanup, and both arms above go RED against such a diff.
 - So a step loop that pauses cannot corrupt step state — it simply cannot advance —
   but it can walk into a cascade of surprise credential errors if it retries.
@@ -152,7 +155,9 @@ callers have been handed.
 
 ## Open
 
-- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).** The
+- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).**
+  <!-- prose-only: because=external-state -->
+  The
   prediction this bullet made came true — "retained for resume" now usually
   describes an empty set — and the resolution was to say so in the description
   rather than to drop the clause. Dropping it would be wrong in the one case that

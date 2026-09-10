@@ -88,6 +88,7 @@ errors.
   `TestEveryUserIdColumnReferencesTheRowsListUsersReturns`). ⚠️ That arm holds the
   second clause; the first is a ruling about other tools' published prose and is the
   review half's, per `aihub#543` spec §5.3.
+  <!-- prose-only: because=external-state -->
 
 ## Open
 

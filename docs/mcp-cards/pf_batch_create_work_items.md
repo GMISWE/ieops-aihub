@@ -140,7 +140,8 @@ perfect copier called too late protects nothing.
   are a model hand-writing escaped JSON that came out malformed, and a batch is
   where a model hand-writes N of them in one message — so N items can carry the same
   serialisation mistake and the response reports it N times, once per index, rather
-  than as one failed call. Size is never the reason: `attrs` has no length cap,
+  than as one failed call.
+  <!-- prose-only: because=measurement --> Size is never the reason: `attrs` has no length cap,
   which is `internal/domain/work_items.go` (`jsonObjectParamSizeNote`)'s entry for
   it and is asserted against real behaviour rather than restated by
   `internal/domain/json_object_params_test.go`

@@ -117,9 +117,9 @@ the prefix of every request.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
-| `project` | string | no | optional when `ids` or `similar_to` is given; otherwise required |
+| `project` | string | no | optional when `ids` or `similar_to` is given (`TestListWorkItems_IdsWithoutProjectIsAllowedAndScoped`); otherwise required (`TestListWorkItems_NoProjectAndNoIdsStillRejected`) |
 | `ids` | array | no | ids or slugs; a CSV string also accepted; makes `project` optional |
-| `status` | string | no | comma-separated; an array is also accepted |
+| `status` | string | no | comma-separated; an array is also accepted (`TestListWorkItemsCSVArgAcceptsArrayAndString`) |
 | `wi_type` | string | no | filter by type |
 | `kind` | string | no | DEPRECATED alias for `wi_type`; an explicit `wi_type` wins |
 | `priority` | string | no | `urgent\|high\|normal\|low` |
@@ -134,8 +134,8 @@ the prefix of every request.
 | `query` | string | no | semantic search over goal+content |
 | `similar_to` | string | no | document→document recall from a stored vector |
 | `min_similarity` | string | no | opt-in cosine floor, `[0,1]`, 0 means OFF |
-| `limit` | string | no | default 50, ceiling 200; a number is accepted |
-| `cursor` | string | no | carries the value of the column named by `sort` |
+| `limit` | string | no | default 50, ceiling 200 (`TestNormalizeListWorkItemsLimit`); a number is accepted (`TestListWorkItemsForwardsRealSkillCallShapes` sends one) |
+| `cursor` | string | no | carries the value of the column named by `sort` (`TestListWorkItemsNextCursor_UsesSortColumn`) |
 | `sort` | enum | no | `created_at` \| `closed_at` |
 | `order` | enum | no | `asc` \| `desc` |
 
@@ -249,6 +249,7 @@ parameter to have a value probe at all
   (`TestCursor_EveryCursorParamGoesThroughOneReader`) is what keeps this endpoint on
   the shared reader. The `::timestamptz` cast belongs to the domain, and re-printing a
   parsed timestamp here would be a second conversion upstream of the one that counts.
+  <!-- prose-only: because=counterfactual -->
 
 ## hop 5 — what comes back
 

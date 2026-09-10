@@ -67,9 +67,9 @@ operation safe.
 | `visible` | boolean | no | updated visibility |
 | `scenario` | string | no | updated scenario repo URL |
 | `repos` | array | no | updated repository list |
-| `members` | array | no | **REPLACES the whole member list**: `[{user_id, role}]`, role is `viewer\|writer\|maintainer` |
+| `members` | array | no | **REPLACES the whole member list**: `[{user_id, role}]`, role is `viewer\|writer\|maintainer` — replacement-not-merge is what `TestUndeclaredRemovals` computes removals against |
 | `members_version` | integer | no | compare-and-set guard; omitting it overwrites unconditionally |
-| `expected_removals` | array | no | user_ids this write is allowed to REMOVE |
+| `expected_removals` | array | no | user_ids this write is allowed to REMOVE (`TestUndeclaredRemovals`) |
 
 The `members` description says outright that anyone missing from the list you send
 loses access, so adding one person means reading the current list and sending it back
@@ -137,7 +137,8 @@ Two coercions before the body is built, both fixing an opaque 400 two layers awa
   `internal/domain/projects_members_removal_test.go` (`TestUndeclaredRemovals`), which
   is also where a same-size swap counting as a removal and a role change not counting
   are decided. A same-size swap counts as
-  a removal; changing only a role does not.
+  a removal (`TestUndeclaredRemovals`, its `SwapOfEqualSizeIsARemoval` case); changing
+  only a role does not.
 - A stale `members_version` is **409 `CONFLICT_CAS_FAILED`** with
   `details.current_members_version` — reread and retry; held at three hops:
   `internal/domain/projects_members_cas_db_test.go`

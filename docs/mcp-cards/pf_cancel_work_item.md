@@ -26,6 +26,7 @@
 
 Two parameters and a long description, because `aihub#355` changed both what this
 tool does and what it can return.
+<!-- prose-only: because=history -->
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
@@ -113,6 +114,7 @@ overall (`pf_reinforce_memory` is, at 83.33% over 6).
 That is consistent with a tool
 whose legal-state set is narrow and whose refusals are 409s rather than faults: a
 high error rate here is not by itself evidence of a defect.
+<!-- prose-only: because=judgement -->
 
 ## Policy
 
@@ -134,7 +136,9 @@ high error rate here is not by itself evidence of a defect.
 
 ## Open
 
-- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).** What the
+- **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09).**
+  <!-- prose-only: because=external-state -->
+  What the
   de-locking ruling did to this release path is: nothing to the CODE, and one thing
   to what it usually finds. The release is still "every lock still held on this work
   item's behalf, whatever its type"; the derivation that used to guarantee two such

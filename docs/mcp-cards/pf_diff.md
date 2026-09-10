@@ -63,7 +63,8 @@ from scratch, and all three branches are driven by
 `internal/mcp/diff_result_shape_test.go`
 (`TestDiffWithoutTheClaimMapNeedsWorkspaceRootAndProjectAndSlug`).
 
-The universal contract gate counts tools that make at least one HTTP call; this one
+The universal contract gate counts tools that make at least one HTTP call
+(`internal/mcp/universal_contract_gate_test.go`, its `floorToolsOnWire` arm); this one
 is in the minority that does not, and its floor is set below that count for exactly
 that reason.
 
@@ -106,6 +107,7 @@ while `TestNullResponseKeysMeansNoCorpusRecordAtAll` holds the empty-list-agains
 distinction to being live in the card set rather than a fact about JSON.
 The corpus README states that
 explicitly: an empty list means "not measurable this way" rather than "returns nothing".
+<!-- prose-only: because=judgement -->
 
 ## Policy
 

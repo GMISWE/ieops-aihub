@@ -34,11 +34,13 @@ tool is on the response side.
 
 `pf_whoami` calls the same client method to build its `projects` array, so the two
 tools' project views come from one endpoint and differ only in what this process does
-with the result.
+with the result — `internal/mcp/tools_whoami_members_test.go` drives pf_whoami's
+`projects` off a fixture answering `GET /v1/projects`, which is that route observed.
 
 ## hop 4 — what it actually does
 
-- Returns every project **visible to the caller**: public, plus member, plus owned.
+- Returns every project **visible to the caller**: public, plus member, plus owned —
+  the three-way `WHERE` held by `TestListProjectsScopesBySQLAndNeverRanksARole`.
   That is one of the **two** implementation shapes of "scoped to visible projects" in
   this repo; the work-item scoping rule is the other, and they are not
   interchangeable.
@@ -70,6 +72,7 @@ observed top-level key union is just `items` and says nothing about per-item fie
 <!-- prose-only: because=measurement -->
 A prose result contributes no keys, and reading that as "returns nothing" is the trap
 the corpus README warns about.
+<!-- prose-only: because=judgement -->
 
 ## Policy
 

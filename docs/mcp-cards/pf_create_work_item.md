@@ -143,8 +143,8 @@ and derives the split rather than typing the two numbers.
 | `declared_resources` | array | no | `{type, uri, intent}` + optional `repo` |
 | `parent_work_item_id` | string | no | parent wi |
 | `source` | enum | no | how it was filed; a closed vocabulary |
-| `attrs` | object | no | additional attributes; a non-object — including a JSON-encoded string of one — is a 400 |
-| `blocked_by` | array | no | creates real `blocks` edges and sets status=blocked |
+| `attrs` | object | no | additional attributes; a non-object — including a JSON-encoded string of one — is a 400 (`TestStringifiedObjectParamIsRejected`) |
+| `blocked_by` | array | no | creates real `blocks` edges and sets status=blocked (`TestBlockedByIsMachineReadable`) |
 | `content` | string | no | markdown ≤20000 chars; **not echoed back** |
 | `force_create` | boolean | no | bypass the duplicate check |
 | `force_reason` | string | no | required by the server with `force_create` |
@@ -159,7 +159,8 @@ held as real enums against the vocabulary domain enforces by
 ⚠️ The enum is what a caller is OFFERED, not what stops it. `aihub#396` recorded that
 "the SDK validates an enum before the handler runs and cannot validate prose", and
 that reason is **false for this codebase** — corrected here by `aihub#496`
-(2026-09-09). `aihub#463` measured it on go-sdk v1.6.0 (2026-09-08):
+(2026-09-09).
+<!-- prose-only: because=history --> `aihub#463` measured it on go-sdk v1.6.0 (2026-09-08):
 `applySchema -> resolved.Validate` is reached only from the generic
 `AddTool[In, Out]`, while polyforge registers through the untyped
 `(*mcp.Server).AddTool`, whose `callTool` hands the request straight to the handler
@@ -174,7 +175,8 @@ caller — an LLM reading `tools/list`, and any client that validates before sen
 learns the set without spending a round trip.
 <!-- prose-only: because=judgement -->
 The refusal is the server-side Go
-validator, which answers 400 naming the field. Both halves are required; publishing
+validator, which answers 400 naming the field
+(`TestWorkItemFieldValidationAnswersFourHundredNamingTheField`). Both halves are required; publishing
 the enum alone would move a 500 nowhere.
 
 `blocked_by` states what it DOES rather than merely what it is a list of, because
@@ -227,7 +229,7 @@ one, which is a data loss to fix a documentation defect.
   and the requeue by `internal/domain/dependencies_requeue_test.go`
   (`TestDeleteDependency_LastBlockerRemoved_Requeues`). An entry naming no work item
   is rejected **and the wi is NOT created**.
-- **`scenario` is effectively fixed.** The column is CHECKed to
+- **`scenario` is effectively fixed** (`TestCreateAcceptsOneOfTheScenariosTheCheckPermits`). The column is CHECKed to
   `coding|writing|data` and creation rejects everything but `coding`, so the
   parameter accepts a value no row can hold —
   `internal/domain/create_work_item_scenario_and_attrs_test.go`

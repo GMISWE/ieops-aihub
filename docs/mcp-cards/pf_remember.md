@@ -91,12 +91,12 @@ are one set only if nothing closed is published.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `project` | string | yes | project name |
-| `type` | string | yes | full name, e.g. `experience.debug`; must start with `experience.` / `fact.` / `rule.` and carry no `\|`; `methodology.*` refused here; 13 curated names are published as suggestions |
+| `type` | string | yes | full name, e.g. `experience.debug`; must start with `experience.` / `fact.` / `rule.` and carry no `\|`; `methodology.*` refused here; 13 curated names are published as suggestions — prefixes and the no-pipe rule by `TestMemoryTypeCheckMatchesTheGoPrefixes`, the methodology subtraction by `TestPfRememberTypeEnum_NoMethodology` |
 | `content` | string | yes | memory content |
-| `visibility` | string | yes | one of `admin\|private\|project\|public\|team`, built from `domain.MemoryVisibilityList()`; `public` is the anonymous-share tier and the description says what it costs |
+| `visibility` | string | yes | one of `admin\|private\|project\|public\|team`, built from `domain.MemoryVisibilityList()`; `public` is the anonymous-share tier and the description says what it costs (`TestPublishedMemoryVisibilityVocabularyIsTheEnforcedOne`) |
 | `work_item_id` | string | no | associated work item |
 | `base_strength` | number | no | "Initial strength, integer 1-5 (default 3). A fractional value is refused" |
-| `attrs` | object | no | additional attributes; a non-object — including a JSON-encoded string of one — is a 400 |
+| `attrs` | object | no | additional attributes; a non-object — including a JSON-encoded string of one — is a 400 (`TestStringifiedObjectParamIsRejected`) |
 | `expires_at` | string | no | RFC3339 |
 | `dedup_mode` | string | no | deduplication mode |
 | `related_memory_ids` | array | no | related memory ids |
@@ -115,7 +115,6 @@ The `aihub#412` corpus records **13 `pf_remember`
 calls carrying `base_strength`, every value inside the published range and outside the
 enforced one, against 13 `pf_remember` INTERNAL_ERRORs naming
 `memories_base_strength_check`.** That is §6.1 T1-3's owner ruling, now landed.
-<!-- prose-only: because=measurement -->
 
 **The range was only half of it, and `aihub#459` closed the other half on
 2026-09-09: the value must also be a WHOLE NUMBER.** The published type is `number`
@@ -123,7 +122,8 @@ and the column is `SMALLINT`, so `2.5` used to satisfy every guard, get truncate
 toward zero by pgx's int2 codec client-side — no error, so Postgres never saw the
 fraction — and be stored as `2` under a 200. `aihub#475` measured that and made the
 response report the row's own value rather than Go's arithmetic, which made the
-answer honest without making it what the caller asked for. The owner's ruling picked
+answer honest without making it what the caller asked for.
+<!-- prose-only: because=history --> The owner's ruling picked
 refusal over rounding and over widening the column, so the value is now a 400. The
 type stays `number` — that is what JSON carries — which is exactly why the
 description had to say `integer`: with the type unchanged, the published text is the
@@ -153,6 +153,7 @@ really received, alongside the two refusals costing no request at all, by
 (`TestRememberRefusesItsOwnContractBeforeAnyRequest`).
 
 The projection is `aihub#586` (owner ruling 2026-09-10), and it cuts both ways:
+<!-- prose-only: because=external-state -->
 
 - **Every published property is on the wire by construction.** The projection keeps
   exactly what `internal/mcp/tools_memory.go` (`rememberSchema`) publishes, so there
@@ -230,7 +231,9 @@ The remaining risk on this tool is at hops 1 and 4.
   (`TestPfRememberTypeEnum_NoMethodology`), and the fact that this tool is the one
   the subtraction is for by `internal/mcp/tools_memory_type_vocab_test.go`
   (`TestRememberTypeDescriptionIsDerivedNotRetyped`). Both are derived from one
-  another rather than typed twice, and NEITHER refuses anything. The consequence a
+  another rather than typed twice (`TestRememberTypeDescriptionIsDerivedNotRetyped`),
+  and NEITHER refuses anything — the off-list type stays storable end to end
+  (`TestMemoryTypeCheckDB_OffListTypeStaysStorableEndToEnd`). The consequence a
   caller should know: a type outside the 19 stores fine and the UI dropdown will
   never offer it back.
 - **`visibility` published four of the column's five values until `aihub#495`
@@ -309,7 +312,9 @@ The remaining risk on this tool is at hops 1 and 4.
   deployment can open that one too — `internal/domain/render_types_reach_test.go`
   (`TestInitRenderTypesAdmitsATypePfRememberAccepts`) — and the conjunct is where an
   honest published claim stops.
-- **`work_item_id` is validated against `project`.** A work item in another project
+- **`work_item_id` is validated against `project`**
+  (`TestRememberWorkItemRefIsScopedToTheRequestProject`, driven end to end by
+  `TestRememberRejectsCrossProjectWorkItem`). A work item in another project
   is refused rather than silently stored — the predicate lives inside the resolving
   query, so "no such work item" and "not in this project" are one zero-row outcome
   (`internal/domain/memory_work_item_scope_test.go`,
@@ -360,9 +365,10 @@ card does NOT declare and so cannot see a key that stops being sent.
   rejects an out-of-range caller-stated value with a 400 that opens by naming the
   field (`TestValidateBaseStrengthRejectsWhatTheColumnWouldRefuse`). The guard sits
   above the first query in `internal/domain/memory.go`
-  (`Remember`), so it covers `pf_remember`, `pf_save_artifact` and `pf_update_memory`
-  alike — `internal/domain/memory.go` (`UpdateMemory`) builds a `RememberRequest` and
-  goes through the same function.
+  (`Remember`) — `TestRememberRejectsOutOfRangeBaseStrengthBeforeThePool` proves the
+  ordering with a nil pool — so it covers `pf_remember`, `pf_save_artifact` and
+  `pf_update_memory` alike: `internal/domain/memory.go` (`UpdateMemory`) builds a
+  `RememberRequest` and goes through the same function.
 - **§6.1 T1-3 residual (owner ruling 2026-09-09) — LANDED** (`aihub#459`). Refuse a
   non-integral `base_strength`; do not round it in Go, and do not widen the column —
   the refusal wired above the first query by

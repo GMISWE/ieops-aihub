@@ -83,10 +83,12 @@ Three behaviours a caller has to know and cannot see from the schema:
   `step_attempt_id` — the UNIQUE index is in the arm above and the 409 a caller sees
   is `TestHandleUpdateStep_DuplicateStepAttemptIsAConflictNotASilentDrop`. Since
   `aihub#399` a terminal transition without one is refused 400 rather than answered
-  200, so "the step completed but is missing from the
+  200 — `TestValidateTerminalStepArgs_MCP` holds the requirement at the hop that
+  publishes it — so "the step completed but is missing from the
   history" is no longer reachable through the tool — `aihub#390` is where that was
   reachable, and the two records disagreeing is what that work item measured.
-- **`completed_steps: []` and the key being absent are different answers.** Empty
+- **`completed_steps: []` and the key being absent are different answers**
+  (`TestGetStepCompletedStepsDistinguishesEmptyFromAbsent`). Empty
   means nothing has completed —
   `internal/server/routes_step_dbgated_test.go`
   (`TestHandleGetStep_EmptyHistoryIsAnEmptyArrayNeverNull`) reads that off a real
@@ -97,7 +99,8 @@ Three behaviours a caller has to know and cannot see from the schema:
   each shape unchanged instead of filling one in. Absent means the server predates
   `aihub#265`. The description states this because a client that conflates them
   reports "no prior steps" for a work item that has six.
-- **A `failed` entry is not a finished step, and the query does not hide one.**
+- **A `failed` entry is not a finished step, and the query does not hide one**
+  (`TestCompletedStepsQueryHasNoStatusFilter`).
   `completedStepsQuery` (`internal/server/routes_step.go`) reads
   `wi_step_completions` by work item with NO status filter, and that table's
   `status` domain is `{completed, failed}`
@@ -140,11 +143,16 @@ which is where the echo could quietly become the caller's own parameter.
 
 ⚠️ This card used to say those two tools "return nothing for a slug", which was the
 pre-`aihub#343` / pre-`aihub#363` behaviour, and `aihub#422`'s own test header had
-already recorded that line as stale with nothing red anywhere. The **tool
-description** still carries the same clause, which this card records rather than
-fixes: it is item 17 of `aihub#400` §3.2, one of the findings `aihub#450` left behind
-when it landed the other two, and no probe pins it — a probe on today's wording
-arrives red on the day it is corrected.
+already recorded that line as stale with nothing red anywhere. `pf_get_step`'s own **published
+tool description** (`internal/mcp/tools_step.go`) still carries the same stale
+clause, which this card records rather than fixes: it is item 17 of `aihub#400`
+§3.2, one of the findings `aihub#450` left behind when it landed the other two, and
+the fix is owned by `aihub#590` — no probe pins it, because a probe on today's
+wording arrives red on the day that work item corrects it.
+<!-- probe-waiver: kind=known-defect | decided=2026-09-10 | citation=aihub#590 |
+reason=the live defect is a stale clause in pf_get_step's published description;
+a probe pinning today's wording would arrive RED on the day aihub#590 corrects
+it — the same shape as pf_recall's known-defect row for the same defect. -->
 
 ## hop 5 — what comes back
 
@@ -169,12 +177,15 @@ naming one turns it into a promise and `getStepAdvertised` is then where it belo
   as the behaviour, and "description-only" is not a cancellation reason. This tool
   is the worked example: `aihub#265` fixed the description by fixing what the
   endpoint returns, rather than by trimming the promise.
+  <!-- prose-only: because=history -->
 - **§6.2 T2-21** — the `aihub#400` findings about this call were revived rather
   than left cancelled, on the grounds that it is "the one call every resuming agent
-  is told to make first". Landed as `aihub#450`: the `docs/mcp-tools.md` row that
+  is told to make first".
+  <!-- prose-only: because=external-state --> Landed as `aihub#450`: the `docs/mcp-tools.md` row that
   still promised a step graph, and the sentence that told the reader to ignore
   `status`.
 
 ## Open
 
 - Nothing this card can settle. The `§6.4` items do not touch this tool.
+  <!-- prose-only: because=external-state -->

@@ -53,7 +53,9 @@ logger.
 
 ## hop 4 — what it actually does
 
-- Generates a new identifier, stores its bcrypt hash, and returns the plaintext once.
+- Generates a new identifier, stores its bcrypt hash, and returns the plaintext once
+  (`TestRotateIdentifierStoresABcryptHashAndReturnsThePlain` pins all three clauses at
+  the source).
   The old identifier stops working immediately, so rotation is not additive.
 - Authorization is owner or admin, checked server-side; a `maintainer` member cannot
   call it — worth stating rather than assuming, because `owner` is not a rung on the

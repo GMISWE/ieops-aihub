@@ -47,7 +47,8 @@ until `aihub#496` (2026-09-09), while the sibling create path had published the 
 column as a real `enum` since `aihub#463`.
 <!-- prose-only: because=history -->
 One column, two tools, two different
-answers to "what may I send" — and only one of them machine-readable. It is now a
+answers to "what may I send" — and only one of them machine-readable.
+<!-- prose-only: because=judgement --> It is now a
 `propEnum` sourced from `domain.UserGlobalRoleList()`, the same list the validator
 uses, so the published set and the accepted set are one value; the published enum is
 compared against the domain list rather than against a literal by
@@ -127,7 +128,9 @@ end binds only what its request struct names.
   (`TestTheRoleVocabulariesAreDistinctAndOwnerIsInNeither`) and driven value by value
   out of the domain list by `internal/server/update_user_vocab_test.go`
   (`TestUpdateUser_LegalRolesReachTheDB`).
-  Changing it does not touch `projects.members`.
+  Changing it does not touch `projects.members` —
+  `TestUpdateUserWritesTheUsersTableOnly` pins the handler's one UPDATE to the
+  `users` table.
 - An out-of-vocabulary `role` is refused **before** the `UPDATE`, with a `400`
   naming the field, echoing the value and listing the legal set — asserted on the
   structured `details` rather than on a message substring by
@@ -193,6 +196,7 @@ live server and holds the result to `ok`, declared in
   shape by publishing the bound field, `aihub#543` measured that the published field
   had no reader (the second shape), and the `aihub#587` owner ruling resolved it by
   WITHDRAWING — parameter, binding and write sites together, 2026-09-10.
+  <!-- prose-only: because=history -->
 - **§6.2 T2-17** — the global role vocabulary is the third one; naming it in the
   cards is what that ruling asks for.
 

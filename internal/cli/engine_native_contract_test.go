@@ -22,10 +22,12 @@ import (
 //
 // Separately, the newer step templates end a failed step with pf_emit_event(note) +
 // pf_pause_attempt. After that the attempt is no longer `running`, and verifyAttemptCredential
-// (internal/domain/run_attempts.go, step 5) hard-rejects every subsequent credential-checked
-// pf_* call. That is fail-safe, but the auto-mode loop had no branch for it: it ran on into a
-// cascade of surprise credential errors and could retry, burning tokens on calls that cannot
-// succeed. (aihub#182.)
+// (internal/domain/run_attempts.go, step 5) hard-rejects every subsequent call on its own path —
+// pf_update_step, pf_save_artifact, pf_complete_attempt, pf_commit, pf_acquire_locks, pf_wrap.
+// (pf_emit_event's lighter check never reads the status, so a paused attempt may still write
+// notes — a ruled contract, aihub#585, not a gap.) That is fail-safe, but the auto-mode loop had
+// no branch for it: it ran on into a cascade of surprise credential errors and could retry,
+// burning tokens on calls that cannot succeed. (aihub#182.)
 //
 // WHY THESE ASSERTIONS
 //   Tag A — no worktree step file is prescribed anywhere in the injected or deferred engine text.
@@ -160,9 +162,10 @@ func TestEngineNativeContract(t *testing.T) {
 		i := strings.Index(body, pauseTool)
 		if i < 0 {
 			t.Fatalf("%s: the auto-mode loop has no branch naming %s. After a step pauses the "+
-				"attempt every credential-checked pf_* call is hard-rejected "+
-				"(internal/domain/run_attempts.go, verifyAttemptCredential step 5), so a loop "+
-				"without this branch ends in a cascade of surprise errors and may retry.",
+				"attempt, every call that authenticates through verifyAttemptCredential is "+
+				"hard-rejected (internal/domain/run_attempts.go, step 5; pf_emit_event's lighter "+
+				"check still works, by design — aihub#585), so a loop without this branch ends "+
+				"in a cascade of surprise errors and may retry.",
 				rel, pauseTool)
 		}
 		// The branch is one contiguous block; the blank line after it bounds the region, so

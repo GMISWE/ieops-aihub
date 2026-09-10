@@ -107,6 +107,24 @@ via `internal/mcp/tools_coding.go` (`emitCodingEvent`).
 - The event is appended to the work item's timeline and is the **only durable record**
   of several things: a wrap that actually delivered something, a lock release with
   its cause, a note whose credentials are about to be deleted.
+- **A paused attempt may still call this tool, and that is a ruled contract**
+  (owner ruling ②, 2026-09-10, `aihub#585`). The credential check here is
+  `verifyAttemptCredentialSimple` in `internal/domain/memory.go`, which verifies
+  the current attempt id, the claim epoch and the secret hash while never reading
+  the attempt's status — a pause moves none of those three — so the tools that
+  authenticate through the full `verifyAttemptCredential` answer 409
+  `ATTEMPT_PAUSED` after a pause and this one keeps working, which
+  `internal/domain/paused_refusal_scope_test.go`
+  (`TestOnlyOneCredentialVerifierRefusesAPausedAttempt`) holds as a census over
+  the verifier population and
+  `internal/domain/paused_attempt_emit_event_dbgated_test.go`
+  (`TestPausedAttemptStillWritesTimelineEvents`) drives end-to-end: a real pause,
+  then a successful `EmitEvent` on the paused attempt's own credentials, with a
+  wrong secret on the same paused attempt still refused as `ATTEMPT_MISMATCH`.
+  The grant survives a pause because that is when it earns its keep — the pause
+  reason, the checkpoint and the handover note land after the pause that made
+  them necessary; the 2026-09-10 close-out wrote `aihub#543`'s checkpoint note
+  exactly this way.
 - **`payload` must be a JSON object, and the 400 says so in `payload`'s own terms**
   (`aihub#465`). It is published as an object and bound to a bare
   `json.RawMessage`, so a JSON-encoded STRING of an object used to be inserted

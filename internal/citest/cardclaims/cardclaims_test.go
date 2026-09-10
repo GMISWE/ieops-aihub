@@ -1,0 +1,502 @@
+package cardclaims
+
+import (
+	"strings"
+	"testing"
+)
+
+// 🔴 Why this file is as long as it is.
+//
+// K12's ledger MATCHES on a healthy tree — that is the arm working — so every
+// branch that reports a problem is unreachable from the card set, exactly the way
+// openCitationWaivers' four findings are unreachable from a tree with no waivers.
+// An arm whose triggers only run on the day somebody files a marker is an arm
+// nobody finds out is broken until the day they rely on it. The precedent is
+// explicit and it was written after a count that was wrong for its entire life and
+// nothing looked at it (aihub#494).
+//
+// So: every finding is driven here against a fixture, and — the half the
+// clampdisclosure/rowserr shape insists on — so is every sentence the recogniser
+// deliberately does NOT recognise. A recogniser tested only on what it accepts is
+// a recogniser whose population can shrink without a failing test.
+
+// ─────────────────────────────── the recogniser ──────────────────────────────
+
+func TestRecogniserAcceptsTheFormItIsWrittenFor(t *testing.T) {
+	// Every line is a real card sentence, or a minimal reduction of one, that
+	// asserts something a test could hold.
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"published token plus a copula",
+			"`intent: \"read\"` is honoured on `path`/`document`/`section` only."},
+		{"a refusal",
+			"The server refuses a `pf_commit` whose changed files a live `file_scope` lock covers."},
+		{"a negative about an absent wire key",
+			"`task_branches` is NO LONGER SENT by this call."},
+		{"present tense carrying a historical clause",
+			"Locks derived at claim are `file_scope` only since `aihub#416`."},
+		{"a derivation",
+			"A `path` entry derives a `file_scope` lock namespaced by project."},
+		{"a status-code verb",
+			"The server 400s a request carrying no `machine_id`."},
+		{"a reader census stated positively",
+			"`last_active_age_seconds` reports an age and no code branches on it."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, why := IsCandidate(tc.text)
+			if !ok {
+				t.Fatalf("IsCandidate rejected a sentence that asserts something: %q\n"+
+					"reason given: %s\nA sentence the recogniser passes over is a sentence "+
+					"nothing counts, so a false negative here is debt that never appears in "+
+					"the ledger at all.", tc.text, why)
+			}
+		})
+	}
+}
+
+func TestRecogniserRejectsWhatItDeliberatelyDoesNotRecognise(t *testing.T) {
+	// 🔴 The half that matters. Each case names the condition it fails, and each
+	// condition is one the package documents as deliberate — so if somebody
+	// loosens the recogniser to make a card quiet, one of these goes green-to-red.
+	cases := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "an evaluative predicate with no token — the `judgement` shape",
+			text: "The only reliable conflict signal in this system is the return value.",
+			want: "names no published token",
+		},
+		{
+			name: "a work-item reference is not a published token",
+			text: "`aihub#510` is the work item that landed the exclusion.",
+			want: "names no published token",
+		},
+		{
+			name: "a section reference is not a published token either",
+			text: "`§6.1 T1-2` is the row this policy answers to.",
+			want: "names no published token",
+		},
+		{
+			name: "a token with no effect verb",
+			text: "See `internal/domain/conflicts.go` for the shared containment fragments.",
+			want: "carries no effect-or-refusal verb",
+		},
+		{
+			name: "past tense — the `history` shape",
+			text: "Rule 2 used to return a `git_branch` lock, bypassing the mapper.",
+			want: "past tense",
+		},
+		{
+			name: "an effect verb that only appears inside a backticked symbol",
+			text: "The field `willUnlock` and the helper `reportsTo` appear here.",
+			want: "carries no effect-or-refusal verb",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, why := IsCandidate(tc.text)
+			if ok {
+				t.Fatalf("IsCandidate accepted %q, which this package documents as outside "+
+					"the form it recognises. Widening the recogniser is allowed; doing it "+
+					"without moving this fixture is how a population grows unnoticed.", tc.text)
+			}
+			if !strings.Contains(why, tc.want) {
+				t.Errorf("rejected for %q, expected a reason mentioning %q — the reason is "+
+					"what a failure message shows a reader, so it has to name the condition "+
+					"that actually failed", why, tc.want)
+			}
+		})
+	}
+}
+
+func TestCitingAnArmIsNarrowerThanCitingAFile(t *testing.T) {
+	// 🔴 The one that retires debt, so it is the one worth pinning hardest: if
+	// naming ANY .go file counted, a card could clear its ledger by describing
+	// where the implementation lives.
+	cited := []string{
+		"Held by `internal/domain/delocking_db_test.go`.",
+		"Held by `TestReadIntentTakesNoWriteLock`.",
+		"Held by `claim_response_projection_test.go` (`TestClaimRecordsRepoPins`).",
+	}
+	notCited := []string{
+		"The rule's SQL lives in `internal/domain/conflicts.go`.",
+		"Bound by `internal/server/router.go` (`handlePredictConflicts`).",
+		"The registry is `internal/mcp/tools_lifecycle.go`.",
+	}
+	for _, s := range cited {
+		if !CitesAnArm(s) {
+			t.Errorf("CitesAnArm(%q) = false; a sentence naming its arm must retire its own "+
+				"debt, or the only way to close the ledger is a marker", s)
+		}
+	}
+	for _, s := range notCited {
+		if CitesAnArm(s) {
+			t.Errorf("CitesAnArm(%q) = true; that names the implementation, not a gate over "+
+				"it. Counting it as probed would let a card retire debt by saying where the "+
+				"code is, which is the one thing a reader of this ledger must not be able to "+
+				"do.", s)
+		}
+	}
+}
+
+// ───────────────────────────── marker parse + place ──────────────────────────
+
+func TestMarkerAttachesToTheSentenceItFollows(t *testing.T) {
+	prose := "## hop 4\n\n" +
+		"- `repo` entries derive no lock at all.\n" +
+		"  <!-- probe-waiver: kind=pending-implementation | decided=2026-09-10 |\n" +
+		"  citation=aihub#543 | reason=the DB fixture for the derivation table is not\n" +
+		"  written yet, and this is the claim it will hold first. -->\n" +
+		"  A `service` entry answers `info` and carries `last_active_age_seconds`.\n"
+
+	sentences, orphans := ReadCard("fixture.md", prose)
+	if len(orphans) != 0 {
+		t.Fatalf("orphans = %d, want 0: %+v", len(orphans), orphans)
+	}
+	if len(sentences) != 2 {
+		t.Fatalf("split into %d sentence(s), want 2:\n%+v", len(sentences), sentences)
+	}
+	if len(sentences[0].Markers) != 1 {
+		t.Fatalf("the marker attached to sentence %d, not the one it follows. A marker "+
+			"written between two sentences sits at exactly the second one's start offset, "+
+			"so reading it as classifying what it PRECEDES puts every trailing marker on "+
+			"the wrong claim.\nsentence 0 markers=%d, sentence 1 markers=%d",
+			1, len(sentences[0].Markers), len(sentences[1].Markers))
+	}
+	m := sentences[0].Markers[0]
+	if m.Form != MarkerWaiver || m.Kind != KindPendingImplementation ||
+		m.Decided != "2026-09-10" || m.Citation != "aihub#543" {
+		t.Errorf("multi-line marker parsed wrong: %+v — a reason long enough to wrap is the "+
+			"ordinary case, not the exception", m)
+	}
+	if !strings.Contains(m.Reason, "written yet") {
+		t.Errorf("reason lost its tail: %q. `reason` is last and runs to the closing "+
+			"comment, so a reason containing the separator has to survive.", m.Reason)
+	}
+	if len(sentences[1].Markers) != 0 {
+		t.Errorf("the following sentence picked up a marker it does not carry")
+	}
+}
+
+func TestMarkerOnALineTheWalkDoesNotReadIsAnOrphan(t *testing.T) {
+	// A marker classifies the SENTENCE it sits on. On a heading, a table row or
+	// inside a fence it classifies nothing while looking like it does — which is
+	// the exemption-that-outlives-its-gap shape, arriving on day one.
+	for _, prose := range []string{
+		"## hop 0-1 <!-- prose-only: because=history -->\n\nA `path` entry derives a lock.\n",
+		"| `dry_run` | boolean | no | <!-- prose-only: because=history --> |\n",
+		"```go\n<!-- prose-only: because=history -->\n```\n",
+	} {
+		_, orphans := ReadCard("fixture.md", prose)
+		if len(orphans) != 1 {
+			t.Errorf("orphans = %d, want 1 for:\n%s", len(orphans), prose)
+		}
+	}
+	tally := Tally("fixture.md", "## hop 0-1 <!-- prose-only: because=history -->\n\nx\n")
+	if !hasFinding(tally.Problems, "K12 MARKER_ORPHAN") {
+		t.Errorf("Tally did not report MARKER_ORPHAN: %v", tally.Problems)
+	}
+}
+
+func TestSplitterReproducesTheSizerOnAMixedSection(t *testing.T) {
+	// The walk drops what the aihub#543 §0.1 population sizer drops — fences,
+	// table rows, headings — because a count here and a count from that command
+	// have to be about the same population, or the spec's numbers stop meaning
+	// anything about this arm.
+	prose := "## hop 0-1\n\n" +
+		"| param | type |\n|---|---|\n| `dry_run` | boolean |\n\n" +
+		"```json\n{\"tool\": \"pf_x\"}\n```\n\n" +
+		"A `path` entry derives a `file_scope` lock. `repo` entries derive none.\n" +
+		"tiny\n"
+	sentences, _ := ReadCard("fixture.md", prose)
+	if len(sentences) != 2 {
+		t.Fatalf("split %d sentence(s), want 2 — the table, the fence, the heading and the "+
+			"sub-floor fragment are all outside the population:\n%+v", len(sentences), sentences)
+	}
+}
+
+// ──────────────────────────────── the findings ───────────────────────────────
+
+func TestEveryMarkerFieldFindingFires(t *testing.T) {
+	const goodReason = "the DB fixture for this derivation is not written yet, and this " +
+		"is the claim it will hold first."
+	cases := []struct {
+		name   string
+		marker string
+		want   string
+	}{
+		{
+			name: "an unknown kind",
+			marker: "<!-- probe-waiver: kind=someday | decided=2026-09-10 | " +
+				"citation=aihub#543 | reason=" + goodReason + " -->",
+			want: "K12 WAIVER_KIND_UNKNOWN",
+		},
+		{
+			name: "a date-SHAPED string that is not a date",
+			marker: "<!-- probe-waiver: kind=pending-implementation | decided=2026-13-40 | " +
+				"citation=aihub#543 | reason=" + goodReason + " -->",
+			want: "K12 WAIVER_NO_DATE",
+		},
+		{
+			name: "no date at all",
+			marker: "<!-- probe-waiver: kind=pending-implementation | " +
+				"citation=aihub#543 | reason=" + goodReason + " -->",
+			want: "K12 WAIVER_NO_DATE",
+		},
+		{
+			name: "no citation",
+			marker: "<!-- probe-waiver: kind=pending-implementation | decided=2026-09-10 | " +
+				"reason=" + goodReason + " -->",
+			want: "K12 WAIVER_NO_CITATION",
+		},
+		{
+			name: "a kind that waits on somebody, citing nobody",
+			marker: "<!-- probe-waiver: kind=known-defect | decided=2026-09-10 | " +
+				"citation=the file that argues it | reason=" + goodReason + " -->",
+			want: "K12 WAIVER_NO_WORK_ITEM",
+		},
+		{
+			name: "a reason too thin to disagree with",
+			marker: "<!-- probe-waiver: kind=pending-implementation | decided=2026-09-10 | " +
+				"citation=aihub#543 | reason=TODO -->",
+			want: "K12 WAIVER_NO_REASON",
+		},
+		{
+			name: "a waiver wearing a prose-only field",
+			marker: "<!-- probe-waiver: kind=pending-implementation | decided=2026-09-10 | " +
+				"citation=aihub#543 | because=history | reason=" + goodReason + " -->",
+			want: "K12 WAIVER_EXTRA_FIELDS",
+		},
+		{
+			name:   "a because outside the closed vocabulary",
+			marker: "<!-- prose-only: because=it-is-fine -->",
+			want:   "K12 PROSE_ONLY_BECAUSE_UNKNOWN",
+		},
+		{
+			name:   "a prose-only row wearing waiver fields",
+			marker: "<!-- prose-only: because=history | decided=2026-09-10 -->",
+			want:   "K12 PROSE_ONLY_EXTRA_FIELDS",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prose := "A `path` entry derives a `file_scope` lock. " + tc.marker + "\n"
+			tally := Tally("fixture.md", prose)
+			if !hasFinding(tally.Problems, tc.want) {
+				t.Errorf("no %s. A finding that cannot be triggered from a fixture is a "+
+					"finding nobody knows is broken until they rely on it.\ngot: %v",
+					tc.want, tally.Problems)
+			}
+		})
+	}
+}
+
+func TestKindsThatNameNobodyAreAcceptedWithoutAWorkItem(t *testing.T) {
+	// The control for WAIVER_NO_WORK_ITEM above. `structurally-unreachable` names
+	// what is MISSING and `accepted-unprobed` names a RULING; clampdisclosure's own
+	// citations are a file and a commit. Requiring a work item there would be
+	// satisfied by citing an unrelated number, which is worse than not asking.
+	for _, kind := range []WaiverKind{KindStructurallyUnreachable, KindAcceptedUnprobed} {
+		prose := "A `path` entry derives a `file_scope` lock. " +
+			"<!-- probe-waiver: kind=" + string(kind) + " | decided=2026-09-10 | " +
+			"citation=internal/server/queryparam.go, the /ui exemption note | " +
+			"reason=asserting this needs a second machine, which the harness cannot " +
+			"create from a unit test. -->\n"
+		tally := Tally("fixture.md", prose)
+		if hasFinding(tally.Problems, "K12 WAIVER_NO_WORK_ITEM") {
+			t.Errorf("kind %s was required to name a work item: %v", kind, tally.Problems)
+		}
+		if len(tally.Problems) != 0 {
+			t.Errorf("kind %s produced findings on a well-formed marker: %v", kind, tally.Problems)
+		}
+		if tally.Census.Unclassified != 0 {
+			t.Errorf("kind %s left the sentence unclassified", kind)
+		}
+	}
+}
+
+func TestClassificationConflictsFire(t *testing.T) {
+	const good = " | decided=2026-09-10 | citation=aihub#543 | reason=the DB fixture for " +
+		"this derivation is not written yet, and this is the claim it will hold first. -->"
+	cases := []struct {
+		name  string
+		prose string
+		want  string
+	}{
+		{
+			name: "a marker on a sentence the recogniser does not flag",
+			prose: "Rule 2 used to return a `git_branch` lock, bypassing the mapper. " +
+				"<!-- probe-waiver: kind=pending-implementation" + good + "\n",
+			want: "K12 STALE_MARKER",
+		},
+		{
+			name: "waived and probed at once",
+			prose: "A `path` entry derives a `file_scope` lock, held by " +
+				"`TestResourceToLock_FileScopeNamespacedByProject`. " +
+				"<!-- probe-waiver: kind=pending-implementation" + good + "\n",
+			want: "K12 STALE_WAIVER",
+		},
+		{
+			name: "waived and prose-only at once",
+			prose: "A `path` entry derives a `file_scope` lock. " +
+				"<!-- prose-only: because=history --> " +
+				"<!-- probe-waiver: kind=pending-implementation" + good + "\n",
+			want: "K12 MARKER_CONFLICT",
+		},
+		{
+			name: "two markers of the same form on one sentence",
+			prose: "A `path` entry derives a `file_scope` lock. " +
+				"<!-- prose-only: because=history --> <!-- prose-only: because=judgement -->\n",
+			want: "K12 MARKER_DUPLICATE",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tally := Tally("fixture.md", tc.prose)
+			if !hasFinding(tally.Problems, tc.want) {
+				t.Errorf("no %s\ngot: %v", tc.want, tally.Problems)
+			}
+		})
+	}
+}
+
+// ─────────────────────────────── the ledger half ─────────────────────────────
+
+func TestLedgerIsCheckedInBothDirections(t *testing.T) {
+	cards := map[string]bool{"pf_a": true, "pf_b": true}
+	measured := map[string]CardTally{
+		"pf_a": {Census: Census{Candidates: 5, Unclassified: 4, PendingImplementation: 1}},
+	}
+	match := Census{Candidates: 5, Unclassified: 4, PendingImplementation: 1}
+
+	cases := []struct {
+		name   string
+		ledger map[string]Census
+		want   []string
+		absent []string
+	}{
+		{
+			name:   "a scoped card with no row bounds nothing",
+			ledger: map[string]Census{},
+			want:   []string{"K12 LEDGER_MISSING", "Unclassified: 4"},
+		},
+		{
+			name:   "a row for a file that is not a card",
+			ledger: map[string]Census{"pf_a": match, "pf_gone": {}},
+			want:   []string{"K12 LEDGER_ORPHAN"},
+		},
+		{
+			name:   "a row for a card outside the scoped set",
+			ledger: map[string]Census{"pf_a": match, "pf_b": {}},
+			want:   []string{"K12 LEDGER_UNSCOPED"},
+		},
+		{
+			name:   "debt that grew",
+			ledger: map[string]Census{"pf_a": {Candidates: 5, Unclassified: 3, PendingImplementation: 1}},
+			want:   []string{"K12 DEBT_GROWTH", "Unclassified: 4"},
+			absent: []string{"K12 STALE_DEBT"},
+		},
+		{
+			name:   "a gap that closed",
+			ledger: map[string]Census{"pf_a": {Candidates: 5, Unclassified: 9, PendingImplementation: 1}},
+			want:   []string{"K12 STALE_DEBT", "Unclassified: 4"},
+			absent: []string{"K12 DEBT_GROWTH"},
+		},
+		{
+			name:   "a relabel that both rises and falls is reported as growth",
+			ledger: map[string]Census{"pf_a": {Candidates: 5, Unclassified: 4, AcceptedUnprobed: 1}},
+			want:   []string{"K12 DEBT_GROWTH"},
+			absent: []string{"K12 STALE_DEBT"},
+		},
+		{
+			// 🔴 The swap: one assertable sentence added, one previously-unclassified
+			// sentence cited. Every debt column is unchanged, so without Candidates and
+			// Cited on the row this passes green while a new unheld claim lands.
+			name:   "a swap that leaves every debt column alone",
+			ledger: map[string]Census{"pf_a": {Candidates: 4, Cited: 1, Unclassified: 4, PendingImplementation: 1}},
+			want:   []string{"K12 POPULATION_MOVED"},
+			absent: []string{"K12 DEBT_GROWTH", "K12 STALE_DEBT"},
+		},
+		{
+			name:   "an exact match is silent",
+			ledger: map[string]Census{"pf_a": match},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := strings.Join(LedgerProblems(measured, tc.ledger, cards), "\n")
+			if len(tc.want) == 0 && got != "" {
+				t.Fatalf("expected silence, got:\n%s", got)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("missing %q in:\n%s", w, got)
+				}
+			}
+			for _, a := range tc.absent {
+				if strings.Contains(got, a) {
+					t.Errorf("unexpected %q in:\n%s", a, got)
+				}
+			}
+		})
+	}
+}
+
+func TestAnUnbalancedCensusIsReported(t *testing.T) {
+	// The classes are exhaustive by construction, so this can only be reached from a
+	// marker naming a kind outside the closed set — but "can only be reached from"
+	// is exactly the claim that stops being true after somebody adds a class and
+	// forgets a switch arm. The arm costs nothing and the assumption is checked.
+	got := strings.Join(LedgerProblems(
+		map[string]CardTally{"pf_a": {Census: Census{Candidates: 5, Cited: 1}}},
+		map[string]Census{"pf_a": {Candidates: 5, Cited: 1}},
+		map[string]bool{"pf_a": true}), "\n")
+	if !strings.Contains(got, "K12 CENSUS_UNBALANCED") {
+		t.Errorf("a row whose classes do not add up to its population went unreported:\n%s", got)
+	}
+}
+
+func TestEveryFailureCarriesAPasteableLine(t *testing.T) {
+	// 🔴 dbtestcov's rule: a gate that demands a number must print the number it
+	// wants. Without this the repair is a hand re-derivation, and a hand-derived
+	// count is the thing aihub#494 measured wrong for its entire life.
+	measured := Census{Candidates: 6, Unclassified: 4, KnownDefect: 2}
+	got := strings.Join(LedgerProblems(
+		map[string]CardTally{"pf_a": {Census: measured}},
+		map[string]Census{"pf_a": {Candidates: 6, Unclassified: 1, KnownDefect: 2}},
+		map[string]bool{"pf_a": true}), "\n")
+	want := measured.Line("pf_a")
+	if !strings.Contains(got, want) {
+		t.Errorf("the failure does not carry the replacement line.\nwant a line containing:\n%s\ngot:\n%s",
+			want, got)
+	}
+}
+
+func TestEveryWaiverKindDescribesItself(t *testing.T) {
+	// A label with no account of what it claims is a label a reader guesses at,
+	// and the reason the four kinds are not one is that they claim different
+	// things. Same arm clampdisclosure runs over its own three.
+	for _, k := range WaiverKinds {
+		if strings.TrimSpace(k.Describe()) == "" {
+			t.Errorf("WaiverKind %q has no Describe(); failure text would show the label "+
+				"instead of the claim", k)
+		}
+	}
+	if WaiverKind("invented").Describe() != "" {
+		t.Errorf("Describe() answers for a kind outside the closed set")
+	}
+}
+
+func hasFinding(problems []string, want string) bool {
+	for _, p := range problems {
+		if strings.Contains(p, want) {
+			return true
+		}
+	}
+	return false
+}

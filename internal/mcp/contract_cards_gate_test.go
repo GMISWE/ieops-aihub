@@ -146,6 +146,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GMISWE/ieops-aihub/internal/citest/cardclaims"
 	"github.com/GMISWE/ieops-aihub/internal/cli"
 )
 
@@ -1861,6 +1862,383 @@ func TestOpenCitationWaiverCheckIsWiredIntoTheArm(t *testing.T) {
 			"side: openCitationWaivers is empty, so nothing about that shows up as a "+
 			"failing card, and the fixtures in the test above go on passing against a "+
 			"function the arm no longer consults. Restore the call.", armName, callName)
+	}
+}
+
+// ─────────────────────────────────── K12 ─────────────────────────────────────
+//
+// K12 (aihub#543) is the RATCHET. It reads every prose sentence of the ten
+// phase-1 cards, decides by form which of them assert something a test could
+// hold, and refuses new debt: an assertable sentence that neither cites its arm
+// nor carries a named classification marker makes the recorded count rise, and a
+// rise is red.
+//
+// ─── The hole it closes, and why a probe family alone would not ────────────
+//
+// aihub#543 was filed on a measured gap: structural gates cannot check
+// "behaviour = description". The 2026-09-08 wave produced 13 false card
+// statements plus aihub#511's behavioural regression, and the 2026-09-09
+// clear-batch produced 21 more findings — 30+ in two days, every one caught by a
+// human re-reading prose and NONE by a gate. K1-K11 were green through all of
+// them, and not by accident: they compare a generated machine block against the
+// live schema, and a false sentence is prose no machine block covers.
+//
+// The counter-shape is a PROBE — one published claim encoded as an executable
+// assertion — and the tree already holds a dozen. But the cards hold 995 prose
+// sentences (re-derive: the sizer in aihub#543's spec §0.1, which this arm's walk
+// reproduces exactly), of which this recogniser calls 533 candidate-assertable
+// repo-wide. A plan that proposes 500 probes is a plan that does not finish.
+//
+// 🔴 So this arm ships FIRST and ALONE, ahead of every probe wave — the owner's
+// Q7 ruling of 2026-09-10. Built second, a wave lands ~50 probes and the other
+// ~450 claims stay exactly as invisible as they are today, at a cost of two
+// waves. Built first, every one of them is COUNTED from the day it lands, the
+// count only moves in a diff somebody signs, and the probes then draw it down.
+//
+// ─── What "classified" means, and where the classification lives ───────────
+//
+// Q4, ruled 2026-09-10: IN-CARD markers, with only the numbers in Go. A
+// per-sentence ledger in Go would be a partial second copy of the cards' prose,
+// whose only failure mode is disagreeing with the original — the same argument
+// the cards' own README makes for storing description_sha256 rather than the
+// description. An inline HTML comment is the shape K9's cardHistoricalMarker
+// already uses: it cannot occur by accident, it renders as nothing, and it is
+// greppable, which is what lets every classification in the tree be counted.
+//
+//	assertable + probed    the sentence CITES ITS ARM in its own prose — a
+//	                       backticked *_test.go path or Test… symbol, both of
+//	                       which K6 already resolves. No marker, no ledger row.
+//	assertable + unprobed  <!-- probe-waiver: kind=… | decided=… | citation=… |
+//	                       reason=… -->. THIS IS DEBT.
+//	not assertable         <!-- prose-only: because=… -->, from a closed
+//	                       six-value vocabulary.
+//	anything else          UNCLASSIFIED — the grandfathering escape, held at its
+//	                       measured value by the ledger below.
+//
+// ─── Why the ledger is an equality and not a ceiling ───────────────────────
+//
+// maxPendingCards above is a one-sided ceiling and this deliberately is not. The
+// difference is what the number counts. A pending CARD is a file somebody has not
+// written yet, and its count falls as a side effect of unrelated work, so
+// requiring the constant to track it would red the gate on somebody else's diff.
+// These counts move only when somebody edits a card sentence or lands a probe —
+// and a number that moves only on purpose can be required to be exact. That buys
+// the second direction: a gap that CLOSES has to be signed too, because a row
+// left high is a vacated slot the next unclassified sentence takes silently.
+//
+// ⚠️ "K12 is green" is not on its own evidence of anything, which is why this arm
+// prints its floors. An empty k12Cards set is green, and so is a recogniser that
+// has stopped recognising. Read the K12 line, not the exit code — the aihub#493
+// distinction.
+//
+//	GOWORK=off go test ./internal/mcp/ -run TestContractCardClaims -count=1 -v
+//
+// ─── Recorded mutants ──────────────────────────────────────────────────────
+//
+// Every one was applied to this tree on 2026-09-10 and the verdict below is what
+// ran, not what was expected. Both directions are covered, which is the point:
+// one direction is not a gate. A publication-side mutant edits a CARD and leaves
+// the gate alone; an enforcement-side mutant edits the GATE and leaves the cards
+// alone; and M10 is the control that says the arm reacts to the population rather
+// than to any card edit at all.
+//
+//	M1  publication  add an assertable sentence to a scoped card, with neither a
+//	                 cited arm nor a marker            RED  K12 DEBT_GROWTH
+//	M2  publication  delete the one waiver marker in the tree
+//	                                                   RED  K12 DEBT_GROWTH
+//	M6  publication  move that marker onto a table row RED  K12 MARKER_ORPHAN
+//	                                                        + K12 DEBT_GROWTH
+//	M7  publication  file a marker on a card outside the scoped set
+//	                                                   RED  K12 MARKER_OUT_OF_SCOPE
+//	M11 publication  the SWAP — add one assertable sentence AND cite one
+//	                 previously-unclassified sentence, so every debt column is
+//	                 unchanged                         RED  K12 POPULATION_MOVED
+//	M3  ledger       raise one row by one, card untouched
+//	                                                   RED  K12 STALE_DEBT
+//	M4  enforcement  IsCandidate stops recognising     RED  K12 FLOOR_CANDIDATES
+//	                                                        + 10× FLOOR_CARD_CANDIDATES
+//	                                                        + 10× STALE_DEBT
+//	                                                        + 6× STALE_MARKER, and 4
+//	                                                        cardclaims fixtures
+//	M5  enforcement  delete the LedgerProblems call    RED  TestCardClaimsLedger…
+//	M8  enforcement  drop one card from k12Cards       RED  K12 SCOPE_SHRANK
+//	                                                        + K12 LEDGER_UNSCOPED
+//	M9  enforcement  widen CitesAnArm from a *_test.go path to any .go path — the
+//	                 route by which a card could retire debt by naming the
+//	                 implementation                    RED  9× K12 STALE_DEBT, and
+//	                                                        TestCitingAnArmIsNarrower…
+//	M10 CONTROL      reword a sentence the recogniser does not flag
+//	                                                   GREEN — the arm is bound to
+//	                                                        the population, not to
+//	                                                        card churn
+//
+// 🔴 M11 is here because this arm did NOT catch it in an earlier shape. The ledger
+// first recorded only the debt columns, and a change adding one unheld claim while
+// citing another netted to zero across them and passed green — a new false
+// statement landing under cover of somebody else's probe, which is precisely the
+// event the ratchet exists to refuse. Candidates and Cited are on every row for
+// that reason, and this mutant is what says so.
+
+// k12Cards is the population this arm walks: the ten phase-1 tools of aihub#543
+// spec §2.2, in that document's dispatch order.
+//
+// 🔴 Scoped rather than repo-wide, and the set only GROWS. Classifying all 45
+// cards in one change is a 995-sentence big bang; classifying ten is a wave. The
+// set is checked BOTH ways — an entry that is no longer a card is reported
+// (K12 LEDGER_ORPHAN), a card walked with no ledger row is reported
+// (K12 LEDGER_MISSING), and a ledger row for a card outside the set is reported
+// (K12 LEDGER_UNSCOPED) — because an arm that quietly measures less than its
+// title claims is the failure every floor in this file exists to catch.
+//
+// Phase 2 grows it to the full roster, at which point the set is redundant and
+// should be DELETED with K1's roster arm taking over: a stale exemption is a
+// K5-class failure in another place.
+var k12Cards = []string{
+	"pf_predict_conflicts", // measured untrustworthy in both directions
+	"pf_claim_work_item",   // issues the credential every later call authenticates with
+	"pf_force_takeover",    // irreversible, silent to the party it evicts, branched on
+	"pf_get_ready_queue",   // the dispatch input; aihub#387 already withdrew one field
+	"pf_update_step",       // step state and the heartbeat lease
+	"pf_complete_attempt",  // terminal transition
+	"pf_acquire_locks",     // the fourth lock writer
+	"pf_commit",            // reaches the working tree and takes commit-time locks
+	"pf_ship",              // commit + push + PR in one call
+	"pf_wrap",              // terminal success
+}
+
+// k12PhaseOneTools is how many tools aihub#543 spec §2.2 puts in phase 1.
+//
+// It is here so that silently dropping a card from the set above is red rather
+// than a smaller measurement nobody notices — the same reason the floors exist,
+// applied to the population's own definition.
+const k12PhaseOneTools = 10
+
+// k12Ledger records what each scoped card currently holds, per class.
+//
+// 🔴 A column per waiver kind, not one number for "waived". With a single column
+// the cheapest way to make debt disappear would be to relabel a row
+// `accepted-unprobed`; with a column each, a relabel moves a number from one
+// column to another in a diff somebody signs. Candidates and Cited are recorded
+// for the sharper reason cardclaims.Census documents: without them, a change that
+// adds one assertable sentence while citing one previously-unclassified sentence
+// nets to zero and passes green. ProseOnly is carried because declaring a claim
+// unassertable is the cheapest escape of all, and it is NOT debt — this gate
+// cannot check whether a `because` is honest, which is polyforge-scenario#20's
+// reviewer's job.
+//
+// 🟡 Every Unclassified below is GRANDFATHERED, not accepted. Wave 0 classifies
+// exactly one sentence — the aihub#543 §8 Q3 row on pf_predict_conflicts — and
+// freezes the rest where they stand, because the owner's Q2 ruling is to ATTEMPT
+// full coverage: the ratchet is the account book, not a renunciation of it. Probe
+// waves draw these to zero. Only `structurally-unreachable` is a terminal state.
+//
+// ⚠️ Do not adjust a row by arithmetic. Every failure prints the replacement line
+// ready to paste, which is the dbtestcov shape and exists so a number is never
+// re-derived by hand.
+var k12Ledger = map[string]cardclaims.Census{
+	"pf_acquire_locks":     {Candidates: 12, Unclassified: 12},
+	"pf_claim_work_item":   {Candidates: 19, Unclassified: 19},
+	"pf_commit":            {Candidates: 6, Unclassified: 6},
+	"pf_complete_attempt":  {Candidates: 11, Unclassified: 11},
+	"pf_force_takeover":    {Candidates: 14, Unclassified: 14},
+	"pf_get_ready_queue":   {Candidates: 22, Cited: 2, Unclassified: 20},
+	"pf_predict_conflicts": {Candidates: 14, Unclassified: 13, KnownDefect: 1},
+	"pf_ship":              {Candidates: 7, Unclassified: 7},
+	"pf_update_step":       {Candidates: 15, Unclassified: 15},
+	"pf_wrap":              {Candidates: 3, Unclassified: 3},
+}
+
+const (
+	// floorK12Sentences bounds how many card sentences the walk actually split out
+	// of the scoped cards. A walk that splits nothing classifies nothing and every
+	// count below matches a ledger of zeroes, which is the same green as a card set
+	// with no debt. Current value: the K12 line.
+	floorK12Sentences = 180
+	// floorK12Candidates bounds how many of those the recogniser called assertable.
+	// This is the one that fails when the recogniser stops recognising — the
+	// specific way this arm can rot into a live-looking green. Current value: the
+	// K12 line.
+	floorK12Candidates = 90
+)
+
+// TestContractCardClaimsAreClassified is K12.
+//
+// It asserts nothing about whether a card sentence is TRUE — K11's limit, and this
+// arm inherits it. It asserts that every sentence which ASSERTS something is
+// either pointed at the arm that holds it or carried, by name and by date, in a
+// count that cannot move without somebody signing the diff.
+func TestContractCardClaimsAreClassified(t *testing.T) {
+	cards := readCards(t)
+
+	if len(k12Cards) != k12PhaseOneTools {
+		t.Errorf("K12 SCOPE_SHRANK: k12Cards names %d card(s), and aihub#543 §2.2 puts %d "+
+			"tools in phase 1. Dropping one shrinks what this arm measures without shrinking "+
+			"what it claims to measure, which is the same failure the floors below refuse for "+
+			"counts. Add the card back, or move the number and say why in the same diff.",
+			len(k12Cards), k12PhaseOneTools)
+	}
+
+	scoped := make(map[string]bool, len(k12Cards))
+	tallies := make(map[string]cardclaims.CardTally, len(k12Cards))
+	sentences, candidates, cited := 0, 0, 0
+
+	for _, name := range k12Cards {
+		c, ok := cards[name]
+		if !ok {
+			t.Errorf("K12 SCOPE_ORPHAN: k12Cards names %q, which is not a card under %s. A "+
+				"scoped set naming a file that does not exist measures one card fewer than it "+
+				"says it does.", name, cardsDirRel)
+			continue
+		}
+		scoped[name] = true
+		tally := cardclaims.Tally(c.path, c.prose)
+		tallies[name] = tally
+		sentences += tally.Sentences
+		candidates += tally.Census.Candidates
+		cited += tally.Census.Cited
+
+		for _, p := range tally.Problems {
+			t.Error(p)
+		}
+		if tally.Census.Candidates == 0 {
+			t.Errorf("K12 FLOOR_CARD_CANDIDATES: %s produced %d sentence(s) and NO "+
+				"candidate-assertable one. Every phase-1 card describes behaviour, so a zero "+
+				"here is the recogniser failing on this card rather than a card that promises "+
+				"nothing — and a card contributing nothing to the population contributes "+
+				"nothing to the ledger either, silently.", c.path, tally.Sentences)
+		}
+	}
+
+	// The whole ledger half, in both directions. Kept in one call so the wiring
+	// check below has something to look for.
+	for _, p := range cardclaims.LedgerProblems(tallies, k12Ledger, cardNames(cards)) {
+		t.Error(p)
+	}
+
+	if sentences < floorK12Sentences {
+		t.Errorf("K12 FLOOR_SENTENCES: the walk split only %d sentence(s) out of %d scoped "+
+			"card(s), floor is %d — a walk that splits nothing classifies nothing, and a "+
+			"ledger of zeroes then matches perfectly", sentences, len(scoped), floorK12Sentences)
+	}
+	if candidates < floorK12Candidates {
+		t.Errorf("K12 FLOOR_CANDIDATES: the recogniser called only %d sentence(s) "+
+			"candidate-assertable, floor is %d — this is the number that falls when the "+
+			"recogniser stops recognising, and every count below it would then agree with a "+
+			"ledger nobody had to change", candidates, floorK12Candidates)
+	}
+
+	total := cardclaims.Census{}
+	for _, name := range k12Cards {
+		d := tallies[name].Census
+		total.Unclassified += d.Unclassified
+		total.PendingImplementation += d.PendingImplementation
+		total.KnownDefect += d.KnownDefect
+		total.StructurallyUnreachable += d.StructurallyUnreachable
+		total.AcceptedUnprobed += d.AcceptedUnprobed
+		total.ProseOnly += d.ProseOnly
+	}
+	t.Logf("K12: %d sentence(s) read across %d scoped card(s), %d candidate-assertable, "+
+		"%d citing an arm; debt unclassified=%d pending-implementation=%d known-defect=%d "+
+		"structurally-unreachable=%d accepted-unprobed=%d, prose-only=%d",
+		sentences, len(scoped), candidates, cited,
+		total.Unclassified, total.PendingImplementation, total.KnownDefect,
+		total.StructurallyUnreachable, total.AcceptedUnprobed, total.ProseOnly)
+}
+
+// cardNames is the card set as a lookup, so LedgerProblems can tell a row naming a
+// non-card from a row naming a card outside the scoped set. The two are different
+// mistakes and the edit that fixes them differs.
+func cardNames(cards map[string]*card) map[string]bool {
+	out := make(map[string]bool, len(cards))
+	for name := range cards {
+		out[name] = true
+	}
+	return out
+}
+
+// TestCardClaimsMarkersStayInsideTheScopedSet refuses a classification marker on a
+// card K12 does not walk.
+//
+// 🔴 Without it the marker syntax is available on all 45 cards while only ten are
+// counted, so a marker on card 11 would be written, reviewed, and then watched by
+// nothing — an exemption whose gap nobody can see close. Scoping the vocabulary to
+// the scoped set is what keeps "the set only grows" honest: the way to classify
+// card 11 is to add it to k12Cards, in the diff that adds the marker.
+func TestCardClaimsMarkersStayInsideTheScopedSet(t *testing.T) {
+	cards := readCards(t)
+	scoped := make(map[string]bool, len(k12Cards))
+	for _, name := range k12Cards {
+		scoped[name] = true
+	}
+	for name, c := range cards {
+		if scoped[name] {
+			continue
+		}
+		for _, marker := range []string{cardclaims.MarkerWaiver, cardclaims.MarkerProseOnly} {
+			if !strings.Contains(c.body, "<!-- "+marker+":") {
+				continue
+			}
+			t.Errorf("K12 MARKER_OUT_OF_SCOPE: %s carries a %s marker and is not in k12Cards, "+
+				"so nothing counts it and nothing will report it stale. Add the card to "+
+				"k12Cards with its ledger row in the same change — the set is meant to grow — "+
+				"or drop the marker.", c.path, marker)
+		}
+	}
+}
+
+// TestCardClaimsLedgerCheckIsWiredIntoTheArm pins the one thing a fixture table
+// structurally cannot.
+//
+// 🔴 Same shape, same reason, as TestOpenCitationWaiverCheckIsWiredIntoTheArm
+// above. cardclaims.LedgerProblems is exercised against fixtures in its own
+// package, and those fixtures go on passing whether or not K12 still calls it —
+// while a healthy tree's ledger MATCHES, so deleting the call reddens nothing.
+// That is a live-looking green over a disconnected check, and reading the source
+// is the only instrument available for it.
+func TestCardClaimsLedgerCheckIsWiredIntoTheArm(t *testing.T) {
+	const (
+		gateFile = "contract_cards_gate_test.go"
+		armName  = "TestContractCardClaimsAreClassified"
+		callName = "LedgerProblems"
+	)
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, gateFile, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v — this arm cannot report a missing call site from a file it "+
+			"could not read, so this is a failure rather than a skip", gateFile, err)
+	}
+
+	var arm *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == armName {
+			arm = fn
+			break
+		}
+	}
+	if arm == nil {
+		t.Fatalf("%s declares no func %s. If K12's arm was renamed, rename it here too — a "+
+			"wiring check that cannot find the thing it checks reports green forever",
+			gateFile, armName)
+	}
+
+	called := false
+	ast.Inspect(arm.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == callName {
+			called = true
+		}
+		return !called
+	})
+	if !called {
+		t.Errorf("%s does not call cardclaims.%s, so the whole ledger half is dead code from "+
+			"the gate's side: a healthy tree's tallies MATCH the ledger, so nothing about that "+
+			"shows up as a failing card, and the fixtures in the cardclaims package go on "+
+			"passing against a function the arm no longer consults. Restore the call.",
+			armName, callName)
 	}
 }
 

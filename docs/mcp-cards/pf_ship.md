@@ -81,8 +81,10 @@ because the fusion hides a force-push behind a word that does not imply one.
 **Why a separate tool rather than `pf_commit(push=true, open_pr=true)`:** `pr_title`
 and `pr_body` would then be required only when a flag is set, and `objectSchema`
 renders a flat `required` array that cannot say so — the published schema would
-understate its own contract. A tool named "commit" that force-pushes to origin also
-hides exactly the property that most needs to stay visible.
+understate its own contract.
+<!-- prose-only: because=counterfactual -->
+A tool named "commit" that force-pushes to origin also hides exactly the property
+that most needs to stay visible.
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -93,7 +95,12 @@ lock gate `pf_commit` uses passed in as a callback. HTTP calls:
   `internal/server/routes_step.go` (`handleReconcileCommitLocks`).
 - `POST /v1/events` — up to three best-effort events (`commit`, `push`, `pr_opened`),
   so shipping in one call leaves the same timeline as shipping in three. Strictly a
-  superset: this `push` event also carries `sha`, which `pf_push`'s does not.
+  superset: this `push` event also carries `sha`, which `pf_push`'s does not — both
+  payloads are read off requests a fake aihub really received, in
+  `internal/mcp/push_event_shape_test.go`
+  (`TestShipPushEventCarriesTheShaTheStandalonePushOmits`), which requires the
+  containment in both directions because "superset" is equally false when the
+  standalone event catches up.
 
 ## hop 4 — what it actually does
 
@@ -101,24 +108,38 @@ lock gate `pf_commit` uses passed in as a callback. HTTP calls:
   something is staged and skips the push when a PR already covers HEAD, so retrying
   after a failure never duplicates a commit. An existing open PR on the branch is
   pushed to and reused rather than duplicated.
-- **On failure the response is a JSON object, not an error string.** `stage` says
-  which of commit/push/pr failed, and `side_effects` lists what already happened —
-  typically a local commit that was never pushed. That mapping is
-  `internal/mcp/tools_coding.go` (`shipPayload`), a plain function precisely because
-  it is the whole load-bearing contract of the failure path: it stands between "push
-  failed" and a caller that cannot tell whether a commit is sitting unpushed in its
-  worktree.
+- **On failure the response is a JSON object rather than an error string.** `stage`
+  says which of commit/push/pr failed, and `side_effects` lists what already
+  happened — typically a local commit that was never pushed, which
+  `internal/mcp/tools_coding_test.go`
+  (`TestShipPayload_PushFailureReportsTheLocalCommit`) reads back out of the payload
+  and `internal/mcp/commit_gate_wire_test.go`
+  (`TestCommitGateWire_ShipRefusalReportsNothingHappened`) drives through the real
+  tool. That mapping is `internal/mcp/tools_coding.go` (`shipPayload`), a plain
+  function precisely because it is the whole load-bearing contract of the failure
+  path: it stands between "push failed" and a caller that cannot tell whether a
+  commit is sitting unpushed in its worktree, which is why
+  `internal/mcp/tools_coding_test.go`
+  (`TestShipPayload_SuccessCarriesNoFailureFields`) calls it directly instead of
+  going through a git repository.
 - **`lock_gate` has five values here, two more than `pf_commit`'s three**: `covered`,
   `acquired`, `not_run`, `refused`, and `could_not_run` — the last meaning nothing
   was checked, with `lock_gate_detail` saying whether the check itself failed or the
   commit stage died before reaching it. `internal/mcp/tools_coding.go`
   (`commitStageErr`) narrows the failure to the commit stage, because a ship that
   staged nothing and failed at the push also leaves the gate un-invoked and there
-  `not_run` is the true answer.
+  `not_run` is the true answer — the two are driven apart in
+  `internal/mcp/commit_gate_wire_test.go`, by
+  `TestCommitGateWire_ShipThatStagedNothingStillSaysNotRun` and
+  `TestCommitGateWire_ShipThatDiedBeforeTheGateDoesNotDenyStaging`, and the whole
+  classification is tabled in `internal/mcp/tools_coding_test.go`
+  (`TestCommitLockGateReport_TellsTheNotCommittedFactsApart`).
 - `internal/mcp/tools_coding.go` (`shipSideEffects`) reports the retry case
-  explicitly: no new commit was needed, but worktree HEAD is not on origin. Reporting
-  "none" there would be a flat denial of undelivered work at the moment the caller is
-  deciding whether to redo it.
+  explicitly: no new commit was needed, but worktree HEAD is not on origin, which
+  `internal/mcp/tools_coding_test.go`
+  (`TestShipPayload_RetryStillReportsTheUnpushedCommit`) requires of the payload a
+  second failed ship produces. Reporting "none" there would be a flat denial of
+  undelivered work at the moment the caller is deciding whether to redo it.
 
 ## hop 5 — what comes back
 
@@ -136,5 +157,10 @@ is the deliverable" looks like in the data.
 
 - **§6.4 item 6 is CLOSED for this tool as of `aihub#416` (2026-09-09)**: an
   advisory `repo`/`service` declaration derives no lock, and this gate takes
-  `file_scope` locks for the paths a commit contains, so the two never meet. Same
-  answer as `pf_commit`, and for the same reason — the gate is byte-unchanged.
+  `file_scope` locks for the paths a commit contains, so the two never meet — held by
+  `internal/domain/commit_lock_type_test.go`
+  (`TestCommitGateKeysFileScopeAndTheAdvisoryTypesDeriveNothing`), which reads the
+  type out of this card as well as out of `pf_commit`'s and requires the two to
+  agree.
+  Same answer as `pf_commit`, and for the same reason — the gate is byte-unchanged.
+  <!-- prose-only: because=history -->

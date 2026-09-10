@@ -62,6 +62,17 @@ func (s *Server) registerStepTools() {
 	// The data was right and the prose was wrong, so only the prose moved.
 	// Cost: 760 -> 933 B of Description (+173 B, ~43 tokens), resident in
 	// every request's tool list.
+	//
+	// aihub#590 (2026-09-10): the closing advice said "pass THAT to pf_recall /
+	// pf_read_events, which return nothing for a slug" — true before aihub#343
+	// (events) and aihub#363 (recall), false since both landed, and recorded
+	// unfixed by the aihub#385 audit (§3.2 item 17). Both siblings resolve
+	// id-or-slug server-side exactly as this tool does, so the clause steered
+	// every caller into a canonical-id round-trip nothing needs — a denial in
+	// the one hop the model reads defeats a capability as effectively as
+	// removing it. The corrected sentence is pinned by
+	// slug_publication_test.go (TestSlugAcceptanceIsNotDeniedByGetStep), which
+	// also refuses the stale clause by its exact words. Cost: +28 B.
 	s.addTool(&sdkmcp.Tool{
 		Name: "pf_get_step",
 		Description: "Read the AUTHORITATIVE step record for a work item, and the only one. Returns " +
@@ -72,9 +83,9 @@ func (s *Server) registerStepTools() {
 			"in-progress step that way too), so redo that step_id unless a later entry completes it. " +
 			"Never take step progress from a file in the worktree; nothing writes one. completed_steps is [] " +
 			"when nothing has completed, and absent only on a server older than aihub#265 — not the same " +
-			"answer. Takes a slug or a canonical id and echoes the canonical one in work_item_id; pass THAT " +
-			"to pf_recall / pf_read_events, which return nothing for a slug. No step graph here — that is " +
-			"the scenario template.",
+			"answer. Takes a slug or a canonical id and echoes the canonical one in work_item_id; " +
+			"pf_recall / pf_read_events resolve either form too, so the echo is informational, not a " +
+			"required hop. No step graph here — that is the scenario template.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID"),
 		}, []string{"work_item_id"}),

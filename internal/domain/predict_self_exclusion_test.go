@@ -125,3 +125,88 @@ func TestPredictSelfExclusionIsBoundInsideTheSharedContainmentFragments(t *testi
 		}
 	})
 }
+
+// TestPredictLockRuleExclusionIsBoundInTheSharedFragment is the aihub#564 twin
+// of the test above, for the two rules that read the LOCK TABLE — 1 (hard_block)
+// and 3 (file_scope) — which aihub#510 deliberately left alone and aihub#564
+// fixed. Same inheritance argument, one family over: the behavioural arms
+// (TestPredictLockRulesLeaveTheCallerOut) hold the two rules that exist, and
+// this one holds WHERE the predicate lives, so a third lock-table rule written
+// tomorrow inherits the exclusion instead of being free to forget it — and so
+// the exclusion cannot quietly migrate out of the shared fragment into one call
+// site while the other keeps reporting the caller to itself.
+//
+// No database:
+//
+//	GOWORK=off go test ./internal/domain/ -run TestPredictLockRuleExclusion -count=1
+//
+// MUTANTS (run against this tree; the verdict is what happened):
+//
+//	M5L enforcement: drop the fragment from rule 3's query and inline
+//	    ` AND ra.work_item_id <> $1` at the call site instead — behaviour
+//	    UNCHANGED, which is exactly why no behavioural arm can see it
+//	                                         RED  both_lock_rules_use_the_shared_fragment
+//	                                              (1 use, want 2) AND
+//	                                              no_rule_inlines_its_own_lock_holder_exclusion
+//	M6L enforcement: blank the fragment to ` AND ` (a tautology-shaped stub)
+//	                                         RED  the floor
+//	M7L publication: cite this arm in the card under a Test symbol the tree does
+//	    not declare                          RED  K12 ARM_CITATION_UNRESOLVED (this
+//	                                              arm reads the SOURCE, not the card;
+//	                                              the publication side is held by
+//	                                              K12's citation binding)
+func TestPredictLockRuleExclusionIsBoundInTheSharedFragment(t *testing.T) {
+	// The floor first, same reason as the declaration-family test above: every
+	// check below is about this constant's text, and a blanked constant is a
+	// substring of everything.
+	if !strings.Contains(notCallersOwnLockHolderSQL, "ra.work_item_id <>") {
+		t.Fatalf("notCallersOwnLockHolderSQL is %q — it no longer excludes by the lock holder's "+
+			"work item. The checks below count USES of this constant, and counting uses of a "+
+			"predicate that predicates nothing would hold the name while losing the behaviour.",
+			notCallersOwnLockHolderSQL)
+	}
+
+	fn := predictConflictsDecl(t)
+
+	t.Run("both_lock_rules_use_the_shared_fragment", func(t *testing.T) {
+		uses := 0
+		ast.Inspect(fn, func(n ast.Node) bool {
+			if ident, ok := n.(*ast.Ident); ok && ident.Name == "notCallersOwnLockHolderSQL" {
+				uses++
+			}
+			return true
+		})
+		if uses != 2 {
+			t.Errorf("PredictConflicts names notCallersOwnLockHolderSQL %d time(s), want 2 — one per "+
+				"lock-table rule (1 hard_block, 3 file_scope). Fewer means a lock rule reports the "+
+				"caller its own lock back as somebody else's hard_block or soft_block, the aihub#564 "+
+				"defect verbatim; more means a new lock rule exists and neither this count nor the "+
+				"card was told.", uses)
+		}
+	})
+
+	t.Run("no_rule_inlines_its_own_lock_holder_exclusion", func(t *testing.T) {
+		var inlined []string
+		ast.Inspect(fn, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok {
+				return true
+			}
+			// The bare column name appears legitimately in every rule's JOIN
+			// (`wi.id = ra.work_item_id`); what is banned at call sites is the
+			// EXCLUSION — the column under a not-equals, in either SQL spelling.
+			for _, marker := range []string{"ra.work_item_id <>", "ra.work_item_id !="} {
+				if strings.Contains(lit.Value, marker) {
+					inlined = append(inlined, lit.Value)
+				}
+			}
+			return true
+		})
+		if len(inlined) > 0 {
+			t.Errorf("PredictConflicts builds a lock-holder exclusion inside its own query strings: %v. "+
+				"It belongs to notCallersOwnLockHolderSQL for the same reason the containment "+
+				"predicates belong to the shared fragments — an exclusion written at the call site is "+
+				"one the next lock rule copies or does not.", inlined)
+		}
+	})
+}

@@ -188,6 +188,38 @@ const declaresContainmentSQL = notCallersOwnWISQL +
 const declaresIntentContainmentSQL = notCallersOwnWISQL +
 	` AND wi.declared_resources @> jsonb_build_array(jsonb_build_object('type',$2::text,'uri',$3::text,'intent',$4::text))`
 
+// notCallersOwnLockHolderSQL is the LOCK-TABLE twin of notCallersOwnWISQL
+// (aihub#564, symmetric with aihub#510's declaration-family exclusion). Rules 1
+// and 3 read resource_locks, and a claimed work item re-predicting its own
+// declarations found the very locks its own claim took and was handed them back
+// as somebody else's conflict — rule 1 as a hard_block that `return`ed on the
+// first hit (so a self-held row could also SUPPRESS a real foreign conflict
+// later in the payload), rule 3 as the dry_run soft_block naming the caller.
+// Either way the top-level severity rose, and that field is what pf-work's
+// pre-claim gate branches on.
+//
+// The predicate is the claim path's own answer to the same question:
+// foreignLockHolderSQL (aihub#207, run_attempts.go) excludes
+// `ra.work_item_id != $4` precisely so a resume or takeover can re-take locks
+// its own earlier attempt still holds. Predict exists to answer "what will
+// claim do", and rule 1 without this exclusion predicted a collision the claim
+// it fronts for would never raise.
+//
+// ⚠️ The parameter POSITION is appended at the call site (`$4` in rule 1, `$1`
+// in rule 3) rather than baked in here, because rule 1 opens with
+// lockConflictWhereClause, whose $1..$3 are shared with FnClaimWorkItem and
+// FnAcquireLocks and cannot be renumbered for one call site. The value bound at
+// that position must be PredictConflicts's canonicalWIID and nothing else — the
+// same two traps notCallersOwnWISQL documents apply verbatim: a nil *string
+// crosses as NULL and `<> NULL` is NULL, which silences the rule for EVERY row
+// (the aihub#238 fake all-clear, on the hard gate this time); and a raw
+// work_item_id may be a slug, which matches no run_attempts.work_item_id, so
+// the exclusion would silently do nothing for the spelling pf-work's Mode B
+// sends. The empty string is the correct "caller did not identify itself"
+// value: no attempt's work_item_id is empty, so an anonymous create-preview
+// predict keeps its pre-aihub#564 answer exactly.
+const notCallersOwnLockHolderSQL = ` AND ra.work_item_id <> `
+
 // PredictConflicts applies the 5 conflict rules and returns predictions.
 // Implements §23 of the design doc.
 func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConflictsRequest, callerProjectRoles map[string]string) (*PredictConflictsResponse, *AihubError) {
@@ -272,8 +304,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 				FROM resource_locks rl
 				JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
 				JOIN work_items wi ON wi.id = ra.work_item_id
-				WHERE `+lockConflictWhereClause+` AND ra.status='running'`,
-				lockType, probe.Keys, probe.LikePattern,
+				WHERE `+lockConflictWhereClause+` AND ra.status='running'`+notCallersOwnLockHolderSQL+`$4`,
+				lockType, probe.Keys, probe.LikePattern, canonicalWIID,
 			).Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID)
 			if err == nil {
 				result.Predictions = append(result.Predictions, ConflictPrediction{
@@ -376,7 +408,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			JOIN run_attempts ra ON ra.id = rl.owner_attempt_id
 			JOIN work_items wi ON wi.id = ra.work_item_id
 			WHERE rl.resource_type='file_scope'
-			  AND ra.status='running'`,
+			  AND ra.status='running'`+notCallersOwnLockHolderSQL+`$1`,
+			canonicalWIID,
 		)
 		if err == nil {
 			for rows.Next() {

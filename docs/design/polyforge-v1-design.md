@@ -31,6 +31,11 @@
 
 ## Changelog
 
+- v1.27（aihub#564，2026-09-10）：**`pf_predict_conflicts` 读锁表的两条规则（1/3）补上 aihub#510 刻意没动的那一半——不再把调用方自己的锁行报成冲突**。
+  已认领的 wi 重预测自己的 path 声明，拿回的曾是规则 1 的 hard_block「Resource lock is already held by another attempt」——`work_item_slug` 就是它自己；dry_run=true 时规则 1 被跳过，规则 3 报 soft_block 同样点名自己。且规则 1 命中即 `return`，自持锁行还能压掉同一 payload 里真正的外部冲突（修复自带的混合 payload 测项 2026-09-10 在修前实测到）。
+  谓词就是 claim 路径自己的答案：`probeForeignLockHolders` 走 `foreignLockHolderSQL`（aihub#207）本就排除调用方的 wi——resume/takeover 要重取自己上个 attempt 还持有的锁。predict 存在的意义是回答「claim 会怎样」，不排除调用方，预测的就是一场它所预演的 claim 根本不会发生的碰撞。
+  实现同 #510 的形状：谓词放进共享片段（`internal/domain/conflicts.go` (`notCallersOwnLockHolderSQL`)），两个调用点只补参数位（规则 1 绑 $4——它开头的 `lockConflictWhereClause` 的 $1..$3 与 claim/acquire 共享，不能为一个调用点重编号；规则 3 绑 $1）。身份仍取归一化后的 canonicalWIID：空串=匿名，不排除任何行，create-preview 逐字不变；绑原始 `*string` 会让 nil 以 NULL 过线，`ra.work_item_id <> NULL` 为 NULL，规则 1 对**所有**调用方静默——aihub#238 那种假全清，这回落在硬闸上。行为由 `predict_lock_self_exclusion_db_test.go` 双向驱动（自持锁不再报＋外部锁仍 hard_block），结构由 `predict_self_exclusion_test.go` 的锁族分测钉住共享片段。
+  pre-claim 闸读数（修前/修后，2026-09-10 实测）：pf-work 模式 B 原样调用（`work_item_id=<slug>, dry_run=true`）从「soft_block 点名自己」变为「info 零预测」；dry_run=false 重预测从 hard_block 变 info；外部持有者两种调法下仍 hard_block / soft_block。
 - v1.26（aihub#510，2026-09-09）：**`pf_predict_conflicts` 的四条声明 join 规则（2/4/5/6）不再把调用方自己报成冲突**。
   §23 写规则 2/6 时一直写的是「**另一个** status='running' 的 wi」、规则 4/5 写的是「双方」，而 SQL 从来没排除过调用方——所以一个已 claim 的 wi 拿自己的 `declared_resources` 去问，就得到自己那条 soft_block / info，`severity` 也随之抬起来（`pf-work` 的 pre-claim 闸读的正是那个字段）。**这不是设计变更，是实现追上本节原本就写着的那个词**；也不是 v1.25 引入的：规则 2 重写前读的是调用方自己的锁行，重写后 join 的是它自己的声明，同一个缺陷换了个来源。
   实现落在**两条共享 containment 片段内部**（`internal/domain/conflicts.go` (`notCallersOwnWISQL`)）而不是四个调用点上：片段的文档注释早就要求「今后任何问同一个问题的查询必须复用这两个常量」，把谓词放进去，第五条规则就自动继承，放在调用点则可以被漏掉。
@@ -4500,10 +4505,18 @@ type Step struct {
 > aihub#357 那次归一化之后的 canonical id；绑原始参数会对 `pf-work` 模式 B
 > 最常发的那种写法**静默失效**。
 >
-> ⚠️ **只修了声明那一半。**读锁表的规则 1（`hard_block`，命中即 `return`、
-> 压掉后面所有规则）和规则 3（`file_scope`）仍然会把调用方自己的锁行报成
-> 「已被**另一个** attempt 持有」。留着是刻意的：规则 1 答的是「取这把锁会不会
-> 撞」，而它决定的正是 `pf-work` pre-claim 闸分支的那个值。
+> ⚠️ **v1.26 只修了声明那一半，且是刻意的**：规则 1 答的是「取这把锁会不会
+> 撞」，而它决定的正是 `pf-work` pre-claim 闸分支的那个值，所以读锁表的
+> 规则 1（`hard_block`，命中即 `return`、压掉后面所有规则）和规则 3
+> （`file_scope`）当时留着没动，仍把调用方自己的锁行报成「已被**另一个**
+> attempt 持有」——直到 v1.27 把这一半也修掉。
+
+> 🔴 **v1.27（aihub#564）：锁表那一半也修了。**规则 1 和规则 3 不再把调用方
+> 自己的锁行报回去。谓词与 claim 路径的 `foreignLockHolderSQL`（aihub#207）
+> 同款——resume 本来就要重取自己还持有的锁，predict 不排除调用方，预测的
+> 就是一场 claim 不会发生的碰撞。身份仍是归一化后的 canonical id（id 或
+> slug 皆可），不报身份的 create-preview 逐字不变；规则 1 命中即 `return`
+> 的性质不变，变的只是「自己的行不算命中」。
 
 `pf_predict_conflicts` 按以下顺序应用 6 条规则，任一 hard_block 即停止：
 
@@ -4513,6 +4526,8 @@ type Step struct {
   → severity: hard_block
   → 在 claim 原子事务内二次校验（advisory 只是预检）
   → v1.25：只有 path/document/section 能走到这里（repo/service 不派生锁）
+  → v1.27：持有者是调用方自己 wi 的锁行不算命中（aihub#564，谓词同 claim
+    路径的 foreignLockHolderSQL）
 
 规则 2：同 repo 声明（v1.25 重写，不再读锁表）
   declared_resources 含 {type:"repo", uri:"repo:X"} 且
@@ -4528,6 +4543,7 @@ type Step struct {
   declared_resources 的 file:path 与 running attempt 的 file:path glob 重叠
   → intent 均含 write/refactor/delete → severity: soft_block
   → 至少一方是 read → severity: info
+  → v1.27：调用方自己 wi 持有的锁行不算重叠（aihub#564）
 
 规则 4：同 repo refactor
   双方均声明 {uri:"repo:X", intent:"refactor"}

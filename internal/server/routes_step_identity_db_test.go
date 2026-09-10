@@ -412,4 +412,74 @@ func TestHandleUpdateStep_DoubleCompleteIsCaughtByWhicheverGuardApplies(t *testi
 			"and assert the refusal instead. body: %v", body)
 	require.Equal(t, 2, completionsForStep(t, pool, wi.ID, "three"),
 		"and the residual's cost is a duplicate history row, which is exactly what the state predicate will remove")
+
+	// --- D: the OTHER predicate, the one the card publishes ----------------
+	//
+	// aihub#543 probe wave 1. docs/mcp-cards/pf_update_step.md's hop 4 opens
+	// with "**`in_progress`** is guarded by the idle predicate", and the
+	// published tool description sells the same fact as the reason no
+	// pf_get_step round-trip is needed ("in_progress is guarded by the idle
+	// predicate"). Every arm above is about a TERMINAL transition; variant C
+	// even states in its failure text that only current_step_status='idle'
+	// distinguishes its residual — so the predicate was named three times in
+	// this file and driven by nothing.
+	//
+	// A subtest of this function rather than a new top-level one: the manifest
+	// (internal/citest/dbtestcov/gated_tests.txt) and the CI step both already
+	// name this function, and aihub#543 spec §3.3 rule 2 puts a row-level claim
+	// on an already-registered function ahead of a new gated step.
+	//
+	// MUTANTS (applied to this tree; the verdict is what ran):
+	//
+	//	M1 enforcement: drop `AND current_step_status = 'idle'` from startStep's
+	//	   UPDATE predicate                       RED  the second start answers 200
+	//	M2 publication: remove this arm's citation from the card sentence
+	//	                                          RED  K12 — the sentence lands back
+	//	                                               in the debt column and the
+	//	                                               ledger row stops matching
+	t.Run("a second in_progress on an open step is refused by the idle predicate", func(t *testing.T) {
+		saD := domain.NewID("sa")
+		code, body := patchStep(t, pool, wi.ID, uc, map[string]any{
+			"attempt_id": att, "status": "in_progress", "step": "four", "step_attempt_id": saD,
+		})
+		require.Equal(t, http.StatusOK, code, "opening a fresh step must succeed; body: %v", body)
+		require.Equal(t, "in_progress", readStepState(t, pool, wi.ID).Status)
+
+		before, eventsBefore := readStepState(t, pool, wi.ID), len(readRecordedOutcomes(t, pool, att))
+		saD2 := domain.NewID("sa")
+		code, body = patchStep(t, pool, wi.ID, uc, map[string]any{
+			"attempt_id": att, "status": "in_progress", "step": "four", "step_attempt_id": saD2,
+		})
+		require.Equal(t, http.StatusConflict, code,
+			"starting a step that is already open must be refused: the idle predicate is the whole "+
+				"concurrency guard this endpoint publishes in place of a client-supplied version, so a "+
+				"200 here means two agents can each believe they own the step; body: %v", body)
+		require.Equal(t, string(domain.ErrConflictCASFailed), body["code"],
+			"the refusal is the CAS-failed predicate, not an identity or duplicate conflict — those are "+
+				"the terminal guards and they cannot fire on an in_progress request")
+		assert.Contains(t, body["message"], "in_progress",
+			"the message must say what state blocked the start, or the caller cannot tell it from a "+
+				"step-identity refusal")
+		requireNothingCommitted(t, pool, wi.ID, att, before, eventsBefore)
+		require.Equal(t, "in_progress", readStepState(t, pool, wi.ID).Status,
+			"the FIRST attempt still owns the step; a refused start that had nonetheless overwritten "+
+				"current_step_attempt would be the silent takeover this predicate exists to stop")
+		require.Equal(t, 0, historyRowsFor(t, pool, saD2),
+			"an in_progress transition files no history row at all, refused or not")
+
+		// CONTROL: the same call after the step closes is accepted. Without it
+		// the refusal above is satisfied by a predicate that rejects every
+		// in_progress request, which would break every step bracket in the repo.
+		code, body = patchStep(t, pool, wi.ID, uc, map[string]any{
+			"attempt_id": att, "status": "completed", "step": "four", "step_attempt_id": saD,
+			"artifact_summary": "four done",
+		})
+		require.Equal(t, http.StatusOK, code, "closing the step must succeed; body: %v", body)
+		code, body = patchStep(t, pool, wi.ID, uc, map[string]any{
+			"attempt_id": att, "status": "in_progress", "step": "four", "step_attempt_id": saD2,
+		})
+		require.Equal(t, http.StatusOK, code,
+			"CONTROL: once the step is idle again the same request is accepted — the guard is on the "+
+				"STATE, not on the step having been started before; body: %v", body)
+	})
 }

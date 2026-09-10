@@ -18,18 +18,24 @@ package server
 //	AIHUB_TEST_DB=postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable \
 //	go test ./internal/server/ -run 'TestHandleGetStep_|TestHandleUpdateStep_EscalatedSurvives' -v -count=1
 //
-// 🔴 What this file deliberately does NOT cover, recorded here because a finding
-// that lives only in a work-item tracker evaporates (aihub#354). handleUpdateStep
-// reads UpdateStepRequest.Escalated only inside `case "failed":`, so
-// PATCH {"status":"completed","escalated":true} is neither persisted nor
-// rejected — it is silently dropped. routes_step.go argues the opposite for
-// next_step, in this same handler: "every combination that cannot be honoured is
-// REJECTED rather than ignored ... the argument for never accepting a parameter
-// we are not going to act on". Fixing that is a behaviour change to a shipped
-// endpoint and was out of aihub#354's scope, which was gates only. If you are
-// here to change it, the gate to add is a case in
-// TestHandleUpdateStep_EscalatedSurvivesToTheHistoryRead's neighbourhood
-// asserting the 400.
+// 🔴 The hole this file used to leave uncovered, and where it is covered now.
+// handleUpdateStep reads UpdateStepRequest.Escalated only inside
+// `case "failed":`, so PATCH {"status":"completed","escalated":true} is neither
+// persisted nor rejected — it is silently dropped. routes_step.go argues the
+// opposite for next_step, in this same handler: "every combination that cannot
+// be honoured is REJECTED rather than ignored ... the argument for never
+// accepting a parameter we are not going to act on". Fixing that is a behaviour
+// change to a shipped endpoint; it was out of aihub#354's scope, which was gates
+// only, and aihub#398's owner decision was to document the drop rather than
+// change it — which is what docs/mcp-cards/pf_update_step.md publishes.
+// aihub#543 probe wave 1 therefore PINS the documented behaviour, defect and
+// all, in a subtest of
+// TestHandleUpdateStep_EscalatedSurvivesToTheHistoryRead, the same shape
+// TestHandleUpdateStep_DoubleCompleteIsCaughtByWhicheverGuardApplies's variant C
+// uses for its own residual: an unasserted comment about a known hole rots
+// silently. If you are here to make the combination a 400, that arm goes red and
+// its failure message says so — flip it, and correct the card sentence in the
+// same change.
 
 import (
 	"context"
@@ -45,6 +51,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GMISWE/ieops-aihub/internal/domain"
@@ -489,4 +496,128 @@ func TestHandleUpdateStep_EscalatedSurvivesToTheHistoryRead(t *testing.T) {
 	// no step still got "code" here and the two sources were indistinguishable.
 	require.Equal(t, "code", got.CompletedSteps[0].StepID,
 		"the escalated step must be recorded under the step the caller named")
+
+	// aihub#543 probe wave 1. docs/mcp-cards/pf_update_step.md publishes the
+	// other half of these two fields — "`error_type` / `escalated` on a
+	// `completed` call are silently dropped, which is documented rather than
+	// changed because rejecting them is a behaviour change" — and the tool's own
+	// InputSchema says "ignored (not refused) on completed". Everything above is
+	// the FAILED path. Nothing drove the completed one, so both halves of
+	// "ignored" were unheld: a handler that started refusing the combination, or
+	// one that started storing it, would have been the same green.
+	//
+	// A subtest of this function rather than a new gated one, for the reason
+	// aihub#543 spec §3.3 rule 2 gives: this function is already in
+	// internal/citest/dbtestcov/gated_tests.txt and already named by a ci.yml
+	// step, so the claim costs no manifest line.
+	//
+	// MUTANTS (applied to this tree; the verdict is what ran):
+	//
+	//	M3 enforcement: pass req.ErrorType/req.Escalated to
+	//	   insertStepCompletion on the COMPLETED branch instead of nil/false
+	//	                                          RED  both stored-value assertions
+	//	M4 enforcement: refuse a completed call carrying either field (400)
+	//	                                          RED  the 200 assertion
+	//	M5 publication: remove EVERY citation from the card sentence carrying this
+	//	   claim                                  RED  K12
+	//	M5b publication: remove only THIS arm's citation, leaving the two schema
+	//	   arms cited in the same sentence       GREEN measured, and recorded rather
+	//	                                              than hidden: K12 binds the
+	//	                                              SENTENCE, and that sentence is
+	//	                                              three claims in one bullet, so
+	//	                                              no ledger movement isolates
+	//	                                              this conjunct (aihub#543 spec
+	//	                                              §1.3, "one row, several arms")
+	t.Run("error_type and escalated on a completed call are neither stored nor refused", func(t *testing.T) {
+		// Read before the call, not compared against a literal: the parent body
+		// above already escalated a FAILED step, which blocks the work item by
+		// design (spec A-1). The claim here is that the completed call moves this
+		// value not at all, so the fixture's own state is the baseline.
+		wiStatusBefore := readWorkItemStatus(t, pool, wi.ID)
+
+		startSA2, doneSA := domain.NewID("sa"), domain.NewID("sa")
+		c4, rec4 := newStepUpdateRequest(t, wi.ID,
+			`{"status":"in_progress","step":"ship","attempt_id":"`+attemptID+
+				`","step_attempt_id":"`+startSA2+`"}`, uc)
+		require.NoError(t, handleUpdateStep(pool)(c4))
+		require.Equal(t, http.StatusOK, rec4.Code, rec4.Body.String())
+
+		c5, rec5 := newStepUpdateRequest(t, wi.ID,
+			`{"status":"completed","step":"ship","attempt_id":"`+attemptID+`","step_attempt_id":"`+doneSA+
+				`","error_type":"gate_failed","artifact_summary":"shipped","escalated":true}`, uc)
+		require.NoError(t, handleUpdateStep(pool)(c5))
+		require.Equal(t, http.StatusOK, rec5.Code,
+			"the two fields are DOCUMENTED as ignored on a completed call (aihub#398's owner decision, "+
+				"published on the card), so refusing them is a behaviour change and not a fix that can "+
+				"land unannounced. If you came here to make this a 400: that is fine, this arm is the "+
+				"MEASURED RESIDUAL and not a wish — flip it and correct the card sentence in the same "+
+				"change; body: %s", rec5.Body.String())
+
+		var storedErrorType *string
+		var storedEscalated *bool
+		require.NoError(t, pool.QueryRow(context.Background(),
+			`SELECT error_type, escalated FROM wi_step_completions WHERE step_attempt_id=$1`, doneSA).
+			Scan(&storedErrorType, &storedEscalated),
+			"no wi_step_completions row was written for the completion")
+		assert.Nil(t, storedErrorType,
+			"error_type reached the completed row. The card calls it dropped and pf_get_step's "+
+				"completed_steps carries error_type per entry, so a stored value makes a successful step "+
+				"read back as one that failed for the reason the caller happened to pass")
+		if storedEscalated != nil {
+			assert.False(t, *storedEscalated,
+				"escalated reached the completed row, so a finished step reads back as one handed to a "+
+					"human — and on the failed path that same flag blocks the work item")
+		}
+
+		// The work item is untouched too: the escalated-stall block that answers
+		// this flag lives in the failed branch alone, and it is what makes the
+		// difference between "ignored" and "ignored except for one side effect".
+		assert.Equal(t, wiStatusBefore, readWorkItemStatus(t, pool, wi.ID),
+			"a COMPLETED call carrying escalated=true must leave the work item's status exactly as it "+
+				"found it; stalling for triage is the failed branch's spec A-1 behaviour and this is the "+
+				"branch the card calls silent")
+
+		// And the read path agrees, which is where a caller would actually see it.
+		c6, rec6 := newStepGetRequest(t, wi.ID, uc)
+		require.NoError(t, handleGetStep(pool)(c6))
+		require.Equal(t, http.StatusOK, rec6.Code, rec6.Body.String())
+		var after StepState
+		require.NoError(t, json.Unmarshal(rec6.Body.Bytes(), &after))
+		var shipped *CompletedStep
+		for i := range after.CompletedSteps {
+			if after.CompletedSteps[i].StepID == "ship" {
+				shipped = &after.CompletedSteps[i]
+			}
+		}
+		require.NotNil(t, shipped, "the completion is missing from the history; body=%s", rec6.Body.String())
+		assert.Equal(t, "completed", shipped.Status)
+		assert.Nil(t, shipped.ErrorType, "the history read must not report an error_type for a completed step")
+		assert.False(t, shipped.Escalated, "the history read must not report the step as escalated")
+		// FLOOR: the failed row from the parent body is still there carrying both
+		// fields. Without it every assertion above is satisfied by a database
+		// that stores neither field for anybody, which would be the aihub#265
+		// regression rather than the documented drop.
+		var failedRows int
+		require.NoError(t, pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM wi_step_completions
+			  WHERE work_item_id=$1 AND status='failed' AND error_type='gate_failed' AND escalated`,
+			wi.ID).Scan(&failedRows))
+		require.Equal(t, 1, failedRows,
+			"FLOOR: the failed path must still be storing both fields, or 'dropped on completed' is "+
+				"indistinguishable from 'dropped everywhere'")
+	})
+}
+
+// readWorkItemStatus is the work item's own status column, read directly.
+//
+// A helper rather than an inline query because the assertion it feeds is a
+// BEFORE/AFTER comparison: the two reads have to be the same read, or a
+// difference in how they are written is indistinguishable from a difference in
+// what the handler did.
+func readWorkItemStatus(t *testing.T, pool *pgxpool.Pool, wiID string) string {
+	t.Helper()
+	var status string
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT status FROM work_items WHERE id=$1`, wiID).Scan(&status))
+	return status
 }

@@ -164,11 +164,24 @@ worth recording.
   single rule-1 prediction reading `Resource lock is already held by another
   attempt` whose `work_item_slug` **is the caller**; with `dry_run=true` rule 1 is
   skipped and rule 3 answers `soft_block` / `File path overlaps with another running
-  attempt`, again naming the caller. The two are never both visible, because rule 1
-  returns on its first hit. `aihub#510` (2026-09-09) scoped itself to the
-  declaration rules and left this untouched deliberately — rule 1 decides the value
-  `pf-work`'s pre-claim gate branches on. No adjudicated row commits to fixing it,
-  and `aihub#510`'s attrs record no decision on it as of 2026-09-09.
+  attempt`, again naming the caller.
+  <!-- probe-waiver: kind=known-defect | decided=2026-09-10 |
+  citation=aihub#543 attrs.owner_annotations_2026_09_10 Q3 ruling; fix carried by
+  aihub#564 |
+  reason=measured behaviour the repo does not want pinned. The owner ruled Q3 on
+  2026-09-10: a ledger row, no probe, on the clampdisclosure precedent. A probe
+  pinning today's answer would arrive red on the day of the fix, and the cheapest
+  compliant path is then deleting the probe. aihub#510 scoped itself to the
+  declaration rules and left lock-table rules 1 and 3 alone deliberately, because
+  rule 1 decides the value the pre-claim gate branches on; aihub#564 carries the
+  fix, and this row goes when it lands. -->
+  The two are never both visible, because rule 1 returns on its first hit.
+  `aihub#510` (2026-09-09) scoped itself to the declaration rules and left this
+  untouched deliberately — rule 1 decides the value `pf-work`'s pre-claim gate
+  branches on. It is adjudicated as of 2026-09-10: `aihub#543` ruled that this
+  paragraph is carried as a `known-defect` ledger row rather than pinned by a
+  probe, because a probe would arrive red on the day of the fix; `aihub#564`
+  (filed 2026-09-10) carries that fix, and the row goes when it lands.
 - **The read-intent false negative is still unfixed**, and no adjudicated row
   commits to fixing it. `aihub#416` (landed 2026-09-09) and `aihub#510` (2026-09-09)
   both left it alone.

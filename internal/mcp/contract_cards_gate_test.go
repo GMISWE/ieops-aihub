@@ -2169,7 +2169,7 @@ func TestOpenCitationWaiverCheckIsWiredIntoTheArm(t *testing.T) {
 var k12Cards = []string{
 	// Phase 1 — spec §2.2, in that document's dispatch order. Wave 1 drew all ten
 	// to zero unclassified (aihub#566/#567/#568).
-	"pf_predict_conflicts", // measured untrustworthy in both directions
+	"pf_predict_conflicts", // picked when measured untrustworthy in both directions; aihub#510+#564 fixed the self-report one, read-intent still stands
 	"pf_claim_work_item",   // issues the credential every later call authenticates with
 	"pf_force_takeover",    // irreversible, silent to the party it evicts, branched on
 	"pf_get_ready_queue",   // the dispatch input; aihub#387 already withdrew one field
@@ -2293,7 +2293,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_list_work_items":         {Candidates: 22, Cited: 19, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
 	"pf_pause_attempt":           {Candidates: 14, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_pr":                      {Candidates: 13, Cited: 10, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_predict_conflicts":       {Candidates: 20, Cited: 15, Unclassified: 0, PendingImplementation: 0, KnownDefect: 2, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_predict_conflicts":       {Candidates: 22, Cited: 20, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_push":                    {Candidates: 8, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_read_events":             {Candidates: 12, Cited: 12, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_recall":                  {Candidates: 36, Cited: 30, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 6},

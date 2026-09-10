@@ -3009,6 +3009,39 @@ jobs:
           ! grep -q -- '--- SKIP' delocking.log \
             || { echo "::error::an aihub#416 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#564: the lock-table rules (1 and 3) of pf_predict_conflicts leave
+      # the caller's own attempt out, the way aihub#510 taught the declaration
+      # rules to. Eight arms drive both directions: the self-held lock stops
+      # being reported (rule 1 hard_block, rule 3 dry_run soft_block, the
+      # pf-work Mode B gate reading, and the mixed self+foreign payload where
+      # the self-held row used to suppress the real conflict), and the controls
+      # that keep the rule a rule (a foreign holder still hard_blocks and
+      # soft_blocks, an anonymous create-preview keeps its self-report, a
+      # caller spelled as a slug is still excluded). Safe after the 0038 step
+      # above: every fixture here is claimed inside this step and takes
+      # file_scope rows, not the git_branch/deploy_env rows that migration
+      # deletes.
+      - name: aihub#564 predict lock-rule self-exclusion DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestPredictLockRulesLeaveTheCallerOut$' -count=1 -v 2>&1 | tee predict_lock_self_exclusion.log
+          for want in TestPredictLockRulesLeaveTheCallerOut \
+                      TestPredictLockRulesLeaveTheCallerOut/rule1_self_held_lock_is_excluded \
+                      TestPredictLockRulesLeaveTheCallerOut/rule1_foreign_lock_still_hard_blocks \
+                      TestPredictLockRulesLeaveTheCallerOut/rule3_self_held_lock_is_excluded \
+                      TestPredictLockRulesLeaveTheCallerOut/rule1_dry_run_gate_reading \
+                      TestPredictLockRulesLeaveTheCallerOut/rule3_foreign_lock_still_soft_blocks \
+                      TestPredictLockRulesLeaveTheCallerOut/mixed_payload_reports_only_the_foreign_holder \
+                      TestPredictLockRulesLeaveTheCallerOut/anonymous_predict_keeps_the_self_report \
+                      TestPredictLockRulesLeaveTheCallerOut/exclusion_holds_when_identified_by_slug; do
+            grep -q -- "--- PASS: $want" predict_lock_self_exclusion.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#564 lock-rule self-exclusion coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' predict_lock_self_exclusion.log \
+            || { echo "::error::an aihub#564 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       - name: aihub#239 recall cursor tie + supersede carry DB tests
         env:
           AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable

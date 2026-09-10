@@ -34,6 +34,13 @@ type recordedCall struct {
 	Method string
 	Path   string
 	Body   map[string]any
+	// Header is the request's headers, cloned at receipt. Kept because some
+	// contract claims are about what the TRANSPORT adds rather than about what a
+	// tool handler put in the body — pf_claim_work_item's card distinguishes the
+	// `idempotency_key` body parameter from the `Idempotency-Key` header the
+	// client mints, and a recorder that keeps only the body cannot tell the two
+	// apart at all.
+	Header http.Header
 }
 
 // fakeAihub records every request and answers from a per-path handler table.
@@ -53,7 +60,8 @@ func newFakeAihub(t *testing.T) *fakeAihub {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 
 		f.mu.Lock()
-		f.calls = append(f.calls, recordedCall{Method: r.Method, Path: r.URL.Path, Body: body})
+		f.calls = append(f.calls, recordedCall{
+			Method: r.Method, Path: r.URL.Path, Body: body, Header: r.Header.Clone()})
 		h := f.handlers[r.URL.Path]
 		f.mu.Unlock()
 

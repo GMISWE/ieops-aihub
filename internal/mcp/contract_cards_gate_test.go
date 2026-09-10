@@ -2085,7 +2085,7 @@ const k12PhaseOneTools = 10
 // re-derived by hand.
 var k12Ledger = map[string]cardclaims.Census{
 	"pf_acquire_locks":     {Candidates: 14, Cited: 0, Unclassified: 14, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_claim_work_item":   {Candidates: 22, Cited: 0, Unclassified: 22, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_claim_work_item":   {Candidates: 22, Cited: 21, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
 	"pf_commit":            {Candidates: 8, Cited: 0, Unclassified: 8, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_complete_attempt":  {Candidates: 14, Cited: 0, Unclassified: 14, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_force_takeover":    {Candidates: 17, Cited: 0, Unclassified: 17, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},

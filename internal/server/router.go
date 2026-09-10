@@ -53,22 +53,33 @@ func NewRouter(pool *pgxpool.Pool, uiCookieSecret []byte) *echo.Echo {
 
 	// Work items
 	v1.POST("/work_items", handleCreateWorkItem(pool))
-	// aihub#402: registered before `:id`, so the literal "ready" can never reach
-	// handleGetWorkItem. That shadowing is accepted rather than fixed, and the
-	// reason is that it shadows nothing reachable: a work item is addressed by
-	// its canonical id (`wi_` + 8 base62 chars) or by its slug, and slug is a
-	// GENERATED column `project || '#' || seq` (migration 0002). Every slug
-	// therefore contains '#', so no work item can have the slug "ready" and no
-	// id can spell it either. Only a caller probing the literal string reaches
-	// this route by accident, and it answers
+	// aihub#402: the literal "ready" never reaches handleGetWorkItem. That
+	// shadowing is accepted rather than fixed, and the reason is that it shadows
+	// nothing reachable: a work item is addressed by its canonical id (`wi_` + 8
+	// base62 chars) or by its slug, and slug is a GENERATED column
+	// `project || '#' || seq` (migration 0002). Every slug therefore contains
+	// '#', so no work item can have the slug "ready" and no id can spell it
+	// either. Only a caller probing the literal string reaches this route by
+	// accident, and it answers
 	// `400 BAD_REQUEST: project query parameter is required` rather than
 	// anything about a work item.
 	//
+	// 🔴 It is NOT the registration order that keeps the literal out of `:id`,
+	// though this comment said so until aihub#543 measured it: echo prefers a
+	// static segment to a parameter at the same position, so the literal wins
+	// whichever order the two are registered in.
+	// internal/server/ready_route_precedence_test.go
+	// (TestTheLiteralReadyPathResolvesToTheQueueRouteWhicheverOrder) resolves
+	// this path against the real router and registers the pair the other way
+	// round in its third arm to hold exactly that. Keeping the line here is a
+	// convention — it reads in the order a reader expects — and moving it would
+	// change nothing.
+	//
 	// ⚠️ What WOULD make this a real shadow is a future route whose literal
-	// segment is a legal slug or id. Adding one means either moving it after
-	// `:id` or teaching the handler to fall through — the ordering comment below
-	// is not a substitute for checking that.
-	v1.GET("/work_items/ready", handleGetReadyQueue(pool)) // must come before :id
+	// segment is a legal slug or id. Reordering is not the fix for that, because
+	// ordering is not what decides it: the handler would have to fall through, or
+	// the segment would have to stop being a legal id.
+	v1.GET("/work_items/ready", handleGetReadyQueue(pool))
 	v1.GET("/work_items", handleListWorkItems(pool))
 	v1.GET("/work_items/:id", handleGetWorkItem(pool))
 	v1.PATCH("/work_items/:id", handleUpdateWorkItem(pool))

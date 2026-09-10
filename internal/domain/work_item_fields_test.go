@@ -65,7 +65,7 @@ var goValidatedWorkItemColumns = map[string]string{
 	"content":  "validateWorkItemContent (work_item_fields.go)",
 	"scenario": "CreateWorkItem's `req.Scenario != \"coding\"` guard, which is STRICTER than the " +
 		"CHECK ('coding','writing','data') — so no value can reach the constraint and the 500 " +
-		"this policy exists to prevent is unreachable here. It answers 501 NOT_IMPLEMENTED, not " +
+		"this policy exists to prevent is unreachable here. It answers 405 NOT_IMPLEMENTED, not " +
 		"400, and that is deliberate for a reserved-but-unbuilt scenario; whether an " +
 		"OUT-of-vocabulary scenario should be a 400 instead is a separate question and is NOT " +
 		"settled by this entry. This column was surfaced BY this gate, which is what the gate is " +

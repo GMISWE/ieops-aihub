@@ -288,10 +288,28 @@ else:
 # aihub#478's 766 for the output format came out of the same common fragments (-780) plus one
 # native-only duplicate (-77), ending 91 characters BELOW where the native branch started.
 # See internal/cli/skill_router_payload_test.go for the per-file accounting and the gate.
+_missing_resident = []
 for _resident in ("iron-rules.md", "output-format.md"):
     _body = read(os.path.join(skills_dir, "using-polyforge", "fragments", _resident))
     if _body and _body.strip():
         header = header + SEP + _body.strip()
+    else:
+        _missing_resident.append(_resident)
+
+# Header-only guard (aihub#514). In that mode the resident rules ARE the payload: emitting
+# the header with a fragment missing ships text announcing "the resident context a
+# DISPATCHED subagent does not inherit" while carrying none of it — worse than emitting
+# nothing, because the SKILL.md is self-sufficient there and an inert hook simply leaves it
+# authoritative. step-body stays fail-open on these two: the step body is the point of that
+# payload, and going inert would kill the engine to punish a missing rule text (its _common
+# fragments already have their own inert guard above).
+if mode != "step-body" and _missing_resident:
+    sys.stderr.write(
+        "pf-skill-router: header-only payload for %s NOT emitted — resident fragment(s) "
+        "missing or empty: %s. The skill's own SKILL.md remains authoritative.\n"
+        % (base, ", ".join(_missing_resident))
+    )
+    sys.exit(0)
 
 ctx = SEP.join([header] + [t for _, _, _, t in parts])
 
@@ -339,7 +357,11 @@ if len(ctx) > MAX_CHARS:
 
     kept, dropped = list(parts), []
     while True:
-        ctx = SEP.join([header, banner(dropped).rstrip("\n")]
+        # Banner FIRST (aihub#514): the belt-and-braces cut below is ctx[:MAX_CHARS] — a TAIL
+        # cut — so with the banner joined after the header, a header long enough to need the
+        # cut lost exactly the sentence announcing the truncation. Leading with the banner
+        # makes it structurally uncuttable, whatever grows behind it.
+        ctx = SEP.join([banner(dropped).rstrip("\n"), header]
                        + [t for _, _, _, t in kept])
         if len(ctx) <= MAX_CHARS or not kept:
             break

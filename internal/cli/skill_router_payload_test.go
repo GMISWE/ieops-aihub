@@ -829,6 +829,13 @@ func assertDegradesLoudly(t *testing.T, pluginRoot, skill string) {
 		t.Errorf("degraded payload carries no banner — the omission would be silent, which is " +
 			"the failure mode this exists to remove")
 	}
+	// aihub#514 F4: the banner must LEAD the degraded payload. The hook's final safety cut is
+	// ctx[:limit] — a TAIL cut — so a banner joined after the header is the first thing a
+	// too-long header pushes out: exactly the sentence announcing the truncation.
+	if bi, hi := strings.Index(over.ctx, routerBannerMark), strings.Index(over.ctx, "[polyforge router]"); bi >= 0 && hi >= 0 && bi > hi {
+		t.Errorf("the banner sits at offset %d, after the header at offset %d — the tail cut "+
+			"removes the banner before anything else", bi, hi)
+	}
 	// aihub#338 / aihub#478: the degrade loop drops FRAGMENTS. Both header-resident texts live
 	// in the header precisely so that it cannot drop them, and this is the only place that
 	// state can be observed — every other assertion in this file measures a tree that does not
@@ -1002,5 +1009,158 @@ func padFragment(t *testing.T, path string, n int) {
 	body := strings.TrimRight(string(b), "\n") + strings.Repeat("x", n) + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// runRouterRaw drives the hook like renderRouter but does not treat an empty emission as
+// fatal. The aihub#514 header-only guard makes silence a CORRECT outcome — asserting it
+// requires being able to observe it, which renderRouter's fail-silent trap forbids.
+func runRouterRaw(t *testing.T, pluginRoot, skill string, superpowers bool) (string, string) {
+	t.Helper()
+	home, ws := routerFixtureHome(t, superpowers)
+	payload := fmt.Sprintf(
+		`{"tool_name":"Skill","tool_input":{"skill":"polyforge:%s"},"cwd":%q}`, skill, ws)
+	cmd := exec.Command("bash", filepath.Join(pluginRoot, "hooks", "pf-skill-router"))
+	cmd.Stdin = strings.NewReader(payload)
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=" + os.Getenv("PATH"),
+		"CLAUDE_PLUGIN_ROOT=" + mustAbs(t, pluginRoot),
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("hook failed for %s (superpowers=%v): %v (stderr: %s)",
+			skill, superpowers, err, stderr.String())
+	}
+	return string(stdout), stderr.String()
+}
+
+// TestRoutedSkillHook_HeaderOnlyOverBudgetBannerSurvives drives the header-only over-budget
+// path (aihub#514 F4). That mode has no droppable parts[], so the ONLY way the hook can fit
+// an oversized header is the ctx[:limit] tail cut — and with the banner joined after the
+// header, the tail cut removed exactly the sentence announcing "this payload is incomplete",
+// reinstating the silent truncation the degrade block exists to prevent. The shipped header
+// is ~1.7k chars so the path is not reachable on this tree; this fixture is the only thing
+// that drives it (assertDegradesLoudly deliberately skips header-only skills).
+func TestRoutedSkillHook_HeaderOnlyOverBudgetBannerSurvives(t *testing.T) {
+	pluginRoot := pluginRootDir(t)
+	modes := routerModes(t, pluginRoot)
+	drove := 0
+	for _, skill := range routedSkills(t, pluginRoot) {
+		if modes[skill] != routerModeHeaderOnly {
+			continue
+		}
+		drove++
+		t.Run(skill, func(t *testing.T) {
+			overRoot := copyPluginTree(t, pluginRoot)
+			clean := renderRouter(t, overRoot, skill, false)
+			if clean.degraded {
+				t.Fatalf("the copied tree already degrades (%d chars) — this fixture could "+
+					"not be told apart from a real regression", clean.assembledLen)
+			}
+			// Pad a HEADER-resident fragment: in this mode everything is header, so the
+			// degrade loop has nothing to drop and must fall through to the tail cut.
+			pad := routerHarnessHardLimit - clean.assembledLen + 500
+			padFragment(t, filepath.Join(overRoot, ironRulesFragment), pad)
+
+			over := renderRouter(t, overRoot, skill, false)
+			if !over.degraded {
+				t.Fatalf("a %d-char header-only payload did not degrade — the harness would "+
+					"replace it with a ~%d-char preview silently, the aihub#285 failure",
+					clean.assembledLen+pad, routerPreviewChars)
+			}
+			if got := charLen(over.ctx); got == 0 || got > routerHarnessHardLimit {
+				t.Errorf("delivered payload is %d chars — must be non-empty and within %d",
+					got, routerHarnessHardLimit)
+			}
+			bi := strings.Index(over.ctx, routerBannerMark)
+			if bi < 0 {
+				t.Fatalf("no banner in the truncated header-only payload — the truncation is "+
+					"silent, which is aihub#514 F4 verbatim. stderr: %s", over.stderr)
+			}
+			if hi := strings.Index(over.ctx, "[polyforge router]"); hi >= 0 && bi > hi {
+				t.Errorf("banner at offset %d, after the header at offset %d — the tail cut "+
+					"takes the banner before it takes the padding", bi, hi)
+			}
+			// The WHOLE banner, not a prefix of it: both of its load-bearing sentences.
+			for _, want := range []string{
+				"THIS HEADER IS TRUNCATED",
+				"Treat any rule below as possibly incomplete",
+			} {
+				if !strings.Contains(over.ctx, want) {
+					t.Errorf("the delivered payload lost the banner sentence %q — a reader is "+
+						"no longer told what it is holding", want)
+				}
+			}
+			// And it must tell the truth for this mode: nothing was dropped, so it must not
+			// claim fragments were, nor point at a deferred tier this payload never had.
+			if strings.Contains(over.ctx, "dropped fragment(s)") {
+				t.Errorf("the header-only banner claims fragments were dropped; this mode has none")
+			}
+			if !strings.Contains(over.stderr, "over the 10000-char harness limit") {
+				t.Errorf("nothing usable on stderr for the over-budget header: %q", over.stderr)
+			}
+		})
+	}
+	if drove == 0 {
+		t.Error("no header-only skill in TARGETS — this test drove nothing; if the mode was " +
+			"removed, remove the test with it rather than leaving it green by vacancy")
+	}
+}
+
+// TestRoutedSkillHook_HeaderOnlyEmptyFragmentGuard is aihub#514 F5. In header-only mode the
+// resident rules ARE the payload: a render with iron-rules.md or output-format.md empty still
+// announced "the resident context a DISPATCHED subagent does not inherit" while carrying no
+// rules at all. The guard makes that render inert instead — the SKILL.md is self-sufficient
+// in this mode, so silence leaves it authoritative, while a lying payload claims coverage
+// nothing provides. step-body must stay fail-open on the same fixture: its payload is the
+// step body, and going inert there would kill the engine to punish a missing rule text.
+func TestRoutedSkillHook_HeaderOnlyEmptyFragmentGuard(t *testing.T) {
+	pluginRoot := pluginRootDir(t)
+	modes := routerModes(t, pluginRoot)
+	cases := []struct {
+		name   string
+		gutted []string
+	}{
+		{"iron-rules-empty", []string{ironRulesFragment}},
+		{"output-format-empty", []string{outputFormatFragment}},
+		{"both-empty", []string{ironRulesFragment, outputFormatFragment}},
+	}
+	for _, skill := range routedSkills(t, pluginRoot) {
+		headerOnly := modes[skill] == routerModeHeaderOnly
+		for _, tc := range cases {
+			t.Run(skill+"/"+tc.name, func(t *testing.T) {
+				root := copyPluginTree(t, pluginRoot)
+				// Control first: the COPY, before gutting, emits. Without this, the silence
+				// asserted below could be the copy failing rather than the guard firing.
+				if out, stderr := runRouterRaw(t, root, skill, false); strings.TrimSpace(out) == "" {
+					t.Fatalf("the copied tree emits nothing before gutting (stderr: %s) — "+
+						"fixture broken, nothing below means anything", stderr)
+				}
+				for _, rel := range tc.gutted {
+					if err := os.WriteFile(filepath.Join(root, rel), []byte("  \n"), 0o644); err != nil {
+						t.Fatalf("gut %s: %v", rel, err)
+					}
+				}
+				out, stderr := runRouterRaw(t, root, skill, false)
+				if headerOnly {
+					if strings.TrimSpace(out) != "" {
+						t.Errorf("header-only %s still emitted %d bytes with %v empty — a "+
+							"payload claiming to carry the resident rules while carrying none",
+							skill, len(out), tc.gutted)
+					}
+					if !strings.Contains(stderr, "NOT emitted") {
+						t.Errorf("the guard fired silently — stderr must say why, or the "+
+							"missing payload is undiagnosable outside the model: %q", stderr)
+					}
+				} else if strings.TrimSpace(out) == "" {
+					// The guard's scope is the mode whose payload is nothing but rules.
+					t.Errorf("step-body %s went inert on an empty resident fragment — the "+
+						"guard over-fired and killed the engine payload", skill)
+				}
+			})
+		}
 	}
 }

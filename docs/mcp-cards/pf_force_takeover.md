@@ -40,20 +40,11 @@ off a live session and compared with the quote below by
 | `reason` | string | yes | recorded on the timeline |
 
 "No flag displaces another work item's lock, **except in a narrow commit-window
-race**" lives here and only here, and only the `pf_claim_work_item` half of that is
-measured.
-<!-- probe-waiver: kind=pending-implementation | decided=2026-09-10 |
-citation=aihub#543 attrs.owner_annotations_2026_09_10 Q5 ruling, which defers the
-cross-card uniqueness census to phase 1b |
-reason=the "lives here" half is held by
-internal/mcp/force_takeover_published_word_test.go's
-TestPublishedTakeoverRaceQualifierIsAbsentFromTheClaimFlag, which requires the
-clause on this tool's live description and absent from the one other place it has
-ever lived, pf_claim_work_item's force_takeover flag. "and only here" is a claim
-about every published description in the repo, and no arm quantifies over that
-population; the owner deferred that census to phase 1b rather than have a probe
-slice build it, so this row is the debt the deferral leaves. It goes when the census
-lands. -->
+race**" lives here and only here — the claim-flag half of that held by the arm
+above, and the whole-surface half by
+`TestTakeoverRaceQualifierIsUniqueAcrossThePublishedSurface`, the phase-1b census
+that sweeps every description and schema string the live toolset publishes and
+requires exactly one carrier: this tool's description.
 `aihub#430` measured the same interleaving on the
 claim path and found it comes back as a retryable 409 with the row untouched,
 because that path opens SERIALIZABLE while this one opens READ COMMITTED — the pair

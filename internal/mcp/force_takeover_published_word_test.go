@@ -26,11 +26,14 @@ package mcp_test
 //
 // ⚠️ SCOPE. This arm holds ONE HALF of "and only here": the qualifier is on this
 // tool's description and is absent from the one other place it used to live
-// (aihub#430 deleted it from pf_claim_work_item's `force_takeover` prop). A
-// repo-wide cross-card uniqueness census is a different instrument and is
-// deferred to phase 1b by the aihub#543 §8 Q5 ruling; it is named here rather
-// than left implicit, because an arm that quietly measures less than its title
-// claims is the failure the floors in this package exist to refuse.
+// (aihub#430 deleted it from pf_claim_work_item's `force_takeover` prop). The
+// other half — no THIRD published string carries it — is a census over every
+// description and schema string the toolset publishes, deferred to phase 1b by
+// the aihub#543 §8 Q5 ruling and landed there:
+// takeover_qualifier_uniqueness_census_test.go's
+// TestTakeoverRaceQualifierIsUniqueAcrossThePublishedSurface. The split is named
+// here rather than left implicit, because an arm that quietly measures less than
+// its title claims is the failure the floors in this package exist to refuse.
 //
 // No database:
 //

@@ -33,8 +33,14 @@ Two parameters, both required. "Revoke an API key (**admin only**)."
 
 `user_id` names the key's **owner** — the same identity `pf_create_api_key`'s does,
 and one of the three §6.2 T2-18 requires every `user_id`-shaped parameter to
-disambiguate. `key_id` is the id `pf_create_api_key` returned; the plaintext is never
-accepted here, which is why revocation does not need the secret.
+disambiguate, which `internal/mcp/api_key_surface_test.go`
+(`TestApiKeyToolsPublishTheOwnersIdentityUnderTheAdminGroup`) holds for both tools
+together with the admin-group registration behind the notice. `key_id` is the id
+`pf_create_api_key` returned; the plaintext is never accepted here, which is why
+revocation does not need the secret, and
+`internal/mcp/api_key_surface_test.go`
+(`TestApiKeyWireShapePutsTheOwnerInThePathAndTheRestInTheBody`) drives a creation and
+feeds its `key_id` straight into a revocation to hold that round trip.
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -53,17 +59,27 @@ and nothing at hop 2 that can be dropped.
   ends the namespace its in-flight idempotency records lived in — a retry under a new
   key is a new namespace, not a replay.
 - There is no un-revoke, and no listing of keys on this surface: `pf_list_users`
-  returns users, not their keys, so a caller must already hold the `key_id` from
-  creation.
+  returns users rather than their keys, so a caller must already hold the `key_id`
+  from creation — `internal/mcp/api_key_surface_test.go`
+  (`TestTheApiKeySurfaceOffersOnlyCreationAndRevocation`) enumerates every statement
+  in the tree that touches `revoked_at` and requires each one to be either the single
+  writer or a null-check, censuses the registry for a third api-key tool, and reads
+  the users query's own column list.
 
 ## hop 5 — what comes back
 
-`jsonResult`, no projection: the single observed key is `ok`. Three calls in the
-corpus window, no errors.
+`jsonResult`, no projection: the single observed key is `ok`, and the no-projection
+half is driven by `internal/mcp/secret_response_relay_test.go`
+(`TestSecretReturningToolsRelayTheServerResponseUnprojected`), which relays a key no
+card lists — a one-key response is where a keep-list would be least visible. Three
+calls in the corpus window, no errors.
 
 ## Policy
 
-- **§6.2 T2-18** — the identity `user_id` names is stated above.
+- **§6.2 T2-18** — the identity `user_id` names is stated above, and
+  `internal/mcp/api_key_surface_test.go`
+  (`TestApiKeyToolsPublishTheOwnersIdentityUnderTheAdminGroup`) requires the
+  parameter and a non-empty description of it on both key tools.
 - **§6.1 T1-9** — the description matches hop 4 in one line, so no disposition is
   needed.
 

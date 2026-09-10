@@ -33,12 +33,20 @@ plaintext is unrecoverable afterwards, and who may call it.
 `internal/mcp/tools_projects.go` (`registerProjectTools`) rejects an empty name and
 calls `pkg/client/client.go` (`RotateProjectIdentifier`) →
 `POST /v1/projects/<name>/rotate_identifier` with a **nil body**, bound by
-`internal/server/routes_projects.go` (`handleRotateIdentifier`). The name is the path
-segment; nothing else is sent.
+`internal/server/routes_projects.go` (`handleRotateIdentifier`) — every one of those
+claims held on the recorded request by
+`internal/mcp/rotate_identifier_surface_test.go`
+(`TestRotateIdentifierSendsOnlyTheProjectNameAndRefusesAnEmptyOneLocally`), which
+reads the route out of this card. The name is the path segment; nothing else is sent.
 
 The handler carries an explicit `NOTE: result contains plain token — do NOT log it`
-at the call site, which is the only place that instruction can be enforced by a
-reader.
+at the call site, and the same instruction is repeated at each of the other three
+hops that hold the plaintext — `pkg/client/client.go`,
+`internal/server/routes_projects.go` and `internal/domain/projects.go` — four
+comments, which `internal/mcp/rotate_identifier_surface_test.go`
+(`TestTheDoNotLogNoticeRidesEveryHopThatHoldsThePlainToken`) turns into a check by
+requiring the notice at all four and requiring none of those four to reach a
+logger.
 
 ## hop 4 — what it actually does
 
@@ -47,15 +55,28 @@ reader.
 - Authorization is owner or admin, checked server-side; a `maintainer` member cannot
   call it — worth stating rather than assuming, because `owner` is not a rung on the
   member ladder at all: `internal/domain/projects.go` (`checkProjectAccess`) settles
-  ownership before any member role is ranked.
+  ownership before any member role is ranked, which
+  `internal/domain/project_ownership_column_test.go`
+  (`TestProjectOwnershipIsSettledBeforeAnyMemberRoleIsRanked`) holds as an ordering —
+  the owner branch returns before the first `RoleLevel` lookup, the owner-level
+  escape leaves the member walk before the comparison runs, and rotation is the
+  caller asking for owner-level access.
 - `identifier_prefix` is the non-secret half that stays in the project row and is what
-  `pf_list_projects` shows.
+  `pf_list_projects` shows, which
+  `internal/domain/project_ownership_column_test.go`
+  (`TestSerialisedProjectCarriesTheIdentifierPrefixAndNeverTheHash`) holds in both
+  directions: a serialised project carries the prefix and mentions no hash at all,
+  and the shared read column list selects the first and never the second.
 
 ## hop 5 — what comes back
 
 `jsonResult`, no projection. **`response_keys_observed` is `null`** — the
 `aihub#412` corpus holds no record for this tool in its window, which for a rotation
-operation is the expected shape rather than evidence of disuse.
+operation is the expected shape rather than evidence of disuse — and both directions
+of that are already held by `internal/mcp/contract_cards_gate_test.go`
+(`TestContractCardsMatchTheCorpusResponseKeys`), where a card listing keys the corpus
+has no record for is CORPUS_INVENTED and a `null` masking a record that does exist is
+CORPUS_NULL_MASKS_RECORD.
 
 The keys are pinned anyway, just not here: `aihub#482`'s K10 in
 `internal/mcp/card_response_keys_live_e2e_db_test.go` drives this tool against a
@@ -70,7 +91,11 @@ radius is the whole bundle it was captured in, not the one call.
 ## Policy
 
 - **§6.2 T2-8** — who may call this is a role question, and the legal member roles
-  are `viewer | writer | maintainer`; `owner` is a column.
+  are `viewer | writer | maintainer`; `owner` is a column, and
+  `internal/domain/project_ownership_column_test.go`
+  (`TestProjectOwnershipIsSettledBeforeAnyMemberRoleIsRanked`) reads that vocabulary
+  out of this bullet and requires `RoleLevel` to hold exactly it, in both
+  directions.
 - **§6.1 T1-5** — no projection, which here is a cost as well as a simplification.
 
 ## Open

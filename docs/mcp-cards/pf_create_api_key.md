@@ -41,9 +41,12 @@ Three parameters, two required, and a handling instruction.
 it securely.**"
 
 `user_id` here names the key's **owner**, which is one of the three identities
-§6.2 T2-18 says every `user_id`-shaped parameter must disambiguate. On this tool it
-is unambiguous because there is only one user in the operation; on the filtering
-tools it is not.
+§6.2 T2-18 says every `user_id`-shaped parameter must disambiguate —
+`internal/mcp/api_key_surface_test.go`
+(`TestApiKeyToolsPublishTheOwnersIdentityUnderTheAdminGroup`) holds the quote above
+against the live description and the identity against the request's own path. On
+this tool it is unambiguous because there is only one user in the operation; on the
+filtering tools it is not.
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -52,7 +55,9 @@ copies every argument **except `user_id`** into the body of
 `POST /v1/admin/users/<user_id>/keys` via `pkg/client/client.go` (`CreateAPIKey`),
 bound by `internal/server/router.go` (`handleCreateAPIKey`), under the admin group.
 
-`user_id` is the path segment; `name` and `project_scope` are body fields.
+`user_id` is the path segment; `name` and `project_scope` are body fields, measured
+on the recorded request by `internal/mcp/api_key_surface_test.go`
+(`TestApiKeyWireShapePutsTheOwnerInThePathAndTheRestInTheBody`).
 
 ## hop 4 — what it actually does
 
@@ -65,13 +70,20 @@ bound by `internal/server/router.go` (`handleCreateAPIKey`), under the admin gro
 
 ## hop 5 — what comes back
 
-`jsonResult`, no projection: the observed keys are `key_id` and `raw_key`. Six calls
-in the corpus window, no errors.
+`jsonResult`, no projection: the observed keys are `key_id` and `raw_key`, and
+`internal/mcp/secret_response_relay_test.go`
+(`TestSecretReturningToolsRelayTheServerResponseUnprojected`) sends a key no card
+lists and requires it to arrive, which is the half a keep-list would drop in
+silence. Six calls in the corpus window, no errors.
 
 🔴 `raw_key` is a live credential in a non-projected response, so it lands in the
-calling agent's transcript. Same property as `pf_rotate_identifier`, and the same
-reason it is worth a card line: the blast radius of a leaked credential is the whole
-bundle it was captured in.
+calling agent's transcript — the relay itself is held verbatim, on a fixture value,
+by `internal/mcp/secret_response_relay_test.go`
+(`TestSecretReturningToolsRelayTheServerResponseUnprojected`). Same property as
+`pf_rotate_identifier`, and the same reason it is worth a card line: the blast radius
+of a leaked credential is the whole bundle it was captured in, and
+`TestSecretReturningToolsRelayTheServerResponseUnprojected` drives the two tools
+together over a population checked against every card carrying the phrase.
 
 ## Policy
 
@@ -82,5 +94,7 @@ bundle it was captured in.
 ## Open
 
 - Whether a secret-returning tool should redact at hop 5 is not covered by any
-  adjudicated row. Recorded, not decided — the same open item `pf_rotate_identifier`
-  carries.
+  adjudicated row. Recorded rather than decided — the same open item
+  `pf_rotate_identifier` carries, and `internal/mcp/secret_response_relay_test.go`
+  (`TestBothSecretCardsRecordTheSameUnadjudicatedOpenItem`) requires both Open
+  sections to keep carrying it.

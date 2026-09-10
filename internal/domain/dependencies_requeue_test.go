@@ -155,4 +155,59 @@ func TestDeleteDependency_OtherBlockerRemains_StaysBlocked(t *testing.T) {
 	aerr = DeleteDependency(context.Background(), pool, blocked.ID, blockerB.ID, "blocks")
 	require.Nil(t, aerr)
 	assert.Equal(t, "queued", wiStatusOf(t, pool, blocked.ID))
+
+	// ── aihub#543 probe wave 2: what a delete that matches NO edge answers ────
+	//
+	// Subtests of this function rather than new top-level ones: it is already in
+	// internal/citest/dbtestcov/gated_tests.txt and already named by ci.yml's
+	// "aihub#242 dependency-requeue DB tests" step, whose greps are on this
+	// function's own PASS line and its sibling's (aihub#543 spec §3.3 rule 2).
+	//
+	// 🔴 These correct docs/mcp-cards/pf_remove_dependency.md. Its Open section
+	// said "the response does not say" whether a no-op delete is
+	// distinguishable from a successful one. Measured 2026-09-10: it does — a
+	// delete matching no row is NOT_FOUND, which the tool turns into an error
+	// result rather than an `ok`. Both edges of `blocked` are already gone at
+	// this point, so the first subtest re-deletes one of them.
+	//
+	// Mutants, all applied to the tree and run (2026-09-10):
+	//
+	//	M112 RowsAffected()==0 returns nil instead of NOT_FOUND          RED
+	//	M113 the DELETE stops filtering on `kind`                        RED (the
+	//	                                                                 typo then
+	//	                                                                 removes the
+	//	                                                                 real edge)
+	//	M114 green control: reword the NOT_FOUND message                 GREEN
+	t.Run("deleting_an_edge_that_does_not_exist_is_not_found", func(t *testing.T) {
+		aerr := DeleteDependency(context.Background(), pool, blocked.ID, blockerA.ID, "blocks")
+		require.NotNil(t, aerr,
+			"a delete matching no row answered success. A no-op that reports ok is indistinguishable "+
+				"from a delete that removed the edge, and a caller retrying after a partial failure "+
+				"cannot tell which one it just did")
+		assert.Equal(t, ErrNotFound, aerr.Code,
+			"want NOT_FOUND; got %+v. The code is what pf_remove_dependency's caller sees, and this "+
+				"card's Open section used to say the response said nothing at all", aerr)
+	})
+
+	t.Run("a_typo_in_kind_addresses_a_different_edge_rather_than_failing_to_parse", func(t *testing.T) {
+		// A live edge again, so the typo has something to miss.
+		createBlocksDep(t, pool, blocked.ID, blockerA.ID, u)
+		require.Equal(t, "blocked", wiStatusOf(t, pool, blocked.ID), "fixture: the edge must be live")
+
+		aerr := DeleteDependency(context.Background(), pool, blocked.ID, blockerA.ID, "block")
+		require.NotNil(t, aerr,
+			"a `kind` of \"block\" removed something. The three-segment address means an "+
+				"unrecognised kind names an edge that does not exist rather than failing to parse — but "+
+				"it must not match the real one either")
+		assert.Equal(t, ErrNotFound, aerr.Code, "want NOT_FOUND for a kind no edge carries; got %+v", aerr)
+		assert.Equal(t, "blocked", wiStatusOf(t, pool, blocked.ID),
+			"the refused delete requeued the wi anyway, so the typo DID reach the real edge")
+
+		// The control: spelled correctly, the same call removes it. Without this,
+		// the refusal above is explained by a broken fixture rather than by the
+		// kind segment.
+		aerr = DeleteDependency(context.Background(), pool, blocked.ID, blockerA.ID, "blocks")
+		require.Nil(t, aerr, "the correctly spelled kind must remove the edge; got %+v", aerr)
+		assert.Equal(t, "queued", wiStatusOf(t, pool, blocked.ID))
+	})
 }

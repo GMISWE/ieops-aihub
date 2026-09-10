@@ -52,7 +52,6 @@ package mcp_test
 //	GOWORK=off go test ./internal/mcp/ -run TestGetMemory -count=1 -v
 
 import (
-	"encoding/json"
 	"net/http"
 	"os"
 	"regexp"
@@ -91,30 +90,13 @@ func getMemoryCard(t *testing.T) string {
 	return strings.Join(strings.Fields(strings.Join(kept, "\n")), " ")
 }
 
-// publishedParamDescriptionFor reads one live tool's published description for
-// one of its parameters.
-func publishedParamDescriptionFor(t *testing.T, tool, param string) string {
-	t.Helper()
-	raw, err := json.Marshal(publishedTool(t, tool).InputSchema)
-	if err != nil {
-		t.Fatalf("re-marshal %s's input schema: %v", tool, err)
-	}
-	var decoded struct {
-		Properties map[string]struct {
-			Description string `json:"description"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		t.Fatalf("%s's input schema is not valid JSON: %v", tool, err)
-	}
-	p, ok := decoded.Properties[param]
-	if !ok {
-		t.Fatalf("%s publishes no %q parameter, so there is no description to read. The card's "+
-			"claim is ABOUT that parameter's description; a missing parameter makes the sentence "+
-			"false in a way no substring check would report.", tool, param)
-	}
-	return p.Description
-}
+// The published-description reader this file needs, publishedParamDescriptionFor,
+// lives in internal/mcp/pr_gh_boundary_test.go — an identical helper landed there
+// in the same wave (aihub#571, PR #465) while this file was being written, and the
+// merge surfaced it as a redeclaration rather than as a conflict git could show.
+// Kept THEIRS and deleted the copy here: two helpers with one meaning is the
+// duplication this repo's own gates exist to refuse, and the reader is not a
+// property of either card.
 
 // TestGetMemoryIdDescriptionNamesWhereTheValueComesFrom is the hop-0-1 sentence
 // about the parenthetical, quantified over BOTH pairs it names.

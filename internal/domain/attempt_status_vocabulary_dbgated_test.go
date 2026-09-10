@@ -219,7 +219,97 @@ func TestAttemptStatusVocabulary_ACancelledAttemptAnswersMismatchNotPaused(t *te
 			"aihub#441 must not have widened the mismatch class over it")
 	assert.Equal(t, 409, paused.HTTPStatus, "CONTROL: ATTEMPT_PAUSED is a 409, not a 403")
 
+	// ── aihub#543 wave 2, lane L11 ────────────────────────────────────────────
+	//
+	// The two subtests below are additions to this arm rather than a new gated
+	// function: both need exactly the states this fixture already produces (a
+	// paused attempt, then the same work item cancelled), and spec §4.2's DB rule
+	// is to attach as a subtest of a function already in gated_tests.txt and
+	// already named by a ci.yml step.
+	//
+	// They hold two docs/mcp-cards sentences the existing assertions do not
+	// reach:
+	//
+	//	pf_pause_attempt.md, Policy — "`ATTEMPT_PAUSED` … is … still reached
+	//	  only by a caller whose secret is VALID, so the unification cannot
+	//	  shadow it."
+	//	pf_cancel_work_item.md, hop 4 — "…resume is impossible because
+	//	  `pf_claim_work_item` refuses a terminal work item."
+	//
+	// The second sentence is the reason residue (b) exists at all, and it was
+	// asserted nowhere: the arm below this comment reads the credential verdict
+	// on a cancelled work item, and this file's own message says the old verdict
+	// pointed at a resume "FnClaimWorkItem refuses as terminal" — stating the
+	// property in prose while nothing executed it.
+	//
+	// MUTANTS (applied to this tree and run against a scratch Postgres; the
+	// verdict is what happened):
+	//
+	//	M41 enforcement: move the `storedStatus == "paused"` branch in
+	//	    verifyAttemptCredential ABOVE the ConstantTimeCompare guard
+	//	                                     RED  the paused branch needs a valid
+	//	                                          secret (got ATTEMPT_PAUSED for a
+	//	                                          wrong one)
+	//	M42 enforcement: delete `wi.Status == "cancelled"` from FnClaimWorkItem's
+	//	    terminal ladder                  RED  a cancelled work item refuses a
+	//	                                          re-claim (the claim SUCCEEDED,
+	//	                                          which is the loop with no exit
+	//	                                          this card describes)
+	//	M43 publication: delete the citation clause from the two card sentences
+	//	                                     RED  K12 DEBT_GROWTH
+	t.Run("the paused branch needs a valid secret", func(t *testing.T) {
+		const wrong = "aihub543-verdict-WRONG-cafebabecafebabecafebabeca"
+		wrongOnPaused := VerifyAttemptCredentialPool(ctx, pool, wi.ID, attemptID, 1, wrong)
+		require.NotNil(t, wrongOnPaused, "a wrong session_secret must be refused whatever the status")
+		assert.Equal(t, ErrAttemptMismatch, wrongOnPaused.Code,
+			"a WRONG secret on a PAUSED attempt must answer the invalid-credential code, not "+
+				"ATTEMPT_PAUSED. The card's Policy bullet rests on this ordering: the paused branch "+
+				"sits below the constant-time comparison, so aihub#441 unifying the credential class "+
+				"to 403 ATTEMPT_MISMATCH cannot shadow the 409. Reversed, a caller holding a dead "+
+				"secret would be told to keep it and resume — the aihub#209 contract pointed at a "+
+				"credential that can never work again")
+		assert.Equal(t, 403, wrongOnPaused.HTTPStatus)
+		assert.NotContains(t, string(wrongOnPaused.Code), "PAUSED",
+			"internal/mcp's classifier keys on the code; a paused-shaped one here keeps a dead file")
+	})
+
 	require.Nil(t, CancelWorkItem(ctx, pool, wi.ID, u, "member", nil))
+
+	t.Run("a cancelled work item refuses a re-claim", func(t *testing.T) {
+		// The other half of the cancel card's credential argument: the answer a
+		// cancelled attempt gives is ATTEMPT_MISMATCH ("re-claim") rather than
+		// ATTEMPT_PAUSED ("resume") BECAUSE resume is not available — a claim on a
+		// terminal work item is refused. Without this, the redirect the card
+		// describes could point at a door that opens.
+		//
+		// wi_type first, and it is a PRECONDITION rather than tidying: C-R9-6
+		// refuses an unclassified work item ahead of the terminal ladder, so
+		// without it this arm would observe a WI_TYPE_MISMATCH and say nothing
+		// about the branch the card's sentence is about. The seed helper sets no
+		// wi_type; the aihub#421 fixture next door does the same thing for the
+		// same reason.
+		mustExec(t, pool, `UPDATE work_items SET wi_type='fix_bug' WHERE id='`+wi.ID+`'`)
+
+		_, claimErr := FnClaimWorkItem(ctx, pool, wi.ID, &ClaimRequest{
+			IdempotencyKey: "aihub543-l11-reclaim",
+			SessionInfo: SessionInfo{
+				MachineID:     "m_aihub543",
+				SessionSecret: "aihub543-reclaim-fedcba9876543210fedcba9876543210fedcba",
+			},
+		}, u, "", "tester")
+		require.NotNil(t, claimErr,
+			"claiming a cancelled work item must be refused. If it succeeds, the cancel card's "+
+				"whole credential argument inverts: ATTEMPT_PAUSED would have been the honest "+
+				"answer after all, because resume WOULD be possible")
+		assert.Equal(t, ErrConflictTerminalState, claimErr.Code,
+			"the refusal is a STATE conflict — aihub#242's rule, 409 for wrong state — and the "+
+				"card names it as the reason a cancelled attempt is handed the re-claim code "+
+				"instead of the resume code")
+		assert.Equal(t, 409, claimErr.HTTPStatus)
+		assert.Contains(t, claimErr.Message, "terminal state",
+			"the message must say WHY, or an operator reads a 409 on a re-claim as a lock conflict "+
+				"and retries it")
+	})
 
 	cancelled := VerifyAttemptCredentialPool(ctx, pool, wi.ID, attemptID, 1, secret)
 	require.NotNil(t, cancelled, "a cancelled work item's attempt must not be usable")

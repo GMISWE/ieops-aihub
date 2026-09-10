@@ -49,6 +49,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 
@@ -451,6 +452,229 @@ func TestRememberRejectsCrossProjectWorkItem(t *testing.T) {
 			assert.Equal(t, domain.ErrNotFound, aerr.Code)
 		}
 	})
+
+	// ── 12/13. aihub#543 probe wave 2. Two claims from
+	//          docs/mcp-cards/pf_remember.md that need this endpoint and a real
+	//          database, hosted here rather than as new top-level functions
+	//          because internal/citest/dbtestcov ratchets on the NUMBER of
+	//          DB-gated functions and a new one costs a manifest line and a
+	//          ci.yml step. This function already drives POST /v1/memories,
+	//          already reads the 201 body, and already has the project and the
+	//          key on hand — so what a third function would buy is a name, and
+	//          the name is on the subtest.
+
+	// hop 5: "`id` and `memory_id` are both present, which is why callers in
+	// this repo use either."
+	//
+	// 🔴 Nothing held this before, and the reason is worth stating: K10 is a
+	// one-directional ratchet — a LIVE key the card does not declare is red —
+	// so a key that stops being sent is invisible to it, and K7 compares two
+	// checked-in files to each other. The alias is a compatibility promise
+	// (memIDOf in this very file reads `id`; internal/mcp's e2e walk reads
+	// `memory_id`), and dropping either one breaks callers without failing a
+	// single existing arm.
+	//
+	// MUTANTS:
+	//
+	//	M35 enforcement: delete "memory_id" from handleRemember's response map
+	//	                                      RED  both_id_aliases (missing key)
+	//	M36 enforcement: set memory_id to a different value than id
+	//	                                      RED  the equality assertion
+	//	M37 enforcement: assert a key the reply does not carry
+	//	                                      RED  the `content` control
+	//	M38 publication: delete the citation from the card sentence
+	//	                                      RED  K12
+	t.Run("the reply carries both id aliases and they agree", func(t *testing.T) {
+		status, body := s.remember(t, s.key,
+			memoryBody(s.projA, "the two id aliases the hop-5 section promises", nil))
+		require.Equal(t, http.StatusCreated, status, "body %s", body)
+
+		var reply map[string]any
+		require.NoError(t, json.Unmarshal(body, &reply), "body was %q", body)
+
+		id, hasID := reply["id"]
+		memID, hasMemID := reply["memory_id"]
+		require.True(t, hasID, "the 201 carries no `id` (keys: %v)", sortedReplyKeys(reply))
+		require.True(t, hasMemID,
+			"the 201 carries no `memory_id` (keys: %v). Both are declared in this card's "+
+				"machine block and callers in this repo read either — K10 only fails on a live "+
+				"key the card does NOT declare, so a key that stops being sent is invisible to "+
+				"it", sortedReplyKeys(reply))
+		assert.Equal(t, id, memID,
+			"`memory_id` is documented as an alias for `id`; two different values make it a "+
+				"second identifier and every caller that picked one is now reading a different row")
+
+		// The control. Without it "the key is present" is satisfied by an
+		// assertion helper that reports every lookup as a hit.
+		_, hasContent := reply["content"]
+		assert.False(t, hasContent,
+			"the 201 carries `content` too, so this walk is not reading the projection it "+
+				"thinks it is and the two presence assertions above prove nothing (keys: %v)",
+			sortedReplyKeys(reply))
+	})
+
+	// hop 4: "`dedup_mode` and `supersedes_memory_id` change what happens to an
+	// existing similar memory; neither is enumerated."
+	//
+	// 🔴 The three spellings had NO arm anywhere in the tree — not the
+	// CONFLICT_SIMILAR_MEMORY code (which no test produced), not the
+	// attrs.similar_to annotation, not the skip. `off` is what every other
+	// fixture in this file sends precisely so dedup stays out of the way, which
+	// is how a parameter with three behaviours ended up driven in one.
+	//
+	// The similarity is Jaccard over word sets, so identical content scores 1.0
+	// and clears memoryDedupHigh; the dissimilar control clears neither
+	// threshold. Both are needed: `strict` refusing everything would satisfy the
+	// refusal arm on its own.
+	//
+	// MUTANTS:
+	//
+	//	M39 enforcement: drop the `dedup_mode != "off"` guard
+	//	                                      RED  off_skips_the_check (a 409)
+	//	M40 enforcement: make strict the only mode (annotate branch removed)
+	//	                                      RED  suggest_annotates
+	//	M41 enforcement: make strict answer 200 instead of the 409
+	//	                                      RED  strict_refuses
+	//	M42 enforcement: compare with `sim > 0` instead of memoryDedupHigh
+	//	                                      RED  strict_stores_a_near_miss.
+	//	                                           ⚠️ GREEN against the DISSIMILAR
+	//	                                           control alone, measured: that
+	//	                                           content scores 0.05 and never
+	//	                                           reaches the strict branch at all,
+	//	                                           because textDedupCheck returns
+	//	                                           nothing below memoryDedupLow. The
+	//	                                           near-miss arm below exists because
+	//	                                           of that measurement.
+	//	M43 publication: delete the citation from the card bullet
+	//	                                      RED  K12
+	t.Run("dedup_mode decides what happens to a similar memory", func(t *testing.T) {
+		const twin = "the retry budget is counted per attempt and never per individual request"
+
+		status, body := s.remember(t, s.key, memoryBody(s.projA, twin, nil))
+		require.Equal(t, http.StatusCreated, status, "seeding the dedup twin: %s", body)
+
+		t.Run("off stores a second copy and annotates nothing", func(t *testing.T) {
+			b := memoryBody(s.projA, twin, nil) // memoryBody sends dedup_mode=off
+			status, body := s.remember(t, s.key, b)
+			require.Equal(t, http.StatusCreated, status, "body %s", body)
+			assert.Empty(t, s.storedSimilarTo(t, memIDOf(t, body)),
+				"dedup_mode=off ran the similarity query anyway; the card's `off` spelling is "+
+					"the one that has to cost nothing")
+		})
+
+		t.Run("suggest stores it and records what it resembles", func(t *testing.T) {
+			b := memoryBody(s.projA, twin, nil)
+			b["dedup_mode"] = "suggest"
+			status, body := s.remember(t, s.key, b)
+			require.Equal(t, http.StatusCreated, status, "body %s", body)
+			assert.NotEmpty(t, s.storedSimilarTo(t, memIDOf(t, body)),
+				"dedup_mode=suggest wrote no attrs.similar_to, so the mode's whole effect — "+
+					"telling a reader this row has a near-twin — is gone while the call still "+
+					"answers 201")
+		})
+
+		t.Run("strict refuses and names the row it collided with", func(t *testing.T) {
+			before := s.countMemories(t, s.projA)
+			b := memoryBody(s.projA, twin, nil)
+			b["dedup_mode"] = "strict"
+			status, body := s.remember(t, s.key, b)
+			assert.Equal(t, http.StatusConflict, status,
+				"dedup_mode=strict stored a near-identical memory (body %s)", body)
+			assert.Contains(t, string(body), "CONFLICT_SIMILAR_MEMORY",
+				"the refusal does not carry the code, so a caller cannot tell it from any "+
+					"other 409; body %s", body)
+			assert.Equal(t, before, s.countMemories(t, s.projA),
+				"the write was refused and the row was created anyway")
+
+			// WHICH row it collided with, resolved against the database rather
+			// than compared to the id this subtest happens to remember. The
+			// dedup query takes the highest-similarity candidate, and by now
+			// several rows carry this content — so an equality against one of
+			// them would be a fact about subtest order. What the card's claim
+			// needs is that the id names a row holding the content that
+			// collided.
+			var refusal struct {
+				Details struct {
+					Existing struct {
+						ID string `json:"id"`
+					} `json:"existing"`
+				} `json:"details"`
+			}
+			require.NoError(t, json.Unmarshal(body, &refusal), "body was %q", body)
+			require.NotEmpty(t, refusal.Details.Existing.ID,
+				"the refusal names no existing row, so a caller is told no and not which "+
+					"memory to read instead; body %s", body)
+			assert.Equal(t, twin, s.storedContent(t, refusal.Details.Existing.ID),
+				"the refusal points at a row whose content is not the one that collided, so "+
+					"details.existing is the wrong row rather than a helpful one; body %s", body)
+		})
+
+		t.Run("strict still accepts a genuinely different memory", func(t *testing.T) {
+			b := memoryBody(s.projA,
+				"certificate rotation reloads the edge proxy rather than restarting it", nil)
+			b["dedup_mode"] = "strict"
+			status, body := s.remember(t, s.key, b)
+			require.Equal(t, http.StatusCreated, status,
+				"dedup_mode=strict refused a dissimilar memory, so the arm above is satisfied "+
+					"by a mode that refuses everything (body %s)", body)
+		})
+
+		// 🔴 The control that matters, and the arm above is NOT it. A dissimilar
+		// body scores 0.05 and textDedupCheck returns nothing below
+		// memoryDedupLow, so the strict comparison is never reached — measured:
+		// replacing `sim >= memoryDedupHigh` with `sim > 0` leaves the arm above
+		// green. This body scores ~0.83, above the low threshold and below the
+		// high one, which is the "strict-below-high" branch the write path's own
+		// comment names and the only place the HIGH threshold is observable.
+		t.Run("strict stores a near miss and annotates it instead", func(t *testing.T) {
+			b := memoryBody(s.projA,
+				"a retry budget is counted per attempt and never per individual request", nil)
+			b["dedup_mode"] = "strict"
+			status, body := s.remember(t, s.key, b)
+			require.Equal(t, http.StatusCreated, status,
+				"dedup_mode=strict refused a body that is similar without being a near-duplicate "+
+					"(body %s). The threshold is what makes `strict` usable at all: a mode that "+
+					"409s on everything above the LOW threshold refuses ordinary revisions.", body)
+			assert.NotEmpty(t, s.storedSimilarTo(t, memIDOf(t, body)),
+				"a strict write below the high threshold took the annotate branch and wrote no "+
+					"attrs.similar_to, so the two thresholds have collapsed into one")
+		})
+	})
+}
+
+// storedContent reads a stored row's content, so a refusal that names a memory
+// can be checked against the row it names rather than against an id this test
+// happens to be holding.
+func (s *rememberScopeStack) storedContent(t *testing.T, memID string) string {
+	t.Helper()
+	var out string
+	require.NoError(t, s.pool.QueryRow(context.Background(),
+		`SELECT content FROM memories WHERE id=$1`, memID).Scan(&out))
+	return out
+}
+
+// storedSimilarTo reads attrs.similar_to off a stored row. Empty when the key is
+// absent, which is the state dedup_mode=off is supposed to leave behind.
+func (s *rememberScopeStack) storedSimilarTo(t *testing.T, memID string) string {
+	t.Helper()
+	var out *string
+	require.NoError(t, s.pool.QueryRow(context.Background(),
+		`SELECT attrs->>'similar_to' FROM memories WHERE id=$1`, memID).Scan(&out))
+	if out == nil {
+		return ""
+	}
+	return *out
+}
+
+// sortedReplyKeys renders a JSON object's key set for a failure message, so a
+// missing key is reported beside what WAS there.
+func sortedReplyKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // normalizeRef blanks the caller's own reference out of an error body so two

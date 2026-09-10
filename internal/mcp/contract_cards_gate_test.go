@@ -2270,7 +2270,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_recall":                  {Candidates: 34, Cited: 2, Unclassified: 32, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_redact_memory":           {Candidates: 7, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_reinforce_memory":        {Candidates: 22, Cited: 20, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_remember":                {Candidates: 41, Cited: 4, Unclassified: 37, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_remember":                {Candidates: 46, Cited: 38, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 8},
 	"pf_remove_dependency":       {Candidates: 3, Cited: 0, Unclassified: 3, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_resolve_commit":          {Candidates: 9, Cited: 1, Unclassified: 8, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_revoke_api_key":          {Candidates: 5, Cited: 0, Unclassified: 5, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},

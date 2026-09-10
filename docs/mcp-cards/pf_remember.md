@@ -77,9 +77,16 @@
 
 ## hop 0-1 — what the caller is told
 
-Thirteen parameters, four required. **None of them is an enum**, and `type` stopped
-being one in `aihub#445`: what the server accepts is a prefix rule, so the published
-set and the accepted set are one set only if nothing closed is published.
+Thirteen parameters, four required. **None of them is an enum** — asserted over the
+whole published property set by `internal/mcp/remember_published_shape_test.go`
+(`TestRememberPublishesNoClosedEnumOnAnyParam`), which is wider than the `type`
+arm below on purpose: `dedup_mode` and `visibility` both have real closed
+spellings behind them and are standing invitations to publish one. And `type`
+stopped being one in `aihub#445` — `internal/mcp/tools_memory_type_vocab_test.go`
+(`TestRememberTypeIsNotPublishedAsAClosedEnum`) — because what the server accepts is
+a prefix rule (`internal/domain/memory_type_check_test.go`,
+`TestMemoryTypeCheckMatchesTheGoPrefixes`), so the published set and the accepted set
+are one set only if nothing closed is published.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
@@ -102,10 +109,13 @@ and the cost was measured rather than argued.** It said "(0-1)" while
 `memories.base_strength` is CHECK-constrained to 1-5 and the Go default was 3.0 —
 three disjoint answers — and `Remember` validated the type but never the value, so a
 number taken straight from the published range reached the CHECK and came back 500
-with the driver's constraint text. The `aihub#412` corpus records **13 `pf_remember`
+with the driver's constraint text.
+<!-- prose-only: because=history -->
+The `aihub#412` corpus records **13 `pf_remember`
 calls carrying `base_strength`, every value inside the published range and outside the
 enforced one, against 13 `pf_remember` INTERNAL_ERRORs naming
 `memories_base_strength_check`.** That is §6.1 T1-3's owner ruling, now landed.
+<!-- prose-only: because=measurement -->
 
 **The range was only half of it, and `aihub#459` closed the other half on
 2026-09-09: the value must also be a WHOLE NUMBER.** The published type is `number`
@@ -117,49 +127,87 @@ answer honest without making it what the caller asked for. The owner's ruling pi
 refusal over rounding and over widening the column, so the value is now a 400. The
 type stays `number` — that is what JSON carries — which is exactly why the
 description had to say `integer`: with the type unchanged, the published text is the
-only place a caller can learn that an in-range `number` is refused.
+only place a caller can learn that an in-range `number` is refused, which is why
+`internal/mcp/remember_published_shape_test.go`
+(`TestPublishedBaseStrengthTypeStaysNumber`) holds the type and the word as a pair —
+narrowing the published type to `integer` would make the word redundant, and a
+redundant sentence is the next one deleted.
 
 `tags` reached the endpoint unpublished until `aihub#425`: this handler forwards its
 whole argument map, so the value was on the wire and reachable only by guessing a
-name no schema mentioned. Until then the only published way to tag a memory was to
+name no schema mentioned.
+<!-- prose-only: because=history -->
+Until then the only published way to tag a memory was to
 create it and then call `pf_update_memory`.
+<!-- prose-only: because=history -->
 
 ## hop 2-3 — what leaves this process, and what binds it
 
 `internal/mcp/tools_memory.go` (`validatePfRememberArgs`) checks the four required
-fields and refuses any `methodology.` prefix, then the handler passes the **argument
-map verbatim** to `pkg/client/client.go` (`Remember`) → `POST /v1/memories`, bound by
-`internal/server/routes_memory.go` (`handleRemember`).
+fields — `internal/mcp/tools_memory_test.go` (`TestValidatePfRememberArgs`) — and
+refuses any `methodology.` prefix, then the handler passes the **argument map
+verbatim** to `pkg/client/client.go` (`Remember`) → `POST /v1/memories`, bound by
+`internal/server/routes_memory.go` (`handleRemember`). The verb and the route are
+observed on a request a fake aihub really received, alongside the two refusals
+costing no request at all, by `internal/mcp/remember_wire_shape_test.go`
+(`TestRememberRefusesItsOwnContractBeforeAnyRequest`).
 
 Because the map is forwarded wholesale there is no forwarding table to drift from —
 every published property is on the wire by construction, and the guard over
 `internal/mcp/tools_memory.go` (`rememberSchema`) states that identity rather than
-assuming it. The risk on this tool is at hops 1 and 4.
+assuming it: `internal/mcp/memory_tools_wire_test.go`
+(`TestMemoryToolsForwardEveryPublishedPropertyByValue`) asserts each landing as a
+value and (`TestMemoryToolsEveryPublishedPropertyHasAWireProbe`) is the completeness
+half. The risk on this tool is at hops 1 and 4.
 
 ## hop 4 — what it actually does
 
 - **`methodology.*` is refused client-side**, before the HTTP call, because those are
-  work-item-bound credentialed artifacts that must go through `pf_save_artifact`.
-  The two tools hit the **same endpoint**; the difference is that one injects attempt
-  credentials and the other does not.
+  work-item-bound credentialed artifacts that must go through `pf_save_artifact` —
+  and "before the HTTP call" is a request COUNT rather than an error string, which is
+  what `internal/mcp/remember_wire_shape_test.go`
+  (`TestRememberRefusesItsOwnContractBeforeAnyRequest`) reads. The two tools hit the
+  **same endpoint**; the difference is that one injects attempt credentials and the
+  other does not.
 - **Only some type prefixes are embedded.** `experience.`, `fact.` and `rule.` get an
-  `emb_vector`; the rest never do, and the vector recall path's WHERE requires one.
+  `emb_vector`; the rest never do — `internal/domain/memory_vector_test.go`
+  (`TestEmbeddableType`) walks all 19 curated names plus an off-list one — and the
+  vector recall path's WHERE requires one, which is what
+  `internal/domain/memory_recall_hybrid_test.go`
+  (`TestPartitionTypesByEmbeddableAgreesWithEmbeddableType`) holds the routing
+  against.
   So the type chosen here decides whether the memory is ever semantically
   recallable — which is why §6.2 T2-6's ruling was to add the DB CHECK for the four
   prefixes: the DB is the only layer that can make an unrecallable row impossible.
   `aihub#445` added it (`internal/db/migrations/0034_memories_type_check.sql`), so a
   row whose type carries no legal prefix, or carries a `|`, can no longer be created
-  at all — not by this tool, not by `pf_save_artifact`, not by a hand-written INSERT.
+  at all — by this tool, by `pf_save_artifact`, or by a hand-written INSERT, the
+  column and the Go predicate driven over the same type set by
+  `internal/domain/memory_type_check_db_test.go`
+  (`TestMemoryTypeCheckDB_ColumnAndGoAgreeOnEveryType`) and the raw-INSERT half
+  refused inside
+  (`TestMigration0034_StillAppliesWhenTheTableAlreadyHoldsAnOutlier`).
 - **The prefix is the contract; the 13 names are not.** An off-list type carrying a
   legal prefix — `experience.whatever` — is accepted, stored and recalled, and that
-  is the DECIDED behaviour rather than a gap. `internal/domain/memory.go`
+  is the DECIDED behaviour rather than a gap:
+  `internal/domain/memory_commit_test.go`
+  (`TestMemoryTypeEnum_OffListTypePassesLenientCheck`) is the lenient-check half and
+  `internal/domain/memory_type_check_db_test.go`
+  (`TestMemoryTypeCheckDB_OffListTypeStaysStorableEndToEnd`) carries it through a real
+  column. `internal/domain/memory.go`
   (`MemoryTypePrefixes`) is the enforced vocabulary; `internal/domain/memory.go`
   (`MemoryTypeEnum`) is a 19-name select list for the `/ui` type dropdown
   (`internal/server/ui_handlers_memory.go`), and `internal/domain/memory.go`
   (`PfRememberTypeEnum`) is that list minus the six `methodology.*` entries, which
-  is where the 13 come from. Both are derived from one another rather than typed
-  twice, and NEITHER refuses anything. The consequence a caller should know: a type
-  outside the 19 stores fine and the UI dropdown will never offer it back.
+  is where the 13 come from — the 19 by `internal/domain/memory_commit_test.go`
+  (`TestMemoryTypeEnum_Count`), the subtraction by
+  `internal/domain/memory_supersede_scope_test.go`
+  (`TestPfRememberTypeEnum_NoMethodology`), and the fact that this tool is the one
+  the subtraction is for by `internal/mcp/tools_memory_type_vocab_test.go`
+  (`TestRememberTypeDescriptionIsDerivedNotRetyped`). Both are derived from one
+  another rather than typed twice, and NEITHER refuses anything. The consequence a
+  caller should know: a type outside the 19 stores fine and the UI dropdown will
+  never offer it back.
 - **`visibility` published four of the column's five values until `aihub#495`
   (2026-09-09), and the missing one was `public`.** Migration
   `internal/db/migrations/0023_memories_visibility_public.sql` added it for
@@ -170,65 +218,135 @@ assuming it. The risk on this tool is at hops 1 and 4.
   tool's description said it did not exist. It is not a fifth rung on a ladder:
   `public` is the tier `internal/server/router.go`'s `GET /share/:id` gates on, and
   `internal/server/routes_artifacts.go` (`handleSharedArtifact`) is
-  **unauthenticated**. That handler's own header already recorded the reachability
-  — "`public` is settable by a project writer straight from `POST /v1/memories` …
-  so it is not by itself a deliberate publication" — a fact about THIS tool,
-  written on the read side, and published nowhere its caller could see it. The
-  description now names the value AND the consequence, and the string is built from
-  `internal/domain/memory.go` (`MemoryVisibilityList`), which is also what
-  `internal/domain/work_item_fields.go` (`vocabularyErr`) renders into the 400 — so the set a
-  caller is shown and the set the refusal names are one value in one order.
+  **unauthenticated** — `internal/server/routes_artifacts_test.go`
+  (`TestSharedArtifact_Public_200`) drives it with no user at all and
+  (`TestSharedArtifact_NonPublic_404`) is the tier half of the same gate.
+  The reachability was written down on the READ side long before hop 1 carried it:
+  `internal/server/routes_artifacts_share_lazy_test.go`
+  (`TestSharedArtifact_StillNotFoundWithNothingToServe`) records "`public` is
+  settable by a project writer straight from `POST /v1/memories` … so it is not by
+  itself a deliberate publication" and is also the arm that holds it, since a
+  `public` memory with content and no stored HTML still answers 404.
+  ⚠️ This card used to attribute that sentence to `handleSharedArtifact`'s own
+  header, where it does not appear — that header is about `hasRenderableBody`
+  standing in for a `rendered_html != nil` gate — and the same wrong attribution
+  still sits in `internal/mcp/tools_memory.go` (`rememberVisibilityParamDesc`) and
+  in the `aihub#495` gate's own header, both left alone here because this slice is
+  scoped to the card (measured 2026-09-10).
+  The description now names the value AND the consequence, and the string is built
+  from `internal/domain/memory.go` (`MemoryVisibilityList`), which is also what
+  `internal/domain/work_item_fields.go` (`vocabularyErr`) renders into the 400 — so
+  the set a caller is shown and the set the refusal names are one value in one
+  order, compared as ORDERED sequences by
+  `internal/mcp/remember_visibility_scope_test.go`
+  (`TestPublishedVisibilityVocabularyMatchesTheRefusalInOrder`), which the
+  `aihub#495` set arm cannot do because it sorts both sides.
   ⚠️ **What a public memory written through THIS tool is actually reachable at is a
   narrower question than the tier suggests**, and the description stops short of
   answering it on purpose. `handleSharedArtifact` gates on `public` **and**
   `internal/server/routes_artifacts.go` (`hasRenderableBody`), which needs either a
-  stored `rendered_html` — this tool publishes no `html` parameter, so it never
-  writes one — or a type in the render set, which
-  `internal/domain/memory.go` (`defaultRenderTypes`) makes the `methodology.*`
-  names this tool refuses. On a default deployment the two conditions therefore
-  cannot both hold for a `pf_remember` row. They are not a promise: the render set
-  is configurable at startup (`internal/domain/memory.go` (`InitRenderTypes`)), so
-  the conjunct is where an honest published claim stops.
+  stored `rendered_html` or a type in the render set; the second branch is closed to
+  this tool, because `internal/domain/memory.go` (`defaultRenderTypes`) holds only
+  `methodology.*` names it refuses — censused by
+  `internal/domain/render_types_reach_test.go`
+  (`TestDefaultRenderTypesAreOnlyTypesPfRememberRefuses`).
+  🔴 **The first branch is open.** `rendered_html` is an unpublished name on this
+  tool and this handler forwards its whole argument map, so a caller who sends it
+  under that exact spelling puts it on the wire, `internal/domain/memory.go`
+  (`RememberRequest`) binds it, and `internal/domain/memory.go`
+  (`resolveRenderedHTML`) stores an explicit non-empty value verbatim for ANY type —
+  the three hops in order by `internal/mcp/remember_wire_shape_test.go`
+  (`TestRememberForwardsUnpublishedRenderedHTMLToTheBinder`) and
+  `internal/domain/memory_render_test.go`
+  (`TestResolveRenderedHTML_ExplicitOverrides`). So `visibility: public` plus an
+  unpublished `rendered_html` is enough to put a `pf_remember` row into the state
+  `internal/server/routes_artifacts_test.go` (`TestSharedArtifact_Public_200`)
+  serves with no auth — the same unpublished-but-reachable path `tags` took until
+  `aihub#425`, two paragraphs above.
+  ⚠️ This card used to reason the other way and concluded that on a default
+  deployment the two conditions cannot both hold for a `pf_remember` row; that was
+  measured false on 2026-09-10 at its first step, and what remains undriven is only
+  the whole journey in one harness — a single request from `pf_remember` to a 200 on
+  `/share/:id`, which would need a database and a route together.
+  The closure of the second branch is no promise either: the render set is
+  configurable at startup (`internal/domain/memory.go` (`InitRenderTypes`)), so a
+  deployment can open that one too — `internal/domain/render_types_reach_test.go`
+  (`TestInitRenderTypesAdmitsATypePfRememberAccepts`) — and the conjunct is where an
+  honest published claim stops.
 - **`work_item_id` is validated against `project`.** A work item in another project
-  is refused rather than silently stored.
+  is refused rather than silently stored — the predicate lives inside the resolving
+  query, so "no such work item" and "not in this project" are one zero-row outcome
+  (`internal/domain/memory_work_item_scope_test.go`,
+  `TestRememberWorkItemRefIsScopedToTheRequestProject`), driven end to end across two
+  real projects by `internal/server/remember_work_item_scope_db_test.go`
+  (`TestRememberRejectsCrossProjectWorkItem`).
 - `dedup_mode` and `supersedes_memory_id` change what happens to an existing similar
-  memory; neither is enumerated.
+  memory and neither is enumerated — all three `dedup_mode` spellings driven against
+  a real column by `internal/server/remember_work_item_scope_db_test.go`
+  (`TestRememberRejectsCrossProjectWorkItem`), the supersede side by
+  `internal/domain/memory_cursor_test.go`
+  (`TestRemember_SupersedeInheritsActivationState`), and the enum half by the
+  whole-tool census in `internal/mcp/remember_published_shape_test.go`
+  (`TestRememberPublishesNoClosedEnumOnAnyParam`). Those three spellings are `off`
+  annotating nothing, `suggest` recording `attrs.similar_to`, and `strict` answering
+  409 `CONFLICT_SIMILAR_MEMORY` while naming the row it collided with, with a
+  dissimilar control beside them so a mode that refused everything would fail
+  (`TestRememberRejectsCrossProjectWorkItem`).
 - **`attrs` must be a JSON object, and only when the CALLER sent it** (`aihub#465`).
   A JSON-encoded string of an object used to be stored verbatim under a 200; it is
   now a 400 naming the type, the byte length and — through
   `details.string_decodes_to` — whether the quoted text was itself valid JSON.
   Nothing is coerced. The provenance qualifier is load-bearing rather than
   decorative: `domain.UpdateMemory` re-enters this same write path carrying the
-  attrs it just READ from the lineage head, and that inherited value is exempt, or
-  editing a memory whose attrs is already a string would fail — which is the only
-  way such a row can be repaired.
+  attrs it just READ from the lineage head, and that inherited value is exempt —
+  `internal/domain/json_object_params_test.go` (`TestRememberAttrsProvenanceSplit`)
+  and (`TestResolveUpdateMemoryAttrsReportsProvenance`) hold the two sides of that
+  split — or editing a memory whose attrs is already a string would fail, which is
+  the only way such a row can be repaired.
 
 ## hop 5 — what comes back
 
 `jsonResult`, no projection. The corpus record above spans 346 calls at a 4.91%
-error rate. `id` and `memory_id` are both present, which is why callers in this repo
-use either.
+error rate. `id` and `memory_id` are both present and carry the same value, which is
+why callers in this repo use either — asserted on a live 201 by
+`internal/server/remember_work_item_scope_db_test.go`
+(`TestRememberRejectsCrossProjectWorkItem`), because K10 only fails on a live key the
+card does NOT declare and so cannot see a key that stops being sent.
 
 ## Policy
 
 - **§6.1 T1-3 (owner ruling) — LANDED** (`aihub#433`). Publish 1-5, the DB's scale,
   and validate it in Go at this entry point. `internal/domain/memory.go`
   (`MinBaseStrength`) / (`MaxBaseStrength`) / (`DefaultBaseStrength`) are taken from
-  the column's own DDL, and `internal/domain/memory.go` (`validateBaseStrength`)
+  the column's own DDL — `internal/domain/memory_base_strength_range_test.go`
+  (`TestBaseStrengthBoundsAreTheColumnsOwn`) parses that DDL — and
+  `internal/domain/memory.go` (`validateBaseStrength`)
   rejects an out-of-range caller-stated value with a 400 that opens by naming the
-  field. The guard sits above the first query in `internal/domain/memory.go`
+  field (`TestValidateBaseStrengthRejectsWhatTheColumnWouldRefuse`). The guard sits
+  above the first query in `internal/domain/memory.go`
   (`Remember`), so it covers `pf_remember`, `pf_save_artifact` and `pf_update_memory`
   alike — `internal/domain/memory.go` (`UpdateMemory`) builds a `RememberRequest` and
   goes through the same function.
 - **§6.1 T1-3 residual (owner ruling 2026-09-09) — LANDED** (`aihub#459`). Refuse a
-  non-integral `base_strength`; do not round it in Go, and do not widen the column.
-  `internal/domain/memory.go` (`ValidateIntegralStrength`) is the rule, called by
+  non-integral `base_strength`; do not round it in Go, and do not widen the column —
+  the refusal wired above the first query by
+  `internal/domain/memory_base_strength_range_test.go`
+  (`TestRememberRefusesFractionalBaseStrengthBeforeThePool`), and the truncation the
+  unwidened `SMALLINT` still performs on anything that gets past it by
+  (`TestBaseStrengthIsTruncatedByThePgxInt2Codec`).
+  `internal/domain/memory.go` (`ValidateIntegralStrength`) is the rule
+  (`TestValidateIntegralStrengthIsTheWholeNumberRule`), called by
   (`validateBaseStrength`) after the range check and by
-  `internal/server/routes_memory.go` (`handleReinforceMemory`) on `strength_delta`,
-  so one column keeps one answer about what may be in it. The order of the two
-  checks is deliberate and pinned by a test: a value that is out of range AND
-  fractional — which is every `base_strength` the `aihub#412` corpus carried — still
-  takes the RANGE error, because that is the constraint it violated first.
+  `internal/server/routes_memory.go` (`handleReinforceMemory`) on `strength_delta` —
+  `internal/server/routes_memory_reinforce_integral_test.go`
+  (`TestReinforceRefusesFractionalStrengthDeltaBeforeThePool`) drives that second
+  caller — so one column keeps one answer about what may be in it. The order of the
+  two checks is deliberate and pinned by
+  `internal/domain/memory_base_strength_range_test.go`
+  (`TestValidateBaseStrengthRefusesFractionalInRangeValues`): a value that is out of
+  range AND fractional — which is every `base_strength` the `aihub#412` corpus
+  carried — still takes the RANGE error, because that is the constraint it violated
+  first.
   `internal/mcp/tools_memory_test.go`
   (`TestPublishedBaseStrengthRangeIsTheEnforcedOne`) now gates the word `integer` in
   the description against the behaviour of `internal/domain/memory.go` (`Remember`)
@@ -242,7 +360,11 @@ use either.
     (prefix plus the `\|` ban) and then offers the 13 as an explicitly non-closed
     suggestion — `internal/mcp/tools_memory.go` (`memoryTypeParamDesc`), built from
     `internal/domain/memory.go` (`MemoryTypePrefixes`) and (`PfRememberTypeEnum`) so
-    the text cannot drift from either. This is `aihub#238`'s rule a second time (a
+    the text cannot drift from either, with both halves held by
+    `internal/mcp/tools_memory_type_vocab_test.go`
+    (`TestRememberTypeIsNotPublishedAsAClosedEnum`) and
+    (`TestRememberTypeDescriptionStatesWhatIsEnforced`). This is `aihub#238`'s rule a
+    second time (a
     value the server does not validate is not published as a closed enum, as
     `internal/mcp/resource_schema_test.go`
     (`TestDeclaredResourcesProp_DescribesURIAndIntent`) already requires of
@@ -250,7 +372,9 @@ use either.
     closed so the repair was to make the server enforce it.
   - `memories.type` now carries `memories_type_check`, term-for-term equal to the Go
     predicate (`starts_with` is `strings.HasPrefix`, `strpos(type,'|') = 0` is
-    `!strings.Contains`). `internal/domain/memory_type_check_test.go` parses the
+    `!strings.Contains`) — `internal/domain/memory_type_check_test.go`
+    (`TestMemoryTypeCheckMatchesTheGoPrefixes`) is where the two are compared term
+    for term. `internal/domain/memory_type_check_test.go` parses the
     migration and fails if the two stop naming the same set, in the direction that
     matters: a CHECK stricter than Go would turn a 400 naming the field into a 500
     carrying the driver's constraint text, which is the `aihub#433` failure mode in
@@ -258,20 +382,33 @@ use either.
 - **§6.1 T1-4 — the caller-facing half, applied to `visibility` by `aihub#495`
   (2026-09-09).** T1-4 says a vocabulary a DB CHECK enforces must also be checked in
   Go and answered with a 400 naming the field, because "the CHECK is the last line
-  of defence and never the one facing the caller". `aihub#434` did that half. What
+  of defence and never the one facing the caller" — the repo-wide register of that
+  policy, this column's row included, is
+  `internal/domain/db_check_policy_test.go`
+  (`TestDBCheckRegistry_MirrorsMatchTheMigration`). `aihub#434` did that half. What
   it left is the half above it: the vocabulary the caller is SHOWN. Published as
   four of five values, `visibility` had a Go guard that would refuse nothing a
   caller sent — the caller simply never sent the fifth, because hop 1 said it did
-  not exist. `internal/mcp/tools_memory.go` (`rememberVisibilityParamDesc`) builds
+  not exist.
+  <!-- prose-only: because=history -->
+  `internal/mcp/tools_memory.go` (`rememberVisibilityParamDesc`) builds
   the string from `internal/domain/memory.go` (`MemoryVisibilityList`), and
   `internal/mcp/visibility_vocab_publication_test.go` asserts the SET both ways — a
   legal value hop 1 hides fails, and an offered value the column refuses fails too,
   which is the direction a shortening back to a literal would take.
   ⚠️ **Scoped to this tool, and the arm says so rather than quietly measuring less
   than its name.** `pf_save_artifact`'s `visibility` still carries the same
-  four-value literal and `pf_update_memory`'s names no values at all; both write
-  this column, and both are the file scope of other work items in this batch. The
-  fix there is one entry each in that gate's `visibilityVocabTools`.
+  four-value literal and `pf_update_memory`'s names no values at all — both counts
+  recorded and checked against the live schema by
+  `internal/mcp/remember_visibility_scope_test.go`
+  (`TestOnlyTheScopedToolsPublishTheWholeVisibilityVocabulary`) — and both write this
+  column, and both are the file scope of other work items in this batch. The fix
+  there is one entry each in that gate's `visibilityVocabTools`, which is also what
+  moves the population of `internal/mcp/remember_visibility_scope_test.go`
+  (`TestOnlyTheScopedToolsPublishTheWholeVisibilityVocabulary`): it derives the set
+  of tools publishing the column from the live tool list and partitions it against
+  the two maps both ways, so a third such tool, a widened literal, and a stale
+  exemption are each red rather than each silent.
 - **§6.2 T2-19** — `pf_recall`'s `min_strength` must be put on the same scale, after
   T1-3 lands.
 
@@ -281,18 +418,31 @@ use either.
   taking the measurement.** The live distinct `type` set is *still* unread from
   outside the deployment — production Postgres sits inside the compose network
   (`docs/deployment.md`) — so the item was closed the only honest way available: the
-  migration no longer cares. It adds the constraint `NOT VALID`, which enforces every
+  migration no longer cares.
+  <!-- prose-only: because=external-state -->
+  It adds the constraint `NOT VALID`, which enforces every
   INSERT and UPDATE immediately and withholds only the scan of rows already there,
-  then counts the outliers itself and runs `VALIDATE CONSTRAINT` when there are none.
+  then counts the outliers itself and runs `VALIDATE CONSTRAINT` when there are none
+  — `internal/domain/memory_type_check_db_test.go`
+  (`TestMigration0034_SelfValidatesOnACleanTable`) drives the clean branch through a
+  Down/Up round trip and requires `convalidated` back.
   A clean database therefore ends byte-identical to a plain validated CHECK; a dirty
   one succeeds anyway, with every offending type and its row count written to the
-  constraint's `COMMENT` — which is where the measurement now lives, because a
-  `RAISE WARNING` does not survive the deploy: measured on goose v3.28.0, a `goose up`
+  constraint's `COMMENT`, still refusing every new write, and reaching `convalidated`
+  once the outliers are settled and the one-line `VALIDATE` is run —
+  `internal/domain/memory_type_check_db_test.go`
+  (`TestMigration0034_StillAppliesWhenTheTableAlreadyHoldsAnOutlier`) constructs
+  exactly that losing case and walks it to the repair.
+  The `COMMENT` is where the measurement lives because a `RAISE WARNING` does not
+  survive the deploy: measured on goose v3.28.0, a `goose up`
   over a table holding four outlier rows logged the migration `OK` and discarded the
-  warning. Read it with `obj_description` on `pg_constraint`. What remains open is a
-  fact about the data, not about this ruling: whether production holds any such rows
-  is unknown until the migration runs there, and if it does, `convalidated` stays
-  false until someone settles them and runs the one-line `VALIDATE`. Re-checked
+  warning.
+  <!-- prose-only: because=measurement -->
+  Read it with `obj_description` on `pg_constraint`. What remains open is a
+  fact about the data rather than about this ruling: whether production holds any
+  such rows is unknown until the migration runs there.
+  Re-checked
   2026-09-09: `aihub#445` is `wrapped` (closed 2026-09-08), so the migration is
   merged and this is now a question about a deployment rather than about work in
   flight — read `obj_description` on `pg_constraint` wherever it has run.
+  <!-- prose-only: because=external-state -->

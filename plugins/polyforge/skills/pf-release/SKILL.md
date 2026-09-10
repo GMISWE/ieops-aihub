@@ -106,10 +106,12 @@ to a stable channel.
    > on this page.
    >
    > Latent today: the `if last_release_at` branch is unreachable anyway, because
-   > `methodology.release` is rejected by `pf_remember` *and* absent from
-   > `MethodologyTypeEnum`, so step 5 can never write the record step 1 reads.
-   > This always takes the `else` branch. Recorded rather than left as another
-   > undocumented dead path.
+   > step 5 writes via `pf_remember`, which refuses every `methodology.*` type (the
+   > prefix gate, aihub#210), so it can never write the record step 1 reads. Since
+   > aihub#499 `pf_save_artifact` would store the type — it enforces only the
+   > `methodology.` prefix; the six names are convention examples, not a published
+   > enum — but step 5 does not use it. This always takes the `else` branch.
+   > Recorded rather than left as another undocumented dead path.
 
 2. Confirm release scope with the user: "These N wi's will be included in <version>."
 

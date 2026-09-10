@@ -49,10 +49,10 @@ interchangeable, so be precise about which:
 
 - `methodology.spec` / `methodology.plan` — **`pf_remember` refuses every `methodology.*`**
   outright (`validatePfRememberArgs`, a hard prefix gate, aihub#210). Use `pf_save_artifact`.
-- `methodology.release` — refused by `pf_remember`, and absent from the
-  `MethodologyTypeEnum` (`spec|plan|review|execute|retro|wrap_summary`) that
-  `pf_save_artifact` PUBLISHES. That tool enforces the `methodology.` prefix and the
-  aihub#210 credential gate, **never the six names**, so the row is stored, not refused.
+- `methodology.release` — refused by `pf_remember`, stored by `pf_save_artifact`, which
+  since aihub#499 publishes the rule it applies — the `methodology.` prefix plus the
+  aihub#210 credential gate, **never a name enum**; the six names
+  (`spec|plan|review|execute|retro|wrap_summary`) are convention examples.
   (Corrected 2026-09-09 from "valid nowhere".)
 - `experience.init` / `rule.init` / the `fact.<subtopic>` placeholder — **accepted by the
   server**, whose validation is a lenient four-prefix check (`experience.` / `fact.` /

@@ -24,6 +24,7 @@ package mcp_test
 //	go test ./internal/mcp/ -run TestReadyQueueSection
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -233,4 +234,176 @@ func readyQueueDesignBlock(doc string) (string, bool) {
 		return "", false
 	}
 	return block, true
+}
+
+// ─── aihub#543 probe wave 1: the four dead fields, in the Go tree ────────────
+//
+// readyQueueResponseTypes are the types that marshal into a ready-queue
+// response. A dead field can only come back on one of these.
+var readyQueueResponseTypes = []string{
+	"ReadyQueue", "ReadyItem", "RunningItem", "StalledItem", "PausedItem",
+}
+
+// readyQueueDeadGoIdent is the Go name of the one dead field that ever existed
+// here as a struct field: ReadyItem.UnblockedAt, deleted by aihub#449.
+//
+// A string literal rather than a symbol, obviously — the point is that nothing
+// in the tree declares it — and the scan below reads IDENTIFIERS out of parsed
+// syntax rather than bytes, so this literal, and the two comments in
+// internal/domain/work_items.go that discuss the deletion, are invisible to it.
+// A textual grep would find all three and report the field as live, which is the
+// mirror of the failure this arm is about.
+const readyQueueDeadGoIdent = "UnblockedAt"
+
+// readyQueueDeadFieldFloor bounds how many struct fields the walk read across the
+// five response types. A parse that found the types and no fields would agree
+// with any dead-field list at all.
+const readyQueueDeadFieldFloor = 15
+
+// TestTheDeadReadyQueueFieldsAreDeclaredNowhereInGo holds the pf_get_ready_queue
+// card's two claims about the fields aihub#449 and aihub#387 disposed of:
+// `UnblockedAt` is deleted rather than written — "no code in this repository ever
+// wrote it" — and `owner_user_type` has never been carried by `RunningItem`.
+//
+// 🔴 What it adds to TestReadyQueueDesignDocDrawsTheSameSegments above, which
+// already names the same four. That arm reads the DESIGN DOC and refuses a
+// drawing of a field no code can produce. Nothing read the code: a dead field
+// re-added to RunningItem in Go would satisfy it completely — and would then be
+// real, so the doc would be right and the card wrong, which is the harder
+// direction to notice. The two arms are the two authorities.
+//
+// ─── Recorded mutants ──────────────────────────────────────────────────────
+//
+// Applied to this tree; the verdict is what ran.
+//
+//	── enforcement side (the code, the card untouched) ──
+//	M24 put ReadyItem.UnblockedAt back, tagged unblocked_at
+//	                                            RED  both halves: the tag census and
+//	                                                 the identifier scan
+//	M25 add RunningItem.OwnerUserType, tagged owner_user_type
+//	                                            RED  the tag census
+//	M26 retag RunningItem.OwnerDisplay as owner_user_type
+//	                                            RED  the tag census — a dead name can
+//	                                                 arrive on a live field, not only
+//	                                                 on a new one
+//
+//	── publication side (the card, the code untouched) ──
+//	M27 delete the sentence from the card        RED  K12 POPULATION_MOVED
+//	G6  control: reword it, citation untouched GREEN  K12 owns the publication side
+//
+// ⚠️ Renaming the RunningItem TYPE was tried and is not a mutant this arm can
+// answer: the rename does not compile, so the red belongs to the build. The type
+// census is exercised by the both-ways comparison against the struct instead.
+func TestTheDeadReadyQueueFieldsAreDeclaredNowhereInGo(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, readyQueueStructFile, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", readyQueueStructFile, err)
+	}
+
+	// ── half one: no response type carries a dead field's json name.
+	seenType := map[string]bool{}
+	fields := 0
+	for _, want := range readyQueueResponseTypes {
+		ast.Inspect(file, func(n ast.Node) bool {
+			ts, ok := n.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != want {
+				return true
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok || st.Fields == nil {
+				return true
+			}
+			seenType[want] = true
+			for _, fld := range st.Fields.List {
+				fields++
+				if fld.Tag == nil {
+					continue
+				}
+				name, _, _ := strings.Cut(
+					reflectStructTag(strings.Trim(fld.Tag.Value, "`"), "json"), ",")
+				for _, dead := range readyQueueDeadFields {
+					if name != dead {
+						continue
+					}
+					t.Errorf("%s.%v marshals as %q, which readyQueueDeadFields records as a "+
+						"field no code in this repository can produce. Either it now has a "+
+						"writer — in which case it is alive, the four-field list above shrinks, "+
+						"and the Ready Queue block of %s may draw it after all — or it is a "+
+						"field that will marshal as a zero value forever, which is how "+
+						"aihub#186's orchestrator came to be designed against a no-op "+
+						"(aihub#387, aihub#449).", want, fld.Names, name, readyQueueDesignDoc)
+				}
+			}
+			return true
+		})
+	}
+	for _, want := range readyQueueResponseTypes {
+		if !seenType[want] {
+			t.Errorf("no struct type %s in %s. This arm censuses the types that marshal into a "+
+				"ready-queue response, and one it cannot find is one it does not check — a "+
+				"rename here silently narrows what the four dead fields are refused from.",
+				want, readyQueueStructFile)
+		}
+	}
+	if fields < readyQueueDeadFieldFloor {
+		t.Errorf("the walk read %d field(s) across the %d response type(s), floor is %d — a "+
+			"census that read no fields agrees with any dead-field list, including this one",
+			fields, len(readyQueueResponseTypes), readyQueueDeadFieldFloor)
+	}
+
+	// ── half two: the identifier exists nowhere in the tree's Go syntax.
+	//
+	// Repo-wide and including _test.go, because the claim on the card is
+	// repo-wide: "no code in this repository ever wrote it". A writer needs the
+	// identifier, and an identifier is what this looks for.
+	parsed := 0
+	var writers []string
+	err = filepath.WalkDir(cardsRepoRoot, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "vendor", "node_modules":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".go") {
+			return nil
+		}
+		f, perr := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			return fmt.Errorf("parse %s: %w", path, perr)
+		}
+		parsed++
+		ast.Inspect(f, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == readyQueueDeadGoIdent {
+				writers = append(writers, path)
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v — an unparseable tree makes the absence below meaningless, so "+
+			"this is a failure rather than a smaller census", cardsRepoRoot, err)
+	}
+	if parsed < 200 {
+		t.Errorf("the walk parsed only %d Go file(s) under %s — far too few for this tree, and "+
+			"a walk that parses nothing reports every identifier as absent", parsed, cardsRepoRoot)
+	}
+	if len(writers) > 0 {
+		t.Errorf("the identifier %s appears in %v. The pf_get_ready_queue card states that no "+
+			"code in this repository ever wrote it, which is the whole reason aihub#387's "+
+			"disposition for a no-writer field applied and aihub#449 could delete it with the "+
+			"response bytes unchanged. A writer makes it a live field with a contract, and the "+
+			"card, the design doc and readyQueueDeadFields all have to change together.",
+			readyQueueDeadGoIdent, writers)
+	}
+
+	t.Logf("dead fields: %d field(s) across %d response type(s) carry none of %v; %s appears in "+
+		"0 of %d parsed Go files", fields, len(seenType), readyQueueDeadFields,
+		readyQueueDeadGoIdent, parsed)
 }

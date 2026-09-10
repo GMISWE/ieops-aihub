@@ -9,7 +9,7 @@ description: >
 
 ## Usage
 
-**Purpose**: Inspect current wi progress or the project-wide ready queue (LCRS six segments).
+**Purpose**: Inspect current wi progress or the project-wide ready queue (LCRS seven segments).
 
 **Pattern**: `/pf-status [--all]`
 
@@ -55,7 +55,7 @@ ready queue, or which items are stalled/blocked.
 1. ```
    pf_get_ready_queue(project=<from .polyforge.yaml>)
    ```
-   Returns all six segments in one call.
+   Returns all seven segments in one call.
 
 2. Render LCRS (Layer-3 Concurrent Ready State) view:
 
@@ -72,6 +72,7 @@ ready queue, or which items are stalled/blocked.
 👤 needs you     (1): wi_eee "design new billing API" [requires_human_session]
 ❓ unclassified   (2): wi_fff (wi_type not set — run /pf-work <slug> to classify)
                      wi_ggg
+🧟 stale running  (1): wi_hhh "migrate search index" [running, untouched >24h]
 ```
 
 3. Highlight segments needing attention:
@@ -88,6 +89,7 @@ ready queue, or which items are stalled/blocked.
 - `items` (ready queue): show priority, truncated goal (60 chars), status
 - `stalled`: show which wi_id is blocking
 - `needs you`: these are `requires_human_session=true` wi's awaiting a human session
+- `stale_running`: running but untouched for >24h — candidates for takeover via `/pf-work`
 - `unclassified`: wi's with `wi_type=NULL` that cannot be claimed until classified
 
 ## NL Triggers

@@ -63,12 +63,23 @@
    `level:` does NOT select a model. It is `common/review`'s review-depth argument and the loop
    passes it through as `Review level: <value>` — nothing more. See §0f.
 
-## 0b. The auto-mode subagent prompt, verbatim
+## 0b. The auto-mode dispatch, verbatim — the Agent call, not just its prompt
 
 `engine.native.md` summarises this in prose to stay inside the payload budget. The literal
-template the loop dispatches:
+template the loop dispatches — COPY IT WHOLE. Every argument shown is REQUIRED, and `model`
+is the one this template exists to force: aihub#544 measured 3/3 post-cutover review
+dispatches carrying model=None, because the tier lived only in the loop's pseudocode and the
+prompt template carried no model at all. An omitted `model` does not mean "the default tier";
+it silently inherits whatever model the parent session runs, which makes a dead selector and
+a working one produce identical transcripts. Fill it with the LITERAL tier name resolved from
+the step id — never leave it to the harness:
 
 ```
+Agent(
+  subagent_type: "general-purpose",
+  model: <REQUIRED — fill in the literal tier name: "opus" (RAISED_TIER) when
+          is_review(step_id), else "sonnet" (DEFAULT_TIER). Never omit this argument.>,
+  prompt: """
 You are executing step {step_id} of wi {wi_id}.
 
 Call pf_get_step(work_item_id={wi_id}) FIRST — it is the only authority for prior-step context.
@@ -84,7 +95,14 @@ progress from a file in the worktree; nothing writes one.
 When done, RETURN your one-line summary of this step in your output; the loop passes it straight
 to pf_update_step(artifact_summary=...). Do not write it to a file.
 If there are learnings worth keeping, call pf_remember to store them in aihub.
+"""
+)
 ```
+
+`internal/cli/engine_native_dispatch_model_test.go` pins this template: it must carry an
+explicit `model:` argument, name BOTH tiers, agree with the constants `engine.native.md`
+declares, and key the raised tier on `is_review` — so deleting the argument, swapping the
+tiers, or re-keying the choice all go red rather than shipping as prose drift.
 
 ## 0c. `fail_step_and_attempt` — the review-FAIL path, verbatim
 

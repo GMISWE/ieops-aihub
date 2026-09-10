@@ -163,12 +163,62 @@ func TestActivate_StillRevivesADecayedVersionWithNoSuccessor(t *testing.T) {
 
 	seedAuditMemory(t, pool, proj, uid, "mem_decayed", "archived", "")
 
-	_, err := Activate(ctx, pool, "mem_decayed", uid, "tester")
+	var stabilityBefore float64
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT stability_days FROM memories WHERE id='mem_decayed'`).Scan(&stabilityBefore))
+
+	resp, err := Activate(ctx, pool, "mem_decayed", uid, "tester")
 	require.NoError(t, err)
 
 	var status string
 	require.NoError(t, pool.QueryRow(ctx, `SELECT status FROM memories WHERE id='mem_decayed'`).Scan(&status))
 	require.Equal(t, "active", status, "a decayed memory with no successor must still revive")
+
+	// ── aihub#543 wave 2, slice L6 ───────────────────────────────────────────
+	//
+	// The pf_activate_memory card's hop-4 sentence is "increments the activation
+	// count and updates the stability term of the forgetting curve, which is what
+	// `effective_strength` is computed from at recall time", and this function's
+	// own header says the behaviour "that activation exists for would be silently
+	// dead" without it — while asserting only the status transition. The two
+	// COLUMNS the sentence is about went unread.
+	//
+	// A subtest of this already-registered function rather than a new gated one:
+	// the fixture is here and the manifest is untouched (spec §3.3 rule 2). The
+	// pure-function monotonicity — that the term rises with the count, and that
+	// MemoryStrength reads it — is held DB-free by
+	// memory_activation_strength_test.go
+	// (TestActivationRaisesTheStabilityTermTheStrengthFormulaReads); this is the
+	// hop that shows the UPDATE writes what those functions compute.
+	//
+	//	M1  drop stability_days from Activate's UPDATE SET list        RED
+	//	M2  pass activationCount instead of newCount to
+	//	    computeStabilityDays                                        RED
+	//	M3  drop activation_count from the UPDATE                       RED
+	require.Equal(t, 1, resp.ActivationCount,
+		"the first activation must report activation_count=1")
+
+	var countAfter int
+	var stabilityAfter float64
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT activation_count, stability_days FROM memories WHERE id='mem_decayed'`,
+	).Scan(&countAfter, &stabilityAfter))
+	require.Equal(t, 1, countAfter,
+		"the response said activation_count=%d and the column holds %d — a response may not "+
+			"name a value the row does not hold", resp.ActivationCount, countAfter)
+	require.Greater(t, stabilityAfter, stabilityBefore,
+		"stability_days went %g -> %g. The card says activation UPDATES the stability term of "+
+			"the forgetting curve; a term that did not move would make this tool the "+
+			"bookkeeping the card denies it is, and recall's min_strength predicate divides by "+
+			"this exact column", stabilityBefore, stabilityAfter)
+	require.Equal(t, computeStabilityDays("experience.debug", countAfter), stabilityAfter,
+		"the column holds %g and computeStabilityDays(experience.debug, %d) is %g. The write "+
+			"and the formula recall reads must be the same number, or the response's "+
+			"new_stability_days describes a curve the row is not on",
+		stabilityAfter, countAfter, computeStabilityDays("experience.debug", countAfter))
+	require.Equal(t, stabilityAfter, resp.NewStabilityDays,
+		"the response reported new_stability_days=%g against a stored %g",
+		resp.NewStabilityDays, stabilityAfter)
 }
 
 // TestActivate_RedactedSuccessorDoesNotCountAsSupersession pins the

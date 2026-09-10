@@ -75,6 +75,56 @@ func TestUpdateWorkItemCASVersionAdvancesAcrossWrites(t *testing.T) {
 	})
 	require.Nil(t, aerr)
 	assert.Equal(t, 2, updated2.ResourcesVersion, "second write of declared_resources must advance version 1 -> 2")
+
+	// aihub#543: the sentence the resources_version DESCRIPTION and the card both
+	// carry — "Leaving it out overwrites unconditionally: a concurrent writer's
+	// list is silently discarded, locks and all, and the caller still gets a 200."
+	//
+	// Every existing arm covers the guarded direction: the two above advance the
+	// counter, TestUpdateWorkItemCASStaleVersionReturns409NotBadRequest refuses a
+	// stale version, and TestDeclaredResourcesCASRetry_* exercise the retry loop.
+	// The UNguarded direction is asserted for the twin parameter
+	// (TestUpdateProjectMembersCASOmittedVersionOverwritesUnconditionally) and
+	// nowhere for this one — so the sentence a caller is shown at the call site
+	// rested on the analogy. It is the sentence that decides whether a caller
+	// bothers to pass the token, which makes it the one worth an arm.
+	//
+	// MUTANTS (applied to this tree and run against a scratch Postgres):
+	//
+	//	M40 enforcement: make buildWorkItemUpdate add the CAS predicate whenever
+	//	    declared_resources is written, defaulting the version to 0
+	//	                                         RED  the parent's first write fails
+	//	                                              its version assertion before
+	//	                                              this subtest is reached — the
+	//	                                              mutant is caught, and by the
+	//	                                              arm nearest the change
+	//	M41 enforcement: keep the predicate off but MERGE the two lists instead of
+	//	    replacing                            RED  the discard assertion here, which
+	//	                                              is the half a version check would
+	//	                                              never reach
+	//	M42 publication: drop the citation clause from the card sentence
+	//	                                         RED  K12 DEBT_GROWTH
+	t.Run("a writer that omits the version discards the previous list and still gets a 200", func(t *testing.T) {
+		other := json.RawMessage(
+			`[{"type":"path","uri":"file:internal/domain/second_writer.go","intent":"write"}]`)
+
+		updated3, aerr := UpdateWorkItem(context.Background(), pool, wi.ID, u, "admin", nil,
+			&UpdateWorkItemRequest{DeclaredResources: other})
+		require.Nil(t, aerr,
+			"no resources_version was supplied, so there is no precondition to fail: the write "+
+				"lands and the caller is told nothing. That is the whole content of the sentence "+
+				"— the guard is opt-in, and a caller who does not opt in is not warned by the "+
+				"server, only by the description.")
+
+		assert.JSONEq(t, string(other), string(updated3.DeclaredResources),
+			"the earlier writer's declared_resources must be GONE — replaced, not merged. The "+
+				"list is what the server derives this attempt's file_scope locks from, so the "+
+				"discard takes those with it (TestNarrowingDeclaredResourcesReleasesItsLocks "+
+				"drives that half against the lock table)")
+		assert.Equal(t, 3, updated3.ResourcesVersion,
+			"the counter still advances on the unguarded path, which is what makes the NEXT "+
+				"writer's CAS able to detect this one (aihub#241 B2)")
+	})
 }
 
 // TestUpdateWorkItemCASStaleVersionReturns409NotBadRequest is the other half

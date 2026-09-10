@@ -2281,7 +2281,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_update_project":          {Candidates: 14, Cited: 0, Unclassified: 14, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_update_step":             {Candidates: 17, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_update_user":             {Candidates: 16, Cited: 2, Unclassified: 14, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_update_work_item":        {Candidates: 45, Cited: 6, Unclassified: 39, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_update_work_item":        {Candidates: 47, Cited: 40, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 7},
 	"pf_whoami":                  {Candidates: 11, Cited: 0, Unclassified: 11, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_wrap":                    {Candidates: 3, Cited: 3, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 }

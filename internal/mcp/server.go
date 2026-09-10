@@ -139,6 +139,16 @@ func (s *Server) addTool(t *sdkmcp.Tool, h sdkmcp.ToolHandler) {
 		// the arguments map it decodes (several default fields into it), and the
 		// diff must describe what the CALLER sent.
 		unknown := unknownParamNames(req.Params.Arguments, published)
+		// aihub#586: for the wholesale-forwarding memory family the unknown set
+		// is STRIPPED as well as disclosed, so an unpublished name can no longer
+		// ride the forwarded argument map into a bound server field — which is
+		// how `rendered_html` reached anonymous /share readability. Here rather
+		// than in the three handlers so the stripped set and the disclosed set
+		// are computed from the same schema in the same place and cannot drift
+		// apart. See wire_strip.go for the census and the scoping.
+		if len(unknown) > 0 && wireStrippedTools[name] {
+			req.Params.Arguments = stripUnpublishedArgs(req.Params.Arguments, published)
+		}
 		res, herr := h(ctx, req)
 		discloseUnknownParams(name, unknown, res)
 		return res, herr

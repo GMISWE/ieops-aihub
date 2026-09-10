@@ -95,9 +95,10 @@ const (
 
 // memoryToolWire is hop 2 stated as VALUES, per tool, per published property.
 var memoryToolWire = map[string]toolWire{
-	// Body is the argument map itself — every published property is on the wire
-	// by construction. Stated rather than assumed: the handler could start
-	// projecting the map tomorrow.
+	// Body is the argument map PROJECTED TO THE PUBLISHED SCHEMA (aihub#586,
+	// wire_strip.go) — every published property is on the wire by construction,
+	// and only published properties are. These probes hold the first half; the
+	// second (an unpublished key never lands) is wire_strip_family_test.go's.
 	"pf_remember": {
 		base: map[string]any{
 			"project": "p_probe", "type": "experience.debug",

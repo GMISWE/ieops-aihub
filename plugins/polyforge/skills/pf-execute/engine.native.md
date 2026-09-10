@@ -31,7 +31,7 @@ for i, (step_id, content) in enumerate(sections):
 
     # Dispatch by copying §0b's Agent-call template VERBATIM. `model` is a REQUIRED argument
     # of that template, filled with the literal tier name — an omitted model is NOT the
-    # default tier, it silently inherits the session's model (aihub#544: 3/3 reviews so).
+    # default tier, it silently inherits the session's model (aihub#544 measured 3/3).
     dispatch Agent(model=RAISED_TIER if is_review(step_id) else DEFAULT_TIER, prompt=§0b)
 
     if a step called pf_pause_attempt (or a pf_* call is rejected "attempt is paused"):
